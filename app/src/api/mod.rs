@@ -5,7 +5,7 @@ pub mod mcp_servers;
 pub mod me;
 
 use axum::{
-    routing::{delete, get, post, put},
+    routing::{get, post, put},
     Router,
 };
 

@@ -3,6 +3,8 @@ mod auth;
 mod config;
 mod db;
 mod error;
+mod llm;
+mod ws;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -76,6 +78,7 @@ async fn main() {
         .route("/health", get(health))
         .nest("/auth", auth::auth_router())
         .nest("/api", api::api_router())
+        .route("/api/ws/chat/{conversation_id}", get(ws::chat::ws_chat_handler))
         .with_state(state)
         .fallback_service(
             ServeDir::new(&static_dir)

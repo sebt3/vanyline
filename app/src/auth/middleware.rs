@@ -6,6 +6,7 @@ use crate::error::AppError;
 use crate::AppState;
 
 pub struct AuthUser {
+    #[allow(dead_code)]
     pub id_token: String,
     pub email: String,
 }
