@@ -9,63 +9,81 @@ Licence : BSD-3.
 ## Architecture
 
 ```
-┌──────────────────────────────────────┐
-│              frontend                │
-│   TypeScript · Svelte 5 · CM6        │
-└──────────────────┬───────────────────┘
-                   │ HTTP / WebSocket
-┌──────────────────▼───────────────────┐
-│                 app                  │
-│   Rust · OIDC · Redis · PGVector     │
-└───────────┬──────────────────────────┘
-            │ WebSocket (editor)
-            │ MCP HTTP streaming (LLM)
-┌───────────▼──────────────────────────┐
-│           sandbox (pod K8s)          │
-│   Rust server · git · curl · make    │
-│   + toolchains via volumes OCI       │
-└──────────────────────────────────────┘
+[ vanyline frontend ]          [ kydah-code (dans code-server K8s) ]
+        │                                      │
+   HTTP REST                         MCP (K8s service interne)
+   WS direct (JWT)                   + NetworkPolicy + SA TokenReview
+        │                                      │
+        ▼                                      ▼
+     [ app ]◄──────MCP HTTP streaming──── [ sandbox pod ]
+  auth · config                          WS (JWT) · MCP
+  LLM orchestration                      Rust server
+                                         + toolchains OCI image volumes
+                                         + git · curl · make · vim
 
-         controller (déféré)
+         [ controller ] (déféré)
          kube-rs · CRDs : Application, Owner, Sandbox
 ```
+
+**L'app n'est pas sur le chemin chaud éditeur.** Le frontend et kydah-code se connectent
+directement à la sandbox. L'app gère l'auth, le LLM, la config.
 
 ## Composants
 
 ### frontend/
 Interface utilisateur : éditeur de code web + conversation LLM.
-TypeScript, Svelte 5, CodeMirror 6.
-Framework de build : TBD (SvelteKit vs Vite+Svelte).
+TypeScript, Svelte 5, CodeMirror 6, svelte-spa-router, Tailwind CSS 4.
+Build : Vite. Tests : Vitest. Composants : Storybook.
+Se connecte directement à la sandbox en WebSocket (JWT validé par la sandbox).
 
 ### app/
 Backend du frontend. Authentification OIDC native, cache Redis, stockage PostgreSQL+PGVector.
 Focus initial : interaction humain/LLM, gestion utilisateurs, API de configuration.
 Rôle MCP : client — orchestre les appels LLM et les tools exposés par la sandbox.
+**Ne proxifie pas** le WebSocket éditeur ni le MCP kydah-code.
 
 ### sandbox/
 Serveur Rust embarqué dans un pod Kubernetes.
 Expose deux interfaces :
-- **WebSocket** : accès éditeur (commandes, filesystem, terminal)
-- **MCP HTTP streaming** : tools pour les LLM
+- **WebSocket** : accès éditeur (commandes, filesystem, terminal) — auth JWT
+- **MCP HTTP streaming** : tools pour les LLM et pour kydah-code
 
 Image de base : Debian slim + binaire serveur + git, curl, make, vim.
-Toolchains : montées en volumes OCI à la création du pod, PATH/LD_LIBRARY_PATH injectés.
+Toolchains : images OCI standard (ex: `rust:1.82-slim-trixie`) montées via `volumes[].image`
+(feature K8s native, GA depuis v1.36, prérequis : v1.31+). PATH/LD_LIBRARY_PATH injectés.
+
+**Deux modes d'authentification :**
+- **JWT** (frontend → sandbox via ingress) : token OIDC émis par l'app, validé par la sandbox
+- **SA TokenReview + NetworkPolicy** (kydah-code → sandbox via service K8s interne) :
+  la sandbox valide le service account du pod appelant via l'API K8s TokenReview ;
+  une NetworkPolicy par sandbox restreint l'accès aux pods du même namespace avec les bons labels
 
 ### controller/
 Opérateur Kubernetes (kube-rs). Gère 3 CRDs namespacés :
 - **Application** : instance deployée de vanyline
-- **Owner** : espace de stockage utilisateur (wrape un PVC, aura des attributs quota)
+- **Owner** : identité cluster d'un utilisateur — crée/référence un PVC (vanyline ou existant,
+  ex: PVC du pod code-server pour kydah-code) + crée un ServiceAccount + attributs quota
 - **Sandbox** : pod de travail — référence un Owner (sous-répertoire PVC) + liste de toolchains
 
 **Statut : déféré.** Pour le dev/test de la sandbox, un script shell/Python crée les pods directement.
 
+## Clients de la sandbox
+
+| Client | Accès | Auth | Usage |
+|--------|-------|------|-------|
+| vanyline frontend | Ingress K8s | JWT (OIDC via app) | Éditeur web, terminal |
+| kydah-code (dans code-server) | Service K8s interne, même namespace | SA TokenReview + NetworkPolicy | MCP tools pour Qwen |
+| app (LLM orchestration) | Service K8s interne | SA TokenReview (SA du Owner concerné) | MCP HTTP streaming pour les tool calls LLM |
+
 ## Interfaces inter-composants
 
-| Source | Destination | Protocole |
-|--------|-------------|-----------|
-| frontend | app | HTTP REST + WebSocket |
-| app | sandbox | WebSocket (editor) + MCP HTTP streaming (LLM) |
-| controller | sandbox pod | K8s API (création pod, montage volumes OCI) |
+| Source | Destination | Protocole | Auth |
+|--------|-------------|-----------|------|
+| frontend | app | HTTP REST | OIDC token |
+| frontend | sandbox | WebSocket | JWT |
+| kydah-code | sandbox | MCP HTTP streaming | SA TokenReview + NetPol |
+| app | sandbox | MCP HTTP streaming | SA TokenReview (SA du Owner concerné) |
+| controller | K8s API | K8s API | Service account |
 
 ## Logging
 
@@ -76,8 +94,8 @@ Convention : jamais `println!`, `dbg!`, `console.log` dans les sources.
 
 | Composant | Langage | Dépendances clés |
 |-----------|---------|-----------------|
-| frontend | TypeScript | Svelte 5, CodeMirror 6 |
-| app | Rust | TBD (axum probable), sqlx, redis |
+| frontend | TypeScript | Svelte 5, CodeMirror 6, svelte-spa-router, Tailwind CSS 4 |
+| app | Rust | TBD (axum probable), sqlx, redis, client API Ollama-compatible |
 | sandbox | Rust | TBD |
 | controller | Rust | kube-rs |
 
@@ -118,10 +136,9 @@ cargo clippy --workspace       # linter
 ### Frontend
 
 ```bash
-# [TBD — à compléter une fois le framework de build choisi]
-npm run check                  # vérification TypeScript
-npm run test                   # tests
-npm run build                  # build
+npm run build                  # vite build
+npm run test                   # vitest run
+npx svelte-check               # vérification TypeScript/Svelte
 ```
 
 ## Conventions

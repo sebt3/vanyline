@@ -22,22 +22,58 @@ Les développeurs peuvent le lire, le corriger ou le compléter à tout moment.
 
 | Composant | Rôle | Décision |
 |-----------|------|----------|
-| frontend | Éditeur web + UI LLM | Svelte 5, CodeMirror 6 — framework de build TBD (SvelteKit vs Vite) |
+| frontend | Éditeur web + UI LLM | Vite + Svelte 5, CodeMirror 6, svelte-spa-router, Tailwind CSS 4, Vitest, Storybook |
 | app | Backend, OIDC, Redis, PGVector | Rust — focus initial : interaction LLM, users, config API |
-| sandbox | Pod K8s, serveur WS/MCP | Rust — image Debian slim + toolchains OCI volumes |
+| sandbox | Pod K8s, serveur WS/MCP | Rust — image Debian slim + toolchains OCI image volumes |
 | controller | Opérateur K8s | Rust, kube-rs — **DÉFÉRÉ** |
 
-### Design sandbox — élégance clé à retenir
+### L'app n'est pas sur le chemin chaud
 
-La base image est stable (Debian slim + serveur + git/curl/make/vim). Les toolchains sont composées
-à la création du pod via volumes OCI — pas de rebuild d'image quand on ajoute une toolchain.
-PATH et LD_LIBRARY_PATH sont injectés pour rendre les binaires accessibles dans le shell.
+Le frontend se connecte **directement** à la sandbox en WebSocket (JWT validé par la sandbox).
+kydah-code se connecte directement au MCP de la sandbox via service K8s interne.
+L'app ne proxifie rien — elle gère l'auth, le LLM, la config.
+
+### Deux modes d'auth sur la sandbox
+
+- **JWT** (frontend via ingress) : token OIDC émis par l'app, validé par la sandbox
+- **SA TokenReview + NetworkPolicy** (kydah-code et app via service interne) : la sandbox appelle
+  le K8s TokenReview API pour valider le SA token du pod appelant ; NetworkPolicy par sandbox
+  restreint l'accès aux pods du même namespace avec les bons labels
+
+Mécanisme uniforme pour kydah-code ET l'app : tous deux utilisent le ServiceAccount du Owner
+concerné. L'app, pour orchestrer le LLM d'un utilisateur donné, utilise le SA de son Owner.
+
+Décision : Option A (JWT émis par l'app pour kydah-code) rejetée car elle crée une dépendance
+à l'app avant que l'app existe — incompatible avec le développement des deux axes en parallèle.
+
+### Design sandbox — toolchains via K8s image volumes
+
+Les toolchains utilisent des images Docker standard (ex: `rust:1.82-slim-trixie`, `node:26-slim`)
+montées via `volumes[].image` — feature K8s native GA depuis v1.36, prérequis v1.31+.
+Pas de registre propriétaire, pas de build custom. PATH/LD_LIBRARY_PATH injectés au démarrage.
+
+### kydah-code est un client de la sandbox
+
+kydah-code (extension VS Code pour code-server) consomme le MCP de la sandbox pour donner
+à Qwen l'accès aux vrais outils (builds, filesystem, terminal) sans saturer le pod code-server.
+Le Owner dans ce cas référence le PVC existant de code-server — pas de nouveau stockage.
+Fonctionne uniquement quand kydah-code tourne dans un code-server K8s (service interne).
 
 ### Contrôleur déféré
 
-Le controller est la glue entre les deux axes de dev. Il ne sera pas construit immédiatement.
-Pour tester la sandbox, un script shell/Python créera les pods directement.
-Le CRD Owner aura des attributs quota (autres TBD).
+Glue entre les deux axes. Non construit dans la phase actuelle.
+Pour tester la sandbox : script shell/Python crée les pods directement.
+CRD Owner : crée/référence un PVC + crée un ServiceAccount (identité cluster du Owner) + attributs quota (TBD).
+Le SA est l'identité utilisée par kydah-code ET par l'app pour accéder aux sandboxes du Owner.
+
+---
+
+## Contexte et philosophie
+
+Projet né de deux tentatives précédentes (kydah-ai, kydah-code) qui ont montré les limites
+des environnements LLM contraints en RAM/CPU. Philosophie : les langages interprétés vont
+devoir réduire de voilure — Rust est un choix délibéré pour la maîtrise des ressources.
+vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils peuvent consommer.
 
 ---
 
@@ -45,12 +81,12 @@ Le CRD Owner aura des attributs quota (autres TBD).
 
 **Deux axes en parallèle :**
 1. **app + frontend** : interaction humain/LLM, gestion utilisateurs, API de configuration
-2. **sandbox** : image de base + serveur + composition toolchains OCI
+2. **sandbox** : image de base + serveur WS/MCP + composition toolchains OCI
 
 **Hors scope pour cette phase :**
 - Controller Kubernetes
 - Intégration des deux axes (nécessite le controller)
-- Multi-utilisateur (arrive avec le controller)
+- Multi-utilisateur complet (arrive avec le controller)
 - Ouverture aux autres contributeurs
 
 **Déclencheur de convergence** : quand les deux axes sont assez matures pour s'assembler via le controller.
@@ -67,8 +103,9 @@ Le CRD Owner aura des attributs quota (autres TBD).
 
 ## Points ouverts (TBD)
 
-- Framework frontend : SvelteKit vs Vite+Svelte (impact sur routing et commandes de build)
+- ~~Framework frontend~~ — décidé : Vite + svelte-spa-router (même stack que gramophone/frontend dans vynil)
 - Web framework Rust pour app : axum probable, pas encore décidé
-- Providers LLM cibles : non définis
+- ~~Auth app→sandbox~~ — décidé : SA TokenReview (SA du Owner concerné), même mécanisme que kydah-code
+- ~~Providers LLM~~ — décidé : Ollama/llama.cpp/vllm auto-hébergés dans le cluster ou via un proxy avec API Ollama-compatible. Aucun provider cloud. Endpoint configurable.
 - Format des identifiants d'erreur
 - Logger projet (app et sandbox)
