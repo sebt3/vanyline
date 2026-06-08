@@ -3716,6 +3716,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 name = "vanyline-app"
 version = "0.0.1-alpha.1"
 dependencies = [
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "cookie",
@@ -3728,6 +3729,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",

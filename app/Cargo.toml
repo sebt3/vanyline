@@ -20,8 +20,10 @@ tower-http = { version = "0.6", features = ["fs", "cors"] }
 cookie = { version = "0.18", features = ["private"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
+async-trait = "0.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tower = { version = "0.5", features = ["util"] }
 futures = "0.3"
 base64 = "0.22"
 url = "2"
