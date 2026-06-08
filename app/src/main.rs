@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod db;
 mod error;
 
 use std::net::SocketAddr;
@@ -16,6 +17,7 @@ pub struct AppState {
     pub config: Config,
     pub oidc_client: Arc<dyn auth::OidcClientTrait>,
     pub cookie_key: cookie::Key,
+    pub pool: sqlx::PgPool,
 }
 
 #[tokio::main]
@@ -50,6 +52,16 @@ async fn main() {
         cookie::Key::from(&bytes[..64])
     };
 
+    let pool = db::create_pool(&config.database_url).await.unwrap_or_else(|e| {
+        tracing::error!("VNL-DB-001: cannot connect to database: {}", e);
+        std::process::exit(1);
+    });
+
+    db::run_migrations(&pool).await.unwrap_or_else(|e| {
+        tracing::error!("{}", e);
+        std::process::exit(1);
+    });
+
     let oidc_client = Arc::new(auth::oidc::OidcClient::new(&config).await);
 
     let static_dir = config.static_dir.clone();
@@ -57,6 +69,7 @@ async fn main() {
         config,
         oidc_client,
         cookie_key,
+        pool,
     };
 
     let app = Router::new()

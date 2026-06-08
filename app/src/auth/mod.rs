@@ -169,6 +169,7 @@ mod tests {
             config,
             oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key: test_key(),
+            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
         };
 
         auth_router().with_state(state)
