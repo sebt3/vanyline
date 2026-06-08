@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vanyline-config
+  namespace: media-station
+data:
+  LISTEN_ADDR: "0.0.0.0:8080"
+  STATIC_DIR: "/app/static"
+  # Authentik issuer URL — update to match your Authentik domain
+  OIDC_ISSUER_URL: "https://auth.kydah.fr/application/o/media-station-vanyline/"
+  # OIDC_CLIENT_ID and OIDC_CLIENT_SECRET come from secret vanyline-openid (produced by RestEndPoint_sso.yaml)
+  # OIDC_REDIRECT_URL matches the ingress hostname + /auth/callback
+  OIDC_REDIRECT_URL: "https://vanyline.kydah.fr/auth/callback"
+  OIDC_SCOPES: "openid,email,profile,media-station-vanyline"

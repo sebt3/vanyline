@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: vanyline
+  namespace: media-station
+spec:
+  selector:
+    app: vanyline
+  ports:
+  - port: 80
+    targetPort: 8080
+  type: ClusterIP

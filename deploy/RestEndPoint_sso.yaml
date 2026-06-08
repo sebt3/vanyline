@@ -1,0 +1,109 @@
+apiVersion: kuberest.solidite.fr/v1
+kind: RestEndPoint
+metadata:
+  name: vanyline-sso
+  namespace: media-station
+spec:
+  checkFrequency: 0
+  inputs:
+  - name: output
+    secretRef:
+      optional: true
+      name: vanyline-openid
+  - name: uuid
+    handleBarsRender: >
+      {{#if input.output.data.OIDC_CLIENT_ID}}{{base64_decode input.output.data.OIDC_CLIENT_ID}}{{else}}{{uuid_new_v7}}{{/if}}
+  - name: admin
+    secretRef:
+      name: authentik
+      namespace: media-system
+  client:
+    baseurl: "http://authentik-server.media-system.svc/api/v3"
+    keyName: pk
+    headers:
+      Authorization: >-
+        Bearer {{base64_decode input.admin.data.AUTHENTIK_BOOTSTRAP_TOKEN}}
+  reads:
+  - name: keypair
+    path: crypto/certificatekeypairs
+    items:
+    - name: ak
+      key: "?name=authentik+Self-signed+Certificate"
+  - name: flow
+    path: flows/instances
+    items:
+    - name: authorization
+      key: default-provider-authorization-implicit-consent/
+    - name: default
+      key: default-authentication-flow/
+    - name: invalid
+      key: default-provider-invalidation-flow/
+  - name: scopes
+    path: propertymappings/provider/scope
+    items:
+    - name: email
+      key: "?scope_name=email"
+    - name: profile
+      key: "?scope_name=profile"
+    - name: openid
+      key: "?scope_name=openid"
+  writes:
+  - name: scope
+    path: propertymappings/provider/scope
+    keyUseSlash: true
+    items:
+    - name: app
+      values: |
+        name: "media-station-vanyline"
+        scope_name: "media-station-vanyline"
+        expression: |-
+          attr = request.user.group_attributes()
+          groups = []
+          if 'media-station_vanyline' in attr:
+            groups.append('user')
+            if 'admin' in attr['media-station_vanyline'] and attr['media-station_vanyline']['admin']:
+              groups.append("admin")
+          return {
+              "resource_access": {"roles": groups},
+          }
+  - name: oauth
+    path: providers/oauth2
+    keyUseSlash: true
+    items:
+    - name: app
+      values: |-
+        name: media-station-vanyline
+        authorization_flow: "{{read.flow.authorization.pk}}"
+        authentication_flow: "{{read.flow.default.pk}}"
+        invalidation_flow: "{{read.flow.invalid.pk}}"
+        client_id: "{{input.uuid}}"
+        client_type: "confidential"
+        property_mappings:
+        - "{{json_query "results[0].pk" read.scopes.email}}"
+        - "{{json_query "results[0].pk" read.scopes.openid}}"
+        - "{{json_query "results[0].pk" read.scopes.profile}}"
+        - "{{write.scope.app.pk}}"
+        sub_mode: "user_email"
+        signing_key: "{{json_query "results[0].pk" read.keypair.ak}}"
+        redirect_uris:
+        - url: "https://vanyline.kydah.fr/auth/callback"
+          matching_mode: "strict"
+  - name: applications
+    path: core/applications
+    keyUseSlash: true
+    keyName: slug
+    items:
+    - name: app
+      values: |-
+        name: vanyline
+        slug: media-station-vanyline
+        provider: "{{write.oauth.app.pk}}"
+        group: media-station
+  outputs:
+  - kind: Secret
+    metadata:
+      name: vanyline-openid
+      namespace: media-station
+    data:
+      OIDC_CLIENT_ID: "{{write.oauth.app.client_id}}"
+      OIDC_CLIENT_SECRET: "{{write.oauth.app.client_secret}}"
