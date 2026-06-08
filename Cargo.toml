@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "app",
+    "sandbox",
+    "controller",
+]
+resolver = "2"

@@ -1,0 +1,27 @@
+[package]
+name = "vanyline-app"
+version = "0.0.1-alpha.1"
+edition = "2021"
+
+[[bin]]
+name = "vanyline-app"
+path = "src/main.rs"
+
+[dependencies]
+axum = { version = "0.8.8", features = ["ws", "macros"] }
+openidconnect = "4.0"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono", "json", "runtime-tokio-rustls", "migrate"] }
+rig-core = { version = "0.38", features = ["rmcp"] }
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+cookie = { version = "0.18", features = ["private"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+base64 = "0.22"
+url = "2"
