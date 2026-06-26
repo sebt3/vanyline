@@ -44,10 +44,22 @@ async fn run_one_shot(user_msg: &str, agent: Option<Uuid>, conversation: Option<
     if is_new {
         println!("Session: {}", conv.id);
     }
-    if let Ok(response) = process_turn(&mut conv, &agent_config, user_msg).await {
+
+    conv.messages.push(vanyline_lib::Message {
+        role: "user".to_string(),
+        content: user_msg.to_string(),
+        tool_calls: None,
+    });
+
+    if let Ok(result) = process_turn(&mut conv, &agent_config, user_msg).await {
         conv.messages.push(vanyline_lib::Message {
             role: "assistant".to_string(),
-            content: response,
+            content: result.response_text,
+            tool_calls: if result.tool_calls.is_empty() {
+                None
+            } else {
+                Some(result.tool_calls)
+            },
         });
         store::save_conversation(&conv).ok();
     } else {
@@ -81,13 +93,19 @@ async fn run_repl(agent: Option<Uuid>, conversation: Option<Uuid>) {
         conv.messages.push(vanyline_lib::Message {
             role: "user".to_string(),
             content: input.clone(),
+            tool_calls: None,
         });
 
         match process_turn(&mut conv, &agent_config, &input).await {
-            Ok(response) => {
+            Ok(result) => {
                 conv.messages.push(vanyline_lib::Message {
                     role: "assistant".to_string(),
-                    content: response,
+                    content: result.response_text,
+                    tool_calls: if result.tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(result.tool_calls)
+                    },
                 });
                 store::save_conversation(&conv).ok();
             }
@@ -101,14 +119,22 @@ async fn process_turn(
     conv: &mut vanyline_lib::Conversation,
     agent_config: &vanyline_lib::Agent,
     user_msg: &str,
-) -> Result<String, vanyline_lib::VnyError> {
+) -> Result<vanyline_lib::ChatTurnResult, vanyline_lib::VnyError> {
     let history: Vec<rig_core::message::Message> = conv
         .messages
         .iter()
-        .map(|m| rig_core::message::Message::user(m.content.clone()))
+        .filter_map(|m| {
+            if m.role == "user" {
+                Some(rig_core::message::Message::user(m.content.clone()))
+            } else if m.role == "assistant" {
+                Some(rig_core::message::Message::assistant(m.content.clone()))
+            } else {
+                None
+            }
+        })
         .collect();
 
-    let sink = Arc::new(StdoutSink);
+    let sink = Arc::new(vanyline_lib::PassthroughCollectingSink::new(StdoutSink));
     let mcp_servers = &agent_config.mcp_servers;
 
     let provider = resolve_provider_owned(agent_config)?;
@@ -118,15 +144,15 @@ async fn process_turn(
         .or(provider.default_model.as_deref())
         .ok_or(vanyline_lib::VnyError::NoModelConfigured)?;
 
-    let response_text = match provider.provider_type.as_str() {
+    let result = match provider.provider_type.as_str() {
         "ollama" => {
             let model = vanyline_lib::build_ollama_model(&provider, model_name)?;
-            vanyline_lib::run_chat_turn(sink, agent_config, mcp_servers, model, history, user_msg)
+            vanyline_lib::run_chat_turn(sink.clone(), agent_config, mcp_servers, model, history, user_msg)
                 .await?
         }
         "openai-compatible" => {
             let model = vanyline_lib::build_openai_compat_model(&provider, model_name)?;
-            vanyline_lib::run_chat_turn(sink, agent_config, mcp_servers, model, history, user_msg)
+            vanyline_lib::run_chat_turn(sink.clone(), agent_config, mcp_servers, model, history, user_msg)
                 .await?
         }
         other => {
@@ -136,7 +162,11 @@ async fn process_turn(
         }
     };
 
-    Ok(response_text)
+    let collected = sink.collected_tool_calls();
+    Ok(vanyline_lib::ChatTurnResult {
+        response_text: result.response_text,
+        tool_calls: collected,
+    })
 }
 
 fn resolve_provider_owned(

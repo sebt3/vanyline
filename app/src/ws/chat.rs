@@ -70,6 +70,24 @@ impl CollectingSink {
             let _ = socket.send(axum::extract::ws::Message::Text(text.into())).await;
         }
     }
+
+    fn collected_tool_calls(&self) -> Vec<vanyline_lib::ToolCall> {
+        self.messages
+            .lock()
+            .iter()
+            .filter_map(|msg| {
+                if let CollectedMessage::ToolCall(name, args) = msg {
+                    Some(vanyline_lib::ToolCall {
+                        name: name.clone(),
+                        arguments: args.clone(),
+                        result: None,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
 }
 
 #[async_trait]
@@ -241,11 +259,11 @@ async fn handle_message(
 
     let history = load_history(state, conversation_id).await?;
 
-    persist_message(state, conversation_id, "user", user_msg).await?;
+    persist_message(state, conversation_id, "user", user_msg, None).await?;
 
     let sink = Arc::new(CollectingSink::new());
 
-       let response_text = match provider.provider_type.as_str() {
+    let result = match provider.provider_type.as_str() {
         "ollama" => {
             let model = crate::llm::client::build_ollama_model(&provider, &model_name)?;
             run_chat_with_sink(sink.clone(), &agent_config, &mcp_servers, model, history, user_msg).await?
@@ -263,7 +281,14 @@ async fn handle_message(
 
     sink.flush(socket).await;
 
-    let msg_id = persist_message(state, conversation_id, "assistant", &response_text).await?;
+    let tool_calls = sink.collected_tool_calls();
+    let msg_id = persist_message(
+        state,
+        conversation_id,
+        "assistant",
+        &result.response_text,
+        if tool_calls.is_empty() { None } else { Some(tool_calls) },
+    ).await?;
 
     let done = serde_json::to_string(&ServerMessage::Done { message_id: msg_id }).unwrap_or_default();
     let _ = socket.send(axum::extract::ws::Message::Text(done.into())).await;
@@ -278,7 +303,7 @@ async fn run_chat_with_sink<M>(
     model: M,
     history: Vec<rig_core::message::Message>,
     user_msg: &str,
-) -> Result<String, AppError>
+) -> Result<vanyline_lib::ChatTurnResult, AppError>
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: GetTokenUsage,
@@ -289,7 +314,7 @@ where
         .map(to_lib_mcp)
         .collect();
 
-    let response_text = vanyline_lib::run_chat_turn(
+    let result = vanyline_lib::run_chat_turn(
         sink,
         &lib_agent,
         &lib_mcp_servers,
@@ -299,7 +324,7 @@ where
     )
     .await?;
 
-    Ok(response_text)
+    Ok(result)
 }
 
 fn to_lib_agent(a: &DbAgent) -> vanyline_lib::Agent {
@@ -340,7 +365,13 @@ async fn load_history(
         .filter_map(|m| {
             serde_json::from_value::<vanyline_lib::Message>(m.payload)
                 .ok()
-                .map(|msg| rig_core::message::Message::user(msg.content))
+                .and_then(|msg| {
+                    match msg.role.as_str() {
+                        "user" => Some(rig_core::message::Message::user(msg.content)),
+                        "assistant" => Some(rig_core::message::Message::assistant(msg.content)),
+                        _ => None,
+                    }
+                })
         })
         .collect();
     Ok(history)
@@ -351,8 +382,13 @@ async fn persist_message(
     conversation_id: Uuid,
     role: &str,
     content: &str,
+    tool_calls: Option<Vec<vanyline_lib::ToolCall>>,
 ) -> Result<Uuid, AppError> {
-    let payload = serde_json::json!({ "role": role, "content": content });
+    let payload = serde_json::json!({
+        "role": role,
+        "content": content,
+        "tool_calls": tool_calls,
+    });
     let id: Uuid = sqlx::query_scalar(
         r#"INSERT INTO messages (conversation_id, role, payload)
            VALUES ($1, $2, $3)

@@ -4021,6 +4021,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "parking_lot",
  "reqwest 0.12.28",
  "rig-core",
  "rmcp",
