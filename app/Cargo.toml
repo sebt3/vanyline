@@ -8,12 +8,12 @@ name = "vanyline-app"
 path = "src/main.rs"
 
 [dependencies]
+vanyline-lib = { path = "../lib" }
 axum = { version = "0.8.8", features = ["ws", "macros"] }
 openidconnect = "4.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono", "json", "runtime-tokio-rustls", "migrate"] }
 rig-core = { version = "0.38", features = ["rmcp"] }
-rmcp = { version = "1.7.0", features = ["transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -29,3 +29,4 @@ tower = { version = "0.5", features = ["util"] }
 futures = "0.3"
 base64 = "0.22"
 url = "2"
+parking_lot = "0.12"

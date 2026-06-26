@@ -1,6 +1,8 @@
 [workspace]
 members = [
+    "lib",
     "app",
+    "cli",
     "sandbox",
     "controller",
 ]

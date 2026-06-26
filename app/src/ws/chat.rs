@@ -1,15 +1,11 @@
+use std::sync::Arc;
+
+use async_trait::async_trait;
 use axum::{
     extract::{Path, State, WebSocketUpgrade, ws::WebSocket},
     response::IntoResponse,
 };
-use futures::StreamExt;
-use rig_core::{
-    agent::{Agent, MultiTurnStreamItem, Text},
-    completion::{CompletionModel, GetTokenUsage},
-    message::Message,
-    streaming::{StreamedAssistantContent, StreamingChat},
-};
-use rmcp::{serve_client, transport::StreamableHttpClientTransport};
+use rig_core::completion::{CompletionModel, GetTokenUsage};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -34,6 +30,71 @@ enum ServerMessage {
     ToolCall { name: String, args: serde_json::Value },
     Done { message_id: Uuid },
     Error { code: String, message: String },
+}
+
+#[derive(Clone)]
+enum CollectedMessage {
+    Token(String),
+    ToolCall(String, serde_json::Value),
+    Error(String, String),
+}
+
+struct CollectingSink {
+    messages: parking_lot::Mutex<Vec<CollectedMessage>>,
+}
+
+impl CollectingSink {
+    fn new() -> Self {
+        Self {
+            messages: parking_lot::Mutex::new(Vec::new()),
+        }
+    }
+
+    async fn flush(&self, socket: &mut WebSocket) {
+        let msgs: Vec<CollectedMessage> = self.messages.lock().clone();
+        for msg in msgs.iter() {
+            let server_msg = match msg {
+                CollectedMessage::Token(content) => ServerMessage::Token {
+                    content: content.clone(),
+                },
+                CollectedMessage::ToolCall(name, args) => ServerMessage::ToolCall {
+                    name: name.clone(),
+                    args: args.clone(),
+                },
+                CollectedMessage::Error(code, message) => ServerMessage::Error {
+                    code: code.clone(),
+                    message: message.clone(),
+                },
+            };
+            let text = serde_json::to_string(&server_msg).unwrap_or_default();
+            let _ = socket.send(axum::extract::ws::Message::Text(text.into())).await;
+        }
+    }
+}
+
+#[async_trait]
+impl vanyline_lib::ChatSink for CollectingSink {
+    async fn send_token(&self, content: &str) {
+        self.messages
+            .lock()
+            .push(CollectedMessage::Token(content.to_string()));
+    }
+
+    async fn send_tool_call(&self, name: &str, args: &serde_json::Value) {
+        self.messages.lock().push(CollectedMessage::ToolCall(
+            name.to_string(),
+            args.clone(),
+        ));
+    }
+
+    async fn send_done(&self) {}
+
+    async fn send_error(&self, code: &str, message: &str) {
+        self.messages.lock().push(CollectedMessage::Error(
+            code.to_string(),
+            message.to_string(),
+        ));
+    }
 }
 
 pub async fn ws_chat_handler(
@@ -99,7 +160,9 @@ async fn run_socket(
             }
         };
 
-        let result = handle_message(&mut socket, &state, conversation_id, agent_id, &client_msg.content).await;
+        let result =
+            handle_message(&mut socket, &state, conversation_id, agent_id, &client_msg.content)
+                .await;
         if let Err(e) = result {
             send_error(&mut socket, "VNL-LLM-001", &e.to_string()).await;
         }
@@ -178,25 +241,93 @@ async fn handle_message(
 
     let history = load_history(state, conversation_id).await?;
 
-    match provider.provider_type.as_str() {
+    persist_message(state, conversation_id, "user", user_msg).await?;
+
+    let sink = Arc::new(CollectingSink::new());
+
+       let response_text = match provider.provider_type.as_str() {
         "ollama" => {
             let model = crate::llm::client::build_ollama_model(&provider, &model_name)?;
-            run_chat_turn(socket, state, conversation_id, user_msg, &agent_config, &mcp_servers, model, history).await
+            run_chat_with_sink(sink.clone(), &agent_config, &mcp_servers, model, history, user_msg).await?
         }
         "openai-compatible" => {
             let model = crate::llm::client::build_openai_compat_model(&provider, &model_name)?;
-            run_chat_turn(socket, state, conversation_id, user_msg, &agent_config, &mcp_servers, model, history).await
+            run_chat_with_sink(sink.clone(), &agent_config, &mcp_servers, model, history, user_msg).await?
         }
-        other => Err(AppError::LlmError(format!(
-            "VNL-LLM-005: unknown provider type: {other}"
-        ))),
+        other => {
+            return Err(AppError::LlmError(format!(
+                "VNL-LLM-005: unknown provider type: {other}"
+            )))
+        }
+    };
+
+    sink.flush(socket).await;
+
+    let msg_id = persist_message(state, conversation_id, "assistant", &response_text).await?;
+
+    let done = serde_json::to_string(&ServerMessage::Done { message_id: msg_id }).unwrap_or_default();
+    let _ = socket.send(axum::extract::ws::Message::Text(done.into())).await;
+
+    Ok(())
+}
+
+async fn run_chat_with_sink<M>(
+    sink: Arc<CollectingSink>,
+    agent_config: &DbAgent,
+    mcp_servers: &[McpServer],
+    model: M,
+    history: Vec<rig_core::message::Message>,
+    user_msg: &str,
+) -> Result<String, AppError>
+where
+    M: CompletionModel + 'static,
+    M::StreamingResponse: GetTokenUsage,
+{
+    let lib_agent = to_lib_agent(agent_config);
+    let lib_mcp_servers: Vec<vanyline_lib::McpServer> = mcp_servers
+        .iter()
+        .map(to_lib_mcp)
+        .collect();
+
+    let response_text = vanyline_lib::run_chat_turn(
+        sink,
+        &lib_agent,
+        &lib_mcp_servers,
+        model,
+        history,
+        user_msg,
+    )
+    .await?;
+
+    Ok(response_text)
+}
+
+fn to_lib_agent(a: &DbAgent) -> vanyline_lib::Agent {
+    vanyline_lib::Agent {
+        id: a.id,
+        name: a.name.clone(),
+        description: a.description.clone(),
+        system_prompt: a.system_prompt.clone(),
+        llm_provider_id: a.llm_provider_id,
+        model: a.model.clone(),
+        mcp_servers: Vec::new(),
+    }
+}
+
+fn to_lib_mcp(m: &McpServer) -> vanyline_lib::McpServer {
+    vanyline_lib::McpServer {
+        id: m.id,
+        name: m.name.clone(),
+        server_type: m.server_type.clone(),
+        url: m.url.clone(),
+        headers: m.headers.clone(),
     }
 }
 
 async fn load_history(
     state: &AppState,
     conversation_id: Uuid,
-) -> Result<Vec<Message>, AppError> {
+) -> Result<Vec<rig_core::message::Message>, AppError> {
     let messages = sqlx::query_as::<_, crate::db::models::Message>(
         "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
     )
@@ -204,136 +335,15 @@ async fn load_history(
     .fetch_all(&state.pool)
     .await?;
 
-    let history = messages
+    let history: Vec<rig_core::message::Message> = messages
         .into_iter()
-        .filter_map(|m| serde_json::from_value(m.payload).ok())
+        .filter_map(|m| {
+            serde_json::from_value::<vanyline_lib::Message>(m.payload)
+                .ok()
+                .map(|msg| rig_core::message::Message::user(msg.content))
+        })
         .collect();
     Ok(history)
-}
-
-async fn connect_mcp_server(
-    server: &McpServer,
-) -> Result<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink), AppError> {
-    match server.server_type.as_str() {
-        "http-streamable" => {
-            let transport = StreamableHttpClientTransport::from_uri(server.url.as_str());
-            let running = serve_client((), transport).await.map_err(|e| {
-                AppError::McpError(format!("VNL-MCP-005: connect to {}: {e}", server.name))
-            })?;
-            let server_sink = running.peer().clone();
-            let tools = running.list_all_tools().await.map_err(|e| {
-                AppError::McpError(format!("VNL-MCP-006: list tools from {}: {e}", server.name))
-            })?;
-            Ok((tools, server_sink))
-        }
-        "sse" => Err(AppError::McpError(
-            "VNL-MCP-004: SSE transport not yet implemented".to_string(),
-        )),
-        other => Err(AppError::McpError(format!(
-            "VNL-MCP-003: unknown server type: {other}"
-        ))),
-    }
-}
-
-async fn run_chat_turn<M>(
-    socket: &mut WebSocket,
-    state: &AppState,
-    conversation_id: Uuid,
-    user_msg: &str,
-    agent_config: &DbAgent,
-    mcp_servers: &[McpServer],
-    model: M,
-    history: Vec<Message>,
-) -> Result<(), AppError>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: GetTokenUsage,
-{
-    let system_prompt = &agent_config.system_prompt;
-
-    let mut connections: Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)> = Vec::new();
-    for server in mcp_servers {
-        match connect_mcp_server(server).await {
-            Ok(pair) => connections.push(pair),
-            Err(e) => tracing::warn!("skipping MCP server {}: {e}", server.name),
-        }
-    }
-
-    let agent: Agent<M> = if connections.is_empty() {
-        rig_core::agent::AgentBuilder::new(model)
-            .preamble(system_prompt)
-            .build()
-    } else {
-        let mut iter = connections.into_iter();
-        let (first_tools, first_sink) = iter.next().unwrap();
-        let mut builder = rig_core::agent::AgentBuilder::new(model)
-            .preamble(system_prompt)
-            .rmcp_tools(first_tools, first_sink);
-        for (tools, sink) in iter {
-            builder = builder.rmcp_tools(tools, sink);
-        }
-        builder.build()
-    };
-
-    stream_agent_response(socket, state, conversation_id, user_msg, agent, history).await
-}
-
-async fn stream_agent_response<M>(
-    socket: &mut WebSocket,
-    state: &AppState,
-    conversation_id: Uuid,
-    user_msg: &str,
-    agent: Agent<M>,
-    history: Vec<Message>,
-) -> Result<(), AppError>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: GetTokenUsage,
-{
-    persist_message(state, conversation_id, "user", user_msg).await?;
-
-    let mut stream = agent.stream_chat(user_msg, history).await;
-    let mut response_text = String::new();
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                Text { text, .. },
-            ))) => {
-                response_text.push_str(&text);
-                let msg = serde_json::to_string(&ServerMessage::Token { content: text })
-                    .unwrap_or_default();
-                let _ = socket
-                    .send(axum::extract::ws::Message::Text(msg.into()))
-                    .await;
-            }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                StreamedAssistantContent::ToolCall { tool_call, .. },
-            )) => {
-                let msg = serde_json::to_string(&ServerMessage::ToolCall {
-                    name: tool_call.function.name.clone(),
-                    args: tool_call.function.arguments.clone(),
-                })
-                .unwrap_or_default();
-                let _ = socket
-                    .send(axum::extract::ws::Message::Text(msg.into()))
-                    .await;
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
-            Err(e) => return Err(AppError::LlmError(format!("VNL-LLM-001: {e}"))),
-            _ => {}
-        }
-    }
-
-    let msg_id = persist_message(state, conversation_id, "assistant", &response_text).await?;
-
-    let done =
-        serde_json::to_string(&ServerMessage::Done { message_id: msg_id }).unwrap_or_default();
-    let _ = socket
-        .send(axum::extract::ws::Message::Text(done.into()))
-        .await;
-
-    Ok(())
 }
 
 async fn persist_message(

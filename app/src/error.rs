@@ -38,6 +38,12 @@ pub enum AppError {
     InternalError(String),
 }
 
+impl From<vanyline_lib::VnyError> for AppError {
+    fn from(e: vanyline_lib::VnyError) -> Self {
+        AppError::InternalError(e.to_string())
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
