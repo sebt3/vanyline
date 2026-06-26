@@ -40,7 +40,10 @@ pub async fn run(message: Option<String>, agent: Option<Uuid>, conversation: Opt
 }
 
 async fn run_one_shot(user_msg: &str, agent: Option<Uuid>, conversation: Option<Uuid>) {
-    let (mut conv, agent_config) = resolve_context(agent, conversation).await;
+    let (mut conv, agent_config, is_new) = resolve_context(agent, conversation).await;
+    if is_new {
+        println!("Session: {}", conv.id);
+    }
     if let Ok(response) = process_turn(&mut conv, &agent_config, user_msg).await {
         conv.messages.push(vanyline_lib::Message {
             role: "assistant".to_string(),
@@ -53,7 +56,7 @@ async fn run_one_shot(user_msg: &str, agent: Option<Uuid>, conversation: Option<
 }
 
 async fn run_repl(agent: Option<Uuid>, conversation: Option<Uuid>) {
-    let (mut conv, agent_config) = resolve_context(agent, conversation).await;
+    let (mut conv, agent_config, _) = resolve_context(agent, conversation).await;
     println!("vanyline REPL (Ctrl-D to exit)");
     println!("Agent: {}", agent_config.name);
     if let Some(title) = &conv.title {
@@ -157,7 +160,7 @@ fn resolve_provider_owned(
 async fn resolve_context(
     agent: Option<Uuid>,
     conversation: Option<Uuid>,
-) -> (vanyline_lib::Conversation, vanyline_lib::Agent) {
+) -> (vanyline_lib::Conversation, vanyline_lib::Agent, bool) {
     let agents = store::list_agents().unwrap_or_default();
     let default_agent_id = store::get_default_agent_id().ok();
 
@@ -183,28 +186,38 @@ async fn resolve_context(
         })
         .clone();
 
-    let conv = if let Some(cid) = conversation {
-        store::get_conversation(&cid).unwrap_or_else(|_| {
-            eprintln!("Conversation not found: {cid}");
-            std::process::exit(1);
-        })
+    let (conv, is_new) = if let Some(cid) = conversation {
+        (
+            store::get_conversation(&cid).unwrap_or_else(|_| {
+                eprintln!("Conversation not found: {cid}");
+                std::process::exit(1);
+            }),
+            false,
+        )
     } else if let Some(active_id) = store::get_active_conversation() {
-        store::get_conversation(&active_id).unwrap_or_else(|_| {
+        match store::get_conversation(&active_id) {
+            Ok(existing) => (existing, false),
+            Err(_) => (
+                vanyline_lib::Conversation {
+                    id: uuid::Uuid::new_v4(),
+                    agent_id: Some(agent_id),
+                    title: None,
+                    messages: Vec::new(),
+                },
+                true,
+            ),
+        }
+    } else {
+        (
             vanyline_lib::Conversation {
                 id: uuid::Uuid::new_v4(),
                 agent_id: Some(agent_id),
                 title: None,
                 messages: Vec::new(),
-            }
-        })
-    } else {
-        vanyline_lib::Conversation {
-            id: uuid::Uuid::new_v4(),
-            agent_id: Some(agent_id),
-            title: None,
-            messages: Vec::new(),
-        }
+            },
+            true,
+        )
     };
 
-    (conv, agent_config)
+    (conv, agent_config, is_new)
 }

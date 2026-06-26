@@ -35,30 +35,15 @@ where
 {
     let system_prompt = &agent_config.system_prompt;
 
-    let mut connections: Vec<(Vec<rmcp::model::Tool>, rmcp::service::ServerSink)> = Vec::new();
-    for server in mcp_servers {
-        match crate::mcp::connect_mcp_server(server).await {
-            Ok(pair) => connections.push(pair),
-            Err(e) => {
-                tracing::warn!("skipping MCP server {}: {e}", server.name);
-            }
-        }
-    }
-
-    let agent: Agent<M> = if connections.is_empty() {
+    let agent: Agent<M> = if let Some(handle) = crate::connect_mcp_servers_prefixed(mcp_servers).await {
+        rig_core::agent::AgentBuilder::new(model)
+            .preamble(system_prompt)
+            .tool_server_handle(handle)
+            .build()
+    } else {
         rig_core::agent::AgentBuilder::new(model)
             .preamble(system_prompt)
             .build()
-    } else {
-        let mut iter = connections.into_iter();
-        let (first_tools, first_sink) = iter.next().unwrap();
-        let mut builder = rig_core::agent::AgentBuilder::new(model)
-            .preamble(system_prompt)
-            .rmcp_tools(first_tools, first_sink);
-        for (tools, sink) in iter {
-            builder = builder.rmcp_tools(tools, sink);
-        }
-        builder.build()
     };
 
     stream_agent_response(sink, agent, history, user_msg).await
