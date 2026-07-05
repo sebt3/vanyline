@@ -19,7 +19,8 @@ Licence : BSD-3.
   auth · config                          WS (JWT) · MCP
   LLM orchestration                      Rust server
                                          + toolchains OCI image volumes
-                                         + git · curl · make · vim
+                                         + base : cc/ld · libc-dev · make
+                                         + git · curl · pkg-config · vim
 
          [ controller ] (déféré)
          kube-rs · CRDs : Application, Owner, Sandbox
@@ -48,9 +49,21 @@ Expose deux interfaces :
 - **WebSocket** : accès éditeur (commandes, filesystem, terminal) — auth JWT
 - **MCP HTTP streaming** : tools pour les LLM et pour kydah-code
 
-Image de base : Debian slim + binaire serveur + git, curl, make, vim.
-Toolchains : images OCI standard (ex: `rust:1.82-slim-trixie`) montées via `volumes[].image`
-(feature K8s native, GA depuis v1.36, prérequis : v1.31+). PATH/LD_LIBRARY_PATH injectés.
+Image de base : Debian slim + binaire serveur + **substrat natif commun** (compilateur C
+`cc`/`ld` + binutils, `libc-dev`, make, pkg-config) + git, curl, vim. Le linker C est
+obligatoire dans le base : sans lui aucune compilation native ne lie (rust, node-gyp, cgo…).
+
+Toolchains : images OCI standard (ex: `rust:slim-trixie`, `node:trixie-slim`) montées via
+`volumes[].image` (feature K8s native, GA depuis v1.36, prérequis : v1.31+). Une toolchain
+devient utilisable par **injection d'env au démarrage**, jamais par magie :
+- `PATH` → `…/usr/local/bin` (ou `cargo/bin`) du volume
+- `LD_LIBRARY_PATH` → `…/usr/lib/<arch>-linux-gnu` du volume (le loader du base ne trouve pas
+  les libs du volume sinon — ex: `libatomic.so.1` pour node)
+- **env spécifiques par toolchain** (ex: rust → `RUSTUP_HOME` sur le volume ;
+  `CARGO_HOME` writable **hors volume**, dans le PVC du Owner car le volume est read-only)
+
+**Contrainte** : base et images toolchain doivent être sur la **même famille de distro**
+(trixie) — le loader du base résout la glibc ; un mismatch de distro est du hasard, pas du design.
 
 **Deux modes d'authentification :**
 - **JWT** (frontend → sandbox via ingress) : token OIDC émis par l'app, validé par la sandbox

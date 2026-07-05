@@ -1,6 +1,11 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use futures::StreamExt;
+use rig_core::agent::{Agent, MultiTurnStreamItem, Text};
+use rig_core::streaming::StreamingChat;
+use rig_core::streaming::StreamedAssistantContent;
+use rig_core::tool::server::ToolServer;
 use uuid::Uuid;
 
 use crate::{config::ensure_config_dir, store};
@@ -135,7 +140,6 @@ async fn process_turn(
         .collect();
 
     let sink = Arc::new(vanyline_lib::PassthroughCollectingSink::new(StdoutSink));
-    let mcp_servers = &agent_config.mcp_servers;
 
     let provider = resolve_provider_owned(agent_config)?;
     let model_name = agent_config
@@ -144,15 +148,45 @@ async fn process_turn(
         .or(provider.default_model.as_deref())
         .ok_or(vanyline_lib::VnyError::NoModelConfigured)?;
 
+    let system_prompt = &agent_config.system_prompt;
+    let mcp_servers = &agent_config.mcp_servers;
+
+    let tool_server = ToolServer::new();
+    let handle = tool_server.run();
+
+    let (read_f, write_f, del_f, mk_dir_f, ls_f, exec_f) = crate::tools::local_tools();
+    if let Err(e) = handle.add_tool(read_f).await {
+        tracing::warn!("failed to add local tool read_file: {e}");
+    }
+    if let Err(e) = handle.add_tool(write_f).await {
+        tracing::warn!("failed to add local tool write_file: {e}");
+    }
+    if let Err(e) = handle.add_tool(del_f).await {
+        tracing::warn!("failed to add local tool delete_file: {e}");
+    }
+    if let Err(e) = handle.add_tool(mk_dir_f).await {
+        tracing::warn!("failed to add local tool create_directory: {e}");
+    }
+    if let Err(e) = handle.add_tool(ls_f).await {
+        tracing::warn!("failed to add local tool list_directory: {e}");
+    }
+    if let Err(e) = handle.add_tool(exec_f).await {
+        tracing::warn!("failed to add local tool execute_command: {e}");
+    }
+
+    if let Err(e) = crate::tools::connect_mcp_servers_prefixed(mcp_servers, &handle).await {
+        tracing::warn!("connecting MCP servers: {e}");
+    }
+
     let result = match provider.provider_type.as_str() {
         "ollama" => {
             let model = vanyline_lib::build_ollama_model(&provider, model_name)?;
-            vanyline_lib::run_chat_turn(sink.clone(), agent_config, mcp_servers, model, history, user_msg)
+            stream_turn(sink.clone(), model, system_prompt, mcp_servers, &handle, history, user_msg)
                 .await?
         }
         "openai-compatible" => {
             let model = vanyline_lib::build_openai_compat_model(&provider, model_name)?;
-            vanyline_lib::run_chat_turn(sink.clone(), agent_config, mcp_servers, model, history, user_msg)
+            stream_turn(sink.clone(), model, system_prompt, mcp_servers, &handle, history, user_msg)
                 .await?
         }
         other => {
@@ -164,9 +198,53 @@ async fn process_turn(
 
     let collected = sink.collected_tool_calls();
     Ok(vanyline_lib::ChatTurnResult {
-        response_text: result.response_text,
+        response_text: result,
         tool_calls: collected,
     })
+}
+
+async fn stream_turn<M>(
+    sink: Arc<impl vanyline_lib::ChatSink>,
+    model: M,
+    system_prompt: &str,
+    _mcp_servers: &[vanyline_lib::McpServer],
+    tool_handle: &rig_core::tool::server::ToolServerHandle,
+    history: Vec<rig_core::message::Message>,
+    user_msg: &str,
+) -> Result<String, vanyline_lib::VnyError>
+where
+    M: rig_core::completion::CompletionModel + 'static,
+    M::StreamingResponse: rig_core::completion::GetTokenUsage,
+{
+    let agent: Agent<M> = rig_core::agent::AgentBuilder::new(model)
+        .preamble(system_prompt)
+        .tool_server_handle(tool_handle.clone())
+        .build();
+
+    let mut stream = agent.stream_chat(user_msg, history).await;
+    let mut response_text = String::new();
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
+                Text { text, .. },
+            ))) => {
+                response_text.push_str(&text);
+                sink.send_token(&text).await;
+            }
+            Ok(MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::ToolCall { tool_call, .. },
+            )) => {
+                sink.send_tool_call(&tool_call.function.name, &tool_call.function.arguments).await;
+            }
+            Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
+            Err(e) => return Err(vanyline_lib::VnyError::LlmError(format!("{}", e))),
+            _ => {}
+        }
+    }
+
+    sink.send_done().await;
+    Ok(response_text)
 }
 
 fn resolve_provider_owned(

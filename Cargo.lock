@@ -3968,6 +3968,7 @@ dependencies = [
  "dirs",
  "futures",
  "rig-core",
+ "rmcp",
  "serde",
  "serde_json",
  "tokio",
@@ -3975,6 +3976,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "vanyline-lib",
+ "vanyline-tools",
 ]
 
 [[package]]
@@ -4040,6 +4042,19 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vanyline-tools",
+]
+
+[[package]]
+name = "vanyline-tools"
+version = "0.0.1-alpha.1"
+dependencies = [
+ "futures",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

@@ -48,9 +48,29 @@ Décision : Option A (JWT émis par l'app pour kydah-code) rejetée car elle cr�
 
 ### Design sandbox — toolchains via K8s image volumes
 
-Les toolchains utilisent des images Docker standard (ex: `rust:1.82-slim-trixie`, `node:26-slim`)
+Les toolchains utilisent des images Docker standard (ex: `rust:slim-trixie`, `node:trixie-slim`)
 montées via `volumes[].image` — feature K8s native GA depuis v1.36, prérequis v1.31+.
-Pas de registre propriétaire, pas de build custom. PATH/LD_LIBRARY_PATH injectés au démarrage.
+Pas de registre propriétaire, pas de build custom.
+
+**Validé en conditions réelles sur cluster 1.36 (2026-07-01, cri-o 1.36.1)** — deux pods de test
+(`deploy/sandbox-imagevol-*.yaml`) ont éprouvé node et rust. Recette d'assemblage confirmée :
+
+- **Répartition base / volume / PVC** :
+  - *base* = substrat natif commun installé proprement (apt) : **linker C `cc`/`ld` + binutils,
+    `libc-dev`, make, pkg-config**, git, curl, vim. Le linker est obligatoire : `rust:slim`
+    ne l'embarque pas → `cargo build` échoue sur `error: linker cc not found`. Vrai pour toute
+    compilation native (node-gyp, cgo…).
+  - *volumes* = toolchains langage, read-only, utilisables par **injection d'env** :
+    - `PATH` → `…/bin` du volume
+    - `LD_LIBRARY_PATH` → `…/usr/lib/<arch>-linux-gnu` du volume (sinon le loader du base ne
+      trouve pas les libs du volume — ex: `libatomic.so.1` manquant pour node)
+    - **env par toolchain** : rust → `RUSTUP_HOME` sur le volume (les binaires de `cargo/bin`
+      sont des symlinks vers `rustup`, ça suffit — rustup n'est PAS un obstacle)
+  - *PVC du Owner* = homes writable **hors volume read-only** : `CARGO_HOME`, `~/.npm`, etc.
+- **Contrainte distro** : base et images toolchain sur la **même famille** (trixie). Le loader
+  du base résout la glibc ; un mismatch de distro marche par compat ascendante = hasard, pas design.
+- **Correction doc** : l'ancienne formule « PATH/LD_LIBRARY_PATH injectés » sous-estimait le sujet
+  (linker manquant dans le base + env par toolchain). AGENTS.md corrigé en conséquence.
 
 ### kydah-code est un client de la sandbox
 

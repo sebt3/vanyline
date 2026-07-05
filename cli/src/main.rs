@@ -2,6 +2,8 @@ mod chat;
 mod config;
 mod store;
 
+mod tools;
+
 use clap::{Parser, Subcommand};
 use tracing_subscriber::prelude::*;
 
