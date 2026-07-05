@@ -8,6 +8,7 @@ name = "vanyline-sandbox"
 path = "src/main.rs"
 
 [dependencies]
+vanyline-tools = { path = "../tools" }
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

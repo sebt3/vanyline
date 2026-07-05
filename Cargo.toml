@@ -4,6 +4,7 @@ members = [
     "app",
     "cli",
     "sandbox",
+    "tools",
     "controller",
 ]
 resolver = "2"
