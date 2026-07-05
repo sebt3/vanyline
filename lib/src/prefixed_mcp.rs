@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::server::ToolServerHandle;
 use rig_core::tool::ToolDyn;
@@ -9,6 +7,36 @@ use rmcp::service::ServerSink;
 
 use crate::error::VnyError;
 use crate::types::McpServer;
+
+/// Create a fresh, running tool-server handle. Callers add tools to it
+/// (local tools and/or MCP tools) before handing it to `run_chat_turn`.
+pub fn new_tool_handle() -> ToolServerHandle {
+    rig_core::tool::server::ToolServer::new().run()
+}
+
+/// Connect to MCP servers and add their prefixed tools to an existing handle.
+/// Per-server failures are logged and skipped; they do not abort the whole set.
+pub async fn connect_mcp_servers_prefixed(
+    servers: &[McpServer],
+    handle: &ToolServerHandle,
+) -> Result<(), VnyError> {
+    for server in servers {
+        match connect_mcp_server_inner(server).await {
+            Ok((tools, client)) => {
+                let prefixed_tools = PrefixedMcpTool::new(tools, client, &server.name);
+                for tool in prefixed_tools {
+                    if let Err(e) = handle.add_tool(tool).await {
+                        tracing::warn!("failed to add prefixed tool: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("skipping MCP server {}: {e}", server.name);
+            }
+        }
+    }
+    Ok(())
+}
 
 /// A tool that presents a prefixed name to the LLM but calls the MCP server
 /// with the original (unprefixed) tool name.
@@ -28,7 +56,7 @@ impl PrefixedMcpTool {
                 let prefixed_name = format!("{}{}", prefix, original.name);
                 let mut prefixed = Tool::new(
                     prefixed_name,
-                    original.description.clone().unwrap_or(Cow::Borrowed("")),
+                    original.description.clone().unwrap_or(std::borrow::Cow::Borrowed("")),
                     original.input_schema.clone(),
                 );
                 prefixed.title = original.title.clone();
@@ -60,7 +88,7 @@ impl ToolDyn for PrefixedMcpTool {
                     .prefixed
                     .description
                     .clone()
-                    .unwrap_or(Cow::from(""))
+                    .unwrap_or(std::borrow::Cow::from(""))
                     .to_string(),
                 parameters: serde_json::to_value(&self.prefixed.input_schema).unwrap_or_default(),
             }
@@ -92,7 +120,7 @@ impl ToolDyn for PrefixedMcpTool {
                     .content
                     .into_iter()
                     .map(|x| x.raw.as_text().map(|y| y.to_owned()))
-                    .map(|x| x.map(|x| x.clone().text))
+                    .map(|x| x.map(|x| x.text))
                     .collect::<Option<Vec<String>>>();
 
                 if let Some(msg) = error_msg {
@@ -168,35 +196,6 @@ impl std::fmt::Display for McpToolCallError {
 }
 
 impl std::error::Error for McpToolCallError {}
-
-/// Connect to MCP servers and return a ToolServerHandle with prefixed tools.
-/// Returns None if no servers are configured.
-pub async fn connect_mcp_servers_prefixed(servers: &[McpServer]) -> Option<ToolServerHandle> {
-    if servers.is_empty() {
-        return None;
-    }
-
-    let tool_server = rig_core::tool::server::ToolServer::new();
-    let handle = tool_server.run();
-
-    for server in servers {
-        match connect_mcp_server_inner(server).await {
-            Ok((tools, client)) => {
-                let prefixed_tools = PrefixedMcpTool::new(tools, client, &server.name);
-                for tool in prefixed_tools {
-                    if let Err(e) = handle.add_tool(tool).await {
-                        tracing::warn!("failed to add prefixed tool: {e}");
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("skipping MCP server {}: {e}", server.name);
-            }
-        }
-    }
-
-    Some(handle)
-}
 
 async fn connect_mcp_server_inner(
     server: &McpServer,

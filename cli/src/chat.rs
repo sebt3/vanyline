@@ -1,11 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use futures::StreamExt;
-use rig_core::agent::{Agent, MultiTurnStreamItem, Text};
-use rig_core::streaming::StreamingChat;
-use rig_core::streaming::StreamedAssistantContent;
-use rig_core::tool::server::ToolServer;
 use uuid::Uuid;
 
 use crate::{config::ensure_config_dir, store};
@@ -139,7 +134,7 @@ async fn process_turn(
         })
         .collect();
 
-    let sink = Arc::new(vanyline_lib::PassthroughCollectingSink::new(StdoutSink));
+    let sink = Arc::new(StdoutSink);
 
     let provider = resolve_provider_owned(agent_config)?;
     let model_name = agent_config
@@ -148,11 +143,7 @@ async fn process_turn(
         .or(provider.default_model.as_deref())
         .ok_or(vanyline_lib::VnyError::NoModelConfigured)?;
 
-    let system_prompt = &agent_config.system_prompt;
-    let mcp_servers = &agent_config.mcp_servers;
-
-    let tool_server = ToolServer::new();
-    let handle = tool_server.run();
+    let handle = vanyline_lib::new_tool_handle();
 
     let (read_f, write_f, del_f, mk_dir_f, ls_f, exec_f) = crate::tools::local_tools();
     if let Err(e) = handle.add_tool(read_f).await {
@@ -174,77 +165,23 @@ async fn process_turn(
         tracing::warn!("failed to add local tool execute_command: {e}");
     }
 
-    if let Err(e) = crate::tools::connect_mcp_servers_prefixed(mcp_servers, &handle).await {
-        tracing::warn!("connecting MCP servers: {e}");
-    }
+    vanyline_lib::connect_mcp_servers_prefixed(&agent_config.mcp_servers, &handle).await?;
 
     let result = match provider.provider_type.as_str() {
         "ollama" => {
             let model = vanyline_lib::build_ollama_model(&provider, model_name)?;
-            stream_turn(sink.clone(), model, system_prompt, mcp_servers, &handle, history, user_msg)
-                .await?
+            vanyline_lib::run_chat_turn(sink, &agent_config.system_prompt, handle, model, history, user_msg).await?
         }
         "openai-compatible" => {
             let model = vanyline_lib::build_openai_compat_model(&provider, model_name)?;
-            stream_turn(sink.clone(), model, system_prompt, mcp_servers, &handle, history, user_msg)
-                .await?
+            vanyline_lib::run_chat_turn(sink, &agent_config.system_prompt, handle, model, history, user_msg).await?
         }
         other => {
-            return Err(vanyline_lib::VnyError::UnknownProviderType(
-                other.to_string(),
-            ))
+            return Err(vanyline_lib::VnyError::UnknownProviderType(other.to_string()))
         }
     };
 
-    let collected = sink.collected_tool_calls();
-    Ok(vanyline_lib::ChatTurnResult {
-        response_text: result,
-        tool_calls: collected,
-    })
-}
-
-async fn stream_turn<M>(
-    sink: Arc<impl vanyline_lib::ChatSink>,
-    model: M,
-    system_prompt: &str,
-    _mcp_servers: &[vanyline_lib::McpServer],
-    tool_handle: &rig_core::tool::server::ToolServerHandle,
-    history: Vec<rig_core::message::Message>,
-    user_msg: &str,
-) -> Result<String, vanyline_lib::VnyError>
-where
-    M: rig_core::completion::CompletionModel + 'static,
-    M::StreamingResponse: rig_core::completion::GetTokenUsage,
-{
-    let agent: Agent<M> = rig_core::agent::AgentBuilder::new(model)
-        .preamble(system_prompt)
-        .tool_server_handle(tool_handle.clone())
-        .build();
-
-    let mut stream = agent.stream_chat(user_msg, history).await;
-    let mut response_text = String::new();
-
-    while let Some(item) = stream.next().await {
-        match item {
-            Ok(MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Text(
-                Text { text, .. },
-            ))) => {
-                response_text.push_str(&text);
-                sink.send_token(&text).await;
-            }
-            Ok(MultiTurnStreamItem::StreamAssistantItem(
-                StreamedAssistantContent::ToolCall { tool_call, .. },
-            )) => {
-                sink.send_tool_call(&tool_call.function.name, &tool_call.function.arguments).await;
-            }
-            Ok(MultiTurnStreamItem::FinalResponse(_)) => break,
-            Err(e) => return Err(vanyline_lib::VnyError::LlmError(format!("{}", e))),
-            _ => {}
-        }
-    }
-
-    sink.send_done().await;
-    Ok(response_text)
+    Ok(result)
 }
 
 fn resolve_provider_owned(

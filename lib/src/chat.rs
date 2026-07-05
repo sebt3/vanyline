@@ -9,9 +9,10 @@ use rig_core::{
     message::Message,
     streaming::{StreamedAssistantContent, StreamingChat},
 };
+use rig_core::tool::server::ToolServerHandle;
 
 use crate::error::VnyError;
-use crate::types::{Agent as AgentConfig, McpServer, ToolCall};
+use crate::types::ToolCall;
 
 #[async_trait]
 pub trait ChatSink: Send + Sync {
@@ -71,8 +72,8 @@ impl<S: ChatSink> ChatSink for PassthroughCollectingSink<S> {
 
 pub async fn run_chat_turn<M, S>(
     sink: Arc<S>,
-    agent_config: &AgentConfig,
-    mcp_servers: &[McpServer],
+    system_prompt: &str,
+    handle: ToolServerHandle,
     model: M,
     history: Vec<Message>,
     user_msg: &str,
@@ -82,18 +83,10 @@ where
     M::StreamingResponse: GetTokenUsage,
     S: ChatSink + 'static,
 {
-    let system_prompt = &agent_config.system_prompt;
-
-    let agent: Agent<M> = if let Some(handle) = crate::connect_mcp_servers_prefixed(mcp_servers).await {
-        rig_core::agent::AgentBuilder::new(model)
-            .preamble(system_prompt)
-            .tool_server_handle(handle)
-            .build()
-    } else {
-        rig_core::agent::AgentBuilder::new(model)
-            .preamble(system_prompt)
-            .build()
-    };
+    let agent: Agent<M> = rig_core::agent::AgentBuilder::new(model)
+        .preamble(system_prompt)
+        .tool_server_handle(handle)
+        .build();
 
     stream_agent_response(sink, agent, history, user_msg).await
 }

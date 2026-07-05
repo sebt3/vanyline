@@ -308,16 +308,18 @@ where
     M: CompletionModel + 'static,
     M::StreamingResponse: GetTokenUsage,
 {
-    let lib_agent = to_lib_agent(agent_config);
     let lib_mcp_servers: Vec<vanyline_lib::McpServer> = mcp_servers
         .iter()
         .map(to_lib_mcp)
         .collect();
 
+    let handle = vanyline_lib::new_tool_handle();
+    vanyline_lib::connect_mcp_servers_prefixed(&lib_mcp_servers, &handle).await?;
+
     let result = vanyline_lib::run_chat_turn(
         sink,
-        &lib_agent,
-        &lib_mcp_servers,
+        &agent_config.system_prompt,
+        handle,
         model,
         history,
         user_msg,
@@ -325,18 +327,6 @@ where
     .await?;
 
     Ok(result)
-}
-
-fn to_lib_agent(a: &DbAgent) -> vanyline_lib::Agent {
-    vanyline_lib::Agent {
-        id: a.id,
-        name: a.name.clone(),
-        description: a.description.clone(),
-        system_prompt: a.system_prompt.clone(),
-        llm_provider_id: a.llm_provider_id,
-        model: a.model.clone(),
-        mcp_servers: Vec::new(),
-    }
 }
 
 fn to_lib_mcp(m: &McpServer) -> vanyline_lib::McpServer {

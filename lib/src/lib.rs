@@ -9,3 +9,5 @@ pub use error::*;
 pub use llm::*;
 pub use prefixed_mcp::*;
 pub use types::*;
+
+pub use rig_core::tool::server::ToolServerHandle;
