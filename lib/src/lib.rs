@@ -1,4 +1,5 @@
 mod chat;
+mod domain;
 mod error;
 mod llm;
 mod prefixed_mcp;

@@ -34,4 +34,8 @@ pub enum VnyError {
     JsonError(#[from] serde_json::Error),
     #[error("VNL-INT-001: Internal error: {0}")]
     InternalError(String),
+    #[error("VNL-CFG-002: Duplicate name '{1}' for {0}")]
+    DuplicateName(&'static str, String),
+    #[error("VNL-CFG-003: Unknown {0} reference: '{1}'")]
+    UnknownReference(&'static str, String),
 }
