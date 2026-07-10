@@ -38,8 +38,8 @@ pub struct EditFileOptions {
     pub replace_all: bool,
 }
 
-// Legacy types — kept for delete_file/create_directory/list_directory which
-// remain on FilesystemError in this task.
+// Legacy types — kept for delete_file/create_directory which remain on
+// FilesystemError in this task.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteFileOptions {
     pub path: String,
@@ -50,13 +50,8 @@ pub struct CreateDirectoryOptions {
     pub path: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-pub struct ListDirectoryOptions {
-    pub path: String,
-}
-
 // ---------------------------------------------------------------------------
-// Legacy error type (kept for delete_file / create_directory / list_directory)
+// Legacy error type (kept for delete_file / create_directory)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -392,14 +387,14 @@ fn closest_line_hint(content: &str, needle: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ListDirectoryOptionsV2 {
+pub struct ListDirectoryOptions {
     pub path: String,
     /// Recursion depth. 0 = default (1), same convention as `ReadFileOptions::limit`.
     #[serde(default)]
     pub depth: usize,
 }
 
-pub fn list_directory_v2(opts: ListDirectoryOptionsV2) -> BoxedFuture<Result<String, ToolsError>> {
+pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let path = opts.path;
     let path_for_err = path.clone();
     let depth = opts.depth;
@@ -529,21 +524,6 @@ pub fn create_directory(opts: CreateDirectoryOptions) -> BoxedFuture<Result<(), 
         tokio::fs::create_dir_all(&path).await
             .map(|_| ())
             .map_err(FilesystemError)
-    })
-}
-
-pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<Vec<String>, FilesystemError>> {
-    let path = opts.path;
-    Box::pin(async move {
-        let mut entries = Vec::new();
-        let mut reader = tokio::fs::read_dir(&path).await
-            .map_err(FilesystemError)?;
-        while let Some(entry) = reader.next_entry().await
-            .map_err(FilesystemError)? {
-            entries.push(entry.file_name().to_string_lossy().to_string());
-        }
-        entries.sort();
-        Ok(entries)
     })
 }
 
@@ -968,7 +948,7 @@ mod tests {
         tokio::fs::write(dir.path().join("alpha.txt"), "content").await.unwrap();
         tokio::fs::create_dir(dir.path().join("beta")).await.unwrap();
 
-        let result = list_directory_v2(ListDirectoryOptionsV2 {
+        let result = list_directory(ListDirectoryOptions {
             path: dir.path().to_string_lossy().to_string(),
             depth: 0,
         })
@@ -990,7 +970,7 @@ mod tests {
         tokio::fs::create_dir_all(&a).await.unwrap();
         tokio::fs::write(&b, "content").await.unwrap();
 
-        let result = list_directory_v2(ListDirectoryOptionsV2 {
+        let result = list_directory(ListDirectoryOptions {
             path: dir.path().to_string_lossy().to_string(),
             depth: 2,
         })
@@ -1013,7 +993,7 @@ mod tests {
         tokio::fs::write(&b, "content").await.unwrap();
 
         // depth=0 → effective_depth=1 → only immediate children, no recursion
-        let result = list_directory_v2(ListDirectoryOptionsV2 {
+        let result = list_directory(ListDirectoryOptions {
             path: dir.path().to_string_lossy().to_string(),
             depth: 0,
         })
@@ -1031,7 +1011,7 @@ mod tests {
     async fn list_directory_empty() {
         let dir = tempfile::tempdir().unwrap();
 
-        let result = list_directory_v2(ListDirectoryOptionsV2 {
+        let result = list_directory(ListDirectoryOptions {
             path: dir.path().to_string_lossy().to_string(),
             depth: 0,
         })
@@ -1043,7 +1023,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_directory_not_found() {
-        let result = list_directory_v2(ListDirectoryOptionsV2 {
+        let result = list_directory(ListDirectoryOptions {
             path: "/nonexistent/path/xyz".into(),
             depth: 0,
         })
@@ -1063,7 +1043,7 @@ mod tests {
         let file = dir.path().join("test.txt");
         tokio::fs::write(&file, "data").await.unwrap();
 
-        let result = list_directory_v2(ListDirectoryOptionsV2 {
+        let result = list_directory(ListDirectoryOptions {
             path: file.to_string_lossy().to_string(),
             depth: 0,
         })
@@ -1086,7 +1066,7 @@ mod tests {
             tokio::fs::write(&f, "x").await.unwrap();
         }
 
-        let result = list_directory_v2(ListDirectoryOptionsV2 {
+        let result = list_directory(ListDirectoryOptions {
             path: dir.path().to_string_lossy().to_string(),
             depth: 0,
         })

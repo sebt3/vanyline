@@ -162,7 +162,7 @@ impl ToolDyn for ListDirectoryTool {
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             let args: ListDirectoryArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            filesystem::list_directory_v2(filesystem::ListDirectoryOptionsV2 { path: args.path, depth: 0 }).await
+            filesystem::list_directory(filesystem::ListDirectoryOptions { path: args.path, depth: 0 }).await
                 .map_err(|e| ToolError::ToolCallError(Box::new(e)))
         })
     }
