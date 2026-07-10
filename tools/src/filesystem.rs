@@ -101,7 +101,7 @@ fn file_not_found_hint(path: &str) -> String {
                     let mut sorted = names;
                     sorted.sort();
                     if sorted.is_empty() {
-                        format!(", parent directory contains: []")
+                        ", parent directory contains: []".to_string()
                     } else {
                         let display = sorted.join(", ");
                         format!(", parent directory contains: [{}]", display)

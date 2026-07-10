@@ -31,7 +31,7 @@ impl ToolDyn for ReadFileTool {
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             let args: ReadFileArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            filesystem::read_file(filesystem::ReadFileOptions { path: args.path }).await
+            filesystem::read_file(filesystem::ReadFileOptions { path: args.path, ..Default::default() }).await
                 .map_err(|e| ToolError::ToolCallError(Box::new(e)))
         })
     }
