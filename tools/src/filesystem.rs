@@ -43,26 +43,7 @@ pub struct DeleteFileOptions {
     pub path: String,
 }
 
-// Legacy type — kept for create_directory which still uses FilesystemError.
-#[derive(Debug, Serialize, Deserialize)]
-pub struct CreateDirectoryOptions {
-    pub path: String,
-}
 
-// ---------------------------------------------------------------------------
-// Legacy error type (kept for create_directory only)
-// ---------------------------------------------------------------------------
-
-#[derive(Debug)]
-pub struct FilesystemError(std::io::Error);
-
-impl std::fmt::Display for FilesystemError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "IO error: {}", self.0)
-    }
-}
-
-impl std::error::Error for FilesystemError {}
 
 // ---------------------------------------------------------------------------
 // Helper: FileNotFound hint
@@ -545,15 +526,6 @@ pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError
                 Err(e) => Err(ToolsError::Io { path, source: e }),
             }
         }
-    })
-}
-
-pub fn create_directory(opts: CreateDirectoryOptions) -> BoxedFuture<Result<(), FilesystemError>> {
-    let path = opts.path;
-    Box::pin(async move {
-        tokio::fs::create_dir_all(&path).await
-            .map(|_| ())
-            .map_err(FilesystemError)
     })
 }
 

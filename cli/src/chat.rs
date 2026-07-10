@@ -145,21 +145,27 @@ async fn process_turn(
 
     let handle = vanyline_lib::new_tool_handle();
 
-    let (read_f, write_f, del_f, mk_dir_f, ls_f, exec_f) = crate::tools::local_tools();
+    let (read_f, write_f, edit_f, del_f, ls_f, find_f, search_f, exec_f) = crate::tools::local_tools();
     if let Err(e) = handle.add_tool(read_f).await {
         tracing::warn!("failed to add local tool read_file: {e}");
     }
     if let Err(e) = handle.add_tool(write_f).await {
         tracing::warn!("failed to add local tool write_file: {e}");
     }
+    if let Err(e) = handle.add_tool(edit_f).await {
+        tracing::warn!("failed to add local tool edit_file: {e}");
+    }
     if let Err(e) = handle.add_tool(del_f).await {
         tracing::warn!("failed to add local tool delete_file: {e}");
     }
-    if let Err(e) = handle.add_tool(mk_dir_f).await {
-        tracing::warn!("failed to add local tool create_directory: {e}");
-    }
     if let Err(e) = handle.add_tool(ls_f).await {
         tracing::warn!("failed to add local tool list_directory: {e}");
+    }
+    if let Err(e) = handle.add_tool(find_f).await {
+        tracing::warn!("failed to add local tool find_files: {e}");
+    }
+    if let Err(e) = handle.add_tool(search_f).await {
+        tracing::warn!("failed to add local tool search: {e}");
     }
     if let Err(e) = handle.add_tool(exec_f).await {
         tracing::warn!("failed to add local tool execute_command: {e}");
