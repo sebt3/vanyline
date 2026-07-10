@@ -1,8 +1,10 @@
 mod crds;
-
-use std::process;
+mod error;
+mod owner;
 
 use clap::Parser;
+use futures::StreamExt;
+use std::sync::Arc;
 
 #[derive(Parser)]
 #[command(name = "vanyline-controller")]
@@ -12,7 +14,8 @@ struct Cli {
     crds: bool,
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let cli = Cli::parse();
 
     if cli.crds {
@@ -20,8 +23,20 @@ fn main() {
         return;
     }
 
-    // Minimal tracing setup (tracing-subscriber is a dep but no runtime yet)
     let _ = tracing_subscriber::fmt::try_init();
-    tracing::info!("controller starting (reconcilers: not yet implemented)");
-    process::exit(0);
+    tracing::info!("controller starting (owner reconciler active)");
+
+    let client = kube::Client::try_default()
+        .await
+        .expect("failed to build kube client from in-cluster or kubeconfig context");
+    let ctx = Arc::new(owner::Context { client: client.clone() });
+
+    owner::build_controller(client)
+        .run(owner::reconcile, owner::error_policy, ctx)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "owner reconcile loop error");
+            }
+        })
+        .await;
 }
