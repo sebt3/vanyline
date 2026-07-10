@@ -68,35 +68,13 @@ pub fn assemble_system_prompt(
     }
 
     // 3. Index des skills
-    let skills_section = match agent.skills {
-        SkillSelection::None => None,
-        SkillSelection::Auto => {
-            let lines: Vec<_> = all_skills
-                .iter()
-                .map(|s| format!("- {} : {}", s.name, s.description))
-                .collect();
-            if lines.is_empty() {
-                None
-            } else {
-                Some(lines.join("\n"))
-            }
-        }
-        SkillSelection::Named(ref names) => {
-            let name_set: std::collections::HashSet<&str> = names.iter().map(|n| n.as_str()).collect();
-            let lines: Vec<_> = all_skills
-                .iter()
-                .filter(|s| name_set.contains(s.name.as_str()))
-                .map(|s| format!("- {} : {}", s.name, s.description))
-                .collect();
-            if lines.is_empty() {
-                None
-            } else {
-                Some(lines.join("\n"))
-            }
-        }
-    };
-    if let Some(section) = skills_section {
-        sections.push(section);
+    let selected_skills = resolve_skill_index(&agent.skills, all_skills);
+    if !selected_skills.is_empty() {
+        let lines: Vec<_> = selected_skills
+            .iter()
+            .map(|s| format!("- {} : {}", s.name, s.description))
+            .collect();
+        sections.push(lines.join("\n"));
     }
 
     // 4. Workspace context
@@ -113,6 +91,31 @@ pub fn assemble_system_prompt(
         String::new()
     } else {
         result
+    }
+}
+
+/// Filtre `all_skills` selon `selection` :
+/// - `None` -> vide (pas de skills disponibles pour cet agent)
+/// - `Auto` -> tous les `all_skills`, dans leur ordre d'origine
+/// - `Named(names)` -> uniquement les skills dont le nom est dans `names`,
+///   dans l'ordre de `all_skills` (pas l'ordre de `names`)
+///
+/// Factorisé car utilisé à deux endroits : `assemble_system_prompt` (index
+/// texte dans le system prompt) et `resolve_turn_context` (index structuré
+/// passé au tool builtin `skill`, tâche 7) — même règle, ne doit pas diverger.
+fn resolve_skill_index(selection: &SkillSelection, all_skills: &[SkillMeta]) -> Vec<SkillMeta> {
+    match selection {
+        SkillSelection::None => Vec::new(),
+        SkillSelection::Auto => all_skills.to_vec(),
+        SkillSelection::Named(names) => {
+            let name_set: std::collections::HashSet<&str> =
+                names.iter().map(|n| n.as_str()).collect();
+            all_skills
+                .iter()
+                .filter(|s| name_set.contains(s.name.as_str()))
+                .cloned()
+                .collect()
+        }
     }
 }
 
@@ -166,6 +169,7 @@ struct ResolvedTurn {
     provider: Provider,
     resolved_toolsets: Vec<Toolset>,
     system_prompt: String,
+    skill_index: Vec<SkillMeta>,
 }
 
 /// Résout la chaîne agent -> modèle -> provider -> toolsets et assemble le
@@ -189,6 +193,7 @@ async fn resolve_turn_context(
     }
 
     let all_skills = ctx.store.list_skills().await?;
+    let selected_skills = resolve_skill_index(&agent.skills, &all_skills);
     let system_prompt = assemble_system_prompt(&agent, &resolved_toolsets, &all_skills, workspace_context);
 
     Ok(ResolvedTurn {
@@ -196,6 +201,7 @@ async fn resolve_turn_context(
         provider,
         resolved_toolsets,
         system_prompt,
+        skill_index: selected_skills,
     })
 }
 
@@ -273,6 +279,17 @@ pub async fn run_agent_turn(
             }
         }
         crate::prefixed_mcp::connect_mcp_servers_selected(&toolset.mcp, &validated_servers, &handle).await?;
+    }
+
+    if !resolved.skill_index.is_empty() {
+        let skill_tool = crate::builtin::skill::SkillTool::new(
+            ctx.store.clone(),
+            ctx.sink.clone(),
+            resolved.skill_index.clone(),
+        );
+        if let Err(e) = handle.add_tool(skill_tool).await {
+            tracing::warn!("failed to add builtin skill tool: {e}");
+        }
     }
 
     let params = crate::model::agent_params(&resolved.profile);

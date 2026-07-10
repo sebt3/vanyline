@@ -1,3 +1,4 @@
+pub mod builtin;
 mod chat;
 mod domain;
 mod error;
