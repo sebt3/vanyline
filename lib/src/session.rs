@@ -1,13 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::domain::{Agent, ModelProfile, Provider, ProviderType, SkillMeta, SkillSelection, Toolset};
+use crate::domain::{Agent, AgentMode, ModelProfile, Provider, ProviderType, SkillMeta, SkillSelection, Toolset};
 use crate::error::VnyError;
 use crate::event::{ChatTurnResult, EventSink};
 use crate::store::ConfigStore;
-
-#[cfg(test)]
-use crate::domain::AgentMode;
 
 /// Assemble le system prompt final d'un tour d'agent, dans l'ordre fixe décrit
 /// par le design (section "Session engine") :
@@ -119,6 +116,18 @@ fn resolve_skill_index(selection: &SkillSelection, all_skills: &[SkillMeta]) -> 
     }
 }
 
+/// Agents invocables comme subagents (mode `Subagent` ou `All`) — `Primary`
+/// exclu. Dans l'ordre de `all_agents`. Sert à l'index du tool builtin `task`
+/// et à décider si ce tool doit être exposé du tout (inutile si personne n'est
+/// invocable).
+fn available_subagents(all_agents: &[Agent]) -> Vec<Agent> {
+    all_agents
+        .iter()
+        .filter(|a| a.mode != AgentMode::Primary)
+        .cloned()
+        .collect()
+}
+
 /// Adapte un `Arc<dyn ToolDyn>` en une valeur `ToolDyn` owned que
 /// `ToolServerHandle::add_tool` peut accepter (`impl ToolDyn + 'static` — un
 /// `Arc<dyn ToolDyn>` n'implémente pas lui-même `ToolDyn`, il faut un
@@ -151,6 +160,7 @@ impl rig_core::tool::ToolDyn for ArcToolDyn {
 /// tools fournis par l'hôte (cli : filesystem/command ; app : aucun ; référencés
 /// par nom via `Toolset.local_tools`), profondeur max de subagents (utilisée par
 /// la tâche 8, pas par cette tâche).
+#[derive(Clone)]
 pub struct SessionContext {
     pub store: Arc<dyn ConfigStore>,
     pub sink: Arc<dyn EventSink>,
@@ -238,18 +248,33 @@ where
     crate::event::stream_agent_events(ctx.sink.clone(), agent, history, user_msg).await
 }
 
-/// Point d'entrée unique de la session engine : résout l'agent par nom,
-/// assemble le prompt, peuple un handle de tools frais (local + MCP filtrés
-/// par toolset) et streame le tour. `workspace_context` est le paramètre
-/// optionnel mentionné par le design (le CLI y met AGENTS.md) — absent de
-/// l'esquisse de signature du design mais requis par sa propre description de
-/// l'assemblage du prompt (étape 4) ; ajouté ici explicitement.
+/// Point d'entrée unique de la session engine, à la profondeur 0 (un appel
+/// top-level, jamais un subagent). Voir `run_agent_turn_at_depth` pour
+/// l'implémentation — ce raccourci fixe simplement `current_depth = 0`.
 pub async fn run_agent_turn(
     ctx: &SessionContext,
     agent_name: &str,
     history: Vec<rig_core::message::Message>,
     user_msg: &str,
     workspace_context: Option<&str>,
+) -> Result<ChatTurnResult, VnyError> {
+    run_agent_turn_at_depth(ctx, agent_name, history, user_msg, workspace_context, 0).await
+}
+
+/// Implémentation réelle de `run_agent_turn`, paramétrée par `current_depth`
+/// (0 pour un tour top-level). `pub(crate)`, pas `pub` : seul le tool builtin
+/// `task` (`builtin::task`, cette tâche) a besoin d'invoquer un tour imbriqué
+/// à `current_depth + 1` ; les hôtes (cli/app) passent toujours par
+/// `run_agent_turn` (profondeur 0 implicite). Résout l'agent par nom, assemble
+/// le prompt, peuple un handle de tools frais (local + MCP filtrés par
+/// toolset + builtins `skill`/`task`) et streame le tour.
+pub(crate) async fn run_agent_turn_at_depth(
+    ctx: &SessionContext,
+    agent_name: &str,
+    history: Vec<rig_core::message::Message>,
+    user_msg: &str,
+    workspace_context: Option<&str>,
+    current_depth: u8,
 ) -> Result<ChatTurnResult, VnyError> {
     let resolved = resolve_turn_context(ctx, agent_name, workspace_context).await?;
     let handle = crate::prefixed_mcp::new_tool_handle();
@@ -289,6 +314,17 @@ pub async fn run_agent_turn(
         );
         if let Err(e) = handle.add_tool(skill_tool).await {
             tracing::warn!("failed to add builtin skill tool: {e}");
+        }
+    }
+
+    if current_depth < ctx.subagent_depth_max {
+        let all_agents = ctx.store.list_agents().await?;
+        let subagents = available_subagents(&all_agents);
+        if !subagents.is_empty() {
+            let task_tool = crate::builtin::task::TaskTool::new(ctx.clone(), current_depth, subagents);
+            if let Err(e) = handle.add_tool(task_tool).await {
+                tracing::warn!("failed to add builtin task tool: {e}");
+            }
         }
     }
 
