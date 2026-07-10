@@ -5,6 +5,9 @@ use rig_core::wasm_compat::WasmBoxedFuture;
 use rmcp::model::Tool;
 use rmcp::service::ServerSink;
 
+use globset::Glob;
+
+use crate::domain::{McpSelection, McpServer as DomainMcpServer, McpTransport};
 use crate::error::VnyError;
 use crate::types::McpServer;
 
@@ -215,5 +218,241 @@ async fn connect_mcp_server_inner(
         }
         "sse" => Err(VnyError::SseNotImplemented),
         other => Err(VnyError::UnknownServerType(other.to_string())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Toolset resolution — task-05: glob filtering & locale selection
+// ---------------------------------------------------------------------------
+
+/// Un pattern glob vide dans `McpSelection.tools` signifie "tous les outils"
+/// (`"*"` implicite). Pattern invalide (glob mal formé) -> ne matche rien
+/// (fail-safe : un outil non exposé plutôt qu'une erreur qui bloquerait toute
+/// la connexion au serveur).
+fn tool_matches(patterns: &[String], name: &str) -> bool {
+    if patterns.is_empty() {
+        return true;
+    }
+    patterns
+        .iter()
+        .any(|pattern| {
+            Glob::new(pattern)
+                .ok()
+                .map(|g| g.compile_matcher().is_match(name))
+                .unwrap_or(false)
+        })
+}
+
+/// Résout, pour un ensemble de `McpSelection`, les paires (sélection, serveur)
+/// effectivement à contacter — UNE paire par sélection dont le `server` a une
+/// correspondance dans `all_servers` ; une sélection sans correspondance est
+/// omise (cf. "Choix de scope explicite" plus haut). Pure — aucune I/O. C'est ce
+/// qui rend vérifiable, sans réseau, que "les serveurs non sélectionnés ne sont
+/// jamais contactés" : `connect_mcp_servers_selected` ne boucle QUE sur le
+/// résultat de cette fonction, jamais sur `all_servers` en entier.
+fn selected_servers<'a>(
+    selections: &'a [McpSelection],
+    all_servers: &'a [DomainMcpServer],
+) -> Vec<(&'a McpSelection, &'a DomainMcpServer)> {
+    let mut result = Vec::with_capacity(selections.len());
+    for selection in selections {
+        if let Some(server) = all_servers.iter().find(|s| s.name == selection.server) {
+            result.push((selection, server));
+        }
+    }
+    result
+}
+
+/// Variante de `connect_mcp_server_inner` (existant, inchangé) pour le type
+/// `domain::McpServer` (transport = enum `McpTransport`, plus de match sur une
+/// String magique). `McpTransport` n'a aujourd'hui qu'une variante
+/// (`HttpStreamable`) — un `match` exhaustif à un bras est volontaire : le jour
+/// où une variante `Sse` est ajoutée à l'enum, le compilateur forcera à traiter
+/// ce cas ici plutôt que de l'oublier silencieusement.
+async fn connect_domain_mcp_server_inner(
+    server: &DomainMcpServer,
+) -> Result<(Vec<Tool>, ServerSink), VnyError> {
+    match server.transport {
+        McpTransport::HttpStreamable => {
+            let transport =
+                rmcp::transport::StreamableHttpClientTransport::from_uri(server.url.as_str());
+            let running = rmcp::serve_client((), transport).await.map_err(|e| {
+                VnyError::McpConnectError(server.name.clone(), e.to_string())
+            })?;
+            let server_sink = running.peer().clone();
+            let tools = running.list_all_tools().await.map_err(|e| {
+                VnyError::McpToolsError(server.name.clone(), e.to_string())
+            })?;
+            Ok((tools, server_sink))
+        }
+    }
+}
+
+/// Connecte UNIQUEMENT les serveurs référencés par `selections` (jamais
+/// `all_servers` en entier) et n'ajoute au handle que les tools du serveur dont
+/// le nom matche `tool_matches(&selection.tools, ..)`. Échec de connexion à un
+/// serveur sélectionné : log + skip, comme `connect_mcp_servers_prefixed`
+/// (existant) — une panne MCP n'abat pas les autres sélections.
+pub async fn connect_mcp_servers_selected(
+    selections: &[McpSelection],
+    all_servers: &[DomainMcpServer],
+    handle: &ToolServerHandle,
+) -> Result<(), VnyError> {
+    for (selection, server) in selected_servers(selections, all_servers) {
+        match connect_domain_mcp_server_inner(server).await {
+            Ok((tools, client)) => {
+                let matching_tools: Vec<_> = tools
+                    .into_iter()
+                    .filter(|tool| tool_matches(&selection.tools, &tool.name))
+                    .collect();
+                let prefixed_tools = PrefixedMcpTool::new(matching_tools, client, &server.name);
+                for tool in prefixed_tools {
+                    if let Err(e) = handle.add_tool(tool).await {
+                        tracing::warn!("failed to add prefixed tool: {e}");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "skipping selected MCP server {}: {e}",
+                    server.name
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Sélectionne, parmi les local tools fournis par l'hôte (`available` —
+/// `SessionContext::local_tools` à la tâche 6, ici générique sur `V` pour rester
+/// testable sans instancier de vrais `ToolDyn`), ceux demandés par
+/// `Toolset.local_tools`. Retourne `(trouvés, absents)` — les absents sont à
+/// logger par l'appelant (pas une erreur bloquante, même philosophie que les
+/// échecs MCP par serveur).
+pub fn select_local_tools<'a, V>(
+    requested: &'a [String],
+    available: &'a std::collections::HashMap<String, V>,
+) -> (Vec<&'a str>, Vec<String>) {
+    let mut found = Vec::with_capacity(requested.len());
+    let mut missing = Vec::new();
+    for name in requested {
+        if available.contains_key(name) {
+            found.push(name.as_str());
+        } else {
+            missing.push(name.clone());
+        }
+    }
+    (found, missing)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::McpServer as DomainMcpServer;
+    use crate::domain::McpTransport;
+    use std::collections::HashMap;
+
+    // ---- tool_matches ----
+
+    #[test]
+    fn tool_matches_empty_patterns_matches_all() {
+        assert!(tool_matches(&[], "anything"));
+    }
+
+    #[test]
+    fn tool_matches_exact() {
+        assert!(tool_matches(&["read_file".to_string()], "read_file"));
+        assert!(!tool_matches(&["read_file".to_string()], "write_file"));
+    }
+
+    #[test]
+    fn tool_matches_wildcard() {
+        assert!(tool_matches(&["read_*".to_string()], "read_file"));
+        assert!(!tool_matches(&["read_*".to_string()], "write_file"));
+    }
+
+    #[test]
+    fn tool_matches_any_of_multiple_patterns() {
+        assert!(tool_matches(
+            &["foo".to_string(), "read_*".to_string()],
+            "read_file"
+        ));
+    }
+
+    #[test]
+    fn tool_matches_invalid_pattern_matches_nothing() {
+        assert!(!tool_matches(&["[".to_string()], "x"));
+    }
+
+    // ---- selected_servers ----
+
+    #[test]
+    fn selected_servers_only_referenced() {
+        let all_servers = vec![
+            DomainMcpServer {
+                name: "a".to_string(),
+                transport: McpTransport::HttpStreamable,
+                url: "http://a".to_string(),
+                headers: Default::default(),
+            },
+            DomainMcpServer {
+                name: "b".to_string(),
+                transport: McpTransport::HttpStreamable,
+                url: "http://b".to_string(),
+                headers: Default::default(),
+            },
+            DomainMcpServer {
+                name: "c".to_string(),
+                transport: McpTransport::HttpStreamable,
+                url: "http://c".to_string(),
+                headers: Default::default(),
+            },
+        ];
+        let selections = vec![McpSelection {
+            server: "b".to_string(),
+            tools: vec![],
+        }];
+        let result = selected_servers(&selections, &all_servers);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0.server, "b");
+        assert_eq!(result[0].1.name, "b");
+    }
+
+    #[test]
+    fn selected_servers_unknown_reference_omitted() {
+        let all_servers = vec![DomainMcpServer {
+            name: "a".to_string(),
+            transport: McpTransport::HttpStreamable,
+            url: "http://a".to_string(),
+            headers: Default::default(),
+        }];
+        let selections = vec![McpSelection {
+            server: "z".to_string(),
+            tools: vec![],
+        }];
+        let result = selected_servers(&selections, &all_servers);
+        assert!(result.is_empty());
+    }
+
+    // ---- select_local_tools ----
+
+    #[test]
+    fn select_local_tools_found_and_missing() {
+        let mut available: HashMap<String, ()> = HashMap::new();
+        available.insert("read_file".to_string(), ());
+        available.insert("write_file".to_string(), ());
+        let requested = vec!["read_file".to_string(), "delete_file".to_string()];
+        let (found, missing) = select_local_tools(&requested, &available);
+        assert_eq!(found, vec!["read_file"]);
+        assert_eq!(missing, vec!["delete_file".to_string()]);
+    }
+
+    #[test]
+    fn select_local_tools_empty_requested() {
+        let available: HashMap<String, ()> = HashMap::new();
+        let requested: Vec<String> = vec![];
+        let (found, missing) = select_local_tools(&requested, &available);
+        assert!(found.is_empty());
+        assert!(missing.is_empty());
     }
 }

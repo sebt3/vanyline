@@ -5044,6 +5044,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "globset",
  "parking_lot",
  "reqwest 0.12.28",
  "rig-core",
