@@ -1,4 +1,10 @@
-use crate::domain::{Agent, SkillMeta, SkillSelection, Toolset};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use crate::domain::{Agent, ModelProfile, Provider, ProviderType, SkillMeta, SkillSelection, Toolset};
+use crate::error::VnyError;
+use crate::event::{ChatTurnResult, EventSink};
+use crate::store::ConfigStore;
 
 #[cfg(test)]
 use crate::domain::AgentMode;
@@ -107,6 +113,178 @@ pub fn assemble_system_prompt(
         String::new()
     } else {
         result
+    }
+}
+
+/// Adapte un `Arc<dyn ToolDyn>` en une valeur `ToolDyn` owned que
+/// `ToolServerHandle::add_tool` peut accepter (`impl ToolDyn + 'static` — un
+/// `Arc<dyn ToolDyn>` n'implémente pas lui-même `ToolDyn`, il faut un
+/// forwarding explicite). Cloner un `Arc` est bon marché — c'est ce qui permet
+/// de peupler un nouveau handle à chaque tour sans consommer
+/// `SessionContext.local_tools`.
+struct ArcToolDyn(Arc<dyn rig_core::tool::ToolDyn>);
+
+impl rig_core::tool::ToolDyn for ArcToolDyn {
+    fn name(&self) -> String {
+        self.0.name()
+    }
+
+    fn definition<'a>(
+        &'a self,
+        prompt: String,
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, rig_core::completion::ToolDefinition> {
+        self.0.definition(prompt)
+    }
+
+    fn call<'a>(
+        &'a self,
+        args: String,
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<String, rig_core::tool::ToolError>> {
+        self.0.call(args)
+    }
+}
+
+/// Contexte partagé d'une session : store de config, sink d'événements, local
+/// tools fournis par l'hôte (cli : filesystem/command ; app : aucun ; référencés
+/// par nom via `Toolset.local_tools`), profondeur max de subagents (utilisée par
+/// la tâche 8, pas par cette tâche).
+pub struct SessionContext {
+    pub store: Arc<dyn ConfigStore>,
+    pub sink: Arc<dyn EventSink>,
+    pub local_tools: HashMap<String, Arc<dyn rig_core::tool::ToolDyn>>,
+    pub subagent_depth_max: u8,
+}
+
+/// Résultat de la résolution d'un tour, AVANT toute I/O réseau (MCP, LLM) —
+/// tout ce qui vient de `ctx.store` uniquement. C'est ce découpage qui rend
+/// testable, sans réseau, la partie la plus piégeuse de `run_agent_turn` : la
+/// résolution en chaîne agent -> modèle -> provider -> toolsets, et la
+/// propagation correcte des erreurs `UnknownReference` à chaque maillon.
+#[derive(Debug)]
+struct ResolvedTurn {
+    profile: ModelProfile,
+    provider: Provider,
+    resolved_toolsets: Vec<Toolset>,
+    system_prompt: String,
+}
+
+/// Résout la chaîne agent -> modèle -> provider -> toolsets et assemble le
+/// system prompt. Propage `VnyError::UnknownReference`/`DuplicateName` de
+/// `ConfigStore` (tâche 3) sans les envelopper. Aucune I/O réseau — uniquement
+/// des appels à `ctx.store` (qui, pour `InMemoryConfigStore`, est purement en
+/// mémoire).
+async fn resolve_turn_context(
+    ctx: &SessionContext,
+    agent_name: &str,
+    workspace_context: Option<&str>,
+) -> Result<ResolvedTurn, VnyError> {
+    let agent = ctx.store.get_agent(agent_name).await?;
+    let profile = ctx.store.get_model(&agent.model).await?;
+    let provider = ctx.store.get_provider(&profile.provider).await?;
+
+    let mut resolved_toolsets = Vec::with_capacity(agent.toolsets.len());
+    for name in &agent.toolsets {
+        let toolset = ctx.store.get_toolset(name).await?;
+        resolved_toolsets.push(toolset);
+    }
+
+    let all_skills = ctx.store.list_skills().await?;
+    let system_prompt = assemble_system_prompt(&agent, &resolved_toolsets, &all_skills, workspace_context);
+
+    Ok(ResolvedTurn {
+        profile,
+        provider,
+        resolved_toolsets,
+        system_prompt,
+    })
+}
+
+/// Construit l'`Agent<M>` rig (préambule + params du profil + handle de tools)
+/// et lance le stream via `event::stream_agent_events`. Générique sur `M` car
+/// le type concret du modèle diffère selon `provider.provider_type`
+/// (`build_ollama_model`/`build_openai_compat_model`, tâche 4) — c'est
+/// `run_agent_turn` qui fait ce dispatch et appelle cette fonction dans chaque
+/// bras du `match`.
+async fn run_turn_with_model<M>(
+    ctx: &SessionContext,
+    model: M,
+    params: crate::model::AgentParams,
+    system_prompt: &str,
+    handle: rig_core::tool::server::ToolServerHandle,
+    history: Vec<rig_core::message::Message>,
+    user_msg: &str,
+) -> Result<ChatTurnResult, VnyError>
+where
+    M: rig_core::completion::CompletionModel + 'static,
+    M::StreamingResponse: rig_core::completion::GetTokenUsage,
+{
+    let mut builder = rig_core::agent::AgentBuilder::new(model).preamble(system_prompt);
+    if let Some(t) = params.temperature {
+        builder = builder.temperature(t);
+    }
+    if let Some(m) = params.max_tokens {
+        builder = builder.max_tokens(m);
+    }
+    if let Some(ap) = params.additional_params {
+        builder = builder.additional_params(ap);
+    }
+    let agent = builder.tool_server_handle(handle).build();
+    crate::event::stream_agent_events(ctx.sink.clone(), agent, history, user_msg).await
+}
+
+/// Point d'entrée unique de la session engine : résout l'agent par nom,
+/// assemble le prompt, peuple un handle de tools frais (local + MCP filtrés
+/// par toolset) et streame le tour. `workspace_context` est le paramètre
+/// optionnel mentionné par le design (le CLI y met AGENTS.md) — absent de
+/// l'esquisse de signature du design mais requis par sa propre description de
+/// l'assemblage du prompt (étape 4) ; ajouté ici explicitement.
+pub async fn run_agent_turn(
+    ctx: &SessionContext,
+    agent_name: &str,
+    history: Vec<rig_core::message::Message>,
+    user_msg: &str,
+    workspace_context: Option<&str>,
+) -> Result<ChatTurnResult, VnyError> {
+    let resolved = resolve_turn_context(ctx, agent_name, workspace_context).await?;
+    let handle = crate::prefixed_mcp::new_tool_handle();
+
+    for toolset in &resolved.resolved_toolsets {
+        // Local tools
+        let (found, missing) = crate::prefixed_mcp::select_local_tools(&toolset.local_tools, &ctx.local_tools);
+        for name in missing {
+            tracing::warn!("local tool not found: {name}");
+        }
+        for name in found {
+            if let Some(tool) = ctx.local_tools.get(name) {
+                let wrapped = ArcToolDyn(tool.clone());
+                if let Err(e) = handle.add_tool(wrapped).await {
+                    tracing::warn!("failed to add local tool {}: {e}", name);
+                }
+            }
+        }
+        // MCP
+        let mut validated_servers = Vec::new();
+        for selection in &toolset.mcp {
+            match ctx.store.get_mcp_server(&selection.server).await {
+                Ok(server) => validated_servers.push(server),
+                Err(e) => {
+                    tracing::warn!("mcp server not found: {e}");
+                }
+            }
+        }
+        crate::prefixed_mcp::connect_mcp_servers_selected(&toolset.mcp, &validated_servers, &handle).await?;
+    }
+
+    let params = crate::model::agent_params(&resolved.profile);
+    match resolved.provider.provider_type {
+        ProviderType::Ollama => {
+            let model = crate::model::build_ollama_model(&resolved.provider, &resolved.profile)?;
+            run_turn_with_model(ctx, model, params, &resolved.system_prompt, handle, history, user_msg).await
+        }
+        ProviderType::OpenaiCompatible => {
+            let model = crate::model::build_openai_compat_model(&resolved.provider, &resolved.profile)?;
+            run_turn_with_model(ctx, model, params, &resolved.system_prompt, handle, history, user_msg).await
+        }
     }
 }
 
@@ -312,5 +490,236 @@ mod tests {
         assert!(system_pos < toolset_pos);
         assert!(toolset_pos < skill_pos);
         assert!(skill_pos < context_pos);
+    }
+
+    // ---- resolve_turn_context tests ----
+
+    use crate::event::ChatEvent;
+    use crate::store::InMemoryConfigStore;
+
+    struct NoopSink;
+
+    #[async_trait::async_trait]
+    impl EventSink for NoopSink {
+        async fn emit(&self, _event: ChatEvent) {}
+    }
+
+    fn test_ctx(store: InMemoryConfigStore) -> SessionContext {
+        SessionContext {
+            store: Arc::new(store),
+            sink: Arc::new(NoopSink),
+            local_tools: HashMap::new(),
+            subagent_depth_max: 1,
+        }
+    }
+
+    // 1. success — full chain resolves, prompt contains agent prompt + toolset prompt
+    #[tokio::test]
+    async fn resolve_turn_context_success() {
+        let store = InMemoryConfigStore {
+            providers: vec![Provider {
+                name: "ollama-local".to_string(),
+                provider_type: ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }],
+            models: vec![ModelProfile {
+                name: "qwen2.5".to_string(),
+                provider: "ollama-local".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
+            mcp_servers: vec![],
+            toolsets: vec![Toolset {
+                name: "default".to_string(),
+                description: None,
+                prompt: Some("TOOLSET_PROMPT".to_string()),
+                local_tools: vec![],
+                mcp: vec![],
+            }],
+            agents: vec![Agent {
+                name: "test-agent".to_string(),
+                description: None,
+                mode: AgentMode::Primary,
+                model: "qwen2.5".to_string(),
+                toolsets: vec!["default".to_string()],
+                skills: SkillSelection::Auto,
+                system_prompt: "You are helpful.".to_string(),
+            }],
+            skills: vec![SkillMeta {
+                name: "pdf".to_string(),
+                description: "PDF processing".to_string(),
+            }],
+            ..Default::default()
+        };
+        let ctx = test_ctx(store);
+        let resolved = resolve_turn_context(&ctx, "test-agent", None).await.unwrap();
+        assert!(resolved.system_prompt.contains("You are helpful."));
+        assert!(resolved.system_prompt.contains("TOOLSET_PROMPT"));
+        assert_eq!(resolved.resolved_toolsets.len(), 1);
+    }
+
+    // 2. unknown agent — empty store
+    #[tokio::test]
+    async fn resolve_turn_context_unknown_agent() {
+        let store = InMemoryConfigStore::default();
+        let ctx = test_ctx(store);
+        let result = resolve_turn_context(&ctx, "nope", None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("VNL-CFG-003"));
+    }
+
+    // 3. unknown model — agent references non-existent model
+    #[tokio::test]
+    async fn resolve_turn_context_unknown_model() {
+        let store = InMemoryConfigStore {
+            providers: vec![Provider {
+                name: "p".to_string(),
+                provider_type: ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }],
+            models: vec![],
+            mcp_servers: vec![],
+            toolsets: vec![],
+            agents: vec![Agent {
+                name: "broken-model".to_string(),
+                description: None,
+                mode: AgentMode::Primary,
+                model: "nonexistent-model".to_string(),
+                toolsets: vec![],
+                skills: SkillSelection::Auto,
+                system_prompt: "prompt".to_string(),
+            }],
+            skills: vec![],
+            ..Default::default()
+        };
+        let ctx = test_ctx(store);
+        let result = resolve_turn_context(&ctx, "broken-model", None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("VNL-CFG-003"));
+    }
+
+    // 4. unknown provider — model references non-existent provider
+    #[tokio::test]
+    async fn resolve_turn_context_unknown_provider() {
+        let store = InMemoryConfigStore {
+            providers: vec![],
+            models: vec![ModelProfile {
+                name: "m".to_string(),
+                provider: "broken-provider".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
+            mcp_servers: vec![],
+            toolsets: vec![],
+            agents: vec![Agent {
+                name: "broken-model".to_string(),
+                description: None,
+                mode: AgentMode::Primary,
+                model: "m".to_string(),
+                toolsets: vec![],
+                skills: SkillSelection::Auto,
+                system_prompt: "prompt".to_string(),
+            }],
+            skills: vec![],
+            ..Default::default()
+        };
+        let ctx = test_ctx(store);
+        let result = resolve_turn_context(&ctx, "broken-model", None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("VNL-CFG-003"));
+    }
+
+    // 5. unknown toolset — agent references non-existent toolset
+    #[tokio::test]
+    async fn resolve_turn_context_unknown_toolset() {
+        let store = InMemoryConfigStore {
+            providers: vec![Provider {
+                name: "ollama-local".to_string(),
+                provider_type: ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }],
+            models: vec![ModelProfile {
+                name: "qwen2.5".to_string(),
+                provider: "ollama-local".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
+            mcp_servers: vec![],
+            toolsets: vec![],
+            agents: vec![Agent {
+                name: "test-agent".to_string(),
+                description: None,
+                mode: AgentMode::Primary,
+                model: "qwen2.5".to_string(),
+                toolsets: vec!["missing".to_string()],
+                skills: SkillSelection::Auto,
+                system_prompt: "prompt".to_string(),
+            }],
+            skills: vec![],
+            ..Default::default()
+        };
+        let ctx = test_ctx(store);
+        let result = resolve_turn_context(&ctx, "test-agent", None).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(format!("{}", err).contains("VNL-CFG-003"));
+    }
+
+    // 6. workspace_context included
+    #[tokio::test]
+    async fn resolve_turn_context_workspace_context_included() {
+        let store = InMemoryConfigStore {
+            providers: vec![Provider {
+                name: "ollama-local".to_string(),
+                provider_type: ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }],
+            models: vec![ModelProfile {
+                name: "qwen2.5".to_string(),
+                provider: "ollama-local".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
+            mcp_servers: vec![],
+            toolsets: vec![Toolset {
+                name: "default".to_string(),
+                description: None,
+                prompt: Some("TOOLSET_PROMPT".to_string()),
+                local_tools: vec![],
+                mcp: vec![],
+            }],
+            agents: vec![Agent {
+                name: "test-agent".to_string(),
+                description: None,
+                mode: AgentMode::Primary,
+                model: "qwen2.5".to_string(),
+                toolsets: vec!["default".to_string()],
+                skills: SkillSelection::Auto,
+                system_prompt: "You are helpful.".to_string(),
+            }],
+            skills: vec![SkillMeta {
+                name: "pdf".to_string(),
+                description: "PDF processing".to_string(),
+            }],
+            ..Default::default()
+        };
+        let ctx = test_ctx(store);
+        let result = resolve_turn_context(&ctx, "test-agent", Some("# AGENTS.md")).await.unwrap();
+        assert!(result.system_prompt.ends_with("# AGENTS.md"));
     }
 }

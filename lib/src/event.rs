@@ -179,7 +179,7 @@ pub async fn stream_agent_events<M, S>(
 where
     M: CompletionModel + 'static,
     M::StreamingResponse: GetTokenUsage,
-    S: EventSink + 'static,
+    S: EventSink + ?Sized + 'static,
 {
     let mut stream = agent.stream_chat(user_msg, history).await;
     let mut acc = StreamAccumulator::new();
