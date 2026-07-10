@@ -38,20 +38,19 @@ pub struct EditFileOptions {
     pub replace_all: bool,
 }
 
-// Legacy types — kept for delete_file/create_directory which remain on
-// FilesystemError in this task.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteFileOptions {
     pub path: String,
 }
 
+// Legacy type — kept for create_directory which still uses FilesystemError.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct CreateDirectoryOptions {
     pub path: String,
 }
 
 // ---------------------------------------------------------------------------
-// Legacy error type (kept for delete_file / create_directory)
+// Legacy error type (kept for create_directory only)
 // ---------------------------------------------------------------------------
 
 #[derive(Debug)]
@@ -509,12 +508,43 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
     })
 }
 
-pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), FilesystemError>> {
-    let path = opts.path;
+pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError>> {
+    let path = opts.path.clone();
     Box::pin(async move {
-        tokio::fs::remove_file(&path).await
-            .map(|_| ())
-            .map_err(FilesystemError)
+        // 1. metadata — not found → FileNotFound, other → Io
+        let meta = match tokio::fs::metadata(&path).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolsError::FileNotFound {
+                    path: path.clone(),
+                    hint: file_not_found_hint(&path),
+                });
+            }
+            Err(e) => return Err(ToolsError::Io { path: path.clone(), source: e }),
+        };
+
+        // 2. directory → remove_dir
+        if meta.is_dir() {
+            match tokio::fs::remove_dir(&path).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::DirectoryNotEmpty => {
+                    Err(ToolsError::InvalidArgument {
+                        name: "path".into(),
+                        reason: "directory is not empty".into(),
+                    })
+                }
+                Err(e) => Err(ToolsError::Io { path, source: e }),
+            }
+        } else {
+            // 3. file → remove_file
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    Err(ToolsError::PermissionDenied(path))
+                }
+                Err(e) => Err(ToolsError::Io { path, source: e }),
+            }
+        }
     })
 }
 
@@ -1074,5 +1104,86 @@ mod tests {
         .unwrap();
 
         assert!(result.contains("truncated at 200 entries"));
+    }
+
+    // -----------------------------------------------------------------------
+    // delete_file tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn delete_file_removes_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("delete_me.txt");
+        tokio::fs::write(&file, "temp content").await.unwrap();
+
+        let result = delete_file(DeleteFileOptions {
+            path: file.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, ());
+
+        // file is gone — metadata should fail
+        let meta = tokio::fs::metadata(&file).await;
+        assert!(meta.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_file_removes_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty_dir = dir.path().join("empty_subdir");
+        tokio::fs::create_dir(&empty_dir).await.unwrap();
+
+        assert!(tokio::fs::metadata(&empty_dir).await.is_ok());
+
+        let result = delete_file(DeleteFileOptions {
+            path: empty_dir.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+        assert_eq!(result, ());
+
+        // directory should be gone
+        assert!(tokio::fs::metadata(&empty_dir).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn delete_file_non_empty_dir_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let non_empty = dir.path().join("non_empty");
+        tokio::fs::create_dir(&non_empty).await.unwrap();
+        // Create a file inside to make it non-empty
+        tokio::fs::write(non_empty.join("inner.txt"), "data").await.unwrap();
+
+        let result = delete_file(DeleteFileOptions {
+            path: non_empty.to_string_lossy().to_string(),
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::InvalidArgument {
+                name,
+                reason,
+            }) => {
+                assert_eq!(name, "path");
+                assert!(reason.contains("not empty"));
+            }
+            other => panic!("Expected InvalidArgument, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn delete_file_not_found() {
+        let result = delete_file(DeleteFileOptions {
+            path: "/nonexistent/fake/path/file.txt".into(),
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::FileNotFound { path: ref p, .. }) => {
+                assert!(p.contains("/nonexistent/fake/path/file.txt"));
+            }
+            other => panic!("Expected FileNotFound, got: {:?}", other),
+        }
     }
 }
