@@ -1,6 +1,7 @@
 mod chat;
 mod domain;
 mod error;
+pub mod model;
 mod event;
 mod llm;
 pub mod store;
