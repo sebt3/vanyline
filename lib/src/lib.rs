@@ -4,6 +4,7 @@ mod error;
 pub mod model;
 mod event;
 mod llm;
+pub mod session;
 pub mod store;
 mod prefixed_mcp;
 mod types;
