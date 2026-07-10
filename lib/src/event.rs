@@ -88,6 +88,8 @@ impl StreamAccumulator {
             }) => {
                 let name = tool_call.function.name.clone();
                 let args = tool_call.function.arguments.clone();
+                // Cloner internal_call_id car il sera déplacé vers ToolCallRecord
+                let internal_call_id_clone = internal_call_id.clone();
                 self.pending_names
                     .insert(internal_call_id.clone(), name.clone());
                 let record = ToolCallRecord {
@@ -99,7 +101,7 @@ impl StreamAccumulator {
                 self.tool_calls.push(record);
                 (
                     vec![ChatEvent::ToolCall {
-                        id: tool_call.id.clone(),
+                        id: internal_call_id_clone,
                         name,
                         args,
                     }],
@@ -397,10 +399,13 @@ mod tests {
                 },
             ),
         );
+        // Capturer l'event ToolCall avant qu'il soit écrasé par apply(ToolResult)
+        let events_call = events.clone();
+
         assert_eq!(
             events,
             vec![ChatEvent::ToolCall {
-                id: "prov-1".into(),
+                id: "call-1".into(),
                 name: "search".into(),
                 args: serde_json::json!({"q":"x"}),
             }]
@@ -429,15 +434,29 @@ mod tests {
         );
         assert_eq!(events.len(), 1);
         assert_eq!(
-            events[0],
-            ChatEvent::ToolResult {
+            events,
+            vec![ChatEvent::ToolResult {
                 id: "call-1".into(),
                 name: "search".into(),
                 result: "42".into(),
                 is_error: false,
-            }
+            }]
         );
         assert_eq!(acc.tool_calls[0].result, Some("42".into()));
+
+        // Assertion directe : ToolCall et ToolResult doivent partager le même id
+        let ChatEvent::ToolCall { id: tool_call_event_id, .. } = &events_call[0] else {
+            panic!("expected ToolCall event")
+        };
+        let ChatEvent::ToolResult { id: tool_result_event_id, .. } = &events[0] else {
+            panic!("expected ToolResult event")
+        };
+        assert_eq!(
+            tool_call_event_id, tool_result_event_id,
+            "ToolCall and ToolResult events for the same tool call must share the same id \
+             (used by consumers to correlate them) — got {:?} vs {:?}",
+            tool_call_event_id, tool_result_event_id
+        );
     }
 
     /// ToolResult avec internal_call_id jamais vu — name vide, pas de panique.
