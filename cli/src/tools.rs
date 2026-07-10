@@ -197,11 +197,13 @@ impl ToolDyn for ExecuteCommandTool {
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
             let args: ExecuteCommandArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            let result = command::execute(command::ExecuteCommandOptions {
+            command::execute(command::ExecuteCommandOptions {
                 command: args.command,
                 timeout_secs: args.timeout_secs.unwrap_or(30),
-            }).await.map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            serde_json::to_string(&result).map_err(|e| ToolError::ToolCallError(Box::new(e)))
+                cwd: String::new(),
+            })
+            .await
+            .map_err(|e| ToolError::ToolCallError(Box::new(e)))
         })
     }
 }
