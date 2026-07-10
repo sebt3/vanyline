@@ -1,6 +1,7 @@
 mod chat;
 mod domain;
 mod error;
+mod event;
 mod llm;
 mod prefixed_mcp;
 mod types;
