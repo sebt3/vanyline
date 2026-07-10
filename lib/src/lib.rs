@@ -3,6 +3,7 @@ mod domain;
 mod error;
 mod event;
 mod llm;
+pub mod store;
 mod prefixed_mcp;
 mod types;
 
