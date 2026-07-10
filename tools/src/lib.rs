@@ -3,3 +3,4 @@ pub mod command;
 pub mod mcp;
 pub mod error;
 pub mod output;
+pub mod search;

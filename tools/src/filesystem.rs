@@ -78,7 +78,7 @@ impl std::error::Error for FilesystemError {}
 /// - parent dir is empty or "." → no extra info
 /// - parent dir is listable → `", parent directory contains: [a.txt, b.rs]"`
 /// - parent dir doesn't exist → `", parent directory does not exist either"`
-fn file_not_found_hint(path: &str) -> String {
+pub(crate) fn file_not_found_hint(path: &str) -> String {
     let parent = std::path::Path::new(&path)
         .parent()
         .map(|p| p.as_os_str())
@@ -388,8 +388,131 @@ fn closest_line_hint(content: &str, needle: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Legacy functions (not to be modified in this task)
+// list_directory v2 — compact tree, bounded by depth
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ListDirectoryOptionsV2 {
+    pub path: String,
+    /// Recursion depth. 0 = default (1), same convention as `ReadFileOptions::limit`.
+    #[serde(default)]
+    pub depth: usize,
+}
+
+pub fn list_directory_v2(opts: ListDirectoryOptionsV2) -> BoxedFuture<Result<String, ToolsError>> {
+    let path = opts.path;
+    let path_for_err = path.clone();
+    let depth = opts.depth;
+
+    Box::pin(async move {
+        let result = tokio::task::spawn_blocking(move || {
+            // 1. Resolve path
+            let meta = match std::fs::metadata(&path) {
+                Ok(m) => m,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(ToolsError::FileNotFound {
+                        path: path.clone(),
+                        hint: file_not_found_hint(&path),
+                    });
+                }
+                Err(e) => {
+                    return Err(ToolsError::Io {
+                        path: path.clone(),
+                        source: e,
+                    });
+                }
+            };
+            if !meta.is_dir() {
+                return Err(ToolsError::NotADirectory(path));
+            }
+
+            let effective_depth = if depth == 0 { 1 } else { depth };
+
+            // 2. Build the output tree
+            let mut output = Vec::new();
+            let mut count = 0usize;
+            let max_entries = output::LIST_MAX_ENTRIES;
+            let limit_reached = std::cell::Cell::new(false);
+
+            fn recurse(
+                dir: &std::path::Path,
+                depth_remaining: usize,
+                indent_level: usize,
+                output: &mut Vec<String>,
+                count: &mut usize,
+                max_entries: usize,
+                limit_reached: &std::cell::Cell<bool>,
+            ) {
+                if limit_reached.get() || *count >= max_entries {
+                    return;
+                }
+
+                let mut entries: Vec<(_, _)> = Vec::new();
+                let reader = match std::fs::read_dir(dir) {
+                    Ok(r) => r,
+                    Err(_) => return,
+                };
+                for entry in reader.flatten() {
+                    entries.push((entry.file_name(), entry.path()));
+                }
+                entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+                for (file_name, full_path) in entries {
+                    if limit_reached.get() {
+                        break;
+                    }
+
+                    let is_dir = full_path.is_dir();
+                    let indent = "  ".repeat(indent_level);
+                    let suffix = if is_dir { "/" } else { "" };
+                    output.push(format!("{}{}{}", indent, file_name.to_string_lossy(), suffix));
+                    *count += 1;
+
+                    // Check limit after adding the entry
+                    if *count >= max_entries {
+                        limit_reached.set(true);
+                        break;
+                    }
+
+                    // Only descend if there are remaining levels
+                    if is_dir && depth_remaining > 1 {
+                        recurse(&full_path, depth_remaining - 1, indent_level + 1, output, count, max_entries, limit_reached);
+                    }
+                }
+            }
+
+            recurse(
+                std::path::Path::new(&path),
+                effective_depth,
+                0,
+                &mut output,
+                &mut count,
+                max_entries,
+                &limit_reached,
+            );
+
+            if output.is_empty() {
+                Ok(format!("{} is empty", path))
+            } else {
+                let mut result = output.join("\n");
+                if limit_reached.get() {
+                    result.push_str(&format!(
+                        "\n[truncated at {} entries — narrow the path or reduce depth]",
+                        output::LIST_MAX_ENTRIES
+                    ));
+                }
+                Ok(result)
+            }
+        })
+        .await
+        .map_err(|e| ToolsError::Io {
+            path: path_for_err,
+            source: std::io::Error::other(e.to_string()),
+        })?;
+
+        result
+    })
+}
 
 pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), FilesystemError>> {
     let path = opts.path;
@@ -833,5 +956,143 @@ mod tests {
             }
             other => panic!("Expected FileNotFound, got: {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // list_directory v2 tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_directory_nominal() {
+        let dir = tempfile::tempdir().unwrap();
+        tokio::fs::write(dir.path().join("alpha.txt"), "content").await.unwrap();
+        tokio::fs::create_dir(dir.path().join("beta")).await.unwrap();
+
+        let result = list_directory_v2(ListDirectoryOptionsV2 {
+            path: dir.path().to_string_lossy().to_string(),
+            depth: 0,
+        })
+        .await
+        .unwrap();
+
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // alpha.txt first (alphabetically), then beta/
+        assert!(lines[0] == "alpha.txt");
+        assert!(lines[1] == "beta/");
+    }
+
+    #[tokio::test]
+    async fn list_directory_depth_2() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = a.join("b.txt");
+        tokio::fs::create_dir_all(&a).await.unwrap();
+        tokio::fs::write(&b, "content").await.unwrap();
+
+        let result = list_directory_v2(ListDirectoryOptionsV2 {
+            path: dir.path().to_string_lossy().to_string(),
+            depth: 2,
+        })
+        .await
+        .unwrap();
+
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 2);
+        // a/ at depth 0, then "  b.txt" at depth 1 (indented)
+        assert!(lines[0] == "a/");
+        assert!(lines[1] == "  b.txt");
+    }
+
+    #[tokio::test]
+    async fn list_directory_depth_default_no_recursion() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = a.join("b.txt");
+        tokio::fs::create_dir_all(&a).await.unwrap();
+        tokio::fs::write(&b, "content").await.unwrap();
+
+        // depth=0 → effective_depth=1 → only immediate children, no recursion
+        let result = list_directory_v2(ListDirectoryOptionsV2 {
+            path: dir.path().to_string_lossy().to_string(),
+            depth: 0,
+        })
+        .await
+        .unwrap();
+
+        let lines: Vec<&str> = result.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0] == "a/");
+        // b.txt should NOT be in the output (not descended)
+        assert!(!lines.join("").contains("b.txt"));
+    }
+
+    #[tokio::test]
+    async fn list_directory_empty() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = list_directory_v2(ListDirectoryOptionsV2 {
+            path: dir.path().to_string_lossy().to_string(),
+            depth: 0,
+        })
+        .await
+        .unwrap();
+
+        assert!(result.contains("is empty"));
+    }
+
+    #[tokio::test]
+    async fn list_directory_not_found() {
+        let result = list_directory_v2(ListDirectoryOptionsV2 {
+            path: "/nonexistent/path/xyz".into(),
+            depth: 0,
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::FileNotFound { path: ref p, .. }) => {
+                assert!(p.contains("nonexistent"));
+            }
+            other => panic!("Expected FileNotFound, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_directory_on_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.txt");
+        tokio::fs::write(&file, "data").await.unwrap();
+
+        let result = list_directory_v2(ListDirectoryOptionsV2 {
+            path: file.to_string_lossy().to_string(),
+            depth: 0,
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::NotADirectory(ref p)) => {
+                assert!(p.contains("test.txt"));
+            }
+            other => panic!("Expected NotADirectory, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_directory_truncates() {
+        let dir = tempfile::tempdir().unwrap();
+        // Create 201 files to exceed LIST_MAX_ENTRIES (200)
+        for i in 0..201 {
+            let f = dir.path().join(format!("file_{:04}.txt", i));
+            tokio::fs::write(&f, "x").await.unwrap();
+        }
+
+        let result = list_directory_v2(ListDirectoryOptionsV2 {
+            path: dir.path().to_string_lossy().to_string(),
+            depth: 0,
+        })
+        .await
+        .unwrap();
+
+        assert!(result.contains("truncated at 200 entries"));
     }
 }
