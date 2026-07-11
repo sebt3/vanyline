@@ -37,7 +37,7 @@ pub trait EventSink: Send + Sync {
 /// Un tool call collecté durant le tour, avec son résultat une fois disponible.
 /// Distinct de `crate::types::ToolCall` (qui n'a pas de champ `id` — cf. stratégie
 /// additive : on ne touche pas à `types.rs` dans cette tâche).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCallRecord {
     pub id: String,
     pub name: String,

@@ -1,18 +1,19 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use axum::{
     extract::{Path, State, WebSocketUpgrade, ws::WebSocket},
     response::IntoResponse,
 };
-use rig_core::completion::{CompletionModel, GetTokenUsage};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use vanyline_lib::session::SessionContext;
 
 use crate::{
     api::conversations::get_or_create_user,
     auth::middleware::AuthUser,
-    db::models::{Agent as DbAgent, LlmProvider, McpServer},
+    config_store::PgConfigStore,
     error::AppError,
     AppState,
 };
@@ -67,7 +68,9 @@ impl CollectingSink {
                 },
             };
             let text = serde_json::to_string(&server_msg).unwrap_or_default();
-            let _ = socket.send(axum::extract::ws::Message::Text(text.into())).await;
+            let _ = socket
+                .send(axum::extract::ws::Message::Text(text.into()))
+                .await;
         }
     }
 
@@ -90,28 +93,30 @@ impl CollectingSink {
     }
 }
 
-#[async_trait]
-impl vanyline_lib::ChatSink for CollectingSink {
-    async fn send_token(&self, content: &str) {
-        self.messages
-            .lock()
-            .push(CollectedMessage::Token(content.to_string()));
-    }
-
-    async fn send_tool_call(&self, name: &str, args: &serde_json::Value) {
-        self.messages.lock().push(CollectedMessage::ToolCall(
-            name.to_string(),
-            args.clone(),
-        ));
-    }
-
-    async fn send_done(&self) {}
-
-    async fn send_error(&self, code: &str, message: &str) {
-        self.messages.lock().push(CollectedMessage::Error(
-            code.to_string(),
-            message.to_string(),
-        ));
+#[async_trait::async_trait]
+impl vanyline_lib::event::EventSink for CollectingSink {
+    async fn emit(&self, event: vanyline_lib::event::ChatEvent) {
+        match event {
+            vanyline_lib::event::ChatEvent::Token { content } => {
+                self.messages
+                    .lock()
+                    .push(CollectedMessage::Token(content));
+            }
+            vanyline_lib::event::ChatEvent::ToolCall { name, args, .. } => {
+                // ToolCall événement — pas représenté dans le protocole WS actuel
+                // (ServerMessage n'a que Token/ToolCall/Done/Error mais ce
+                // path est géré dans flush, non dans emit)
+                drop((name, args));
+            }
+            vanyline_lib::event::ChatEvent::Error { code, message } => {
+                self.messages.lock().push(CollectedMessage::Error(code, message));
+            }
+            // Done, ToolResult, SkillLoaded, Usage, Subagent* : pas de
+            // représentation dans le protocole WS actuel (ServerMessage n'a
+            // que Token/ToolCall/Done/Error) — cohérent avec l'ancien
+            // ChatSink qui n'avait pas non plus d'équivalent pour ces cas.
+            _ => {}
+        }
     }
 }
 
@@ -124,12 +129,7 @@ pub async fn ws_chat_handler(
     ws.on_upgrade(move |socket| handle_socket(socket, state, user, conversation_id))
 }
 
-async fn handle_socket(
-    socket: WebSocket,
-    state: AppState,
-    user: AuthUser,
-    conversation_id: Uuid,
-) {
+async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conversation_id: Uuid) {
     if let Err(e) = run_socket(socket, state, user, conversation_id).await {
         tracing::error!("ws chat error: {e}");
     }
@@ -204,139 +204,50 @@ async fn handle_message(
     agent_id: Uuid,
     user_msg: &str,
 ) -> Result<(), AppError> {
-    let agent_row = sqlx::query_as::<_, crate::db::models::AgentRow>(
-        "SELECT * FROM agents WHERE id = $1",
-    )
-    .bind(agent_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::AgentNotFound)?;
-
-    let mcp_servers: Vec<McpServer> = sqlx::query_as::<_, McpServer>(
-        r#"SELECT m.* FROM mcp_servers m
-           JOIN agent_mcp_servers ams ON ams.mcp_server_id = m.id
-           WHERE ams.agent_id = $1 ORDER BY m.name"#,
-    )
-    .bind(agent_id)
-    .fetch_all(&state.pool)
-    .await?;
-
-    let provider: Option<LlmProvider> = if let Some(pid) = agent_row.llm_provider_id {
-        sqlx::query_as::<_, LlmProvider>("SELECT * FROM llm_providers WHERE id = $1")
-            .bind(pid)
-            .fetch_optional(&state.pool)
-            .await?
-    } else {
-        sqlx::query_as::<_, LlmProvider>(
-            "SELECT * FROM llm_providers WHERE is_default = TRUE LIMIT 1",
-        )
+    let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+        .bind(agent_id)
         .fetch_optional(&state.pool)
         .await?
-    };
-
-    let provider = provider.ok_or_else(|| {
-        AppError::LlmError("VNL-LLM-007: no LLM provider configured".to_string())
-    })?;
-
-    let model_name = agent_row
-        .model
-        .as_deref()
-        .or(provider.default_model.as_deref())
-        .ok_or_else(|| AppError::LlmError("VNL-LLM-008: no model configured".to_string()))?
-        .to_string();
-
-    let agent_config = DbAgent {
-        id: agent_row.id,
-        name: agent_row.name,
-        description: agent_row.description,
-        system_prompt: agent_row.system_prompt,
-        llm_provider_id: agent_row.llm_provider_id,
-        model: agent_row.model,
-        mcp_servers: mcp_servers.clone(),
-        created_at: agent_row.created_at,
-        updated_at: agent_row.updated_at,
-    };
+        .ok_or(AppError::AgentNotFound)?;
 
     let history = load_history(state, conversation_id).await?;
 
     persist_message(state, conversation_id, "user", user_msg, None).await?;
 
     let sink = Arc::new(CollectingSink::new());
-
-    let result = match provider.provider_type.as_str() {
-        "ollama" => {
-            let model = crate::llm::client::build_ollama_model(&provider, &model_name)?;
-            run_chat_with_sink(sink.clone(), &agent_config, &mcp_servers, model, history, user_msg).await?
-        }
-        "openai-compatible" => {
-            let model = crate::llm::client::build_openai_compat_model(&provider, &model_name)?;
-            run_chat_with_sink(sink.clone(), &agent_config, &mcp_servers, model, history, user_msg).await?
-        }
-        other => {
-            return Err(AppError::LlmError(format!(
-                "VNL-LLM-005: unknown provider type: {other}"
-            )))
-        }
+    let ctx = SessionContext {
+        store: Arc::new(PgConfigStore::new(state.pool.clone())),
+        sink: sink.clone(),
+        local_tools: HashMap::new(),
+        subagent_depth_max: 1,
     };
+
+    let result = vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None)
+        .await?;
 
     sink.flush(socket).await;
 
-    let tool_calls = sink.collected_tool_calls();
+    let tool_calls = result.tool_calls;
     let msg_id = persist_message(
         state,
         conversation_id,
         "assistant",
         &result.response_text,
-        if tool_calls.is_empty() { None } else { Some(tool_calls) },
-    ).await?;
-
-    let done = serde_json::to_string(&ServerMessage::Done { message_id: msg_id }).unwrap_or_default();
-    let _ = socket.send(axum::extract::ws::Message::Text(done.into())).await;
-
-    Ok(())
-}
-
-async fn run_chat_with_sink<M>(
-    sink: Arc<CollectingSink>,
-    agent_config: &DbAgent,
-    mcp_servers: &[McpServer],
-    model: M,
-    history: Vec<rig_core::message::Message>,
-    user_msg: &str,
-) -> Result<vanyline_lib::ChatTurnResult, AppError>
-where
-    M: CompletionModel + 'static,
-    M::StreamingResponse: GetTokenUsage,
-{
-    let lib_mcp_servers: Vec<vanyline_lib::McpServer> = mcp_servers
-        .iter()
-        .map(to_lib_mcp)
-        .collect();
-
-    let handle = vanyline_lib::new_tool_handle();
-    vanyline_lib::connect_mcp_servers_prefixed(&lib_mcp_servers, &handle).await?;
-
-    let result = vanyline_lib::run_chat_turn(
-        sink,
-        &agent_config.system_prompt,
-        handle,
-        model,
-        history,
-        user_msg,
+        if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
     )
     .await?;
 
-    Ok(result)
-}
+    let done = serde_json::to_string(&ServerMessage::Done { message_id: msg_id })
+        .unwrap_or_default();
+    let _ = socket
+        .send(axum::extract::ws::Message::Text(done.into()))
+        .await;
 
-fn to_lib_mcp(m: &McpServer) -> vanyline_lib::McpServer {
-    vanyline_lib::McpServer {
-        id: m.id,
-        name: m.name.clone(),
-        server_type: m.server_type.clone(),
-        url: m.url.clone(),
-        headers: m.headers.clone(),
-    }
+    Ok(())
 }
 
 async fn load_history(
@@ -372,7 +283,7 @@ async fn persist_message(
     conversation_id: Uuid,
     role: &str,
     content: &str,
-    tool_calls: Option<Vec<vanyline_lib::ToolCall>>,
+    tool_calls: Option<Vec<vanyline_lib::event::ToolCallRecord>>,
 ) -> Result<Uuid, AppError> {
     let payload = serde_json::json!({
         "role": role,
