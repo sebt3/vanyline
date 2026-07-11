@@ -720,7 +720,7 @@ tools:
         let skills_dir = tmp.path().join("skills");
         std::fs::create_dir_all(&skills_dir).unwrap();
         std::fs::create_dir_all(skills_dir.join("random")).unwrap();
-        std::fs::create_dir_all(&skills_dir.join("pdf")).unwrap();
+        std::fs::create_dir_all(skills_dir.join("pdf")).unwrap();
         std::fs::write(skills_dir.join("pdf").join("SKILL.md"), "---\ndescription: PDF\n---\n").unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
