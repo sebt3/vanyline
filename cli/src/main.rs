@@ -95,6 +95,8 @@ mod agent {
         List,
         /// Set default agent
         SetDefault { name: String },
+        /// Show resolved detail for an agent (model → provider, toolsets expanded)
+        Show { name: String },
     }
 }
 
@@ -235,6 +237,73 @@ async fn run_agent(cmd: agent::Commands) {
                 std::process::exit(1);
             });
             println!("Default agent set to: {name}");
+        }
+        Show { name } => {
+            let agent = store.get_agent(&name).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+
+            println!("Agent: {}", agent.name);
+            let source = config::file_entry_source(store.layers(), "agents", "md", &agent.name);
+            println!("  Source: {source}");
+            if let Some(desc) = &agent.description {
+                println!("  Description: {desc}");
+            }
+            println!("  Mode: {:?}", agent.mode);
+
+            match store.get_model(&agent.model).await {
+                Ok(model) => match store.get_provider(&model.provider).await {
+                    Ok(provider) => println!(
+                        "  Model: {} -> provider '{}' ({:?}, {}), model '{}'",
+                        model.name, provider.name, provider.provider_type, provider.endpoint, model.model
+                    ),
+                    Err(_) => println!("  Model: {} -> provider '{}' (unknown)", model.name, model.provider),
+                },
+                Err(_) => println!("  Model: {} (unknown)", agent.model),
+            }
+
+            println!("  Skills: {:?}", agent.skills);
+
+            if agent.toolsets.is_empty() {
+                println!("  Toolsets: (none)");
+            } else {
+                println!("  Toolsets:");
+                for ts_name in &agent.toolsets {
+                    match store.get_toolset(ts_name).await {
+                        Ok(t) => {
+                            let local = if t.local_tools.is_empty() {
+                                "-".to_string()
+                            } else {
+                                t.local_tools.join(", ")
+                            };
+                            let mcp = if t.mcp.is_empty() {
+                                "-".to_string()
+                            } else {
+                                t.mcp
+                                    .iter()
+                                    .map(|s| {
+                                        let tools = if s.tools.is_empty() {
+                                            "*".to_string()
+                                        } else {
+                                            s.tools.join(", ")
+                                        };
+                                        format!("{}: {}", s.server, tools)
+                                    })
+                                    .collect::<Vec<_>>()
+                                    .join("; ")
+                            };
+                            println!("    - {} : local=[{}], mcp=[{}]", t.name, local, mcp);
+                        }
+                        Err(_) => println!("    - {ts_name} (unknown)"),
+                    }
+                }
+            }
+
+            println!("  System prompt:");
+            for line in agent.system_prompt.lines() {
+                println!("    {line}");
+            }
         }
     }
 }
