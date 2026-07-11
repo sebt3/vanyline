@@ -481,7 +481,7 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
     let status = compute_status(project, cloned);
     let patch = serde_json::json!({ "status": status });
     projects
-        .patch_status(&project.name_any(), &pp, &Patch::Merge(&patch))
+        .patch_status(&project.name_any(), &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
 
     Ok(Action::requeue(Duration::from_secs(if cloned { 300 } else { 15 })))

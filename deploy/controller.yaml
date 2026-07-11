@@ -1,0 +1,91 @@
+# Déploiement de vanyline-controller — feature controller-bootstrap.
+#
+# Prérequis (une fois) : les CRDs (fichier statique, régénéré via
+# deploy/generate-crds.sh à chaque changement de schéma) :
+#   kubectl apply -f deploy/crds.yaml
+#
+#   kubectl apply -f deploy/controller.yaml
+#   kubectl -n media-station logs -f deploy/vanyline-controller
+#   kubectl -n media-station delete -f deploy/controller.yaml
+#
+# Le controller watche les trois CRDs (Owner/Project/Sandbox) sur TOUT le
+# cluster (Api::all dans owner.rs/project.rs/sandbox.rs) — d'où ClusterRole +
+# ClusterRoleBinding plutôt que Role/RoleBinding namespacés, même si les CRDs
+# elles-mêmes sont namespacées (une seule instance du controller pour tout le
+# cluster).
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: vanyline-controller
+  namespace: media-station
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vanyline-controller
+rules:
+  - apiGroups: ["vanyline.solidite.fr"]
+    resources: ["owners", "projects", "sandboxes"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["vanyline.solidite.fr"]
+    resources: ["owners/status", "projects/status", "sandboxes/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["vanyline.solidite.fr"]
+    resources: ["owners/finalizers", "projects/finalizers", "sandboxes/finalizers"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "serviceaccounts", "pods", "services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: vanyline-controller
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: vanyline-controller
+subjects:
+  - kind: ServiceAccount
+    name: vanyline-controller
+    namespace: media-station
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vanyline-controller
+  namespace: media-station
+  labels:
+    app: vanyline-controller
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: vanyline-controller
+  template:
+    metadata:
+      labels:
+        app: vanyline-controller
+    spec:
+      serviceAccountName: vanyline-controller
+      containers:
+        - name: controller
+          image: docker.io/sebt3/vanyline-controller:0.0.1-alpha.1
+          imagePullPolicy: Always
+          env:
+            - name: SANDBOX_IMAGE
+              value: "docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1"
+            - name: RUST_LOG
+              value: "info,vanyline_controller=debug"
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              memory: 256Mi

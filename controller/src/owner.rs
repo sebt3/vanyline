@@ -142,7 +142,7 @@ pub async fn reconcile(owner: Arc<Owner>, ctx: Arc<Context>) -> Result<Action, C
     let status = compute_status(&owner);
     let patch = serde_json::json!({ "status": status });
     owners
-        .patch_status(&owner.name_any(), &pp, &Patch::Merge(&patch))
+        .patch_status(&owner.name_any(), &PatchParams::default(), &Patch::Merge(&patch))
         .await?;
 
     Ok(Action::requeue(Duration::from_secs(300)))

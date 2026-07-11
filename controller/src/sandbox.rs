@@ -559,7 +559,7 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
     let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
     let status = compute_status(sandbox, &phase);
     let patch = serde_json::json!({ "status": status });
-    sandboxes.patch_status(&sandbox.name_any(), &pp, &Patch::Merge(&patch)).await?;
+    sandboxes.patch_status(&sandbox.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
 
     Ok(Action::requeue(Duration::from_secs(if phase == "Running" { 300 } else { 15 })))
 }
