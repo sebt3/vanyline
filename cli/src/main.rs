@@ -1,5 +1,6 @@
 mod chat;
 mod config;
+mod config_check;
 mod config_store;
 mod fs_store;
 mod store;
@@ -38,6 +39,9 @@ enum Commands {
     /// Manage LLM providers
     #[command(subcommand)]
     Providers(provider::Commands),
+    /// Validate configuration (both layers)
+    #[command(subcommand)]
+    Config(config_cmd::Commands),
 }
 
 mod conversation {
@@ -87,6 +91,16 @@ mod provider {
     }
 }
 
+mod config_cmd {
+    use clap::Subcommand;
+
+    #[derive(Subcommand)]
+    pub enum Commands {
+        /// Validate configuration (both layers)
+        Check,
+    }
+}
+
 #[tokio::main]
 async fn main() {
     tracing_subscriber::registry()
@@ -108,6 +122,7 @@ async fn main() {
         Commands::Conversations(cmd) => run_conversation(cmd).await,
         Commands::Agents(cmd) => run_agent(cmd).await,
         Commands::Providers(cmd) => run_provider(cmd).await,
+        Commands::Config(cmd) => run_config(cmd).await,
     }
 }
 
@@ -212,6 +227,29 @@ async fn run_provider(cmd: provider::Commands) {
                 for p in &providers {
                     println!("  {} | {:?}", p.name, p.provider_type);
                 }
+            }
+        }
+    }
+}
+
+async fn run_config(cmd: config_cmd::Commands) {
+    use config_cmd::Commands::*;
+    match cmd {
+        Check => {
+            let cwd = std::env::current_dir().unwrap_or_else(|e| {
+                eprintln!("Failed to read current directory: {e}");
+                std::process::exit(1);
+            });
+            let layers = config::Layers::discover(&cwd);
+            let store = fs_store::FsConfigStore::new(layers);
+            let problems = config_check::check_config(&store).await;
+            if problems.is_empty() {
+                println!("Config OK — no problems found.");
+            } else {
+                for p in &problems {
+                    println!("  {p}");
+                }
+                std::process::exit(1);
             }
         }
     }
