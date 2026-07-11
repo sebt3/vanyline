@@ -215,6 +215,42 @@ async fn resolve_turn_context(
     })
 }
 
+/// Nombre max d'allers-retours d'appels d'outils par tour. Sans ça, rig-core
+/// retombe sur son défaut interne (0 — un seul aller-retour), ce qui bloque
+/// toute tâche nécessitant lire/chercher/éditer plusieurs fichiers dans un
+/// même tour. 100 = un vrai filet de sécurité anti-boucle-infinie (modèle
+/// confus qui n'arrête jamais d'appeler des outils), pas un plafond de travail
+/// — une tâche de code légitime (explorer, chercher, éditer, vérifier sur
+/// plusieurs fichiers) ne doit jamais s'en approcher en pratique.
+const DEFAULT_MAX_TURNS: usize = 100;
+
+/// Construit l'`Agent` rig-core à partir des `AgentParams` — extrait de
+/// `run_turn_with_model` pour être testable sans réseau (aucun appel HTTP tant
+/// qu'on n'appelle pas `.stream_chat(..)`/`.prompt(..)` dessus).
+fn build_agent<M>(
+    model: M,
+    params: &crate::model::AgentParams,
+    system_prompt: &str,
+    handle: rig_core::tool::server::ToolServerHandle,
+) -> rig_core::agent::Agent<M>
+where
+    M: rig_core::completion::CompletionModel + Clone + 'static,
+{
+    let mut builder = rig_core::agent::AgentBuilder::new(model)
+        .preamble(system_prompt)
+        .default_max_turns(DEFAULT_MAX_TURNS);
+    if let Some(t) = params.temperature {
+        builder = builder.temperature(t);
+    }
+    if let Some(m) = params.max_tokens {
+        builder = builder.max_tokens(m);
+    }
+    if let Some(ap) = params.additional_params.clone() {
+        builder = builder.additional_params(ap);
+    }
+    builder.tool_server_handle(handle).build()
+}
+
 /// Construit l'`Agent<M>` rig (préambule + params du profil + handle de tools)
 /// et lance le stream via `event::stream_agent_events`. Générique sur `M` car
 /// le type concret du modèle diffère selon `provider.provider_type`
@@ -231,20 +267,10 @@ async fn run_turn_with_model<M>(
     user_msg: &str,
 ) -> Result<ChatTurnResult, VnyError>
 where
-    M: rig_core::completion::CompletionModel + 'static,
+    M: rig_core::completion::CompletionModel + Clone + 'static,
     M::StreamingResponse: rig_core::completion::GetTokenUsage,
 {
-    let mut builder = rig_core::agent::AgentBuilder::new(model).preamble(system_prompt);
-    if let Some(t) = params.temperature {
-        builder = builder.temperature(t);
-    }
-    if let Some(m) = params.max_tokens {
-        builder = builder.max_tokens(m);
-    }
-    if let Some(ap) = params.additional_params {
-        builder = builder.additional_params(ap);
-    }
-    let agent = builder.tool_server_handle(handle).build();
+    let agent = build_agent(model, &params, system_prompt, handle);
     crate::event::stream_agent_events(ctx.sink.clone(), agent, history, user_msg).await
 }
 
@@ -774,5 +800,29 @@ mod tests {
         let ctx = test_ctx(store);
         let result = resolve_turn_context(&ctx, "test-agent", Some("# AGENTS.md")).await.unwrap();
         assert!(result.system_prompt.ends_with("# AGENTS.md"));
+    }
+
+    // 8. build_agent_sets_default_max_turns
+    #[test]
+    fn build_agent_sets_default_max_turns() {
+        let provider = crate::domain::Provider {
+            name: "p".to_string(),
+            provider_type: crate::domain::ProviderType::OpenaiCompatible,
+            endpoint: "http://localhost:1".to_string(),
+            api_key: None,
+        };
+        let profile = crate::domain::ModelProfile {
+            name: "m".to_string(),
+            provider: "p".to_string(),
+            model: "qwen2.5".to_string(),
+            temperature: None,
+            max_tokens: None,
+            options: serde_json::Map::new(),
+        };
+        let model = crate::model::build_openai_compat_model(&provider, &profile).unwrap();
+        let params = crate::model::agent_params(&profile);
+        let handle = crate::new_tool_handle();
+        let agent = build_agent(model, &params, "system prompt", handle);
+        assert_eq!(agent.default_max_turns, Some(DEFAULT_MAX_TURNS));
     }
 }
