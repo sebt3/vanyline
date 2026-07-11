@@ -9,36 +9,11 @@ use globset::Glob;
 
 use crate::domain::{McpSelection, McpServer as DomainMcpServer, McpTransport};
 use crate::error::VnyError;
-use crate::types::McpServer;
 
 /// Create a fresh, running tool-server handle. Callers add tools to it
 /// (local tools and/or MCP tools) before handing it to `run_chat_turn`.
 pub fn new_tool_handle() -> ToolServerHandle {
     rig_core::tool::server::ToolServer::new().run()
-}
-
-/// Connect to MCP servers and add their prefixed tools to an existing handle.
-/// Per-server failures are logged and skipped; they do not abort the whole set.
-pub async fn connect_mcp_servers_prefixed(
-    servers: &[McpServer],
-    handle: &ToolServerHandle,
-) -> Result<(), VnyError> {
-    for server in servers {
-        match connect_mcp_server_inner(server).await {
-            Ok((tools, client)) => {
-                let prefixed_tools = PrefixedMcpTool::new(tools, client, &server.name);
-                for tool in prefixed_tools {
-                    if let Err(e) = handle.add_tool(tool).await {
-                        tracing::warn!("failed to add prefixed tool: {e}");
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!("skipping MCP server {}: {e}", server.name);
-            }
-        }
-    }
-    Ok(())
 }
 
 /// A tool that presents a prefixed name to the LLM but calls the MCP server
@@ -199,27 +174,6 @@ impl std::fmt::Display for McpToolCallError {
 }
 
 impl std::error::Error for McpToolCallError {}
-
-async fn connect_mcp_server_inner(
-    server: &McpServer,
-) -> Result<(Vec<Tool>, ServerSink), VnyError> {
-    match server.server_type.as_str() {
-        "http-streamable" => {
-            let transport =
-                rmcp::transport::StreamableHttpClientTransport::from_uri(server.url.as_str());
-            let running = rmcp::serve_client((), transport).await.map_err(|e| {
-                VnyError::McpConnectError(server.name.clone(), e.to_string())
-            })?;
-            let server_sink = running.peer().clone();
-            let tools = running.list_all_tools().await.map_err(|e| {
-                VnyError::McpToolsError(server.name.clone(), e.to_string())
-            })?;
-            Ok((tools, server_sink))
-        }
-        "sse" => Err(VnyError::SseNotImplemented),
-        other => Err(VnyError::UnknownServerType(other.to_string())),
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Toolset resolution — task-05: glob filtering & locale selection

@@ -4,7 +4,6 @@ mod config;
 mod config_store;
 mod db;
 mod error;
-mod llm;
 mod ws;
 
 use std::net::SocketAddr;
