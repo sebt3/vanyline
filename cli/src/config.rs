@@ -69,6 +69,18 @@ impl Layers {
         };
         Ok(merge_config_layers(global, workspace))
     }
+
+    /// Résout les fichiers d'extension `ext` sous `<couche>/<subdir>/` des
+    /// deux couches, fusionnés par nom (workspace gagne). `subdir` : ex.
+    /// `"agents"`, `"toolsets"`.
+    pub fn resolve_named_files(&self, subdir: &str, ext: &str) -> Result<BTreeMap<String, PathBuf>, VnyError> {
+        let global = list_layer_files(&self.global_dir.join(subdir), ext)?;
+        let workspace = match &self.workspace_dir {
+            Some(dir) => Some(list_layer_files(&dir.join(subdir), ext)?),
+            None => None,
+        };
+        Ok(merge_layer_files(global, workspace))
+    }
 }
 
 /// Représentation brute de `config.yaml` — pas encore de types du domaine
@@ -121,6 +133,45 @@ pub fn merge_config_layers(global: RawConfigFile, workspace: Option<RawConfigFil
     let mut defaults = global.defaults;
     defaults.extend(ws.defaults);
     RawConfigFile { providers, models, mcp, defaults }
+}
+
+/// Liste les fichiers d'extension `ext` (sans le point, ex. `"md"`)
+/// directement sous `dir` (non récursif — les sous-répertoires, ex.
+/// `skills/<name>/`, sont ignorés), indexés par `stem` (nom de fichier sans
+/// extension). `dir` absent -> map vide, PAS une erreur (une couche peut ne
+/// pas avoir ce sous-répertoire).
+#[allow(dead_code)]
+pub fn list_layer_files(dir: &std::path::Path, ext: &str) -> Result<BTreeMap<String, PathBuf>, VnyError> {
+    let mut result = BTreeMap::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+        Err(e) => return Err(VnyError::from(e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(VnyError::from)?;
+        let path = entry.path();
+        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                result.insert(stem.to_string(), path);
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Fusionne deux maps stem -> chemin : `workspace` (si `Some`) remplace
+/// `global` à stem égal (remplacement de la valeur, comme
+/// `merge_config_layers`). `None` -> `global` inchangé.
+#[allow(dead_code)]
+pub fn merge_layer_files(
+    global: BTreeMap<String, PathBuf>,
+    workspace: Option<BTreeMap<String, PathBuf>>,
+) -> BTreeMap<String, PathBuf> {
+    let Some(ws) = workspace else { return global };
+    let mut merged = global;
+    merged.extend(ws);
+    merged
 }
 
 #[cfg(test)]
@@ -299,5 +350,85 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         let result = merge_config_layers(global, Some(workspace));
         assert_eq!(result.defaults["agent"], "debug");
         assert_eq!(result.defaults["autre"], "x");
+    }
+
+    // --- list_layer_files ---
+
+    #[test]
+    fn list_layer_files_finds_matching_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path_a = tmp.path().join("a.md");
+        let path_b = tmp.path().join("b.md");
+        let path_c = tmp.path().join("c.txt");
+        std::fs::write(&path_a, "# A").unwrap();
+        std::fs::write(&path_b, "# B").unwrap();
+        std::fs::write(&path_c, "text").unwrap();
+        let result = list_layer_files(tmp.path(), "md").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key("a"));
+        assert!(result.contains_key("b"));
+        assert!(!result.contains_key("c"));
+    }
+
+    #[test]
+    fn list_layer_files_ignores_subdirectories() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path_a = tmp.path().join("a.md");
+        std::fs::write(&path_a, "# A").unwrap();
+        std::fs::create_dir(tmp.path().join("sub.md")).unwrap();
+        let result = list_layer_files(tmp.path(), "md").unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("a"));
+    }
+
+    #[test]
+    fn list_layer_files_missing_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does_not_exist");
+        let result = list_layer_files(&missing, "md").unwrap();
+        assert!(result.is_empty());
+    }
+
+    // --- merge_layer_files ---
+
+    #[test]
+    fn merge_layer_files_workspace_overrides() {
+        let tmp_a = tempfile::tempdir().unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+        let tmp_c = tempfile::tempdir().unwrap();
+        let global = BTreeMap::from([("build".into(), tmp_a.path().to_path_buf())]);
+        let workspace = BTreeMap::from([
+            ("build".into(), tmp_b.path().to_path_buf()),
+            ("debug".into(), tmp_c.path().to_path_buf()),
+        ]);
+        let result = merge_layer_files(global, Some(workspace));
+        assert_eq!(result.len(), 2);
+        assert!(
+            result["build"] == tmp_b.path(),
+            "build should be overridden by workspace path"
+        );
+        assert!(result.contains_key("debug"));
+        assert!(result["debug"] == tmp_c.path());
+    }
+
+    // --- resolve_named_files ---
+
+    #[test]
+    fn resolve_named_files_merges_across_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = tmp.path().join("global");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(global.join("agents")).unwrap();
+        std::fs::create_dir_all(workspace.join("agents")).unwrap();
+        std::fs::write(global.join("agents").join("build.md"), "# build").unwrap();
+        std::fs::write(workspace.join("agents").join("debug.md"), "# debug").unwrap();
+        let layers = Layers {
+            global_dir: global,
+            workspace_dir: Some(workspace),
+        };
+        let result = layers.resolve_named_files("agents", "md").unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key("build"));
+        assert!(result.contains_key("debug"));
     }
 }

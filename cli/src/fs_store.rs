@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use vanyline_lib::domain::{Agent, McpServer, ModelProfile, Provider, ProviderType, McpTransport, SkillMeta, Toolset};
+use vanyline_lib::domain::{Agent, AgentMode, McpSelection, McpServer, ModelProfile, Provider, ProviderType, McpTransport, SkillSelection, SkillMeta, Toolset};
 use vanyline_lib::store::ConfigStore;
 use vanyline_lib::VnyError;
 
@@ -39,6 +39,16 @@ struct RawProviderEntry {
 
 #[allow(dead_code)]
 #[derive(Debug, Deserialize)]
+struct RawMcpEntry {
+    #[serde(rename = "type")]
+    transport: McpTransport,
+    url: String,
+    #[serde(default)]
+    headers: std::collections::BTreeMap<String, String>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Deserialize)]
 struct RawModelEntry {
     provider: String,
     model: String,
@@ -50,14 +60,102 @@ struct RawModelEntry {
     options: serde_json::Map<String, serde_json::Value>,
 }
 
-#[allow(dead_code)]
+use std::path::Path;
+
+/// Sépare le frontmatter YAML (entre deux lignes `---` exactes) du corps
+/// markdown. La première ligne du fichier DOIT être exactement `---` ; la
+/// fermeture est la prochaine ligne exactement `---`. Le corps est tout ce
+/// qui suit la ligne de fermeture. Erreur `ConfigError` (avec `path` dans le
+/// message) si la première ligne n'est pas `---` ou si aucune fermeture
+/// n'est trouvée. Pas de crate — extraction manuelle (cf. design).
+fn split_frontmatter(path: &Path, content: &str) -> Result<(String, String), VnyError> {
+    let mut lines = content.lines();
+    match lines.next() {
+        Some("---") => {}
+        _ => return Err(VnyError::ConfigError(format!(
+            "{}: must start with '---' frontmatter delimiter", path.display()
+        ))),
+    }
+    let mut frontmatter = Vec::new();
+    let mut closed = false;
+    for line in lines.by_ref() {
+        if line == "---" {
+            closed = true;
+            break;
+        }
+        frontmatter.push(line);
+    }
+    if !closed {
+        return Err(VnyError::ConfigError(format!(
+            "{}: missing closing '---' for frontmatter", path.display()
+        )));
+    }
+    let body: Vec<&str> = lines.collect();
+    Ok((frontmatter.join("\n"), body.join("\n")))
+}
+
 #[derive(Debug, Deserialize)]
-struct RawMcpEntry {
-    #[serde(rename = "type")]
-    transport: McpTransport,
-    url: String,
+struct RawAgentFrontmatter {
     #[serde(default)]
-    headers: std::collections::BTreeMap<String, String>,
+    description: Option<String>,
+    #[serde(default = "default_agent_mode")]
+    mode: AgentMode,
+    model: String,
+    #[serde(default)]
+    toolsets: Vec<String>,
+    #[serde(default)]
+    skills: SkillSelection,
+}
+
+fn default_agent_mode() -> AgentMode {
+    AgentMode::Primary
+}
+
+fn parse_agent_file(name: &str, path: &Path) -> Result<Agent, VnyError> {
+    let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+    let (frontmatter, body) = split_frontmatter(path, &content)?;
+    let raw: RawAgentFrontmatter = yaml_serde::from_str(&frontmatter)
+        .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
+    Ok(Agent {
+        name: name.to_string(),
+        description: raw.description,
+        mode: raw.mode,
+        model: raw.model,
+        toolsets: raw.toolsets,
+        skills: raw.skills,
+        system_prompt: body.trim().to_string(),
+    })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RawToolsSection {
+    #[serde(default)]
+    local: Vec<String>,
+    #[serde(default)]
+    mcp: std::collections::BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawToolsetFile {
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(default)]
+    prompt: Option<String>,
+    #[serde(default)]
+    tools: RawToolsSection,
+}
+
+fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, VnyError> {
+    let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+    let raw: RawToolsetFile = yaml_serde::from_str(&content)
+        .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
+    Ok(Toolset {
+        name: name.to_string(),
+        description: raw.description,
+        prompt: raw.prompt,
+        local_tools: raw.tools.local,
+        mcp: raw.tools.mcp.into_iter().map(|(server, tools)| McpSelection { server, tools }).collect(),
+    })
 }
 
 #[async_trait]
@@ -112,14 +210,16 @@ impl ConfigStore for FsConfigStore {
         Ok(result)
     }
 
-    /// Stub — implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
+    /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
     async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError> {
-        Ok(Vec::new())
+        let files = self.layers.resolve_named_files("toolsets", "yaml")?;
+        files.iter().map(|(name, path)| parse_toolset_file(name, path)).collect()
     }
 
-    /// Stub — implémenté en tâche 02b.
+    /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
     async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
-        Ok(Vec::new())
+        let files = self.layers.resolve_named_files("agents", "md")?;
+        files.iter().map(|(name, path)| parse_agent_file(name, path)).collect()
     }
 
     /// Stub — implémenté en tâche 02c (skills/<name>/SKILL.md).
@@ -336,9 +436,9 @@ mod tests {
         }
     }
 
-    // 9. stubs_return_empty_or_unknown
+    // 9. skill stubs still return empty/unknown (list_skills, load_skill unchanged)
     #[tokio::test]
-    async fn stubs_return_empty_or_unknown() {
+    async fn skill_stubs_return_empty_or_unknown() {
         let tmp = tempdir().unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
@@ -346,17 +446,11 @@ mod tests {
         };
         let store = FsConfigStore::new(layers);
 
-        // List stubs return empty vectors
-        let toolsets = store.list_toolsets().await.unwrap();
-        assert!(toolsets.is_empty());
-
-        let agents = store.list_agents().await.unwrap();
-        assert!(agents.is_empty());
-
+        // list_skills still returns empty vector
         let skills = store.list_skills().await.unwrap();
         assert!(skills.is_empty());
 
-        // load_skill returns UnknownReference
+        // load_skill still returns UnknownReference
         let result = store.load_skill("x").await;
         match result {
             Err(VnyError::UnknownReference(kind, name)) => {
@@ -365,5 +459,197 @@ mod tests {
             }
             _ => panic!("Expected UnknownReference(\"skill\")"),
         }
+    }
+
+    // 10. list_agents_parses_frontmatter
+    #[tokio::test]
+    async fn list_agents_parses_frontmatter() {
+        let tmp = tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            &agents_dir.join("build.md"),
+            "---
+description: Agent d'implémentation
+mode: primary
+model: qwen-code
+toolsets:
+  - fs
+  - grafana-kydah
+skills: auto
+---
+
+Tu es un agent d'implémentation.",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let agents = store.list_agents().await.unwrap();
+        assert_eq!(agents.len(), 1);
+        let a = &agents[0];
+        assert_eq!(a.name, "build");
+        assert_eq!(a.description.as_deref(), Some("Agent d'implémentation"));
+        assert_eq!(a.mode, AgentMode::Primary);
+        assert_eq!(a.model, "qwen-code");
+        assert_eq!(a.toolsets, vec!["fs", "grafana-kydah"]);
+        assert_eq!(a.system_prompt, "Tu es un agent d'implémentation.");
+    }
+
+    // 11. list_agents_defaults
+    #[tokio::test]
+    async fn list_agents_defaults() {
+        let tmp = tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(&agents_dir.join("simple.md"), "---\nmodel: x\n---\n").unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let agents = store.list_agents().await.unwrap();
+        assert_eq!(agents.len(), 1);
+        let a = &agents[0];
+        assert_eq!(a.name, "simple");
+        assert_eq!(a.mode, AgentMode::Primary);
+        assert!(a.description.is_none());
+        assert!(a.toolsets.is_empty());
+        assert_eq!(a.skills, SkillSelection::Auto);
+    }
+
+    // 12. list_agents_missing_opening_delimiter_errors
+    #[tokio::test]
+    async fn list_agents_missing_opening_delimiter_errors() {
+        let tmp = tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(&agents_dir.join("bad.md"), "model: x\n---\nbody\n").unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let result = store.list_agents().await;
+        match result {
+            Err(VnyError::ConfigError(msg)) => {
+                assert!(msg.contains("bad.md"));
+                assert!(msg.contains("must start with '---'"));
+            }
+            other => panic!("Expected ConfigError, got {:?}", other),
+        }
+    }
+
+    // 13. list_agents_missing_closing_delimiter_errors
+    #[tokio::test]
+    async fn list_agents_missing_closing_delimiter_errors() {
+        let tmp = tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(&agents_dir.join("bad.md"), "---\nmodel: x\nbody\n").unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let result = store.list_agents().await;
+        match result {
+            Err(VnyError::ConfigError(msg)) => {
+                assert!(msg.contains("bad.md"));
+                assert!(msg.contains("missing closing '---'"));
+            }
+            other => panic!("Expected ConfigError, got {:?}", other),
+        }
+    }
+
+    // 14. list_toolsets_parses_tools_section
+    #[tokio::test]
+    async fn list_toolsets_parses_tools_section() {
+        let tmp = tempdir().unwrap();
+        let toolsets_dir = tmp.path().join("toolsets");
+        std::fs::create_dir_all(&toolsets_dir).unwrap();
+        std::fs::write(
+            &toolsets_dir.join("grafana.yaml"),
+            "\
+description: Outils Grafana
+prompt: Interroger Grafana
+tools:
+  local:
+    - grafana_query
+  mcp:
+    grafana-kydah:
+      - query_dashboard
+      - query_metrics
+",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let toolsets = store.list_toolsets().await.unwrap();
+        assert_eq!(toolsets.len(), 1);
+        let t = &toolsets[0];
+        assert_eq!(t.name, "grafana");
+        assert_eq!(t.description.as_deref(), Some("Outils Grafana"));
+        assert_eq!(t.prompt.as_deref(), Some("Interroger Grafana"));
+        assert_eq!(t.local_tools, vec!["grafana_query"]);
+        assert_eq!(t.mcp.len(), 1);
+        let mcp_sel = &t.mcp[0];
+        assert_eq!(mcp_sel.server, "grafana-kydah");
+        assert_eq!(mcp_sel.tools, vec!["query_dashboard", "query_metrics"]);
+    }
+
+    // 15. list_toolsets_defaults
+    #[tokio::test]
+    async fn list_toolsets_defaults() {
+        let tmp = tempdir().unwrap();
+        let toolsets_dir = tmp.path().join("toolsets");
+        std::fs::create_dir_all(&toolsets_dir).unwrap();
+        std::fs::write(&toolsets_dir.join("empty.yaml"), "tools: {}").unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let toolsets = store.list_toolsets().await.unwrap();
+        assert_eq!(toolsets.len(), 1);
+        let t = &toolsets[0];
+        assert_eq!(t.name, "empty");
+        assert!(t.description.is_none());
+        assert!(t.prompt.is_none());
+        assert!(t.local_tools.is_empty());
+        assert!(t.mcp.is_empty());
+    }
+
+    // 16. list_agents_and_toolsets_two_layer_override
+    #[tokio::test]
+    async fn list_agents_and_toolsets_two_layer_override() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        std::fs::create_dir_all(global_dir.path().join("agents")).unwrap();
+        std::fs::create_dir_all(workspace_dir.path().join("agents")).unwrap();
+        std::fs::write(
+            &global_dir.path().join("agents").join("build.md"),
+            "---\nmodel: global-model\n---\nbody\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &workspace_dir.path().join("agents").join("build.md"),
+            "---\nmodel: workspace-model\n---\nbody\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        let agents = store.list_agents().await.unwrap();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "build");
+        assert_eq!(agents[0].model, "workspace-model");
     }
 }
