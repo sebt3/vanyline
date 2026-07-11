@@ -13,13 +13,27 @@ pub struct User {
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct LlmProvider {
     pub id: Uuid,
+    pub user_id: Uuid,
     pub name: String,
     pub provider_type: String,
     pub endpoint: String,
     pub api_key: Option<String>,
-    pub default_model: Option<String>,
     pub available_models: serde_json::Value,
     pub is_default: bool,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ModelProfile {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub provider_id: Uuid,
+    pub model: String,
+    pub temperature: Option<f64>,
+    pub max_tokens: Option<i64>,
+    pub options: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

@@ -11,7 +11,10 @@ use vanyline_lib::domain::{
 use vanyline_lib::store::ConfigStore;
 use vanyline_lib::VnyError;
 
-use crate::db::models::{AgentRow, LlmProvider as DbLlmProvider, McpServer as DbMcpServer};
+use crate::db::models::{
+    AgentRow, LlmProvider as DbLlmProvider, McpServer as DbMcpServer,
+    ModelProfile as DbModelProfile,
+};
 
 // ---------------------------------------------------------------------------
 // Fonctions pures — testées sans base de données (fixtures construites à la
@@ -70,6 +73,32 @@ fn domain_provider(row: &DbLlmProvider) -> Result<Provider, VnyError> {
     })
 }
 
+/// `providers` = résultat de `load_providers()` de CE `PgConfigStore` (même
+/// utilisateur — la garantie de cohérence vient de l'appelant, pas de cette
+/// fonction). `VnyError::LlmProviderNotFound` si `row.provider_id` n'y
+/// figure pas.
+fn domain_model_profile(
+    row: &DbModelProfile,
+    providers: &[DbLlmProvider],
+) -> Result<ModelProfile, VnyError> {
+    let provider = providers
+        .iter()
+        .find(|p| p.id == row.provider_id)
+        .ok_or(VnyError::LlmProviderNotFound)?;
+    let options = match &row.options {
+        serde_json::Value::Object(map) => map.clone(),
+        _ => serde_json::Map::new(),
+    };
+    Ok(ModelProfile {
+        name: row.name.clone(),
+        provider: provider.name.clone(),
+        model: row.model.clone(),
+        temperature: row.temperature,
+        max_tokens: row.max_tokens.map(|v| v as u64),
+        options,
+    })
+}
+
 /// `None` si `agent.llm_provider_id` référence un id absent de `providers`,
 /// ou si aucun `is_default` n'existe quand `llm_provider_id` est `None` — le
 /// `Result`/`Err` exact (`LlmProviderNotFound` vs `NoProviderConfigured`) est
@@ -89,22 +118,6 @@ fn resolve_provider_for_agent<'a>(
             .find(|p| p.is_default)
             .ok_or(VnyError::NoProviderConfigured)
     }
-}
-
-fn model_profile_for_agent(agent: &AgentRow, provider: &DbLlmProvider) -> Result<ModelProfile, VnyError> {
-    let model = agent
-        .model
-        .clone()
-        .or_else(|| provider.default_model.clone())
-        .ok_or(VnyError::NoModelConfigured)?;
-    Ok(ModelProfile {
-        name: agent.name.clone(),
-        provider: provider.name.clone(),
-        model,
-        temperature: None,
-        max_tokens: None,
-        options: serde_json::Map::new(),
-    })
 }
 
 fn domain_agent(agent: &AgentRow) -> Agent {
@@ -140,15 +153,25 @@ fn toolset_for_agent(agent: &AgentRow, mcp_rows: &[DbMcpServer]) -> Toolset {
 
 pub struct PgConfigStore {
     pool: PgPool,
+    user_id: Uuid,
 }
 
 impl PgConfigStore {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, user_id: Uuid) -> Self {
+        Self { pool, user_id }
     }
 
     async fn load_providers(&self) -> Result<Vec<DbLlmProvider>, VnyError> {
-        sqlx::query_as::<_, DbLlmProvider>("SELECT * FROM llm_providers")
+        sqlx::query_as::<_, DbLlmProvider>("SELECT * FROM llm_providers WHERE user_id = $1")
+            .bind(self.user_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| VnyError::ConfigError(e.to_string()))
+    }
+
+    async fn load_model_profiles(&self) -> Result<Vec<DbModelProfile>, VnyError> {
+        sqlx::query_as::<_, DbModelProfile>("SELECT * FROM model_profiles WHERE user_id = $1")
+            .bind(self.user_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
@@ -182,15 +205,9 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelProfile>, VnyError> {
-        let agents = self.load_agents().await?;
+        let rows = self.load_model_profiles().await?;
         let providers = self.load_providers().await?;
-        agents
-            .iter()
-            .map(|a| {
-                let provider = resolve_provider_for_agent(a, &providers)?;
-                model_profile_for_agent(a, provider)
-            })
-            .collect()
+        rows.iter().map(|r| domain_model_profile(r, &providers)).collect()
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
@@ -247,16 +264,31 @@ impl ConfigStore for PgConfigStore {
 mod tests {
     use super::*;
 
-    fn sample_provider(id: Uuid, name: &str, provider_type: &str, is_default: bool, default_model: Option<&str>) -> DbLlmProvider {
+    fn sample_provider(id: Uuid, user_id: Uuid, name: &str, provider_type: &str, is_default: bool) -> DbLlmProvider {
         DbLlmProvider {
             id,
+            user_id,
             name: name.to_string(),
             provider_type: provider_type.to_string(),
             endpoint: "http://localhost:11434".to_string(),
             api_key: None,
-            default_model: default_model.map(String::from),
             available_models: serde_json::json!([]),
             is_default,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn sample_model_profile(id: Uuid, user_id: Uuid, name: &str, provider_id: Uuid, model: &str) -> DbModelProfile {
+        DbModelProfile {
+            id,
+            user_id,
+            name: name.to_string(),
+            provider_id,
+            model: model.to_string(),
+            temperature: None,
+            max_tokens: None,
+            options: serde_json::json!({}),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -340,8 +372,9 @@ mod tests {
     fn resolve_provider_for_agent_by_id() {
         let id1 = Uuid::new_v4();
         let id2 = Uuid::new_v4();
-        let p1 = sample_provider(id1, "ollama", "ollama", false, None);
-        let p2 = sample_provider(id2, "openai", "openai-compatible", false, None);
+        let uid = Uuid::new_v4();
+        let p1 = sample_provider(id1, uid, "ollama", "ollama", false);
+        let p2 = sample_provider(id2, uid, "openai", "openai-compatible", false);
         let agents = vec![p1.clone(), p2.clone()];
         let agent = sample_agent(Uuid::new_v4(), "test-agent", Some(id2), None);
         let result = resolve_provider_for_agent(&agent, &agents).unwrap();
@@ -352,7 +385,7 @@ mod tests {
     #[test]
     fn resolve_provider_for_agent_unknown_id() {
         let unknown_id = Uuid::new_v4();
-        let p1 = sample_provider(Uuid::new_v4(), "ollama", "ollama", false, None);
+        let p1 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "ollama", "ollama", false);
         let agent = sample_agent(Uuid::new_v4(), "test-agent", Some(unknown_id), None);
         let err = resolve_provider_for_agent(&agent, &[p1]).unwrap_err();
         assert!(matches!(err, VnyError::LlmProviderNotFound));
@@ -361,8 +394,8 @@ mod tests {
     // 7. resolve_provider_for_agent_default_fallback
     #[test]
     fn resolve_provider_for_agent_default_fallback() {
-        let p1 = sample_provider(Uuid::new_v4(), "ollama", "ollama", true, None);
-        let p2 = sample_provider(Uuid::new_v4(), "openai", "openai-compatible", false, None);
+        let p1 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "ollama", "ollama", true);
+        let p2 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "openai", "openai-compatible", false);
         let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
         let providers = vec![p1.clone(), p2];
         let result = resolve_provider_for_agent(&agent, &providers).unwrap();
@@ -373,42 +406,14 @@ mod tests {
     // 8. resolve_provider_for_agent_no_default
     #[test]
     fn resolve_provider_for_agent_no_default() {
-        let p1 = sample_provider(Uuid::new_v4(), "ollama", "ollama", false, None);
-        let p2 = sample_provider(Uuid::new_v4(), "openai", "openai-compatible", false, None);
+        let p1 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "ollama", "ollama", false);
+        let p2 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "openai", "openai-compatible", false);
         let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
         let err = resolve_provider_for_agent(&agent, &[p1, p2]).unwrap_err();
         assert!(matches!(err, VnyError::NoProviderConfigured));
     }
 
-    // 9. model_profile_for_agent_uses_agent_model
-    #[test]
-    fn model_profile_for_agent_uses_agent_model() {
-        let p = sample_provider(Uuid::new_v4(), "ollama", "ollama", false, Some("qwen2.5"));
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", Some(p.id), Some("qwen2.5-coder"));
-        let result = model_profile_for_agent(&agent, &p).unwrap();
-        assert_eq!(result.model, "qwen2.5-coder");
-        assert_eq!(result.provider, "ollama");
-    }
-
-    // 10. model_profile_for_agent_falls_back_to_provider_default
-    #[test]
-    fn model_profile_for_agent_falls_back_to_provider_default() {
-        let p = sample_provider(Uuid::new_v4(), "ollama", "ollama", false, Some("qwen2.5"));
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", Some(p.id), None);
-        let result = model_profile_for_agent(&agent, &p).unwrap();
-        assert_eq!(result.model, "qwen2.5");
-    }
-
-    // 11. model_profile_for_agent_errors_without_any_model
-    #[test]
-    fn model_profile_for_agent_errors_without_any_model() {
-        let p = sample_provider(Uuid::new_v4(), "ollama", "ollama", false, None);
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", Some(p.id), None);
-        let err = model_profile_for_agent(&agent, &p).unwrap_err();
-        assert!(matches!(err, VnyError::NoModelConfigured));
-    }
-
-    // 12. domain_agent_synthesizes_self_references
+    // 9. domain_agent_synthesizes_self_references
     #[test]
     fn domain_agent_synthesizes_self_references() {
         let agent_row = sample_agent(Uuid::new_v4(), "my-agent", None, None);
@@ -418,7 +423,7 @@ mod tests {
         assert_eq!(agent.mode, AgentMode::Primary);
     }
 
-    // 13. toolset_for_agent_local_tools_always_empty
+    // 10. toolset_for_agent_local_tools_always_empty
     #[test]
     fn toolset_for_agent_local_tools_always_empty() {
         let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
@@ -426,7 +431,7 @@ mod tests {
         assert!(toolset.local_tools.is_empty());
     }
 
-    // 14. toolset_for_agent_mcp_selections_from_rows
+    // 11. toolset_for_agent_mcp_selections_from_rows
     #[test]
     fn toolset_for_agent_mcp_selections_from_rows() {
         let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
@@ -452,5 +457,94 @@ mod tests {
         let toolset = toolset_for_agent(&agent, &mcp_rows);
         assert_eq!(toolset.mcp.len(), 1);
         assert_eq!(toolset.mcp[0].server, "http-srv");
+    }
+
+    // 12. domain_model_profile_resolves_provider_name
+    #[test]
+    fn domain_model_profile_resolves_provider_name() {
+        let pid = Uuid::new_v4();
+        let uid = Uuid::new_v4();
+        let row = sample_model_profile(Uuid::new_v4(), uid, "qwen", pid, "qwen2.5");
+        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let result = domain_model_profile(&row, &[provider]).unwrap();
+        assert_eq!(result.provider, "ollama");
+        assert_eq!(result.name, "qwen");
+        assert_eq!(result.model, "qwen2.5");
+    }
+
+    // 13. domain_model_profile_unknown_provider_errors
+    #[test]
+    fn domain_model_profile_unknown_provider_errors() {
+        let uid = Uuid::new_v4();
+        let row = sample_model_profile(Uuid::new_v4(), uid, "qwen", Uuid::new_v4(), "qwen2.5");
+        let provider = sample_provider(Uuid::new_v4(), uid, "ollama", "ollama", false);
+        let err = domain_model_profile(&row, &[provider]).unwrap_err();
+        assert!(matches!(err, VnyError::LlmProviderNotFound));
+    }
+
+    // 14. domain_model_profile_options_object_passthrough
+    #[test]
+    fn domain_model_profile_options_object_passthrough() {
+        let uid = Uuid::new_v4();
+        let pid = Uuid::new_v4();
+        let row = DbModelProfile {
+            id: Uuid::new_v4(),
+            user_id: uid,
+            name: "qwen".to_string(),
+            provider_id: pid,
+            model: "qwen2.5".to_string(),
+            temperature: None,
+            max_tokens: None,
+            options: serde_json::json!({"num_ctx": 65536}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let result = domain_model_profile(&row, &[provider]).unwrap();
+        assert_eq!(result.options.get("num_ctx"), Some(&serde_json::json!(65536)));
+    }
+
+    // 15. domain_model_profile_options_non_object_defaults_empty
+    #[test]
+    fn domain_model_profile_options_non_object_defaults_empty() {
+        let uid = Uuid::new_v4();
+        let pid = Uuid::new_v4();
+        let row = DbModelProfile {
+            id: Uuid::new_v4(),
+            user_id: uid,
+            name: "qwen".to_string(),
+            provider_id: pid,
+            model: "qwen2.5".to_string(),
+            temperature: None,
+            max_tokens: None,
+            options: serde_json::Value::Null,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let result = domain_model_profile(&row, &[provider]).unwrap();
+        assert!(result.options.is_empty());
+    }
+
+    // 16. domain_model_profile_max_tokens_conversion
+    #[test]
+    fn domain_model_profile_max_tokens_conversion() {
+        let uid = Uuid::new_v4();
+        let pid = Uuid::new_v4();
+        let row = DbModelProfile {
+            id: Uuid::new_v4(),
+            user_id: uid,
+            name: "qwen".to_string(),
+            provider_id: pid,
+            model: "qwen2.5".to_string(),
+            temperature: None,
+            max_tokens: Some(4096),
+            options: serde_json::json!({}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let result = domain_model_profile(&row, &[provider]).unwrap();
+        assert_eq!(result.max_tokens, Some(4096u64));
     }
 }

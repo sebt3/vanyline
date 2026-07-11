@@ -178,7 +178,7 @@ async fn run_socket(
         };
 
         let result =
-            handle_message(&mut socket, &state, conversation_id, agent_id, &client_msg.content)
+            handle_message(&mut socket, &state, conversation_id, agent_id, db_user.id, &client_msg.content)
                 .await;
         if let Err(e) = result {
             send_error(&mut socket, "VNL-LLM-001", &e.to_string()).await;
@@ -201,6 +201,7 @@ async fn handle_message(
     state: &AppState,
     conversation_id: Uuid,
     agent_id: Uuid,
+    user_id: Uuid,
     user_msg: &str,
 ) -> Result<(), AppError> {
     let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
@@ -215,7 +216,7 @@ async fn handle_message(
 
     let sink = Arc::new(CollectingSink::new());
     let ctx = SessionContext {
-        store: Arc::new(PgConfigStore::new(state.pool.clone())),
+        store: Arc::new(PgConfigStore::new(state.pool.clone(), user_id)),
         sink: sink.clone(),
         local_tools: HashMap::new(),
         subagent_depth_max: 1,
