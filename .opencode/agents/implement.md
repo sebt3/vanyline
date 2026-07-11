@@ -55,7 +55,10 @@ Les commandes de compilation et de test sont définies dans `AGENTS.md` — lis 
 
 ## Validation obligatoire après chaque fichier modifié
 
-Utiliser les commandes définies dans `AGENTS.md` (compilation puis tests).
+Utiliser les commandes définies dans `AGENTS.md` — compilation, tests, ET
+lint (`cargo clippy` / `svelte-check` selon le composant). Le lint fait
+partie des commandes de validation au même titre que les tests, pas une
+étape optionnelle.
 
 ## Quand STOPPER et remonter à l'utilisateur
 
@@ -79,4 +82,8 @@ Attente : validation de l'utilisateur avant de continuer
 
 ## Commit final
 
-Seulement si tous les tests passent et la compilation est propre.
+Seulement si TOUTES les commandes de validation d'`AGENTS.md` passent sans
+exception : compilation, tests, ET lint sans le moindre warning nouveau. Un
+warning de lint sur du code que tu as toi-même écrit ou modifié dans cette
+tâche n'est pas préexistant — il DOIT être corrigé avant de committer, pas
+laissé pour la revue.
