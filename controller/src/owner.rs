@@ -18,6 +18,10 @@ use crate::error::ControllerError;
 pub const FIELD_MANAGER: &str = "vanyline-controller";
 const DEFAULT_HOME_SIZE: &str = "1Gi";
 
+/// Point de montage du PVC home (Owner) — sert de `$HOME` partout où il est monté
+/// (Jobs git du Project, futur pod Sandbox).
+pub const HOME_MOUNT_PATH: &str = "/home/vanyline";
+
 pub struct Context {
     pub client: Client,
 }

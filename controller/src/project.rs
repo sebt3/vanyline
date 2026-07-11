@@ -1,11 +1,16 @@
 use std::collections::BTreeMap;
 
-use k8s_openapi::api::core::v1::{PersistentVolumeClaim, PersistentVolumeClaimSpec, VolumeResourceRequirements};
+use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec};
+use k8s_openapi::api::core::v1::{
+    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
+    PodSpec, PodTemplateSpec, SecretVolumeSource, Volume, VolumeMount, VolumeResourceRequirements,
+};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use kube::api::ObjectMeta;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::{Resource, ResourceExt};
 
 use crate::crds::Project;
+use crate::owner::HOME_MOUNT_PATH;
 
 /// Point de montage du PVC workspace dans les pods (Jobs et, plus tard, Sandbox).
 #[allow(dead_code)]
@@ -142,6 +147,216 @@ pub fn build_workspace_pvc(
         }),
         ..Default::default()
     })
+}
+
+/// Context nécessaire pour les builders de Jobs git. Résolu par l'appelant (le reconciler Project
+/// ira chercher l'image sandbox par défaut du controller, éventuellement surchargée).
+pub struct ProjectJobContext {
+    /// Image utilisée par tous les Jobs git (elle contient git — c'est l'image sandbox).
+    pub sandbox_image: String,
+    /// Nom du PVC home de l'Owner du Project (résolu par l'appelant depuis owner::effective_pvc_name).
+    pub owner_pvc_name: String,
+}
+
+pub fn init_job_name(project_name: &str) -> String {
+    format!("project-{project_name}-init")
+}
+
+pub fn fetch_cronjob_name(project_name: &str) -> String {
+    format!("project-{project_name}-fetch")
+}
+
+pub fn purge_job_name(project_name: &str) -> String {
+    format!("project-{project_name}-purge")
+}
+
+/// `schedule` de CronJob pour `spec.fetch_interval` (défaut `"1h"`) — cf. note `@every` dans le contexte de cette tâche.
+pub fn fetch_schedule(project: &Project) -> String {
+    let interval = project
+        .spec
+        .fetch_interval
+        .clone()
+        .unwrap_or_else(|| "1h".to_string());
+    format!("@every {interval}")
+}
+
+/// Construit le `PodTemplateSpec` commun aux trois Jobs git : image sandbox,
+/// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
+/// `git` exécutant `script` via `sh -c`.
+fn git_pod_template(project: &Project, ctx: &ProjectJobContext, script: String) -> PodTemplateSpec {
+    let mut volumes = vec![
+        Volume {
+            name: "workspace".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: effective_pvc_name(project),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        Volume {
+            name: "home".to_string(),
+            persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
+                claim_name: ctx.owner_pvc_name.clone(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+    ];
+    let mut mounts = vec![
+        VolumeMount {
+            name: "workspace".to_string(),
+            mount_path: WORKSPACE_MOUNT_PATH.to_string(),
+            sub_path: effective_sub_path(project),
+            ..Default::default()
+        },
+        VolumeMount {
+            name: "home".to_string(),
+            mount_path: HOME_MOUNT_PATH.to_string(),
+            ..Default::default()
+        },
+    ];
+    let mut env = vec![EnvVar {
+        name: "HOME".to_string(),
+        value: Some(HOME_MOUNT_PATH.to_string()),
+        ..Default::default()
+    }];
+
+    if let Some(secret_name) = &project.spec.git_secret {
+        volumes.push(Volume {
+            name: "git-secret".to_string(),
+            secret: Some(SecretVolumeSource {
+                secret_name: Some(secret_name.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+        mounts.push(VolumeMount {
+            name: "git-secret".to_string(),
+            mount_path: "/git-secret".to_string(),
+            read_only: Some(true),
+            ..Default::default()
+        });
+        env.push(EnvVar {
+            name: "GIT_SSH_COMMAND".to_string(),
+            value: Some("ssh -i /git-secret/ssh-privatekey -o StrictHostKeyChecking=no".to_string()),
+            ..Default::default()
+        });
+    }
+
+    let mut labels = BTreeMap::new();
+    labels.insert("vanyline.solidite.fr/project".to_string(), project.name_any());
+
+    PodTemplateSpec {
+        metadata: Some(ObjectMeta {
+            labels: Some(labels),
+            ..Default::default()
+        }),
+        spec: Some(PodSpec {
+            containers: vec![Container {
+                name: "git".to_string(),
+                image: Some(ctx.sandbox_image.clone()),
+                command: Some(vec!["sh".to_string(), "-c".to_string(), script]),
+                env: Some(env),
+                volume_mounts: Some(mounts),
+                ..Default::default()
+            }],
+            restart_policy: Some("Never".to_string()),
+            volumes: Some(volumes),
+            ..Default::default()
+        }),
+    }
+}
+
+/// Job une fois : crée les répertoires de cache puis clone bare le remote si
+/// n'existe pas déjà (idempotent — le controller peut réappliquer sans réétat).
+pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
+    let cache_dirs = effective_caches(project)
+        .iter()
+        .map(|c| format!("{WORKSPACE_MOUNT_PATH}/{}", cache_path(c)))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let script = format!(
+        "set -eu\nmkdir -p {cache_dirs}\nif [ ! -d {mount}/{bare} ]; then git clone --bare {repo} {mount}/{bare}; fi\n",
+        mount = WORKSPACE_MOUNT_PATH,
+        bare = bare_repo_path(),
+        repo = project.spec.repo_url,
+    );
+
+    Job {
+        metadata: ObjectMeta {
+            name: Some(init_job_name(&project.name_any())),
+            namespace: project.namespace(),
+            owner_references: Some(vec![project.controller_owner_ref(&()).expect("Project a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            backoff_limit: Some(3),
+            ttl_seconds_after_finished: Some(3600),
+            template: git_pod_template(project, ctx, script),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// CronJob périodique : `git fetch --prune` sur le clone bare.
+pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJob {
+    let script = format!(
+        "set -eu\ngit --git-dir={mount}/{bare} fetch --prune\n",
+        mount = WORKSPACE_MOUNT_PATH,
+        bare = bare_repo_path(),
+    );
+
+    CronJob {
+        metadata: ObjectMeta {
+            name: Some(fetch_cronjob_name(&project.name_any())),
+            namespace: project.namespace(),
+            owner_references: Some(vec![project.controller_owner_ref(&()).expect("Project a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: CronJobSpec {
+            schedule: fetch_schedule(project),
+            job_template: k8s_openapi::api::batch::v1::JobTemplateSpec {
+                metadata: None,
+                spec: Some(JobSpec {
+                    backoff_limit: Some(3),
+                    ttl_seconds_after_finished: Some(3600),
+                    template: git_pod_template(project, ctx, script),
+                    ..Default::default()
+                }),
+            },
+            ..Default::default()
+        },
+        status: None,
+    }
+}
+
+/// Job de purge : supprime `repo.git`, `worktrees` et `cache` sous le point de
+/// montage. Invoqué par le finalizer du reconciler Project (tâche 05) avant
+/// suppression d'un PVC créé par le controller — sûr aussi pour un PVC référencé
+/// grâce au `subPath` (voir note de contexte).
+pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
+    let script = format!(
+        "set -eu\nrm -rf {mount}/{bare} {mount}/worktrees {mount}/cache\n",
+        mount = WORKSPACE_MOUNT_PATH,
+        bare = bare_repo_path(),
+    );
+
+    Job {
+        metadata: ObjectMeta {
+            name: Some(purge_job_name(&project.name_any())),
+            namespace: project.namespace(),
+            owner_references: Some(vec![project.controller_owner_ref(&()).expect("Project a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            backoff_limit: Some(3),
+            ttl_seconds_after_finished: Some(3600),
+            template: git_pod_template(project, ctx, script),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
 }
 
 #[allow(dead_code)]
@@ -321,5 +536,175 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name.as_str(), "demo");
         assert_eq!(refs[0].kind.as_str(), "Project");
+    }
+
+    // ===== Tests git jobs (tâche 04) =====
+
+    fn make_ctx() -> ProjectJobContext {
+        ProjectJobContext {
+            sandbox_image: "registry.example/vanyline-sandbox:latest".to_string(),
+            owner_pvc_name: "owner-alice-home".to_string(),
+        }
+    }
+
+    // 15. job_names
+    #[test]
+    fn job_names() {
+        assert_eq!(init_job_name("demo"), "project-demo-init");
+        assert_eq!(fetch_cronjob_name("demo"), "project-demo-fetch");
+        assert_eq!(purge_job_name("demo"), "project-demo-purge");
+    }
+
+    // 16. fetch_schedule_default
+    #[test]
+    fn fetch_schedule_default() {
+        let project = make_project(None, None);
+        assert_eq!(fetch_schedule(&project), "@every 1h");
+    }
+
+    // 17. fetch_schedule_custom
+    #[test]
+    fn fetch_schedule_custom() {
+        let mut project = make_project(None, None);
+        project.spec.fetch_interval = Some("30m".to_string());
+        assert_eq!(fetch_schedule(&project), "@every 30m");
+    }
+
+    // 18. build_init_job_shape
+    #[test]
+    fn build_init_job_shape() {
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+        let job = build_init_job(&project, &ctx);
+
+        assert_eq!(job.metadata.name, Some("project-demo-init".to_string()));
+
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        assert_eq!(
+            pod_spec.containers[0].image,
+            Some(ctx.sandbox_image.clone())
+        );
+
+        let command = pod_spec.containers[0].command.as_ref().unwrap();
+        assert_eq!(command.len(), 3);
+        let script = &command[2];
+        assert!(script.contains("git clone --bare"));
+        assert!(script.contains("https://github.com/owner/repo"));
+        assert!(script.contains("/workspace/cache/cargo"));
+        assert!(script.contains("/workspace/cache/pnpm-store"));
+
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+        assert_eq!(volumes.len(), 2);
+        let names: Vec<_> = volumes.iter().map(|v| &v.name).collect();
+        assert!(names.contains(&&"workspace".to_string()));
+        assert!(names.contains(&&"home".to_string()));
+
+        let refs = job.metadata.owner_references.as_ref().unwrap();
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "demo");
+        assert_eq!(refs[0].kind, "Project");
+    }
+
+    // 19. build_init_job_with_git_secret
+    #[test]
+    fn build_init_job_with_git_secret() {
+        let mut project = make_project(None, None);
+        project.spec.git_secret = Some("demo-deploy-key".to_string());
+        let ctx = make_ctx();
+
+        let job = build_init_job(&project, &ctx);
+
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let volumes = pod_spec.volumes.as_ref().unwrap();
+        assert_eq!(volumes.len(), 3);
+
+        let secret_vol = volumes.iter().find(|v| v.name == "git-secret").expect("should have git-secret volume");
+        assert_eq!(secret_vol.secret.as_ref().unwrap().secret_name, Some("demo-deploy-key".to_string()));
+
+        let env_vars = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
+            .env.as_ref().unwrap();
+        let ssh_env = env_vars.iter().find(|e| e.name == "GIT_SSH_COMMAND").expect("should have GIT_SSH_COMMAND");
+        assert!(ssh_env.value.as_ref().unwrap().contains("/git-secret/ssh-privatekey"));
+    }
+
+    // 20. build_init_job_existing_pvc_sub_path
+    #[test]
+    fn build_init_job_existing_pvc_sub_path() {
+        let project = make_project(
+            Some(crate::crds::PvcRef {
+                name: "code-server-home".into(),
+                sub_path: Some("demo".into()),
+            }),
+            None,
+        );
+        let ctx = make_ctx();
+
+        let job = build_init_job(&project, &ctx);
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+
+        // Volume "workspace" should reference the existing PVC
+        let workspace_vol = pod_spec.volumes.as_ref().unwrap()
+            .iter().find(|v| v.name == "workspace").unwrap();
+        assert_eq!(workspace_vol.persistent_volume_claim.as_ref().unwrap().claim_name, "code-server-home");
+
+        // VolumeMount "workspace" should have sub_path
+        let mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
+        let ws_mount = mounts.iter().find(|m| m.name == "workspace").unwrap();
+        assert_eq!(ws_mount.sub_path, Some("demo".to_string()));
+    }
+
+    // 21. build_fetch_cronjob_shape
+    #[test]
+    fn build_fetch_cronjob_shape() {
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+
+        let cronjob = build_fetch_cronjob(&project, &ctx);
+
+        assert_eq!(cronjob.metadata.name, Some("project-demo-fetch".to_string()));
+        assert_eq!(cronjob.spec.schedule, "@every 1h");
+
+        let job_spec = cronjob.spec.job_template.spec.as_ref().unwrap();
+        let container = job_spec.template.spec.as_ref().unwrap().containers.first().unwrap();
+        let command = container.command.as_ref().unwrap();
+        let script = &command[2];
+        assert!(script.contains("git --git-dir=/workspace/repo.git fetch --prune"));
+    }
+
+    // 22. build_purge_job_shape
+    #[test]
+    fn build_purge_job_shape() {
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+
+        let job = build_purge_job(&project, &ctx);
+
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let container = pod_spec.containers.first().unwrap();
+        let command = container.command.as_ref().unwrap();
+        let script = &command[2];
+        assert!(script.contains("rm -rf"));
+        assert!(script.contains("/workspace/repo.git"));
+        assert!(script.contains("/workspace/worktrees"));
+        assert!(script.contains("/workspace/cache"));
+    }
+
+    // 23. git_jobs_no_service_account
+    #[test]
+    fn git_jobs_no_service_account() {
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+
+        let init_job = build_init_job(&project, &ctx);
+        assert!(init_job.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+            .service_account_name.is_none());
+
+        let fetch_cronjob = build_fetch_cronjob(&project, &ctx);
+        assert!(fetch_cronjob.spec.job_template.spec.as_ref().unwrap()
+            .template.spec.as_ref().unwrap().service_account_name.is_none());
+
+        let purge_job = build_purge_job(&project, &ctx);
+        assert!(purge_job.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
+            .service_account_name.is_none());
     }
 }
