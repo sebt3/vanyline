@@ -197,7 +197,7 @@ pub fn fetch_schedule(project: &Project) -> String {
 /// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
 /// `git` exécutant `script` via `sh -c`.
 #[allow(dead_code)]
-fn git_pod_template(project: &Project, ctx: &ProjectJobContext, script: String) -> PodTemplateSpec {
+pub(crate) fn git_pod_template(project: &Project, ctx: &ProjectJobContext, script: String) -> PodTemplateSpec {
     let mut volumes = vec![
         Volume {
             name: "workspace".to_string(),

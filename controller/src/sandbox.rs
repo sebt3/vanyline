@@ -1,34 +1,45 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
+use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
-    PodSpec, Probe, Volume, VolumeMount,
+    Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaimVolumeSource,
+    Pod, PodSpec, Probe, Service, Volume, VolumeMount,
 };
+use k8s_openapi::api::networking::v1::{
+    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
+};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::ObjectMeta;
-use kube::{Resource, ResourceExt};
+use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams};
+use kube::runtime::controller::{Action, Controller};
+use kube::runtime::finalizer::{Event, finalizer};
+use kube::{Client, Resource, ResourceExt};
 
-use crate::crds::{Project, Sandbox, Toolchain};
+use crate::crds::{Owner, Project, Sandbox, SandboxStatus, Toolchain};
+use crate::error::ControllerError;
+use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
-use crate::project::{cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path};
+use crate::project::{self, ProjectJobContext};
+use crate::project::{
+    bare_repo_path, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path,
+    WORKSPACE_MOUNT_PATH,
+};
 
 /// Port MCP exposé par `vanyline-sandbox` (`MCP_LISTEN` par défaut `0.0.0.0:3000`
 /// côté binaire — cf. `sandbox/src/config.rs`).
-#[allow(dead_code)]
 pub const MCP_PORT: i32 = 3000;
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
 /// telle quelle de `deploy/sandbox-test.yaml` (recette validée).
-#[allow(dead_code)]
 const BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
-#[allow(dead_code)]
 pub fn pod_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }
 
 /// Point de montage d'un volume toolchain — `/toolchains/<name>`.
-#[allow(dead_code)]
 pub fn toolchain_root(name: &str) -> String {
     format!("/toolchains/{name}")
 }
@@ -38,7 +49,6 @@ pub fn toolchain_root(name: &str) -> String {
 /// `PATH`/`LD_LIBRARY_PATH` sont concaténées entre toolchains par
 /// `aggregate_toolchain_env` ; les autres clés (ex. `RUSTUP_HOME`) sont posées
 /// telles quelles.
-#[allow(dead_code)]
 fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
     match name {
         "rust" => Some(BTreeMap::from([
@@ -58,7 +68,6 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
 /// (le contrat de `SandboxSpec.toolchains[].env`, cf. `crds.rs`), sinon le
 /// preset s'il existe pour `toolchain.name`, sinon aucune variable. Substitue
 /// `{root}` par `toolchain_root(&toolchain.name)` dans chaque valeur.
-#[allow(dead_code)]
 fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
     let root = toolchain_root(&toolchain.name);
     let raw = if !toolchain.env.is_empty() {
@@ -78,7 +87,6 @@ fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
 /// (`RUSTUP_HOME`, etc.) est posée telle quelle — en cas de collision entre
 /// deux toolchains sur une même clé non `PATH`/`LD_LIBRARY_PATH`, la dernière
 /// toolchain de la liste gagne.
-#[allow(dead_code)]
 pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
     let mut path_segments = Vec::new();
     let mut ld_segments = Vec::new();
@@ -118,7 +126,6 @@ pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
 
 /// Variable d'env pour un cache donné, `None` si le cache n'a pas de convention
 /// connue (seuls `"cargo"` et `"pnpm"` en ont une en v1).
-#[allow(dead_code)]
 fn cache_env_var(cache: &str) -> Option<(&'static str, String)> {
     let path = format!("/project-cache/{}", crate::project::cache_dir_name(cache));
     match cache {
@@ -132,7 +139,6 @@ fn cache_env_var(cache: &str) -> Option<(&'static str, String)> {
 /// kydah-code) avec un chemin relatif du layout (`worktree_path`, `cache_path`).
 /// `None` côté Project => le chemin relatif est utilisé tel quel (le PVC créé
 /// n'appartient qu'à ce Project, pas de préfixe nécessaire).
-#[allow(dead_code)]
 fn combine_sub_path(project: &Project, relative: &str) -> String {
     match effective_sub_path(project) {
         Some(base) => format!("{base}/{relative}"),
@@ -142,7 +148,6 @@ fn combine_sub_path(project: &Project, relative: &str) -> String {
 
 /// Context résolu par l'appelant (le reconciler Sandbox ira chercher l'Owner du
 /// Project référencé — cette fonction reste pure, aucun appel réseau).
-#[allow(dead_code)]
 pub struct SandboxPodContext {
     pub owner_name: String,
     pub owner_pvc_name: String,
@@ -156,7 +161,6 @@ pub struct SandboxPodContext {
 /// `--no-auth` (voir décisions de cette tâche), probes `/health`, labels
 /// `vanyline.solidite.fr/{owner,project,sandbox}`, `ownerReference` vers la
 /// Sandbox (GC en cascade).
-#[allow(dead_code)]
 pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodContext) -> Pod {
     let workspace_pvc = effective_pvc_name(project);
     let mut volumes = vec![
@@ -275,6 +279,371 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
     }
 }
 
+const FINALIZER: &str = "vanyline.solidite.fr/sandbox-cleanup";
+const SERVICE_PORT_NAME: &str = "mcp";
+
+pub struct Context {
+    pub client: Client,
+    pub default_image: String,
+}
+
+pub fn checkout_job_name(sandbox_name: &str) -> String {
+    format!("sandbox-{sandbox_name}-checkout")
+}
+
+pub fn worktree_remove_job_name(sandbox_name: &str) -> String {
+    format!("sandbox-{sandbox_name}-remove")
+}
+
+pub fn service_name(sandbox_name: &str) -> String {
+    format!("sandbox-{sandbox_name}")
+}
+
+pub fn netpol_name(sandbox_name: &str) -> String {
+    format!("sandbox-{sandbox_name}")
+}
+
+/// Job une fois : crée le worktree de la branche (le crée depuis
+/// `default_branch` — résolu par le script si absent de la spec — si la
+/// branche n'existe pas encore localement dans le clone bare).
+pub fn build_checkout_job(sandbox: &Sandbox, project: &Project, job_ctx: &ProjectJobContext) -> Job {
+    let default_branch = project.spec.default_branch.clone().unwrap_or_default();
+    let script = format!(
+        r#"set -eu
+cd {mount}
+if [ -d {wt} ]; then exit 0; fi
+DEFAULT_BRANCH="{default_branch}"
+if [ -z "$DEFAULT_BRANCH" ]; then
+  DEFAULT_BRANCH=$(git --git-dir={bare} symbolic-ref --short HEAD 2>/dev/null || echo main)
+fi
+if git --git-dir={bare} show-ref --verify --quiet refs/heads/{branch}; then
+  git --git-dir={bare} worktree add {wt} {branch}
+else
+  git --git-dir={bare} worktree add -b {branch} {wt} "$DEFAULT_BRANCH"
+fi
+"#,
+        mount = WORKSPACE_MOUNT_PATH,
+        wt = worktree_path(&sandbox.name_any()),
+        bare = bare_repo_path(),
+        branch = sandbox.spec.branch,
+        default_branch = default_branch,
+    );
+
+    Job {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(checkout_job_name(&sandbox.name_any())),
+            namespace: sandbox.namespace(),
+            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            backoff_limit: Some(3),
+            ttl_seconds_after_finished: Some(3600),
+            template: project::git_pod_template(project, job_ctx, script),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Job de retrait du worktree — invoqué par le finalizer. `worktree remove
+/// --force` gère l'état non commité ; repli sur `rm -rf` + `worktree prune` si
+/// les métadonnées git sont dans un état incohérent.
+pub fn build_worktree_remove_job(sandbox: &Sandbox, project: &Project, job_ctx: &ProjectJobContext) -> Job {
+    let script = format!(
+        r#"set -eu
+cd {mount}
+git --git-dir={bare} worktree remove --force {wt} 2>/dev/null || rm -rf {wt}
+git --git-dir={bare} worktree prune
+"#,
+        mount = WORKSPACE_MOUNT_PATH,
+        bare = bare_repo_path(),
+        wt = worktree_path(&sandbox.name_any()),
+    );
+
+    Job {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(worktree_remove_job_name(&sandbox.name_any())),
+            namespace: sandbox.namespace(),
+            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(JobSpec {
+            backoff_limit: Some(3),
+            ttl_seconds_after_finished: Some(3600),
+            template: project::git_pod_template(project, job_ctx, script),
+            ..Default::default()
+        }),
+        ..Default::default()
+    }
+}
+
+/// Service ClusterIP exposant le port MCP du Pod sandbox (sélecteur =
+/// `vanyline.solidite.fr/sandbox: <sandbox>`, seul label garanti unique à ce
+/// pod parmi ceux posés par `build_sandbox_pod`).
+pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
+    let mut selector = BTreeMap::new();
+    selector.insert("vanyline.solidite.fr/sandbox".to_string(), sandbox.name_any());
+
+    Service {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(service_name(&sandbox.name_any())),
+            namespace: sandbox.namespace(),
+            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(k8s_openapi::api::core::v1::ServiceSpec {
+            selector: Some(selector),
+            ports: Some(vec![k8s_openapi::api::core::v1::ServicePort {
+                name: Some(SERVICE_PORT_NAME.to_string()),
+                port: MCP_PORT,
+                target_port: Some(IntOrString::Int(MCP_PORT)),
+                ..Default::default()
+            }]),
+            ..Default::default()
+        }),
+        status: None,
+    }
+}
+
+/// NetworkPolicy : cible le Pod de cette Sandbox, autorise l'ingress
+/// uniquement depuis les pods du même namespace portant
+/// `vanyline.solidite.fr/owner: <owner_name>` (même Owner — code-server,
+/// autres sandboxes du même utilisateur).
+pub fn build_sandbox_netpol(sandbox: &Sandbox, owner_name: &str) -> NetworkPolicy {
+    let mut pod_selector_labels = BTreeMap::new();
+    pod_selector_labels.insert("vanyline.solidite.fr/sandbox".to_string(), sandbox.name_any());
+
+    let mut peer_labels = BTreeMap::new();
+    peer_labels.insert("vanyline.solidite.fr/owner".to_string(), owner_name.to_string());
+
+    NetworkPolicy {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(netpol_name(&sandbox.name_any())),
+            namespace: sandbox.namespace(),
+            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(pod_selector_labels),
+                ..Default::default()
+            }),
+            policy_types: Some(vec!["Ingress".to_string()]),
+            ingress: Some(vec![NetworkPolicyIngressRule {
+                from: Some(vec![NetworkPolicyPeer {
+                    pod_selector: Some(LabelSelector {
+                        match_labels: Some(peer_labels),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }]),
+                ports: Some(vec![NetworkPolicyPort {
+                    port: Some(IntOrString::Int(MCP_PORT)),
+                    protocol: Some("TCP".to_string()),
+                    ..Default::default()
+                }]),
+            }]),
+            ..Default::default()
+        }),
+    }
+}
+
+/// Status attendu : `service`, condition `Ready` reflétant `phase == "Running"`.
+pub fn compute_status(sandbox: &Sandbox, phase: &str) -> SandboxStatus {
+    let (status, reason) = if phase == "Running" {
+        ("True", "PodRunning")
+    } else {
+        ("False", "NotRunning")
+    };
+    SandboxStatus {
+        phase: Some(phase.to_string()),
+        service: Some(service_name(&sandbox.name_any())),
+        conditions: vec![Condition {
+            type_: "Ready".to_string(),
+            status: status.to_string(),
+            reason: reason.to_string(),
+            message: format!("phase={phase}"),
+            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ),
+            observed_generation: sandbox.meta().generation,
+        }],
+    }
+}
+
+async fn fetch_project(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Project, ControllerError> {
+    let projects: Api<Project> = Api::namespaced(ctx.client.clone(), ns);
+    Ok(projects.get(&sandbox.spec.project).await?)
+}
+
+async fn fetch_owner(project: &Project, ctx: &Context, ns: &str) -> Result<Owner, ControllerError> {
+    let owners: Api<Owner> = Api::namespaced(ctx.client.clone(), ns);
+    Ok(owners.get(&project.spec.owner).await?)
+}
+
+async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
+    let project = fetch_project(sandbox, ctx, ns).await?;
+    if !project.status.as_ref().map(|s| s.cloned).unwrap_or(false) {
+        return Err(ControllerError::ProjectNotReady {
+            project: sandbox.spec.project.clone(),
+            sandbox: sandbox.name_any(),
+        });
+    }
+    let owner = fetch_owner(&project, ctx, ns).await?;
+    let owner_pvc_name = owner
+        .status
+        .as_ref()
+        .and_then(|s| s.pvc_name.clone())
+        .ok_or_else(|| ControllerError::OwnerNotReady {
+            owner: project.spec.owner.clone(),
+            project: sandbox.spec.project.clone(),
+        })?;
+    let owner_service_account = owner
+        .status
+        .as_ref()
+        .and_then(|s| s.service_account.clone())
+        .ok_or_else(|| ControllerError::OwnerNotReady {
+            owner: project.spec.owner.clone(),
+            project: sandbox.spec.project.clone(),
+        })?;
+
+    let job_ctx = ProjectJobContext {
+        sandbox_image: ctx.default_image.clone(),
+        owner_pvc_name: owner_pvc_name.clone(),
+    };
+
+    let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
+    let checked_out = match jobs.get_opt(&checkout_job_name(&sandbox.name_any())).await? {
+        Some(job) => job.status.and_then(|s| s.succeeded).unwrap_or(0) > 0,
+        None => {
+            let job = build_checkout_job(sandbox, &project, &job_ctx);
+            jobs.create(&PostParams::default(), &job).await?;
+            false
+        }
+    };
+
+    let pp = PatchParams::apply(owner::FIELD_MANAGER).force();
+    let phase = if !checked_out {
+        "Provisioning".to_string()
+    } else {
+        let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(ctx.client.clone(), ns);
+        let pod_ctx = SandboxPodContext {
+            owner_name: project.spec.owner.clone(),
+            owner_pvc_name,
+            owner_service_account,
+            default_image: ctx.default_image.clone(),
+        };
+        match pods.get_opt(&pod_name(&sandbox.name_any())).await? {
+            Some(pod) => match pod.status.and_then(|s| s.phase) {
+                Some(p) if p == "Running" => "Running".to_string(),
+                Some(p) if p == "Failed" => "Failed".to_string(),
+                _ => "Provisioning".to_string(),
+            },
+            None => {
+                let pod = build_sandbox_pod(sandbox, &project, &pod_ctx);
+                pods.create(&PostParams::default(), &pod).await?;
+                "Provisioning".to_string()
+            }
+        }
+    };
+
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
+    let service = build_sandbox_service(sandbox);
+    services.patch(&service_name(&sandbox.name_any()), &pp, &Patch::Apply(&service)).await?;
+
+    let netpols: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
+    let netpol = build_sandbox_netpol(sandbox, &project.spec.owner);
+    netpols.patch(&netpol_name(&sandbox.name_any()), &pp, &Patch::Apply(&netpol)).await?;
+
+    let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
+    let status = compute_status(sandbox, &phase);
+    let patch = serde_json::json!({ "status": status });
+    sandboxes.patch_status(&sandbox.name_any(), &pp, &Patch::Merge(&patch)).await?;
+
+    Ok(Action::requeue(Duration::from_secs(if phase == "Running" { 300 } else { 15 })))
+}
+
+async fn cleanup(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
+    let project = match fetch_project(sandbox, ctx, ns).await {
+        Ok(p) => p,
+        Err(_) => {
+            tracing::warn!(
+                sandbox = %sandbox.name_any(),
+                "project introuvable pendant le cleanup — retrait de worktree ignoré (best-effort v1)"
+            );
+            return Ok(Action::await_change());
+        }
+    };
+    let owner_pvc_name = match fetch_owner(&project, ctx, ns).await {
+        Ok(o) => o.status.and_then(|s| s.pvc_name),
+        Err(_) => None,
+    };
+    let Some(owner_pvc_name) = owner_pvc_name else {
+        tracing::warn!(
+            sandbox = %sandbox.name_any(),
+            "owner introuvable pendant le cleanup — retrait de worktree ignoré (best-effort v1)"
+        );
+        return Ok(Action::await_change());
+    };
+
+    let job_ctx = ProjectJobContext {
+        sandbox_image: ctx.default_image.clone(),
+        owner_pvc_name,
+    };
+    let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
+    let name = worktree_remove_job_name(&sandbox.name_any());
+    let job = jobs.get_opt(&name).await?;
+    match job {
+        Some(job) if job.status.clone().and_then(|s| s.succeeded).unwrap_or(0) > 0 => {
+            Ok(Action::await_change())
+        }
+        Some(_) => {
+            jobs.create(&PostParams::default(), &build_worktree_remove_job(sandbox, &project, &job_ctx)).await?;
+            Err(ControllerError::WorktreeRemovalPending { sandbox: sandbox.name_any() })
+        }
+        None => {
+            jobs.create(&PostParams::default(), &build_worktree_remove_job(sandbox, &project, &job_ctx)).await?;
+            Err(ControllerError::WorktreeRemovalPending { sandbox: sandbox.name_any() })
+        }
+    }
+}
+
+pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Action, ControllerError> {
+    let ns = sandbox.namespace().unwrap_or_else(|| "default".to_string());
+    let api: Api<Sandbox> = Api::namespaced(ctx.client.clone(), &ns);
+    finalizer(&api, FINALIZER, sandbox, |event| async {
+        match event {
+            Event::Apply(s) => apply(&s, &ctx, &ns).await,
+            Event::Cleanup(s) => cleanup(&s, &ctx, &ns).await,
+        }
+    })
+    .await
+    .map_err(|e| ControllerError::Finalizer(e.to_string()))
+}
+
+pub fn error_policy(_sandbox: Arc<Sandbox>, error: &ControllerError, _ctx: Arc<Context>) -> Action {
+    match error {
+        ControllerError::WorktreeRemovalPending { .. } => {
+            tracing::info!(%error, "worktree removal pending, requeue in 10s");
+            Action::requeue(Duration::from_secs(10))
+        }
+        ControllerError::ProjectNotReady { .. } => {
+            tracing::info!(%error, "project not cloned yet, requeue in 15s");
+            Action::requeue(Duration::from_secs(15))
+        }
+        _ => {
+            tracing::warn!(%error, "sandbox reconcile error, requeue in 30s");
+            Action::requeue(Duration::from_secs(30))
+        }
+    }
+}
+
+pub fn build_controller(client: Client) -> Controller<Sandbox> {
+    let sandboxes: Api<Sandbox> = Api::all(client);
+    Controller::new(sandboxes, kube::runtime::watcher::Config::default())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -324,6 +693,13 @@ mod tests {
         });
         project.meta_mut().namespace = Some("ns".into());
         project
+    }
+
+    fn make_job_ctx() -> ProjectJobContext {
+        ProjectJobContext {
+            sandbox_image: "registry.example/vanyline-sandbox:latest".to_string(),
+            owner_pvc_name: "owner-alice-home".to_string(),
+        }
     }
 
     // ===== aggregate_toolchain_env =====
@@ -668,5 +1044,172 @@ mod tests {
         let sandbox_no_res = make_sandbox("demo-branch", vec![], None);
         let pod_no_res = build_sandbox_pod(&sandbox_no_res, &project, &ctx);
         assert!(pod_no_res.spec.as_ref().unwrap().containers[0].resources.is_none());
+    }
+
+    // ===== Job name helpers =====
+
+    #[test]
+    fn checkout_job_name_and_worktree_remove_job_name() {
+        assert_eq!(checkout_job_name("demo-branch"), "sandbox-demo-branch-checkout");
+        assert_eq!(worktree_remove_job_name("demo-branch"), "sandbox-demo-branch-remove");
+    }
+
+    // ===== build_checkout_job =====
+
+    #[test]
+    fn build_checkout_job_script_no_default_branch() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None, None);
+        let job_ctx = make_job_ctx();
+        let job = build_checkout_job(&sandbox, &project, &job_ctx);
+
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let command = pod_spec.containers[0].command.as_ref().unwrap();
+        let script = &command[2];
+
+        // default_branch is None, so DEFAULT_BRANCH should be empty string
+        assert!(script.contains("DEFAULT_BRANCH=\"\""));
+        // Should contain symbolic-ref for resolution
+        assert!(script.contains("symbolic-ref --short HEAD"));
+        // Should contain worktree path
+        assert!(script.contains("worktrees/demo-branch"));
+    }
+
+    #[test]
+    fn build_checkout_job_script_with_default_branch() {
+        let mut project = make_project(None, None);
+        project.spec.default_branch = Some("develop".to_string());
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let job_ctx = make_job_ctx();
+        let job = build_checkout_job(&sandbox, &project, &job_ctx);
+
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let command = pod_spec.containers[0].command.as_ref().unwrap();
+        let script = &command[2];
+
+        assert!(script.contains("DEFAULT_BRANCH=\"develop\""));
+    }
+
+    #[test]
+    fn build_checkout_job_owner_reference() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None, None);
+        let job_ctx = make_job_ctx();
+        let job = build_checkout_job(&sandbox, &project, &job_ctx);
+
+        let refs = job.metadata.owner_references.as_ref().expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "demo-branch");
+        assert_eq!(refs[0].kind, "Sandbox");
+    }
+
+    // ===== build_worktree_remove_job =====
+
+    #[test]
+    fn build_worktree_remove_job_script() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None, None);
+        let job_ctx = make_job_ctx();
+        let job = build_worktree_remove_job(&sandbox, &project, &job_ctx);
+
+        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
+        let command = pod_spec.containers[0].command.as_ref().unwrap();
+        let script = &command[2];
+
+        assert!(script.contains("worktree remove --force worktrees/demo-branch"));
+        assert!(script.contains("worktree prune"));
+    }
+
+    // ===== build_sandbox_service =====
+
+    #[test]
+    fn build_sandbox_service_shape() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let service = build_sandbox_service(&sandbox);
+
+        assert_eq!(service.metadata.name, Some("sandbox-demo-branch".to_string()));
+
+        let spec = service.spec.as_ref().expect("should have spec");
+        let selector = spec.selector.as_ref().expect("should have selector");
+        assert_eq!(
+            selector.get("vanyline.solidite.fr/sandbox").map(String::as_str),
+            Some("demo-branch")
+        );
+
+        let ports = spec.ports.as_ref().expect("should have ports");
+        assert_eq!(ports.len(), 1);
+        assert_eq!(
+            ports[0].port,
+            MCP_PORT
+        );
+        assert_eq!(
+            ports[0].name,
+            Some("mcp".to_string())
+        );
+    }
+
+    // ===== build_sandbox_netpol =====
+
+    #[test]
+    fn build_sandbox_netpol_shape() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let netpol = build_sandbox_netpol(&sandbox, "alice");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let pod_sel = spec.pod_selector.as_ref().expect("should have pod_selector");
+        let labels = pod_sel.match_labels.as_ref().expect("should have match_labels");
+        assert_eq!(
+            labels.get("vanyline.solidite.fr/sandbox").map(String::as_str),
+            Some("demo-branch")
+        );
+
+        let ingress = spec.ingress.as_ref().expect("should have ingress");
+        assert_eq!(ingress.len(), 1);
+
+        let from = ingress[0].from.as_ref().expect("should have from");
+        assert_eq!(from.len(), 1);
+        let peer_pod_sel = from[0]
+            .pod_selector
+            .as_ref()
+            .expect("should have pod_selector in peer");
+        let peer_labels = peer_pod_sel.match_labels.as_ref().expect("should have match_labels");
+        assert_eq!(
+            peer_labels.get("vanyline.solidite.fr/owner").map(String::as_str),
+            Some("alice")
+        );
+
+        let ports = ingress[0].ports.as_ref().expect("should have ports");
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0].port, Some(IntOrString::Int(MCP_PORT)));
+
+        assert_eq!(spec.policy_types, Some(vec!["Ingress".to_string()]));
+    }
+
+    // ===== compute_status =====
+
+    #[test]
+    fn compute_status_running() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let status = compute_status(&sandbox, "Running");
+
+        assert_eq!(status.phase, Some("Running".to_string()));
+        assert_eq!(status.service, Some("sandbox-demo-branch".to_string()));
+        assert_eq!(status.conditions.len(), 1);
+        let cond = &status.conditions[0];
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "PodRunning");
+    }
+
+    #[test]
+    fn compute_status_provisioning() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let status = compute_status(&sandbox, "Provisioning");
+
+        assert_eq!(status.phase, Some("Provisioning".to_string()));
+        assert_eq!(status.service, Some("sandbox-demo-branch".to_string()));
+        assert_eq!(status.conditions.len(), 1);
+        let cond = &status.conditions[0];
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "NotRunning");
     }
 }

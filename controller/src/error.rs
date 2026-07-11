@@ -13,4 +13,10 @@ pub enum ControllerError {
 
     #[error("VNL-CTL-004: finalizer error: {0}")]
     Finalizer(String),
+
+    #[error("VNL-CTL-005: Project '{project}' not cloned yet for Sandbox '{sandbox}'")]
+    ProjectNotReady { project: String, sandbox: String },
+
+    #[error("VNL-CTL-006: worktree removal job for Sandbox '{sandbox}' not finished yet")]
+    WorktreeRemovalPending { sandbox: String },
 }
