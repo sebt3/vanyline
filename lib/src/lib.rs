@@ -1,6 +1,6 @@
 pub mod builtin;
 mod chat;
-mod domain;
+pub mod domain;
 mod error;
 pub mod model;
 mod event;

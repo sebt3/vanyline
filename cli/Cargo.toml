@@ -24,3 +24,6 @@ async-trait = "0.1"
 rig-core = { version = "0.38", features = ["rmcp"] }
 futures = "0.3"
 rmcp = { version = "1.7.0", features = ["transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
+
+[dev-dependencies]
+tempfile = "3"
