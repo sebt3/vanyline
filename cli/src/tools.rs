@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use rig_core::completion::ToolDefinition;
 use rig_core::tool::ToolDyn;
 use rig_core::tool::ToolError;
@@ -230,25 +233,16 @@ impl ToolDyn for ExecuteCommandTool {
     }
 }
 
-/// Create the full set of local tools available to the LLM.
-pub fn local_tools() -> (
-    ReadFileTool,
-    WriteFileTool,
-    EditFileTool,
-    DeleteFileTool,
-    ListDirectoryTool,
-    FindFilesTool,
-    SearchTool,
-    ExecuteCommandTool,
-) {
-    (
-        ReadFileTool,
-        WriteFileTool,
-        EditFileTool,
-        DeleteFileTool,
-        ListDirectoryTool,
-        FindFilesTool,
-        SearchTool,
-        ExecuteCommandTool,
-    )
+/// Expose les 8 outils locaux CLI dans une hashmap indexée par nom.
+pub fn local_tools_map() -> HashMap<String, Arc<dyn rig_core::tool::ToolDyn>> {
+    let mut map: HashMap<String, Arc<dyn rig_core::tool::ToolDyn>> = HashMap::new();
+    map.insert("read_file".to_string(), Arc::new(ReadFileTool));
+    map.insert("write_file".to_string(), Arc::new(WriteFileTool));
+    map.insert("edit_file".to_string(), Arc::new(EditFileTool));
+    map.insert("delete_file".to_string(), Arc::new(DeleteFileTool));
+    map.insert("list_directory".to_string(), Arc::new(ListDirectoryTool));
+    map.insert("find_files".to_string(), Arc::new(FindFilesTool));
+    map.insert("search".to_string(), Arc::new(SearchTool));
+    map.insert("execute_command".to_string(), Arc::new(ExecuteCommandTool));
+    map
 }

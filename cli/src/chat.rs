@@ -3,80 +3,80 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use crate::{config::ensure_config_dir, store};
+use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
+use vanyline_lib::session::run_agent_turn;
+use vanyline_lib::store::ConfigStore;
+
+use crate::{config, config_store::CliConfigStore, store};
 
 struct StdoutSink;
 
 #[async_trait]
-impl vanyline_lib::ChatSink for StdoutSink {
-    async fn send_token(&self, content: &str) {
-        print!("{content}");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-    }
-
-    async fn send_tool_call(&self, name: &str, args: &serde_json::Value) {
-        print!("\n[tool] {name}({args})\n");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
-    }
-
-    async fn send_done(&self) {
-        println!();
-    }
-
-    async fn send_error(&self, code: &str, message: &str) {
-        eprintln!("[{code}] {message}");
+impl EventSink for StdoutSink {
+    async fn emit(&self, event: ChatEvent) {
+        match event {
+            ChatEvent::Token { content } => {
+                print!("{content}");
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+            }
+            ChatEvent::ToolCall { name, args, .. } => {
+                print!("\n[tool] {name}({args})\n");
+                std::io::Write::flush(&mut std::io::stdout()).ok();
+            }
+            ChatEvent::Done => println!(),
+            ChatEvent::Error { code, message } => eprintln!("[{code}] {message}"),
+            _ => {}
+        }
     }
 }
 
-pub async fn run(message: Option<String>, agent: Option<Uuid>, conversation: Option<Uuid>) {
-    ensure_config_dir();
-
+pub async fn run(message: Option<String>, agent: Option<String>, conversation: Option<Uuid>) {
+    config::ensure_config_dir();
     if let Some(msg) = message {
         run_one_shot(&msg, agent, conversation).await;
         return;
     }
-
     run_repl(agent, conversation).await;
 }
 
-async fn run_one_shot(user_msg: &str, agent: Option<Uuid>, conversation: Option<Uuid>) {
-    let (mut conv, agent_config, is_new) = resolve_context(agent, conversation).await;
+async fn run_one_shot(user_msg: &str, agent: Option<String>, conversation: Option<Uuid>) {
+    let (mut conv, agent_name, is_new) = resolve_context(agent, conversation).await;
     if is_new {
         println!("Session: {}", conv.id);
     }
 
-    conv.messages.push(vanyline_lib::Message {
-        role: "user".to_string(),
-        content: user_msg.to_string(),
-        tool_calls: None,
-    });
+    let ctx = build_session_context();
+    let workspace_context = read_workspace_context();
 
-    if let Ok(result) = process_turn(&mut conv, &agent_config, user_msg).await {
-        conv.messages.push(vanyline_lib::Message {
-            role: "assistant".to_string(),
-            content: result.response_text,
-            tool_calls: if result.tool_calls.is_empty() {
-                None
-            } else {
-                Some(result.tool_calls)
-            },
-        });
-        store::save_conversation(&conv).ok();
-    } else {
-        std::process::exit(1);
+    match process_turn(&conv, &agent_name, &ctx, workspace_context.as_deref(), user_msg).await {
+        Ok(result) => {
+            conv.messages.push(vanyline_lib::Message {
+                role: "user".to_string(),
+                content: user_msg.to_string(),
+                tool_calls: None,
+            });
+            conv.messages.push(result_to_assistant_message(result));
+            store::save_conversation(&conv).ok();
+        }
+        Err(_) => {
+            std::process::exit(1);
+        }
     }
 }
 
-async fn run_repl(agent: Option<Uuid>, conversation: Option<Uuid>) {
-    let (mut conv, agent_config, _) = resolve_context(agent, conversation).await;
+async fn run_repl(agent: Option<String>, conversation: Option<Uuid>) {
+    let (mut conv, agent_name, _) = resolve_context(agent, conversation).await;
     println!("vanyline REPL (Ctrl-D to exit)");
-    println!("Agent: {}", agent_config.name);
+    println!("Agent: {agent_name}");
     if let Some(title) = &conv.title {
         println!("Conversation: {} ({})", title, conv.id);
     } else {
         println!("Conversation: {}", conv.id);
     }
     println!();
+
+    let ctx = build_session_context();
+    let workspace_context = read_workspace_context();
 
     loop {
         let mut input = String::new();
@@ -90,23 +90,14 @@ async fn run_repl(agent: Option<Uuid>, conversation: Option<Uuid>) {
             continue;
         }
 
-        conv.messages.push(vanyline_lib::Message {
-            role: "user".to_string(),
-            content: input.clone(),
-            tool_calls: None,
-        });
-
-        match process_turn(&mut conv, &agent_config, &input).await {
+        match process_turn(&conv, &agent_name, &ctx, workspace_context.as_deref(), &input).await {
             Ok(result) => {
                 conv.messages.push(vanyline_lib::Message {
-                    role: "assistant".to_string(),
-                    content: result.response_text,
-                    tool_calls: if result.tool_calls.is_empty() {
-                        None
-                    } else {
-                        Some(result.tool_calls)
-                    },
+                    role: "user".to_string(),
+                    content: input.clone(),
+                    tool_calls: None,
                 });
+                conv.messages.push(result_to_assistant_message(result));
                 store::save_conversation(&conv).ok();
             }
             Err(_) => break,
@@ -115,11 +106,32 @@ async fn run_repl(agent: Option<Uuid>, conversation: Option<Uuid>) {
     println!();
 }
 
+/// Construit le `SessionContext` de la session CLI — UNE FOIS par exécution
+/// (`run_one_shot`/`run_repl`), pas par tour : `store`/`sink`/`local_tools`/
+/// `subagent_depth_max` ne changent jamais au sein d'une session CLI.
+fn build_session_context() -> vanyline_lib::session::SessionContext {
+    vanyline_lib::session::SessionContext {
+        store: Arc::new(CliConfigStore::new(config::config_dir())),
+        sink: Arc::new(StdoutSink),
+        local_tools: crate::tools::local_tools_map(),
+        subagent_depth_max: 1,
+    }
+}
+
+/// Contenu d'AGENTS.md dans le répertoire courant, si présent — c'est le
+/// `workspace_context` optionnel de `run_agent_turn` (design harness-core,
+/// section "Session engine", étape 4 de l'assemblage du prompt).
+fn read_workspace_context() -> Option<String> {
+    std::fs::read_to_string("AGENTS.md").ok()
+}
+
 async fn process_turn(
-    conv: &mut vanyline_lib::Conversation,
-    agent_config: &vanyline_lib::Agent,
+    conv: &vanyline_lib::Conversation,
+    agent_name: &str,
+    ctx: &vanyline_lib::session::SessionContext,
+    workspace_context: Option<&str>,
     user_msg: &str,
-) -> Result<vanyline_lib::ChatTurnResult, vanyline_lib::VnyError> {
+) -> Result<ChatTurnResult, vanyline_lib::VnyError> {
     let history: Vec<rig_core::message::Message> = conv
         .messages
         .iter()
@@ -134,108 +146,55 @@ async fn process_turn(
         })
         .collect();
 
-    let sink = Arc::new(StdoutSink);
-
-    let provider = resolve_provider_owned(agent_config)?;
-    let model_name = agent_config
-        .model
-        .as_deref()
-        .or(provider.default_model.as_deref())
-        .ok_or(vanyline_lib::VnyError::NoModelConfigured)?;
-
-    let handle = vanyline_lib::new_tool_handle();
-
-    let (read_f, write_f, edit_f, del_f, ls_f, find_f, search_f, exec_f) = crate::tools::local_tools();
-    if let Err(e) = handle.add_tool(read_f).await {
-        tracing::warn!("failed to add local tool read_file: {e}");
-    }
-    if let Err(e) = handle.add_tool(write_f).await {
-        tracing::warn!("failed to add local tool write_file: {e}");
-    }
-    if let Err(e) = handle.add_tool(edit_f).await {
-        tracing::warn!("failed to add local tool edit_file: {e}");
-    }
-    if let Err(e) = handle.add_tool(del_f).await {
-        tracing::warn!("failed to add local tool delete_file: {e}");
-    }
-    if let Err(e) = handle.add_tool(ls_f).await {
-        tracing::warn!("failed to add local tool list_directory: {e}");
-    }
-    if let Err(e) = handle.add_tool(find_f).await {
-        tracing::warn!("failed to add local tool find_files: {e}");
-    }
-    if let Err(e) = handle.add_tool(search_f).await {
-        tracing::warn!("failed to add local tool search: {e}");
-    }
-    if let Err(e) = handle.add_tool(exec_f).await {
-        tracing::warn!("failed to add local tool execute_command: {e}");
-    }
-
-    vanyline_lib::connect_mcp_servers_prefixed(&agent_config.mcp_servers, &handle).await?;
-
-    let result = match provider.provider_type.as_str() {
-        "ollama" => {
-            let model = vanyline_lib::build_ollama_model(&provider, model_name)?;
-            vanyline_lib::run_chat_turn(sink, &agent_config.system_prompt, handle, model, history, user_msg).await?
-        }
-        "openai-compatible" => {
-            let model = vanyline_lib::build_openai_compat_model(&provider, model_name)?;
-            vanyline_lib::run_chat_turn(sink, &agent_config.system_prompt, handle, model, history, user_msg).await?
-        }
-        other => {
-            return Err(vanyline_lib::VnyError::UnknownProviderType(other.to_string()))
-        }
-    };
-
-    Ok(result)
+    run_agent_turn(ctx, agent_name, history, user_msg, workspace_context).await
 }
 
-fn resolve_provider_owned(
-    agent: &vanyline_lib::Agent,
-) -> Result<vanyline_lib::LlmProvider, vanyline_lib::VnyError> {
-    let providers = store::list_providers().map_err(|_| vanyline_lib::VnyError::NoProviderConfigured)?;
-
-    if let Some(pid) = agent.llm_provider_id {
-        providers
-            .into_iter()
-            .find(|p| p.id == pid)
-            .ok_or(vanyline_lib::VnyError::LlmProviderNotFound)
-    } else {
-        providers
-            .into_iter()
-            .find(|p| !p.name.is_empty())
-            .ok_or(vanyline_lib::VnyError::NoProviderConfigured)
+/// Convertit le résultat d'un tour (`event::ChatTurnResult`, tool_calls avec
+/// `id`) en `types::Message` à persister dans la conversation CLI
+/// (`types::ToolCall`, PAS d'`id` — champ abandonné à la persistance, la
+/// corrélation call/result n'a de sens que pendant le tour lui-même).
+fn result_to_assistant_message(result: ChatTurnResult) -> vanyline_lib::Message {
+    let tool_calls: Vec<vanyline_lib::ToolCall> = result.tool_calls.iter().map(|tc| {
+        vanyline_lib::ToolCall {
+            name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+            result: tc.result.clone(),
+        }
+    }).collect();
+    vanyline_lib::Message {
+        role: "assistant".to_string(),
+        content: result.response_text,
+        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
     }
 }
 
 async fn resolve_context(
-    agent: Option<Uuid>,
+    agent: Option<String>,
     conversation: Option<Uuid>,
-) -> (vanyline_lib::Conversation, vanyline_lib::Agent, bool) {
-    let agents = store::list_agents().unwrap_or_default();
-    let default_agent_id = store::get_default_agent_id().ok();
+) -> (vanyline_lib::Conversation, String, bool) {
+    let config_store = CliConfigStore::new(config::config_dir());
 
-    let agent_id = agent.or(default_agent_id).unwrap_or_else(|| {
+    let agents = config_store.list_agents().await.unwrap_or_default();
+    let default_agent_name = config_store.default_agent().await.ok().flatten();
+
+    let agent_name = agent.or(default_agent_name).unwrap_or_else(|| {
         if agents.len() == 1 {
-            agents[0].id
+            agents[0].name.clone()
         } else {
             eprintln!("No agent specified. Use --agent or set a default agent.");
             eprintln!("Available agents:");
             for a in &agents {
-                println!("  {} | {}", a.id, a.name);
+                println!("  {}", a.name);
             }
             std::process::exit(1);
         }
     });
 
-    let agent_config = agents
-        .iter()
-        .find(|a| a.id == agent_id)
-        .unwrap_or_else(|| {
-            eprintln!("Agent not found: {agent_id}");
-            std::process::exit(1);
-        })
-        .clone();
+    // Validate agent exists
+    if !agents.iter().any(|a| a.name == agent_name) {
+        eprintln!("Agent not found: {agent_name}");
+        std::process::exit(1);
+    }
 
     let (conv, is_new) = if let Some(cid) = conversation {
         (
@@ -251,7 +210,7 @@ async fn resolve_context(
             Err(_) => (
                 vanyline_lib::Conversation {
                     id: uuid::Uuid::new_v4(),
-                    agent_id: Some(agent_id),
+                    agent: Some(agent_name.clone()),
                     title: None,
                     messages: Vec::new(),
                 },
@@ -262,7 +221,7 @@ async fn resolve_context(
         (
             vanyline_lib::Conversation {
                 id: uuid::Uuid::new_v4(),
-                agent_id: Some(agent_id),
+                agent: Some(agent_name.clone()),
                 title: None,
                 messages: Vec::new(),
             },
@@ -270,5 +229,5 @@ async fn resolve_context(
         )
     };
 
-    (conv, agent_config, is_new)
+    (conv, agent_name, is_new)
 }

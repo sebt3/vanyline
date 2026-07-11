@@ -4,40 +4,6 @@ use uuid::Uuid;
 
 use crate::config::{config_dir, ensure_config_dir};
 
-pub fn list_providers() -> Result<Vec<vanyline_lib::LlmProvider>, std::io::Error> {
-    let path = config_dir().join("providers.json");
-    load_json(&path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no providers configured")
-        } else {
-            e
-        }
-    })
-}
-
-pub fn list_agents() -> Result<Vec<vanyline_lib::Agent>, std::io::Error> {
-    let path = config_dir().join("agents.json");
-    load_json(&path).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no agents configured")
-        } else {
-            e
-        }
-    })
-}
-
-pub fn get_default_agent_id() -> Result<Uuid, std::io::Error> {
-    let path = config_dir().join("default-agent.json");
-    let content = std::fs::read_to_string(&path)?;
-    serde_json::from_str(&content).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
-}
-
-pub fn set_default_agent_id(id: &Uuid) -> Result<(), std::io::Error> {
-    ensure_config_dir();
-    let path = config_dir().join("default-agent.json");
-    save_json(&path, id)
-}
-
 pub fn list_conversations() -> Result<Vec<vanyline_lib::Conversation>, std::io::Error> {
     let dir = config_dir().join("conversations");
     if !dir.exists() {

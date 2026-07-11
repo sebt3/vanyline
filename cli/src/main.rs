@@ -21,9 +21,9 @@ enum Commands {
     Chat {
         /// One-shot message (skip REPL if provided)
         message: Option<String>,
-        /// Agent ID to use
+        /// Agent name to use
         #[arg(short, long)]
-        agent: Option<uuid::Uuid>,
+        agent: Option<String>,
         /// Conversation ID to continue
         #[arg(short, long)]
         conversation: Option<uuid::Uuid>,
@@ -41,7 +41,6 @@ enum Commands {
 
 mod conversation {
     use clap::Subcommand;
-    use uuid::Uuid;
 
     #[derive(Subcommand)]
     pub enum Commands {
@@ -49,32 +48,31 @@ mod conversation {
         List,
         /// Create a new conversation
         New {
-            /// Agent ID to use
+            /// Agent name to use
             #[arg(short, long)]
-            agent: Option<Uuid>,
+            agent: Option<String>,
             /// Title for the conversation
             #[arg(short, long)]
             title: Option<String>,
         },
         /// Show conversation messages
-        Show { id: Uuid },
+        Show { id: uuid::Uuid },
         /// Delete a conversation
-        Delete { id: Uuid },
+        Delete { id: uuid::Uuid },
         /// Set active conversation
-        Set { id: Uuid },
+        Set { id: uuid::Uuid },
     }
 }
 
 mod agent {
     use clap::Subcommand;
-    use uuid::Uuid;
 
     #[derive(Subcommand)]
     pub enum Commands {
         /// List available agents
         List,
         /// Set default agent
-        SetDefault { id: Uuid },
+        SetDefault { name: String },
     }
 }
 
@@ -121,11 +119,7 @@ async fn run_conversation(cmd: conversation::Commands) {
                 println!("No conversations.");
             } else {
                 for c in &convs {
-                    let agents = store::list_agents().unwrap_or_default();
-                    let agent_label = c
-                        .agent_id
-                        .and_then(|aid| agents.iter().find(|a| a.id == aid).map(|a| a.name.clone()))
-                        .unwrap_or_default();
+                    let agent_label = c.agent.as_deref().unwrap_or("(none)");
                     let title = c.title.as_deref().unwrap_or("(untitled)");
                     println!(
                         "  {} | {} | {} messages | {}",
@@ -141,7 +135,7 @@ async fn run_conversation(cmd: conversation::Commands) {
             let id = uuid::Uuid::new_v4();
             let conv = vanyline_lib::Conversation {
                 id,
-                agent_id: agent,
+                agent,
                 title,
                 messages: Vec::new(),
             };
@@ -168,50 +162,54 @@ async fn run_conversation(cmd: conversation::Commands) {
 
 async fn run_agent(cmd: agent::Commands) {
     use agent::Commands::*;
+    let config_store = config_store::CliConfigStore::new(config::config_dir());
+    use vanyline_lib::store::ConfigStore;
+
     match cmd {
         List => {
-            let agents = store::list_agents().unwrap_or_default();
-            let default_id = store::get_default_agent_id().unwrap_or_default();
+            let agents = config_store.list_agents().await.unwrap_or_default();
+            let default_name = config_store.default_agent().await.ok().flatten();
             if agents.is_empty() {
                 println!("No agents configured.");
             } else {
                 for a in &agents {
-                    let marker = if a.id == default_id { " (default)" } else { "" };
-                    println!("  {} | {}{}", a.id, a.name, marker);
+                    let marker = if a.name == default_name.as_deref().unwrap_or("") {
+                        " (default)"
+                    } else {
+                        ""
+                    };
+                    println!("  {}{}", a.name, marker);
                     if let Some(ref desc) = a.description {
                         println!("      {}", desc);
                     }
                 }
             }
         }
-        SetDefault { id } => {
-            store::list_agents()
-                .unwrap_or_default()
-                .iter()
-                .find(|a| a.id == id)
-                .expect("agent not found");
-            store::set_default_agent_id(&id).expect("failed to set default agent");
-            println!("Default agent set to: {}", id);
+        SetDefault { name } => {
+            let agents = config_store.list_agents().await.unwrap_or_default();
+            if !agents.iter().any(|a| a.name == name) {
+                eprintln!("agent not found: {name}");
+                std::process::exit(1);
+            }
+            config_store.set_default_agent_name(&name).expect("failed to set default agent");
+            println!("Default agent set to: {name}");
         }
     }
 }
 
 async fn run_provider(cmd: provider::Commands) {
     use provider::Commands::*;
+    let config_store = config_store::CliConfigStore::new(config::config_dir());
+    use vanyline_lib::store::ConfigStore;
+
     match cmd {
         List => {
-            let providers = store::list_providers().unwrap_or_default();
+            let providers = config_store.list_providers().await.unwrap_or_default();
             if providers.is_empty() {
                 println!("No LLM providers configured.");
             } else {
                 for p in &providers {
-                    println!(
-                        "  {} | {} | {} | model: {}",
-                        p.id,
-                        p.name,
-                        p.provider_type,
-                        p.default_model.as_deref().unwrap_or("(none)")
-                    );
+                    println!("  {} | {:?}", p.name, p.provider_type);
                 }
             }
         }

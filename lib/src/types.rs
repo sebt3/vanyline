@@ -70,7 +70,7 @@ impl<'de> Deserialize<'de> for Message {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: Uuid,
-    pub agent_id: Option<Uuid>,
+    pub agent: Option<String>,
     pub title: Option<String>,
     pub messages: Vec<Message>,
 }

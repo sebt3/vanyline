@@ -3,7 +3,7 @@ mod chat;
 pub mod domain;
 mod error;
 pub mod model;
-mod event;
+pub mod event;
 mod llm;
 pub mod session;
 pub mod store;

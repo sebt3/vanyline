@@ -306,6 +306,17 @@ impl ConfigStore for CliConfigStore {
     }
 }
 
+impl CliConfigStore {
+    /// Écrit le nom par défaut dans `default-agent.json`.
+    pub fn set_default_agent_name(&self, name: &str) -> Result<(), VnyError> {
+        let path = self.config_dir.join("default-agent.json");
+        let content = serde_json::to_string_pretty(name)
+            .map_err(|e| VnyError::ConfigError(format!("serialize default-agent: {e}")))?;
+        std::fs::write(&path, content).map_err(VnyError::from)?;
+        Ok(())
+    }
+}
+
 /// Les 8 outils locaux CLI (utilisés par `SessionContext.local_tools` — tâche
 /// 9b, pas cette tâche). Nom constant, réutilisé par `list_toolsets` pour
 /// synthétiser `Toolset.local_tools` de chaque agent.
@@ -612,5 +623,27 @@ mod tests {
 
         let result = store.default_agent().await.unwrap();
         assert_eq!(result, None);
+    }
+
+    #[tokio::test]
+    async fn set_default_agent_name_then_read_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        store.set_default_agent_name("build").unwrap();
+        let result = store.default_agent().await.unwrap();
+        assert_eq!(result, Some("build".to_string()));
+    }
+
+    #[tokio::test]
+    async fn set_default_agent_name_overwrites() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = make_store(dir.path());
+
+        store.set_default_agent_name("build").unwrap();
+        store.set_default_agent_name("chat").unwrap();
+
+        let result = store.default_agent().await.unwrap();
+        assert_eq!(result, Some("chat".to_string()));
     }
 }
