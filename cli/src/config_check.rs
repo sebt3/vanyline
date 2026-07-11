@@ -291,11 +291,8 @@ mod tests {
         };
         let problems = check_config(&store).await;
         for p in &problems {
-            match p {
-                VnyError::UnknownReference(kind, _) => {
-                    assert_ne!(*kind, "skill", "skill should never be flagged for Auto/None");
-                }
-                _ => {}
+            if let VnyError::UnknownReference(kind, _) = p {
+                assert_ne!(*kind, "skill", "skill should never be flagged for Auto/None");
             }
         }
     }
@@ -447,7 +444,7 @@ mod tests {
         // Write an agent file with an unknown model
         let agents_dir = tmp.path().join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        let mut f = std::fs::File::create(&agents_dir.join("build.md")).unwrap();
+        let mut f = std::fs::File::create(agents_dir.join("build.md")).unwrap();
         write!(f, "---\nmodel: does-not-exist\n---\n\nBuild agent.").unwrap();
         drop(f);
 
