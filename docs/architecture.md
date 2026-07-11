@@ -12,11 +12,11 @@ Six crates : **deux bibliothèques feuilles** partagées (`vanyline-tools`, `van
 
 | Crate | Type | Rôle | Contenu clé |
 |-------|------|------|-------------|
-| `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic | `filesystem` (read/write/delete/mkdir/ls), `command` (`execute` via `sh -c` + timeout) |
+| `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic, SLM-friendly (v2) | `filesystem` (read/write/edit/delete/list), `search` (find_files/search), `command` (`execute` via `sh -c`, timeout, cwd), `error` (`ToolsError`, codes `VNL-TLS-*`), `output` (bornage centralisé), `mcp` (schémas JSON — source unique consommée par `cli` et `sandbox`) |
 | `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), erreurs `VNL-*` |
 | `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | REPL + one-shot, `CliConfigStore` (adapte les fichiers JSON `~/.config/vanyline` en `ConfigStore`), enveloppe les `vanyline-tools` en `ToolDyn` locaux |
 | `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib` |
-| `vanyline-sandbox` | binaire | Pod serveur WS/MCP | *(stub)* — exposera les `vanyline-tools` via MCP |
+| `vanyline-sandbox` | binaire | Pod serveur WS/MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) |
 | `vanyline-controller` | binaire | Opérateur Kubernetes | *(stub)* — kube-rs, CRDs |
 
 ## Graphe de dépendances
@@ -112,6 +112,54 @@ glob de la sélection — c'est ce qui maîtrise le contexte pour les petits mod
   `ChatEvent::SubagentEvent`. Refuse au-delà de `subagent_depth_max` (garde vérifiée à
   la fois à l'exposition du tool et à l'appel — double sécurité contre la récursion).
 
+## Outils (`vanyline-tools`) — conventions SLM-friendly
+
+La crate `vanyline-tools` cible explicitement des modèles plus petits que Qwen3.6
+(SLM), pas seulement les modèles haut de gamme. Surface volontairement réduite à
+8 outils orthogonaux, un par capacité évidente :
+
+| Outil | Params requis | Notes |
+|-------|---------------|-------|
+| `read_file` | `path` | `offset`/`limit` optionnels (0 = défaut), sortie numérotée `NNN\tligne` |
+| `write_file` | `path`, `content` | crée les répertoires parents |
+| `edit_file` | `path`, `old_string`, `new_string` | remplacement exact ; `replace_all` optionnel. Seul outil à dépasser le principe « ≤2 params requis » — tension acceptée, inhérente à un remplacement exact (path + old + new sont tous les trois indispensables) |
+| `delete_file` | `path` | fichier ou répertoire **vide** uniquement |
+| `list_directory` | `path` | arbre compact, `depth` optionnel (0 = défaut 1, pas de récursion) |
+| `find_files` | `pattern` | glob (`**/*.rs`), `path` optionnel (défaut `.`) |
+| `search` | `pattern` | regex, `path`/`glob` optionnels, résultats `fichier:ligne: extrait` |
+| `execute_command` | `command` | `timeout_secs`/`cwd` optionnels, sortie = exit code + durée + stdout/stderr bornés tête+queue |
+
+Conventions transverses (`tools/src/error.rs`, `tools/src/output.rs`) :
+- **Erreurs actionnables** : chaque variante de `ToolsError` porte un code
+  `VNL-TLS-NNN` et un message qui dit quoi faire (`FileNotFound` inclut le
+  contenu du répertoire parent ; `EditNoMatch` inclut la ligne la plus proche
+  par distance de Levenshtein ; `EditAmbiguous` suggère `replace_all`).
+- **Sorties bornées, jamais de coupure silencieuse** : `bound_lines` (lignes,
+  avec `offset` de reprise explicite dans le message) et `bound_head_tail`
+  (tête+queue, pour les commandes) — constantes centralisées
+  (`READ_MAX_LINES`, `SEARCH_MAX_MATCHES`, `COMMAND_MAX_BYTES`…), jamais de
+  nombre magique dans un outil.
+- **Schéma unique** : `tools/src/mcp.rs` porte les schémas JSON des 8 outils
+  (description calibrée + mini-exemple d'arguments, un seul `required`
+  minimal) — consommés à l'identique par `cli/src/tools.rs`
+  (`ToolDefinition`) et par `sandbox/src/mcp.rs` (MCP). Ajouter un outil ou
+  changer un schéma se fait à un seul endroit.
+
+**Validation manuelle SLM** (au-delà des tests unitaires par outil) : avant de
+faire évoluer cette surface, vérifier avec un vrai petit modèle plutôt qu'avec
+Claude — les schémas/erreurs qui semblent clairs à un modèle haut de gamme ne
+le sont pas toujours pour un SLM. Pratique établie : un agent CLI configuré
+sur un modèle local (`~/.config/vanyline/agents.json`, provider `openai-compatible`
+pointant vers l'inférence locale), **sans serveur MCP** pour isoler les 8
+outils locaux, et une poignée de prompts forçant un enchaînement réaliste
+(explorer → chercher → lire → éditer → vérifier). Observer : le modèle
+choisit-il le bon outil, construit-il des arguments valides, se corrige-t-il
+tout seul sur une erreur (nom de fichier approximatif, occurrence ambiguë) ?
+Cette pratique a débusqué un bug réel du moteur de session (`default_max_turns`
+jamais configuré, cf. `git log --grep default_max_turns`) qu'aucun test
+unitaire n'aurait attrapé — un SLM enchaîne spontanément plus d'outils par
+tour qu'un scénario de test écrit à la main.
+
 ## Limites connues (dette assumée, pas oubliée)
 
 - **Pas de streaming WS live côté app** : `CollectingSink` bufferise tous les événements
@@ -128,6 +176,12 @@ glob de la sélection — c'est ce qui maîtrise le contexte pour les petits mod
   (ex. `num_ctx` pour ollama) est correctement transmis à `AgentBuilder::additional_params`
   côté code, mais la transmission effective jusqu'à la requête HTTP par le provider ollama
   de rig 0.38 n'a pas été vérifiée contre un serveur réel (nécessite un ollama vivant).
+- **Bornes de sortie non calibrées en conditions réelles** : les constantes de
+  `tools/src/output.rs` (`READ_MAX_LINES=200`, `SEARCH_MAX_MATCHES=50`,
+  `COMMAND_MAX_BYTES=8Ko`…) sont des valeurs de départ raisonnables, pas
+  mesurées contre de gros fichiers/sorties réels. La validation manuelle SLM
+  menée jusqu'ici portait sur des petits fichiers de test — à revisiter si un
+  usage réel montre qu'elles tronquent trop tôt (ou pas assez).
 
 ## Workspace TypeScript (npm workspaces)
 
