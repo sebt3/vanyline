@@ -151,6 +151,7 @@ pub fn build_workspace_pvc(
 
 /// Context nécessaire pour les builders de Jobs git. Résolu par l'appelant (le reconciler Project
 /// ira chercher l'image sandbox par défaut du controller, éventuellement surchargée).
+#[allow(dead_code)]
 pub struct ProjectJobContext {
     /// Image utilisée par tous les Jobs git (elle contient git — c'est l'image sandbox).
     pub sandbox_image: String,
@@ -158,19 +159,23 @@ pub struct ProjectJobContext {
     pub owner_pvc_name: String,
 }
 
+#[allow(dead_code)]
 pub fn init_job_name(project_name: &str) -> String {
     format!("project-{project_name}-init")
 }
 
+#[allow(dead_code)]
 pub fn fetch_cronjob_name(project_name: &str) -> String {
     format!("project-{project_name}-fetch")
 }
 
+#[allow(dead_code)]
 pub fn purge_job_name(project_name: &str) -> String {
     format!("project-{project_name}-purge")
 }
 
 /// `schedule` de CronJob pour `spec.fetch_interval` (défaut `"1h"`) — cf. note `@every` dans le contexte de cette tâche.
+#[allow(dead_code)]
 pub fn fetch_schedule(project: &Project) -> String {
     let interval = project
         .spec
@@ -183,6 +188,7 @@ pub fn fetch_schedule(project: &Project) -> String {
 /// Construit le `PodTemplateSpec` commun aux trois Jobs git : image sandbox,
 /// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
 /// `git` exécutant `script` via `sh -c`.
+#[allow(dead_code)]
 fn git_pod_template(project: &Project, ctx: &ProjectJobContext, script: String) -> PodTemplateSpec {
     let mut volumes = vec![
         Volume {
@@ -269,6 +275,7 @@ fn git_pod_template(project: &Project, ctx: &ProjectJobContext, script: String) 
 
 /// Job une fois : crée les répertoires de cache puis clone bare le remote si
 /// n'existe pas déjà (idempotent — le controller peut réappliquer sans réétat).
+#[allow(dead_code)]
 pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
     let cache_dirs = effective_caches(project)
         .iter()
@@ -300,6 +307,7 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
 }
 
 /// CronJob périodique : `git fetch --prune` sur le clone bare.
+#[allow(dead_code)]
 pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJob {
     let script = format!(
         "set -eu\ngit --git-dir={mount}/{bare} fetch --prune\n",
@@ -335,6 +343,7 @@ pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJo
 /// montage. Invoqué par le finalizer du reconciler Project (tâche 05) avant
 /// suppression d'un PVC créé par le controller — sûr aussi pour un PVC référencé
 /// grâce au `subPath` (voir note de contexte).
+#[allow(dead_code)]
 pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
     let script = format!(
         "set -eu\nrm -rf {mount}/{bare} {mount}/worktrees {mount}/cache\n",
