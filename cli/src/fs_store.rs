@@ -145,6 +145,14 @@ struct RawToolsetFile {
     tools: RawToolsSection,
 }
 
+#[derive(Debug, Deserialize)]
+struct RawSkillFrontmatter {
+    description: String,
+    // `name` peut être présent (format compat écosystème) mais n'est pas
+    // déclaré ici -> ignoré par serde, jamais utilisé (le nom canonique est
+    // le nom du répertoire, porté séparément par `resolve_skill_files`).
+}
+
 fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, VnyError> {
     let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
     let raw: RawToolsetFile = yaml_serde::from_str(&content)
@@ -222,14 +230,26 @@ impl ConfigStore for FsConfigStore {
         files.iter().map(|(name, path)| parse_agent_file(name, path)).collect()
     }
 
-    /// Stub — implémenté en tâche 02c (skills/<name>/SKILL.md).
+    /// Résolu en tâche 02c (skills/<name>/SKILL.md).
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
-        Ok(Vec::new())
+        let files = self.layers.resolve_skill_files()?;
+        files.iter().map(|(name, path)| {
+            let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+            let (frontmatter, _body) = split_frontmatter(path, &content)?;
+            let raw: RawSkillFrontmatter = yaml_serde::from_str(&frontmatter)
+                .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
+            Ok(SkillMeta { name: name.clone(), description: raw.description })
+        }).collect()
     }
 
-    /// Stub — implémenté en tâche 02c.
+    /// Résolu en tâche 02c.
     async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
-        Err(VnyError::UnknownReference("skill", name.to_string()))
+        let files = self.layers.resolve_skill_files()?;
+        let path = files.get(name)
+            .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))?;
+        let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+        let (_frontmatter, body) = split_frontmatter(path, &content)?;
+        Ok(body.trim().to_string())
     }
 
     async fn default_agent(&self) -> Result<Option<String>, VnyError> {
@@ -436,31 +456,6 @@ mod tests {
         }
     }
 
-    // 9. skill stubs still return empty/unknown (list_skills, load_skill unchanged)
-    #[tokio::test]
-    async fn skill_stubs_return_empty_or_unknown() {
-        let tmp = tempdir().unwrap();
-        let layers = Layers {
-            global_dir: tmp.path().to_path_buf(),
-            workspace_dir: None,
-        };
-        let store = FsConfigStore::new(layers);
-
-        // list_skills still returns empty vector
-        let skills = store.list_skills().await.unwrap();
-        assert!(skills.is_empty());
-
-        // load_skill still returns UnknownReference
-        let result = store.load_skill("x").await;
-        match result {
-            Err(VnyError::UnknownReference(kind, name)) => {
-                assert_eq!(kind, "skill");
-                assert_eq!(name, "x");
-            }
-            _ => panic!("Expected UnknownReference(\"skill\")"),
-        }
-    }
-
     // 10. list_agents_parses_frontmatter
     #[tokio::test]
     async fn list_agents_parses_frontmatter() {
@@ -651,5 +646,141 @@ tools:
         assert_eq!(agents.len(), 1);
         assert_eq!(agents[0].name, "build");
         assert_eq!(agents[0].model, "workspace-model");
+    }
+
+    // --- list_skills / load_skill ---
+
+    // 5. list_skills_parses_metadata_dirname_is_canonical
+    #[tokio::test]
+    async fn list_skills_parses_metadata_dirname_is_canonical() {
+        let tmp = tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::create_dir_all(skills_dir.join("pdf")).unwrap();
+        let mut buf = std::fs::File::create(skills_dir.join("pdf").join("SKILL.md")).unwrap();
+        use std::io::Write;
+        buf.write_all(b"---\nname: something-else\ndescription: PDF processing\n---\n# body\n")
+            .unwrap();
+        drop(buf);
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let skills = store.list_skills().await.unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "pdf");
+        assert_eq!(skills[0].description, "PDF processing");
+    }
+
+    // 6. load_skill_returns_body
+    #[tokio::test]
+    async fn load_skill_returns_body() {
+        let tmp = tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::create_dir_all(skills_dir.join("pdf")).unwrap();
+        std::fs::write(
+            skills_dir.join("pdf").join("SKILL.md"),
+            "---\ndescription: PDF\n---\n# PDF skill\n\nDétails...",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let body = store.load_skill("pdf").await.unwrap();
+        assert_eq!(body, "# PDF skill\n\nDétails...");
+    }
+
+    // 7. load_skill_unknown_errors
+    #[tokio::test]
+    async fn load_skill_unknown_errors() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let result = store.load_skill("nope").await;
+        match result {
+            Err(VnyError::UnknownReference(kind, name)) => {
+                assert_eq!(kind, "skill");
+                assert_eq!(name, "nope");
+            }
+            other => panic!("Expected UnknownReference, got {:?}", other),
+        }
+    }
+
+    // 8. list_skills_ignores_dirs_without_skill_md
+    #[tokio::test]
+    async fn list_skills_ignores_dirs_without_skill_md() {
+        let tmp = tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::create_dir_all(skills_dir.join("random")).unwrap();
+        std::fs::create_dir_all(&skills_dir.join("pdf")).unwrap();
+        std::fs::write(skills_dir.join("pdf").join("SKILL.md"), "---\ndescription: PDF\n---\n").unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let skills = store.list_skills().await.unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "pdf");
+    }
+
+    // 9. list_skills_and_load_skill_two_layer_override
+    #[tokio::test]
+    async fn list_skills_and_load_skill_two_layer_override() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        std::fs::create_dir_all(global_dir.path().join("skills").join("pdf")).unwrap();
+        std::fs::create_dir_all(workspace_dir.path().join("skills").join("pdf")).unwrap();
+        std::fs::write(
+            global_dir.path().join("skills").join("pdf").join("SKILL.md"),
+            "---\ndescription: old\n---\nold body",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace_dir.path().join("skills").join("pdf").join("SKILL.md"),
+            "---\ndescription: new\n---\nnew body",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        let skills = store.list_skills().await.unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0].name, "pdf");
+        assert_eq!(skills[0].description, "new");
+        let body = store.load_skill("pdf").await.unwrap();
+        assert_eq!(body, "new body");
+    }
+
+    // 10. list_skills_missing_description_errors
+    #[tokio::test]
+    async fn list_skills_missing_description_errors() {
+        let tmp = tempdir().unwrap();
+        let skills_dir = tmp.path().join("skills");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::create_dir_all(skills_dir.join("bad")).unwrap();
+        std::fs::write(skills_dir.join("bad").join("SKILL.md"), "---\n---\nbody\n").unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let result = store.list_skills().await;
+        match result {
+            Err(VnyError::ConfigError(msg)) => {
+                assert!(msg.contains("SKILL.md") || msg.contains("bad"));
+            }
+            other => panic!("Expected ConfigError, got {:?}", other),
+        }
     }
 }

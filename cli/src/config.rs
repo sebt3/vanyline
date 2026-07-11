@@ -81,6 +81,18 @@ impl Layers {
         };
         Ok(merge_layer_files(global, workspace))
     }
+
+    /// Résout les `SKILL.md` des deux couches (sous `<couche>/skills/`),
+    /// fusionnés par nom de répertoire (workspace gagne) via
+    /// `merge_layer_files` — même mécanique que `resolve_named_files`.
+    pub fn resolve_skill_files(&self) -> Result<BTreeMap<String, PathBuf>, VnyError> {
+        let global = list_layer_skill_dirs(&self.global_dir.join("skills"))?;
+        let workspace = match &self.workspace_dir {
+            Some(dir) => Some(list_layer_skill_dirs(&dir.join("skills"))?),
+            None => None,
+        };
+        Ok(merge_layer_files(global, workspace))
+    }
 }
 
 /// Représentation brute de `config.yaml` — pas encore de types du domaine
@@ -172,6 +184,35 @@ pub fn merge_layer_files(
     let mut merged = global;
     merged.extend(ws);
     merged
+}
+
+/// Liste les sous-répertoires directs de `dir` qui contiennent un fichier
+/// `SKILL.md`, indexés par nom de répertoire, valeur = chemin vers ce
+/// `SKILL.md` (pas le répertoire lui-même — évite de le rejoindre à chaque
+/// usage). Un sous-répertoire sans `SKILL.md` est ignoré silencieusement.
+/// `dir` absent -> map vide (comme `list_layer_files`).
+#[allow(dead_code)]
+pub fn list_layer_skill_dirs(dir: &std::path::Path) -> Result<BTreeMap<String, PathBuf>, VnyError> {
+    let mut result = BTreeMap::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(result),
+        Err(e) => return Err(VnyError::from(e)),
+    };
+    for entry in entries {
+        let entry = entry.map_err(VnyError::from)?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let skill_file = path.join("SKILL.md");
+        if skill_file.is_file() {
+            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
+                result.insert(name.to_string(), skill_file);
+            }
+        }
+    }
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -430,5 +471,59 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         assert_eq!(result.len(), 2);
         assert!(result.contains_key("build"));
         assert!(result.contains_key("debug"));
+    }
+
+    // --- list_layer_skill_dirs ---
+
+    #[test]
+    fn list_layer_skill_dirs_finds_dirs_with_skill_md() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("pdf")).unwrap();
+        std::fs::create_dir_all(tmp.path().join("empty-dir")).unwrap();
+        std::fs::write(tmp.path().join("pdf").join("SKILL.md"), "---\ndescription: PDF\n---\n").unwrap();
+        let result = list_layer_skill_dirs(tmp.path()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result.contains_key("pdf"));
+        assert_eq!(
+            result["pdf"],
+            tmp.path().join("pdf").join("SKILL.md")
+        );
+    }
+
+    #[test]
+    fn list_layer_skill_dirs_ignores_plain_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("not-a-skill.md"), "---\n---\n").unwrap();
+        let result = list_layer_skill_dirs(tmp.path()).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_layer_skill_dirs_missing_dir_is_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does_not_exist");
+        let result = list_layer_skill_dirs(&missing).unwrap();
+        assert!(result.is_empty());
+    }
+
+    // --- resolve_skill_files ---
+
+    #[test]
+    fn resolve_skill_files_merges_across_layers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let global = tmp.path().join("global");
+        let workspace = tmp.path().join("workspace");
+        std::fs::create_dir_all(global.join("skills").join("pdf")).unwrap();
+        std::fs::create_dir_all(workspace.join("skills").join("csv")).unwrap();
+        std::fs::write(global.join("skills").join("pdf").join("SKILL.md"), "---\n---\n").unwrap();
+        std::fs::write(workspace.join("skills").join("csv").join("SKILL.md"), "---\n---\n").unwrap();
+        let layers = Layers {
+            global_dir: global,
+            workspace_dir: Some(workspace),
+        };
+        let result = layers.resolve_skill_files().unwrap();
+        assert_eq!(result.len(), 2);
+        assert!(result.contains_key("pdf"));
+        assert!(result.contains_key("csv"));
     }
 }
