@@ -1,6 +1,7 @@
 mod api;
 mod auth;
 mod config;
+mod config_store;
 mod db;
 mod error;
 mod llm;
