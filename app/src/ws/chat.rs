@@ -103,10 +103,9 @@ impl vanyline_lib::event::EventSink for CollectingSink {
                     .push(CollectedMessage::Token(content));
             }
             vanyline_lib::event::ChatEvent::ToolCall { name, args, .. } => {
-                // ToolCall événement — pas représenté dans le protocole WS actuel
-                // (ServerMessage n'a que Token/ToolCall/Done/Error mais ce
-                // path est géré dans flush, non dans emit)
-                drop((name, args));
+                self.messages
+                    .lock()
+                    .push(CollectedMessage::ToolCall(name, args));
             }
             vanyline_lib::event::ChatEvent::Error { code, message } => {
                 self.messages.lock().push(CollectedMessage::Error(code, message));
@@ -227,7 +226,7 @@ async fn handle_message(
 
     sink.flush(socket).await;
 
-    let tool_calls = result.tool_calls;
+    let tool_calls = sink.collected_tool_calls();
     let msg_id = persist_message(
         state,
         conversation_id,
@@ -283,7 +282,7 @@ async fn persist_message(
     conversation_id: Uuid,
     role: &str,
     content: &str,
-    tool_calls: Option<Vec<vanyline_lib::event::ToolCallRecord>>,
+    tool_calls: Option<Vec<vanyline_lib::ToolCall>>,
 ) -> Result<Uuid, AppError> {
     let payload = serde_json::json!({
         "role": role,
