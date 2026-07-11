@@ -13,7 +13,7 @@ use vanyline_lib::VnyError;
 
 use crate::db::models::{
     AgentRow, LlmProvider as DbLlmProvider, McpServer as DbMcpServer,
-    ModelProfile as DbModelProfile,
+    ModelProfile as DbModelProfile, Toolset as DbToolset,
 };
 
 // ---------------------------------------------------------------------------
@@ -36,17 +36,6 @@ fn headers_from_json(v: &serde_json::Value) -> BTreeMap<String, String> {
             .collect()
     } else {
         BTreeMap::new()
-    }
-}
-
-fn domain_mcp_server_selection(row: &DbMcpServer) -> Option<McpSelection> {
-    if row.server_type == "http-streamable" {
-        Some(McpSelection {
-            server: row.name.clone(),
-            tools: vec![],
-        })
-    } else {
-        None
     }
 }
 
@@ -132,16 +121,21 @@ fn domain_agent(agent: &AgentRow) -> Agent {
     }
 }
 
-/// `mcp_rows` = déjà filtrées à cet agent (résultat de la jointure
-/// `agent_mcp_servers`, faite par l'appelant). `local_tools` toujours vide
-/// (app n'a pas d'outils locaux).
-fn toolset_for_agent(agent: &AgentRow, mcp_rows: &[DbMcpServer]) -> Toolset {
-    let mcp: Vec<_> = mcp_rows.iter().filter_map(domain_mcp_server_selection).collect();
+/// Infaillible par design : `local_tools`/`mcp` sont `NOT NULL DEFAULT '[]'`
+/// en base et n'y sont écrits que par l'app elle-même — un JSON qui ne
+/// correspond pas à la forme attendue retombe silencieusement sur une liste
+/// vide plutôt que d'échouer tout `list_toolsets` (même posture défensive
+/// que `domain_model_profile` pour `options`).
+fn domain_toolset(row: &DbToolset) -> Toolset {
+    let local_tools: Vec<String> =
+        serde_json::from_value(row.local_tools.clone()).unwrap_or_default();
+    let mcp: Vec<McpSelection> =
+        serde_json::from_value(row.mcp.clone()).unwrap_or_default();
     Toolset {
-        name: agent.name.clone(),
-        description: None,
-        prompt: None,
-        local_tools: vec![],
+        name: row.name.clone(),
+        description: row.description.clone(),
+        prompt: row.prompt.clone(),
+        local_tools,
         mcp,
     }
 }
@@ -177,23 +171,19 @@ impl PgConfigStore {
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 
-    async fn load_agents(&self) -> Result<Vec<AgentRow>, VnyError> {
-        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+    async fn load_toolsets(&self) -> Result<Vec<DbToolset>, VnyError> {
+        sqlx::query_as::<_, DbToolset>("SELECT * FROM toolsets WHERE user_id = $1")
+            .bind(self.user_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 
-    async fn load_mcp_servers_for_agent(&self, agent_id: Uuid) -> Result<Vec<DbMcpServer>, VnyError> {
-        sqlx::query_as::<_, DbMcpServer>(
-            r#"SELECT m.* FROM mcp_servers m
-               JOIN agent_mcp_servers ams ON ams.mcp_server_id = m.id
-               WHERE ams.agent_id = $1 ORDER BY m.name"#,
-        )
-        .bind(agent_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VnyError::ConfigError(e.to_string()))
+    async fn load_agents(&self) -> Result<Vec<AgentRow>, VnyError> {
+        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 }
 
@@ -211,10 +201,12 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
-        let rows = sqlx::query_as::<_, DbMcpServer>("SELECT * FROM mcp_servers")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))?;
+        let rows =
+            sqlx::query_as::<_, DbMcpServer>("SELECT * FROM mcp_servers WHERE user_id = $1")
+                .bind(self.user_id)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| VnyError::ConfigError(e.to_string()))?;
         let mut result = Vec::new();
         for row in &rows {
             match domain_mcp_server(row) {
@@ -229,13 +221,8 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError> {
-        let agents = self.load_agents().await?;
-        let mut result = Vec::with_capacity(agents.len());
-        for agent in &agents {
-            let mcp_rows = self.load_mcp_servers_for_agent(agent.id).await?;
-            result.push(toolset_for_agent(agent, &mcp_rows));
-        }
-        Ok(result)
+        let rows = self.load_toolsets().await?;
+        Ok(rows.iter().map(domain_toolset).collect())
     }
 
     async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
@@ -307,6 +294,26 @@ mod tests {
         }
     }
 
+    fn sample_toolset(
+        id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        local_tools: serde_json::Value,
+        mcp: serde_json::Value,
+    ) -> DbToolset {
+        DbToolset {
+            id,
+            user_id,
+            name: name.to_string(),
+            description: None,
+            prompt: None,
+            local_tools,
+            mcp,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
     // 1. provider_type_from_str_known_values
     #[test]
     fn provider_type_from_str_known_values() {
@@ -338,6 +345,7 @@ mod tests {
     fn domain_mcp_server_http_streamable() {
         let row = DbMcpServer {
             id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
             name: "my-server".to_string(),
             server_type: "http-streamable".to_string(),
             url: "http://localhost:8080".to_string(),
@@ -357,6 +365,7 @@ mod tests {
     fn domain_mcp_server_sse_skipped() {
         let row = DbMcpServer {
             id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
             name: "sse-srv".to_string(),
             server_type: "sse".to_string(),
             url: "http://localhost:9090".to_string(),
@@ -423,43 +432,7 @@ mod tests {
         assert_eq!(agent.mode, AgentMode::Primary);
     }
 
-    // 10. toolset_for_agent_local_tools_always_empty
-    #[test]
-    fn toolset_for_agent_local_tools_always_empty() {
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
-        let toolset = toolset_for_agent(&agent, &[]);
-        assert!(toolset.local_tools.is_empty());
-    }
-
-    // 11. toolset_for_agent_mcp_selections_from_rows
-    #[test]
-    fn toolset_for_agent_mcp_selections_from_rows() {
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
-        let row_http = DbMcpServer {
-            id: Uuid::new_v4(),
-            name: "http-srv".to_string(),
-            server_type: "http-streamable".to_string(),
-            url: "http://localhost:1234".to_string(),
-            headers: serde_json::json!({}),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        let row_sse = DbMcpServer {
-            id: Uuid::new_v4(),
-            name: "sse-srv".to_string(),
-            server_type: "sse".to_string(),
-            url: "http://localhost:5678".to_string(),
-            headers: serde_json::json!({}),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        };
-        let mcp_rows = vec![row_http, row_sse];
-        let toolset = toolset_for_agent(&agent, &mcp_rows);
-        assert_eq!(toolset.mcp.len(), 1);
-        assert_eq!(toolset.mcp[0].server, "http-srv");
-    }
-
-    // 12. domain_model_profile_resolves_provider_name
+    // 10. domain_model_profile_resolves_provider_name
     #[test]
     fn domain_model_profile_resolves_provider_name() {
         let pid = Uuid::new_v4();
@@ -472,7 +445,7 @@ mod tests {
         assert_eq!(result.model, "qwen2.5");
     }
 
-    // 13. domain_model_profile_unknown_provider_errors
+    // 11. domain_model_profile_unknown_provider_errors
     #[test]
     fn domain_model_profile_unknown_provider_errors() {
         let uid = Uuid::new_v4();
@@ -482,7 +455,7 @@ mod tests {
         assert!(matches!(err, VnyError::LlmProviderNotFound));
     }
 
-    // 14. domain_model_profile_options_object_passthrough
+    // 12. domain_model_profile_options_object_passthrough
     #[test]
     fn domain_model_profile_options_object_passthrough() {
         let uid = Uuid::new_v4();
@@ -504,7 +477,7 @@ mod tests {
         assert_eq!(result.options.get("num_ctx"), Some(&serde_json::json!(65536)));
     }
 
-    // 15. domain_model_profile_options_non_object_defaults_empty
+    // 13. domain_model_profile_options_non_object_defaults_empty
     #[test]
     fn domain_model_profile_options_non_object_defaults_empty() {
         let uid = Uuid::new_v4();
@@ -526,7 +499,7 @@ mod tests {
         assert!(result.options.is_empty());
     }
 
-    // 16. domain_model_profile_max_tokens_conversion
+    // 14. domain_model_profile_max_tokens_conversion
     #[test]
     fn domain_model_profile_max_tokens_conversion() {
         let uid = Uuid::new_v4();
@@ -546,5 +519,78 @@ mod tests {
         let provider = sample_provider(pid, uid, "ollama", "ollama", false);
         let result = domain_model_profile(&row, &[provider]).unwrap();
         assert_eq!(result.max_tokens, Some(4096u64));
+    }
+
+    // 15. domain_toolset_parses_local_tools_and_mcp
+    #[test]
+    fn domain_toolset_parses_local_tools_and_mcp() {
+        let uid = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let local_tools = serde_json::json!(["read_file", "search"]);
+        let mcp = serde_json::json!([{"server": "fs", "tools": ["read"]}]);
+        let row = sample_toolset(id, uid, "test-toolset", local_tools.clone(), mcp.clone());
+        let toolset = domain_toolset(&row);
+        assert_eq!(toolset.local_tools, vec!["read_file".to_string(), "search".to_string()]);
+        assert_eq!(toolset.mcp.len(), 1);
+        assert_eq!(toolset.mcp[0].server, "fs");
+        assert_eq!(toolset.mcp[0].tools, vec!["read".to_string()]);
+    }
+
+    // 16. domain_toolset_defaults_on_invalid_json
+    #[test]
+    fn domain_toolset_defaults_on_invalid_json() {
+        let uid = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let row = DbToolset {
+            id,
+            user_id: uid,
+            name: "test-toolset".to_string(),
+            description: None,
+            prompt: None,
+            local_tools: serde_json::Value::Null,
+            mcp: serde_json::Value::Null,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let toolset = domain_toolset(&row);
+        assert!(toolset.local_tools.is_empty());
+        assert!(toolset.mcp.is_empty());
+    }
+
+    // 17. domain_toolset_preserves_description_and_prompt
+    #[test]
+    fn domain_toolset_preserves_description_and_prompt() {
+        let uid = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let row = DbToolset {
+            id,
+            user_id: uid,
+            name: "desc-toolset".to_string(),
+            description: Some("desc".to_string()),
+            prompt: Some("frag".to_string()),
+            local_tools: serde_json::json!([]),
+            mcp: serde_json::json!([]),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let toolset = domain_toolset(&row);
+        assert_eq!(toolset.description, Some("desc".to_string()));
+        assert_eq!(toolset.prompt, Some("frag".to_string()));
+
+        // second case: both None stay None
+        let row2 = DbToolset {
+            id: Uuid::new_v4(),
+            user_id: uid,
+            name: "blank-toolset".to_string(),
+            description: None,
+            prompt: None,
+            local_tools: serde_json::json!([]),
+            mcp: serde_json::json!([]),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let toolset2 = domain_toolset(&row2);
+        assert_eq!(toolset2.description, None);
+        assert_eq!(toolset2.prompt, None);
     }
 }

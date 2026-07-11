@@ -41,10 +41,24 @@ pub struct ModelProfile {
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct McpServer {
     pub id: Uuid,
+    pub user_id: Uuid,
     pub name: String,
     pub server_type: String,
     pub url: String,
     pub headers: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Toolset {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub prompt: Option<String>,
+    pub local_tools: serde_json::Value,
+    pub mcp: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
