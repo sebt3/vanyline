@@ -79,12 +79,29 @@ kydah-code (extension VS Code pour code-server) consomme le MCP de la sandbox po
 Le Owner dans ce cas référence le PVC existant de code-server — pas de nouveau stockage.
 Fonctionne uniquement quand kydah-code tourne dans un code-server K8s (service interne).
 
-### Contrôleur déféré
+### Contrôleur — bootstrap engagé
 
-Glue entre les deux axes. Non construit dans la phase actuelle.
-Pour tester la sandbox : script shell/Python crée les pods directement.
-CRD Owner : crée/référence un PVC + crée un ServiceAccount (identité cluster du Owner) + attributs quota (TBD).
-Le SA est l'identité utilisée par kydah-code ET par l'app pour accéder aux sandboxes du Owner.
+CRDs Owner/Project/Sandbox v1alpha1. Owner : identité + PVC home RWX + ServiceAccount
+(identité utilisée par kydah-code ET l'app pour accéder aux sandboxes du Owner). Project :
+repo git + PVC workspace RWO bloc local (rust-analyzer/openvscode-server ont besoin
+d'inotify, ne traverse pas les FS réseau). Sandbox : projection d'une branche (git worktree)
++ toolchains en image volumes. Reconciler Owner (PVC home/SA/status) déjà implémenté.
+
+### harness-core — cœur LLM/MCP name-keyed (terminé)
+
+Refonte complète de `vanyline-lib` : domaine name-keyed (`Provider`, `ModelProfile`,
+`McpServer`, `Toolset`, `Agent`, `SkillMeta` — plus d'UUID exposé), `ConfigStore` (trait de
+résolution par nom), `ChatEvent`/`EventSink` (un seul type d'événement pour REPL/WS/futur
+JSON-RPC), `SessionContext`/`run_agent_turn` (point d'entrée unique), tools builtin
+`skill`/`task` (subagents avec garde de profondeur). `cli/` et `app/` migrés dessus
+(`CliConfigStore` adapte les fichiers JSON existants, `PgConfigStore` adapte le schéma PG
+existant — aucun des deux n'a introduit de nouveau stockage, adaptation mécanique
+uniquement). Ancien cœur (`ChatSink`/`run_chat_turn`/types UUID-keyed) supprimé. Détails :
+`docs/architecture.md` (section "Session engine"). Stratégie qui a bien fonctionné : tâches
+additives strictes (nouveaux modules, jamais toucher l'existant) jusqu'à une tâche finale de
+bascule mécanique — le workspace est resté vert après chaque tâche, permettant une revue
+incrémentale fiable. Dette assumée et documentée (pas streaming WS live, pas
+d'annulation, historique appauvri) plutôt que du scope creep pour "bien faire tout de suite".
 
 ---
 
@@ -99,17 +116,20 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 
 ## Scope — phase actuelle
 
-**Deux axes en parallèle :**
-1. **app + frontend** : interaction humain/LLM, gestion utilisateurs, API de configuration
-2. **sandbox** : image de base + serveur WS/MCP + composition toolchains OCI
+harness-core terminé (cli + app migrés, ancien cœur supprimé). Plusieurs workstreams
+avancent en parallèle : tools-v2 (refonte SLM-friendly de `vanyline-tools`, 8 outils finaux),
+sandbox-bootstrap (image podman + confinement des chemins + glue MCP), controller
+(reconciler Owner). Prochain sur harness : convergence cli-harness.md (vrai stockage YAML
+layered, remplace `CliConfigStore`) et app-harness-parity.md (schéma PG étendu, remplace
+`PgConfigStore`) — pas encore démarrés.
 
 **Hors scope pour cette phase :**
-- Controller Kubernetes
-- Intégration des deux axes (nécessite le controller)
-- Multi-utilisateur complet (arrive avec le controller)
+- Intégration app ↔ sandbox (nécessite le controller à maturité)
+- Multi-utilisateur complet, quotas
+- Permissions/approbation des tools ; compaction automatique du contexte
 - Ouverture aux autres contributeurs
 
-**Déclencheur de convergence** : quand les deux axes sont assez matures pour s'assembler via le controller.
+**Déclencheur de convergence** : quand les axes sont assez matures pour s'assembler via le controller.
 
 ---
 
