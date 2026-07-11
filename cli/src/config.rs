@@ -215,6 +215,51 @@ pub fn list_layer_skill_dirs(dir: &std::path::Path) -> Result<BTreeMap<String, P
     Ok(result)
 }
 
+/// "workspace" si `name` est présent dans la map choisie (`pick`) du
+/// `config.yaml` de la couche workspace de `layers`, "global" sinon — y
+/// compris si `layers.workspace_dir` est `None`, ou si son `config.yaml`
+/// est illisible/invalide (cette fonction n'est pas le lieu pour remonter
+/// une erreur de parsing — `list_x()`/`config check` s'en chargent déjà).
+pub fn config_entry_source(
+    layers: &Layers,
+    name: &str,
+    pick: fn(&RawConfigFile) -> &BTreeMap<String, yaml_serde::Value>,
+) -> &'static str {
+    match &layers.workspace_dir {
+        Some(dir) => match load_config_layer(dir) {
+            Ok(raw) if pick(&raw).contains_key(name) => "workspace",
+            _ => "global",
+        },
+        None => "global",
+    }
+}
+
+/// "workspace" si `name` est présent parmi les fichiers d'extension `ext`
+/// sous `<workspace>/<subdir>/`. Même permissivité que `config_entry_source`
+/// en cas d'erreur de lecture.
+pub fn file_entry_source(layers: &Layers, subdir: &str, ext: &str, name: &str) -> &'static str {
+    match &layers.workspace_dir {
+        Some(dir) => match list_layer_files(&dir.join(subdir), ext) {
+            Ok(files) if files.contains_key(name) => "workspace",
+            _ => "global",
+        },
+        None => "global",
+    }
+}
+
+/// Équivalent de `file_entry_source` pour `skills/<name>/SKILL.md`
+/// (découverte par répertoire, pas par extension — cf.
+/// `list_layer_skill_dirs`).
+pub fn skill_entry_source(layers: &Layers, name: &str) -> &'static str {
+    match &layers.workspace_dir {
+        Some(dir) => match list_layer_skill_dirs(&dir.join("skills")) {
+            Ok(files) if files.contains_key(name) => "workspace",
+            _ => "global",
+        },
+        None => "global",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::io::Write;
@@ -525,5 +570,111 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         assert_eq!(result.len(), 2);
         assert!(result.contains_key("pdf"));
         assert!(result.contains_key("csv"));
+    }
+
+    // --- config_entry_source ---
+
+    #[test]
+    fn config_entry_source_workspace_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("config.yaml"),
+            "models:\n  qwen-code:\n    provider: ollama\n    model: qwen2\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: PathBuf::from("/nonexistent"),
+            workspace_dir: Some(ws_dir),
+        };
+        let result = config_entry_source(&layers, "qwen-code", |r| &r.models);
+        assert_eq!(result, "workspace");
+    }
+
+    #[test]
+    fn config_entry_source_global_fallback_no_workspace() {
+        let layers = Layers {
+            global_dir: PathBuf::from("/nonexistent"),
+            workspace_dir: None,
+        };
+        let result = config_entry_source(&layers, "any-key", |r| &r.models);
+        assert_eq!(result, "global");
+    }
+
+    #[test]
+    fn config_entry_source_global_fallback_absent_in_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("config.yaml"),
+            "models:\n  other-model:\n    provider: openai\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: PathBuf::from("/nonexistent"),
+            workspace_dir: Some(ws_dir),
+        };
+        let result = config_entry_source(&layers, "nonexistent-model", |r| &r.models);
+        assert_eq!(result, "global");
+    }
+
+    // --- file_entry_source ---
+
+    #[test]
+    fn file_entry_source_workspace_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("workspace");
+        let toolsets_dir = ws_dir.join("toolsets");
+        std::fs::create_dir_all(&toolsets_dir).unwrap();
+        std::fs::write(toolsets_dir.join("grafana.yaml"), "description: Grafana\n").unwrap();
+        let layers = Layers {
+            global_dir: PathBuf::from("/nonexistent"),
+            workspace_dir: Some(ws_dir),
+        };
+        let result = file_entry_source(&layers, "toolsets", "yaml", "grafana");
+        assert_eq!(result, "workspace");
+    }
+
+    #[test]
+    fn file_entry_source_global_fallback_no_workspace() {
+        let layers = Layers {
+            global_dir: PathBuf::from("/nonexistent"),
+            workspace_dir: None,
+        };
+        let result = file_entry_source(&layers, "toolsets", "yaml", "grafana");
+        assert_eq!(result, "global");
+    }
+
+    // --- skill_entry_source ---
+
+    #[test]
+    fn skill_entry_source_workspace_hit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws_dir = tmp.path().join("workspace");
+        let skills_dir = ws_dir.join("skills").join("pdf");
+        std::fs::create_dir_all(&skills_dir).unwrap();
+        std::fs::write(
+            skills_dir.join("SKILL.md"),
+            "---\ndescription: PDF\n---\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: PathBuf::from("/nonexistent"),
+            workspace_dir: Some(ws_dir),
+        };
+        let result = skill_entry_source(&layers, "pdf");
+        assert_eq!(result, "workspace");
+    }
+
+    #[test]
+    fn skill_entry_source_global_fallback_no_workspace() {
+        let layers = Layers {
+            global_dir: PathBuf::from("/nonexistent"),
+            workspace_dir: None,
+        };
+        let result = skill_entry_source(&layers, "pdf");
+        assert_eq!(result, "global");
     }
 }

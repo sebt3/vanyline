@@ -20,6 +20,11 @@ impl FsConfigStore {
     pub fn new(layers: Layers) -> Self {
         Self { layers }
     }
+
+    #[allow(dead_code)]
+    pub fn layers(&self) -> &Layers {
+        &self.layers
+    }
 }
 
 // --- Formes brutes d'une entrée de map nommée dans config.yaml : mêmes
