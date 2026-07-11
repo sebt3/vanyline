@@ -468,7 +468,7 @@ mod tests {
         let agents_dir = tmp.path().join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
         std::fs::write(
-            &agents_dir.join("build.md"),
+            agents_dir.join("build.md"),
             "---
 description: Agent d'implémentation
 mode: primary
@@ -504,7 +504,7 @@ Tu es un agent d'implémentation.",
         let tmp = tempdir().unwrap();
         let agents_dir = tmp.path().join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(&agents_dir.join("simple.md"), "---\nmodel: x\n---\n").unwrap();
+        std::fs::write(agents_dir.join("simple.md"), "---\nmodel: x\n---\n").unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -526,7 +526,7 @@ Tu es un agent d'implémentation.",
         let tmp = tempdir().unwrap();
         let agents_dir = tmp.path().join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(&agents_dir.join("bad.md"), "model: x\n---\nbody\n").unwrap();
+        std::fs::write(agents_dir.join("bad.md"), "model: x\n---\nbody\n").unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -548,7 +548,7 @@ Tu es un agent d'implémentation.",
         let tmp = tempdir().unwrap();
         let agents_dir = tmp.path().join("agents");
         std::fs::create_dir_all(&agents_dir).unwrap();
-        std::fs::write(&agents_dir.join("bad.md"), "---\nmodel: x\nbody\n").unwrap();
+        std::fs::write(agents_dir.join("bad.md"), "---\nmodel: x\nbody\n").unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -571,7 +571,7 @@ Tu es un agent d'implémentation.",
         let toolsets_dir = tmp.path().join("toolsets");
         std::fs::create_dir_all(&toolsets_dir).unwrap();
         std::fs::write(
-            &toolsets_dir.join("grafana.yaml"),
+            toolsets_dir.join("grafana.yaml"),
             "\
 description: Outils Grafana
 prompt: Interroger Grafana
@@ -609,7 +609,7 @@ tools:
         let tmp = tempdir().unwrap();
         let toolsets_dir = tmp.path().join("toolsets");
         std::fs::create_dir_all(&toolsets_dir).unwrap();
-        std::fs::write(&toolsets_dir.join("empty.yaml"), "tools: {}").unwrap();
+        std::fs::write(toolsets_dir.join("empty.yaml"), "tools: {}").unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -633,12 +633,12 @@ tools:
         std::fs::create_dir_all(global_dir.path().join("agents")).unwrap();
         std::fs::create_dir_all(workspace_dir.path().join("agents")).unwrap();
         std::fs::write(
-            &global_dir.path().join("agents").join("build.md"),
+            global_dir.path().join("agents").join("build.md"),
             "---\nmodel: global-model\n---\nbody\n",
         )
         .unwrap();
         std::fs::write(
-            &workspace_dir.path().join("agents").join("build.md"),
+            workspace_dir.path().join("agents").join("build.md"),
             "---\nmodel: workspace-model\n---\nbody\n",
         )
         .unwrap();
