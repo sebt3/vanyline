@@ -25,19 +25,36 @@ async fn main() {
     }
 
     let _ = tracing_subscriber::fmt::try_init();
-    tracing::info!("controller starting (owner reconciler active)");
+    tracing::info!("controller starting (owner + project reconcilers active)");
 
     let client = kube::Client::try_default()
         .await
         .expect("failed to build kube client from in-cluster or kubeconfig context");
-    let ctx = Arc::new(owner::Context { client: client.clone() });
 
-    owner::build_controller(client)
-        .run(owner::reconcile, owner::error_policy, ctx)
+    let sandbox_image = std::env::var("SANDBOX_IMAGE")
+        .unwrap_or_else(|_| "vanyline-sandbox:latest".to_string());
+
+    let owner_ctx = Arc::new(owner::Context { client: client.clone() });
+    let project_ctx = Arc::new(project::Context {
+        client: client.clone(),
+        sandbox_image,
+    });
+
+    let owner_run = owner::build_controller(client.clone())
+        .run(owner::reconcile, owner::error_policy, owner_ctx)
         .for_each(|res| async move {
             if let Err(e) = res {
                 tracing::warn!(error = %e, "owner reconcile loop error");
             }
-        })
-        .await;
+        });
+
+    let project_run = project::build_controller(client)
+        .run(project::reconcile, project::error_policy, project_ctx)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "project reconcile loop error");
+            }
+        });
+
+    tokio::join!(owner_run, project_run);
 }

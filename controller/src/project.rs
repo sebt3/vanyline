@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec};
 use k8s_openapi::api::core::v1::{
@@ -6,10 +8,16 @@ use k8s_openapi::api::core::v1::{
     PodSpec, PodTemplateSpec, SecretVolumeSource, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
-use kube::{Resource, ResourceExt};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time};
+use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::runtime::controller::{Action, Controller};
+use kube::runtime::finalizer::{Event, finalizer};
+use kube::{Client, Resource, ResourceExt};
 
+use crate::crds::{Owner, ProjectStatus};
 use crate::crds::Project;
+use crate::error::ControllerError;
+use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 
 /// Point de montage du PVC workspace dans les pods (Jobs et, plus tard, Sandbox).
@@ -364,11 +372,191 @@ pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
             template: git_pod_template(project, ctx, script),
             ..Default::default()
         }),
-        ..Default::default()
+            ..Default::default()
     }
 }
 
-#[allow(dead_code)]
+/// Identifiant finalizer (tâche 05).
+const FINALIZER: &str = "vanyline.solidite.fr/project-cleanup";
+
+/// Contexte client Kubernetes + image sandbox par défaut.
+pub struct Context {
+    pub client: Client,
+    /// Image sandbox par défaut pour tous les Jobs git (contient git). Résolu au
+    /// démarrage du controller (`main.rs`) depuis l'env `SANDBOX_IMAGE`.
+    pub sandbox_image: String,
+}
+
+/// Status attendu : `pvc_name`, `cloned`, condition `Ready` reflétant `cloned`
+/// (`True`/`"Init job succeeded"` une fois cloné, `False`/`"Waiting for init job"`
+/// sinon). `last_fetch` et `worktrees` restent vides en v1 (pas encore suivis —
+/// `last_fetch` viendrait du status du CronJob, `worktrees` du reconciler Sandbox,
+/// tous deux hors scope ici).
+pub fn compute_status(project: &Project, cloned: bool) -> ProjectStatus {
+    let (status, reason, message) = if cloned {
+        ("True", "InitJobSucceeded", "PVC workspace et clone bare en place")
+    } else {
+        ("False", "WaitingForInitJob", "En attente de la fin du job project-init")
+    };
+    ProjectStatus {
+        pvc_name: Some(effective_pvc_name(project)),
+        cloned,
+        last_fetch: None,
+        worktrees: Vec::new(),
+        conditions: vec![Condition {
+            type_: "Ready".to_string(),
+            status: status.to_string(),
+            reason: reason.to_string(),
+            message: message.to_string(),
+            last_transition_time: Time(k8s_openapi::jiff::Timestamp::now()),
+            observed_generation: project.meta().generation,
+        }],
+    }
+}
+
+/// Récupère l'Owner référencé par le Project (même namespace).
+async fn fetch_owner(project: &Project, ctx: &Context, ns: &str) -> Result<Owner, ControllerError> {
+    let owners: Api<Owner> = Api::namespaced(ctx.client.clone(), ns);
+    Ok(owners.get(&project.spec.owner).await?)
+}
+
+/// `Event::Apply` : PVC workspace (si à créer) + Job init (une fois) + CronJob
+/// fetch (une fois cloné) + status.
+async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
+    let owner = fetch_owner(project, ctx, ns).await?;
+    let owner_pvc_name = owner
+        .status
+        .as_ref()
+        .and_then(|s| s.pvc_name.clone())
+        .ok_or_else(|| ControllerError::OwnerNotReady {
+            owner: project.spec.owner.clone(),
+            project: project.name_any(),
+        })?;
+
+    let pp = PatchParams::apply(owner::FIELD_MANAGER).force();
+
+    if let Some(pvc) = build_workspace_pvc(
+        project,
+        owner
+            .spec
+            .project_defaults
+            .as_ref()
+            .and_then(|d| d.storage_size.as_deref()),
+        owner
+            .spec
+            .project_defaults
+            .as_ref()
+            .and_then(|d| d.storage_class.as_deref()),
+    ) {
+        let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
+        pvcs.patch(&project_pvc_name(&project.name_any()), &pp, &Patch::Apply(&pvc))
+            .await?;
+    }
+
+    let job_ctx = ProjectJobContext {
+        sandbox_image: ctx.sandbox_image.clone(),
+        owner_pvc_name,
+    };
+
+    let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
+    let cloned = match jobs.get_opt(&init_job_name(&project.name_any())).await? {
+        Some(job) => job.status.and_then(|s| s.succeeded).unwrap_or(0) > 0,
+        None => {
+            let job = build_init_job(project, &job_ctx);
+            jobs.create(&PostParams::default(), &job).await?;
+            false
+        }
+    };
+
+    if cloned {
+        let cronjobs: Api<CronJob> = Api::namespaced(ctx.client.clone(), ns);
+        let mut cronjob = build_fetch_cronjob(project, &job_ctx);
+        cronjob.spec.concurrency_policy = Some("Forbid".to_string());
+        cronjobs
+            .patch(&fetch_cronjob_name(&project.name_any()), &pp, &Patch::Apply(&cronjob))
+            .await?;
+    }
+
+    let projects: Api<Project> = Api::namespaced(ctx.client.clone(), ns);
+    let status = compute_status(project, cloned);
+    let patch = serde_json::json!({ "status": status });
+    projects
+        .patch_status(&project.name_any(), &pp, &Patch::Merge(&patch))
+        .await?;
+
+    Ok(Action::requeue(Duration::from_secs(if cloned { 300 } else { 15 })))
+}
+
+/// `Event::Cleanup` : Job de purge, en attente de succès (voir note sur la
+/// sémantique du finalizer : un `Ok` retire le finalizer, donc on renvoie
+/// `Err(PurgePending)` tant que ce n'est pas terminé).
+async fn cleanup(project: &Project, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
+    let owner_pvc_name = match fetch_owner(project, ctx, ns).await {
+        Ok(owner) => owner.status.and_then(|s| s.pvc_name),
+        Err(_) => None,
+    };
+    let Some(owner_pvc_name) = owner_pvc_name else {
+        tracing::warn!(
+            project = %project.name_any(),
+            "owner introuvable pendant le cleanup — purge ignorée (best-effort v1)"
+        );
+        return Ok(Action::await_change());
+    };
+
+    let job_ctx = ProjectJobContext {
+        sandbox_image: ctx.sandbox_image.clone(),
+        owner_pvc_name,
+    };
+    let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
+    let name = purge_job_name(&project.name_any());
+    match jobs.get_opt(&name).await? {
+        Some(job) if job.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0) > 0 => {
+            Ok(Action::await_change())
+        }
+        Some(_) => Err(ControllerError::PurgePending {
+            project: project.name_any(),
+        }),
+        None => {
+            let job = build_purge_job(project, &job_ctx);
+            jobs.create(&PostParams::default(), &job).await?;
+            Err(ControllerError::PurgePending {
+                project: project.name_any(),
+            })
+        }
+    }
+}
+
+pub async fn reconcile(project: Arc<Project>, ctx: Arc<Context>) -> Result<Action, ControllerError> {
+    let ns = project.namespace().unwrap_or_else(|| "default".to_string());
+    let api: Api<Project> = Api::namespaced(ctx.client.clone(), &ns);
+    finalizer(&api, FINALIZER, project, |event| async {
+        match event {
+            Event::Apply(p) => apply(&p, &ctx, &ns).await,
+            Event::Cleanup(p) => cleanup(&p, &ctx, &ns).await,
+        }
+    })
+    .await
+    .map_err(|e| ControllerError::Finalizer(e.to_string()))
+}
+
+pub fn error_policy(_project: Arc<Project>, error: &ControllerError, _ctx: Arc<Context>) -> Action {
+    match error {
+        ControllerError::PurgePending { .. } => {
+            tracing::info!(%error, "purge job pending, requeue in 10s");
+            Action::requeue(Duration::from_secs(10))
+        }
+        _ => {
+            tracing::warn!(%error, "project reconcile error, requeue in 30s");
+            Action::requeue(Duration::from_secs(30))
+        }
+    }
+}
+
+pub fn build_controller(client: Client) -> Controller<Project> {
+    let projects: Api<Project> = Api::all(client);
+    Controller::new(projects, kube::runtime::watcher::Config::default())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::crds::{PvcRef, ProjectSpec};
@@ -715,5 +903,46 @@ mod tests {
         let purge_job = build_purge_job(&project, &ctx);
         assert!(purge_job.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
             .service_account_name.is_none());
+    }
+
+    // 24. compute_status_cloned_true
+    #[test]
+    fn compute_status_cloned_true() {
+        let project = make_project(None, None);
+        let status = compute_status(&project, true);
+        assert!(status.cloned);
+        assert_eq!(status.pvc_name.as_ref().unwrap(), "project-demo");
+        assert_eq!(status.conditions.len(), 1);
+        let cond = &status.conditions[0];
+        assert_eq!(cond.type_, "Ready");
+        assert_eq!(cond.status, "True");
+        assert_eq!(cond.reason, "InitJobSucceeded");
+    }
+
+    // 25. compute_status_cloned_false
+    #[test]
+    fn compute_status_cloned_false() {
+        let project = make_project(None, None);
+        let status = compute_status(&project, false);
+        assert!(!status.cloned);
+        assert_eq!(status.pvc_name.as_ref().unwrap(), "project-demo");
+        assert_eq!(status.conditions.len(), 1);
+        let cond = &status.conditions[0];
+        assert_eq!(cond.type_, "Ready");
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "WaitingForInitJob");
+    }
+
+    // 26. compute_status_worktrees_and_last_fetch_empty
+    #[test]
+    fn compute_status_worktrees_and_last_fetch_empty() {
+        let project = make_project(None, None);
+        let status_true = compute_status(&project, true);
+        assert!(status_true.worktrees.is_empty());
+        assert!(status_true.last_fetch.is_none());
+
+        let status_false = compute_status(&project, false);
+        assert!(status_false.worktrees.is_empty());
+        assert!(status_false.last_fetch.is_none());
     }
 }
