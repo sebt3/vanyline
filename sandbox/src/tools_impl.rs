@@ -126,6 +126,7 @@ pub fn confine_path(sandbox_root: &Path, user_path: &str) -> Result<PathBuf, San
 use serde_json::Value;
 
 use vanyline_tools::filesystem::{self, DeleteFileOptions, EditFileOptions, ListDirectoryOptions, ReadFileOptions, WriteFileOptions};
+use vanyline_tools::search::{self, FindFilesOptions, SearchOptions};
 
 /// Successful MCP tool-result envelope (`isError: false`).
 pub fn ok_result(text: String) -> Value {
@@ -249,6 +250,60 @@ pub async fn dispatch_filesystem(sandbox_root: &Path, name: &str, arguments: Val
                 match filesystem::list_directory(ListDirectoryOptions {
                     path: resolved.clone(),
                     depth: opts.depth,
+                })
+                .await
+                {
+                    Ok(text) => Some(ok_result(text)),
+                    Err(e) => Some(err_result(e.to_string())),
+                }
+            }
+            Err(val) => Some(val),
+        }
+    }
+    else {
+        None
+    }
+}
+
+/// Dispatches a `tools/call` for `find_files` or `search`. Same shape as
+/// `dispatch_filesystem`: confine `path` (empty → sandbox_root, per
+/// `confine_path`'s own rule), overwrite it, call the tools-v2 function, map
+/// the result. Returns `None` if `name` isn't one of these two.
+pub async fn dispatch_search(sandbox_root: &Path, name: &str, arguments: Value) -> Option<Value> {
+    // --- find_files ---
+    if name == "find_files" {
+        let opts: FindFilesOptions = match serde_json::from_value(arguments) {
+            Ok(o) => o,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        // `path` is optional (serde default = "") — confine with empty is `sandbox_root`
+        match confine(sandbox_root, &opts.path).await {
+            Ok(resolved) => {
+                match search::find_files(FindFilesOptions {
+                    pattern: opts.pattern,
+                    path: resolved,
+                })
+                .await
+                {
+                    Ok(text) => Some(ok_result(text)),
+                    Err(e) => Some(err_result(e.to_string())),
+                }
+            }
+            Err(val) => Some(val),
+        }
+    }
+    // --- search ---
+    else if name == "search" {
+        let opts: SearchOptions = match serde_json::from_value(arguments) {
+            Ok(o) => o,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        match confine(sandbox_root, &opts.path).await {
+            Ok(resolved) => {
+                match search::search(SearchOptions {
+                    pattern: opts.pattern,
+                    path: resolved,
+                    glob: opts.glob,
                 })
                 .await
                 {

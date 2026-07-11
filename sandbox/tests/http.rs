@@ -248,13 +248,38 @@ async fn tools_list_advertises_filesystem_tools() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["jsonrpc"], "2.0");
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 5);
+    assert_eq!(tools.len(), 7);
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
     assert!(names.contains(&"edit_file"));
     assert!(names.contains(&"delete_file"));
     assert!(names.contains(&"list_directory"));
+    assert!(names.contains(&"find_files"));
+    assert!(names.contains(&"search"));
+    assert!(json["error"].is_null());
+}
+
+// ── tools/list — full list ────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn tools_list_advertises_search_tools() {
+    let app = build_app(no_auth_state());
+    let resp = app.oneshot(mcp_request("tools/list")).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["jsonrpc"], "2.0");
+    let tools = json["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 7);
+    let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"read_file"));
+    assert!(names.contains(&"write_file"));
+    assert!(names.contains(&"edit_file"));
+    assert!(names.contains(&"delete_file"));
+    assert!(names.contains(&"list_directory"));
+    assert!(names.contains(&"find_files"));
+    assert!(names.contains(&"search"));
     assert!(json["error"].is_null());
 }
 
@@ -678,6 +703,191 @@ async fn response_id_matches_request_id_string() {
     let resp = app.oneshot(req).await.unwrap();
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["id"], "req-xyz");
+}
+
+// ── tools/call (search) ───────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn tools_call_find_files_nominal() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    // Write a .rs and a .txt file
+    let write_rs_req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "write_file", "arguments": { "path": "a.rs", "content": "fn main() {}" } }
+            }).to_string(),
+        )).unwrap();
+    app.clone().oneshot(write_rs_req).await.unwrap();
+
+    let write_txt_req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "write_file", "arguments": { "path": "b.txt", "content": "hello" } }
+            }).to_string(),
+        )).unwrap();
+    app.clone().oneshot(write_txt_req).await.unwrap();
+
+    // find_files with pattern "*.rs"
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "find_files", "arguments": { "pattern": "*.rs", "path": "" } }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("a.rs"), "expected a.rs in: {text}");
+    assert!(!text.contains("b.txt"), "should not contain b.txt in: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_find_files_default_path() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    // Write a .rs and a .txt file at root
+    let write_rs_req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "write_file", "arguments": { "path": "rusty.rs", "content": "rusty" } }
+            }).to_string(),
+        )).unwrap();
+    app.clone().oneshot(write_rs_req).await.unwrap();
+
+    let write_txt_req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "write_file", "arguments": { "path": "plain.txt", "content": "plain" } }
+            }).to_string(),
+        )).unwrap();
+    app.clone().oneshot(write_txt_req).await.unwrap();
+
+    // find_files WITHOUT path in arguments — should default to sandbox root
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "find_files", "arguments": { "pattern": "*.rs" } }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("rusty.rs"), "expected rusty.rs in: {text}");
+    assert!(!text.contains("plain.txt"), "should not contain plain.txt in: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_search_nominal() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    // Write a file containing "fn foo() {}"
+    let write_req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "write_file", "arguments": { "path": "mod.rs", "content": "fn foo() {}\n" } }
+            }).to_string(),
+        )).unwrap();
+    app.clone().oneshot(write_req).await.unwrap();
+
+    // search with regex pattern
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "search", "arguments": { "pattern": "fn \\w+", "path": "" } }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("foo"), "expected 'foo' in match: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_search_confinement_rejected() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+    // search with path escaping sandbox root
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "search", "arguments": { "pattern": "foo", "path": "../../etc" } }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], true);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("VNL-SBX-001"), "expected VNL-SBX-001 in: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_find_files_invalid_pattern() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+    // find_files with an invalid glob pattern — confinement succeeds (empty path → sandbox_root)
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "find_files", "arguments": { "pattern": "[" } }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], true);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("VNL-TLS-005"), "expected VNL-TLS-005 in: {text}");
 }
 
 // ── OAuth metadata ────────────────────────────────────────────────────────────
