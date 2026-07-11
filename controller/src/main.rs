@@ -1,6 +1,7 @@
 mod crds;
 mod error;
 mod owner;
+mod project;
 
 use clap::Parser;
 use futures::StreamExt;
