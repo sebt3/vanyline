@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use vanyline_lib::VnyError;
 
@@ -100,7 +100,7 @@ impl Layers {
 /// clés des 4 maps sont les noms (`providers.strix`, `models.qwen-code`...) ;
 /// les valeurs restent `yaml_serde::Value` non interprétées.
 #[allow(dead_code)]
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RawConfigFile {
     #[serde(default)]
     pub providers: BTreeMap<String, yaml_serde::Value>,
@@ -258,6 +258,27 @@ pub fn skill_entry_source(layers: &Layers, name: &str) -> &'static str {
         },
         None => "global",
     }
+}
+
+/// Écrit `defaults.agent = name` dans le `config.yaml` de la couche globale
+/// de `layers` (jamais la couche workspace). Relit l'existant (couche
+/// absente -> `RawConfigFile::default()`), mute uniquement `defaults.agent`,
+/// réécrit le fichier en entier — providers/models/mcp/autres clés
+/// `defaults` sont préservées EN CONTENU mais pas en formatting (pas de
+/// commentaires, ordre des clés = ordre `BTreeMap`, cf. `yaml_serde`).
+/// Crée `layers.global_dir` s'il n'existe pas encore.
+#[allow(dead_code)]
+pub fn set_default_agent(layers: &Layers, name: &str) -> Result<(), VnyError> {
+    let mut raw = load_config_layer(&layers.global_dir)?;
+    raw.defaults
+        .insert("agent".to_string(), yaml_serde::Value::String(name.to_string()));
+    std::fs::create_dir_all(&layers.global_dir).map_err(VnyError::from)?;
+    let path = layers.global_dir.join("config.yaml");
+    let content = yaml_serde::to_string(&raw).map_err(|e| {
+        VnyError::ConfigError(format!("Failed to serialize {}: {}", path.display(), e))
+    })?;
+    std::fs::write(&path, content).map_err(VnyError::from)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -676,5 +697,91 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         };
         let result = skill_entry_source(&layers, "pdf");
         assert_eq!(result, "global");
+    }
+
+    // --- set_default_agent ---
+
+    #[test]
+    fn set_default_agent_writes_new_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        set_default_agent(&layers, "build").unwrap();
+        let raw = load_config_layer(&layers.global_dir).unwrap();
+        assert_eq!(
+            raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("build".into()))
+        );
+    }
+
+    #[test]
+    fn set_default_agent_preserves_existing_content() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "providers:\n  strix:\n    type: openai-compatible\n    endpoint: http://localhost\nmodels:\n  qwen-code:\n    provider: ollama\n    model: qwen2.5\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        set_default_agent(&layers, "build").unwrap();
+        let raw = load_config_layer(&layers.global_dir).unwrap();
+        assert!(raw.providers.contains_key("strix"));
+        assert!(raw.models.contains_key("qwen-code"));
+        assert_eq!(
+            raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("build".into()))
+        );
+    }
+
+    #[test]
+    fn set_default_agent_overwrites_existing_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let config_path = tmp.path().join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "defaults:\n  agent: old\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        set_default_agent(&layers, "new").unwrap();
+        let raw = load_config_layer(&layers.global_dir).unwrap();
+        let agent = raw.defaults.get("agent").unwrap();
+        assert_eq!(agent.as_str().unwrap(), "new");
+        // Ensure there's only one entry for "agent" (the BTreeMap should have exactly one)
+        let agent_count = raw.defaults.values().filter(|v| {
+            if let Some(s) = v.as_str() {
+                s == "new"
+            } else {
+                false
+            }
+        }).count();
+        assert_eq!(agent_count, 1);
+    }
+
+    #[test]
+    fn set_default_agent_creates_missing_global_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let non_existent = tmp.path().join("does-not-exist-yet");
+        assert!(!non_existent.exists());
+        let layers = Layers {
+            global_dir: non_existent.clone(),
+            workspace_dir: None,
+        };
+        set_default_agent(&layers, "build").unwrap();
+        assert!(non_existent.is_dir());
+        let raw = load_config_layer(&layers.global_dir).unwrap();
+        assert_eq!(
+            raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("build".into()))
+        );
     }
 }

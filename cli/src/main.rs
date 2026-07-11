@@ -199,36 +199,41 @@ async fn run_conversation(cmd: conversation::Commands) {
 
 async fn run_agent(cmd: agent::Commands) {
     use agent::Commands::*;
-    let config_store = config_store::CliConfigStore::new(config::config_dir());
     use vanyline_lib::store::ConfigStore;
+    let store = discover_fs_store();
 
     match cmd {
         List => {
-            let agents = config_store.list_agents().await.unwrap_or_default();
-            let default_name = config_store.default_agent().await.ok().flatten();
+            let agents = store.list_agents().await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            let default_name = store.default_agent().await.ok().flatten();
             if agents.is_empty() {
                 println!("No agents configured.");
             } else {
                 for a in &agents {
+                    let source = config::file_entry_source(store.layers(), "agents", "md", &a.name);
+                    let summary = a.description.as_deref().unwrap_or("-");
                     let marker = if a.name == default_name.as_deref().unwrap_or("") {
                         " (default)"
                     } else {
                         ""
                     };
-                    println!("  {}{}", a.name, marker);
-                    if let Some(ref desc) = a.description {
-                        println!("      {}", desc);
-                    }
+                    println!("  {} | {} | {}{}", a.name, source, summary, marker);
                 }
             }
         }
         SetDefault { name } => {
-            let agents = config_store.list_agents().await.unwrap_or_default();
+            let agents = store.list_agents().await.unwrap_or_default();
             if !agents.iter().any(|a| a.name == name) {
                 eprintln!("agent not found: {name}");
                 std::process::exit(1);
             }
-            config_store.set_default_agent_name(&name).expect("failed to set default agent");
+            config::set_default_agent(store.layers(), &name).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
             println!("Default agent set to: {name}");
         }
     }
@@ -236,24 +241,28 @@ async fn run_agent(cmd: agent::Commands) {
 
 async fn run_provider(cmd: provider::Commands) {
     use provider::Commands::*;
-    let config_store = config_store::CliConfigStore::new(config::config_dir());
     use vanyline_lib::store::ConfigStore;
+    let store = discover_fs_store();
 
     match cmd {
         List => {
-            let providers = config_store.list_providers().await.unwrap_or_default();
+            let providers = store.list_providers().await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
             if providers.is_empty() {
                 println!("No LLM providers configured.");
             } else {
                 for p in &providers {
-                    println!("  {} | {:?}", p.name, p.provider_type);
+                    let source = config::config_entry_source(store.layers(), &p.name, |raw| &raw.providers);
+                    println!("  {} | {} | {:?}", p.name, source, p.provider_type);
                 }
             }
         }
     }
 }
 
-fn discover_fs_store() -> fs_store::FsConfigStore {
+pub(crate) fn discover_fs_store() -> fs_store::FsConfigStore {
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("Failed to read current directory: {e}");
         std::process::exit(1);

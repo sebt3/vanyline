@@ -7,7 +7,7 @@ use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
 use vanyline_lib::session::run_agent_turn;
 use vanyline_lib::store::ConfigStore;
 
-use crate::{config, config_store::CliConfigStore, store};
+use crate::{config, store};
 
 struct StdoutSink;
 
@@ -111,7 +111,7 @@ async fn run_repl(agent: Option<String>, conversation: Option<Uuid>) {
 /// `subagent_depth_max` ne changent jamais au sein d'une session CLI.
 fn build_session_context() -> vanyline_lib::session::SessionContext {
     vanyline_lib::session::SessionContext {
-        store: Arc::new(CliConfigStore::new(config::config_dir())),
+        store: Arc::new(crate::discover_fs_store()),
         sink: Arc::new(StdoutSink),
         local_tools: crate::tools::local_tools_map(),
         subagent_depth_max: 1,
@@ -172,7 +172,7 @@ async fn resolve_context(
     agent: Option<String>,
     conversation: Option<Uuid>,
 ) -> (vanyline_lib::Conversation, String, bool) {
-    let config_store = CliConfigStore::new(config::config_dir());
+    let config_store = crate::discover_fs_store();
 
     let agents = config_store.list_agents().await.unwrap_or_default();
     let default_agent_name = config_store.default_agent().await.ok().flatten();
