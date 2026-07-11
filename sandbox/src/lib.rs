@@ -2,6 +2,7 @@ pub mod auth;
 pub mod config;
 pub mod mcp;
 pub mod telemetry;
+pub mod tools_impl;
 
 use std::sync::Arc;
 use std::time::Instant;

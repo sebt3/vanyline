@@ -35,3 +35,4 @@ tracing-opentelemetry = { version = "0.33", default-features = false }
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
+tempfile = "3"
