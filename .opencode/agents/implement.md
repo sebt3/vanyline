@@ -79,4 +79,4 @@ Attente : validation de l'utilisateur avant de continuer
 
 ## Commit final
 
-Seulement si tous les tests passent et la compilation est propre. Demander confirmation avant de committer.
+Seulement si tous les tests passent et la compilation est propre.
