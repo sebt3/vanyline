@@ -248,7 +248,7 @@ async fn tools_list_advertises_filesystem_tools() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["jsonrpc"], "2.0");
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 8);
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
@@ -257,6 +257,7 @@ async fn tools_list_advertises_filesystem_tools() {
     assert!(names.contains(&"list_directory"));
     assert!(names.contains(&"find_files"));
     assert!(names.contains(&"search"));
+    assert!(names.contains(&"execute_command"));
     assert!(json["error"].is_null());
 }
 
@@ -271,7 +272,7 @@ async fn tools_list_advertises_search_tools() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["jsonrpc"], "2.0");
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 7);
+    assert_eq!(tools.len(), 8);
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
@@ -280,6 +281,7 @@ async fn tools_list_advertises_search_tools() {
     assert!(names.contains(&"list_directory"));
     assert!(names.contains(&"find_files"));
     assert!(names.contains(&"search"));
+    assert!(names.contains(&"execute_command"));
     assert!(json["error"].is_null());
 }
 
@@ -888,6 +890,157 @@ async fn tools_call_find_files_invalid_pattern() {
     assert_eq!(json["result"]["isError"], true);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("VNL-TLS-005"), "expected VNL-TLS-005 in: {text}");
+}
+
+// ── tools/call (command) ─────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn tools_list_advertises_command_tool() {
+    let app = build_app(no_auth_state());
+    let resp = app.oneshot(mcp_request("tools/list")).await.unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["jsonrpc"], "2.0");
+    let tools = json["result"]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 8);
+    let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"execute_command"));
+    assert!(json["error"].is_null());
+}
+
+#[tokio::test]
+async fn tools_call_execute_command_default_cwd_is_sandbox_root() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    // execute_command sans cwd → doit tourner dans sandbox_root
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": { "command": "pwd" }
+                }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    let expected = tmpdir.path().canonicalize().unwrap();
+    assert!(
+        text.contains(&expected.to_string_lossy().into_owned()),
+        "expected sandbox root {expected:?} in output: {text}"
+    );
+}
+
+#[tokio::test]
+async fn tools_call_execute_command_nominal() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": { "command": "echo hello" }
+                }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("hello"), "expected 'hello' in: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_execute_command_confinement_rejected() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": { "command": "pwd", "cwd": "../../etc" }
+                }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], true);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("VNL-SBX-001"), "expected VNL-SBX-001 in: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_execute_command_empty_command_rejected() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": { "command": "" }
+                }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], true);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("VNL-TLS-005"), "expected VNL-TLS-005 in: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_execute_command_missing_argument() {
+    let app = build_app(no_auth_state());
+
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": {}
+                }
+            }).to_string(),
+        )).unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    // Must be a tool-level error, NOT a JSON-RPC protocol error
+    assert_eq!(json["result"]["isError"], true);
+    assert!(json["error"].is_null(), "expected tool error, not JSON-RPC error");
 }
 
 // ── OAuth metadata ────────────────────────────────────────────────────────────

@@ -127,6 +127,7 @@ use serde_json::Value;
 
 use vanyline_tools::filesystem::{self, DeleteFileOptions, EditFileOptions, ListDirectoryOptions, ReadFileOptions, WriteFileOptions};
 use vanyline_tools::search::{self, FindFilesOptions, SearchOptions};
+use vanyline_tools::command::{self, ExecuteCommandOptions};
 
 /// Successful MCP tool-result envelope (`isError: false`).
 pub fn ok_result(text: String) -> Value {
@@ -316,6 +317,38 @@ pub async fn dispatch_search(sandbox_root: &Path, name: &str, arguments: Value) 
     }
     else {
         None
+    }
+}
+
+/// Dispatches a `tools/call` for `execute_command`. Same shape as the other
+/// `dispatch_*` functions: `cwd` (even empty) always goes through `confine()`,
+/// so the effective default cwd is `sandbox_root` — matching the design's
+/// requirement that execute_command defaults to VNL_SANDBOX_ROOT, not the
+/// sandbox process's own cwd (which is what tools::command::execute does when
+/// given an empty cwd directly, unconfined).
+pub async fn dispatch_command(sandbox_root: &Path, name: &str, arguments: Value) -> Option<Value> {
+    if name != "execute_command" {
+        return None;
+    }
+    let opts: ExecuteCommandOptions = match serde_json::from_value(arguments) {
+        Ok(o) => o,
+        Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+    };
+    // `cwd` is optional (serde default = "") — confine with empty is `sandbox_root`
+    match confine(sandbox_root, &opts.cwd).await {
+        Ok(resolved) => {
+            match command::execute(ExecuteCommandOptions {
+                command: opts.command,
+                timeout_secs: opts.timeout_secs,
+                cwd: resolved,
+            })
+            .await
+            {
+                Ok(text) => Some(ok_result(text)),
+                Err(e) => Some(err_result(e.to_string())),
+            }
+        }
+        Err(val) => Some(val),
     }
 }
 

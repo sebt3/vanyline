@@ -105,6 +105,7 @@ pub(crate) fn handle_initialize(_id: Option<Value>, _params: Value) -> JsonRpcRe
 pub(crate) fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
     let mut tools = vanyline_tools::mcp::filesystem_tools();
     tools.extend(vanyline_tools::mcp::search_tools());
+    tools.extend(vanyline_tools::mcp::command_tools());
     JsonRpcResponse::ok(id, serde_json::json!({ "tools": tools }))
 }
 
@@ -124,7 +125,9 @@ pub(crate) async fn handle_tools_call(
 
     if let Some(result) = tools_impl::dispatch_filesystem(sandbox_root, name, arguments.clone()).await {
         JsonRpcResponse::ok(id, result)
-    } else if let Some(result) = tools_impl::dispatch_search(sandbox_root, name, arguments).await {
+    } else if let Some(result) = tools_impl::dispatch_search(sandbox_root, name, arguments.clone()).await {
+        JsonRpcResponse::ok(id, result)
+    } else if let Some(result) = tools_impl::dispatch_command(sandbox_root, name, arguments).await {
         JsonRpcResponse::ok(id, result)
     } else {
         JsonRpcResponse::err(id, -32602, format!("Unknown tool: {name}"))
@@ -182,7 +185,7 @@ mod tests {
         let resp = handle_tools_list(Some(serde_json::json!(1)));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 7);
+        assert_eq!(tools.len(), 8);
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
@@ -191,6 +194,7 @@ mod tests {
         assert!(names.contains(&"list_directory"));
         assert!(names.contains(&"find_files"));
         assert!(names.contains(&"search"));
+        assert!(names.contains(&"execute_command"));
     }
 
     #[tokio::test]
