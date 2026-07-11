@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
-    PodSpec, Probe, ResourceRequirements, Volume, VolumeMount,
+    PodSpec, Probe, Volume, VolumeMount,
 };
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::ObjectMeta;
@@ -14,17 +14,21 @@ use crate::project::{cache_dir_name, effective_caches, effective_pvc_name, effec
 
 /// Port MCP exposé par `vanyline-sandbox` (`MCP_LISTEN` par défaut `0.0.0.0:3000`
 /// côté binaire — cf. `sandbox/src/config.rs`).
+#[allow(dead_code)]
 pub const MCP_PORT: i32 = 3000;
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
 /// telle quelle de `deploy/sandbox-test.yaml` (recette validée).
+#[allow(dead_code)]
 const BASE_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
+#[allow(dead_code)]
 pub fn pod_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }
 
 /// Point de montage d'un volume toolchain — `/toolchains/<name>`.
+#[allow(dead_code)]
 pub fn toolchain_root(name: &str) -> String {
     format!("/toolchains/{name}")
 }
@@ -34,6 +38,7 @@ pub fn toolchain_root(name: &str) -> String {
 /// `PATH`/`LD_LIBRARY_PATH` sont concaténées entre toolchains par
 /// `aggregate_toolchain_env` ; les autres clés (ex. `RUSTUP_HOME`) sont posées
 /// telles quelles.
+#[allow(dead_code)]
 fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
     match name {
         "rust" => Some(BTreeMap::from([
@@ -53,6 +58,7 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
 /// (le contrat de `SandboxSpec.toolchains[].env`, cf. `crds.rs`), sinon le
 /// preset s'il existe pour `toolchain.name`, sinon aucune variable. Substitue
 /// `{root}` par `toolchain_root(&toolchain.name)` dans chaque valeur.
+#[allow(dead_code)]
 fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
     let root = toolchain_root(&toolchain.name);
     let raw = if !toolchain.env.is_empty() {
@@ -72,6 +78,7 @@ fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
 /// (`RUSTUP_HOME`, etc.) est posée telle quelle — en cas de collision entre
 /// deux toolchains sur une même clé non `PATH`/`LD_LIBRARY_PATH`, la dernière
 /// toolchain de la liste gagne.
+#[allow(dead_code)]
 pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
     let mut path_segments = Vec::new();
     let mut ld_segments = Vec::new();
@@ -111,6 +118,7 @@ pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
 
 /// Variable d'env pour un cache donné, `None` si le cache n'a pas de convention
 /// connue (seuls `"cargo"` et `"pnpm"` en ont une en v1).
+#[allow(dead_code)]
 fn cache_env_var(cache: &str) -> Option<(&'static str, String)> {
     let path = format!("/project-cache/{}", crate::project::cache_dir_name(cache));
     match cache {
@@ -124,6 +132,7 @@ fn cache_env_var(cache: &str) -> Option<(&'static str, String)> {
 /// kydah-code) avec un chemin relatif du layout (`worktree_path`, `cache_path`).
 /// `None` côté Project => le chemin relatif est utilisé tel quel (le PVC créé
 /// n'appartient qu'à ce Project, pas de préfixe nécessaire).
+#[allow(dead_code)]
 fn combine_sub_path(project: &Project, relative: &str) -> String {
     match effective_sub_path(project) {
         Some(base) => format!("{base}/{relative}"),
@@ -133,6 +142,7 @@ fn combine_sub_path(project: &Project, relative: &str) -> String {
 
 /// Context résolu par l'appelant (le reconciler Sandbox ira chercher l'Owner du
 /// Project référencé — cette fonction reste pure, aucun appel réseau).
+#[allow(dead_code)]
 pub struct SandboxPodContext {
     pub owner_name: String,
     pub owner_pvc_name: String,
@@ -146,6 +156,7 @@ pub struct SandboxPodContext {
 /// `--no-auth` (voir décisions de cette tâche), probes `/health`, labels
 /// `vanyline.solidite.fr/{owner,project,sandbox}`, `ownerReference` vers la
 /// Sandbox (GC en cascade).
+#[allow(dead_code)]
 pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodContext) -> Pod {
     let workspace_pvc = effective_pvc_name(project);
     let mut volumes = vec![
@@ -218,7 +229,7 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
     let mut labels = BTreeMap::new();
     labels.insert("vanyline.solidite.fr/owner".to_string(), ctx.owner_name.clone());
     labels.insert("vanyline.solidite.fr/project".to_string(), sandbox.spec.project.clone());
-    labels.insert("vanyline.solidite.fr/sandbox".to_string(), pod_name(&sandbox.name_any()));
+    labels.insert("vanyline.solidite.fr/sandbox".to_string(), sandbox.name_any());
 
     let probe = Probe {
         http_get: Some(HTTPGetAction {
@@ -437,7 +448,7 @@ mod tests {
         let labels = pod.metadata.labels.as_ref().expect("should have labels");
         assert_eq!(labels.get("vanyline.solidite.fr/owner").map(String::as_str), Some("alice"));
         assert_eq!(labels.get("vanyline.solidite.fr/project").map(String::as_str), Some("demo"));
-        assert_eq!(labels.get("vanyline.solidite.fr/sandbox").map(String::as_str), Some("sandbox-demo-branch"));
+        assert_eq!(labels.get("vanyline.solidite.fr/sandbox").map(String::as_str), Some("demo-branch"));
     }
 
     #[test]
@@ -624,6 +635,7 @@ mod tests {
 
     #[test]
     fn resources_passthrough() {
+        use k8s_openapi::api::core::v1::ResourceRequirements;
         use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
         use std::collections::BTreeMap;
 
