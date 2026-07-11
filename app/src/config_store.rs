@@ -13,7 +13,7 @@ use vanyline_lib::VnyError;
 
 use crate::db::models::{
     AgentRow, LlmProvider as DbLlmProvider, McpServer as DbMcpServer,
-    ModelProfile as DbModelProfile, Toolset as DbToolset,
+    ModelProfile as DbModelProfile, Skill as DbSkill, Toolset as DbToolset,
 };
 
 // ---------------------------------------------------------------------------
@@ -140,6 +140,15 @@ fn domain_toolset(row: &DbToolset) -> Toolset {
     }
 }
 
+/// Index léger : ne porte jamais `body` (cohérent avec `SkillMeta` côté
+/// domaine — le corps est chargé séparément par `load_skill`).
+fn domain_skill_meta(row: &DbSkill) -> SkillMeta {
+    SkillMeta {
+        name: row.name.clone(),
+        description: row.description.clone(),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // PgConfigStore — méthodes ConfigStore, fines : une requête + un appel aux
 // fonctions pures ci-dessus.
@@ -181,6 +190,14 @@ impl PgConfigStore {
 
     async fn load_agents(&self) -> Result<Vec<AgentRow>, VnyError> {
         sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| VnyError::ConfigError(e.to_string()))
+    }
+
+    async fn load_skills(&self) -> Result<Vec<DbSkill>, VnyError> {
+        sqlx::query_as::<_, DbSkill>("SELECT * FROM skills WHERE user_id = $1")
+            .bind(self.user_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
@@ -235,11 +252,20 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
-        Ok(Vec::new())
+        let rows = self.load_skills().await?;
+        Ok(rows.iter().map(domain_skill_meta).collect())
     }
 
     async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
-        Err(VnyError::UnknownReference("skill", name.to_string()))
+        sqlx::query_scalar::<_, String>(
+            "SELECT body FROM skills WHERE user_id = $1 AND name = $2",
+        )
+        .bind(self.user_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| VnyError::ConfigError(e.to_string()))?
+        .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))
     }
 
     async fn default_agent(&self) -> Result<Option<String>, VnyError> {
@@ -592,5 +618,52 @@ mod tests {
         let toolset2 = domain_toolset(&row2);
         assert_eq!(toolset2.description, None);
         assert_eq!(toolset2.prompt, None);
+    }
+
+    // 18. domain_skill_meta_index_only
+    #[test]
+    fn domain_skill_meta_index_only() {
+        let row = DbSkill {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            name: "pdf".to_string(),
+            description: "PDF processing".to_string(),
+            body: "# corps long...".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let meta = domain_skill_meta(&row);
+        assert_eq!(meta.name, "pdf");
+        assert_eq!(meta.description, "PDF processing");
+    }
+
+    #[allow(dead_code)]
+    fn sample_skill(id: Uuid, user_id: Uuid, name: &str, description: &str, body: &str) -> DbSkill {
+        DbSkill {
+            id,
+            user_id,
+            name: name.to_string(),
+            description: description.to_string(),
+            body: body.to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    // 19. domain_skill_meta_empty_description
+    #[test]
+    fn domain_skill_meta_empty_description() {
+        let row = DbSkill {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            name: "blank".to_string(),
+            description: "".to_string(),
+            body: "body".to_string(),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        let meta = domain_skill_meta(&row);
+        assert_eq!(meta.name, "blank");
+        assert_eq!(meta.description, "");
     }
 }

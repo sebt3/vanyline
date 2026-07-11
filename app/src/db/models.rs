@@ -63,6 +63,17 @@ pub struct Toolset {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct Skill {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub body: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: Uuid,
