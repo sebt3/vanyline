@@ -32,6 +32,8 @@ opentelemetry_sdk = { version = "0.32", default-features = false, features = ["t
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"] }
 tracing-opentelemetry = { version = "0.33", default-features = false }
 
+vanyline-tools = { path = "../tools" }
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"

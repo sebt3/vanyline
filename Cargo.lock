@@ -5084,6 +5084,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "vanyline-tools",
 ]
 
 [[package]]

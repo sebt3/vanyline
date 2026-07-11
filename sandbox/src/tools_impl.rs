@@ -123,6 +123,147 @@ pub fn confine_path(sandbox_root: &Path, user_path: &str) -> Result<PathBuf, San
     }
 }
 
+use serde_json::Value;
+
+use vanyline_tools::filesystem::{self, DeleteFileOptions, EditFileOptions, ListDirectoryOptions, ReadFileOptions, WriteFileOptions};
+
+/// Successful MCP tool-result envelope (`isError: false`).
+pub fn ok_result(text: String) -> Value {
+    serde_json::json!({ "content": [{"type": "text", "text": text}], "isError": false })
+}
+
+/// Failed MCP tool-result envelope (`isError: true`) — a *tool-level* failure,
+/// not a JSON-RPC protocol error. The tool name was valid; execution failed.
+pub fn err_result(text: String) -> Value {
+    serde_json::json!({ "content": [{"type": "text", "text": text}], "isError": true })
+}
+
+/// Resolves `raw_path` under `sandbox_root`, off the tokio executor thread
+/// (confine_path does blocking filesystem I/O). On confinement failure, returns
+/// an `err_result` envelope ready to hand straight back to the MCP caller.
+pub async fn confine(sandbox_root: &Path, raw_path: &str) -> Result<String, Value> {
+    let root = sandbox_root.to_path_buf();
+    let raw = raw_path.to_string();
+    tokio::task::spawn_blocking(move || confine_path(&root, &raw))
+        .await
+        .expect("confine_path blocking task panicked")
+        .map(|p| p.to_string_lossy().into_owned())
+        .map_err(|e| err_result(e.to_string()))
+}
+
+/// Dispatches a `tools/call` for one of the 5 filesystem tools
+/// (read_file, write_file, edit_file, delete_file, list_directory).
+/// Returns `None` if `name` isn't one of them, so the caller can try other
+/// tool families (search, command — added in follow-up tasks).
+pub async fn dispatch_filesystem(sandbox_root: &Path, name: &str, arguments: Value) -> Option<Value> {
+    // --- read_file ---
+    if name == "read_file" {
+        let opts: ReadFileOptions = match serde_json::from_value(arguments) {
+            Ok(o) => o,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        match confine(sandbox_root, &opts.path).await {
+            Ok(resolved) => {
+                let mut o = opts;
+                o.path = resolved;
+                match filesystem::read_file(o).await {
+                    Ok(text) => Some(ok_result(text)),
+                    Err(e) => Some(err_result(e.to_string())),
+                }
+            }
+            Err(val) => Some(val),
+        }
+    }
+    // --- write_file ---
+    else if name == "write_file" {
+        let opts: WriteFileOptions = match serde_json::from_value(arguments) {
+            Ok(o) => o,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        match confine(sandbox_root, &opts.path).await {
+            Ok(resolved) => {
+                match filesystem::write_file(WriteFileOptions {
+                    path: resolved.clone(),
+                    content: opts.content,
+                })
+                .await
+                {
+                    Ok(()) => Some(ok_result(format!("wrote {resolved}"))),
+                    Err(e) => Some(err_result(e.to_string())),
+                }
+            }
+            Err(val) => Some(val),
+        }
+    }
+    // --- edit_file ---
+    else if name == "edit_file" {
+        let opts: EditFileOptions = match serde_json::from_value(arguments) {
+            Ok(o) => o,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        match confine(sandbox_root, &opts.path).await {
+            Ok(resolved) => {
+                match filesystem::edit_file(EditFileOptions {
+                    path: resolved.clone(),
+                    old_string: opts.old_string,
+                    new_string: opts.new_string,
+                    replace_all: opts.replace_all,
+                })
+                .await
+                {
+                    Ok(text) => Some(ok_result(text)),
+                    Err(e) => Some(err_result(e.to_string())),
+                }
+            }
+            Err(val) => Some(val),
+        }
+    }
+    // --- delete_file ---
+    else if name == "delete_file" {
+        let opts: DeleteFileOptions = match serde_json::from_value(arguments) {
+            Ok(o) => o,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        match confine(sandbox_root, &opts.path).await {
+            Ok(resolved) => {
+                match filesystem::delete_file(DeleteFileOptions {
+                    path: resolved.clone(),
+                })
+                .await
+                {
+                    Ok(()) => Some(ok_result(format!("deleted {resolved}"))),
+                    Err(e) => Some(err_result(e.to_string())),
+                }
+            }
+            Err(val) => Some(val),
+        }
+    }
+    // --- list_directory ---
+    else if name == "list_directory" {
+        let opts: ListDirectoryOptions = match serde_json::from_value(arguments) {
+            Ok(o) => o,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        match confine(sandbox_root, &opts.path).await {
+            Ok(resolved) => {
+                match filesystem::list_directory(ListDirectoryOptions {
+                    path: resolved.clone(),
+                    depth: opts.depth,
+                })
+                .await
+                {
+                    Ok(text) => Some(ok_result(text)),
+                    Err(e) => Some(err_result(e.to_string())),
+                }
+            }
+            Err(val) => Some(val),
+        }
+    }
+    else {
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

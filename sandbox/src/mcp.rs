@@ -2,7 +2,7 @@ use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::AppState;
+use crate::{AppState, tools_impl};
 
 // ── JSON-RPC 2.0 types ───────────────────────────────────────────────────────
 
@@ -59,7 +59,7 @@ impl JsonRpcResponse {
 // ── MCP POST /mcp ─────────────────────────────────────────────────────────────
 
 pub async fn handle(
-    State(_state): State<AppState>,
+    State(state): State<AppState>,
     Json(req): Json<JsonRpcRequest>,
 ) -> impl IntoResponse {
     // Notifications have no id and expect HTTP 202, no body
@@ -70,6 +70,8 @@ pub async fn handle(
 
     metrics::counter!("mcp_requests_total", "method" => req.method.clone()).increment(1);
 
+    let sandbox_root = &state.config.sandbox_root;
+
     let response = match req.method.as_str() {
         "initialize" => handle_initialize(req.id, req.params),
         "notifications/initialized" => {
@@ -77,7 +79,7 @@ pub async fn handle(
             return StatusCode::ACCEPTED.into_response();
         }
         "tools/list" => handle_tools_list(req.id),
-        "tools/call" => handle_tools_call(req.id, req.params),
+        "tools/call" => handle_tools_call(req.id, req.params, sandbox_root).await,
         _ => JsonRpcResponse::err(req.id, -32601, format!("Method not found: {}", req.method)),
     };
 
@@ -101,24 +103,14 @@ pub(crate) fn handle_initialize(_id: Option<Value>, _params: Value) -> JsonRpcRe
 }
 
 pub(crate) fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
-    JsonRpcResponse::ok(
-        id,
-        serde_json::json!({
-            "tools": [
-                {
-                    "name": "ping",
-                    "description": "Health-check tool: replies pong",
-                    "inputSchema": {
-                        "type": "object",
-                        "properties": {}
-                    }
-                }
-            ]
-        }),
-    )
+    JsonRpcResponse::ok(id, serde_json::json!({ "tools": vanyline_tools::mcp::filesystem_tools() }))
 }
 
-fn handle_tools_call(id: Option<Value>, params: Value) -> JsonRpcResponse {
+pub(crate) async fn handle_tools_call(
+    id: Option<Value>,
+    params: Value,
+    sandbox_root: &std::path::Path,
+) -> JsonRpcResponse {
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
         None => {
@@ -126,20 +118,12 @@ fn handle_tools_call(id: Option<Value>, params: Value) -> JsonRpcResponse {
         }
     };
 
-    match name {
-        "ping" => JsonRpcResponse::ok(
-            id,
-            serde_json::json!({
-                "content": [
-                    {
-                        "type": "text",
-                        "text": "pong"
-                    }
-                ],
-                "isError": false
-            }),
-        ),
-        unknown => JsonRpcResponse::err(id, -32602, format!("Unknown tool: {unknown}")),
+    let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
+
+    if let Some(result) = tools_impl::dispatch_filesystem(sandbox_root, name, arguments).await {
+        JsonRpcResponse::ok(id, result)
+    } else {
+        JsonRpcResponse::err(id, -32602, format!("Unknown tool: {name}"))
     }
 }
 
@@ -190,29 +174,23 @@ mod tests {
     }
 
     #[test]
-    fn tools_list_contains_ping() {
+    fn tools_list_returns_filesystem_tools() {
         let resp = handle_tools_list(Some(serde_json::json!(1)));
         let result = resp.result.unwrap();
-        let tools = &result["tools"];
-        assert!(tools.as_array().unwrap().len() == 1);
-        assert_eq!(tools[0]["name"], "ping");
-        assert_eq!(tools[0]["description"], "Health-check tool: replies pong");
-        assert_eq!(tools[0]["inputSchema"]["type"], "object");
+        let tools = result["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 5);
+        let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"edit_file"));
+        assert!(names.contains(&"delete_file"));
+        assert!(names.contains(&"list_directory"));
     }
 
-    #[test]
-    fn tools_call_ping_returns_pong() {
-        let params = serde_json::json!({ "name": "ping", "arguments": {} });
-        let resp = handle_tools_call(Some(serde_json::json!(1)), params);
-        let result = resp.result.unwrap();
-        assert_eq!(result["content"][0]["text"], "pong");
-        assert_eq!(result["isError"], false);
-    }
-
-    #[test]
-    fn tools_call_unknown_tool_returns_error() {
+    #[tokio::test]
+    async fn tools_call_unknown_tool_returns_error() {
         let params = serde_json::json!({ "name": "nope", "arguments": {} });
-        let resp = handle_tools_call(Some(serde_json::json!(1)), params);
+        let resp = handle_tools_call(Some(serde_json::json!(1)), params, std::path::Path::new("/tmp")).await;
         let error = resp.error.unwrap();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "Unknown tool: nope");
@@ -220,8 +198,16 @@ mod tests {
 
     #[test]
     fn tools_call_missing_name_returns_error() {
-        let params = serde_json::json!({ "arguments": {} });
-        let resp = handle_tools_call(Some(serde_json::json!(1)), params);
+        // handle_tools_call needs async — but we test the missing-name branch
+        // which is synchronous (just extracts and matches). Use a quick wrapper.
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let resp = rt.block_on(async {
+            let params = serde_json::json!({ "arguments": {} });
+            handle_tools_call(Some(serde_json::json!(1)), params, std::path::Path::new("/tmp")).await
+        });
         let error = resp.error.unwrap();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "Missing tool name in params");
