@@ -1,0 +1,106 @@
+use serde::{Deserialize, Serialize};
+
+/// Version de protocole supportée par ce serveur (design doc, section "Cycle de vie").
+pub const PROTOCOL_VERSION: u32 = 1;
+
+/// Requête JSON-RPC entrante. `params` défaut à `Value::Null` si absent —
+/// chaque méthode fait sa propre désérialisation depuis ce `Value`.
+#[derive(Debug, Deserialize)]
+pub struct JsonRpcRequest {
+    #[allow(dead_code)]
+    pub jsonrpc: String,
+    /// `None` = notification (pas de réponse attendue). Aucune méthode
+    /// client -> serveur de cette tâche n'est une notification : traiter
+    /// `None` comme un id `Value::Null` pour construire la réponse quand
+    /// même (permissif — le design ne définit pas ce cas explicitement).
+    #[serde(default)]
+    pub id: Option<serde_json::Value>,
+    pub method: String,
+    #[serde(default)]
+    pub params: serde_json::Value,
+}
+
+/// Réponse JSON-RPC sortante (succès XOR erreur — jamais les deux, jamais aucun
+/// des deux ; c'est `JsonRpcResponse::success`/`::error` qui garantit ça, pas
+/// le type — ne pas construire la struct à la main ailleurs que dans ces
+/// deux fonctions).
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonRpcResponse {
+    pub jsonrpc: String,
+    pub id: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub result: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<JsonRpcErrorObj>,
+}
+
+impl JsonRpcResponse {
+    pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
+        Self { jsonrpc: "2.0".to_string(), id, result: Some(result), error: None }
+    }
+
+    pub fn error(id: serde_json::Value, code: i64, message: impl Into<String>, vnl_code: &'static str) -> Self {
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result: None,
+            error: Some(JsonRpcErrorObj {
+                code,
+                message: message.into(),
+                data: JsonRpcErrorData { code: vnl_code.to_string() },
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonRpcErrorObj {
+    pub code: i64,
+    pub message: String,
+    pub data: JsonRpcErrorData,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct JsonRpcErrorData {
+    /// Identifiant unique `VNL-RPC-*` — TOUTE réponse d'erreur en a un
+    /// (règle du projet, cf. AGENTS.md "Messages d'erreur avec identifiant unique").
+    pub code: String,
+}
+
+/// Codes JSON-RPC standard (plage réservée -32768..-32000, spec JSON-RPC 2.0).
+pub mod jsonrpc_code {
+    pub const PARSE_ERROR: i64 = -32700;
+    pub const METHOD_NOT_FOUND: i64 = -32601;
+    pub const SERVER_ERROR: i64 = -32000;
+}
+
+/// Codes `VNL-RPC-*` de cette tâche. Les tâches 2/3 en ajouteront d'autres
+/// (busy = VNL-RPC-002 déjà réservé par le design, pas utilisé ici).
+pub mod vnl_code {
+    pub const MALFORMED_REQUEST: &str = "VNL-RPC-000";
+    pub const NOT_INITIALIZED: &str = "VNL-RPC-001";
+    #[allow(dead_code)] // utilisé par la tâche 3 (rpc-chat)
+    pub const BUSY: &str = "VNL-RPC-002";
+    pub const UNKNOWN_PROTOCOL_VERSION: &str = "VNL-RPC-003";
+    pub const METHOD_NOT_FOUND: &str = "VNL-RPC-004";
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeParams {
+    pub protocol_version: u32,
+    #[serde(default)]
+    #[allow(dead_code)] // consommé par la tâche 2 (layering de config par workspace)
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InitializeResult {
+    pub protocol_version: u32,
+    pub server_version: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_agent: Option<String>,
+}

@@ -11,6 +11,8 @@ mod toolset_cmd;
 mod skill_cmd;
 mod mcp_cmd;
 
+mod rpc;
+
 use clap::{Parser, Subcommand};
 use tracing_subscriber::prelude::*;
 
@@ -57,6 +59,12 @@ enum Commands {
     /// Validate configuration (both layers)
     #[command(subcommand)]
     Config(config_cmd::Commands),
+    /// Run a JSON-RPC 2.0 server (for the VS Code extension, or any programmatic client)
+    Serve {
+        /// Use stdio transport (the only transport supported in v1)
+        #[arg(long)]
+        stdio: bool,
+    },
 }
 
 mod conversation {
@@ -141,6 +149,14 @@ async fn main() {
         Some(Commands::Skills(cmd)) => run_skills(cmd).await,
         Some(Commands::Mcp(cmd)) => run_mcp(cmd).await,
         Some(Commands::Config(cmd)) => run_config(cmd).await,
+        Some(Commands::Serve { stdio }) => {
+            if stdio {
+                rpc::run_stdio_server().await;
+            } else {
+                eprintln!("vanyline serve: only --stdio is currently supported");
+                std::process::exit(1);
+            }
+        }
     }
 }
 
