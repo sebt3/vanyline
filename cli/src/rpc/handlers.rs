@@ -2,10 +2,12 @@ use crate::rpc::protocol::*;
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io::ErrorKind;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use uuid::Uuid;
-use vanyline_lib::event::{ChatEvent, EventSink};
+use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
+use vanyline_lib::session::{run_agent_turn, SessionContext};
 use vanyline_lib::store::ConfigStore;
 
 use crate::store;
@@ -17,7 +19,6 @@ pub struct ServerState {
     /// Sender du canal d'écriture unique de `rpc::mod` — cloné dans toute
     /// tâche spawnée qui a besoin d'écrire (réponse finale OU notification
     /// `chat/event`, tâche 03b).
-    #[allow(dead_code)] // utilisé par la tâche 03b (chat/send)
     pub tx: mpsc::UnboundedSender<String>,
     /// Conversations avec un tour actif — vérifié/inséré de façon atomique
     /// avant de spawner un tour (tâche 03b) ; PAS utilisé par cette tâche
@@ -170,6 +171,7 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "conversations/create" => Some(handle_conversations_create(id, request.params)),
         "conversations/delete" => Some(handle_conversations_delete(id, request.params)),
         "chat/cancel" => Some(handle_chat_cancel(id, request.params)),
+        "chat/send" => handle_chat_send(state, id, request.params).await,
         _ => Some(
             serde_json::to_string(&JsonRpcResponse::error(
                 id,
@@ -444,10 +446,209 @@ fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
     serde_json::to_string(&JsonRpcResponse::success(id, Value::Null)).expect("serialize cancel response")
 }
 
+/// `chat/send` : `{conversationId, message, agent?}` -> `{text, toolCalls}`.
+/// Répond de façon ASYNCHRONE (contrairement à toutes les autres
+/// méthodes) : la partie synchrone de cette fonction ne fait que valider
+/// et réserver (parse params, charge la conversation, vérifie/marque
+/// `busy`, résout le NOM de l'agent) — dès que tout est valide, elle
+/// spawn une tâche tokio qui fait le vrai tour LLM et envoie la réponse
+/// finale sur `state.tx` elle-même (PAS via la valeur de retour). Ordre
+/// de validation (chaque étape peut retourner `Some(erreur)` avant tout
+/// spawn) :
+/// 1. `params` désérialise en `ChatSendParams` ? Sinon `VNL-RPC-000`.
+/// 2. `conversationId` est un UUID valide ? Sinon `VNL-RPC-000`.
+/// 3. `store::get_conversation(&uuid)` réussit ? `NotFound` ->
+///    `VNL-RPC-005` ; autre erreur io -> `VNL-RPC-007`.
+/// 4. Verrou `busy` : si déjà présent -> `VNL-RPC-002`, RIEN d'autre ne se
+///    passe (pas de spawn). Sinon, insertion immédiate (même verrouillage
+///    court, synchrone, cf. tâche 03a).
+/// 5. Résolution du NOM d'agent (PAS de validation qu'il existe
+///    réellement dans le store — ça, c'est `run_agent_turn`, tâche
+///    session-engine, qui s'en charge et propage son échec comme
+///    `VNL-RPC-009` plus bas) : `params.agent` -> sinon `conv.agent` ->
+///    sinon `store.default_agent().await` -> si toujours rien,
+///    `VNL-RPC-008`, ET retirer `conv_id` de `busy` avant de retourner
+///    (déjà inséré à l'étape 4).
+/// 6. Spawn : construit un `SessionContext` (store en `Arc<dyn
+///    ConfigStore>`, sink = `RpcEventSink` pour CETTE conversation,
+///    `local_tools` = `crate::tools::local_tools_map()`,
+///    `subagent_depth_max: 1`), convertit l'historique de `conv.messages`,
+///    appelle `run_agent_turn`, persiste la conversation (best-effort,
+///    même `.ok()` que `cli/src/chat.rs` — ne bloque pas la réponse au
+///    client), construit la réponse finale (succès ou
+///    `VNL-RPC-009` si `run_agent_turn` a échoué), l'envoie sur `tx`.
+///    `busy` est TOUJOURS nettoyé à la fin (via `BusyGuard`, ci-dessous —
+///    son `Drop` retire `conv_id`, garanti même si la tâche panique).
+///    Retourne `None` dès que le spawn a lieu — la réponse arrivera plus
+///    tard sur `tx`, avec le MÊME `id` que la requête originale.
+async fn handle_chat_send(state: &ServerState, id: Value, params: serde_json::Value) -> Option<String> {
+    let params: ChatSendParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => return Some(serde_json::to_string(&JsonRpcResponse::error(
+            id, jsonrpc_code::PARSE_ERROR,
+            "Malformed request: params could not be deserialized as ChatSendParams",
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize chat/send error response")),
+    };
+    let conv_id = match Uuid::parse_str(&params.conversation_id) {
+        Ok(u) => u,
+        Err(_) => return Some(serde_json::to_string(&JsonRpcResponse::error(
+            id, jsonrpc_code::PARSE_ERROR,
+            format!("Invalid UUID in conversationId: {}", params.conversation_id),
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize chat/send error response")),
+    };
+    let conv = match store::get_conversation(&conv_id) {
+        Ok(c) => c,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Some(serde_json::to_string(&JsonRpcResponse::error(
+            id, jsonrpc_code::SERVER_ERROR,
+            format!("Conversation not found: {}", params.conversation_id),
+            vnl_code::CONVERSATION_NOT_FOUND,
+        )).expect("serialize chat/send error response")),
+        Err(e) => return Some(serde_json::to_string(&JsonRpcResponse::error(
+            id, jsonrpc_code::SERVER_ERROR, format!("{e}"), vnl_code::CONVERSATION_STORAGE_ERROR,
+        )).expect("serialize chat/send error response")),
+    };
+
+    {
+        let mut busy = state.busy.lock().unwrap();
+        if busy.contains(&conv_id) {
+            return Some(serde_json::to_string(&JsonRpcResponse::error(
+                id, jsonrpc_code::SERVER_ERROR, "Conversation busy: a turn is already in progress", vnl_code::BUSY,
+            )).expect("serialize chat/send error response"));
+        }
+        busy.insert(conv_id);
+    }
+
+    let store = state.store.as_ref().expect("initialized implies store = Some").clone();
+    let agent_name = match params.agent.clone().or_else(|| conv.agent.clone()) {
+        Some(a) => Some(a),
+        None => store.default_agent().await.ok().flatten(),
+    };
+    let agent_name = match agent_name {
+        Some(a) => a,
+        None => {
+            state.busy.lock().unwrap().remove(&conv_id);
+            return Some(serde_json::to_string(&JsonRpcResponse::error(
+                id, jsonrpc_code::SERVER_ERROR,
+                "No agent specified, no agent on the conversation, and no default agent configured",
+                vnl_code::NO_AGENT_RESOLVED,
+            )).expect("serialize chat/send error response"));
+        }
+    };
+
+    let tx = state.tx.clone();
+    let busy = state.busy.clone();
+    let seq = state.seq.clone();
+    let workspace_context = read_workspace_context(&store);
+    let history = conversation_history_to_messages(&conv.messages);
+    let message = params.message.clone();
+
+    tokio::spawn(async move {
+        let _guard = BusyGuard { busy, conv_id };
+        let ctx = SessionContext {
+            store: store.clone() as Arc<dyn ConfigStore>,
+            sink: Arc::new(RpcEventSink { conversation_id: conv_id, seq, tx: tx.clone() }),
+            local_tools: crate::tools::local_tools_map(),
+            subagent_depth_max: 1,
+        };
+        let result = run_agent_turn(&ctx, &agent_name, history, &message, workspace_context.as_deref()).await;
+        let response = match result {
+            Ok(turn_result) => {
+                let mut conv = conv;
+                conv.messages.push(vanyline_lib::Message {
+                    role: "user".to_string(),
+                    content: message,
+                    tool_calls: None,
+                });
+                conv.messages.push(chat_turn_result_to_message(&turn_result));
+                store::save_conversation(&conv).ok();
+                JsonRpcResponse::success(id, serde_json::to_value(ChatSendResult {
+                    text: turn_result.response_text,
+                    tool_calls: turn_result.tool_calls,
+                }).expect("serialize ChatSendResult"))
+            }
+            Err(e) => JsonRpcResponse::error(id, jsonrpc_code::SERVER_ERROR, format!("{e}"), vnl_code::TURN_EXECUTION_ERROR),
+        };
+        if let Ok(line) = serde_json::to_string(&response) {
+            let _ = tx.send(line);
+        }
+    });
+
+    None
+}
+
+/// Nettoie `busy` à la fin d'un tour, même en cas de panique dans la tâche
+/// spawnée — `Drop` est synchrone, cohérent avec `busy: Mutex` (pas
+/// `tokio::sync::Mutex`, cf. tâche 03a).
+struct BusyGuard {
+    busy: Arc<Mutex<HashSet<Uuid>>>,
+    conv_id: Uuid,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.busy.lock().unwrap().remove(&self.conv_id);
+    }
+}
+
+/// Contenu d'AGENTS.md à la racine du workspace résolu par `initialize`
+/// (`store.layers().workspace_dir`), s'il existe — équivalent RPC de
+/// `cli/src/chat.rs::read_workspace_context` (qui lit depuis le cwd du
+/// process CLI ; ici la racine vient du client, pas du cwd, cf. design).
+/// `None` si `workspace_dir` est `None` ou si le fichier n'existe pas.
+fn read_workspace_context(store: &crate::fs_store::FsConfigStore) -> Option<String> {
+    let dir = store.layers().workspace_dir.as_ref()?;
+    std::fs::read_to_string(dir.join("AGENTS.md")).ok()
+}
+
+/// Convertit l'historique persistant (`vanyline_lib::Message`, rôles
+/// "user"/"assistant" en `String`) en historique `rig_core` — DUPLIQUE
+/// intentionnellement la logique équivalente de
+/// `cli/src/chat.rs::process_turn` (fonction privée, non réutilisable
+/// telle quelle depuis ce module ; extraire un helper partagé sort du
+/// périmètre de cette tâche pour 3 lignes de logique — acceptable, ne
+/// PAS reformuler différemment, garder EXACTEMENT cette forme pour rester
+/// visiblement identique au comportement CLI déjà testé) :
+fn conversation_history_to_messages(messages: &[vanyline_lib::Message]) -> Vec<rig_core::message::Message> {
+    messages
+        .iter()
+        .filter_map(|m| {
+            if m.role == "user" {
+                Some(rig_core::message::Message::user(m.content.clone()))
+            } else if m.role == "assistant" {
+                Some(rig_core::message::Message::assistant(m.content.clone()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Convertit un `ChatTurnResult` en `vanyline_lib::Message` à persister —
+/// DUPLIQUE intentionnellement
+/// `cli/src/chat.rs::result_to_assistant_message` (même remarque que
+/// ci-dessus : `tool_calls` perdent leur `id` à la persistance, seul
+/// `name`/`arguments`/`result` sont gardés, cf. commentaire déjà présent
+/// dans `chat.rs`).
+fn chat_turn_result_to_message(result: &ChatTurnResult) -> vanyline_lib::Message {
+    let tool_calls: Vec<vanyline_lib::ToolCall> = result.tool_calls.iter().map(|tc| {
+        vanyline_lib::ToolCall {
+            name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+            result: tc.result.clone(),
+        }
+    }).collect();
+    vanyline_lib::Message {
+        role: "assistant".to_string(),
+        content: result.response_text.clone(),
+        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+    }
+}
+
 /// Adapteur qui traduit un `ChatEvent` émis par le tour en notification
 /// `chat/event` écrite sur `tx`. Utilisé par `run_agent_turn` via
 /// `SessionContext.sink` (tâche 03b).
-#[allow(dead_code)] // construit par la tâche 03b (chat/send) ; déjà testé directement dans cette tâche
 pub struct RpcEventSink {
     pub conversation_id: Uuid,
     pub seq: Arc<Mutex<HashMap<Uuid, u64>>>,
@@ -1176,5 +1377,277 @@ mod tests {
 
         assert_eq!(v2["params"]["seq"], 1);
         assert_eq!(v2["params"]["event"]["content"], "b");
+    }
+
+    // -- New tests for task 03b-fix-01 --
+
+    /// chat_send_malformed_params — après `initialize`, `chat/send` avec
+    /// `params: {}` (ni `conversationId` ni `message`) -> `error.data.code
+    /// == "VNL-RPC-000"`. Un vide deserialise en `ChatSendParams` avec
+    /// `conversation_id=""` `message=""` (deux champs `#[serde(default)]`) —
+    /// donc la désérialisation PASSE, mais `uuid::parse_str("")` ->
+    /// `Error` -> renvoie `VNL-RPC-000`.
+    #[tokio::test]
+    async fn chat_send_malformed_params() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(100, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // chat/send with empty params -> deserializes as ChatSendParams(
+        // conversation_id="", message="") -> uuid parse fails -> VNL-RPC-000
+        let line = make_request_json(101, "chat/send", Some(json!({})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    /// chat_send_malformed_conversation_id — `{"conversationId":"nope",
+    /// "message":"hi"}` -> `VNL-RPC-000` (cette fixture couvre le bug
+    /// corrigé : avant le fix, `handle_line` retournait `None` ici).
+    #[tokio::test]
+    async fn chat_send_malformed_conversation_id() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(110, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(111, "chat/send", Some(json!({
+            "conversationId": "nope",
+            "message": "hi",
+        })));
+        let result = handle_line(&mut state, &line).await;
+
+        // Before fix: result would be None (silently returned)
+        // After fix: result is Some with VNL-RPC-000 error
+        assert!(result.is_some(), "should return an error for malformed UUID");
+        let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    /// chat_send_conversation_not_found — UUID valide jamais créé via
+    /// `conversations/create` -> `VNL-RPC-005`.
+    #[tokio::test]
+    async fn chat_send_conversation_not_found() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(120, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let uuid = Uuid::new_v4().to_string();
+        let line = make_request_json(121, "chat/send", Some(json!({
+            "conversationId": uuid,
+            "message": "hi",
+        })));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-005");
+    }
+
+    /// chat_send_busy_conversation_rejected — `conversations/create`
+    /// d'abord, insérer `conv_id` dans `state.busy`, puis `chat/send` ->
+    /// `VNL-RPC-002`. Vérifier que `handle_line` retourne `Some(...)`.
+    #[tokio::test]
+    async fn chat_send_busy_conversation_rejected() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(130, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Create conversation
+        let create_line = make_request_json(131, "conversations/create", Some(json!({
+            "agent": "build",
+            "title": "Test",
+        })));
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID from create");
+
+        // Insert into busy directly (no need for a real turn in progress)
+        state.busy.lock().unwrap().insert(conv_id);
+        assert!(state.busy.lock().unwrap().contains(&conv_id));
+
+        // Send chat on this busy conversation
+        let line = make_request_json(132, "chat/send", Some(json!({
+            "conversationId": conv_id_str,
+            "message": "hi",
+        })));
+        let result = handle_line(&mut state, &line).await;
+
+        // Busy check happens synchronously BEFORE any spawn
+        assert!(result.is_some(), "handle_line should return Some for busy error");
+        let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-002");
+        // Conversation should still be in busy (no cleanup on error path)
+        assert!(state.busy.lock().unwrap().contains(&conv_id));
+    }
+
+    /// chat_send_no_agent_resolved — `conversations/create` avec params
+    /// `{} ` (pas d'`agent`), `initialize` sur un workspace SANS agent par
+    /// défaut (ne pas appeler l'équivalent de `set_default_agent`),
+    /// `chat/send` SANS `agent` dans les params -> `VNL-RPC-008`. Vérifier
+    /// ensuite que `state.busy.lock().unwrap()` ne contient PLUS `conv_id`.
+    #[tokio::test]
+    async fn chat_send_no_agent_resolved() {
+        let (_tmp, _guard) = isolated_data_dir();
+        // tempdir is left alive for the duration of `store` (workspace_dir
+        // points into the tempdir) — do NOT drop the tempdir before
+        // checking busy is cleaned up.
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", tmp.path());
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+
+        // Initialize with empty workspace (no agents)
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(140, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Create conversation without agent -> conv.agent = None
+        let create_line = make_request_json(141, "conversations/create", Some(json!({})));
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID from create");
+
+        // Send chat WITHOUT agent in params:
+        // params.agent is None -> conv.agent is None -> store.default_agent()
+        // returns None (empty workspace) -> VNL-RPC-008
+        let line = make_request_json(142, "chat/send", Some(json!({
+            "conversationId": conv_id_str,
+            "message": "hi",
+        })));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-008");
+
+        // busy should be cleaned up (conv_id removed after agent resolution
+        // fails, despite having been inserted)
+        assert!(!state.busy.lock().unwrap().contains(&conv_id));
+    }
+
+    /// chat_send_spawns_and_clears_busy_on_turn_error — test principal,
+    /// bout-en-bout sur le chemin d'échec réseau (AUCUN de ces tests n'a
+    /// besoin d'un vrai LLM joignable).
+    ///
+    /// Fixture : tempdir avec `.vanyline/config.yaml` + `agents/build.md`,
+    /// provider `ollama` pointant vers `127.0.0.1:1` (connexion refusée
+    /// quasi instantanément).
+    #[tokio::test]
+    async fn chat_send_spawns_and_clears_busy_on_turn_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let vanyline = tmp.path().join(".vanyline");
+        let agents_dir = vanyline.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+
+        // config.yaml with a broken ollama provider
+        std::fs::write(
+            vanyline.join("config.yaml"),
+            r#"providers:
+  ollama-bad:
+    type: openai-compatible
+    endpoint: http://127.0.0.1:1
+models:
+  ollama-qwen:
+    provider: ollama-bad
+    model: qwen2.5
+defaults:
+  agent: build
+"#,
+        ).unwrap();
+
+        // agents/build.md referencing the model
+        std::fs::write(
+            agents_dir.join("build.md"),
+            "---\nmodel: ollama-qwen\ntoolsets: []\nskills: none\n---\ntest agent\n",
+        ).unwrap();
+
+        let tmp_path = tmp.path().to_str().unwrap();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+
+        // Initialize with workspace
+        let init_line = make_request_json(150, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        let result = handle_line(&mut state, &init_line).await;
+        assert!(result.is_some());
+        let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse init");
+        assert!(resp.error.is_none(), "init should succeed, got: {:?}", resp.error);
+        assert!(state.initialized);
+
+        // Create conversation with build agent
+        let create_line = make_request_json(151, "conversations/create", Some(json!({
+            "agent": "build",
+            "title": "Test turn error",
+        })));
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse create response");
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID");
+        let request_id = resp.result.as_ref().expect("result should be Some")["id"].clone();
+
+        // Send chat
+        let send_line = make_request_json(request_id.clone(), "chat/send", Some(json!({
+            "conversationId": conv_id_str,
+            "message": "hi",
+        })));
+        let result = handle_line(&mut state, &send_line).await;
+
+        // handle_line must return None IMMEDIATELY (spawns a task)
+        assert!(result.is_none(), "handle_line should return None (async path)");
+
+        // busy should CONTAIN conv_id (turn just spawned)
+        assert!(state.busy.lock().unwrap().contains(&conv_id));
+
+        // Wait for the FINAL chat/send response on rx — le canal reçoit aussi,
+        // avant elle, une notification chat/event (ChatEvent::Error, émise par
+        // le sink quand stream_agent_events échoue) : elle n'a pas de champ
+        // `id` (c'est une notification JSON-RPC, pas une réponse), donc on
+        // l'ignore et on continue à attendre.
+        let resp: JsonRpcResponse = loop {
+            let received = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+                .await
+                .expect("timed out waiting for chat/send response")
+                .expect("channel closed without a response");
+            let probe: serde_json::Value = serde_json::from_str(&received).expect("parse probe");
+            if probe.get("method").is_none() {
+                break serde_json::from_str(&received).expect("parse final response");
+            }
+            // sinon : c'était une notification (chat/event) — continuer la boucle
+        };
+        assert!(resp.error.is_some(), "turn should fail with network error");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-009");
+        assert_eq!(resp.id, request_id, "response id should match request id");
+
+        // busy should be cleaned up after the turn (BusyGuard Drop)
+        assert!(!state.busy.lock().unwrap().contains(&conv_id));
     }
 }

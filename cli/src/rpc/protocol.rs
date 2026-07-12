@@ -79,13 +79,14 @@ pub mod jsonrpc_code {
 pub mod vnl_code {
     pub const MALFORMED_REQUEST: &str = "VNL-RPC-000";
     pub const NOT_INITIALIZED: &str = "VNL-RPC-001";
-    #[allow(dead_code)] // utilisé par la tâche 3 (rpc-chat)
     pub const BUSY: &str = "VNL-RPC-002";
     pub const UNKNOWN_PROTOCOL_VERSION: &str = "VNL-RPC-003";
     pub const METHOD_NOT_FOUND: &str = "VNL-RPC-004";
     pub const CONVERSATION_NOT_FOUND: &str = "VNL-RPC-005";
     pub const CONFIG_ERROR: &str = "VNL-RPC-006";
     pub const CONVERSATION_STORAGE_ERROR: &str = "VNL-RPC-007";
+    pub const NO_AGENT_RESOLVED: &str = "VNL-RPC-008";
+    pub const TURN_EXECUTION_ERROR: &str = "VNL-RPC-009";
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,7 +153,6 @@ pub struct ConversationCreateParams {
 /// être réutilisable par de futurs types de notification au-delà de
 /// `chat/event`.
 #[derive(Debug, Serialize)]
-#[allow(dead_code)] // construit par RpcEventSink, utilisé en production par la tâche 03b (chat/send)
 pub struct JsonRpcNotification<T: Serialize> {
     pub jsonrpc: &'static str,
     pub method: &'static str,
@@ -161,11 +161,26 @@ pub struct JsonRpcNotification<T: Serialize> {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code)] // construit par RpcEventSink, utilisé en production par la tâche 03b (chat/send)
 pub struct ChatEventNotificationParams {
     pub conversation_id: String,
     pub seq: u64,
     pub event: vanyline_lib::event::ChatEvent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSendParams {
+    pub conversation_id: String,
+    pub message: String,
+    #[serde(default)]
+    pub agent: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatSendResult {
+    pub text: String,
+    pub tool_calls: Vec<vanyline_lib::event::ToolCallRecord>,
 }
 
 #[derive(Debug, Deserialize)]
