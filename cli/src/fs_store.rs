@@ -8,8 +8,8 @@ use vanyline_lib::VnyError;
 use crate::config::Layers;
 
 /// Implémente `ConfigStore` sur les deux couches YAML (`Layers`, tâche 1).
-/// Remplace à terme `CliConfigStore` (ancien format JSON) — câblage dans la
-/// tâche `commands`, pas ici.
+/// Store actif de toutes les commandes CLI depuis la tâche 04b (cutover) —
+/// l'ancien `CliConfigStore` (format JSON) a été supprimé.
 #[allow(dead_code)]
 pub struct FsConfigStore {
     layers: Layers,

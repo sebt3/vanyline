@@ -1,7 +1,6 @@
 mod chat;
 mod config;
 mod config_check;
-mod config_store;
 mod fs_store;
 mod store;
 
