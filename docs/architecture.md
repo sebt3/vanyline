@@ -14,7 +14,7 @@ Six crates : **deux bibliothèques feuilles** partagées (`vanyline-tools`, `van
 |-------|------|------|-------------|
 | `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic, SLM-friendly (v2) | `filesystem` (read/write/edit/delete/list), `search` (find_files/search), `command` (`execute` via `sh -c`, timeout, cwd), `error` (`ToolsError`, codes `VNL-TLS-*`), `output` (bornage centralisé), `mcp` (schémas JSON — source unique consommée par `cli` et `sandbox`) |
 | `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), erreurs `VNL-*` |
-| `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | REPL + one-shot, `CliConfigStore` (adapte les fichiers JSON `~/.config/vanyline` en `ConfigStore`), enveloppe les `vanyline-tools` en `ToolDyn` locaux |
+| `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux |
 | `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib` |
 | `vanyline-sandbox` | binaire | Pod serveur WS/MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) |
 | `vanyline-controller` | binaire | Opérateur Kubernetes | *(stub)* — kube-rs, CRDs |
@@ -77,13 +77,10 @@ pub async fn run_agent_turn(
 `SessionContext` porte tout ce qui varie par binaire :
 - `store: Arc<dyn ConfigStore>` — résolution de config par nom (providers, modèles,
   toolsets, agents, skills). Chaque binaire fournit sa **propre implémentation** :
-  `CliConfigStore` (cli, lit les fichiers JSON existants) et `PgConfigStore` (app, requête
-  le schéma PostgreSQL existant). Aucun des deux n'a introduit de nouveau format de
-  stockage — ce sont des adaptateurs mécaniques vers le modèle name-keyed, qui
-  **synthétisent** `ModelProfile`/`Toolset` (absents des schémas d'origine, un par agent,
-  conventionnellement nommé comme l'agent lui-même). Le vrai stockage natif (YAML
-  layered pour le CLI, schéma PG étendu pour l'app) est différé à des features séparées
-  (`cli-harness.md`, `app-harness-parity.md`).
+  `FsConfigStore` (cli, YAML deux couches natif — voir "Configuration CLI" plus bas ;
+  remplace l'ancien `CliConfigStore`/JSON, supprimé) et `PgConfigStore` (app, requête le
+  schéma PostgreSQL existant, synthétise encore `ModelProfile`/`Toolset` en attendant sa
+  propre bascule vers un stockage natif — `app-harness-parity.md`).
 - `sink: Arc<dyn EventSink>` — un seul type d'événement, `ChatEvent`, pour tous les
   transports (REPL stdout, WebSocket, futur JSON-RPC stdio). `EventSink::emit` est
   appelée pour chaque `ChatEvent` produit pendant le tour (tokens, tool calls/résultats,
@@ -111,6 +108,67 @@ glob de la sélection — c'est ce qui maîtrise le contexte pour les petits mod
   vierge et un sink qui encapsule chaque événement du subagent en
   `ChatEvent::SubagentEvent`. Refuse au-delà de `subagent_depth_max` (garde vérifiée à
   la fois à l'exposition du tool et à l'appel — double sécurité contre la récursion).
+
+## Configuration CLI — `FsConfigStore` (deux couches YAML)
+
+`vanyline` (cli) résout sa configuration en **deux couches YAML**
+superposées, name-keyed comme le reste du harness (aucun UUID manipulé) :
+
+| Couche | Racine | Découverte |
+|--------|--------|------------|
+| Globale | `~/.config/vanyline/` | toujours présente |
+| Workspace | `<racine>/.vanyline/` | remontée depuis le cwd jusqu'à trouver `.vanyline/` ou `.git/` — le premier marqueur trouvé (quel qu'il soit) fixe la racine ; absente si aucun marqueur jusqu'à la racine du système de fichiers |
+
+**Fusion** : par nom, l'entrée workspace remplace intégralement l'entrée
+globale homonyme (pas de deep-merge intra-entrée). `config.yaml` fusionne
+en plus clé par clé au niveau de ses quatre maps nommées (`providers`,
+`models`, `mcp`, `defaults` — `cli/src/config.rs::merge_config_layers`).
+Agents/toolsets/skills (un fichier/répertoire par entité) fusionnent par
+nom de fichier (`list_layer_files`/`list_layer_skill_dirs` +
+`merge_layer_files`, même module).
+
+**Formats** : `config.yaml` (providers/models/mcp/defaults, un fichier par
+couche) ; `agents/<name>.md` (frontmatter YAML + corps = system prompt,
+délimiteurs `---` parsés à la main, pas de crate) ; `toolsets/<name>.yaml` ;
+`skills/<name>/SKILL.md` (frontmatter `name`+`description` compatible
+écosystème externe, mais le nom canonique reste celui du répertoire —
+chargement paresseux : `list_skills` ne lit que la description, `load_skill`
+le corps à la demande).
+
+**Modules** : `cli/src/config.rs` porte toute la mécanique de couches
+(découverte, fusion, et la "source" d'une entrée — global vs workspace,
+réutilisée par les commandes `list` et par l'affichage "sources workspace"
+au lancement) ; `cli/src/fs_store.rs::FsConfigStore` implémente
+`ConfigStore` dessus — store actif de toutes les commandes CLI. Dépendance
+`yaml_serde` (fork maintenu de `serde_yaml`, devenu archivé — API
+identique : `from_str`/`to_string`/`Value`/`Error`).
+
+**`vanyline config check`** (`cli/src/config_check.rs`) : charge toutes les
+entités et croise leurs références (model→provider, agent→model/toolset/
+skill nommé, toolset→mcp_server, `defaults.agent`→agent) — best-effort, un
+`list_x()` qui échoue ne bloque pas les autres vérifications, tous les
+problèmes sont rapportés ensemble (pas de fail-fast).
+
+**Sécurité workspace assumée** : un `.vanyline/` de repo cloné peut définir
+des agents/mcp arbitraires — accepté (usage solo, agents de confiance,
+philosophie yolo du projet), simplement affiché au lancement de `run`/REPL
+(« sources workspace : … ») pour la visibilité, pas de sandboxing ni de
+confirmation.
+
+**Données ≠ config** : les conversations vivent sous
+`~/.local/share/vanyline/` (XDG data, `config::data_dir`), pas
+`~/.config`. Leur UUID reste interne au stockage — `conversations
+show|delete|set` acceptent un index 1-based (position dans `conversations
+list`) ou un préfixe d'UUID (`store::resolve_conversation_reference`),
+jamais l'UUID complet obligatoire.
+
+**Rupture assumée, pas de migration automatique** : l'ancien format JSON
+(`providers.json`/`agents.json`/`default-agent.json`, `CliConfigStore`) a
+été entièrement supprimé — une config JSON pré-existante doit être
+réécrite en YAML à la main. Même logique pour l'emplacement des
+conversations (ancien `~/.config/vanyline/conversations/` → nouveau XDG
+data) : les anciens fichiers restent orphelins sur disque, jamais lus ni
+déplacés.
 
 ## Outils (`vanyline-tools`) — conventions SLM-friendly
 
