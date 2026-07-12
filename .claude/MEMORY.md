@@ -155,6 +155,22 @@ Deux pièges d'environnement rencontrés au premier essai :
   passer `-m` explicitement (l'auto-découverte reste à éviter), juste avec
   ce tag-là par défaut sur ce projet.
 
+Constaté sur les tâches 01 et 02a : les permissions bash de l'agent
+`implement` (`.opencode/agents/implement.md`) sont des globs de préfixe
+simples (`cargo check*: allow`, etc.) — tout ce qui sort de ce motif exact
+(un `mkdir` isolé, ou même `cargo check --workspace 2>&1` à cause de la
+redirection) tombe sur `"*": ask`, auto-rejeté en exécution non-interactive.
+Qwen s'est arrêté net les deux fois sans y revenir. **Contournement côté
+prompt de tâche** (pas de modification de la config partagée sans
+accord) : demander explicitivement dans le prompt `llm-exec` de lancer les
+commandes de validation SANS pipe/redirection (`cargo check --workspace`
+tout court, pas de `| tail`/`2>&1`), et de ne jamais dépendre de `mkdir` —
+les répertoires parents des fichiers créés via l'outil `write` d'opencode
+sont créés automatiquement, contrairement à un `mkdir` shell isolé.
+Claude relit et valide toujours lui-même après coup de toute façon, donc
+la perte réelle si Qwen s'arrête trop tôt est du temps, pas de la
+correction manquée.
+
 ---
 
 ## Contexte et philosophie
