@@ -3,6 +3,8 @@ pub mod conversations;
 pub mod llm_providers;
 pub mod mcp_servers;
 pub mod me;
+pub mod model_profiles;
+pub mod toolsets;
 
 use axum::{
     routing::{get, post, put},
@@ -22,6 +24,12 @@ pub fn api_router() -> Router<AppState> {
         // MCP servers (admin)
         .route("/mcp-servers", get(mcp_servers::list_servers).post(mcp_servers::create_server))
         .route("/mcp-servers/{id}", get(mcp_servers::get_server).put(mcp_servers::update_server).delete(mcp_servers::delete_server))
+        // Model profiles (OIDC, by name)
+        .route("/model-profiles", get(model_profiles::list_model_profiles).post(model_profiles::create_model_profile))
+        .route("/model-profiles/{name}", get(model_profiles::get_model_profile).put(model_profiles::update_model_profile).delete(model_profiles::delete_model_profile))
+        // Toolsets (OIDC, by name)
+        .route("/toolsets", get(toolsets::list_toolsets).post(toolsets::create_toolset))
+        .route("/toolsets/{name}", get(toolsets::get_toolset).put(toolsets::update_toolset).delete(toolsets::delete_toolset))
         // Agents (read: OIDC, write: admin)
         .route("/agents", get(agents::list_agents).post(agents::create_agent))
         .route("/agents/{id}", get(agents::get_agent).put(agents::update_agent).delete(agents::delete_agent))

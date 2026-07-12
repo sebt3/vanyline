@@ -28,6 +28,12 @@ pub enum AppError {
     McpError(String),
     #[error("VNL-AGT-001: Agent not found")]
     AgentNotFound,
+    #[error("VNL-CFG-004: Model profile not found")]
+    ModelProfileNotFound,
+    #[error("VNL-CFG-005: Toolset not found")]
+    ToolsetNotFound,
+    #[error("{0}")]
+    UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-CNV-001: Conversation not found")]
     ConversationNotFound,
     #[error("VNL-CNV-002: Access denied to conversation")]
@@ -57,6 +63,9 @@ impl IntoResponse for AppError {
             AppError::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             AppError::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            AppError::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            AppError::ToolsetNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            AppError::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             AppError::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
             AppError::RequestError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
@@ -65,5 +74,29 @@ impl IntoResponse for AppError {
 
         let body = Json(json!({ "error": message }));
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_profile_not_found_maps_to_404() {
+        let resp = AppError::ModelProfileNotFound.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn toolset_not_found_maps_to_404() {
+        let resp = AppError::ToolsetNotFound.into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn unprocessable_reference_maps_to_422() {
+        let err = vanyline_lib::VnyError::UnknownReference("provider", "ghost".to_string());
+        let resp = AppError::UnprocessableReference(err).into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }
