@@ -87,7 +87,7 @@ pub fn resolve_conversation_reference(
     reference: &str,
 ) -> Result<Uuid, String> {
     // Seule une chaîne décimale propre (pas de zéros leading) est interprétée
-    // comme un index 1-based. Les zéros leading font tomber en匹配 préfixe.
+    // comme un index 1-based. Les zéros leading font tomber dans le matching préfixe.
     let is_clean_decimal = reference
         .chars()
         .all(|c| c.is_ascii_digit())
