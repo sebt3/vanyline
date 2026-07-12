@@ -35,32 +35,6 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-pub struct AdminAuth;
-
-impl FromRequestParts<AppState> for AdminAuth {
-    type Rejection = AppError;
-
-    async fn from_request_parts(
-        parts: &mut Parts,
-        state: &AppState,
-    ) -> Result<Self, Self::Rejection> {
-        let auth_header = parts
-            .headers
-            .get("Authorization")
-            .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
-
-        let expected = format!("Bearer {}", state.config.admin_secret);
-        match auth_header {
-            Some(h) if h == expected => Ok(AdminAuth),
-            _ => {
-                tracing::debug!("VNL-AUTH-004: admin auth rejected");
-                Err(AppError::Forbidden)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -81,10 +55,6 @@ mod tests {
         axum::Json(serde_json::json!({ "authenticated": true }))
     }
 
-    async fn admin_handler(_admin: AdminAuth) -> impl axum::response::IntoResponse {
-        axum::Json(serde_json::json!({ "admin": true }))
-    }
-
     fn make_app(cookie_key: cookie::Key) -> Router {
         let config = crate::config::Config {
             oidc_issuer_url: "https://issuer.example.com".to_string(),
@@ -95,7 +65,6 @@ mod tests {
             oidc_ca_cert: None,
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
-            admin_secret: "test-admin-secret".to_string(),
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
         };
@@ -109,7 +78,6 @@ mod tests {
 
         Router::new()
             .route("/protected", axum::routing::get(protected_handler))
-            .route("/admin", axum::routing::get(admin_handler))
             .with_state(state)
     }
 
@@ -146,29 +114,5 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn admin_with_correct_bearer_passes() {
-        let app = make_app(test_key());
-        let req = Request::builder()
-            .uri("/admin")
-            .header("Authorization", "Bearer test-admin-secret")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-    }
-
-    #[tokio::test]
-    async fn admin_with_wrong_bearer_returns_403() {
-        let app = make_app(test_key());
-        let req = Request::builder()
-            .uri("/admin")
-            .header("Authorization", "Bearer wrong")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
 }

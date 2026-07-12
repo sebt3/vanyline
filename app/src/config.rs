@@ -10,7 +10,6 @@ pub struct Config {
     pub oidc_ca_cert: Option<String>,
     pub cookie_secret: String,
     pub database_url: String,
-    pub admin_secret: String,
     pub listen_addr: String,
     pub static_dir: String,
 }
@@ -36,8 +35,6 @@ impl Config {
                 .map_err(|_| "VNL-CFG-005: COOKIE_SECRET is required".to_string())?,
             database_url: env::var("DATABASE_URL")
                 .map_err(|_| "VNL-CFG-006: DATABASE_URL is required".to_string())?,
-            admin_secret: env::var("ADMIN_SECRET")
-                .map_err(|_| "VNL-CFG-007: ADMIN_SECRET is required".to_string())?,
             listen_addr: env::var("LISTEN_ADDR")
                 .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             static_dir: env::var("STATIC_DIR")

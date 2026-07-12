@@ -29,11 +29,6 @@ spec:
             secretKeyRef:
               name: vanyline-secrets
               key: COOKIE_SECRET
-        - name: ADMIN_SECRET
-          valueFrom:
-            secretKeyRef:
-              name: vanyline-secrets
-              key: ADMIN_SECRET
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
