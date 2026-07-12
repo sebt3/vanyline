@@ -57,6 +57,21 @@ Un seul tour actif **par conversation** (un `chat/send` sur une conversation occ
 répond `VNL-RPC-002 busy`). Plusieurs conversations peuvent streamer en parallèle —
 les notifications sont multiplexées par `conversationId`.
 
+**Mécanisme (décidé tâche rpc-chat, 2026-07-12)** : la boucle stdio lit et dispatche
+les lignes en séquence, mais `chat/send` est **spawné** (tâche tokio indépendante) —
+sinon un tour en cours bloquerait la lecture de toute nouvelle requête, y compris sur
+une AUTRE conversation, ce que ce paragraphe interdit explicitement. Pour que ça soit
+sûr, les champs de `ServerState` qui doivent être visibles/mutables depuis une tâche
+spawnée (le suivi des conversations occupées, le compteur `seq` par conversation, le
+sender du canal d'écriture) sont chacun `Arc<std::sync::Mutex<...>>` (ou juste `Clone`
+pour le sender mpsc, déjà `Clone` nativement) — PAS tout `ServerState` derrière un
+`Arc<Mutex<ServerState>>` global : `store` (config, en lecture seule après
+`initialize`) est un simple `Arc<FsConfigStore>` partagé sans verrou, et le reste de
+l'état (`initialized`, etc.) reste local à la boucle séquentielle, jamais touché par
+une tâche spawnée. Un `chat/send` concurrent sur la MÊME conversation reste refusé
+(`VNL-RPC-002`) via le set `busy` ; deux conversations différentes tournent en vrai
+parallèle, chacune dans sa propre tâche tokio.
+
 ### Cycle de vie
 
 `initialize` obligatoire avant toute autre méthode (`VNL-RPC-001` sinon). Le paramètre
