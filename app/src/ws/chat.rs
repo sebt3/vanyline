@@ -2,12 +2,19 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    extract::{Path, State, WebSocketUpgrade, ws::WebSocket},
+    extract::{
+        Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     response::IntoResponse,
 };
-use serde::{Deserialize, Serialize};
+use futures::stream::SplitSink;
+use futures::{SinkExt, StreamExt};
+use serde::Deserialize;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use vanyline_lib::event::{ChatEvent, EventSink, ToolCallRecord};
 use vanyline_lib::session::SessionContext;
 
 use crate::{
@@ -24,98 +31,19 @@ struct ClientMessage {
     content: String,
 }
 
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum ServerMessage {
-    Token { content: String },
-    ToolCall { name: String, args: serde_json::Value },
-    Done { message_id: Uuid },
-    Error { code: String, message: String },
-}
-
-#[derive(Clone)]
-enum CollectedMessage {
-    Token(String),
-    ToolCall(String, serde_json::Value),
-    Error(String, String),
-}
-
-struct CollectingSink {
-    messages: parking_lot::Mutex<Vec<CollectedMessage>>,
-}
-
-impl CollectingSink {
-    fn new() -> Self {
-        Self {
-            messages: parking_lot::Mutex::new(Vec::new()),
-        }
-    }
-
-    async fn flush(&self, socket: &mut WebSocket) {
-        let msgs: Vec<CollectedMessage> = self.messages.lock().clone();
-        for msg in msgs.iter() {
-            let server_msg = match msg {
-                CollectedMessage::Token(content) => ServerMessage::Token {
-                    content: content.clone(),
-                },
-                CollectedMessage::ToolCall(name, args) => ServerMessage::ToolCall {
-                    name: name.clone(),
-                    args: args.clone(),
-                },
-                CollectedMessage::Error(code, message) => ServerMessage::Error {
-                    code: code.clone(),
-                    message: message.clone(),
-                },
-            };
-            let text = serde_json::to_string(&server_msg).unwrap_or_default();
-            let _ = socket
-                .send(axum::extract::ws::Message::Text(text.into()))
-                .await;
-        }
-    }
-
-    fn collected_tool_calls(&self) -> Vec<vanyline_lib::ToolCall> {
-        self.messages
-            .lock()
-            .iter()
-            .filter_map(|msg| {
-                if let CollectedMessage::ToolCall(name, args) = msg {
-                    Some(vanyline_lib::ToolCall {
-                        name: name.clone(),
-                        arguments: args.clone(),
-                        result: None,
-                    })
-                } else {
-                    None
-                }
-            })
-            .collect()
-    }
+/// Pont EventSink -> canal mpsc : chaque événement est poussé sur `tx` dès
+/// qu'il est émis, sans attendre la fin du tour. Remplace l'ancien
+/// `CollectingSink` (bufferisait tout un tour avant le premier octet
+/// envoyé) — la tâche `forward_events` (une par connexion, pas une par
+/// tour) draine le canal et écrit sur le socket au fil de l'eau.
+struct ChannelSink {
+    tx: mpsc::UnboundedSender<ChatEvent>,
 }
 
 #[async_trait::async_trait]
-impl vanyline_lib::event::EventSink for CollectingSink {
-    async fn emit(&self, event: vanyline_lib::event::ChatEvent) {
-        match event {
-            vanyline_lib::event::ChatEvent::Token { content } => {
-                self.messages
-                    .lock()
-                    .push(CollectedMessage::Token(content));
-            }
-            vanyline_lib::event::ChatEvent::ToolCall { name, args, .. } => {
-                self.messages
-                    .lock()
-                    .push(CollectedMessage::ToolCall(name, args));
-            }
-            vanyline_lib::event::ChatEvent::Error { code, message } => {
-                self.messages.lock().push(CollectedMessage::Error(code, message));
-            }
-            // Done, ToolResult, SkillLoaded, Usage, Subagent* : pas de
-            // représentation dans le protocole WS actuel (ServerMessage n'a
-            // que Token/ToolCall/Done/Error) — cohérent avec l'ancien
-            // ChatSink qui n'avait pas non plus d'équivalent pour ces cas.
-            _ => {}
-        }
+impl EventSink for ChannelSink {
+    async fn emit(&self, event: ChatEvent) {
+        let _ = self.tx.send(event);
     }
 }
 
@@ -135,7 +63,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conve
 }
 
 async fn run_socket(
-    mut socket: WebSocket,
+    socket: WebSocket,
     state: AppState,
     user: AuthUser,
     conversation_id: Uuid,
@@ -154,10 +82,14 @@ async fn run_socket(
         return Err(AppError::ConversationAccessDenied);
     }
 
-    while let Some(Ok(msg)) = socket.recv().await {
+    let (ws_sink, mut ws_stream) = socket.split();
+    let (tx, rx) = mpsc::unbounded_channel::<ChatEvent>();
+    let forward_handle = tokio::spawn(forward_events(rx, ws_sink));
+
+    while let Some(Ok(msg)) = ws_stream.next().await {
         let text = match msg {
-            axum::extract::ws::Message::Text(t) => t,
-            axum::extract::ws::Message::Close(_) => break,
+            Message::Text(t) => t,
+            Message::Close(_) => break,
             _ => continue,
         };
 
@@ -172,32 +104,48 @@ async fn run_socket(
         let agent_id = match conv.agent_id {
             Some(id) => id,
             None => {
-                send_error(&mut socket, "VNL-AGT-001", "No agent assigned to conversation").await;
+                send_error(&tx, "VNL-AGT-001", "No agent assigned to conversation");
                 continue;
             }
         };
 
         let result =
-            handle_message(&mut socket, &state, conversation_id, agent_id, db_user.id, &client_msg.content)
+            handle_message(&tx, &state, conversation_id, agent_id, db_user.id, &client_msg.content)
                 .await;
         if let Err(e) = result {
-            send_error(&mut socket, "VNL-LLM-001", &e.to_string()).await;
+            send_error(&tx, "VNL-LLM-001", &e.to_string());
         }
     }
+
+    drop(tx);
+    let _ = forward_handle.await;
     Ok(())
 }
 
-async fn send_error(socket: &mut WebSocket, code: &str, message: &str) {
-    let msg = serde_json::to_string(&ServerMessage::Error {
+/// Draine `rx` et écrit chaque `ChatEvent` sur le socket dès réception —
+/// c'est ce qui rend le streaming réel. Se termine quand `tx` est dropped
+/// (fin de `run_socket`) ou si l'écriture échoue (client déconnecté).
+async fn forward_events(
+    mut rx: mpsc::UnboundedReceiver<ChatEvent>,
+    mut sink: SplitSink<WebSocket, Message>,
+) {
+    while let Some(event) = rx.recv().await {
+        let text = serde_json::to_string(&event).unwrap_or_default();
+        if sink.send(Message::Text(text.into())).await.is_err() {
+            break;
+        }
+    }
+}
+
+fn send_error(tx: &mpsc::UnboundedSender<ChatEvent>, code: &str, message: &str) {
+    let _ = tx.send(ChatEvent::Error {
         code: code.to_string(),
         message: message.to_string(),
-    })
-    .unwrap_or_default();
-    let _ = socket.send(axum::extract::ws::Message::Text(msg.into())).await;
+    });
 }
 
 async fn handle_message(
-    socket: &mut WebSocket,
+    tx: &mpsc::UnboundedSender<ChatEvent>,
     state: &AppState,
     conversation_id: Uuid,
     agent_id: Uuid,
@@ -214,10 +162,10 @@ async fn handle_message(
 
     persist_message(state, conversation_id, "user", user_msg, None).await?;
 
-    let sink = Arc::new(CollectingSink::new());
+    let sink = Arc::new(ChannelSink { tx: tx.clone() });
     let ctx = SessionContext {
         store: Arc::new(PgConfigStore::new(state.pool.clone(), user_id)),
-        sink: sink.clone(),
+        sink,
         local_tools: HashMap::new(),
         subagent_depth_max: 1,
     };
@@ -225,29 +173,33 @@ async fn handle_message(
     let result = vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None)
         .await?;
 
-    sink.flush(socket).await;
-
-    let tool_calls = sink.collected_tool_calls();
-    let msg_id = persist_message(
+    let tool_calls = tool_calls_for_persistence(&result.tool_calls);
+    persist_message(
         state,
         conversation_id,
         "assistant",
         &result.response_text,
-        if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        },
+        if tool_calls.is_empty() { None } else { Some(tool_calls) },
     )
     .await?;
 
-    let done = serde_json::to_string(&ServerMessage::Done { message_id: msg_id })
-        .unwrap_or_default();
-    let _ = socket
-        .send(axum::extract::ws::Message::Text(done.into()))
-        .await;
-
     Ok(())
+}
+
+/// `ChatTurnResult.tool_calls` (`ToolCallRecord`, avec `id` — sert à la
+/// corrélation ToolCall/ToolResult dans le flux d'événements, cf.
+/// `lib/src/event.rs`) -> `vanyline_lib::ToolCall` (sans `id` — forme de
+/// persistance existante, `messages.payload`, inchangée par cette tâche).
+/// Pure, testable sans réseau ni DB.
+fn tool_calls_for_persistence(records: &[ToolCallRecord]) -> Vec<vanyline_lib::ToolCall> {
+    records
+        .iter()
+        .map(|r| vanyline_lib::ToolCall {
+            name: r.name.clone(),
+            arguments: r.arguments.clone(),
+            result: r.result.clone(),
+        })
+        .collect()
 }
 
 async fn load_history(
@@ -266,12 +218,10 @@ async fn load_history(
         .filter_map(|m| {
             serde_json::from_value::<vanyline_lib::Message>(m.payload)
                 .ok()
-                .and_then(|msg| {
-                    match msg.role.as_str() {
-                        "user" => Some(rig_core::message::Message::user(msg.content)),
-                        "assistant" => Some(rig_core::message::Message::assistant(msg.content)),
-                        _ => None,
-                    }
+                .and_then(|msg| match msg.role.as_str() {
+                    "user" => Some(rig_core::message::Message::user(msg.content)),
+                    "assistant" => Some(rig_core::message::Message::assistant(msg.content)),
+                    _ => None,
                 })
         })
         .collect();
@@ -307,4 +257,40 @@ async fn persist_message(
         .await?;
 
     Ok(id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_calls_for_persistence_drops_id_keeps_rest() {
+        let records = vec![
+            ToolCallRecord {
+                id: "call-1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({"q": "x"}),
+                result: Some("42".to_string()),
+            },
+            ToolCallRecord {
+                id: "call-2".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "a.txt"}),
+                result: None,
+            },
+        ];
+        let calls = tool_calls_for_persistence(&records);
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "search");
+        assert_eq!(calls[0].arguments, serde_json::json!({"q": "x"}));
+        assert_eq!(calls[0].result, Some("42".to_string()));
+        assert_eq!(calls[1].name, "read_file");
+        assert_eq!(calls[1].result, None);
+    }
+
+    #[test]
+    fn tool_calls_for_persistence_empty() {
+        let calls = tool_calls_for_persistence(&[]);
+        assert!(calls.is_empty());
+    }
 }
