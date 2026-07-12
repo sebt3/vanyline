@@ -31,6 +31,7 @@ impl EventSink for StdoutSink {
 
 pub async fn run(message: Option<String>, agent: Option<String>, continue_active: bool) {
     config::ensure_config_dir();
+    print_workspace_sources().await;
     if let Some(msg) = message {
         run_one_shot(&msg, agent, continue_active).await;
         return;
@@ -167,6 +168,94 @@ fn result_to_assistant_message(result: ChatTurnResult) -> vanyline_lib::Message 
     }
 }
 
+/// Calcule les lignes "sources workspace" à afficher au lancement — une
+/// ligne par kind qui a au moins une entrée workspace-sourcée (via
+/// `config::file_entry_source`/`config::skill_entry_source`/
+/// `config::config_entry_source`, déjà utilisés par les commandes `list`,
+/// tâche 04a). Vide si `layers.workspace_dir` est `None`, ou si aucun kind
+/// n'a d'entrée workspace-sourcée. L'appelant ajoute l'en-tête avec le
+/// chemin — cette fonction ne fait que la liste des lignes de détail, pour
+/// rester testable sans capturer stdout.
+async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec<String> {
+    let layers = store.layers();
+    if layers.workspace_dir.is_none() {
+        return Vec::new();
+    }
+
+    let mut lines = Vec::new();
+
+    let agents = store.list_agents().await.unwrap_or_default();
+    let names: Vec<&str> = agents.iter()
+        .filter(|a| config::file_entry_source(layers, "agents", "md", &a.name) == "workspace")
+        .map(|a| a.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        lines.push(format!("  agents: {}", names.join(", ")));
+    }
+
+    let toolsets = store.list_toolsets().await.unwrap_or_default();
+    let names: Vec<&str> = toolsets.iter()
+        .filter(|t| config::file_entry_source(layers, "toolsets", "yaml", &t.name) == "workspace")
+        .map(|t| t.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        lines.push(format!("  toolsets: {}", names.join(", ")));
+    }
+
+    let skills = store.list_skills().await.unwrap_or_default();
+    let names: Vec<&str> = skills.iter()
+        .filter(|s| config::skill_entry_source(layers, &s.name) == "workspace")
+        .map(|s| s.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        lines.push(format!("  skills: {}", names.join(", ")));
+    }
+
+    let mcp_servers = store.list_mcp_servers().await.unwrap_or_default();
+    let names: Vec<&str> = mcp_servers.iter()
+        .filter(|s| config::config_entry_source(layers, &s.name, |r| &r.mcp) == "workspace")
+        .map(|s| s.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        lines.push(format!("  mcp: {}", names.join(", ")));
+    }
+
+    let models = store.list_models().await.unwrap_or_default();
+    let names: Vec<&str> = models.iter()
+        .filter(|m| config::config_entry_source(layers, &m.name, |r| &r.models) == "workspace")
+        .map(|m| m.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        lines.push(format!("  models: {}", names.join(", ")));
+    }
+
+    let providers = store.list_providers().await.unwrap_or_default();
+    let names: Vec<&str> = providers.iter()
+        .filter(|p| config::config_entry_source(layers, &p.name, |r| &r.providers) == "workspace")
+        .map(|p| p.name.as_str())
+        .collect();
+    if !names.is_empty() {
+        lines.push(format!("  providers: {}", names.join(", ")));
+    }
+
+    lines
+}
+
+/// Affiche l'en-tête + les lignes de `workspace_source_summary`, rien si
+/// cette dernière retourne une liste vide.
+async fn print_workspace_sources() {
+    let store = crate::discover_fs_store();
+    let Some(ws_dir) = store.layers().workspace_dir.clone() else { return };
+    let lines = workspace_source_summary(&store).await;
+    if lines.is_empty() {
+        return;
+    }
+    println!("Sources workspace ({}):", ws_dir.display());
+    for line in &lines {
+        println!("{line}");
+    }
+}
+
 async fn resolve_context(
     agent: Option<String>,
     continue_active: bool,
@@ -214,4 +303,133 @@ async fn resolve_context(
     };
 
     (conv, agent_name, is_new)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Write;
+
+    use tempfile::tempdir;
+
+    use super::*;
+    use crate::config::Layers;
+    use crate::fs_store::FsConfigStore;
+
+    fn write_config_yaml(dir: &std::path::Path, content: &str) {
+        let path = dir.join("config.yaml");
+        let mut f = std::fs::File::create(&path)
+            .unwrap_or_else(|e| panic!("Failed to create config.yaml at {}: {e}", path.display()));
+        f.write_all(content.as_bytes())
+            .unwrap_or_else(|e| panic!("Failed to write config.yaml at {}: {e}", path.display()));
+    }
+
+    // 1. no_workspace_layer_yields_empty_summary
+    #[tokio::test]
+    async fn no_workspace_layer_yields_empty_summary() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let result = workspace_source_summary(&store).await;
+        assert!(result.is_empty());
+    }
+
+    // 2. workspace_layer_with_no_overrides_yields_empty_summary
+    #[tokio::test]
+    async fn workspace_layer_with_no_overrides_yields_empty_summary() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        let result = workspace_source_summary(&store).await;
+        assert!(result.is_empty());
+    }
+
+    // 3. workspace_agent_reported
+    #[tokio::test]
+    async fn workspace_agent_reported() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        // Global: no agents
+        std::fs::create_dir_all(workspace_dir.path().join("agents")).unwrap();
+        std::fs::write(
+            workspace_dir.path().join("agents").join("build.md"),
+            "---\nmodel: test\n---\nbuild agent\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        let result = workspace_source_summary(&store).await;
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("agents: build"));
+    }
+
+    // 4. workspace_toolset_and_mcp_reported
+    #[tokio::test]
+    async fn workspace_toolset_and_mcp_reported() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        // Workspace: toolset + mcp config
+        std::fs::create_dir_all(workspace_dir.path().join("toolsets")).unwrap();
+        std::fs::write(
+            workspace_dir.path().join("toolsets").join("grafana.yaml"),
+            "tools:\n  mcp:\n    internal:\n      - metric_query\n",
+        )
+        .unwrap();
+        write_config_yaml(
+            workspace_dir.path(),
+            "mcp:\n  internal:\n    type: http-streamable\n    url: http://localhost:3000\n",
+        );
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        let result = workspace_source_summary(&store).await;
+        assert!(result.len() == 2);
+        let mcp_line = result.iter().find(|l| l.contains("mcp")).unwrap();
+        assert!(mcp_line.contains("internal"));
+        let ts_line = result.iter().find(|l| l.contains("toolsets")).unwrap();
+        assert!(ts_line.contains("grafana"));
+    }
+
+    // 5. multiple_workspace_agents_joined_on_one_line
+    #[tokio::test]
+    async fn multiple_workspace_agents_joined_on_one_line() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        std::fs::create_dir_all(workspace_dir.path().join("agents")).unwrap();
+        std::fs::write(
+            workspace_dir.path().join("agents").join("build.md"),
+            "---\nmodel: test\n---\nbuild\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace_dir.path().join("agents").join("debug.md"),
+            "---\nmodel: test\n---\ndebug\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+        let result = workspace_source_summary(&store).await;
+        assert_eq!(result.len(), 1);
+        assert!(result[0].contains("agents:"));
+        assert!(result[0].contains("build"));
+        assert!(result[0].contains("debug"));
+        assert!(result[0].contains("build, debug") || result[0].contains("debug, build"));
+        // Not two separate lines
+        let agent_lines = result.iter().filter(|l| l.contains("agents:")).count();
+        assert_eq!(agent_lines, 1);
+    }
 }
