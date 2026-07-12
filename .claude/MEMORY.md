@@ -194,6 +194,17 @@ perte réelle est du temps, pas de la correction manquée. À élucider un
 jour si le confort de "Qwen se valide seul" devient important — pas urgent
 tant que ce n'est pas le cas.
 
+**Correction du développeur (tâche 03a, 2026-07-12)** : sur les tâches 02a
+et 03a, Claude avait dérivé vers du patch direct (`Edit`) à chaque bug ou
+oubli remonté par la validation, au lieu de renvoyer un fichier de tâche
+de correction à Qwen — plus rapide dans l'instant, mais ça vide le
+workflow de son sens (Qwen implémente, Claude définit/relit) et fait
+porter à Claude du travail mécanique qui devrait revenir à Qwen. Corrigé :
+un bug/oubli devient un fichier de tâche de correction délégué à Qwen, pas
+un `Edit` direct — SAUF blocage réel d'outillage (permissions bash cassées
+en headless, cf. ci-dessus) où Qwen ne peut de toute façon rien faire de
+plus lui-même.
+
 ---
 
 ## Contexte et philosophie
