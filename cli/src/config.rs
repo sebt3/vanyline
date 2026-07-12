@@ -10,13 +10,21 @@ pub fn config_dir() -> PathBuf {
     base.join("vanyline")
 }
 
+pub fn data_dir() -> PathBuf {
+    let base = dirs::data_dir().unwrap_or_else(|| PathBuf::from("~/.local/share"));
+    base.join("vanyline")
+}
+
 pub fn ensure_config_dir() {
     std::fs::create_dir_all(config_dir()).unwrap_or_else(|e| {
         eprintln!("Failed to create config dir: {e}");
         std::process::exit(1);
     });
-    std::fs::create_dir_all(config_dir().join("conversations")).unwrap_or_else(|e| {
-        eprintln!("Failed to create conversations dir: {e}");
+}
+
+pub fn ensure_data_dir() {
+    std::fs::create_dir_all(data_dir().join("conversations")).unwrap_or_else(|e| {
+        eprintln!("Failed to create data dir: {e}");
         std::process::exit(1);
     });
 }

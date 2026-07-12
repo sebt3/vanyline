@@ -76,11 +76,11 @@ mod conversation {
             title: Option<String>,
         },
         /// Show conversation messages
-        Show { id: uuid::Uuid },
+        Show { reference: String },
         /// Delete a conversation
-        Delete { id: uuid::Uuid },
+        Delete { reference: String },
         /// Set active conversation
-        Set { id: uuid::Uuid },
+        Set { reference: String },
     }
 }
 
@@ -152,11 +152,12 @@ async fn run_conversation(cmd: conversation::Commands) {
             if convs.is_empty() {
                 println!("No conversations.");
             } else {
-                for c in &convs {
+                for (i, c) in convs.iter().enumerate() {
                     let agent_label = c.agent.as_deref().unwrap_or("(none)");
                     let title = c.title.as_deref().unwrap_or("(untitled)");
                     println!(
-                        "  {} | {} | {} messages | {}",
+                        "  [{}] {} | {} | {} messages | {}",
+                        i + 1,
                         c.id,
                         title,
                         c.messages.len(),
@@ -176,17 +177,32 @@ async fn run_conversation(cmd: conversation::Commands) {
             store::save_conversation(&conv).expect("failed to save conversation");
             println!("Created conversation: {}", id);
         }
-        Show { id } => {
+        Show { reference } => {
+            let convs = store::list_conversations().unwrap_or_default();
+            let id = store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
             let conv = store::get_conversation(&id).expect("conversation not found");
             for msg in &conv.messages {
                 println!("[{}] {}", msg.role, msg.content);
             }
         }
-        Delete { id } => {
+        Delete { reference } => {
+            let convs = store::list_conversations().unwrap_or_default();
+            let id = store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
             store::delete_conversation(&id).expect("failed to delete conversation");
             println!("Deleted conversation: {}", id);
         }
-        Set { id } => {
+        Set { reference } => {
+            let convs = store::list_conversations().unwrap_or_default();
+            let id = store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
             store::get_conversation(&id).expect("conversation not found");
             store::set_active_conversation(&id).expect("failed to set active conversation");
             println!("Active conversation: {}", id);
