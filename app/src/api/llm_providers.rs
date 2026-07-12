@@ -7,7 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    auth::middleware::AdminAuth,
+    api::conversations::get_or_create_user,
+    auth::middleware::AuthUser,
     db::models::LlmProvider,
     error::AppError,
     AppState,
@@ -19,7 +20,6 @@ pub struct CreateLlmProvider {
     pub provider_type: String,
     pub endpoint: String,
     pub api_key: Option<String>,
-    pub default_model: Option<String>,
     pub is_default: Option<bool>,
 }
 
@@ -29,7 +29,6 @@ pub struct UpdateLlmProvider {
     pub provider_type: Option<String>,
     pub endpoint: Option<String>,
     pub api_key: Option<String>,
-    pub default_model: Option<String>,
     pub is_default: Option<bool>,
 }
 
@@ -40,11 +39,13 @@ pub struct TestResult {
 
 pub async fn list_providers(
     State(state): State<AppState>,
-    _admin: AdminAuth,
+    user: AuthUser,
 ) -> Result<Json<Vec<LlmProvider>>, AppError> {
+    let db_user = get_or_create_user(&state, &user).await?;
     let providers = sqlx::query_as::<_, LlmProvider>(
-        "SELECT * FROM llm_providers ORDER BY created_at DESC",
+        "SELECT * FROM llm_providers WHERE user_id = $1 ORDER BY created_at DESC",
     )
+    .bind(db_user.id)
     .fetch_all(&state.pool)
     .await?;
     Ok(Json(providers))
@@ -52,27 +53,31 @@ pub async fn list_providers(
 
 pub async fn create_provider(
     State(state): State<AppState>,
-    _admin: AdminAuth,
+    user: AuthUser,
     Json(body): Json<CreateLlmProvider>,
 ) -> Result<(StatusCode, Json<LlmProvider>), AppError> {
     validate_provider_type(&body.provider_type)?;
+    let db_user = get_or_create_user(&state, &user).await?;
 
     if body.is_default == Some(true) {
-        sqlx::query("UPDATE llm_providers SET is_default = FALSE, updated_at = NOW()")
-            .execute(&state.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1",
+        )
+        .bind(db_user.id)
+        .execute(&state.pool)
+        .await?;
     }
 
     let provider = sqlx::query_as::<_, LlmProvider>(
-        r#"INSERT INTO llm_providers (name, provider_type, endpoint, api_key, default_model, is_default)
+        r#"INSERT INTO llm_providers (user_id, name, provider_type, endpoint, api_key, is_default)
            VALUES ($1, $2, $3, $4, $5, $6)
            RETURNING *"#,
     )
+    .bind(db_user.id)
     .bind(&body.name)
     .bind(&body.provider_type)
     .bind(&body.endpoint)
     .bind(&body.api_key)
-    .bind(&body.default_model)
     .bind(body.is_default.unwrap_or(false))
     .fetch_one(&state.pool)
     .await?;
@@ -82,13 +87,15 @@ pub async fn create_provider(
 
 pub async fn get_provider(
     State(state): State<AppState>,
-    _admin: AdminAuth,
+    user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LlmProvider>, AppError> {
+    let db_user = get_or_create_user(&state, &user).await?;
     let provider = sqlx::query_as::<_, LlmProvider>(
-        "SELECT * FROM llm_providers WHERE id = $1",
+        "SELECT * FROM llm_providers WHERE id = $1 AND user_id = $2",
     )
     .bind(id)
+    .bind(db_user.id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or(AppError::LlmProviderNotFound)?;
@@ -97,39 +104,42 @@ pub async fn get_provider(
 
 pub async fn update_provider(
     State(state): State<AppState>,
-    _admin: AdminAuth,
+    user: AuthUser,
     Path(id): Path<Uuid>,
     Json(body): Json<UpdateLlmProvider>,
 ) -> Result<Json<LlmProvider>, AppError> {
     if let Some(ref t) = body.provider_type {
         validate_provider_type(t)?;
     }
+    let db_user = get_or_create_user(&state, &user).await?;
 
     if body.is_default == Some(true) {
-        sqlx::query("UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE id != $1")
-            .bind(id)
-            .execute(&state.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1 AND id != $2",
+        )
+        .bind(db_user.id)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
     }
 
     let provider = sqlx::query_as::<_, LlmProvider>(
         r#"UPDATE llm_providers SET
-            name = COALESCE($2, name),
-            provider_type = COALESCE($3, provider_type),
-            endpoint = COALESCE($4, endpoint),
-            api_key = COALESCE($5, api_key),
-            default_model = COALESCE($6, default_model),
+            name = COALESCE($3, name),
+            provider_type = COALESCE($4, provider_type),
+            endpoint = COALESCE($5, endpoint),
+            api_key = COALESCE($6, api_key),
             is_default = COALESCE($7, is_default),
             updated_at = NOW()
-           WHERE id = $1
+           WHERE id = $1 AND user_id = $2
            RETURNING *"#,
     )
     .bind(id)
+    .bind(db_user.id)
     .bind(&body.name)
     .bind(&body.provider_type)
     .bind(&body.endpoint)
     .bind(&body.api_key)
-    .bind(&body.default_model)
     .bind(body.is_default)
     .fetch_optional(&state.pool)
     .await?
@@ -140,11 +150,13 @@ pub async fn update_provider(
 
 pub async fn delete_provider(
     State(state): State<AppState>,
-    _admin: AdminAuth,
+    user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
-    let rows = sqlx::query("DELETE FROM llm_providers WHERE id = $1")
+    let db_user = get_or_create_user(&state, &user).await?;
+    let rows = sqlx::query("DELETE FROM llm_providers WHERE id = $1 AND user_id = $2")
         .bind(id)
+        .bind(db_user.id)
         .execute(&state.pool)
         .await?
         .rows_affected();
@@ -157,17 +169,21 @@ pub async fn delete_provider(
 
 pub async fn set_default_provider(
     State(state): State<AppState>,
-    _admin: AdminAuth,
+    user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<LlmProvider>, AppError> {
-    sqlx::query("UPDATE llm_providers SET is_default = FALSE, updated_at = NOW()")
+    let db_user = get_or_create_user(&state, &user).await?;
+
+    sqlx::query("UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1")
+        .bind(db_user.id)
         .execute(&state.pool)
         .await?;
 
     let provider = sqlx::query_as::<_, LlmProvider>(
-        "UPDATE llm_providers SET is_default = TRUE, updated_at = NOW() WHERE id = $1 RETURNING *",
+        "UPDATE llm_providers SET is_default = TRUE, updated_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING *",
     )
     .bind(id)
+    .bind(db_user.id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or(AppError::LlmProviderNotFound)?;
@@ -177,13 +193,15 @@ pub async fn set_default_provider(
 
 pub async fn test_provider(
     State(state): State<AppState>,
-    _admin: AdminAuth,
+    user: AuthUser,
     Path(id): Path<Uuid>,
 ) -> Result<Json<TestResult>, AppError> {
+    let db_user = get_or_create_user(&state, &user).await?;
     let provider = sqlx::query_as::<_, LlmProvider>(
-        "SELECT * FROM llm_providers WHERE id = $1",
+        "SELECT * FROM llm_providers WHERE id = $1 AND user_id = $2",
     )
     .bind(id)
+    .bind(db_user.id)
     .fetch_optional(&state.pool)
     .await?
     .ok_or(AppError::LlmProviderNotFound)?;
@@ -193,13 +211,11 @@ pub async fn test_provider(
     let models_json = serde_json::to_value(&models)
         .map_err(|e| AppError::InternalError(format!("VNL-LLM-002: serialization error: {e}")))?;
 
-    sqlx::query(
-        "UPDATE llm_providers SET available_models = $1, updated_at = NOW() WHERE id = $2",
-    )
-    .bind(&models_json)
-    .bind(id)
-    .execute(&state.pool)
-    .await?;
+    sqlx::query("UPDATE llm_providers SET available_models = $1, updated_at = NOW() WHERE id = $2")
+        .bind(&models_json)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
 
     Ok(Json(TestResult { models }))
 }
@@ -266,4 +282,70 @@ fn validate_provider_type(t: &str) -> Result<(), AppError> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::MockOidcClient;
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode},
+        Router,
+    };
+    use tower::ServiceExt;
+
+    fn test_key() -> cookie::Key {
+        cookie::Key::from(&[0u8; 64])
+    }
+
+    fn make_app() -> Router {
+        let config = crate::config::Config {
+            oidc_issuer_url: "https://issuer.example.com".to_string(),
+            oidc_client_id: "client-id".to_string(),
+            oidc_client_secret: "client-secret".to_string(),
+            oidc_redirect_url: "https://app.example.com/callback".to_string(),
+            oidc_scopes: vec![],
+            oidc_ca_cert: None,
+            cookie_secret: "0".repeat(64),
+            database_url: "postgres://localhost/test".to_string(),
+            admin_secret: "test-admin-secret".to_string(),
+            listen_addr: "0.0.0.0:8080".to_string(),
+            static_dir: "./static".to_string(),
+        };
+
+        let state = AppState {
+            config,
+            oidc_client: std::sync::Arc::new(MockOidcClient),
+            cookie_key: test_key(),
+            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
+        };
+
+        Router::new()
+            .route("/llm-providers", axum::routing::get(list_providers))
+            .with_state(state)
+    }
+
+    #[test]
+    fn validate_provider_type_accepts_known() {
+        assert!(validate_provider_type("ollama").is_ok());
+        assert!(validate_provider_type("openai-compatible").is_ok());
+    }
+
+    #[test]
+    fn validate_provider_type_rejects_unknown() {
+        let err = validate_provider_type("bogus").unwrap_err();
+        assert!(matches!(err, AppError::LlmError(_)));
+    }
+
+    #[tokio::test]
+    async fn list_providers_without_cookie_returns_401() {
+        let app = make_app();
+        let req = Request::builder()
+            .uri("/llm-providers")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
 }
