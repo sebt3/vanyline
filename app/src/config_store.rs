@@ -12,7 +12,7 @@ use vanyline_lib::store::ConfigStore;
 use vanyline_lib::VnyError;
 
 use crate::db::models::{
-    AgentRow, LlmProvider as DbLlmProvider, McpServer as DbMcpServer,
+    AgentRecord, LlmProvider as DbLlmProvider, McpServer as DbMcpServer,
     ModelProfile as DbModelProfile, Skill as DbSkill, Toolset as DbToolset,
 };
 
@@ -88,37 +88,50 @@ fn domain_model_profile(
     })
 }
 
-/// `None` si `agent.llm_provider_id` référence un id absent de `providers`,
-/// ou si aucun `is_default` n'existe quand `llm_provider_id` est `None` — le
-/// `Result`/`Err` exact (`LlmProviderNotFound` vs `NoProviderConfigured`) est
-/// choisi ICI (fonction pure, testable sans DB).
-fn resolve_provider_for_agent<'a>(
-    agent: &AgentRow,
-    providers: &'a [DbLlmProvider],
-) -> Result<&'a DbLlmProvider, VnyError> {
-    if let Some(id) = agent.llm_provider_id {
-        providers
-            .iter()
-            .find(|p| p.id == id)
-            .ok_or(VnyError::LlmProviderNotFound)
-    } else {
-        providers
-            .iter()
-            .find(|p| p.is_default)
-            .ok_or(VnyError::NoProviderConfigured)
+/// `agent.mode` est une garantie d'intégrité (CHECK en base), donc en
+/// pratique `Err` n'arrive jamais — mais on garde le Result parce que
+/// `agent_mode_from_str` expose un contrat avec le consommateur final.
+fn agent_mode_from_str(s: &str) -> Result<AgentMode, VnyError> {
+    match s {
+        "primary" => Ok(AgentMode::Primary),
+        "subagent" => Ok(AgentMode::Subagent),
+        "all" => Ok(AgentMode::All),
+        other => Err(VnyError::ConfigError(format!("unknown agent mode: {other}"))),
     }
 }
 
-fn domain_agent(agent: &AgentRow) -> Agent {
-    Agent {
-        name: agent.name.clone(),
-        description: agent.description.clone(),
-        mode: AgentMode::Primary,
-        model: agent.name.clone(),
-        toolsets: vec![agent.name.clone()],
-        skills: SkillSelection::None,
-        system_prompt: agent.system_prompt.clone(),
-    }
+/// `profiles` = résultat de `load_model_profiles()` de CE `PgConfigStore`
+/// (même utilisateur — la garantie de cohérence vient de l'appelant, pas de
+/// cette fonction). L'Agent.model porte le NOM du profil, jamais son id.
+fn resolve_model_profile_name(
+    agent: &AgentRecord,
+    profiles: &[DbModelProfile],
+) -> Result<String, VnyError> {
+    profiles
+        .iter()
+        .find(|p| p.id == agent.model_profile_id)
+        .map(|p| p.name.clone())
+        .ok_or_else(|| VnyError::UnknownReference("model", agent.model_profile_id.to_string()))
+}
+
+/// `toolsets`/`skills` : repli défensif JSON invalide -> vide/`SkillSelection`
+/// par défaut — un JSON malformé sur ces deux colonnes ne doit pas faire
+/// échouer tout `list_agents`. En revanche `mode` invalide et
+/// `model_profile_id` orphelin restent des erreurs dures.
+fn domain_agent_record(row: &AgentRecord, profiles: &[DbModelProfile]) -> Result<Agent, VnyError> {
+    let model = resolve_model_profile_name(row, profiles)?;
+    let mode = agent_mode_from_str(&row.mode)?;
+    let toolsets: Vec<String> = serde_json::from_value(row.toolsets.clone()).unwrap_or_default();
+    let skills: SkillSelection = serde_json::from_value(row.skills.clone()).unwrap_or_default();
+    Ok(Agent {
+        name: row.name.clone(),
+        description: row.description.clone(),
+        mode,
+        model,
+        toolsets,
+        skills,
+        system_prompt: row.system_prompt.clone(),
+    })
 }
 
 /// Infaillible par design : `local_tools`/`mcp` sont `NOT NULL DEFAULT '[]'`
@@ -188,8 +201,9 @@ impl PgConfigStore {
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 
-    async fn load_agents(&self) -> Result<Vec<AgentRow>, VnyError> {
-        sqlx::query_as::<_, AgentRow>("SELECT * FROM agents")
+    async fn load_agent_records(&self) -> Result<Vec<AgentRecord>, VnyError> {
+        sqlx::query_as::<_, AgentRecord>("SELECT * FROM agents WHERE user_id = $1")
+            .bind(self.user_id)
             .fetch_all(&self.pool)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
@@ -243,12 +257,9 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
-        let agents = self.load_agents().await?;
-        let providers = self.load_providers().await?;
-        for agent in &agents {
-            resolve_provider_for_agent(agent, &providers)?; // valide la référence
-        }
-        Ok(agents.iter().map(domain_agent).collect())
+        let rows = self.load_agent_records().await?;
+        let profiles = self.load_model_profiles().await?;
+        rows.iter().map(|r| domain_agent_record(r, &profiles)).collect()
     }
 
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
@@ -307,14 +318,25 @@ mod tests {
         }
     }
 
-    fn sample_agent(id: Uuid, name: &str, llm_provider_id: Option<Uuid>, model: Option<&str>) -> AgentRow {
-        AgentRow {
+    fn sample_agent_record(
+        id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        mode: &str,
+        model_profile_id: Uuid,
+        toolsets: serde_json::Value,
+        skills: serde_json::Value,
+    ) -> AgentRecord {
+        AgentRecord {
             id,
+            user_id,
             name: name.to_string(),
             description: None,
+            mode: mode.to_string(),
+            model_profile_id,
+            toolsets,
+            skills,
             system_prompt: "prompt".to_string(),
-            llm_provider_id,
-            model: model.map(String::from),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         }
@@ -402,63 +424,7 @@ mod tests {
         assert!(domain_mcp_server(&row).is_none());
     }
 
-    // 5. resolve_provider_for_agent_by_id
-    #[test]
-    fn resolve_provider_for_agent_by_id() {
-        let id1 = Uuid::new_v4();
-        let id2 = Uuid::new_v4();
-        let uid = Uuid::new_v4();
-        let p1 = sample_provider(id1, uid, "ollama", "ollama", false);
-        let p2 = sample_provider(id2, uid, "openai", "openai-compatible", false);
-        let agents = vec![p1.clone(), p2.clone()];
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", Some(id2), None);
-        let result = resolve_provider_for_agent(&agent, &agents).unwrap();
-        assert_eq!(result.name, "openai");
-    }
-
-    // 6. resolve_provider_for_agent_unknown_id
-    #[test]
-    fn resolve_provider_for_agent_unknown_id() {
-        let unknown_id = Uuid::new_v4();
-        let p1 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "ollama", "ollama", false);
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", Some(unknown_id), None);
-        let err = resolve_provider_for_agent(&agent, &[p1]).unwrap_err();
-        assert!(matches!(err, VnyError::LlmProviderNotFound));
-    }
-
-    // 7. resolve_provider_for_agent_default_fallback
-    #[test]
-    fn resolve_provider_for_agent_default_fallback() {
-        let p1 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "ollama", "ollama", true);
-        let p2 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "openai", "openai-compatible", false);
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
-        let providers = vec![p1.clone(), p2];
-        let result = resolve_provider_for_agent(&agent, &providers).unwrap();
-        assert_eq!(result.name, "ollama");
-        assert!(result.is_default);
-    }
-
-    // 8. resolve_provider_for_agent_no_default
-    #[test]
-    fn resolve_provider_for_agent_no_default() {
-        let p1 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "ollama", "ollama", false);
-        let p2 = sample_provider(Uuid::new_v4(), Uuid::new_v4(), "openai", "openai-compatible", false);
-        let agent = sample_agent(Uuid::new_v4(), "test-agent", None, None);
-        let err = resolve_provider_for_agent(&agent, &[p1, p2]).unwrap_err();
-        assert!(matches!(err, VnyError::NoProviderConfigured));
-    }
-
-    // 9. domain_agent_synthesizes_self_references
-    #[test]
-    fn domain_agent_synthesizes_self_references() {
-        let agent_row = sample_agent(Uuid::new_v4(), "my-agent", None, None);
-        let agent = domain_agent(&agent_row);
-        assert_eq!(agent.model, "my-agent");
-        assert_eq!(agent.toolsets, vec!["my-agent".to_string()]);
-        assert_eq!(agent.mode, AgentMode::Primary);
-    }
-
-    // 10. domain_model_profile_resolves_provider_name
+    // 5. domain_model_profile_resolves_provider_name
     #[test]
     fn domain_model_profile_resolves_provider_name() {
         let pid = Uuid::new_v4();
@@ -665,5 +631,195 @@ mod tests {
         let meta = domain_skill_meta(&row);
         assert_eq!(meta.name, "blank");
         assert_eq!(meta.description, "");
+    }
+
+    // --- agents (pg-store) ---
+
+    // 20. agent_mode_from_str_known_values
+    #[test]
+    fn agent_mode_from_str_known_values() {
+        assert_eq!(agent_mode_from_str("primary").unwrap(), AgentMode::Primary);
+        assert_eq!(agent_mode_from_str("subagent").unwrap(), AgentMode::Subagent);
+        assert_eq!(agent_mode_from_str("all").unwrap(), AgentMode::All);
+    }
+
+    // 21. agent_mode_from_str_unknown_errors
+    #[test]
+    fn agent_mode_from_str_unknown_errors() {
+        let err = agent_mode_from_str("bogus").unwrap_err();
+        assert!(matches!(err, VnyError::ConfigError(_)));
+    }
+
+    // 22. resolve_model_profile_name_found
+    #[test]
+    fn resolve_model_profile_name_found() {
+        let uid = Uuid::new_v4();
+        let pid = Uuid::new_v4();
+        let pid2 = Uuid::new_v4();
+        let row = sample_model_profile(pid2, uid, "qwen-pro", pid, "qwen2.5");
+        let agent = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "coder",
+            "primary",
+            pid2,
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let profiles = vec![row];
+        let name = resolve_model_profile_name(&agent, &profiles).unwrap();
+        assert_eq!(name, "qwen-pro");
+    }
+
+    // 23. resolve_model_profile_name_unknown_errors
+    #[test]
+    fn resolve_model_profile_name_unknown_errors() {
+        let uid = Uuid::new_v4();
+        let row_id = Uuid::new_v4();
+        let pid = Uuid::new_v4();
+        let row = sample_model_profile(row_id, uid, "qwen", pid, "qwen2.5");
+        let orphan_id = Uuid::new_v4(); // id qui n'appartient à aucun profil
+        let agent = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "coder",
+            "primary",
+            orphan_id, // id absent de profiles
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let err = resolve_model_profile_name(&agent, &[row]).unwrap_err();
+        assert!(matches!(err, VnyError::UnknownReference("model", ref id) if *id == orphan_id.to_string()));
+    }
+
+    // 24. domain_agent_record_full_conversion
+    #[test]
+    fn domain_agent_record_full_conversion() {
+        let uid = Uuid::new_v4();
+        let row_id = Uuid::new_v4();
+        let row = sample_model_profile(row_id, uid, "qwen-pro", Uuid::new_v4(), "qwen2.5");
+        let agent = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "coder",
+            "subagent",
+            row_id, // model_profile_id pointe sur le row créé ci-dessus
+            serde_json::json!(["fs", "build"]),
+            serde_json::json!(["pdf"]),
+        );
+        let result = domain_agent_record(&agent, &[row]).unwrap();
+        assert_eq!(result.mode, AgentMode::Subagent);
+        assert_eq!(result.model, "qwen-pro");
+        assert_eq!(result.toolsets, vec!["fs".to_string(), "build".to_string()]);
+        assert!(matches!(
+            result.skills,
+            SkillSelection::Named(names) if names == vec!["pdf".to_string()]
+        ));
+    }
+
+    // 25. domain_agent_record_skills_auto_and_none
+    #[test]
+    fn domain_agent_record_skills_auto_and_none() {
+        let uid = Uuid::new_v4();
+        let row_id = Uuid::new_v4();
+        let row = sample_model_profile(row_id, uid, "qwen", Uuid::new_v4(), "qwen2.5");
+        let agent_auto = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "a",
+            "primary",
+            row_id,
+            serde_json::json!([]),
+            serde_json::json!("auto"),
+        );
+        let agent_none = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "b",
+            "primary",
+            row_id,
+            serde_json::json!([]),
+            serde_json::json!("none"),
+        );
+        let result_auto = domain_agent_record(&agent_auto, &[row.clone()]).unwrap();
+        let result_none = domain_agent_record(&agent_none, &[row.clone()]).unwrap();
+        assert!(matches!(result_auto.skills, SkillSelection::Auto));
+        assert!(matches!(result_none.skills, SkillSelection::None));
+    }
+
+    // 27. domain_agent_record_invalid_toolsets_json_defaults_empty
+    #[test]
+    fn domain_agent_record_invalid_toolsets_json_defaults_empty() {
+        let uid = Uuid::new_v4();
+        let row_id = Uuid::new_v4();
+        let row = sample_model_profile(row_id, uid, "qwen", Uuid::new_v4(), "qwen2.5");
+        let agent = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "a",
+            "primary",
+            row_id,
+            serde_json::Value::Null,
+            serde_json::json!([]),
+        );
+        let result = domain_agent_record(&agent, &[row]).unwrap();
+        assert!(result.toolsets.is_empty());
+    }
+
+    // 28. domain_agent_record_invalid_skills_json_defaults_auto
+    #[test]
+    fn domain_agent_record_invalid_skills_json_defaults_auto() {
+        let uid = Uuid::new_v4();
+        let row_id = Uuid::new_v4();
+        let row = sample_model_profile(row_id, uid, "qwen", Uuid::new_v4(), "qwen2.5");
+        let agent = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "a",
+            "primary",
+            row_id,
+            serde_json::json!([]),
+            serde_json::Value::Null,
+        );
+        let result = domain_agent_record(&agent, &[row]).unwrap();
+        assert!(matches!(result.skills, SkillSelection::Auto));
+    }
+
+    // 29. domain_agent_record_unknown_model_profile_errors
+    #[test]
+    fn domain_agent_record_unknown_model_profile_errors() {
+        let uid = Uuid::new_v4();
+        let agent_record = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "a",
+            "primary",
+            Uuid::new_v4(), // absent de profiles
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let profiles: Vec<DbModelProfile> = Vec::new();
+        let err = domain_agent_record(&agent_record, &profiles).unwrap_err();
+        assert!(matches!(err, VnyError::UnknownReference("model", _)));
+    }
+
+    // 30. domain_agent_record_invalid_mode_errors
+    #[test]
+    fn domain_agent_record_invalid_mode_errors() {
+        let uid = Uuid::new_v4();
+        let pid = Uuid::new_v4();
+        let row_id = Uuid::new_v4();
+        let row = sample_model_profile(row_id, uid, "qwen", pid, "qwen2.5");
+        let agent = sample_agent_record(
+            Uuid::new_v4(),
+            uid,
+            "a",
+            "bogus",
+            row_id,
+            serde_json::json!([]),
+            serde_json::json!([]),
+        );
+        let err = domain_agent_record(&agent, &[row]).unwrap_err();
+        assert!(matches!(err, VnyError::ConfigError(_)));
     }
 }

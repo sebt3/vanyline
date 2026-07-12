@@ -74,6 +74,21 @@ pub struct Skill {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct AgentRecord {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub name: String,
+    pub description: Option<String>,
+    pub mode: String,
+    pub model_profile_id: Uuid,
+    pub toolsets: serde_json::Value,
+    pub skills: serde_json::Value,
+    pub system_prompt: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
     pub id: Uuid,
