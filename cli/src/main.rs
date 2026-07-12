@@ -19,21 +19,20 @@ use tracing_subscriber::prelude::*;
 #[command(name = "vanyline", version, about = "CLI for vanyline LLM chat")]
 struct Cli {
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
+    /// Agent name to use (REPL or `run`)
+    #[arg(short, long, global = true)]
+    agent: Option<String>,
+    /// Continue the active conversation instead of starting a new one
+    #[arg(short = 'c', long = "continue", global = true)]
+    continue_active: bool,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Chat with an LLM agent (REPL or one-shot)
-    Chat {
-        /// One-shot message (skip REPL if provided)
-        message: Option<String>,
-        /// Agent name to use
-        #[arg(short, long)]
-        agent: Option<String>,
-        /// Conversation ID to continue
-        #[arg(short, long)]
-        conversation: Option<uuid::Uuid>,
+    /// One-shot message to an LLM agent
+    Run {
+        message: String,
     },
     /// Manage conversations
     #[command(subcommand)]
@@ -133,19 +132,16 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Chat {
-            message,
-            agent,
-            conversation,
-        } => chat::run(message, agent, conversation).await,
-        Commands::Conversations(cmd) => run_conversation(cmd).await,
-        Commands::Agents(cmd) => run_agent(cmd).await,
-        Commands::Providers(cmd) => run_provider(cmd).await,
-        Commands::Models(cmd) => run_models(cmd).await,
-        Commands::Toolsets(cmd) => run_toolsets(cmd).await,
-        Commands::Skills(cmd) => run_skills(cmd).await,
-        Commands::Mcp(cmd) => run_mcp(cmd).await,
-        Commands::Config(cmd) => run_config(cmd).await,
+        None => chat::run(None, cli.agent, cli.continue_active).await,
+        Some(Commands::Run { message }) => chat::run(Some(message), cli.agent, cli.continue_active).await,
+        Some(Commands::Conversations(cmd)) => run_conversation(cmd).await,
+        Some(Commands::Agents(cmd)) => run_agent(cmd).await,
+        Some(Commands::Providers(cmd)) => run_provider(cmd).await,
+        Some(Commands::Models(cmd)) => run_models(cmd).await,
+        Some(Commands::Toolsets(cmd)) => run_toolsets(cmd).await,
+        Some(Commands::Skills(cmd)) => run_skills(cmd).await,
+        Some(Commands::Mcp(cmd)) => run_mcp(cmd).await,
+        Some(Commands::Config(cmd)) => run_config(cmd).await,
     }
 }
 

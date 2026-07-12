@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use uuid::Uuid;
 
 use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
 use vanyline_lib::session::run_agent_turn;
@@ -30,17 +29,17 @@ impl EventSink for StdoutSink {
     }
 }
 
-pub async fn run(message: Option<String>, agent: Option<String>, conversation: Option<Uuid>) {
+pub async fn run(message: Option<String>, agent: Option<String>, continue_active: bool) {
     config::ensure_config_dir();
     if let Some(msg) = message {
-        run_one_shot(&msg, agent, conversation).await;
+        run_one_shot(&msg, agent, continue_active).await;
         return;
     }
-    run_repl(agent, conversation).await;
+    run_repl(agent, continue_active).await;
 }
 
-async fn run_one_shot(user_msg: &str, agent: Option<String>, conversation: Option<Uuid>) {
-    let (mut conv, agent_name, is_new) = resolve_context(agent, conversation).await;
+async fn run_one_shot(user_msg: &str, agent: Option<String>, continue_active: bool) {
+    let (mut conv, agent_name, is_new) = resolve_context(agent, continue_active).await;
     if is_new {
         println!("Session: {}", conv.id);
     }
@@ -64,8 +63,8 @@ async fn run_one_shot(user_msg: &str, agent: Option<String>, conversation: Optio
     }
 }
 
-async fn run_repl(agent: Option<String>, conversation: Option<Uuid>) {
-    let (mut conv, agent_name, _) = resolve_context(agent, conversation).await;
+async fn run_repl(agent: Option<String>, continue_active: bool) {
+    let (mut conv, agent_name, _) = resolve_context(agent, continue_active).await;
     println!("vanyline REPL (Ctrl-D to exit)");
     println!("Agent: {agent_name}");
     if let Some(title) = &conv.title {
@@ -170,7 +169,7 @@ fn result_to_assistant_message(result: ChatTurnResult) -> vanyline_lib::Message 
 
 async fn resolve_context(
     agent: Option<String>,
-    conversation: Option<Uuid>,
+    continue_active: bool,
 ) -> (vanyline_lib::Conversation, String, bool) {
     let config_store = crate::discover_fs_store();
 
@@ -190,43 +189,28 @@ async fn resolve_context(
         }
     });
 
-    // Validate agent exists
     if !agents.iter().any(|a| a.name == agent_name) {
         eprintln!("Agent not found: {agent_name}");
         std::process::exit(1);
     }
 
-    let (conv, is_new) = if let Some(cid) = conversation {
-        (
-            store::get_conversation(&cid).unwrap_or_else(|_| {
-                eprintln!("Conversation not found: {cid}");
-                std::process::exit(1);
-            }),
-            false,
-        )
-    } else if let Some(active_id) = store::get_active_conversation() {
-        match store::get_conversation(&active_id) {
-            Ok(existing) => (existing, false),
-            Err(_) => (
-                vanyline_lib::Conversation {
-                    id: uuid::Uuid::new_v4(),
-                    agent: Some(agent_name.clone()),
-                    title: None,
-                    messages: Vec::new(),
-                },
-                true,
-            ),
+    let new_conversation = || vanyline_lib::Conversation {
+        id: uuid::Uuid::new_v4(),
+        agent: Some(agent_name.clone()),
+        title: None,
+        messages: Vec::new(),
+    };
+
+    let (conv, is_new) = if continue_active {
+        match store::get_active_conversation().and_then(|id| store::get_conversation(&id).ok()) {
+            Some(existing) => (existing, false),
+            None => {
+                println!("No active conversation found, starting a new one.");
+                (new_conversation(), true)
+            }
         }
     } else {
-        (
-            vanyline_lib::Conversation {
-                id: uuid::Uuid::new_v4(),
-                agent: Some(agent_name.clone()),
-                title: None,
-                messages: Vec::new(),
-            },
-            true,
-        )
+        (new_conversation(), true)
     };
 
     (conv, agent_name, is_new)
