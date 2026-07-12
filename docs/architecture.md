@@ -82,7 +82,7 @@ pub async fn run_agent_turn(
   schéma PostgreSQL existant, synthétise encore `ModelProfile`/`Toolset` en attendant sa
   propre bascule vers un stockage natif — `app-harness-parity.md`).
 - `sink: Arc<dyn EventSink>` — un seul type d'événement, `ChatEvent`, pour tous les
-  transports (REPL stdout, WebSocket, futur JSON-RPC stdio). `EventSink::emit` est
+  transports (REPL stdout, WebSocket, JSON-RPC stdio). `EventSink::emit` est
   appelée pour chaque `ChatEvent` produit pendant le tour (tokens, tool calls/résultats,
   usage, événements de subagent…) ; chaque binaire décide comment les afficher/transmettre
   (cli : impression directe ; app : accumulation puis flush WS en fin de tour — pas de
@@ -170,6 +170,55 @@ conversations (ancien `~/.config/vanyline/conversations/` → nouveau XDG
 data) : les anciens fichiers restent orphelins sur disque, jamais lus ni
 déplacés.
 
+## RPC stdio — `vanyline serve --stdio` (JSON-RPC 2.0)
+
+Serveur JSON-RPC 2.0 sur stdio (ndjson — une trame JSON par ligne, `\n`,
+stdout réservé au protocole, logs sur stderr), exposant tout le harness
+CLI pour l'extension VS Code (ou tout autre client programmatique) sans
+passer par l'app. **Spec complète (transport, enveloppes, table des codes
+d'erreur, exemples de trames pour chaque méthode) : `docs/rpc-protocol.md`
+— ce qui suit est le résumé architectural, pas une référence.**
+
+**Modules** : `cli/src/rpc/mod.rs` (boucle stdin/stdout, writer unique via
+canal mpsc), `protocol.rs` (types serde requêtes/réponses/notifications,
+namespace d'erreur `VNL-RPC-000` à `VNL-RPC-009`), `handlers.rs`
+(dispatch, `ServerState`, logique par méthode). Réutilise `FsConfigStore`
+(config, tâche 02a) et `cli/src/store.rs` (conversations, format JSON
+existant, tâche 02b) tels quels — aucun nouveau stockage introduit.
+
+**Concurrence de `chat/send`** — la seule méthode asynchrone du protocole
+(le tour LLM peut être long) : la boucle stdio reste séquentielle pour
+tout le reste, mais `chat/send` est **spawné** en tâche tokio indépendante
+pour ne pas bloquer la lecture d'autres requêtes (y compris un autre
+`chat/send` sur une AUTRE conversation — plusieurs conversations tournent
+en vrai parallèle). Pas de `Arc<Mutex<ServerState>>` global : seuls les
+champs qui doivent être visibles/mutables depuis une tâche spawnée
+(`busy: Arc<Mutex<HashSet<Uuid>>>`, `seq: Arc<Mutex<HashMap<Uuid,u64>>>`,
+`tx` — déjà `Clone` nativement) le sont individuellement ; `store` est un
+`Arc<FsConfigStore>` partagé sans verrou (lecture seule après
+`initialize`). Un `chat/send` sur une conversation déjà occupée répond
+`VNL-RPC-002` immédiatement, sans rien spawner. `BusyGuard` (`Drop`)
+garantit le nettoyage même si la tâche panique.
+
+**Passthrough camelCase/snake_case** : les enveloppes RPC propres à ce
+protocole (`InitializeResult`, `ConversationSummary`, `ChatSendParams`/
+`Result`, notifications) sont en camelCase ; `config/*` et
+`conversations/get` retournent les types `vanyline_lib`/CLI **tels
+quels**, en snake_case natif (`system_prompt`, `tool_calls`…) — aucune
+conversion, documenté explicitement dans `rpc-protocol.md` pour ne pas
+piéger le développeur de l'extension.
+
+**Dette assumée** (cohérente avec « Limites connues » plus bas) :
+`chat/cancel` est un no-op protocolaire (valide juste l'UUID, accepte,
+n'annule rien) — l'annulation réelle dépend du support d'annulation de
+`run_agent_turn`, toujours absent. Pas de watcher de config : `FsConfigStore`
+relit le disque à chaque appel (déjà son comportement natif, pas
+spécifique au RPC). Pas de détachement propre des tâches `chat/send`
+encore en vol à l'arrêt du serveur (shutdown/EOF) — `writer.await` peut
+attendre un tour qui ne se termine jamais si le client ferme la
+connexion en plein tour ; acceptable pour v1, le process est de toute
+façon sur le point de sortir.
+
 ## Outils (`vanyline-tools`) — conventions SLM-friendly
 
 La crate `vanyline-tools` cible explicitement des modèles plus petits que Qwen3.6
@@ -227,9 +276,10 @@ tour qu'un scénario de test écrit à la main.
   (`&self`) — hors scope de l'adaptation mécanique tâche 9.
 - **Historique appauvri** : seul le texte user/assistant est rejoué d'un tour à l'autre
   (`cli/src/chat.rs`, `app/src/ws/chat.rs`) — pas les tool calls/résultats intermédiaires.
-- **Pas d'annulation** : `run_agent_turn` ne prend pas de token d'annulation ; son ajout
-  futur (requis par un éventuel RPC `chat/cancel`) devra rester compatible signature
-  (paramètre sur `SessionContext` plutôt que sur la fonction).
+- **Pas d'annulation** : `run_agent_turn` ne prend pas de token d'annulation. Le RPC
+  `chat/cancel` existe déjà dans le protocole (no-op v1, cf. section RPC stdio ci-dessus)
+  pour ne pas casser les clients qui l'appellent ; son ajout futur devra rester
+  compatible signature (paramètre sur `SessionContext` plutôt que sur la fonction).
 - **`additional_params` par provider non validé en conditions réelles** : `ModelProfile.options`
   (ex. `num_ctx` pour ollama) est correctement transmis à `AgentBuilder::additional_params`
   côté code, mais la transmission effective jusqu'à la requête HTTP par le provider ollama

@@ -129,81 +129,70 @@ anticipées à l'avance. Fonctionne bien : découper *pendant* l'exécution dès
 candidate touche plusieurs formats/fichiers indépendants, plutôt que de figer le découpage
 dans le design doc.
 
+### cli-rpc-stdio — serveur JSON-RPC 2.0 sur stdio (terminé)
+
+`vanyline serve --stdio` (`cli/src/rpc/`) : `initialize`/`shutdown`,
+`config/agents|models|toolsets|skills`, `conversations/list|get|create|
+delete`, `chat/send` (asynchrone, spawné en tokio pour un vrai parallélisme
+inter-conversations — un seul tour actif par conversation, `VNL-RPC-002`
+sinon), `chat/cancel` (no-op v1). 110 tests cli au total. Détails
+architecturaux : `docs/architecture.md` section "RPC stdio". Spec complète
+du protocole (trames, codes d'erreur, piège camelCase/snake_case) :
+`docs/rpc-protocol.md`.
+
+Bug réel trouvé en cours de route (pas dans le design, dans
+l'implémentation) : `state` détenait un clone du sender mpsc et n'était
+droppé qu'après avoir attendu la tâche writer — le process ne sortait
+JAMAIS après `shutdown`/EOF (deadlock silencieux, seulement visible via un
+test d'intégration qui spawn le vrai binaire, pas via des tests unitaires
+sur `handle_line`). Confirme l'utilité d'au moins un test de bout en bout
+par le process réel en plus des tests unitaires pour ce genre de code
+(cycle de vie / shutdown), qui ne se voit pas en testant la logique pure.
+
 ### Outillage — délégation à Qwen via `llm-exec`
 
-Depuis la feature cli-rpc-stdio (2026-07-12), Claude délègue directement à
-Qwen via `llm-exec` (plus de passe-plat humain) : fichier de tâche écrit
-dans `.tasks/<feature>/`, lancé en arrière-plan, revu puis committé par
-Claude après coup (l'agent opencode `implement` a `git commit*: ask` dans
-ses permissions — bloquant en exécution non-interactive, donc Qwen
-implémente + valide, ne commit jamais).
+Depuis la feature cli-rpc-stdio (2026-07-12, 6 tâches + plusieurs rondes
+de correction), Claude délègue directement à Qwen via `llm-exec` (plus de
+passe-plat humain) : fichier de tâche écrit dans `.tasks/<feature>/`,
+lancé en arrière-plan, revu et validé par Claude après coup, committé par
+Claude. Règles stabilisées :
 
-Deux pièges d'environnement rencontrés au premier essai :
-
-- **`opencode run` échoue avec `Session not found`** si lancé depuis le Bash
-  tool de Claude Code sur cette machine — l'environnement hérite
-  `OPENCODE_SERVER_PASSWORD`/`OPENCODE_BINARY` du pod code-server, et leur
-  présence fait échouer la création de session (mécanisme de contrôle
-  serveur sans rapport avec un `run` ponctuel). Un terminal interactif
-  classique n'a pas ce problème (confirmé : même commande, résultat
-  différent). **Fix** : préfixer `env -u OPENCODE_SERVER_PASSWORD -u
-  OPENCODE_BINARY` devant `llm-exec`/`opencode run` quand l'appel vient du
-  Bash tool.
-- **Modèle** : malgré la consigne globale d'utiliser `strix/qwen3.6:27b`
-  (dense), le développeur préfère `strix/qwen3.6:35b-a3b` (MoE) pour ces
-  délégations — le dense est trop lent en pratique sur le Strix. Toujours
-  passer `-m` explicitement (l'auto-découverte reste à éviter), juste avec
-  ce tag-là par défaut sur ce projet.
-
-Constaté sur les tâches 01 et 02a : les permissions bash de l'agent
-`implement` (`.opencode/agents/implement.md`) sont des globs de préfixe
-simples (`cargo check*: allow`, etc.) — tout ce qui sort de ce motif exact
-(un `mkdir` isolé, ou même `cargo check --workspace 2>&1` à cause de la
-redirection) tombe sur `"*": ask`, auto-rejeté en exécution non-interactive.
-Qwen s'est arrêté net les deux fois sans y revenir.
-
-Doc opencode (permissions) : matching par glob sur la commande *parsée*
-(dernière règle qui matche l'emporte), rien de documenté sur les
-pipes/redirections/commandes composées — pas de certitude sur pourquoi le
-`2>&1` cassait le match malgré `cargo check*: allow`. Décision prise avec
-le développeur (2026-07-12) : élargir `.opencode/agents/implement.md`
-plutôt que de compenser à chaque prompt de tâche — ajouté `mkdir*`,
-`tail*`, `head*`, `grep*`, `wc*: allow` (tous à faible risque : création de
-répertoire réversible, utilitaires read-only). Le problème spécifique des
-redirections (`2>&1`, `|`) reste non résolu (pas creusé plus loin côté
-parsing opencode) — continuer à demander dans les prompts de tâche de
-lancer les commandes de validation SANS pipe/redirection tant que ce n'est
-pas éclairci.
-
-**Mise à jour (tâche 02b)** : constat plus grave — même `cargo check
---workspace` NU (sans pipe ni redirection, cas censé matcher `cargo
-check*: allow` trivialement) est refusé en `opencode run` non-interactif,
-reproduit directement (hors Qwen, `opencode run --agent implement ...`
-tout court). Hypothèse testée et INVALIDÉE : espace avant l'étoile
-(`cargo check *` vs `cargo check*`, cf. doc "`grep *` permet `grep pattern
-file.txt`") — ajouté `cargo check *: allow` en plus, aucun effet. Piste NON
-suivie : `--dangerously-skip-permissions` (bypass complet du garde-fou,
-hors périmètre de ce qui a été autorisé — ne pas y toucher sans en
-rediscuter explicitement). Conclusion actuelle : les entrées `allow` de
-`permission.bash` ne semblent produire AUCUN effet observable en mode
-`opencode run` headless, quelle que soit la commande — Qwen ne peut donc
-pas se valider lui-même en pratique, peu importe le motif. Ce n'est pas
-bloquant pour autant : Claude relit et valide toujours lui-même après coup
-de toute façon (déjà le cas sur les 3 tâches de cette feature), donc la
-perte réelle est du temps, pas de la correction manquée. À élucider un
-jour si le confort de "Qwen se valide seul" devient important — pas urgent
-tant que ce n'est pas le cas.
-
-**Correction du développeur (tâche 03a, 2026-07-12)** : sur les tâches 02a
-et 03a, Claude avait dérivé vers du patch direct (`Edit`) à chaque bug ou
-oubli remonté par la validation, au lieu de renvoyer un fichier de tâche
-de correction à Qwen — plus rapide dans l'instant, mais ça vide le
-workflow de son sens (Qwen implémente, Claude définit/relit) et fait
-porter à Claude du travail mécanique qui devrait revenir à Qwen. Corrigé :
-un bug/oubli devient un fichier de tâche de correction délégué à Qwen, pas
-un `Edit` direct — SAUF blocage réel d'outillage (permissions bash cassées
-en headless, cf. ci-dessus) où Qwen ne peut de toute façon rien faire de
-plus lui-même.
+- **Toujours préfixer `env -u OPENCODE_SERVER_PASSWORD -u
+  OPENCODE_BINARY`** devant `llm-exec`/`opencode run` lancé depuis le Bash
+  tool de Claude Code — sans ça, `opencode run` échoue avec `Session not
+  found` (l'environnement hérite ces deux variables du pod code-server ;
+  un terminal interactif classique n'a pas le problème). Non lié à un
+  process `opencode serve` particulier — c'est la présence des variables
+  elles-mêmes qui casse la création de session.
+- **Modèle** : `-m "strix/qwen3.6:35b-a3b"` (MoE) par défaut sur ce
+  projet, pas le dense `27b` de la consigne globale — trop lent en
+  pratique sur le Strix (préférence du développeur). Toujours passer `-m`
+  explicitement, ne jamais compter sur l'auto-découverte.
+- **Les permissions `bash: ... allow` de `.opencode/agents/implement.md`
+  n'ont AUCUN effet observable en `opencode run` headless** — confirmé
+  directement (hors Qwen) sur le cas le plus simple possible (`cargo check
+  --workspace` nu, censé matcher `cargo check*: allow` trivialement,
+  refusé quand même). Hypothèse espace-avant-étoile testée et invalidée ;
+  `--dangerously-skip-permissions` non exploré (bypass complet, hors
+  périmètre autorisé). Conséquence acceptée : **Qwen ne peut jamais se
+  valider lui-même dans cet environnement**, quel que soit le prompt —
+  Claude relit et valide (`cargo check/test/clippy`) après CHAQUE
+  délégation, systématiquement. Elargi quand même `mkdir*`/`tail*`/
+  `head*`/`grep*`/`wc*: allow` (faible risque, au cas où un autre contexte
+  d'exécution en bénéficierait) mais sans compter dessus.
+- **Corriger en déléguant, pas en patchant direct** (retour du
+  développeur, 2026-07-12) : un bug/oubli remonté par la validation de
+  Claude devient un fichier de tâche de correction (`<tâche>-fix-NN.md`)
+  délégué à Qwen, jamais un `Edit` direct de Claude — sauf blocage réel
+  d'outillage où Qwen ne peut de toute façon rien faire de plus (rare : la
+  plupart des bugs de code s'y prêtent très bien, vu sur 4 rondes de
+  correction consécutives sur `chat/send` sans encombre).
+- **Qwen oublie régulièrement d'écrire les tests prévus par la tâche**
+  même quand l'implémentation de production est correcte (vu sur 2 tâches
+  sur 6) — vérifier le compte de tests avant/après (`cargo test
+  --workspace`) plutôt que de faire confiance au rapport final de Qwen ;
+  si des tests manquent, fichier de tâche de correction dédié plutôt que
+  de les écrire soi-même.
 
 ---
 
@@ -218,16 +207,17 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 
 ## Scope — phase actuelle
 
-harness-core et cli-harness terminés (cli sur son vrai stockage YAML deux couches,
-ancien `CliConfigStore` JSON supprimé). Plusieurs workstreams avancent en parallèle :
-app-harness-parity (stockage PG natif côté app, en cours — migrations et `PgConfigStore`
-avancés, statut exact à vérifier avant de s'appuyer dessus), tools-v2 (refonte SLM-friendly
-de `vanyline-tools`, 8 outils finaux), sandbox-bootstrap (image podman + confinement des
-chemins + glue MCP), controller-bootstrap (reconcilers Owner/Project/Sandbox avancés).
-Convergence CLI ↔ app : cli-rpc-stdio (JSON-RPC stdio) démarré le 2026-07-12
-sur la branche `feature/cli-rpc-stdio` (design doc commité, tâche 1/4
-`rpc-skeleton` en cours via Qwen) ; `vscode-ext-bootstrap.md` pas encore
-démarré, dépend de la stabilisation des commandes CLI.
+harness-core, cli-harness et cli-rpc-stdio terminés (cli sur son vrai stockage
+YAML deux couches, ancien `CliConfigStore` JSON supprimé ; serveur JSON-RPC
+stdio complet, cf. section dédiée plus haut). Plusieurs workstreams avancent
+en parallèle : app-harness-parity (stockage PG natif côté app, en cours —
+migrations et `PgConfigStore` avancés, statut exact à vérifier avant de
+s'appuyer dessus), tools-v2 (refonte SLM-friendly de `vanyline-tools`, 8
+outils finaux), sandbox-bootstrap (image podman + confinement des chemins +
+glue MCP), controller-bootstrap (reconcilers Owner/Project/Sandbox avancés).
+Convergence CLI ↔ app : `vscode-ext-bootstrap.md` (extension VS Code,
+consomme le RPC stdio) pas encore démarré — c'est la prochaine étape
+naturelle maintenant que le RPC stdio est en place.
 
 **Hors scope pour cette phase :**
 - Intégration app ↔ sandbox (nécessite le controller à maturité)
