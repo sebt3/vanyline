@@ -11,9 +11,9 @@
   import type { Conversation } from '$lib/types';
 
   const sample: Conversation[] = [
-    { id: '1', user_id: 'u1', agent_id: 'a1', title: 'Rust async question', created_at: '2026-06-01T10:00:00Z', updated_at: '2026-06-01T10:05:00Z' },
-    { id: '2', user_id: 'u1', agent_id: null, title: null, created_at: '2026-06-02T14:00:00Z', updated_at: '2026-06-02T14:00:00Z' },
-    { id: '3', user_id: 'u1', agent_id: 'a1', title: 'Kubernetes debug', created_at: '2026-06-03T09:00:00Z', updated_at: '2026-06-03T09:30:00Z' },
+    { id: '1', user_id: 'u1', agent_name: 'DevOps assistant', title: 'Rust async question', created_at: '2026-06-01T10:00:00Z', updated_at: '2026-06-01T10:05:00Z' },
+    { id: '2', user_id: 'u1', agent_name: null, title: null, created_at: '2026-06-02T14:00:00Z', updated_at: '2026-06-02T14:00:00Z' },
+    { id: '3', user_id: 'u1', agent_name: 'DevOps assistant', title: 'Kubernetes debug', created_at: '2026-06-03T09:00:00Z', updated_at: '2026-06-03T09:30:00Z' },
   ];
 </script>
 

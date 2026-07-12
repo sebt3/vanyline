@@ -28,8 +28,8 @@
     onchange={handleChange}
   >
     <option value="">— none —</option>
-    {#each agents as agent (agent.id)}
-      <option value={agent.id}>{agent.name}</option>
+    {#each agents as agent (agent.name)}
+      <option value={agent.name}>{agent.name}</option>
     {/each}
   </select>
 </div>

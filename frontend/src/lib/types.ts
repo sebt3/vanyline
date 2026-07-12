@@ -11,7 +11,6 @@ export interface LlmProvider {
   provider_type: LlmProviderType;
   endpoint: string;
   api_key?: string | null;
-  default_model?: string | null;
   available_models: string[];
   is_default: boolean;
   created_at: string;
@@ -30,22 +29,25 @@ export interface McpServer {
   updated_at: string;
 }
 
+export type AgentMode = 'primary' | 'subagent' | 'all';
+
+/** "auto" | "none" | liste de noms de skills — cf. lib/src/domain.rs::SkillSelection (Rust). */
+export type SkillSelection = 'auto' | 'none' | string[];
+
 export interface Agent {
-  id: string;
   name: string;
   description?: string | null;
+  mode: AgentMode;
+  model: string;
+  toolsets: string[];
+  skills: SkillSelection;
   system_prompt: string;
-  llm_provider_id?: string | null;
-  model?: string | null;
-  mcp_servers: McpServer[];
-  created_at: string;
-  updated_at: string;
 }
 
 export interface Conversation {
   id: string;
   user_id: string;
-  agent_id?: string | null;
+  agent_name?: string | null;
   title?: string | null;
   created_at: string;
   updated_at: string;

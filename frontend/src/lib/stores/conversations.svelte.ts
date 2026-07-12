@@ -20,8 +20,8 @@ export const conversationsStore = {
       loading = false;
     }
   },
-  async create(agentId?: string): Promise<Conversation> {
-    const conv = await createConversation(agentId);
+  async create(agentName?: string): Promise<Conversation> {
+    const conv = await createConversation(agentName);
     conversations = [conv, ...conversations];
     return conv;
   },

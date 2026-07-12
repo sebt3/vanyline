@@ -11,8 +11,8 @@
   import type { Agent } from '$lib/types';
 
   const agents: Agent[] = [
-    { id: 'a1', name: 'DevOps assistant', description: 'Kubernetes expert', system_prompt: '', mcp_servers: [], created_at: '', updated_at: '' },
-    { id: 'a2', name: 'Rust helper', description: null, system_prompt: '', mcp_servers: [], created_at: '', updated_at: '' },
+    { name: 'DevOps assistant', description: 'Kubernetes expert', mode: 'primary', model: 'qwen2.5', toolsets: [], skills: 'auto', system_prompt: '' },
+    { name: 'Rust helper', description: null, mode: 'primary', model: 'qwen2.5', toolsets: [], skills: 'auto', system_prompt: '' },
   ];
 </script>
 
@@ -22,7 +22,7 @@
   </div>
 </Template>
 
-<Story name="Agents disponibles" args={{ agents, value: 'a1' }} />
+<Story name="Agents disponibles" args={{ agents, value: 'DevOps assistant' }} />
 <Story name="Sans sélection" args={{ agents, value: null }} />
-<Story name="Désactivé" args={{ agents, value: 'a1', disabled: true }} />
+<Story name="Désactivé" args={{ agents, value: 'DevOps assistant', disabled: true }} />
 <Story name="Vide" args={{ agents: [], value: null }} />

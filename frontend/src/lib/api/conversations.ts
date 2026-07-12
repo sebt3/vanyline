@@ -5,10 +5,10 @@ export function listConversations(): Promise<Conversation[]> {
   return apiFetch<Conversation[]>('/api/conversations');
 }
 
-export function createConversation(agentId?: string): Promise<Conversation> {
+export function createConversation(agentName?: string): Promise<Conversation> {
   return apiFetch<Conversation>('/api/conversations', {
     method: 'POST',
-    body: JSON.stringify({ agent_id: agentId ?? null }),
+    body: JSON.stringify({ agent_name: agentName ?? null }),
   });
 }
 

@@ -5,6 +5,6 @@ export function listAgents(): Promise<Agent[]> {
   return apiFetch<Agent[]>('/api/agents');
 }
 
-export function getAgent(id: string): Promise<Agent> {
-  return apiFetch<Agent>(`/api/agents/${id}`);
+export function getAgent(name: string): Promise<Agent> {
+  return apiFetch<Agent>(`/api/agents/${name}`);
 }

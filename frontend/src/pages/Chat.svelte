@@ -18,7 +18,7 @@
   let { params = {} }: { params?: { id?: string } } = $props();
 
   let conversationId = $derived(params?.id ?? null);
-  let selectedAgentId = $state<string | null>(null);
+  let selectedAgentName = $state<string | null>(null);
 
   let messages = $state<UiMessage[]>([]);
   let streaming = $state(false);
@@ -135,7 +135,7 @@
   }
 
   async function handleNewConversation() {
-    const conv = await conversationsStore.create(selectedAgentId ?? undefined);
+    const conv = await conversationsStore.create(selectedAgentName ?? undefined);
     push(`/chat/${conv.id}`);
   }
 
@@ -175,8 +175,8 @@
 
       <AgentSelector
         agents={agentsStore.agents}
-        value={selectedAgentId}
-        onChange={(id) => { selectedAgentId = id; }}
+        value={selectedAgentName}
+        onChange={(name) => { selectedAgentName = name; }}
       />
 
       <div class="flex-1 overflow-hidden">
