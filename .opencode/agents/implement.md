@@ -24,6 +24,7 @@ permission:
     git diff*: allow
     git add*: allow
     git commit*: ask
+    cargo check *: allow
     cargo check*: allow
     cargo test*: allow
     cargo build*: allow

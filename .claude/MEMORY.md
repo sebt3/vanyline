@@ -173,9 +173,26 @@ répertoire réversible, utilitaires read-only). Le problème spécifique des
 redirections (`2>&1`, `|`) reste non résolu (pas creusé plus loin côté
 parsing opencode) — continuer à demander dans les prompts de tâche de
 lancer les commandes de validation SANS pipe/redirection tant que ce n'est
-pas éclairci. Claude relit et valide toujours lui-même après coup de toute
-façon, donc la perte réelle si Qwen s'arrête trop tôt est du temps, pas de
-la correction manquée.
+pas éclairci.
+
+**Mise à jour (tâche 02b)** : constat plus grave — même `cargo check
+--workspace` NU (sans pipe ni redirection, cas censé matcher `cargo
+check*: allow` trivialement) est refusé en `opencode run` non-interactif,
+reproduit directement (hors Qwen, `opencode run --agent implement ...`
+tout court). Hypothèse testée et INVALIDÉE : espace avant l'étoile
+(`cargo check *` vs `cargo check*`, cf. doc "`grep *` permet `grep pattern
+file.txt`") — ajouté `cargo check *: allow` en plus, aucun effet. Piste NON
+suivie : `--dangerously-skip-permissions` (bypass complet du garde-fou,
+hors périmètre de ce qui a été autorisé — ne pas y toucher sans en
+rediscuter explicitement). Conclusion actuelle : les entrées `allow` de
+`permission.bash` ne semblent produire AUCUN effet observable en mode
+`opencode run` headless, quelle que soit la commande — Qwen ne peut donc
+pas se valider lui-même en pratique, peu importe le motif. Ce n'est pas
+bloquant pour autant : Claude relit et valide toujours lui-même après coup
+de toute façon (déjà le cas sur les 3 tâches de cette feature), donc la
+perte réelle est du temps, pas de la correction manquée. À élucider un
+jour si le confort de "Qwen se valide seul" devient important — pas urgent
+tant que ce n'est pas le cas.
 
 ---
 
