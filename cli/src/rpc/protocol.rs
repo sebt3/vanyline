@@ -83,6 +83,7 @@ pub mod vnl_code {
     pub const BUSY: &str = "VNL-RPC-002";
     pub const UNKNOWN_PROTOCOL_VERSION: &str = "VNL-RPC-003";
     pub const METHOD_NOT_FOUND: &str = "VNL-RPC-004";
+    pub const CONFIG_ERROR: &str = "VNL-RPC-006";
 }
 
 #[derive(Debug, Deserialize)]

@@ -1,6 +1,7 @@
 use crate::rpc::protocol::*;
 
 use serde_json::Value;
+use vanyline_lib::store::ConfigStore;
 
 pub struct ServerState {
     pub initialized: bool,
@@ -8,11 +9,48 @@ pub struct ServerState {
     /// appelante (`rpc::run_stdio_server`) doit alors arrêter de lire stdin
     /// APRÈS avoir envoyé la réponse.
     pub shutdown_requested: bool,
+    /// `None` avant `initialize` réussi, `Some` après (invariant : tout
+    /// appelant qui a passé le check `state.initialized` dans `handle_line`
+    /// peut faire `.store.as_ref().expect(...)` sans crainte).
+    pub store: Option<crate::fs_store::FsConfigStore>,
 }
 
 impl ServerState {
     pub fn new() -> Self {
-        Self { initialized: false, shutdown_requested: false }
+        Self { initialized: false, shutdown_requested: false, store: None }
+    }
+}
+
+/// Résout la racine de config à partir du `workspace` optionnel
+/// d'`initialize` — PAS le cwd du process (design : "c'est l'extension qui
+/// la connaît (workspace folder VS Code), pas le cwd"). Fallback sur le
+/// cwd uniquement si `workspace` est `None` (usage CLI direct / tests).
+fn resolve_layers(workspace: Option<&str>) -> crate::config::Layers {
+    let root = workspace
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    crate::config::Layers::discover(&root)
+}
+
+/// Convertit une opération de config (`Result<T, VnyError>`) en réponse
+/// JSON-RPC : `Ok` → succès (sérielisé en Value), `Err` → erreur
+/// `VNL-RPC-006` ("config read error", message = format!("{}", err)).
+fn config_error_response<T: serde::Serialize>(
+    id: Value,
+    result: Result<T, vanyline_lib::VnyError>,
+) -> JsonRpcResponse {
+    match result {
+        Ok(v) => {
+            JsonRpcResponse::success(id, serde_json::to_value(v).expect("serialize config list"))
+        }
+        Err(e) => {
+            JsonRpcResponse::error(
+                id,
+                jsonrpc_code::SERVER_ERROR,
+                format!("{e}"),
+                vnl_code::CONFIG_ERROR,
+            )
+        }
     }
 }
 
@@ -55,7 +93,7 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
     // "initialize" is always allowed
     if request.method == "initialize" {
         return Some(
-            serde_json::to_string(&handle_initialize(state, id, request.params))
+            serde_json::to_string(&handle_initialize(state, id, request.params).await)
                 .expect("JSON serialize response"),
         );
     }
@@ -74,23 +112,59 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
     }
 
     // Dispatch on known methods
-    if request.method == "shutdown" {
-        return Some(
-            serde_json::to_string(&handle_shutdown(state, id))
-                .expect("JSON serialize response"),
-        );
+    let store = state.store.as_ref().expect("initialized implies store = Some");
+    match request.method.as_str() {
+        "shutdown" => {
+            state.shutdown_requested = true;
+            Some(
+                serde_json::to_string(&shutdown_response(id)).expect("JSON serialize response"),
+            )
+        }
+        "config/agents" => {
+            let store_clone = store.clone();
+            Some(handle_config_list(id, async {
+                store_clone.list_agents().await
+            }).await)
+        }
+        "config/models" => {
+            let store_clone = store.clone();
+            Some(handle_config_list(id, async {
+                store_clone.list_models().await
+            }).await)
+        }
+        "config/toolsets" => {
+            let store_clone = store.clone();
+            Some(handle_config_list(id, async {
+                store_clone.list_toolsets().await
+            }).await)
+        }
+        "config/skills" => {
+            let store_clone = store.clone();
+            Some(handle_config_list(id, async {
+                store_clone.list_skills().await
+            }).await)
+        }
+        _ => Some(
+            serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::METHOD_NOT_FOUND,
+                format!("Method not found: {}", request.method),
+                vnl_code::METHOD_NOT_FOUND,
+            ))
+            .expect("JSON serialize response"),
+        ),
     }
+}
 
-    // Unknown method (already initialized)
-    Some(
-        serde_json::to_string(&JsonRpcResponse::error(
-            id,
-            jsonrpc_code::METHOD_NOT_FOUND,
-            format!("Method not found: {}", request.method),
-            vnl_code::METHOD_NOT_FOUND,
-        ))
-        .expect("JSON serialize response"),
-    )
+/// Helper async : reçoit un future produisant la liste typée d'une méthode
+/// `config/*` (`Vec<Agent>`, `Vec<ModelProfile>`, ...), l'exécute et
+/// convertit le résultat en réponse JSON-RPC sérialisée.
+async fn handle_config_list<T: serde::Serialize>(
+    id: Value,
+    action: impl std::future::Future<Output = Result<T, vanyline_lib::VnyError>>,
+) -> String {
+    let result = action.await;
+    serde_json::to_string(&config_error_response(id, result)).expect("serialize config response")
 }
 
 /// `initialize` : valide `protocol_version == PROTOCOL_VERSION`. Si mismatch,
@@ -100,11 +174,13 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
 /// en `InitializeParams` (ex. `protocolVersion` absent ou mauvais type),
 /// traiter comme `VNL-RPC-000` (requête malformée), PAS `VNL-RPC-003`.
 ///
-/// Succès : `state.initialized = true`, résultat `InitializeResult` avec
-/// `server_version` = `env!("CARGO_PKG_VERSION")`, `workspace_root` et
-/// `default_agent` = `None` dans cette tâche (résolus à la tâche 2, une fois
-/// `FsConfigStore` branché ici).
-fn handle_initialize(state: &mut ServerState, id: Value, params: serde_json::Value) -> JsonRpcResponse {
+/// Succès : `state.initialized = true`, store branché, résultat
+/// `InitializeResult` avec `server_version` = `env!("CARGO_PKG_VERSION")`,
+/// `workspace_root` = `layers.workspace_dir.display().to_string()`
+/// (ou `None` si aucun marqueur `.vanyline`/`.git`), `default_agent`
+/// = `store.default_agent()` (`Ok(Some(name))` -> `Some(name)`,
+/// `Ok(None)` ou `Err` -> `None`).
+async fn handle_initialize(state: &mut ServerState, id: Value, params: serde_json::Value) -> JsonRpcResponse {
     let initialize_params: InitializeParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -129,25 +205,36 @@ fn handle_initialize(state: &mut ServerState, id: Value, params: serde_json::Val
         );
     }
 
+    // Build the store from workspace
+    let layers = resolve_layers(initialize_params.workspace.as_deref());
+    let store = crate::fs_store::FsConfigStore::new(layers);
+
+    // Resolve default_agent from store — an error here does NOT fail
+    // initialize itself; the real error will surface on first config/* call.
+    let default_agent = store.default_agent().await.ok().flatten();
+
+    // Resolve workspace_root from layers
+    let workspace_root = store.layers().workspace_dir.as_ref().map(|p| p.display().to_string());
+
     *state = ServerState::new();
     state.initialized = true;
+    state.store = Some(store);
+
     JsonRpcResponse::success(
         id,
         serde_json::to_value(InitializeResult {
             protocol_version: PROTOCOL_VERSION,
             server_version: env!("CARGO_PKG_VERSION").to_string(),
-            workspace_root: None,
-            default_agent: None,
+            workspace_root,
+            default_agent,
         })
         .expect("serialize InitializeResult"),
     )
 }
 
-/// `shutdown` : positionne `state.shutdown_requested = true`, retourne
-/// `result: null`. Ne désérialise pas `params` (ignoré, cf. table du design :
-/// `shutdown` n'a pas de params).
-fn handle_shutdown(state: &mut ServerState, id: Value) -> JsonRpcResponse {
-    state.shutdown_requested = true;
+/// `shutdown` renvoie `result: null`. Ne désérialise pas `params`
+/// (ignoré, cf. table du design : `shutdown` n'a pas de params).
+fn shutdown_response(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, Value::Null)
 }
 
@@ -155,6 +242,8 @@ fn handle_shutdown(state: &mut ServerState, id: Value) -> JsonRpcResponse {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::io::Write;
+    use tempfile::tempdir;
     use tokio::test;
 
     fn make_request_json(id: impl Into<Value>, method: &str, params: Option<serde_json::Value>) -> String {
@@ -167,6 +256,8 @@ mod tests {
         }
         serde_json::to_string(&Value::Object(map)).expect("serialize request")
     }
+
+    // -- Existing tests from task 01 --
 
     #[test]
     async fn initialize_success() {
@@ -234,7 +325,7 @@ mod tests {
         assert!(state.initialized);
 
         // Then try unknown method
-        let unknown_line = make_request_json(6, "config/agents", None);
+        let unknown_line = make_request_json(6, "chat/history", None);
         let result = handle_line(&mut state, &unknown_line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
@@ -293,11 +384,212 @@ mod tests {
 
         // Test with string id for error
         let mut state2 = ServerState::new();
-        let error_line = make_request_json("xyz", "config/agents", None);
+        let error_line = make_request_json("xyz", "chat/history", None);
         let result2 = handle_line(&mut state2, &error_line).await;
         assert!(result2.is_some());
         let resp2: JsonRpcResponse = serde_json::from_str(&result2.unwrap()).expect("parse response");
         assert!(resp2.error.is_some());
         assert_eq!(resp2.id, Value::String("xyz".into()));
+    }
+
+    // -- New tests for task 02a --
+
+    /// initialize_resolves_workspace_root — `workspace` pointant vers un
+    /// tempdir contenant `.vanyline/` (créer
+    /// `<tempdir>/.vanyline/agents/build.md` avec un frontmatter minimal, cf.
+    /// `cli/src/chat.rs::tests::workspace_agent_reported` pour le format) ->
+    /// `result.workspaceRoot` non-`None` et contient le chemin du tempdir.
+    #[test]
+    async fn initialize_resolves_workspace_root() {
+        let tmp = tempdir().unwrap();
+        let vanyline = tmp.path().join(".vanyline");
+        let agents_dir = vanyline.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("build.md"),
+            "---\nmodel: test-model\n---\nbuild agent\n",
+        )
+        .unwrap();
+
+        let mut state = ServerState::new();
+        let tmp_path = tmp.path().to_str().unwrap();
+        let line = make_request_json(10, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        let result = handle_line(&mut state, &line).await;
+        assert!(result.is_some());
+        let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
+        
+        assert!(resp.error.is_none(), "initialize should succeed");
+        let r = resp.result.as_ref().expect("result should be Some");
+        assert!(
+            r["workspaceRoot"].is_string(),
+            "workspaceRoot should be a string, got: {:?}", r["workspaceRoot"]
+        );
+        let ws_root = r["workspaceRoot"].as_str().unwrap();
+        assert!(
+            ws_root.contains(tmp.path().to_str().unwrap()),
+            "workspaceRoot should contain tempdir path, got: {}", ws_root
+        );
+    }
+
+    /// initialize_no_workspace_marker_yields_none_root — `workspace` pointant
+    /// vers un tempdir SANS `.vanyline/` ni `.git/` -> `result.workspaceRoot ==
+    /// null`.
+    #[test]
+    async fn initialize_no_workspace_marker_yields_none() {
+        // Use a temporary directory that won't be discovered as a workspace.
+        // Create a unique dir that doesn't contain .vanyline/ or .git/
+        // anywhere inside or in parent dirs down to the test's repo root.
+        let tmp = tempdir().unwrap();
+
+        let mut state = ServerState::new();
+        let tmp_path = tmp.path().to_str().unwrap();
+        let line = make_request_json(11, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        let result = handle_line(&mut state, &line).await;
+        assert!(result.is_some());
+        let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
+        
+        assert!(resp.error.is_none(), "initialize should succeed");
+        // `workspace_root: Option<String>` has `skip_serializing_if =
+        // Option::is_none` (task 01, consistent with the design's `?`
+        // optional-field notation) — when no marker is found, the field is
+        // ABSENT from the JSON entirely, not present-as-null.
+        let r = resp.result.as_ref().expect("result should be Some");
+        assert!(
+            r.get("workspaceRoot").is_none(),
+            "workspaceRoot should be absent when no .vanyline/.git marker is found, got: {:?}",
+            r.get("workspaceRoot")
+        );
+    }
+
+    /// config_agents_before_and_after_initialize — sans `initialize` d'abord,
+    /// `config/agents` -> `VNL-RPC-001` (non initialisé). Avec `initialize`,
+    /// retourne un tableau valide.
+    #[test]
+    async fn config_agents_before_and_after_initialize() {
+        let mut state = ServerState::new();
+
+        // Before initialize: should get NOT_INITIALIZATED (VNL-RPC-001)
+        let line = make_request_json(12, "config/agents", None);
+        let result = handle_line(&mut state, &line).await;
+        assert!(result.is_some());
+        let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-001");
+        assert!(!state.initialized);
+    }
+
+    /// config_agents_lists_workspace_agent — `initialize` avec `workspace` =
+    /// tempdir contenant `.vanyline/agents/build.md` -> `config/agents` ->
+    /// `result` est un tableau JSON contenant un objet avec `"name":"build"`.
+    #[test]
+    async fn config_agents_lists_workspace_agent() {
+        let tmp = tempdir().unwrap();
+        let vanyline = tmp.path().join(".vanyline");
+        let agents_dir = vanyline.join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("build.md"),
+            "---\nmodel: test-model\n---\nbuild agent system prompt\n",
+        )
+        .unwrap();
+
+        let mut state = ServerState::new();
+        let tmp_path = tmp.path().to_str().unwrap();
+
+        // Initialize with workspace
+        let init_line = make_request_json(20, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // List agents
+        let agents_line = make_request_json(21, "config/agents", None);
+        let result = handle_line(&mut state, &agents_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "config/agents should succeed, got error: {:?}", resp.error);
+        let agents = &resp.result.as_ref().expect("result should be Some");
+        assert!(agents.is_array(), "result should be a JSON array");
+        let arr = agents.as_array().unwrap();
+        assert!(!arr.is_empty(), "agents list should contain at least the build agent");
+        assert_eq!(arr[0]["name"], "build");
+    }
+
+    /// config_models_empty_list — `initialize` avec un tempdir vide ->
+    /// `config/models` -> `result == []` (pas d'erreur).
+    #[test]
+    async fn config_models_empty_list() {
+        // Create an empty tempdir with no .vanyline/ config
+        let tmp = tempdir().unwrap();
+
+        let mut state = ServerState::new();
+        let tmp_path = tmp.path().to_str().unwrap();
+
+        // Initialize with empty tempdir
+        let init_line = make_request_json(30, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // List models — should return empty array, not an error
+        let models_line = make_request_json(31, "config/models", None);
+        let result = handle_line(&mut state, &models_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "config/models should succeed with empty list, got error: {:?}", resp.error);
+        let models = &resp.result.as_ref().expect("result should be Some");
+        assert!(models.is_array());
+        assert_eq!(models.as_array().unwrap().len(), 0);
+    }
+
+    /// config_toolsets_and_skills_dispatch — vérifie que `config/toolsets` et
+    /// `config/skills` sont bien dispatchées (pas `VNL-RPC-004` méthode inconnue).
+    #[test]
+    async fn config_toolsets_and_skills_dispatch() {
+        let tmp = tempdir().unwrap();
+
+        let mut state = ServerState::new();
+        let tmp_path = tmp.path().to_str().unwrap();
+
+        // Initialize
+        let init_line = make_request_json(40, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // config/toolsets — should NOT be VNL-RPC-004 (method not found)
+        let ts_line = make_request_json(41, "config/toolsets", None);
+        let result = handle_line(&mut state, &ts_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none() || resp.error.as_ref().map(|e| e.data.code.as_str()) != Some("VNL-RPC-004"),
+            "config/toolsets should be a known method, got error code: {:?}",
+            resp.error.as_ref().map(|e| e.data.code.as_str())
+        );
+        // Result should be a JSON array
+        assert!(resp.result.as_ref().map(|v| v.is_array()).unwrap_or_default(), "result should be an array");
+
+        // config/skills — same pattern
+        let skills_line = make_request_json(42, "config/skills", None);
+        let result = handle_line(&mut state, &skills_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none() || resp.error.as_ref().map(|e| e.data.code.as_str()) != Some("VNL-RPC-004"),
+            "config/skills should be a known method, got error code: {:?}",
+            resp.error.as_ref().map(|e| e.data.code.as_str())
+        );
+        assert!(resp.result.as_ref().map(|v| v.is_array()).unwrap_or_default(), "result should be an array");
     }
 }

@@ -11,6 +11,7 @@ use crate::config::Layers;
 /// Store actif de toutes les commandes CLI depuis la tâche 04b (cutover) —
 /// l'ancien `CliConfigStore` (format JSON) a été supprimé.
 #[allow(dead_code)]
+#[derive(Clone)]
 pub struct FsConfigStore {
     layers: Layers,
 }
