@@ -160,16 +160,22 @@ Constaté sur les tâches 01 et 02a : les permissions bash de l'agent
 simples (`cargo check*: allow`, etc.) — tout ce qui sort de ce motif exact
 (un `mkdir` isolé, ou même `cargo check --workspace 2>&1` à cause de la
 redirection) tombe sur `"*": ask`, auto-rejeté en exécution non-interactive.
-Qwen s'est arrêté net les deux fois sans y revenir. **Contournement côté
-prompt de tâche** (pas de modification de la config partagée sans
-accord) : demander explicitivement dans le prompt `llm-exec` de lancer les
-commandes de validation SANS pipe/redirection (`cargo check --workspace`
-tout court, pas de `| tail`/`2>&1`), et de ne jamais dépendre de `mkdir` —
-les répertoires parents des fichiers créés via l'outil `write` d'opencode
-sont créés automatiquement, contrairement à un `mkdir` shell isolé.
-Claude relit et valide toujours lui-même après coup de toute façon, donc
-la perte réelle si Qwen s'arrête trop tôt est du temps, pas de la
-correction manquée.
+Qwen s'est arrêté net les deux fois sans y revenir.
+
+Doc opencode (permissions) : matching par glob sur la commande *parsée*
+(dernière règle qui matche l'emporte), rien de documenté sur les
+pipes/redirections/commandes composées — pas de certitude sur pourquoi le
+`2>&1` cassait le match malgré `cargo check*: allow`. Décision prise avec
+le développeur (2026-07-12) : élargir `.opencode/agents/implement.md`
+plutôt que de compenser à chaque prompt de tâche — ajouté `mkdir*`,
+`tail*`, `head*`, `grep*`, `wc*: allow` (tous à faible risque : création de
+répertoire réversible, utilitaires read-only). Le problème spécifique des
+redirections (`2>&1`, `|`) reste non résolu (pas creusé plus loin côté
+parsing opencode) — continuer à demander dans les prompts de tâche de
+lancer les commandes de validation SANS pipe/redirection tant que ce n'est
+pas éclairci. Claude relit et valide toujours lui-même après coup de toute
+façon, donc la perte réelle si Qwen s'arrête trop tôt est du temps, pas de
+la correction manquée.
 
 ---
 

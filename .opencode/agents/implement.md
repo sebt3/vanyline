@@ -31,6 +31,11 @@ permission:
     npm run check*: allow
     npm run test*: allow
     npm run build*: allow
+    mkdir*: allow
+    tail*: allow
+    head*: allow
+    grep*: allow
+    wc*: allow
     "*": ask
   websearch: ask
 ---
