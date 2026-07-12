@@ -24,7 +24,7 @@ pub async fn run_stdio_server() {
         }
     });
 
-    let mut state = handlers::ServerState::new();
+    let mut state = handlers::ServerState::new(tx.clone());
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
 
@@ -48,6 +48,12 @@ pub async fn run_stdio_server() {
         }
     }
 
+    // `state` détient un clone de `tx` (`ServerState.tx`) — il doit être
+    // droppé AVANT `tx` lui-même, sinon le writer ne voit jamais tous ses
+    // senders disparaître (`rx.recv()` ne retourne jamais `None`) et
+    // `writer.await` bloque indéfiniment : le process ne sort jamais après
+    // `shutdown`/EOF.
+    drop(state);
     drop(tx);
     let _ = writer.await;
 }

@@ -145,3 +145,31 @@ pub struct ConversationCreateParams {
     #[serde(default)]
     pub title: Option<String>,
 }
+
+/// Enveloppe JSON-RPC 2.0 générique pour une notification (PAS de champ
+/// `id` — contrairement à `JsonRpcResponse` — une notification ne répond à
+/// aucune requête précise, cf. spec JSON-RPC 2.0). Générique sur `T` pour
+/// être réutilisable par de futurs types de notification au-delà de
+/// `chat/event`.
+#[derive(Debug, Serialize)]
+#[allow(dead_code)] // construit par RpcEventSink, utilisé en production par la tâche 03b (chat/send)
+pub struct JsonRpcNotification<T: Serialize> {
+    pub jsonrpc: &'static str,
+    pub method: &'static str,
+    pub params: T,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+#[allow(dead_code)] // construit par RpcEventSink, utilisé en production par la tâche 03b (chat/send)
+pub struct ChatEventNotificationParams {
+    pub conversation_id: String,
+    pub seq: u64,
+    pub event: vanyline_lib::event::ChatEvent,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatCancelParams {
+    pub conversation_id: String,
+}

@@ -1,26 +1,44 @@
 use crate::rpc::protocol::*;
 
 use serde_json::Value;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 use uuid::Uuid;
+use vanyline_lib::event::{ChatEvent, EventSink};
 use vanyline_lib::store::ConfigStore;
 
 use crate::store;
 
 pub struct ServerState {
     pub initialized: bool,
-    /// Passe à `true` quand `shutdown` a été traité avec succès — la boucle
-    /// appelante (`rpc::run_stdio_server`) doit alors arrêter de lire stdin
-    /// APRÈS avoir envoyé la réponse.
     pub shutdown_requested: bool,
-    /// `None` avant `initialize` réussi, `Some` après (invariant : tout
-    /// appelant qui a passé le check `state.initialized` dans `handle_line`
-    /// peut faire `.store.as_ref().expect(...)` sans crainte).
-    pub store: Option<crate::fs_store::FsConfigStore>,
+    pub store: Option<Arc<crate::fs_store::FsConfigStore>>,
+    /// Sender du canal d'écriture unique de `rpc::mod` — cloné dans toute
+    /// tâche spawnée qui a besoin d'écrire (réponse finale OU notification
+    /// `chat/event`, tâche 03b).
+    #[allow(dead_code)] // utilisé par la tâche 03b (chat/send)
+    pub tx: mpsc::UnboundedSender<String>,
+    /// Conversations avec un tour actif — vérifié/inséré de façon atomique
+    /// avant de spawner un tour (tâche 03b) ; PAS utilisé par cette tâche
+    /// au-delà de sa définition et de son reset sur `initialize`.
+    pub busy: Arc<Mutex<HashSet<Uuid>>>,
+    /// Compteur `seq` par conversation pour les notifications `chat/event`
+    /// (tâche 03b) — défini ici pour que `RpcEventSink` (cette tâche)
+    /// puisse déjà l'utiliser.
+    pub seq: Arc<Mutex<HashMap<Uuid, u64>>>,
 }
 
 impl ServerState {
-    pub fn new() -> Self {
-        Self { initialized: false, shutdown_requested: false, store: None }
+    pub fn new(tx: mpsc::UnboundedSender<String>) -> Self {
+        Self {
+            initialized: false,
+            shutdown_requested: false,
+            store: None,
+            tx,
+            busy: Arc::new(Mutex::new(HashSet::new())),
+            seq: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 }
 
@@ -151,6 +169,7 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "conversations/get" => Some(handle_conversations_get(id, request.params)),
         "conversations/create" => Some(handle_conversations_create(id, request.params)),
         "conversations/delete" => Some(handle_conversations_delete(id, request.params)),
+        "chat/cancel" => Some(handle_chat_cancel(id, request.params)),
         _ => Some(
             serde_json::to_string(&JsonRpcResponse::error(
                 id,
@@ -223,9 +242,11 @@ async fn handle_initialize(state: &mut ServerState, id: Value, params: serde_jso
     // Resolve workspace_root from layers
     let workspace_root = store.layers().workspace_dir.as_ref().map(|p| p.display().to_string());
 
-    *state = ServerState::new();
     state.initialized = true;
-    state.store = Some(store);
+    state.shutdown_requested = false;
+    state.store = Some(Arc::new(store));
+    state.busy.lock().unwrap().clear();
+    state.seq.lock().unwrap().clear();
 
     JsonRpcResponse::success(
         id,
@@ -397,6 +418,72 @@ fn handle_conversations_delete(id: Value, params: serde_json::Value) -> String {
     }
 }
 
+/// `chat/cancel` — M3, no-op en v1 (design : "accepté et no-op en v1,
+/// documenté"). Valide seulement que `conversationId` est un UUID bien
+/// formé (`VNL-RPC-000` sinon) ; n'exige PAS que la conversation existe ni
+/// qu'un tour soit effectivement en cours — pur no-op accepté, cohérent
+/// avec le fait que l'annulation réelle n'existe pas encore côté lib.
+fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
+    let params: ChatCancelParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            "Malformed request: params could not be deserialized as ChatCancelParams",
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize cancel error response"),
+    };
+    if Uuid::parse_str(&params.conversation_id).is_err() {
+        return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            format!("Invalid UUID in conversationId: {}", params.conversation_id),
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize cancel error response");
+    }
+    serde_json::to_string(&JsonRpcResponse::success(id, Value::Null)).expect("serialize cancel response")
+}
+
+/// Adapteur qui traduit un `ChatEvent` émis par le tour en notification
+/// `chat/event` écrite sur `tx`. Utilisé par `run_agent_turn` via
+/// `SessionContext.sink` (tâche 03b).
+#[allow(dead_code)] // construit par la tâche 03b (chat/send) ; déjà testé directement dans cette tâche
+pub struct RpcEventSink {
+    pub conversation_id: Uuid,
+    pub seq: Arc<Mutex<HashMap<Uuid, u64>>>,
+    pub tx: mpsc::UnboundedSender<String>,
+}
+
+#[async_trait::async_trait]
+impl EventSink for RpcEventSink {
+    /// Incrémente le compteur `seq` DE CETTE conversation (verrou tenu le
+    /// temps du lire-incrémenter-écrire uniquement, jamais à travers un
+    /// `.await`), construit la notification, l'envoie sur `tx`. Best-effort :
+    /// une erreur de `send` (le lecteur stdin a fermé le canal) est
+    /// silencieusement ignorée.
+    async fn emit(&self, event: ChatEvent) {
+        let seq = {
+            let mut map = self.seq.lock().unwrap();
+            let counter = map.entry(self.conversation_id).or_insert(0);
+            let current = *counter;
+            *counter += 1;
+            current
+        };
+        let notif = JsonRpcNotification {
+            jsonrpc: "2.0",
+            method: "chat/event",
+            params: ChatEventNotificationParams {
+                conversation_id: self.conversation_id.to_string(),
+                seq,
+                event,
+            },
+        };
+        if let Ok(line) = serde_json::to_string(&notif) {
+            let _ = self.tx.send(line);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,7 +507,8 @@ mod tests {
 
     #[test]
     async fn initialize_success() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         let line = make_request_json(1, "initialize", Some(json!({"protocolVersion": 1})));
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
@@ -439,7 +527,8 @@ mod tests {
 
     #[test]
     async fn initialize_wrong_version() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         let line = make_request_json(2, "initialize", Some(json!({"protocolVersion": 99})));
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
@@ -453,7 +542,8 @@ mod tests {
 
     #[test]
     async fn initialize_missing_protocol_version() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         let line = make_request_json(3, "initialize", Some(json!({})));
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
@@ -465,7 +555,8 @@ mod tests {
 
     #[test]
     async fn method_before_initialize_rejected() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         let line = make_request_json(4, "shutdown", None);
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
@@ -477,7 +568,8 @@ mod tests {
 
     #[test]
     async fn unknown_method_after_initialize() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         // First initialize
         let init_line = make_request_json(5, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
@@ -495,7 +587,8 @@ mod tests {
 
     #[test]
     async fn shutdown_after_initialize() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         // First initialize
         let init_line = make_request_json(7, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
@@ -520,7 +613,8 @@ mod tests {
 
     #[test]
     async fn malformed_json_line() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         let line = "not json at all";
         let result = handle_line(&mut state, line).await;
         assert!(result.is_some());
@@ -534,7 +628,8 @@ mod tests {
     #[test]
     async fn id_preserved_in_response() {
         // Test with string id for success
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json("abc", "initialize", Some(json!({"protocolVersion": 1})));
         let result = handle_line(&mut state, &init_line).await;
         assert!(result.is_some());
@@ -542,7 +637,8 @@ mod tests {
         assert_eq!(resp.id, Value::String("abc".into()));
 
         // Test with string id for error
-        let mut state2 = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state2 = ServerState::new(tx);
         let error_line = make_request_json("xyz", "chat/history", None);
         let result2 = handle_line(&mut state2, &error_line).await;
         assert!(result2.is_some());
@@ -570,7 +666,9 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let tmp_path = tmp.path().to_str().unwrap();
         let line = make_request_json(10, "initialize", Some(json!({
             "protocolVersion": 1,
@@ -603,7 +701,9 @@ mod tests {
         // anywhere inside or in parent dirs down to the test's repo root.
         let tmp = tempdir().unwrap();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let tmp_path = tmp.path().to_str().unwrap();
         let line = make_request_json(11, "initialize", Some(json!({
             "protocolVersion": 1,
@@ -631,7 +731,8 @@ mod tests {
     /// retourne un tableau valide.
     #[test]
     async fn config_agents_before_and_after_initialize() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
 
         // Before initialize: should get NOT_INITIALIZATED (VNL-RPC-001)
         let line = make_request_json(12, "config/agents", None);
@@ -658,7 +759,9 @@ mod tests {
         )
         .unwrap();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let tmp_path = tmp.path().to_str().unwrap();
 
         // Initialize with workspace
@@ -689,7 +792,9 @@ mod tests {
         // Create an empty tempdir with no .vanyline/ config
         let tmp = tempdir().unwrap();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let tmp_path = tmp.path().to_str().unwrap();
 
         // Initialize with empty tempdir
@@ -717,7 +822,9 @@ mod tests {
     async fn config_toolsets_and_skills_dispatch() {
         let tmp = tempdir().unwrap();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let tmp_path = tmp.path().to_str().unwrap();
 
         // Initialize
@@ -772,7 +879,9 @@ mod tests {
     async fn conversations_list_empty() {
         let (_tmp, _guard) = isolated_data_dir();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json(50, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
@@ -791,7 +900,9 @@ mod tests {
     async fn conversations_create_then_list() {
         let (_tmp, _guard) = isolated_data_dir();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json(55, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
@@ -826,7 +937,9 @@ mod tests {
     async fn conversations_get_found() {
         let (_tmp, _guard) = isolated_data_dir();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json(60, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
@@ -853,7 +966,9 @@ mod tests {
     async fn conversations_get_not_found() {
         let (_tmp, _guard) = isolated_data_dir();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json(65, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
@@ -872,7 +987,9 @@ mod tests {
     async fn conversations_get_malformed_id() {
         let (_tmp, _guard) = isolated_data_dir();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json(68, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
@@ -890,7 +1007,9 @@ mod tests {
     async fn conversations_delete_then_list_empty() {
         let (_tmp, _guard) = isolated_data_dir();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json(70, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
@@ -923,7 +1042,9 @@ mod tests {
     async fn conversations_delete_unknown_id_succeeds() {
         let (_tmp, _guard) = isolated_data_dir();
 
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+
+        let mut state = ServerState::new(tx);
         let init_line = make_request_json(75, "initialize", Some(json!({"protocolVersion": 1})));
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
@@ -941,7 +1062,8 @@ mod tests {
 
     #[test]
     async fn conversations_methods_require_initialize() {
-        let mut state = ServerState::new();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
 
         // Any of the 4 methods should return NOT_INITIALIZED before initialize
         let line = make_request_json(80, "conversations/list", None);
@@ -951,5 +1073,108 @@ mod tests {
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-001");
         assert!(!state.initialized);
+    }
+
+    // -- New tests for task 03a --
+
+    #[test]
+    async fn chat_cancel_valid_uuid_returns_null() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(90, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let fake_uuid = uuid::Uuid::new_v4().to_string();
+        let line = make_request_json(91, "chat/cancel", Some(json!({"conversationId": fake_uuid})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        // Wire format check on the raw string first — `Option<Value>`'s
+        // Deserialize collapses a JSON `null` into `None` (cf.
+        // shutdown_after_initialize), so a round-tripped struct can't
+        // distinguish "result: null" from "no result field" — the raw
+        // string is the only way to assert the wire behavior directly.
+        assert!(result.contains("\"result\":null"));
+
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_none(), "chat/cancel should succeed, got: {:?}", resp.error);
+        assert_eq!(resp.result, None);
+    }
+
+    #[test]
+    async fn chat_cancel_malformed_uuid() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(92, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(93, "chat/cancel", Some(json!({"conversationId": "not-a-uuid"})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    #[test]
+    async fn chat_cancel_requires_initialize() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+
+        let fake_uuid = uuid::Uuid::new_v4().to_string();
+        let line = make_request_json(94, "chat/cancel", Some(json!({"conversationId": fake_uuid})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-001");
+        assert!(!state.initialized);
+    }
+
+    #[test]
+    async fn reinitialize_clears_busy_and_seq() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(95, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        state.busy.lock().unwrap().insert(uuid::Uuid::new_v4());
+        state.seq.lock().unwrap().insert(uuid::Uuid::new_v4(), 5);
+        assert!(!state.busy.lock().unwrap().is_empty());
+        assert!(!state.seq.lock().unwrap().is_empty());
+
+        let reinit_line = make_request_json(96, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &reinit_line).await;
+
+        assert!(state.busy.lock().unwrap().is_empty());
+        assert!(state.seq.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    async fn rpc_event_sink_emits_notification_with_incrementing_seq() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let seq = Arc::new(Mutex::new(HashMap::new()));
+        let conversation_id = uuid::Uuid::new_v4();
+        let sink = RpcEventSink { conversation_id, seq, tx };
+
+        sink.emit(ChatEvent::Token { content: "a".into() }).await;
+        sink.emit(ChatEvent::Token { content: "b".into() }).await;
+
+        let line1 = rx.recv().await.expect("first notification");
+        let line2 = rx.recv().await.expect("second notification");
+
+        let v1: serde_json::Value = serde_json::from_str(&line1).expect("parse notification 1");
+        let v2: serde_json::Value = serde_json::from_str(&line2).expect("parse notification 2");
+
+        assert_eq!(v1["method"], "chat/event");
+        assert!(v1.get("id").is_none(), "notification must not have an id field");
+        assert_eq!(v1["params"]["conversationId"], conversation_id.to_string());
+        assert_eq!(v1["params"]["seq"], 0);
+        assert_eq!(v1["params"]["event"]["type"], "token");
+        assert_eq!(v1["params"]["event"]["content"], "a");
+
+        assert_eq!(v2["params"]["seq"], 1);
+        assert_eq!(v2["params"]["event"]["content"], "b");
     }
 }
