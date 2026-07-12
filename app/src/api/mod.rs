@@ -4,6 +4,7 @@ pub mod llm_providers;
 pub mod mcp_servers;
 pub mod me;
 pub mod model_profiles;
+pub mod skills;
 pub mod toolsets;
 
 use axum::{
@@ -30,9 +31,12 @@ pub fn api_router() -> Router<AppState> {
         // Toolsets (OIDC, by name)
         .route("/toolsets", get(toolsets::list_toolsets).post(toolsets::create_toolset))
         .route("/toolsets/{name}", get(toolsets::get_toolset).put(toolsets::update_toolset).delete(toolsets::delete_toolset))
+        // Skills (OIDC, leaf resource)
+        .route("/skills", get(skills::list_skills).post(skills::create_skill))
+        .route("/skills/{name}", get(skills::get_skill).put(skills::update_skill).delete(skills::delete_skill))
         // Agents (read: OIDC, write: admin)
         .route("/agents", get(agents::list_agents).post(agents::create_agent))
-        .route("/agents/{id}", get(agents::get_agent).put(agents::update_agent).delete(agents::delete_agent))
+        .route("/agents/{name}", get(agents::get_agent).put(agents::update_agent).delete(agents::delete_agent))
         // Conversations (OIDC)
         .route("/conversations", get(conversations::list_conversations).post(conversations::create_conversation))
         .route("/conversations/{id}", get(conversations::get_conversation).delete(conversations::delete_conversation))

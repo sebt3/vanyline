@@ -89,47 +89,6 @@ pub struct AgentRecord {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Agent {
-    pub id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub system_prompt: String,
-    pub llm_provider_id: Option<Uuid>,
-    pub model: Option<String>,
-    pub mcp_servers: Vec<McpServer>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-#[derive(Debug, Clone, FromRow)]
-pub struct AgentRow {
-    pub id: Uuid,
-    pub name: String,
-    pub description: Option<String>,
-    pub system_prompt: String,
-    pub llm_provider_id: Option<Uuid>,
-    pub model: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
-
-impl AgentRow {
-    pub fn into_agent(self, mcp_servers: Vec<McpServer>) -> Agent {
-        Agent {
-            id: self.id,
-            name: self.name,
-            description: self.description,
-            system_prompt: self.system_prompt,
-            llm_provider_id: self.llm_provider_id,
-            model: self.model,
-            mcp_servers,
-            created_at: self.created_at,
-            updated_at: self.updated_at,
-        }
-    }
-}
-
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct Conversation {
     pub id: Uuid,
