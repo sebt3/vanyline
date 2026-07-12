@@ -129,6 +129,32 @@ anticipées à l'avance. Fonctionne bien : découper *pendant* l'exécution dès
 candidate touche plusieurs formats/fichiers indépendants, plutôt que de figer le découpage
 dans le design doc.
 
+### Outillage — délégation à Qwen via `llm-exec`
+
+Depuis la feature cli-rpc-stdio (2026-07-12), Claude délègue directement à
+Qwen via `llm-exec` (plus de passe-plat humain) : fichier de tâche écrit
+dans `.tasks/<feature>/`, lancé en arrière-plan, revu puis committé par
+Claude après coup (l'agent opencode `implement` a `git commit*: ask` dans
+ses permissions — bloquant en exécution non-interactive, donc Qwen
+implémente + valide, ne commit jamais).
+
+Deux pièges d'environnement rencontrés au premier essai :
+
+- **`opencode run` échoue avec `Session not found`** si lancé depuis le Bash
+  tool de Claude Code sur cette machine — l'environnement hérite
+  `OPENCODE_SERVER_PASSWORD`/`OPENCODE_BINARY` du pod code-server, et leur
+  présence fait échouer la création de session (mécanisme de contrôle
+  serveur sans rapport avec un `run` ponctuel). Un terminal interactif
+  classique n'a pas ce problème (confirmé : même commande, résultat
+  différent). **Fix** : préfixer `env -u OPENCODE_SERVER_PASSWORD -u
+  OPENCODE_BINARY` devant `llm-exec`/`opencode run` quand l'appel vient du
+  Bash tool.
+- **Modèle** : malgré la consigne globale d'utiliser `strix/qwen3.6:27b`
+  (dense), le développeur préfère `strix/qwen3.6:35b-a3b` (MoE) pour ces
+  délégations — le dense est trop lent en pratique sur le Strix. Toujours
+  passer `-m` explicitement (l'auto-découverte reste à éviter), juste avec
+  ce tag-là par défaut sur ce projet.
+
 ---
 
 ## Contexte et philosophie
@@ -148,8 +174,10 @@ app-harness-parity (stockage PG natif côté app, en cours — migrations et `Pg
 avancés, statut exact à vérifier avant de s'appuyer dessus), tools-v2 (refonte SLM-friendly
 de `vanyline-tools`, 8 outils finaux), sandbox-bootstrap (image podman + confinement des
 chemins + glue MCP), controller-bootstrap (reconcilers Owner/Project/Sandbox avancés).
-Convergence CLI ↔ app : `cli-rpc-stdio.md` (JSON-RPC stdio) et `vscode-ext-bootstrap.md`
-pas encore démarrés, dépendent de la stabilisation des commandes CLI.
+Convergence CLI ↔ app : cli-rpc-stdio (JSON-RPC stdio) démarré le 2026-07-12
+sur la branche `feature/cli-rpc-stdio` (design doc commité, tâche 1/4
+`rpc-skeleton` en cours via Qwen) ; `vscode-ext-bootstrap.md` pas encore
+démarré, dépend de la stabilisation des commandes CLI.
 
 **Hors scope pour cette phase :**
 - Intégration app ↔ sandbox (nécessite le controller à maturité)
