@@ -83,7 +83,9 @@ pub mod vnl_code {
     pub const BUSY: &str = "VNL-RPC-002";
     pub const UNKNOWN_PROTOCOL_VERSION: &str = "VNL-RPC-003";
     pub const METHOD_NOT_FOUND: &str = "VNL-RPC-004";
+    pub const CONVERSATION_NOT_FOUND: &str = "VNL-RPC-005";
     pub const CONFIG_ERROR: &str = "VNL-RPC-006";
+    pub const CONVERSATION_STORAGE_ERROR: &str = "VNL-RPC-007";
 }
 
 #[derive(Debug, Deserialize)]
@@ -104,4 +106,42 @@ pub struct InitializeResult {
     pub workspace_root: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_agent: Option<String>,
+}
+
+/// Vue allégée d'une conversation — résultat de `conversations/list` et
+/// `conversations/create`. `conversations/get` retourne la `Conversation`
+/// COMPLÈTE de `vanyline_lib` (déjà Serialize) — pas ce type.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationSummary {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub message_count: usize,
+}
+
+impl From<&vanyline_lib::Conversation> for ConversationSummary {
+    fn from(c: &vanyline_lib::Conversation) -> Self {
+        Self {
+            id: c.id.to_string(),
+            agent: c.agent.clone(),
+            title: c.title.clone(),
+            message_count: c.messages.len(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConversationIdParams {
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ConversationCreateParams {
+    #[serde(default)]
+    pub agent: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
 }

@@ -1,7 +1,10 @@
 use crate::rpc::protocol::*;
 
 use serde_json::Value;
+use uuid::Uuid;
 use vanyline_lib::store::ConfigStore;
+
+use crate::store;
 
 pub struct ServerState {
     pub initialized: bool,
@@ -144,6 +147,10 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
                 store_clone.list_skills().await
             }).await)
         }
+        "conversations/list" => Some(handle_conversations_list(id)),
+        "conversations/get" => Some(handle_conversations_get(id, request.params)),
+        "conversations/create" => Some(handle_conversations_create(id, request.params)),
+        "conversations/delete" => Some(handle_conversations_delete(id, request.params)),
         _ => Some(
             serde_json::to_string(&JsonRpcResponse::error(
                 id,
@@ -236,6 +243,158 @@ async fn handle_initialize(state: &mut ServerState, id: Value, params: serde_jso
 /// (ignoré, cf. table du design : `shutdown` n'a pas de params).
 fn shutdown_response(id: Value) -> JsonRpcResponse {
     JsonRpcResponse::success(id, Value::Null)
+}
+
+/// `conversations/list` : `store::list_conversations()` -> erreur io ->
+/// `VNL-RPC-007` (message = `format!("{e}")`) ; succès -> tableau de
+/// `ConversationSummary` (PAS la `Conversation` complète — pas de
+/// `messages` dans la liste, cf. design : `Conversation` complète
+/// seulement pour `conversations/get`).
+fn handle_conversations_list(id: Value) -> String {
+    let result = store::list_conversations();
+    match result {
+        Ok(convs) => {
+            let summaries: Vec<ConversationSummary> = convs.iter().map(ConversationSummary::from).collect();
+            serde_json::to_string(&JsonRpcResponse::success(id, Value::Array(
+                summaries.into_iter().map(|s| serde_json::to_value(s).expect("serialize summary")).collect()
+            ))).expect("serialize list response")
+        }
+        Err(e) => {
+            serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::SERVER_ERROR,
+                format!("{e}"),
+                vnl_code::CONVERSATION_STORAGE_ERROR,
+            )).expect("serialize list error response")
+        }
+    }
+}
+
+/// `conversations/get` : params -> `ConversationIdParams`. Si
+/// désérialisation échoue OU si `id` n'est pas un UUID valide
+/// (`uuid::Uuid::parse_str`) -> `VNL-RPC-000` (requête malformée). Sinon
+/// `store::get_conversation(&uuid)` : `Err` avec
+/// `e.kind() == std::io::ErrorKind::NotFound` -> `VNL-RPC-005` ; toute
+/// autre erreur io -> `VNL-RPC-007`. Succès -> la `Conversation` COMPLÈTE
+/// (`vanyline_lib::Conversation`, déjà `Serialize`), PAS un
+/// `ConversationSummary`.
+fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
+    let params: ConversationIdParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            "Malformed request: params could not be deserialized as ConversationIdParams",
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize get error response"),
+    };
+    let uuid = match Uuid::parse_str(&params.id) {
+        Ok(u) => u,
+        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            format!("Invalid UUID in id: {}", params.id),
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize get error response"),
+    };
+    match store::get_conversation(&uuid) {
+        Ok(conv) => serde_json::to_string(&JsonRpcResponse::success(id, serde_json::to_value(&conv).expect("serialize conversation"))).expect("serialize get response"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::SERVER_ERROR,
+                format!("Conversation not found: {}", params.id),
+                vnl_code::CONVERSATION_NOT_FOUND,
+            )).expect("serialize get not found error response")
+        }
+        Err(e) => serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::SERVER_ERROR,
+            format!("{e}"),
+            vnl_code::CONVERSATION_STORAGE_ERROR,
+        )).expect("serialize get error response"),
+    }
+}
+
+/// `conversations/create` : params -> `ConversationCreateParams`
+/// (désérialisation échoue seulement sur un type incorrect, PAS sur
+/// l'absence de champs — les deux sont `#[serde(default)]` -> `VNL-RPC-000`
+/// si malformé quand même, ex. `agent` envoyé comme nombre). Construit une
+/// nouvelle `vanyline_lib::Conversation` : `id: Uuid::new_v4()`, `agent`,
+/// `title` depuis les params, `messages: Vec::new()`. AUCUNE validation
+/// que `agent` référence un agent existant du `FsConfigStore` (même
+/// comportement que la commande CLI `conversations new`, cf.
+/// `main.rs::run_conversation::New` déjà lu — ne pas introduire une
+/// vérification que la CLI elle-même ne fait pas). `store::save_conversation(&conv)` :
+/// `Err` -> `VNL-RPC-007` ; succès -> `ConversationSummary::from(&conv)`.
+fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
+    let params: ConversationCreateParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            "Malformed request: params could not be deserialized as ConversationCreateParams",
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize create error response"),
+    };
+    let conv = vanyline_lib::Conversation {
+        id: Uuid::new_v4(),
+        agent: params.agent,
+        title: params.title,
+        messages: Vec::new(),
+    };
+    match store::save_conversation(&conv) {
+        Ok(()) => {
+            let summary = ConversationSummary::from(&conv);
+            serde_json::to_string(&JsonRpcResponse::success(id, serde_json::to_value(summary).expect("serialize summary"))).expect("serialize create response")
+        }
+        Err(e) => serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::SERVER_ERROR,
+            format!("{e}"),
+            vnl_code::CONVERSATION_STORAGE_ERROR,
+        )).expect("serialize create error response"),
+    }
+}
+
+/// `conversations/delete` : params -> `ConversationIdParams`, mêmes règles
+/// de validation d'UUID que `conversations/get` (`VNL-RPC-000` si
+/// malformé). `store::delete_conversation(&uuid)` est déjà IDEMPOTENT côté
+/// store (ne retourne pas d'erreur si le fichier n'existe pas déjà, cf.
+/// `cli/src/store.rs::delete_conversation` déjà lu) — NE PAS ajouter de
+/// vérification d'existence supplémentaire ici, ni retourner
+/// `VNL-RPC-005` pour un id absent : `delete` d'un id inconnu réussit
+/// silencieusement, exactement comme la commande CLI. Seule une vraie
+/// erreur io (permissions, disque...) -> `VNL-RPC-007`. Succès -> `result:
+/// null` (même pattern que `shutdown`, tâche 01 : `JsonRpcResponse::success(id, Value::Null)`).
+fn handle_conversations_delete(id: Value, params: serde_json::Value) -> String {
+    let params: ConversationIdParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            "Malformed request: params could not be deserialized as ConversationIdParams",
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize delete error response"),
+    };
+    let uuid = match Uuid::parse_str(&params.id) {
+        Ok(u) => u,
+        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            format!("Invalid UUID in id: {}", params.id),
+            vnl_code::MALFORMED_REQUEST,
+        )).expect("serialize delete error response"),
+    };
+    match store::delete_conversation(&uuid) {
+        Ok(()) => serde_json::to_string(&JsonRpcResponse::success(id, Value::Null)).expect("serialize delete response"),
+        Err(e) => serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::SERVER_ERROR,
+            format!("{e}"),
+            vnl_code::CONVERSATION_STORAGE_ERROR,
+        )).expect("serialize delete error response"),
+    }
 }
 
 #[cfg(test)]
@@ -591,5 +750,206 @@ mod tests {
             resp.error.as_ref().map(|e| e.data.code.as_str())
         );
         assert!(resp.result.as_ref().map(|v| v.is_array()).unwrap_or_default(), "result should be an array");
+    }
+
+    /// Isolation lock and helper for tests that touch `crate::store` (reads
+    /// `XDG_DATA_HOME` via `dirs` crate without injection parameter).
+    static DATA_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Pointe `XDG_DATA_HOME` vers un tempdir frais et retourne (tempdir,
+    /// guard) — les DEUX doivent être gardés en vie (bindés, pas `let _ =`)
+    /// jusqu'à la fin du test : dropper le tempdir supprime le répertoire,
+    /// dropper le guard laisse un autre test muter la variable pendant que
+    /// celui-ci tourne encore.
+    fn isolated_data_dir() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", tmp.path());
+        (tmp, guard)
+    }
+
+    #[test]
+    async fn conversations_list_empty() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let mut state = ServerState::new();
+        let init_line = make_request_json(50, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(51, "conversations/list", None);
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "list should succeed with empty result, got: {:?}", resp.error);
+        let items = &resp.result.as_ref().expect("result should be Some");
+        assert!(items.is_array());
+        assert_eq!(items.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    async fn conversations_create_then_list() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let mut state = ServerState::new();
+        let init_line = make_request_json(55, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Create
+        let create_line = make_request_json(56, "conversations/create", Some(json!({"agent":"build","title":"Test"})));
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "create should succeed, got: {:?}", resp.error);
+        let created = &resp.result.as_ref().expect("result should be Some");
+        assert!(created["id"].is_string());
+        let created_id = created["id"].as_str().unwrap();
+        assert!(!created_id.is_empty());
+        assert_eq!(created["agent"], "build");
+        assert_eq!(created["title"], "Test");
+        assert_eq!(created["messageCount"], 0);
+
+        // List
+        let line = make_request_json(57, "conversations/list", None);
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "list should succeed, got: {:?}", resp.error);
+        let items = &resp.result.as_ref().expect("result should be Some");
+        assert!(items.is_array());
+        assert_eq!(items.as_array().unwrap().len(), 1);
+        assert_eq!(items.as_array().unwrap()[0]["id"], created_id);
+    }
+
+    #[test]
+    async fn conversations_get_found() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let mut state = ServerState::new();
+        let init_line = make_request_json(60, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Create
+        let create_line = make_request_json(61, "conversations/create", Some(json!({"agent":"build","title":"Test"})));
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let created_id = resp.result.as_ref().unwrap()["id"].as_str().unwrap();
+
+        // Get by id
+        let get_line = make_request_json(62, "conversations/get", Some(json!({"id": created_id})));
+        let result = handle_line(&mut state, &get_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "get should succeed, got: {:?}", resp.error);
+        let got = &resp.result.as_ref().expect("result should be Some");
+        assert_eq!(got["id"], created_id);
+        assert!(got["messages"].is_array());
+        assert_eq!(got["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    async fn conversations_get_not_found() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let mut state = ServerState::new();
+        let init_line = make_request_json(65, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Get with a valid UUID that was never created
+        let fake_uuid = "aaaaaaaa-0000-0000-0000-000000000001";
+        let get_line = make_request_json(66, "conversations/get", Some(json!({"id": fake_uuid})));
+        let result = handle_line(&mut state, &get_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-005");
+    }
+
+    #[test]
+    async fn conversations_get_malformed_id() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let mut state = ServerState::new();
+        let init_line = make_request_json(68, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Get with non-UUID string
+        let get_line = make_request_json(69, "conversations/get", Some(json!({"id":"not-a-uuid"})));
+        let result = handle_line(&mut state, &get_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    #[test]
+    async fn conversations_delete_then_list_empty() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let mut state = ServerState::new();
+        let init_line = make_request_json(70, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Create
+        let create_line = make_request_json(71, "conversations/create", Some(json!({"agent":"build","title":"Test"})));
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let created_id = resp.result.as_ref().unwrap()["id"].as_str().unwrap();
+
+        // Delete
+        let delete_line = make_request_json(72, "conversations/delete", Some(json!({"id": created_id})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "delete should succeed, got: {:?}", resp.error);
+        assert!(result.contains("\"result\":null"));
+
+        // List should be empty
+        let line = make_request_json(73, "conversations/list", None);
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_none(), "list should succeed, got: {:?}", resp.error);
+        let items = &resp.result.as_ref().expect("result should be Some");
+        assert_eq!(items.as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    async fn conversations_delete_unknown_id_succeeds() {
+        let (_tmp, _guard) = isolated_data_dir();
+
+        let mut state = ServerState::new();
+        let init_line = make_request_json(75, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // Delete with a valid UUID that was never created
+        let fake_uuid = "bbbbbbbb-0000-0000-0000-000000000001";
+        let delete_line = make_request_json(76, "conversations/delete", Some(json!({"id": fake_uuid})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        // Should succeed silently (idempotent, like CLI)
+        assert!(resp.error.is_none(), "delete of unknown id should succeed, got: {:?}", resp.error);
+        assert!(result.contains("\"result\":null"));
+    }
+
+    #[test]
+    async fn conversations_methods_require_initialize() {
+        let mut state = ServerState::new();
+
+        // Any of the 4 methods should return NOT_INITIALIZED before initialize
+        let line = make_request_json(80, "conversations/list", None);
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-001");
+        assert!(!state.initialized);
     }
 }
