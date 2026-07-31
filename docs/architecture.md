@@ -376,6 +376,38 @@ conditions réelles le 2026-07-01 sur cluster K8s 1.36.2/cri-o 1.36.1 (cf. secti
 "vanyline-maint" pour la recette elle-même). Image publiée :
 `docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1`.
 
+### Endpoints git — `GET /git/status` et `GET /git/unpushed` (WS-11)
+
+Deux endpoints REST (`sandbox/src/git.rs`), même middleware d'authentification que
+`/mcp`. Servent l'app/le frontend — pas de tool MCP git (les LLM ont déjà
+`execute_command` + git dans l'image). Pas d'action git (commit/push/merge), pas de
+diff de contenu — des listes, pas des patches. Erreurs `VNL-SBX-004` (commande git en
+échec), `VNL-SBX-005` (sortie git non reconnue par le parseur — préféré à un JSON
+mensonger), `VNL-SBX-006` (HEAD détachée, seulement pour `/git/unpushed`).
+
+- **`GET /git/status`** : parse pur de `git status --porcelain=v2 --branch` (exécuté
+  dans `VNL_SANDBOX_ROOT`). `{ branch, files: [{ path, state, staged }], clean }`.
+  `state` ∈ `modified | added | deleted | renamed | untracked | conflicted` — mapping
+  depuis les colonnes X (staged)/Y (unstaged) porcelain v2, X prioritaire si non `.` ;
+  `typechange` traité comme `modified`, `copied` comme `renamed` (pas d'état dédié dans
+  ce schéma). HEAD détachée : `branch == "(detached)"` (littéral git, pas de sentinelle
+  inventée) — pas une erreur pour cet endpoint, contrairement à `/git/unpushed`.
+- **`GET /git/unpushed`** : `{ branch, upstream: Option<String>, commits: [{ sha,
+  title, author, date }], truncated }`. Si `refs/remotes/origin/<branch>` existe →
+  compare à `origin/<branch>` (`upstream` renseigné) ; sinon (branche créée par la
+  sandbox, jamais poussée) → compare à `origin/<default>`, `default` résolu
+  dynamiquement via le HEAD symbolique du dépôt bare (`git rev-parse
+  --git-common-dir` depuis le worktree, puis `symbolic-ref --short HEAD` sur ce
+  chemin — pas de chemin codé en dur côté sandbox), repli `"main"` sur tout échec.
+  Sortie bornée à 200 commits (`truncated: true` au-delà). HEAD détachée → erreur
+  `VNL-SBX-006` (la comparaison n'aurait pas de sens sans branche).
+- **Fraîcheur** : les refs `origin/*` ont la fraîcheur du dernier `fetch` périodique du
+  Project (cron), pas du remote instantané — aucun fetch déclenché par ces endpoints.
+- **Dépend du mount `repo.git`** (cf. section "Opérateur Kubernetes" ci-dessous) et de
+  la refspec de fetch (cf. section "Maintenance des workspaces" ci-dessous) — sans ces
+  deux fixes (découverts pendant WS-11, préexistants au design initial), aucune
+  commande git ne fonctionnait dans le pod sandbox.
+
 ## Opérateur Kubernetes — `vanyline-controller`
 
 kube-rs, trois CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) réconciliées par un
@@ -403,7 +435,7 @@ nœuds sans contrainte de colocalisation.
 |---|---|
 | `owner.rs` | PVC home (créé ou référence `existing_pvc` vérifiée) + ServiceAccount `owner-<name>` + condition `Ready`. Pas de finalizer (rien à nettoyer côté cluster que la suppression K8s de l'Owner n'efface pas déjà via owner references). |
 | `project.rs` | PVC workspace (créé ou référence vérifiée) + Job `project-init` (clone bare + mkdir caches, une fois) + CronJob `project-fetch` (`git fetch --prune`, planning dérivé de `fetch_interval`) + finalizer (Job purge puis suppression du PVC créé — un PVC référencé n'est jamais supprimé). |
-| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches) + Service ClusterIP (port MCP) + NetworkPolicy (ingress restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
+| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches) + Service ClusterIP (port MCP) + NetworkPolicy (ingress restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
 
 Tous les Jobs git (`project.rs`/`sandbox.rs`) invoquent `vanyline-maint` (image sandbox)
 en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une commande shell
@@ -413,6 +445,18 @@ en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une comman
 `LD_LIBRARY_PATH` deux arches, `RUSTUP_HOME`…) vit ici, pas répétée dans chaque CR —
 `Toolchain.env` vide déclenche le preset si `Toolchain.name` matche (`rust`, `node`),
 sinon aucune variable ; `Toolchain.env` explicite remplace le preset entièrement.
+
+**Mount `repo.git` dans le pod Sandbox** (`build_sandbox_pod`, WS-11) : `git worktree
+add` (Job checkout, monté sur tout le PVC à `/workspace`) écrit dans le `.git` du
+worktree un pointeur **absolu** — `gitdir: /workspace/repo.git/worktrees/<sandbox>`
+(comportement standard de git). Le pod Sandbox ne montait jusqu'ici que le subPath
+`worktrees/<sandbox>` : ce pointeur ne résolvait donc vers rien à l'intérieur du pod, et
+toute commande git y échouait (bug préexistant à `controller-bootstrap`, jamais débusqué
+faute de test e2e exerçant une vraie commande git). Fix : un second `VolumeMount` sur le
+même `Volume` `workspace`, subPath `repo.git`, monté à `/workspace/repo.git` — même
+chemin absolu que celui utilisé par les Jobs. Lecture-écriture (git écrit
+`HEAD`/`index`/objets). Isolation préservée : seul l'object store partagé du Project
+devient visible, jamais les worktrees des autres sandboxes.
 
 **Tests** : unitaires purs sur les builders (spec → Pod/Job/Service/NetworkPolicy
 attendus, sans cluster) — pas de mock de l'API K8s. `--crds` (flag CLI) imprime les
@@ -436,9 +480,7 @@ réconcilié), pas d'ingress/JWT sur la Sandbox (le frontend n'y accède pas enc
 de webhook d'admission (validation par schéma CRD uniquement), pas de merge/push
 automatique des branches (le controller gère la plomberie git, pas le contenu), pas
 d'openvscode-server dans le pod. Changement de spec Sandbox = recréation du pod
-(immutable en v1). `fetch` ne rafraîchit pas les branches du clone bare (cf.
-"Limites connues" générales plus bas — bug préexistant, hors périmètre du controller
-lui-même, à traiter dans WS-11).
+(immutable en v1).
 
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 
@@ -450,7 +492,7 @@ correspondante ("l'image sandbox est l'outil de maintenance du controller") est 
 
 | Sous-commande | Rôle |
 |---------------|------|
-| `init --repo <url> --workspace <dir> [--cache <name>]...` | mkdir des caches + clone bare si absent (idempotent) |
+| `init --repo <url> --workspace <dir> [--cache <name>]...` | mkdir des caches + clone bare si absent (idempotent) + pose la refspec de fetch (idempotent, cf. décisions) |
 | `fetch --workspace <dir>` | `git fetch --prune` sur le clone bare |
 | `purge --workspace <dir>` | supprime `repo.git`, `worktrees/`, `cache/` (idempotent) |
 | `checkout --workspace <dir> --sandbox <n> --branch <ref> [--default-branch <ref>]` | worktree idempotent ; branche créée depuis la default branch (résolue par `symbolic-ref`, repli `main`) si absente du bare |
@@ -483,16 +525,15 @@ Décisions structurantes :
   logique par nœud.
 - **Release couplée** : controller et image sandbox sortent du même repo et avancent
   ensemble — une image antérieure à WS-9 ne contient pas `vanyline-maint`.
+- **Refspec de fetch posée par `init`** (WS-11) : `git clone --bare` ne configure aucune
+  refspec de fetch (vérifié : `[remote "origin"] url = ...` sans ligne `fetch =`) — le
+  `fetch` périodique ne rafraîchissait donc que `FETCH_HEAD`, jamais les refs. `init` pose
+  désormais `git config --replace-all remote.origin.fetch
+  '+refs/heads/*:refs/remotes/origin/*'` (idempotent). Cible `refs/remotes/origin/*`, pas
+  `refs/heads/*` — ne doit jamais écraser les branches locales des worktrees. C'est
+  directement ce que `GET /git/unpushed` interroge (cf. section "Serveur MCP" ci-dessus).
 
 ## Limites connues (dette assumée, pas oubliée)
-
-- **`fetch` ne met pas à jour les branches du clone bare** : `git clone --bare` ne
-  configure aucune refspec de fetch, donc le `vanyline-maint fetch` périodique (comme le
-  script shell qu'il remplace — parité voulue par WS-9) ne rafraîchit que `FETCH_HEAD`,
-  pas `refs/heads/*` ; un `checkout` d'une branche apparue sur le remote après le clone
-  ne la verra pas, et `--prune` n'a rien à élaguer. Bug latent **préexistant** du design
-  controller, hors périmètre WS-9 (parité stricte) — à traiter dans WS-11 (sandbox-git),
-  probablement via une refspec `+refs/heads/*:refs/heads/*` posée par `init`.
 
 - **Historique appauvri** : seul le texte user/assistant est rejoué d'un tour à l'autre
   (`cli/src/chat.rs`, `app/src/ws/chat.rs`) — pas les tool calls/résultats intermédiaires.
