@@ -80,14 +80,6 @@ kydah-code (extension VS Code pour code-server) consomme le MCP de la sandbox po
 Le Owner dans ce cas référence le PVC existant de code-server — pas de nouveau stockage.
 Fonctionne uniquement quand kydah-code tourne dans un code-server K8s (service interne).
 
-### Contrôleur — bootstrap engagé
-
-CRDs Owner/Project/Sandbox v1alpha1. Owner : identité + PVC home RWX + ServiceAccount
-(identité utilisée par kydah-code ET l'app pour accéder aux sandboxes du Owner). Project :
-repo git + PVC workspace RWO bloc local (rust-analyzer/openvscode-server ont besoin
-d'inotify, ne traverse pas les FS réseau). Sandbox : projection d'une branche (git worktree)
-+ toolchains en image volumes. Reconciler Owner (PVC home/SA/status) déjà implémenté.
-
 ### harness-core — cœur LLM/MCP name-keyed (terminé)
 
 Refonte complète de `vanyline-lib` : domaine name-keyed (`Provider`, `ModelProfile`,
@@ -330,6 +322,70 @@ volontairement conservée par WS-9, documenté dans "Limites connues" de
 `docs/architecture.md`. Fix probable : refspec `+refs/heads/*:refs/heads/*`
 posée par `vanyline-maint init`.
 
+### controller-bootstrap — WS-4 (terminé, clôturé après coup le 2026-07-31)
+
+`vanyline-controller` sorti du statut déféré : trois CRDs v1alpha1
+(Owner/Project/Sandbox) et leurs reconcilers (`owner.rs`/`project.rs`/`sandbox.rs`),
+7 tâches candidates du design toutes implémentées (crds, owner-reconciler,
+project-jobs-builder, project-reconciler, sandbox-pod-builder, sandbox-reconciler,
+deploy). Détails architecturaux : `docs/architecture.md` section "Opérateur
+Kubernetes — vanyline-controller". `docs/features/controller-bootstrap.md` supprimé
+à la clôture.
+
+**Anomalie de process découverte en reprenant cette feature** : le design doc était
+resté en `docs/features/` alors que le code était fini, testé (67 tests) et déployé
+depuis le 2026-07-11 (image publiée `docker.io/sebt3/vanyline-controller:0.0.1-alpha.1`,
+validée en e2e réel sur le cluster de dev — commit `ef0d3da`, qui a d'ailleurs débusqué
+un vrai bug de `PatchParams::force` incompatible avec `Patch::Merge` sur le patch de
+status). La Phase 3 (clôture : migration vers `architecture.md` + suppression du
+design doc) n'avait jamais été faite alors que WS-9 (sandbox-maint-agent) et WS-8
+(github-publication) ont ensuite modifié `controller/` sans jamais y toucher — signe
+que la clôture peut se perdre silencieusement quand plusieurs features s'enchaînent
+sans repasser explicitement par la Phase 3 de chacune. Réflexe à garder : après toute
+tâche qui touche un composant dont le design doc est encore présent, vérifier s'il est
+encore d'actualité plutôt que de supposer qu'il a déjà été clos.
+
+### initial-app-frontend et sandbox-bootstrap (terminés, clôturés après coup le 2026-07-31)
+
+Même anomalie que controller-bootstrap, découverte dans la foulée en vérifiant les
+autres design docs restés en `docs/features/` : les deux étaient finis depuis
+longtemps sans jamais avoir traversé la Phase 3.
+
+- **initial-app-frontend (MVP)** : auth OIDC/cookie, config API, chat MCP, image
+  déployable — tout fait, et depuis dépassé par `app-harness-parity` (tables/API
+  name-keyed) sans que ça invalide la clôture (évolution attendue, pas une régression).
+  `AdminAuth`/`ADMIN_SECRET` du MVP ont disparu en cours de route (retirés une fois
+  l'API scopée par utilisateur) — les commentaires `// admin` encore présents dans
+  `app/src/api/mod.rs` sont un résidu inoffensif, pas un vrai contrôle d'accès.
+  Détails migrés : `docs/architecture.md` section "Backend web — vanyline-app".
+- **sandbox-bootstrap (WS-3)** : les 4 tâches du design (fork-template, tools-glue,
+  image, deploy-test) faites. Découverte notable en vérifiant le code réel : l'auth
+  du serveur MCP (OIDC/JWKS + groupes, héritée telle quelle du template) est déjà
+  active par défaut (refuse de démarrer sans `--no-auth`/`STATIC_TOKEN` explicite) —
+  plus avancée que ce que la Phase P1 du design annonçait ("`--no-auth` uniquement").
+  Reste un vrai point ouvert, pas un oubli de clôture : ce modèle OIDC/groupes est
+  **distinct** des deux modes JWT-app/SA-TokenReview décrits dans `AGENTS.md` pour le
+  frontend et kydah-code — personne ne les a encore câblés dessus (P2/P3 du design
+  d'origine, jamais démarrés, pas de design doc dédié pour l'instant). Détails migrés :
+  `docs/architecture.md` section "Serveur MCP — vanyline-sandbox".
+- **Bonus trouvé en vérifiant le code contre `docs/architecture.md`** : la limite
+  "Pas de streaming WS live côté app" (section Limites connues) était stale — la
+  tâche `ws-chatevent` d'`app-harness-parity` l'a résolue (`ChannelSink` sur canal
+  mpsc, streaming réel token-par-token, `CollectingSink` n'existe plus dans le code).
+  Bullet retiré.
+
+**app-harness-parity (WS-2) — partiellement clos** : le backend (migrations,
+`PgConfigStore`, API REST, WS streaming — tâches 1-4 du design) est fini et migré
+dans `docs/architecture.md`. Le frontend (tâches 5-6, `front-crud`/`front-chat`)
+n'a jamais été commencé — `frontend/src/` n'a que `Login.svelte`/`Chat.svelte` du
+MVP, aucun écran CRUD, `ChatMessage.svelte` ne rend que texte + tool calls à plat
+(pas de repli par tool result, pas de badge usage, pas de sous-fil subagent).
+`docs/features/app-harness-parity.md` **gardé**, réduit au seul périmètre restant —
+ne pas le supprimer tant que le frontend n'est pas fait. Différence clé avec les
+trois clôtures ci-dessus : toujours vérifier que TOUTES les tâches candidates du
+design ont un équivalent dans le code avant de fermer, pas seulement le backend/la
+partie la plus visible — une feature peut être "backend-complete" et rester ouverte.
+
 ---
 
 ## Contexte et philosophie
@@ -344,23 +400,32 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 ## Scope — phase actuelle
 
 harness-core, cli-harness, cli-rpc-stdio, ws07-review-fixes,
-ws08-github-publication et ws09-sandbox-maint-agent terminés (cli sur son vrai stockage YAML deux
+ws08-github-publication, ws09-sandbox-maint-agent, controller-bootstrap (WS-4)
+terminés (cli sur son vrai stockage YAML deux
 couches, ancien `CliConfigStore` JSON supprimé ; serveur JSON-RPC stdio
 complet, cf. section dédiée plus haut ; review sprint 1 R3-R16 corrigées —
 R1/R2 closes par WS-9 (vanyline-maint, cf. section dédiée) ; repo publiable — Dockerfiles à
 leur place, `deploy/` trié, CI de validation et de release GitHub Actions,
 README étendu, cf. `docs/architecture.md` section "Limites connues" pour le
-détail des deux dettes révélées en route — détails dans `docs/architecture.md`,
-`docs/features/ws07-review-fixes.md` et `docs/features/ws08-github-publication.md`
-supprimés après clôture). Plusieurs workstreams avancent
-en parallèle : app-harness-parity (stockage PG natif côté app, en cours —
-migrations et `PgConfigStore` avancés, statut exact à vérifier avant de
-s'appuyer dessus), tools-v2 (refonte SLM-friendly de `vanyline-tools`, 8
-outils finaux), sandbox-bootstrap (image podman + confinement des chemins +
-glue MCP), controller-bootstrap (reconcilers Owner/Project/Sandbox avancés).
-Convergence CLI ↔ app : `vscode-ext-bootstrap.md` (extension VS Code,
-consomme le RPC stdio) pas encore démarré — c'est la prochaine étape
-naturelle maintenant que le RPC stdio est en place.
+détail des deux dettes révélées en route ; `vanyline-controller` sorti du
+statut déféré — trois CRDs Owner/Project/Sandbox réconciliées, déployé et
+validé en e2e sur le cluster de dev, cf. `docs/architecture.md` section
+"Opérateur Kubernetes" et section dédiée ci-dessus pour l'anomalie de clôture
+tardive découverte en reprenant cette feature — détails dans
+`docs/architecture.md`, `docs/features/ws07-review-fixes.md`,
+`docs/features/ws08-github-publication.md` et
+`docs/features/controller-bootstrap.md` supprimés après clôture) ; de même,
+initial-app-frontend (MVP) et sandbox-bootstrap (WS-3, image podman +
+confinement des chemins + glue MCP) étaient terminés sans jamais avoir été
+clos — cf. section dédiée ci-dessus, détails migrés dans `docs/architecture.md`
+sections "Backend web" et "Serveur MCP", les deux design docs supprimés.
+app-harness-parity (WS-2) est **partiellement** clos : backend fini et migré
+dans `docs/architecture.md`, frontend (`front-crud`/`front-chat`) jamais
+commencé — `docs/features/app-harness-parity.md` gardé, réduit à ce périmètre
+restant. tools-v2 (refonte SLM-friendly de `vanyline-tools`, 8 outils finaux)
+avance en parallèle. Convergence CLI ↔ app : `vscode-ext-bootstrap.md`
+(extension VS Code, consomme le RPC stdio) pas encore démarré — c'est la
+prochaine étape naturelle maintenant que le RPC stdio est en place.
 
 **Point ouvert issu de ws08, résolu** : `svelte-check`/storybook (2026-07-31,
 branche `fix/svelte-check-skiplibcheck`). Root cause : les fichiers

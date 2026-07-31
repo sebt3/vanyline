@@ -15,9 +15,9 @@ Six crates : **deux bibliothèques feuilles** partagées (`vanyline-tools`, `van
 | `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic, SLM-friendly (v2) | `filesystem` (read/write/edit/delete/list), `search` (find_files/search), `command` (`execute` via `sh -c`, timeout, cwd), `error` (`ToolsError`, codes `VNL-TLS-*`), `output` (bornage centralisé), `mcp` (schémas JSON — source unique consommée par `cli` et `sandbox`) |
 | `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), erreurs `VNL-*` |
 | `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux |
-| `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib` |
-| `vanyline-sandbox` | binaire | Pod serveur WS/MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
-| `vanyline-controller` | binaire | Opérateur Kubernetes | *(stub)* — kube-rs, CRDs |
+| `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib` — voir section "Backend web" plus bas |
+| `vanyline-sandbox` | binaire | Pod serveur MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) — voir section "Serveur MCP" plus bas ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
+| `vanyline-controller` | binaire | Opérateur Kubernetes | kube-rs, CRDs Owner/Project/Sandbox v1alpha1 — voir section dédiée plus bas |
 
 ## Graphe de dépendances
 
@@ -248,6 +248,52 @@ attendre un tour qui ne se termine jamais si le client ferme la
 connexion en plein tour ; acceptable pour v1, le process est de toute
 façon sur le point de sortir.
 
+## Backend web — `vanyline-app`
+
+Backend axum du frontend (MVP `initial-app-frontend` + tables/API name-keyed de
+`app-harness-parity`). Auth OIDC stateless (pas de session serveur) : `openidconnect`
+4.0, cookie `HttpOnly` chiffré (`cookie::Key` 64 octets depuis `COOKIE_SECRET`,
+payload `{id_token}|{email}`, `auth/cookie.rs`) revalidé à chaque requête par
+l'extractor `AuthUser` (`auth/middleware.rs`) — tout endpoint `/api/*` scope ses
+requêtes par utilisateur (`get_or_create_user`), aucune notion d'admin distincte
+(`AdminAuth`/`ADMIN_SECRET` du MVP initial ont été retirés une fois l'API CRUD
+name-keyed en place — l'ancienne distinction admin/utilisateur n'avait plus de sens
+dès que providers/mcp servers sont eux aussi scopés par utilisateur).
+
+**Stockage** : PostgreSQL/sqlx, migrations `app/migrations/0001_initial.sql` (schéma
+MVP) + `0002_harness_parity.sql` (tables `model_profiles`/`toolsets`/`skills`, `agents`
+v2 name-keyed, `user_id`+`UNIQUE(user_id, name)` ajoutés à `llm_providers`/
+`mcp_servers`). `config_store.rs::PgConfigStore` implémente `vanyline_lib::ConfigStore`
+sur ce schéma — une instance par requête, scopée `user_id`, convertit les lignes en
+types name-keyed de la lib (le nom remplace l'UUID en sortie, comme `FsConfigStore`
+côté cli). `load_skill` lit `skills.body` à la demande, même paresse que le cli.
+
+**API REST** (`api/*.rs`, `api::api_router`) : CRUD par nom pour `model-profiles`,
+`toolsets`, `skills`, `agents` ; CRUD par id pour `llm-providers`/`mcp-servers`
+(`{id}/test` = discovery modèles, `{id}/default`) ; `conversations` + `messages`.
+Toutes les routes exigent `AuthUser` et scopent par utilisateur.
+
+**WebSocket chat** (`ws/chat.rs`) : `run_agent_turn` avec `local_tools` vide (l'app
+reste sur le chemin froid — cf. règle de dépendances plus haut). `ChannelSink` pousse
+chaque `ChatEvent` sur un canal mpsc dès son émission ; une tâche `forward_events` par
+connexion (pas par tour) draine le canal et écrit sur le socket au fil de l'eau — vrai
+streaming token-par-token, contrairement à l'ancien `CollectingSink` qui bufferisait
+tout un tour avant le premier octet (limite documentée pendant la migration
+harness-core, résolue par la tâche `ws-chatevent`).
+
+**Déploiement** : image `docker.io/sebt3/vanyline-app:0.0.1-alpha.1`, build podman
+multi-stage (node → rust → debian-slim), manifestes `deploy/web/` (dont
+`RestEndPoint_sso.yaml` — kuberest provisionne l'app OIDC dans Authentik).
+
+**Frontend actuel** (`frontend/src/`) : deux pages (`Login.svelte`, `Chat.svelte`),
+routage hash-based. `Chat.svelte` assemble `ConversationList` + `AgentSelector` +
+`ChatMessage` + `ChatInput`. `ChatMessage` rend le texte + les tool calls à plat —
+pas encore de repli/dépliage par tool result, de badge usage ni de sous-fil pour les
+événements subagent, et aucun écran de gestion CRUD (model profiles/toolsets/skills/
+agents n'ont pas d'UI, seule l'API existe) : ce sont les tâches `front-chat` et
+`front-crud` de `app-harness-parity`, pas encore faites — cf.
+`docs/features/app-harness-parity.md`, laissé ouvert pour cette raison.
+
 ## Outils (`vanyline-tools`) — conventions SLM-friendly
 
 La crate `vanyline-tools` cible explicitement des modèles plus petits que Qwen3.6
@@ -295,6 +341,104 @@ Cette pratique a débusqué un bug réel du moteur de session (`default_max_turn
 jamais configuré, cf. `git log --grep default_max_turns`) qu'aucun test
 unitaire n'aurait attrapé — un SLM enchaîne spontanément plus d'outils par
 tour qu'un scénario de test écrit à la main.
+
+## Serveur MCP — `vanyline-sandbox`
+
+Fork adapté de `kydah-mcp-template` (transport MCP HTTP streamable POST-only fait
+main sur axum, JSON-RPC 2.0 dispatch `tools/list`/`tools/call` dans `mcp.rs` — pas de
+dépendance à l'API server `rmcp`, contrairement au client côté `vanyline-lib`).
+`tools_impl.rs` est la glue vers les 8 outils de `vanyline-tools` (mêmes schémas JSON
+que `cli/src/tools.rs`, source unique `tools/src/mcp.rs`).
+
+**Auth** (`auth.rs`, héritée du template telle quelle) : OIDC/JWKS + niveaux d'accès
+par groupe (`AUTH_GROUPS_ADMIN`/`AUTH_GROUPS_READ`), `--no-auth` (dev, refuse de
+démarrer sans le flag explicite) ou `STATIC_TOKEN` (démo, bypasse l'OIDC). C'est un
+modèle **distinct** des deux modes JWT-app/SA-TokenReview décrits dans `AGENTS.md`
+pour le frontend et kydah-code — celui-ci reste à câbler quand ces clients
+consommeront réellement la sandbox (P2/P3 du design d'origine, pas encore démarrés).
+
+**Confinement** (`tools_impl.rs`, garde-fou d'ergonomie — la frontière de sécurité
+réelle est le pod) : tout chemin est résolu sous `VNL_SANDBOX_ROOT` (canonicalisation
++ vérification de préfixe, y compris pour un suffixe non encore existant — résolution
+lexicale du parent le plus proche qui existe déjà, `VNL-SBX-003`), erreur `VNL-SBX-001`
+sinon ; `execute_command` a `cwd = VNL_SANDBOX_ROOT`.
+
+**Observabilité** (`telemetry.rs`, du template) : métriques Prometheus sur un port
+séparé (`METRICS_LISTEN`, `0.0.0.0:9090` par défaut — délibérément jamais exposé par
+le Service K8s, cf. commentaire `config.rs`), export OTLP optionnel
+(`OTEL_EXPORTER_OTLP_ENDPOINT`, dégradation silencieuse si le collecteur est injoignable).
+
+**Déploiement** : `sandbox/Dockerfile` (multi-stage → `debian:trixie-slim` + substrat
+natif validé). `deploy/sandbox/sandbox-test.yaml` (pod + PVC + toolchains rust/node en
+`volumes[].image`) remplace les pods d'expérimentation `deploy/sandbox-imagevol-*.yaml`
+une fois la recette absorbée par le Dockerfile et le controller — validée en
+conditions réelles le 2026-07-01 sur cluster K8s 1.36.2/cri-o 1.36.1 (cf. section
+"vanyline-maint" pour la recette elle-même). Image publiée :
+`docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1`.
+
+## Opérateur Kubernetes — `vanyline-controller`
+
+kube-rs, trois CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) réconciliées par un
+reconciler chacun, tournant en parallèle dans le même process (`main.rs::tokio::join!`) :
+
+```
+Owner (1) ────────── (n) Project ─────────── (n) Sandbox
+SA + PVC home RWX       PVC workspace RWO       pod = worktree d'une branche
+(clés, dotfiles)        repo git bare + caches   (monte home + workspace + toolchains)
+```
+
+**Pourquoi trois CRDs** : un CRD se justifie par un état désiré à réconcilier, pas par la
+possession d'un objet natif. Owner = identité (ServiceAccount `owner-<name>` — pilier de
+l'auth TokenReview pour kydah-code et l'app), home. Project = workspace, repo git,
+caches, Jobs/CronJob de maintenance. Sandbox = pod + branche. Zéro chevauchement.
+
+**Répartition du stockage — dictée par les filewatchers** : openvscode-server et
+rust-analyzer reposent sur inotify, qui ne traverse pas les filesystems réseau. PVC
+Project (workspace, arbres de code) : bloc local **RWO** — colocalisation limitée aux
+branches actives d'un même projet, le scheduler co-place via le volume. PVC Owner
+(home) : petit, read-mostly, zéro watcher → **RWX**, suit l'utilisateur sur tous les
+nœuds sans contrainte de colocalisation.
+
+| Reconciler (`controller/src/*.rs`) | Objets gérés |
+|---|---|
+| `owner.rs` | PVC home (créé ou référence `existing_pvc` vérifiée) + ServiceAccount `owner-<name>` + condition `Ready`. Pas de finalizer (rien à nettoyer côté cluster que la suppression K8s de l'Owner n'efface pas déjà via owner references). |
+| `project.rs` | PVC workspace (créé ou référence vérifiée) + Job `project-init` (clone bare + mkdir caches, une fois) + CronJob `project-fetch` (`git fetch --prune`, planning dérivé de `fetch_interval`) + finalizer (Job purge puis suppression du PVC créé — un PVC référencé n'est jamais supprimé). |
+| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches) + Service ClusterIP (port MCP) + NetworkPolicy (ingress restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
+
+Tous les Jobs git (`project.rs`/`sandbox.rs`) invoquent `vanyline-maint` (image sandbox)
+en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une commande shell
+(cf. section "Maintenance des workspaces" ci-dessous pour l'outil lui-même).
+
+**Presets toolchain** (`sandbox.rs::toolchain_preset`) : la recette d'env validée (PATH,
+`LD_LIBRARY_PATH` deux arches, `RUSTUP_HOME`…) vit ici, pas répétée dans chaque CR —
+`Toolchain.env` vide déclenche le preset si `Toolchain.name` matche (`rust`, `node`),
+sinon aucune variable ; `Toolchain.env` explicite remplace le preset entièrement.
+
+**Tests** : unitaires purs sur les builders (spec → Pod/Job/Service/NetworkPolicy
+attendus, sans cluster) — pas de mock de l'API K8s. `--crds` (flag CLI) imprime les
+manifests CRD générés par `schemars`, source de `deploy/controller/crds.yaml`
+(régénéré via `deploy/controller/generate-crds.sh`).
+
+**Déploiement** : `deploy/controller/` (RBAC ClusterRole/ClusterRoleBinding — le
+controller watche les trois CRDs sur tout le cluster via `Api::all`, donc pas de
+Role/RoleBinding namespacé même si les CRDs elles-mêmes le sont — + Deployment) et
+`controller/Dockerfile` (cargo-chef, rustls-tls, pas de libssl). Image publiée :
+`docker.io/sebt3/vanyline-controller:0.0.1-alpha.1`. Validé en e2e sur le cluster de
+dev (Owner + Project + Sandbox de démo) — a débusqué un bug réel : les trois
+reconcilers réutilisaient les mêmes `PatchParams` (avec `force()`, nécessaire aux
+`Patch::Apply` de PVC/SA/Service/NetworkPolicy) pour le patch de status en
+`Patch::Merge`, que kube-rs rejette hors contexte Apply — corrigé en isolant
+`PatchParams::default()` pour le patch de status.
+
+**Limites connues** (v1, assumées) : pas de CRD Application (viendra avec la
+convergence app ↔ sandbox), pas de quotas (champ réservé dans `OwnerSpec`, non
+réconcilié), pas d'ingress/JWT sur la Sandbox (le frontend n'y accède pas encore), pas
+de webhook d'admission (validation par schéma CRD uniquement), pas de merge/push
+automatique des branches (le controller gère la plomberie git, pas le contenu), pas
+d'openvscode-server dans le pod. Changement de spec Sandbox = recréation du pod
+(immutable en v1). `fetch` ne rafraîchit pas les branches du clone bare (cf.
+"Limites connues" générales plus bas — bug préexistant, hors périmètre du controller
+lui-même, à traiter dans WS-11).
 
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 
@@ -350,11 +494,6 @@ Décisions structurantes :
   controller, hors périmètre WS-9 (parité stricte) — à traiter dans WS-11 (sandbox-git),
   probablement via une refspec `+refs/heads/*:refs/heads/*` posée par `init`.
 
-- **Pas de streaming WS live côté app** : `CollectingSink` bufferise tous les événements
-  d'un tour et les envoie d'un coup en fin de tour (`flush`), comme avant la migration
-  harness-core. Un vrai streaming token-par-token nécessiterait de partager la moitié
-  écriture du WebSocket dans un état interior-mutable accessible depuis `EventSink::emit`
-  (`&self`) — hors scope de l'adaptation mécanique tâche 9.
 - **Historique appauvri** : seul le texte user/assistant est rejoué d'un tour à l'autre
   (`cli/src/chat.rs`, `app/src/ws/chat.rs`) — pas les tool calls/résultats intermédiaires.
 - **Pas d'annulation** : `run_agent_turn` ne prend pas de token d'annulation. Le RPC
