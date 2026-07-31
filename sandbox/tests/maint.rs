@@ -331,3 +331,120 @@ fn remove_nonexistent_worktree_ok() {
     // No checkout — just remove a non-existent worktree.
     maint::run_remove(&ws, "never-created").unwrap();
 }
+
+// ===== init_sets_fetch_refspec =====
+#[test]
+fn init_sets_fetch_refspec() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // Read the fetch refspec from the bare repo.
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            ws.join("repo.git").to_str().unwrap(),
+            "config",
+            "remote.origin.fetch",
+        ])
+        .output()
+        .expect("git config failed");
+    assert!(output.status.success(), "git config failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(
+        stdout,
+        "+refs/heads/*:refs/remotes/origin/*",
+        "fetch refspec should be set on the bare repo"
+    );
+}
+
+// ===== fetch_populates_remote_tracking_refs =====
+#[test]
+fn fetch_populates_remote_tracking_refs() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // Init the bare repo.
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // Create a new branch on src AFTER init.
+    assert!(
+        Command::new("git")
+            .args(["checkout", "-b", "feature"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git checkout -b feature failed"
+    );
+    let commit_output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "feature commit",
+        ])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(
+        commit_output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit_output.stderr)
+    );
+
+    // Fetch into the workspace.
+    maint::run_fetch(&ws).unwrap();
+
+    // Verify refs/remotes/origin/feature exists in the bare repo.
+    assert!(
+        ws.join("repo.git/refs/remotes/origin/feature").exists(),
+        "refs/remotes/origin/feature should exist after fetch (proves the refspec is working)"
+    );
+}
+
+// ===== init_idempotent_refspec_not_duplicated =====
+#[test]
+fn init_idempotent_refspec_not_duplicated() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let caches = vec!["cargo".into()];
+
+    // Run init twice.
+    maint::run_init(&ws, src.to_str().unwrap(), &caches).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &caches).unwrap();
+
+    // Read all values of remote.origin.fetch.
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            ws.join("repo.git").to_str().unwrap(),
+            "config",
+            "--get-all",
+            "remote.origin.fetch",
+        ])
+        .output()
+        .expect("git config --get-all failed");
+    assert!(output.status.success(), "git config --get-all failed: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "remote.origin.fetch should appear exactly once after two init calls (found {}): {}",
+        lines.len(),
+        stdout
+    );
+}

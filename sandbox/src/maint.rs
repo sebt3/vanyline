@@ -164,6 +164,9 @@ pub fn validate_sandbox_name(name: &str) -> Result<(), MaintError> {
 /// `<workspace>/repo.git` si ce répertoire n'existe pas déjà.
 /// Invocation git : `git clone --bare -- <repo> <workspace>/repo.git`
 /// (noter le `--` avant les arguments positionnels).
+///
+/// Pose ensuite la refspec de fetch (idempotent, appliqué que le clone
+/// vienne d'être fait ou préexistait déjà).
 pub fn run_init(workspace: &Path, repo: &str, caches: &[String]) -> Result<(), MaintError> {
     // Create all cache directories (always, even if clone already exists).
     for cache in caches {
@@ -192,11 +195,9 @@ pub fn run_init(workspace: &Path, repo: &str, caches: &[String]) -> Result<(), M
                 stderr: String::new(),
             })?;
 
-        if output.status.success() {
-            Ok(())
-        } else {
+        if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            Err(MaintError::GitFailed {
+            return Err(MaintError::GitFailed {
                 args: vec![
                     "clone".into(),
                     "--bare".into(),
@@ -206,12 +207,12 @@ pub fn run_init(workspace: &Path, repo: &str, caches: &[String]) -> Result<(), M
                 ],
                 status: output.status.to_string(),
                 stderr,
-            })
+            });
         }
-    } else {
-        // Already cloned, skip — idempotent.
-        Ok(())
     }
+
+    // Idempotent : appliqué que le clone vienne d'être fait ou préexistait déjà.
+    set_fetch_refspec(&bare_path)
 }
 
 /// `fetch` : `git --git-dir=<workspace>/repo.git fetch --prune`.
@@ -488,6 +489,44 @@ pub fn run_purge(workspace: &Path) -> Result<(), MaintError> {
         }
     }
     Ok(())
+}
+
+/// Refspec de fetch posée sur le clone bare — `git clone --bare` n'en
+/// configure aucune par défaut. Cible `refs/remotes/origin/*`, pas
+/// `refs/heads/*` : ne doit jamais écraser les branches locales créées par
+/// `checkout` (worktree add -b).
+const FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
+
+/// Pose (ou réécrit, idempotent via `--replace-all`) la refspec de fetch
+/// sur le clone bare `bare_path`.
+fn set_fetch_refspec(bare_path: &Path) -> Result<(), MaintError> {
+    let bare_str = bare_path.to_str().unwrap();
+    let args = [
+        "--git-dir",
+        bare_str,
+        "config",
+        "--replace-all",
+        "remote.origin.fetch",
+        FETCH_REFSPEC,
+    ];
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| MaintError::GitFailed {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Err(MaintError::GitFailed {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            status: output.status.to_string(),
+            stderr,
+        })
+    }
 }
 
 #[cfg(test)]
