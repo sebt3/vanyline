@@ -164,6 +164,47 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
     })
 }
 
+/// Écrit `content` dans `path` de façon atomique : fichier temporaire dans
+/// le même répertoire que `path` (même filesystem, `rename` reste
+/// atomique), permissions du fichier remplacé préservées s'il existe, puis
+/// `rename` par-dessus la cible (R15 — un crash/kill en cours d'écriture ne
+/// laisse plus un fichier tronqué, et le mode du fichier n'est plus
+/// silencieusement réinitialisé à l'umask du process).
+async fn atomic_write(path: &str, content: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let path_ref = std::path::Path::new(path);
+    let parent = path_ref
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let file_name = path_ref.file_name().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, "path has no file name")
+    })?;
+    let tmp_path = parent.join(format!(
+        ".{}.vny-tmp-{}",
+        file_name.to_string_lossy(),
+        std::process::id()
+    ));
+
+    if let Err(e) = tokio::fs::write(&tmp_path, content.as_ref()).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e);
+    }
+
+    if let Ok(existing_meta) = tokio::fs::metadata(path_ref).await {
+        if let Err(e) = tokio::fs::set_permissions(&tmp_path, existing_meta.permissions()).await {
+            let _ = tokio::fs::remove_file(&tmp_path).await;
+            return Err(e);
+        }
+    }
+
+    if let Err(e) = tokio::fs::rename(&tmp_path, path_ref).await {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e);
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // write_file
 // ---------------------------------------------------------------------------
@@ -198,7 +239,7 @@ pub fn write_file(opts: WriteFileOptions) -> BoxedFuture<Result<(), ToolsError>>
         }
 
         // 3. write file
-        match tokio::fs::write(&path, content).await {
+        match atomic_write(&path, content).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 Err(ToolsError::PermissionDenied(path))
@@ -283,7 +324,7 @@ pub fn edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, ToolsError
         };
 
         // 7. write back
-        match tokio::fs::write(&path, new_content).await {
+        match atomic_write(&path, new_content).await {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 Err(ToolsError::PermissionDenied(path.clone()))
@@ -1157,5 +1198,76 @@ mod tests {
             }
             other => panic!("Expected FileNotFound, got: {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    /// R15 — atomic_write tests
+    /// -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn write_file_preserves_permissions_of_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        tokio::fs::write(&path, "old content").await.unwrap();
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .await
+            .unwrap();
+
+        let result = write_file(WriteFileOptions {
+            path: path.to_string_lossy().to_string(),
+            content: "new content".to_string(),
+        })
+        .await;
+
+        assert!(result.is_ok());
+        let meta = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new content");
+    }
+
+    #[tokio::test]
+    async fn write_file_does_not_leave_temp_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("target.txt");
+
+        let result = write_file(WriteFileOptions {
+            path: path.to_string_lossy().to_string(),
+            content: "content".to_string(),
+        })
+        .await;
+        assert!(result.is_ok());
+
+        let mut entries = tokio::fs::read_dir(dir.path()).await.unwrap();
+        let mut names = Vec::new();
+        while let Some(entry) = entries.next_entry().await.unwrap() {
+            names.push(entry.file_name().to_string_lossy().to_string());
+        }
+        assert_eq!(names, vec!["target.txt".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn edit_file_preserves_permissions_of_existing_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("existing.txt");
+        tokio::fs::write(&path, "hello world\n").await.unwrap();
+        tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .await
+            .unwrap();
+
+        let result = edit_file(EditFileOptions {
+            path: path.to_string_lossy().to_string(),
+            old_string: "hello".to_string(),
+            new_string: "goodbye".to_string(),
+            replace_all: false,
+        })
+        .await;
+
+        assert!(result.is_ok());
+        let meta = tokio::fs::metadata(&path).await.unwrap();
+        assert_eq!(meta.permissions().mode() & 0o777, 0o640);
     }
 }

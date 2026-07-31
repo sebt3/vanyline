@@ -70,7 +70,8 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
             .arg(&command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            .process_group(0);
 
         if let Some(ref dir) = base_dir {
             cmd.current_dir(dir);
@@ -82,6 +83,7 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
                 path: format!("command: {command}"),
                 source: e,
             })?;
+        let child_pid = child.id();
 
         // 4. Attendre avec timeout optionnel
         let output = if timeout_secs == 0 {
@@ -107,6 +109,16 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
                     });
                 }
                 Err(_) => {
+                    if let Some(pid) = child_pid {
+                        // SAFETY : kill(2) sur -pid cible le groupe de processus créé par
+                        // process_group(0) (pgid == pid du leader) — pas seulement `sh`
+                        // mais tous ses descendants. Best-effort : ESRCH (déjà mort) ou
+                        // toute autre erreur n'est pas remontée, le timeout reste
+                        // l'erreur pertinente à propager à l'appelant.
+                        unsafe {
+                            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                        }
+                    }
                     return Err(ToolsError::CommandTimeout(timeout_secs));
                 }
             }
@@ -339,5 +351,30 @@ mod tests {
         assert!(res.contains("bytes truncated"));
         // Should be in stderr section
         assert!(res.contains("\nstderr:\n"));
+    }
+
+    #[tokio::test]
+    async fn test_timeout_kills_process_group_not_just_direct_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("marker");
+        let marker_str = marker.to_string_lossy().to_string();
+
+        let result = execute(ExecuteCommandOptions {
+            command: format!("(sleep 2 && touch {marker_str}) & sleep 100"),
+            timeout_secs: 1,
+            ..Default::default()
+        })
+        .await;
+
+        assert!(matches!(result, Err(ToolsError::CommandTimeout(1))));
+
+        // Avant le fix R8, seul `sh` est tué : le sous-shell backgrounded
+        // (`&`) survit, se fait réparenter, et crée le marker ~1s après le
+        // timeout. Marge large pour éviter la flakiness.
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        assert!(
+            !marker.exists(),
+            "background grandchild survived the timeout — process group was not killed"
+        );
     }
 }
