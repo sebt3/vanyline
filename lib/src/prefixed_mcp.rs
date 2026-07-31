@@ -10,6 +10,11 @@ use globset::Glob;
 use crate::domain::{McpSelection, McpServer as DomainMcpServer, McpTransport};
 use crate::error::VnyError;
 
+/// McpRunningService générique pour un client MCP `()` (pas de handler côté
+/// client — vanyline ne reçoit pas de requêtes serveur->client). Alias pour
+/// lisibilité : c'est le type exact retourné par `rmcp::serve_client((), _)`.
+pub type McpRunningService = rmcp::service::RunningService<rmcp::RoleClient, ()>;
+
 /// Create a fresh, running tool-server handle. Callers add tools to it
 /// (local tools and/or MCP tools) before handing it to `run_chat_turn`.
 pub fn new_tool_handle() -> ToolServerHandle {
@@ -225,11 +230,29 @@ fn selected_servers<'a>(
 /// ce cas ici plutôt que de l'oublier silencieusement.
 async fn connect_domain_mcp_server_inner(
     server: &DomainMcpServer,
-) -> Result<(Vec<Tool>, ServerSink), VnyError> {
+) -> Result<(Vec<Tool>, ServerSink, McpRunningService), VnyError> {
     match server.transport {
         McpTransport::HttpStreamable => {
-            let transport =
-                rmcp::transport::StreamableHttpClientTransport::from_uri(server.url.as_str());
+            let mut headers = std::collections::HashMap::new();
+            for (name, value) in &server.headers {
+                match (
+                    reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                    reqwest::header::HeaderValue::from_str(value),
+                ) {
+                    (Ok(name), Ok(value)) => {
+                        headers.insert(name, value);
+                    }
+                    _ => tracing::warn!(
+                        "invalid MCP header for server {}: {name}",
+                        server.name
+                    ),
+                }
+            }
+            let config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
+                server.url.as_str(),
+            )
+            .custom_headers(headers);
+            let transport = rmcp::transport::StreamableHttpClientTransport::from_config(config);
             let running = rmcp::serve_client((), transport).await.map_err(|e| {
                 VnyError::McpConnectError(server.name.clone(), e.to_string())
             })?;
@@ -237,7 +260,7 @@ async fn connect_domain_mcp_server_inner(
             let tools = running.list_all_tools().await.map_err(|e| {
                 VnyError::McpToolsError(server.name.clone(), e.to_string())
             })?;
-            Ok((tools, server_sink))
+            Ok((tools, server_sink, running))
         }
     }
 }
@@ -247,14 +270,17 @@ async fn connect_domain_mcp_server_inner(
 /// le nom matche `tool_matches(&selection.tools, ..)`. Échec de connexion à un
 /// serveur sélectionné : log + skip, comme `connect_mcp_servers_prefixed`
 /// (existant) — une panne MCP n'abat pas les autres sélections.
+/// Retourne les `McpRunningService` connectés — l'appelant est responsable de
+/// les garder en vie (pour le fix R12) et de les annuler à la fin du tour.
 pub async fn connect_mcp_servers_selected(
     selections: &[McpSelection],
     all_servers: &[DomainMcpServer],
     handle: &ToolServerHandle,
-) -> Result<(), VnyError> {
+) -> Result<Vec<McpRunningService>, VnyError> {
+    let mut connections = Vec::new();
     for (selection, server) in selected_servers(selections, all_servers) {
         match connect_domain_mcp_server_inner(server).await {
-            Ok((tools, client)) => {
+            Ok((tools, client, running)) => {
                 let matching_tools: Vec<_> = tools
                     .into_iter()
                     .filter(|tool| tool_matches(&selection.tools, &tool.name))
@@ -265,6 +291,7 @@ pub async fn connect_mcp_servers_selected(
                         tracing::warn!("failed to add prefixed tool: {e}");
                     }
                 }
+                connections.push(running);
             }
             Err(e) => {
                 tracing::warn!(
@@ -274,7 +301,7 @@ pub async fn connect_mcp_servers_selected(
             }
         }
     }
-    Ok(())
+    Ok(connections)
 }
 
 /// Sélectionne, parmi les local tools fournis par l'hôte (`available` —

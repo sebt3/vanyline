@@ -5,7 +5,7 @@ pub mod model;
 pub mod event;
 pub mod session;
 pub mod store;
-mod prefixed_mcp;
+pub mod prefixed_mcp;
 mod types;
 
 pub use error::*;

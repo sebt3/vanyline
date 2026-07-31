@@ -305,6 +305,8 @@ pub(crate) async fn run_agent_turn_at_depth(
     let resolved = resolve_turn_context(ctx, agent_name, workspace_context).await?;
     let handle = crate::prefixed_mcp::new_tool_handle();
 
+    let mut mcp_connections: Vec<crate::prefixed_mcp::McpRunningService> = Vec::new();
+
     for toolset in &resolved.resolved_toolsets {
         // Local tools
         let (found, missing) = crate::prefixed_mcp::select_local_tools(&toolset.local_tools, &ctx.local_tools);
@@ -329,7 +331,8 @@ pub(crate) async fn run_agent_turn_at_depth(
                 }
             }
         }
-        crate::prefixed_mcp::connect_mcp_servers_selected(&toolset.mcp, &validated_servers, &handle).await?;
+        let running = crate::prefixed_mcp::connect_mcp_servers_selected(&toolset.mcp, &validated_servers, &handle).await?;
+        mcp_connections.extend(running);
     }
 
     if !resolved.skill_index.is_empty() {
@@ -355,7 +358,7 @@ pub(crate) async fn run_agent_turn_at_depth(
     }
 
     let params = crate::model::agent_params(&resolved.profile);
-    match resolved.provider.provider_type {
+    let result = match resolved.provider.provider_type {
         ProviderType::Ollama => {
             let model = crate::model::build_ollama_model(&resolved.provider, &resolved.profile)?;
             run_turn_with_model(ctx, model, params, &resolved.system_prompt, handle, history, user_msg).await
@@ -364,7 +367,15 @@ pub(crate) async fn run_agent_turn_at_depth(
             let model = crate::model::build_openai_compat_model(&resolved.provider, &resolved.profile)?;
             run_turn_with_model(ctx, model, params, &resolved.system_prompt, handle, history, user_msg).await
         }
+    };
+
+    for conn in mcp_connections {
+        if let Err(e) = conn.cancel().await {
+            tracing::warn!("failed to cleanly cancel mcp connection: {e}");
+        }
     }
+
+    result
 }
 
 #[cfg(test)]
