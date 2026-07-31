@@ -1,4 +1,3 @@
-mod crds;
 mod error;
 mod owner;
 mod project;
@@ -21,7 +20,7 @@ async fn main() {
     let cli = Cli::parse();
 
     if cli.crds {
-        print!("{}", crds::crd_manifests());
+        print!("{}", vanyline_crds::crd_manifests());
         return;
     }
 

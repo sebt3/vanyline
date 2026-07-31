@@ -15,8 +15,8 @@ use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
-use crate::crds::Project;
-use crate::crds::{Owner, ProjectStatus};
+use vanyline_crds::Project;
+use vanyline_crds::{Owner, ProjectStatus};
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
@@ -612,7 +612,7 @@ pub fn build_controller(client: Client) -> Controller<Project> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crds::{ProjectSpec, PvcRef};
+    use vanyline_crds::{ProjectSpec, PvcRef};
 
     fn make_project(existing_pvc: Option<PvcRef>, storage_size: Option<String>) -> Project {
         let mut project = Project::new(
@@ -692,7 +692,7 @@ mod tests {
     #[test]
     fn effective_pvc_name_existing() {
         let project = make_project(
-            Some(crate::crds::PvcRef {
+            Some(PvcRef {
                 name: "code-server-home".into(),
                 sub_path: Some("repo".into()),
             }),
@@ -710,7 +710,7 @@ mod tests {
 
         // existing_pvc with sub_path
         let project = make_project(
-            Some(crate::crds::PvcRef {
+            Some(PvcRef {
                 name: "x".into(),
                 sub_path: Some("repo".into()),
             }),
@@ -720,7 +720,7 @@ mod tests {
 
         // existing_pvc without sub_path
         let project = make_project(
-            Some(crate::crds::PvcRef {
+            Some(PvcRef {
                 name: "x".into(),
                 sub_path: None,
             }),
@@ -733,7 +733,7 @@ mod tests {
     #[test]
     fn build_workspace_pvc_none_when_existing() {
         let project = make_project(
-            Some(crate::crds::PvcRef {
+            Some(PvcRef {
                 name: "code-server-home".into(),
                 sub_path: None,
             }),
@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn build_init_job_existing_pvc_sub_path() {
         let project = make_project(
-            Some(crate::crds::PvcRef {
+            Some(PvcRef {
                 name: "code-server-home".into(),
                 sub_path: Some("demo".into()),
             }),

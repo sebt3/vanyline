@@ -18,7 +18,7 @@ use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
-use crate::crds::{Owner, Project, Sandbox, SandboxStatus, Toolchain};
+use vanyline_crds::{Owner, Project, Sandbox, SandboxStatus, Toolchain};
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
@@ -763,7 +763,7 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crds::{ProjectSpec, PvcRef, SandboxSpec};
+    use vanyline_crds::{ProjectSpec, PvcRef, SandboxSpec};
 
     fn make_ctx() -> SandboxPodContext {
         SandboxPodContext {

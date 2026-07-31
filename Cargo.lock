@@ -5079,14 +5079,25 @@ dependencies = [
  "futures",
  "k8s-openapi",
  "kube",
- "schemars 1.2.1",
  "serde",
  "serde_json",
- "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "vanyline-crds",
+]
+
+[[package]]
+name = "vanyline-crds"
+version = "0.0.1-alpha.1"
+dependencies = [
+ "k8s-openapi",
+ "kube",
+ "schemars 1.2.1",
+ "serde",
+ "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

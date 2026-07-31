@@ -11,7 +11,7 @@ use kube::api::{Api, ObjectMeta, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::{Client, Resource, ResourceExt};
 
-use crate::crds::{Owner, OwnerStatus};
+use vanyline_crds::{Owner, OwnerStatus};
 use crate::error::ControllerError;
 
 /// Field manager utilisé pour tous les server-side apply du controller.
@@ -182,7 +182,7 @@ mod tests {
     ) -> Owner {
         let mut owner = Owner::new(
             "alice",
-            crate::crds::OwnerSpec {
+            vanyline_crds::OwnerSpec {
                 existing_pvc,
                 home_size,
                 home_storage_class,
