@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::domain::{Agent, AgentMode, ModelProfile, Provider, ProviderType, SkillMeta, SkillSelection, Toolset};
+use crate::domain::{Agent, AgentMode, McpSelection, ModelProfile, Provider, ProviderType, SkillMeta, SkillSelection, Toolset};
 use crate::error::VnyError;
 use crate::event::{ChatTurnResult, EventSink};
 use crate::store::ConfigStore;
@@ -41,8 +41,11 @@ pub fn assemble_system_prompt(
 ) -> String {
     let mut sections = Vec::new();
 
-    // 1. System prompt de l'agent (toujours inclus)
-    sections.push(agent.system_prompt.clone());
+    // 1. System prompt de l'agent (filtré comme les autres sections — R10)
+    let system_prompt = agent.system_prompt.trim();
+    if !system_prompt.is_empty() {
+        sections.push(system_prompt.to_string());
+    }
 
     // 2. Prompts des toolsets, dans l'ordre de agent.toolsets
     let mut toolset_sections = String::new();
@@ -82,13 +85,38 @@ pub fn assemble_system_prompt(
         }
     }
 
-    let result = sections.join("\n\n");
-    // Si system_prompt était vide et qu'il n'y a rien d'autre, retourner ""
-    if agent.system_prompt.is_empty() && sections.len() == 1 {
-        String::new()
-    } else {
-        result
-    }
+    sections.join("\n\n")
+}
+
+/// Filtre les noms de tools locaux déjà ajoutés au handle durant CE tour
+/// (across tous les toolsets, pas seulement le toolset courant) — évite les
+/// doublons quand plusieurs toolsets référencent le même tool local (R11).
+/// `added` est mutée : chaque nom retourné y est aussi inséré.
+fn dedupe_local_tool_names<'a>(
+    names: Vec<&'a str>,
+    added: &mut std::collections::HashSet<String>,
+) -> Vec<&'a str> {
+    names
+        .into_iter()
+        .filter(|name| added.insert(name.to_string()))
+        .collect()
+}
+
+/// Filtre les `McpSelection` dont le serveur a déjà été connecté durant CE
+/// tour — évite de rouvrir une connexion vers un serveur MCP déjà contacté
+/// par un toolset précédent (R11, dédup par nom de serveur — une
+/// sélection différente sur un serveur déjà connecté par un AUTRE toolset
+/// est ignorée, simplification assumée et documentée au design).
+/// `connected` est mutée : chaque nom de serveur retourné y est aussi inséré.
+fn dedupe_mcp_selections(
+    selections: &[McpSelection],
+    connected: &mut std::collections::HashSet<String>,
+) -> Vec<McpSelection> {
+    selections
+        .iter()
+        .filter(|s| connected.insert(s.server.clone()))
+        .cloned()
+        .collect()
 }
 
 /// Filtre `all_skills` selon `selection` :
@@ -306,6 +334,8 @@ pub(crate) async fn run_agent_turn_at_depth(
     let handle = crate::prefixed_mcp::new_tool_handle();
 
     let mut mcp_connections: Vec<crate::prefixed_mcp::McpRunningService> = Vec::new();
+    let mut added_tool_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut connected_mcp_servers: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for toolset in &resolved.resolved_toolsets {
         // Local tools
@@ -313,6 +343,7 @@ pub(crate) async fn run_agent_turn_at_depth(
         for name in missing {
             tracing::warn!("local tool not found: {name}");
         }
+        let found = dedupe_local_tool_names(found, &mut added_tool_names);
         for name in found {
             if let Some(tool) = ctx.local_tools.get(name) {
                 let wrapped = ArcToolDyn(tool.clone());
@@ -322,8 +353,9 @@ pub(crate) async fn run_agent_turn_at_depth(
             }
         }
         // MCP
+        let mcp_selections = dedupe_mcp_selections(&toolset.mcp, &mut connected_mcp_servers);
         let mut validated_servers = Vec::new();
-        for selection in &toolset.mcp {
+        for selection in &mcp_selections {
             match ctx.store.get_mcp_server(&selection.server).await {
                 Ok(server) => validated_servers.push(server),
                 Err(e) => {
@@ -331,7 +363,7 @@ pub(crate) async fn run_agent_turn_at_depth(
                 }
             }
         }
-        let running = crate::prefixed_mcp::connect_mcp_servers_selected(&toolset.mcp, &validated_servers, &handle).await?;
+        let running = crate::prefixed_mcp::connect_mcp_servers_selected(&mcp_selections, &validated_servers, &handle).await?;
         mcp_connections.extend(running);
     }
 
@@ -580,6 +612,30 @@ mod tests {
         assert!(system_pos < toolset_pos);
         assert!(toolset_pos < skill_pos);
         assert!(skill_pos < context_pos);
+    }
+
+    // 12. empty_system_prompt_with_other_sections_no_leading_separator
+    #[test]
+    fn empty_system_prompt_with_other_sections_no_leading_separator() {
+        let toolsets = vec![Toolset {
+            name: "a".to_string(),
+            description: None,
+            prompt: Some("PROMPT_A".to_string()),
+            local_tools: vec![],
+            mcp: vec![],
+        }];
+        let agent = Agent {
+            name: "test-agent".to_string(),
+            description: None,
+            mode: AgentMode::Primary,
+            model: "qwen".to_string(),
+            toolsets: vec!["a".to_string()],
+            skills: SkillSelection::None,
+            system_prompt: String::new(),
+        };
+        let result = assemble_system_prompt(&agent, &toolsets, &[], None);
+        assert!(!result.starts_with("\n\n"));
+        assert_eq!(result, "PROMPT_A");
     }
 
     // ---- resolve_turn_context tests ----
@@ -835,5 +891,65 @@ mod tests {
         let handle = crate::new_tool_handle();
         let agent = build_agent(model, &params, "system prompt", handle);
         assert_eq!(agent.default_max_turns, Some(DEFAULT_MAX_TURNS));
+    }
+
+    // ---- dedupe_local_tool_names tests ----
+
+    #[test]
+    fn dedupe_local_tool_names_skips_already_added() {
+        let mut added: std::collections::HashSet<String> = ["read_file".to_string()].into_iter().collect();
+        let names = vec!["read_file", "write_file"];
+        let result = dedupe_local_tool_names(names, &mut added);
+        assert_eq!(result, vec!["write_file"]);
+        assert!(added.contains("read_file"));
+        assert!(added.contains("write_file"));
+    }
+
+    #[test]
+    fn dedupe_local_tool_names_empty_added_keeps_all() {
+        let mut added: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let names = vec!["a", "b"];
+        let result = dedupe_local_tool_names(names, &mut added);
+        assert_eq!(result, vec!["a", "b"]);
+        assert_eq!(added.len(), 2);
+    }
+
+    // ---- dedupe_mcp_selections tests ----
+
+    #[test]
+    fn dedupe_mcp_selections_skips_already_connected_server() {
+        let mut connected: std::collections::HashSet<String> = ["server-a".to_string()].into_iter().collect();
+        let selections = vec![
+            McpSelection {
+                server: "server-a".to_string(),
+                tools: vec![],
+            },
+            McpSelection {
+                server: "server-b".to_string(),
+                tools: vec![],
+            },
+        ];
+        let result = dedupe_mcp_selections(&selections, &mut connected);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].server, "server-b");
+        assert!(connected.contains("server-a"));
+        assert!(connected.contains("server-b"));
+    }
+
+    #[test]
+    fn dedupe_mcp_selections_empty_connected_keeps_all() {
+        let mut connected: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let selections = vec![
+            McpSelection {
+                server: "server-a".to_string(),
+                tools: vec![],
+            },
+            McpSelection {
+                server: "server-b".to_string(),
+                tools: vec![],
+            },
+        ];
+        let result = dedupe_mcp_selections(&selections, &mut connected);
+        assert_eq!(result.len(), 2);
     }
 }

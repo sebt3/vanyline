@@ -12,11 +12,17 @@ pub fn build_ollama_model(
     provider: &Provider,
     profile: &ModelProfile,
 ) -> Result<impl rig_core::completion::CompletionModel + 'static, VnyError> {
-    let client = ollama::Client::builder()
-        .api_key(Nothing)
-        .base_url(&provider.endpoint)
-        .build()
-        .map_err(|e| VnyError::ModelBuildError(format!("{e}")))?;
+    let client = match provider.api_key.as_deref() {
+        Some(key) => ollama::Client::builder()
+            .api_key(key)
+            .base_url(&provider.endpoint)
+            .build(),
+        None => ollama::Client::builder()
+            .api_key(Nothing)
+            .base_url(&provider.endpoint)
+            .build(),
+    }
+    .map_err(|e| VnyError::ModelBuildError(format!("{e}")))?;
     Ok(client.completion_model(&profile.model))
 }
 
@@ -94,6 +100,19 @@ mod tests {
     #[test]
     fn build_ollama_model_succeeds() {
         let provider = sample_provider(ProviderType::Ollama, "http://localhost:11434");
+        let profile = sample_profile(serde_json::Map::new());
+        let result = build_ollama_model(&provider, &profile);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn build_ollama_model_with_api_key_succeeds() {
+        let provider = Provider {
+            name: "p".to_string(),
+            provider_type: ProviderType::Ollama,
+            endpoint: "http://localhost:11434".to_string(),
+            api_key: Some("secret".to_string()),
+        };
         let profile = sample_profile(serde_json::Map::new());
         let result = build_ollama_model(&provider, &profile);
         assert!(result.is_ok());

@@ -64,10 +64,17 @@ impl ToolDyn for SkillTool {
     fn call(&self, args: String) -> WasmBoxedFuture<'_, Result<String, rig_core::tool::ToolError>> {
         let store = self.store.clone();
         let sink = self.sink.clone();
+        let available = self.available.clone();
         Box::pin(async move {
             let parsed: SkillArgs = serde_json::from_str(&args).map_err(|e| {
                 rig_core::tool::ToolError::ToolCallError(Box::new(e))
             })?;
+
+            if !available.iter().any(|s| s.name == parsed.name) {
+                return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
+                    crate::error::VnyError::UnknownReference("skill", parsed.name.clone()),
+                )));
+            }
 
             let body = store.load_skill(&parsed.name).await.map_err(|e| {
                 rig_core::tool::ToolError::ToolCallError(Box::new(e))
@@ -168,7 +175,14 @@ mod tests {
             ..Default::default()
         });
         let sink = Arc::new(RecordingSink::new());
-        let skill_tool = SkillTool::new(store, sink.clone(), Vec::new());
+        let skill_tool = SkillTool::new(
+            store,
+            sink.clone(),
+            vec![SkillMeta {
+                name: "pdf".to_string(),
+                description: "".to_string(),
+            }],
+        );
 
         let result = skill_tool
             .call(serde_json::json!({"name": "pdf"}).to_string())
@@ -182,6 +196,28 @@ mod tests {
                 name: "pdf".to_string()
             }]
         );
+    }
+
+    // 7. call_skill_absent_from_selection_returns_error_no_emit
+    #[tokio::test]
+    async fn call_skill_absent_from_selection_returns_error_no_emit() {
+        let store = Arc::new(InMemoryConfigStore {
+            skill_bodies: {
+                let mut m = std::collections::HashMap::new();
+                m.insert("pdf".to_string(), "# PDF skill\ncontent".to_string());
+                m
+            },
+            ..Default::default()
+        });
+        let sink = Arc::new(RecordingSink::new());
+        let skill_tool = SkillTool::new(store, sink.clone(), Vec::new());
+
+        let result = skill_tool
+            .call(serde_json::json!({"name": "pdf"}).to_string())
+            .await;
+
+        assert!(result.is_err());
+        assert!(sink.events().is_empty());
     }
 
     // 5. call_unknown_skill_returns_error_no_emit
