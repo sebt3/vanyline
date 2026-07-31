@@ -18,7 +18,7 @@ use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::{Owner, Project, Sandbox, SandboxStatus, Toolchain};
+use vanyline_crds::{MCP_PORT, Owner, Project, Sandbox, SandboxStatus, Toolchain, service_name};
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
@@ -27,10 +27,6 @@ use crate::project::{
     cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path,
     WORKSPACE_MOUNT_PATH,
 };
-
-/// Port MCP exposé par `vanyline-sandbox` (`MCP_LISTEN` par défaut `0.0.0.0:3000`
-/// côté binaire — cf. `sandbox/src/config.rs`).
-pub const MCP_PORT: i32 = 3000;
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
 /// telle quelle de `deploy/sandbox-test.yaml` (recette validée).
@@ -348,10 +344,6 @@ pub fn checkout_job_name(sandbox_name: &str) -> String {
 
 pub fn worktree_remove_job_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}-remove")
-}
-
-pub fn service_name(sandbox_name: &str) -> String {
-    format!("sandbox-{sandbox_name}")
 }
 
 pub fn netpol_name(sandbox_name: &str) -> String {

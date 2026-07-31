@@ -18,6 +18,12 @@ futures = "0.3"
 async-trait = "0.1"
 parking_lot = "0.12"
 globset = "0.4"
+vanyline-crds = { path = "../crds", optional = true }
+kube = { version = "4", default-features = false, features = ["client", "rustls-tls"], optional = true }
+k8s-openapi = { version = "0.28", features = ["latest", "schemars"], optional = true }
+
+[features]
+k8s = ["dep:kube", "dep:vanyline-crds", "dep:k8s-openapi"]
 
 [dev-dependencies]
 rmcp = { version = "1.7.0", features = ["server", "macros", "transport-streamable-http-server", "client"] }

@@ -38,4 +38,10 @@ pub enum VnyError {
     DuplicateName(&'static str, String),
     #[error("VNL-CFG-003: Unknown {0} reference: '{1}'")]
     UnknownReference(&'static str, String),
+    #[cfg(feature = "k8s")]
+    #[error("VNL-K8S-001: Cannot reach Kubernetes cluster: {0}")]
+    K8sConfigError(String),
+    #[cfg(feature = "k8s")]
+    #[error("VNL-K8S-002: Kubernetes API error: {0}")]
+    K8sApiError(String),
 }

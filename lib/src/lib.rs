@@ -2,6 +2,8 @@ pub mod builtin;
 pub mod domain;
 mod error;
 pub mod event;
+#[cfg(feature = "k8s")]
+pub mod k8s;
 pub mod model;
 pub mod prefixed_mcp;
 pub mod session;

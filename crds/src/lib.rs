@@ -140,6 +140,15 @@ pub fn crd_manifests() -> String {
     docs.join("---\n")
 }
 
+/// Port MCP expose par `vanyline-sandbox` (`MCP_LISTEN` par defaut `0.0.0.0:3000
+/// cote binaire — cf. `sandbox/src/config.rs`).
+pub const MCP_PORT: i32 = 3000;
+
+/// Nom du Service K8s exposeant le port MCP d'une sandbox.
+pub fn service_name(sandbox_name: &str) -> String {
+    format!("sandbox-{sandbox_name}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
