@@ -234,6 +234,7 @@ mod tests {
             oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
             pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
         };
 
         Router::new()

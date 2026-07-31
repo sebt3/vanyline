@@ -6,13 +6,15 @@ mod db;
 mod error;
 mod ws;
 
+use std::collections::HashSet;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use axum::{routing::get, Router};
 use config::Config;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -20,6 +22,7 @@ pub struct AppState {
     pub oidc_client: Arc<dyn auth::OidcClientTrait>,
     pub cookie_key: cookie::Key,
     pub pool: sqlx::PgPool,
+    pub busy: Arc<Mutex<HashSet<Uuid>>>,
 }
 
 #[tokio::main]
@@ -72,6 +75,7 @@ async fn main() {
         oidc_client,
         cookie_key,
         pool,
+        busy: Arc::new(Mutex::new(HashSet::new())),
     };
 
     let app = Router::new()

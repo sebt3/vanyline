@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
 
 use axum::{
     extract::{
@@ -62,6 +62,35 @@ async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conve
     }
 }
 
+/// Tente d'acquérir le verrou busy pour `conversation_id` : `true` si
+/// acquis (aucun tour actif pour cette conversation, insertion faite),
+/// `false` si déjà occupée (l'appelant doit renvoyer une erreur busy sans
+/// spawn). Extrait de `run_socket` pour être testable sans WebSocket/DB
+/// (R4).
+fn try_acquire_busy(busy: &Mutex<HashSet<Uuid>>, conversation_id: Uuid) -> bool {
+    let mut guard = busy.lock().unwrap();
+    if guard.contains(&conversation_id) {
+        false
+    } else {
+        guard.insert(conversation_id);
+        true
+    }
+}
+
+/// Nettoie `busy` à la fin d'un tour (spawné), même en cas de panique dans
+/// la tâche — `Drop` est synchrone, cohérent avec `busy: Mutex` (pas
+/// `tokio::sync::Mutex`). Même pattern que `BusyGuard` côté RPC.
+struct BusyGuard {
+    busy: Arc<Mutex<HashSet<Uuid>>>,
+    conversation_id: Uuid,
+}
+
+impl Drop for BusyGuard {
+    fn drop(&mut self) {
+        self.busy.lock().unwrap().remove(&self.conversation_id);
+    }
+}
+
 async fn run_socket(
     socket: WebSocket,
     state: AppState,
@@ -69,6 +98,7 @@ async fn run_socket(
     conversation_id: Uuid,
 ) -> Result<(), AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
+    let user_id = db_user.id;
 
     let conv = sqlx::query_as::<_, crate::db::models::Conversation>(
         "SELECT * FROM conversations WHERE id = $1",
@@ -109,12 +139,34 @@ async fn run_socket(
             }
         };
 
-        let result =
-            handle_message(&tx, &state, conversation_id, agent_id, db_user.id, &client_msg.content)
-                .await;
-        if let Err(e) = result {
-            send_error(&tx, "VNL-LLM-001", &e.to_string());
+        // R4 : verrou busy par conversation — un tour ne bloque plus la
+        // lecture du socket (Close honoré pendant un tour actif).
+        if !try_acquire_busy(&state.busy, conversation_id) {
+            send_error(&tx, "VNL-WS-001", "A turn is already in progress for this conversation");
+            continue;
         }
+
+        let spawn_state = state.clone();
+        let spawn_tx = tx.clone();
+        let content = client_msg.content.clone();
+        tokio::spawn(async move {
+            let _guard = BusyGuard {
+                busy: spawn_state.busy.clone(),
+                conversation_id,
+            };
+            let result = handle_message(
+                &spawn_tx,
+                &spawn_state,
+                conversation_id,
+                agent_id,
+                user_id,
+                &content,
+            )
+            .await;
+            if let Err(e) = result {
+                send_error(&spawn_tx, "VNL-LLM-001", &e.to_string());
+            }
+        });
     }
 
     drop(tx);
@@ -144,6 +196,12 @@ fn send_error(tx: &mpsc::UnboundedSender<ChatEvent>, code: &str, message: &str) 
     });
 }
 
+/// Persistance (R9) : le message user est enregistré AVANT l'appel à
+/// `run_agent_turn` (il a bien été envoyé, qu'importe l'issue du tour) ;
+/// le message assistant seulement APRÈS un tour réussi (le `?` sur
+/// `run_agent_turn` empêche d'atteindre le persist_message final en cas
+/// d'échec). C'est cette sémantique qui fait référence — le RPC
+/// (`cli/src/rpc/handlers.rs`) est aligné dessus séparément.
 async fn handle_message(
     tx: &mpsc::UnboundedSender<ChatEvent>,
     state: &AppState,
@@ -292,5 +350,34 @@ mod tests {
     fn tool_calls_for_persistence_empty() {
         let calls = tool_calls_for_persistence(&[]);
         assert!(calls.is_empty());
+    }
+
+    #[test]
+    fn try_acquire_busy_first_call_succeeds_second_fails() {
+        let busy = Mutex::new(HashSet::new());
+        let conv = Uuid::new_v4();
+        assert!(try_acquire_busy(&busy, conv));
+        assert!(!try_acquire_busy(&busy, conv));
+    }
+
+    #[test]
+    fn try_acquire_busy_different_conversations_independent() {
+        let busy = Mutex::new(HashSet::new());
+        let a = Uuid::new_v4();
+        let b = Uuid::new_v4();
+        assert!(try_acquire_busy(&busy, a));
+        assert!(try_acquire_busy(&busy, b));
+    }
+
+    #[test]
+    fn busy_guard_removes_conversation_on_drop() {
+        let busy = Arc::new(Mutex::new(HashSet::new()));
+        let conv = Uuid::new_v4();
+        busy.lock().unwrap().insert(conv);
+        {
+            let _guard = BusyGuard { busy: busy.clone(), conversation_id: conv };
+            assert!(busy.lock().unwrap().contains(&conv));
+        }
+        assert!(!busy.lock().unwrap().contains(&conv));
     }
 }
