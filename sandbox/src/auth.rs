@@ -61,7 +61,11 @@ impl AuthState {
     }
 
     async fn get_jwks_uri(&self) -> Result<String> {
-        let issuer = self.config.oidc_issuer.as_ref().unwrap();
+        let issuer = self.config.oidc_issuer.as_ref().context(
+            "oidc_issuer missing — should be unreachable: Config::validate() refuses to \
+             start without --no-auth/STATIC_TOKEN unless oidc_issuer is set, and this \
+             code path is only reached when neither is active",
+        )?;
         let url = format!(
             "{}/.well-known/openid-configuration",
             issuer.trim_end_matches('/')
@@ -490,5 +494,12 @@ mod tests {
         assert!(header.contains(
             "resource_metadata=\"http://localhost:3000/.well-known/oauth-protected-resource\""
         ));
+    }
+
+    #[tokio::test]
+    async fn get_jwks_uri_without_issuer_returns_error_not_panic() {
+        let auth = make_auth("kubernetes-admin", "kubernetes-view");
+        let result = auth.get_jwks_uri().await;
+        assert!(result.is_err(), "should return an error, not panic, when oidc_issuer is None");
     }
 }
