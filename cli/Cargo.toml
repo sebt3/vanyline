@@ -8,8 +8,10 @@ name = "vanyline"
 path = "src/main.rs"
 
 [dependencies]
-vanyline-lib = { path = "../lib" }
+vanyline-lib = { path = "../lib", features = ["k8s"] }
 vanyline-tools = { path = "../tools" }
+vanyline-crds = { path = "../crds" }
+kube = { version = "4", default-features = false, features = ["client"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

@@ -8,6 +8,7 @@ mod tools;
 
 mod mcp_cmd;
 mod model_cmd;
+mod owner_cmd;
 mod skill_cmd;
 mod toolset_cmd;
 
@@ -27,6 +28,9 @@ struct Cli {
     /// Continue the active conversation instead of starting a new one
     #[arg(short = 'c', long = "continue", global = true)]
     continue_active: bool,
+    /// Namespace K8s target (owner/project/sandbox). Overrides `defaults.namespace`.
+    #[arg(short, long, global = true)]
+    namespace: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -54,6 +58,9 @@ enum Commands {
     /// Manage MCP servers
     #[command(subcommand)]
     Mcp(mcp_cmd::Commands),
+    /// Manage K8s Owners
+    #[command(name = "owner", subcommand)]
+    K8sOwner(owner_cmd::Commands),
     /// Validate configuration (both layers)
     #[command(subcommand)]
     Config(config_cmd::Commands),
@@ -157,6 +164,7 @@ async fn main() {
                 std::process::exit(1);
             }
         }
+        Some(Commands::K8sOwner(cmd)) => run_owner_k8s(cmd, cli.namespace).await,
     }
 }
 
@@ -481,6 +489,143 @@ async fn run_mcp(cmd: mcp_cmd::Commands) {
                 let source = config::config_entry_source(store.layers(), &s.name, |raw| &raw.mcp);
                 println!("  {} | {} | {:?} {}", s.name, source, s.transport, s.url);
             }
+        }
+    }
+}
+
+/// Construit le client K8s pour les commandes owner/project/sandbox.
+/// Précédence namespace : `--namespace` (flag global) > `defaults.namespace`
+/// (config.yaml, fusionné) > namespace du contexte kubeconfig courant
+/// (résolu par `VnlK8sClient::discover` elle-même si les deux premiers
+/// sont absents). Erreur `VNL-K8S-001` propre si aucun cluster/kubeconfig
+/// n'est joignable — affichée et le process quitte en erreur ; le reste du
+/// CLI (chat, agents, config...) n'est pas affecté par cette fonction, elle
+/// n'est appelée que par les commandes K8s.
+async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8s::VnlK8sClient {
+    let store = discover_fs_store();
+    let namespace = namespace_flag.or_else(|| config::configured_namespace(store.layers()));
+    vanyline_lib::k8s::VnlK8sClient::discover(namespace).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    })
+}
+
+async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
+    use owner_cmd::Commands::*;
+    use kube::ResourceExt;
+    let client = discover_k8s_client(namespace).await;
+    match cmd {
+        List => {
+            let owners = client.list_owners().await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            if owners.is_empty() {
+                println!("No owners found.");
+            } else {
+                for o in &owners {
+                    println!(
+                        "  {} | {} | {}",
+                        o.name_any(),
+                        o.status.as_ref().and_then(|s| s.pvc_name.as_deref()).unwrap_or("-"),
+                        o.status.as_ref().and_then(|s| s.service_account.as_deref()).unwrap_or("-")
+                    );
+                }
+            }
+        }
+        Show { name } => {
+            let owner = client.get_owner(&name).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Owner: {}", owner.name_any());
+            println!(
+                "  existingPvc: {}",
+                owner.spec.existing_pvc.as_deref().unwrap_or("-")
+            );
+            println!(
+                "  homeSize: {}",
+                owner.spec.home_size.as_deref().unwrap_or("-")
+            );
+            println!(
+                "  homeStorageClass: {}",
+                owner.spec.home_storage_class.as_deref().unwrap_or("-")
+            );
+            if let Some(pd) = &owner.spec.project_defaults {
+                println!("  projectDefaults:");
+                println!(
+                    "    storageSize: {}",
+                    pd.storage_size.as_deref().unwrap_or("-")
+                );
+                println!(
+                    "    storageClass: {}",
+                    pd.storage_class.as_deref().unwrap_or("-")
+                );
+            } else {
+                println!("  projectDefaults: -");
+            }
+            println!("Status:");
+            match &owner.status {
+                Some(status) => {
+                    println!(
+                        "  pvcName: {}",
+                        status.pvc_name.as_deref().unwrap_or("-")
+                    );
+                    println!(
+                        "  serviceAccount: {}",
+                        status.service_account.as_deref().unwrap_or("-")
+                    );
+                    if status.conditions.is_empty() {
+                        println!("  conditions: -");
+                    } else {
+                        println!("  conditions:");
+                        for c in &status.conditions {
+                            println!(
+                                "    - {} status={} message={}",
+                                c.type_, c.status, c.message
+                            );
+                        }
+                    }
+                }
+                None => println!("  (not yet reconciled)"),
+            }
+        }
+        Create {
+            name,
+            existing_pvc,
+            home_size,
+            home_storage_class,
+            project_default_storage_size,
+            project_default_storage_class,
+        } => {
+            let project_defaults = if project_default_storage_size.is_some()
+                || project_default_storage_class.is_some()
+            {
+                Some(vanyline_crds::ProjectDefaults {
+                    storage_size: project_default_storage_size,
+                    storage_class: project_default_storage_class,
+                })
+            } else {
+                None
+            };
+            let spec = vanyline_crds::OwnerSpec {
+                existing_pvc,
+                home_size,
+                home_storage_class,
+                project_defaults,
+            };
+            let _owner = client.create_owner(&name, spec).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Created owner: {name}");
+        }
+        Delete { name } => {
+            client.delete_owner(&name).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Deleted owner: {name}");
         }
     }
 }

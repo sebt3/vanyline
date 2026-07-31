@@ -284,6 +284,18 @@ pub fn skill_entry_source(layers: &Layers, name: &str) -> &'static str {
     }
 }
 
+/// Namespace par défaut configuré dans `config.yaml` (clé `defaults.namespace`,
+/// fusionnée sur les deux couches comme le reste de `defaults` — cf.
+/// `merge_config_layers`). `None` si absent des deux couches, ou si la
+/// valeur n'est pas une chaîne. Ne consulte JAMAIS le kubeconfig — c'est
+/// `VnlK8sClient::discover` qui s'en charge en dernier recours.
+pub fn configured_namespace(layers: &Layers) -> Option<String> {
+    layers
+        .load_merged_config()
+        .ok()
+        .and_then(|raw| raw.defaults.get("namespace").and_then(|v| v.as_str().map(String::from)))
+}
+
 /// Écrit `defaults.agent = name` dans le `config.yaml` de la couche globale
 /// de `layers` (jamais la couche workspace). Relit l'existant (couche
 /// absente -> `RawConfigFile::default()`), mute uniquement `defaults.agent`,
