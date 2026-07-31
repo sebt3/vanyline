@@ -24,6 +24,64 @@ Pour les développeurs qui font tourner un cluster Kubernetes et veulent :
 | **sandbox** | Pod Kubernetes embarquant un serveur WebSocket/MCP — accès réel au code et aux commandes |
 | **controller** | Opérateur K8s gérant les ressources Application, Owner et Sandbox |
 
+## Déploiement
+
+Manifestes Kubernetes dans `deploy/` :
+
+- `deploy/web/` : l'app (déploiement, service, ingress, configmap, secret,
+  RestEndPoint_sso pour l'auth OIDC via kuberest)
+- `deploy/controller/` : l'opérateur (CRDs, RBAC, déploiement) — régénérer
+  `crds.yaml` après tout changement de schéma via `deploy/controller/generate-crds.sh`
+- `deploy/sandbox/` : manifeste de test pour une sandbox (pas géré par le
+  controller pour l'instant, usage développement)
+
+Déployer l'app :
+
+```bash
+kubectl apply -f deploy/web/
+```
+
+Déployer le controller (CRDs d'abord, une fois) :
+
+```bash
+kubectl apply -f deploy/controller/crds.yaml
+kubectl apply -f deploy/controller/controller.yaml
+```
+
+Le controller lit `SANDBOX_IMAGE` (variable d'env de son déploiement) pour
+savoir quelle image utiliser pour les pods sandbox qu'il crée — sans cette
+variable, il retombe sur `vanyline-sandbox:latest`.
+
+## Build local
+
+Images (depuis la racine du repo, un Dockerfile par composant) :
+
+```bash
+podman build -f app/Dockerfile -t vanyline-app:dev .
+podman build -f sandbox/Dockerfile -t vanyline-sandbox:dev .
+podman build -f controller/Dockerfile -t vanyline-controller:dev .
+```
+
+Binaires, hors image :
+
+```bash
+cargo build --workspace
+npm run build   # frontend
+```
+
+## Limites de sécurité connues
+
+- **`StrictHostKeyChecking=no`** sur les jobs git du controller
+  (`GIT_SSH_COMMAND`, `controller/src/project.rs`) : la clé hôte du serveur
+  git n'est pas vérifiée lors du clone/fetch. Acceptable pour l'instant
+  (repos internes, réseau de confiance) — à durcir avant un usage avec des
+  remotes non maîtrisés.
+- **Mode `--no-auth` de la sandbox** (`sandbox/src/config.rs`) désactive
+  l'authentification JWT/TokenReview — usage développement uniquement (log de
+  warning au démarrage). La frontière de sécurité devient alors le pod
+  lui-même et sa NetworkPolicy, pas un token applicatif : ne jamais exposer
+  une sandbox `--no-auth` au-delà du réseau interne du namespace.
+
 ## État du projet
 
 En développement actif. Pas encore utilisable en production.
