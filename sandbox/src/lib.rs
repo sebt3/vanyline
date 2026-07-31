@@ -36,6 +36,7 @@ pub fn build_app(state: AppState) -> Router {
         Router::new()
             .route("/mcp", post(mcp::handle))
             .route("/git/status", get(git::handle_status))
+            .route("/git/unpushed", get(git::handle_unpushed))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 auth::require_auth,

@@ -1399,3 +1399,283 @@ async fn git_status_endpoint_not_a_repo() {
         "expected VNL-SBX-004 in: {error_text}"
     );
 }
+
+// ── git unpushed ──────────────────────────────────────────────────────────────
+
+fn run_git(dir: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .status()
+        .unwrap();
+    assert!(status.success(), "git {args:?} failed in {dir:?}");
+}
+
+/// Construit `<tmp>/remote` (dépôt normal, un commit initial sur `main`),
+/// `<tmp>/bare.git` (clone bare avec la refspec de fetch posée + fetch —
+/// mêmes étapes que `vanyline-maint init`) et `<tmp>/wt` (worktree créé
+/// depuis le bare — mêmes étapes que `vanyline-maint checkout`).
+/// `worktree_branch == "main"` réutilise la branche existante (cas
+/// upstream) ; toute autre valeur crée une nouvelle branche locale depuis
+/// `main` (cas sans upstream). Retourne le chemin du worktree.
+fn make_worktree_topology(tmp: &std::path::Path, worktree_branch: &str) -> std::path::PathBuf {
+    let remote = tmp.join("remote");
+    std::fs::create_dir_all(&remote).unwrap();
+    run_git(&remote, &["init", "-q", "-b", "main"]);
+    run_git(&remote, &["config", "user.email", "t@t"]);
+    run_git(&remote, &["config", "user.name", "t"]);
+    run_git(&remote, &["commit", "-q", "--allow-empty", "-m", "c1"]);
+
+    let bare = tmp.join("bare.git");
+    run_git(
+        tmp,
+        &["clone", "-q", "--bare", remote.to_str().unwrap(), bare.to_str().unwrap()],
+    );
+    run_git(
+        &bare,
+        &["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+    );
+    run_git(&bare, &["fetch", "-q", "--prune"]);
+
+    let wt = tmp.join("wt");
+    if worktree_branch == "main" {
+        run_git(
+            tmp,
+            &["--git-dir", bare.to_str().unwrap(), "worktree", "add", wt.to_str().unwrap(), "main"],
+        );
+    } else {
+        run_git(
+            tmp,
+            &[
+                "--git-dir", bare.to_str().unwrap(),
+                "worktree", "add", "-b", worktree_branch,
+                wt.to_str().unwrap(), "main",
+            ],
+        );
+    }
+    // Worktree commits need author identity too.
+    run_git(&wt, &["config", "user.email", "t@t"]);
+    run_git(&wt, &["config", "user.name", "t"]);
+
+    wt
+}
+
+#[tokio::test]
+async fn git_unpushed_endpoint_with_upstream() {
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use vanyline_sandbox::build_app;
+    use vanyline_sandbox::config::Config;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    let wt = make_worktree_topology(tmpdir.path(), "main");
+
+    // Add a local commit on the worktree
+    run_git(&wt, &["commit", "-q", "--allow-empty", "-m", "local change"]);
+
+    let config = std::sync::Arc::new(Config {
+        listen: "0.0.0.0:3000".into(),
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
+        auth_groups_admin: "kubernetes-admin".into(),
+        auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+        no_auth: true,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: wt.to_path_buf(),
+    });
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let state = vanyline_sandbox::AppState { config, auth };
+
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/git/unpushed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+
+    assert_eq!(json["branch"], "main");
+    assert_eq!(json["upstream"], "origin/main");
+    let commits = json["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["title"], "local change");
+    assert_eq!(json["truncated"], false);
+}
+
+#[tokio::test]
+async fn git_unpushed_endpoint_without_upstream() {
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use vanyline_sandbox::build_app;
+    use vanyline_sandbox::config::Config;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    let wt = make_worktree_topology(tmpdir.path(), "feat-new");
+
+    // Add a local commit on the worktree
+    run_git(&wt, &["commit", "-q", "--allow-empty", "-m", "wip on feature"]);
+
+    let config = std::sync::Arc::new(Config {
+        listen: "0.0.0.0:3000".into(),
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
+        auth_groups_admin: "kubernetes-admin".into(),
+        auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+        no_auth: true,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: wt.to_path_buf(),
+    });
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let state = vanyline_sandbox::AppState { config, auth };
+
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/git/unpushed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+
+    assert_eq!(json["branch"], "feat-new");
+    assert!(json["upstream"].is_null());
+    let commits = json["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0]["title"], "wip on feature");
+}
+
+#[tokio::test]
+async fn git_unpushed_endpoint_no_local_commits() {
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use vanyline_sandbox::build_app;
+    use vanyline_sandbox::config::Config;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    let wt = make_worktree_topology(tmpdir.path(), "main");
+    // No additional commit — worktree is at same point as origin/main
+
+    let config = std::sync::Arc::new(Config {
+        listen: "0.0.0.0:3000".into(),
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
+        auth_groups_admin: "kubernetes-admin".into(),
+        auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+        no_auth: true,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: wt.to_path_buf(),
+    });
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let state = vanyline_sandbox::AppState { config, auth };
+
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/git/unpushed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+
+    assert_eq!(json["branch"], "main");
+    assert_eq!(json["upstream"], "origin/main");
+    let commits = json["commits"].as_array().unwrap();
+    assert_eq!(commits.len(), 0);
+}
+
+#[tokio::test]
+async fn git_unpushed_endpoint_detached_head() {
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use vanyline_sandbox::build_app;
+    use vanyline_sandbox::config::Config;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    let wt = make_worktree_topology(tmpdir.path(), "main");
+    // Detach HEAD
+    run_git(&wt, &["checkout", "-q", "--detach", "HEAD"]);
+
+    let config = std::sync::Arc::new(Config {
+        listen: "0.0.0.0:3000".into(),
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
+        auth_groups_admin: "kubernetes-admin".into(),
+        auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+        no_auth: true,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: wt.to_path_buf(),
+    });
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let state = vanyline_sandbox::AppState { config, auth };
+
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/git/unpushed")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let error_text = json["error"].as_str().unwrap();
+    assert!(
+        error_text.contains("VNL-SBX-006"),
+        "expected VNL-SBX-006 in: {error_text}"
+    );
+}

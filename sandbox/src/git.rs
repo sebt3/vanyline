@@ -25,6 +25,9 @@ pub enum GitError {
 
     #[error("VNL-SBX-005: could not parse git status output at line {line_no}: {line:?}")]
     ParseFailed { line_no: usize, line: String },
+
+    #[error("VNL-SBX-006: cannot determine unpushed commits: HEAD is detached")]
+    DetachedHead,
 }
 
 impl IntoResponse for GitError {
@@ -259,6 +262,170 @@ pub async fn handle_status(State(state): State<AppState>) -> Result<Json<GitStat
     run_status(&state.config.sandbox_root).await.map(Json)
 }
 
+// ── GET /git/unpushed ──────────────────────────────────────────────────────
+
+const UNPUSHED_MAX_COMMITS: usize = 200;
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CommitEntry {
+    pub sha: String,
+    pub title: String,
+    pub author: String,
+    pub date: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct UnpushedStatus {
+    pub branch: String,
+    pub upstream: Option<String>,
+    pub commits: Vec<CommitEntry>,
+    pub truncated: bool,
+}
+
+/// Exécute une commande git et retourne stdout. Erreur `CommandFailed`
+/// (VNL-SBX-004) si le process ne peut pas être lancé ou retourne un code
+/// non nul. Doublon volontaire avec la logique inline de `run_status`
+/// (tâche 02, déjà mergée) — ne pas refactorer `run_status` pour réutiliser
+/// ce helper, ça toucherait du code déjà testé hors du périmètre de cette
+/// tâche.
+fn run_git(args: &[&str]) -> Result<String, GitError> {
+    let output = Command::new("git")
+        .args(args)
+        .output()
+        .map_err(|e| GitError::CommandFailed {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(GitError::CommandFailed {
+            args: args.iter().map(|s| s.to_string()).collect(),
+            status: output.status.to_string(),
+            stderr,
+        });
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `true` si `refname` existe (`git show-ref --verify --quiet`).
+fn ref_exists(worktree_root: &str, refname: &str) -> Result<bool, GitError> {
+    let status = Command::new("git")
+        .args(["-C", worktree_root, "show-ref", "--verify", "--quiet", refname])
+        .status()
+        .map_err(|e| GitError::CommandFailed {
+            args: vec![
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                refname.into(),
+            ],
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+    Ok(status.success())
+}
+
+/// Résout la "branche par défaut" du remote via le HEAD symbolique du
+/// dépôt bare lui-même (pas celui du worktree) — cf. section Contexte.
+/// Ne retourne jamais d'erreur : repli sur `"main"` (même convention que
+/// `vanyline-maint`).
+fn resolve_default_branch(worktree_root: &str) -> String {
+    let Ok(common_dir) = run_git(&["-C", worktree_root, "rev-parse", "--git-common-dir"]) else {
+        return "main".to_string();
+    };
+    let common_dir = common_dir.trim();
+    match run_git(&["--git-dir", common_dir, "symbolic-ref", "--short", "HEAD"]) {
+        Ok(d) => d.trim().to_string(),
+        Err(_) => "main".to_string(),
+    }
+}
+
+/// Parse la sortie de `git log <range> --pretty=format:"%H\x1f%s\x1f%an\x1f%aI"`
+/// — une ligne par commit. Fonction pure — testable directement sur des
+/// chaînes de fixture. Le SHA est tronqué à 7 caractères (convention fixe,
+/// pas le `--abbrev` variable de git).
+fn parse_commits(output: &str) -> Result<Vec<CommitEntry>, GitError> {
+    let mut commits = Vec::new();
+    for (idx, line) in output.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_no = idx + 1;
+        let fields: Vec<&str> = line.split('\u{1f}').collect();
+        match fields.as_slice() {
+            [sha, title, author, date] => {
+                commits.push(CommitEntry {
+                    sha: sha.chars().take(7).collect(),
+                    title: title.to_string(),
+                    author: author.to_string(),
+                    date: date.to_string(),
+                });
+            }
+            _ => {
+                return Err(GitError::ParseFailed {
+                    line_no,
+                    line: line.to_string(),
+                });
+            }
+        }
+    }
+    Ok(commits)
+}
+
+/// Exécute la comparaison et retourne le résultat. `sandbox_root` est un
+/// worktree normal (pas bare) — `VNL_SANDBOX_ROOT`.
+pub async fn run_unpushed(sandbox_root: &Path) -> Result<UnpushedStatus, GitError> {
+    let root = sandbox_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let root_str = root.to_string_lossy().into_owned();
+
+        let branch = run_git(&["-C", &root_str, "rev-parse", "--abbrev-ref", "HEAD"])?
+            .trim()
+            .to_string();
+        if branch == "HEAD" {
+            return Err(GitError::DetachedHead);
+        }
+
+        let origin_branch_ref = format!("refs/remotes/origin/{branch}");
+        let (upstream, compare_ref) = if ref_exists(&root_str, &origin_branch_ref)? {
+            let up = format!("origin/{branch}");
+            (Some(up.clone()), up)
+        } else {
+            let default = resolve_default_branch(&root_str);
+            (None, format!("origin/{default}"))
+        };
+
+        let range = format!("{compare_ref}..HEAD");
+        let max_count_arg = format!("--max-count={}", UNPUSHED_MAX_COMMITS + 1);
+        let log_output = run_git(&[
+            "-C",
+            &root_str,
+            "log",
+            &range,
+            &max_count_arg,
+            "--pretty=format:%H\u{1f}%s\u{1f}%an\u{1f}%aI",
+        ])?;
+
+        let mut commits = parse_commits(&log_output)?;
+        let truncated = commits.len() > UNPUSHED_MAX_COMMITS;
+        commits.truncate(UNPUSHED_MAX_COMMITS);
+
+        Ok(UnpushedStatus {
+            branch,
+            upstream,
+            commits,
+            truncated,
+        })
+    })
+    .await
+    .expect("run_unpushed blocking task panicked")
+}
+
+pub async fn handle_unpushed(State(state): State<AppState>) -> Result<Json<UnpushedStatus>, GitError> {
+    run_unpushed(&state.config.sandbox_root).await.map(Json)
+}
+
 // ── Unit Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -401,6 +568,47 @@ X foo\n\
             GitError::ParseFailed { line_no, line } => {
                 assert_eq!(line_no, 0);
                 assert_eq!(line, "missing '# branch.head' header in git status output");
+            }
+            _ => panic!("expected ParseFailed"),
+        }
+    }
+
+    // ── parse_commits (unpushed) ───────────────────────────────────────────
+
+    #[test]
+    fn parse_commits_nominal() {
+        let sep = '\u{1f}';
+        let output = format!(
+            "abcdef123456{sep}Initial commit{sep}Alice{sep}2024-01-01T10:00:00Z\n\
+             fedcba987654{sep}Second commit{sep}Bob{sep}2024-01-02T14:30:00Z",
+            sep = sep,
+        );
+        let result = parse_commits(&output).unwrap();
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].sha, "abcdef1");
+        assert_eq!(result[0].title, "Initial commit");
+        assert_eq!(result[0].author, "Alice");
+        assert_eq!(result[0].date, "2024-01-01T10:00:00Z");
+        assert_eq!(result[1].sha, "fedcba9");
+        assert_eq!(result[1].title, "Second commit");
+        assert_eq!(result[1].author, "Bob");
+        assert_eq!(result[1].date, "2024-01-02T14:30:00Z");
+    }
+
+    #[test]
+    fn parse_commits_empty_output() {
+        let result = parse_commits("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_commits_malformed_line_is_parse_error() {
+        let result = parse_commits("abc123 no separator");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GitError::ParseFailed { line_no, line } => {
+                assert_eq!(line_no, 1);
+                assert_eq!(line, "abc123 no separator");
             }
             _ => panic!("expected ParseFailed"),
         }
