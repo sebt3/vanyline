@@ -97,12 +97,29 @@ pub async fn run_agent_turn(
 **Résolution des MCP servers** : `prefixed_mcp::connect_mcp_servers_selected` ne contacte
 QUE les serveurs référencés par les `McpSelection` des toolsets de l'agent (jamais tous les
 serveurs configurés), et ne remonte au modèle que les tools dont le nom matche un pattern
-glob de la sélection — c'est ce qui maîtrise le contexte pour les petits modèles.
+glob de la sélection — c'est ce qui maîtrise le contexte pour les petits modèles. Les
+en-têtes HTTP custom (`McpServer.headers`) sont appliqués via
+`StreamableHttpClientTransportConfig::custom_headers` (`StreamableHttpClientTransport::
+from_config`, jamais un `reqwest::Client` construit à la main — `rmcp` embarque son propre
+reqwest interne, une version différente de celle du workspace, les deux ne sont pas
+interchangeables au niveau des types). Deux serveurs/tools locaux référencés par plusieurs
+toolsets de l'agent ne sont ni recontactés ni réajoutés en double (dédup par nom de
+serveur / nom de tool sur la durée du tour).
+
+**Cycle de vie des connexions MCP** : `connect_mcp_servers_selected` retourne les
+`RunningService` (alias `McpRunningService`) de chaque serveur connecté — `run_agent_turn_at_depth`
+les garde en vie jusqu'à la fin du tour et les annule proprement (`.cancel().await`) après.
+Point d'attention pour toute évolution de ce code : `RunningService` porte un `DropGuard` qui
+annule sa tâche de fond au drop — un `RunningService` local qui sort de portée AVANT la fin du
+tour coupe la connexion avant tout appel de tool réel (bug réel corrigé, pas hypothétique).
 
 **Tools builtin** (`vanyline_lib::builtin`) :
 - `skill` : charge le corps d'un `SKILL.md` par nom (`ConfigStore::load_skill`), sa
   description embarque l'index des skills résolus pour l'agent (vide si
-  `SkillSelection::None` ou si rien ne matche → le tool n'est même pas exposé).
+  `SkillSelection::None` ou si rien ne matche → le tool n'est même pas exposé). `call`
+  refuse tout nom absent de cet index (`VnyError::UnknownReference`) même s'il existe dans
+  le store — la portée `SkillSelection` de l'agent est une garantie du tool, pas seulement
+  de sa description.
 - `task` : délègue à un subagent (`mode: Subagent|All` seulement — un agent `Primary` est
   refusé). Lance un `run_agent_turn` imbriqué à `current_depth + 1`, avec un historique
   vierge et un sink qui encapsule chaque événement du subagent en
@@ -198,7 +215,19 @@ champs qui doivent être visibles/mutables depuis une tâche spawnée
 `Arc<FsConfigStore>` partagé sans verrou (lecture seule après
 `initialize`). Un `chat/send` sur une conversation déjà occupée répond
 `VNL-RPC-002` immédiatement, sans rien spawner. `BusyGuard` (`Drop`)
-garantit le nettoyage même si la tâche panique.
+garantit le nettoyage même si la tâche panique. `conversations/delete`
+purge aussi `busy`/`seq` pour l'id supprimé (sinon croissance non bornée
+de ces maps sur la durée de vie du process).
+
+Même pattern verrou-busy-par-conversation + spawn répliqué côté app
+(`app/src/ws/chat.rs`, `AppState.busy` + `BusyGuard` + `try_acquire_busy` —
+implémentation séparée, pas de code partagé entre les deux binaires, mais
+la même sémantique : un message reçu pendant un tour actif reçoit une
+erreur busy (`VNL-WS-001` côté WS, `VNL-RPC-002` côté RPC) au lieu d'être
+mis en file ou de bloquer la lecture du transport). Persistance
+identique sur les deux surfaces : le message user est enregistré AVANT le
+tour (il a bien été envoyé, quelle que soit l'issue du tour), le message
+assistant seulement APRÈS un tour réussi.
 
 **Passthrough camelCase/snake_case** : les enveloppes RPC propres à ce
 protocole (`InitializeResult`, `ConversationSummary`, `ChatSendParams`/
