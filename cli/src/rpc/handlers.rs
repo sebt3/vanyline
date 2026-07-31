@@ -169,7 +169,7 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "conversations/list" => Some(handle_conversations_list(id)),
         "conversations/get" => Some(handle_conversations_get(id, request.params)),
         "conversations/create" => Some(handle_conversations_create(id, request.params)),
-        "conversations/delete" => Some(handle_conversations_delete(id, request.params)),
+        "conversations/delete" => Some(handle_conversations_delete(state, id, request.params)),
         "chat/cancel" => Some(handle_chat_cancel(id, request.params)),
         "chat/send" => handle_chat_send(state, id, request.params).await,
         _ => Some(
@@ -390,7 +390,7 @@ fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
 /// silencieusement, exactement comme la commande CLI. Seule une vraie
 /// erreur io (permissions, disque...) -> `VNL-RPC-007`. Succès -> `result:
 /// null` (même pattern que `shutdown`, tâche 01 : `JsonRpcResponse::success(id, Value::Null)`).
-fn handle_conversations_delete(id: Value, params: serde_json::Value) -> String {
+fn handle_conversations_delete(state: &ServerState, id: Value, params: serde_json::Value) -> String {
     let params: ConversationIdParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
@@ -410,7 +410,11 @@ fn handle_conversations_delete(id: Value, params: serde_json::Value) -> String {
         )).expect("serialize delete error response"),
     };
     match store::delete_conversation(&uuid) {
-        Ok(()) => serde_json::to_string(&JsonRpcResponse::success(id, Value::Null)).expect("serialize delete response"),
+        Ok(()) => {
+            state.seq.lock().unwrap().remove(&uuid);
+            state.busy.lock().unwrap().remove(&uuid);
+            serde_json::to_string(&JsonRpcResponse::success(id, Value::Null)).expect("serialize delete response")
+        }
         Err(e) => serde_json::to_string(&JsonRpcResponse::error(
             id,
             jsonrpc_code::SERVER_ERROR,
@@ -545,6 +549,14 @@ async fn handle_chat_send(state: &ServerState, id: Value, params: serde_json::Va
     let message = params.message.clone();
 
     tokio::spawn(async move {
+        let mut conv = conv;
+        conv.messages.push(vanyline_lib::Message {
+            role: "user".to_string(),
+            content: message.clone(),
+            tool_calls: None,
+        });
+        store::save_conversation(&conv).ok();
+
         let _guard = BusyGuard { busy, conv_id };
         let ctx = SessionContext {
             store: store.clone() as Arc<dyn ConfigStore>,
@@ -555,12 +567,6 @@ async fn handle_chat_send(state: &ServerState, id: Value, params: serde_json::Va
         let result = run_agent_turn(&ctx, &agent_name, history, &message, workspace_context.as_deref()).await;
         let response = match result {
             Ok(turn_result) => {
-                let mut conv = conv;
-                conv.messages.push(vanyline_lib::Message {
-                    role: "user".to_string(),
-                    content: message,
-                    tool_calls: None,
-                });
                 conv.messages.push(chat_turn_result_to_message(&turn_result));
                 store::save_conversation(&conv).ok();
                 JsonRpcResponse::success(id, serde_json::to_value(ChatSendResult {
@@ -1560,6 +1566,8 @@ mod tests {
     /// quasi instantanément).
     #[tokio::test]
     async fn chat_send_spawns_and_clears_busy_on_turn_error() {
+        let (_data_tmp, _data_guard) = isolated_data_dir();
+
         let tmp = tempfile::tempdir().unwrap();
         let vanyline = tmp.path().join(".vanyline");
         let agents_dir = vanyline.join("agents");
@@ -1649,5 +1657,50 @@ defaults:
 
         // busy should be cleaned up after the turn (BusyGuard Drop)
         assert!(!state.busy.lock().unwrap().contains(&conv_id));
+
+        // R9 : le message user doit être persisté malgré l'échec du tour.
+        let persisted = store::get_conversation(&conv_id).expect("conversation should still exist");
+        assert_eq!(persisted.messages.len(), 1, "only the user message should be persisted on turn failure");
+        assert_eq!(persisted.messages[0].role, "user");
+        assert_eq!(persisted.messages[0].content, "hi");
+    }
+
+    /// conversations_delete_purges_seq_and_busy — supprimer une conversation
+    /// doit purger ses entrées dans `state.seq` et `state.busy` (R13).
+    #[tokio::test]
+    async fn conversations_delete_purges_seq_and_busy() {
+        let (_data_tmp, _data_guard) = isolated_data_dir();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let vanyline = tmp.path().join(".vanyline");
+        std::fs::create_dir_all(&vanyline).unwrap();
+        let tmp_path = tmp.path().to_str().unwrap();
+
+        let init_line = make_request_json(160, "initialize", Some(json!({
+            "protocolVersion": 1,
+            "workspace": tmp_path,
+        })));
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(161, "conversations/create", Some(json!({"title": "to delete"})));
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse create response");
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID");
+
+        // Simuler un état résiduel (comme si un tour avait tourné sur cette conversation)
+        state.seq.lock().unwrap().insert(conv_id, 3);
+        state.busy.lock().unwrap().insert(conv_id);
+
+        let delete_line = make_request_json(162, "conversations/delete", Some(json!({"id": conv_id_str})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse delete response");
+        assert!(resp.error.is_none(), "delete should succeed, got: {:?}", resp.error);
+
+        assert!(!state.seq.lock().unwrap().contains_key(&conv_id), "seq entry should be purged");
+        assert!(!state.busy.lock().unwrap().contains(&conv_id), "busy entry should be purged");
     }
 }
