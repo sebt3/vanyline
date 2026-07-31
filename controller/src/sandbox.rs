@@ -24,8 +24,8 @@ use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 use crate::project::{self, ProjectJobContext};
 use crate::project::{
-    bare_repo_path, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path,
-    worktree_path, WORKSPACE_MOUNT_PATH,
+    cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path,
+    WORKSPACE_MOUNT_PATH,
 };
 
 /// Port MCP exposé par `vanyline-sandbox` (`MCP_LISTEN` par défaut `0.0.0.0:3000`
@@ -59,7 +59,7 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
             ),
             (
                 "LD_LIBRARY_PATH".to_string(),
-                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/local/lib".to_string(),
+                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/lib/aarch64-linux-gnu:{root}/usr/local/lib".to_string(),
             ),
             (
                 "RUSTUP_HOME".to_string(),
@@ -70,7 +70,7 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
             ("PATH".to_string(), "{root}/usr/local/bin".to_string()),
             (
                 "LD_LIBRARY_PATH".to_string(),
-                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/local/lib".to_string(),
+                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/lib/aarch64-linux-gnu:{root}/usr/local/lib".to_string(),
             ),
         ])),
         _ => None,
@@ -348,34 +348,29 @@ pub fn netpol_name(sandbox_name: &str) -> String {
 }
 
 /// Job une fois : crée le worktree de la branche (le crée depuis
-/// `default_branch` — résolu par le script si absent de la spec — si la
-/// branche n'existe pas encore localement dans le clone bare).
+/// `default_branch` si fourni, sinon `vanyline-maint` le résolve par
+/// `symbolic-ref --short HEAD`).
 pub fn build_checkout_job(
     sandbox: &Sandbox,
     project: &Project,
     job_ctx: &ProjectJobContext,
 ) -> Job {
-    let default_branch = project.spec.default_branch.clone().unwrap_or_default();
-    let script = format!(
-        r#"set -eu
-cd {mount}
-if [ -d {wt} ]; then exit 0; fi
-DEFAULT_BRANCH="{default_branch}"
-if [ -z "$DEFAULT_BRANCH" ]; then
-  DEFAULT_BRANCH=$(git --git-dir={bare} symbolic-ref --short HEAD 2>/dev/null || echo main)
-fi
-if git --git-dir={bare} show-ref --verify --quiet refs/heads/{branch}; then
-  git --git-dir={bare} worktree add {wt} {branch}
-else
-  git --git-dir={bare} worktree add -b {branch} {wt} "$DEFAULT_BRANCH"
-fi
-"#,
-        mount = WORKSPACE_MOUNT_PATH,
-        wt = worktree_path(&sandbox.name_any()),
-        bare = bare_repo_path(),
-        branch = sandbox.spec.branch,
-        default_branch = default_branch,
-    );
+    let mut command = vec![
+        "vanyline-maint".to_string(),
+        "checkout".to_string(),
+        "--workspace".to_string(),
+        WORKSPACE_MOUNT_PATH.to_string(),
+        "--sandbox".to_string(),
+        sandbox.name_any(),
+        "--branch".to_string(),
+        sandbox.spec.branch.clone(),
+    ];
+    if let Some(db) = &project.spec.default_branch {
+        if !db.is_empty() {
+            command.push("--default-branch".to_string());
+            command.push(db.clone());
+        }
+    }
 
     Job {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -389,7 +384,7 @@ fi
         spec: Some(JobSpec {
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
-            template: project::git_pod_template(project, job_ctx, script),
+            template: project::git_pod_template(project, job_ctx, command),
             ..Default::default()
         }),
         ..Default::default()
@@ -398,22 +393,21 @@ fi
 
 /// Job de retrait du worktree — invoqué par le finalizer. `worktree remove
 /// --force` gère l'état non commité ; repli sur `rm -rf` + `worktree prune` si
-/// les métadonnées git sont dans un état incohérent.
+/// les métadonnées git sont dans un état incohérent. La résolution est faite
+/// par `vanyline-maint`.
 pub fn build_worktree_remove_job(
     sandbox: &Sandbox,
     project: &Project,
     job_ctx: &ProjectJobContext,
 ) -> Job {
-    let script = format!(
-        r#"set -eu
-cd {mount}
-git --git-dir={bare} worktree remove --force {wt} 2>/dev/null || rm -rf {wt}
-git --git-dir={bare} worktree prune
-"#,
-        mount = WORKSPACE_MOUNT_PATH,
-        bare = bare_repo_path(),
-        wt = worktree_path(&sandbox.name_any()),
-    );
+    let command = vec![
+        "vanyline-maint".to_string(),
+        "remove".to_string(),
+        "--workspace".to_string(),
+        WORKSPACE_MOUNT_PATH.to_string(),
+        "--sandbox".to_string(),
+        sandbox.name_any(),
+    ];
 
     Job {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -427,7 +421,7 @@ git --git-dir={bare} worktree prune
         spec: Some(JobSpec {
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
-            template: project::git_pod_template(project, job_ctx, script),
+            template: project::git_pod_template(project, job_ctx, command),
             ..Default::default()
         }),
         ..Default::default()
@@ -851,6 +845,7 @@ mod tests {
             .expect("must have LD_LIBRARY_PATH");
         let ld_val = ld.value.as_ref().expect("LD_LIBRARY_PATH must have value");
         assert!(ld_val.contains("/toolchains/rust/usr/lib/x86_64-linux-gnu"));
+        assert!(ld_val.contains("/toolchains/rust/usr/lib/aarch64-linux-gnu"));
 
         // RUSTUP_HOME
         let rustup = env
@@ -879,6 +874,7 @@ mod tests {
             .expect("must have LD_LIBRARY_PATH");
         let ld_val = ld.value.as_ref().expect("LD_LIBRARY_PATH must have value");
         assert!(ld_val.contains("/toolchains/node/usr/lib/x86_64-linux-gnu"));
+        assert!(ld_val.contains("/toolchains/node/usr/lib/aarch64-linux-gnu"));
 
         // No RUSTUP_HOME for node
         assert!(env.iter().find(|e| e.name == "RUSTUP_HOME").is_none());
@@ -1306,7 +1302,7 @@ mod tests {
     // ===== build_checkout_job =====
 
     #[test]
-    fn build_checkout_job_script_no_default_branch() {
+    fn build_checkout_job_argv_no_default_branch() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None, None);
         let job_ctx = make_job_ctx();
@@ -1314,18 +1310,23 @@ mod tests {
 
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let command = pod_spec.containers[0].command.as_ref().unwrap();
-        let script = &command[2];
-
-        // default_branch is None, so DEFAULT_BRANCH should be empty string
-        assert!(script.contains("DEFAULT_BRANCH=\"\""));
-        // Should contain symbolic-ref for resolution
-        assert!(script.contains("symbolic-ref --short HEAD"));
-        // Should contain worktree path
-        assert!(script.contains("worktrees/demo-branch"));
+        assert_eq!(
+            command,
+            &vec![
+                "vanyline-maint".to_string(),
+                "checkout".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+                "--sandbox".to_string(),
+                "demo-branch".to_string(),
+                "--branch".to_string(),
+                "main".to_string(),
+            ]
+        );
     }
 
     #[test]
-    fn build_checkout_job_script_with_default_branch() {
+    fn build_checkout_job_argv_with_default_branch() {
         let mut project = make_project(None, None);
         project.spec.default_branch = Some("develop".to_string());
         let sandbox = make_sandbox("demo-branch", vec![], None);
@@ -1334,9 +1335,21 @@ mod tests {
 
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let command = pod_spec.containers[0].command.as_ref().unwrap();
-        let script = &command[2];
-
-        assert!(script.contains("DEFAULT_BRANCH=\"develop\""));
+        assert_eq!(
+            command,
+            &vec![
+                "vanyline-maint".to_string(),
+                "checkout".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+                "--sandbox".to_string(),
+                "demo-branch".to_string(),
+                "--branch".to_string(),
+                "main".to_string(),
+                "--default-branch".to_string(),
+                "develop".to_string(),
+            ]
+        );
     }
 
     #[test]
@@ -1359,7 +1372,7 @@ mod tests {
     // ===== build_worktree_remove_job =====
 
     #[test]
-    fn build_worktree_remove_job_script() {
+    fn build_worktree_remove_job_argv() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None, None);
         let job_ctx = make_job_ctx();
@@ -1367,10 +1380,17 @@ mod tests {
 
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let command = pod_spec.containers[0].command.as_ref().unwrap();
-        let script = &command[2];
-
-        assert!(script.contains("worktree remove --force worktrees/demo-branch"));
-        assert!(script.contains("worktree prune"));
+        assert_eq!(
+            command,
+            &vec![
+                "vanyline-maint".to_string(),
+                "remove".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+                "--sandbox".to_string(),
+                "demo-branch".to_string(),
+            ]
+        );
     }
 
     // ===== build_sandbox_service =====

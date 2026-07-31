@@ -202,12 +202,12 @@ pub fn fetch_schedule(project: &Project) -> String {
 
 /// Construit le `PodTemplateSpec` commun aux trois Jobs git : image sandbox,
 /// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
-/// `git` exécutant `script` via `sh -c`.
+/// `git` exécutant `command` en argv direct.
 #[allow(dead_code)]
 pub(crate) fn git_pod_template(
     project: &Project,
     ctx: &ProjectJobContext,
-    script: String,
+    command: Vec<String>,
 ) -> PodTemplateSpec {
     let mut volumes = vec![
         Volume {
@@ -285,7 +285,7 @@ pub(crate) fn git_pod_template(
             containers: vec![Container {
                 name: "git".to_string(),
                 image: Some(ctx.sandbox_image.clone()),
-                command: Some(vec!["sh".to_string(), "-c".to_string(), script]),
+                command: Some(command),
                 env: Some(env),
                 volume_mounts: Some(mounts),
                 ..Default::default()
@@ -301,17 +301,18 @@ pub(crate) fn git_pod_template(
 /// n'existe pas déjà (idempotent — le controller peut réappliquer sans réétat).
 #[allow(dead_code)]
 pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
-    let cache_dirs = effective_caches(project)
-        .iter()
-        .map(|c| format!("{WORKSPACE_MOUNT_PATH}/{}", cache_path(c)))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let script = format!(
-        "set -eu\nmkdir -p {cache_dirs}\nif [ ! -d {mount}/{bare} ]; then git clone --bare {repo} {mount}/{bare}; fi\n",
-        mount = WORKSPACE_MOUNT_PATH,
-        bare = bare_repo_path(),
-        repo = project.spec.repo_url,
-    );
+    let mut command = vec![
+        "vanyline-maint".to_string(),
+        "init".to_string(),
+        "--repo".to_string(),
+        project.spec.repo_url.clone(),
+        "--workspace".to_string(),
+        WORKSPACE_MOUNT_PATH.to_string(),
+    ];
+    for cache in effective_caches(project) {
+        command.push("--cache".to_string());
+        command.push(cache);
+    }
 
     Job {
         metadata: ObjectMeta {
@@ -325,7 +326,7 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         spec: Some(JobSpec {
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
-            template: git_pod_template(project, ctx, script),
+            template: git_pod_template(project, ctx, command),
             ..Default::default()
         }),
         ..Default::default()
@@ -335,11 +336,12 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
 /// CronJob périodique : `git fetch --prune` sur le clone bare.
 #[allow(dead_code)]
 pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJob {
-    let script = format!(
-        "set -eu\ngit --git-dir={mount}/{bare} fetch --prune\n",
-        mount = WORKSPACE_MOUNT_PATH,
-        bare = bare_repo_path(),
-    );
+    let command = vec![
+        "vanyline-maint".to_string(),
+        "fetch".to_string(),
+        "--workspace".to_string(),
+        WORKSPACE_MOUNT_PATH.to_string(),
+    ];
 
     CronJob {
         metadata: ObjectMeta {
@@ -357,7 +359,7 @@ pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJo
                 spec: Some(JobSpec {
                     backoff_limit: Some(3),
                     ttl_seconds_after_finished: Some(3600),
-                    template: git_pod_template(project, ctx, script),
+                    template: git_pod_template(project, ctx, command),
                     ..Default::default()
                 }),
             },
@@ -373,11 +375,12 @@ pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJo
 /// grâce au `subPath` (voir note de contexte).
 #[allow(dead_code)]
 pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
-    let script = format!(
-        "set -eu\nrm -rf {mount}/{bare} {mount}/worktrees {mount}/cache\n",
-        mount = WORKSPACE_MOUNT_PATH,
-        bare = bare_repo_path(),
-    );
+    let command = vec![
+        "vanyline-maint".to_string(),
+        "purge".to_string(),
+        "--workspace".to_string(),
+        WORKSPACE_MOUNT_PATH.to_string(),
+    ];
 
     Job {
         metadata: ObjectMeta {
@@ -391,7 +394,7 @@ pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         spec: Some(JobSpec {
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
-            template: git_pod_template(project, ctx, script),
+            template: git_pod_template(project, ctx, command),
             ..Default::default()
         }),
         ..Default::default()
@@ -860,12 +863,21 @@ mod tests {
         );
 
         let command = pod_spec.containers[0].command.as_ref().unwrap();
-        assert_eq!(command.len(), 3);
-        let script = &command[2];
-        assert!(script.contains("git clone --bare"));
-        assert!(script.contains("https://github.com/owner/repo"));
-        assert!(script.contains("/workspace/cache/cargo"));
-        assert!(script.contains("/workspace/cache/pnpm-store"));
+        assert_eq!(
+            command,
+            &vec![
+                "vanyline-maint".to_string(),
+                "init".to_string(),
+                "--repo".to_string(),
+                "https://github.com/owner/repo".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+                "--cache".to_string(),
+                "cargo".to_string(),
+                "--cache".to_string(),
+                "pnpm".to_string(),
+            ]
+        );
 
         let volumes = pod_spec.volumes.as_ref().unwrap();
         assert_eq!(volumes.len(), 2);
@@ -986,8 +998,15 @@ mod tests {
             .first()
             .unwrap();
         let command = container.command.as_ref().unwrap();
-        let script = &command[2];
-        assert!(script.contains("git --git-dir=/workspace/repo.git fetch --prune"));
+        assert_eq!(
+            command,
+            &vec![
+                "vanyline-maint".to_string(),
+                "fetch".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+            ]
+        );
     }
 
     // 22. build_purge_job_shape
@@ -1001,11 +1020,15 @@ mod tests {
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let container = pod_spec.containers.first().unwrap();
         let command = container.command.as_ref().unwrap();
-        let script = &command[2];
-        assert!(script.contains("rm -rf"));
-        assert!(script.contains("/workspace/repo.git"));
-        assert!(script.contains("/workspace/worktrees"));
-        assert!(script.contains("/workspace/cache"));
+        assert_eq!(
+            command,
+            &vec![
+                "vanyline-maint".to_string(),
+                "purge".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+            ]
+        );
     }
 
     // 23. git_jobs_no_service_account
@@ -1053,7 +1076,67 @@ mod tests {
             .is_none());
     }
 
-    // 24. compute_status_cloned_true
+    // 24. git_pod_template_no_shell
+    #[test]
+    fn git_pod_template_no_shell() {
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+
+        let init_job = build_init_job(&project, &ctx);
+        let init_cmd = init_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .command
+            .as_ref()
+            .unwrap();
+        assert_eq!(init_cmd[0], "vanyline-maint");
+        assert!(!init_cmd.iter().any(|a| a == "sh"));
+        assert!(!init_cmd.iter().any(|a| a == "-c"));
+
+        let fetch_cronjob = build_fetch_cronjob(&project, &ctx);
+        let fetch_cmd = fetch_cronjob
+            .spec
+            .job_template
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .command
+            .as_ref()
+            .unwrap();
+        assert_eq!(fetch_cmd[0], "vanyline-maint");
+        assert!(!fetch_cmd.iter().any(|a| a == "sh"));
+        assert!(!fetch_cmd.iter().any(|a| a == "-c"));
+
+        let purge_job = build_purge_job(&project, &ctx);
+        let purge_cmd = purge_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .command
+            .as_ref()
+            .unwrap();
+        assert_eq!(purge_cmd[0], "vanyline-maint");
+        assert!(!purge_cmd.iter().any(|a| a == "sh"));
+        assert!(!purge_cmd.iter().any(|a| a == "-c"));
+    }
+
+    // 25. compute_status_cloned_true
     #[test]
     fn compute_status_cloned_true() {
         let project = make_project(None, None);
@@ -1067,7 +1150,7 @@ mod tests {
         assert_eq!(cond.reason, "InitJobSucceeded");
     }
 
-    // 25. compute_status_cloned_false
+    // 26. compute_status_cloned_false
     #[test]
     fn compute_status_cloned_false() {
         let project = make_project(None, None);
@@ -1081,7 +1164,7 @@ mod tests {
         assert_eq!(cond.reason, "WaitingForInitJob");
     }
 
-    // 26. compute_status_worktrees_and_last_fetch_empty
+    // 27. compute_status_worktrees_and_last_fetch_empty
     #[test]
     fn compute_status_worktrees_and_last_fetch_empty() {
         let project = make_project(None, None);
