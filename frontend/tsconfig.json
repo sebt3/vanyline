@@ -7,6 +7,7 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "verbatimModuleSyntax": true,
+    "skipLibCheck": true,
     "types": ["vitest/globals", "vite/client"],
     "paths": {
       "$lib": ["./src/lib"],

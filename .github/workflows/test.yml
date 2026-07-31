@@ -49,8 +49,5 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run build --workspace=frontend
-      # svelte-check (npm run check) désactivé pour l'instant : les types de
-      # storybook (React/Node) fuitent dans le tsconfig de l'app (70 erreurs
-      # préexistantes, indépendantes de la commande utilisée) — diagnostic à
-      # part avant réactivation.
+      - run: npm run check --workspace=frontend
       - run: npm run test --workspace=frontend

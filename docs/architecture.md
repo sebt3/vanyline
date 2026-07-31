@@ -329,15 +329,6 @@ tour qu'un scénario de test écrit à la main.
   texte (fragile, faux positifs/négatifs) — limite documentée et acceptée
   plutôt que contournée. À revisiter si une version future de `rig-core`
   expose l'information.
-- **`svelte-check` désactivé en CI** : les types de `storybook` (React/Node)
-  fuitent dans le tsconfig de `frontend/` (70 erreurs, reproductibles
-  indépendamment de la commande d'invocation — `npm run check` en workspace
-  ou `npx svelte-check` direct dans `frontend/`, même résultat). Découvert en
-  écrivant `.github/workflows/test.yml` (WS-8) : jamais lancé en CI/CD avant,
-  donc jamais remarqué en usage courant. L'étape est commentée dans le
-  workflow en attendant un diagnostic dédié (probablement un souci de
-  résolution de types du `tsconfig.json` de `frontend/` vis-à-vis des
-  `devDependencies` de Storybook hissées par npm workspaces).
 - **`cargo clippy --workspace --all-targets`** est la commande utilisée par
   la CI (`clippy` job de `.github/workflows/test.yml`), pas
   `cargo clippy --workspace` seul (documenté dans `AGENTS.md`) : `--all-targets`
