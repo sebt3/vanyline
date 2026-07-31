@@ -92,7 +92,7 @@ Image : `docker.io/sebt3/vanyline-app:0.0.1-alpha.1`
 Build : `podman build` multi-stage (node → rust → debian-slim)
 Namespace K8s : `media-station`
 
-Manifestes dans `deploy/` :
+Manifestes dans `deploy/web/` :
 - `RestEndPoint_sso.yaml` — kuberest crée l'app OIDC dans Authentik (`media-system`)
 - `secret.yaml`, `configmap.yaml`, `deployment.yaml`, `service.yaml`, `ingress.yaml`
 

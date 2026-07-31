@@ -1,12 +1,12 @@
 # Déploiement de vanyline-controller — feature controller-bootstrap.
 #
 # Prérequis (une fois) : les CRDs (fichier statique, régénéré via
-# deploy/generate-crds.sh à chaque changement de schéma) :
-#   kubectl apply -f deploy/crds.yaml
+# deploy/controller/generate-crds.sh à chaque changement de schéma) :
+#   kubectl apply -f deploy/controller/crds.yaml
 #
-#   kubectl apply -f deploy/controller.yaml
+#   kubectl apply -f deploy/controller/controller.yaml
 #   kubectl -n media-station logs -f deploy/vanyline-controller
-#   kubectl -n media-station delete -f deploy/controller.yaml
+#   kubectl -n media-station delete -f deploy/controller/controller.yaml
 #
 # Le controller watche les trois CRDs (Owner/Project/Sandbox) sur TOUT le
 # cluster (Api::all dans owner.rs/project.rs/sandbox.rs) — d'où ClusterRole +

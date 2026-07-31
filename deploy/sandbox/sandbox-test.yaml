@@ -1,0 +1,111 @@
+# Déploiement de test de vanyline-sandbox — remplace les pods d'expérimentation
+# deploy/sandbox-imagevol-*.yaml, depuis supprimés ; la recette image-volumes
+# a été validée le 2026-07-01 sur ce même cluster, K8s 1.36.2 / cri-o 1.36.1,
+# amd64.
+#
+#   kubectl apply --dry-run=client -f deploy/sandbox/sandbox-test.yaml   # validation schéma
+#   kubectl apply -f deploy/sandbox/sandbox-test.yaml                    # déploiement réel
+#   kubectl -n media-station port-forward svc/vanyline-sandbox-test 3000:3000
+#   kubectl -n media-station logs -f deploy/vanyline-sandbox-test  (ou pod/...)
+#   kubectl -n media-station delete -f deploy/sandbox/sandbox-test.yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: vanyline-sandbox-test-workspace
+  namespace: media-station
+  labels:
+    app: vanyline
+    role: sandbox-test
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: vanyline-sandbox-test
+  namespace: media-station
+  labels:
+    app: vanyline
+    role: sandbox-test
+spec:
+  restartPolicy: Always
+  containers:
+    - name: sandbox
+      image: docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1
+      args: ["--no-auth"]
+      ports:
+        - name: mcp
+          containerPort: 3000
+        # Le port metrics (9090) n'est délibérément pas exposé ici, ni par le
+        # Service ci-dessous — cf. commentaire sandbox/src/config.rs.
+      env:
+        - name: VNL_SANDBOX_ROOT
+          value: "/workspace"
+        # Toolchains via image volumes — PATH augmenté (pas remplacé),
+        # LD_LIBRARY_PATH requis (le loader du base ne trouve pas les libs
+        # du volume sinon, ex: libatomic.so.1 pour node).
+        - name: PATH
+          value: "/toolchains/rust/usr/local/cargo/bin:/toolchains/rust/usr/bin:/toolchains/node/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+        - name: LD_LIBRARY_PATH
+          value: "/toolchains/rust/usr/lib/x86_64-linux-gnu:/toolchains/rust/usr/local/lib:/toolchains/node/usr/lib/x86_64-linux-gnu:/toolchains/node/usr/local/lib"
+        - name: RUSTUP_HOME
+          value: "/toolchains/rust/usr/local/rustup"
+        - name: CARGO_HOME
+          value: "/workspace/.cargo"   # writable — PAS sur le volume rust (read-only)
+      volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+        - name: rust-toolchain
+          mountPath: /toolchains/rust
+        - name: node-toolchain
+          mountPath: /toolchains/node
+      readinessProbe:
+        httpGet:
+          path: /health
+          port: 3000
+        initialDelaySeconds: 5
+        periodSeconds: 10
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 3000
+        initialDelaySeconds: 10
+        periodSeconds: 30
+      resources:
+        requests:
+          cpu: 100m
+          memory: 256Mi
+        limits:
+          memory: 1Gi
+  volumes:
+    - name: workspace
+      persistentVolumeClaim:
+        claimName: vanyline-sandbox-test-workspace
+    - name: rust-toolchain
+      image:
+        reference: docker.io/library/rust:slim-trixie
+        pullPolicy: IfNotPresent
+    - name: node-toolchain
+      image:
+        reference: docker.io/library/node:trixie-slim
+        pullPolicy: IfNotPresent
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vanyline-sandbox-test
+  namespace: media-station
+  labels:
+    app: vanyline
+    role: sandbox-test
+spec:
+  selector:
+    app: vanyline
+    role: sandbox-test
+  ports:
+    - name: mcp
+      port: 3000
+      targetPort: 3000
