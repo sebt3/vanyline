@@ -326,9 +326,15 @@ Convergence CLI ↔ app : `vscode-ext-bootstrap.md` (extension VS Code,
 consomme le RPC stdio) pas encore démarré — c'est la prochaine étape
 naturelle maintenant que le RPC stdio est en place.
 
-**Point ouvert issu de ws08** : diagnostic `svelte-check`/storybook (70
-erreurs préexistantes, désactivé en CI) pas encore fait — cf.
-`docs/architecture.md` section "Limites connues".
+**Point ouvert issu de ws08, résolu** : `svelte-check`/storybook (2026-07-31,
+branche `fix/svelte-check-skiplibcheck`). Root cause : les fichiers
+`*.stories.svelte` importent `@storybook/addon-svelte-csf`, dont les types
+importent `storybook/internal/types` (générique multi-renderer, touche
+React/Node même en usage Svelte pur) — `frontend/tsconfig.json` ne
+définissait pas `skipLibCheck`, donc TypeScript type-checkait aussi ces
+`.d.ts` tiers. Fix : `skipLibCheck: true` (réglage standard pour ce cas, pas
+un compromis) — 70 erreurs → 0. Étape `check` réactivée dans
+`.github/workflows/test.yml`, bullet retiré de `docs/architecture.md`.
 
 **Hors scope pour cette phase :**
 - Intégration app ↔ sandbox (nécessite le controller à maturité)
