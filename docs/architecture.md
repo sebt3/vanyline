@@ -290,6 +290,16 @@ tour qu'un scénario de test écrit à la main.
   mesurées contre de gros fichiers/sorties réels. La validation manuelle SLM
   menée jusqu'ici portait sur des petits fichiers de test — à revisiter si un
   usage réel montre qu'elles tronquent trop tôt (ou pas assez).
+- **`ChatEvent::ToolResult.is_error` toujours `false`** : `rig-core` 0.38.1
+  (`agent/prompt_request/streaming.rs`, autour de la ligne 1530) convertit
+  toute erreur de tool call en texte (`Err(e) => e.to_string()`) *avant* de
+  construire `StreamedUserContent::ToolResult` — `rig_core::message::ToolResult`
+  n'expose aucun champ `is_error` dans cette version, l'information est perdue
+  en amont de tout code vanyline. Vérifié en lisant les sources vendored de
+  `rig-core`, pas une supposition. Pas de heuristique de détection par contenu
+  texte (fragile, faux positifs/négatifs) — limite documentée et acceptée
+  plutôt que contournée. À revisiter si une version future de `rig-core`
+  expose l'information.
 
 ## Workspace TypeScript (npm workspaces)
 

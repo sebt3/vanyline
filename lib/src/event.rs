@@ -19,6 +19,10 @@ use crate::error::VnyError;
 pub enum ChatEvent {
     Token { content: String },
     ToolCall { id: String, name: String, args: serde_json::Value },
+    /// `is_error` est toujours `false` — `rig-core` 0.38.1 convertit les
+    /// erreurs de tool call en texte avant `StreamedUserContent::ToolResult`,
+    /// l'information n'atteint jamais ce code. Limite connue et documentée
+    /// (`docs/architecture.md`, section "Limites connues"), pas un bug local.
     ToolResult { id: String, name: String, result: String, is_error: bool },
     SkillLoaded { name: String },
     SubagentStart { id: String, agent: String, task: String },
