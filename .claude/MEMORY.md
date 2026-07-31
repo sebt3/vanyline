@@ -256,9 +256,12 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 
 ## Scope — phase actuelle
 
-harness-core, cli-harness et cli-rpc-stdio terminés (cli sur son vrai stockage
-YAML deux couches, ancien `CliConfigStore` JSON supprimé ; serveur JSON-RPC
-stdio complet, cf. section dédiée plus haut). Plusieurs workstreams avancent
+harness-core, cli-harness, cli-rpc-stdio et ws07-review-fixes terminés (cli
+sur son vrai stockage YAML deux couches, ancien `CliConfigStore` JSON
+supprimé ; serveur JSON-RPC stdio complet, cf. section dédiée plus haut ;
+review sprint 1 R3-R16 corrigées — R1/R2 absorbées par WS-9, hors périmètre
+— détails dans `docs/architecture.md`, `docs/features/ws07-review-fixes.md`
+supprimé après clôture). Plusieurs workstreams avancent
 en parallèle : app-harness-parity (stockage PG natif côté app, en cours —
 migrations et `PgConfigStore` avancés, statut exact à vérifier avant de
 s'appuyer dessus), tools-v2 (refonte SLM-friendly de `vanyline-tools`, 8
