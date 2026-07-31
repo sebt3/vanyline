@@ -53,7 +53,8 @@ montées via `volumes[].image` — feature K8s native GA depuis v1.36, prérequi
 Pas de registre propriétaire, pas de build custom.
 
 **Validé en conditions réelles sur cluster 1.36 (2026-07-01, cri-o 1.36.1)** — deux pods de test
-(`deploy/sandbox-imagevol-*.yaml`) ont éprouvé node et rust. Recette d'assemblage confirmée :
+(`deploy/sandbox-imagevol-*.yaml`, supprimés depuis par WS-8 une fois la recette absorbée par
+`sandbox/Dockerfile` et le controller) ont éprouvé node et rust. Recette d'assemblage confirmée :
 
 - **Répartition base / volume / PVC** :
   - *base* = substrat natif commun installé proprement (apt) : **linker C `cc`/`ld` + binutils,
@@ -242,6 +243,56 @@ Claude. Règles stabilisées :
   --workspace`) plutôt que de faire confiance au rapport final de Qwen ;
   si des tests manquent, fichier de tâche de correction dédié plutôt que
   de les écrire soi-même.
+- **Qwen ne respecte pas fiablement le format de message de commit** donné
+  verbatim dans la section "Commit" du fichier de tâche (vu sur
+  ws08-github-publication, 2026-07-31 : 4 commits sur 7 dans le mauvais
+  format — `feat(nom): titre` ou `feat: nom — titre` au lieu de
+  `(feat: nom) titre — description`, parfois même sans le nom de la feature
+  du tout). Sans conséquence fonctionnelle mais casse la cohérence de
+  l'historique. Comme rien n'est poussé avant la fin de la feature (`origin/main`
+  très en retard sur ce projet solo), corriger via `git commit --amend`
+  (commit de tête) ou `git reset --soft` + recommit (commits plus anciens)
+  est sûr — **toujours vérifier le format après chaque délégation**, ne pas
+  supposer que la consigne verbatim suffit.
+- **Qwen peut stager plus large que le périmètre de la tâche** (vu sur
+  ws08-github-publication, tâche `dockerfiles` : le premier commit a
+  embarqué `docs/roadmap-sprint2.md`, un fichier non tracké sans rapport,
+  probablement via un `git add` trop large côté Qwen). Corrigé une fois
+  (reset + recommit ciblé) puis **prévenu en ajoutant une consigne
+  explicite dans chaque tâche suivante** ("stager précisément les fichiers
+  listés, jamais `git add -A`/`git add .`") — n'a plus reproduit sur les 6
+  tâches suivantes. Instruction à inclure systématiquement dans la section
+  "Commit" de tout fichier de tâche sur ce projet, tant que le repo contient
+  des design docs non trackés en attente (`docs/features/*.md`,
+  `docs/roadmap*.md`).
+- **`external_directory` en dehors du repo courant peut planter toute la
+  session même avec la whitelist déjà élargie** (confirmé à nouveau sur
+  ws08-github-publication, tâche `ci-test` v1, 2026-07-31) : un fichier de
+  tâche qui demandait à Qwen de lire `~/projets/juke/.github/workflows/`
+  (repo voisin, hors périmètre `implement.md`) a fait planter la session sur
+  un rejet auto (diff vide, aucun commit). Fix : **ne jamais référencer un
+  chemin hors du repo courant dans un fichier de tâche** — si du contenu
+  d'un autre projet sert de modèle, le lire soi-même (Claude) et le
+  reproduire intégralement dans la section "Code partiel" du fichier de
+  tâche plutôt que de renvoyer Qwen le lire.
+- **Le compte de tests annoncé par Qwen dans son propre rapport peut être
+  faux même quand l'exécution réelle est correcte** (vu sur
+  ws08-github-publication, tâche `fmt-repo` : Qwen a annoncé "363 tests
+  passés", le vrai chiffre — revérifié par Claude — était 474, identique à
+  avant la tâche, aucune régression). Ne jamais citer le chiffre du rapport
+  Qwen sans le revérifier soi-même via `cargo test --workspace`.
+- **`AGENTS.md` documente des commandes de validation moins strictes que ce
+  qu'il faudrait pour une CI propre** : `cargo clippy --workspace` (sans
+  `--all-targets`) ne vérifie pas le code de test, jamais remarqué avant
+  d'écrire une vraie CI (ws08-github-publication, 2026-07-31) — a révélé
+  d'un coup ~20 erreurs préexistantes (surtout un faux positif
+  `await_holding_lock` répété sur le pattern `isolated_data_dir()`, cf.
+  section cli-rpc-stdio ci-dessus). Idem `cargo fmt --all --check` : jamais
+  lancé sur tout le workspace, 53 fichiers non conformes découverts d'un
+  coup. Les deux ont nécessité une tâche de nettoyage dédiée avant que la CI
+  parte verte. Leçon : **une commande de validation documentée mais jamais
+  réellement exécutée sur tout le périmètre n'est pas une garantie** — le
+  premier run réel révèle souvent de la dette accumulée silencieusement.
 
 ---
 
@@ -256,12 +307,16 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 
 ## Scope — phase actuelle
 
-harness-core, cli-harness, cli-rpc-stdio et ws07-review-fixes terminés (cli
-sur son vrai stockage YAML deux couches, ancien `CliConfigStore` JSON
-supprimé ; serveur JSON-RPC stdio complet, cf. section dédiée plus haut ;
-review sprint 1 R3-R16 corrigées — R1/R2 absorbées par WS-9, hors périmètre
-— détails dans `docs/architecture.md`, `docs/features/ws07-review-fixes.md`
-supprimé après clôture). Plusieurs workstreams avancent
+harness-core, cli-harness, cli-rpc-stdio, ws07-review-fixes et
+ws08-github-publication terminés (cli sur son vrai stockage YAML deux
+couches, ancien `CliConfigStore` JSON supprimé ; serveur JSON-RPC stdio
+complet, cf. section dédiée plus haut ; review sprint 1 R3-R16 corrigées —
+R1/R2 absorbées par WS-9, hors périmètre ; repo publiable — Dockerfiles à
+leur place, `deploy/` trié, CI de validation et de release GitHub Actions,
+README étendu, cf. `docs/architecture.md` section "Limites connues" pour le
+détail des deux dettes révélées en route — détails dans `docs/architecture.md`,
+`docs/features/ws07-review-fixes.md` et `docs/features/ws08-github-publication.md`
+supprimés après clôture). Plusieurs workstreams avancent
 en parallèle : app-harness-parity (stockage PG natif côté app, en cours —
 migrations et `PgConfigStore` avancés, statut exact à vérifier avant de
 s'appuyer dessus), tools-v2 (refonte SLM-friendly de `vanyline-tools`, 8
@@ -270,6 +325,10 @@ glue MCP), controller-bootstrap (reconcilers Owner/Project/Sandbox avancés).
 Convergence CLI ↔ app : `vscode-ext-bootstrap.md` (extension VS Code,
 consomme le RPC stdio) pas encore démarré — c'est la prochaine étape
 naturelle maintenant que le RPC stdio est en place.
+
+**Point ouvert issu de ws08** : diagnostic `svelte-check`/storybook (70
+erreurs préexistantes, désactivé en CI) pas encore fait — cf.
+`docs/architecture.md` section "Limites connues".
 
 **Hors scope pour cette phase :**
 - Intégration app ↔ sandbox (nécessite le controller à maturité)
