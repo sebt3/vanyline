@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod git;
 pub mod maint;
 pub mod mcp;
 pub mod telemetry;
@@ -34,6 +35,7 @@ pub fn build_app(state: AppState) -> Router {
     let protected =
         Router::new()
             .route("/mcp", post(mcp::handle))
+            .route("/git/status", get(git::handle_status))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 auth::require_auth,

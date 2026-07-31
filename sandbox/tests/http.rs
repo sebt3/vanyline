@@ -1,3 +1,4 @@
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
 
@@ -1203,5 +1204,198 @@ async fn metrics_body_is_valid_prometheus_text() {
     assert!(
         text.contains("test_counter_total"),
         "metric not found in output:\n{text}"
+    );
+}
+
+// ── git status ────────────────────────────────────────────────────────────────
+
+/// Helper: create a git repo in `root` with an initial commit on `main`.
+fn init_repo(root: &std::path::Path) {
+    std::fs::create_dir_all(root).expect("create dir");
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+    std::fs::write(root.join("README.md"), "# test\n").expect("write README");
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(root)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(root)
+        .output()
+        .expect("git commit failed");
+    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+}
+
+#[tokio::test]
+async fn git_status_endpoint_nominal() {
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+    use vanyline_sandbox::build_app;
+    use vanyline_sandbox::config::Config;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    init_repo(tmpdir.path());
+
+    // Create an untracked file after the commit
+    std::fs::write(tmpdir.path().join("new.txt"), "hello\n").expect("write new.txt");
+
+    let config = std::sync::Arc::new(Config {
+        listen: "0.0.0.0:3000".into(),
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
+        auth_groups_admin: "kubernetes-admin".into(),
+        auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+        no_auth: true,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: tmpdir.path().to_path_buf(),
+    });
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let state = vanyline_sandbox::AppState { config, auth };
+
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/git/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+
+    assert_eq!(json["clean"], false);
+    let files = json["files"].as_array().unwrap();
+    assert!(!files.is_empty(), "expected at least one file in status: {json}");
+}
+
+#[tokio::test]
+async fn git_status_endpoint_clean() {
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    init_repo(tmpdir.path());
+
+    let config = std::sync::Arc::new(Config {
+        listen: "0.0.0.0:3000".into(),
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
+        auth_groups_admin: "kubernetes-admin".into(),
+        auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+        no_auth: true,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: tmpdir.path().to_path_buf(),
+    });
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let state = vanyline_sandbox::AppState { config, auth };
+
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/git/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+
+    assert_eq!(json["clean"], true);
+    assert!(json["files"].is_array());
+    assert_eq!(json["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn git_status_endpoint_not_a_repo() {
+    use axum::http::Request;
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    // Do NOT init a git repo here
+
+    let config = std::sync::Arc::new(Config {
+        listen: "0.0.0.0:3000".into(),
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
+        auth_groups_admin: "kubernetes-admin".into(),
+        auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+        no_auth: true,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: tmpdir.path().to_path_buf(),
+    });
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let state = vanyline_sandbox::AppState { config, auth };
+
+    let app = build_app(state);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/git/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let json = resp.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&json).unwrap();
+    let error_text = json["error"].as_str().unwrap();
+    assert!(
+        error_text.contains("VNL-SBX-004"),
+        "expected VNL-SBX-004 in: {error_text}"
     );
 }
