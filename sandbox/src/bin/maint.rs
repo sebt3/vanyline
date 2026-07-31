@@ -35,6 +35,29 @@ enum Cmd {
         #[arg(long)]
         workspace: PathBuf,
     },
+    /// Crée le worktree de la branche pour une sandbox (idempotent).
+    Checkout {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        sandbox: String,
+        #[arg(long)]
+        branch: String,
+        #[arg(long)]
+        default_branch: Option<String>,
+    },
+    /// Retire le worktree d'une sandbox (worktree remove + prune).
+    Remove {
+        #[arg(long)]
+        workspace: PathBuf,
+        #[arg(long)]
+        sandbox: String,
+    },
+    /// Détection des langages du workspace (stub — implémenté par WS-10).
+    Detect {
+        #[arg(long)]
+        workspace: PathBuf,
+    },
 }
 
 fn main() -> ExitCode {
@@ -47,6 +70,16 @@ fn main() -> ExitCode {
         } => maint::validate_repo(&repo).and_then(|()| maint::run_init(&workspace, &repo, &caches)),
         Cmd::Fetch { workspace } => maint::run_fetch(&workspace),
         Cmd::Purge { workspace } => maint::run_purge(&workspace),
+        Cmd::Checkout {
+            workspace,
+            sandbox,
+            branch,
+            default_branch,
+        } => maint::run_checkout(&workspace, &sandbox, &branch, default_branch.as_deref()),
+        Cmd::Remove { workspace, sandbox } => maint::run_remove(&workspace, &sandbox),
+        Cmd::Detect { workspace } => maint::run_detect(&workspace).map(|json| {
+            println!("{json}");
+        }),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

@@ -12,10 +12,10 @@ fn make_source_repo(dir: &Path) -> PathBuf {
     // `git init` requires the working directory to exist.
     std::fs::create_dir_all(&dir).expect("create dir");
 
-    // `git init`
+    // `git init -b main` — branche par défaut déterministe.
     assert!(
         Command::new("git")
-            .args(["init"])
+            .args(["init", "-b", "main"])
             .current_dir(&dir)
             .status()
             .unwrap()
@@ -185,4 +185,149 @@ fn purge_on_empty_workspace_ok() {
     std::fs::create_dir_all(&ws).unwrap();
 
     maint::run_purge(&ws).unwrap();
+}
+
+// ===== checkout_existing_branch =====
+#[test]
+fn checkout_existing_branch() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    // Init the bare repo.
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // Check out sb1 with branch "main".
+    maint::run_checkout(&ws, "sb1", "main", None).unwrap();
+
+    // worktrees/sb1 exists and contains README.md.
+    assert!(ws.join("worktrees/sb1").exists());
+    assert!(ws.join("worktrees/sb1/README.md").exists());
+}
+
+// ===== checkout_creates_branch_from_default =====
+#[test]
+fn checkout_creates_branch_from_default() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // Check out a non-existing branch — should be created from "main".
+    maint::run_checkout(&ws, "sb1", "feature-x", None).unwrap();
+
+    // worktrees/sb1 exists.
+    assert!(ws.join("worktrees/sb1").exists());
+
+    // The worktree's current branch is "feature-x".
+    let output = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(ws.join("worktrees/sb1"))
+        .output()
+        .expect("git rev-parse failed");
+    assert!(
+        output.status.success(),
+        "git rev-parse failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    assert_eq!(head, "feature-x");
+}
+
+// ===== checkout_explicit_default_branch =====
+#[test]
+fn checkout_explicit_default_branch() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // Checkout with explicit default branch.
+    maint::run_checkout(&ws, "sb1", "feature-y", Some("main")).unwrap();
+
+    assert!(ws.join("worktrees/sb1").exists());
+}
+
+// ===== checkout_is_idempotent =====
+#[test]
+fn checkout_is_idempotent() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // First checkout.
+    maint::run_checkout(&ws, "sb1", "main", None).unwrap();
+
+    // Place a marker inside the worktree.
+    std::fs::write(ws.join("worktrees/sb1/MARKER"), "keep").unwrap();
+
+    // Second checkout — should be a no-op.
+    maint::run_checkout(&ws, "sb1", "main", None).unwrap();
+
+    // Marker still exists.
+    assert!(ws.join("worktrees/sb1/MARKER").exists());
+}
+
+// ===== remove_removes_worktree =====
+#[test]
+fn remove_removes_worktree() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // Checkout then remove.
+    maint::run_checkout(&ws, "sb1", "main", None).unwrap();
+    maint::run_remove(&ws, "sb1").unwrap();
+
+    assert!(
+        !ws.join("worktrees/sb1").exists(),
+        "worktree should be removed"
+    );
+}
+
+// ===== remove_incoherent_worktree_falls_back =====
+#[test]
+fn remove_incoherent_worktree_falls_back() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // Checkout then manually remove the directory to simulate incoherent state.
+    maint::run_checkout(&ws, "sb1", "main", None).unwrap();
+    std::fs::remove_dir_all(ws.join("worktrees/sb1")).unwrap();
+
+    // run_remove should succeed (fallback + prune).
+    maint::run_remove(&ws, "sb1").unwrap();
+
+    // A subsequent checkout should also succeed (proves prune cleaned up).
+    maint::run_checkout(&ws, "sb1", "main", None).unwrap();
+    assert!(ws.join("worktrees/sb1").exists());
+}
+
+// ===== remove_nonexistent_worktree_ok =====
+#[test]
+fn remove_nonexistent_worktree_ok() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    // No checkout — just remove a non-existent worktree.
+    maint::run_remove(&ws, "never-created").unwrap();
 }

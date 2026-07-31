@@ -248,6 +248,229 @@ pub fn run_fetch(workspace: &Path) -> Result<(), MaintError> {
     }
 }
 
+/// Chemin (relatif au workspace) du worktree d'une sandbox donnée.
+/// Doit rester identique à `controller/src/project.rs::worktree_path`.
+pub fn worktree_path(sandbox_name: &str) -> String {
+    format!("worktrees/{sandbox_name}")
+}
+
+/// `checkout` : crée le worktree `worktrees/<sandbox>` pour `branch` s'il
+/// n'existe pas déjà (idempotent). Valide `sandbox` (validate_sandbox_name),
+/// `branch` (validate_branch) et, si fourni et non vide, `default_branch`
+/// (validate_branch) AVANT toute action. `default_branch: None` ou `Some("")`
+/// => résolution via symbolic-ref, repli "main" (voir Contexte).
+pub fn run_checkout(
+    workspace: &Path,
+    sandbox: &str,
+    branch: &str,
+    default_branch: Option<&str>,
+) -> Result<(), MaintError> {
+    validate_sandbox_name(sandbox)?;
+    validate_branch(branch)?;
+    if let Some(db) = default_branch
+        && !db.is_empty()
+    {
+        validate_branch(db)?;
+    }
+
+    let wt = worktree_path(sandbox);
+    if workspace.join(&wt).exists() {
+        // Already checked out — idempotent.
+        return Ok(());
+    }
+
+    // Resolve the default branch.
+    let default = if let Some(db) = default_branch {
+        if db.is_empty() {
+            // Resolve via symbolic-ref, fall back to "main".
+            resolve_default_branch(workspace).unwrap_or_else(|_| "main".into())
+        } else {
+            db.to_string()
+        }
+    } else {
+        // Resolve via symbolic-ref, fall back to "main".
+        resolve_default_branch(workspace).unwrap_or_else(|_| "main".into())
+    };
+
+    let bare_git_dir = BARE_REPO_DIR;
+
+    // Check if the branch exists in the bare repo.
+    let show_ref = Command::new("git")
+        .args([
+            "--git-dir",
+            bare_git_dir,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            &format!("refs/heads/{branch}"),
+        ])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| MaintError::GitFailed {
+            args: vec![
+                "--git-dir".into(),
+                bare_git_dir.into(),
+                "show-ref".into(),
+                "--verify".into(),
+                "--quiet".into(),
+                format!("refs/heads/{branch}"),
+            ],
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+
+    let git_worktree_add = |args: &[&str]| -> Result<(), MaintError> {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(workspace)
+            .output()
+            .map_err(|e| MaintError::GitFailed {
+                args: args.iter().cloned().map(String::from).collect(),
+                status: e.to_string(),
+                stderr: String::new(),
+            })?;
+        if output.status.success() {
+            Ok(())
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            Err(MaintError::GitFailed {
+                args: args.iter().cloned().map(String::from).collect(),
+                status: output.status.to_string(),
+                stderr,
+            })
+        }
+    };
+
+    if show_ref.status.success() {
+        // Branch exists in bare repo.
+        git_worktree_add(&["--git-dir", bare_git_dir, "worktree", "add", &wt, branch])?;
+    } else {
+        // Branch doesn't exist — create it from the default.
+        git_worktree_add(&[
+            "--git-dir",
+            bare_git_dir,
+            "worktree",
+            "add",
+            "-b",
+            branch,
+            &wt,
+            &default,
+        ])?;
+    }
+
+    Ok(())
+}
+
+/// Resolve the current branch via `symbolic-ref --short HEAD`.
+/// Returns "main" on failure (same fallback as the controller scripts).
+fn resolve_default_branch(workspace: &Path) -> Result<String, MaintError> {
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            BARE_REPO_DIR,
+            "symbolic-ref",
+            "--short",
+            "HEAD",
+        ])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| MaintError::GitFailed {
+            args: vec![
+                "--git-dir".into(),
+                BARE_REPO_DIR.into(),
+                "symbolic-ref".into(),
+                "--short".into(),
+                "HEAD".into(),
+            ],
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        Err(MaintError::GitFailed {
+            args: vec![
+                "--git-dir".into(),
+                BARE_REPO_DIR.into(),
+                "symbolic-ref".into(),
+                "--short".into(),
+                "HEAD".into(),
+            ],
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        })
+    }
+}
+
+/// `remove` : retire le worktree `worktrees/<sandbox>` (worktree remove
+/// --force, repli rm -rf) puis `worktree prune`. Valide `sandbox` d'abord.
+pub fn run_remove(workspace: &Path, sandbox: &str) -> Result<(), MaintError> {
+    validate_sandbox_name(sandbox)?;
+
+    let wt = worktree_path(sandbox);
+    let bare_git_dir = BARE_REPO_DIR;
+
+    // First attempt: git worktree remove --force.
+    // A non-zero exit is NOT an error — it's a logic branch (incoherent state).
+    let remove_result = Command::new("git")
+        .args([
+            "--git-dir",
+            bare_git_dir,
+            "worktree",
+            "remove",
+            "--force",
+            &wt,
+        ])
+        .current_dir(workspace)
+        .output(); // Result<Output, io::Error> — we handle both variants below.
+
+    // Fallback: rm -rf the worktree directory.
+    // A non-zero exit is NOT an error — it's a logic branch (incoherent state).
+    // A spawn error also triggers the fallback.
+    if !matches!(remove_result, Ok(output) if output.status.success()) {
+        let _ = std::fs::remove_dir_all(workspace.join(&wt));
+    }
+
+    // `worktree prune` must succeed — its failure is an error.
+    let prune_output = Command::new("git")
+        .args(["--git-dir", bare_git_dir, "worktree", "prune"])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| MaintError::GitFailed {
+            args: vec![
+                "--git-dir".into(),
+                bare_git_dir.into(),
+                "worktree".into(),
+                "prune".into(),
+            ],
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+
+    if prune_output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&prune_output.stderr).to_string();
+        Err(MaintError::GitFailed {
+            args: vec![
+                "--git-dir".into(),
+                bare_git_dir.into(),
+                "worktree".into(),
+                "prune".into(),
+            ],
+            status: prune_output.status.to_string(),
+            stderr,
+        })
+    }
+}
+
+/// `detect` : stub — retourne le JSON `{}`. Implémentation réelle : WS-10.
+/// Le paramètre `workspace` est ignoré pour l'instant (underscore) mais fait
+/// partie du contrat d'interface.
+pub fn run_detect(_workspace: &Path) -> Result<String, MaintError> {
+    Ok("{}".to_string())
+}
+
 /// `purge` : supprime récursivement `repo.git`, `worktrees` et `cache` sous
 /// `workspace`. `std::fs::remove_dir_all` ; un `NotFound` est ignoré (succès).
 pub fn run_purge(workspace: &Path) -> Result<(), MaintError> {
@@ -366,5 +589,43 @@ mod tests {
         validate_sandbox_name(".").expect_err("self");
         validate_sandbox_name("-x").expect_err("leading dash");
         validate_sandbox_name("a b").expect_err("space");
+    }
+
+    // ===== worktree_path =====
+
+    #[test]
+    fn worktree_path_value() {
+        assert_eq!(worktree_path("sb1"), "worktrees/sb1");
+    }
+
+    // ===== run_detect =====
+
+    #[test]
+    fn detect_stub_returns_empty_json() {
+        let result = run_detect(Path::new("/tmp"));
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), "{}");
+    }
+
+    // ===== run_checkout validation =====
+
+    #[test]
+    fn checkout_rejects_invalid_sandbox() {
+        let result = run_checkout(Path::new("/tmp"), "a/b", "main", None);
+        assert!(matches!(result, Err(MaintError::InvalidSandboxName { .. })));
+    }
+
+    #[test]
+    fn checkout_rejects_invalid_branch() {
+        let result = run_checkout(Path::new("/tmp"), "sb1", "a..b", None);
+        assert!(matches!(result, Err(MaintError::InvalidBranch { .. })));
+    }
+
+    // ===== run_remove validation =====
+
+    #[test]
+    fn remove_rejects_invalid_sandbox() {
+        let result = run_remove(Path::new("/tmp"), "..");
+        assert!(matches!(result, Err(MaintError::InvalidSandboxName { .. })));
     }
 }
