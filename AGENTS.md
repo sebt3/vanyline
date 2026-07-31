@@ -53,6 +53,11 @@ Image de base : Debian slim + binaire serveur + **substrat natif commun** (compi
 `cc`/`ld` + binutils, `libc-dev`, make, pkg-config) + git, curl, vim. Le linker C est
 obligatoire dans le base : sans lui aucune compilation native ne lie (rust, node-gyp, cgo…).
 
+L'image embarque un second binaire : **`vanyline-maint`** (`sandbox/src/bin/maint.rs`),
+l'utilitaire de maintenance des workspaces invoqué par les Jobs du controller
+(`init`/`fetch`/`purge`/`checkout`/`remove`/`detect`) — cf. la règle de maintenance
+dans la section controller et `docs/architecture.md` (section `vanyline-maint`).
+
 Toolchains : images OCI standard (ex: `rust:slim-trixie`, `node:trixie-slim`) montées via
 `volumes[].image` (feature K8s native, GA depuis v1.36, prérequis : v1.31+). Une toolchain
 devient utilisable par **injection d'env au démarrage**, jamais par magie :
@@ -77,6 +82,14 @@ Opérateur Kubernetes (kube-rs). Gère 3 CRDs namespacés :
 - **Owner** : identité cluster d'un utilisateur — crée/référence un PVC (vanyline ou existant,
   ex: PVC du pod code-server pour kydah-code) + crée un ServiceAccount + attributs quota
 - **Sandbox** : pod de travail — référence un Owner (sous-répertoire PVC) + liste de toolchains
+
+**Règle — maintenance des projets** : toute action de maintenance du controller sur les
+projets (clone, fetch, purge, worktrees, détection de langages) s'exécute dans un pod
+portant **l'image sandbox**, via l'utilitaire `vanyline-maint` de l'image — jamais un
+script shell assemblé par le controller. Les arguments passent en **argv**
+(`command: ["vanyline-maint", ...]`) : aucun champ de CRD n'est interpolé dans une
+commande shell. Conséquences : une seule image à maintenir, et l'outillage git/langages
+disponible au même endroit pour la maintenance ET pour les sessions LLM.
 
 **Statut : déféré.** Pour le dev/test de la sandbox, un script shell/Python crée les pods directement.
 

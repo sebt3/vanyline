@@ -16,7 +16,7 @@ Six crates : **deux bibliothèques feuilles** partagées (`vanyline-tools`, `van
 | `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), erreurs `VNL-*` |
 | `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux |
 | `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib` |
-| `vanyline-sandbox` | binaire | Pod serveur WS/MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) |
+| `vanyline-sandbox` | binaire | Pod serveur WS/MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
 | `vanyline-controller` | binaire | Opérateur Kubernetes | *(stub)* — kube-rs, CRDs |
 
 ## Graphe de dépendances
@@ -296,7 +296,59 @@ jamais configuré, cf. `git log --grep default_max_turns`) qu'aucun test
 unitaire n'aurait attrapé — un SLM enchaîne spontanément plus d'outils par
 tour qu'un scénario de test écrit à la main.
 
+## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
+
+Second binaire du crate `vanyline-sandbox` (`sandbox/src/bin/maint.rs`, logique dans
+`sandbox/src/maint.rs`). C'est l'outil que les Jobs du controller exécutent dans un pod
+à image sandbox pour toute maintenance d'un workspace Project — la règle système
+correspondante ("l'image sandbox est l'outil de maintenance du controller") est dans
+`AGENTS.md`, section controller.
+
+| Sous-commande | Rôle |
+|---------------|------|
+| `init --repo <url> --workspace <dir> [--cache <name>]...` | mkdir des caches + clone bare si absent (idempotent) |
+| `fetch --workspace <dir>` | `git fetch --prune` sur le clone bare |
+| `purge --workspace <dir>` | supprime `repo.git`, `worktrees/`, `cache/` (idempotent) |
+| `checkout --workspace <dir> --sandbox <n> --branch <ref> [--default-branch <ref>]` | worktree idempotent ; branche créée depuis la default branch (résolue par `symbolic-ref`, repli `main`) si absente du bare |
+| `remove --workspace <dir> --sandbox <n>` | `worktree remove --force`, repli `rm -rf`, puis `worktree prune` |
+| `detect --workspace <dir>` | stub — sort `{}` ; implémentation réelle : WS-10 |
+
+Décisions structurantes :
+
+- **Validation avant toute action** : branches via `git check-ref-format --branch`
+  (subprocess — sémantique exacte de git, pas de réimplémentation), nom de sandbox comme
+  composant de chemin sûr (`[A-Za-z0-9._-]`, ni `.` ni `..`, pas de `-` initial — le nom
+  entre dans `worktrees/<n>`, ferme le path traversal), URL de repo plausible (non vide,
+  pas de `-` initial, pas de caractère de contrôle). Erreurs `VNL-MAINT-001` à `005`.
+- **Jamais de shell** : toutes les invocations git en argv (`std::process::Command`),
+  `--` avant les positionnels de `clone`. Côté controller, les 5 Jobs git construisent
+  `command: Vec<String>` (`git_pod_template`) — plus aucun `sh -c` dans `controller/`,
+  un champ de CRD ne peut plus s'échapper dans un shell (R1 clos par construction ;
+  test `git_pod_template_no_shell` le fige).
+- **Layout dupliqué délibérément** : `repo.git`, `worktrees/<sandbox>`, `cache/<dir>`
+  et le mapping `pnpm` → `pnpm-store` existent des deux côtés
+  (`controller/src/project.rs` et `sandbox/src/maint.rs`) — conforme à la règle
+  "`vanyline-controller` reste isolé", pas de crate partagée pour 3 chemins. La dérive
+  est couverte par des tests aux mêmes littéraux des deux côtés (`layout_constants`,
+  `cache_dir_name_mapping`, `worktree_path_value` côté maint ;
+  `bare_repo_and_worktree_paths`, `cache_dir_name_mapping` côté controller).
+- **Les identifiants de cache passent tels quels** (`--cache pnpm`) : le mapping vers le
+  nom de répertoire vit dans `vanyline-maint`, plus dans la commande du Job.
+- **R2** : les presets toolchain du controller listent x86_64 **et** aarch64 dans
+  `LD_LIBRARY_PATH` — le loader ignore silencieusement les répertoires absents, aucune
+  logique par nœud.
+- **Release couplée** : controller et image sandbox sortent du même repo et avancent
+  ensemble — une image antérieure à WS-9 ne contient pas `vanyline-maint`.
+
 ## Limites connues (dette assumée, pas oubliée)
+
+- **`fetch` ne met pas à jour les branches du clone bare** : `git clone --bare` ne
+  configure aucune refspec de fetch, donc le `vanyline-maint fetch` périodique (comme le
+  script shell qu'il remplace — parité voulue par WS-9) ne rafraîchit que `FETCH_HEAD`,
+  pas `refs/heads/*` ; un `checkout` d'une branche apparue sur le remote après le clone
+  ne la verra pas, et `--prune` n'a rien à élaguer. Bug latent **préexistant** du design
+  controller, hors périmètre WS-9 (parité stricte) — à traiter dans WS-11 (sandbox-git),
+  probablement via une refspec `+refs/heads/*:refs/heads/*` posée par `init`.
 
 - **Pas de streaming WS live côté app** : `CollectingSink` bufferise tous les événements
   d'un tour et les envoie d'un coup en fin de tour (`flush`), comme avant la migration
