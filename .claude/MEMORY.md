@@ -294,6 +294,42 @@ Claude. Règles stabilisées :
   réellement exécutée sur tout le périmètre n'est pas une garantie** — le
   premier run réel révèle souvent de la dette accumulée silencieusement.
 
+### ws09-sandbox-maint-agent — vanyline-maint (terminé)
+
+Binaire `vanyline-maint` dans l'image sandbox (`sandbox/src/maint.rs` + wrapper
+clap `sandbox/src/bin/maint.rs`) : `init`/`fetch`/`purge`/`checkout`/`remove` +
+stub `detect` (WS-10). Les 5 Jobs git du controller invoquent ce binaire en
+argv — plus aucun `sh -c` dans `controller/` (R1 clos), presets toolchain deux
+arches (R2). Erreurs `VNL-MAINT-001..005`. Détails : `docs/architecture.md`
+section "Maintenance des workspaces". 4 tâches (3 Qwen + docs par Claude),
+506 tests au total en fin de feature (474 au départ).
+
+Leçons de délégation spécifiques (complètent la section Outillage ci-dessus) :
+
+- **Les apostrophes françaises dans un message de commit donné verbatim font
+  planter Qwen en boucle sur le quoting bash** (tâche 1 : 3 tentatives
+  échouées puis crash de session sur un `Write /tmp/...` auto-rejeté — /tmp
+  est hors whitelist `external_directory`). Parade qui marche, appliquée dès
+  la tâche 2 : message **sans apostrophes/accents** + procédure imposée dans
+  la section Commit du fichier de tâche : écrire le message dans
+  `.tasks/commit-msg.txt` (chemin DANS le repo), `git commit -F`, supprimer
+  le fichier. Zéro échec ensuite.
+- **Vérifier le préfixe du message même avec la procédure -F** : tâche 3
+  committée avec `(featur: ...)` au lieu de `(feat: ...)` — typo de Qwen dans
+  le fichier de message, corrigée par `git commit --amend` (sûr : rien n'est
+  poussé avant la clôture).
+- Le compte de tests annoncé par Qwen était encore une fois faux/périmé
+  (tâche 2 : "493" annoncés, 505 réels) — la règle "toujours recompter
+  soi-même" reste valable.
+
+**Point ouvert légué à WS-11 (sandbox-git)** : `git clone --bare` ne configure
+aucune refspec de fetch → le `fetch` périodique ne rafraîchit que `FETCH_HEAD`,
+pas `refs/heads/*` ; une branche créée sur le remote après le clone est
+invisible au `checkout`. Préexistant (le script shell faisait pareil), parité
+volontairement conservée par WS-9, documenté dans "Limites connues" de
+`docs/architecture.md`. Fix probable : refspec `+refs/heads/*:refs/heads/*`
+posée par `vanyline-maint init`.
+
 ---
 
 ## Contexte et philosophie
@@ -307,11 +343,11 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 
 ## Scope — phase actuelle
 
-harness-core, cli-harness, cli-rpc-stdio, ws07-review-fixes et
-ws08-github-publication terminés (cli sur son vrai stockage YAML deux
+harness-core, cli-harness, cli-rpc-stdio, ws07-review-fixes,
+ws08-github-publication et ws09-sandbox-maint-agent terminés (cli sur son vrai stockage YAML deux
 couches, ancien `CliConfigStore` JSON supprimé ; serveur JSON-RPC stdio
 complet, cf. section dédiée plus haut ; review sprint 1 R3-R16 corrigées —
-R1/R2 absorbées par WS-9, hors périmètre ; repo publiable — Dockerfiles à
+R1/R2 closes par WS-9 (vanyline-maint, cf. section dédiée) ; repo publiable — Dockerfiles à
 leur place, `deploy/` trié, CI de validation et de release GitHub Actions,
 README étendu, cf. `docs/architecture.md` section "Limites connues" pour le
 détail des deux dettes révélées en route — détails dans `docs/architecture.md`,
