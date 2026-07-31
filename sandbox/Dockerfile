@@ -26,6 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git curl vim ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /app/target/release/vanyline-sandbox /usr/local/bin/vanyline-sandbox
+COPY --from=builder /app/target/release/vanyline-maint /usr/local/bin/vanyline-maint
 
 EXPOSE 3000 9090
 ENTRYPOINT ["/usr/local/bin/vanyline-sandbox"]

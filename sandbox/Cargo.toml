@@ -7,6 +7,10 @@ edition = "2024"
 name = "vanyline-sandbox"
 path = "src/main.rs"
 
+[[bin]]
+name = "vanyline-maint"
+path = "src/bin/maint.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["json", "macros"] }

@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod config;
+pub mod maint;
 pub mod mcp;
 pub mod telemetry;
 pub mod tools_impl;
