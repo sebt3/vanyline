@@ -168,18 +168,52 @@ Claude. Règles stabilisées :
   projet, pas le dense `27b` de la consigne globale — trop lent en
   pratique sur le Strix (préférence du développeur). Toujours passer `-m`
   explicitement, ne jamais compter sur l'auto-découverte.
-- **Les permissions `bash: ... allow` de `.opencode/agents/implement.md`
-  n'ont AUCUN effet observable en `opencode run` headless** — confirmé
-  directement (hors Qwen) sur le cas le plus simple possible (`cargo check
-  --workspace` nu, censé matcher `cargo check*: allow` trivialement,
-  refusé quand même). Hypothèse espace-avant-étoile testée et invalidée ;
-  `--dangerously-skip-permissions` non exploré (bypass complet, hors
-  périmètre autorisé). Conséquence acceptée : **Qwen ne peut jamais se
-  valider lui-même dans cet environnement**, quel que soit le prompt —
-  Claude relit et valide (`cargo check/test/clippy`) après CHAQUE
-  délégation, systématiquement. Elargi quand même `mkdir*`/`tail*`/
-  `head*`/`grep*`/`wc*: allow` (faible risque, au cas où un autre contexte
-  d'exécution en bénéficierait) mais sans compter dessus.
+- **Cause racine trouvée et corrigée (2026-07-31)** : les permissions
+  `bash: ... allow` de `.opencode/agents/implement.md` n'avaient aucun
+  effet parce que le catch-all `"*": ask` était placé en **dernière**
+  position du mapping YAML — or la résolution de permission d'opencode
+  applique la règle **la dernière qui matche gagne** (confirmé par la doc
+  officielle : "Rules are evaluated by pattern match, with the last
+  matching rule winning" ; pattern recommandé : catch-all en premier,
+  règles spécifiques après). Un `"*": ask` en fin de liste matche tout et
+  écrase silencieusement tous les `allow` déclarés au-dessus. Le bloc
+  `external_directory` du même fichier avait la bonne structure
+  (catch-all d'abord) — c'était une erreur d'ordre isolée au bloc `bash`,
+  pas une limitation d'`opencode run` headless. Décision du développeur
+  (2026-07-31) : basculer `implement.md` en modèle blacklist — `bash:
+  "*": allow` en tête, puis `git push*: deny`, `git rebase*: deny`,
+  `sudo*: deny` après. Qwen peut désormais committer et faire tout ce que
+  le développeur ferait en bash, sauf push/rebase/sudo — **changement de
+  workflow assumé** : l'ancienne règle "Claude committe systématiquement
+  après relecture" ne s'applique plus par défaut à `implement`, seule la
+  relecture (`cargo check/test/clippy` après chaque délégation) reste
+  systématique. `diagnose.md` avait le même bug d'ordre sur son bloc
+  `bash` (`"*": deny` en dernier) — corrigé en gardant le modèle whitelist
+  (catch-all `deny` remis en premier) car `diagnose` a `edit: deny` et ne
+  doit jamais pouvoir écrire de fichier, y compris via un détour bash
+  (`sed -i`, redirection `>`) — un blacklist y créerait une fuite de la
+  garantie "aucune modification".
+- **`external_directory: /home/coder/.config/opencode/*: allow`** ajouté
+  aux deux agents (2026-07-31) : Qwen plantait en boucle sur un `ask`
+  auto-rejeté en tentant de lire `~/.config/opencode/AGENTS.md` (contexte
+  global qu'il connaît par sa propre config opencode). Décision du
+  développeur : autoriser quand même, malgré ce fichier contenant un prénom
+  en clair (que la règle globale du développeur garde hors des fichiers
+  commités) — Qwen est un outil d'exécution locale, pas un tiers externe ;
+  le risque réel est qu'il reproduise ce prénom dans un fichier commité ou
+  un message généré, à surveiller en review plutôt qu'à bloquer en amont.
+- **Une permission auto-rejetée (bash OU external_directory) a une chance
+  non négligeable de faire planter toute la session `opencode run`**
+  plutôt que de laisser Qwen s'adapter et continuer — observé à 3 reprises
+  sur cette feature (deux fois sur des `bash find` avant le fix d'ordre,
+  une fois sur un `external_directory` légitimement `ask`). Le fix d'ordre
+  bash + l'ajout d'`external_directory` réduisent la fréquence des
+  rejets, mais ne garantissent pas qu'un rejet restant (ex: un chemin
+  externe vraiment hors périmètre) laisse la session continuer proprement.
+  Réflexe : en cas de session qui se termine avec un diff vide ou quasi
+  vide après un `! permission requested ... auto-rejecting` dans le log,
+  relancer directement la même tâche plutôt que de chercher un bug dans le
+  fichier de tâche — c'est souvent juste ce plantage.
 - **Corriger en déléguant, pas en patchant direct** (retour du
   développeur, 2026-07-12) : un bug/oubli remonté par la validation de
   Claude devient un fichier de tâche de correction (`<tâche>-fix-NN.md`)

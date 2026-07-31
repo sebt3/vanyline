@@ -8,6 +8,7 @@ permission:
   doom_loop: ask
   external_directory:
     "*": ask
+    /home/coder/.config/opencode/*: allow
     /home/coder/.local/share/opencode/tool-output/*: allow
     /tmp/opencode/*: allow
   question: deny
@@ -20,24 +21,10 @@ permission:
     "*.env.*": ask
     "*.env.example": allow
   bash:
-    git status*: allow
-    git diff*: allow
-    git add*: allow
-    git commit*: ask
-    cargo check *: allow
-    cargo check*: allow
-    cargo test*: allow
-    cargo build*: allow
-    cargo clippy*: allow
-    npm run check*: allow
-    npm run test*: allow
-    npm run build*: allow
-    mkdir*: allow
-    tail*: allow
-    head*: allow
-    grep*: allow
-    wc*: allow
-    "*": ask
+    "*": allow
+    git push*: deny
+    git rebase*: deny
+    sudo*: deny
   websearch: ask
 ---
 
