@@ -215,6 +215,17 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         },
     ];
 
+    // Monté le clone bare du repo pour que le pointeur .git du worktree
+    // (gitdir absolu écrit par `git worktree add`) pointe vers un chemin
+    // visible dans le pod sandbox. Lecture-écriture : git doit pouvoir
+    // écrire HEAD/index (sous worktrees/<sandbox>/) et de nouveaux objets.
+    mounts.push(VolumeMount {
+        name: "workspace".to_string(),
+        mount_path: format!("{WORKSPACE_MOUNT_PATH}/{}", project::bare_repo_path()),
+        sub_path: Some(combine_sub_path(project, project::bare_repo_path())),
+        ..Default::default()
+    });
+
     let mut env = vec![EnvVar {
         name: "VNL_SANDBOX_ROOT".to_string(),
         value: Some(format!("{HOME_MOUNT_PATH}/workspace")),
@@ -1496,5 +1507,84 @@ mod tests {
         let cond = &status.conditions[0];
         assert_eq!(cond.status, "False");
         assert_eq!(cond.reason, "NotRunning");
+    }
+
+    // ===== bare_repo mount (tâche 00) =====
+
+    #[test]
+    fn bare_repo_mount_present_no_existing_pvc() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+
+        // Find the mount by exact mount_path (unique for this bare_repo mount)
+        let bare_repo_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/workspace/repo.git")
+            .expect("should have bare repo mount at /workspace/repo.git");
+
+        assert_eq!(
+            bare_repo_mount.sub_path,
+            Some("repo.git".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_repo_mount_present_with_existing_pvc_subpath() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(
+            Some(PvcRef {
+                name: "code-server-home".into(),
+                sub_path: Some("demo".into()),
+            }),
+            None,
+        );
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+
+        let bare_repo_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/workspace/repo.git")
+            .expect("should have bare repo mount at /workspace/repo.git");
+
+        assert_eq!(
+            bare_repo_mount.sub_path,
+            Some("demo/repo.git".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_repo_mount_is_writable() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+
+        let bare_repo_mount = mounts
+            .iter()
+            .find(|m| m.mount_path == "/workspace/repo.git")
+            .expect("should have bare repo mount at /workspace/repo.git");
+
+        // read_only must NOT be Some(true)
+        assert_ne!(bare_repo_mount.read_only, Some(true));
     }
 }
