@@ -43,8 +43,6 @@ pub struct DeleteFileOptions {
     pub path: String,
 }
 
-
-
 // ---------------------------------------------------------------------------
 // Helper: FileNotFound hint
 // ---------------------------------------------------------------------------
@@ -61,30 +59,28 @@ pub(crate) fn file_not_found_hint(path: &str) -> String {
 
     match parent {
         None => String::new(),
-        Some(parent) if parent.as_encoded_bytes().is_empty()
-            || parent == std::ffi::OsStr::new(".") =>
+        Some(parent)
+            if parent.as_encoded_bytes().is_empty() || parent == std::ffi::OsStr::new(".") =>
         {
             String::new()
         }
-        Some(parent) => {
-            match std::fs::read_dir(parent) {
-                Ok(entries) => {
-                    let names: Vec<String> = entries
-                        .filter_map(|e| e.ok())
-                        .map(|e| e.file_name().to_string_lossy().to_string())
-                        .collect();
-                    let mut sorted = names;
-                    sorted.sort();
-                    if sorted.is_empty() {
-                        ", parent directory contains: []".to_string()
-                    } else {
-                        let display = sorted.join(", ");
-                        format!(", parent directory contains: [{}]", display)
-                    }
+        Some(parent) => match std::fs::read_dir(parent) {
+            Ok(entries) => {
+                let names: Vec<String> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect();
+                let mut sorted = names;
+                sorted.sort();
+                if sorted.is_empty() {
+                    ", parent directory contains: []".to_string()
+                } else {
+                    let display = sorted.join(", ");
+                    format!(", parent directory contains: [{}]", display)
                 }
-                Err(_) => ", parent directory does not exist either".to_string(),
             }
-        }
+            Err(_) => ", parent directory does not exist either".to_string(),
+        },
     }
 }
 
@@ -107,7 +103,12 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
                     hint: file_not_found_hint(&path),
                 });
             }
-            Err(e) => return Err(ToolsError::Io { path: path.clone(), source: e }),
+            Err(e) => {
+                return Err(ToolsError::Io {
+                    path: path.clone(),
+                    source: e,
+                })
+            }
         };
 
         if meta.is_dir() {
@@ -158,7 +159,8 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
         let sliced: Vec<&str> = content.lines().skip(offset).collect();
         let sliced_text = sliced.join("\n");
         let numbered = output::number_lines(&sliced_text, offset + 1);
-        let result = output::bound_lines(&numbered, offset, effective_limit, output::READ_MAX_BYTES);
+        let result =
+            output::bound_lines(&numbered, offset, effective_limit, output::READ_MAX_BYTES);
 
         Ok(result)
     })
@@ -280,7 +282,12 @@ pub fn edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, ToolsError
                     hint: file_not_found_hint(&path),
                 });
             }
-            Err(e) => return Err(ToolsError::Io { path: path.clone(), source: e }),
+            Err(e) => {
+                return Err(ToolsError::Io {
+                    path: path.clone(),
+                    source: e,
+                })
+            }
         };
 
         if meta.is_dir() {
@@ -365,10 +372,12 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     for i in 1..=len_a {
         curr[0] = i;
         for j in 1..=len_b {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] { 0 } else { 1 };
-            curr[j] = (prev[j] + 1)
-                .min(curr[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
+                0
+            } else {
+                1
+            };
+            curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
     }
@@ -481,7 +490,12 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
                     let is_dir = full_path.is_dir();
                     let indent = "  ".repeat(indent_level);
                     let suffix = if is_dir { "/" } else { "" };
-                    output.push(format!("{}{}{}", indent, file_name.to_string_lossy(), suffix));
+                    output.push(format!(
+                        "{}{}{}",
+                        indent,
+                        file_name.to_string_lossy(),
+                        suffix
+                    ));
                     *count += 1;
 
                     // Check limit after adding the entry
@@ -492,7 +506,15 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
 
                     // Only descend if there are remaining levels
                     if is_dir && depth_remaining > 1 {
-                        recurse(&full_path, depth_remaining - 1, indent_level + 1, output, count, max_entries, limit_reached);
+                        recurse(
+                            &full_path,
+                            depth_remaining - 1,
+                            indent_level + 1,
+                            output,
+                            count,
+                            max_entries,
+                            limit_reached,
+                        );
                     }
                 }
             }
@@ -542,7 +564,12 @@ pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError
                     hint: file_not_found_hint(&path),
                 });
             }
-            Err(e) => return Err(ToolsError::Io { path: path.clone(), source: e }),
+            Err(e) => {
+                return Err(ToolsError::Io {
+                    path: path.clone(),
+                    source: e,
+                })
+            }
         };
 
         // 2. directory → remove_dir
@@ -586,7 +613,9 @@ mod tests {
     async fn read_file_nominal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        tokio::fs::write(&path, "line1\nline2\nline3\nline4\nline5\n").await.unwrap();
+        tokio::fs::write(&path, "line1\nline2\nline3\nline4\nline5\n")
+            .await
+            .unwrap();
 
         let result = read_file(ReadFileOptions {
             path: path.to_string_lossy().to_string(),
@@ -610,7 +639,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
         let lines: Vec<String> = (0..10).map(|i| format!("line {}", i)).collect();
-        tokio::fs::write(&path, lines.join("\n") + "\n").await.unwrap();
+        tokio::fs::write(&path, lines.join("\n") + "\n")
+            .await
+            .unwrap();
 
         let result = read_file(ReadFileOptions {
             path: path.to_string_lossy().to_string(),
@@ -630,10 +661,10 @@ mod tests {
     async fn read_file_limit_truncates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        let lines: Vec<String> = (0..300)
-            .map(|i| format!("line {}", i))
-            .collect();
-        tokio::fs::write(&path, lines.join("\n") + "\n").await.unwrap();
+        let lines: Vec<String> = (0..300).map(|i| format!("line {}", i)).collect();
+        tokio::fs::write(&path, lines.join("\n") + "\n")
+            .await
+            .unwrap();
 
         let result = read_file(ReadFileOptions {
             path: path.to_string_lossy().to_string(),
@@ -832,7 +863,9 @@ mod tests {
     async fn edit_file_nominal() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        tokio::fs::write(&path, "hello world\nfoo bar\n").await.unwrap();
+        tokio::fs::write(&path, "hello world\nfoo bar\n")
+            .await
+            .unwrap();
 
         let result = edit_file(EditFileOptions {
             path: path.to_string_lossy().to_string(),
@@ -852,7 +885,9 @@ mod tests {
     async fn edit_file_no_match() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        tokio::fs::write(&path, "hello world\nfoo bar\n").await.unwrap();
+        tokio::fs::write(&path, "hello world\nfoo bar\n")
+            .await
+            .unwrap();
 
         let result = edit_file(EditFileOptions {
             path: path.to_string_lossy().to_string(),
@@ -888,7 +923,11 @@ mod tests {
         match result {
             Err(ToolsError::EditNoMatch { hint, .. }) => {
                 // Should not panic, hint should be empty
-                assert!(hint.is_empty(), "hint should be empty for empty file, got: '{}'", hint);
+                assert!(
+                    hint.is_empty(),
+                    "hint should be empty for empty file, got: '{}'",
+                    hint
+                );
             }
             other => panic!("Expected EditNoMatch, got: {:?}", other),
         }
@@ -898,7 +937,9 @@ mod tests {
     async fn edit_file_ambiguous() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        tokio::fs::write(&path, "apple\napple\napple\n").await.unwrap();
+        tokio::fs::write(&path, "apple\napple\napple\n")
+            .await
+            .unwrap();
 
         let result = edit_file(EditFileOptions {
             path: path.to_string_lossy().to_string(),
@@ -921,7 +962,9 @@ mod tests {
     async fn edit_file_replace_all() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        tokio::fs::write(&path, "apple\napple\napple\n").await.unwrap();
+        tokio::fs::write(&path, "apple\napple\napple\n")
+            .await
+            .unwrap();
 
         let result = edit_file(EditFileOptions {
             path: path.to_string_lossy().to_string(),
@@ -988,8 +1031,12 @@ mod tests {
     #[tokio::test]
     async fn list_directory_nominal() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("alpha.txt"), "content").await.unwrap();
-        tokio::fs::create_dir(dir.path().join("beta")).await.unwrap();
+        tokio::fs::write(dir.path().join("alpha.txt"), "content")
+            .await
+            .unwrap();
+        tokio::fs::create_dir(dir.path().join("beta"))
+            .await
+            .unwrap();
 
         let result = list_directory(ListDirectoryOptions {
             path: dir.path().to_string_lossy().to_string(),
@@ -1166,7 +1213,9 @@ mod tests {
         let non_empty = dir.path().join("non_empty");
         tokio::fs::create_dir(&non_empty).await.unwrap();
         // Create a file inside to make it non-empty
-        tokio::fs::write(non_empty.join("inner.txt"), "data").await.unwrap();
+        tokio::fs::write(non_empty.join("inner.txt"), "data")
+            .await
+            .unwrap();
 
         let result = delete_file(DeleteFileOptions {
             path: non_empty.to_string_lossy().to_string(),
@@ -1174,10 +1223,7 @@ mod tests {
         .await;
 
         match result {
-            Err(ToolsError::InvalidArgument {
-                name,
-                reason,
-            }) => {
+            Err(ToolsError::InvalidArgument { name, reason }) => {
                 assert_eq!(name, "path");
                 assert!(reason.contains("not empty"));
             }
@@ -1224,7 +1270,10 @@ mod tests {
         assert!(result.is_ok());
         let meta = tokio::fs::metadata(&path).await.unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o640);
-        assert_eq!(tokio::fs::read_to_string(&path).await.unwrap(), "new content");
+        assert_eq!(
+            tokio::fs::read_to_string(&path).await.unwrap(),
+            "new content"
+        );
     }
 
     #[tokio::test]

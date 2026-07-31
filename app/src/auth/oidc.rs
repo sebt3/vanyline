@@ -69,7 +69,9 @@ async fn send_http_request(
         headers.extend(response.headers().clone().into_iter());
     }
     let body = response.bytes().await?.to_vec();
-    Ok(response_builder.body(body).expect("VNL-AUTH-008: failed to build HTTP response"))
+    Ok(response_builder
+        .body(body)
+        .expect("VNL-AUTH-008: failed to build HTTP response"))
 }
 
 impl OidcClient {
@@ -148,17 +150,21 @@ impl OidcClientTrait for OidcClient {
                 AppError::OidcError(e.to_string())
             })?;
 
-        let id_token = token_response
-            .id_token()
-            .ok_or_else(|| AppError::OidcError("VNL-AUTH-002: no id_token in response".to_string()))?;
+        let id_token = token_response.id_token().ok_or_else(|| {
+            AppError::OidcError("VNL-AUTH-002: no id_token in response".to_string())
+        })?;
 
         let id_token_claims = id_token
             .claims(&self.inner.id_token_verifier(), expected_nonce)
-            .map_err(|e| AppError::OidcError(format!("VNL-AUTH-003: token verification failed: {e}")))?;
+            .map_err(|e| {
+                AppError::OidcError(format!("VNL-AUTH-003: token verification failed: {e}"))
+            })?;
 
         let email = id_token_claims
             .email()
-            .ok_or_else(|| AppError::OidcError("VNL-AUTH-002: no email in token claims".to_string()))?
+            .ok_or_else(|| {
+                AppError::OidcError("VNL-AUTH-002: no email in token claims".to_string())
+            })?
             .to_string();
 
         let id_token_string = id_token.to_string();

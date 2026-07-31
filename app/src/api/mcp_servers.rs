@@ -7,11 +7,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
-    api::conversations::get_or_create_user,
-    auth::middleware::AuthUser,
-    db::models::McpServer,
-    error::AppError,
-    AppState,
+    api::conversations::get_or_create_user, auth::middleware::AuthUser, db::models::McpServer,
+    error::AppError, AppState,
 };
 
 #[derive(Deserialize)]
@@ -74,14 +71,15 @@ pub async fn get_server(
     Path(id): Path<Uuid>,
 ) -> Result<Json<McpServer>, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
-    let server = sqlx::query_as::<_, McpServer>(
-        "SELECT * FROM mcp_servers WHERE id = $1 AND user_id = $2",
-    )
-    .bind(id)
-    .bind(db_user.id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::McpError("VNL-MCP-002: MCP server not found".to_string()))?;
+    let server =
+        sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(db_user.id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or(AppError::McpError(
+                "VNL-MCP-002: MCP server not found".to_string(),
+            ))?;
     Ok(Json(server))
 }
 
@@ -114,7 +112,9 @@ pub async fn update_server(
     .bind(&body.headers)
     .fetch_optional(&state.pool)
     .await?
-    .ok_or(AppError::McpError("VNL-MCP-002: MCP server not found".to_string()))?;
+    .ok_or(AppError::McpError(
+        "VNL-MCP-002: MCP server not found".to_string(),
+    ))?;
 
     Ok(Json(server))
 }
@@ -133,7 +133,9 @@ pub async fn delete_server(
         .rows_affected();
 
     if rows == 0 {
-        return Err(AppError::McpError("VNL-MCP-002: MCP server not found".to_string()));
+        return Err(AppError::McpError(
+            "VNL-MCP-002: MCP server not found".to_string(),
+        ));
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -172,7 +174,7 @@ mod tests {
             oidc_ca_cert: None,
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
-            
+
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
         };

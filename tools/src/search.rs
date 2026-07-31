@@ -38,7 +38,12 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
                     hint: file_not_found_hint(&effective_path),
                 });
             }
-            Err(e) => return Err(ToolsError::Io { path: effective_path.clone(), source: e }),
+            Err(e) => {
+                return Err(ToolsError::Io {
+                    path: effective_path.clone(),
+                    source: e,
+                })
+            }
         };
         if !meta.is_dir() {
             return Err(ToolsError::NotADirectory(effective_path.clone()));
@@ -68,7 +73,8 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
             .git_global(false)
             .filter_entry(|entry| {
                 // Always exclude .git, target, node_modules
-                entry.file_name()
+                entry
+                    .file_name()
                     .to_str()
                     .map(|name| name != ".git" && name != "target" && name != "node_modules")
                     .unwrap_or(true)
@@ -109,7 +115,10 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
         results.sort();
 
         if results.is_empty() {
-            Ok(format!("no files matching '{}' under {}", pattern, effective_path))
+            Ok(format!(
+                "no files matching '{}' under {}",
+                pattern, effective_path
+            ))
         } else {
             let mut line = results.join("\n");
             if limit_reached.get() {
@@ -157,7 +166,12 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
                     hint: file_not_found_hint(&effective_path),
                 });
             }
-            Err(e) => return Err(ToolsError::Io { path: effective_path.clone(), source: e }),
+            Err(e) => {
+                return Err(ToolsError::Io {
+                    path: effective_path.clone(),
+                    source: e,
+                })
+            }
         };
         if !meta.is_dir() {
             return Err(ToolsError::NotADirectory(effective_path.clone()));
@@ -200,7 +214,8 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
             .git_ignore(true)
             .git_global(false)
             .filter_entry(|entry| {
-                entry.file_name()
+                entry
+                    .file_name()
                     .to_str()
                     .map(|name| name != ".git" && name != "target" && name != "node_modules")
                     .unwrap_or(true)
@@ -258,7 +273,10 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
         }
 
         if results.is_empty() {
-            Ok(format!("no matches for '{}' under {}", pattern, effective_path))
+            Ok(format!(
+                "no matches for '{}' under {}",
+                pattern, effective_path
+            ))
         } else {
             let mut line = results.join("\n");
             if limit_reached.get() {
@@ -289,9 +307,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         tokio::fs::create_dir_all(&src).await.unwrap();
-        tokio::fs::write(src.join("main.rs"), "fn main() {}").await.unwrap();
-        tokio::fs::write(src.join("lib.rs"), "pub fn lib() {}").await.unwrap();
-        tokio::fs::write(dir.path().join("README.md"), "# Project").await.unwrap();
+        tokio::fs::write(src.join("main.rs"), "fn main() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(src.join("lib.rs"), "pub fn lib() {}")
+            .await
+            .unwrap();
+        tokio::fs::write(dir.path().join("README.md"), "# Project")
+            .await
+            .unwrap();
 
         let result = find_files(FindFilesOptions {
             pattern: "**/*.rs".into(),
@@ -313,8 +337,12 @@ mod tests {
         let rs_file = dir.path().join("main.rs");
         let git_file = dir.path().join(".git").join("config");
         let target_file = dir.path().join("target").join("out.o");
-        tokio::fs::create_dir_all(dir.path().join(".git")).await.unwrap();
-        tokio::fs::create_dir_all(dir.path().join("target")).await.unwrap();
+        tokio::fs::create_dir_all(dir.path().join(".git"))
+            .await
+            .unwrap();
+        tokio::fs::create_dir_all(dir.path().join("target"))
+            .await
+            .unwrap();
         tokio::fs::write(&git_file, "[core]").await.unwrap();
         tokio::fs::write(&target_file, "binary").await.unwrap();
         tokio::fs::write(&rs_file, "fn main() {}").await.unwrap();
@@ -334,7 +362,9 @@ mod tests {
     #[tokio::test]
     async fn find_files_no_match() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("README.md"), "# Project").await.unwrap();
+        tokio::fs::write(dir.path().join("README.md"), "# Project")
+            .await
+            .unwrap();
 
         let result = find_files(FindFilesOptions {
             pattern: "**/*.rs".into(),
@@ -388,12 +418,9 @@ mod tests {
     async fn search_nominal() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("test.rs");
-        tokio::fs::write(
-            &file,
-            "fn foo() {}\nfn bar() {}\nfn baz() {}\n",
-        )
-        .await
-        .unwrap();
+        tokio::fs::write(&file, "fn foo() {}\nfn bar() {}\nfn baz() {}\n")
+            .await
+            .unwrap();
 
         let result = search(SearchOptions {
             pattern: "fn \\w+".into(),
@@ -438,7 +465,9 @@ mod tests {
         // Binary file with invalid UTF-8
         std::fs::write(dir.path().join("binary.bin"), [0xFF, 0xFE, 0x00, 0x01]).unwrap();
         // A non-empty text file with no match
-        tokio::fs::write(dir.path().join("text.txt"), "hello world\n").await.unwrap();
+        tokio::fs::write(dir.path().join("text.txt"), "hello world\n")
+            .await
+            .unwrap();
 
         let result = search(SearchOptions {
             pattern: "fn \\w+".into(),
@@ -455,7 +484,9 @@ mod tests {
     #[tokio::test]
     async fn search_no_match() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("test.txt"), "hello world\n").await.unwrap();
+        tokio::fs::write(dir.path().join("test.txt"), "hello world\n")
+            .await
+            .unwrap();
 
         let result = search(SearchOptions {
             pattern: "fn \\w+".into(),
@@ -490,7 +521,9 @@ mod tests {
     #[tokio::test]
     async fn search_invalid_glob() {
         let dir = tempfile::tempdir().unwrap();
-        tokio::fs::write(dir.path().join("test.txt"), "foo\n").await.unwrap();
+        tokio::fs::write(dir.path().join("test.txt"), "foo\n")
+            .await
+            .unwrap();
 
         let result = search(SearchOptions {
             pattern: "foo".into(),

@@ -4,8 +4,8 @@ use std::sync::OnceLock;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use vanyline_sandbox::{AppState, auth::AuthState, build_app, build_metrics_app, config::Config};
 use tower::ServiceExt;
+use vanyline_sandbox::{AppState, auth::AuthState, build_app, build_metrics_app, config::Config};
 
 // ── Prometheus recorder (one-time global init for the test process) ───────────
 
@@ -314,8 +314,13 @@ async fn tools_call_write_then_read_file() {
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], false);
-    
-    assert!(json["result"]["content"][0]["text"].as_str().unwrap().contains("wrote"));
+
+    assert!(
+        json["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("wrote")
+    );
 
     // Read it back
     let req = Request::builder()
@@ -334,7 +339,7 @@ async fn tools_call_write_then_read_file() {
             })
             .to_string(),
         ))
-.unwrap();
+        .unwrap();
     let resp = app.clone().oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
@@ -370,7 +375,10 @@ async fn tools_call_read_file_confinement_rejected() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], true);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("VNL-SBX-001"), "expected VNL-SBX-001 in: {text}");
+    assert!(
+        text.contains("VNL-SBX-001"),
+        "expected VNL-SBX-001 in: {text}"
+    );
 }
 
 #[tokio::test]
@@ -510,7 +518,10 @@ async fn tools_call_delete_file_nominal() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], true);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("VNL-TLS-001"), "expected VNL-TLS-001 in: {text}");
+    assert!(
+        text.contains("VNL-TLS-001"),
+        "expected VNL-TLS-001 in: {text}"
+    );
 }
 
 #[tokio::test]
@@ -595,7 +606,10 @@ async fn tools_call_read_file_missing_argument() {
     let json = body_json(resp.into_body()).await;
     // Must be an isError:true tool-level error, NOT a JSON-RPC protocol error
     assert_eq!(json["result"]["isError"], true);
-    assert!(json["error"].is_null(), "expected tool error, not JSON-RPC error");
+    assert!(
+        json["error"].is_null(),
+        "expected tool error, not JSON-RPC error"
+    );
 }
 
 // ── tools/call (error codes) ──────────────────────────────────────────────────
@@ -652,10 +666,12 @@ async fn tools_call_unknown_returns_unknown_tool_message() {
 
     let resp = app.oneshot(req).await.unwrap();
     let json = body_json(resp.into_body()).await;
-    assert!(json["error"]["message"]
-        .as_str()
-        .unwrap()
-        .contains("Unknown tool: foobar"));
+    assert!(
+        json["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("Unknown tool: foobar")
+    );
 }
 
 #[tokio::test]
@@ -748,15 +764,20 @@ async fn tools_call_find_files_nominal() {
             serde_json::json!({
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": { "name": "find_files", "arguments": { "pattern": "*.rs", "path": "" } }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], false);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("a.rs"), "expected a.rs in: {text}");
-    assert!(!text.contains("b.txt"), "should not contain b.txt in: {text}");
+    assert!(
+        !text.contains("b.txt"),
+        "should not contain b.txt in: {text}"
+    );
 }
 
 #[tokio::test]
@@ -798,15 +819,20 @@ async fn tools_call_find_files_default_path() {
             serde_json::json!({
                 "jsonrpc": "2.0", "id": 3, "method": "tools/call",
                 "params": { "name": "find_files", "arguments": { "pattern": "*.rs" } }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], false);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
     assert!(text.contains("rusty.rs"), "expected rusty.rs in: {text}");
-    assert!(!text.contains("plain.txt"), "should not contain plain.txt in: {text}");
+    assert!(
+        !text.contains("plain.txt"),
+        "should not contain plain.txt in: {text}"
+    );
 }
 
 #[tokio::test]
@@ -836,8 +862,10 @@ async fn tools_call_search_nominal() {
             serde_json::json!({
                 "jsonrpc": "2.0", "id": 2, "method": "tools/call",
                 "params": { "name": "search", "arguments": { "pattern": "fn \\w+", "path": "" } }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
@@ -866,7 +894,10 @@ async fn tools_call_search_confinement_rejected() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], true);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("VNL-SBX-001"), "expected VNL-SBX-001 in: {text}");
+    assert!(
+        text.contains("VNL-SBX-001"),
+        "expected VNL-SBX-001 in: {text}"
+    );
 }
 
 #[tokio::test]
@@ -882,14 +913,19 @@ async fn tools_call_find_files_invalid_pattern() {
             serde_json::json!({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": { "name": "find_files", "arguments": { "pattern": "[" } }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], true);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("VNL-TLS-005"), "expected VNL-TLS-005 in: {text}");
+    assert!(
+        text.contains("VNL-TLS-005"),
+        "expected VNL-TLS-005 in: {text}"
+    );
 }
 
 // ── tools/call (command) ─────────────────────────────────────────────────────
@@ -926,8 +962,10 @@ async fn tools_call_execute_command_default_cwd_is_sandbox_root() {
                     "name": "execute_command",
                     "arguments": { "command": "pwd" }
                 }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
@@ -956,8 +994,10 @@ async fn tools_call_execute_command_nominal() {
                     "name": "execute_command",
                     "arguments": { "command": "echo hello" }
                 }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
@@ -982,14 +1022,19 @@ async fn tools_call_execute_command_confinement_rejected() {
                     "name": "execute_command",
                     "arguments": { "command": "pwd", "cwd": "../../etc" }
                 }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], true);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("VNL-SBX-001"), "expected VNL-SBX-001 in: {text}");
+    assert!(
+        text.contains("VNL-SBX-001"),
+        "expected VNL-SBX-001 in: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1008,14 +1053,19 @@ async fn tools_call_execute_command_empty_command_rejected() {
                     "name": "execute_command",
                     "arguments": { "command": "" }
                 }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["result"]["isError"], true);
     let text = json["result"]["content"][0]["text"].as_str().unwrap();
-    assert!(text.contains("VNL-TLS-005"), "expected VNL-TLS-005 in: {text}");
+    assert!(
+        text.contains("VNL-TLS-005"),
+        "expected VNL-TLS-005 in: {text}"
+    );
 }
 
 #[tokio::test]
@@ -1033,14 +1083,19 @@ async fn tools_call_execute_command_missing_argument() {
                     "name": "execute_command",
                     "arguments": {}
                 }
-            }).to_string(),
-        )).unwrap();
+            })
+            .to_string(),
+        ))
+        .unwrap();
     let resp = app.oneshot(req).await.unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
     // Must be a tool-level error, NOT a JSON-RPC protocol error
     assert_eq!(json["result"]["isError"], true);
-    assert!(json["error"].is_null(), "expected tool error, not JSON-RPC error");
+    assert!(
+        json["error"].is_null(),
+        "expected tool error, not JSON-RPC error"
+    );
 }
 
 // ── OAuth metadata ────────────────────────────────────────────────────────────

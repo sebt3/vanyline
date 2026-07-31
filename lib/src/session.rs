@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::domain::{Agent, AgentMode, McpSelection, ModelProfile, Provider, ProviderType, SkillMeta, SkillSelection, Toolset};
+use crate::domain::{
+    Agent, AgentMode, McpSelection, ModelProfile, Provider, ProviderType, SkillMeta,
+    SkillSelection, Toolset,
+};
 use crate::error::VnyError;
 use crate::event::{ChatTurnResult, EventSink};
 use crate::store::ConfigStore;
@@ -232,7 +235,8 @@ async fn resolve_turn_context(
 
     let all_skills = ctx.store.list_skills().await?;
     let selected_skills = resolve_skill_index(&agent.skills, &all_skills);
-    let system_prompt = assemble_system_prompt(&agent, &resolved_toolsets, &all_skills, workspace_context);
+    let system_prompt =
+        assemble_system_prompt(&agent, &resolved_toolsets, &all_skills, workspace_context);
 
     Ok(ResolvedTurn {
         profile,
@@ -335,11 +339,13 @@ pub(crate) async fn run_agent_turn_at_depth(
 
     let mut mcp_connections: Vec<crate::prefixed_mcp::McpRunningService> = Vec::new();
     let mut added_tool_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut connected_mcp_servers: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut connected_mcp_servers: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for toolset in &resolved.resolved_toolsets {
         // Local tools
-        let (found, missing) = crate::prefixed_mcp::select_local_tools(&toolset.local_tools, &ctx.local_tools);
+        let (found, missing) =
+            crate::prefixed_mcp::select_local_tools(&toolset.local_tools, &ctx.local_tools);
         for name in missing {
             tracing::warn!("local tool not found: {name}");
         }
@@ -363,7 +369,12 @@ pub(crate) async fn run_agent_turn_at_depth(
                 }
             }
         }
-        let running = crate::prefixed_mcp::connect_mcp_servers_selected(&mcp_selections, &validated_servers, &handle).await?;
+        let running = crate::prefixed_mcp::connect_mcp_servers_selected(
+            &mcp_selections,
+            &validated_servers,
+            &handle,
+        )
+        .await?;
         mcp_connections.extend(running);
     }
 
@@ -382,7 +393,8 @@ pub(crate) async fn run_agent_turn_at_depth(
         let all_agents = ctx.store.list_agents().await?;
         let subagents = available_subagents(&all_agents);
         if !subagents.is_empty() {
-            let task_tool = crate::builtin::task::TaskTool::new(ctx.clone(), current_depth, subagents);
+            let task_tool =
+                crate::builtin::task::TaskTool::new(ctx.clone(), current_depth, subagents);
             if let Err(e) = handle.add_tool(task_tool).await {
                 tracing::warn!("failed to add builtin task tool: {e}");
             }
@@ -393,11 +405,30 @@ pub(crate) async fn run_agent_turn_at_depth(
     let result = match resolved.provider.provider_type {
         ProviderType::Ollama => {
             let model = crate::model::build_ollama_model(&resolved.provider, &resolved.profile)?;
-            run_turn_with_model(ctx, model, params, &resolved.system_prompt, handle, history, user_msg).await
+            run_turn_with_model(
+                ctx,
+                model,
+                params,
+                &resolved.system_prompt,
+                handle,
+                history,
+                user_msg,
+            )
+            .await
         }
         ProviderType::OpenaiCompatible => {
-            let model = crate::model::build_openai_compat_model(&resolved.provider, &resolved.profile)?;
-            run_turn_with_model(ctx, model, params, &resolved.system_prompt, handle, history, user_msg).await
+            let model =
+                crate::model::build_openai_compat_model(&resolved.provider, &resolved.profile)?;
+            run_turn_with_model(
+                ctx,
+                model,
+                params,
+                &resolved.system_prompt,
+                handle,
+                history,
+                user_msg,
+            )
+            .await
         }
     };
 
@@ -549,10 +580,7 @@ mod tests {
                 description: "Web search".to_string(),
             },
         ];
-        let agent = sample_agent(
-            Vec::new(),
-            SkillSelection::Named(vec!["web".to_string()]),
-        );
+        let agent = sample_agent(Vec::new(), SkillSelection::Named(vec!["web".to_string()]));
         let result = assemble_system_prompt(&agent, &[], &skills, None);
         assert!(result.contains("- web : Web search"));
         assert!(!result.contains("PDF processing"));
@@ -598,11 +626,9 @@ mod tests {
             name: "web".to_string(),
             description: "Web search".to_string(),
         }];
-        let agent = sample_agent(
-            vec!["shell".to_string()],
-            SkillSelection::Auto,
-        );
-        let result = assemble_system_prompt(&agent, &toolset, &skills, Some("# AGENTS.md\ncontent"));
+        let agent = sample_agent(vec!["shell".to_string()], SkillSelection::Auto);
+        let result =
+            assemble_system_prompt(&agent, &toolset, &skills, Some("# AGENTS.md\ncontent"));
 
         let system_pos = result.find("You are helpful.").unwrap();
         let toolset_pos = result.find("## Shell tool").unwrap();
@@ -701,7 +727,9 @@ mod tests {
             ..Default::default()
         };
         let ctx = test_ctx(store);
-        let resolved = resolve_turn_context(&ctx, "test-agent", None).await.unwrap();
+        let resolved = resolve_turn_context(&ctx, "test-agent", None)
+            .await
+            .unwrap();
         assert!(resolved.system_prompt.contains("You are helpful."));
         assert!(resolved.system_prompt.contains("TOOLSET_PROMPT"));
         assert_eq!(resolved.resolved_toolsets.len(), 1);
@@ -865,7 +893,9 @@ mod tests {
             ..Default::default()
         };
         let ctx = test_ctx(store);
-        let result = resolve_turn_context(&ctx, "test-agent", Some("# AGENTS.md")).await.unwrap();
+        let result = resolve_turn_context(&ctx, "test-agent", Some("# AGENTS.md"))
+            .await
+            .unwrap();
         assert!(result.system_prompt.ends_with("# AGENTS.md"));
     }
 
@@ -897,7 +927,8 @@ mod tests {
 
     #[test]
     fn dedupe_local_tool_names_skips_already_added() {
-        let mut added: std::collections::HashSet<String> = ["read_file".to_string()].into_iter().collect();
+        let mut added: std::collections::HashSet<String> =
+            ["read_file".to_string()].into_iter().collect();
         let names = vec!["read_file", "write_file"];
         let result = dedupe_local_tool_names(names, &mut added);
         assert_eq!(result, vec!["write_file"]);
@@ -918,7 +949,8 @@ mod tests {
 
     #[test]
     fn dedupe_mcp_selections_skips_already_connected_server() {
-        let mut connected: std::collections::HashSet<String> = ["server-a".to_string()].into_iter().collect();
+        let mut connected: std::collections::HashSet<String> =
+            ["server-a".to_string()].into_iter().collect();
         let selections = vec![
             McpSelection {
                 server: "server-a".to_string(),

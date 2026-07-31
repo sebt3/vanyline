@@ -24,8 +24,8 @@ impl FromRequestParts<AppState> for AuthUser {
             .and_then(|v| v.to_str().ok())
             .map(|s| s.to_string());
 
-        let (id_token, email) =
-            extract_token(cookie_header.as_deref(), &state.cookie_key).map_err(|e| {
+        let (id_token, email) = extract_token(cookie_header.as_deref(), &state.cookie_key)
+            .map_err(|e| {
                 tracing::debug!("VNL-AUTH-001: auth rejected: {}", e);
                 e
             })?;

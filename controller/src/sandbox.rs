@@ -4,17 +4,18 @@ use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::{Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaimVolumeSource,
-    Pod, PodSpec, Probe, Service, Volume, VolumeMount,
+    Container, ContainerPort, EnvVar, HTTPGetAction, PersistentVolumeClaimVolumeSource, Pod,
+    PodSpec, Probe, Service, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
+    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
+    NetworkPolicySpec,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
-use kube::runtime::finalizer::{Event, finalizer};
+use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
 use crate::crds::{Owner, Project, Sandbox, SandboxStatus, Toolchain};
@@ -23,8 +24,8 @@ use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 use crate::project::{self, ProjectJobContext};
 use crate::project::{
-    bare_repo_path, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path,
-    WORKSPACE_MOUNT_PATH,
+    bare_repo_path, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path,
+    worktree_path, WORKSPACE_MOUNT_PATH,
 };
 
 /// Port MCP exposé par `vanyline-sandbox` (`MCP_LISTEN` par défaut `0.0.0.0:3000`
@@ -52,13 +53,25 @@ pub fn toolchain_root(name: &str) -> String {
 fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
     match name {
         "rust" => Some(BTreeMap::from([
-            ("PATH".to_string(), "{root}/usr/local/cargo/bin:{root}/usr/bin".to_string()),
-            ("LD_LIBRARY_PATH".to_string(), "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/local/lib".to_string()),
-            ("RUSTUP_HOME".to_string(), "{root}/usr/local/rustup".to_string()),
+            (
+                "PATH".to_string(),
+                "{root}/usr/local/cargo/bin:{root}/usr/bin".to_string(),
+            ),
+            (
+                "LD_LIBRARY_PATH".to_string(),
+                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/local/lib".to_string(),
+            ),
+            (
+                "RUSTUP_HOME".to_string(),
+                "{root}/usr/local/rustup".to_string(),
+            ),
         ])),
         "node" => Some(BTreeMap::from([
             ("PATH".to_string(), "{root}/usr/local/bin".to_string()),
-            ("LD_LIBRARY_PATH".to_string(), "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/local/lib".to_string()),
+            (
+                "LD_LIBRARY_PATH".to_string(),
+                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/local/lib".to_string(),
+            ),
         ])),
         _ => None,
     }
@@ -119,7 +132,11 @@ pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
         });
     }
     for (k, v) in others {
-        env.push(EnvVar { name: k, value: Some(v), ..Default::default() });
+        env.push(EnvVar {
+            name: k,
+            value: Some(v),
+            ..Default::default()
+        });
     }
     env
 }
@@ -190,7 +207,10 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         VolumeMount {
             name: "workspace".to_string(),
             mount_path: format!("{HOME_MOUNT_PATH}/workspace"),
-            sub_path: Some(combine_sub_path(project, &worktree_path(&sandbox.name_any()))),
+            sub_path: Some(combine_sub_path(
+                project,
+                &worktree_path(&sandbox.name_any()),
+            )),
             ..Default::default()
         },
     ];
@@ -205,11 +225,18 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         mounts.push(VolumeMount {
             name: "workspace".to_string(),
             mount_path: format!("/project-cache/{}", cache_dir_name(&cache)),
-            sub_path: Some(combine_sub_path(project, &crate::project::cache_path(&cache))),
+            sub_path: Some(combine_sub_path(
+                project,
+                &crate::project::cache_path(&cache),
+            )),
             ..Default::default()
         });
         if let Some((key, value)) = cache_env_var(&cache) {
-            env.push(EnvVar { name: key.to_string(), value: Some(value), ..Default::default() });
+            env.push(EnvVar {
+                name: key.to_string(),
+                value: Some(value),
+                ..Default::default()
+            });
         }
     }
 
@@ -231,9 +258,18 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
     env.extend(aggregate_toolchain_env(&sandbox.spec.toolchains));
 
     let mut labels = BTreeMap::new();
-    labels.insert("vanyline.solidite.fr/owner".to_string(), ctx.owner_name.clone());
-    labels.insert("vanyline.solidite.fr/project".to_string(), sandbox.spec.project.clone());
-    labels.insert("vanyline.solidite.fr/sandbox".to_string(), sandbox.name_any());
+    labels.insert(
+        "vanyline.solidite.fr/owner".to_string(),
+        ctx.owner_name.clone(),
+    );
+    labels.insert(
+        "vanyline.solidite.fr/project".to_string(),
+        sandbox.spec.project.clone(),
+    );
+    labels.insert(
+        "vanyline.solidite.fr/sandbox".to_string(),
+        sandbox.name_any(),
+    );
 
     let probe = Probe {
         http_get: Some(HTTPGetAction {
@@ -251,14 +287,22 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
             name: Some(pod_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
             labels: Some(labels),
-            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(PodSpec {
             service_account_name: Some(ctx.owner_service_account.clone()),
             containers: vec![Container {
                 name: "sandbox".to_string(),
-                image: Some(sandbox.spec.image.clone().unwrap_or_else(|| ctx.default_image.clone())),
+                image: Some(
+                    sandbox
+                        .spec
+                        .image
+                        .clone()
+                        .unwrap_or_else(|| ctx.default_image.clone()),
+                ),
                 args: Some(vec!["--no-auth".to_string()]),
                 ports: Some(vec![ContainerPort {
                     container_port: MCP_PORT,
@@ -306,7 +350,11 @@ pub fn netpol_name(sandbox_name: &str) -> String {
 /// Job une fois : crée le worktree de la branche (le crée depuis
 /// `default_branch` — résolu par le script si absent de la spec — si la
 /// branche n'existe pas encore localement dans le clone bare).
-pub fn build_checkout_job(sandbox: &Sandbox, project: &Project, job_ctx: &ProjectJobContext) -> Job {
+pub fn build_checkout_job(
+    sandbox: &Sandbox,
+    project: &Project,
+    job_ctx: &ProjectJobContext,
+) -> Job {
     let default_branch = project.spec.default_branch.clone().unwrap_or_default();
     let script = format!(
         r#"set -eu
@@ -333,7 +381,9 @@ fi
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(checkout_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -349,7 +399,11 @@ fi
 /// Job de retrait du worktree — invoqué par le finalizer. `worktree remove
 /// --force` gère l'état non commité ; repli sur `rm -rf` + `worktree prune` si
 /// les métadonnées git sont dans un état incohérent.
-pub fn build_worktree_remove_job(sandbox: &Sandbox, project: &Project, job_ctx: &ProjectJobContext) -> Job {
+pub fn build_worktree_remove_job(
+    sandbox: &Sandbox,
+    project: &Project,
+    job_ctx: &ProjectJobContext,
+) -> Job {
     let script = format!(
         r#"set -eu
 cd {mount}
@@ -365,7 +419,9 @@ git --git-dir={bare} worktree prune
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(worktree_remove_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -383,13 +439,18 @@ git --git-dir={bare} worktree prune
 /// pod parmi ceux posés par `build_sandbox_pod`).
 pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
     let mut selector = BTreeMap::new();
-    selector.insert("vanyline.solidite.fr/sandbox".to_string(), sandbox.name_any());
+    selector.insert(
+        "vanyline.solidite.fr/sandbox".to_string(),
+        sandbox.name_any(),
+    );
 
     Service {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(service_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(k8s_openapi::api::core::v1::ServiceSpec {
@@ -412,16 +473,24 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
 /// autres sandboxes du même utilisateur).
 pub fn build_sandbox_netpol(sandbox: &Sandbox, owner_name: &str) -> NetworkPolicy {
     let mut pod_selector_labels = BTreeMap::new();
-    pod_selector_labels.insert("vanyline.solidite.fr/sandbox".to_string(), sandbox.name_any());
+    pod_selector_labels.insert(
+        "vanyline.solidite.fr/sandbox".to_string(),
+        sandbox.name_any(),
+    );
 
     let mut peer_labels = BTreeMap::new();
-    peer_labels.insert("vanyline.solidite.fr/owner".to_string(), owner_name.to_string());
+    peer_labels.insert(
+        "vanyline.solidite.fr/owner".to_string(),
+        owner_name.to_string(),
+    );
 
     NetworkPolicy {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(netpol_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox.controller_owner_ref(&()).expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(NetworkPolicySpec {
@@ -472,7 +541,11 @@ pub fn compute_status(sandbox: &Sandbox, phase: &str) -> SandboxStatus {
     }
 }
 
-async fn fetch_project(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Project, ControllerError> {
+async fn fetch_project(
+    sandbox: &Sandbox,
+    ctx: &Context,
+    ns: &str,
+) -> Result<Project, ControllerError> {
     let projects: Api<Project> = Api::namespaced(ctx.client.clone(), ns);
     Ok(projects.get(&sandbox.spec.project).await?)
 }
@@ -514,7 +587,10 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
     };
 
     let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
-    let checked_out = match jobs.get_opt(&checkout_job_name(&sandbox.name_any())).await? {
+    let checked_out = match jobs
+        .get_opt(&checkout_job_name(&sandbox.name_any()))
+        .await?
+    {
         Some(job) => job.status.and_then(|s| s.succeeded).unwrap_or(0) > 0,
         None => {
             let job = build_checkout_job(sandbox, &project, &job_ctx);
@@ -550,18 +626,38 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
 
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let service = build_sandbox_service(sandbox);
-    services.patch(&service_name(&sandbox.name_any()), &pp, &Patch::Apply(&service)).await?;
+    services
+        .patch(
+            &service_name(&sandbox.name_any()),
+            &pp,
+            &Patch::Apply(&service),
+        )
+        .await?;
 
     let netpols: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
     let netpol = build_sandbox_netpol(sandbox, &project.spec.owner);
-    netpols.patch(&netpol_name(&sandbox.name_any()), &pp, &Patch::Apply(&netpol)).await?;
+    netpols
+        .patch(
+            &netpol_name(&sandbox.name_any()),
+            &pp,
+            &Patch::Apply(&netpol),
+        )
+        .await?;
 
     let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
     let status = compute_status(sandbox, &phase);
     let patch = serde_json::json!({ "status": status });
-    sandboxes.patch_status(&sandbox.name_any(), &PatchParams::default(), &Patch::Merge(&patch)).await?;
+    sandboxes
+        .patch_status(
+            &sandbox.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await?;
 
-    Ok(Action::requeue(Duration::from_secs(if phase == "Running" { 300 } else { 15 })))
+    Ok(Action::requeue(Duration::from_secs(
+        if phase == "Running" { 300 } else { 15 },
+    )))
 }
 
 async fn cleanup(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
@@ -599,17 +695,32 @@ async fn cleanup(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, C
             Ok(Action::await_change())
         }
         Some(_) => {
-            jobs.create(&PostParams::default(), &build_worktree_remove_job(sandbox, &project, &job_ctx)).await?;
-            Err(ControllerError::WorktreeRemovalPending { sandbox: sandbox.name_any() })
+            jobs.create(
+                &PostParams::default(),
+                &build_worktree_remove_job(sandbox, &project, &job_ctx),
+            )
+            .await?;
+            Err(ControllerError::WorktreeRemovalPending {
+                sandbox: sandbox.name_any(),
+            })
         }
         None => {
-            jobs.create(&PostParams::default(), &build_worktree_remove_job(sandbox, &project, &job_ctx)).await?;
-            Err(ControllerError::WorktreeRemovalPending { sandbox: sandbox.name_any() })
+            jobs.create(
+                &PostParams::default(),
+                &build_worktree_remove_job(sandbox, &project, &job_ctx),
+            )
+            .await?;
+            Err(ControllerError::WorktreeRemovalPending {
+                sandbox: sandbox.name_any(),
+            })
         }
     }
 }
 
-pub async fn reconcile(sandbox: Arc<Sandbox>, ctx: Arc<Context>) -> Result<Action, ControllerError> {
+pub async fn reconcile(
+    sandbox: Arc<Sandbox>,
+    ctx: Arc<Context>,
+) -> Result<Action, ControllerError> {
     let ns = sandbox.namespace().unwrap_or_else(|| "default".to_string());
     let api: Api<Sandbox> = Api::namespaced(ctx.client.clone(), &ns);
     finalizer(&api, FINALIZER, sandbox, |event| async {
@@ -647,7 +758,7 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::crds::{PvcRef, ProjectSpec, SandboxSpec};
+    use crate::crds::{ProjectSpec, PvcRef, SandboxSpec};
 
     fn make_ctx() -> SandboxPodContext {
         SandboxPodContext {
@@ -659,38 +770,52 @@ mod tests {
     }
 
     fn make_sandbox(name: &str, toolchains: Vec<Toolchain>, image: Option<String>) -> Sandbox {
-        let mut sandbox = Sandbox::new(name, SandboxSpec {
-            project: "demo".to_string(),
-            branch: "main".to_string(),
-            toolchains,
-            image,
-            resources: None,
-        });
+        let mut sandbox = Sandbox::new(
+            name,
+            SandboxSpec {
+                project: "demo".to_string(),
+                branch: "main".to_string(),
+                toolchains,
+                image,
+                resources: None,
+            },
+        );
         sandbox.meta_mut().namespace = Some("ns".into());
         sandbox.meta_mut().uid = Some(format!("test-uid-{name}"));
         sandbox
     }
 
     fn make_rust_tc(env: std::collections::BTreeMap<String, String>) -> Toolchain {
-        Toolchain { name: "rust".to_string(), image: "rust:slim-trixie".to_string(), env }
+        Toolchain {
+            name: "rust".to_string(),
+            image: "rust:slim-trixie".to_string(),
+            env,
+        }
     }
 
     fn make_node_tc(env: std::collections::BTreeMap<String, String>) -> Toolchain {
-        Toolchain { name: "node".to_string(), image: "node:trixie-slim".to_string(), env }
+        Toolchain {
+            name: "node".to_string(),
+            image: "node:trixie-slim".to_string(),
+            env,
+        }
     }
 
     fn make_project(existing_pvc: Option<PvcRef>, caches: Option<Vec<String>>) -> Project {
-        let mut project = Project::new("demo", ProjectSpec {
-            owner: "alice".to_string(),
-            repo_url: "https://github.com/owner/repo".to_string(),
-            default_branch: None,
-            existing_pvc,
-            storage_size: None,
-            storage_class: None,
-            git_secret: None,
-            caches,
-            fetch_interval: None,
-        });
+        let mut project = Project::new(
+            "demo",
+            ProjectSpec {
+                owner: "alice".to_string(),
+                repo_url: "https://github.com/owner/repo".to_string(),
+                default_branch: None,
+                existing_pvc,
+                storage_size: None,
+                storage_class: None,
+                git_secret: None,
+                caches,
+                fetch_interval: None,
+            },
+        );
         project.meta_mut().namespace = Some("ns".into());
         project
     }
@@ -710,19 +835,28 @@ mod tests {
         let env = aggregate_toolchain_env(&[toolchain]);
 
         // PATH must contain resolved paths
-        let path = env.iter().find(|e| e.name == "PATH").expect("must have PATH");
+        let path = env
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
         let path_val = path.value.as_ref().expect("PATH must have value");
         assert!(path_val.contains("/toolchains/rust/usr/local/cargo/bin"));
         assert!(path_val.contains("/toolchains/rust/usr/bin"));
         assert!(path_val.ends_with(BASE_PATH));
 
         // LD_LIBRARY_PATH
-        let ld = env.iter().find(|e| e.name == "LD_LIBRARY_PATH").expect("must have LD_LIBRARY_PATH");
+        let ld = env
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .expect("must have LD_LIBRARY_PATH");
         let ld_val = ld.value.as_ref().expect("LD_LIBRARY_PATH must have value");
         assert!(ld_val.contains("/toolchains/rust/usr/lib/x86_64-linux-gnu"));
 
         // RUSTUP_HOME
-        let rustup = env.iter().find(|e| e.name == "RUSTUP_HOME").expect("must have RUSTUP_HOME");
+        let rustup = env
+            .iter()
+            .find(|e| e.name == "RUSTUP_HOME")
+            .expect("must have RUSTUP_HOME");
         let rustup_val = rustup.value.as_ref().expect("RUSTUP_HOME must have value");
         assert_eq!(rustup_val, "/toolchains/rust/usr/local/rustup");
     }
@@ -732,11 +866,17 @@ mod tests {
         let toolchain = make_node_tc(Default::default());
         let env = aggregate_toolchain_env(&[toolchain]);
 
-        let path = env.iter().find(|e| e.name == "PATH").expect("must have PATH");
+        let path = env
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
         let path_val = path.value.as_ref().expect("PATH must have value");
         assert!(path_val.contains("/toolchains/node/usr/local/bin"));
 
-        let ld = env.iter().find(|e| e.name == "LD_LIBRARY_PATH").expect("must have LD_LIBRARY_PATH");
+        let ld = env
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .expect("must have LD_LIBRARY_PATH");
         let ld_val = ld.value.as_ref().expect("LD_LIBRARY_PATH must have value");
         assert!(ld_val.contains("/toolchains/node/usr/lib/x86_64-linux-gnu"));
 
@@ -750,7 +890,10 @@ mod tests {
         let node = make_node_tc(Default::default());
         let env = aggregate_toolchain_env(&[rust, node]);
 
-        let path = env.iter().find(|e| e.name == "PATH").expect("must have PATH");
+        let path = env
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
         let path_val = path.value.as_ref().expect("PATH must have value");
         // rust first, then node, then BASE_PATH
         let rust_bin = "/toolchains/rust/usr/local/cargo/bin";
@@ -761,7 +904,10 @@ mod tests {
         assert!(path_val.find(rust_bin2) < path_val.find(node_bin));
         assert!(path_val.ends_with(BASE_PATH));
 
-        let ld = env.iter().find(|e| e.name == "LD_LIBRARY_PATH").expect("must have LD_LIBRARY_PATH");
+        let ld = env
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .expect("must have LD_LIBRARY_PATH");
         let ld_val = ld.value.as_ref().expect("LD_LIBRARY_PATH must have value");
         assert!(ld_val.find("/toolchains/rust") < ld_val.find("/toolchains/node"));
     }
@@ -770,30 +916,50 @@ mod tests {
     fn explicit_env_overrides_preset() {
         let mut env = BTreeMap::new();
         env.insert("PATH".to_string(), "{root}/bin".to_string());
-        let toolchain = Toolchain { name: "custom".to_string(), image: "x".to_string(), env };
+        let toolchain = Toolchain {
+            name: "custom".to_string(),
+            image: "x".to_string(),
+            env,
+        };
         let env_result = aggregate_toolchain_env(&[toolchain]);
 
-        let path = env_result.iter().find(|e| e.name == "PATH").expect("must have PATH");
+        let path = env_result
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
         let path_val = path.value.as_ref().expect("PATH must have value");
         assert!(path_val.contains("/toolchains/custom/bin"));
         assert!(path_val.ends_with(BASE_PATH));
 
         // No LD_LIBRARY_PATH because custom has none
-        assert!(env_result.iter().find(|e| e.name == "LD_LIBRARY_PATH").is_none());
+        assert!(env_result
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .is_none());
     }
 
     #[test]
     fn unknown_toolchain_no_preset_no_env() {
-        let toolchain = Toolchain { name: "unknown".to_string(), image: "x".to_string(), env: Default::default() };
+        let toolchain = Toolchain {
+            name: "unknown".to_string(),
+            image: "x".to_string(),
+            env: Default::default(),
+        };
         let env_result = aggregate_toolchain_env(&[toolchain]);
 
         // PATH == BASE_PATH exactly (no segments added)
-        let path = env_result.iter().find(|e| e.name == "PATH").expect("must have PATH");
+        let path = env_result
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
         let path_val = path.value.as_ref().expect("PATH must have value");
         assert_eq!(path_val, BASE_PATH);
 
         // No LD_LIBRARY_PATH
-        assert!(env_result.iter().find(|e| e.name == "LD_LIBRARY_PATH").is_none());
+        assert!(env_result
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .is_none());
     }
 
     // ===== build_sandbox_pod =====
@@ -816,15 +982,32 @@ mod tests {
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
-        let refs = pod.metadata.owner_references.as_ref().expect("should have ownerReferences");
+        let refs = pod
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "demo-branch");
         assert_eq!(refs[0].kind, "Sandbox".to_string());
 
         let labels = pod.metadata.labels.as_ref().expect("should have labels");
-        assert_eq!(labels.get("vanyline.solidite.fr/owner").map(String::as_str), Some("alice"));
-        assert_eq!(labels.get("vanyline.solidite.fr/project").map(String::as_str), Some("demo"));
-        assert_eq!(labels.get("vanyline.solidite.fr/sandbox").map(String::as_str), Some("demo-branch"));
+        assert_eq!(
+            labels.get("vanyline.solidite.fr/owner").map(String::as_str),
+            Some("alice")
+        );
+        assert_eq!(
+            labels
+                .get("vanyline.solidite.fr/project")
+                .map(String::as_str),
+            Some("demo")
+        );
+        assert_eq!(
+            labels
+                .get("vanyline.solidite.fr/sandbox")
+                .map(String::as_str),
+            Some("demo-branch")
+        );
     }
 
     #[test]
@@ -849,7 +1032,8 @@ mod tests {
         assert_eq!(container.image, Some(ctx.default_image.clone()));
 
         // With image -> use spec
-        let sandbox_with_image = make_sandbox("demo-branch", vec![], Some("custom:tag".to_string()));
+        let sandbox_with_image =
+            make_sandbox("demo-branch", vec![], Some("custom:tag".to_string()));
         let pod2 = build_sandbox_pod(&sandbox_with_image, &project, &ctx);
         let container2 = pod2.spec.as_ref().unwrap().containers[0].clone();
         assert_eq!(container2.image, Some("custom:tag".to_string()));
@@ -883,11 +1067,26 @@ mod tests {
         assert_eq!(ports[0].name, Some("mcp".to_string()));
 
         // Probes
-        let rp = container.readiness_probe.as_ref().expect("should have readiness probe");
-        let lg = container.liveness_probe.as_ref().expect("should have liveness probe");
-        assert_eq!(rp.http_get.as_ref().unwrap().path, Some("/health".to_string()));
-        assert_eq!(lg.http_get.as_ref().unwrap().path, Some("/health".to_string()));
-        assert_eq!(rp.http_get.as_ref().unwrap().port, IntOrString::Int(MCP_PORT));
+        let rp = container
+            .readiness_probe
+            .as_ref()
+            .expect("should have readiness probe");
+        let lg = container
+            .liveness_probe
+            .as_ref()
+            .expect("should have liveness probe");
+        assert_eq!(
+            rp.http_get.as_ref().unwrap().path,
+            Some("/health".to_string())
+        );
+        assert_eq!(
+            lg.http_get.as_ref().unwrap().path,
+            Some("/health".to_string())
+        );
+        assert_eq!(
+            rp.http_get.as_ref().unwrap().port,
+            IntOrString::Int(MCP_PORT)
+        );
     }
 
     #[test]
@@ -899,8 +1098,14 @@ mod tests {
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let env = container.env.as_ref().expect("should have env");
-        let vnl = env.iter().find(|e| e.name == "VNL_SANDBOX_ROOT").expect("should have VNL_SANDBOX_ROOT");
-        let val = vnl.value.as_ref().expect("VNL_SANDBOX_ROOT should have value");
+        let vnl = env
+            .iter()
+            .find(|e| e.name == "VNL_SANDBOX_ROOT")
+            .expect("should have VNL_SANDBOX_ROOT");
+        let val = vnl
+            .value
+            .as_ref()
+            .expect("VNL_SANDBOX_ROOT should have value");
         assert_eq!(val, &format!("{HOME_MOUNT_PATH}/workspace"));
     }
 
@@ -913,7 +1118,13 @@ mod tests {
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
-        let volumes = pod.spec.as_ref().unwrap().volumes.as_ref().expect("should have volumes");
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
 
         // Should have: home, workspace, toolchain-rust, toolchain-node
         assert_eq!(volumes.len(), 4);
@@ -927,7 +1138,10 @@ mod tests {
         // Check toolchain volumes have image reference and pull policy
         for vol in volumes {
             if vol.name.starts_with("toolchain-") {
-                let src = vol.image.as_ref().expect("toolchain volume should have image source");
+                let src = vol
+                    .image
+                    .as_ref()
+                    .expect("toolchain volume should have image source");
                 assert!(src.reference.is_some());
                 assert_eq!(src.pull_policy, Some("IfNotPresent".to_string()));
             }
@@ -942,8 +1156,14 @@ mod tests {
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
-        let mounts = container.volume_mounts.as_ref().expect("should have volume_mounts");
-        let ws_mount = mounts.iter().find(|m| m.name == "workspace").expect("should have workspace mount");
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+        let ws_mount = mounts
+            .iter()
+            .find(|m| m.name == "workspace")
+            .expect("should have workspace mount");
 
         assert_eq!(
             ws_mount.mount_path.as_str(),
@@ -966,14 +1186,23 @@ mod tests {
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
-        let mounts = container.volume_mounts.as_ref().expect("should have volume_mounts");
-        let ws_mount = mounts.iter().find(|m| m.name == "workspace").expect("should have workspace mount");
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+        let ws_mount = mounts
+            .iter()
+            .find(|m| m.name == "workspace")
+            .expect("should have workspace mount");
 
         assert_eq!(
             ws_mount.mount_path.as_str(),
             &(format!("{HOME_MOUNT_PATH}/workspace"))
         );
-        assert_eq!(ws_mount.sub_path, Some("demo/worktrees/demo-branch".to_string()));
+        assert_eq!(
+            ws_mount.sub_path,
+            Some("demo/worktrees/demo-branch".to_string())
+        );
     }
 
     #[test]
@@ -985,7 +1214,10 @@ mod tests {
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
-        let mounts = container.volume_mounts.as_ref().expect("should have volume_mounts");
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
 
         // Should have: workspace, cargo cache, pnpm cache + toolchain mounts
         let cargo_mount = mounts
@@ -1002,11 +1234,20 @@ mod tests {
 
         // Env vars
         let env = container.env.as_ref().expect("should have env");
-        let cargo_home = env.iter().find(|e| e.name == "CARGO_HOME").expect("should have CARGO_HOME");
+        let cargo_home = env
+            .iter()
+            .find(|e| e.name == "CARGO_HOME")
+            .expect("should have CARGO_HOME");
         assert_eq!(cargo_home.value, Some("/project-cache/cargo".to_string()));
 
-        let pnpm_dir = env.iter().find(|e| e.name == "npm_config_store_dir").expect("should have npm_config_store_dir");
-        assert_eq!(pnpm_dir.value, Some("/project-cache/pnpm-store".to_string()));
+        let pnpm_dir = env
+            .iter()
+            .find(|e| e.name == "npm_config_store_dir")
+            .expect("should have npm_config_store_dir");
+        assert_eq!(
+            pnpm_dir.value,
+            Some("/project-cache/pnpm-store".to_string())
+        );
     }
 
     #[test]
@@ -1043,15 +1284,23 @@ mod tests {
         // Without resources
         let sandbox_no_res = make_sandbox("demo-branch", vec![], None);
         let pod_no_res = build_sandbox_pod(&sandbox_no_res, &project, &ctx);
-        assert!(pod_no_res.spec.as_ref().unwrap().containers[0].resources.is_none());
+        assert!(pod_no_res.spec.as_ref().unwrap().containers[0]
+            .resources
+            .is_none());
     }
 
     // ===== Job name helpers =====
 
     #[test]
     fn checkout_job_name_and_worktree_remove_job_name() {
-        assert_eq!(checkout_job_name("demo-branch"), "sandbox-demo-branch-checkout");
-        assert_eq!(worktree_remove_job_name("demo-branch"), "sandbox-demo-branch-remove");
+        assert_eq!(
+            checkout_job_name("demo-branch"),
+            "sandbox-demo-branch-checkout"
+        );
+        assert_eq!(
+            worktree_remove_job_name("demo-branch"),
+            "sandbox-demo-branch-remove"
+        );
     }
 
     // ===== build_checkout_job =====
@@ -1097,7 +1346,11 @@ mod tests {
         let job_ctx = make_job_ctx();
         let job = build_checkout_job(&sandbox, &project, &job_ctx);
 
-        let refs = job.metadata.owner_references.as_ref().expect("should have ownerReferences");
+        let refs = job
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "demo-branch");
         assert_eq!(refs[0].kind, "Sandbox");
@@ -1127,25 +1380,24 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let service = build_sandbox_service(&sandbox);
 
-        assert_eq!(service.metadata.name, Some("sandbox-demo-branch".to_string()));
+        assert_eq!(
+            service.metadata.name,
+            Some("sandbox-demo-branch".to_string())
+        );
 
         let spec = service.spec.as_ref().expect("should have spec");
         let selector = spec.selector.as_ref().expect("should have selector");
         assert_eq!(
-            selector.get("vanyline.solidite.fr/sandbox").map(String::as_str),
+            selector
+                .get("vanyline.solidite.fr/sandbox")
+                .map(String::as_str),
             Some("demo-branch")
         );
 
         let ports = spec.ports.as_ref().expect("should have ports");
         assert_eq!(ports.len(), 1);
-        assert_eq!(
-            ports[0].port,
-            MCP_PORT
-        );
-        assert_eq!(
-            ports[0].name,
-            Some("mcp".to_string())
-        );
+        assert_eq!(ports[0].port, MCP_PORT);
+        assert_eq!(ports[0].name, Some("mcp".to_string()));
     }
 
     // ===== build_sandbox_netpol =====
@@ -1156,10 +1408,18 @@ mod tests {
         let netpol = build_sandbox_netpol(&sandbox, "alice");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
-        let pod_sel = spec.pod_selector.as_ref().expect("should have pod_selector");
-        let labels = pod_sel.match_labels.as_ref().expect("should have match_labels");
+        let pod_sel = spec
+            .pod_selector
+            .as_ref()
+            .expect("should have pod_selector");
+        let labels = pod_sel
+            .match_labels
+            .as_ref()
+            .expect("should have match_labels");
         assert_eq!(
-            labels.get("vanyline.solidite.fr/sandbox").map(String::as_str),
+            labels
+                .get("vanyline.solidite.fr/sandbox")
+                .map(String::as_str),
             Some("demo-branch")
         );
 
@@ -1172,9 +1432,14 @@ mod tests {
             .pod_selector
             .as_ref()
             .expect("should have pod_selector in peer");
-        let peer_labels = peer_pod_sel.match_labels.as_ref().expect("should have match_labels");
+        let peer_labels = peer_pod_sel
+            .match_labels
+            .as_ref()
+            .expect("should have match_labels");
         assert_eq!(
-            peer_labels.get("vanyline.solidite.fr/owner").map(String::as_str),
+            peer_labels
+                .get("vanyline.solidite.fr/owner")
+                .map(String::as_str),
             Some("alice")
         );
 

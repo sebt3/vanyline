@@ -135,14 +135,22 @@ pub async fn reconcile(owner: Arc<Owner>, ctx: Arc<Context>) -> Result<Action, C
 
     let sas: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), &ns);
     let sa = build_service_account(&owner);
-    sas.patch(&service_account_name(&owner.name_any()), &pp, &Patch::Apply(&sa))
-        .await?;
+    sas.patch(
+        &service_account_name(&owner.name_any()),
+        &pp,
+        &Patch::Apply(&sa),
+    )
+    .await?;
 
     let owners: Api<Owner> = Api::namespaced(ctx.client.clone(), &ns);
     let status = compute_status(&owner);
     let patch = serde_json::json!({ "status": status });
     owners
-        .patch_status(&owner.name_any(), &PatchParams::default(), &Patch::Merge(&patch))
+        .patch_status(
+            &owner.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
         .await?;
 
     Ok(Action::requeue(Duration::from_secs(300)))
@@ -167,13 +175,20 @@ pub fn build_controller(client: Client) -> Controller<Owner> {
 mod tests {
     use super::*;
 
-    fn make_owner(existing_pvc: Option<String>, home_size: Option<String>, home_storage_class: Option<String>) -> Owner {
-        let mut owner = Owner::new("alice", crate::crds::OwnerSpec {
-            existing_pvc,
-            home_size,
-            home_storage_class,
-            project_defaults: None,
-        });
+    fn make_owner(
+        existing_pvc: Option<String>,
+        home_size: Option<String>,
+        home_storage_class: Option<String>,
+    ) -> Owner {
+        let mut owner = Owner::new(
+            "alice",
+            crate::crds::OwnerSpec {
+                existing_pvc,
+                home_size,
+                home_storage_class,
+                project_defaults: None,
+            },
+        );
         owner.meta_mut().namespace = Some("ns".into());
         owner.meta_mut().uid = Some("test-uid-alice".into());
         owner
@@ -208,8 +223,15 @@ mod tests {
         let owner = make_owner(None, None, None);
         let pvc = build_home_pvc(&owner).expect("should build PVC when no existing_pvc");
         assert_eq!(
-            pvc.spec.as_ref().unwrap().resources.as_ref().unwrap()
-                .requests.as_ref().unwrap()["storage"],
+            pvc.spec
+                .as_ref()
+                .unwrap()
+                .resources
+                .as_ref()
+                .unwrap()
+                .requests
+                .as_ref()
+                .unwrap()["storage"],
             Quantity("1Gi".into())
         );
         assert_eq!(
@@ -223,12 +245,24 @@ mod tests {
         let owner = make_owner(None, Some("5Gi".into()), Some("cephfs".into()));
         let pvc = build_home_pvc(&owner).expect("should build PVC");
         assert_eq!(
-            pvc.spec.as_ref().unwrap().resources.as_ref().unwrap()
-                .requests.as_ref().unwrap()["storage"],
+            pvc.spec
+                .as_ref()
+                .unwrap()
+                .resources
+                .as_ref()
+                .unwrap()
+                .requests
+                .as_ref()
+                .unwrap()["storage"],
             Quantity("5Gi".into())
         );
         assert_eq!(
-            pvc.spec.as_ref().unwrap().storage_class_name.as_ref().unwrap(),
+            pvc.spec
+                .as_ref()
+                .unwrap()
+                .storage_class_name
+                .as_ref()
+                .unwrap(),
             "cephfs"
         );
     }
@@ -237,7 +271,11 @@ mod tests {
     fn build_home_pvc_owner_reference() {
         let owner = make_owner(None, None, None);
         let pvc = build_home_pvc(&owner).expect("should build PVC");
-        let refs = pvc.metadata.owner_references.as_ref().expect("should have ownerReferences");
+        let refs = pvc
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name, "alice");
         assert_eq!(refs[0].kind, "Owner");
@@ -253,7 +291,10 @@ mod tests {
         // No existing PVC
         let owner_no_existing = make_owner(None, None, None);
         let sa_no_existing = build_service_account(&owner_no_existing);
-        assert_eq!(sa_no_existing.metadata.name, Some("owner-alice".to_string()));
+        assert_eq!(
+            sa_no_existing.metadata.name,
+            Some("owner-alice".to_string())
+        );
     }
 
     #[test]

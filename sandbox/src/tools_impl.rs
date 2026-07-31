@@ -53,9 +53,7 @@ fn join_lexical(base: &Path, suffix: &Path) -> PathBuf {
 /// - `sandbox_root` must exist and be canonicalisable, else `InvalidRoot`.
 pub fn confine_path(sandbox_root: &Path, user_path: &str) -> Result<PathBuf, SandboxError> {
     let root = std::fs::canonicalize(sandbox_root).map_err(|e| {
-        tracing::warn!(
-            "invalid sandbox root {sandbox_root:?}: canonicalize failed: {e}"
-        );
+        tracing::warn!("invalid sandbox root {sandbox_root:?}: canonicalize failed: {e}");
         SandboxError::InvalidRoot(sandbox_root.to_string_lossy().into_owned())
     })?;
 
@@ -125,9 +123,12 @@ pub fn confine_path(sandbox_root: &Path, user_path: &str) -> Result<PathBuf, San
 
 use serde_json::Value;
 
-use vanyline_tools::filesystem::{self, DeleteFileOptions, EditFileOptions, ListDirectoryOptions, ReadFileOptions, WriteFileOptions};
-use vanyline_tools::search::{self, FindFilesOptions, SearchOptions};
 use vanyline_tools::command::{self, ExecuteCommandOptions};
+use vanyline_tools::filesystem::{
+    self, DeleteFileOptions, EditFileOptions, ListDirectoryOptions, ReadFileOptions,
+    WriteFileOptions,
+};
+use vanyline_tools::search::{self, FindFilesOptions, SearchOptions};
 
 /// Successful MCP tool-result envelope (`isError: false`).
 pub fn ok_result(text: String) -> Value {
@@ -157,7 +158,11 @@ pub async fn confine(sandbox_root: &Path, raw_path: &str) -> Result<String, Valu
 /// (read_file, write_file, edit_file, delete_file, list_directory).
 /// Returns `None` if `name` isn't one of them, so the caller can try other
 /// tool families (search, command — added in follow-up tasks).
-pub async fn dispatch_filesystem(sandbox_root: &Path, name: &str, arguments: Value) -> Option<Value> {
+pub async fn dispatch_filesystem(
+    sandbox_root: &Path,
+    name: &str,
+    arguments: Value,
+) -> Option<Value> {
     // --- read_file ---
     if name == "read_file" {
         let opts: ReadFileOptions = match serde_json::from_value(arguments) {
@@ -260,8 +265,7 @@ pub async fn dispatch_filesystem(sandbox_root: &Path, name: &str, arguments: Val
             }
             Err(val) => Some(val),
         }
-    }
-    else {
+    } else {
         None
     }
 }
@@ -314,8 +318,7 @@ pub async fn dispatch_search(sandbox_root: &Path, name: &str, arguments: Value) 
             }
             Err(val) => Some(val),
         }
-    }
-    else {
+    } else {
         None
     }
 }
@@ -426,11 +429,7 @@ mod tests {
         let outside = tempfile::tempdir().unwrap();
 
         // Create a symlink inside root that points outside
-        symlink(
-            outside.path(),
-            root.path().join("escape_link"),
-        )
-        .unwrap();
+        symlink(outside.path(), root.path().join("escape_link")).unwrap();
 
         // Traversing the symlink leads outside root
         let result = confine_path(root.path(), "escape_link/some_file");
@@ -469,9 +468,14 @@ mod tests {
     fn dotdot_via_nonexistent_intermediate_rejected() {
         let root = make_root();
         let result = confine_path(root.path(), "sub/newdir/../../../etc/evilfile");
-        assert!(result.is_err(), "expected PathEscape for '..' passing through nonexistent intermediates");
+        assert!(
+            result.is_err(),
+            "expected PathEscape for '..' passing through nonexistent intermediates"
+        );
         match result.unwrap_err() {
-            SandboxError::PathEscape { path, .. } => assert_eq!(path, "sub/newdir/../../../etc/evilfile"),
+            SandboxError::PathEscape { path, .. } => {
+                assert_eq!(path, "sub/newdir/../../../etc/evilfile")
+            }
             _ => panic!("expected PathEscape"),
         }
     }
@@ -483,12 +487,19 @@ mod tests {
     fn single_token_dotdot_bypass_rejected() {
         let owner_home = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(owner_home.path().join(".ssh")).unwrap();
-        std::fs::write(owner_home.path().join(".ssh/authorized_keys"), "existing-key\n").unwrap();
+        std::fs::write(
+            owner_home.path().join(".ssh/authorized_keys"),
+            "existing-key\n",
+        )
+        .unwrap();
         let workspace = owner_home.path().join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
 
         let result = confine_path(&workspace, "bogus/../../.ssh/authorized_keys");
-        assert!(result.is_err(), "expected PathEscape for single-token '..' bypass to sibling .ssh");
+        assert!(
+            result.is_err(),
+            "expected PathEscape for single-token '..' bypass to sibling .ssh"
+        );
         match result.unwrap_err() {
             SandboxError::PathEscape { path, .. } => {
                 assert_eq!(path, "bogus/../../.ssh/authorized_keys")
@@ -527,8 +538,15 @@ mod tests {
     fn avoids_redundant_canonicalize_when_ancestor_is_root() {
         let root = make_root();
         let result = confine_path(root.path(), "brand/new/path.txt").unwrap();
-        let expected = root.path().canonicalize().unwrap().join("brand/new/path.txt");
-        assert_eq!(result, expected, "new path under root should resolve correctly");
+        let expected = root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("brand/new/path.txt");
+        assert_eq!(
+            result, expected,
+            "new path under root should resolve correctly"
+        );
     }
 
     /// Test complémentaire : le fix ne casse pas la régression initiale
@@ -540,7 +558,10 @@ mod tests {
         // mais .exists() est appelée sur le candidat et le parcours d'ancêtres devrait
         // trouver root comme plus profond)
         let result = confine_path(root.path(), "../../etc/hosts");
-        assert!(result.is_err(), "dotdot simple escape should still be blocked");
+        assert!(
+            result.is_err(),
+            "dotdot simple escape should still be blocked"
+        );
         match result.unwrap_err() {
             SandboxError::PathEscape { path, .. } => {
                 assert_eq!(path, "../../etc/hosts")

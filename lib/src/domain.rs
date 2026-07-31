@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
+use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
@@ -55,7 +55,9 @@ where
     map.end()
 }
 
-fn deserialize_options<'de, D>(deserializer: D) -> std::result::Result<serde_json::Map<String, serde_json::Value>, D::Error>
+fn deserialize_options<'de, D>(
+    deserializer: D,
+) -> std::result::Result<serde_json::Map<String, serde_json::Value>, D::Error>
 where
     D: Deserializer<'de>,
 {
@@ -160,7 +162,10 @@ impl<'de> Deserialize<'de> for SkillSelection {
             type Value = SkillSelection;
 
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
-                write!(formatter, "a string (\"auto\" or \"none\") or an array of skill names")
+                write!(
+                    formatter,
+                    "a string (\"auto\" or \"none\") or an array of skill names"
+                )
             }
 
             fn visit_str<E>(self, value: &str) -> std::result::Result<SkillSelection, E>
@@ -214,8 +219,8 @@ fn default_agent_mode() -> AgentMode {
 
 #[cfg(test)]
 mod tests {
-    use crate::VnyError;
     use super::*;
+    use crate::VnyError;
 
     #[test]
     fn provider_type_serde() {
@@ -325,7 +330,10 @@ mod tests {
         assert_eq!(profile.model, "qwen2.5");
         assert_eq!(profile.temperature, Some(0.7));
         assert_eq!(profile.max_tokens, Some(4096));
-        assert_eq!(profile.options.get("num_ctx").unwrap().as_u64().unwrap(), 65536);
+        assert_eq!(
+            profile.options.get("num_ctx").unwrap().as_u64().unwrap(),
+            65536
+        );
 
         let back = serde_json::to_string(&profile).unwrap();
         let parsed: ModelProfile = serde_json::from_str(&back).unwrap();
@@ -341,8 +349,11 @@ mod tests {
         let serialized = serde_json::to_value(&minimal).unwrap();
         let opt_fields = &["temperature", "max_tokens", "options"];
         for field in opt_fields {
-            assert!(!serialized.as_object().unwrap().contains_key(*field),
-                "field '{}' should not be serialized for minimal profile", field);
+            assert!(
+                !serialized.as_object().unwrap().contains_key(*field),
+                "field '{}' should not be serialized for minimal profile",
+                field
+            );
         }
     }
 

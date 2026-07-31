@@ -101,21 +101,19 @@ pub fn search_tools() -> Vec<serde_json::Value> {
 
 /// execute_command.
 pub fn command_tools() -> Vec<serde_json::Value> {
-    vec![
-        json!({
-            "name": "execute_command",
-            "description": "Execute a shell command and capture output. Example: {\"command\": \"cargo test\"}",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "command": {"type": "string", "description": "Shell command to execute"},
-                    "timeout_secs": {"type": "integer", "description": "Timeout in seconds (default 30, 0 = no timeout)"},
-                    "cwd": {"type": "string", "description": "Working directory (default: current directory)"}
-                },
-                "required": ["command"]
-            }
-        }),
-    ]
+    vec![json!({
+        "name": "execute_command",
+        "description": "Execute a shell command and capture output. Example: {\"command\": \"cargo test\"}",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string", "description": "Shell command to execute"},
+                "timeout_secs": {"type": "integer", "description": "Timeout in seconds (default 30, 0 = no timeout)"},
+                "cwd": {"type": "string", "description": "Working directory (default: current directory)"}
+            },
+            "required": ["command"]
+        }
+    })]
 }
 
 #[cfg(test)]

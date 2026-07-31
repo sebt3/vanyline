@@ -39,7 +39,10 @@ impl PrefixedMcpTool {
                 let prefixed_name = format!("{}{}", prefix, original.name);
                 let mut prefixed = Tool::new(
                     prefixed_name,
-                    original.description.clone().unwrap_or(std::borrow::Cow::Borrowed("")),
+                    original
+                        .description
+                        .clone()
+                        .unwrap_or(std::borrow::Cow::Borrowed("")),
                     original.input_schema.clone(),
                 );
                 prefixed.title = original.title.clone();
@@ -89,14 +92,9 @@ impl ToolDyn for PrefixedMcpTool {
                 .map(|a| rmcp::model::CallToolRequestParams::new(name.clone()).with_arguments(a))
                 .unwrap_or_else(|| rmcp::model::CallToolRequestParams::new(name));
 
-            let result = client
-                .call_tool(request)
-                .await
-                .map_err(|e| {
-                    rig_core::tool::ToolError::ToolCallError(Box::new(McpToolCallError(
-                        e.to_string(),
-                    )))
-                })?;
+            let result = client.call_tool(request).await.map_err(|e| {
+                rig_core::tool::ToolError::ToolCallError(Box::new(McpToolCallError(e.to_string())))
+            })?;
 
             if let Some(true) = result.is_error {
                 let error_msg = result
@@ -143,8 +141,7 @@ impl ToolDyn for PrefixedMcpTool {
                             ..
                         } => format!(
                             "{mime_type}{uri}:{blob}",
-                            mime_type =
-                                mime_type.map(|m| format!("data:{m};")).unwrap_or_default(),
+                            mime_type = mime_type.map(|m| format!("data:{m};")).unwrap_or_default(),
                         ),
                     },
                     rmcp::model::RawContent::Audio(_) => {
@@ -192,14 +189,12 @@ fn tool_matches(patterns: &[String], name: &str) -> bool {
     if patterns.is_empty() {
         return true;
     }
-    patterns
-        .iter()
-        .any(|pattern| {
-            Glob::new(pattern)
-                .ok()
-                .map(|g| g.compile_matcher().is_match(name))
-                .unwrap_or(false)
-        })
+    patterns.iter().any(|pattern| {
+        Glob::new(pattern)
+            .ok()
+            .map(|g| g.compile_matcher().is_match(name))
+            .unwrap_or(false)
+    })
 }
 
 /// Résout, pour un ensemble de `McpSelection`, les paires (sélection, serveur)
@@ -242,10 +237,7 @@ async fn connect_domain_mcp_server_inner(
                     (Ok(name), Ok(value)) => {
                         headers.insert(name, value);
                     }
-                    _ => tracing::warn!(
-                        "invalid MCP header for server {}: {name}",
-                        server.name
-                    ),
+                    _ => tracing::warn!("invalid MCP header for server {}: {name}", server.name),
                 }
             }
             let config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
@@ -253,13 +245,14 @@ async fn connect_domain_mcp_server_inner(
             )
             .custom_headers(headers);
             let transport = rmcp::transport::StreamableHttpClientTransport::from_config(config);
-            let running = rmcp::serve_client((), transport).await.map_err(|e| {
-                VnyError::McpConnectError(server.name.clone(), e.to_string())
-            })?;
+            let running = rmcp::serve_client((), transport)
+                .await
+                .map_err(|e| VnyError::McpConnectError(server.name.clone(), e.to_string()))?;
             let server_sink = running.peer().clone();
-            let tools = running.list_all_tools().await.map_err(|e| {
-                VnyError::McpToolsError(server.name.clone(), e.to_string())
-            })?;
+            let tools = running
+                .list_all_tools()
+                .await
+                .map_err(|e| VnyError::McpToolsError(server.name.clone(), e.to_string()))?;
             Ok((tools, server_sink, running))
         }
     }
@@ -294,10 +287,7 @@ pub async fn connect_mcp_servers_selected(
                 connections.push(running);
             }
             Err(e) => {
-                tracing::warn!(
-                    "skipping selected MCP server {}: {e}",
-                    server.name
-                );
+                tracing::warn!("skipping selected MCP server {}: {e}", server.name);
             }
         }
     }

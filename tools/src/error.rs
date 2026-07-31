@@ -6,7 +6,6 @@ pub enum ToolsError {
     FileNotFound { path: String, hint: String },
     // `hint` : ", parent directory contains: [a, b, c]" si le parent existe,
     // ", parent directory does not exist either" sinon. Toujours actionnable.
-
     #[error("VNL-TLS-002: not a file: {0} (it is a directory — use list_directory)")]
     NotAFile(String),
 
@@ -19,11 +18,12 @@ pub enum ToolsError {
     #[error("VNL-TLS-005: invalid argument {name}: {reason}")]
     InvalidArgument { name: String, reason: String },
 
-    #[error("VNL-TLS-006: string not found in {path}: no occurrence of the provided old_string{hint}")]
+    #[error(
+        "VNL-TLS-006: string not found in {path}: no occurrence of the provided old_string{hint}"
+    )]
     EditNoMatch { path: String, hint: String },
     // `hint` : ". Closest line in file: '<ligne>'" — aide le modèle à corriger
     // son old_string (indentation, espaces).
-
     #[error("VNL-TLS-007: {count} occurrences of old_string in {path} — pass replace_all=true or provide a more specific old_string")]
     EditAmbiguous { path: String, count: usize },
 

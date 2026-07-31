@@ -48,9 +48,9 @@ impl ServerState {
 /// la connaît (workspace folder VS Code), pas le cwd"). Fallback sur le
 /// cwd uniquement si `workspace` est `None` (usage CLI direct / tests).
 fn resolve_layers(workspace: Option<&str>) -> crate::config::Layers {
-    let root = workspace
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let root = workspace.map(std::path::PathBuf::from).unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
     crate::config::Layers::discover(&root)
 }
 
@@ -65,14 +65,12 @@ fn config_error_response<T: serde::Serialize>(
         Ok(v) => {
             JsonRpcResponse::success(id, serde_json::to_value(v).expect("serialize config list"))
         }
-        Err(e) => {
-            JsonRpcResponse::error(
-                id,
-                jsonrpc_code::SERVER_ERROR,
-                format!("{e}"),
-                vnl_code::CONFIG_ERROR,
-            )
-        }
+        Err(e) => JsonRpcResponse::error(
+            id,
+            jsonrpc_code::SERVER_ERROR,
+            format!("{e}"),
+            vnl_code::CONFIG_ERROR,
+        ),
     }
 }
 
@@ -134,37 +132,30 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
     }
 
     // Dispatch on known methods
-    let store = state.store.as_ref().expect("initialized implies store = Some");
+    let store = state
+        .store
+        .as_ref()
+        .expect("initialized implies store = Some");
     match request.method.as_str() {
         "shutdown" => {
             state.shutdown_requested = true;
-            Some(
-                serde_json::to_string(&shutdown_response(id)).expect("JSON serialize response"),
-            )
+            Some(serde_json::to_string(&shutdown_response(id)).expect("JSON serialize response"))
         }
         "config/agents" => {
             let store_clone = store.clone();
-            Some(handle_config_list(id, async {
-                store_clone.list_agents().await
-            }).await)
+            Some(handle_config_list(id, async { store_clone.list_agents().await }).await)
         }
         "config/models" => {
             let store_clone = store.clone();
-            Some(handle_config_list(id, async {
-                store_clone.list_models().await
-            }).await)
+            Some(handle_config_list(id, async { store_clone.list_models().await }).await)
         }
         "config/toolsets" => {
             let store_clone = store.clone();
-            Some(handle_config_list(id, async {
-                store_clone.list_toolsets().await
-            }).await)
+            Some(handle_config_list(id, async { store_clone.list_toolsets().await }).await)
         }
         "config/skills" => {
             let store_clone = store.clone();
-            Some(handle_config_list(id, async {
-                store_clone.list_skills().await
-            }).await)
+            Some(handle_config_list(id, async { store_clone.list_skills().await }).await)
         }
         "conversations/list" => Some(handle_conversations_list(id)),
         "conversations/get" => Some(handle_conversations_get(id, request.params)),
@@ -208,7 +199,11 @@ async fn handle_config_list<T: serde::Serialize>(
 /// (ou `None` si aucun marqueur `.vanyline`/`.git`), `default_agent`
 /// = `store.default_agent()` (`Ok(Some(name))` -> `Some(name)`,
 /// `Ok(None)` ou `Err` -> `None`).
-async fn handle_initialize(state: &mut ServerState, id: Value, params: serde_json::Value) -> JsonRpcResponse {
+async fn handle_initialize(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> JsonRpcResponse {
     let initialize_params: InitializeParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -242,7 +237,11 @@ async fn handle_initialize(state: &mut ServerState, id: Value, params: serde_jso
     let default_agent = store.default_agent().await.ok().flatten();
 
     // Resolve workspace_root from layers
-    let workspace_root = store.layers().workspace_dir.as_ref().map(|p| p.display().to_string());
+    let workspace_root = store
+        .layers()
+        .workspace_dir
+        .as_ref()
+        .map(|p| p.display().to_string());
 
     state.initialized = true;
     state.shutdown_requested = false;
@@ -277,19 +276,26 @@ fn handle_conversations_list(id: Value) -> String {
     let result = store::list_conversations();
     match result {
         Ok(convs) => {
-            let summaries: Vec<ConversationSummary> = convs.iter().map(ConversationSummary::from).collect();
-            serde_json::to_string(&JsonRpcResponse::success(id, Value::Array(
-                summaries.into_iter().map(|s| serde_json::to_value(s).expect("serialize summary")).collect()
-            ))).expect("serialize list response")
-        }
-        Err(e) => {
-            serde_json::to_string(&JsonRpcResponse::error(
+            let summaries: Vec<ConversationSummary> =
+                convs.iter().map(ConversationSummary::from).collect();
+            serde_json::to_string(&JsonRpcResponse::success(
                 id,
-                jsonrpc_code::SERVER_ERROR,
-                format!("{e}"),
-                vnl_code::CONVERSATION_STORAGE_ERROR,
-            )).expect("serialize list error response")
+                Value::Array(
+                    summaries
+                        .into_iter()
+                        .map(|s| serde_json::to_value(s).expect("serialize summary"))
+                        .collect(),
+                ),
+            ))
+            .expect("serialize list response")
         }
+        Err(e) => serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::SERVER_ERROR,
+            format!("{e}"),
+            vnl_code::CONVERSATION_STORAGE_ERROR,
+        ))
+        .expect("serialize list error response"),
     }
 }
 
@@ -304,38 +310,50 @@ fn handle_conversations_list(id: Value) -> String {
 fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
     let params: ConversationIdParams = match serde_json::from_value(params) {
         Ok(p) => p,
-        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
-            id,
-            jsonrpc_code::PARSE_ERROR,
-            "Malformed request: params could not be deserialized as ConversationIdParams",
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize get error response"),
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as ConversationIdParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize get error response")
+        }
     };
     let uuid = match Uuid::parse_str(&params.id) {
         Ok(u) => u,
-        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
-            id,
-            jsonrpc_code::PARSE_ERROR,
-            format!("Invalid UUID in id: {}", params.id),
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize get error response"),
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                format!("Invalid UUID in id: {}", params.id),
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize get error response")
+        }
     };
     match store::get_conversation(&uuid) {
-        Ok(conv) => serde_json::to_string(&JsonRpcResponse::success(id, serde_json::to_value(&conv).expect("serialize conversation"))).expect("serialize get response"),
+        Ok(conv) => serde_json::to_string(&JsonRpcResponse::success(
+            id,
+            serde_json::to_value(&conv).expect("serialize conversation"),
+        ))
+        .expect("serialize get response"),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             serde_json::to_string(&JsonRpcResponse::error(
                 id,
                 jsonrpc_code::SERVER_ERROR,
                 format!("Conversation not found: {}", params.id),
                 vnl_code::CONVERSATION_NOT_FOUND,
-            )).expect("serialize get not found error response")
+            ))
+            .expect("serialize get not found error response")
         }
         Err(e) => serde_json::to_string(&JsonRpcResponse::error(
             id,
             jsonrpc_code::SERVER_ERROR,
             format!("{e}"),
             vnl_code::CONVERSATION_STORAGE_ERROR,
-        )).expect("serialize get error response"),
+        ))
+        .expect("serialize get error response"),
     }
 }
 
@@ -351,15 +369,17 @@ fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
 /// vérification que la CLI elle-même ne fait pas). `store::save_conversation(&conv)` :
 /// `Err` -> `VNL-RPC-007` ; succès -> `ConversationSummary::from(&conv)`.
 fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
-    let params: ConversationCreateParams = match serde_json::from_value(params) {
-        Ok(p) => p,
-        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
-            id,
-            jsonrpc_code::PARSE_ERROR,
-            "Malformed request: params could not be deserialized as ConversationCreateParams",
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize create error response"),
-    };
+    let params: ConversationCreateParams =
+        match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as ConversationCreateParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize create error response"),
+        };
     let conv = vanyline_lib::Conversation {
         id: Uuid::new_v4(),
         agent: params.agent,
@@ -369,14 +389,19 @@ fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
     match store::save_conversation(&conv) {
         Ok(()) => {
             let summary = ConversationSummary::from(&conv);
-            serde_json::to_string(&JsonRpcResponse::success(id, serde_json::to_value(summary).expect("serialize summary"))).expect("serialize create response")
+            serde_json::to_string(&JsonRpcResponse::success(
+                id,
+                serde_json::to_value(summary).expect("serialize summary"),
+            ))
+            .expect("serialize create response")
         }
         Err(e) => serde_json::to_string(&JsonRpcResponse::error(
             id,
             jsonrpc_code::SERVER_ERROR,
             format!("{e}"),
             vnl_code::CONVERSATION_STORAGE_ERROR,
-        )).expect("serialize create error response"),
+        ))
+        .expect("serialize create error response"),
     }
 }
 
@@ -390,37 +415,49 @@ fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
 /// silencieusement, exactement comme la commande CLI. Seule une vraie
 /// erreur io (permissions, disque...) -> `VNL-RPC-007`. Succès -> `result:
 /// null` (même pattern que `shutdown`, tâche 01 : `JsonRpcResponse::success(id, Value::Null)`).
-fn handle_conversations_delete(state: &ServerState, id: Value, params: serde_json::Value) -> String {
+fn handle_conversations_delete(
+    state: &ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: ConversationIdParams = match serde_json::from_value(params) {
         Ok(p) => p,
-        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
-            id,
-            jsonrpc_code::PARSE_ERROR,
-            "Malformed request: params could not be deserialized as ConversationIdParams",
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize delete error response"),
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as ConversationIdParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize delete error response")
+        }
     };
     let uuid = match Uuid::parse_str(&params.id) {
         Ok(u) => u,
-        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
-            id,
-            jsonrpc_code::PARSE_ERROR,
-            format!("Invalid UUID in id: {}", params.id),
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize delete error response"),
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                format!("Invalid UUID in id: {}", params.id),
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize delete error response")
+        }
     };
     match store::delete_conversation(&uuid) {
         Ok(()) => {
             state.seq.lock().unwrap().remove(&uuid);
             state.busy.lock().unwrap().remove(&uuid);
-            serde_json::to_string(&JsonRpcResponse::success(id, Value::Null)).expect("serialize delete response")
+            serde_json::to_string(&JsonRpcResponse::success(id, Value::Null))
+                .expect("serialize delete response")
         }
         Err(e) => serde_json::to_string(&JsonRpcResponse::error(
             id,
             jsonrpc_code::SERVER_ERROR,
             format!("{e}"),
             vnl_code::CONVERSATION_STORAGE_ERROR,
-        )).expect("serialize delete error response"),
+        ))
+        .expect("serialize delete error response"),
     }
 }
 
@@ -432,12 +469,15 @@ fn handle_conversations_delete(state: &ServerState, id: Value, params: serde_jso
 fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
     let params: ChatCancelParams = match serde_json::from_value(params) {
         Ok(p) => p,
-        Err(_) => return serde_json::to_string(&JsonRpcResponse::error(
-            id,
-            jsonrpc_code::PARSE_ERROR,
-            "Malformed request: params could not be deserialized as ChatCancelParams",
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize cancel error response"),
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as ChatCancelParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize cancel error response")
+        }
     };
     if Uuid::parse_str(&params.conversation_id).is_err() {
         return serde_json::to_string(&JsonRpcResponse::error(
@@ -445,9 +485,11 @@ fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
             jsonrpc_code::PARSE_ERROR,
             format!("Invalid UUID in conversationId: {}", params.conversation_id),
             vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize cancel error response");
+        ))
+        .expect("serialize cancel error response");
     }
-    serde_json::to_string(&JsonRpcResponse::success(id, Value::Null)).expect("serialize cancel response")
+    serde_json::to_string(&JsonRpcResponse::success(id, Value::Null))
+        .expect("serialize cancel response")
 }
 
 /// `chat/send` : `{conversationId, message, agent?}` -> `{text, toolCalls}`.
@@ -485,46 +527,86 @@ fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
 ///    son `Drop` retire `conv_id`, garanti même si la tâche panique).
 ///    Retourne `None` dès que le spawn a lieu — la réponse arrivera plus
 ///    tard sur `tx`, avec le MÊME `id` que la requête originale.
-async fn handle_chat_send(state: &ServerState, id: Value, params: serde_json::Value) -> Option<String> {
+async fn handle_chat_send(
+    state: &ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> Option<String> {
     let params: ChatSendParams = match serde_json::from_value(params) {
         Ok(p) => p,
-        Err(_) => return Some(serde_json::to_string(&JsonRpcResponse::error(
-            id, jsonrpc_code::PARSE_ERROR,
-            "Malformed request: params could not be deserialized as ChatSendParams",
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize chat/send error response")),
+        Err(_) => {
+            return Some(
+                serde_json::to_string(&JsonRpcResponse::error(
+                    id,
+                    jsonrpc_code::PARSE_ERROR,
+                    "Malformed request: params could not be deserialized as ChatSendParams",
+                    vnl_code::MALFORMED_REQUEST,
+                ))
+                .expect("serialize chat/send error response"),
+            )
+        }
     };
     let conv_id = match Uuid::parse_str(&params.conversation_id) {
         Ok(u) => u,
-        Err(_) => return Some(serde_json::to_string(&JsonRpcResponse::error(
-            id, jsonrpc_code::PARSE_ERROR,
-            format!("Invalid UUID in conversationId: {}", params.conversation_id),
-            vnl_code::MALFORMED_REQUEST,
-        )).expect("serialize chat/send error response")),
+        Err(_) => {
+            return Some(
+                serde_json::to_string(&JsonRpcResponse::error(
+                    id,
+                    jsonrpc_code::PARSE_ERROR,
+                    format!("Invalid UUID in conversationId: {}", params.conversation_id),
+                    vnl_code::MALFORMED_REQUEST,
+                ))
+                .expect("serialize chat/send error response"),
+            )
+        }
     };
     let conv = match store::get_conversation(&conv_id) {
         Ok(c) => c,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Some(serde_json::to_string(&JsonRpcResponse::error(
-            id, jsonrpc_code::SERVER_ERROR,
-            format!("Conversation not found: {}", params.conversation_id),
-            vnl_code::CONVERSATION_NOT_FOUND,
-        )).expect("serialize chat/send error response")),
-        Err(e) => return Some(serde_json::to_string(&JsonRpcResponse::error(
-            id, jsonrpc_code::SERVER_ERROR, format!("{e}"), vnl_code::CONVERSATION_STORAGE_ERROR,
-        )).expect("serialize chat/send error response")),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            return Some(
+                serde_json::to_string(&JsonRpcResponse::error(
+                    id,
+                    jsonrpc_code::SERVER_ERROR,
+                    format!("Conversation not found: {}", params.conversation_id),
+                    vnl_code::CONVERSATION_NOT_FOUND,
+                ))
+                .expect("serialize chat/send error response"),
+            )
+        }
+        Err(e) => {
+            return Some(
+                serde_json::to_string(&JsonRpcResponse::error(
+                    id,
+                    jsonrpc_code::SERVER_ERROR,
+                    format!("{e}"),
+                    vnl_code::CONVERSATION_STORAGE_ERROR,
+                ))
+                .expect("serialize chat/send error response"),
+            )
+        }
     };
 
     {
         let mut busy = state.busy.lock().unwrap();
         if busy.contains(&conv_id) {
-            return Some(serde_json::to_string(&JsonRpcResponse::error(
-                id, jsonrpc_code::SERVER_ERROR, "Conversation busy: a turn is already in progress", vnl_code::BUSY,
-            )).expect("serialize chat/send error response"));
+            return Some(
+                serde_json::to_string(&JsonRpcResponse::error(
+                    id,
+                    jsonrpc_code::SERVER_ERROR,
+                    "Conversation busy: a turn is already in progress",
+                    vnl_code::BUSY,
+                ))
+                .expect("serialize chat/send error response"),
+            );
         }
         busy.insert(conv_id);
     }
 
-    let store = state.store.as_ref().expect("initialized implies store = Some").clone();
+    let store = state
+        .store
+        .as_ref()
+        .expect("initialized implies store = Some")
+        .clone();
     let agent_name = match params.agent.clone().or_else(|| conv.agent.clone()) {
         Some(a) => Some(a),
         None => store.default_agent().await.ok().flatten(),
@@ -560,21 +642,42 @@ async fn handle_chat_send(state: &ServerState, id: Value, params: serde_json::Va
         let _guard = BusyGuard { busy, conv_id };
         let ctx = SessionContext {
             store: store.clone() as Arc<dyn ConfigStore>,
-            sink: Arc::new(RpcEventSink { conversation_id: conv_id, seq, tx: tx.clone() }),
+            sink: Arc::new(RpcEventSink {
+                conversation_id: conv_id,
+                seq,
+                tx: tx.clone(),
+            }),
             local_tools: crate::tools::local_tools_map(),
             subagent_depth_max: 1,
         };
-        let result = run_agent_turn(&ctx, &agent_name, history, &message, workspace_context.as_deref()).await;
+        let result = run_agent_turn(
+            &ctx,
+            &agent_name,
+            history,
+            &message,
+            workspace_context.as_deref(),
+        )
+        .await;
         let response = match result {
             Ok(turn_result) => {
-                conv.messages.push(chat_turn_result_to_message(&turn_result));
+                conv.messages
+                    .push(chat_turn_result_to_message(&turn_result));
                 store::save_conversation(&conv).ok();
-                JsonRpcResponse::success(id, serde_json::to_value(ChatSendResult {
-                    text: turn_result.response_text,
-                    tool_calls: turn_result.tool_calls,
-                }).expect("serialize ChatSendResult"))
+                JsonRpcResponse::success(
+                    id,
+                    serde_json::to_value(ChatSendResult {
+                        text: turn_result.response_text,
+                        tool_calls: turn_result.tool_calls,
+                    })
+                    .expect("serialize ChatSendResult"),
+                )
             }
-            Err(e) => JsonRpcResponse::error(id, jsonrpc_code::SERVER_ERROR, format!("{e}"), vnl_code::TURN_EXECUTION_ERROR),
+            Err(e) => JsonRpcResponse::error(
+                id,
+                jsonrpc_code::SERVER_ERROR,
+                format!("{e}"),
+                vnl_code::TURN_EXECUTION_ERROR,
+            ),
         };
         if let Ok(line) = serde_json::to_string(&response) {
             let _ = tx.send(line);
@@ -616,7 +719,9 @@ fn read_workspace_context(store: &crate::fs_store::FsConfigStore) -> Option<Stri
 /// périmètre de cette tâche pour 3 lignes de logique — acceptable, ne
 /// PAS reformuler différemment, garder EXACTEMENT cette forme pour rester
 /// visiblement identique au comportement CLI déjà testé) :
-fn conversation_history_to_messages(messages: &[vanyline_lib::Message]) -> Vec<rig_core::message::Message> {
+fn conversation_history_to_messages(
+    messages: &[vanyline_lib::Message],
+) -> Vec<rig_core::message::Message> {
     messages
         .iter()
         .filter_map(|m| {
@@ -638,17 +743,23 @@ fn conversation_history_to_messages(messages: &[vanyline_lib::Message]) -> Vec<r
 /// `name`/`arguments`/`result` sont gardés, cf. commentaire déjà présent
 /// dans `chat.rs`).
 fn chat_turn_result_to_message(result: &ChatTurnResult) -> vanyline_lib::Message {
-    let tool_calls: Vec<vanyline_lib::ToolCall> = result.tool_calls.iter().map(|tc| {
-        vanyline_lib::ToolCall {
+    let tool_calls: Vec<vanyline_lib::ToolCall> = result
+        .tool_calls
+        .iter()
+        .map(|tc| vanyline_lib::ToolCall {
             name: tc.name.clone(),
             arguments: tc.arguments.clone(),
             result: tc.result.clone(),
-        }
-    }).collect();
+        })
+        .collect();
     vanyline_lib::Message {
         role: "assistant".to_string(),
         content: result.response_text.clone(),
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
     }
 }
 
@@ -699,7 +810,11 @@ mod tests {
     use tempfile::tempdir;
     use tokio::test;
 
-    fn make_request_json(id: impl Into<Value>, method: &str, params: Option<serde_json::Value>) -> String {
+    fn make_request_json(
+        id: impl Into<Value>,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> String {
         let mut map = serde_json::Map::new();
         map.insert("jsonrpc".into(), Value::String("2.0".into()));
         map.insert("id".into(), id.into());
@@ -720,14 +835,19 @@ mod tests {
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         // No error
         assert!(resp.error.is_none(), "response should have no error");
         // Result should have protocolVersion == 1 and non-empty serverVersion
         let r = resp.result.as_ref().expect("result should be Some");
         assert_eq!(r["protocolVersion"], 1);
-        let server_version = r["serverVersion"].as_str().expect("serverVersion should be a string");
-        assert!(!server_version.is_empty(), "serverVersion should not be empty");
+        let server_version = r["serverVersion"]
+            .as_str()
+            .expect("serverVersion should be a string");
+        assert!(
+            !server_version.is_empty(),
+            "serverVersion should not be empty"
+        );
         // State should be initialized
         assert!(state.initialized);
     }
@@ -740,7 +860,7 @@ mod tests {
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-003");
         // State should NOT be initialized
@@ -755,7 +875,7 @@ mod tests {
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
@@ -768,7 +888,7 @@ mod tests {
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-001");
     }
@@ -787,7 +907,7 @@ mod tests {
         let result = handle_line(&mut state, &unknown_line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-004");
     }
@@ -802,7 +922,9 @@ mod tests {
 
         // Then shutdown
         let shutdown_line = make_request_json(8, "shutdown", None);
-        let result = handle_line(&mut state, &shutdown_line).await.expect("response");
+        let result = handle_line(&mut state, &shutdown_line)
+            .await
+            .expect("response");
 
         // Wire format check first: `result: null` must actually be on the wire
         // (design doc: shutdown -> null). Checked on the raw string because
@@ -826,7 +948,7 @@ mod tests {
         let result = handle_line(&mut state, line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
         assert_eq!(resp.id, Value::Null);
@@ -849,7 +971,8 @@ mod tests {
         let error_line = make_request_json("xyz", "chat/history", None);
         let result2 = handle_line(&mut state2, &error_line).await;
         assert!(result2.is_some());
-        let resp2: JsonRpcResponse = serde_json::from_str(&result2.unwrap()).expect("parse response");
+        let resp2: JsonRpcResponse =
+            serde_json::from_str(&result2.unwrap()).expect("parse response");
         assert!(resp2.error.is_some());
         assert_eq!(resp2.id, Value::String("xyz".into()));
     }
@@ -877,24 +1000,30 @@ mod tests {
 
         let mut state = ServerState::new(tx);
         let tmp_path = tmp.path().to_str().unwrap();
-        let line = make_request_json(10, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let line = make_request_json(
+            10,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         assert!(resp.error.is_none(), "initialize should succeed");
         let r = resp.result.as_ref().expect("result should be Some");
         assert!(
             r["workspaceRoot"].is_string(),
-            "workspaceRoot should be a string, got: {:?}", r["workspaceRoot"]
+            "workspaceRoot should be a string, got: {:?}",
+            r["workspaceRoot"]
         );
         let ws_root = r["workspaceRoot"].as_str().unwrap();
         assert!(
             ws_root.contains(tmp.path().to_str().unwrap()),
-            "workspaceRoot should contain tempdir path, got: {}", ws_root
+            "workspaceRoot should contain tempdir path, got: {}",
+            ws_root
         );
     }
 
@@ -912,14 +1041,18 @@ mod tests {
 
         let mut state = ServerState::new(tx);
         let tmp_path = tmp.path().to_str().unwrap();
-        let line = make_request_json(11, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let line = make_request_json(
+            11,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         let result = handle_line(&mut state, &line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
-        
+
         assert!(resp.error.is_none(), "initialize should succeed");
         // `workspace_root: Option<String>` has `skip_serializing_if =
         // Option::is_none` (task 01, consistent with the design's `?`
@@ -972,10 +1105,14 @@ mod tests {
         let tmp_path = tmp.path().to_str().unwrap();
 
         // Initialize with workspace
-        let init_line = make_request_json(20, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let init_line = make_request_json(
+            20,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
 
@@ -984,11 +1121,18 @@ mod tests {
         let result = handle_line(&mut state, &agents_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "config/agents should succeed, got error: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "config/agents should succeed, got error: {:?}",
+            resp.error
+        );
         let agents = &resp.result.as_ref().expect("result should be Some");
         assert!(agents.is_array(), "result should be a JSON array");
         let arr = agents.as_array().unwrap();
-        assert!(!arr.is_empty(), "agents list should contain at least the build agent");
+        assert!(
+            !arr.is_empty(),
+            "agents list should contain at least the build agent"
+        );
         assert_eq!(arr[0]["name"], "build");
     }
 
@@ -1005,10 +1149,14 @@ mod tests {
         let tmp_path = tmp.path().to_str().unwrap();
 
         // Initialize with empty tempdir
-        let init_line = make_request_json(30, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let init_line = make_request_json(
+            30,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
 
@@ -1017,7 +1165,11 @@ mod tests {
         let result = handle_line(&mut state, &models_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "config/models should succeed with empty list, got error: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "config/models should succeed with empty list, got error: {:?}",
+            resp.error
+        );
         let models = &resp.result.as_ref().expect("result should be Some");
         assert!(models.is_array());
         assert_eq!(models.as_array().unwrap().len(), 0);
@@ -1035,10 +1187,14 @@ mod tests {
         let tmp_path = tmp.path().to_str().unwrap();
 
         // Initialize
-        let init_line = make_request_json(40, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let init_line = make_request_json(
+            40,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
 
@@ -1047,23 +1203,37 @@ mod tests {
         let result = handle_line(&mut state, &ts_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
         assert!(
-            resp.error.is_none() || resp.error.as_ref().map(|e| e.data.code.as_str()) != Some("VNL-RPC-004"),
+            resp.error.is_none()
+                || resp.error.as_ref().map(|e| e.data.code.as_str()) != Some("VNL-RPC-004"),
             "config/toolsets should be a known method, got error code: {:?}",
             resp.error.as_ref().map(|e| e.data.code.as_str())
         );
         // Result should be a JSON array
-        assert!(resp.result.as_ref().map(|v| v.is_array()).unwrap_or_default(), "result should be an array");
+        assert!(
+            resp.result
+                .as_ref()
+                .map(|v| v.is_array())
+                .unwrap_or_default(),
+            "result should be an array"
+        );
 
         // config/skills — same pattern
         let skills_line = make_request_json(42, "config/skills", None);
         let result = handle_line(&mut state, &skills_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
         assert!(
-            resp.error.is_none() || resp.error.as_ref().map(|e| e.data.code.as_str()) != Some("VNL-RPC-004"),
+            resp.error.is_none()
+                || resp.error.as_ref().map(|e| e.data.code.as_str()) != Some("VNL-RPC-004"),
             "config/skills should be a known method, got error code: {:?}",
             resp.error.as_ref().map(|e| e.data.code.as_str())
         );
-        assert!(resp.result.as_ref().map(|v| v.is_array()).unwrap_or_default(), "result should be an array");
+        assert!(
+            resp.result
+                .as_ref()
+                .map(|v| v.is_array())
+                .unwrap_or_default(),
+            "result should be an array"
+        );
     }
 
     /// Isolation lock and helper for tests that touch `crate::store` (reads
@@ -1097,7 +1267,11 @@ mod tests {
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "list should succeed with empty result, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "list should succeed with empty result, got: {:?}",
+            resp.error
+        );
         let items = &resp.result.as_ref().expect("result should be Some");
         assert!(items.is_array());
         assert_eq!(items.as_array().unwrap().len(), 0);
@@ -1115,11 +1289,19 @@ mod tests {
         assert!(state.initialized);
 
         // Create
-        let create_line = make_request_json(56, "conversations/create", Some(json!({"agent":"build","title":"Test"})));
+        let create_line = make_request_json(
+            56,
+            "conversations/create",
+            Some(json!({"agent":"build","title":"Test"})),
+        );
         let result = handle_line(&mut state, &create_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "create should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "create should succeed, got: {:?}",
+            resp.error
+        );
         let created = &resp.result.as_ref().expect("result should be Some");
         assert!(created["id"].is_string());
         let created_id = created["id"].as_str().unwrap();
@@ -1133,7 +1315,11 @@ mod tests {
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "list should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "list should succeed, got: {:?}",
+            resp.error
+        );
         let items = &resp.result.as_ref().expect("result should be Some");
         assert!(items.is_array());
         assert_eq!(items.as_array().unwrap().len(), 1);
@@ -1152,7 +1338,11 @@ mod tests {
         assert!(state.initialized);
 
         // Create
-        let create_line = make_request_json(61, "conversations/create", Some(json!({"agent":"build","title":"Test"})));
+        let create_line = make_request_json(
+            61,
+            "conversations/create",
+            Some(json!({"agent":"build","title":"Test"})),
+        );
         let result = handle_line(&mut state, &create_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
         let created_id = resp.result.as_ref().unwrap()["id"].as_str().unwrap();
@@ -1162,7 +1352,11 @@ mod tests {
         let result = handle_line(&mut state, &get_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "get should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "get should succeed, got: {:?}",
+            resp.error
+        );
         let got = &resp.result.as_ref().expect("result should be Some");
         assert_eq!(got["id"], created_id);
         assert!(got["messages"].is_array());
@@ -1222,17 +1416,26 @@ mod tests {
         assert!(state.initialized);
 
         // Create
-        let create_line = make_request_json(71, "conversations/create", Some(json!({"agent":"build","title":"Test"})));
+        let create_line = make_request_json(
+            71,
+            "conversations/create",
+            Some(json!({"agent":"build","title":"Test"})),
+        );
         let result = handle_line(&mut state, &create_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
         let created_id = resp.result.as_ref().unwrap()["id"].as_str().unwrap();
 
         // Delete
-        let delete_line = make_request_json(72, "conversations/delete", Some(json!({"id": created_id})));
+        let delete_line =
+            make_request_json(72, "conversations/delete", Some(json!({"id": created_id})));
         let result = handle_line(&mut state, &delete_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "delete should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "delete should succeed, got: {:?}",
+            resp.error
+        );
         assert!(result.contains("\"result\":null"));
 
         // List should be empty
@@ -1240,7 +1443,11 @@ mod tests {
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
-        assert!(resp.error.is_none(), "list should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "list should succeed, got: {:?}",
+            resp.error
+        );
         let items = &resp.result.as_ref().expect("result should be Some");
         assert_eq!(items.as_array().unwrap().len(), 0);
     }
@@ -1258,12 +1465,17 @@ mod tests {
 
         // Delete with a valid UUID that was never created
         let fake_uuid = "bbbbbbbb-0000-0000-0000-000000000001";
-        let delete_line = make_request_json(76, "conversations/delete", Some(json!({"id": fake_uuid})));
+        let delete_line =
+            make_request_json(76, "conversations/delete", Some(json!({"id": fake_uuid})));
         let result = handle_line(&mut state, &delete_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
         // Should succeed silently (idempotent, like CLI)
-        assert!(resp.error.is_none(), "delete of unknown id should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "delete of unknown id should succeed, got: {:?}",
+            resp.error
+        );
         assert!(result.contains("\"result\":null"));
     }
 
@@ -1293,7 +1505,11 @@ mod tests {
         assert!(state.initialized);
 
         let fake_uuid = uuid::Uuid::new_v4().to_string();
-        let line = make_request_json(91, "chat/cancel", Some(json!({"conversationId": fake_uuid})));
+        let line = make_request_json(
+            91,
+            "chat/cancel",
+            Some(json!({"conversationId": fake_uuid})),
+        );
         let result = handle_line(&mut state, &line).await.unwrap();
         // Wire format check on the raw string first — `Option<Value>`'s
         // Deserialize collapses a JSON `null` into `None` (cf.
@@ -1303,7 +1519,11 @@ mod tests {
         assert!(result.contains("\"result\":null"));
 
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
-        assert!(resp.error.is_none(), "chat/cancel should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "chat/cancel should succeed, got: {:?}",
+            resp.error
+        );
         assert_eq!(resp.result, None);
     }
 
@@ -1315,7 +1535,11 @@ mod tests {
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
 
-        let line = make_request_json(93, "chat/cancel", Some(json!({"conversationId": "not-a-uuid"})));
+        let line = make_request_json(
+            93,
+            "chat/cancel",
+            Some(json!({"conversationId": "not-a-uuid"})),
+        );
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
@@ -1329,7 +1553,11 @@ mod tests {
         let mut state = ServerState::new(tx);
 
         let fake_uuid = uuid::Uuid::new_v4().to_string();
-        let line = make_request_json(94, "chat/cancel", Some(json!({"conversationId": fake_uuid})));
+        let line = make_request_json(
+            94,
+            "chat/cancel",
+            Some(json!({"conversationId": fake_uuid})),
+        );
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
@@ -1363,10 +1591,20 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let seq = Arc::new(Mutex::new(HashMap::new()));
         let conversation_id = uuid::Uuid::new_v4();
-        let sink = RpcEventSink { conversation_id, seq, tx };
+        let sink = RpcEventSink {
+            conversation_id,
+            seq,
+            tx,
+        };
 
-        sink.emit(ChatEvent::Token { content: "a".into() }).await;
-        sink.emit(ChatEvent::Token { content: "b".into() }).await;
+        sink.emit(ChatEvent::Token {
+            content: "a".into(),
+        })
+        .await;
+        sink.emit(ChatEvent::Token {
+            content: "b".into(),
+        })
+        .await;
 
         let line1 = rx.recv().await.expect("first notification");
         let line2 = rx.recv().await.expect("second notification");
@@ -1375,7 +1613,10 @@ mod tests {
         let v2: serde_json::Value = serde_json::from_str(&line2).expect("parse notification 2");
 
         assert_eq!(v1["method"], "chat/event");
-        assert!(v1.get("id").is_none(), "notification must not have an id field");
+        assert!(
+            v1.get("id").is_none(),
+            "notification must not have an id field"
+        );
         assert_eq!(v1["params"]["conversationId"], conversation_id.to_string());
         assert_eq!(v1["params"]["seq"], 0);
         assert_eq!(v1["params"]["event"]["type"], "token");
@@ -1422,15 +1663,22 @@ mod tests {
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
 
-        let line = make_request_json(111, "chat/send", Some(json!({
-            "conversationId": "nope",
-            "message": "hi",
-        })));
+        let line = make_request_json(
+            111,
+            "chat/send",
+            Some(json!({
+                "conversationId": "nope",
+                "message": "hi",
+            })),
+        );
         let result = handle_line(&mut state, &line).await;
 
         // Before fix: result would be None (silently returned)
         // After fix: result is Some with VNL-RPC-000 error
-        assert!(result.is_some(), "should return an error for malformed UUID");
+        assert!(
+            result.is_some(),
+            "should return an error for malformed UUID"
+        );
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
 
         assert!(resp.error.is_some());
@@ -1450,10 +1698,14 @@ mod tests {
         assert!(state.initialized);
 
         let uuid = Uuid::new_v4().to_string();
-        let line = make_request_json(121, "chat/send", Some(json!({
-            "conversationId": uuid,
-            "message": "hi",
-        })));
+        let line = make_request_json(
+            121,
+            "chat/send",
+            Some(json!({
+                "conversationId": uuid,
+                "message": "hi",
+            })),
+        );
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
@@ -1475,13 +1727,19 @@ mod tests {
         assert!(state.initialized);
 
         // Create conversation
-        let create_line = make_request_json(131, "conversations/create", Some(json!({
-            "agent": "build",
-            "title": "Test",
-        })));
+        let create_line = make_request_json(
+            131,
+            "conversations/create",
+            Some(json!({
+                "agent": "build",
+                "title": "Test",
+            })),
+        );
         let result = handle_line(&mut state, &create_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
-        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"]
+            .as_str()
+            .unwrap();
         let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID from create");
 
         // Insert into busy directly (no need for a real turn in progress)
@@ -1489,14 +1747,21 @@ mod tests {
         assert!(state.busy.lock().unwrap().contains(&conv_id));
 
         // Send chat on this busy conversation
-        let line = make_request_json(132, "chat/send", Some(json!({
-            "conversationId": conv_id_str,
-            "message": "hi",
-        })));
+        let line = make_request_json(
+            132,
+            "chat/send",
+            Some(json!({
+                "conversationId": conv_id_str,
+                "message": "hi",
+            })),
+        );
         let result = handle_line(&mut state, &line).await;
 
         // Busy check happens synchronously BEFORE any spawn
-        assert!(result.is_some(), "handle_line should return Some for busy error");
+        assert!(
+            result.is_some(),
+            "handle_line should return Some for busy error"
+        );
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse response");
 
         assert!(resp.error.is_some());
@@ -1525,10 +1790,14 @@ mod tests {
 
         // Initialize with empty workspace (no agents)
         let tmp_path = tmp.path().to_str().unwrap();
-        let init_line = make_request_json(140, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let init_line = make_request_json(
+            140,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
 
@@ -1536,16 +1805,22 @@ mod tests {
         let create_line = make_request_json(141, "conversations/create", Some(json!({})));
         let result = handle_line(&mut state, &create_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
-        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"]
+            .as_str()
+            .unwrap();
         let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID from create");
 
         // Send chat WITHOUT agent in params:
         // params.agent is None -> conv.agent is None -> store.default_agent()
         // returns None (empty workspace) -> VNL-RPC-008
-        let line = make_request_json(142, "chat/send", Some(json!({
-            "conversationId": conv_id_str,
-            "message": "hi",
-        })));
+        let line = make_request_json(
+            142,
+            "chat/send",
+            Some(json!({
+                "conversationId": conv_id_str,
+                "message": "hi",
+            })),
+        );
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 
@@ -1587,13 +1862,15 @@ models:
 defaults:
   agent: build
 "#,
-        ).unwrap();
+        )
+        .unwrap();
 
         // agents/build.md referencing the model
         std::fs::write(
             agents_dir.join("build.md"),
             "---\nmodel: ollama-qwen\ntoolsets: []\nskills: none\n---\ntest agent\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let tmp_path = tmp.path().to_str().unwrap();
 
@@ -1601,36 +1878,57 @@ defaults:
         let mut state = ServerState::new(tx);
 
         // Initialize with workspace
-        let init_line = make_request_json(150, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let init_line = make_request_json(
+            150,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         let result = handle_line(&mut state, &init_line).await;
         assert!(result.is_some());
         let resp: JsonRpcResponse = serde_json::from_str(&result.unwrap()).expect("parse init");
-        assert!(resp.error.is_none(), "init should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "init should succeed, got: {:?}",
+            resp.error
+        );
         assert!(state.initialized);
 
         // Create conversation with build agent
-        let create_line = make_request_json(151, "conversations/create", Some(json!({
-            "agent": "build",
-            "title": "Test turn error",
-        })));
+        let create_line = make_request_json(
+            151,
+            "conversations/create",
+            Some(json!({
+                "agent": "build",
+                "title": "Test turn error",
+            })),
+        );
         let result = handle_line(&mut state, &create_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse create response");
-        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"]
+            .as_str()
+            .unwrap();
         let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID");
         let request_id = resp.result.as_ref().expect("result should be Some")["id"].clone();
 
         // Send chat
-        let send_line = make_request_json(request_id.clone(), "chat/send", Some(json!({
-            "conversationId": conv_id_str,
-            "message": "hi",
-        })));
+        let send_line = make_request_json(
+            request_id.clone(),
+            "chat/send",
+            Some(json!({
+                "conversationId": conv_id_str,
+                "message": "hi",
+            })),
+        );
         let result = handle_line(&mut state, &send_line).await;
 
         // handle_line must return None IMMEDIATELY (spawns a task)
-        assert!(result.is_none(), "handle_line should return None (async path)");
+        assert!(
+            result.is_none(),
+            "handle_line should return None (async path)"
+        );
 
         // busy should CONTAIN conv_id (turn just spawned)
         assert!(state.busy.lock().unwrap().contains(&conv_id));
@@ -1660,7 +1958,11 @@ defaults:
 
         // R9 : le message user doit être persisté malgré l'échec du tour.
         let persisted = store::get_conversation(&conv_id).expect("conversation should still exist");
-        assert_eq!(persisted.messages.len(), 1, "only the user message should be persisted on turn failure");
+        assert_eq!(
+            persisted.messages.len(),
+            1,
+            "only the user message should be persisted on turn failure"
+        );
         assert_eq!(persisted.messages[0].role, "user");
         assert_eq!(persisted.messages[0].content, "hi");
     }
@@ -1679,28 +1981,52 @@ defaults:
         std::fs::create_dir_all(&vanyline).unwrap();
         let tmp_path = tmp.path().to_str().unwrap();
 
-        let init_line = make_request_json(160, "initialize", Some(json!({
-            "protocolVersion": 1,
-            "workspace": tmp_path,
-        })));
+        let init_line = make_request_json(
+            160,
+            "initialize",
+            Some(json!({
+                "protocolVersion": 1,
+                "workspace": tmp_path,
+            })),
+        );
         handle_line(&mut state, &init_line).await;
 
-        let create_line = make_request_json(161, "conversations/create", Some(json!({"title": "to delete"})));
+        let create_line = make_request_json(
+            161,
+            "conversations/create",
+            Some(json!({"title": "to delete"})),
+        );
         let result = handle_line(&mut state, &create_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse create response");
-        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"].as_str().unwrap();
+        let conv_id_str = resp.result.as_ref().expect("result should be Some")["id"]
+            .as_str()
+            .unwrap();
         let conv_id = Uuid::parse_str(conv_id_str).expect("valid UUID");
 
         // Simuler un état résiduel (comme si un tour avait tourné sur cette conversation)
         state.seq.lock().unwrap().insert(conv_id, 3);
         state.busy.lock().unwrap().insert(conv_id);
 
-        let delete_line = make_request_json(162, "conversations/delete", Some(json!({"id": conv_id_str})));
+        let delete_line = make_request_json(
+            162,
+            "conversations/delete",
+            Some(json!({"id": conv_id_str})),
+        );
         let result = handle_line(&mut state, &delete_line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse delete response");
-        assert!(resp.error.is_none(), "delete should succeed, got: {:?}", resp.error);
+        assert!(
+            resp.error.is_none(),
+            "delete should succeed, got: {:?}",
+            resp.error
+        );
 
-        assert!(!state.seq.lock().unwrap().contains_key(&conv_id), "seq entry should be purged");
-        assert!(!state.busy.lock().unwrap().contains(&conv_id), "busy entry should be purged");
+        assert!(
+            !state.seq.lock().unwrap().contains_key(&conv_id),
+            "seq entry should be purged"
+        );
+        assert!(
+            !state.busy.lock().unwrap().contains(&conv_id),
+            "busy entry should be purged"
+        );
     }
 }

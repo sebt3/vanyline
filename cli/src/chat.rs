@@ -48,7 +48,15 @@ async fn run_one_shot(user_msg: &str, agent: Option<String>, continue_active: bo
     let ctx = build_session_context();
     let workspace_context = read_workspace_context();
 
-    match process_turn(&conv, &agent_name, &ctx, workspace_context.as_deref(), user_msg).await {
+    match process_turn(
+        &conv,
+        &agent_name,
+        &ctx,
+        workspace_context.as_deref(),
+        user_msg,
+    )
+    .await
+    {
         Ok(result) => {
             conv.messages.push(vanyline_lib::Message {
                 role: "user".to_string(),
@@ -90,7 +98,15 @@ async fn run_repl(agent: Option<String>, continue_active: bool) {
             continue;
         }
 
-        match process_turn(&conv, &agent_name, &ctx, workspace_context.as_deref(), &input).await {
+        match process_turn(
+            &conv,
+            &agent_name,
+            &ctx,
+            workspace_context.as_deref(),
+            &input,
+        )
+        .await
+        {
             Ok(result) => {
                 conv.messages.push(vanyline_lib::Message {
                     role: "user".to_string(),
@@ -154,17 +170,23 @@ async fn process_turn(
 /// (`types::ToolCall`, PAS d'`id` — champ abandonné à la persistance, la
 /// corrélation call/result n'a de sens que pendant le tour lui-même).
 fn result_to_assistant_message(result: ChatTurnResult) -> vanyline_lib::Message {
-    let tool_calls: Vec<vanyline_lib::ToolCall> = result.tool_calls.iter().map(|tc| {
-        vanyline_lib::ToolCall {
+    let tool_calls: Vec<vanyline_lib::ToolCall> = result
+        .tool_calls
+        .iter()
+        .map(|tc| vanyline_lib::ToolCall {
             name: tc.name.clone(),
             arguments: tc.arguments.clone(),
             result: tc.result.clone(),
-        }
-    }).collect();
+        })
+        .collect();
     vanyline_lib::Message {
         role: "assistant".to_string(),
         content: result.response_text,
-        tool_calls: if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        tool_calls: if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
     }
 }
 
@@ -185,7 +207,8 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     let mut lines = Vec::new();
 
     let agents = store.list_agents().await.unwrap_or_default();
-    let names: Vec<&str> = agents.iter()
+    let names: Vec<&str> = agents
+        .iter()
         .filter(|a| config::file_entry_source(layers, "agents", "md", &a.name) == "workspace")
         .map(|a| a.name.as_str())
         .collect();
@@ -194,7 +217,8 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     }
 
     let toolsets = store.list_toolsets().await.unwrap_or_default();
-    let names: Vec<&str> = toolsets.iter()
+    let names: Vec<&str> = toolsets
+        .iter()
         .filter(|t| config::file_entry_source(layers, "toolsets", "yaml", &t.name) == "workspace")
         .map(|t| t.name.as_str())
         .collect();
@@ -203,7 +227,8 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     }
 
     let skills = store.list_skills().await.unwrap_or_default();
-    let names: Vec<&str> = skills.iter()
+    let names: Vec<&str> = skills
+        .iter()
         .filter(|s| config::skill_entry_source(layers, &s.name) == "workspace")
         .map(|s| s.name.as_str())
         .collect();
@@ -212,7 +237,8 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     }
 
     let mcp_servers = store.list_mcp_servers().await.unwrap_or_default();
-    let names: Vec<&str> = mcp_servers.iter()
+    let names: Vec<&str> = mcp_servers
+        .iter()
         .filter(|s| config::config_entry_source(layers, &s.name, |r| &r.mcp) == "workspace")
         .map(|s| s.name.as_str())
         .collect();
@@ -221,7 +247,8 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     }
 
     let models = store.list_models().await.unwrap_or_default();
-    let names: Vec<&str> = models.iter()
+    let names: Vec<&str> = models
+        .iter()
         .filter(|m| config::config_entry_source(layers, &m.name, |r| &r.models) == "workspace")
         .map(|m| m.name.as_str())
         .collect();
@@ -230,7 +257,8 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     }
 
     let providers = store.list_providers().await.unwrap_or_default();
-    let names: Vec<&str> = providers.iter()
+    let names: Vec<&str> = providers
+        .iter()
         .filter(|p| config::config_entry_source(layers, &p.name, |r| &r.providers) == "workspace")
         .map(|p| p.name.as_str())
         .collect();
@@ -245,7 +273,9 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
 /// cette dernière retourne une liste vide.
 async fn print_workspace_sources() {
     let store = crate::discover_fs_store();
-    let Some(ws_dir) = store.layers().workspace_dir.clone() else { return };
+    let Some(ws_dir) = store.layers().workspace_dir.clone() else {
+        return;
+    };
     let lines = workspace_source_summary(&store).await;
     if lines.is_empty() {
         return;

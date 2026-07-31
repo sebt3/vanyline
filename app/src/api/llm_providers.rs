@@ -7,11 +7,8 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    api::conversations::get_or_create_user,
-    auth::middleware::AuthUser,
-    db::models::LlmProvider,
-    error::AppError,
-    AppState,
+    api::conversations::get_or_create_user, auth::middleware::AuthUser, db::models::LlmProvider,
+    error::AppError, AppState,
 };
 
 #[derive(Deserialize)]
@@ -174,10 +171,12 @@ pub async fn set_default_provider(
 ) -> Result<Json<LlmProvider>, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
 
-    sqlx::query("UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1")
-        .bind(db_user.id)
-        .execute(&state.pool)
-        .await?;
+    sqlx::query(
+        "UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1",
+    )
+    .bind(db_user.id)
+    .execute(&state.pool)
+    .await?;
 
     let provider = sqlx::query_as::<_, LlmProvider>(
         "UPDATE llm_providers SET is_default = TRUE, updated_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING *",
@@ -309,7 +308,7 @@ mod tests {
             oidc_ca_cert: None,
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
-            
+
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
         };

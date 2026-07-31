@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use kube::{CustomResource, CustomResourceExt};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
+use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 pub struct OwnerSpec {
     /// PVC home existant (ex. celui de code-server). None: créé (`owner-<name>-home`).
     pub existing_pvc: Option<String>,
-    pub home_size: Option<String>,            // défaut appliqué au reconcile: "1Gi"
-    pub home_storage_class: Option<String>,   // RWX recommandé (CephFS)
+    pub home_size: Option<String>, // défaut appliqué au reconcile: "1Gi"
+    pub home_storage_class: Option<String>, // RWX recommandé (CephFS)
     pub project_defaults: Option<ProjectDefaults>,
 }
 
@@ -124,7 +124,7 @@ pub struct Toolchain {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxStatus {
-    pub phase: Option<String>,      // Provisioning | Running | Failed
+    pub phase: Option<String>, // Provisioning | Running | Failed
     pub service: Option<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
@@ -188,16 +188,20 @@ mod tests {
             fetch_interval: None,
         };
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(json.contains(r#""repoUrl""#), "should contain repoUrl (camelCase), got: {json}");
-        assert!(!json.contains("repo_url"), "should not contain repo_url (snake_case), got: {json}");
+        assert!(
+            json.contains(r#""repoUrl""#),
+            "should contain repoUrl (camelCase), got: {json}"
+        );
+        assert!(
+            !json.contains("repo_url"),
+            "should not contain repo_url (snake_case), got: {json}"
+        );
     }
 
     #[test]
     fn sandbox_defaults() {
-        let spec: SandboxSpec = serde_json::from_str(
-            r#"{"project":"p","branch":"main"}"#,
-        )
-        .expect("should deserialize");
+        let spec: SandboxSpec =
+            serde_json::from_str(r#"{"project":"p","branch":"main"}"#).expect("should deserialize");
         assert!(spec.toolchains.is_empty());
         assert!(spec.image.is_none());
     }

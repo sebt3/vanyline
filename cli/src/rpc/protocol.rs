@@ -36,10 +36,20 @@ pub struct JsonRpcResponse {
 
 impl JsonRpcResponse {
     pub fn success(id: serde_json::Value, result: serde_json::Value) -> Self {
-        Self { jsonrpc: "2.0".to_string(), id, result: Some(result), error: None }
+        Self {
+            jsonrpc: "2.0".to_string(),
+            id,
+            result: Some(result),
+            error: None,
+        }
     }
 
-    pub fn error(id: serde_json::Value, code: i64, message: impl Into<String>, vnl_code: &'static str) -> Self {
+    pub fn error(
+        id: serde_json::Value,
+        code: i64,
+        message: impl Into<String>,
+        vnl_code: &'static str,
+    ) -> Self {
         Self {
             jsonrpc: "2.0".to_string(),
             id,
@@ -47,7 +57,9 @@ impl JsonRpcResponse {
             error: Some(JsonRpcErrorObj {
                 code,
                 message: message.into(),
-                data: JsonRpcErrorData { code: vnl_code.to_string() },
+                data: JsonRpcErrorData {
+                    code: vnl_code.to_string(),
+                },
             }),
         }
     }

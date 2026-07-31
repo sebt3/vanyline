@@ -17,20 +17,49 @@ use crate::error::VnyError;
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
-    Token { content: String },
-    ToolCall { id: String, name: String, args: serde_json::Value },
+    Token {
+        content: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        args: serde_json::Value,
+    },
     /// `is_error` est toujours `false` — `rig-core` 0.38.1 convertit les
     /// erreurs de tool call en texte avant `StreamedUserContent::ToolResult`,
     /// l'information n'atteint jamais ce code. Limite connue et documentée
     /// (`docs/architecture.md`, section "Limites connues"), pas un bug local.
-    ToolResult { id: String, name: String, result: String, is_error: bool },
-    SkillLoaded { name: String },
-    SubagentStart { id: String, agent: String, task: String },
-    SubagentEvent { id: String, event: Box<ChatEvent> },
-    SubagentEnd { id: String, result: String },
-    Usage { input_tokens: u64, output_tokens: u64 },
+    ToolResult {
+        id: String,
+        name: String,
+        result: String,
+        is_error: bool,
+    },
+    SkillLoaded {
+        name: String,
+    },
+    SubagentStart {
+        id: String,
+        agent: String,
+        task: String,
+    },
+    SubagentEvent {
+        id: String,
+        event: Box<ChatEvent>,
+    },
+    SubagentEnd {
+        id: String,
+        result: String,
+    },
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
     Done,
-    Error { code: String, message: String },
+    Error {
+        code: String,
+        message: String,
+    },
 }
 
 #[async_trait]
@@ -226,10 +255,10 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig_core::agent::CompletionCall;
     use rig_core::completion::Usage;
     use rig_core::message::{Text, ToolCall, ToolFunction, ToolResult, ToolResultContent};
     use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
-    use rig_core::agent::CompletionCall;
     use rig_core::OneOrMany;
     use std::sync::Mutex;
 
@@ -345,14 +374,12 @@ mod tests {
         let mut acc = StreamAccumulator::new();
 
         // premier token
-        let (events, is_final) = acc.apply(
-            MultiTurnStreamItem::<()>::StreamAssistantItem(
-                StreamedAssistantContent::Text(Text {
-                    text: "Hel".into(),
-                    additional_params: None,
-                }),
-            ),
-        );
+        let (events, is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::Text(Text {
+                text: "Hel".into(),
+                additional_params: None,
+            }),
+        ));
         assert_eq!(is_final, false);
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -364,14 +391,12 @@ mod tests {
         assert_eq!(acc.response_text, "Hel");
 
         // deuxième token
-        let (events, is_final) = acc.apply(
-            MultiTurnStreamItem::<()>::StreamAssistantItem(
-                StreamedAssistantContent::Text(Text {
-                    text: "lo".into(),
-                    additional_params: None,
-                }),
-            ),
-        );
+        let (events, is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::Text(Text {
+                text: "lo".into(),
+                additional_params: None,
+            }),
+        ));
         assert_eq!(is_final, false);
         assert_eq!(events.len(), 1);
         assert_eq!(
@@ -389,20 +414,18 @@ mod tests {
         let mut acc = StreamAccumulator::new();
 
         // ToolCall
-        let (events, _is_final) = acc.apply(
-            MultiTurnStreamItem::<()>::StreamAssistantItem(
-                StreamedAssistantContent::ToolCall {
-                    tool_call: ToolCall::new(
-                        "prov-1".into(),
-                        ToolFunction {
-                            name: "search".into(),
-                            arguments: serde_json::json!({"q":"x"}),
-                        },
-                    ),
-                    internal_call_id: "call-1".into(),
-                },
-            ),
-        );
+        let (events, _is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::ToolCall {
+                tool_call: ToolCall::new(
+                    "prov-1".into(),
+                    ToolFunction {
+                        name: "search".into(),
+                        arguments: serde_json::json!({"q":"x"}),
+                    },
+                ),
+                internal_call_id: "call-1".into(),
+            },
+        ));
         // Capturer l'event ToolCall avant qu'il soit écrasé par apply(ToolResult)
         let events_call = events.clone();
 
@@ -417,25 +440,20 @@ mod tests {
         assert_eq!(acc.tool_calls.len(), 1);
         assert_eq!(acc.tool_calls[0].id, "call-1");
         assert_eq!(acc.tool_calls[0].name, "search");
-        assert_eq!(
-            acc.tool_calls[0].arguments,
-            serde_json::json!({"q":"x"})
-        );
+        assert_eq!(acc.tool_calls[0].arguments, serde_json::json!({"q":"x"}));
         assert_eq!(acc.tool_calls[0].result, None);
 
         // ToolResult — internal_call_id = "call-1" (même id), mais tool_result.id ≠
-        let (events, _is_final) = acc.apply(
-            MultiTurnStreamItem::<()>::StreamUserItem(
-                StreamedUserContent::ToolResult {
-                    tool_result: ToolResult {
-                        id: "prov-1".into(),
-                        call_id: None,
-                        content: OneOrMany::one(ToolResultContent::text("42")),
-                    },
-                    internal_call_id: "call-1".into(),
+        let (events, _is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamUserItem(
+            StreamedUserContent::ToolResult {
+                tool_result: ToolResult {
+                    id: "prov-1".into(),
+                    call_id: None,
+                    content: OneOrMany::one(ToolResultContent::text("42")),
                 },
-            ),
-        );
+                internal_call_id: "call-1".into(),
+            },
+        ));
         assert_eq!(events.len(), 1);
         assert_eq!(
             events,
@@ -449,10 +467,18 @@ mod tests {
         assert_eq!(acc.tool_calls[0].result, Some("42".into()));
 
         // Assertion directe : ToolCall et ToolResult doivent partager le même id
-        let ChatEvent::ToolCall { id: tool_call_event_id, .. } = &events_call[0] else {
+        let ChatEvent::ToolCall {
+            id: tool_call_event_id,
+            ..
+        } = &events_call[0]
+        else {
             panic!("expected ToolCall event")
         };
-        let ChatEvent::ToolResult { id: tool_result_event_id, .. } = &events[0] else {
+        let ChatEvent::ToolResult {
+            id: tool_result_event_id,
+            ..
+        } = &events[0]
+        else {
             panic!("expected ToolResult event")
         };
         assert_eq!(
@@ -468,18 +494,16 @@ mod tests {
     fn apply_tool_result_without_matching_call() {
         let mut acc = StreamAccumulator::new();
 
-        let (events, _is_final) = acc.apply(
-            MultiTurnStreamItem::<()>::StreamUserItem(
-                StreamedUserContent::ToolResult {
-                    tool_result: ToolResult {
-                        id: "unknown".into(),
-                        call_id: None,
-                        content: OneOrMany::one(ToolResultContent::text("result")),
-                    },
-                    internal_call_id: "never-seen".into(),
+        let (events, _is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamUserItem(
+            StreamedUserContent::ToolResult {
+                tool_result: ToolResult {
+                    id: "unknown".into(),
+                    call_id: None,
+                    content: OneOrMany::one(ToolResultContent::text("result")),
                 },
-            ),
-        );
+                internal_call_id: "never-seen".into(),
+            },
+        ));
 
         // Pas de panique, name vide
         assert_eq!(
@@ -509,9 +533,9 @@ mod tests {
             tool_use_prompt_tokens: 0,
             reasoning_tokens: 0,
         };
-        let (events, _is_final) = acc.apply(
-            MultiTurnStreamItem::<()>::CompletionCall(CompletionCall::new(0, Some(usage))),
-        );
+        let (events, _is_final) = acc.apply(MultiTurnStreamItem::<()>::CompletionCall(
+            CompletionCall::new(0, Some(usage)),
+        ));
         assert_eq!(
             events,
             vec![ChatEvent::Usage {
@@ -522,8 +546,9 @@ mod tests {
 
         // Sans usage
         let mut acc2 = StreamAccumulator::new();
-        let (events2, _is_final2) = acc2
-            .apply(MultiTurnStreamItem::<()>::CompletionCall(CompletionCall::new(1, None)));
+        let (events2, _is_final2) = acc2.apply(MultiTurnStreamItem::<()>::CompletionCall(
+            CompletionCall::new(1, None),
+        ));
         assert!(events2.is_empty());
     }
 

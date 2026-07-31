@@ -36,7 +36,11 @@ pub fn bound_lines(text: &str, offset: usize, max_lines: usize, max_bytes: usize
         }
     }
 
-    let returned_count = if result.is_empty() { 0 } else { result.lines().count() };
+    let returned_count = if result.is_empty() {
+        0
+    } else {
+        result.lines().count()
+    };
     let truncated = returned_count < total_lines;
 
     if truncated {
@@ -129,7 +133,12 @@ fn find_count_from_end(lines: &[&str], max_bytes: usize) -> usize {
     let mut result_len = 0;
     let mut count = 0;
     for line in lines.iter().rev() {
-        let next_len = result_len + if count == 0 { line.len() } else { line.len() + 1 };
+        let next_len = result_len
+            + if count == 0 {
+                line.len()
+            } else {
+                line.len() + 1
+            };
         if next_len > max_bytes {
             break;
         }
@@ -186,9 +195,7 @@ mod tests {
 
     #[test]
     fn bound_lines_respects_offset() {
-        let lines: Vec<String> = (0..300)
-            .map(|i| format!("line {}", i))
-            .collect();
+        let lines: Vec<String> = (0..300).map(|i| format!("line {}", i)).collect();
         let text = lines.join("\n");
 
         let result = bound_lines(&text, 200, 200, 16 * 1024);

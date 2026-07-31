@@ -18,27 +18,90 @@ pub fn api_router() -> Router<AppState> {
     Router::new()
         .route("/me", get(me::handler_me))
         // LLM providers (admin)
-        .route("/llm-providers", get(llm_providers::list_providers).post(llm_providers::create_provider))
-        .route("/llm-providers/{id}", get(llm_providers::get_provider).put(llm_providers::update_provider).delete(llm_providers::delete_provider))
-        .route("/llm-providers/{id}/test", post(llm_providers::test_provider))
-        .route("/llm-providers/{id}/default", put(llm_providers::set_default_provider))
+        .route(
+            "/llm-providers",
+            get(llm_providers::list_providers).post(llm_providers::create_provider),
+        )
+        .route(
+            "/llm-providers/{id}",
+            get(llm_providers::get_provider)
+                .put(llm_providers::update_provider)
+                .delete(llm_providers::delete_provider),
+        )
+        .route(
+            "/llm-providers/{id}/test",
+            post(llm_providers::test_provider),
+        )
+        .route(
+            "/llm-providers/{id}/default",
+            put(llm_providers::set_default_provider),
+        )
         // MCP servers (admin)
-        .route("/mcp-servers", get(mcp_servers::list_servers).post(mcp_servers::create_server))
-        .route("/mcp-servers/{id}", get(mcp_servers::get_server).put(mcp_servers::update_server).delete(mcp_servers::delete_server))
+        .route(
+            "/mcp-servers",
+            get(mcp_servers::list_servers).post(mcp_servers::create_server),
+        )
+        .route(
+            "/mcp-servers/{id}",
+            get(mcp_servers::get_server)
+                .put(mcp_servers::update_server)
+                .delete(mcp_servers::delete_server),
+        )
         // Model profiles (OIDC, by name)
-        .route("/model-profiles", get(model_profiles::list_model_profiles).post(model_profiles::create_model_profile))
-        .route("/model-profiles/{name}", get(model_profiles::get_model_profile).put(model_profiles::update_model_profile).delete(model_profiles::delete_model_profile))
+        .route(
+            "/model-profiles",
+            get(model_profiles::list_model_profiles).post(model_profiles::create_model_profile),
+        )
+        .route(
+            "/model-profiles/{name}",
+            get(model_profiles::get_model_profile)
+                .put(model_profiles::update_model_profile)
+                .delete(model_profiles::delete_model_profile),
+        )
         // Toolsets (OIDC, by name)
-        .route("/toolsets", get(toolsets::list_toolsets).post(toolsets::create_toolset))
-        .route("/toolsets/{name}", get(toolsets::get_toolset).put(toolsets::update_toolset).delete(toolsets::delete_toolset))
+        .route(
+            "/toolsets",
+            get(toolsets::list_toolsets).post(toolsets::create_toolset),
+        )
+        .route(
+            "/toolsets/{name}",
+            get(toolsets::get_toolset)
+                .put(toolsets::update_toolset)
+                .delete(toolsets::delete_toolset),
+        )
         // Skills (OIDC, leaf resource)
-        .route("/skills", get(skills::list_skills).post(skills::create_skill))
-        .route("/skills/{name}", get(skills::get_skill).put(skills::update_skill).delete(skills::delete_skill))
+        .route(
+            "/skills",
+            get(skills::list_skills).post(skills::create_skill),
+        )
+        .route(
+            "/skills/{name}",
+            get(skills::get_skill)
+                .put(skills::update_skill)
+                .delete(skills::delete_skill),
+        )
         // Agents (read: OIDC, write: admin)
-        .route("/agents", get(agents::list_agents).post(agents::create_agent))
-        .route("/agents/{name}", get(agents::get_agent).put(agents::update_agent).delete(agents::delete_agent))
+        .route(
+            "/agents",
+            get(agents::list_agents).post(agents::create_agent),
+        )
+        .route(
+            "/agents/{name}",
+            get(agents::get_agent)
+                .put(agents::update_agent)
+                .delete(agents::delete_agent),
+        )
         // Conversations (OIDC)
-        .route("/conversations", get(conversations::list_conversations).post(conversations::create_conversation))
-        .route("/conversations/{id}", get(conversations::get_conversation).delete(conversations::delete_conversation))
-        .route("/conversations/{id}/messages", get(conversations::get_messages))
+        .route(
+            "/conversations",
+            get(conversations::list_conversations).post(conversations::create_conversation),
+        )
+        .route(
+            "/conversations/{id}",
+            get(conversations::get_conversation).delete(conversations::delete_conversation),
+        )
+        .route(
+            "/conversations/{id}/messages",
+            get(conversations::get_messages),
+        )
 }

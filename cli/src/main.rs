@@ -6,10 +6,10 @@ mod store;
 
 mod tools;
 
-mod model_cmd;
-mod toolset_cmd;
-mod skill_cmd;
 mod mcp_cmd;
+mod model_cmd;
+mod skill_cmd;
+mod toolset_cmd;
 
 mod rpc;
 
@@ -32,9 +32,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// One-shot message to an LLM agent
-    Run {
-        message: String,
-    },
+    Run { message: String },
     /// Manage conversations
     #[command(subcommand)]
     Conversations(conversation::Commands),
@@ -140,7 +138,9 @@ async fn main() {
 
     match cli.command {
         None => chat::run(None, cli.agent, cli.continue_active).await,
-        Some(Commands::Run { message }) => chat::run(Some(message), cli.agent, cli.continue_active).await,
+        Some(Commands::Run { message }) => {
+            chat::run(Some(message), cli.agent, cli.continue_active).await
+        }
         Some(Commands::Conversations(cmd)) => run_conversation(cmd).await,
         Some(Commands::Agents(cmd)) => run_agent(cmd).await,
         Some(Commands::Providers(cmd)) => run_provider(cmd).await,
@@ -195,10 +195,11 @@ async fn run_conversation(cmd: conversation::Commands) {
         }
         Show { reference } => {
             let convs = store::list_conversations().unwrap_or_default();
-            let id = store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            let id =
+                store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             let conv = store::get_conversation(&id).expect("conversation not found");
             for msg in &conv.messages {
                 println!("[{}] {}", msg.role, msg.content);
@@ -206,19 +207,21 @@ async fn run_conversation(cmd: conversation::Commands) {
         }
         Delete { reference } => {
             let convs = store::list_conversations().unwrap_or_default();
-            let id = store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            let id =
+                store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             store::delete_conversation(&id).expect("failed to delete conversation");
             println!("Deleted conversation: {}", id);
         }
         Set { reference } => {
             let convs = store::list_conversations().unwrap_or_default();
-            let id = store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            let id =
+                store::resolve_conversation_reference(&convs, &reference).unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             store::get_conversation(&id).expect("conversation not found");
             store::set_active_conversation(&id).expect("failed to set active conversation");
             println!("Active conversation: {}", id);
@@ -283,9 +286,16 @@ async fn run_agent(cmd: agent::Commands) {
                 Ok(model) => match store.get_provider(&model.provider).await {
                     Ok(provider) => println!(
                         "  Model: {} -> provider '{}' ({:?}, {}), model '{}'",
-                        model.name, provider.name, provider.provider_type, provider.endpoint, model.model
+                        model.name,
+                        provider.name,
+                        provider.provider_type,
+                        provider.endpoint,
+                        model.model
                     ),
-                    Err(_) => println!("  Model: {} -> provider '{}' (unknown)", model.name, model.provider),
+                    Err(_) => println!(
+                        "  Model: {} -> provider '{}' (unknown)",
+                        model.name, model.provider
+                    ),
                 },
                 Err(_) => println!("  Model: {} (unknown)", agent.model),
             }
@@ -350,7 +360,8 @@ async fn run_provider(cmd: provider::Commands) {
                 println!("No LLM providers configured.");
             } else {
                 for p in &providers {
-                    let source = config::config_entry_source(store.layers(), &p.name, |raw| &raw.providers);
+                    let source =
+                        config::config_entry_source(store.layers(), &p.name, |raw| &raw.providers);
                     println!("  {} | {} | {:?}", p.name, source, p.provider_type);
                 }
             }
@@ -399,7 +410,8 @@ async fn run_models(cmd: model_cmd::Commands) {
                 return;
             }
             for m in &models {
-                let source = config::config_entry_source(store.layers(), &m.name, |raw| &raw.models);
+                let source =
+                    config::config_entry_source(store.layers(), &m.name, |raw| &raw.models);
                 println!("  {} | {} | {} / {}", m.name, source, m.provider, m.model);
             }
         }

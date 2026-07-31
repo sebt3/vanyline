@@ -30,7 +30,9 @@ pub fn get_conversation(id: &Uuid) -> Result<vanyline_lib::Conversation, std::io
 
 pub fn save_conversation(conv: &vanyline_lib::Conversation) -> Result<(), std::io::Error> {
     ensure_data_dir();
-    let path = data_dir().join("conversations").join(format!("{}.json", conv.id));
+    let path = data_dir()
+        .join("conversations")
+        .join(format!("{}.json", conv.id));
     save_json(&path, conv)
 }
 
@@ -59,16 +61,14 @@ pub fn get_active_conversation() -> Option<Uuid> {
 
 fn load_json<T: serde::de::DeserializeOwned>(path: &PathBuf) -> Result<T, std::io::Error> {
     let content = std::fs::read_to_string(path)?;
-    let val: T = serde_json::from_str(&content).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let val: T = serde_json::from_str(&content)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     Ok(val)
 }
 
 fn save_json<T: serde::Serialize>(path: &PathBuf, val: &T) -> Result<(), std::io::Error> {
-    let content = serde_json::to_string_pretty(val).map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let content = serde_json::to_string_pretty(val)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -88,9 +88,7 @@ pub fn resolve_conversation_reference(
 ) -> Result<Uuid, String> {
     // Seule une chaîne décimale propre (pas de zéros leading) est interprétée
     // comme un index 1-based. Les zéros leading font tomber dans le matching préfixe.
-    let is_clean_decimal = reference
-        .chars()
-        .all(|c| c.is_ascii_digit())
+    let is_clean_decimal = reference.chars().all(|c| c.is_ascii_digit())
         && !reference.is_empty()
         && (reference.len() == 1 || reference.as_bytes()[0] != b'0');
 
@@ -99,7 +97,10 @@ pub fn resolve_conversation_reference(
             if index >= 1 && index <= convs.len() {
                 return Ok(convs[index - 1].id);
             }
-            return Err(format!("No conversation at index {index} (have {})", convs.len()));
+            return Err(format!(
+                "No conversation at index {index} (have {})",
+                convs.len()
+            ));
         }
     }
 
@@ -124,7 +125,12 @@ mod tests {
     use super::*;
 
     fn make_conv(id: Uuid) -> vanyline_lib::Conversation {
-        vanyline_lib::Conversation { id, agent: None, title: None, messages: Vec::new() }
+        vanyline_lib::Conversation {
+            id,
+            agent: None,
+            title: None,
+            messages: Vec::new(),
+        }
     }
 
     #[test]

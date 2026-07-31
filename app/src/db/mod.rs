@@ -10,8 +10,9 @@ pub async fn create_pool(database_url: &str) -> Result<PgPool, AppError> {
 }
 
 pub async fn run_migrations(pool: &PgPool) -> Result<(), AppError> {
-    sqlx::migrate!("./migrations").run(pool).await.map_err(|e| {
-        AppError::InternalError(format!("VNL-DB-002: migration failed: {e}"))
-    })?;
+    sqlx::migrate!("./migrations")
+        .run(pool)
+        .await
+        .map_err(|e| AppError::InternalError(format!("VNL-DB-002: migration failed: {e}")))?;
     Ok(())
 }

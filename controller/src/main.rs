@@ -32,10 +32,12 @@ async fn main() {
         .await
         .expect("failed to build kube client from in-cluster or kubeconfig context");
 
-    let sandbox_image: String = std::env::var("SANDBOX_IMAGE")
-        .unwrap_or_else(|_| "vanyline-sandbox:latest".to_string());
+    let sandbox_image: String =
+        std::env::var("SANDBOX_IMAGE").unwrap_or_else(|_| "vanyline-sandbox:latest".to_string());
 
-    let owner_ctx = Arc::new(owner::Context { client: client.clone() });
+    let owner_ctx = Arc::new(owner::Context {
+        client: client.clone(),
+    });
     let project_ctx = Arc::new(project::Context {
         client: client.clone(),
         sandbox_image: sandbox_image.clone(),

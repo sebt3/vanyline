@@ -57,10 +57,12 @@ async fn main() {
         cookie::Key::from(&bytes[..64])
     };
 
-    let pool = db::create_pool(&config.database_url).await.unwrap_or_else(|e| {
-        tracing::error!("VNL-DB-001: cannot connect to database: {}", e);
-        std::process::exit(1);
-    });
+    let pool = db::create_pool(&config.database_url)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("VNL-DB-001: cannot connect to database: {}", e);
+            std::process::exit(1);
+        });
 
     db::run_migrations(&pool).await.unwrap_or_else(|e| {
         tracing::error!("{}", e);
@@ -82,7 +84,10 @@ async fn main() {
         .route("/health", get(health))
         .nest("/auth", auth::auth_router())
         .nest("/api", api::api_router())
-        .route("/api/ws/chat/{conversation_id}", get(ws::chat::ws_chat_handler))
+        .route(
+            "/api/ws/chat/{conversation_id}",
+            get(ws::chat::ws_chat_handler),
+        )
         .with_state(state)
         .fallback_service(
             ServeDir::new(&static_dir)

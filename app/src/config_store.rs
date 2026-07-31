@@ -5,8 +5,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use vanyline_lib::domain::{
-    Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider,
-    ProviderType, SkillMeta, SkillSelection, Toolset,
+    Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
+    SkillMeta, SkillSelection, Toolset,
 };
 use vanyline_lib::store::ConfigStore;
 use vanyline_lib::VnyError;
@@ -96,7 +96,9 @@ fn agent_mode_from_str(s: &str) -> Result<AgentMode, VnyError> {
         "primary" => Ok(AgentMode::Primary),
         "subagent" => Ok(AgentMode::Subagent),
         "all" => Ok(AgentMode::All),
-        other => Err(VnyError::ConfigError(format!("unknown agent mode: {other}"))),
+        other => Err(VnyError::ConfigError(format!(
+            "unknown agent mode: {other}"
+        ))),
     }
 }
 
@@ -142,8 +144,7 @@ fn domain_agent_record(row: &AgentRecord, profiles: &[DbModelProfile]) -> Result
 fn domain_toolset(row: &DbToolset) -> Toolset {
     let local_tools: Vec<String> =
         serde_json::from_value(row.local_tools.clone()).unwrap_or_default();
-    let mcp: Vec<McpSelection> =
-        serde_json::from_value(row.mcp.clone()).unwrap_or_default();
+    let mcp: Vec<McpSelection> = serde_json::from_value(row.mcp.clone()).unwrap_or_default();
     Toolset {
         name: row.name.clone(),
         description: row.description.clone(),
@@ -228,23 +229,25 @@ impl ConfigStore for PgConfigStore {
     async fn list_models(&self) -> Result<Vec<ModelProfile>, VnyError> {
         let rows = self.load_model_profiles().await?;
         let providers = self.load_providers().await?;
-        rows.iter().map(|r| domain_model_profile(r, &providers)).collect()
+        rows.iter()
+            .map(|r| domain_model_profile(r, &providers))
+            .collect()
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
-        let rows =
-            sqlx::query_as::<_, DbMcpServer>("SELECT * FROM mcp_servers WHERE user_id = $1")
-                .bind(self.user_id)
-                .fetch_all(&self.pool)
-                .await
-                .map_err(|e| VnyError::ConfigError(e.to_string()))?;
+        let rows = sqlx::query_as::<_, DbMcpServer>("SELECT * FROM mcp_servers WHERE user_id = $1")
+            .bind(self.user_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| VnyError::ConfigError(e.to_string()))?;
         let mut result = Vec::new();
         for row in &rows {
             match domain_mcp_server(row) {
                 Some(server) => result.push(server),
                 None => tracing::warn!(
                     "Skipping MCP server '{}': unknown server_type '{}'",
-                    row.name, row.server_type
+                    row.name,
+                    row.server_type
                 ),
             }
         }
@@ -259,7 +262,9 @@ impl ConfigStore for PgConfigStore {
     async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
         let rows = self.load_agent_records().await?;
         let profiles = self.load_model_profiles().await?;
-        rows.iter().map(|r| domain_agent_record(r, &profiles)).collect()
+        rows.iter()
+            .map(|r| domain_agent_record(r, &profiles))
+            .collect()
     }
 
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
@@ -268,15 +273,13 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
-        sqlx::query_scalar::<_, String>(
-            "SELECT body FROM skills WHERE user_id = $1 AND name = $2",
-        )
-        .bind(self.user_id)
-        .bind(name)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|e| VnyError::ConfigError(e.to_string()))?
-        .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))
+        sqlx::query_scalar::<_, String>("SELECT body FROM skills WHERE user_id = $1 AND name = $2")
+            .bind(self.user_id)
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| VnyError::ConfigError(e.to_string()))?
+            .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))
     }
 
     async fn default_agent(&self) -> Result<Option<String>, VnyError> {
@@ -288,7 +291,13 @@ impl ConfigStore for PgConfigStore {
 mod tests {
     use super::*;
 
-    fn sample_provider(id: Uuid, user_id: Uuid, name: &str, provider_type: &str, is_default: bool) -> DbLlmProvider {
+    fn sample_provider(
+        id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        provider_type: &str,
+        is_default: bool,
+    ) -> DbLlmProvider {
         DbLlmProvider {
             id,
             user_id,
@@ -303,7 +312,13 @@ mod tests {
         }
     }
 
-    fn sample_model_profile(id: Uuid, user_id: Uuid, name: &str, provider_id: Uuid, model: &str) -> DbModelProfile {
+    fn sample_model_profile(
+        id: Uuid,
+        user_id: Uuid,
+        name: &str,
+        provider_id: Uuid,
+        model: &str,
+    ) -> DbModelProfile {
         DbModelProfile {
             id,
             user_id,
@@ -466,7 +481,10 @@ mod tests {
         };
         let provider = sample_provider(pid, uid, "ollama", "ollama", false);
         let result = domain_model_profile(&row, &[provider]).unwrap();
-        assert_eq!(result.options.get("num_ctx"), Some(&serde_json::json!(65536)));
+        assert_eq!(
+            result.options.get("num_ctx"),
+            Some(&serde_json::json!(65536))
+        );
     }
 
     // 13. domain_model_profile_options_non_object_defaults_empty
@@ -522,7 +540,10 @@ mod tests {
         let mcp = serde_json::json!([{"server": "fs", "tools": ["read"]}]);
         let row = sample_toolset(id, uid, "test-toolset", local_tools.clone(), mcp.clone());
         let toolset = domain_toolset(&row);
-        assert_eq!(toolset.local_tools, vec!["read_file".to_string(), "search".to_string()]);
+        assert_eq!(
+            toolset.local_tools,
+            vec!["read_file".to_string(), "search".to_string()]
+        );
         assert_eq!(toolset.mcp.len(), 1);
         assert_eq!(toolset.mcp[0].server, "fs");
         assert_eq!(toolset.mcp[0].tools, vec!["read".to_string()]);
@@ -639,7 +660,10 @@ mod tests {
     #[test]
     fn agent_mode_from_str_known_values() {
         assert_eq!(agent_mode_from_str("primary").unwrap(), AgentMode::Primary);
-        assert_eq!(agent_mode_from_str("subagent").unwrap(), AgentMode::Subagent);
+        assert_eq!(
+            agent_mode_from_str("subagent").unwrap(),
+            AgentMode::Subagent
+        );
         assert_eq!(agent_mode_from_str("all").unwrap(), AgentMode::All);
     }
 
@@ -689,7 +713,9 @@ mod tests {
             serde_json::json!([]),
         );
         let err = resolve_model_profile_name(&agent, &[row]).unwrap_err();
-        assert!(matches!(err, VnyError::UnknownReference("model", ref id) if *id == orphan_id.to_string()));
+        assert!(
+            matches!(err, VnyError::UnknownReference("model", ref id) if *id == orphan_id.to_string())
+        );
     }
 
     // 24. domain_agent_record_full_conversion

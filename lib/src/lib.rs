@@ -1,11 +1,11 @@
 pub mod builtin;
 pub mod domain;
 mod error;
-pub mod model;
 pub mod event;
+pub mod model;
+pub mod prefixed_mcp;
 pub mod session;
 pub mod store;
-pub mod prefixed_mcp;
 mod types;
 
 pub use error::*;

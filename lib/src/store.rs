@@ -12,12 +12,36 @@ trait HasName {
     fn name(&self) -> &str;
 }
 
-impl HasName for Provider { fn name(&self) -> &str { &self.name } }
-impl HasName for ModelProfile { fn name(&self) -> &str { &self.name } }
-impl HasName for McpServer { fn name(&self) -> &str { &self.name } }
-impl HasName for Toolset { fn name(&self) -> &str { &self.name } }
-impl HasName for Agent { fn name(&self) -> &str { &self.name } }
-impl HasName for SkillMeta { fn name(&self) -> &str { &self.name } }
+impl HasName for Provider {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+impl HasName for ModelProfile {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+impl HasName for McpServer {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+impl HasName for Toolset {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+impl HasName for Agent {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
+impl HasName for SkillMeta {
+    fn name(&self) -> &str {
+        &self.name
+    }
+}
 
 /// Résout un item par nom dans une liste : 0 match -> `UnknownReference(kind, name)`,
 /// >1 match -> `DuplicateName(kind, name)`, exactement 1 -> `Ok(item)`.
@@ -128,7 +152,8 @@ impl ConfigStore for InMemoryConfigStore {
     }
 
     async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
-        self.skill_bodies.get(name)
+        self.skill_bodies
+            .get(name)
             .cloned()
             .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))
     }
@@ -144,58 +169,46 @@ mod tests {
 
     fn sample_store() -> InMemoryConfigStore {
         InMemoryConfigStore {
-            providers: vec![
-                Provider {
-                    name: "ollama-local".to_string(),
-                    provider_type: crate::domain::ProviderType::Ollama,
-                    endpoint: "http://localhost:11434".to_string(),
-                    api_key: None,
-                },
-            ],
-            models: vec![
-                ModelProfile {
-                    name: "qwen2.5".to_string(),
-                    provider: "ollama".to_string(),
-                    model: "qwen2.5".to_string(),
-                    temperature: None,
-                    max_tokens: None,
-                    options: serde_json::Map::new(),
-                },
-            ],
-            mcp_servers: vec![
-                McpServer {
-                    name: "fs".to_string(),
-                    transport: crate::domain::McpTransport::HttpStreamable,
-                    url: "http://mcp-fs:3000".to_string(),
-                    headers: Default::default(),
-                },
-            ],
-            toolsets: vec![
-                Toolset {
-                    name: "default".to_string(),
-                    description: None,
-                    prompt: None,
-                    local_tools: vec![],
-                    mcp: vec![],
-                },
-            ],
-            agents: vec![
-                Agent {
-                    name: "build".to_string(),
-                    description: Some("Build agent".to_string()),
-                    mode: crate::domain::AgentMode::Primary,
-                    model: "qwen2.5".to_string(),
-                    toolsets: vec!["default".to_string()],
-                    skills: crate::domain::SkillSelection::Auto,
-                    system_prompt: "You are a build assistant.".to_string(),
-                },
-            ],
-            skills: vec![
-                SkillMeta {
-                    name: "pdf".to_string(),
-                    description: "PDF processing skill".to_string(),
-                },
-            ],
+            providers: vec![Provider {
+                name: "ollama-local".to_string(),
+                provider_type: crate::domain::ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }],
+            models: vec![ModelProfile {
+                name: "qwen2.5".to_string(),
+                provider: "ollama".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
+            mcp_servers: vec![McpServer {
+                name: "fs".to_string(),
+                transport: crate::domain::McpTransport::HttpStreamable,
+                url: "http://mcp-fs:3000".to_string(),
+                headers: Default::default(),
+            }],
+            toolsets: vec![Toolset {
+                name: "default".to_string(),
+                description: None,
+                prompt: None,
+                local_tools: vec![],
+                mcp: vec![],
+            }],
+            agents: vec![Agent {
+                name: "build".to_string(),
+                description: Some("Build agent".to_string()),
+                mode: crate::domain::AgentMode::Primary,
+                model: "qwen2.5".to_string(),
+                toolsets: vec!["default".to_string()],
+                skills: crate::domain::SkillSelection::Auto,
+                system_prompt: "You are a build assistant.".to_string(),
+            }],
+            skills: vec![SkillMeta {
+                name: "pdf".to_string(),
+                description: "PDF processing skill".to_string(),
+            }],
             skill_bodies: {
                 let mut m = HashMap::new();
                 m.insert("pdf".to_string(), "# PDF skill\n...".to_string());
@@ -311,7 +324,10 @@ mod tests {
         assert_eq!(skills[0].name, "pdf");
         // La liste ne contient PAS le corps
         for skill in &skills {
-            assert!(!skill.description.contains("PDF skill") || skill.description == "PDF processing skill");
+            assert!(
+                !skill.description.contains("PDF skill")
+                    || skill.description == "PDF processing skill"
+            );
         }
         // load_skill retourne le corps exact
         let body = store.load_skill("pdf").await.unwrap();

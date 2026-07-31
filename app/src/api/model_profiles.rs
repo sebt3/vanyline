@@ -11,11 +11,8 @@ use vanyline_lib::store::ConfigStore;
 use vanyline_lib::VnyError;
 
 use crate::{
-    api::conversations::get_or_create_user,
-    auth::middleware::AuthUser,
-    config_store::PgConfigStore,
-    error::AppError,
-    AppState,
+    api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    config_store::PgConfigStore, error::AppError, AppState,
 };
 
 #[derive(Deserialize)]
@@ -199,7 +196,7 @@ mod tests {
             oidc_ca_cert: None,
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
-            
+
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
         };

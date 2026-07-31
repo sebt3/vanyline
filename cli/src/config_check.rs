@@ -13,13 +13,34 @@ use vanyline_lib::VnyError;
 pub async fn check_config(store: &dyn ConfigStore) -> Vec<VnyError> {
     let mut problems = Vec::new();
 
-    let providers = store.list_providers().await.unwrap_or_else(|e| { problems.push(e); Vec::new() });
-    let models = store.list_models().await.unwrap_or_else(|e| { problems.push(e); Vec::new() });
-    let mcp_servers = store.list_mcp_servers().await.unwrap_or_else(|e| { problems.push(e); Vec::new() });
-    let toolsets = store.list_toolsets().await.unwrap_or_else(|e| { problems.push(e); Vec::new() });
-    let agents = store.list_agents().await.unwrap_or_else(|e| { problems.push(e); Vec::new() });
-    let skills = store.list_skills().await.unwrap_or_else(|e| { problems.push(e); Vec::new() });
-    let default_agent = store.default_agent().await.unwrap_or_else(|e| { problems.push(e); None });
+    let providers = store.list_providers().await.unwrap_or_else(|e| {
+        problems.push(e);
+        Vec::new()
+    });
+    let models = store.list_models().await.unwrap_or_else(|e| {
+        problems.push(e);
+        Vec::new()
+    });
+    let mcp_servers = store.list_mcp_servers().await.unwrap_or_else(|e| {
+        problems.push(e);
+        Vec::new()
+    });
+    let toolsets = store.list_toolsets().await.unwrap_or_else(|e| {
+        problems.push(e);
+        Vec::new()
+    });
+    let agents = store.list_agents().await.unwrap_or_else(|e| {
+        problems.push(e);
+        Vec::new()
+    });
+    let skills = store.list_skills().await.unwrap_or_else(|e| {
+        problems.push(e);
+        Vec::new()
+    });
+    let default_agent = store.default_agent().await.unwrap_or_else(|e| {
+        problems.push(e);
+        None
+    });
 
     // Doublons — défensif : la construction de FsConfigStore ne devrait
     // jamais en produire (clé de map / nom de fichier uniques par couche),
@@ -107,69 +128,61 @@ fn check_duplicate_names<T>(
     }
 }
 
-    #[cfg(test)]
+#[cfg(test)]
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use vanyline_lib::domain::{Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType, SkillSelection, SkillMeta, Toolset};
+    use vanyline_lib::domain::{
+        Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider,
+        ProviderType, SkillMeta, SkillSelection, Toolset,
+    };
     use vanyline_lib::store::InMemoryConfigStore;
 
     fn make_consistent_store() -> InMemoryConfigStore {
         InMemoryConfigStore {
-            providers: vec![
-                Provider {
-                    name: "ollama".to_string(),
-                    provider_type: ProviderType::Ollama,
-                    endpoint: "http://localhost:11434".to_string(),
-                    api_key: None,
-                },
-            ],
-            models: vec![
-                ModelProfile {
-                    name: "qwen2.5".to_string(),
-                    provider: "ollama".to_string(),
-                    model: "qwen2.5".to_string(),
-                    temperature: None,
-                    max_tokens: None,
-                    options: serde_json::Map::new(),
-                },
-            ],
-            mcp_servers: vec![
-                McpServer {
-                    name: "fs".to_string(),
-                    transport: McpTransport::HttpStreamable,
-                    url: "http://mcp-fs:3000".to_string(),
-                    headers: Default::default(),
-                },
-            ],
-            toolsets: vec![
-                Toolset {
-                    name: "default".to_string(),
-                    description: None,
-                    prompt: None,
-                    local_tools: vec![],
-                    mcp: vec![
-                        McpSelection { server: "fs".to_string(), tools: vec!["*".to_string()] },
-                    ],
-                },
-            ],
-            agents: vec![
-                Agent {
-                    name: "build".to_string(),
-                    description: Some("Build agent".to_string()),
-                    mode: AgentMode::Primary,
-                    model: "qwen2.5".to_string(),
-                    toolsets: vec!["default".to_string()],
-                    skills: SkillSelection::Auto,
-                    system_prompt: "Build helper.".to_string(),
-                },
-            ],
-            skills: vec![
-                SkillMeta {
-                    name: "pdf".to_string(),
-                    description: "PDF processing".to_string(),
-                },
-            ],
+            providers: vec![Provider {
+                name: "ollama".to_string(),
+                provider_type: ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }],
+            models: vec![ModelProfile {
+                name: "qwen2.5".to_string(),
+                provider: "ollama".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
+            mcp_servers: vec![McpServer {
+                name: "fs".to_string(),
+                transport: McpTransport::HttpStreamable,
+                url: "http://mcp-fs:3000".to_string(),
+                headers: Default::default(),
+            }],
+            toolsets: vec![Toolset {
+                name: "default".to_string(),
+                description: None,
+                prompt: None,
+                local_tools: vec![],
+                mcp: vec![McpSelection {
+                    server: "fs".to_string(),
+                    tools: vec!["*".to_string()],
+                }],
+            }],
+            agents: vec![Agent {
+                name: "build".to_string(),
+                description: Some("Build agent".to_string()),
+                mode: AgentMode::Primary,
+                model: "qwen2.5".to_string(),
+                toolsets: vec!["default".to_string()],
+                skills: SkillSelection::Auto,
+                system_prompt: "Build helper.".to_string(),
+            }],
+            skills: vec![SkillMeta {
+                name: "pdf".to_string(),
+                description: "PDF processing".to_string(),
+            }],
             skill_bodies: Default::default(),
             default_agent: Some("build".to_string()),
         }
@@ -179,7 +192,11 @@ mod tests {
     async fn no_problems_on_consistent_config() {
         let store = make_consistent_store();
         let problems = check_config(&store).await;
-        assert!(problems.is_empty(), "expected no problems, got: {:?}", problems);
+        assert!(
+            problems.is_empty(),
+            "expected no problems, got: {:?}",
+            problems
+        );
     }
 
     #[tokio::test]
@@ -220,7 +237,9 @@ mod tests {
         let mut store = make_consistent_store();
         store.agents[0].model = "ghost".to_string();
         let problems = check_config(&store).await;
-        let model_err = problems.into_iter().find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "model"));
+        let model_err = problems
+            .into_iter()
+            .find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "model"));
         assert!(model_err.is_some(), "expected UnknownReference(model)");
     }
 
@@ -229,7 +248,9 @@ mod tests {
         let mut store = make_consistent_store();
         store.agents[0].toolsets = vec!["ghost".to_string()];
         let problems = check_config(&store).await;
-        let ts_err = problems.into_iter().find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "toolset"));
+        let ts_err = problems
+            .into_iter()
+            .find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "toolset"));
         assert!(ts_err.is_some(), "expected UnknownReference(toolset)");
     }
 
@@ -238,7 +259,9 @@ mod tests {
         let mut store = make_consistent_store();
         store.agents[0].skills = SkillSelection::Named(vec!["ghost".to_string()]);
         let problems = check_config(&store).await;
-        let sk_err = problems.into_iter().find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "skill"));
+        let sk_err = problems
+            .into_iter()
+            .find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "skill"));
         assert!(sk_err.is_some(), "expected UnknownReference(skill)");
     }
 
@@ -265,24 +288,20 @@ mod tests {
                     system_prompt: "none".to_string(),
                 },
             ],
-            models: vec![
-                ModelProfile {
-                    name: "qwen2.5".to_string(),
-                    provider: "ollama".to_string(),
-                    model: "qwen2.5".to_string(),
-                    temperature: None,
-                    max_tokens: None,
-                    options: serde_json::Map::new(),
-                },
-            ],
-            providers: vec![
-                Provider {
-                    name: "ollama".to_string(),
-                    provider_type: ProviderType::Ollama,
-                    endpoint: "http://localhost:11434".to_string(),
-                    api_key: None,
-                },
-            ],
+            models: vec![ModelProfile {
+                name: "qwen2.5".to_string(),
+                provider: "ollama".to_string(),
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
+            providers: vec![Provider {
+                name: "ollama".to_string(),
+                provider_type: ProviderType::Ollama,
+                endpoint: "http://localhost:11434".to_string(),
+                api_key: None,
+            }],
             mcp_servers: vec![],
             toolsets: vec![],
             skills: vec![],
@@ -292,7 +311,10 @@ mod tests {
         let problems = check_config(&store).await;
         for p in &problems {
             if let VnyError::UnknownReference(kind, _) = p {
-                assert_ne!(*kind, "skill", "skill should never be flagged for Auto/None");
+                assert_ne!(
+                    *kind, "skill",
+                    "skill should never be flagged for Auto/None"
+                );
             }
         }
     }
@@ -305,8 +327,13 @@ mod tests {
             ..Default::default()
         };
         let problems = check_config(&store).await;
-        let agent_err = problems.into_iter().find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "agent"));
-        assert!(agent_err.is_some(), "expected UnknownReference(agent) for ghost");
+        let agent_err = problems
+            .into_iter()
+            .find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "agent"));
+        assert!(
+            agent_err.is_some(),
+            "expected UnknownReference(agent) for ghost"
+        );
     }
 
     #[tokio::test]
@@ -320,13 +347,18 @@ mod tests {
 
         // Without default_agent, there should be fewer or same problems
         // (specifically, no default_agent UnknownReference)
-        let missing_default = problems_check.iter()
+        let missing_default = problems_check
+            .iter()
             .filter(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "agent"))
             .count();
-        let missing_none = problems_none.iter()
+        let missing_none = problems_none
+            .iter()
             .filter(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "agent"))
             .count();
-        assert!(missing_none <= missing_default, "None default_agent should produce fewer agent errors");
+        assert!(
+            missing_none <= missing_default,
+            "None default_agent should produce fewer agent errors"
+        );
     }
 
     #[tokio::test]
@@ -355,7 +387,9 @@ mod tests {
             ..Default::default()
         };
         let problems = check_config(&store).await;
-        let dup_err = problems.into_iter().find(|p| matches!(p, VnyError::DuplicateName(k, n) if *k == "agent" && *n == "dup"));
+        let dup_err = problems
+            .into_iter()
+            .find(|p| matches!(p, VnyError::DuplicateName(k, n) if *k == "agent" && *n == "dup"));
         assert!(dup_err.is_some(), "expected DuplicateName(agent, dup)");
     }
 
@@ -395,31 +429,30 @@ mod tests {
     #[tokio::test]
     async fn partial_store_error_does_not_block_other_checks() {
         let inner = InMemoryConfigStore {
-            models: vec![
-                ModelProfile {
-                    name: "ghost-model".to_string(),
-                    provider: "ghost".to_string(), // unknown provider
-                    model: "qwen2.5".to_string(),
-                    temperature: None,
-                    max_tokens: None,
-                    options: serde_json::Map::new(),
-                },
-            ],
+            models: vec![ModelProfile {
+                name: "ghost-model".to_string(),
+                provider: "ghost".to_string(), // unknown provider
+                model: "qwen2.5".to_string(),
+                temperature: None,
+                max_tokens: None,
+                options: serde_json::Map::new(),
+            }],
             providers: vec![],
             mcp_servers: vec![],
             toolsets: vec![],
-            agents: vec![
-                Agent {
-                    name: "build".to_string(),
-                    description: None,
-                    mode: AgentMode::Primary,
-                    model: "nonexistent-model".to_string(), // references model not in list
-                    toolsets: vec![],
-                    skills: SkillSelection::Named(vec!["ghost".to_string()]), // refs skills
-                    system_prompt: "prompt".to_string(),
-                },
-            ],
-            skills: vec![SkillMeta { name: "pdf".to_string(), description: "PDF".to_string() }],
+            agents: vec![Agent {
+                name: "build".to_string(),
+                description: None,
+                mode: AgentMode::Primary,
+                model: "nonexistent-model".to_string(), // references model not in list
+                toolsets: vec![],
+                skills: SkillSelection::Named(vec!["ghost".to_string()]), // refs skills
+                system_prompt: "prompt".to_string(),
+            }],
+            skills: vec![SkillMeta {
+                name: "pdf".to_string(),
+                description: "PDF".to_string(),
+            }],
             skill_bodies: Default::default(),
             default_agent: None,
         };
@@ -427,18 +460,25 @@ mod tests {
         let problems = check_config(&store).await;
 
         // Should contain both the ConfigError and the UnknownReference
-        let config_err = problems.iter().any(|p| matches!(p, VnyError::ConfigError(msg) if msg == "boom"));
-        let unknown_ref = problems.iter().any(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "model"));
+        let config_err = problems
+            .iter()
+            .any(|p| matches!(p, VnyError::ConfigError(msg) if msg == "boom"));
+        let unknown_ref = problems
+            .iter()
+            .any(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "model"));
         assert!(config_err, "should report ConfigError from list_skills");
-        assert!(unknown_ref, "should still report UnknownReference(model) despite list_skills failure");
+        assert!(
+            unknown_ref,
+            "should still report UnknownReference(model) despite list_skills failure"
+        );
     }
 
     #[tokio::test]
     async fn fs_config_store_end_to_end_detects_unknown_model() {
-        use std::io::Write;
-        use tempfile::tempdir;
         use crate::config::Layers;
         use crate::fs_store::FsConfigStore;
+        use std::io::Write;
+        use tempfile::tempdir;
 
         let tmp = tempdir().unwrap();
         // Write an agent file with an unknown model
@@ -455,11 +495,19 @@ mod tests {
         let store = FsConfigStore::new(layers);
         let problems = check_config(&store).await;
 
-        let model_err = problems.iter().find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "model"));
-        assert!(model_err.is_some(), "expected UnknownReference(model) for does-not-exist");
+        let model_err = problems
+            .iter()
+            .find(|p| matches!(p, VnyError::UnknownReference(k, _) if *k == "model"));
+        assert!(
+            model_err.is_some(),
+            "expected UnknownReference(model) for does-not-exist"
+        );
         match model_err.unwrap() {
             VnyError::UnknownReference(_, msg) => {
-                assert!(msg.contains("does-not-exist"), "message should contain 'does-not-exist'");
+                assert!(
+                    msg.contains("does-not-exist"),
+                    "message should contain 'does-not-exist'"
+                );
                 assert!(msg.contains("build"), "message should contain 'build'");
             }
             _ => panic!("Expected UnknownReference"),

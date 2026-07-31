@@ -36,10 +36,12 @@ pub struct ConversationOut {
 /// reste défensive plutôt que de `.unwrap()`).
 async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationOut, AppError> {
     let agent_name = match conv.agent_id {
-        Some(id) => sqlx::query_scalar::<_, String>("SELECT name FROM agents WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.pool)
-            .await?,
+        Some(id) => {
+            sqlx::query_scalar::<_, String>("SELECT name FROM agents WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&state.pool)
+                .await?
+        }
         None => None,
     };
     Ok(ConversationOut {
@@ -51,7 +53,11 @@ async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationO
     })
 }
 
-async fn resolve_agent_id(state: &AppState, user_id: Uuid, agent_name: &str) -> Result<Uuid, AppError> {
+async fn resolve_agent_id(
+    state: &AppState,
+    user_id: Uuid,
+    agent_name: &str,
+) -> Result<Uuid, AppError> {
     sqlx::query_scalar::<_, Uuid>("SELECT id FROM agents WHERE user_id = $1 AND name = $2")
         .bind(user_id)
         .bind(agent_name)
@@ -114,13 +120,11 @@ pub async fn get_conversation(
     Path(id): Path<Uuid>,
 ) -> Result<Json<ConversationOut>, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
-    let conv = sqlx::query_as::<_, Conversation>(
-        "SELECT * FROM conversations WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::ConversationNotFound)?;
+    let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or(AppError::ConversationNotFound)?;
 
     if conv.user_id != db_user.id {
         return Err(AppError::ConversationAccessDenied);
@@ -136,14 +140,12 @@ pub async fn delete_conversation(
     Path(id): Path<Uuid>,
 ) -> Result<StatusCode, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
-    let rows = sqlx::query(
-        "DELETE FROM conversations WHERE id = $1 AND user_id = $2",
-    )
-    .bind(id)
-    .bind(db_user.id)
-    .execute(&state.pool)
-    .await?
-    .rows_affected();
+    let rows = sqlx::query("DELETE FROM conversations WHERE id = $1 AND user_id = $2")
+        .bind(id)
+        .bind(db_user.id)
+        .execute(&state.pool)
+        .await?
+        .rows_affected();
 
     if rows == 0 {
         return Err(AppError::ConversationNotFound);
@@ -157,13 +159,11 @@ pub async fn get_messages(
     Path(id): Path<Uuid>,
 ) -> Result<Json<Vec<Message>>, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
-    let conv = sqlx::query_as::<_, Conversation>(
-        "SELECT * FROM conversations WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::ConversationNotFound)?;
+    let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = $1")
+        .bind(id)
+        .fetch_optional(&state.pool)
+        .await?
+        .ok_or(AppError::ConversationNotFound)?;
 
     if conv.user_id != db_user.id {
         return Err(AppError::ConversationAccessDenied);
@@ -179,12 +179,10 @@ pub async fn get_messages(
 }
 
 pub async fn get_or_create_user(state: &AppState, auth_user: &AuthUser) -> Result<User, AppError> {
-    if let Some(user) = sqlx::query_as::<_, User>(
-        "SELECT * FROM users WHERE email = $1",
-    )
-    .bind(&auth_user.email)
-    .fetch_optional(&state.pool)
-    .await?
+    if let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
+        .bind(&auth_user.email)
+        .fetch_optional(&state.pool)
+        .await?
     {
         return Ok(user);
     }

@@ -68,7 +68,9 @@ impl IntoResponse for AppError {
             AppError::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::ToolsetNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::SkillNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            AppError::UnprocessableReference(_) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
+            }
             AppError::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             AppError::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
             AppError::RequestError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),

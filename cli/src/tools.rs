@@ -41,15 +41,23 @@ struct ReadFileArgs {
 pub struct ReadFileTool;
 
 impl ToolDyn for ReadFileTool {
-    fn name(&self) -> String { "read_file".into() }
+    fn name(&self) -> String {
+        "read_file".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("read_file") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: ReadFileArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            filesystem::read_file(filesystem::ReadFileOptions { path: args.path, offset: args.offset, limit: args.limit }).await
-                .map_err(|e| ToolError::ToolCallError(Box::new(e)))
+            let args: ReadFileArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            filesystem::read_file(filesystem::ReadFileOptions {
+                path: args.path,
+                offset: args.offset,
+                limit: args.limit,
+            })
+            .await
+            .map_err(|e| ToolError::ToolCallError(Box::new(e)))
         })
     }
 }
@@ -63,17 +71,24 @@ struct WriteFileArgs {
 pub struct WriteFileTool;
 
 impl ToolDyn for WriteFileTool {
-    fn name(&self) -> String { "write_file".into() }
+    fn name(&self) -> String {
+        "write_file".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("write_file") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: WriteFileArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            let args: WriteFileArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
             let len = args.content.len();
             let path = args.path.clone();
-            filesystem::write_file(filesystem::WriteFileOptions { path: args.path, content: args.content }).await
-                .map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            filesystem::write_file(filesystem::WriteFileOptions {
+                path: args.path,
+                content: args.content,
+            })
+            .await
+            .map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
             Ok(format!("wrote {len} bytes to {path}"))
         })
     }
@@ -91,13 +106,16 @@ struct EditFileArgs {
 pub struct EditFileTool;
 
 impl ToolDyn for EditFileTool {
-    fn name(&self) -> String { "edit_file".into() }
+    fn name(&self) -> String {
+        "edit_file".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("edit_file") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: EditFileArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            let args: EditFileArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
             filesystem::edit_file(filesystem::EditFileOptions {
                 path: args.path,
                 old_string: args.old_string,
@@ -118,15 +136,19 @@ struct DeleteFileArgs {
 pub struct DeleteFileTool;
 
 impl ToolDyn for DeleteFileTool {
-    fn name(&self) -> String { "delete_file".into() }
+    fn name(&self) -> String {
+        "delete_file".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("delete_file") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: DeleteFileArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            let args: DeleteFileArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
             let path = args.path.clone();
-            filesystem::delete_file(filesystem::DeleteFileOptions { path: args.path }).await
+            filesystem::delete_file(filesystem::DeleteFileOptions { path: args.path })
+                .await
                 .map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
             Ok(format!("deleted {path}"))
         })
@@ -143,15 +165,22 @@ struct ListDirectoryArgs {
 pub struct ListDirectoryTool;
 
 impl ToolDyn for ListDirectoryTool {
-    fn name(&self) -> String { "list_directory".into() }
+    fn name(&self) -> String {
+        "list_directory".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("list_directory") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: ListDirectoryArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            filesystem::list_directory(filesystem::ListDirectoryOptions { path: args.path, depth: args.depth }).await
-                .map_err(|e| ToolError::ToolCallError(Box::new(e)))
+            let args: ListDirectoryArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            filesystem::list_directory(filesystem::ListDirectoryOptions {
+                path: args.path,
+                depth: args.depth,
+            })
+            .await
+            .map_err(|e| ToolError::ToolCallError(Box::new(e)))
         })
     }
 }
@@ -166,15 +195,22 @@ struct FindFilesArgs {
 pub struct FindFilesTool;
 
 impl ToolDyn for FindFilesTool {
-    fn name(&self) -> String { "find_files".into() }
+    fn name(&self) -> String {
+        "find_files".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("find_files") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: FindFilesArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            search::find_files(search::FindFilesOptions { pattern: args.pattern, path: args.path }).await
-                .map_err(|e| ToolError::ToolCallError(Box::new(e)))
+            let args: FindFilesArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            search::find_files(search::FindFilesOptions {
+                pattern: args.pattern,
+                path: args.path,
+            })
+            .await
+            .map_err(|e| ToolError::ToolCallError(Box::new(e)))
         })
     }
 }
@@ -191,15 +227,23 @@ struct SearchArgs {
 pub struct SearchTool;
 
 impl ToolDyn for SearchTool {
-    fn name(&self) -> String { "search".into() }
+    fn name(&self) -> String {
+        "search".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("search") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: SearchArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
-            search::search(search::SearchOptions { pattern: args.pattern, path: args.path, glob: args.glob }).await
-                .map_err(|e| ToolError::ToolCallError(Box::new(e)))
+            let args: SearchArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            search::search(search::SearchOptions {
+                pattern: args.pattern,
+                path: args.path,
+                glob: args.glob,
+            })
+            .await
+            .map_err(|e| ToolError::ToolCallError(Box::new(e)))
         })
     }
 }
@@ -215,13 +259,16 @@ struct ExecuteCommandArgs {
 pub struct ExecuteCommandTool;
 
 impl ToolDyn for ExecuteCommandTool {
-    fn name(&self) -> String { "execute_command".into() }
+    fn name(&self) -> String {
+        "execute_command".into()
+    }
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
         Box::pin(async move { tool_definition("execute_command") })
     }
     fn call(&self, params: String) -> WasmBoxedFuture<'_, Result<String, ToolError>> {
         Box::pin(async move {
-            let args: ExecuteCommandArgs = serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
+            let args: ExecuteCommandArgs =
+                serde_json::from_str(&params).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
             command::execute(command::ExecuteCommandOptions {
                 command: args.command,
                 timeout_secs: args.timeout_secs.unwrap_or(30),

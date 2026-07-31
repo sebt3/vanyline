@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     extract::{
-        Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
+        Path, State, WebSocketUpgrade,
     },
     response::IntoResponse,
 };
@@ -18,11 +18,8 @@ use vanyline_lib::event::{ChatEvent, EventSink, ToolCallRecord};
 use vanyline_lib::session::SessionContext;
 
 use crate::{
-    api::conversations::get_or_create_user,
-    auth::middleware::AuthUser,
-    config_store::PgConfigStore,
-    error::AppError,
-    AppState,
+    api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    config_store::PgConfigStore, error::AppError, AppState,
 };
 
 #[derive(Deserialize)]
@@ -142,7 +139,11 @@ async fn run_socket(
         // R4 : verrou busy par conversation — un tour ne bloque plus la
         // lecture du socket (Close honoré pendant un tour actif).
         if !try_acquire_busy(&state.busy, conversation_id) {
-            send_error(&tx, "VNL-WS-001", "A turn is already in progress for this conversation");
+            send_error(
+                &tx,
+                "VNL-WS-001",
+                "A turn is already in progress for this conversation",
+            );
             continue;
         }
 
@@ -228,8 +229,8 @@ async fn handle_message(
         subagent_depth_max: 1,
     };
 
-    let result = vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None)
-        .await?;
+    let result =
+        vanyline_lib::session::run_agent_turn(&ctx, &agent_name, history, user_msg, None).await?;
 
     let tool_calls = tool_calls_for_persistence(&result.tool_calls);
     persist_message(
@@ -237,7 +238,11 @@ async fn handle_message(
         conversation_id,
         "assistant",
         &result.response_text,
-        if tool_calls.is_empty() { None } else { Some(tool_calls) },
+        if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        },
     )
     .await?;
 
@@ -375,7 +380,10 @@ mod tests {
         let conv = Uuid::new_v4();
         busy.lock().unwrap().insert(conv);
         {
-            let _guard = BusyGuard { busy: busy.clone(), conversation_id: conv };
+            let _guard = BusyGuard {
+                busy: busy.clone(),
+                conversation_id: conv,
+            };
             assert!(busy.lock().unwrap().contains(&conv));
         }
         assert!(!busy.lock().unwrap().contains(&conv));

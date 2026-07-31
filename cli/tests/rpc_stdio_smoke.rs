@@ -15,7 +15,11 @@ fn initialize_then_shutdown_end_to_end() {
     let stdout = child.stdout.take().unwrap();
     let mut reader = BufReader::new(stdout);
 
-    writeln!(stdin, r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":1}}}}"#).unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":1}}}}"#
+    )
+    .unwrap();
     let mut line = String::new();
     reader.read_line(&mut line).unwrap();
     let resp: serde_json::Value = serde_json::from_str(&line).unwrap();

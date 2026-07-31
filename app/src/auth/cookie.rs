@@ -92,7 +92,10 @@ pub fn build_set_cookie(id_token: &str, email: &str, key: &Key) -> String {
 }
 
 pub fn clear_cookie() -> String {
-    format!("{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0", COOKIE_NAME)
+    format!(
+        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
+        COOKIE_NAME
+    )
 }
 
 #[cfg(test)]

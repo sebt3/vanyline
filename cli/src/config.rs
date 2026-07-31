@@ -81,7 +81,11 @@ impl Layers {
     /// Résout les fichiers d'extension `ext` sous `<couche>/<subdir>/` des
     /// deux couches, fusionnés par nom (workspace gagne). `subdir` : ex.
     /// `"agents"`, `"toolsets"`.
-    pub fn resolve_named_files(&self, subdir: &str, ext: &str) -> Result<BTreeMap<String, PathBuf>, VnyError> {
+    pub fn resolve_named_files(
+        &self,
+        subdir: &str,
+        ext: &str,
+    ) -> Result<BTreeMap<String, PathBuf>, VnyError> {
         let global = list_layer_files(&self.global_dir.join(subdir), ext)?;
         let workspace = match &self.workspace_dir {
             Some(dir) => Some(list_layer_files(&dir.join(subdir), ext)?),
@@ -128,8 +132,9 @@ pub struct RawConfigFile {
 pub fn load_config_layer(dir: &std::path::Path) -> Result<RawConfigFile, VnyError> {
     let path = dir.join("config.yaml");
     match std::fs::read_to_string(&path) {
-        Ok(content) => yaml_serde::from_str(&content)
-            .map_err(|e| VnyError::ConfigError(format!("Failed to parse {}: {}", path.display(), e))),
+        Ok(content) => yaml_serde::from_str(&content).map_err(|e| {
+            VnyError::ConfigError(format!("Failed to parse {}: {}", path.display(), e))
+        }),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(RawConfigFile::default()),
         Err(e) => Err(VnyError::from(e)),
     }
@@ -142,7 +147,10 @@ pub fn load_config_layer(dir: &std::path::Path) -> Result<RawConfigFile, VnyErro
 /// (pas de deep-merge intra-entrée, cf. design). `workspace: None` -> retourne
 /// `global` inchangé.
 #[allow(dead_code)]
-pub fn merge_config_layers(global: RawConfigFile, workspace: Option<RawConfigFile>) -> RawConfigFile {
+pub fn merge_config_layers(
+    global: RawConfigFile,
+    workspace: Option<RawConfigFile>,
+) -> RawConfigFile {
     let Some(ws) = workspace else { return global };
     let mut providers = global.providers;
     providers.extend(ws.providers);
@@ -152,7 +160,12 @@ pub fn merge_config_layers(global: RawConfigFile, workspace: Option<RawConfigFil
     mcp.extend(ws.mcp);
     let mut defaults = global.defaults;
     defaults.extend(ws.defaults);
-    RawConfigFile { providers, models, mcp, defaults }
+    RawConfigFile {
+        providers,
+        models,
+        mcp,
+        defaults,
+    }
 }
 
 /// Liste les fichiers d'extension `ext` (sans le point, ex. `"md"`)
@@ -161,7 +174,10 @@ pub fn merge_config_layers(global: RawConfigFile, workspace: Option<RawConfigFil
 /// extension). `dir` absent -> map vide, PAS une erreur (une couche peut ne
 /// pas avoir ce sous-répertoire).
 #[allow(dead_code)]
-pub fn list_layer_files(dir: &std::path::Path, ext: &str) -> Result<BTreeMap<String, PathBuf>, VnyError> {
+pub fn list_layer_files(
+    dir: &std::path::Path,
+    ext: &str,
+) -> Result<BTreeMap<String, PathBuf>, VnyError> {
     let mut result = BTreeMap::new();
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -278,8 +294,10 @@ pub fn skill_entry_source(layers: &Layers, name: &str) -> &'static str {
 #[allow(dead_code)]
 pub fn set_default_agent(layers: &Layers, name: &str) -> Result<(), VnyError> {
     let mut raw = load_config_layer(&layers.global_dir)?;
-    raw.defaults
-        .insert("agent".to_string(), yaml_serde::Value::String(name.to_string()));
+    raw.defaults.insert(
+        "agent".to_string(),
+        yaml_serde::Value::String(name.to_string()),
+    );
     std::fs::create_dir_all(&layers.global_dir).map_err(VnyError::from)?;
     let path = layers.global_dir.join("config.yaml");
     let content = yaml_serde::to_string(&raw).map_err(|e| {
@@ -424,21 +442,17 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
     #[test]
     fn colliding_key_workspace_wins_wholesale() {
         let global = RawConfigFile {
-            models: BTreeMap::from([
-                (
-                    "qwen-code".into(),
-                    yaml_serde::from_str("temperature: 0.1\nmax_tokens: 512").unwrap(),
-                ),
-            ]),
+            models: BTreeMap::from([(
+                "qwen-code".into(),
+                yaml_serde::from_str("temperature: 0.1\nmax_tokens: 512").unwrap(),
+            )]),
             ..Default::default()
         };
         let workspace = RawConfigFile {
-            models: BTreeMap::from([
-                (
-                    "qwen-code".into(),
-                    yaml_serde::from_str("temperature: 0.5").unwrap(),
-                ),
-            ]),
+            models: BTreeMap::from([(
+                "qwen-code".into(),
+                yaml_serde::from_str("temperature: 0.5").unwrap(),
+            )]),
             ..Default::default()
         };
         let result = merge_config_layers(global, Some(workspace));
@@ -554,14 +568,15 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("pdf")).unwrap();
         std::fs::create_dir_all(tmp.path().join("empty-dir")).unwrap();
-        std::fs::write(tmp.path().join("pdf").join("SKILL.md"), "---\ndescription: PDF\n---\n").unwrap();
+        std::fs::write(
+            tmp.path().join("pdf").join("SKILL.md"),
+            "---\ndescription: PDF\n---\n",
+        )
+        .unwrap();
         let result = list_layer_skill_dirs(tmp.path()).unwrap();
         assert_eq!(result.len(), 1);
         assert!(result.contains_key("pdf"));
-        assert_eq!(
-            result["pdf"],
-            tmp.path().join("pdf").join("SKILL.md")
-        );
+        assert_eq!(result["pdf"], tmp.path().join("pdf").join("SKILL.md"));
     }
 
     #[test]
@@ -589,8 +604,16 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         let workspace = tmp.path().join("workspace");
         std::fs::create_dir_all(global.join("skills").join("pdf")).unwrap();
         std::fs::create_dir_all(workspace.join("skills").join("csv")).unwrap();
-        std::fs::write(global.join("skills").join("pdf").join("SKILL.md"), "---\n---\n").unwrap();
-        std::fs::write(workspace.join("skills").join("csv").join("SKILL.md"), "---\n---\n").unwrap();
+        std::fs::write(
+            global.join("skills").join("pdf").join("SKILL.md"),
+            "---\n---\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("skills").join("csv").join("SKILL.md"),
+            "---\n---\n",
+        )
+        .unwrap();
         let layers = Layers {
             global_dir: global,
             workspace_dir: Some(workspace),
@@ -684,11 +707,7 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         let ws_dir = tmp.path().join("workspace");
         let skills_dir = ws_dir.join("skills").join("pdf");
         std::fs::create_dir_all(&skills_dir).unwrap();
-        std::fs::write(
-            skills_dir.join("SKILL.md"),
-            "---\ndescription: PDF\n---\n",
-        )
-        .unwrap();
+        std::fs::write(skills_dir.join("SKILL.md"), "---\ndescription: PDF\n---\n").unwrap();
         let layers = Layers {
             global_dir: PathBuf::from("/nonexistent"),
             workspace_dir: Some(ws_dir),
@@ -751,11 +770,7 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
     fn set_default_agent_overwrites_existing_default() {
         let tmp = tempfile::tempdir().unwrap();
         let config_path = tmp.path().join("config.yaml");
-        std::fs::write(
-            &config_path,
-            "defaults:\n  agent: old\n",
-        )
-        .unwrap();
+        std::fs::write(&config_path, "defaults:\n  agent: old\n").unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -765,13 +780,17 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
         let agent = raw.defaults.get("agent").unwrap();
         assert_eq!(agent.as_str().unwrap(), "new");
         // Ensure there's only one entry for "agent" (the BTreeMap should have exactly one)
-        let agent_count = raw.defaults.values().filter(|v| {
-            if let Some(s) = v.as_str() {
-                s == "new"
-            } else {
-                false
-            }
-        }).count();
+        let agent_count = raw
+            .defaults
+            .values()
+            .filter(|v| {
+                if let Some(s) = v.as_str() {
+                    s == "new"
+                } else {
+                    false
+                }
+            })
+            .count();
         assert_eq!(agent_count, 1);
     }
 

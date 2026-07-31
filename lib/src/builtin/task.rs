@@ -55,7 +55,11 @@ pub struct TaskTool {
 
 impl TaskTool {
     pub fn new(ctx: SessionContext, current_depth: u8, available_agents: Vec<Agent>) -> Self {
-        Self { ctx, current_depth, available_agents }
+        Self {
+            ctx,
+            current_depth,
+            available_agents,
+        }
     }
 }
 
@@ -81,9 +85,13 @@ impl ToolDyn for TaskTool {
         let description = if available.is_empty() {
             "Délègue une tâche à un subagent. Aucun subagent disponible.".to_string()
         } else {
-            let mut s = "Délègue une tâche à un subagent nommé. Subagents disponibles :\n".to_string();
+            let mut s =
+                "Délègue une tâche à un subagent nommé. Subagents disponibles :\n".to_string();
             for agent in &available {
-                let desc = agent.description.as_deref().unwrap_or("(pas de description)");
+                let desc = agent
+                    .description
+                    .as_deref()
+                    .unwrap_or("(pas de description)");
                 s.push_str(&format!("- {} : {}\n", agent.name, desc));
             }
             s
@@ -105,27 +113,29 @@ impl ToolDyn for TaskTool {
 
         Box::pin(async move {
             // 1. Désérialiser args
-            let parsed: TaskArgs = serde_json::from_str(&args).map_err(|e| {
-                ToolError::ToolCallError(Box::new(e))
-            })?;
+            let parsed: TaskArgs =
+                serde_json::from_str(&args).map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
 
             // 2. Garde de profondeur
             if current_depth >= subagent_depth_max {
-                return Err(ToolError::ToolCallError(Box::new(SubagentError(
-                    format!("subagent depth limit ({}) reached, cannot delegate further", subagent_depth_max)
-                ))));
+                return Err(ToolError::ToolCallError(Box::new(SubagentError(format!(
+                    "subagent depth limit ({}) reached, cannot delegate further",
+                    subagent_depth_max
+                )))));
             }
 
             // 3. Résoudre l'agent cible
-            let target = store.get_agent(&parsed.agent).await.map_err(|e| {
-                ToolError::ToolCallError(Box::new(e))
-            })?;
+            let target = store
+                .get_agent(&parsed.agent)
+                .await
+                .map_err(|e| ToolError::ToolCallError(Box::new(e)))?;
 
             // 4. Vérifier mode Primary
             if target.mode == AgentMode::Primary {
-                return Err(ToolError::ToolCallError(Box::new(SubagentError(
-                    format!("agent '{}' is a primary agent and cannot be invoked as a subagent", parsed.agent)
-                ))));
+                return Err(ToolError::ToolCallError(Box::new(SubagentError(format!(
+                    "agent '{}' is a primary agent and cannot be invoked as a subagent",
+                    parsed.agent
+                )))));
             }
 
             // 5. Générer subagent_id
@@ -136,7 +146,8 @@ impl ToolDyn for TaskTool {
                 id: subagent_id.clone(),
                 agent: parsed.agent.clone(),
                 task: parsed.prompt.clone(),
-            }).await;
+            })
+            .await;
 
             // 7. Construire le contexte imbriqué
             let nested_sink: Arc<dyn EventSink> = Arc::new(SubagentEventSink {
@@ -152,8 +163,14 @@ impl ToolDyn for TaskTool {
 
             // 8. Lancer le tour imbriqué
             let result = crate::session::run_agent_turn_at_depth(
-                &nested_ctx, &parsed.agent, Vec::new(), &parsed.prompt, None, current_depth + 1,
-            ).await;
+                &nested_ctx,
+                &parsed.agent,
+                Vec::new(),
+                &parsed.prompt,
+                None,
+                current_depth + 1,
+            )
+            .await;
 
             // 9. Émettre SubagentEnd et retourner
             match result {
@@ -161,14 +178,16 @@ impl ToolDyn for TaskTool {
                     sink.emit(ChatEvent::SubagentEnd {
                         id: subagent_id.clone(),
                         result: turn.response_text.clone(),
-                    }).await;
+                    })
+                    .await;
                     Ok(turn.response_text)
                 }
                 Err(e) => {
                     sink.emit(ChatEvent::SubagentEnd {
                         id: subagent_id.clone(),
                         result: format!("Error: {e}"),
-                    }).await;
+                    })
+                    .await;
                     Err(ToolError::ToolCallError(Box::new(e)))
                 }
             }
@@ -263,7 +282,10 @@ mod tests {
         assert!(def.description.contains("- sub : A subagent"));
         assert!(def.description.contains("- all : An all agent"));
         assert_eq!(def.name, "task");
-        assert_eq!(def.parameters["required"], serde_json::json!(["agent", "prompt"]));
+        assert_eq!(
+            def.parameters["required"],
+            serde_json::json!(["agent", "prompt"])
+        );
     }
 
     // 3. definition_empty_index_placeholder
@@ -294,13 +316,19 @@ mod tests {
             subagent_id: "sub-1".to_string(),
         };
 
-        wrapped.emit(ChatEvent::Token { content: "hi".to_string() }).await;
+        wrapped
+            .emit(ChatEvent::Token {
+                content: "hi".to_string(),
+            })
+            .await;
 
         assert_eq!(
             recording.events(),
             vec![ChatEvent::SubagentEvent {
                 id: "sub-1".to_string(),
-                event: Box::new(ChatEvent::Token { content: "hi".to_string() }),
+                event: Box::new(ChatEvent::Token {
+                    content: "hi".to_string()
+                }),
             }]
         );
     }

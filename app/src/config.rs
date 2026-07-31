@@ -35,10 +35,8 @@ impl Config {
                 .map_err(|_| "VNL-CFG-005: COOKIE_SECRET is required".to_string())?,
             database_url: env::var("DATABASE_URL")
                 .map_err(|_| "VNL-CFG-006: DATABASE_URL is required".to_string())?,
-            listen_addr: env::var("LISTEN_ADDR")
-                .unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
-            static_dir: env::var("STATIC_DIR")
-                .unwrap_or_else(|_| "./static".to_string()),
+            listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
+            static_dir: env::var("STATIC_DIR").unwrap_or_else(|_| "./static".to_string()),
         })
     }
 }

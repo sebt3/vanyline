@@ -20,8 +20,16 @@ pub struct SkillTool {
 }
 
 impl SkillTool {
-    pub fn new(store: Arc<dyn ConfigStore>, sink: Arc<dyn EventSink>, available: Vec<SkillMeta>) -> Self {
-        Self { store, sink, available }
+    pub fn new(
+        store: Arc<dyn ConfigStore>,
+        sink: Arc<dyn EventSink>,
+        available: Vec<SkillMeta>,
+    ) -> Self {
+        Self {
+            store,
+            sink,
+            available,
+        }
     }
 }
 
@@ -46,7 +54,8 @@ impl ToolDyn for SkillTool {
         let description = if available.is_empty() {
             "Charge le corps complet d'un skill par son nom. Aucun skill disponible.".to_string()
         } else {
-            let mut s = "Charge le corps complet d'un skill par son nom. Skills disponibles :\n".to_string();
+            let mut s = "Charge le corps complet d'un skill par son nom. Skills disponibles :\n"
+                .to_string();
             for skill in &available {
                 s.push_str(&format!("- {} : {}\n", skill.name, skill.description));
             }
@@ -66,9 +75,8 @@ impl ToolDyn for SkillTool {
         let sink = self.sink.clone();
         let available = self.available.clone();
         Box::pin(async move {
-            let parsed: SkillArgs = serde_json::from_str(&args).map_err(|e| {
-                rig_core::tool::ToolError::ToolCallError(Box::new(e))
-            })?;
+            let parsed: SkillArgs = serde_json::from_str(&args)
+                .map_err(|e| rig_core::tool::ToolError::ToolCallError(Box::new(e)))?;
 
             if !available.iter().any(|s| s.name == parsed.name) {
                 return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
@@ -76,9 +84,10 @@ impl ToolDyn for SkillTool {
                 )));
             }
 
-            let body = store.load_skill(&parsed.name).await.map_err(|e| {
-                rig_core::tool::ToolError::ToolCallError(Box::new(e))
-            })?;
+            let body = store
+                .load_skill(&parsed.name)
+                .await
+                .map_err(|e| rig_core::tool::ToolError::ToolCallError(Box::new(e)))?;
 
             sink.emit(ChatEvent::SkillLoaded {
                 name: parsed.name.clone(),

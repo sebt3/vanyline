@@ -4,18 +4,19 @@ use std::time::Duration;
 
 use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec};
 use k8s_openapi::api::core::v1::{
-    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec, PersistentVolumeClaimVolumeSource,
-    PodSpec, PodTemplateSpec, SecretVolumeSource, Volume, VolumeMount, VolumeResourceRequirements,
+    Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
+    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, SecretVolumeSource, Volume,
+    VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time};
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
-use kube::runtime::finalizer::{Event, finalizer};
+use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
-use crate::crds::{Owner, ProjectStatus};
 use crate::crds::Project;
+use crate::crds::{Owner, ProjectStatus};
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
@@ -50,7 +51,11 @@ pub fn effective_pvc_name(project: &Project) -> String {
 /// `existing_pvc.sub_path` n'est pas renseigné.
 #[allow(dead_code)]
 pub fn effective_sub_path(project: &Project) -> Option<String> {
-    project.spec.existing_pvc.as_ref().and_then(|r| r.sub_path.clone())
+    project
+        .spec
+        .existing_pvc
+        .as_ref()
+        .and_then(|r| r.sub_path.clone())
 }
 
 /// Chemin (relatif à la racine du volume, donc à `WORKSPACE_MOUNT_PATH` une fois
@@ -97,7 +102,9 @@ pub fn effective_caches(project: &Project) -> Vec<String> {
 
 /// `ownerReference` vers ce Project, pour la GC en cascade du PVC créé.
 #[allow(dead_code)]
-fn owner_reference(project: &Project) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+fn owner_reference(
+    project: &Project,
+) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
     project
         .controller_owner_ref(&())
         .expect("Project a apiVersion/kind renseignés par le derive CustomResource")
@@ -197,7 +204,11 @@ pub fn fetch_schedule(project: &Project) -> String {
 /// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
 /// `git` exécutant `script` via `sh -c`.
 #[allow(dead_code)]
-pub(crate) fn git_pod_template(project: &Project, ctx: &ProjectJobContext, script: String) -> PodTemplateSpec {
+pub(crate) fn git_pod_template(
+    project: &Project,
+    ctx: &ProjectJobContext,
+    script: String,
+) -> PodTemplateSpec {
     let mut volumes = vec![
         Volume {
             name: "workspace".to_string(),
@@ -252,13 +263,18 @@ pub(crate) fn git_pod_template(project: &Project, ctx: &ProjectJobContext, scrip
         });
         env.push(EnvVar {
             name: "GIT_SSH_COMMAND".to_string(),
-            value: Some("ssh -i /git-secret/ssh-privatekey -o StrictHostKeyChecking=no".to_string()),
+            value: Some(
+                "ssh -i /git-secret/ssh-privatekey -o StrictHostKeyChecking=no".to_string(),
+            ),
             ..Default::default()
         });
     }
 
     let mut labels = BTreeMap::new();
-    labels.insert("vanyline.solidite.fr/project".to_string(), project.name_any());
+    labels.insert(
+        "vanyline.solidite.fr/project".to_string(),
+        project.name_any(),
+    );
 
     PodTemplateSpec {
         metadata: Some(ObjectMeta {
@@ -301,7 +317,9 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         metadata: ObjectMeta {
             name: Some(init_job_name(&project.name_any())),
             namespace: project.namespace(),
-            owner_references: Some(vec![project.controller_owner_ref(&()).expect("Project a apiVersion/kind")]),
+            owner_references: Some(vec![project
+                .controller_owner_ref(&())
+                .expect("Project a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -327,7 +345,9 @@ pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJo
         metadata: ObjectMeta {
             name: Some(fetch_cronjob_name(&project.name_any())),
             namespace: project.namespace(),
-            owner_references: Some(vec![project.controller_owner_ref(&()).expect("Project a apiVersion/kind")]),
+            owner_references: Some(vec![project
+                .controller_owner_ref(&())
+                .expect("Project a apiVersion/kind")]),
             ..Default::default()
         },
         spec: CronJobSpec {
@@ -363,7 +383,9 @@ pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         metadata: ObjectMeta {
             name: Some(purge_job_name(&project.name_any())),
             namespace: project.namespace(),
-            owner_references: Some(vec![project.controller_owner_ref(&()).expect("Project a apiVersion/kind")]),
+            owner_references: Some(vec![project
+                .controller_owner_ref(&())
+                .expect("Project a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -372,7 +394,7 @@ pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
             template: git_pod_template(project, ctx, script),
             ..Default::default()
         }),
-            ..Default::default()
+        ..Default::default()
     }
 }
 
@@ -394,9 +416,17 @@ pub struct Context {
 /// tous deux hors scope ici).
 pub fn compute_status(project: &Project, cloned: bool) -> ProjectStatus {
     let (status, reason, message) = if cloned {
-        ("True", "InitJobSucceeded", "PVC workspace et clone bare en place")
+        (
+            "True",
+            "InitJobSucceeded",
+            "PVC workspace et clone bare en place",
+        )
     } else {
-        ("False", "WaitingForInitJob", "En attente de la fin du job project-init")
+        (
+            "False",
+            "WaitingForInitJob",
+            "En attente de la fin du job project-init",
+        )
     };
     ProjectStatus {
         pvc_name: Some(effective_pvc_name(project)),
@@ -449,8 +479,12 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
             .and_then(|d| d.storage_class.as_deref()),
     ) {
         let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
-        pvcs.patch(&project_pvc_name(&project.name_any()), &pp, &Patch::Apply(&pvc))
-            .await?;
+        pvcs.patch(
+            &project_pvc_name(&project.name_any()),
+            &pp,
+            &Patch::Apply(&pvc),
+        )
+        .await?;
     }
 
     let job_ctx = ProjectJobContext {
@@ -473,7 +507,11 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
         let mut cronjob = build_fetch_cronjob(project, &job_ctx);
         cronjob.spec.concurrency_policy = Some("Forbid".to_string());
         cronjobs
-            .patch(&fetch_cronjob_name(&project.name_any()), &pp, &Patch::Apply(&cronjob))
+            .patch(
+                &fetch_cronjob_name(&project.name_any()),
+                &pp,
+                &Patch::Apply(&cronjob),
+            )
             .await?;
     }
 
@@ -481,10 +519,18 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
     let status = compute_status(project, cloned);
     let patch = serde_json::json!({ "status": status });
     projects
-        .patch_status(&project.name_any(), &PatchParams::default(), &Patch::Merge(&patch))
+        .patch_status(
+            &project.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
         .await?;
 
-    Ok(Action::requeue(Duration::from_secs(if cloned { 300 } else { 15 })))
+    Ok(Action::requeue(Duration::from_secs(if cloned {
+        300
+    } else {
+        15
+    })))
 }
 
 /// `Event::Cleanup` : Job de purge, en attente de succès (voir note sur la
@@ -526,7 +572,10 @@ async fn cleanup(project: &Project, ctx: &Context, ns: &str) -> Result<Action, C
     }
 }
 
-pub async fn reconcile(project: Arc<Project>, ctx: Arc<Context>) -> Result<Action, ControllerError> {
+pub async fn reconcile(
+    project: Arc<Project>,
+    ctx: Arc<Context>,
+) -> Result<Action, ControllerError> {
     let ns = project.namespace().unwrap_or_else(|| "default".to_string());
     let api: Api<Project> = Api::namespaced(ctx.client.clone(), &ns);
     finalizer(&api, FINALIZER, project, |event| async {
@@ -559,21 +608,24 @@ pub fn build_controller(client: Client) -> Controller<Project> {
 
 #[cfg(test)]
 mod tests {
-    use crate::crds::{PvcRef, ProjectSpec};
     use super::*;
+    use crate::crds::{ProjectSpec, PvcRef};
 
     fn make_project(existing_pvc: Option<PvcRef>, storage_size: Option<String>) -> Project {
-        let mut project = Project::new("demo", ProjectSpec {
-            owner: "alice".to_string(),
-            repo_url: "https://github.com/owner/repo".to_string(),
-            default_branch: None,
-            existing_pvc,
-            storage_size,
-            storage_class: None,
-            git_secret: None,
-            caches: None,
-            fetch_interval: None,
-        });
+        let mut project = Project::new(
+            "demo",
+            ProjectSpec {
+                owner: "alice".to_string(),
+                repo_url: "https://github.com/owner/repo".to_string(),
+                default_branch: None,
+                existing_pvc,
+                storage_size,
+                storage_class: None,
+                git_secret: None,
+                caches: None,
+                fetch_interval: None,
+            },
+        );
         project.meta_mut().namespace = Some("ns".into());
         project.meta_mut().uid = Some("test-uid-demo".into());
         project
@@ -611,7 +663,10 @@ mod tests {
     #[test]
     fn effective_caches_default() {
         let project = make_project(None, None);
-        assert_eq!(effective_caches(&project), vec!["cargo".to_string(), "pnpm".to_string()]);
+        assert_eq!(
+            effective_caches(&project),
+            vec!["cargo".to_string(), "pnpm".to_string()]
+        );
     }
 
     // 6. effective_caches_custom
@@ -689,11 +744,17 @@ mod tests {
     fn build_workspace_pvc_default_size() {
         let project = make_project(None, None);
         let pvc = build_workspace_pvc(&project, None, None).expect("PVC should be built");
-        let requests = pvc.spec.as_ref().unwrap().resources.as_ref().unwrap().requests.as_ref().unwrap();
-        assert_eq!(
-            requests.get("storage").unwrap(),
-            &Quantity("10Gi".into())
-        );
+        let requests = pvc
+            .spec
+            .as_ref()
+            .unwrap()
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(requests.get("storage").unwrap(), &Quantity("10Gi".into()));
         assert_eq!(
             pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
             &vec!["ReadWriteOnce".to_string()]
@@ -705,11 +766,17 @@ mod tests {
     fn build_workspace_pvc_owner_default_size() {
         let project = make_project(None, None);
         let pvc = build_workspace_pvc(&project, Some("20Gi"), None).expect("PVC should be built");
-        let requests = pvc.spec.as_ref().unwrap().resources.as_ref().unwrap().requests.as_ref().unwrap();
-        assert_eq!(
-            requests.get("storage").unwrap(),
-            &Quantity("20Gi".into())
-        );
+        let requests = pvc
+            .spec
+            .as_ref()
+            .unwrap()
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(requests.get("storage").unwrap(), &Quantity("20Gi".into()));
     }
 
     // 13. build_workspace_pvc_spec_overrides_default
@@ -717,11 +784,17 @@ mod tests {
     fn build_workspace_pvc_spec_overrides_default() {
         let project = make_project(None, Some("5Gi".to_string()));
         let pvc = build_workspace_pvc(&project, Some("20Gi"), None).expect("PVC should be built");
-        let requests = pvc.spec.as_ref().unwrap().resources.as_ref().unwrap().requests.as_ref().unwrap();
-        assert_eq!(
-            requests.get("storage").unwrap(),
-            &Quantity("5Gi".into())
-        );
+        let requests = pvc
+            .spec
+            .as_ref()
+            .unwrap()
+            .resources
+            .as_ref()
+            .unwrap()
+            .requests
+            .as_ref()
+            .unwrap();
+        assert_eq!(requests.get("storage").unwrap(), &Quantity("5Gi".into()));
     }
 
     // 14. build_workspace_pvc_owner_reference
@@ -729,7 +802,11 @@ mod tests {
     fn build_workspace_pvc_owner_reference() {
         let project = make_project(None, None);
         let pvc = build_workspace_pvc(&project, None, None).expect("PVC should be built");
-        let refs = pvc.metadata.owner_references.as_ref().expect("owner_references should be present");
+        let refs = pvc
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("owner_references should be present");
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].name.as_str(), "demo");
         assert_eq!(refs[0].kind.as_str(), "Project");
@@ -815,13 +892,36 @@ mod tests {
         let volumes = pod_spec.volumes.as_ref().unwrap();
         assert_eq!(volumes.len(), 3);
 
-        let secret_vol = volumes.iter().find(|v| v.name == "git-secret").expect("should have git-secret volume");
-        assert_eq!(secret_vol.secret.as_ref().unwrap().secret_name, Some("demo-deploy-key".to_string()));
+        let secret_vol = volumes
+            .iter()
+            .find(|v| v.name == "git-secret")
+            .expect("should have git-secret volume");
+        assert_eq!(
+            secret_vol.secret.as_ref().unwrap().secret_name,
+            Some("demo-deploy-key".to_string())
+        );
 
-        let env_vars = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap().containers[0]
-            .env.as_ref().unwrap();
-        let ssh_env = env_vars.iter().find(|e| e.name == "GIT_SSH_COMMAND").expect("should have GIT_SSH_COMMAND");
-        assert!(ssh_env.value.as_ref().unwrap().contains("/git-secret/ssh-privatekey"));
+        let env_vars = job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0]
+            .env
+            .as_ref()
+            .unwrap();
+        let ssh_env = env_vars
+            .iter()
+            .find(|e| e.name == "GIT_SSH_COMMAND")
+            .expect("should have GIT_SSH_COMMAND");
+        assert!(ssh_env
+            .value
+            .as_ref()
+            .unwrap()
+            .contains("/git-secret/ssh-privatekey"));
     }
 
     // 20. build_init_job_existing_pvc_sub_path
@@ -840,9 +940,21 @@ mod tests {
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
 
         // Volume "workspace" should reference the existing PVC
-        let workspace_vol = pod_spec.volumes.as_ref().unwrap()
-            .iter().find(|v| v.name == "workspace").unwrap();
-        assert_eq!(workspace_vol.persistent_volume_claim.as_ref().unwrap().claim_name, "code-server-home");
+        let workspace_vol = pod_spec
+            .volumes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find(|v| v.name == "workspace")
+            .unwrap();
+        assert_eq!(
+            workspace_vol
+                .persistent_volume_claim
+                .as_ref()
+                .unwrap()
+                .claim_name,
+            "code-server-home"
+        );
 
         // VolumeMount "workspace" should have sub_path
         let mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
@@ -858,11 +970,21 @@ mod tests {
 
         let cronjob = build_fetch_cronjob(&project, &ctx);
 
-        assert_eq!(cronjob.metadata.name, Some("project-demo-fetch".to_string()));
+        assert_eq!(
+            cronjob.metadata.name,
+            Some("project-demo-fetch".to_string())
+        );
         assert_eq!(cronjob.spec.schedule, "@every 1h");
 
         let job_spec = cronjob.spec.job_template.spec.as_ref().unwrap();
-        let container = job_spec.template.spec.as_ref().unwrap().containers.first().unwrap();
+        let container = job_spec
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .first()
+            .unwrap();
         let command = container.command.as_ref().unwrap();
         let script = &command[2];
         assert!(script.contains("git --git-dir=/workspace/repo.git fetch --prune"));
@@ -893,16 +1015,42 @@ mod tests {
         let ctx = make_ctx();
 
         let init_job = build_init_job(&project, &ctx);
-        assert!(init_job.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
-            .service_account_name.is_none());
+        assert!(init_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .service_account_name
+            .is_none());
 
         let fetch_cronjob = build_fetch_cronjob(&project, &ctx);
-        assert!(fetch_cronjob.spec.job_template.spec.as_ref().unwrap()
-            .template.spec.as_ref().unwrap().service_account_name.is_none());
+        assert!(fetch_cronjob
+            .spec
+            .job_template
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .service_account_name
+            .is_none());
 
         let purge_job = build_purge_job(&project, &ctx);
-        assert!(purge_job.spec.as_ref().unwrap().template.spec.as_ref().unwrap()
-            .service_account_name.is_none());
+        assert!(purge_job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .service_account_name
+            .is_none());
     }
 
     // 24. compute_status_cloned_true

@@ -500,6 +500,9 @@ mod tests {
     async fn get_jwks_uri_without_issuer_returns_error_not_panic() {
         let auth = make_auth("kubernetes-admin", "kubernetes-view");
         let result = auth.get_jwks_uri().await;
-        assert!(result.is_err(), "should return an error, not panic, when oidc_issuer is None");
+        assert!(
+            result.is_err(),
+            "should return an error, not panic, when oidc_issuer is None"
+        );
     }
 }

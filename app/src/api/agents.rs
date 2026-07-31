@@ -11,11 +11,8 @@ use vanyline_lib::store::ConfigStore;
 use vanyline_lib::VnyError;
 
 use crate::{
-    api::conversations::get_or_create_user,
-    auth::middleware::AuthUser,
-    config_store::PgConfigStore,
-    error::AppError,
-    AppState,
+    api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    config_store::PgConfigStore, error::AppError, AppState,
 };
 
 fn default_mode() -> AgentMode {
@@ -212,40 +209,48 @@ async fn resolve_model_profile_id(
         })
 }
 
-async fn validate_toolsets(state: &AppState, user_id: Uuid, names: &[String]) -> Result<(), AppError> {
+async fn validate_toolsets(
+    state: &AppState,
+    user_id: Uuid,
+    names: &[String],
+) -> Result<(), AppError> {
     for name in names {
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM toolsets WHERE user_id = $1 AND name = $2)")
-                .bind(user_id)
-                .bind(name)
-                .fetch_one(&state.pool)
-                .await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM toolsets WHERE user_id = $1 AND name = $2)",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_one(&state.pool)
+        .await?;
         if !exists {
-            return Err(AppError::UnprocessableReference(VnyError::UnknownReference(
-                "toolset",
-                name.clone(),
-            )));
+            return Err(AppError::UnprocessableReference(
+                VnyError::UnknownReference("toolset", name.clone()),
+            ));
         }
     }
     Ok(())
 }
 
-async fn validate_skills(state: &AppState, user_id: Uuid, skills: &SkillSelection) -> Result<(), AppError> {
+async fn validate_skills(
+    state: &AppState,
+    user_id: Uuid,
+    skills: &SkillSelection,
+) -> Result<(), AppError> {
     let SkillSelection::Named(names) = skills else {
         return Ok(()); // Auto / None : rien à valider, même règle que cli/src/config_check.rs
     };
     for name in names {
-        let exists: bool =
-            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM skills WHERE user_id = $1 AND name = $2)")
-                .bind(user_id)
-                .bind(name)
-                .fetch_one(&state.pool)
-                .await?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM skills WHERE user_id = $1 AND name = $2)",
+        )
+        .bind(user_id)
+        .bind(name)
+        .fetch_one(&state.pool)
+        .await?;
         if !exists {
-            return Err(AppError::UnprocessableReference(VnyError::UnknownReference(
-                "skill",
-                name.clone(),
-            )));
+            return Err(AppError::UnprocessableReference(
+                VnyError::UnknownReference("skill", name.clone()),
+            ));
         }
     }
     Ok(())
@@ -277,7 +282,7 @@ mod tests {
             oidc_ca_cert: None,
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
-            
+
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
         };

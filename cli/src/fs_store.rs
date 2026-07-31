@@ -1,7 +1,10 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use vanyline_lib::domain::{Agent, AgentMode, McpSelection, McpServer, ModelProfile, Provider, ProviderType, McpTransport, SkillSelection, SkillMeta, Toolset};
+use vanyline_lib::domain::{
+    Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
+    SkillMeta, SkillSelection, Toolset,
+};
 use vanyline_lib::store::ConfigStore;
 use vanyline_lib::VnyError;
 
@@ -78,9 +81,12 @@ fn split_frontmatter(path: &Path, content: &str) -> Result<(String, String), Vny
     let mut lines = content.lines();
     match lines.next() {
         Some("---") => {}
-        _ => return Err(VnyError::ConfigError(format!(
-            "{}: must start with '---' frontmatter delimiter", path.display()
-        ))),
+        _ => {
+            return Err(VnyError::ConfigError(format!(
+                "{}: must start with '---' frontmatter delimiter",
+                path.display()
+            )))
+        }
     }
     let mut frontmatter = Vec::new();
     let mut closed = false;
@@ -93,7 +99,8 @@ fn split_frontmatter(path: &Path, content: &str) -> Result<(String, String), Vny
     }
     if !closed {
         return Err(VnyError::ConfigError(format!(
-            "{}: missing closing '---' for frontmatter", path.display()
+            "{}: missing closing '---' for frontmatter",
+            path.display()
         )));
     }
     let body: Vec<&str> = lines.collect();
@@ -168,7 +175,12 @@ fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, VnyError> {
         description: raw.description,
         prompt: raw.prompt,
         local_tools: raw.tools.local,
-        mcp: raw.tools.mcp.into_iter().map(|(server, tools)| McpSelection { server, tools }).collect(),
+        mcp: raw
+            .tools
+            .mcp
+            .into_iter()
+            .map(|(server, tools)| McpSelection { server, tools })
+            .collect(),
     })
 }
 
@@ -227,31 +239,44 @@ impl ConfigStore for FsConfigStore {
     /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
     async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError> {
         let files = self.layers.resolve_named_files("toolsets", "yaml")?;
-        files.iter().map(|(name, path)| parse_toolset_file(name, path)).collect()
+        files
+            .iter()
+            .map(|(name, path)| parse_toolset_file(name, path))
+            .collect()
     }
 
     /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
     async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
         let files = self.layers.resolve_named_files("agents", "md")?;
-        files.iter().map(|(name, path)| parse_agent_file(name, path)).collect()
+        files
+            .iter()
+            .map(|(name, path)| parse_agent_file(name, path))
+            .collect()
     }
 
     /// Résolu en tâche 02c (skills/<name>/SKILL.md).
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
         let files = self.layers.resolve_skill_files()?;
-        files.iter().map(|(name, path)| {
-            let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
-            let (frontmatter, _body) = split_frontmatter(path, &content)?;
-            let raw: RawSkillFrontmatter = yaml_serde::from_str(&frontmatter)
-                .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
-            Ok(SkillMeta { name: name.clone(), description: raw.description })
-        }).collect()
+        files
+            .iter()
+            .map(|(name, path)| {
+                let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+                let (frontmatter, _body) = split_frontmatter(path, &content)?;
+                let raw: RawSkillFrontmatter = yaml_serde::from_str(&frontmatter)
+                    .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
+                Ok(SkillMeta {
+                    name: name.clone(),
+                    description: raw.description,
+                })
+            })
+            .collect()
     }
 
     /// Résolu en tâche 02c.
     async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
         let files = self.layers.resolve_skill_files()?;
-        let path = files.get(name)
+        let path = files
+            .get(name)
             .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))?;
         let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
         let (_frontmatter, body) = split_frontmatter(path, &content)?;
@@ -262,10 +287,9 @@ impl ConfigStore for FsConfigStore {
         let merged = self.layers.load_merged_config()?;
         match merged.defaults.get("agent") {
             None => Ok(None),
-            Some(value) => value
-                .as_str()
-                .map(|s| Some(s.to_string()))
-                .ok_or_else(|| VnyError::ConfigError("defaults.agent must be a string".to_string())),
+            Some(value) => value.as_str().map(|s| Some(s.to_string())).ok_or_else(|| {
+                VnyError::ConfigError("defaults.agent must be a string".to_string())
+            }),
         }
     }
 }
@@ -282,7 +306,12 @@ mod tests {
     fn write_config_yaml(dir: &std::path::Path, content: &str) {
         let path = dir.join("config.yaml");
         std::fs::File::create(&path)
-            .unwrap_or_else(|e| panic!("Failed to create config.yaml in tempdir at {}: {e}", path.display()))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "Failed to create config.yaml in tempdir at {}: {e}",
+                    path.display()
+                )
+            })
             .write_all(content.as_bytes())
             .unwrap_or_else(|e| panic!("Failed to write config.yaml at {}: {e}", path.display()));
     }
@@ -359,10 +388,7 @@ mod tests {
     #[tokio::test]
     async fn default_agent_reads_defaults_agent() {
         let tmp = tempdir().unwrap();
-        write_config_yaml(
-            tmp.path(),
-            "defaults:\n  agent: build\n",
-        );
+        write_config_yaml(tmp.path(), "defaults:\n  agent: build\n");
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -391,10 +417,7 @@ mod tests {
     async fn default_agent_wrong_type_errors() {
         let tmp = tempdir().unwrap();
         // Number instead of string
-        write_config_yaml(
-            tmp.path(),
-            "defaults:\n  agent: 123\n",
-        );
+        write_config_yaml(tmp.path(), "defaults:\n  agent: 123\n");
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -727,7 +750,11 @@ tools:
         std::fs::create_dir_all(&skills_dir).unwrap();
         std::fs::create_dir_all(skills_dir.join("random")).unwrap();
         std::fs::create_dir_all(skills_dir.join("pdf")).unwrap();
-        std::fs::write(skills_dir.join("pdf").join("SKILL.md"), "---\ndescription: PDF\n---\n").unwrap();
+        std::fs::write(
+            skills_dir.join("pdf").join("SKILL.md"),
+            "---\ndescription: PDF\n---\n",
+        )
+        .unwrap();
         let layers = Layers {
             global_dir: tmp.path().to_path_buf(),
             workspace_dir: None,
@@ -746,12 +773,20 @@ tools:
         std::fs::create_dir_all(global_dir.path().join("skills").join("pdf")).unwrap();
         std::fs::create_dir_all(workspace_dir.path().join("skills").join("pdf")).unwrap();
         std::fs::write(
-            global_dir.path().join("skills").join("pdf").join("SKILL.md"),
+            global_dir
+                .path()
+                .join("skills")
+                .join("pdf")
+                .join("SKILL.md"),
             "---\ndescription: old\n---\nold body",
         )
         .unwrap();
         std::fs::write(
-            workspace_dir.path().join("skills").join("pdf").join("SKILL.md"),
+            workspace_dir
+                .path()
+                .join("skills")
+                .join("pdf")
+                .join("SKILL.md"),
             "---\ndescription: new\n---\nnew body",
         )
         .unwrap();

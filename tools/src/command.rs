@@ -77,23 +77,18 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
             cmd.current_dir(dir);
         }
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| ToolsError::Io {
-                path: format!("command: {command}"),
-                source: e,
-            })?;
+        let child = cmd.spawn().map_err(|e| ToolsError::Io {
+            path: format!("command: {command}"),
+            source: e,
+        })?;
         let child_pid = child.id();
 
         // 4. Attendre avec timeout optionnel
         let output = if timeout_secs == 0 {
-            child
-                .wait_with_output()
-                .await
-                .map_err(|e| ToolsError::Io {
-                    path: format!("command: {command}"),
-                    source: e,
-                })?
+            child.wait_with_output().await.map_err(|e| ToolsError::Io {
+                path: format!("command: {command}"),
+                source: e,
+            })?
         } else {
             match tokio::time::timeout(
                 std::time::Duration::from_secs(timeout_secs),
@@ -281,7 +276,9 @@ mod tests {
         // Extract stdout section (after "stdout:\n")
         let stdout_section = res.split("\nstdout:\n").nth(1).unwrap();
         let pwd_output = stdout_section.lines().next().unwrap();
-        let actual = std::path::Path::new(pwd_output.trim()).canonicalize().unwrap();
+        let actual = std::path::Path::new(pwd_output.trim())
+            .canonicalize()
+            .unwrap();
         assert_eq!(expected, actual);
     }
 

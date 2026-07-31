@@ -5,13 +5,13 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use rmcp::{
-    ServerHandler, ServiceExt,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
+    ServerHandler, ServiceExt,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
@@ -60,29 +60,32 @@ type CapturedHeaders = Arc<Mutex<Option<BTreeMap<String, String>>>>;
 async fn spawn_echo_server() -> (String, CancellationToken, CapturedHeaders) {
     let ct = CancellationToken::new();
 
-    let service: StreamableHttpService<EchoServer, LocalSessionManager> = StreamableHttpService::new(
-        || Ok(EchoServer::new()),
-        Default::default(),
-        StreamableHttpServerConfig::default()
-            .with_sse_keep_alive(None)
-            .with_cancellation_token(ct.child_token()),
-    );
+    let service: StreamableHttpService<EchoServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            || Ok(EchoServer::new()),
+            Default::default(),
+            StreamableHttpServerConfig::default()
+                .with_sse_keep_alive(None)
+                .with_cancellation_token(ct.child_token()),
+        );
 
     let captured_headers: CapturedHeaders = Arc::new(Mutex::new(None));
     let captured_for_mw = captured_headers.clone();
-    let capture_mw = axum::middleware::from_fn(move |req: axum::extract::Request, next: axum::middleware::Next| {
-        let captured = captured_for_mw.clone();
-        async move {
-            let mut map = BTreeMap::new();
-            for (k, v) in req.headers() {
-                if let Ok(vs) = v.to_str() {
-                    map.insert(k.to_string(), vs.to_string());
+    let capture_mw = axum::middleware::from_fn(
+        move |req: axum::extract::Request, next: axum::middleware::Next| {
+            let captured = captured_for_mw.clone();
+            async move {
+                let mut map = BTreeMap::new();
+                for (k, v) in req.headers() {
+                    if let Ok(vs) = v.to_str() {
+                        map.insert(k.to_string(), vs.to_string());
+                    }
                 }
+                *captured.lock().await = Some(map);
+                next.run(req).await
             }
-            *captured.lock().await = Some(map);
-            next.run(req).await
-        }
-    });
+        },
+    );
 
     let router = axum::Router::new()
         .nest_service("/mcp", service)
@@ -133,7 +136,9 @@ async fn test_mcp_custom_headers_reach_server() {
         .expect("connect_mcp_servers_selected should succeed");
 
     let captured = captured_headers.lock().await;
-    let map = captured.as_ref().expect("server should have captured headers");
+    let map = captured
+        .as_ref()
+        .expect("server should have captured headers");
     assert_eq!(
         map.get("x-test-auth").map(String::as_str),
         Some("hello-from-client"),
@@ -165,14 +170,18 @@ async fn test_mcp_tool_survives_multiple_calls_in_same_connection() {
     // c'est exactement le contrat que `session.rs` doit respecter après le
     // fix (garder les McpRunningService en vie jusqu'à la fin du tour).
 
-    let result1 = handle.call_tool("test-mcp/echo", "{\"text\":\"salut\"}").await;
+    let result1 = handle
+        .call_tool("test-mcp/echo", "{\"text\":\"salut\"}")
+        .await;
     assert_eq!(
         result1.expect("call #1 should succeed"),
         "salut",
         "first call should echo back the input"
     );
 
-    let result2 = handle.call_tool("test-mcp/echo", "{\"text\":\"au revoir\"}").await;
+    let result2 = handle
+        .call_tool("test-mcp/echo", "{\"text\":\"au revoir\"}")
+        .await;
     assert_eq!(
         result2.expect("call #2 should succeed"),
         "au revoir",

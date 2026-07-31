@@ -87,19 +87,23 @@ async fn handler_callback(
                     })
                 })
         })
-        .ok_or(AppError::OidcError("VNL-AUTH-003: missing oidc_pending cookie".to_string()))?;
+        .ok_or(AppError::OidcError(
+            "VNL-AUTH-003: missing oidc_pending cookie".to_string(),
+        ))?;
 
     let jar = CookieJar::new();
     let private_jar = jar.private(&state.cookie_key);
     let raw_cookie = Cookie::new("oidc_pending", pending_value);
-    let decrypted = private_jar
-        .decrypt(raw_cookie)
-        .ok_or(AppError::OidcError("VNL-AUTH-003: invalid oidc_pending cookie".to_string()))?;
+    let decrypted = private_jar.decrypt(raw_cookie).ok_or(AppError::OidcError(
+        "VNL-AUTH-003: invalid oidc_pending cookie".to_string(),
+    ))?;
 
     let value = decrypted.value();
     let parts: Vec<&str> = value.splitn(2, ':').collect();
     if parts.len() != 2 {
-        return Err(AppError::OidcError("VNL-AUTH-003: malformed oidc_pending value".to_string()));
+        return Err(AppError::OidcError(
+            "VNL-AUTH-003: malformed oidc_pending value".to_string(),
+        ));
     }
 
     let expected_csrf = parts[0];
@@ -107,7 +111,9 @@ async fn handler_callback(
 
     if params.state != expected_csrf {
         tracing::warn!("VNL-AUTH-003: CSRF state mismatch");
-        return Err(AppError::OidcError("VNL-AUTH-003: invalid CSRF state".to_string()));
+        return Err(AppError::OidcError(
+            "VNL-AUTH-003: invalid CSRF state".to_string(),
+        ));
     }
 
     let (id_token_str, email) = state
@@ -160,7 +166,7 @@ mod tests {
             oidc_ca_cert: None,
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
-            
+
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
         };

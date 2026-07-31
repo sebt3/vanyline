@@ -123,9 +123,13 @@ pub(crate) async fn handle_tools_call(
 
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
-    if let Some(result) = tools_impl::dispatch_filesystem(sandbox_root, name, arguments.clone()).await {
+    if let Some(result) =
+        tools_impl::dispatch_filesystem(sandbox_root, name, arguments.clone()).await
+    {
         JsonRpcResponse::ok(id, result)
-    } else if let Some(result) = tools_impl::dispatch_search(sandbox_root, name, arguments.clone()).await {
+    } else if let Some(result) =
+        tools_impl::dispatch_search(sandbox_root, name, arguments.clone()).await
+    {
         JsonRpcResponse::ok(id, result)
     } else if let Some(result) = tools_impl::dispatch_command(sandbox_root, name, arguments).await {
         JsonRpcResponse::ok(id, result)
@@ -200,7 +204,12 @@ mod tests {
     #[tokio::test]
     async fn tools_call_unknown_tool_returns_error() {
         let params = serde_json::json!({ "name": "nope", "arguments": {} });
-        let resp = handle_tools_call(Some(serde_json::json!(1)), params, std::path::Path::new("/tmp")).await;
+        let resp = handle_tools_call(
+            Some(serde_json::json!(1)),
+            params,
+            std::path::Path::new("/tmp"),
+        )
+        .await;
         let error = resp.error.unwrap();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "Unknown tool: nope");
@@ -216,7 +225,12 @@ mod tests {
             .unwrap();
         let resp = rt.block_on(async {
             let params = serde_json::json!({ "arguments": {} });
-            handle_tools_call(Some(serde_json::json!(1)), params, std::path::Path::new("/tmp")).await
+            handle_tools_call(
+                Some(serde_json::json!(1)),
+                params,
+                std::path::Path::new("/tmp"),
+            )
+            .await
         });
         let error = resp.error.unwrap();
         assert_eq!(error.code, -32602);
