@@ -767,8 +767,8 @@ mod tests {
             serde_json::json!([]),
             serde_json::json!("none"),
         );
-        let result_auto = domain_agent_record(&agent_auto, &[row.clone()]).unwrap();
-        let result_none = domain_agent_record(&agent_none, &[row.clone()]).unwrap();
+        let result_auto = domain_agent_record(&agent_auto, std::slice::from_ref(&row)).unwrap();
+        let result_none = domain_agent_record(&agent_none, std::slice::from_ref(&row)).unwrap();
         assert!(matches!(result_auto.skills, SkillSelection::Auto));
         assert!(matches!(result_none.skills, SkillSelection::None));
     }

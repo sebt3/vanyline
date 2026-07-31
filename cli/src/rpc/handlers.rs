@@ -804,9 +804,14 @@ impl EventSink for RpcEventSink {
 
 #[cfg(test)]
 mod tests {
+    // isolated_data_dir() tient un MutexGuard across await par design (cf.
+    // .claude/MEMORY.md, section cli-rpc-stdio) : il sérialise les tests qui
+    // touchent XDG_DATA_HOME (état global au process), pas de contention
+    // async réelle — faux positif clippy sur ce pattern précis.
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use serde_json::json;
-    use std::io::Write;
     use tempfile::tempdir;
     use tokio::test;
 

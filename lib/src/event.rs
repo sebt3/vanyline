@@ -380,7 +380,7 @@ mod tests {
                 additional_params: None,
             }),
         ));
-        assert_eq!(is_final, false);
+        assert!(!is_final);
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],
@@ -397,7 +397,7 @@ mod tests {
                 additional_params: None,
             }),
         ));
-        assert_eq!(is_final, false);
+        assert!(!is_final);
         assert_eq!(events.len(), 1);
         assert_eq!(
             events[0],

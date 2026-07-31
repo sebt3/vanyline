@@ -11,7 +11,7 @@ use rmcp::{
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     },
-    ServerHandler, ServiceExt,
+    ServerHandler,
 };
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;

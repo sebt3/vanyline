@@ -1176,12 +1176,11 @@ mod tests {
         let file = dir.path().join("delete_me.txt");
         tokio::fs::write(&file, "temp content").await.unwrap();
 
-        let result = delete_file(DeleteFileOptions {
+        delete_file(DeleteFileOptions {
             path: file.to_string_lossy().to_string(),
         })
         .await
         .unwrap();
-        assert_eq!(result, ());
 
         // file is gone — metadata should fail
         let meta = tokio::fs::metadata(&file).await;
@@ -1196,12 +1195,11 @@ mod tests {
 
         assert!(tokio::fs::metadata(&empty_dir).await.is_ok());
 
-        let result = delete_file(DeleteFileOptions {
+        delete_file(DeleteFileOptions {
             path: empty_dir.to_string_lossy().to_string(),
         })
         .await
         .unwrap();
-        assert_eq!(result, ());
 
         // directory should be gone
         assert!(tokio::fs::metadata(&empty_dir).await.is_err());

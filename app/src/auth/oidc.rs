@@ -66,7 +66,7 @@ async fn send_http_request(
     let status = response.status();
     let mut response_builder = openidconnect::http::Response::builder().status(status);
     if let Some(headers) = response_builder.headers_mut() {
-        headers.extend(response.headers().clone().into_iter());
+        headers.extend(response.headers().clone());
     }
     let body = response.bytes().await?.to_vec();
     Ok(response_builder
