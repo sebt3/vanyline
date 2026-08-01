@@ -38,6 +38,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
+  doc-lint:
+    name: Documentation lint (missing_docs, non-regression)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Count missing_docs warnings
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set -o pipefail
+          COUNT=$(\
+            cargo rustc -p vanyline-lib --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
+            cargo rustc -p vanyline-sandbox --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
+            cargo rustc -p vanyline-tools --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
+            cargo rustc -p vanyline-crds --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation')
+          TOTAL=0
+          for n in $COUNT; do TOTAL=$((TOTAL + n)); done
+          echo "missing_docs warnings total: $TOTAL"
+          BASELINE=421
+          if [ "$TOTAL" -gt "$BASELINE" ]; then
+            echo "::error::Regression: $TOTAL missing_docs warnings > baseline $BASELINE"
+            exit 1
+          fi
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest
