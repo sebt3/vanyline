@@ -9,6 +9,7 @@ mod tools;
 mod mcp_cmd;
 mod model_cmd;
 mod owner_cmd;
+mod project_cmd;
 mod skill_cmd;
 mod toolset_cmd;
 
@@ -61,6 +62,9 @@ enum Commands {
     /// Manage K8s Owners
     #[command(name = "owner", subcommand)]
     K8sOwner(owner_cmd::Commands),
+    /// Manage K8s Projects
+    #[command(name = "project", subcommand)]
+    K8sProject(project_cmd::Commands),
     /// Validate configuration (both layers)
     #[command(subcommand)]
     Config(config_cmd::Commands),
@@ -165,6 +169,7 @@ async fn main() {
             }
         }
         Some(Commands::K8sOwner(cmd)) => run_owner_k8s(cmd, cli.namespace).await,
+        Some(Commands::K8sProject(cmd)) => run_project_k8s(cmd, cli.namespace).await,
     }
 }
 
@@ -626,6 +631,115 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
                 std::process::exit(1);
             });
             println!("Deleted owner: {name}");
+        }
+    }
+}
+
+async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) {
+    use project_cmd::Commands::*;
+    use kube::ResourceExt;
+    let client = discover_k8s_client(namespace).await;
+    match cmd {
+        List => {
+            let projects = client.list_projects().await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            if projects.is_empty() {
+                println!("No projects found.");
+            } else {
+                for p in &projects {
+                    let cloned = p.status.as_ref().map(|s| s.cloned).unwrap_or(false);
+                    println!(
+                        "  {} | owner={} | {} | cloned={}",
+                        p.name_any(), p.spec.owner, p.spec.repo_url, cloned
+                    );
+                }
+            }
+        }
+        Show { name } => {
+            let project = client.get_project(&name).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Project: {}", project.name_any());
+            println!("  owner: {}", project.spec.owner);
+            println!("  repoUrl: {}", project.spec.repo_url);
+            println!("  defaultBranch: {}", project.spec.default_branch.as_deref().unwrap_or("-"));
+            match &project.spec.existing_pvc {
+                Some(pvc) => println!("  existingPvc: {} (subPath={})", pvc.name, pvc.sub_path.as_deref().unwrap_or("-")),
+                None => println!("  existingPvc: -"),
+            }
+            println!("  storageSize: {}", project.spec.storage_size.as_deref().unwrap_or("-"));
+            println!("  storageClass: {}", project.spec.storage_class.as_deref().unwrap_or("-"));
+            println!("  gitSecret: {}", project.spec.git_secret.as_deref().unwrap_or("-"));
+            match &project.spec.caches {
+                Some(c) if !c.is_empty() => println!("  caches: {}", c.join(", ")),
+                _ => println!("  caches: -"),
+            }
+            println!("  fetchInterval: {}", project.spec.fetch_interval.as_deref().unwrap_or("-"));
+            println!("Status:");
+            match &project.status {
+                Some(status) => {
+                    println!("  pvcName: {}", status.pvc_name.as_deref().unwrap_or("-"));
+                    println!("  cloned: {}", status.cloned);
+                    if status.worktrees.is_empty() {
+                        println!("  worktrees: -");
+                    } else {
+                        println!("  worktrees: {}", status.worktrees.join(", "));
+                    }
+                    if status.conditions.is_empty() {
+                        println!("  conditions: -");
+                    } else {
+                        println!("  conditions:");
+                        for c in &status.conditions {
+                            println!("    - {} status={} message={}", c.type_, c.status, c.message);
+                        }
+                    }
+                }
+                None => println!("  (not yet reconciled)"),
+            }
+        }
+        Create {
+            name,
+            owner,
+            repo_url,
+            default_branch,
+            existing_pvc_name,
+            existing_pvc_subpath,
+            storage_size,
+            storage_class,
+            git_secret,
+            caches,
+            fetch_interval,
+        } => {
+            let existing_pvc = existing_pvc_name.map(|pvc_name| vanyline_crds::PvcRef {
+                name: pvc_name,
+                sub_path: existing_pvc_subpath,
+            });
+            let spec = vanyline_crds::ProjectSpec {
+                owner,
+                repo_url,
+                default_branch,
+                existing_pvc,
+                storage_size,
+                storage_class,
+                git_secret,
+                caches: if caches.is_empty() { None } else { Some(caches) },
+                fetch_interval,
+            };
+            client.create_project(&name, spec).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Created project: {name}");
+        }
+        Delete { name } => {
+            client.delete_project(&name).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Deleted project: {name}");
         }
     }
 }
