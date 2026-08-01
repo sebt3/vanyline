@@ -145,7 +145,9 @@ clippy::nursery` (build propre, `cargo clean` préalable) : **959 warnings** (st
 uniquement, 0 error). Une première mesure sans ce soin (cache incrémental tiède, plusieurs
 builds différents déjà effectués dans le même `target/`) avait donné 583 — sous-compté de
 376, même cause que pour `missing_docs` ci-dessus. Clippy par défaut (`-D warnings`, gate CI
-actuel) : **0 warning, job vert** — vérifié, pas de régression à corriger.
+actuel) : **0 warning, job vert au 2026-08-01 avant task-01** — cassé par les attributs
+`#![warn(...)]` posés ensuite en source (task-01/02/03), cf. "Risques" (finding critique).
+Restauré par la tâche de correction dédiée avant task-05.
 
 ### Coverage
 
@@ -158,16 +160,21 @@ de suivi ultérieure.
 
 ## Documentation des items publics
 
-Principe : lint natif du compilateur `#[warn(missing_docs)]`, posé au niveau crate
-(`lib.rs`/`main.rs`), sur `lib`, `app`, `sandbox`, `tools`, `controller`, `crds`. `cli/`
-exclu. `missing_docs` s'applique à **toute la crate** (tous les modules atteignables depuis
-la racine), pas seulement au fichier où l'attribut est écrit — aucun des 6 crates n'est
+Principe : lint natif du compilateur `missing_docs`, mesuré via `-W missing_docs` en ligne
+de commande par le job CI `doc-lint` sur `lib`, `app`, `sandbox`, `tools`, `controller`,
+`crds`. `cli/` exclu. `missing_docs` s'applique à **toute la crate** (tous les modules
+atteignables depuis la racine), pas seulement au fichier visé — aucun des 6 crates n'est
 assez propre pour un `#![deny(...)]` immédiat une fois mesuré correctement (39 à 169 items
-manquants chacun). Un seul traitement pour les 6 : `#![warn(missing_docs)]` partout + un
-seul job CI à cliquet qui **échoue en cas de régression** au-delà de la baseline mesurée
-(621 au global — voir tâches). N'exige pas de combler le passif tout de suite ; empêche
-seulement d'en ajouter. Combler le passif (documenter les 621 items) est laissé pour une
-feature de suivi, crate par crate, une fois le gate en place.
+manquants chacun). **Pas d'attribut `#![warn(missing_docs)]` en source** — testé et retiré
+après task-04 (cf. "Risques", finding critique) : un tel attribut a une précédence
+absolue sur tout flag `-A`/`-D` de ligne de commande, ce qui casse le job `clippy` par
+défaut (`-D warnings`) dès qu'il est présent. Le job `doc-lint` reste pleinement
+fonctionnel sans lui, puisqu'il active le lint lui-même via `-W missing_docs` à chaque
+invocation. Un seul job CI à cliquet pour les 6 crates, qui **échoue en cas de
+régression** au-delà de la baseline mesurée (621 au global — voir tâches). N'exige pas de
+combler le passif tout de suite ; empêche seulement d'en ajouter. Combler le passif
+(documenter les 621 items) est laissé pour une feature de suivi, crate par crate, une fois
+le gate en place.
 
 ### Implémentation
 - Job CI `doc-lint` (une seule fois, task-01, étendu par task-02) : compte par crate via
@@ -199,14 +206,30 @@ mod tests {
 }
 ```
 
-Remplacement par occurrence : `?` si la fonction retourne déjà un `Result` compatible,
-sinon `.expect("invariant tenu par <raison précise>")` documentant pourquoi le panic ne
-devrait jamais se produire.
+Remplacement par occurrence : `?` si la fonction retourne déjà un `Result` compatible
+(propagation réelle, à privilégier). **`clippy::expect_used` est deny au même titre que
+`clippy::unwrap_used`** — remplacer un `.unwrap()` par un `.expect("raison")` ne suffit
+PAS à satisfaire le gate (trouvé en écrivant task-04 : les deux lints sont posés
+ensemble dès le départ, précisément pour empêcher ce contournement). Quand `?` n'est
+vraiment pas possible (signature externe imposée, trait comme `Drop` qui ne peut pas
+retourner `Result`, construction authentiquement infaillible), la seule option est un
+`#[allow(clippy::unwrap_used)]`/`#[allow(clippy::expect_used)]` **local et documenté**
+(commentaire d'une ligne expliquant pourquoi), pas un `.expect(...)` nu qui resterait
+bloqué par le `deny`.
+
+**Sur l'attribut de lint lui-même : `#![warn(...)]` en source ne doit jamais être posé
+au niveau crate pour ces lints** (cf. "Risques", finding critique découvert en validant
+task-04) — il casserait le job `clippy` par défaut (`-D warnings`) exactement comme
+`#![warn(missing_docs)]` l'a fait. Les jobs à cliquet (`unwrap-lint`) mesurent via `-W`
+en ligne de commande uniquement, sans attribut en source. Seul `#![deny(...)]` (l'état
+final, une fois un crate propre) est sans risque, puisqu'il ne rentre jamais en conflit
+avec `-D warnings`.
 
 ## Clippy pedantic/nursery — cliquet non bloquant
 
 Le job `clippy` existant garde son rôle de gate bloquant (niveau défaut, `-D warnings`,
-déjà vert, inchangé). Nouveau job `clippy-pedantic`, **non bloquant** au sens où il
+vert après la correction du finding critique — cf. "Risques"). Nouveau job
+`clippy-pedantic`, **non bloquant** au sens où il
 n'empêche pas le merge tant que le total ne régresse pas au-delà de la baseline mesurée au
 moment de la tâche (959 au 2026-08-01, mesuré à froid — à remesurer à l'exécution, le
 nombre bougera avec chaque ajout de code). Publie l'inventaire par catégorie en artifact.
@@ -246,13 +269,24 @@ mesure disponible — ce sera le contenu d'une feature de suivi, pas de celle-ci
 3. `unwrap-lint-baseline` — `#![deny(clippy::unwrap_used, clippy::expect_used)]` immédiat
    sur lib + tools (0 fix requis) ; `#![warn(...)]` + job CI à cliquet sur app/sandbox/
    controller/crds (baseline 35, `--no-deps` + `CARGO_INCREMENTAL=0` obligatoires,
-   remesurée à l'exécution).
+   remesurée à l'exécution). **Terminé**, 35 confirmé, 548 tests.
 4. `unwrap-fix-app-crds` — corriger les 15 occurrences réelles (app: 12, crds: 3), passer
-   ces deux crates en `deny`.
+   ces deux crates en `deny`. **Terminé**, 0 restant confirmé, 548 tests. 6 propagées via
+   `?`/pattern `unwrap_or_else`+exit déjà établi dans le fichier, 6 `#[allow]` locaux
+   documentés (cas authentiquement infaillibles ou contraints par une API externe) —
+   `.expect("raison")` seul ne suffit pas, `expect_used` est deny au même titre que
+   `unwrap_used` (cf. section "unwrap()/expect()" plus haut, corrigée après coup).
+4bis. `fix-clippy-gate-warn-attributes` — **critique, non prévue au design initial**,
+   découverte en validant task-04 : retirer tous les `#![warn(missing_docs)]` (6 crates,
+   task-01/02) et `#![warn(clippy::unwrap_used, clippy::expect_used)]` (sandbox/
+   controller restants, task-03) posés en source — ils cassent le job `clippy` par défaut
+   (`-D warnings`) depuis le commit de task-01, jamais revérifié avec la vraie commande CI
+   entre-temps. Cf. "Risques" pour le détail de la précédence rustc. Ne touche à aucun job
+   CI (les jobs à cliquet sont autosuffisants via leur propre `-W`).
 5. `unwrap-fix-sandbox-controller` — corriger les 20 occurrences réelles (sandbox: 9,
-   controller: 11), passer ces deux crates en `deny`. Une fois les tâches 4 et 5 faites,
-   les 6 crates non-cli sont tous en `deny` — le job à cliquet de la tâche 3 devient
-   obsolète et peut être supprimé.
+   controller: 11), passer ces deux crates en `deny`. Une fois cette tâche faite, les 6
+   crates non-cli sont tous en `deny` — le job à cliquet de la tâche 3 devient obsolète et
+   peut être supprimé.
 6. `clippy-pedantic-ratchet` — job CI `clippy-pedantic` non bloquant, baseline remesurée
    à l'exécution **avec `CARGO_INCREMENTAL=0` et `cargo clean` préalable** (cf.
    "Risques" — sans ça la mesure du 2026-08-01 était sous-comptée à 583 au lieu de 959
@@ -262,6 +296,47 @@ mesure disponible — ce sera le contenu d'une feature de suivi, pas de celle-ci
 
 ## Risques et questions ouvertes
 
+- **CRITIQUE, découvert en validant `task-04-fix-01` — `cargo check`/`cargo test` n'exécutent
+  JAMAIS les lints clippy, y compris `#![deny(clippy::...)]`.** `clippy::unwrap_used`/
+  `clippy::expect_used` sont des lints **clippy**, pas des lints rustc — `cargo check`/
+  `cargo build`/`cargo test` utilisent rustc seul et ignorent silencieusement tout
+  `#![deny(clippy::X)]` en source (aucune erreur, aucun warning, rien). Seul `cargo clippy`
+  connaît et applique ces lints. Conséquence concrète : après avoir posé
+  `#![deny(clippy::unwrap_used, clippy::expect_used)]` sur `app`/`crds` (task-04), la seule
+  validation faite (`cargo check`/`cargo test`, 548 tests verts) ne pouvait STRUCTURELLEMENT
+  PAS détecter que les modules `#[cfg(test)] mod tests { ... }` de 12 fichiers `app/` et de
+  `crds/src/lib.rs` utilisent aussi `.unwrap()`/`.expect()`/`.unwrap_err()` dans leurs
+  assertions — invisibles jusqu'à ce que `cargo clippy --workspace --all-targets -- -D
+  warnings` (la vraie commande CI) soit rejouée pour valider `task-04-fix-01`. Fix :
+  `task-04-fix-02`, ajoute `#![allow(clippy::unwrap_used, clippy::expect_used)]` dans les
+  13 modules de test concernés (même pattern que task-03 avait déjà appliqué correctement
+  sur `lib`/`tools`, jamais étendu à `app`/`crds` faute d'avoir tourné la bonne commande).
+  **Leçon générale, definitive pour la suite de la feature** : toute tâche qui pose
+  `#![deny(clippy::X)]`/`#![warn(clippy::X)]` doit être validée avec `cargo clippy
+  --workspace --all-targets -- -D warnings` (la commande CI réelle, `--all-targets` inclus
+  pour couvrir les tests), jamais seulement `cargo check`/`cargo test` — ces deux dernières
+  commandes ne peuvent tout simplement pas voir un lint clippy, quel que soit son niveau.
+- **CRITIQUE, découvert en validant task-04 — `#![warn(missing_docs)]`/`#![warn(clippy::
+  unwrap_used, clippy::expect_used)]` posés en source (task-01/02/03) cassent le job CI
+  `clippy` existant (`cargo clippy --workspace --all-targets -- -D warnings`), qui n'avait
+  jamais été revérifié après ces tâches (seul `cargo check --workspace` l'avait été).**
+  Rustc applique un ordre de précédence strict : un attribut en source (`#![warn(X)]`)
+  l'emporte **toujours** sur un flag `-A X` en ligne de commande, quel que soit l'ordre des
+  flags — vérifié empiriquement (`-D warnings -A missing_docs` et `-A missing_docs -D
+  warnings` échouent tous les deux identiquement). `-D warnings` promeut ensuite tout
+  warning actif (y compris ceux fixés par un attribut en source) en erreur. Résultat : le
+  job `clippy` par défaut, censé rester vert et inchangé, échouait en fait avec ~100+
+  erreurs dès le commit de task-01 — jamais détecté faute d'avoir rejoué la vraie commande
+  CI après chaque tâche. **Fix (task de correction dédiée, avant task-05)** : retirer les
+  attributs `#![warn(...)]` en source — les jobs à cliquet (`doc-lint`, `unwrap-lint`) n'en
+  ont jamais eu besoin, ils utilisent déjà leur propre `-W` explicite en ligne de commande,
+  autosuffisant. Les `#![deny(...)]` déjà posés (lib/tools pour unwrap, et maintenant app/
+  crds après task-04) restent : `deny` ne pose pas ce problème, il n'entre jamais en
+  conflit avec `-D warnings` (l'un et l'autre convergent vers "erreur", pas de précédence à
+  arbitrer). Leçon générale : **après toute tâche qui ajoute un attribut de lint en
+  source, rejouer explicitement chaque commande de CI existante telle quelle** (pas
+  seulement `cargo check`/`cargo test`) — un attribut en source peut casser un gate qui
+  semblait sans rapport.
 - **Confirmé pendant l'exécution de task-01 — la compilation incrémentale de rustc/cargo
   sous-compte les diagnostics de façon non déterministe.** `cargo rustc -p vanyline-sandbox
   --lib -- -W missing_docs | grep -c ...` a donné 109 avec un cache incrémental tiède
