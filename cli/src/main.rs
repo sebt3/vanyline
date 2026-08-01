@@ -869,5 +869,19 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
             });
             println!("Deleted sandbox: {name}");
         }
+        Stop { name } => {
+            client.set_sandbox_suspended(&name, true).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Stopped sandbox: {name}");
+        }
+        Start { name } => {
+            client.set_sandbox_suspended(&name, false).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Started sandbox: {name}");
+        }
     }
 }

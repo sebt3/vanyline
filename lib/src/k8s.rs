@@ -66,6 +66,26 @@ impl VnlK8sClient {
         delete::<Sandbox>(&self.client, &self.namespace, name).await
     }
 
+    /// Patch `spec.suspended` d'un Sandbox existant (merge patch JSON, pas de
+    /// remplacement complet de la spec). Retourne l'objet patché (contrairement
+    /// à `delete_sandbox` qui retourne `()`) — stop/start est une transition
+    /// d'état, l'appelant (CLI/RPC) veut voir le nouveau statut immédiatement.
+    pub async fn set_sandbox_suspended(
+        &self,
+        name: &str,
+        suspended: bool,
+    ) -> Result<Sandbox, VnyError> {
+        let api: kube::Api<Sandbox> = kube::Api::namespaced(self.client.clone(), &self.namespace);
+        let patch = serde_json::json!({ "spec": { "suspended": suspended } });
+        api.patch(
+            name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(&patch),
+        )
+        .await
+        .map_err(|e| VnyError::K8sApiError(e.to_string()))
+    }
+
     /// URL MCP HTTP-streamable de la sandbox `name`, posée par le
     /// controller (`vanyline_crds::service_name`/`MCP_PORT`). Vérifie
     /// d'abord que la sandbox existe (`get_sandbox`) — erreur claire si ce

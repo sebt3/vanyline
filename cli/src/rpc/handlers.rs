@@ -229,6 +229,8 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "sandboxes/get" => Some(handle_sandboxes_get(state, id, request.params).await),
         "sandboxes/create" => Some(handle_sandboxes_create(state, id, request.params).await),
         "sandboxes/delete" => Some(handle_sandboxes_delete(state, id, request.params).await),
+        "sandboxes/stop" => Some(handle_sandboxes_stop(state, id, request.params).await),
+        "sandboxes/start" => Some(handle_sandboxes_start(state, id, request.params).await),
         _ => Some(
             serde_json::to_string(&JsonRpcResponse::error(
                 id,
@@ -1084,6 +1086,50 @@ async fn handle_sandboxes_delete(state: &mut ServerState, id: Value, params: ser
         Err(e) => return k8s_client_error(id, e),
     };
     k8s_result_response(id, client.delete_sandbox(&params.name).await)
+}
+
+/// `sandboxes/stop` : params -> `NameParams`, puis
+/// `client.set_sandbox_suspended(&name, true)`.
+async fn handle_sandboxes_stop(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: NameParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as NameParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize stop error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.set_sandbox_suspended(&params.name, true).await)
+}
+
+/// `sandboxes/start` : params -> `NameParams`, puis
+/// `client.set_sandbox_suspended(&name, false)`.
+async fn handle_sandboxes_start(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: NameParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as NameParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize start error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.set_sandbox_suspended(&params.name, false).await)
 }
 
 #[cfg(test)]
@@ -2494,6 +2540,44 @@ defaults:
         assert!(state.initialized);
 
         let line = make_request_json(225, "sandboxes/delete", Some(json!({})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    // -- New tests for task 06 --
+
+    /// sandboxes_stop_missing_name_returns_malformed — `sandboxes/stop` avec
+    /// `params: {}` -> `VNL-RPC-000`.
+    #[tokio::test]
+    async fn sandboxes_stop_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(226, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(227, "sandboxes/stop", Some(json!({})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    /// sandboxes_start_missing_name_returns_malformed — `sandboxes/start` avec
+    /// `params: {}` -> `VNL-RPC-000`.
+    #[tokio::test]
+    async fn sandboxes_start_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(228, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(229, "sandboxes/start", Some(json!({})));
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 

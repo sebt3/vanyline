@@ -45,6 +45,10 @@ pub enum Commands {
     },
     /// Delete a Sandbox
     Delete { name: String },
+    /// Stop a Sandbox (suspend the pod without deleting the resource)
+    Stop { name: String },
+    /// Start a previously stopped Sandbox
+    Start { name: String },
 }
 
 #[cfg(test)]
