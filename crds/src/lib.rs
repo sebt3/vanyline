@@ -1,4 +1,4 @@
-#![warn(clippy::unwrap_used, clippy::expect_used)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
 #![warn(missing_docs)]
 
 use std::collections::BTreeMap;
@@ -134,6 +134,7 @@ pub struct SandboxStatus {
 }
 
 /// Returns the three CRD manifests as YAML, separated by `---\n`.
+#[allow(clippy::unwrap_used)] // serialisation YAML d un schema Rust connu a la compilation, sans entree externe : ne peut pas echouer en pratique
 pub fn crd_manifests() -> String {
     let docs = [
         serde_yaml::to_string(&Owner::crd()).unwrap(),

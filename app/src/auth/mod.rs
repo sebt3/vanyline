@@ -34,7 +34,7 @@ struct CallbackParams {
     state: String,
 }
 
-async fn handler_login(State(state): State<AppState>) -> impl IntoResponse {
+async fn handler_login(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     let (url, csrf_token, nonce) = state.oidc_client.authorization_url();
     tracing::info!(url = %url, "OIDC login → redirect");
 
@@ -52,13 +52,12 @@ async fn handler_login(State(state): State<AppState>) -> impl IntoResponse {
         encrypted_value
     );
 
-    Response::builder()
+    Ok(Response::builder()
         .status(StatusCode::FOUND)
         .header("Location", url.as_str())
         .header(SET_COOKIE, set_cookie_pending)
         .body(axum::body::Body::empty())
-        .unwrap()
-        .into_response()
+        .map_err(|e| AppError::OidcError(e.to_string()))?)
 }
 
 async fn handler_callback(
@@ -126,24 +125,24 @@ async fn handler_callback(
 
     tracing::info!(email = %email, "OIDC authentication successful");
 
-    Ok(Response::builder()
+    let response = Response::builder()
         .status(StatusCode::FOUND)
         .header("Location", "/#/")
         .header(SET_COOKIE, set_cookie_main)
         .header(SET_COOKIE, set_cookie_clear_pending)
         .body(axum::body::Body::empty())
-        .unwrap()
-        .into_response())
+        .map_err(|e| AppError::OidcError(e.to_string()))?;
+    Ok(response.into_response())
 }
 
-async fn handler_logout() -> impl IntoResponse {
-    Response::builder()
+async fn handler_logout() -> Result<impl IntoResponse, AppError> {
+    Ok(Response::builder()
         .status(StatusCode::FOUND)
         .header("Location", "/#/")
         .header(SET_COOKIE, clear_cookie())
         .body(axum::body::Body::empty())
-        .unwrap()
-        .into_response()
+        .map_err(|e| AppError::OidcError(e.to_string()))?
+        .into_response())
 }
 
 #[cfg(test)]

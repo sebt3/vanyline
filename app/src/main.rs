@@ -1,4 +1,4 @@
-#![warn(clippy::unwrap_used, clippy::expect_used)]
+#![deny(clippy::unwrap_used, clippy::expect_used)]
 #![warn(missing_docs)]
 
 mod api;
@@ -72,7 +72,12 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let oidc_client = Arc::new(auth::oidc::OidcClient::new(&config).await);
+    let oidc_client = Arc::new(auth::oidc::OidcClient::new(&config).await.unwrap_or_else(
+        |e| {
+            tracing::error!("{}", e);
+            std::process::exit(1);
+        },
+    ));
 
     let static_dir = config.static_dir.clone();
     let state = AppState {
@@ -97,9 +102,17 @@ async fn main() {
                 .fallback(ServeFile::new(format!("{}/index.html", static_dir))),
         );
 
-    let listener = tokio::net::TcpListener::bind(listen_addr).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(listen_addr)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("VNL-NET-001: failed to bind {}: {}", listen_addr, e);
+            std::process::exit(1);
+        });
     tracing::info!("listening on {}", listen_addr);
-    axum::serve(listener, app).await.unwrap();
+    axum::serve(listener, app).await.unwrap_or_else(|e| {
+        tracing::error!("VNL-NET-002: server error: {}", e);
+        std::process::exit(1);
+    });
 }
 
 async fn health() -> &'static str {

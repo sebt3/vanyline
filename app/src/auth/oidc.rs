@@ -32,22 +32,23 @@ pub struct OidcClient {
     scopes: Vec<String>,
 }
 
-fn build_http_client(config: &Config) -> reqwest::Client {
+fn build_http_client(config: &Config) -> Result<reqwest::Client, AppError> {
     let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
 
     if let Some(ref ca_path) = config.oidc_ca_cert {
         let pem = std::fs::read(ca_path)
-            .unwrap_or_else(|e| panic!("VNL-AUTH-007: OIDC CA read {ca_path}: {e}"));
+            .map_err(|e| AppError::OidcError(format!("VNL-AUTH-007: OIDC CA read {ca_path}: {e}")))?;
         let cert = reqwest::Certificate::from_pem(&pem)
-            .unwrap_or_else(|e| panic!("VNL-AUTH-007: invalid OIDC CA cert: {e}"));
+            .map_err(|e| AppError::OidcError(format!("VNL-AUTH-007: invalid OIDC CA cert: {e}")))?;
         builder = builder.add_root_certificate(cert);
     }
 
     builder
         .build()
-        .expect("VNL-AUTH-007: failed to build OIDC HTTP client")
+        .map_err(|e| AppError::OidcError(format!("VNL-AUTH-007: failed to build OIDC HTTP client: {e}")))
 }
 
+#[allow(clippy::expect_used)] // signature imposee par openidconnect::discover_async (reqwest::Error) ; construction de reponse a partir d un status+headers deja valides, infaillible en pratique
 async fn send_http_request(
     client: &reqwest::Client,
     request: HttpRequest,
@@ -75,11 +76,11 @@ async fn send_http_request(
 }
 
 impl OidcClient {
-    pub async fn new(config: &Config) -> Self {
+    pub async fn new(config: &Config) -> Result<Self, AppError> {
         let issuer_url = IssuerUrl::new(config.oidc_issuer_url.clone())
-            .expect("VNL-AUTH-004: invalid OIDC issuer URL");
+            .map_err(|e| AppError::OidcError(format!("VNL-AUTH-004: invalid OIDC issuer URL: {:?}", e)))?;
 
-        let http_client = build_http_client(config);
+        let http_client = build_http_client(config)?;
 
         let provider_metadata = {
             let client = http_client.clone();
@@ -88,11 +89,11 @@ impl OidcClient {
                 async move { send_http_request(&client, req).await }
             })
             .await
-            .expect("VNL-AUTH-005: OIDC discovery failed")
+            .map_err(|e| AppError::OidcError(format!("VNL-AUTH-005: OIDC discovery failed: {:?}", e)))?
         };
 
         let redirect_url = RedirectUrl::new(config.oidc_redirect_url.clone())
-            .expect("VNL-AUTH-006: invalid OIDC redirect URL");
+            .map_err(|e| AppError::OidcError(format!("VNL-AUTH-006: invalid OIDC redirect URL: {:?}", e)))?;
 
         let client = CoreClient::from_provider_metadata(
             provider_metadata,
@@ -101,11 +102,11 @@ impl OidcClient {
         )
         .set_redirect_uri(redirect_url);
 
-        Self {
+        Ok(Self {
             inner: client,
             http_client,
             scopes: config.oidc_scopes.clone(),
-        }
+        })
     }
 }
 

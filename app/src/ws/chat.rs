@@ -64,6 +64,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conve
 /// `false` si déjà occupée (l'appelant doit renvoyer une erreur busy sans
 /// spawn). Extrait de `run_socket` pour être testable sans WebSocket/DB
 /// (R4).
+#[allow(clippy::unwrap_used)] // mutex empoisonne = etat deja corrompu ailleurs, panic attendu
 fn try_acquire_busy(busy: &Mutex<HashSet<Uuid>>, conversation_id: Uuid) -> bool {
     let mut guard = busy.lock().unwrap();
     if guard.contains(&conversation_id) {
@@ -83,6 +84,7 @@ struct BusyGuard {
 }
 
 impl Drop for BusyGuard {
+    #[allow(clippy::unwrap_used)] // Drop::drop ne peut pas retourner Result ; mutex empoisonne = panic attendu
     fn drop(&mut self) {
         self.busy.lock().unwrap().remove(&self.conversation_id);
     }
