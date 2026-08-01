@@ -506,6 +506,98 @@ Nom malformé :
 ← {"jsonrpc":"2.0","id":107,"error":{"code":-32000,"message":"...","data":{"code":"VNL-RPC-010"}}}
 ```
 
+### sandboxes/list
+
+Retourne la liste des `Sandbox` du namespace. L'objet retourné est la
+**sérialisation directe du CRD K8s** en camelCase (le même format qu'utilise
+`kubectl get sandboxes -o json`).
+
+```json
+→ {"jsonrpc":"2.0","id":108,"method":"sandboxes/list"}
+← {"jsonrpc":"2.0","id":108,"result":[
+    {
+      "apiVersion":"vanyline.solidite.fr/v1alpha1",
+      "kind":"Sandbox",
+      "metadata":{
+        "name":"demo-sandbox",
+        "namespace":"dev"
+      },
+      "spec":{
+        "project":"demo-project",
+        "branch":"main",
+        "toolchains":[
+          {"ociImage":"rust:slim-trixie","env":{"PATH":"…/usr/local/bin","RUSTUP_HOME":"…/.rustup"}}
+        ],
+        "image":null,
+        "resources":null
+      },
+      "status":{"podName":"sandbox-demo-sandbox"}
+    }
+  ]}
+```
+
+### sandboxes/get
+
+Retourne un `Sandbox` par nom.
+
+```json
+→ {"jsonrpc":"2.0","id":109,"method":"sandboxes/get","params":{"name":"demo-sandbox"}}
+← {"jsonrpc":"2.0","id":109,"result":{
+    "apiVersion":"vanyline.solidite.fr/v1alpha1",
+    "kind":"Sandbox",
+    "metadata":{"name":"demo-sandbox","namespace":"dev"},
+    "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null},
+    "status":{"podName":"sandbox-demo-sandbox"}
+  }}
+```
+
+`name` requis. Si params malformé (pas de `name`) :
+```json
+← {"jsonrpc":"2.0","id":109,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
+```
+
+### sandboxes/create
+
+Crée un `Sandbox` dans le namespace. `name` + champs de `SandboxSpec` aplati
+en camelCase (pas d'objet `spec` imbriqué). `toolchains` et `image` sont
+optionnels (valeurs par défaut appliquées par le controller).
+
+```json
+→ {"jsonrpc":"2.0","id":110,"method":"sandboxes/create","params":{"name":"demo-sandbox","project":"demo-project","branch":"main"}}
+← {"jsonrpc":"2.0","id":110,"result":{
+    "apiVersion":"vanyline.solidite.fr/v1alpha1",
+    "kind":"Sandbox",
+    "metadata":{"name":"demo-sandbox","namespace":"dev","uid":"..."},
+    "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null},
+    "status":{"podName":"sandbox-demo-sandbox"}
+  }}
+```
+
+`name` requis. `project` et `branch` requis, les autres champs sont optionnels
+(valeurs par défaut appliquées par le controller).
+
+### sandboxes/delete
+
+Supprime un `Sandbox` par nom. Succès -> `result: null`. **Pas idempotent** —
+contrairement à `conversations/delete` : un nom inexistant remonte l'erreur
+404 de l'API K8s telle quelle (`VNL-RPC-010`), même comportement que la
+commande CLI `vanyline sandbox delete`.
+
+```json
+→ {"jsonrpc":"2.0","id":111,"method":"sandboxes/delete","params":{"name":"demo-sandbox"}}
+← {"jsonrpc":"2.0","id":111,"result":null}
+```
+
+Nom malformé :
+```json
+← {"jsonrpc":"2.0","id":111,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
+```
+
+Échec du client K8s ou de l'appel API :
+```json
+← {"jsonrpc":"2.0","id":111,"error":{"code":-32000,"message":"...","data":{"code":"VNL-RPC-010"}}}
+```
+
 ## Concurrence
 
 Un seul tour actif **par conversation** — un `chat/send` sur une

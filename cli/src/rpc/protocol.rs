@@ -202,8 +202,8 @@ pub struct ChatCancelParams {
     pub conversation_id: String,
 }
 
-/// Params partagés par `owners/get`, `owners/delete` (et, tâches 4b/4c,
-/// `projects/get`, `projects/delete`, `sandboxes/get`, `sandboxes/delete`).
+/// Params partagés par `owners/get`, `owners/delete`,
+/// `projects/get`, `projects/delete`, `sandboxes/get`, `sandboxes/delete`.
 #[derive(Debug, Deserialize)]
 pub struct NameParams {
     pub name: String,
@@ -228,4 +228,12 @@ pub struct ProjectCreateParams {
     pub name: String,
     #[serde(flatten)]
     pub spec: vanyline_crds::ProjectSpec,
+}
+
+/// `sandboxes/create` — même principe que `OwnerCreateParams`/`ProjectCreateParams`.
+#[derive(Debug, Deserialize)]
+pub struct SandboxCreateParams {
+    pub name: String,
+    #[serde(flatten)]
+    pub spec: vanyline_crds::SandboxSpec,
 }
