@@ -854,6 +854,7 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
                 image,
                 resources: None,
                 egress: Vec::new(),
+                suspended: false,
             };
             client.create_sandbox(&name, spec).await.unwrap_or_else(|e| {
                 eprintln!("{e}");

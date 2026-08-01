@@ -140,6 +140,11 @@ pub struct SandboxSpec {
     pub resources: Option<k8s_openapi::api::core::v1::ResourceRequirements>,
     #[serde(default)]
     pub egress: Vec<EgressRule>,
+    /// Arrêt manuel : true => le reconciler supprime le Pod (worktree, PVC,
+    /// Service, NetworkPolicies conservés), status.phase devient
+    /// "Suspended". false => le Pod est recréé (chemin nominal).
+    #[serde(default)]
+    pub suspended: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -306,6 +311,7 @@ mod tests {
                     protocol: Some("UDP".to_string()),
                 }],
             }],
+            suspended: false,
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(
@@ -325,5 +331,33 @@ mod tests {
         let spec: SandboxSpec =
             serde_json::from_str(r#"{"project":"p","branch":"main"}"#).expect("should deserialize");
         assert!(spec.egress.is_empty());
+    }
+
+    #[test]
+    fn suspended_defaults_to_false() {
+        let spec: SandboxSpec =
+            serde_json::from_str(r#"{"project":"p","branch":"main"}"#).expect("should deserialize");
+        assert!(!spec.suspended);
+    }
+
+    #[test]
+    fn sandbox_schema_fields_suspended() {
+        let crd = Sandbox::crd();
+        let oas = &crd.spec.versions[0]
+            .schema
+            .as_ref()
+            .unwrap()
+            .open_api_v3_schema
+            .as_ref()
+            .unwrap();
+        let spec_props = &oas.properties.as_ref().unwrap()["spec"]
+            .properties
+            .as_ref()
+            .unwrap();
+
+        assert!(
+            spec_props.contains_key("suspended"),
+            "Sandbox schema should contain 'suspended', got: {spec_props:?}"
+        );
     }
 }

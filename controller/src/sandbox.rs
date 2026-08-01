@@ -655,10 +655,10 @@ pub fn build_sandbox_egress_netpol(
 
 /// Status attendu : `service`, condition `Ready` reflétant `phase == "Running"`.
 pub fn compute_status(sandbox: &Sandbox, phase: &str) -> SandboxStatus {
-    let (status, reason) = if phase == "Running" {
-        ("True", "PodRunning")
-    } else {
-        ("False", "NotRunning")
+    let (status, reason) = match phase {
+        "Running" => ("True", "PodRunning"),
+        "Suspended" => ("False", "Suspended"),
+        _ => ("False", "NotRunning"),
     };
     SandboxStatus {
         phase: Some(phase.to_string()),
@@ -735,10 +735,16 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
     };
 
     let pp = PatchParams::apply(owner::FIELD_MANAGER).force();
-    let phase = if !checked_out {
+    let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(ctx.client.clone(), ns);
+    let phase = if sandbox.spec.suspended {
+        let name = pod_name(&sandbox.name_any());
+        if pods.get_opt(&name).await?.is_some() {
+            pods.delete(&name, &DeleteParams::default()).await?;
+        }
+        "Suspended".to_string()
+    } else if !checked_out {
         "Provisioning".to_string()
     } else {
-        let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(ctx.client.clone(), ns);
         let pod_ctx = SandboxPodContext {
             owner_name: project.spec.owner.clone(),
             owner_pvc_name,
@@ -809,7 +815,11 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         .await?;
 
     Ok(Action::requeue(Duration::from_secs(
-        if phase == "Running" { 300 } else { 15 },
+        if phase == "Running" || phase == "Suspended" {
+            300
+        } else {
+            15
+        },
     )))
 }
 
@@ -933,6 +943,7 @@ mod tests {
                 image,
                 resources: None,
                 egress: Vec::new(),
+                suspended: false,
             },
         );
         sandbox.meta_mut().namespace = Some("ns".into());
@@ -1658,6 +1669,19 @@ mod tests {
         let cond = &status.conditions[0];
         assert_eq!(cond.status, "False");
         assert_eq!(cond.reason, "NotRunning");
+    }
+
+    #[test]
+    fn compute_status_suspended() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let status = compute_status(&sandbox, "Suspended");
+
+        assert_eq!(status.phase, Some("Suspended".to_string()));
+        assert_eq!(status.service, Some("sandbox-demo-branch".to_string()));
+        assert_eq!(status.conditions.len(), 1);
+        let cond = &status.conditions[0];
+        assert_eq!(cond.status, "False");
+        assert_eq!(cond.reason, "Suspended");
     }
 
     // ===== bare_repo mount (tâche 00) =====
