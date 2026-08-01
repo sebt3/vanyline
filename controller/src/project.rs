@@ -102,6 +102,7 @@ pub fn effective_caches(project: &Project) -> Vec<String> {
 
 /// `ownerReference` vers ce Project, pour la GC en cascade du PVC créé.
 #[allow(dead_code)]
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 fn owner_reference(
     project: &Project,
 ) -> k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
@@ -300,6 +301,7 @@ pub(crate) fn git_pod_template(
 /// Job une fois : crée les répertoires de cache puis clone bare le remote si
 /// n'existe pas déjà (idempotent — le controller peut réappliquer sans réétat).
 #[allow(dead_code)]
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
     let mut command = vec![
         "vanyline-maint".to_string(),
@@ -335,6 +337,7 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
 
 /// CronJob périodique : `git fetch --prune` sur le clone bare.
 #[allow(dead_code)]
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJob {
     let command = vec![
         "vanyline-maint".to_string(),
@@ -374,6 +377,7 @@ pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJo
 /// suppression d'un PVC créé par le controller — sûr aussi pour un PVC référencé
 /// grâce au `subPath` (voir note de contexte).
 #[allow(dead_code)]
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
     let command = vec![
         "vanyline-maint".to_string(),
@@ -611,6 +615,7 @@ pub fn build_controller(client: Client) -> Controller<Project> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use vanyline_crds::{ProjectSpec, PvcRef};
 

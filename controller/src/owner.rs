@@ -49,6 +49,7 @@ pub fn effective_pvc_name(owner: &Owner) -> String {
 
 /// `ownerReference` vers cet Owner, pour la GC en cascade des objets créés
 /// par le controller (PVC home si créé, ServiceAccount).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 fn owner_reference(owner: &Owner) -> OwnerReference {
     owner
         .controller_owner_ref(&())
@@ -173,6 +174,7 @@ pub fn build_controller(client: Client) -> Controller<Owner> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn make_owner(

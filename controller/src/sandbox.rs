@@ -174,6 +174,7 @@ pub struct SandboxPodContext {
 /// `--no-auth` (voir décisions de cette tâche), probes `/health`, labels
 /// `vanyline.solidite.fr/{owner,project,sandbox}`, `ownerReference` vers la
 /// Sandbox (GC en cascade).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodContext) -> Pod {
     let workspace_pvc = effective_pvc_name(project);
     let mut volumes = vec![
@@ -353,6 +354,7 @@ pub fn netpol_name(sandbox_name: &str) -> String {
 /// Job une fois : crée le worktree de la branche (le crée depuis
 /// `default_branch` si fourni, sinon `vanyline-maint` le résolve par
 /// `symbolic-ref --short HEAD`).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_checkout_job(
     sandbox: &Sandbox,
     project: &Project,
@@ -398,6 +400,7 @@ pub fn build_checkout_job(
 /// --force` gère l'état non commité ; repli sur `rm -rf` + `worktree prune` si
 /// les métadonnées git sont dans un état incohérent. La résolution est faite
 /// par `vanyline-maint`.
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_worktree_remove_job(
     sandbox: &Sandbox,
     project: &Project,
@@ -434,6 +437,7 @@ pub fn build_worktree_remove_job(
 /// Service ClusterIP exposant le port MCP du Pod sandbox (sélecteur =
 /// `vanyline.solidite.fr/sandbox: <sandbox>`, seul label garanti unique à ce
 /// pod parmi ceux posés par `build_sandbox_pod`).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
     let mut selector = BTreeMap::new();
     selector.insert(
@@ -468,6 +472,7 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
 /// uniquement depuis les pods du même namespace portant
 /// `vanyline.solidite.fr/owner: <owner_name>` (même Owner — code-server,
 /// autres sandboxes du même utilisateur).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_netpol(sandbox: &Sandbox, owner_name: &str) -> NetworkPolicy {
     let mut pod_selector_labels = BTreeMap::new();
     pod_selector_labels.insert(
@@ -754,6 +759,7 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use vanyline_crds::{ProjectSpec, PvcRef, SandboxSpec};
 

@@ -1,3 +1,5 @@
+#![deny(clippy::unwrap_used, clippy::expect_used)]
+
 mod error;
 mod owner;
 mod project;
@@ -27,9 +29,13 @@ async fn main() {
     let _ = tracing_subscriber::fmt::try_init();
     tracing::info!("controller starting (owner + project + sandbox reconcilers active)");
 
-    let client = kube::Client::try_default()
-        .await
-        .expect("failed to build kube client from in-cluster or kubeconfig context");
+    let client = kube::Client::try_default().await.unwrap_or_else(|e| {
+        tracing::error!(
+            "failed to build kube client from in-cluster or kubeconfig context: {}",
+            e
+        );
+        std::process::exit(1);
+    });
 
     let sandbox_image: String =
         std::env::var("SANDBOX_IMAGE").unwrap_or_else(|_| "vanyline-sandbox:latest".to_string());
