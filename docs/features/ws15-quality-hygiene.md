@@ -284,9 +284,14 @@ mesure disponible — ce sera le contenu d'une feature de suivi, pas de celle-ci
    entre-temps. Cf. "Risques" pour le détail de la précédence rustc. Ne touche à aucun job
    CI (les jobs à cliquet sont autosuffisants via leur propre `-W`).
 5. `unwrap-fix-sandbox-controller` — corriger les 20 occurrences réelles (sandbox: 9,
-   controller: 11), passer ces deux crates en `deny`. Une fois cette tâche faite, les 6
-   crates non-cli sont tous en `deny` — le job à cliquet de la tâche 3 devient obsolète et
-   peut être supprimé.
+   controller: 11), passer ces deux crates en `deny`. **Terminé**, scindée en task-05a
+   (sandbox) et task-05b (controller) après deux échecs de la version combinée (limite de
+   contexte du modèle Qwen sous-jacent, 131K tokens, dépassée en lisant l'ensemble des
+   fichiers sandbox — un vrai blocage d'outillage, pas un problème de spécification).
+   Appliquée directement par Claude plutôt que déléguée, vu le contrat déjà entièrement
+   écrit et le risque de récidive du même blocage. Les 6 crates non-cli sont maintenant
+   tous en `deny` — le job à cliquet `unwrap-lint` (task-03) supprimé. `cargo clippy
+   --workspace --all-targets -- -D warnings` vert sur tout le workspace, 548 tests.
 6. `clippy-pedantic-ratchet` — job CI `clippy-pedantic` non bloquant, baseline remesurée
    à l'exécution **avec `CARGO_INCREMENTAL=0` et `cargo clean` préalable** (cf.
    "Risques" — sans ça la mesure du 2026-08-01 était sous-comptée à 583 au lieu de 959
@@ -296,6 +301,19 @@ mesure disponible — ce sera le contenu d'une feature de suivi, pas de celle-ci
 
 ## Risques et questions ouvertes
 
+- **Découvert en exécutant task-05 — le modèle Qwen sous-jacent (context window 131K
+  tokens) peut échouer par compaction de contexte sur une tâche qui touche beaucoup de
+  fichiers volumineux**, même bien spécifiée. `task-05` (sandbox + controller combinés,
+  ~6000 lignes de fichiers source à lire) a échoué deux fois : la session se compacte en
+  cours de route et finit par poser une question au lieu d'agir (malgré `question: deny`
+  dans la config de permissions de l'agent — ce n'est pas un appel d'outil bloqué par la
+  permission, juste du texte de fin de tour). Scinder en tâches plus petites (task-05a/
+  task-05b par crate) a réduit le risque sans l'éliminer complètement. Quand un contrat de
+  tâche est déjà entièrement écrit (chaque changement précisé noir sur blanc, comme c'était
+  le cas ici) et que le risque de récidive est élevé, appliquer directement les
+  modifications plutôt que de multiplier les tentatives de délégation est plus efficace —
+  ce n'est pas un problème de spécification que réécrire la tâche peut résoudre, c'est une
+  limite matérielle de l'outil.
 - **CRITIQUE, découvert en validant `task-04-fix-01` — `cargo check`/`cargo test` n'exécutent
   JAMAIS les lints clippy, y compris `#![deny(clippy::...)]`.** `clippy::unwrap_used`/
   `clippy::expect_used` sont des lints **clippy**, pas des lints rustc — `cargo check`/
