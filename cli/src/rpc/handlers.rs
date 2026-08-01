@@ -221,6 +221,10 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "owners/get" => Some(handle_owners_get(state, id, request.params).await),
         "owners/create" => Some(handle_owners_create(state, id, request.params).await),
         "owners/delete" => Some(handle_owners_delete(state, id, request.params).await),
+        "projects/list" => Some(handle_projects_list(state, id).await),
+        "projects/get" => Some(handle_projects_get(state, id, request.params).await),
+        "projects/create" => Some(handle_projects_create(state, id, request.params).await),
+        "projects/delete" => Some(handle_projects_delete(state, id, request.params).await),
         _ => Some(
             serde_json::to_string(&JsonRpcResponse::error(
                 id,
@@ -931,6 +935,78 @@ async fn handle_owners_delete(state: &mut ServerState, id: Value, params: serde_
         Err(e) => return k8s_client_error(id, e),
     };
     k8s_result_response(id, client.delete_owner(&params.name).await)
+}
+
+/// `projects/list` : retourne tous les `Project` du namespace résolu.
+async fn handle_projects_list(state: &mut ServerState, id: Value) -> String {
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.list_projects().await)
+}
+
+/// `projects/get` : params -> `NameParams`, puis `client.get_project(&name)`.
+async fn handle_projects_get(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: NameParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as NameParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize get error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.get_project(&params.name).await)
+}
+
+/// `projects/create` : params -> `ProjectCreateParams` (name + spec aplati).
+async fn handle_projects_create(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: ProjectCreateParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as ProjectCreateParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize create error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.create_project(&params.name, params.spec).await)
+}
+
+/// `projects/delete` : params -> `NameParams`, puis `client.delete_project(&name)`.
+async fn handle_projects_delete(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: NameParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as NameParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize delete error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.delete_project(&params.name).await)
 }
 
 #[cfg(test)]
@@ -2219,6 +2295,67 @@ defaults:
         assert!(state.initialized);
 
         let line = make_request_json(205, "owners/delete", Some(json!({})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    // -- New tests for task 04b --
+
+    /// projects_get_missing_name_returns_malformed — `projects/get` avec
+    /// `params: {}` -> `error.data.code == "VNL-RPC-000"`.
+    #[tokio::test]
+    async fn projects_get_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(210, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(211, "projects/get", Some(json!({})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    /// projects_create_missing_name_returns_malformed — `projects/create` avec
+    /// `params: {"repoUrl": "https://example.com/repo.git"}` (pas de `name`) ->
+    /// `VNL-RPC-000`.
+    #[tokio::test]
+    async fn projects_create_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(212, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(
+            213,
+            "projects/create",
+            Some(json!({"repoUrl": "https://example.com/repo.git"})),
+        );
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    /// projects_delete_missing_name_returns_malformed — `projects/delete` avec
+    /// `params: {}` -> `VNL-RPC-000`.
+    #[tokio::test]
+    async fn projects_delete_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(214, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(215, "projects/delete", Some(json!({})));
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 

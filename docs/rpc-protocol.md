@@ -413,6 +413,99 @@ Nom malformé :
 ← {"jsonrpc":"2.0","id":103,"error":{"code":-32000,"message":"...","data":{"code":"VNL-RPC-010"}}}
 ```
 
+### projects/list
+
+Retourne la liste des `Project` du namespace. L'objet retourné est la
+**sérialisation directe du CRD K8s** en camelCase (le même format qu'utilise
+`kubectl get projects -o json`).
+
+```json
+→ {"jsonrpc":"2.0","id":104,"method":"projects/list"}
+← {"jsonrpc":"2.0","id":104,"result":[
+    {
+      "apiVersion":"vanyline.solidite.fr/v1alpha1",
+      "kind":"Project",
+      "metadata":{
+        "name":"demo-project",
+        "namespace":"dev"
+      },
+      "spec":{
+        "owner":"alice",
+        "repoUrl":"https://github.com/alice/demo.git",
+        "defaultBranch":"main",
+        "existingPvc":null,
+        "storageSize":"10Gi",
+        "storageClass":"standard",
+        "gitSecret":null,
+        "caches":["cargo","pnpm"],
+        "fetchInterval":"1h"
+      },
+      "status":{"pvcName":"project-demo-project","cloned":true,"lastFetch":null,"worktrees":[] }
+    }
+  ]}
+```
+
+### projects/get
+
+Retourne un `Project` par nom.
+
+```json
+→ {"jsonrpc":"2.0","id":105,"method":"projects/get","params":{"name":"demo-project"}}
+← {"jsonrpc":"2.0","id":105,"result":{
+    "apiVersion":"vanyline.solidite.fr/v1alpha1",
+    "kind":"Project",
+    "metadata":{"name":"demo-project","namespace":"dev"},
+    "spec":{"owner":"alice","repoUrl":"https://github.com/alice/demo.git","defaultBranch":"main","existingPvc":null,"storageSize":"10Gi","storageClass":"standard","gitSecret":null,"caches":["cargo","pnpm"],"fetchInterval":"1h"},
+    "status":{"pvcName":"project-demo-project","cloned":true,"lastFetch":null,"worktrees":[]}
+  }}
+```
+
+`name` requis. Si params malformé (pas de `name`) :
+```json
+← {"jsonrpc":"2.0","id":105,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
+```
+
+### projects/create
+
+Crée un `Project` dans le namespace. `name` + champs de `ProjectSpec` aplati
+en camelCase (pas d'objet `spec` imbriqué).
+
+```json
+→ {"jsonrpc":"2.0","id":106,"method":"projects/create","params":{"name":"demo-project","owner":"alice","repoUrl":"https://github.com/alice/demo.git","defaultBranch":"main"}}
+← {"jsonrpc":"2.0","id":106,"result":{
+    "apiVersion":"vanyline.solidite.fr/v1alpha1",
+    "kind":"Project",
+    "metadata":{"name":"demo-project","namespace":"dev","uid":"..."},
+    "spec":{"owner":"alice","repoUrl":"https://github.com/alice/demo.git","defaultBranch":"main","existingPvc":null,"storageSize":null,"storageClass":null,"gitSecret":null,"caches":null,"fetchInterval":null},
+    "status":{"pvcName":"project-demo-project","cloned":false,"lastFetch":null,"worktrees":[]}
+  }}
+```
+
+`name` requis. `owner` et `repoUrl` requis, les autres champs sont optionnels
+(valeurs par défaut appliquées par le controller).
+
+### projects/delete
+
+Supprime un `Project` par nom. Succès -> `result: null`. **Pas idempotent** —
+contrairement à `conversations/delete` : un nom inexistant remonte l'erreur
+404 de l'API K8s telle quelle (`VNL-RPC-010`), même comportement que la
+commande CLI `vanyline project delete`.
+
+```json
+→ {"jsonrpc":"2.0","id":107,"method":"projects/delete","params":{"name":"demo-project"}}
+← {"jsonrpc":"2.0","id":107,"result":null}
+```
+
+Nom malformé :
+```json
+← {"jsonrpc":"2.0","id":107,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
+```
+
+Échec du client K8s ou de l'appel API :
+```json
+← {"jsonrpc":"2.0","id":107,"error":{"code":-32000,"message":"...","data":{"code":"VNL-RPC-010"}}}
+```
+
 ## Concurrence
 
 Un seul tour actif **par conversation** — un `chat/send` sur une

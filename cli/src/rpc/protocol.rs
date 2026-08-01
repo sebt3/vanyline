@@ -220,3 +220,12 @@ pub struct OwnerCreateParams {
     #[serde(flatten)]
     pub spec: vanyline_crds::OwnerSpec,
 }
+
+/// `projects/create` — même principe que `OwnerCreateParams` (04a) :
+/// `spec` aplati, `ProjectSpec` dérive déjà `Deserialize` en camelCase.
+#[derive(Debug, Deserialize)]
+pub struct ProjectCreateParams {
+    pub name: String,
+    #[serde(flatten)]
+    pub spec: vanyline_crds::ProjectSpec,
+}
