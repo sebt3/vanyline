@@ -604,6 +604,13 @@ la même URL depuis le CLI).
 - `sandbox_mcp_url(name)` — vérifie d'abord que la sandbox existe
   (`get_sandbox`, erreur claire plutôt qu'un échec de connexion confus
   plus tard) puis construit `http://<service_name(name)>.<ns>.svc:<MCP_PORT>/mcp`.
+- `set_sandbox_suspended(name, suspended)` — patch merge JSON ciblé sur
+  `spec.suspended` (pas de fonction générique partagée avec le CRUD
+  ci-dessus : un seul type appelant, une abstraction à un seul site
+  d'appel serait prématurée), retourne le `Sandbox` patché. Le champ
+  `suspended` est posé par `ws13-sandbox-runtime` (voir "Opérateur
+  Kubernetes" pour la sémantique côté controller) ; cette méthode ne fait
+  que le patcher, aucune logique de suspension côté client.
 
 **Convention de test, alignée sur "Opérateur Kubernetes" ci-dessus** :
 aucun appel `Api<K>::list/get/create/delete` n'est unit-testé contre un
@@ -615,7 +622,9 @@ légèreté de monter un serveur HTTP en local (trivial) contre celle de
 simuler une API server Kubernetes (pas d'équivalent léger disponible).
 
 **CLI** (`vanyline owner/project/sandbox list|show|create|delete`,
-`cli/src/{owner,project,sandbox}_cmd.rs`) : mêmes conventions que les
+`vanyline sandbox stop|start`, `cli/src/{owner,project,sandbox}_cmd.rs`) :
+`stop`/`start` suivent le même patron que `delete` (juste le nom en
+argument), délèguent à `set_sandbox_suspended`. Mêmes conventions que les
 commandes de config existantes (sortie tabulaire). `create` prend des
 flags `clap` complets par ressource (pas de `-f fichier.yaml` — jugé sans
 valeur ajoutée sur un `kubectl apply -f` direct, et chaque commande n'a
@@ -627,8 +636,9 @@ rare — édition via `kubectl` si besoin). Namespace résolu par précédence :
 `--namespace` (flag global) > `defaults.namespace` (`config.yaml`,
 fusionné deux couches) > namespace du contexte kubeconfig courant.
 
-**RPC stdio** : `owners/*`, `projects/*`, `sandboxes/*`, voir section
-"RPC stdio" ci-dessus et `docs/rpc-protocol.md`.
+**RPC stdio** : `owners/*`, `projects/*`, `sandboxes/*` (incl.
+`sandboxes/stop`/`sandboxes/start`), voir section "RPC stdio" ci-dessus et
+`docs/rpc-protocol.md`.
 
 **Toolbox en inférence** (`vanyline run --toolbox <sandbox>` / REPL,
 `defaults.toolbox`) : résout l'URL MCP de la sandbox
@@ -644,10 +654,7 @@ CLI uniquement en v1, pas de toolbox sur `chat/send` (RPC).
 port-forward manuel fonctionne déjà pour le reste) ; auth SA TokenReview
 sur la sandbox pour ce chemin (les sandboxes tournent en `--no-auth`
 derrière NetworkPolicy — le CLI dans le cluster passe si ses
-labels/namespace le permettent, cf. "Serveur MCP" plus haut) ;
-`vanyline sandbox stop/start` — **bloqué sur WS-13** (le champ
-`suspended` n'existe pas encore sur `SandboxSpec`), voir
-`docs/features/ws12-sandbox-clients.md`.
+labels/namespace le permettent, cf. "Serveur MCP" plus haut).
 
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 

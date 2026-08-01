@@ -598,6 +598,34 @@ Nom malformé :
 ← {"jsonrpc":"2.0","id":111,"error":{"code":-32000,"message":"...","data":{"code":"VNL-RPC-010"}}}
 ```
 
+### `sandboxes/stop` / `sandboxes/start`
+
+Patch `spec.suspended` (merge patch JSON, pas de remplacement complet de la
+spec) — `true` pour `stop`, `false` pour `start`. Le controller interprète ce
+champ pour suspendre/redémarrer le pod sans supprimer la ressource (voir
+`docs/architecture.md`, section "Opérateur Kubernetes"). Retourne le `Sandbox`
+patché (même format que `sandboxes/get`), pas `null` — contrairement à
+`sandboxes/delete`, la transition d'état est ce que l'appelant veut voir.
+
+```json
+→ {"jsonrpc":"2.0","id":112,"method":"sandboxes/stop","params":{"name":"demo-sandbox"}}
+← {"jsonrpc":"2.0","id":112,"result":{
+    "apiVersion":"vanyline.solidite.fr/v1alpha1",
+    "kind":"Sandbox",
+    "metadata":{"name":"demo-sandbox","namespace":"dev"},
+    "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null,"egress":[],"suspended":true},
+    "status":{"podName":"sandbox-demo-sandbox"}
+  }}
+```
+
+```json
+→ {"jsonrpc":"2.0","id":113,"method":"sandboxes/start","params":{"name":"demo-sandbox"}}
+← {"jsonrpc":"2.0","id":113,"result":{"...":"...","spec":{"...":"...","suspended":false},"...":"..."}}
+```
+
+`name` requis. Nom malformé ou échec K8s : mêmes codes que `sandboxes/get`
+(`VNL-RPC-000` / `VNL-RPC-010`).
+
 ## Concurrence
 
 Un seul tour actif **par conversation** — un `chat/send` sur une
