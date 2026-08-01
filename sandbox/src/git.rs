@@ -221,6 +221,7 @@ fn entry_from_xy(
 
 /// Exécute `git -C <sandbox_root> status --porcelain=v2 --branch` et parse
 /// le résultat. Le `Command` bloquant tourne hors de l'executor tokio.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn run_status(sandbox_root: &Path) -> Result<GitStatus, GitError> {
     let root = sandbox_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -375,6 +376,7 @@ fn parse_commits(output: &str) -> Result<Vec<CommitEntry>, GitError> {
 
 /// Exécute la comparaison et retourne le résultat. `sandbox_root` est un
 /// worktree normal (pas bare) — `VNL_SANDBOX_ROOT`.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn run_unpushed(sandbox_root: &Path) -> Result<UnpushedStatus, GitError> {
     let root = sandbox_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
@@ -430,6 +432,7 @@ pub async fn handle_unpushed(State(state): State<AppState>) -> Result<Json<Unpus
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn clean_output() -> &'static str {

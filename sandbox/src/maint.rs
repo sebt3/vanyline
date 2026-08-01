@@ -167,6 +167,7 @@ pub fn validate_sandbox_name(name: &str) -> Result<(), MaintError> {
 ///
 /// Pose ensuite la refspec de fetch (idempotent, appliqué que le clone
 /// vienne d'être fait ou préexistait déjà).
+#[allow(clippy::unwrap_used)] // chemin construit en interne a partir d un nom deja valide (MaintError valide les entrees en amont), toujours UTF-8 dans ce deploiement
 pub fn run_init(workspace: &Path, repo: &str, caches: &[String]) -> Result<(), MaintError> {
     // Create all cache directories (always, even if clone already exists).
     for cache in caches {
@@ -216,6 +217,7 @@ pub fn run_init(workspace: &Path, repo: &str, caches: &[String]) -> Result<(), M
 }
 
 /// `fetch` : `git --git-dir=<workspace>/repo.git fetch --prune`.
+#[allow(clippy::unwrap_used)] // chemin construit en interne a partir d un nom deja valide (MaintError valide les entrees en amont), toujours UTF-8 dans ce deploiement
 pub fn run_fetch(workspace: &Path) -> Result<(), MaintError> {
     let git_dir = workspace.join(BARE_REPO_DIR);
     let output = Command::new("git")
@@ -499,6 +501,7 @@ const FETCH_REFSPEC: &str = "+refs/heads/*:refs/remotes/origin/*";
 
 /// Pose (ou réécrit, idempotent via `--replace-all`) la refspec de fetch
 /// sur le clone bare `bare_path`.
+#[allow(clippy::unwrap_used)] // chemin construit en interne a partir d un nom deja valide (MaintError valide les entrees en amont), toujours UTF-8 dans ce deploiement
 fn set_fetch_refspec(bare_path: &Path) -> Result<(), MaintError> {
     let bare_str = bare_path.to_str().unwrap();
     let args = [
@@ -531,6 +534,7 @@ fn set_fetch_refspec(bare_path: &Path) -> Result<(), MaintError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     // 1. layout_constants — anti-dérive avec le controller.

@@ -144,6 +144,7 @@ pub fn err_result(text: String) -> Value {
 /// Resolves `raw_path` under `sandbox_root`, off the tokio executor thread
 /// (confine_path does blocking filesystem I/O). On confinement failure, returns
 /// an `err_result` envelope ready to hand straight back to the MCP caller.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne dans confine_path, pas une erreur de chemin normale
 pub async fn confine(sandbox_root: &Path, raw_path: &str) -> Result<String, Value> {
     let root = sandbox_root.to_path_buf();
     let raw = raw_path.to_string();
@@ -357,6 +358,7 @@ pub async fn dispatch_command(sandbox_root: &Path, name: &str, arguments: Value)
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn make_root() -> tempfile::TempDir {

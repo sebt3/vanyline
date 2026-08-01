@@ -165,6 +165,7 @@ pub async fn oauth_metadata(State(state): State<AppState>) -> Json<Value> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

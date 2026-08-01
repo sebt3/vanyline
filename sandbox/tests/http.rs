@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -38,7 +40,7 @@ fn no_auth_state() -> AppState {
         otel_endpoint: None,
         sandbox_root: std::path::Path::new("/workspace").into(),
     });
-    let auth = Arc::new(AuthState::new(config.clone()));
+    let auth = Arc::new(AuthState::new(config.clone()).unwrap());
     AppState { config, auth }
 }
 
@@ -59,7 +61,7 @@ fn no_auth_state_with_root(root: &std::path::Path) -> AppState {
         otel_endpoint: None,
         sandbox_root: root.to_path_buf(),
     });
-    let auth = Arc::new(AuthState::new(config.clone()));
+    let auth = Arc::new(AuthState::new(config.clone()).unwrap());
     AppState { config, auth }
 }
 
@@ -80,7 +82,7 @@ fn auth_state() -> AppState {
         otel_endpoint: None,
         sandbox_root: std::path::Path::new("/workspace").into(),
     });
-    let auth = Arc::new(AuthState::new(config.clone()));
+    let auth = Arc::new(AuthState::new(config.clone()).unwrap());
     AppState { config, auth }
 }
 
@@ -101,7 +103,7 @@ fn static_token_state() -> AppState {
         otel_endpoint: None,
         sandbox_root: std::path::Path::new("/workspace").into(),
     });
-    let auth = Arc::new(AuthState::new(config.clone()));
+    let auth = Arc::new(AuthState::new(config.clone()).unwrap());
     AppState { config, auth }
 }
 
@@ -1277,7 +1279,7 @@ async fn git_status_endpoint_nominal() {
         otel_endpoint: None,
         sandbox_root: tmpdir.path().to_path_buf(),
     });
-    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState { config, auth };
 
     let app = build_app(state);
@@ -1326,7 +1328,7 @@ async fn git_status_endpoint_clean() {
         otel_endpoint: None,
         sandbox_root: tmpdir.path().to_path_buf(),
     });
-    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState { config, auth };
 
     let app = build_app(state);
@@ -1375,7 +1377,7 @@ async fn git_status_endpoint_not_a_repo() {
         otel_endpoint: None,
         sandbox_root: tmpdir.path().to_path_buf(),
     });
-    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState { config, auth };
 
     let app = build_app(state);
@@ -1490,7 +1492,7 @@ async fn git_unpushed_endpoint_with_upstream() {
         otel_endpoint: None,
         sandbox_root: wt.to_path_buf(),
     });
-    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState { config, auth };
 
     let app = build_app(state);
@@ -1547,7 +1549,7 @@ async fn git_unpushed_endpoint_without_upstream() {
         otel_endpoint: None,
         sandbox_root: wt.to_path_buf(),
     });
-    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState { config, auth };
 
     let app = build_app(state);
@@ -1601,7 +1603,7 @@ async fn git_unpushed_endpoint_no_local_commits() {
         otel_endpoint: None,
         sandbox_root: wt.to_path_buf(),
     });
-    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState { config, auth };
 
     let app = build_app(state);
@@ -1655,7 +1657,7 @@ async fn git_unpushed_endpoint_detached_head() {
         otel_endpoint: None,
         sandbox_root: wt.to_path_buf(),
     });
-    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()));
+    let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState { config, auth };
 
     let app = build_app(state);

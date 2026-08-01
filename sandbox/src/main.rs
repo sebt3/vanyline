@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
     let metrics_addr: std::net::SocketAddr = config.metrics_listen.parse()?;
     spawn_metrics_server(metrics_addr).await;
 
-    let auth = Arc::new(AuthState::new(config.clone()));
+    let auth = Arc::new(AuthState::new(config.clone())?);
     let state = AppState {
         config: config.clone(),
         auth,

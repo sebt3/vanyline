@@ -112,6 +112,7 @@ fn try_init_otel_tracer(endpoint: &str) -> Result<opentelemetry_sdk::trace::SdkT
 /// If `otel_endpoint` is `Some`, the function attempts to build an OTLP gRPC
 /// exporter. Failure is **non-fatal**: a warning is printed to stderr and the
 /// server starts without trace export.
+#[allow(clippy::unwrap_used)] // chaine litterale connue a la compilation, toujours valide
 pub fn init(otel_endpoint: Option<&str>) -> Result<()> {
     init_prometheus()?;
 

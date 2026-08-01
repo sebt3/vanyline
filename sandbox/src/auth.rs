@@ -40,13 +40,13 @@ pub struct AuthState {
 }
 
 impl AuthState {
-    pub fn new(config: Arc<Config>) -> Self {
-        let http = Self::build_http_client(&config).expect("failed to build HTTP client for JWKS");
-        Self {
+    pub fn new(config: Arc<Config>) -> anyhow::Result<Self> {
+        let http = Self::build_http_client(&config)?;
+        Ok(Self {
             config,
             cache: RwLock::new(None),
             http,
-        }
+        })
     }
 
     fn build_http_client(config: &Config) -> anyhow::Result<reqwest::Client> {
@@ -223,6 +223,7 @@ impl AuthError {
     /// Build the HTTP response, emitting an RFC 9728-conformant absolute
     /// `resource_metadata` URI in `WWW-Authenticate` for 401s. `public_url` is the
     /// operator-configured public URL (`None` → localhost default).
+    #[allow(clippy::expect_used)] // VMP-130: format! produit toujours une valeur ASCII valide pour un header HTTP
     fn into_response_with_metadata(self, public_url: Option<&str>) -> Response {
         let (status, error_code) = match &self {
             AuthError::InsufficientPermissions => (StatusCode::FORBIDDEN, "insufficient_scope"),
@@ -342,6 +343,7 @@ async fn authenticate(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use axum::response::IntoResponse;
 
@@ -362,7 +364,7 @@ mod tests {
             otel_endpoint: None,
             sandbox_root: std::path::Path::new("/workspace").into(),
         });
-        AuthState::new(config)
+        AuthState::new(config).expect("test setup should not fail")
     }
 
     fn claims(groups: &[&str]) -> Claims {
