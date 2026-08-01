@@ -468,6 +468,7 @@ pub(crate) async fn run_agent_turn_at_depth(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     fn sample_agent(toolsets: Vec<String>, skills: SkillSelection) -> Agent {

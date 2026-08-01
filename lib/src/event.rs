@@ -254,6 +254,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use rig_core::agent::CompletionCall;
     use rig_core::completion::Usage;

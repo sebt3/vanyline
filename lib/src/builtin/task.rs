@@ -198,6 +198,7 @@ impl ToolDyn for TaskTool {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::event::ChatEvent;
     use crate::store::{ConfigStore, InMemoryConfigStore};

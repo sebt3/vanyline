@@ -296,6 +296,7 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     // -----------------------------------------------------------------------

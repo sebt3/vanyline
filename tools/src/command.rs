@@ -142,6 +142,7 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use std::time::Duration;
     use std::time::Instant;

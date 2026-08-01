@@ -66,6 +66,34 @@ jobs:
             exit 1
           fi
 
+  unwrap-lint:
+    name: unwrap/expect lint (non-regression on app, sandbox, controller, crds)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Count unwrap_used/expect_used warnings
+        env:
+          CARGO_INCREMENTAL: "0"
+        run: |
+          set -o pipefail
+          COUNT=$(\
+            cargo clippy -p vanyline-app --bin vanyline-app --no-deps -- -W clippy::unwrap_used -W clippy::expect_used 2>&1 | grep -cE "warning: used.*(unwrap|expect)"; \
+            cargo clippy -p vanyline-sandbox --lib --no-deps -- -W clippy::unwrap_used -W clippy::expect_used 2>&1 | grep -cE "warning: used.*(unwrap|expect)"; \
+            cargo clippy -p vanyline-controller --bin vanyline-controller --no-deps -- -W clippy::unwrap_used -W clippy::expect_used 2>&1 | grep -cE "warning: used.*(unwrap|expect)"; \
+            cargo clippy -p vanyline-crds --lib --no-deps -- -W clippy::unwrap_used -W clippy::expect_used 2>&1 | grep -cE "warning: used.*(unwrap|expect)")
+          TOTAL=0
+          for n in $COUNT; do TOTAL=$((TOTAL + n)); done
+          echo "unwrap/expect warnings total: $TOTAL"
+          BASELINE=35
+          if [ "$TOTAL" -gt "$BASELINE" ]; then
+            echo "::error::Regression: $TOTAL unwrap/expect warnings > baseline $BASELINE"
+            exit 1
+          fi
+
   frontend:
     name: Frontend
     runs-on: ubuntu-latest

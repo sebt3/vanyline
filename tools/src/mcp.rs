@@ -118,6 +118,7 @@ pub fn command_tools() -> Vec<serde_json::Value> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
 
     #[test]

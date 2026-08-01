@@ -74,6 +74,7 @@ pub fn agent_params(profile: &ModelProfile) -> AgentParams {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::domain::{Provider, ProviderType};
 

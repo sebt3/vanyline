@@ -1,3 +1,4 @@
+#![warn(clippy::unwrap_used, clippy::expect_used)]
 #![warn(missing_docs)]
 
 use std::collections::BTreeMap;
