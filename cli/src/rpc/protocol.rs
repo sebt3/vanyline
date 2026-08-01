@@ -99,6 +99,7 @@ pub mod vnl_code {
     pub const CONVERSATION_STORAGE_ERROR: &str = "VNL-RPC-007";
     pub const NO_AGENT_RESOLVED: &str = "VNL-RPC-008";
     pub const TURN_EXECUTION_ERROR: &str = "VNL-RPC-009";
+    pub const K8S_ERROR: &str = "VNL-RPC-010";
 }
 
 #[derive(Debug, Deserialize)]
@@ -199,4 +200,23 @@ pub struct ChatSendResult {
 #[serde(rename_all = "camelCase")]
 pub struct ChatCancelParams {
     pub conversation_id: String,
+}
+
+/// Params partagés par `owners/get`, `owners/delete` (et, tâches 4b/4c,
+/// `projects/get`, `projects/delete`, `sandboxes/get`, `sandboxes/delete`).
+#[derive(Debug, Deserialize)]
+pub struct NameParams {
+    pub name: String,
+}
+
+/// `owners/create` — `spec` aplati (`#[serde(flatten)]`) : le JSON attendu
+/// est `{"name": "...", ...champs de OwnerSpec en camelCase...}`, pas un
+/// objet `spec` imbriqué. `OwnerSpec` dérive déjà `Deserialize` avec
+/// `#[serde(rename_all = "camelCase")]` (cf. `crds/src/lib.rs`) — réutilisé
+/// tel quel, pas de DTO parallèle à maintenir.
+#[derive(Debug, Deserialize)]
+pub struct OwnerCreateParams {
+    pub name: String,
+    #[serde(flatten)]
+    pub spec: vanyline_crds::OwnerSpec,
 }

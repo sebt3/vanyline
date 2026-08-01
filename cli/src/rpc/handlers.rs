@@ -28,6 +28,12 @@ pub struct ServerState {
     /// (tâche 03b) — défini ici pour que `RpcEventSink` (cette tâche)
     /// puisse déjà l'utiliser.
     pub seq: Arc<Mutex<HashMap<Uuid, u64>>>,
+    /// Client K8s, construit paresseusement au premier appel
+    /// `owners/projects/sandboxes/*` (pas à `initialize` — un cluster
+    /// injoignable ne doit PAS empêcher `chat/send`/`config/*` de fonctionner).
+    /// Remis à `None` par `handle_initialize` (le namespace résolu dépend du
+    /// workspace, qui peut changer entre deux `initialize`).
+    pub k8s_client: Option<Arc<vanyline_lib::k8s::VnlK8sClient>>,
 }
 
 impl ServerState {
@@ -39,6 +45,7 @@ impl ServerState {
             tx,
             busy: Arc::new(Mutex::new(HashSet::new())),
             seq: Arc::new(Mutex::new(HashMap::new())),
+            k8s_client: None,
         }
     }
 }
@@ -71,6 +78,53 @@ fn config_error_response<T: serde::Serialize>(
             format!("{e}"),
             vnl_code::CONFIG_ERROR,
         ),
+    }
+}
+
+/// Construits (ou réutilise depuis le cache) le `VnlK8sClient` de cette
+/// session. Namespace résolu via `configured_namespace` sur les layers du
+/// store déjà initialisé (voir Contexte pour la différence avec le CLI).
+async fn ensure_k8s_client(
+    state: &mut ServerState,
+) -> Result<Arc<vanyline_lib::k8s::VnlK8sClient>, vanyline_lib::VnyError> {
+    if let Some(client) = &state.k8s_client {
+        return Ok(client.clone());
+    }
+    let store = state
+        .store
+        .as_ref()
+        .expect("initialized implies store = Some");
+    let namespace = crate::config::configured_namespace(store.layers());
+    let client = Arc::new(vanyline_lib::k8s::VnlK8sClient::discover(namespace).await?);
+    state.k8s_client = Some(client.clone());
+    Ok(client)
+}
+
+/// Sérialise une erreur `VnyError` survenue AVANT la résolution du client
+/// (`ensure_k8s_client` a échoué) en réponse JSON-RPC `VNL-RPC-010`.
+fn k8s_client_error(id: Value, e: vanyline_lib::VnyError) -> String {
+    serde_json::to_string(&JsonRpcResponse::error(
+        id,
+        jsonrpc_code::SERVER_ERROR,
+        format!("{e}"),
+        vnl_code::K8S_ERROR,
+    ))
+    .expect("serialize k8s error response")
+}
+
+/// Convertit le résultat d'un appel `VnlK8sClient::*` en réponse JSON-RPC —
+/// même convention que `config_error_response` pour `VNL-RPC-006`.
+fn k8s_result_response<T: serde::Serialize>(
+    id: Value,
+    result: Result<T, vanyline_lib::VnyError>,
+) -> String {
+    match result {
+        Ok(v) => serde_json::to_string(&JsonRpcResponse::success(
+            id,
+            serde_json::to_value(v).expect("serialize k8s response"),
+        ))
+        .expect("serialize k8s success response"),
+        Err(e) => k8s_client_error(id, e),
     }
 }
 
@@ -163,6 +217,10 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "conversations/delete" => Some(handle_conversations_delete(state, id, request.params)),
         "chat/cancel" => Some(handle_chat_cancel(id, request.params)),
         "chat/send" => handle_chat_send(state, id, request.params).await,
+        "owners/list" => Some(handle_owners_list(state, id).await),
+        "owners/get" => Some(handle_owners_get(state, id, request.params).await),
+        "owners/create" => Some(handle_owners_create(state, id, request.params).await),
+        "owners/delete" => Some(handle_owners_delete(state, id, request.params).await),
         _ => Some(
             serde_json::to_string(&JsonRpcResponse::error(
                 id,
@@ -248,6 +306,7 @@ async fn handle_initialize(
     state.store = Some(Arc::new(store));
     state.busy.lock().unwrap().clear();
     state.seq.lock().unwrap().clear();
+    state.k8s_client = None;
 
     JsonRpcResponse::success(
         id,
@@ -800,6 +859,78 @@ impl EventSink for RpcEventSink {
             let _ = self.tx.send(line);
         }
     }
+}
+
+/// `owners/list` : retourne tous les `Owner` du namespace résolu.
+async fn handle_owners_list(state: &mut ServerState, id: Value) -> String {
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.list_owners().await)
+}
+
+/// `owners/get` : params -> `NameParams`, puis `client.get_owner(&name)`.
+async fn handle_owners_get(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: NameParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as NameParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize get error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.get_owner(&params.name).await)
+}
+
+/// `owners/create` : params -> `OwnerCreateParams` (name + spec aplati).
+async fn handle_owners_create(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: OwnerCreateParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as OwnerCreateParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize create error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.create_owner(&params.name, params.spec).await)
+}
+
+/// `owners/delete` : params -> `NameParams`, puis `client.delete_owner(&name)`.
+async fn handle_owners_delete(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+    let params: NameParams = match serde_json::from_value(params) {
+        Ok(p) => p,
+        Err(_) => {
+            return serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                "Malformed request: params could not be deserialized as NameParams",
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize delete error response")
+        }
+    };
+    let client = match ensure_k8s_client(state).await {
+        Ok(c) => c,
+        Err(e) => return k8s_client_error(id, e),
+    };
+    k8s_result_response(id, client.delete_owner(&params.name).await)
 }
 
 #[cfg(test)]
@@ -2033,5 +2164,65 @@ defaults:
             !state.busy.lock().unwrap().contains(&conv_id),
             "busy entry should be purged"
         );
+    }
+
+    // -- New tests for task 04a --
+
+    /// owners_get_missing_name_returns_malformed — `owners/get` avec
+    /// `params: {}` -> `error.data.code == "VNL-RPC-000"`.
+    #[tokio::test]
+    async fn owners_get_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(200, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(201, "owners/get", Some(json!({})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    /// owners_create_missing_name_returns_malformed — `owners/create` avec
+    /// `params: {"homeSize": "1Gi"}` (pas de `name`) -> `VNL-RPC-000`.
+    #[tokio::test]
+    async fn owners_create_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(202, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(
+            203,
+            "owners/create",
+            Some(json!({"homeSize": "1Gi"})),
+        );
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    /// owners_delete_missing_name_returns_malformed — `owners/delete` avec
+    /// `params: {}` -> `VNL-RPC-000`.
+    #[tokio::test]
+    async fn owners_delete_missing_name_returns_malformed() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(204, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(205, "owners/delete", Some(json!({})));
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 }

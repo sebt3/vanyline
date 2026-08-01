@@ -91,6 +91,7 @@ se planter sur `config/agents`/`config/models`/`config/toolsets`/
 | `VNL-RPC-007` | Erreur de stockage des conversations (I/O disque) |
 | `VNL-RPC-008` | Aucun agent résolvable pour `chat/send` (ni param, ni conversation, ni défaut) |
 | `VNL-RPC-009` | Le tour LLM a échoué (`run_agent_turn`) |
+| `VNL-RPC-010` | Erreur K8s (client injoignable ou appel API échoué, `owners/projects/sandboxes`) |
 
 ## Méthodes
 
@@ -310,6 +311,107 @@ Variantes de `event` :
 | `usage` | `input_tokens, output_tokens: number` |
 | `done` | — |
 | `error` | `code, message: string` |
+
+## Ressources K8s (owners/projects/sandboxes)
+
+Les méthodes `owners/*` (tâche 04a), `projects/*` (4b), `sandboxes/*` (4c)
+interagissent avec un cluster Kubernetes via un client `VnlK8sClient` construit
+paresseusement au premier appel. Le namespace est résolu **une seule fois**,
+après `initialize`, en lisant `defaults.namespace` du `config.yaml` fusionné
+(des deux couches initialisées par `initialize`), puis en fallback sur le
+namespace du contexte kubeconfig courant.
+
+**Limitation v1 — namespace par session** : le namespace est résolu une seule
+fois et appliqué à toutes les méthodes `owners/`/`projects/`/`sandboxes/` de la
+session. Il n'y a **pas de param `namespace` par appel**. La configuration CLI/RPC
+est considérée comme stable en cours de session : changer `config.yaml` entre deux
+appels a un effet immédiat sur la config (`config/*`) mais le namespace K8s n'est
+réévalué qu'après un nouvel `initialize` (qui remet le client K8s à `None`). Ceci
+est cohérent avec le modèle du serveur stdio long-vivant, mais diffère du CLI où
+chaque invocation peut recevoir un `--namespace`.
+
+### owners/list
+
+Retourne la liste des `Owner` du namespace. L'objet retourné est la
+**sérialisation directe du CRD K8s** en camelCase (le même format qu'utilise
+`kubectl get owners -o json`).
+
+```json
+→ {"jsonrpc":"2.0","id":100,"method":"owners/list"}
+← {"jsonrpc":"2.0","id":100,"result":[
+    {
+      "apiVersion":"vanyline.solidite.fr/v1alpha1",
+      "kind":"Owner",
+      "metadata":{
+        "name":"alice",
+        "namespace":"dev"
+      },
+      "spec":{"existingPvc":null,"homeSize":"1Gi"},
+      "status":{"pvcName":"owner-alice-home","serviceAccount":"alice"}
+    }
+  ]}
+```
+
+### owners/get
+
+Retourne un `Owner` par nom.
+
+```json
+→ {"jsonrpc":"2.0","id":101,"method":"owners/get","params":{"name":"alice"}}
+← {"jsonrpc":"2.0","id":101,"result":{
+    "apiVersion":"vanyline.solidite.fr/v1alpha1",
+    "kind":"Owner",
+    "metadata":{"name":"alice","namespace":"dev"},
+    "spec":{"existingPvc":null,"homeSize":"1Gi"},
+    "status":{"pvcName":"owner-alice-home","serviceAccount":"alice"}
+  }}
+```
+
+`name` requis. Si params malformé (pas de `name`) :
+```json
+← {"jsonrpc":"2.0","id":101,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
+```
+
+### owners/create
+
+Crée un `Owner` dans le namespace. `name` + champs de `OwnerSpec` aplati en
+camelCase (pas d'objet `spec` imbriqué).
+
+```json
+→ {"jsonrpc":"2.0","id":102,"method":"owners/create","params":{"name":"alice","homeSize":"2Gi"}}
+← {"jsonrpc":"2.0","id":102,"result":{
+    "apiVersion":"vanyline.solidite.fr/v1alpha1",
+    "kind":"Owner",
+    "metadata":{"name":"alice","namespace":"dev","uid":"..."},
+    "spec":{"existingPvc":null,"homeSize":"2Gi"},
+    "status":{"pvcName":"owner-alice-home","serviceAccount":"alice"}
+  }}
+```
+
+`name` requis. `homeSize`, `existingPvc`, `projectDefaults` optionnels (valeurs
+par défaut appliquées par le controller).
+
+### owners/delete
+
+Supprime un `Owner` par nom. Succès -> `result: null`. **Pas idempotent** —
+contrairement à `conversations/delete` : un nom inexistant remonte l'erreur
+404 de l'API K8s telle quelle (`VNL-RPC-010`), même comportement que la
+commande CLI `vanyline owner delete`.
+
+```json
+→ {"jsonrpc":"2.0","id":103,"method":"owners/delete","params":{"name":"alice"}}
+← {"jsonrpc":"2.0","id":103,"result":null}
+```
+
+Nom malformé :
+```json
+← {"jsonrpc":"2.0","id":103,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
+```
+
+Échec du client K8s ou de l'appel API :
+```json
+← {"jsonrpc":"2.0","id":103,"error":{"code":-32000,"message":"...","data":{"code":"VNL-RPC-010"}}}
+```
 
 ## Concurrence
 
