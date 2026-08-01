@@ -296,6 +296,15 @@ pub fn configured_namespace(layers: &Layers) -> Option<String> {
         .and_then(|raw| raw.defaults.get("namespace").and_then(|v| v.as_str().map(String::from)))
 }
 
+/// Nom de la sandbox toolbox configuree par defaut (`defaults.toolbox`
+/// du `config.yaml` fusionne). Meme mecanique que `configured_namespace`.
+pub fn configured_toolbox(layers: &Layers) -> Option<String> {
+    layers
+        .load_merged_config()
+        .ok()
+        .and_then(|raw| raw.defaults.get("toolbox").and_then(|v| v.as_str().map(String::from)))
+}
+
 /// Écrit `defaults.agent = name` dans le `config.yaml` de la couche globale
 /// de `layers` (jamais la couche workspace). Relit l'existant (couche
 /// absente -> `RawConfigFile::default()`), mute uniquement `defaults.agent`,

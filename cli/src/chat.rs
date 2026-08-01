@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 
+use vanyline_lib::domain::{McpSelection, McpServer, McpTransport};
 use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
 use vanyline_lib::session::run_agent_turn;
 use vanyline_lib::store::ConfigStore;
@@ -29,34 +30,36 @@ impl EventSink for StdoutSink {
     }
 }
 
-pub async fn run(message: Option<String>, agent: Option<String>, continue_active: bool) {
+pub async fn run(
+    message: Option<String>,
+    agent: Option<String>,
+    continue_active: bool,
+    toolbox_mcp_url: Option<String>,
+) {
     config::ensure_config_dir();
     print_workspace_sources().await;
     if let Some(msg) = message {
-        run_one_shot(&msg, agent, continue_active).await;
+        run_one_shot(&msg, agent, continue_active, toolbox_mcp_url).await;
         return;
     }
-    run_repl(agent, continue_active).await;
+    run_repl(agent, continue_active, toolbox_mcp_url).await;
 }
 
-async fn run_one_shot(user_msg: &str, agent: Option<String>, continue_active: bool) {
+async fn run_one_shot(
+    user_msg: &str,
+    agent: Option<String>,
+    continue_active: bool,
+    toolbox_mcp_url: Option<String>,
+) {
     let (mut conv, agent_name, is_new) = resolve_context(agent, continue_active).await;
     if is_new {
         println!("Session: {}", conv.id);
     }
 
-    let ctx = build_session_context();
+    let ctx = build_session_context(toolbox_mcp_url.as_deref());
     let workspace_context = read_workspace_context();
 
-    match process_turn(
-        &conv,
-        &agent_name,
-        &ctx,
-        workspace_context.as_deref(),
-        user_msg,
-    )
-    .await
-    {
+    match process_turn(&conv, &agent_name, &ctx, workspace_context.as_deref(), user_msg).await {
         Ok(result) => {
             conv.messages.push(vanyline_lib::Message {
                 role: "user".to_string(),
@@ -72,7 +75,11 @@ async fn run_one_shot(user_msg: &str, agent: Option<String>, continue_active: bo
     }
 }
 
-async fn run_repl(agent: Option<String>, continue_active: bool) {
+async fn run_repl(
+    agent: Option<String>,
+    continue_active: bool,
+    toolbox_mcp_url: Option<String>,
+) {
     let (mut conv, agent_name, _) = resolve_context(agent, continue_active).await;
     println!("vanyline REPL (Ctrl-D to exit)");
     println!("Agent: {agent_name}");
@@ -83,7 +90,7 @@ async fn run_repl(agent: Option<String>, continue_active: bool) {
     }
     println!();
 
-    let ctx = build_session_context();
+    let ctx = build_session_context(toolbox_mcp_url.as_deref());
     let workspace_context = read_workspace_context();
 
     loop {
@@ -122,16 +129,40 @@ async fn run_repl(agent: Option<String>, continue_active: bool) {
     println!();
 }
 
-/// Construit le `SessionContext` de la session CLI — UNE FOIS par exécution
-/// (`run_one_shot`/`run_repl`), pas par tour : `store`/`sink`/`local_tools`/
-/// `subagent_depth_max` ne changent jamais au sein d'une session CLI.
-fn build_session_context() -> vanyline_lib::session::SessionContext {
-    vanyline_lib::session::SessionContext {
-        store: Arc::new(crate::discover_fs_store()),
-        sink: Arc::new(StdoutSink),
-        local_tools: crate::tools::local_tools_map(),
-        subagent_depth_max: 1,
-        extra_mcp: Vec::new(),
+/// Construit le `SessionContext` de la session CLI. `toolbox_mcp_url` :
+/// `Some(url)` -> `local_tools` vide + la sandbox injectee comme serveur
+/// MCP nomme "toolbox" dans `extra_mcp` (design "Toolbox en inference" de
+/// ws12-sandbox-clients) ; `None` -> comportement inchange (local_tools du
+/// CLI, `extra_mcp` vide).
+fn build_session_context(
+    toolbox_mcp_url: Option<&str>,
+) -> vanyline_lib::session::SessionContext {
+    match toolbox_mcp_url {
+        Some(url) => vanyline_lib::session::SessionContext {
+            store: Arc::new(crate::discover_fs_store()),
+            sink: Arc::new(StdoutSink),
+            local_tools: std::collections::HashMap::new(),
+            subagent_depth_max: 1,
+            extra_mcp: vec![(
+                McpServer {
+                    name: "toolbox".to_string(),
+                    transport: McpTransport::HttpStreamable,
+                    url: url.to_string(),
+                    headers: Default::default(),
+                },
+                McpSelection {
+                    server: "toolbox".to_string(),
+                    tools: vec![],
+                },
+            )],
+        },
+        None => vanyline_lib::session::SessionContext {
+            store: Arc::new(crate::discover_fs_store()),
+            sink: Arc::new(StdoutSink),
+            local_tools: crate::tools::local_tools_map(),
+            subagent_depth_max: 1,
+            extra_mcp: Vec::new(),
+        },
     }
 }
 
@@ -462,5 +493,39 @@ mod tests {
         // Not two separate lines
         let agent_lines = result.iter().filter(|l| l.contains("agents:")).count();
         assert_eq!(agent_lines, 1);
+    }
+
+    // 6. build_session_context_none_uses_local_tools
+    #[test]
+    fn build_session_context_none_uses_local_tools() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(None);
+        assert!(!ctx.local_tools.is_empty());
+        assert!(ctx.local_tools.contains_key("read_file"));
+        assert!(ctx.extra_mcp.is_empty());
+    }
+
+    // 7. build_session_context_toolbox_empties_local_tools
+    #[test]
+    fn build_session_context_toolbox_empties_local_tools() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"));
+        assert!(ctx.local_tools.is_empty());
+        assert_eq!(ctx.extra_mcp.len(), 1);
+        let (server, selection) = &ctx.extra_mcp[0];
+        assert_eq!(server.name, "toolbox");
+        assert_eq!(server.url, "http://sandbox-demo.dev.svc:3000/mcp");
+        assert_eq!(selection.server, "toolbox");
+        assert!(selection.tools.is_empty());
     }
 }

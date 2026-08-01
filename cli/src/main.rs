@@ -33,6 +33,11 @@ struct Cli {
     /// Namespace K8s target (owner/project/sandbox). Overrides `defaults.namespace`.
     #[arg(short, long, global = true)]
     namespace: Option<String>,
+    /// Nom de la sandbox a utiliser comme toolbox d'inference (remplace les
+    /// local_tools par les tools MCP de la sandbox). Surcharge
+    /// `defaults.toolbox`.
+    #[arg(long, global = true)]
+    toolbox: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -152,9 +157,15 @@ async fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        None => chat::run(None, cli.agent, cli.continue_active).await,
+        None => {
+            let toolbox_mcp_url =
+                resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
+            chat::run(None, cli.agent, cli.continue_active, toolbox_mcp_url).await
+        }
         Some(Commands::Run { message }) => {
-            chat::run(Some(message), cli.agent, cli.continue_active).await
+            let toolbox_mcp_url =
+                resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
+            chat::run(Some(message), cli.agent, cli.continue_active, toolbox_mcp_url).await
         }
         Some(Commands::Conversations(cmd)) => run_conversation(cmd).await,
         Some(Commands::Agents(cmd)) => run_agent(cmd).await,
@@ -518,6 +529,24 @@ async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8
         eprintln!("{e}");
         std::process::exit(1);
     })
+}
+
+/// Resout l'URL MCP de la toolbox pour ce lancement, ou `None` si aucune
+/// toolbox n'est demandee (ni `--toolbox`, ni `defaults.toolbox`) — dans
+/// ce cas, PAS d'appel K8s du tout (coherent avec "les commandes non-K8s
+/// continuent de fonctionner", meme principe que `discover_k8s_client`
+/// mais applique ici au chemin chat par defaut).
+async fn resolve_toolbox_mcp_url(
+    toolbox_flag: Option<String>,
+    namespace: Option<String>,
+) -> Option<String> {
+    let store = discover_fs_store();
+    let name = toolbox_flag.or_else(|| config::configured_toolbox(store.layers()))?;
+    let client = discover_k8s_client(namespace).await;
+    Some(client.sandbox_mcp_url(&name).await.unwrap_or_else(|e| {
+        eprintln!("{e}");
+        std::process::exit(1);
+    }))
 }
 
 async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
