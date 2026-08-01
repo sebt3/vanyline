@@ -189,6 +189,7 @@ mod tests {
                 home_size,
                 home_storage_class,
                 project_defaults: None,
+                egress: Vec::new(),
             },
         );
         owner.meta_mut().namespace = Some("ns".into());

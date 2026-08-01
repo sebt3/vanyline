@@ -632,6 +632,7 @@ mod tests {
                 git_secret: None,
                 caches: None,
                 fetch_interval: None,
+                egress: Vec::new(),
             },
         );
         project.meta_mut().namespace = Some("ns".into());

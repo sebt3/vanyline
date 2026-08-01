@@ -652,6 +652,7 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
                 home_size,
                 home_storage_class,
                 project_defaults,
+                egress: Vec::new(),
             };
             let _owner = client.create_owner(&name, spec).await.unwrap_or_else(|e| {
                 eprintln!("{e}");
@@ -761,6 +762,7 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                 git_secret,
                 caches: if caches.is_empty() { None } else { Some(caches) },
                 fetch_interval,
+                egress: Vec::new(),
             };
             client.create_project(&name, spec).await.unwrap_or_else(|e| {
                 eprintln!("{e}");
@@ -851,6 +853,7 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
                 toolchains,
                 image,
                 resources: None,
+                egress: Vec::new(),
             };
             client.create_sandbox(&name, spec).await.unwrap_or_else(|e| {
                 eprintln!("{e}");

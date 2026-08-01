@@ -781,6 +781,7 @@ mod tests {
                 toolchains,
                 image,
                 resources: None,
+                egress: Vec::new(),
             },
         );
         sandbox.meta_mut().namespace = Some("ns".into());
@@ -817,6 +818,7 @@ mod tests {
                 git_secret: None,
                 caches,
                 fetch_interval: None,
+                egress: Vec::new(),
             },
         );
         project.meta_mut().namespace = Some("ns".into());

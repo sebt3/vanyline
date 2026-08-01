@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, Time};
 use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,6 +24,8 @@ pub struct OwnerSpec {
     pub home_size: Option<String>, // défaut appliqué au reconcile: "1Gi"
     pub home_storage_class: Option<String>, // RWX recommandé (CephFS)
     pub project_defaults: Option<ProjectDefaults>,
+    #[serde(default)]
+    pub egress: Vec<EgressRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -31,6 +33,30 @@ pub struct OwnerSpec {
 pub struct ProjectDefaults {
     pub storage_size: Option<String>,
     pub storage_class: Option<String>,
+}
+
+/// Une règle d'une white-list egress. `cidr` et `pod_selector` sont
+/// exclusifs (l'un ou l'autre, jamais les deux) ; `namespace_selector` est
+/// optionnel et se combine avec `pod_selector`. Aucune validation de cette
+/// exclusivité au niveau du type — portée par la construction de la
+/// `NetworkPolicy` (tâche `netpol-builder`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EgressRule {
+    pub description: String,
+    pub cidr: Option<String>,
+    pub pod_selector: Option<LabelSelector>,
+    pub namespace_selector: Option<LabelSelector>,
+    #[serde(default)]
+    pub ports: Vec<EgressPort>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EgressPort {
+    pub port: i32,
+    /// "TCP" | "UDP". `None` => TCP (interprété par `netpol-builder`, pas ici).
+    pub protocol: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -68,6 +94,8 @@ pub struct ProjectSpec {
     pub caches: Option<Vec<String>>,
     /// Intervalle du CronJob de fetch. None => "1h".
     pub fetch_interval: Option<String>,
+    #[serde(default)]
+    pub egress: Vec<EgressRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -110,6 +138,8 @@ pub struct SandboxSpec {
     /// Image du serveur sandbox. None => défaut du controller (env).
     pub image: Option<String>,
     pub resources: Option<k8s_openapi::api::core::v1::ResourceRequirements>,
+    #[serde(default)]
+    pub egress: Vec<EgressRule>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -199,6 +229,7 @@ mod tests {
             git_secret: None,
             caches: None,
             fetch_interval: None,
+            egress: Vec::new(),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(
@@ -243,5 +274,56 @@ mod tests {
             spec_props.contains_key("projectDefaults"),
             "Owner schema should contain 'projectDefaults', got: {spec_props:?}"
         );
+        assert!(
+            spec_props.contains_key("egress"),
+            "Owner schema should contain 'egress', got: {spec_props:?}"
+        );
+    }
+
+    #[test]
+    fn egress_camel_case() {
+        let ls = LabelSelector {
+            match_labels: Some({
+                let mut m = std::collections::BTreeMap::new();
+                m.insert("app".to_string(), "myapp".to_string());
+                m
+            }),
+            match_expressions: None,
+        };
+        let spec = SandboxSpec {
+            project: "test".to_string(),
+            branch: "main".to_string(),
+            toolchains: Vec::new(),
+            image: None,
+            resources: None,
+            egress: vec![EgressRule {
+                description: "allow dns".to_string(),
+                cidr: None,
+                pod_selector: Some(ls.clone()),
+                namespace_selector: Some(ls),
+                ports: vec![EgressPort {
+                    port: 53,
+                    protocol: Some("UDP".to_string()),
+                }],
+            }],
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains(r#""podSelector""#),
+            "should contain podSelector (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""namespaceSelector""#),
+            "should contain namespaceSelector (camelCase), got: {json}"
+        );
+        assert!(!json.contains("pod_selector"));
+        assert!(!json.contains("namespace_selector"));
+    }
+
+    #[test]
+    fn egress_defaults_to_empty() {
+        let spec: SandboxSpec =
+            serde_json::from_str(r#"{"project":"p","branch":"main"}"#).expect("should deserialize");
+        assert!(spec.egress.is_empty());
     }
 }
