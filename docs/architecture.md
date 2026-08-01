@@ -6,31 +6,39 @@ interfaces réseau, auth), voir `AGENTS.md`.
 
 ## Vue d'ensemble
 
-Six crates : **deux bibliothèques feuilles** partagées (`vanyline-tools`, `vanyline-lib`) et
-**quatre binaires** qui les consomment (`vanyline`, `vanyline-app`, `vanyline-sandbox`,
-`vanyline-controller`).
+Sept crates : **trois bibliothèques feuilles** partagées (`vanyline-tools`, `vanyline-lib`,
+`vanyline-crds`) et **quatre binaires** qui les consomment (`vanyline`, `vanyline-app`,
+`vanyline-sandbox`, `vanyline-controller`).
 
 | Crate | Type | Rôle | Contenu clé |
 |-------|------|------|-------------|
 | `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic, SLM-friendly (v2) | `filesystem` (read/write/edit/delete/list), `search` (find_files/search), `command` (`execute` via `sh -c`, timeout, cwd), `error` (`ToolsError`, codes `VNL-TLS-*`), `output` (bornage centralisé), `mcp` (schémas JSON — source unique consommée par `cli` et `sandbox`) |
-| `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), erreurs `VNL-*` |
-| `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux |
+| `vanyline-crds` | lib feuille | Types CRD Owner/Project/Sandbox (spec/status/derives kube), sans runtime opérateur | `Owner`/`Project`/`Sandbox` + specs/status, `Toolchain`/`PvcRef`/`ProjectDefaults`, `crd_manifests()`, `service_name`/`MCP_PORT` (convention de nommage du Service MCP d'une sandbox, partagée avec `vanyline-lib`) — voir section "Client K8s CLI" plus bas |
+| `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), `k8s` (`VnlK8sClient`, **feature Cargo optionnelle `k8s`**, désactivée par défaut — voir "Client K8s CLI" plus bas), erreurs `VNL-*` |
+| `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux, active la feature `k8s` de `vanyline-lib` (commandes owner/project/sandbox + toolbox) |
 | `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib` — voir section "Backend web" plus bas |
 | `vanyline-sandbox` | binaire | Pod serveur MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) — voir section "Serveur MCP" plus bas ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
-| `vanyline-controller` | binaire | Opérateur Kubernetes | kube-rs, CRDs Owner/Project/Sandbox v1alpha1 — voir section dédiée plus bas |
+| `vanyline-controller` | binaire | Opérateur Kubernetes | kube-rs, reconcilers des CRDs Owner/Project/Sandbox v1alpha1 (types importés de `vanyline-crds`) — voir section dédiée plus bas |
 
 ## Graphe de dépendances
 
 ```
 vanyline-tools  ◄──  vanyline (cli),  vanyline-sandbox
 vanyline-lib    ◄──  vanyline (cli),  vanyline-app
+vanyline-crds   ◄──  vanyline-controller,  vanyline-lib (feature k8s, via vanyline (cli))
 
 vanyline-tools  : aucune dépendance interne, pas de rig/rmcp
-vanyline-lib    : aucune dépendance interne (rig-core + rmcp externes)
-vanyline-controller : isolé — aucune dépendance sur les autres crates
+vanyline-lib    : aucune dépendance interne obligatoire (rig-core + rmcp externes) ;
+                  feature optionnelle k8s -> vanyline-crds + kube (default-features = false,
+                  "client" seulement — jamais "runtime", le CLI ne doit pas embarquer le
+                  reconciler)
+vanyline-crds   : aucune dépendance interne, kube en "derive" seul (pas de "client"/"runtime")
+vanyline-controller : dépend uniquement de vanyline-crds (types CRD) parmi les crates du
+                  workspace — aucune autre dépendance interne
 ```
 
-Aucun cycle. Les deux feuilles sont indépendantes l'une de l'autre.
+Aucun cycle. Les trois feuilles sont indépendantes l'une de l'autre (`vanyline-crds` ne
+dépend ni de `vanyline-tools` ni de `vanyline-lib`, et réciproquement).
 
 ## Règles de dépendances
 
@@ -54,8 +62,12 @@ Aucun cycle. Les deux feuilles sont indépendantes l'une de l'autre.
 5. **Les binaires dépendent des libs, jamais l'inverse.** Un besoin partagé entre plusieurs
    binaires remonte dans `vanyline-lib` (logique LLM/MCP) ou `vanyline-tools` (capacité).
 
-6. **`vanyline-controller` reste isolé.** Il ne partage pas de code avec les autres crates (kube-rs
-   uniquement).
+6. **`vanyline-controller` ne partage QUE les types CRD.** Sa seule dépendance interne est
+   `vanyline-crds` (specs/status Owner/Project/Sandbox + derives kube) — pas de code de
+   reconciliation partagé, pas de dépendance sur `vanyline-lib`/`vanyline-tools`. Extrait de
+   `controller/src/crds.rs` (mécanique, sans changement de sémantique) pour que `vanyline-lib`
+   (feature `k8s`) puisse consommer les mêmes types sans embarquer le runtime opérateur
+   (`kube-runtime`, reconcilers).
 
 ## Session engine — `run_agent_turn`
 
@@ -93,6 +105,16 @@ pub async fn run_agent_turn(
   lui parviennent via MCP).
 - `subagent_depth_max: u8` — profondeur maximale d'imbrication pour le tool builtin `task`
   (voir plus bas).
+- `extra_mcp: Vec<(McpServer, McpSelection)>` — serveurs MCP forcés par l'hôte pour CE tour,
+  en plus de ceux résolus via les toolsets de l'agent (fournis directement, pas par nom via
+  `ctx.store` — symétrique de `local_tools`). Connectés AVANT la boucle des toolsets
+  (l'`extra_mcp` "gagne" en cas de collision de nom de serveur, même dédup que le reste).
+  Vide dans le cas général ; c'est le mécanisme de la **toolbox CLI**
+  (`vanyline run --toolbox <sandbox>` / `defaults.toolbox`, feature `k8s`) — le CLI y résout
+  l'URL MCP de la sandbox (`VnlK8sClient::sandbox_mcp_url`) et vide `local_tools` en même
+  temps, remplaçant les outils locaux par ceux de la sandbox pour tout le tour (subagents
+  inclus, `extra_mcp` est propagé au contexte imbriqué du tool `task`). Voir "Client K8s CLI"
+  plus bas.
 
 **Résolution des MCP servers** : `prefixed_mcp::connect_mcp_servers_selected` ne contacte
 QUE les serveurs référencés par les `McpSelection` des toolsets de l'agent (jamais tous les
@@ -198,10 +220,23 @@ d'erreur, exemples de trames pour chaque méthode) : `docs/rpc-protocol.md`
 
 **Modules** : `cli/src/rpc/mod.rs` (boucle stdin/stdout, writer unique via
 canal mpsc), `protocol.rs` (types serde requêtes/réponses/notifications,
-namespace d'erreur `VNL-RPC-000` à `VNL-RPC-009`), `handlers.rs`
+namespace d'erreur `VNL-RPC-000` à `VNL-RPC-010`), `handlers.rs`
 (dispatch, `ServerState`, logique par méthode). Réutilise `FsConfigStore`
 (config, tâche 02a) et `cli/src/store.rs` (conversations, format JSON
 existant, tâche 02b) tels quels — aucun nouveau stockage introduit.
+
+**Méthodes K8s** (`owners/*`, `projects/*`, `sandboxes/*`, miroir des
+commandes CLI `owner`/`project`/`sandbox` — feature `k8s`, `VNL-RPC-010`
+en cas d'erreur) : `VnlK8sClient` est construit **paresseusement**, au
+premier appel de ce type, PAS à `initialize` — un cluster injoignable ne
+doit jamais empêcher `chat/send`/`config/*` de fonctionner. Mis en cache
+dans `ServerState.k8s_client`, remis à `None` à chaque `initialize`
+(le namespace peut changer avec le workspace). **Limitation v1** : le
+namespace est résolu une seule fois par session (`defaults.namespace` du
+`config.yaml` fusionné, sinon le contexte kubeconfig courant) — pas de
+param `namespace` par appel, contrairement au `--namespace` du CLI (qui
+peut varier à chaque invocation). Détails et exemples : `docs/rpc-protocol.md`
+section "Ressources K8s".
 
 **Concurrence de `chat/send`** — la seule méthode asynchrone du protocole
 (le tour LLM peut être long) : la boucle stdio reste séquentielle pour
@@ -482,6 +517,79 @@ automatique des branches (le controller gère la plomberie git, pas le contenu),
 d'openvscode-server dans le pod. Changement de spec Sandbox = recréation du pod
 (immutable en v1).
 
+## Client K8s CLI — `vanyline-crds`, `VnlK8sClient`, toolbox
+
+Rend les Owners/Projects/Sandboxes pilotables **hors du cluster-admin** —
+`kubectl`/accès direct au cluster n'est plus le seul moyen d'agir dessus.
+Pas d'UI app/frontend pour ces objets en v1 (viendra avec la convergence
+app ↔ sandbox) : API/CLI d'abord.
+
+**`vanyline-crds`** (lib feuille, voir "Vue d'ensemble") : extraction
+mécanique des types CRD depuis `controller/src/crds.rs`, `kube` en
+`default-features = false, features = ["derive"]` — jamais `client`/
+`runtime`, sinon le CLI embarquerait la même machinerie réseau que
+l'opérateur. `service_name`/`MCP_PORT` (nommage du Service MCP d'une
+sandbox) y vivent aussi désormais — seule source de vérité pour
+`controller` (qui pose le Service) ET `vanyline-lib` (qui doit résoudre
+la même URL depuis le CLI).
+
+**`VnlK8sClient`** (`lib/src/k8s.rs`, feature Cargo `k8s` de
+`vanyline-lib`, désactivée par défaut — seul le CLI l'active) :
+- `discover(namespace_override: Option<String>)` — `kube::Config::infer()`
+  (in-cluster ou kubeconfig), erreur `VNL-K8S-001` si injoignable.
+  `namespace_override` prime sur le namespace du contexte kubeconfig
+  courant si fourni.
+- `list/get/create/delete_{owner,project,sandbox}` — CRUD générique par
+  petites fonctions privées paramétrées sur `K: kube::Resource<...>`
+  (évite la répétition x3 types x4 opérations), erreurs `VNL-K8S-002`.
+- `sandbox_mcp_url(name)` — vérifie d'abord que la sandbox existe
+  (`get_sandbox`, erreur claire plutôt qu'un échec de connexion confus
+  plus tard) puis construit `http://<service_name(name)>.<ns>.svc:<MCP_PORT>/mcp`.
+
+**Convention de test, alignée sur "Opérateur Kubernetes" ci-dessus** :
+aucun appel `Api<K>::list/get/create/delete` n'est unit-testé contre un
+cluster réel ou mocké — même principe que les reconcilers du controller.
+**Différence avec les connexions MCP** (voir "Session engine" plus haut) :
+celles-ci SONT testées avec un vrai serveur HTTP local
+(`lib/tests/mcp_connection_lifecycle.rs`) — la distinction tient à la
+légèreté de monter un serveur HTTP en local (trivial) contre celle de
+simuler une API server Kubernetes (pas d'équivalent léger disponible).
+
+**CLI** (`vanyline owner/project/sandbox list|show|create|delete`,
+`cli/src/{owner,project,sandbox}_cmd.rs`) : mêmes conventions que les
+commandes de config existantes (sortie tabulaire). `create` prend des
+flags `clap` complets par ressource (pas de `-f fichier.yaml` — jugé sans
+valeur ajoutée sur un `kubectl apply -f` direct, et chaque commande n'a
+qu'une poignée de champs). `--toolchain NAME=IMAGE` répétable pour
+`sandbox create` (`env` vide → preset controller si `NAME` est connu,
+cf. "Opérateur Kubernetes"). `resources` (`SandboxSpec`) non exposé en
+flags v1 (structure `ResourceRequirements` sans mapping raisonnable, cas
+rare — édition via `kubectl` si besoin). Namespace résolu par précédence :
+`--namespace` (flag global) > `defaults.namespace` (`config.yaml`,
+fusionné deux couches) > namespace du contexte kubeconfig courant.
+
+**RPC stdio** : `owners/*`, `projects/*`, `sandboxes/*`, voir section
+"RPC stdio" ci-dessus et `docs/rpc-protocol.md`.
+
+**Toolbox en inférence** (`vanyline run --toolbox <sandbox>` / REPL,
+`defaults.toolbox`) : résout l'URL MCP de la sandbox
+(`VnlK8sClient::sandbox_mcp_url`), construit le `SessionContext` avec
+`local_tools` vide et la sandbox injectée dans `extra_mcp` (voir "Session
+engine" ci-dessus pour le mécanisme lib). Toute la logique K8s reste dans
+`cli/src/main.rs` — `cli/src/chat.rs` reçoit une URL déjà résolue
+(`Option<String>`), ne dépend pas de K8s, reste testable sans réseau.
+CLI uniquement en v1, pas de toolbox sur `chat/send` (RPC).
+
+**Hors scope v1** : joignabilité de l'URL MCP depuis un CLI hors cluster
+(cas nominal : le CLI tourne dans le cluster, ex. pod code-server — un
+port-forward manuel fonctionne déjà pour le reste) ; auth SA TokenReview
+sur la sandbox pour ce chemin (les sandboxes tournent en `--no-auth`
+derrière NetworkPolicy — le CLI dans le cluster passe si ses
+labels/namespace le permettent, cf. "Serveur MCP" plus haut) ;
+`vanyline sandbox stop/start` — **bloqué sur WS-13** (le champ
+`suspended` n'existe pas encore sur `SandboxSpec`), voir
+`docs/features/ws12-sandbox-clients.md`.
+
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 
 Second binaire du crate `vanyline-sandbox` (`sandbox/src/bin/maint.rs`, logique dans
@@ -561,6 +669,12 @@ Décisions structurantes :
   texte (fragile, faux positifs/négatifs) — limite documentée et acceptée
   plutôt que contournée. À revisiter si une version future de `rig-core`
   expose l'information.
+- **Pas de `vanyline sandbox stop/start`** : bloqué sur WS-13 (champ
+  `suspended` absent de `SandboxSpec`), cf. section "Client K8s CLI"
+  ci-dessus et `docs/features/ws12-sandbox-clients.md`.
+- **Namespace RPC résolu une fois par session** (`owners/*`/`projects/*`/
+  `sandboxes/*`) : pas de param `namespace` par appel, contrairement au
+  `--namespace` du CLI — cf. section "RPC stdio" ci-dessus.
 - **`cargo clippy --workspace --all-targets`** est la commande utilisée par
   la CI (`clippy` job de `.github/workflows/test.yml`), pas
   `cargo clippy --workspace` seul (documenté dans `AGENTS.md`) : `--all-targets`
