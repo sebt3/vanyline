@@ -54,11 +54,13 @@ jobs:
             cargo rustc -p vanyline-lib --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
             cargo rustc -p vanyline-sandbox --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
             cargo rustc -p vanyline-tools --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
-            cargo rustc -p vanyline-crds --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation')
+            cargo rustc -p vanyline-crds --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
+            cargo rustc -p vanyline-app --bin vanyline-app -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
+            cargo rustc -p vanyline-controller --bin vanyline-controller -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation')
           TOTAL=0
           for n in $COUNT; do TOTAL=$((TOTAL + n)); done
           echo "missing_docs warnings total: $TOTAL"
-          BASELINE=421
+          BASELINE=621
           if [ "$TOTAL" -gt "$BASELINE" ]; then
             echo "::error::Regression: $TOTAL missing_docs warnings > baseline $BASELINE"
             exit 1
