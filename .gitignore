@@ -2,3 +2,5 @@ node_modules/
 target/
 frontend/dist/
 .tasks/
+coverage.json
+coverage-summary.txt
