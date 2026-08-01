@@ -45,9 +45,31 @@ Règles de production (reconciler Sandbox) :
   - DNS vers kube-dns (UDP/TCP 53) — sans quoi toute white-list est inutilisable
   - l'API server si le pod en a besoin (à confirmer : v1 non, le serveur sandbox
     n'appelle pas l'API K8s tant que TokenReview n'est pas actif)
-- La netpol est reconciliée : modifier l'egress d'un Owner met à jour les
-  netpols de toutes ses sandboxes (le reconciler Sandbox watch/requeue sur
-  Owner et Project — mécanique déjà en place pour la résolution des refs).
+- La netpol egress est un **second objet `NetworkPolicy`**, distinct de celui
+  d'ingress existant (`build_sandbox_netpol`/`netpol_name`) — conditionnel
+  (absent si aucun niveau ne déclare d'egress) alors que l'ingress est
+  inconditionnel. Comme toutes les ressources produites par le reconciler
+  Sandbox, elle porte une `ownerReference` vers la `Sandbox` : GC K8s en
+  cascade si le controller a un bug, même garantie que pod/service/job/netpol
+  ingress.
+- **Propagation d'un changement d'egress Owner/Project vers les netpols des
+  sandboxes** (correction : la version précédente de ce doc affirmait à tort
+  qu'un mécanisme de watch inter-CRD existait déjà — vérifié faux, aucun
+  `.watches()` nulle part dans `controller/src`, tout est en polling propre à
+  chaque CRD). Décision (2026-08-01) : pas de nouveau watch inter-CRD.
+  - Un changement sur `Sandbox.spec` lui-même se réconcilie déjà
+    immédiatement (watch natif kube-runtime sur sa propre CRD).
+  - Un changement sur `Owner.spec.egress` ou `Project.spec.egress` ne touche
+    pas directement l'objet Sandbox — sans action, il faudrait attendre le
+    polling existant (≤300s en `Running`, ≤15s en `Provisioning`).
+  - Pour une propagation quasi immédiate sans coût de watch supplémentaire :
+    le reconciler Owner (et Project) liste les Sandboxes concernées (Project
+    → ses Sandboxes directes ; Owner → ses Projects → leurs Sandboxes) et
+    patch une annotation de "bump" (ex. `vanyline.solidite.fr/egress-bump:
+    <timestamp>`) dessus quand son propre egress a changé — cette écriture
+    déclenche le watch natif de la Sandbox, donc son reconcile immédiat.
+    Aucun coût d'API-server supplémentaire (pas de watch permanent en plus),
+    juste une écriture ponctuelle au moment du changement réel.
 
 Fonctions pures de construction (même style que `build_sandbox_netpol`
 existant), testées sans cluster.
@@ -62,7 +84,9 @@ existant), testées sans cluster.
   (idempotence déjà en place).
 - Piloté par WS-12 (`vanyline sandbox stop|start` = patch du champ).
 - Le coût conservé d'une sandbox suspendue = son worktree sur le PVC — c'est le
-  compromis voulu (MR pas encore validée).
+  compromis voulu : `suspended` est un arrêt volontaire (ex. en attendant une
+  review de merge request), pas un nettoyage ; le worktree reste prêt pour
+  appliquer des ajustements demandés en review sans tout recloner.
 
 ## Risques et questions ouvertes
 
@@ -80,6 +104,9 @@ existant), testées sans cluster.
 1. `image-cmds` — paquets + symlink fd + build validé
 2. `crds-egress` — champ `egress` aux trois niveaux + régénération CRDs
 3. `netpol-builder` — fonctions pures union + DNS + tests
-4. `netpol-reconcile` — application/mise à jour/suppression dans le reconciler,
-   requeue sur Owner/Project
+4. `netpol-reconcile` — application/mise à jour/suppression de la netpol
+   egress dans le reconciler Sandbox (ownerReference incluse), + bump
+   d'annotation par les reconcilers Owner/Project sur leurs Sandboxes quand
+   leur propre egress change (probable découpage en sous-tâches pendant
+   l'exécution, cf. `netpol-sandbox-reconcile`/`netpol-cascade-bump`)
 5. `suspended` — champ + logique reconciler + status + tests
