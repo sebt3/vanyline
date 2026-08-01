@@ -12,6 +12,7 @@ mod owner_cmd;
 mod project_cmd;
 mod skill_cmd;
 mod toolset_cmd;
+mod sandbox_cmd;
 
 mod rpc;
 
@@ -65,6 +66,9 @@ enum Commands {
     /// Manage K8s Projects
     #[command(name = "project", subcommand)]
     K8sProject(project_cmd::Commands),
+    /// Manage K8s Sandboxes
+    #[command(name = "sandbox", subcommand)]
+    K8sSandbox(sandbox_cmd::Commands),
     /// Validate configuration (both layers)
     #[command(subcommand)]
     Config(config_cmd::Commands),
@@ -170,6 +174,7 @@ async fn main() {
         }
         Some(Commands::K8sOwner(cmd)) => run_owner_k8s(cmd, cli.namespace).await,
         Some(Commands::K8sProject(cmd)) => run_project_k8s(cmd, cli.namespace).await,
+        Some(Commands::K8sSandbox(cmd)) => run_sandbox_k8s(cmd, cli.namespace).await,
     }
 }
 
@@ -740,6 +745,96 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                 std::process::exit(1);
             });
             println!("Deleted project: {name}");
+        }
+    }
+}
+
+async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) {
+    use sandbox_cmd::Commands::*;
+    use kube::ResourceExt;
+    let client = discover_k8s_client(namespace).await;
+    match cmd {
+        List => {
+            let sandboxes = client.list_sandboxes().await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            if sandboxes.is_empty() {
+                println!("No sandboxes found.");
+            } else {
+                for s in &sandboxes {
+                    let phase = s
+                        .status
+                        .as_ref()
+                        .and_then(|st| st.phase.as_deref())
+                        .unwrap_or("-");
+                    println!(
+                        "  {} | project={} | branch={} | phase={}",
+                        s.name_any(), s.spec.project, s.spec.branch, phase
+                    );
+                }
+            }
+        }
+        Show { name } => {
+            let sandbox = client.get_sandbox(&name).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Sandbox: {}", sandbox.name_any());
+            println!("  project: {}", sandbox.spec.project);
+            println!("  branch: {}", sandbox.spec.branch);
+            println!("  image: {}", sandbox.spec.image.as_deref().unwrap_or("-"));
+            if sandbox.spec.toolchains.is_empty() {
+                println!("  toolchains: -");
+            } else {
+                println!("  toolchains:");
+                for tc in &sandbox.spec.toolchains {
+                    println!("    - {} = {}", tc.name, tc.image);
+                }
+            }
+            println!("Status:");
+            match &sandbox.status {
+                Some(status) => {
+                    println!("  phase: {}", status.phase.as_deref().unwrap_or("-"));
+                    println!("  service: {}", status.service.as_deref().unwrap_or("-"));
+                    if status.conditions.is_empty() {
+                        println!("  conditions: -");
+                    } else {
+                        println!("  conditions:");
+                        for c in &status.conditions {
+                            println!("    - {} status={} message={}", c.type_, c.status, c.message);
+                        }
+                    }
+                }
+                None => println!("  (not yet reconciled)"),
+            }
+        }
+        Create {
+            name,
+            project,
+            branch,
+            toolchains,
+            image,
+        } => {
+            let spec = vanyline_crds::SandboxSpec {
+                project,
+                branch,
+                toolchains,
+                image,
+                resources: None,
+            };
+            client.create_sandbox(&name, spec).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Created sandbox: {name}");
+        }
+        Delete { name } => {
+            client.delete_sandbox(&name).await.unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            });
+            println!("Deleted sandbox: {name}");
         }
     }
 }
