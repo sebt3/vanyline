@@ -641,6 +641,76 @@ Décisions structurantes :
   `refs/heads/*` — ne doit jamais écraser les branches locales des worktrees. C'est
   directement ce que `GET /git/unpushed` interroge (cf. section "Serveur MCP" ci-dessus).
 
+## Gouvernance qualité — jobs CI (WS-15)
+
+Quatre jobs CI (`.github/workflows/test.yml`, en plus de `test`/`fmt`/`clippy` déjà
+existants), tous adossés à un chiffre mesuré directement par le compilateur/clippy —
+jamais un script `grep`/`awk` maison qui approxime ce qu'ils mesurent déjà exactement.
+
+| Job | Rôle | Baseline (2026-08-01) | Bloquant ? |
+|---|---|---|---|
+| `clippy` (existant) | Niveau clippy défaut, `-D warnings` | 0 warning | Oui, gate historique |
+| `doc-lint` | `missing_docs` sur `lib`/`app`/`sandbox`/`tools`/`controller`/`crds` (`cli/` exclu) | 621 items non documentés | Oui, en régression uniquement |
+| `clippy-pedantic` | `clippy::pedantic`/`clippy::nursery`, workspace entier | 585 warnings | Non — annotation seulement |
+| `coverage` | `cargo-llvm-cov`, push sur `main` uniquement | 74,97 % lignes | Non — mesure seule, pas de seuil |
+
+`unwrap_used`/`expect_used` n'a plus de job dédié : les 6 crates non-cli (`lib`, `app`,
+`sandbox`, `tools`, `controller`, `crds`) sont tous en `#![deny(clippy::unwrap_used,
+clippy::expect_used)]` directement en source — le job à cliquet `unwrap-lint` qui a existé
+le temps de corriger les crates un par un a été supprimé une fois `deny` posé partout.
+
+### Quatre pièges vérifiés empiriquement (pas des suppositions)
+
+- **`#![warn(X)]` en source a une précédence absolue sur tout flag `-A`/`-D` de ligne de
+  commande** — vérifié en inversant l'ordre des flags, aucune combinaison ne permet à
+  `-A missing_docs`/`-A clippy::unwrap_used` de neutraliser un `#![warn(...)]` déjà présent
+  dans le fichier. `-D warnings` promeut ensuite ce warning en erreur bloquante. Conséquence :
+  **ne jamais poser `#![warn(clippy::X)]` ou `#![warn(missing_docs)]` en source** — les jobs
+  à cliquet (`doc-lint`, `clippy-pedantic`) activent leur lint eux-mêmes via `-W` en ligne de
+  commande à chaque invocation, sans dépendre d'un attribut en source. Seul `#![deny(...)]`
+  (l'état final, une fois un crate propre) est sans risque : il converge avec `-D warnings`
+  vers "erreur" des deux côtés, pas de précédence à arbitrer.
+- **`cargo check`/`cargo test` n'exécutent jamais les lints clippy**, y compris
+  `#![deny(clippy::X)]` — ce sont des lints clippy, pas des lints rustc ; `cargo check`/
+  `cargo build`/`cargo test` utilisent rustc seul et ignorent silencieusement tout
+  `#![deny(clippy::X)]` en source (aucune erreur, aucun warning). Seul `cargo clippy` connaît
+  et applique ces lints. **La seule validation qui vaut, après toute tâche posant un
+  `#![deny(clippy::X)]`/`#![warn(clippy::X)]`, est `cargo clippy --workspace --all-targets --
+  -D warnings`** (`--all-targets` inclus, pour couvrir aussi le code de test — un module
+  `#[cfg(test)] mod tests { ... }` qui utilise `.unwrap()` casse le `deny` sans que
+  `cargo check`/`cargo test` ne le voient jamais).
+- **La compilation incrémentale de rustc/cargo sous-compte les diagnostics de façon non
+  déterministe** — un cache incrémental tiède (hérité d'invocations précédentes avec
+  d'autres combinaisons de flags dans le même `target/`) peut sous-compter un total de
+  plusieurs centaines par rapport à un build propre (`CARGO_INCREMENTAL=0` ou `cargo clean`
+  préalable). Vérifié à deux reprises avec des écarts significatifs : `missing_docs` sur
+  `sandbox` (109 vs 169 réel), `clippy::pedantic`+`clippy::nursery` sur tout le workspace
+  (583 vs 959 réel avant les corrections unwrap). **`CARGO_INCREMENTAL=0` est obligatoire
+  dans tout job CI qui compte des warnings** (`Swatinem/rust-cache@v2` conserve le cache
+  entre les runs GitHub Actions — sans ce garde-fou, le comptage en CI serait aussi
+  instable qu'en local).
+- **`cargo clippy -p <crate> -- -W <lint>` (contrairement à `cargo rustc -p <crate> -- -W
+  <lint>`) propage les flags de lint aux dépendances internes du workspace compilées dans
+  la même invocation.** `controller` dépend de `crds` (path dependency) : sans `--no-deps`,
+  compter les warnings de `controller` comptait aussi ceux de `crds`, doublant certaines
+  occurrences. `--no-deps` est donc obligatoire pour toute mesure `cargo clippy -p <crate>`
+  dans ce projet. `cargo rustc -p <crate> -- -W missing_docs` n'a pas ce problème (vérifié :
+  résultat identique avec et sans `--no-deps`).
+
+### Limite d'outillage — Qwen et les grosses tâches
+
+Le modèle Qwen sous-jacent (`llm-exec`, context window 131K tokens) peut échouer par
+compaction de contexte sur une tâche déléguée qui touche beaucoup de fichiers volumineux,
+même bien spécifiée — la session se compacte en cours de route et finit par poser une
+question au lieu d'agir (indépendant de la permission `question: deny`, qui ne bloque que
+les appels d'outil, pas du texte de fin de tour). Observé sur une tâche couvrant `sandbox`
+et `controller` combinés (~6000 lignes de fichiers source à lire) : deux échecs malgré une
+spécification déjà complète. Scinder par crate a réduit le risque. Quand le contrat d'une
+tâche est déjà entièrement écrit et le risque de récidive élevé, appliquer directement les
+modifications plutôt que de multiplier les tentatives de délégation est plus efficace — ce
+n'est pas un problème de spécification qu'une réécriture peut résoudre, c'est une limite
+matérielle de l'outil.
+
 ## Limites connues (dette assumée, pas oubliée)
 
 - **Historique appauvri** : seul le texte user/assistant est rejoué d'un tour à l'autre
@@ -678,12 +748,12 @@ Décisions structurantes :
 - **`cargo clippy --workspace --all-targets`** est la commande utilisée par
   la CI (`clippy` job de `.github/workflows/test.yml`), pas
   `cargo clippy --workspace` seul (documenté dans `AGENTS.md`) : `--all-targets`
-  inclut aussi le code de test, jamais vérifié localement jusqu'à WS-8, ce qui
-  a révélé une vingtaine d'erreurs préexistantes (corrigées, cf. commit
-  `clippy-all-targets-cleanup`). Le pattern `MutexGuard` tenu across `.await`
-  dans les tests RPC (`isolated_data_dir()`, cf. section "RPC stdio"
-  ci-dessus) déclenche un faux positif `clippy::await_holding_lock` — `allow`
-  documenté au niveau du module de test plutôt que de restructurer les tests.
+  inclut aussi le code de test — cf. section "Gouvernance qualité — jobs CI (WS-15)"
+  ci-dessus pour les pièges découverts depuis (précédence des attributs `#![warn(...)]`,
+  `cargo check`/`cargo test` qui n'exécutent jamais les lints clippy). Le pattern
+  `MutexGuard` tenu across `.await` dans les tests RPC (`isolated_data_dir()`, cf.
+  section "RPC stdio" ci-dessus) déclenche un faux positif `clippy::await_holding_lock`
+  — `allow` documenté au niveau du module de test plutôt que de restructurer les tests.
 
 ## Workspace TypeScript (npm workspaces)
 
