@@ -24,7 +24,10 @@ FROM debian:trixie-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc libc6-dev binutils make pkg-config \
         git curl vim ca-certificates \
+        ripgrep fd-find jq procps less file tree patch diffutils \
+        unzip openssh-client python3 \
     && rm -rf /var/lib/apt/lists/*
+RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 COPY --from=builder /app/target/release/vanyline-sandbox /usr/local/bin/vanyline-sandbox
 COPY --from=builder /app/target/release/vanyline-maint /usr/local/bin/vanyline-maint
 
