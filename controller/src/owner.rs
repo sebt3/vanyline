@@ -7,11 +7,11 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, OwnerReference, Time};
-use kube::api::{Api, ObjectMeta, Patch, PatchParams};
+use kube::api::{Api, ListParams, ObjectMeta, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::{Owner, OwnerStatus};
+use vanyline_crds::{Owner, OwnerStatus, Project, Sandbox};
 use crate::error::ControllerError;
 
 /// Field manager utilisé pour tous les server-side apply du controller.
@@ -153,6 +153,41 @@ pub async fn reconcile(owner: Arc<Owner>, ctx: Arc<Context>) -> Result<Action, C
             &Patch::Merge(&patch),
         )
         .await?;
+
+    // Bump inconditionnel, 2 sauts (Owner -> ses Projects -> leurs
+    // Sandboxes) : force le reconcile immediat de toutes les Sandboxes de
+    // cet Owner. Meme logique que project.rs::apply(), cf. design
+    // ws13-sandbox-runtime section 2.
+    let projects: Api<Project> = Api::namespaced(ctx.client.clone(), &ns);
+    let project_names: Vec<String> = projects
+        .list(&ListParams::default())
+        .await?
+        .into_iter()
+        .filter(|p| p.spec.owner == owner.name_any())
+        .map(|p| p.name_any())
+        .collect();
+
+    if !project_names.is_empty() {
+        let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), &ns);
+        let bump = serde_json::json!({
+            "metadata": {
+                "annotations": {
+                    "vanyline.solidite.fr/egress-bump": k8s_openapi::jiff::Timestamp::now().to_string()
+                }
+            }
+        });
+        for sandbox in sandboxes.list(&ListParams::default()).await? {
+            if project_names.contains(&sandbox.spec.project) {
+                sandboxes
+                    .patch(
+                        &sandbox.name_any(),
+                        &PatchParams::default(),
+                        &Patch::Merge(&bump),
+                    )
+                    .await?;
+            }
+        }
+    }
 
     Ok(Action::requeue(Duration::from_secs(300)))
 }

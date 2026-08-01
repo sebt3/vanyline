@@ -10,13 +10,13 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time};
-use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
 use vanyline_crds::Project;
-use vanyline_crds::{Owner, ProjectStatus};
+use vanyline_crds::{Owner, ProjectStatus, Sandbox};
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
@@ -532,6 +532,29 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
             &Patch::Merge(&patch),
         )
         .await?;
+
+    // Bump inconditionnel : force le reconcile immediat des Sandboxes de ce
+    // Project (watch natif kube-runtime sur leur propre objet), sans watch
+    // inter-CRD permanent. Cf. design ws13-sandbox-runtime section 2.
+    let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
+    let bump = serde_json::json!({
+        "metadata": {
+            "annotations": {
+                "vanyline.solidite.fr/egress-bump": k8s_openapi::jiff::Timestamp::now().to_string()
+            }
+        }
+    });
+    for sandbox in sandboxes.list(&ListParams::default()).await? {
+        if sandbox.spec.project == project.name_any() {
+            sandboxes
+                .patch(
+                    &sandbox.name_any(),
+                    &PatchParams::default(),
+                    &Patch::Merge(&bump),
+                )
+                .await?;
+        }
+    }
 
     Ok(Action::requeue(Duration::from_secs(if cloned {
         300
