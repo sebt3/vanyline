@@ -13,7 +13,7 @@ use k8s_openapi::api::networking::v1::{
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use kube::api::{Api, ObjectMeta, Patch, PatchParams, PostParams};
+use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
@@ -778,6 +778,24 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             &Patch::Apply(&netpol),
         )
         .await?;
+
+    match build_sandbox_egress_netpol(sandbox, &owner.spec.egress, &project.spec.egress) {
+        Some(egress_netpol) => {
+            netpols
+                .patch(
+                    &netpol_egress_name(&sandbox.name_any()),
+                    &pp,
+                    &Patch::Apply(&egress_netpol),
+                )
+                .await?;
+        }
+        None => {
+            let name = netpol_egress_name(&sandbox.name_any());
+            if netpols.get_opt(&name).await?.is_some() {
+                netpols.delete(&name, &DeleteParams::default()).await?;
+            }
+        }
+    }
 
     let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
     let status = compute_status(sandbox, &phase);
