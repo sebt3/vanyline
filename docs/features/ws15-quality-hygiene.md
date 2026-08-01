@@ -231,8 +231,10 @@ Le job `clippy` existant garde son rôle de gate bloquant (niveau défaut, `-D w
 vert après la correction du finding critique — cf. "Risques"). Nouveau job
 `clippy-pedantic`, **non bloquant** au sens où il
 n'empêche pas le merge tant que le total ne régresse pas au-delà de la baseline mesurée au
-moment de la tâche (959 au 2026-08-01, mesuré à froid — à remesurer à l'exécution, le
-nombre bougera avec chaque ajout de code). Publie l'inventaire par catégorie en artifact.
+moment de la tâche (959 au 2026-08-01 avant task-04/05 ; **585 remesuré après task-05**,
+la correction des unwrap/expect et les `#[allow]` associés ayant fait baisser certains
+warnings pedantic qui se chevauchaient — remesurer à l'exécution, le nombre bougera avec
+chaque ajout de code). Publie l'inventaire par catégorie en artifact.
 
 ### Implémentation
 - `CARGO_INCREMENTAL=0 cargo clippy --workspace --all-targets --message-format=short -- -W clippy::pedantic -W clippy::nursery 2>&1 | grep -c ': warning: '`
