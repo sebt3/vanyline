@@ -438,19 +438,41 @@ trois clôtures ci-dessus : toujours vérifier que TOUTES les tâches candidates
 design ont un équivalent dans le code avant de fermer, pas seulement le backend/la
 partie la plus visible — une feature peut être "backend-complete" et rester ouverte.
 
-### ws12-sandbox-clients — client K8s CLI + toolbox (terminé, stop-start différé sur WS-13)
+### ws12-sandbox-clients — client K8s CLI + toolbox (terminé et clos)
 
 Rend les Owners/Projects/Sandboxes pilotables hors du cluster-admin :
 extraction `vanyline-crds` (types CRD, sans runtime kube), `VnlK8sClient`
 (`lib/src/k8s.rs`, feature Cargo `k8s` désactivée par défaut), commandes
-CLI `owner`/`project`/`sandbox` (`list`/`show`/`create`/`delete`),
-méthodes JSON-RPC miroir, toolbox en inférence (`--toolbox`,
+CLI `owner`/`project`/`sandbox` (`list`/`show`/`create`/`delete`,
+`sandbox stop`/`start`), méthodes JSON-RPC miroir (incl.
+`sandboxes/stop`/`sandboxes/start`), toolbox en inférence (`--toolbox`,
 `SessionContext.extra_mcp`). Détails : `docs/architecture.md` section
-"Client K8s CLI". 10 commits (crate-crds, lib-k8s, cli-owner/project/sandbox,
-rpc-owner/project/sandbox, toolbox-lib/cli), 532 → 548 tests, 0 régression
-à aucune étape. `docs/features/ws12-sandbox-clients.md` **gardé**, réduit
-au seul périmètre restant (`stop`/`start`, bloqué sur WS-13 — champ
-`suspended` absent de `SandboxSpec`, pas encore démarré).
+"Client K8s CLI". 11 commits (crate-crds, lib-k8s, cli-owner/project/sandbox,
+rpc-owner/project/sandbox, toolbox-lib/cli, stop-start), 532 → 566 tests,
+0 régression à aucune étape. `docs/features/ws12-sandbox-clients.md`
+supprimé à la clôture (2026-08-01).
+
+**Tâche `stop-start` (dernière du design, débloquée par
+[[ws13-sandbox-runtime]])** : `VnlK8sClient::set_sandbox_suspended(name,
+suspended)` — patch merge JSON ciblé sur `spec.suspended`, pas de fonction
+générique partagée avec le CRUD `list/get/create/delete` (un seul type
+appelant, abstraction prématurée). Délégation Qwen sans round de
+correction sur le code (diff conforme au contrat au premier essai), mais
+**nouvelle occurrence du mode d'échec "compaction de contexte mi-session"**
+déjà documenté sur ws15/ws13 : après avoir terminé l'implémentation, passé
+tous les tests et lancé `cargo clippy`, la session a affiché une erreur de
+dépassement de contexte du provider, puis un résumé post-compaction s'est
+arrêté sur une question de confirmation avant de committer (jamais
+répondue, session non interactive) — **aucun commit produit**, diff
+correct mais non commité. Contrairement à ws15 (grosse tâche, échec
+prévisible) et à ws13 (petite tâche, échec en cours d'édition), ici la
+compaction a frappé **après** la fin du travail utile, au moment de
+rédiger le rapport final — confirme que ce mode d'échec peut survenir à
+n'importe quelle étape de la session, pas seulement pendant l'édition de
+fichiers volumineux. Traité comme les précédents : diff vérifié
+(`git diff`, conforme ligne à ligne au contrat de la tâche), tests
+recomptés soi-même (566, +2 exact), commit fait directement par Claude
+plutôt que re-délégué.
 
 **Décisions d'architecture prises en cours de route (pas dans le design
 initial)** :
@@ -735,14 +757,11 @@ avance en parallèle. Convergence CLI ↔ app : `vscode-ext-bootstrap.md`
 prochaine étape naturelle maintenant que le RPC stdio est en place.
 
 ws12-sandbox-clients (client K8s CLI : `vanyline-crds`, `VnlK8sClient`,
-commandes owner/project/sandbox, méthodes RPC miroir, toolbox
-`--toolbox`) **partiellement** clos, même statut qu'app-harness-parity :
-tout sauf `stop`/`start` est fini et migré dans `docs/architecture.md`
-(section "Client K8s CLI") — `docs/features/ws12-sandbox-clients.md`
-gardé, réduit au seul périmètre `stop-start`. **Déblocage** : WS-13 a
-ajouté `SandboxSpec.suspended` (cf. ci-dessous) — le seul reste est le
-câblage CLI (`vanyline sandbox stop|start` = patch du champ), pas encore
-fait, prochaine étape naturelle pour clore cette feature.
+commandes owner/project/sandbox (incl. `sandbox stop|start`), méthodes RPC
+miroir, toolbox `--toolbox`) **terminée et close** — cf. section dédiée
+plus haut, détails migrés dans `docs/architecture.md` section "Client K8s
+CLI", design doc supprimé. 566 tests, `cargo clippy --workspace
+--all-targets` vert.
 
 ws15-quality-hygiene (gouvernance qualité CI : doc-lint, deny unwrap/expect
 sur les 6 crates non-cli, clippy-pedantic non bloquant, coverage baseline)
