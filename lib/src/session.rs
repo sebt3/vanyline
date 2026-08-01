@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::domain::{
-    Agent, AgentMode, McpSelection, ModelProfile, Provider, ProviderType, SkillMeta,
+    Agent, AgentMode, McpSelection, McpServer, ModelProfile, Provider, ProviderType, SkillMeta,
     SkillSelection, Toolset,
 };
 use crate::error::VnyError;
@@ -197,6 +197,16 @@ pub struct SessionContext {
     pub sink: Arc<dyn EventSink>,
     pub local_tools: HashMap<String, Arc<dyn rig_core::tool::ToolDyn>>,
     pub subagent_depth_max: u8,
+    /// Serveurs MCP forces par l'hote pour CE tour, en plus de ceux resolves
+    /// via les toolsets de l'agent — fourni directement (pas par nom via
+    /// `ctx.store`), comme `local_tools`. Vide dans le cas general ; utilise
+    /// par la toolbox CLI (`--toolbox`, tache `05b-toolbox-cli`) pour
+    /// injecter la sandbox comme serveur MCP du tour sans passer par la
+    /// config `mcp:` de l'utilisateur. Deduplie par nom de serveur contre
+    /// les serveurs des toolsets, meme mecanique que `dedupe_mcp_selections`
+    /// — connecte AVANT la boucle des toolsets pour que l'extra_mcp
+    /// "gagne" en cas de collision de nom.
+    pub extra_mcp: Vec<(McpServer, McpSelection)>,
 }
 
 /// Résultat de la résolution d'un tour, AVANT toute I/O réseau (MCP, LLM) —
@@ -341,6 +351,21 @@ pub(crate) async fn run_agent_turn_at_depth(
     let mut added_tool_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut connected_mcp_servers: std::collections::HashSet<String> =
         std::collections::HashSet::new();
+
+    for (server, selection) in &ctx.extra_mcp {
+        let selections =
+            dedupe_mcp_selections(std::slice::from_ref(selection), &mut connected_mcp_servers);
+        if selections.is_empty() {
+            continue;
+        }
+        let running = crate::prefixed_mcp::connect_mcp_servers_selected(
+            &selections,
+            std::slice::from_ref(server),
+            &handle,
+        )
+        .await?;
+        mcp_connections.extend(running);
+    }
 
     for toolset in &resolved.resolved_toolsets {
         // Local tools
@@ -682,6 +707,7 @@ mod tests {
             sink: Arc::new(NoopSink),
             local_tools: HashMap::new(),
             subagent_depth_max: 1,
+            extra_mcp: Vec::new(),
         }
     }
 

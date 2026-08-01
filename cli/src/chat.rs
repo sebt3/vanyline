@@ -131,6 +131,7 @@ fn build_session_context() -> vanyline_lib::session::SessionContext {
         sink: Arc::new(StdoutSink),
         local_tools: crate::tools::local_tools_map(),
         subagent_depth_max: 1,
+        extra_mcp: Vec::new(),
     }
 }
 

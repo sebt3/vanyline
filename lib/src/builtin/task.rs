@@ -159,6 +159,7 @@ impl ToolDyn for TaskTool {
                 sink: nested_sink,
                 local_tools: self.ctx.local_tools.clone(),
                 subagent_depth_max: self.ctx.subagent_depth_max,
+                extra_mcp: self.ctx.extra_mcp.clone(),
             };
 
             // 8. Lancer le tour imbriqué
@@ -237,6 +238,7 @@ mod tests {
                 sink: sample_sink(),
                 local_tools: std::collections::HashMap::new(),
                 subagent_depth_max: 1,
+                extra_mcp: Vec::new(),
             },
             0,
             Vec::new(),
@@ -273,6 +275,7 @@ mod tests {
                 sink: sample_sink(),
                 local_tools: std::collections::HashMap::new(),
                 subagent_depth_max: 1,
+                extra_mcp: Vec::new(),
             },
             0,
             available_agents,
@@ -297,6 +300,7 @@ mod tests {
                 sink: sample_sink(),
                 local_tools: std::collections::HashMap::new(),
                 subagent_depth_max: 1,
+                extra_mcp: Vec::new(),
             },
             0,
             Vec::new(),
@@ -354,6 +358,7 @@ mod tests {
             sink: sink.clone(),
             local_tools: std::collections::HashMap::new(),
             subagent_depth_max: 1,
+            extra_mcp: Vec::new(),
         };
         let task_tool = TaskTool::new(ctx, 1, vec![]);
 
@@ -386,6 +391,7 @@ mod tests {
             sink: sink.clone(),
             local_tools: std::collections::HashMap::new(),
             subagent_depth_max: 1,
+            extra_mcp: Vec::new(),
         };
         let task_tool = TaskTool::new(ctx, 0, vec![]);
 
@@ -418,6 +424,7 @@ mod tests {
             sink: sink.clone(),
             local_tools: std::collections::HashMap::new(),
             subagent_depth_max: 1,
+            extra_mcp: Vec::new(),
         };
         let task_tool = TaskTool::new(ctx, 0, vec![]);
 

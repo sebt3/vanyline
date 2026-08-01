@@ -716,6 +716,7 @@ async fn handle_chat_send(
             }),
             local_tools: crate::tools::local_tools_map(),
             subagent_depth_max: 1,
+            extra_mcp: Vec::new(),
         };
         let result = run_agent_turn(
             &ctx,

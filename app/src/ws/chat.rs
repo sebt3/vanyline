@@ -227,6 +227,7 @@ async fn handle_message(
         sink,
         local_tools: HashMap::new(),
         subagent_depth_max: 1,
+        extra_mcp: Vec::new(),
     };
 
     let result =
