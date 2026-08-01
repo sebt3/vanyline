@@ -285,6 +285,22 @@ Claude. Règles stabilisées :
   parte verte. Leçon : **une commande de validation documentée mais jamais
   réellement exécutée sur tout le périmètre n'est pas une garantie** — le
   premier run réel révèle souvent de la dette accumulée silencieusement.
+- **Récidive du piège `/tmp` hors whitelist** (ws13-sandbox-runtime, tâche
+  `image-cmds`, 2026-08-01) : un fichier de tâche qui demandait à Qwen
+  d'écrire un Dockerfile de validation sous `/tmp/<nom>/` (au lieu de
+  `/tmp/opencode/*`, seul préfixe `/tmp` whitelisté dans
+  `external_directory` de `implement.md`) a fait échouer le `mkdir`
+  (`auto-rejecting`) — la session ne plante pas cette fois (juste le step
+  de validation qui ne s'exécute pas), mais rien n'est commité. Déjà
+  documenté une fois pour de la *lecture* hors repo (cf. plus haut,
+  ws08) ; ici c'est de l'*écriture* d'un fichier scratch, même cause
+  racine. **Réflexe à appliquer systématiquement en rédigeant un fichier
+  de tâche** : tout chemin scratch/temporaire donné à Qwen doit être soit
+  `/tmp/opencode/*`, soit un chemin dans le repo (ex.
+  `.tasks/<feature>/scratch/`) — jamais un `/tmp/<nom-libre>/` inventé au
+  moment de la rédaction. Traité comme blocage d'outillage réel (pas un
+  bug de code) : validé et committé directement par Claude plutôt que
+  re-délégué.
 
 ### ws09-sandbox-maint-agent — vanyline-maint (terminé)
 
