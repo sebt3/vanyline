@@ -411,6 +411,13 @@ conditions réelles le 2026-07-01 sur cluster K8s 1.36.2/cri-o 1.36.1 (cf. secti
 "vanyline-maint" pour la recette elle-même). Image publiée :
 `docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1`.
 
+**Socle CLI étendu** (WS-13, 2026-08-01) : en plus du substrat natif (`gcc`/`libc6-dev`/
+`binutils`/`make`/`pkg-config`/`git`/`curl`/`vim`/`ca-certificates`), l'image embarque
+`ripgrep`, `fd-find` (symlink `fd` → `fdfind`, Debian nomme le binaire différemment),
+`jq`, `procps`, `less`, `file`, `tree`, `patch`, `diffutils`, `unzip`, `openssh-client`,
+`python3` — outils courants pour un agent LLM qui explore/édite du code. Pas d'outils
+réseau/debug (`dnsutils`, `netcat`, `strace`) tant qu'un besoin réel ne les réclame pas.
+
 ### Endpoints git — `GET /git/status` et `GET /git/unpushed` (WS-11)
 
 Deux endpoints REST (`sandbox/src/git.rs`), même middleware d'authentification que
@@ -470,7 +477,7 @@ nœuds sans contrainte de colocalisation.
 |---|---|
 | `owner.rs` | PVC home (créé ou référence `existing_pvc` vérifiée) + ServiceAccount `owner-<name>` + condition `Ready`. Pas de finalizer (rien à nettoyer côté cluster que la suppression K8s de l'Owner n'efface pas déjà via owner references). |
 | `project.rs` | PVC workspace (créé ou référence vérifiée) + Job `project-init` (clone bare + mkdir caches, une fois) + CronJob `project-fetch` (`git fetch --prune`, planning dérivé de `fetch_interval`) + finalizer (Job purge puis suppression du PVC créé — un PVC référencé n'est jamais supprimé). |
-| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches) + Service ClusterIP (port MCP) + NetworkPolicy (ingress restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
+| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches — supprimé si `spec.suspended`, cf. ci-dessous) + Service ClusterIP (port MCP) + NetworkPolicy ingress (restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`) + NetworkPolicy egress conditionnelle (WS-13, cf. ci-dessous) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
 
 Tous les Jobs git (`project.rs`/`sandbox.rs`) invoquent `vanyline-maint` (image sandbox)
 en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une commande shell
@@ -492,6 +499,55 @@ même `Volume` `workspace`, subPath `repo.git`, monté à `/workspace/repo.git` 
 chemin absolu que celui utilisé par les Jobs. Lecture-écriture (git écrit
 `HEAD`/`index`/objets). Isolation préservée : seul l'object store partagé du Project
 devient visible, jamais les worktrees des autres sandboxes.
+
+### NetworkPolicies egress à trois niveaux (WS-13)
+
+Champ `egress: Vec<EgressRule>` (`#[serde(default)]`, absent = liste vide = "ne
+déclare rien") présent aux **trois** niveaux (`OwnerSpec`, `ProjectSpec`,
+`SandboxSpec`, `vanyline-crds`). Une `EgressRule` a une `description` (obligatoire,
+auto-documentation de la white-list), soit `cidr` soit `pod_selector`/
+`namespace_selector` (exclusifs — `cidr` gagne si les deux sont renseignés,
+non validé au niveau du type, tranché à la construction de la netpol), et des
+`ports` optionnels (liste vide = tous les ports).
+
+`build_sandbox_egress_netpol` (`sandbox.rs`, pure, testée sans cluster) construit
+l'union Owner + Project + Sandbox : **`None`** si les trois listes sont vides (pas
+de netpol produite, egress libre) ; sinon une `NetworkPolicy` **distincte** de la
+netpol ingress (`sandbox-<name>-egress` vs `sandbox-<name>`), avec toujours en tête
+une règle DNS port 53 UDP+TCP **sans restriction de destination** (décision
+2026-08-01 : pas de `podSelector`/`namespaceSelector` ciblant kube-dns, pour ne
+dépendre d'aucune convention de labels du cluster — le risque d'un mauvais choix de
+label y aurait cassé silencieusement toute résolution DNS des sandboxes à egress
+restreint). `apply()` du reconciler Sandbox patch la netpol egress quand elle
+existe, la supprime explicitement sinon (transition vers "plus aucune règle" —
+contrairement à la netpol ingress, la GC par ownerReference seule ne suffit pas
+puisque l'objet doit disparaître sans que la Sandbox elle-même soit supprimée).
+
+**Propagation sans watch inter-CRD permanent** : un changement sur `Sandbox.spec`
+se réconcilie déjà immédiatement (watch natif kube-runtime). Pour qu'un changement
+sur `Owner.spec.egress`/`Project.spec.egress` se propage aussi vite sans watch
+permanent supplémentaire, `owner.rs::reconcile()` et `project.rs::apply()` patchent,
+à **chaque** reconcile (inconditionnellement, pas de détection de changement — choix
+délibéré, cohérent avec le reste du controller qui ne diff jamais rien nulle part),
+une annotation de bump (`vanyline.solidite.fr/egress-bump`, valeur = timestamp) sur
+les Sandboxes concernées (directes pour Project, via ses Projects pour Owner) — cette
+écriture déclenche leur propre watch, donc leur reconcile immédiat. Coût borné par
+l'intervalle de requeue déjà en place (300s), pas un watch permanent additionnel.
+
+### Suspension manuelle (WS-13)
+
+`SandboxSpec.suspended: bool` (défaut `false`). `true` → le reconciler supprime le
+**Pod** uniquement (worktree/PVC/Service/NetworkPolicies conservés), `status.phase`
+devient `"Suspended"` (condition `Ready: False`, reason `Suspended` — distinct de
+`NotRunning` pour ne pas confondre arrêt volontaire et échec/provisioning). `false` →
+le Pod est recréé ; le Job checkout ne re-tourne pas s'il a déjà réussi (mécanique
+d'idempotence déjà en place, inchangée) — c'est le worktree conservé qui permet une
+reprise rapide. Le Job checkout n'est jamais conditionné par `suspended` : même une
+Sandbox créée directement `suspended: true` obtient son worktree. Pas d'auto-arrêt
+sur inactivité (décision 2026-07-12 : manuel uniquement). Requeue 300s en régime
+stable (`Running` et `Suspended`), comme pour le reste du reconciler. Piloté par
+`vanyline sandbox stop|start` — commandes CLI **pas encore câblées** : périmètre
+restant de `ws12-sandbox-clients`, qui n'attendait que ce champ.
 
 **Tests** : unitaires purs sur les builders (spec → Pod/Job/Service/NetworkPolicy
 attendus, sans cluster) — pas de mock de l'API K8s. `--crds` (flag CLI) imprime les
@@ -515,7 +571,10 @@ réconcilié), pas d'ingress/JWT sur la Sandbox (le frontend n'y accède pas enc
 de webhook d'admission (validation par schéma CRD uniquement), pas de merge/push
 automatique des branches (le controller gère la plomberie git, pas le contenu), pas
 d'openvscode-server dans le pod. Changement de spec Sandbox = recréation du pod
-(immutable en v1).
+(immutable en v1). Pas de résolution FQDN dans les règles egress (limite K8s :
+`ipBlock`/selectors, pas de nom de domaine — si le besoin FQDN devient réel, chantier
+CNI type CiliumNetworkPolicy, hors scope v1). Pas d'auto-arrêt sur inactivité
+(`suspended` est manuel uniquement, décision 2026-07-12).
 
 ## Client K8s CLI — `vanyline-crds`, `VnlK8sClient`, toolbox
 
