@@ -1,6 +1,3 @@
-#![warn(clippy::unwrap_used, clippy::expect_used)]
-#![warn(missing_docs)]
-
 mod error;
 mod owner;
 mod project;

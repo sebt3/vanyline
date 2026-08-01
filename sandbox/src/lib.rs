@@ -1,6 +1,3 @@
-#![warn(clippy::unwrap_used, clippy::expect_used)]
-#![warn(missing_docs)]
-
 pub mod auth;
 pub mod config;
 pub mod git;

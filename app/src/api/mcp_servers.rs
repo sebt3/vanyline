@@ -151,6 +151,7 @@ fn validate_server_type(t: &str) -> Result<(), AppError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{

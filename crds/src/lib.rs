@@ -1,5 +1,4 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
-#![warn(missing_docs)]
 
 use std::collections::BTreeMap;
 
@@ -155,6 +154,7 @@ pub fn service_name(sandbox_name: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use serde_yaml::Value;
 

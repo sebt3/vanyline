@@ -52,12 +52,12 @@ async fn handler_login(State(state): State<AppState>) -> Result<impl IntoRespons
         encrypted_value
     );
 
-    Ok(Response::builder()
+    Response::builder()
         .status(StatusCode::FOUND)
         .header("Location", url.as_str())
         .header(SET_COOKIE, set_cookie_pending)
         .body(axum::body::Body::empty())
-        .map_err(|e| AppError::OidcError(e.to_string()))?)
+        .map_err(|e| AppError::OidcError(e.to_string()))
 }
 
 async fn handler_callback(
@@ -147,6 +147,7 @@ async fn handler_logout() -> Result<impl IntoResponse, AppError> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
