@@ -8,8 +8,8 @@ use k8s_openapi::api::core::v1::{
     PodSpec, Probe, Service, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
-    NetworkPolicy, NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort,
-    NetworkPolicySpec,
+    IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
+    NetworkPolicyPort, NetworkPolicySpec,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -18,7 +18,10 @@ use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::{MCP_PORT, Owner, Project, Sandbox, SandboxStatus, Toolchain, service_name};
+use vanyline_crds::{
+    EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus, Toolchain,
+    service_name,
+};
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
@@ -351,6 +354,13 @@ pub fn netpol_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }
 
+/// Nom de la NetworkPolicy egress — objet distinct de la netpol ingress
+/// (`netpol_name`), car elle est conditionnelle (absente si aucun niveau ne
+/// déclare d'egress) alors que l'ingress est toujours produite.
+pub fn netpol_egress_name(sandbox_name: &str) -> String {
+    format!("sandbox-{sandbox_name}-egress")
+}
+
 /// Job une fois : crée le worktree de la branche (le crée depuis
 /// `default_branch` si fourni, sinon `vanyline-maint` le résolve par
 /// `symbolic-ref --short HEAD`).
@@ -468,6 +478,72 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
     }
 }
 
+/// Convertit une `EgressRule` en `NetworkPolicyPeer`. `cidr` et
+/// `pod_selector`/`namespace_selector` sont exclusifs au niveau du type
+/// CRD (non validé à la construction, cf. `vanyline-crds`) — ici la
+/// précédence est explicite : si `cidr` est renseigné, il gagne (ipBlock),
+/// `pod_selector`/`namespace_selector` sont ignorés même si présents.
+fn egress_rule_to_peer(rule: &EgressRule) -> NetworkPolicyPeer {
+    if let Some(cidr) = &rule.cidr {
+        NetworkPolicyPeer {
+            ip_block: Some(IPBlock {
+                cidr: cidr.clone(),
+                except: None,
+            }),
+            pod_selector: None,
+            namespace_selector: None,
+        }
+    } else {
+        NetworkPolicyPeer {
+            ip_block: None,
+            pod_selector: rule.pod_selector.clone(),
+            namespace_selector: rule.namespace_selector.clone(),
+        }
+    }
+}
+
+/// Convertit les `EgressPort` d'une `EgressRule` en `NetworkPolicyPort`.
+/// Liste vide => `None` (pas de restriction de port, sémantique K8s :
+/// "If this field is empty or missing, this rule matches all ports").
+/// `protocol: None` sur un `EgressPort` => `"TCP"` (défaut K8s explicite,
+/// documenté dans `EgressPort::protocol`).
+fn egress_ports_to_netpol_ports(ports: &[EgressPort]) -> Option<Vec<NetworkPolicyPort>> {
+    if ports.is_empty() {
+        return None;
+    }
+    Some(
+        ports
+            .iter()
+            .map(|p| NetworkPolicyPort {
+                port: Some(IntOrString::Int(p.port)),
+                protocol: Some(p.protocol.clone().unwrap_or_else(|| "TCP".to_string())),
+                end_port: None,
+            })
+            .collect(),
+    )
+}
+
+/// Règle egress DNS toujours présente dès qu'au moins une netpol egress est
+/// produite — sans restriction de destination (décision 2026-08-01, cf.
+/// contexte de cette tâche), seulement le port 53 UDP+TCP.
+fn dns_egress_rule() -> NetworkPolicyEgressRule {
+    NetworkPolicyEgressRule {
+        to: None,
+        ports: Some(vec![
+            NetworkPolicyPort {
+                port: Some(IntOrString::Int(53)),
+                protocol: Some("UDP".to_string()),
+                end_port: None,
+            },
+            NetworkPolicyPort {
+                port: Some(IntOrString::Int(53)),
+                protocol: Some("TCP".to_string()),
+                end_port: None,
+            },
+        ]),
+    }
+}
+
 /// NetworkPolicy : cible le Pod de cette Sandbox, autorise l'ingress
 /// uniquement depuis les pods du même namespace portant
 /// `vanyline.solidite.fr/owner: <owner_name>` (même Owner — code-server,
@@ -518,6 +594,63 @@ pub fn build_sandbox_netpol(sandbox: &Sandbox, owner_name: &str) -> NetworkPolic
             ..Default::default()
         }),
     }
+}
+
+/// Construit la NetworkPolicy egress d'une Sandbox à partir de l'union des
+/// règles `owner_egress` + `project_egress` + `sandbox.spec.egress` (dans
+/// cet ordre). `None` si les trois sont vides — pas de netpol egress
+/// produite (l'egress du pod reste libre, cf. design section 2). Sinon,
+/// une règle par `EgressRule` de l'union, plus toujours `dns_egress_rule()`
+/// en tête. `ownerReference` vers la Sandbox (GC en cascade), même
+/// pod_selector ciblant `vanyline.solidite.fr/sandbox` que la netpol
+/// ingress (`build_sandbox_netpol`).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_sandbox_egress_netpol(
+    sandbox: &Sandbox,
+    owner_egress: &[EgressRule],
+    project_egress: &[EgressRule],
+) -> Option<NetworkPolicy> {
+    let all_rules: Vec<&EgressRule> = owner_egress
+        .iter()
+        .chain(project_egress.iter())
+        .chain(sandbox.spec.egress.iter())
+        .collect();
+
+    if all_rules.is_empty() {
+        return None;
+    }
+
+    let mut egress_rules = vec![dns_egress_rule()];
+    egress_rules.extend(all_rules.iter().map(|rule| NetworkPolicyEgressRule {
+        to: Some(vec![egress_rule_to_peer(rule)]),
+        ports: egress_ports_to_netpol_ports(&rule.ports),
+    }));
+
+    let mut pod_selector_labels = BTreeMap::new();
+    pod_selector_labels.insert(
+        "vanyline.solidite.fr/sandbox".to_string(),
+        sandbox.name_any(),
+    );
+
+    Some(NetworkPolicy {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(netpol_egress_name(&sandbox.name_any())),
+            namespace: sandbox.namespace(),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(NetworkPolicySpec {
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(pod_selector_labels),
+                ..Default::default()
+            }),
+            policy_types: Some(vec!["Egress".to_string()]),
+            egress: Some(egress_rules),
+            ..Default::default()
+        }),
+    })
 }
 
 /// Status attendu : `service`, condition `Ready` reflétant `phase == "Running"`.
@@ -1586,5 +1719,344 @@ mod tests {
 
         // read_only must NOT be Some(true)
         assert_ne!(bare_repo_mount.read_only, Some(true));
+    }
+
+    // ===== netpol_egress_name =====
+
+    #[test]
+    fn netpol_egress_name_format() {
+        assert_eq!(
+            netpol_egress_name("demo-branch"),
+            "sandbox-demo-branch-egress"
+        );
+    }
+
+    // ===== build_sandbox_egress_netpol =====
+
+    #[test]
+    fn build_sandbox_egress_netpol_none_when_all_empty() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress: &[EgressRule] = &[];
+        let project_egress: &[EgressRule] = &[];
+
+        let result = build_sandbox_egress_netpol(&sandbox, owner_egress, project_egress);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_dns_always_present() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "test".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+        let project_egress: &[EgressRule] = &[];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, project_egress)
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+        assert!(egress.len() >= 2, "should have at least DNS + owner rule");
+
+        // First rule is DNS: to = None, ports must include 53 UDP and 53 TCP
+        let dns_rule = &egress[0];
+        assert!(dns_rule.to.is_none(), "DNS rule must have no destination restriction");
+        let dns_ports = dns_rule.ports.as_ref().expect("DNS rule must have ports");
+        assert!(dns_ports.len() >= 2, "DNS rule must have UDP and TCP");
+
+        let has_udp = dns_ports.iter().any(|p| {
+            p.port == Some(IntOrString::Int(53)) && p.protocol.as_deref() == Some("UDP")
+        });
+        let has_tcp = dns_ports.iter().any(|p| {
+            p.port == Some(IntOrString::Int(53)) && p.protocol.as_deref() == Some("TCP")
+        });
+        assert!(has_udp, "DNS rule must have 53/UDP");
+        assert!(has_tcp, "DNS rule must have 53/TCP");
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_union_three_levels() {
+        let mut sandbox = make_sandbox("demo-branch", vec![], None);
+        sandbox.spec.egress = vec![EgressRule {
+            description: "sandbox rule".into(),
+            cidr: Some("10.0.2.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let owner_egress = vec![EgressRule {
+            description: "owner rule".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+        let project_egress = vec![EgressRule {
+            description: "project rule".into(),
+            cidr: Some("10.0.1.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &project_egress)
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+        // DNS + 3 rules = 4
+        assert_eq!(egress.len(), 4);
+
+        // Collect all CIDRs from the non-DNS rules (egress[1..4])
+        let mut found_cidrs: Vec<String> = egress[1..]
+            .iter()
+            .filter_map(|rule| {
+                rule.to.as_ref()
+                    .and_then(|peers| peers.first())
+                    .and_then(|peer| peer.ip_block.as_ref())
+                    .map(|ip| ip.cidr.clone())
+            })
+            .collect();
+        found_cidrs.sort();
+
+        assert!(found_cidrs.contains(&"10.0.0.0/24".to_string()));
+        assert!(found_cidrs.contains(&"10.0.1.0/24".to_string()));
+        assert!(found_cidrs.contains(&"10.0.2.0/24".to_string()));
+        assert_eq!(found_cidrs.len(), 3);
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_cidr_rule() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "cidr rule".into(),
+            cidr: Some("10.42.7.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+
+        // The CIDR rule is egress[1] (second after DNS)
+        let cidr_rule = &egress[1];
+        let peer = cidr_rule.to.as_ref().expect("rule must have to").first().expect("must have one peer");
+        let ip_block = peer.ip_block.as_ref().expect("peer must have ip_block");
+        assert_eq!(ip_block.cidr, "10.42.7.0/24");
+        assert!(peer.pod_selector.is_none());
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_selector_rule() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "selector rule".into(),
+            cidr: None,
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([("app".into(), "registry".into())])),
+                ..Default::default()
+            }),
+            namespace_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([(
+                    "kubernetes.io/metadata.name".into(),
+                    "tools".into(),
+                )])),
+                ..Default::default()
+            }),
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+
+        let selector_rule = &egress[1];
+        let peer = selector_rule.to.as_ref().expect("rule must have to").first().expect("must have one peer");
+        assert!(peer.ip_block.is_none());
+
+        let pod_sel = peer.pod_selector.as_ref().expect("pod_selector must be set");
+        let pod_labels = pod_sel.match_labels.as_ref().expect("pod_selector match_labels");
+        assert_eq!(pod_labels.get("app"), Some(&"registry".to_string()));
+
+        let ns_sel = peer.namespace_selector.as_ref().expect("namespace_selector must be set");
+        let ns_labels = ns_sel.match_labels.as_ref().expect("namespace_selector match_labels");
+        assert_eq!(
+            ns_labels.get("kubernetes.io/metadata.name"),
+            Some(&"tools".to_string())
+        );
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_cidr_precedence_over_selector() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "both cidr and selector".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([("app".into(), "registry".into())])),
+                ..Default::default()
+            }),
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+
+        let rule = &egress[1];
+        let peer = rule.to.as_ref().expect("rule must have to").first().expect("must have one peer");
+        let ip_block = peer.ip_block.as_ref().expect("cidr wins, ip_block must be set");
+        assert_eq!(ip_block.cidr, "10.0.0.0/24");
+        assert!(peer.pod_selector.is_none(), "pod_selector must be None when cidr wins");
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_ports_restriction() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "port rule".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![EgressPort {
+                port: 443,
+                protocol: Some("TCP".into()),
+            }],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+        let rule = &egress[1];
+
+        let ports = rule.ports.as_ref().expect("rule must have ports");
+        assert_eq!(ports.len(), 1);
+        assert_eq!(
+            *ports,
+            vec![NetworkPolicyPort {
+                port: Some(IntOrString::Int(443)),
+                protocol: Some("TCP".to_string()),
+                end_port: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_empty_ports_means_all_ports() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "no ports".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+
+        // Rule at index 1 (second after DNS) has no port restriction
+        let rule = &egress[1];
+        assert!(rule.ports.is_none(), "empty ports => None (all ports allowed)");
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_protocol_defaults_to_tcp() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "tcp default".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![EgressPort {
+                port: 8080,
+                protocol: None,
+            }],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+
+        let rule = &egress[1];
+        let ports = rule.ports.as_ref().expect("rule must have ports");
+        assert_eq!(
+            ports[0].protocol,
+            Some("TCP".to_string()),
+            "protocol should default to TCP"
+        );
+    }
+
+    #[test]
+    fn build_sandbox_egress_netpol_shape() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "simple rule".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
+            .expect("should return Some");
+
+        assert_eq!(
+            netpol.metadata.name,
+            Some(netpol_egress_name("demo-branch"))
+        );
+
+        // Verify pod_selector matches sandbox
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let pod_sel = spec
+            .pod_selector
+            .as_ref()
+            .expect("should have pod_selector");
+        let labels = pod_sel
+            .match_labels
+            .as_ref()
+            .expect("should have match_labels");
+        assert_eq!(
+            labels
+                .get("vanyline.solidite.fr/sandbox")
+                .map(String::as_str),
+            Some("demo-branch")
+        );
+
+        assert_eq!(
+            spec.policy_types,
+            Some(vec!["Egress".to_string()])
+        );
+
+        // Verify owner_references
+        let refs = netpol
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, "Sandbox");
+        assert_eq!(refs[0].name, "demo-branch");
     }
 }
