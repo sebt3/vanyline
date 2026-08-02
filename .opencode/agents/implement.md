@@ -1,13 +1,13 @@
 ---
 description: Implémente une tâche à partir d'un fichier de tâche structuré contenant des prototypes de code
-mode: primary
+mode: subagent
+model: strix/qwen3.6:35b-a3b
 temperature: 0.3
 color: success
 permission:
   "*": allow
   doom_loop: ask
   external_directory:
-    "*": ask
     /home/coder/.config/opencode/*: allow
     /home/coder/.local/share/opencode/tool-output/*: allow
     /tmp/opencode/*: allow
