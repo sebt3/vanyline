@@ -130,6 +130,7 @@ mod tests {
             agent: None,
             title: None,
             messages: Vec::new(),
+            todo: None,
         }
     }
 

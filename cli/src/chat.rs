@@ -408,6 +408,7 @@ async fn resolve_context(
         agent: Some(agent_name.clone()),
         title: None,
         messages: Vec::new(),
+        todo: None,
     };
 
     let (conv, is_new) = if continue_active {

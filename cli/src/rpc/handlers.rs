@@ -454,6 +454,7 @@ fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
         agent: params.agent,
         title: params.title,
         messages: Vec::new(),
+        todo: None,
     };
     match store::save_conversation(&conv) {
         Ok(()) => {

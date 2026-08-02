@@ -239,6 +239,7 @@ async fn run_conversation(cmd: conversation::Commands) {
                 agent,
                 title,
                 messages: Vec::new(),
+                todo: None,
             };
             store::save_conversation(&conv).expect("failed to save conversation");
             println!("Created conversation: {}", id);
