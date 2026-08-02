@@ -73,7 +73,12 @@ async fn run_one_shot(
         println!("Session: {}", conv.id);
     }
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref(), json, model.as_deref());
+    let ctx = build_session_context(
+        toolbox_mcp_url.as_deref(),
+        json,
+        model.as_deref(),
+        conv.todo.clone(),
+    );
     let workspace_context = read_workspace_context();
 
     let turn = process_turn(
@@ -103,6 +108,7 @@ async fn run_one_shot(
                 tool_calls: None,
             });
             conv.messages.push(result_to_assistant_message(result));
+            conv.todo = read_todo_state(&ctx.todo_state);
             store::save_conversation(&conv).ok();
             if !json {
                 print_git_diff_stat();
@@ -114,11 +120,7 @@ async fn run_one_shot(
     }
 }
 
-async fn run_repl(
-    agent: Option<String>,
-    continue_active: bool,
-    toolbox_mcp_url: Option<String>,
-) {
+async fn run_repl(agent: Option<String>, continue_active: bool, toolbox_mcp_url: Option<String>) {
     let (mut conv, agent_name, _) = resolve_context(agent, continue_active).await;
     println!("vanyline REPL (Ctrl-D to exit)");
     println!("Agent: {agent_name}");
@@ -129,7 +131,7 @@ async fn run_repl(
     }
     println!();
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref(), false, None);
+    let ctx = build_session_context(toolbox_mcp_url.as_deref(), false, None, conv.todo.clone());
     let workspace_context = read_workspace_context();
 
     loop {
@@ -160,6 +162,7 @@ async fn run_repl(
                     tool_calls: None,
                 });
                 conv.messages.push(result_to_assistant_message(result));
+                conv.todo = read_todo_state(&ctx.todo_state);
                 store::save_conversation(&conv).ok();
             }
             Err(_) => break,
@@ -168,16 +171,27 @@ async fn run_repl(
     println!();
 }
 
+/// Lit l'état todo courant du handle partagé — même logique de récupération
+/// sur poison que `lib/src/builtin/todo.rs` (`unwrap_or_else(|e| e.into_inner())`) :
+/// un panic dans un tool call ne doit pas empêcher de persister l'état posé
+/// avant le panic.
+fn read_todo_state(state: &std::sync::Mutex<Option<String>>) -> Option<String> {
+    state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Construit le `SessionContext` de la session CLI. `toolbox_mcp_url` :
 /// `Some(url)` -> `local_tools` vide + la sandbox injectee comme serveur
 /// MCP nomme "toolbox" dans `extra_mcp` (design "Toolbox en inference" de
 /// ws12-sandbox-clients) ; `None` -> comportement inchange (local_tools du
 /// CLI, `extra_mcp` vide). Le paramètre `json` choisit le sink de sortie :
 /// `JsonSink` (ligne JSON par événement) ou `StdoutSink` (sortie lisible).
+/// `todo_seed` : valeur optionnelle issue de `Conversation.todo` pour le
+/// resume d'une conversation existante (`-c/--continue`).
 fn build_session_context(
     toolbox_mcp_url: Option<&str>,
     json: bool,
     model_override: Option<&str>,
+    todo_seed: Option<String>,
 ) -> vanyline_lib::session::SessionContext {
     let sink: Arc<dyn vanyline_lib::event::EventSink> = if json {
         Arc::new(JsonSink)
@@ -203,7 +217,7 @@ fn build_session_context(
                 },
             )],
             model_override: model_override.map(str::to_string),
-            todo_state: Arc::new(std::sync::Mutex::new(None)),
+            todo_state: Arc::new(std::sync::Mutex::new(todo_seed)),
         },
         None => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
@@ -212,7 +226,7 @@ fn build_session_context(
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
             model_override: model_override.map(str::to_string),
-            todo_state: Arc::new(std::sync::Mutex::new(None)),
+            todo_state: Arc::new(std::sync::Mutex::new(todo_seed)),
         },
     }
 }
@@ -614,7 +628,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(None, false, None);
+        let ctx = build_session_context(None, false, None, None);
         assert!(!ctx.local_tools.is_empty());
         assert!(ctx.local_tools.contains_key("read_file"));
         assert!(ctx.extra_mcp.is_empty());
@@ -629,7 +643,12 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), false, None);
+        let ctx = build_session_context(
+            Some("http://sandbox-demo.dev.svc:3000/mcp"),
+            false,
+            None,
+            None,
+        );
         assert!(ctx.local_tools.is_empty());
         assert_eq!(ctx.extra_mcp.len(), 1);
         let (server, selection) = &ctx.extra_mcp[0];
@@ -648,7 +667,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(None, true, None);
+        let ctx = build_session_context(None, true, None, None);
         assert!(!ctx.local_tools.is_empty());
         assert!(ctx.local_tools.contains_key("read_file"));
         assert!(ctx.extra_mcp.is_empty());
@@ -664,7 +683,12 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), true, None);
+        let ctx = build_session_context(
+            Some("http://sandbox-demo.dev.svc:3000/mcp"),
+            true,
+            None,
+            None,
+        );
         assert!(ctx.local_tools.is_empty());
         assert_eq!(ctx.extra_mcp.len(), 1);
         let (server, selection) = &ctx.extra_mcp[0];
@@ -718,5 +742,49 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "hello world\n").unwrap();
         let out = git_diff_stat(&repo).unwrap();
         assert!(out.contains("a.txt"));
+    }
+
+    // 13. build_session_context_seeds_todo_from_conversation
+    #[test]
+    fn build_session_context_seeds_todo_from_conversation() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx =
+            build_session_context(None, false, None, Some("[{\"content\":\"x\"}]".to_string()));
+        assert_eq!(
+            ctx.todo_state.lock().unwrap().clone(),
+            Some("[{\"content\":\"x\"}]".to_string())
+        );
+    }
+
+    // 14. build_session_context_no_seed_when_none
+    #[test]
+    fn build_session_context_no_seed_when_none() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(None, false, None, None);
+        assert!(ctx.todo_state.lock().unwrap().is_none());
+    }
+
+    // 15. read_todo_state_returns_value
+    #[test]
+    fn read_todo_state_returns_value() {
+        let m = std::sync::Mutex::new(Some("x".to_string()));
+        assert_eq!(read_todo_state(&m), Some("x".to_string()));
+    }
+
+    // 16. read_todo_state_returns_none
+    #[test]
+    fn read_todo_state_returns_none() {
+        let m = std::sync::Mutex::new(None);
+        assert_eq!(read_todo_state(&m), None);
     }
 }
