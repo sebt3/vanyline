@@ -37,13 +37,15 @@ pub async fn run(
     toolbox_mcp_url: Option<String>,
     timeout_secs: Option<u64>,
     json: bool,
+    model: Option<String>,
 ) {
     config::ensure_config_dir();
     if !json {
         print_workspace_sources().await;
     }
     if let Some(msg) = message {
-        run_one_shot(&msg, agent, continue_active, toolbox_mcp_url, timeout_secs, json).await;
+        run_one_shot(&msg, agent, continue_active, toolbox_mcp_url, timeout_secs, json, model)
+            .await;
         return;
     }
     run_repl(agent, continue_active, toolbox_mcp_url).await;
@@ -56,13 +58,14 @@ async fn run_one_shot(
     toolbox_mcp_url: Option<String>,
     timeout_secs: Option<u64>,
     json: bool,
+    model: Option<String>,
 ) {
     let (mut conv, agent_name, is_new) = resolve_context(agent, continue_active).await;
     if is_new && !json {
         println!("Session: {}", conv.id);
     }
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref(), json);
+    let ctx = build_session_context(toolbox_mcp_url.as_deref(), json, model.as_deref());
     let workspace_context = read_workspace_context();
 
     let turn = process_turn(
@@ -115,7 +118,7 @@ async fn run_repl(
     }
     println!();
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref(), false);
+    let ctx = build_session_context(toolbox_mcp_url.as_deref(), false, None);
     let workspace_context = read_workspace_context();
 
     loop {
@@ -163,6 +166,7 @@ async fn run_repl(
 fn build_session_context(
     toolbox_mcp_url: Option<&str>,
     json: bool,
+    model_override: Option<&str>,
 ) -> vanyline_lib::session::SessionContext {
     let sink: Arc<dyn vanyline_lib::event::EventSink> = if json {
         Arc::new(JsonSink)
@@ -187,7 +191,7 @@ fn build_session_context(
                     tools: vec![],
                 },
             )],
-            model_override: None,
+            model_override: model_override.map(str::to_string),
         },
         None => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
@@ -195,7 +199,7 @@ fn build_session_context(
             local_tools: crate::tools::local_tools_map(),
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
-            model_override: None,
+            model_override: model_override.map(str::to_string),
         },
     }
 }
@@ -558,7 +562,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(None, false);
+        let ctx = build_session_context(None, false, None);
         assert!(!ctx.local_tools.is_empty());
         assert!(ctx.local_tools.contains_key("read_file"));
         assert!(ctx.extra_mcp.is_empty());
@@ -573,7 +577,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), false);
+        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), false, None);
         assert!(ctx.local_tools.is_empty());
         assert_eq!(ctx.extra_mcp.len(), 1);
         let (server, selection) = &ctx.extra_mcp[0];
@@ -592,7 +596,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(None, true);
+        let ctx = build_session_context(None, true, None);
         assert!(!ctx.local_tools.is_empty());
         assert!(ctx.local_tools.contains_key("read_file"));
         assert!(ctx.extra_mcp.is_empty());
@@ -608,7 +612,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), true);
+        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), true, None);
         assert!(ctx.local_tools.is_empty());
         assert_eq!(ctx.extra_mcp.len(), 1);
         let (server, selection) = &ctx.extra_mcp[0];

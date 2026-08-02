@@ -45,6 +45,9 @@ enum Commands {
     /// One-shot message to an LLM agent
     Run {
         message: String,
+        /// Override du modèle de l'agent pour ce run (sans toucher la config)
+        #[arg(short = 'm', long = "model")]
+        model: Option<String>,
         /// Timeout global du run, en secondes (0 = aucune limite)
         #[arg(short = 't', long = "timeout")]
         timeout: Option<u64>,
@@ -168,9 +171,10 @@ async fn main() {
         None => {
             let toolbox_mcp_url =
                 resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
-            chat::run(None, cli.agent, cli.continue_active, toolbox_mcp_url, None, false).await
+            chat::run(None, cli.agent, cli.continue_active, toolbox_mcp_url, None, false, None)
+                .await
         }
-        Some(Commands::Run { message, timeout, json }) => {
+        Some(Commands::Run { message, model, timeout, json }) => {
             let toolbox_mcp_url =
                 resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
             chat::run(
@@ -180,6 +184,7 @@ async fn main() {
                 toolbox_mcp_url,
                 timeout,
                 json,
+                model,
             )
             .await
         }
@@ -912,10 +917,11 @@ mod tests {
         let cli = Cli::try_parse_from(["vanyline", "run", "hello", "-t", "5"]).unwrap();
         match cli {
             Cli {
-                command: Some(Commands::Run { message, timeout, json }),
+                command: Some(Commands::Run { message, model, timeout, json }),
                 ..
             } => {
                 assert_eq!(message, "hello");
+                assert_eq!(model, None);
                 assert_eq!(timeout, Some(5));
                 assert!(!json);
             }
@@ -929,10 +935,11 @@ mod tests {
         let cli = Cli::try_parse_from(["vanyline", "run", "hello", "--json"]).unwrap();
         match cli {
             Cli {
-                command: Some(Commands::Run { message, timeout, json }),
+                command: Some(Commands::Run { message, model, timeout, json }),
                 ..
             } => {
                 assert_eq!(message, "hello");
+                assert_eq!(model, None);
                 assert_eq!(timeout, None);
                 assert!(json);
             }
@@ -946,10 +953,11 @@ mod tests {
         let cli = Cli::try_parse_from(["vanyline", "run", "hello"]).unwrap();
         match cli {
             Cli {
-                command: Some(Commands::Run { message, timeout, json }),
+                command: Some(Commands::Run { message, model, timeout, json }),
                 ..
             } => {
                 assert_eq!(message, "hello");
+                assert_eq!(model, None);
                 assert_eq!(timeout, None);
                 assert!(!json);
             }
@@ -962,5 +970,24 @@ mod tests {
     fn run_rejects_unknown_flag() {
         let result = Cli::try_parse_from(["vanyline", "run", "hello", "--nope"]);
         assert!(result.is_err());
+    }
+
+    // 5. run_model_flag_parses
+    #[test]
+    fn run_model_flag_parses() {
+        let cli =
+            Cli::try_parse_from(["vanyline", "run", "hello", "-m", "qwen"]).unwrap();
+        match cli {
+            Cli {
+                command: Some(Commands::Run { message, model, timeout, json }),
+                ..
+            } => {
+                assert_eq!(message, "hello");
+                assert_eq!(model, Some("qwen".to_string()));
+                assert_eq!(timeout, None);
+                assert!(!json);
+            }
+            _ => panic!("expected Commands::Run"),
+        }
     }
 }
