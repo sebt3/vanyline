@@ -187,6 +187,7 @@ fn build_session_context(
                     tools: vec![],
                 },
             )],
+            model_override: None,
         },
         None => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
@@ -194,6 +195,7 @@ fn build_session_context(
             local_tools: crate::tools::local_tools_map(),
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
+            model_override: None,
         },
     }
 }

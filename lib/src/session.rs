@@ -207,6 +207,11 @@ pub struct SessionContext {
     /// — connecte AVANT la boucle des toolsets pour que l'extra_mcp
     /// "gagne" en cas de collision de nom.
     pub extra_mcp: Vec<(McpServer, McpSelection)>,
+    /// Override du modele pour CE tour, fourni par l'hote (ex. flag CLI
+    /// `run -m/--model`) : remplace le `model` de l'agent pour la resolution
+    /// agent -> modele, sans toucher la config. `None` (cas general) ->
+    /// comportement inchange (le modele de l'agent).
+    pub model_override: Option<String>,
 }
 
 /// Résultat de la résolution d'un tour, AVANT toute I/O réseau (MCP, LLM) —
@@ -234,7 +239,10 @@ async fn resolve_turn_context(
     workspace_context: Option<&str>,
 ) -> Result<ResolvedTurn, VnyError> {
     let agent = ctx.store.get_agent(agent_name).await?;
-    let profile = ctx.store.get_model(&agent.model).await?;
+    let profile = match &ctx.model_override {
+        Some(name) => ctx.store.get_model(name).await?,
+        None => ctx.store.get_model(&agent.model).await?,
+    };
     let provider = ctx.store.get_provider(&profile.provider).await?;
 
     let mut resolved_toolsets = Vec::with_capacity(agent.toolsets.len());
@@ -709,6 +717,7 @@ mod tests {
             local_tools: HashMap::new(),
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
+            model_override: None,
         }
     }
 

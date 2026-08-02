@@ -230,6 +230,7 @@ async fn handle_message(
         local_tools: HashMap::new(),
         subagent_depth_max: 1,
         extra_mcp: Vec::new(),
+        model_override: None,
     };
 
     let result =
