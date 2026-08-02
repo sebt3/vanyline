@@ -104,6 +104,9 @@ async fn run_one_shot(
             });
             conv.messages.push(result_to_assistant_message(result));
             store::save_conversation(&conv).ok();
+            if !json {
+                print_git_diff_stat();
+            }
         }
         Err(_) => {
             std::process::exit(1);
@@ -386,6 +389,44 @@ async fn print_workspace_sources() {
     }
 }
 
+/// Reproduit le `git diff --stat` du wrapper llm-exec : exécute `git diff
+/// --stat` dans `root` et renvoie le texte de sortie (trimé), ou `None` si
+/// `root` n'est pas un dépôt git, si `git` échoue, ou si le diff est vide.
+/// Séparée de l'affichage pour rester testable sans capturer stdout.
+fn git_diff_stat(root: &std::path::Path) -> Option<String> {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .args(["diff", "--stat"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
+}
+
+/// Résout la racine workspace depuis le cwd courant puis affiche
+/// `git diff --stat`. Silencieux si le cwd n'est pas dans un dépôt git,
+/// si `git` échoue, ou si le diff est vide.
+fn print_git_diff_stat() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Some(root) = config::discover_workspace_root(&cwd) else {
+        return;
+    };
+    if let Some(text) = git_diff_stat(&root) {
+        println!("{text}");
+    }
+}
+
 async fn resolve_context(
     agent: Option<String>,
     continue_active: bool,
@@ -632,5 +673,50 @@ mod tests {
         assert_eq!(selection.server, "toolbox");
         assert!(selection.tools.is_empty());
         // Même logique que le cas non-json : local_tools vides, toolbox dans extra_mcp
+    }
+
+    // git_diff_stat_non_repo_returns_none
+    #[test]
+    fn git_diff_stat_non_repo_returns_none() {
+        let tmp = tempdir().unwrap();
+        assert_eq!(git_diff_stat(tmp.path()), None);
+    }
+
+    // git_diff_stat_clean_repo_returns_none
+    #[test]
+    fn git_diff_stat_clean_repo_returns_none() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        assert_eq!(git_diff_stat(&repo), None);
+    }
+
+    // git_diff_stat_with_changes_returns_summary
+    #[test]
+    fn git_diff_stat_with_changes_returns_summary() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git(&["init", "-q"]));
+        assert!(git(&["config", "user.email", "test@example.com"]));
+        assert!(git(&["config", "user.name", "test"]));
+        assert!(git(&["add", "a.txt"]));
+        assert!(git(&["commit", "-q", "-m", "init"]));
+        std::fs::write(repo.join("a.txt"), "hello world\n").unwrap();
+        let out = git_diff_stat(&repo).unwrap();
+        assert!(out.contains("a.txt"));
     }
 }
