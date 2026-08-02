@@ -44,8 +44,16 @@ pub async fn run(
         print_workspace_sources().await;
     }
     if let Some(msg) = message {
-        run_one_shot(&msg, agent, continue_active, toolbox_mcp_url, timeout_secs, json, model)
-            .await;
+        run_one_shot(
+            &msg,
+            agent,
+            continue_active,
+            toolbox_mcp_url,
+            timeout_secs,
+            json,
+            model,
+        )
+        .await;
         return;
     }
     run_repl(agent, continue_active, toolbox_mcp_url).await;

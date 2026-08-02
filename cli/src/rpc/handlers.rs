@@ -709,7 +709,7 @@ async fn handle_chat_send(
         });
         store::save_conversation(&conv).ok();
 
-let _guard = BusyGuard { busy, conv_id };
+        let _guard = BusyGuard { busy, conv_id };
         let ctx = SessionContext {
             store: store.clone() as Arc<dyn ConfigStore>,
             sink: Arc::new(RpcEventSink {

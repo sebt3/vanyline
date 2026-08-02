@@ -171,10 +171,23 @@ async fn main() {
         None => {
             let toolbox_mcp_url =
                 resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
-            chat::run(None, cli.agent, cli.continue_active, toolbox_mcp_url, None, false, None)
-                .await
+            chat::run(
+                None,
+                cli.agent,
+                cli.continue_active,
+                toolbox_mcp_url,
+                None,
+                false,
+                None,
+            )
+            .await
         }
-        Some(Commands::Run { message, model, timeout, json }) => {
+        Some(Commands::Run {
+            message,
+            model,
+            timeout,
+            json,
+        }) => {
             let toolbox_mcp_url =
                 resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
             chat::run(
@@ -918,7 +931,13 @@ mod tests {
         let cli = Cli::try_parse_from(["vanyline", "run", "hello", "-t", "5"]).unwrap();
         match cli {
             Cli {
-                command: Some(Commands::Run { message, model, timeout, json }),
+                command:
+                    Some(Commands::Run {
+                        message,
+                        model,
+                        timeout,
+                        json,
+                    }),
                 ..
             } => {
                 assert_eq!(message, "hello");
@@ -936,7 +955,13 @@ mod tests {
         let cli = Cli::try_parse_from(["vanyline", "run", "hello", "--json"]).unwrap();
         match cli {
             Cli {
-                command: Some(Commands::Run { message, model, timeout, json }),
+                command:
+                    Some(Commands::Run {
+                        message,
+                        model,
+                        timeout,
+                        json,
+                    }),
                 ..
             } => {
                 assert_eq!(message, "hello");
@@ -954,7 +979,13 @@ mod tests {
         let cli = Cli::try_parse_from(["vanyline", "run", "hello"]).unwrap();
         match cli {
             Cli {
-                command: Some(Commands::Run { message, model, timeout, json }),
+                command:
+                    Some(Commands::Run {
+                        message,
+                        model,
+                        timeout,
+                        json,
+                    }),
                 ..
             } => {
                 assert_eq!(message, "hello");
@@ -976,11 +1007,16 @@ mod tests {
     // 5. run_model_flag_parses
     #[test]
     fn run_model_flag_parses() {
-        let cli =
-            Cli::try_parse_from(["vanyline", "run", "hello", "-m", "qwen"]).unwrap();
+        let cli = Cli::try_parse_from(["vanyline", "run", "hello", "-m", "qwen"]).unwrap();
         match cli {
             Cli {
-                command: Some(Commands::Run { message, model, timeout, json }),
+                command:
+                    Some(Commands::Run {
+                        message,
+                        model,
+                        timeout,
+                        json,
+                    }),
                 ..
             } => {
                 assert_eq!(message, "hello");
