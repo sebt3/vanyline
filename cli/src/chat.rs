@@ -35,11 +35,15 @@ pub async fn run(
     agent: Option<String>,
     continue_active: bool,
     toolbox_mcp_url: Option<String>,
+    timeout_secs: Option<u64>,
+    json: bool,
 ) {
     config::ensure_config_dir();
-    print_workspace_sources().await;
+    if !json {
+        print_workspace_sources().await;
+    }
     if let Some(msg) = message {
-        run_one_shot(&msg, agent, continue_active, toolbox_mcp_url).await;
+        run_one_shot(&msg, agent, continue_active, toolbox_mcp_url, timeout_secs, json).await;
         return;
     }
     run_repl(agent, continue_active, toolbox_mcp_url).await;
@@ -50,16 +54,37 @@ async fn run_one_shot(
     agent: Option<String>,
     continue_active: bool,
     toolbox_mcp_url: Option<String>,
+    timeout_secs: Option<u64>,
+    json: bool,
 ) {
     let (mut conv, agent_name, is_new) = resolve_context(agent, continue_active).await;
-    if is_new {
+    if is_new && !json {
         println!("Session: {}", conv.id);
     }
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref());
+    let ctx = build_session_context(toolbox_mcp_url.as_deref(), json);
     let workspace_context = read_workspace_context();
 
-    match process_turn(&conv, &agent_name, &ctx, workspace_context.as_deref(), user_msg).await {
+    let turn = process_turn(
+        &conv,
+        &agent_name,
+        &ctx,
+        workspace_context.as_deref(),
+        user_msg,
+    );
+    let result = match timeout_secs {
+        Some(secs) if secs > 0 => {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), turn).await {
+                Ok(inner) => inner,
+                Err(_) => {
+                    eprintln!("[VNL-CLI-001] run timed out after {secs} seconds");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => turn.await,
+    };
+    match result {
         Ok(result) => {
             conv.messages.push(vanyline_lib::Message {
                 role: "user".to_string(),
@@ -90,7 +115,7 @@ async fn run_repl(
     }
     println!();
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref());
+    let ctx = build_session_context(toolbox_mcp_url.as_deref(), false);
     let workspace_context = read_workspace_context();
 
     loop {
@@ -133,14 +158,21 @@ async fn run_repl(
 /// `Some(url)` -> `local_tools` vide + la sandbox injectee comme serveur
 /// MCP nomme "toolbox" dans `extra_mcp` (design "Toolbox en inference" de
 /// ws12-sandbox-clients) ; `None` -> comportement inchange (local_tools du
-/// CLI, `extra_mcp` vide).
+/// CLI, `extra_mcp` vide). Le paramètre `json` choisit le sink de sortie :
+/// `JsonSink` (ligne JSON par événement) ou `StdoutSink` (sortie lisible).
 fn build_session_context(
     toolbox_mcp_url: Option<&str>,
+    json: bool,
 ) -> vanyline_lib::session::SessionContext {
+    let sink: Arc<dyn vanyline_lib::event::EventSink> = if json {
+        Arc::new(JsonSink)
+    } else {
+        Arc::new(StdoutSink)
+    };
     match toolbox_mcp_url {
         Some(url) => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
-            sink: Arc::new(StdoutSink),
+            sink,
             local_tools: std::collections::HashMap::new(),
             subagent_depth_max: 1,
             extra_mcp: vec![(
@@ -158,11 +190,31 @@ fn build_session_context(
         },
         None => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
-            sink: Arc::new(StdoutSink),
+            sink,
             local_tools: crate::tools::local_tools_map(),
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
         },
+    }
+}
+
+/// Sink de sortie structurée : sérialise chaque `ChatEvent` en une ligne JSON
+/// (`#[serde(tag = "type", rename_all = "snake_case")]`, cf. `event.rs`). Les
+/// erreurs vont sur stderr (même convention que `StdoutSink`), tout le reste en
+/// JSON sur stdout.
+struct JsonSink;
+
+#[async_trait]
+impl EventSink for JsonSink {
+    async fn emit(&self, event: ChatEvent) {
+        match event {
+            ChatEvent::Error { code, message } => eprintln!("[{code}] {message}"),
+            _ => {
+                if let Ok(line) = serde_json::to_string(&event) {
+                    println!("{line}");
+                }
+            }
+        }
     }
 }
 
@@ -504,7 +556,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(None);
+        let ctx = build_session_context(None, false);
         assert!(!ctx.local_tools.is_empty());
         assert!(ctx.local_tools.contains_key("read_file"));
         assert!(ctx.extra_mcp.is_empty());
@@ -519,7 +571,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"));
+        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), false);
         assert!(ctx.local_tools.is_empty());
         assert_eq!(ctx.extra_mcp.len(), 1);
         let (server, selection) = &ctx.extra_mcp[0];
@@ -527,5 +579,41 @@ mod tests {
         assert_eq!(server.url, "http://sandbox-demo.dev.svc:3000/mcp");
         assert_eq!(selection.server, "toolbox");
         assert!(selection.tools.is_empty());
+    }
+
+    // 8. build_session_context_none_json
+    #[test]
+    fn build_session_context_none_json() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(None, true);
+        assert!(!ctx.local_tools.is_empty());
+        assert!(ctx.local_tools.contains_key("read_file"));
+        assert!(ctx.extra_mcp.is_empty());
+        // Same logic as non-json: local_tools peupés, extra_mcp vide
+    }
+
+    // 9. build_session_context_toolbox_json
+    #[test]
+    fn build_session_context_toolbox_json() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"), true);
+        assert!(ctx.local_tools.is_empty());
+        assert_eq!(ctx.extra_mcp.len(), 1);
+        let (server, selection) = &ctx.extra_mcp[0];
+        assert_eq!(server.name, "toolbox");
+        assert_eq!(server.url, "http://sandbox-demo.dev.svc:3000/mcp");
+        assert_eq!(selection.server, "toolbox");
+        assert!(selection.tools.is_empty());
+        // Même logique que le cas non-json : local_tools vides, toolbox dans extra_mcp
     }
 }
