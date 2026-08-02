@@ -441,6 +441,17 @@ pub(crate) async fn run_agent_turn_at_depth(
         }
     }
 
+    {
+        let write = crate::builtin::todo::TodoWriteTool::new(ctx.todo_state.clone());
+        if let Err(e) = handle.add_tool(write).await {
+            tracing::warn!("failed to add builtin todowrite tool: {e}");
+        }
+        let read = crate::builtin::todo::TodoReadTool::new(ctx.todo_state.clone());
+        if let Err(e) = handle.add_tool(read).await {
+            tracing::warn!("failed to add builtin todoread tool: {e}");
+        }
+    }
+
     let params = crate::model::agent_params(&resolved.profile);
     let result = match resolved.provider.provider_type {
         ProviderType::Ollama => {
