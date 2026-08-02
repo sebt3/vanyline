@@ -35,11 +35,25 @@ pub async fn run(
     agent: Option<String>,
     continue_active: bool,
     toolbox_mcp_url: Option<String>,
+    timeout_secs: Option<u64>,
+    json: bool,
+    model: Option<String>,
 ) {
     config::ensure_config_dir();
-    print_workspace_sources().await;
+    if !json {
+        print_workspace_sources().await;
+    }
     if let Some(msg) = message {
-        run_one_shot(&msg, agent, continue_active, toolbox_mcp_url).await;
+        run_one_shot(
+            &msg,
+            agent,
+            continue_active,
+            toolbox_mcp_url,
+            timeout_secs,
+            json,
+            model,
+        )
+        .await;
         return;
     }
     run_repl(agent, continue_active, toolbox_mcp_url).await;
@@ -50,16 +64,43 @@ async fn run_one_shot(
     agent: Option<String>,
     continue_active: bool,
     toolbox_mcp_url: Option<String>,
+    timeout_secs: Option<u64>,
+    json: bool,
+    model: Option<String>,
 ) {
     let (mut conv, agent_name, is_new) = resolve_context(agent, continue_active).await;
-    if is_new {
+    if is_new && !json {
         println!("Session: {}", conv.id);
     }
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref());
+    let ctx = build_session_context(
+        toolbox_mcp_url.as_deref(),
+        json,
+        model.as_deref(),
+        conv.todo.clone(),
+    );
     let workspace_context = read_workspace_context();
 
-    match process_turn(&conv, &agent_name, &ctx, workspace_context.as_deref(), user_msg).await {
+    let turn = process_turn(
+        &conv,
+        &agent_name,
+        &ctx,
+        workspace_context.as_deref(),
+        user_msg,
+    );
+    let result = match timeout_secs {
+        Some(secs) if secs > 0 => {
+            match tokio::time::timeout(std::time::Duration::from_secs(secs), turn).await {
+                Ok(inner) => inner,
+                Err(_) => {
+                    eprintln!("[VNL-CLI-001] run timed out after {secs} seconds");
+                    std::process::exit(1);
+                }
+            }
+        }
+        _ => turn.await,
+    };
+    match result {
         Ok(result) => {
             conv.messages.push(vanyline_lib::Message {
                 role: "user".to_string(),
@@ -67,7 +108,11 @@ async fn run_one_shot(
                 tool_calls: None,
             });
             conv.messages.push(result_to_assistant_message(result));
+            conv.todo = read_todo_state(&ctx.todo_state);
             store::save_conversation(&conv).ok();
+            if !json {
+                print_git_diff_stat();
+            }
         }
         Err(_) => {
             std::process::exit(1);
@@ -75,11 +120,7 @@ async fn run_one_shot(
     }
 }
 
-async fn run_repl(
-    agent: Option<String>,
-    continue_active: bool,
-    toolbox_mcp_url: Option<String>,
-) {
+async fn run_repl(agent: Option<String>, continue_active: bool, toolbox_mcp_url: Option<String>) {
     let (mut conv, agent_name, _) = resolve_context(agent, continue_active).await;
     println!("vanyline REPL (Ctrl-D to exit)");
     println!("Agent: {agent_name}");
@@ -90,7 +131,7 @@ async fn run_repl(
     }
     println!();
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref());
+    let ctx = build_session_context(toolbox_mcp_url.as_deref(), false, None, conv.todo.clone());
     let workspace_context = read_workspace_context();
 
     loop {
@@ -121,6 +162,7 @@ async fn run_repl(
                     tool_calls: None,
                 });
                 conv.messages.push(result_to_assistant_message(result));
+                conv.todo = read_todo_state(&ctx.todo_state);
                 store::save_conversation(&conv).ok();
             }
             Err(_) => break,
@@ -129,18 +171,37 @@ async fn run_repl(
     println!();
 }
 
+/// Lit l'état todo courant du handle partagé — même logique de récupération
+/// sur poison que `lib/src/builtin/todo.rs` (`unwrap_or_else(|e| e.into_inner())`) :
+/// un panic dans un tool call ne doit pas empêcher de persister l'état posé
+/// avant le panic.
+fn read_todo_state(state: &std::sync::Mutex<Option<String>>) -> Option<String> {
+    state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+}
+
 /// Construit le `SessionContext` de la session CLI. `toolbox_mcp_url` :
 /// `Some(url)` -> `local_tools` vide + la sandbox injectee comme serveur
 /// MCP nomme "toolbox" dans `extra_mcp` (design "Toolbox en inference" de
 /// ws12-sandbox-clients) ; `None` -> comportement inchange (local_tools du
-/// CLI, `extra_mcp` vide).
+/// CLI, `extra_mcp` vide). Le paramètre `json` choisit le sink de sortie :
+/// `JsonSink` (ligne JSON par événement) ou `StdoutSink` (sortie lisible).
+/// `todo_seed` : valeur optionnelle issue de `Conversation.todo` pour le
+/// resume d'une conversation existante (`-c/--continue`).
 fn build_session_context(
     toolbox_mcp_url: Option<&str>,
+    json: bool,
+    model_override: Option<&str>,
+    todo_seed: Option<String>,
 ) -> vanyline_lib::session::SessionContext {
+    let sink: Arc<dyn vanyline_lib::event::EventSink> = if json {
+        Arc::new(JsonSink)
+    } else {
+        Arc::new(StdoutSink)
+    };
     match toolbox_mcp_url {
         Some(url) => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
-            sink: Arc::new(StdoutSink),
+            sink,
             local_tools: std::collections::HashMap::new(),
             subagent_depth_max: 1,
             extra_mcp: vec![(
@@ -155,14 +216,38 @@ fn build_session_context(
                     tools: vec![],
                 },
             )],
+            model_override: model_override.map(str::to_string),
+            todo_state: Arc::new(std::sync::Mutex::new(todo_seed)),
         },
         None => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
-            sink: Arc::new(StdoutSink),
+            sink,
             local_tools: crate::tools::local_tools_map(),
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
+            model_override: model_override.map(str::to_string),
+            todo_state: Arc::new(std::sync::Mutex::new(todo_seed)),
         },
+    }
+}
+
+/// Sink de sortie structurée : sérialise chaque `ChatEvent` en une ligne JSON
+/// (`#[serde(tag = "type", rename_all = "snake_case")]`, cf. `event.rs`). Les
+/// erreurs vont sur stderr (même convention que `StdoutSink`), tout le reste en
+/// JSON sur stdout.
+struct JsonSink;
+
+#[async_trait]
+impl EventSink for JsonSink {
+    async fn emit(&self, event: ChatEvent) {
+        match event {
+            ChatEvent::Error { code, message } => eprintln!("[{code}] {message}"),
+            _ => {
+                if let Ok(line) = serde_json::to_string(&event) {
+                    println!("{line}");
+                }
+            }
+        }
     }
 }
 
@@ -318,6 +403,44 @@ async fn print_workspace_sources() {
     }
 }
 
+/// Reproduit le `git diff --stat` du wrapper llm-exec : exécute `git diff
+/// --stat` dans `root` et renvoie le texte de sortie (trimé), ou `None` si
+/// `root` n'est pas un dépôt git, si `git` échoue, ou si le diff est vide.
+/// Séparée de l'affichage pour rester testable sans capturer stdout.
+fn git_diff_stat(root: &std::path::Path) -> Option<String> {
+    if !root.join(".git").exists() {
+        return None;
+    }
+    let output = std::process::Command::new("git")
+        .args(["diff", "--stat"])
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if text.is_empty() {
+        return None;
+    }
+    Some(text)
+}
+
+/// Résout la racine workspace depuis le cwd courant puis affiche
+/// `git diff --stat`. Silencieux si le cwd n'est pas dans un dépôt git,
+/// si `git` échoue, ou si le diff est vide.
+fn print_git_diff_stat() {
+    let Ok(cwd) = std::env::current_dir() else {
+        return;
+    };
+    let Some(root) = config::discover_workspace_root(&cwd) else {
+        return;
+    };
+    if let Some(text) = git_diff_stat(&root) {
+        println!("{text}");
+    }
+}
+
 async fn resolve_context(
     agent: Option<String>,
     continue_active: bool,
@@ -350,6 +473,7 @@ async fn resolve_context(
         agent: Some(agent_name.clone()),
         title: None,
         messages: Vec::new(),
+        todo: None,
     };
 
     let (conv, is_new) = if continue_active {
@@ -504,7 +628,7 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(None);
+        let ctx = build_session_context(None, false, None, None);
         assert!(!ctx.local_tools.is_empty());
         assert!(ctx.local_tools.contains_key("read_file"));
         assert!(ctx.extra_mcp.is_empty());
@@ -519,7 +643,12 @@ mod tests {
             workspace_dir: None,
         };
         let _store = FsConfigStore::new(layers);
-        let ctx = build_session_context(Some("http://sandbox-demo.dev.svc:3000/mcp"));
+        let ctx = build_session_context(
+            Some("http://sandbox-demo.dev.svc:3000/mcp"),
+            false,
+            None,
+            None,
+        );
         assert!(ctx.local_tools.is_empty());
         assert_eq!(ctx.extra_mcp.len(), 1);
         let (server, selection) = &ctx.extra_mcp[0];
@@ -527,5 +656,135 @@ mod tests {
         assert_eq!(server.url, "http://sandbox-demo.dev.svc:3000/mcp");
         assert_eq!(selection.server, "toolbox");
         assert!(selection.tools.is_empty());
+    }
+
+    // 8. build_session_context_none_json
+    #[test]
+    fn build_session_context_none_json() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(None, true, None, None);
+        assert!(!ctx.local_tools.is_empty());
+        assert!(ctx.local_tools.contains_key("read_file"));
+        assert!(ctx.extra_mcp.is_empty());
+        // Same logic as non-json: local_tools peupés, extra_mcp vide
+    }
+
+    // 9. build_session_context_toolbox_json
+    #[test]
+    fn build_session_context_toolbox_json() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(
+            Some("http://sandbox-demo.dev.svc:3000/mcp"),
+            true,
+            None,
+            None,
+        );
+        assert!(ctx.local_tools.is_empty());
+        assert_eq!(ctx.extra_mcp.len(), 1);
+        let (server, selection) = &ctx.extra_mcp[0];
+        assert_eq!(server.name, "toolbox");
+        assert_eq!(server.url, "http://sandbox-demo.dev.svc:3000/mcp");
+        assert_eq!(selection.server, "toolbox");
+        assert!(selection.tools.is_empty());
+        // Même logique que le cas non-json : local_tools vides, toolbox dans extra_mcp
+    }
+
+    // git_diff_stat_non_repo_returns_none
+    #[test]
+    fn git_diff_stat_non_repo_returns_none() {
+        let tmp = tempdir().unwrap();
+        assert_eq!(git_diff_stat(tmp.path()), None);
+    }
+
+    // git_diff_stat_clean_repo_returns_none
+    #[test]
+    fn git_diff_stat_clean_repo_returns_none() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        let ok = std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(&repo)
+            .status()
+            .unwrap();
+        assert!(ok.success());
+        assert_eq!(git_diff_stat(&repo), None);
+    }
+
+    // git_diff_stat_with_changes_returns_summary
+    #[test]
+    fn git_diff_stat_with_changes_returns_summary() {
+        let tmp = tempdir().unwrap();
+        let repo = tmp.path().to_path_buf();
+        std::fs::write(repo.join("a.txt"), "hello\n").unwrap();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .status()
+                .unwrap()
+                .success()
+        };
+        assert!(git(&["init", "-q"]));
+        assert!(git(&["config", "user.email", "test@example.com"]));
+        assert!(git(&["config", "user.name", "test"]));
+        assert!(git(&["add", "a.txt"]));
+        assert!(git(&["commit", "-q", "-m", "init"]));
+        std::fs::write(repo.join("a.txt"), "hello world\n").unwrap();
+        let out = git_diff_stat(&repo).unwrap();
+        assert!(out.contains("a.txt"));
+    }
+
+    // 13. build_session_context_seeds_todo_from_conversation
+    #[test]
+    fn build_session_context_seeds_todo_from_conversation() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx =
+            build_session_context(None, false, None, Some("[{\"content\":\"x\"}]".to_string()));
+        assert_eq!(
+            ctx.todo_state.lock().unwrap().clone(),
+            Some("[{\"content\":\"x\"}]".to_string())
+        );
+    }
+
+    // 14. build_session_context_no_seed_when_none
+    #[test]
+    fn build_session_context_no_seed_when_none() {
+        let global_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let _store = FsConfigStore::new(layers);
+        let ctx = build_session_context(None, false, None, None);
+        assert!(ctx.todo_state.lock().unwrap().is_none());
+    }
+
+    // 15. read_todo_state_returns_value
+    #[test]
+    fn read_todo_state_returns_value() {
+        let m = std::sync::Mutex::new(Some("x".to_string()));
+        assert_eq!(read_todo_state(&m), Some("x".to_string()));
+    }
+
+    // 16. read_todo_state_returns_none
+    #[test]
+    fn read_todo_state_returns_none() {
+        let m = std::sync::Mutex::new(None);
+        assert_eq!(read_todo_state(&m), None);
     }
 }

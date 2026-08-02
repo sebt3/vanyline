@@ -454,6 +454,7 @@ fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
         agent: params.agent,
         title: params.title,
         messages: Vec::new(),
+        todo: None,
     };
     match store::save_conversation(&conv) {
         Ok(()) => {
@@ -719,6 +720,8 @@ async fn handle_chat_send(
             local_tools: crate::tools::local_tools_map(),
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
+            model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         };
         let result = run_agent_turn(
             &ctx,

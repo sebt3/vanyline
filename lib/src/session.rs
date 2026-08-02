@@ -207,6 +207,18 @@ pub struct SessionContext {
     /// — connecte AVANT la boucle des toolsets pour que l'extra_mcp
     /// "gagne" en cas de collision de nom.
     pub extra_mcp: Vec<(McpServer, McpSelection)>,
+    /// Override du modele pour CE tour, fourni par l'hote (ex. flag CLI
+    /// `run -m/--model`) : remplace le `model` de l'agent pour la resolution
+    /// agent -> modele, sans toucher la config. `None` (cas general) ->
+    /// comportement inchange (le modele de l'agent).
+    pub model_override: Option<String>,
+    /// Handle du etat todo (todowrite/todoread) pour CE tour : `Arc<Mutex>` pour
+    /// une interiote mutable partagee entre l'hote (CLI seme depuis
+    /// `Conversation.todo` et relit apres le tour pour persister), l'outil
+    /// builtin (lit/ecrit pendant le tour) et les tours imbriques (clone de
+    /// l'Arc). `Some(json)` = serialisation JSON de la liste de taches ; `None`
+    /// = aucun etat pose. Clone de SessionContext partage l'Arc (meme etat).
+    pub todo_state: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Résultat de la résolution d'un tour, AVANT toute I/O réseau (MCP, LLM) —
@@ -234,7 +246,10 @@ async fn resolve_turn_context(
     workspace_context: Option<&str>,
 ) -> Result<ResolvedTurn, VnyError> {
     let agent = ctx.store.get_agent(agent_name).await?;
-    let profile = ctx.store.get_model(&agent.model).await?;
+    let profile = match &ctx.model_override {
+        Some(name) => ctx.store.get_model(name).await?,
+        None => ctx.store.get_model(&agent.model).await?,
+    };
     let provider = ctx.store.get_provider(&profile.provider).await?;
 
     let mut resolved_toolsets = Vec::with_capacity(agent.toolsets.len());
@@ -423,6 +438,17 @@ pub(crate) async fn run_agent_turn_at_depth(
             if let Err(e) = handle.add_tool(task_tool).await {
                 tracing::warn!("failed to add builtin task tool: {e}");
             }
+        }
+    }
+
+    {
+        let write = crate::builtin::todo::TodoWriteTool::new(ctx.todo_state.clone());
+        if let Err(e) = handle.add_tool(write).await {
+            tracing::warn!("failed to add builtin todowrite tool: {e}");
+        }
+        let read = crate::builtin::todo::TodoReadTool::new(ctx.todo_state.clone());
+        if let Err(e) = handle.add_tool(read).await {
+            tracing::warn!("failed to add builtin todoread tool: {e}");
         }
     }
 
@@ -709,6 +735,8 @@ mod tests {
             local_tools: HashMap::new(),
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
+            model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 

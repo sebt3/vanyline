@@ -105,6 +105,11 @@ pub async fn run_agent_turn(
   lui parviennent via MCP).
 - `subagent_depth_max: u8` — profondeur maximale d'imbrication pour le tool builtin `task`
   (voir plus bas).
+- `todo_state: Arc<std::sync::Mutex<Option<String>>>` — handle du **tool builtin
+  `todowrite`/`todoread`** pour CE tour : serialisation JSON de la liste de tâches
+  (`[{"content":..., "status":...}]`), `None` = aucun état posé. L'hôte (CLI) sème depuis
+  `Conversation.todo` et lit après le tour pour persister — c'est la seule forme d'état
+  resumable en une-passe (`-c/--continue`).
 - `extra_mcp: Vec<(McpServer, McpSelection)>` — serveurs MCP forcés par l'hôte pour CE tour,
   en plus de ceux résolus via les toolsets de l'agent (fournis directement, pas par nom via
   `ctx.store` — symétrique de `local_tools`). Connectés AVANT la boucle des toolsets
@@ -147,6 +152,11 @@ tour coupe la connexion avant tout appel de tool réel (bug réel corrigé, pas 
   vierge et un sink qui encapsule chaque événement du subagent en
   `ChatEvent::SubagentEvent`. Refuse au-delà de `subagent_depth_max` (garde vérifiée à
   la fois à l'exposition du tool et à l'appel — double sécurité contre la récursion).
+- `todo` : `todowrite(todos)` **remplace tout** l'état todo par la liste fournie
+  (comportement opencode) et `todoread()` renvoie l'état courant (`no todo list yet` si
+  aucun) — écrit/lit le handle partagé `SessionContext.todo_state`. Toujours exposés (pas
+  de dépendance à un index), à la différence de `skill`/`task`. L'état est **persisté sur
+  `Conversation.todo`** par le CLI (seed + relecture après tour).
 
 ## Configuration CLI — `FsConfigStore` (deux couches YAML)
 
@@ -173,6 +183,33 @@ délimiteurs `---` parsés à la main, pas de crate) ; `toolsets/<name>.yaml` ;
 écosystème externe, mais le nom canonique reste celui du répertoire —
 chargement paresseux : `list_skills` ne lit que la description, `load_skill`
 le corps à la demande).
+
+**Correspondance opencode → vanyline** : les agents `.opencode/agents/*.md`
+peuvent être copiés tels quels dans `.vanyline/agents/*.md`. Le frontmatter
+est partiellement compatible — `RawAgentFrontmatter` ne déclare que
+`description`, `mode`, `model`, `toolsets`, `skills`. Tout champ non déclaré
+est ignoré par serde, ce qui verrouille le comportement. Table complète :
+
+| opencode | vanyline | Statut |
+|----------|----------|--------|
+| `description` | `description` | direct |
+| `mode` | `mode` (`AgentMode`) | direct |
+| `model` | `model` | direct |
+| `temperature` | sur `ModelProfile` (config.yaml), PAS l'agent | **ignoré** (single source, décision 2026-08-02) |
+| `permission` | — | sans objet (philosophie yolo, aucun système de permissions) |
+| `steps` | — | ne pas exposer (`max-turns` = filet anti-boucle interne, pas un plafond de travail) |
+| `color` | — | UI only, sans objet backend |
+| `disable`/`hidden`/`top_p` | — | sans équivalent |
+
+**`vanyline run` — flags backend d'exécution** (backlog ws14, pour remplacer le wrapper
+`llm-exec`) : `-m/--model <nom>` (override du modèle de l'agent pour ce run, sans toucher
+la config), `-t/--timeout <secs>` (timeout global du tour, `0` = aucune limite, erreur
+`VNL-CLI-001` et exit 1 au-delà), `-j/--json` (sortie structurée — supprime l'en-tête de
+sources workspace et le `git diff --stat`). En fin de `run` **en mode texte** et sur
+succès, `run_one_shot` affiche `git diff --stat` (comportement du wrapper `llm-exec`
+reproduit, `cli/src/chat.rs`) : résout la racine workspace depuis le cwd
+(`config::discover_workspace_root`), silencieux hors dépôt git, si `git` échoue ou si le
+diff est vide.
 
 **Modules** : `cli/src/config.rs` porte toute la mécanique de couches
 (découverte, fusion, et la "source" d'une entrée — global vs workspace,

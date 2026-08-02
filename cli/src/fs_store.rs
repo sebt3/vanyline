@@ -677,6 +677,40 @@ tools:
         assert_eq!(agents[0].model, "workspace-model");
     }
 
+    // 17. agent_frontmatter_temperature_ignored
+    #[tokio::test]
+    async fn agent_frontmatter_temperature_ignored() {
+        let tmp = tempdir().unwrap();
+        let agents_dir = tmp.path().join("agents");
+        std::fs::create_dir_all(&agents_dir).unwrap();
+        std::fs::write(
+            agents_dir.join("build.md"),
+            "---
+description: Agent d'implémentation
+mode: primary
+model: qwen-code
+temperature: 0.9
+---
+Tu es un agent d'implémentation.",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        let agents = store.list_agents().await.unwrap();
+        assert_eq!(agents.len(), 1);
+        let a = &agents[0];
+        assert_eq!(a.name, "build");
+        assert_eq!(a.description.as_deref(), Some("Agent d'implémentation"));
+        assert_eq!(a.mode, AgentMode::Primary);
+        assert_eq!(a.model, "qwen-code");
+        assert_eq!(a.system_prompt, "Tu es un agent d'implémentation.");
+        // temperature est ignoré : le type Agent n'a aucun champ temperature,
+        // et le frontmatter avec temperature reste parfaitement valide.
+    }
+
     // --- list_skills / load_skill ---
 
     // 5. list_skills_parses_metadata_dirname_is_canonical

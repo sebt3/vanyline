@@ -42,4 +42,10 @@ pub struct Conversation {
     pub agent: Option<String>,
     pub title: Option<String>,
     pub messages: Vec<Message>,
+    /// Etat todo (todowrite/todoread) porte par la conversation : serialisation
+    /// JSON de la liste de taches. Persiste (resume via `-c/--continue`) — c'est
+    /// la seule forme d'etat resumable en une-passe. `None` quand aucun etat
+    /// todo n'a encore ete pose.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub todo: Option<String>,
 }
