@@ -765,17 +765,24 @@ le temps de corriger les crates un par un a été supprimé une fois `deny` pos�
 
 ### Limite d'outillage — Qwen et les grosses tâches
 
-Le modèle Qwen sous-jacent (`llm-exec`, context window 131K tokens) peut échouer par
-compaction de contexte sur une tâche déléguée qui touche beaucoup de fichiers volumineux,
-même bien spécifiée — la session se compacte en cours de route et finit par poser une
-question au lieu d'agir (indépendant de la permission `question: deny`, qui ne bloque que
-les appels d'outil, pas du texte de fin de tour). Observé sur une tâche couvrant `sandbox`
-et `controller` combinés (~6000 lignes de fichiers source à lire) : deux échecs malgré une
-spécification déjà complète. Scinder par crate a réduit le risque. Quand le contrat d'une
-tâche est déjà entièrement écrit et le risque de récidive élevé, appliquer directement les
-modifications plutôt que de multiplier les tentatives de délégation est plus efficace — ce
-n'est pas un problème de spécification qu'une réécriture peut résoudre, c'est une limite
-matérielle de l'outil.
+Le modèle Qwen sous-jacent (`llm-exec`, context natif 262 144 tokens — vLLM était
+plafonné à `--max-model-len 131072` jusqu'au 2026-08-02, corrigé depuis pour matcher le
+natif vu la marge de KV cache réelle) peut échouer par compaction de contexte sur une
+tâche déléguée qui touche beaucoup de fichiers volumineux, même bien spécifiée — la
+session se compacte en cours de route et finit par poser une question au lieu d'agir
+(indépendant de la permission `question: deny`, qui ne bloque que les appels d'outil, pas
+le texte de fin de tour). Observé sur une tâche couvrant `sandbox` et `controller`
+combinés (~6000 lignes de fichiers source à lire) : deux échecs malgré une spécification
+déjà complète. Scinder par crate a réduit le risque. Quand le contrat d'une tâche est déjà
+entièrement écrit et le risque de récidive élevé, appliquer directement les modifications
+plutôt que de multiplier les tentatives de délégation est plus efficace — ce n'est pas un
+problème de spécification qu'une réécriture peut résoudre, c'est une limite matérielle de
+l'outil.
+
+**Point ouvert** : plusieurs compactions documentées (ws12/ws13/ws15) sont survenues sur
+des tâches petites (5 fichiers, diffs courts) — bien en dessous même de l'ancien plafond
+131072. Le cap vLLM explique un plafond bas, pas ces échecs-là précisément ; cause encore
+non identifiée, à creuser si ça se reproduit après le passage à 262144.
 
 ## Limites connues (dette assumée, pas oubliée)
 

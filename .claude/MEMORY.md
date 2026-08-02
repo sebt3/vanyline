@@ -622,8 +622,10 @@ commandes dans `docs/architecture.md`, section dédiée) :
   mesure de warnings, en local comme en CI.
 
 **Nouveau mode d'échec Qwen, spécifique à cette feature** : le modèle sous-jacent
-(context window 131K tokens) peut échouer par compaction de contexte sur une tâche qui
-touche beaucoup de fichiers volumineux, même bien spécifiée — la session se compacte en
+(context natif 262 144 tokens ; vLLM plafonné à `--max-model-len 131072` jusqu'au
+2026-08-02, corrigé depuis — cf. `docs/architecture.md` section "Limite d'outillage")
+peut échouer par compaction de contexte sur une tâche qui touche beaucoup de fichiers
+volumineux, même bien spécifiée — la session se compacte en
 cours de route et finit par poser une question au lieu d'agir (pas un appel d'outil
 bloqué par `question: deny`, juste du texte de fin de tour ; le résumé post-compaction
 peut aussi halluciner des détails, ex. citer des crates "frontend"/"harness-core"
@@ -722,6 +724,19 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 ---
 
 ## Scope — phase actuelle
+
+**ws14-cli-backend-llm-exec, en cours (démarré 2026-08-02)** : implémente le backlog
+validé dans `docs/llm-exec-gap.md` (flags `run` `-m/-t/-j`, builtin `todowrite`/
+`todoread`, mapping agents, `git diff --stat` en fin de `run`) — design doc
+`docs/features/ws14-cli-backend-llm-exec.md`. **Expérience de pilotage** : comme pour
+l'étude qui a produit le gap doc, le développeur fait rédiger les fichiers de tâche et
+prendre les décisions au fil de l'eau par DeepSeek plutôt que Claude, sur une branche
+dédiée. Claude n'intervient qu'à la clôture (Phase 3) : review des fichiers de tâche
+DeepSeek (contrat complet, périmètre atomique, chemins scratch valides) ET du code
+Qwen produit à partir de ces fichiers (comme pour toute feature), plus les décisions
+prises en cours de route qui s'écarteraient du design (ex. le sort de `temperature`
+sur l'agent, encore ouvert). Compte de tests et format de commit à revérifier comme
+d'habitude, indépendamment de qui a rédigé la tâche.
 
 harness-core, cli-harness, cli-rpc-stdio, ws07-review-fixes,
 ws08-github-publication, ws09-sandbox-maint-agent, controller-bootstrap (WS-4)
