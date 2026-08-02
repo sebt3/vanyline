@@ -174,6 +174,23 @@ délimiteurs `---` parsés à la main, pas de crate) ; `toolsets/<name>.yaml` ;
 chargement paresseux : `list_skills` ne lit que la description, `load_skill`
 le corps à la demande).
 
+**Correspondance opencode → vanyline** : les agents `.opencode/agents/*.md`
+peuvent être copiés tels quels dans `.vanyline/agents/*.md`. Le frontmatter
+est partiellement compatible — `RawAgentFrontmatter` ne déclare que
+`description`, `mode`, `model`, `toolsets`, `skills`. Tout champ non déclaré
+est ignoré par serde, ce qui verrouille le comportement. Table complète :
+
+| opencode | vanyline | Statut |
+|----------|----------|--------|
+| `description` | `description` | direct |
+| `mode` | `mode` (`AgentMode`) | direct |
+| `model` | `model` | direct |
+| `temperature` | sur `ModelProfile` (config.yaml), PAS l'agent | **ignoré** (single source, décision 2026-08-02) |
+| `permission` | — | sans objet (philosophie yolo, aucun système de permissions) |
+| `steps` | — | ne pas exposer (`max-turns` = filet anti-boucle interne, pas un plafond de travail) |
+| `color` | — | UI only, sans objet backend |
+| `disable`/`hidden`/`top_p` | — | sans équivalent |
+
 **Modules** : `cli/src/config.rs` porte toute la mécanique de couches
 (découverte, fusion, et la "source" d'une entrée — global vs workspace,
 réutilisée par les commandes `list` et par l'affichage "sources workspace"
