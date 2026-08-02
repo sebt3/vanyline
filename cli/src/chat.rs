@@ -192,6 +192,7 @@ fn build_session_context(
                 },
             )],
             model_override: model_override.map(str::to_string),
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         },
         None => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
@@ -200,6 +201,7 @@ fn build_session_context(
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
             model_override: model_override.map(str::to_string),
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         },
     }
 }

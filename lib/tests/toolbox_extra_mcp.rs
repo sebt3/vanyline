@@ -165,6 +165,7 @@ async fn extra_mcp_server_is_contacted_during_turn() {
             },
         )],
         model_override: None,
+        todo_state: Arc::new(std::sync::Mutex::new(None)),
     };
 
     // Le tour echoue forcement (LLM injoignable) -- ce n'est pas ce qu'on

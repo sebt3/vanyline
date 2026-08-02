@@ -709,7 +709,7 @@ async fn handle_chat_send(
         });
         store::save_conversation(&conv).ok();
 
-        let _guard = BusyGuard { busy, conv_id };
+let _guard = BusyGuard { busy, conv_id };
         let ctx = SessionContext {
             store: store.clone() as Arc<dyn ConfigStore>,
             sink: Arc::new(RpcEventSink {
@@ -721,6 +721,7 @@ async fn handle_chat_send(
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
             model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         };
         let result = run_agent_turn(
             &ctx,

@@ -161,6 +161,7 @@ impl ToolDyn for TaskTool {
                 subagent_depth_max: self.ctx.subagent_depth_max,
                 extra_mcp: self.ctx.extra_mcp.clone(),
                 model_override: self.ctx.model_override.clone(),
+                todo_state: self.ctx.todo_state.clone(),
             };
 
             // 8. Lancer le tour imbriqué
@@ -242,6 +243,7 @@ mod tests {
                 subagent_depth_max: 1,
                 extra_mcp: Vec::new(),
                 model_override: None,
+                todo_state: Arc::new(std::sync::Mutex::new(None)),
             },
             0,
             Vec::new(),
@@ -280,6 +282,7 @@ mod tests {
                 subagent_depth_max: 1,
                 extra_mcp: Vec::new(),
                 model_override: None,
+                todo_state: Arc::new(std::sync::Mutex::new(None)),
             },
             0,
             available_agents,
@@ -306,6 +309,7 @@ mod tests {
                 subagent_depth_max: 1,
                 extra_mcp: Vec::new(),
                 model_override: None,
+                todo_state: Arc::new(std::sync::Mutex::new(None)),
             },
             0,
             Vec::new(),
@@ -365,6 +369,7 @@ mod tests {
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
             model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         };
         let task_tool = TaskTool::new(ctx, 1, vec![]);
 
@@ -399,6 +404,7 @@ mod tests {
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
             model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         };
         let task_tool = TaskTool::new(ctx, 0, vec![]);
 
@@ -433,6 +439,7 @@ mod tests {
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
             model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         };
         let task_tool = TaskTool::new(ctx, 0, vec![]);
 

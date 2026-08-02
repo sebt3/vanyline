@@ -212,6 +212,13 @@ pub struct SessionContext {
     /// agent -> modele, sans toucher la config. `None` (cas general) ->
     /// comportement inchange (le modele de l'agent).
     pub model_override: Option<String>,
+    /// Handle du etat todo (todowrite/todoread) pour CE tour : `Arc<Mutex>` pour
+    /// une interiote mutable partagee entre l'hote (CLI seme depuis
+    /// `Conversation.todo` et relit apres le tour pour persister), l'outil
+    /// builtin (lit/ecrit pendant le tour) et les tours imbriques (clone de
+    /// l'Arc). `Some(json)` = serialisation JSON de la liste de taches ; `None`
+    /// = aucun etat pose. Clone de SessionContext partage l'Arc (meme etat).
+    pub todo_state: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Résultat de la résolution d'un tour, AVANT toute I/O réseau (MCP, LLM) —
@@ -718,6 +725,7 @@ mod tests {
             subagent_depth_max: 1,
             extra_mcp: Vec::new(),
             model_override: None,
+            todo_state: Arc::new(std::sync::Mutex::new(None)),
         }
     }
 
