@@ -12,6 +12,7 @@ pub struct Config {
     pub database_url: String,
     pub listen_addr: String,
     pub static_dir: String,
+    pub k8s_namespace: Option<String>,
 }
 
 impl Config {
@@ -37,6 +38,7 @@ impl Config {
                 .map_err(|_| "VNL-CFG-006: DATABASE_URL is required".to_string())?,
             listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             static_dir: env::var("STATIC_DIR").unwrap_or_else(|_| "./static".to_string()),
+            k8s_namespace: env::var("VNL_K8S_NAMESPACE").ok(),
         })
     }
 }

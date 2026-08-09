@@ -5,6 +5,7 @@ use crate::error::VnyError;
 /// Client K8s typé pour les CRDs Owner/Project/Sandbox — namespace résolu
 /// par l'appelant (CLI, tâche 3 : `--namespace` > `defaults.namespace` du
 /// config.yaml > namespace du contexte kubeconfig courant, cf. `discover`).
+#[derive(Clone)]
 pub struct VnlK8sClient {
     client: kube::Client,
     namespace: String,

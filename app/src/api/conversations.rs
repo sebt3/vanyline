@@ -228,6 +228,7 @@ mod tests {
             database_url: "postgres://localhost/test".to_string(),
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
+            k8s_namespace: None,
         };
 
         let state = AppState {
