@@ -44,6 +44,10 @@ pub enum AppError {
     RequestError(#[from] reqwest::Error),
     #[error("VNL-INT-001: Internal error: {0}")]
     InternalError(String),
+    #[error("VNL-K8S-001: Kubernetes config error: {0}")]
+    K8sConfigError(String),
+    #[error("VNL-K8S-002: Kubernetes API error: {0}")]
+    K8sApiError(String),
 }
 
 impl From<vanyline_lib::VnyError> for AppError {
@@ -75,6 +79,8 @@ impl IntoResponse for AppError {
             AppError::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
             AppError::RequestError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             AppError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            AppError::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            AppError::K8sApiError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
         };
 
         let body = Json(json!({ "error": message }));
@@ -103,5 +109,17 @@ mod tests {
         let err = vanyline_lib::VnyError::UnknownReference("provider", "ghost".to_string());
         let resp = AppError::UnprocessableReference(err).into_response();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    #[test]
+    fn k8s_config_error_maps_to_502() {
+        let resp = AppError::K8sConfigError("x".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn k8s_api_error_maps_to_500() {
+        let resp = AppError::K8sApiError("x".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 }

@@ -6,6 +6,7 @@ mod config;
 mod config_store;
 mod db;
 mod error;
+mod k8s;
 mod ws;
 
 use std::collections::HashSet;
@@ -17,6 +18,7 @@ use config::Config;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
+use vanyline_lib::k8s::VnlK8sClient;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,6 +27,7 @@ pub struct AppState {
     pub cookie_key: cookie::Key,
     pub pool: sqlx::PgPool,
     pub busy: Arc<Mutex<HashSet<Uuid>>>,
+    pub k8s: Arc<tokio::sync::Mutex<Option<VnlK8sClient>>>,
 }
 
 #[tokio::main]
@@ -85,6 +88,7 @@ async fn main() {
         cookie_key,
         pool,
         busy: Arc::new(Mutex::new(HashSet::new())),
+        k8s: Arc::new(tokio::sync::Mutex::new(None)),
     };
 
     let app = Router::new()

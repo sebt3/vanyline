@@ -178,6 +178,7 @@ mod tests {
             cookie_key: test_key(),
             pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         };
 
         auth_router().with_state(state)
