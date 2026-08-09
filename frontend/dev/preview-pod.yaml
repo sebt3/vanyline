@@ -1,0 +1,97 @@
+# Outillage de review jetable — pas le mécanisme de déploiement produit
+# (celui-ci passera par le controller/CRDs, cf. AGENTS.md). Sert le build
+# statique (`npm run build`, dist/) via nginx pour permettre au développeur
+# de visualiser le frontend en cours de travail dans son cluster, sans
+# builder d'image ni la pousser sur un registre.
+#
+# Usage :
+#   npm run build   # produit frontend/dist
+#   kubectl apply -f frontend/dev/preview-pod.yaml
+#
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vanyline-ui-poc
+  namespace: media-station
+  labels:
+    app.kubernetes.io/name: vanyline-ui-poc
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: vanyline-ui-poc
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: vanyline-ui-poc
+    spec:
+      # Le build (dist/) est servi depuis le PVC seb-code-server-home en
+      # subPath — même PVC que vyrn-server-pod.yaml — donc ce pod doit
+      # tourner sur le même nœud (PVC en ReadWriteOnce, storageClass local-path).
+      nodeName: media
+      containers:
+        - name: nginx
+          image: nginx:alpine
+          ports:
+            - containerPort: 80
+              name: http
+          volumeMounts:
+            - mountPath: /usr/share/nginx/html
+              name: home
+              subPath: projets/vanyline/frontend/dist
+              readOnly: true
+          resources:
+            requests:
+              cpu: "50m"
+              memory: 32Mi
+            limits:
+              cpu: "200m"
+              memory: 64Mi
+      volumes:
+        - name: home
+          persistentVolumeClaim:
+            claimName: seb-code-server-home
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vanyline-ui-poc
+  namespace: media-station
+  labels:
+    app.kubernetes.io/name: vanyline-ui-poc
+spec:
+  selector:
+    app.kubernetes.io/name: vanyline-ui-poc
+  ports:
+    - port: 80
+      targetPort: 80
+      name: http
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: vanyline-ui-poc
+  namespace: media-station
+  labels:
+    app.kubernetes.io/name: vanyline-ui-poc
+  annotations:
+    acme.cert-manager.io/http01-ingress-class: traefik
+    cert-manager.io/cluster-issuer: self-sign
+    traefik.ingress.kubernetes.io/router.middlewares: enforce-https@file
+spec:
+  ingressClassName: traefik
+  rules:
+    - host: vanyline-poc.media.rennes.home
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: vanyline-ui-poc
+                port:
+                  number: 80
+  tls:
+    - hosts:
+        - vanyline-poc.media.rennes.home
+      secretName: vanyline-ui-poc-cert
