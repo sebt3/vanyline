@@ -48,11 +48,24 @@ pub enum AppError {
     K8sConfigError(String),
     #[error("VNL-K8S-002: Kubernetes API error: {0}")]
     K8sApiError(String),
+    #[error("VNL-K8S-003: Kubernetes resource not found: {0}")]
+    K8sNotFound(String),
 }
 
 impl From<vanyline_lib::VnyError> for AppError {
     fn from(e: vanyline_lib::VnyError) -> Self {
-        AppError::InternalError(e.to_string())
+        match &e {
+            vanyline_lib::VnyError::K8sConfigError(_) => AppError::K8sConfigError(e.to_string()),
+            vanyline_lib::VnyError::K8sApiError(s)
+                if s.contains("404")
+                    || s.contains("NotFound")
+                    || s.contains("not found") =>
+            {
+                AppError::K8sNotFound(e.to_string())
+            }
+            vanyline_lib::VnyError::K8sApiError(_) => AppError::K8sApiError(e.to_string()),
+            _ => AppError::InternalError(e.to_string()),
+        }
     }
 }
 
@@ -81,6 +94,7 @@ impl IntoResponse for AppError {
             AppError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             AppError::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             AppError::K8sApiError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            AppError::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
         };
 
         let body = Json(json!({ "error": message }));
@@ -121,5 +135,11 @@ mod tests {
     fn k8s_api_error_maps_to_500() {
         let resp = AppError::K8sApiError("x".into()).into_response();
         assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn k8s_not_found_maps_to_404() {
+        let resp = AppError::K8sNotFound("x".into()).into_response();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }

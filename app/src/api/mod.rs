@@ -7,6 +7,7 @@ pub mod model_profiles;
 pub mod owners;
 pub mod skills;
 pub mod toolsets;
+pub mod projects;
 
 use axum::{
     routing::{get, post, put},
@@ -104,5 +105,14 @@ pub fn api_router() -> Router<AppState> {
         .route(
             "/conversations/{id}/messages",
             get(conversations::get_messages),
+        )
+        // Projects (OIDC)
+        .route(
+            "/projects",
+            get(projects::list_projects).post(projects::create_project),
+        )
+        .route(
+            "/projects/{name}",
+            get(projects::get_project).delete(projects::delete_project),
         )
 }
