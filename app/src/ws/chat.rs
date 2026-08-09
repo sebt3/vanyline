@@ -224,13 +224,12 @@ async fn handle_message(
 
     persist_message(state, conversation_id, "user", user_msg, None).await?;
 
-    let todo_initial: Option<String> = sqlx::query_scalar(
-        "SELECT todo FROM conversations WHERE id = $1",
-    )
-    .bind(conversation_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .flatten();
+    let todo_initial: Option<String> =
+        sqlx::query_scalar("SELECT todo FROM conversations WHERE id = $1")
+            .bind(conversation_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .flatten();
 
     let sink = Arc::new(ChannelSink { tx: tx.clone() });
     let ctx = SessionContext {
@@ -442,17 +441,11 @@ mod tests {
 
     #[test]
     fn todo_to_persist_changed_to_none_does_not_null_previous() {
-        assert_eq!(
-            todo_to_persist(None, Some("old".to_string())),
-            None
-        );
+        assert_eq!(todo_to_persist(None, Some("old".to_string())), None);
     }
 
     #[test]
     fn todo_to_persist_unchanged_none_is_none() {
-        assert_eq!(
-            todo_to_persist(None, None),
-            None
-        );
+        assert_eq!(todo_to_persist(None, None), None);
     }
 }
