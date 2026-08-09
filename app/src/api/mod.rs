@@ -8,6 +8,7 @@ pub mod owners;
 pub mod skills;
 pub mod toolsets;
 pub mod projects;
+pub mod sandboxes;
 
 use axum::{
     routing::{get, post, put},
@@ -114,5 +115,18 @@ pub fn api_router() -> Router<AppState> {
         .route(
             "/projects/{name}",
             get(projects::get_project).delete(projects::delete_project),
+        )
+        // Sandboxes (OIDC)
+        .route(
+            "/sandboxes",
+            get(sandboxes::list_sandboxes).post(sandboxes::create_sandbox),
+        )
+        .route(
+            "/sandboxes/{name}",
+            get(sandboxes::get_sandbox).delete(sandboxes::delete_sandbox),
+        )
+        .route(
+            "/sandboxes/{name}/suspend",
+            post(sandboxes::set_sandbox_suspended),
         )
 }
