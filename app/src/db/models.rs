@@ -7,6 +7,7 @@ pub struct User {
     pub id: Uuid,
     pub oidc_sub: String,
     pub email: String,
+    pub k8s_owner_name: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 

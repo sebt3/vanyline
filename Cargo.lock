@@ -5070,6 +5070,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "vanyline-crds",
  "vanyline-lib",
 ]
 
