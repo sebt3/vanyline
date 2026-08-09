@@ -1,5 +1,8 @@
-import './app.css';
-import { mount } from 'svelte';
-import App from './App.svelte';
+import { createApp } from 'vue';
+import { register as registerAdvancedChat } from 'vue-advanced-chat';
+import './style.css';
+import App from './App.vue';
 
-mount(App, { target: document.getElementById('app')! });
+registerAdvancedChat();
+
+createApp(App).mount('#app');

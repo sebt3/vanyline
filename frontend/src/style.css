@@ -1,0 +1,17 @@
+@import "dockview-vue/dist/styles/dockview.css";
+@import "element-plus/theme-chalk/base.css";
+@import "element-plus/theme-chalk/el-tree.css";
+
+* { box-sizing: border-box; }
+html, body, #app {
+  height: 100%;
+  margin: 0;
+}
+body {
+  /* La coquille .shell (App.vue) couvre tout l'écran, mais le contenu
+     téléporté (menus, à terme tooltips/dialogs) sort de cette arborescence
+     et repose directement sur ce fond. Sans lui : transparent = blanc navigateur. */
+  background: #10192c;
+  font-family: -apple-system, "Segoe UI", system-ui, sans-serif;
+  font-size: 13px;
+}
