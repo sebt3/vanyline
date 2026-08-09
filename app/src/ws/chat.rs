@@ -205,6 +205,7 @@ fn send_error(tx: &mpsc::UnboundedSender<ChatEvent>, code: &str, message: &str) 
 /// `run_agent_turn` empêche d'atteindre le persist_message final en cas
 /// d'échec). C'est cette sémantique qui fait référence — le RPC
 /// (`cli/src/rpc/handlers.rs`) est aligné dessus séparément.
+#[allow(clippy::unwrap_used)] // mutex empoisonne = etat deja corrompu ailleurs, panic attendu
 async fn handle_message(
     tx: &mpsc::UnboundedSender<ChatEvent>,
     state: &AppState,
@@ -223,6 +224,14 @@ async fn handle_message(
 
     persist_message(state, conversation_id, "user", user_msg, None).await?;
 
+    let todo_initial: Option<String> = sqlx::query_scalar(
+        "SELECT todo FROM conversations WHERE id = $1",
+    )
+    .bind(conversation_id)
+    .fetch_optional(&state.pool)
+    .await?
+    .flatten();
+
     let sink = Arc::new(ChannelSink { tx: tx.clone() });
     let ctx = SessionContext {
         store: Arc::new(PgConfigStore::new(state.pool.clone(), user_id)),
@@ -231,7 +240,7 @@ async fn handle_message(
         subagent_depth_max: 1,
         extra_mcp: Vec::new(),
         model_override: None,
-        todo_state: Arc::new(std::sync::Mutex::new(None)),
+        todo_state: Arc::new(std::sync::Mutex::new(todo_initial.clone())),
     };
 
     let result =
@@ -251,6 +260,15 @@ async fn handle_message(
     )
     .await?;
 
+    let current_todo = ctx.todo_state.lock().unwrap().clone();
+    if let Some(todo) = todo_to_persist(current_todo, todo_initial) {
+        sqlx::query("UPDATE conversations SET todo = $1 WHERE id = $2")
+            .bind(&todo)
+            .bind(conversation_id)
+            .execute(&state.pool)
+            .await?;
+    }
+
     Ok(())
 }
 
@@ -268,6 +286,17 @@ fn tool_calls_for_persistence(records: &[ToolCallRecord]) -> Vec<vanyline_lib::T
             result: r.result.clone(),
         })
         .collect()
+}
+
+/// Renvoie la valeur todo à persister après un tour : `Some(final)` si l'état
+/// a été modifié par rapport au seed `initial` ET si le résultat est non-NULL.
+/// `None` sinon (aucun changement, ou résultat NULL) — on ne NULL-e jamais un état
+/// antérieur par un update systématique.
+fn todo_to_persist(current: Option<String>, initial: Option<String>) -> Option<String> {
+    match current {
+        Some(_) if current != initial => current,
+        _ => None,
+    }
 }
 
 async fn load_history(
@@ -393,5 +422,37 @@ mod tests {
             assert!(busy.lock().unwrap().contains(&conv));
         }
         assert!(!busy.lock().unwrap().contains(&conv));
+    }
+
+    #[test]
+    fn todo_to_persist_changed_some_from_none_returns_some() {
+        assert_eq!(
+            todo_to_persist(Some("new todo".to_string()), None),
+            Some("new todo".to_string())
+        );
+    }
+
+    #[test]
+    fn todo_to_persist_unchanged_returns_none() {
+        assert_eq!(
+            todo_to_persist(Some("x".to_string()), Some("x".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn todo_to_persist_changed_to_none_does_not_null_previous() {
+        assert_eq!(
+            todo_to_persist(None, Some("old".to_string())),
+            None
+        );
+    }
+
+    #[test]
+    fn todo_to_persist_unchanged_none_is_none() {
+        assert_eq!(
+            todo_to_persist(None, None),
+            None
+        );
     }
 }
