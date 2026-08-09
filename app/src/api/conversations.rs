@@ -25,6 +25,7 @@ pub struct ConversationOut {
     pub id: Uuid,
     pub agent_name: Option<String>,
     pub title: Option<String>,
+    pub todo: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -48,6 +49,7 @@ async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationO
         id: conv.id,
         agent_name,
         title: conv.title,
+        todo: conv.todo,
         created_at: conv.created_at,
         updated_at: conv.updated_at,
     })

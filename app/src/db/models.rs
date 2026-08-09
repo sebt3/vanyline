@@ -95,6 +95,7 @@ pub struct Conversation {
     pub user_id: Uuid,
     pub agent_id: Option<Uuid>,
     pub title: Option<String>,
+    pub todo: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
