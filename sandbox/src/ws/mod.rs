@@ -4,4 +4,5 @@
 //! browser WebSocket upgrade handshake.
 
 pub mod fs;
+pub mod terminal;
 pub mod ticket;

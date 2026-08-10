@@ -1,47 +1,14 @@
 //! Filesystem WebSocket endpoint: `GET /ws/fs`.
 //!
 //! Authentication is performed by a middleware layer (`ws_auth_middleware`)
-//! that runs before the `WebSocketUpgrade` extractor. This avoids axum's
-//! 426 conversion issue when a handler with `WebSocketUpgrade` returns a
-//! non-OnUpgrade response (e.g. 401 auth error).
+//! in [`crate::ws::ticket`], which runs before the `WebSocketUpgrade`
+//! extractor. This avoids axum's 426 conversion issue when a handler with
+//! `WebSocketUpgrade` returns a non-OnUpgrade response (e.g. 401 auth error).
 
 use crate::AppState;
-use axum::{
-    extract::{State, WebSocketUpgrade},
-    http::Request,
-    middleware::Next,
-    response::{IntoResponse, Response},
-};
+use axum::extract::{State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
-
-/// Middleware that checks the ticket from the query string before
-/// allowing the WebSocket upgrade to proceed. If the ticket is missing
-/// or invalid, returns 401; otherwise passes the request to the handler.
-pub async fn ws_auth_middleware(
-    State(state): State<AppState>,
-    req: Request<axum::body::Body>,
-    next: Next,
-) -> Response {
-    // Extract ticket from query string
-    let ticket = req
-        .uri()
-        .query()
-        .and_then(|qs| {
-            for pair in qs.split('&') {
-                if let Some((key, value)) = pair.split_once('=')
-                    && key == "ticket"
-                {
-                    return Some(value.to_string());
-                }
-            }
-            None
-        });
-
-    match crate::ws::ticket::redeem_from_query(&state.tickets, ticket) {
-        Ok(_) => next.run(req).await,
-        Err(e) => e.into_response(),
-    }
-}
+use axum::response::IntoResponse;
 
 /// Query-string par lequel le navigateur présente son ticket au handshake WS.
 #[derive(Debug, serde::Deserialize)]
@@ -50,8 +17,8 @@ pub struct TicketQuery {
     pub ticket: Option<String>,
 }
 
-/// Handler de `GET /ws/fs`. Le middleware [`ws_auth_middleware`] a déjà
-/// validé et consommé le ticket. Ce handler met simplement en place la
+/// Handler de `GET /ws/fs`. Le middleware [`crate::ws::ticket::ws_auth_middleware`]
+/// a déjà validé et consommé le ticket. Ce handler met simplement en place la
 /// session requête/réponse filesystem.
 pub async fn handle_ws_fs(
     State(state): State<AppState>,
@@ -244,7 +211,6 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
     use super::*;
-    use crate::AppState;
 
     // Test 1: read_file_returns_content
     #[tokio::test]

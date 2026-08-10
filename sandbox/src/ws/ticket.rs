@@ -10,7 +10,41 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::auth::AccessLevel;
-use axum::{http::StatusCode, response::IntoResponse, Json};
+use axum::body::Body;
+use axum::extract::State;
+use axum::http::{Request, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+
+/// Middleware d'auth WS partagé par `/ws/fs` et `/ws/terminal`. Lit le ticket en
+/// query string (`?ticket=`), le consomme via `redeem_from_query`, renvoie 401 en
+/// cas d'erreur (MissingTicket/InvalidTicket), sinon laisse passer vers le handler.
+pub async fn ws_auth_middleware(
+    State(state): State<crate::AppState>,
+    req: Request<Body>,
+    next: Next,
+) -> Response {
+    // Extract ticket from query string
+    let ticket = req
+        .uri()
+        .query()
+        .and_then(|qs| {
+            for pair in qs.split('&') {
+                if let Some((key, value)) = pair.split_once('=')
+                    && key == "ticket"
+                {
+                    return Some(value.to_string());
+                }
+            }
+            None
+        });
+
+    match crate::ws::ticket::redeem_from_query(&state.tickets, ticket) {
+        Ok(_) => next.run(req).await,
+        Err(e) => e.into_response(),
+    }
+}
 
 /// Convert a `WsAuthError` into an HTTP response (401 for both variants,
 /// matching the token-auth error path).

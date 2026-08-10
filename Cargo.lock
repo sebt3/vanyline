@@ -5217,6 +5217,7 @@ dependencies = [
  "clap",
  "http-body-util",
  "jsonwebtoken",
+ "libc",
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",

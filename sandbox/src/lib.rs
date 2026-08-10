@@ -57,7 +57,16 @@ pub fn build_app(state: AppState) -> Router {
             get(crate::ws::fs::handle_ws_fs).layer(
                 middleware::from_fn_with_state(
                     state.clone(),
-                    crate::ws::fs::ws_auth_middleware,
+                    crate::ws::ticket::ws_auth_middleware,
+                ),
+            ),
+        )
+        .route(
+            "/ws/terminal",
+            get(crate::ws::terminal::handle_ws_terminal).layer(
+                middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::ws::ticket::ws_auth_middleware,
                 ),
             ),
         );
