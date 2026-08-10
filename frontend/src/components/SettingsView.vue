@@ -1,127 +1,148 @@
 <script setup lang="ts">
-import { TabsRoot, TabsList, TabsTrigger, TabsContent } from 'reka-ui';
+import type { Component } from 'vue';
+import { computed, ref } from 'vue';
+import AccountScreen from './settings/AccountScreen.vue';
 
-interface Field {
+interface NavSub {
+  id: string;
   label: string;
-  type: 'text' | 'select';
-  value: string;
-  options?: string[];
-  hint?: string;
-  wide?: boolean;
 }
 
-interface Category {
+interface NavGroup {
   id: string;
   label: string;
   icon: string;
   accent: string;
-  subtitle: string;
-  fields: Field[];
+  sub?: NavSub[];
 }
 
-const categories: Category[] = [
-  {
-    id: 'project',
-    label: 'Projet',
-    icon: '⌥',
-    accent: '#4c90f0',
-    subtitle: 'Le dépôt et la branche sur lesquels la sandbox va travailler.',
-    fields: [
-      { label: 'Dépôt git', type: 'text', value: 'git@git.kydah.fr:shuss/media-station.git', wide: true },
-      { label: 'Branche', type: 'select', value: 'main', options: ['main', 'feat/thumbnails-webp'] },
-    ],
-  },
-  {
-    id: 'sandbox',
-    label: 'Sandbox',
-    icon: '▣',
-    accent: '#3fb56d',
-    subtitle: "L'environnement d'exécution provisionné pour ce projet.",
-    fields: [
-      { label: 'Toolchains', type: 'text', value: 'python, rust', hint: 'liste séparée par des virgules', wide: true },
-      { label: 'CPU', type: 'select', value: '2 vCPU', options: ['1 vCPU', '2 vCPU', '4 vCPU'] },
-      { label: 'Mémoire', type: 'select', value: '4 Gi', options: ['2 Gi', '4 Gi', '8 Gi'] },
-    ],
-  },
+const groups: NavGroup[] = [
+  { id: 'projects', label: 'Projets', icon: '⌥', accent: '#4c90f0' },
+  { id: 'sandboxes', label: 'Sandboxes', icon: '▣', accent: '#3fb56d' },
   {
     id: 'agent',
     label: 'Agent & modèle',
     icon: '✦',
     accent: '#5b1ecf',
-    subtitle: 'Le LLM que consulte l\'assistant, et où il vit.',
-    fields: [
-      { label: 'Endpoint', type: 'text', value: 'http://ollama.kydah.svc.cluster.local:11434', wide: true },
-      { label: 'Modèle', type: 'select', value: 'qwen3.6:35b-a3b', options: ['qwen3.6:35b-a3b', 'llama3.2:8b'] },
+    sub: [
+      { id: 'llm-providers', label: 'Fournisseurs LLM' },
+      { id: 'model-profiles', label: 'Profils de modèle' },
+      { id: 'toolsets', label: 'Toolsets' },
+      { id: 'skills', label: 'Skills' },
+      { id: 'agents', label: 'Agents' },
+      { id: 'mcp-servers', label: 'Serveurs MCP' },
     ],
   },
-  {
-    id: 'account',
-    label: 'Compte',
-    icon: '●',
-    accent: '#e0a83d',
-    subtitle: 'Ton identité cluster et ce qui en dépend.',
-    fields: [{ label: 'Owner', type: 'text', value: 'shuss' }],
-  },
+  { id: 'account', label: 'Compte', icon: '●', accent: '#e0a83d' },
 ];
+
+const activeGroup = ref(groups[0].id);
+const activeScreen = ref(getScreenId(groups[0]));
+const expandedAgent = ref(false);
+
+function getScreenId(group: NavGroup): string {
+  if (group.sub && group.sub.length > 0) {
+    return group.sub[0].id;
+  }
+  return group.id;
+}
+
+function setActiveGroup(groupId: string) {
+  const group = groups.find((g) => g.id === groupId);
+  if (!group) return;
+  activeGroup.value = groupId;
+  if (group.sub) {
+    expandedAgent.value = true;
+    activeScreen.value = group.sub[0].id;
+  } else {
+    expandedAgent.value = false;
+    activeScreen.value = groupId;
+  }
+}
+
+function setSubScreen(subId: string) {
+  activeScreen.value = subId;
+}
+
+// Liste des écrans qui n'ont pas encore été implémentés (rendent un placeholder)
+const pendingScreenIds = [
+  'projects',
+  'sandboxes',
+  'llm-providers',
+  'model-profiles',
+  'toolsets',
+  'skills',
+  'agents',
+  'mcp-servers',
+];
+
+const isPending = computed(() => pendingScreenIds.includes(activeScreen.value));
+
+const screens: Record<string, Component> = {
+  account: AccountScreen,
+};
+
+const Pending: Component = {
+  template: '<div class="pending"><span class="pending-icon">🔜</span>À venir</div>',
+  styles: [
+    `
+.pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  color: #6a7185;
+  font-size: 14px;
+}
+.pending-icon {
+  font-size: 22px;
+}
+`,
+  ],
+};
 </script>
 
 <template>
-  <TabsRoot class="settings" default-value="project" orientation="vertical">
-    <TabsList class="nav" aria-label="Catégories de configuration">
-      <TabsTrigger
-        v-for="cat in categories"
-        :key="cat.id"
-        class="nav-item"
-        :value="cat.id"
-        :style="{ '--accent': cat.accent }"
-      >
-        <span class="nav-icon">{{ cat.icon }}</span>
-        {{ cat.label }}
-      </TabsTrigger>
-    </TabsList>
-    <div class="panels">
-      <TabsContent v-for="cat in categories" :key="cat.id" class="panel" :value="cat.id" :style="{ '--accent': cat.accent }">
-        <div class="panel-head">
-          <span class="panel-icon">{{ cat.icon }}</span>
-          <div>
-            <h2>{{ cat.label }}</h2>
-            <p class="subtitle">{{ cat.subtitle }}</p>
-          </div>
-        </div>
-
-        <div class="card">
-          <label v-for="field in cat.fields" :key="field.label" class="field" :class="{ wide: field.wide }">
-            <span class="field-label">{{ field.label }}</span>
-            <select v-if="field.type === 'select'" :value="field.value">
-              <option v-for="opt in field.options" :key="opt" :value="opt">{{ opt }}</option>
-            </select>
-            <input v-else type="text" :value="field.value" />
-            <span v-if="field.hint" class="field-hint">{{ field.hint }}</span>
-          </label>
-        </div>
-
-        <div v-if="cat.id === 'project'" class="action-row">
-          <button class="primary-btn">Ouvrir le workspace</button>
-          <span class="status-pill ok">● dépôt joignable</span>
-        </div>
-        <div v-else-if="cat.id === 'sandbox'" class="status-row">
-          <span class="status-pill ok">● sandbox active</span>
-          <span class="status-dim">provisionnée il y a 14j</span>
-        </div>
-        <div v-else-if="cat.id === 'agent'" class="status-row">
-          <span class="status-pill ok">● endpoint joignable</span>
-          <span class="status-dim">latence moyenne 180ms</span>
-        </div>
-        <div v-else-if="cat.id === 'account'" class="quota">
-          <div class="quota-row">
-            <span>Sandboxes utilisées</span>
-            <span class="quota-value">3 / 5</span>
-          </div>
-          <div class="quota-bar"><div class="quota-fill" style="width: 60%" /></div>
-        </div>
-      </TabsContent>
-    </div>
-  </TabsRoot>
+  <div class="settings">
+    <nav class="nav" aria-label="Configuration">
+      <template v-for="group in groups" :key="group.id">
+        <button
+          class="nav-item"
+          :class="{ active: group.id === activeGroup }"
+          :data-group="group.id"
+          :style="{ '--accent': group.accent }"
+          @click="setActiveGroup(group.id)"
+        >
+          <span class="nav-icon">{{ group.icon }}</span>
+          <span class="nav-label">{{ group.label }}</span>
+          <template v-if="group.sub">
+            <span
+              class="nav-arrow"
+              :class="{ expanded: group.id === 'agent' && expandedAgent }"
+              @click.stop="expandedAgent = !expandedAgent"
+            >▼</span>
+          </template>
+        </button>
+        <template v-if="group.sub && expandedAgent">
+          <button
+            v-for="sub in group.sub"
+            :key="sub.id"
+            class="nav-sub-item"
+            :class="{ active: activeScreen === sub.id }"
+            :style="{ '--accent': group.accent }"
+            @click="setSubScreen(sub.id)"
+          >
+            {{ sub.label }}
+          </button>
+        </template>
+      </template>
+    </nav>
+    <main class="panels">
+      <div class="screen-wrap">
+        <component :is="isPending ? Pending : screens[activeScreen]" />
+      </div>
+    </main>
+  </div>
 </template>
 
 <style scoped>
@@ -155,9 +176,11 @@ const categories: Category[] = [
   font: inherit;
   font-size: 13.5px;
   height: 38px;
-  padding: 0 10px 0 10px;
+  padding: 0 10px;
   border-radius: 0 6px 6px 0;
-  cursor: default;
+  cursor: pointer;
+  width: 100%;
+  font-family: inherit;
 }
 .nav-icon {
   width: 18px;
@@ -169,9 +192,42 @@ const categories: Category[] = [
   background: #161d2c;
   color: white;
 }
-.nav-item[data-state='active'] {
+.nav-item.active {
   background: #161d2c;
   border-left-color: var(--accent);
+  color: white;
+  font-weight: 600;
+}
+.nav-arrow {
+  margin-left: auto;
+  font-size: 10px;
+  color: #6a7185;
+  transition: transform 0.15s;
+}
+.nav-arrow.expanded {
+  transform: rotate(180deg);
+}
+.nav-sub-item {
+  appearance: none;
+  background: transparent;
+  border: none;
+  color: #6a7185;
+  display: block;
+  text-align: left;
+  font: inherit;
+  font-size: 12.5px;
+  height: 32px;
+  padding: 0 10px 0 42px;
+  border-radius: 0 6px 6px 0;
+  cursor: pointer;
+  width: 100%;
+  font-family: inherit;
+}
+.nav-sub-item:hover {
+  background: #161d2c;
+  color: white;
+}
+.nav-sub-item.active {
   color: white;
   font-weight: 600;
 }
@@ -181,145 +237,7 @@ const categories: Category[] = [
   overflow-y: auto;
   padding: 48px 56px;
 }
-.panel-head {
-  display: flex;
-  align-items: flex-start;
-  gap: 18px;
-  margin-bottom: 32px;
+.screen-wrap {
   max-width: 760px;
-}
-.panel-icon {
-  width: 48px;
-  height: 48px;
-  flex: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  color: var(--accent);
-  font-size: 21px;
-}
-.panel h2 {
-  margin: 3px 0 6px;
-  font-size: 24px;
-  font-weight: 700;
-}
-.subtitle {
-  margin: 0;
-  color: #9497a9;
-  font-size: 13.5px;
-}
-
-.card {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-top: 2px solid var(--accent);
-  border-radius: 10px;
-}
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.field.wide {
-  grid-column: 1 / -1;
-}
-.field-label {
-  font-size: 11px;
-  color: #9497a9;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-}
-.field input,
-.field select {
-  height: 30px;
-  padding: 0 9px;
-  background: #0c1420;
-  border: 1px solid #2b2b4a;
-  border-radius: 4px;
-  color: #e6e9f0;
-  font: inherit;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 12.5px;
-}
-.field input:focus,
-.field select:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-.field-hint {
-  font-size: 11px;
-  color: #6a7185;
-}
-
-.action-row,
-.status-row {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-top: 24px;
-  max-width: 760px;
-}
-.primary-btn {
-  appearance: none;
-  border: none;
-  height: 32px;
-  padding: 0 16px;
-  border-radius: 5px;
-  background: var(--accent);
-  color: white;
-  font: inherit;
-  font-weight: 600;
-  font-size: 12.5px;
-  cursor: default;
-}
-.status-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11.5px;
-  padding: 4px 10px;
-  border-radius: 999px;
-}
-.status-pill.ok {
-  background: rgba(63, 181, 109, 0.15);
-  color: #3fb56d;
-}
-.status-dim {
-  font-size: 11.5px;
-  color: #6a7185;
-}
-
-.quota {
-  max-width: 760px;
-  margin-top: 8px;
-}
-.quota-row {
-  display: flex;
-  justify-content: space-between;
-  font-size: 12px;
-  color: #9497a9;
-  margin-bottom: 6px;
-}
-.quota-value {
-  color: #e6e9f0;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-}
-.quota-bar {
-  height: 6px;
-  border-radius: 999px;
-  background: #1c1c2a;
-  overflow: hidden;
-}
-.quota-fill {
-  height: 100%;
-  background: var(--accent);
-  border-radius: 999px;
 }
 </style>
