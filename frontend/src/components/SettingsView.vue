@@ -3,6 +3,7 @@ import type { Component } from 'vue';
 import { computed, ref } from 'vue';
 import AccountScreen from './settings/AccountScreen.vue';
 import ProjectsScreen from './settings/ProjectsScreen.vue';
+import SandboxesScreen from './settings/SandboxesScreen.vue';
 
 interface NavSub {
   id: string;
@@ -67,7 +68,6 @@ function setSubScreen(subId: string) {
 
 // Liste des écrans qui n'ont pas encore été implémentés (rendent un placeholder)
 const pendingScreenIds = [
-  'sandboxes',
   'llm-providers',
   'model-profiles',
   'toolsets',
@@ -81,6 +81,7 @@ const isPending = computed(() => pendingScreenIds.includes(activeScreen.value));
 const screens: Record<string, Component> = {
   account: AccountScreen,
   projects: ProjectsScreen,
+  sandboxes: SandboxesScreen,
 };
 
 const Pending: Component = {
