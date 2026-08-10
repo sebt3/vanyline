@@ -7,12 +7,8 @@ use serde::Deserialize;
 use vanyline_crds::{Sandbox, SandboxSpec};
 
 use crate::{
-    api::conversations::get_or_create_user,
-    api::owners,
-    auth::middleware::AuthUser,
-    error::AppError,
-    k8s,
-    AppState,
+    api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
+    error::AppError, k8s, AppState,
 };
 
 /// Body de `POST /api/sandboxes`. `name` porte le nom du CRD Sandbox ;

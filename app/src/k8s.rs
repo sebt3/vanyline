@@ -4,7 +4,6 @@ use vanyline_lib::k8s::VnlK8sClient;
 /// Retourne le client K8s, découvert lazily à la première requête qui en a besoin
 /// (jamais au démarrage). Caché dans AppState::k8s. `discover` ré-utilise le
 /// namespace résolu (kubeconfig courant si VNL_K8S_NAMESPACE absent).
-#[allow(dead_code)]
 pub async fn client(state: &AppState) -> Result<VnlK8sClient, AppError> {
     let mut guard = state.k8s.lock().await;
     if let Some(c) = guard.as_ref() {

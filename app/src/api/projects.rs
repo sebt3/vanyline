@@ -7,12 +7,8 @@ use serde::Deserialize;
 use vanyline_crds::{EgressRule, Project, ProjectSpec, PvcRef};
 
 use crate::{
-    api::conversations::get_or_create_user,
-    api::owners,
-    auth::middleware::AuthUser,
-    error::AppError,
-    k8s,
-    AppState,
+    api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
+    error::AppError, k8s, AppState,
 };
 
 /// Body de `POST /api/projects`. Reprend les champs de `ProjectSpec` SAUF `owner`,
@@ -53,7 +49,10 @@ pub async fn list_projects(
     let client = k8s::client(&state).await?;
     let projects = client.list_projects().await?;
     Ok(Json(
-        projects.into_iter().filter(|p| p.spec.owner == owner).collect(),
+        projects
+            .into_iter()
+            .filter(|p| p.spec.owner == owner)
+            .collect(),
     ))
 }
 

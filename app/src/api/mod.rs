@@ -5,10 +5,10 @@ pub mod mcp_servers;
 pub mod me;
 pub mod model_profiles;
 pub mod owners;
-pub mod skills;
-pub mod toolsets;
 pub mod projects;
 pub mod sandboxes;
+pub mod skills;
+pub mod toolsets;
 
 use axum::{
     routing::{get, post, put},

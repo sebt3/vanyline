@@ -20,7 +20,12 @@ pub fn sanitize_owner_name(raw: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('-');
-    let mut label = trimmed.chars().take(63).collect::<String>();
+    let cut: String = trimmed.chars().take(63).collect();
+    // Le cut à 63 caractères peut retomber pile sur un `-` (ex. un `-` en
+    // position 62 d'un local-part plus long) — retrim pour ne jamais
+    // renvoyer une étiquette qui se termine par un tiret (RFC1123 : début
+    // ET fin alphanumériques).
+    let mut label = cut.trim_end_matches('-').to_string();
     if label.is_empty() {
         label = "owner".to_string();
     }
@@ -29,25 +34,23 @@ pub fn sanitize_owner_name(raw: &str) -> String {
 
 /// Lit `users.k8s_owner_name` pour `user_id`. `Some(...)` si l'Owner a déjà
 /// été résolu ; `None` sinon (routes de lecture : « aucun Owner »).
-#[allow(dead_code)]
 pub async fn resolve_owner_name(
     state: &AppState,
     user_id: Uuid,
 ) -> Result<Option<String>, AppError> {
-    Ok(sqlx::query_scalar::<_, Option<String>>(
-        "SELECT k8s_owner_name FROM users WHERE id = $1",
+    Ok(
+        sqlx::query_scalar::<_, Option<String>>("SELECT k8s_owner_name FROM users WHERE id = $1")
+            .bind(user_id)
+            .fetch_optional(&state.pool)
+            .await
+            .map_err(AppError::DatabaseError)?
+            .flatten(),
     )
-    .bind(user_id)
-    .fetch_optional(&state.pool)
-    .await
-    .map_err(AppError::DatabaseError)?
-    .flatten())
 }
 
 /// Crée l'Owner si absent et persiste `users.k8s_owner_name` pour `db_user`.
 /// Réservé au `POST /api/projects` (décision développeur : lazy provisioning
 /// restreint). Retourne le nom d'Owner.
-#[allow(dead_code)]
 pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, AppError> {
     if let Some(name) = &db_user.k8s_owner_name {
         return Ok(name.clone());
@@ -64,13 +67,16 @@ pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, Ap
     match k8s.get_owner(&name).await {
         Ok(_) => {}
         Err(_) => {
-            k8s.create_owner(&name, OwnerSpec {
-                existing_pvc: None,
-                home_size: None,
-                home_storage_class: None,
-                project_defaults: None,
-                egress: Vec::new(),
-            })
+            k8s.create_owner(
+                &name,
+                OwnerSpec {
+                    existing_pvc: None,
+                    home_size: None,
+                    home_storage_class: None,
+                    project_defaults: None,
+                    egress: Vec::new(),
+                },
+            )
             .await?;
         }
     }
@@ -101,5 +107,17 @@ mod tests {
     fn sanitize_owner_truncates_to_63() {
         let input = format!("{}@x", "a".repeat(70));
         assert_eq!(sanitize_owner_name(&input), "a".repeat(63));
+    }
+
+    #[test]
+    fn sanitize_owner_truncation_never_ends_in_hyphen() {
+        // Le '-' en position 62 (0-indexed) tombe exactement sur la coupe à 63.
+        let input = format!("{}-{}@x", "a".repeat(62), "b".repeat(10));
+        let result = sanitize_owner_name(&input);
+        assert!(
+            !result.ends_with('-'),
+            "label should never end with '-' after truncation, got {result:?}"
+        );
+        assert_eq!(result, "a".repeat(62));
     }
 }

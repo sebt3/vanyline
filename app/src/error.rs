@@ -57,9 +57,7 @@ impl From<vanyline_lib::VnyError> for AppError {
         match &e {
             vanyline_lib::VnyError::K8sConfigError(_) => AppError::K8sConfigError(e.to_string()),
             vanyline_lib::VnyError::K8sApiError(s)
-                if s.contains("404")
-                    || s.contains("NotFound")
-                    || s.contains("not found") =>
+                if s.contains("404") || s.contains("NotFound") || s.contains("not found") =>
             {
                 AppError::K8sNotFound(e.to_string())
             }
