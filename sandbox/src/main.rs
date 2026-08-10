@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::Parser as _;
 use vanyline_sandbox::{
     AppState, auth::AuthState, build_app, config::Config, spawn_metrics_server,
+    ws::ticket::TicketStore,
 };
 
 #[tokio::main]
@@ -23,6 +24,7 @@ async fn main() -> Result<()> {
     let state = AppState {
         config: config.clone(),
         auth,
+        tickets: TicketStore::new(),
     };
     let app = build_app(state);
 

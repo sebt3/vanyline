@@ -7,27 +7,31 @@ pub mod maint;
 pub mod mcp;
 pub mod telemetry;
 pub mod tools_impl;
+pub mod ws;
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
     Router,
-    extract::Request,
+    extract::{Extension, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
+    Json,
 };
 use tower_http::trace::TraceLayer;
 
 use auth::AuthState;
 use config::Config;
+use ws::ticket::TicketStore;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub auth: Arc<AuthState>,
+    pub tickets: TicketStore,
 }
 
 /// Build the main MCP application router (MCP + public routes).
@@ -39,6 +43,7 @@ pub fn build_app(state: AppState) -> Router {
             .route("/mcp", post(mcp::handle))
             .route("/git/status", get(git::handle_status))
             .route("/git/unpushed", get(git::handle_unpushed))
+            .route("/ws/ticket", post(handle_ws_ticket))
             .layer(middleware::from_fn_with_state(
                 state.clone(),
                 auth::require_auth,
@@ -63,6 +68,28 @@ pub fn build_app(state: AppState) -> Router {
 /// port externally — protect it at the network/infra layer (NetworkPolicy, etc.).
 pub fn build_metrics_app() -> Router {
     Router::new().route("/metrics", get(metrics_handler))
+}
+
+/// Handler for `POST /ws/ticket` — issues a short-lived, single-use ticket
+/// for WebSocket upgrade authentication.
+async fn handle_ws_ticket(
+    State(state): State<AppState>,
+    Extension(auth): Extension<auth::AuthInfo>,
+) -> impl IntoResponse {
+    use ws::ticket::{TicketClaims, TICKET_TTL_SECS};
+
+    let store = &state.tickets;
+    let ticket = store.issue(TicketClaims {
+        subject: auth.subject,
+        access: auth.access,
+    });
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ticket": ticket,
+            "expires_in_secs": TICKET_TTL_SECS,
+        })),
+    )
 }
 
 /// Spawn the metrics HTTP server as a background task.

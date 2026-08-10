@@ -13,7 +13,9 @@ path = "src/bin/maint.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-axum = { version = "0.8", features = ["json", "macros"] }
+rand = "0.8"
+axum = { version = "0.8", features = ["json", "macros", "ws"] }
+portable-pty = "0.9"
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower-http = { version = "0.6", features = ["trace"] }
 serde = { version = "1", features = ["derive"] }
