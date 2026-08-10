@@ -49,10 +49,18 @@ pub fn build_app(state: AppState) -> Router {
                 auth::require_auth,
             ));
 
-    let public = Router::new().route("/health", get(health)).route(
-        "/.well-known/oauth-protected-resource",
-        get(mcp::oauth_metadata),
-    );
+    let public = Router::new()
+        .route("/health", get(health))
+        .route("/.well-known/oauth-protected-resource", get(mcp::oauth_metadata))
+        .route(
+            "/ws/fs",
+            get(crate::ws::fs::handle_ws_fs).layer(
+                middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::ws::fs::ws_auth_middleware,
+                ),
+            ),
+        );
 
     Router::new()
         .merge(protected)

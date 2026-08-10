@@ -3,4 +3,5 @@
 //! Provides short-lived, single-use tickets for authenticating the
 //! browser WebSocket upgrade handshake.
 
+pub mod fs;
 pub mod ticket;

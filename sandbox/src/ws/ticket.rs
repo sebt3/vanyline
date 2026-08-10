@@ -10,6 +10,22 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::auth::AccessLevel;
+use axum::{http::StatusCode, response::IntoResponse, Json};
+
+/// Convert a `WsAuthError` into an HTTP response (401 for both variants,
+/// matching the token-auth error path).
+impl IntoResponse for WsAuthError {
+    fn into_response(self) -> axum::response::Response {
+        let status = match self {
+            WsAuthError::MissingTicket => StatusCode::UNAUTHORIZED,
+            WsAuthError::InvalidTicket => StatusCode::UNAUTHORIZED,
+        };
+        (status, Json(serde_json::json!({
+            "error": self.to_string(),
+        })))
+            .into_response()
+    }
+}
 
 /// Duration of a ticket — a few seconds, long enough for the browser to
 /// chain `POST /ws/ticket` then the WS handshake. Not a full session.
@@ -77,7 +93,7 @@ impl TicketStore {
         ticket
     }
 
-    /// Consumes `ticket`. Removes the entry **no matter what** (valid or expired).
+    /// Consumes the ticket. Removes the entry **no matter what** (valid or expired).
     /// Returns `Some(TicketClaims)` if the ticket is present and not expired;
     /// `None` otherwise.
     #[allow(clippy::expect_used)] // poison means a bug in *our* code, not an external actor
@@ -97,6 +113,18 @@ impl TicketStore {
             // Ticket already consumed or never existed
             None
         }
+    }
+}
+
+/// Consomme `ticket` (retiré quoi qu'il arrive) pour produire `TicketClaims`.
+/// `None` de query → `MissingTicket` ; ticket absent/expiré → `InvalidTicket`.
+pub fn redeem_from_query(
+    store: &TicketStore,
+    ticket: Option<String>,
+) -> Result<TicketClaims, WsAuthError> {
+    match ticket {
+        Some(t) => store.redeem(&t).ok_or(WsAuthError::InvalidTicket),
+        None => Err(WsAuthError::MissingTicket),
     }
 }
 
