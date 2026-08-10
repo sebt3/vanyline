@@ -13,13 +13,12 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use axum::{
-    Router,
+    Json, Router,
     extract::{Extension, Request, State},
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json,
 };
 use tower_http::trace::TraceLayer;
 
@@ -38,37 +37,35 @@ pub struct AppState {
 ///
 /// The metrics server runs on a separate port — see [`spawn_metrics_server`].
 pub fn build_app(state: AppState) -> Router {
-    let protected =
-        Router::new()
-            .route("/mcp", post(mcp::handle))
-            .route("/git/status", get(git::handle_status))
-            .route("/git/unpushed", get(git::handle_unpushed))
-            .route("/ws/ticket", post(handle_ws_ticket))
-            .layer(middleware::from_fn_with_state(
-                state.clone(),
-                auth::require_auth,
-            ));
+    let protected = Router::new()
+        .route("/mcp", post(mcp::handle))
+        .route("/git/status", get(git::handle_status))
+        .route("/git/unpushed", get(git::handle_unpushed))
+        .route("/ws/ticket", post(handle_ws_ticket))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            auth::require_auth,
+        ));
 
     let public = Router::new()
         .route("/health", get(health))
-        .route("/.well-known/oauth-protected-resource", get(mcp::oauth_metadata))
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(mcp::oauth_metadata),
+        )
         .route(
             "/ws/fs",
-            get(crate::ws::fs::handle_ws_fs).layer(
-                middleware::from_fn_with_state(
-                    state.clone(),
-                    crate::ws::ticket::ws_auth_middleware,
-                ),
-            ),
+            get(crate::ws::fs::handle_ws_fs).layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::ws::ticket::ws_auth_middleware,
+            )),
         )
         .route(
             "/ws/terminal",
-            get(crate::ws::terminal::handle_ws_terminal).layer(
-                middleware::from_fn_with_state(
-                    state.clone(),
-                    crate::ws::ticket::ws_auth_middleware,
-                ),
-            ),
+            get(crate::ws::terminal::handle_ws_terminal).layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::ws::ticket::ws_auth_middleware,
+            )),
         );
 
     Router::new()
@@ -93,7 +90,7 @@ async fn handle_ws_ticket(
     State(state): State<AppState>,
     Extension(auth): Extension<auth::AuthInfo>,
 ) -> impl IntoResponse {
-    use ws::ticket::{TicketClaims, TICKET_TTL_SECS};
+    use ws::ticket::{TICKET_TTL_SECS, TicketClaims};
 
     let store = &state.tickets;
     let ticket = store.issue(TicketClaims {

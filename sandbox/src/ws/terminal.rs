@@ -12,7 +12,7 @@
 //! - Close/erreur/fin de stream → fermer la session et tuer le groupe de processus.
 
 use crate::AppState;
-use axum::extract::ws::{Message, WebSocket, Utf8Bytes};
+use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
@@ -60,7 +60,7 @@ async fn terminal_session(mut ws: WebSocket, state: AppState) {
         let mut buf = vec![0u8; PTY_BUF_SIZE];
         loop {
             match reader.read(&mut buf) {
-                Ok(0) => break,    // EOF
+                Ok(0) => break, // EOF
                 Ok(n) if tx.blocking_send(buf[..n].to_vec()).is_err() => break,
                 Ok(_) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -100,8 +100,11 @@ async fn terminal_session(mut ws: WebSocket, state: AppState) {
         // Since writer is a separate fd clone, resize works on the master directly.
 
         tokio::select! {
-            biased;
-
+            // Pas de `biased` : un flux PTY continu (ex. commande verbeuse)
+            // rendrait `rx.recv()` quasi-toujours prêt en premier, ce qui
+            // affamerait indéfiniment `ws.recv()` — donc le clavier de
+            // l'utilisateur (Ctrl-C compris) tant que la sortie ne se tarit
+            // pas. Le tirage pseudo-aléatoire par défaut évite ce cas.
             received = rx.recv() => {
                 match received {
                     Some(data) => {
@@ -130,9 +133,14 @@ async fn terminal_session(mut ws: WebSocket, state: AppState) {
                                 tracing::warn!("PTY resize error: {e}");
                             }
                     }
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None | Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
                         break;
                     }
+                    // axum répond automatiquement aux Ping par un Pong ; ces
+                    // frames n'appellent aucune action ici. Les traiter comme
+                    // une fermeture (comme avant ce correctif) coupait le
+                    // terminal au premier keepalive envoyé par un proxy/client.
+                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
                 }
             }
 
@@ -177,9 +185,9 @@ pub fn spawn_shell(
     let pty_system = native_pty_system();
     let pair = pty_system.openpty(size)?;
 
-    let shell = std::env::var("SHELL").ok().unwrap_or_else(|| {
-        "/bin/bash".to_string()
-    });
+    let shell = std::env::var("SHELL")
+        .ok()
+        .unwrap_or_else(|| "/bin/bash".to_string());
 
     let mut cmd = CommandBuilder::new(shell);
     cmd.set_controlling_tty(true);
@@ -189,8 +197,27 @@ pub fn spawn_shell(
     Ok((pair.master, child))
 }
 
-/// Tue le groupe de processus du shell (descendants inclus), pas seulement le PID
-/// direct. Le shell est leader de session (setsid fait pgid == pid) → kill(-pid, SIGKILL).
+/// Tue le shell et ses jobs **foreground** — pas ses jobs explicitement
+/// détachés (`cmd &`, `nohup`, `disown`), qui survivent par design. Pas
+/// qu'une tolérance de la sémantique Unix : nécessaire pour la feature
+/// "service de dev en arrière-plan" déjà prévue à court terme (`npm run dev
+/// &` ou équivalent, exposé ensuite via un Service/Ingress créés par le
+/// controller) — tuer les jobs backgroundés à la fermeture du terminal
+/// casserait ce cas d'usage.
+///
+/// Deux mécanismes combinés, pas un seul :
+/// - `kill(-pid, SIGKILL)` sur le pgid du shell tue le shell lui-même (leader
+///   de session, `setsid` fait pgid == pid).
+/// - la mort du leader de session déclenche un hangup **noyau** du terminal
+///   contrôlant, qui envoie SIGHUP au groupe de processus **actuellement
+///   foreground** de ce terminal — sous contrôle de job (shell interactif
+///   attaché à un pty), CHAQUE commande externe reçoit son propre pgid,
+///   foreground ou backgroundée ; c'est ce hangup, pas le `kill(-pid)`
+///   lui-même, qui tue un job foreground en cours. Un job backgroundé n'est
+///   jamais le groupe foreground du terminal, donc n'est jamais atteint par
+///   ce hangup — vérifié empiriquement (`/proc/<pid>/stat`, champ pgrp)
+///   avant d'écrire ce commentaire, pas une supposition.
+///
 /// Best-effort : une erreur (déjà mort) n'est pas remontée.
 pub fn kill_process_group(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
     let pid = child.process_id();
@@ -221,8 +248,8 @@ mod tests {
     fn make_state(test_name: &str) -> AppState {
         use crate::ws::ticket::TicketStore;
 
-        let tmpdir = std::env::temp_dir()
-            .join(format!("vanyline-sandbox-terminal-test/{}", test_name));
+        let tmpdir =
+            std::env::temp_dir().join(format!("vanyline-sandbox-terminal-test/{}", test_name));
         let sandbox_root = tmpdir.join("sandbox");
 
         std::fs::create_dir_all(&sandbox_root).unwrap();
@@ -261,12 +288,8 @@ mod tests {
         let (master, _child) = spawn_shell(&state.config.sandbox_root, PtySize::default())
             .expect("spawn_shell should succeed again");
 
-        let mut reader = master
-            .try_clone_reader()
-            .expect("should have a reader");
-        let mut writer = master
-            .take_writer()
-            .expect("should have a writer");
+        let mut reader = master.try_clone_reader().expect("should have a reader");
+        let mut writer = master.take_writer().expect("should have a writer");
 
         writeln!(writer, "echo pty_hello\r").unwrap();
 
@@ -281,7 +304,7 @@ mod tests {
                     continue;
                 }
                 Ok(n) => {
-                    output.push_str(&String::from_utf8_lossy(&buf[..n]).into_owned());
+                    output.push_str(&String::from_utf8_lossy(&buf[..n]));
                 }
                 Err(_) => break,
             }
@@ -300,48 +323,83 @@ mod tests {
         );
     }
 
-    // Test 2: kill_process_group_kills_descendants
+    // Test 2a: kill_process_group_kills_foreground_child — la garantie réelle.
+    // Un job FOREGROUND (pas de `&`) meurt à la fermeture : la mort du leader
+    // de session (le shell) déclenche un hangup noyau du terminal contrôlant,
+    // qui SIGHUP le groupe de processus actuellement foreground.
     #[test]
-    fn kill_process_group_kills_descendants() {
-        let state = make_state("kill_fg");
+    fn kill_process_group_kills_foreground_child() {
+        let state = make_state("kill_fg_child");
         let marker = state.config.sandbox_root.join("_should_not_exist");
 
         let (master, mut child) = spawn_shell(&state.config.sandbox_root, PtySize::default())
-                .expect("spawn_shell should succeed");
+            .expect("spawn_shell should succeed");
 
-        let reader = master
-            .try_clone_reader()
-            .expect("should have a reader");
-        let mut writer = master
-            .take_writer()
-            .expect("should have a writer");
+        let reader = master.try_clone_reader().expect("should have a reader");
+        let mut writer = master.take_writer().expect("should have a writer");
 
-        // Spawn a background job: sleep 1s then touch the marker file.
-        write!(
-            writer,
-            "(sleep 1 && touch _should_not_exist) &\r\n"
-        )
-        .unwrap();
+        // Job foreground : pas de `&`, le shell attend dessus.
+        write!(writer, "sleep 2 && touch _should_not_exist\r\n").unwrap();
 
-        // Wait for the shell to start the background job.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+        // Laisser le shell (fork/exec bash + lecture de la commande) démarrer
+        // le job foreground — marge large façon
+        // `vanyline-tools::command::test_timeout_kills_process_group_not_just_direct_child`,
+        // 200ms s'est révélé flaky sous charge (bash pas encore prêt à forker
+        // le job au moment du kill).
+        std::thread::sleep(std::time::Duration::from_millis(500));
 
-        // Kill the process group.
         kill_process_group(&mut child);
 
-        // Drop the PTY handles so the marker file can be accessed from the test process.
+        // Drop les handles PTY pour accéder au marker depuis le process de test.
         drop(reader);
         drop(writer);
         drop(master);
         drop(child);
 
-        // Wait for the sleep+touch to complete (or fail because it was killed).
-        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Laisser le temps au sleep+touch de se terminer (ou d'être tué).
+        std::thread::sleep(std::time::Duration::from_secs(3));
 
         assert!(
             !marker.exists(),
-            "marker file should not exist — background process killed in process group"
+            "marker file should not exist — foreground child killed via session-leader hangup"
         );
+    }
+
+    // Test 2b: detached_background_job_survives_by_design — comportement
+    // Unix voulu, pas un manque. Un job explicitement backgroundé (`&`) a son
+    // propre groupe de processus et n'est jamais le foreground du terminal :
+    // ni le kill(-pgid) du shell, ni le hangup noyau qui suit sa mort ne
+    // l'atteignent. C'est exactement ce qui permet à `nohup`/`disown` de
+    // fonctionner ailleurs — un choix utilisateur qu'on n'a pas à juger ici.
+    #[test]
+    fn detached_background_job_survives_by_design() {
+        let state = make_state("bg_survives");
+        let marker = state.config.sandbox_root.join("_should_exist");
+
+        let (master, mut child) = spawn_shell(&state.config.sandbox_root, PtySize::default())
+            .expect("spawn_shell should succeed");
+
+        let reader = master.try_clone_reader().expect("should have a reader");
+        let mut writer = master.take_writer().expect("should have a writer");
+
+        write!(writer, "(sleep 2 && touch _should_exist) &\r\n").unwrap();
+        // Marge large, même raison que le test jumeau ci-dessus.
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        kill_process_group(&mut child);
+
+        drop(reader);
+        drop(writer);
+        drop(master);
+        drop(child);
+
+        std::thread::sleep(std::time::Duration::from_secs(3));
+
+        assert!(
+            marker.exists(),
+            "backgrounded job should survive session close — deliberate Unix semantics, not a bug"
+        );
+        let _ = std::fs::remove_file(&marker);
     }
 
     // Test 3: resize_updates_pty_size
@@ -411,7 +469,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "missing ticket → 401");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "missing ticket → 401"
+        );
 
         // Unknown ticket → 401
         let resp = app
@@ -425,6 +487,10 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "unknown ticket → 401");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unknown ticket → 401"
+        );
     }
 }

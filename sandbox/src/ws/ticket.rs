@@ -10,12 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::auth::AccessLevel;
+use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
 use axum::http::{Request, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 /// Middleware d'auth WS partagé par `/ws/fs` et `/ws/terminal`. Lit le ticket en
 /// query string (`?ticket=`), le consomme via `redeem_from_query`, renvoie 401 en
@@ -26,19 +26,16 @@ pub async fn ws_auth_middleware(
     next: Next,
 ) -> Response {
     // Extract ticket from query string
-    let ticket = req
-        .uri()
-        .query()
-        .and_then(|qs| {
-            for pair in qs.split('&') {
-                if let Some((key, value)) = pair.split_once('=')
-                    && key == "ticket"
-                {
-                    return Some(value.to_string());
-                }
+    let ticket = req.uri().query().and_then(|qs| {
+        for pair in qs.split('&') {
+            if let Some((key, value)) = pair.split_once('=')
+                && key == "ticket"
+            {
+                return Some(value.to_string());
             }
-            None
-        });
+        }
+        None
+    });
 
     match crate::ws::ticket::redeem_from_query(&state.tickets, ticket) {
         Ok(_) => next.run(req).await,
@@ -54,9 +51,12 @@ impl IntoResponse for WsAuthError {
             WsAuthError::MissingTicket => StatusCode::UNAUTHORIZED,
             WsAuthError::InvalidTicket => StatusCode::UNAUTHORIZED,
         };
-        (status, Json(serde_json::json!({
-            "error": self.to_string(),
-        })))
+        (
+            status,
+            Json(serde_json::json!({
+                "error": self.to_string(),
+            })),
+        )
             .into_response()
     }
 }
@@ -171,7 +171,7 @@ mod tests {
     use super::*;
     use crate::{AppState, AuthState, build_app, config::Config};
     use axum::body::Body;
-    use axum::http::{header::AUTHORIZATION, Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header::AUTHORIZATION};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -292,16 +292,18 @@ mod tests {
             .await
             .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        let ticket = json["ticket"].as_str().expect("response must carry a ticket");
+        let ticket = json["ticket"]
+            .as_str()
+            .expect("response must carry a ticket");
 
         // Redeem on the (shared) external store clone and verify the claims.
         let claims = external_store
-            .redeem(&ticket.to_string())
+            .redeem(ticket)
             .expect("the ticket issued by the handler must be redeemable");
         assert_eq!(claims.subject, "static-token");
         assert_eq!(claims.access, AccessLevel::Admin);
         // The ticket is single-use: a second redeem must fail.
-        assert!(external_store.redeem(&ticket.to_string()).is_none());
+        assert!(external_store.redeem(ticket).is_none());
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────

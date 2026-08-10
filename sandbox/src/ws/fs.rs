@@ -6,8 +6,8 @@
 //! `WebSocketUpgrade` returns a non-OnUpgrade response (e.g. 401 auth error).
 
 use crate::AppState;
-use axum::extract::{State, WebSocketUpgrade};
 use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{State, WebSocketUpgrade};
 use axum::response::IntoResponse;
 
 /// Query-string par lequel le navigateur présente son ticket au handshake WS.
@@ -35,7 +35,11 @@ async fn fs_session(state: AppState, mut ws: WebSocket) {
         match ws.recv().await {
             Some(Ok(Message::Text(raw))) => {
                 let resp = dispatch_fs_message(&state, &raw).await;
-                if ws.send(Message::Text(resp.to_string().into())).await.is_err() {
+                if ws
+                    .send(Message::Text(resp.to_string().into()))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }
@@ -162,17 +166,12 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
 
 // Helper to create an AppState with a fresh TempDir for each test.
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 fn make_state(test_name: &str) -> AppState {
     use crate::{AuthState, config::Config};
 
-    let tmpdir = std::env::temp_dir().join(format!(
-        "vanyline-sandbox-fs-test/{}",
-        test_name
-    ));
-    let sandbox_root = std::path::PathBuf::from(format!(
-        "{}/sandbox",
-        tmpdir.display()
-    ));
+    let tmpdir = std::env::temp_dir().join(format!("vanyline-sandbox-fs-test/{}", test_name));
+    let sandbox_root = std::path::PathBuf::from(format!("{}/sandbox", tmpdir.display()));
 
     std::fs::create_dir_all(&sandbox_root).unwrap();
     std::fs::create_dir_all(sandbox_root.join("sub")).unwrap();
@@ -183,12 +182,19 @@ fn make_state(test_name: &str) -> AppState {
 
     let config = std::sync::Arc::new(Config {
         listen: "0.0.0.0:3000".into(),
-        tls_cert: None, tls_key: None, oidc_issuer: None, oidc_audience: None,
+        tls_cert: None,
+        tls_key: None,
+        oidc_issuer: None,
+        oidc_audience: None,
         auth_groups_admin: "kubernetes-admin".into(),
         auth_groups_read: "kubernetes-view".into(),
-        no_auth: false, static_token: None, public_url: None,
-        oidc_ca_cert: None, metrics_listen: "0.0.0.0:9090".into(),
-        otel_endpoint: None, sandbox_root: sandbox_root.clone(),
+        no_auth: false,
+        static_token: None,
+        public_url: None,
+        oidc_ca_cert: None,
+        metrics_listen: "0.0.0.0:9090".into(),
+        otel_endpoint: None,
+        sandbox_root: sandbox_root.clone(),
     });
     let auth = AuthState::new(config.clone()).unwrap();
 
@@ -216,45 +222,47 @@ mod tests {
     #[tokio::test]
     async fn read_file_returns_content() {
         let state = make_state("read");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"read","path":"sub/file.txt"}"#,
-        ).await;
+        let resp = dispatch_fs_message(&state, r#"{"op":"read","path":"sub/file.txt"}"#).await;
         assert!(ok(&resp));
         let content = resp["content"].as_str().unwrap();
-        assert!(content.contains("hello"), "content should contain 'hello', got: {content}");
-        assert_eq!(resp["truncated"].as_bool().unwrap(), false);
+        assert!(
+            content.contains("hello"),
+            "content should contain 'hello', got: {content}"
+        );
+        assert!(!resp["truncated"].as_bool().unwrap());
     }
 
     // Test 2: read_file_with_limit_truncates
     #[tokio::test]
     async fn read_file_with_limit_truncates() {
         let state = make_state("read_limit");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"read","path":"sub/file.txt","limit":10}"#,
-        ).await;
+        let resp =
+            dispatch_fs_message(&state, r#"{"op":"read","path":"sub/file.txt","limit":10}"#).await;
         assert!(ok(&resp));
         let content = resp["content"].as_str().unwrap();
         assert!(content.contains("truncated"));
-        assert_eq!(resp["truncated"].as_bool().unwrap(), true);
+        assert!(resp["truncated"].as_bool().unwrap());
     }
 
     // Test 3: write_file_creates
     #[tokio::test]
     async fn write_file_creates() {
         let state = make_state("write");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"write","path":"new.txt","content":"abc"}"#,
-        ).await;
+        let resp =
+            dispatch_fs_message(&state, r#"{"op":"write","path":"new.txt","content":"abc"}"#).await;
         assert!(ok(&resp));
         let wrote = resp["wrote"].as_str().unwrap();
-        assert!(wrote.ends_with("/new.txt"), "wrote path should end with /new.txt, got {wrote}");
+        assert!(
+            wrote.ends_with("/new.txt"),
+            "wrote path should end with /new.txt, got {wrote}"
+        );
 
         // Verify file exists on disk
         let sandbox_root = &state.config.sandbox_root;
-        assert!(sandbox_root.join("new.txt").exists(), "new.txt should exist on disk");
+        assert!(
+            sandbox_root.join("new.txt").exists(),
+            "new.txt should exist on disk"
+        );
 
         // Clean up for subsequent tests
         let _ = std::fs::remove_file(sandbox_root.join("new.txt"));
@@ -267,7 +275,8 @@ mod tests {
         let resp = dispatch_fs_message(
             &state,
             r#"{"op":"edit","path":"sub/file.txt","old_string":"hello","new_string":"hi"}"#,
-        ).await;
+        )
+        .await;
         assert!(ok(&resp));
         // edit_file returns "edited /path: N replacement(s)"
         let content = resp["content"].as_str().unwrap();
@@ -296,38 +305,38 @@ mod tests {
         std::fs::write(sandbox_root.join("sub/file.txt"), "delete_me\n").ok();
 
         let state = make_state("delete");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"delete","path":"sub/file.txt"}"#,
-        ).await;
+        let resp = dispatch_fs_message(&state, r#"{"op":"delete","path":"sub/file.txt"}"#).await;
         assert!(ok(&resp));
         let deleted = resp["deleted"].as_str().unwrap();
-        assert!(deleted.ends_with("/sub/file.txt"), "deleted path should end with /sub/file.txt, got {deleted}");
-        assert!(!sandbox_root.join("sub/file.txt").exists(), "deleted file should not exist on disk");
+        assert!(
+            deleted.ends_with("/sub/file.txt"),
+            "deleted path should end with /sub/file.txt, got {deleted}"
+        );
+        assert!(
+            !sandbox_root.join("sub/file.txt").exists(),
+            "deleted file should not exist on disk"
+        );
     }
 
     // Test 6: list_directory_returns_entries
     #[tokio::test]
     async fn list_directory_returns_entries() {
         let state = make_state("list");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"list","path":"sub"}"#,
-        ).await;
+        let resp = dispatch_fs_message(&state, r#"{"op":"list","path":"sub"}"#).await;
         assert!(ok(&resp));
         assert!(resp["entries"].is_string());
         let entries: String = resp["entries"].as_str().unwrap().to_string();
-        assert!(entries.contains("file.txt"), "entries should contain file.txt, got {entries}");
+        assert!(
+            entries.contains("file.txt"),
+            "entries should contain file.txt, got {entries}"
+        );
     }
 
     // Test 7: path_escape_rejected — error contains VNL-SBX-001
     #[tokio::test]
     async fn path_escape_rejected() {
         let state = make_state("escape");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"read","path":"../../etc/passwd"}"#,
-        ).await;
+        let resp = dispatch_fs_message(&state, r#"{"op":"read","path":"../../etc/passwd"}"#).await;
         assert!(!ok(&resp));
         let err = resp["error"].as_str().unwrap();
         assert!(
@@ -340,10 +349,7 @@ mod tests {
     #[tokio::test]
     async fn unknown_op_rejected() {
         let state = make_state("unknown_op");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"bogus","path":"sub"}"#,
-        ).await;
+        let resp = dispatch_fs_message(&state, r#"{"op":"bogus","path":"sub"}"#).await;
         assert!(!ok(&resp));
         assert_eq!(resp["error"].as_str().unwrap(), "unknown op");
     }
@@ -383,7 +389,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "missing ticket → 401");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "missing ticket → 401"
+        );
 
         // Unknown ticket → 401 (InvalidTicket)
         let resp = app
@@ -397,16 +407,33 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "unknown ticket → 401");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "unknown ticket → 401"
+        );
 
         // Verify the ticket is consumed: second redeem of same ticket must fail
-        let claims = crate::ws::ticket::redeem_from_query(&state.tickets, Some("unknown-ticket".into()));
-        assert!(claims.is_err(), "unknown ticket should be consumed and return error");
-        assert!(matches!(claims.unwrap_err(), crate::ws::ticket::WsAuthError::InvalidTicket));
+        let claims =
+            crate::ws::ticket::redeem_from_query(&state.tickets, Some("unknown-ticket".into()));
+        assert!(
+            claims.is_err(),
+            "unknown ticket should be consumed and return error"
+        );
+        assert!(matches!(
+            claims.unwrap_err(),
+            crate::ws::ticket::WsAuthError::InvalidTicket
+        ));
 
         // Verify missing ticket still returns MissingTicket error
         let claims = crate::ws::ticket::redeem_from_query(&state.tickets, None);
-        assert!(claims.is_err(), "missing ticket should return MissingTicket error");
-        assert!(matches!(claims.unwrap_err(), crate::ws::ticket::WsAuthError::MissingTicket));
+        assert!(
+            claims.is_err(),
+            "missing ticket should return MissingTicket error"
+        );
+        assert!(matches!(
+            claims.unwrap_err(),
+            crate::ws::ticket::WsAuthError::MissingTicket
+        ));
     }
 }
