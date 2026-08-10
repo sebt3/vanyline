@@ -6,6 +6,7 @@ import ProjectsScreen from './settings/ProjectsScreen.vue';
 import SandboxesScreen from './settings/SandboxesScreen.vue';
 import LlmProvidersScreen from './settings/LlmProvidersScreen.vue';
 import ModelProfilesScreen from './settings/ModelProfilesScreen.vue';
+import ToolsetsScreen from './settings/ToolsetsScreen.vue';
 
 interface NavSub {
   id: string;
@@ -70,7 +71,6 @@ function setSubScreen(subId: string) {
 
 // Liste des écrans qui n'ont pas encore été implémentés (rendent un placeholder)
 const pendingScreenIds = [
-  'toolsets',
   'skills',
   'agents',
   'mcp-servers',
@@ -84,6 +84,7 @@ const screens: Record<string, Component> = {
   sandboxes: SandboxesScreen,
   'llm-providers': LlmProvidersScreen,
   'model-profiles': ModelProfilesScreen,
+  toolsets: ToolsetsScreen,
 };
 
 const Pending: Component = {
