@@ -195,7 +195,8 @@ mod tests {
     }
 
     // Test 5: issuance_with_static_token_returns_ticket
-    // Route-level test: POST /ws/ticket with static_token auth → 200 + ticket
+    // Route-level test: POST /ws/ticket with static_token auth → 200 + ticket,
+    // and the issued ticket redeems to the same subject/access it was minted for.
     #[tokio::test]
     async fn issuance_with_static_token_returns_ticket() {
         let config = make_config_with_static_token("s3cret");
@@ -207,7 +208,7 @@ mod tests {
         let app = build_app(AppState {
             config,
             auth: Arc::new(auth),
-            tickets: external_store,
+            tickets: external_store.clone(),
         });
 
         let resp = app
@@ -224,10 +225,21 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::OK);
 
-        // The store was cloned before being consumed by build_app.
-        // The handler already called `issue()` which put the ticket into the
-        // (shared) map. We can't retroactively redeem it, so we just verify
-        // the response structure is correct.
+        // Read the body to recover the issued opaque ticket.
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let ticket = json["ticket"].as_str().expect("response must carry a ticket");
+
+        // Redeem on the (shared) external store clone and verify the claims.
+        let claims = external_store
+            .redeem(&ticket.to_string())
+            .expect("the ticket issued by the handler must be redeemable");
+        assert_eq!(claims.subject, "static-token");
+        assert_eq!(claims.access, AccessLevel::Admin);
+        // The ticket is single-use: a second redeem must fail.
+        assert!(external_store.redeem(&ticket.to_string()).is_none());
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
