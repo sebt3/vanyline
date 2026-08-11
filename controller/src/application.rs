@@ -2,25 +2,27 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use k8s_openapi::ByteString;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentCondition, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
-    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PodSpec, PodTemplateSpec,
-    Probe, Secret, SecretKeySelector, Service, ServicePort, ServiceSpec,
+    Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PodSpec, PodTemplateSpec, Probe,
+    Secret, SecretKeySelector, Service, ServicePort, ServiceSpec,
 };
 use k8s_openapi::api::networking::v1::{
-    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule, IngressServiceBackend,
-    IngressSpec, ServiceBackendPort,
+    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
+    IngressServiceBackend, IngressSpec, ServiceBackendPort,
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, ObjectMeta, OwnerReference};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+    Condition, LabelSelector, ObjectMeta, OwnerReference,
+};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use k8s_openapi::ByteString;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::{Application, ApplicationStatus};
 use crate::error::ControllerError;
 use crate::owner::FIELD_MANAGER;
+use vanyline_crds::{Application, ApplicationStatus};
 
 /// Port HTTP du Deployment `app` — défaut de `LISTEN_ADDR` côté
 /// `app/src/config.rs` (`0.0.0.0:8080`).
@@ -305,7 +307,10 @@ pub fn build_application_ingress(app: &Application) -> Ingress {
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_cookie_secret(app: &Application, cookie_data_value: String) -> Secret {
     let mut data = BTreeMap::new();
-    data.insert("cookieSecret".to_string(), ByteString(cookie_data_value.into_bytes()));
+    data.insert(
+        "cookieSecret".to_string(),
+        ByteString(cookie_data_value.into_bytes()),
+    );
 
     Secret {
         metadata: ObjectMeta {
@@ -369,17 +374,22 @@ async fn ensure_cookie_secret(
 /// Note : k8s-openapi 0.28 utilise `DeploymentCondition` (apps/v1) pour
 /// `DeploymentStatus.conditions`, avec les mêmes champs `type_`/`status`/`reason`.
 fn deployment_phase(conditions: Option<&Vec<DeploymentCondition>>) -> String {
-    let available = conditions.map(|cs| {
-        cs.iter()
-            .any(|c| c.type_ == "Available" && c.status == "True")
-    }).unwrap_or(false);
-    let failed = conditions.map(|cs| {
-        cs.iter().any(|c| {
-            c.type_ == "Available"
-                && c.status == "False"
-                && (c.reason.as_deref() == Some("Failed") || c.reason.as_deref() == Some("ProgressDeadlineExceeded"))
+    let available = conditions
+        .map(|cs| {
+            cs.iter()
+                .any(|c| c.type_ == "Available" && c.status == "True")
         })
-    }).unwrap_or(false);
+        .unwrap_or(false);
+    let failed = conditions
+        .map(|cs| {
+            cs.iter().any(|c| {
+                c.type_ == "Available"
+                    && c.status == "False"
+                    && (c.reason.as_deref() == Some("Failed")
+                        || c.reason.as_deref() == Some("ProgressDeadlineExceeded"))
+            })
+        })
+        .unwrap_or(false);
 
     if available {
         "Running".to_string()
@@ -440,15 +450,11 @@ pub async fn reconcile(
 
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
     let service = build_application_service(&app);
-    services
-        .patch(&name, &pp, &Patch::Apply(&service))
-        .await?;
+    services.patch(&name, &pp, &Patch::Apply(&service)).await?;
 
     let ingresses: Api<Ingress> = Api::namespaced(ctx.client.clone(), &ns);
     let ingress = build_application_ingress(&app);
-    ingresses
-        .patch(&name, &pp, &Patch::Apply(&ingress))
-        .await?;
+    ingresses.patch(&name, &pp, &Patch::Apply(&ingress)).await?;
 
     let applications: Api<Application> = Api::namespaced(ctx.client.clone(), &ns);
     let status = compute_status(&app, &phase);
@@ -461,11 +467,9 @@ pub async fn reconcile(
         )
         .await?;
 
-    Ok(Action::requeue(Duration::from_secs(if phase == "Running" {
-        300
-    } else {
-        15
-    })))
+    Ok(Action::requeue(Duration::from_secs(
+        if phase == "Running" { 300 } else { 15 },
+    )))
 }
 
 /// Politique d'erreur : requeue à 30s, quelle que soit l'erreur (patron
@@ -551,10 +555,7 @@ mod tests {
         assert_eq!(refs[0].name, "demo");
         assert_eq!(refs[0].kind, "Application");
 
-        assert_eq!(
-            deployment.spec.as_ref().unwrap().replicas,
-            Some(1)
-        );
+        assert_eq!(deployment.spec.as_ref().unwrap().replicas, Some(1));
 
         let container = deployment
             .spec
@@ -590,8 +591,14 @@ mod tests {
             lg.http_get.as_ref().unwrap().path,
             Some("/health".to_string())
         );
-        assert_eq!(rp.http_get.as_ref().unwrap().port, IntOrString::Int(APP_PORT));
-        assert_eq!(lg.http_get.as_ref().unwrap().port, IntOrString::Int(APP_PORT));
+        assert_eq!(
+            rp.http_get.as_ref().unwrap().port,
+            IntOrString::Int(APP_PORT)
+        );
+        assert_eq!(
+            lg.http_get.as_ref().unwrap().port,
+            IntOrString::Int(APP_PORT)
+        );
     }
 
     // 5. build_application_deployment_replicas_and_image
@@ -618,10 +625,7 @@ mod tests {
             .containers
             .first()
             .unwrap();
-        assert_eq!(
-            container.image,
-            Some(DEFAULT_APP_IMAGE.to_string())
-        );
+        assert_eq!(container.image, Some(DEFAULT_APP_IMAGE.to_string()));
 
         // image = Some("custom:tag")
         let mut app = make_application("demo");
@@ -658,12 +662,17 @@ mod tests {
             .first()
             .expect("should have 1 container");
         let env = container.env.as_ref().expect("should have env");
-        assert_eq!(env.len(), 9, "expected 9 environment variables, got {}", env.len());
+        assert_eq!(
+            env.len(),
+            9,
+            "expected 9 environment variables, got {}",
+            env.len()
+        );
 
         let find = |name: &str| {
             env.iter()
                 .find(|e| e.name == name)
-                .expect(&format!("should have env var {name}"))
+                .unwrap_or_else(|| panic!("should have env var {name}"))
         };
 
         // OIDC_REDIRECT_URL
@@ -682,47 +691,89 @@ mod tests {
         // OIDC_ISSUER_URL (name=issuerUrl)
         let oidc_issuer = find("OIDC_ISSUER_URL");
         assert!(oidc_issuer.value.is_none());
-        let skr = oidc_issuer.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        let skr = oidc_issuer
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
         assert_eq!(skr.name, "oidc-secret");
         assert_eq!(skr.key, "issuerUrl");
         assert!(skr.optional.is_none());
 
         // OIDC_CLIENT_ID
         let oidc_id = find("OIDC_CLIENT_ID");
-        let skr = oidc_id.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        let skr = oidc_id
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
         assert_eq!(skr.name, "oidc-secret");
         assert_eq!(skr.key, "clientId");
         assert!(skr.optional.is_none());
 
         // OIDC_CLIENT_SECRET
         let oidc_sec = find("OIDC_CLIENT_SECRET");
-        let skr = oidc_sec.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        let skr = oidc_sec
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
         assert_eq!(skr.name, "oidc-secret");
         assert_eq!(skr.key, "clientSecret");
         assert!(skr.optional.is_none());
 
         // OIDC_SCOPES
         let oidc_scopes = find("OIDC_SCOPES");
-        let skr = oidc_scopes.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        let skr = oidc_scopes
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
         assert_eq!(skr.name, "oidc-secret");
         assert_eq!(skr.key, "scopes");
         assert!(skr.optional.is_none());
 
         // OIDC_CA_CERT (optional: true)
         let ca_cert = find("OIDC_CA_CERT");
-        let skr = ca_cert.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        let skr = ca_cert
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
         assert_eq!(skr.key, "caCert");
         assert_eq!(skr.optional, Some(true));
 
         // DATABASE_URL
         let db_url = find("DATABASE_URL");
-        let skr = db_url.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        let skr = db_url
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
         assert_eq!(skr.name, "db-secret");
         assert_eq!(skr.key, "databaseUrl");
 
         // COOKIE_SECRET (auto-generated cookie secret)
         let cookie = find("COOKIE_SECRET");
-        let skr = cookie.value_from.as_ref().unwrap().secret_key_ref.as_ref().unwrap();
+        let skr = cookie
+            .value_from
+            .as_ref()
+            .unwrap()
+            .secret_key_ref
+            .as_ref()
+            .unwrap();
         assert_eq!(skr.name, "demo-cookie");
         assert_eq!(skr.key, "cookieSecret");
     }
@@ -733,16 +784,10 @@ mod tests {
         let app = make_application("demo");
         let service = build_application_service(&app);
 
-        assert_eq!(
-            service.metadata.name,
-            Some("application-demo".to_string())
-        );
+        assert_eq!(service.metadata.name, Some("application-demo".to_string()));
 
         let selector = service.spec.as_ref().unwrap().selector.as_ref().unwrap();
-        assert_eq!(
-            selector.get(APP_LABEL),
-            Some(&"demo".to_string())
-        );
+        assert_eq!(selector.get(APP_LABEL), Some(&"demo".to_string()));
 
         let ports = service
             .spec
@@ -762,10 +807,7 @@ mod tests {
         let app = make_application("demo");
         let ingress = build_application_ingress(&app);
 
-        assert_eq!(
-            ingress.metadata.name,
-            Some("application-demo".to_string())
-        );
+        assert_eq!(ingress.metadata.name, Some("application-demo".to_string()));
         assert_eq!(
             ingress.spec.as_ref().unwrap().ingress_class_name,
             Some("nginx".to_string())
@@ -773,10 +815,7 @@ mod tests {
 
         let rules = ingress.spec.as_ref().unwrap().rules.as_ref().unwrap();
         assert_eq!(rules.len(), 1);
-        assert_eq!(
-            rules[0].host.as_ref().unwrap().as_str(),
-            "app.example.com"
-        );
+        assert_eq!(rules[0].host.as_ref().unwrap().as_str(), "app.example.com");
 
         // HTTPIngressRuleValue.paths est Vec (pas Option) en k8s-openapi 0.28
         let paths = &rules[0].http.as_ref().unwrap().paths;
@@ -795,9 +834,10 @@ mod tests {
     fn build_application_ingress_annotations() {
         // With annotations
         let mut app = make_application("demo");
-        app.spec.ingress_annotations = BTreeMap::from([
-            ("cert-manager.io/cluster-issuer".to_string(), "letsencrypt".to_string()),
-        ]);
+        app.spec.ingress_annotations = BTreeMap::from([(
+            "cert-manager.io/cluster-issuer".to_string(),
+            "letsencrypt".to_string(),
+        )]);
         let ingress = build_application_ingress(&app);
         let ann = ingress
             .metadata
@@ -821,10 +861,7 @@ mod tests {
         let app = make_application("demo");
         let secret = build_cookie_secret(&app, "YWJj".to_string());
 
-        assert_eq!(
-            secret.metadata.name,
-            Some("demo-cookie".to_string())
-        );
+        assert_eq!(secret.metadata.name, Some("demo-cookie".to_string()));
         assert_eq!(secret.metadata.namespace, Some("ns".to_string()));
 
         let refs = secret
@@ -943,7 +980,9 @@ mod tests {
         assert!(!value.is_empty());
 
         // STANDARD.decode gives exactly 64 bytes
-        let decoded = base64::engine::general_purpose::STANDARD.decode(&value).expect("decode");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(&value)
+            .expect("decode");
         assert_eq!(decoded.len(), 64);
 
         // Decoded bytes must be nonZero (random)

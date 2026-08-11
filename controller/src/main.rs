@@ -28,7 +28,9 @@ async fn main() {
     }
 
     let _ = tracing_subscriber::fmt::try_init();
-    tracing::info!("controller starting (owner + project + sandbox + application reconcilers active)");
+    tracing::info!(
+        "controller starting (owner + project + sandbox + application reconcilers active)"
+    );
 
     let client = kube::Client::try_default().await.unwrap_or_else(|e| {
         tracing::error!(
