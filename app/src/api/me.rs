@@ -72,10 +72,7 @@ mod tests {
     #[tokio::test]
     async fn handler_me_without_cookie_returns_401() {
         let app = make_app(test_key());
-        let req = Request::builder()
-            .uri("/me")
-            .body(Body::empty())
-            .unwrap();
+        let req = Request::builder().uri("/me").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }

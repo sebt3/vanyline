@@ -30,9 +30,9 @@ describe('SettingsView', () => {
   });
 
   it('monte AccountScreen quand on sélectionne le groupe "account"', async () => {
+    // Projects est maintenant un écran réel, pas pending → "À venir" n'est plus affiché par défaut
     const wrapper = mount(SettingsView);
-    // Par défaut, Projects → Pending
-    expect(wrapper.text()).toContain('À venir');
+    expect(wrapper.text()).not.toContain('À venir');
 
     // Le 4ème bouton de nav (index 3) est "Compte"
     const navItems = wrapper.findAll('.nav-item');
