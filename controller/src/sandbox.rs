@@ -8,8 +8,10 @@ use k8s_openapi::api::core::v1::{
     PodSpec, Probe, Service, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
-    IPBlock, NetworkPolicy, NetworkPolicyEgressRule, NetworkPolicyIngressRule, NetworkPolicyPeer,
-    NetworkPolicyPort, NetworkPolicySpec,
+    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
+    IngressServiceBackend, IngressSpec, IngressTLS, IPBlock, NetworkPolicy, NetworkPolicyEgressRule,
+    NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
+    ServiceBackendPort,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
@@ -19,8 +21,8 @@ use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
 use vanyline_crds::{
-    EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus, Toolchain,
-    service_name,
+    Application, EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
+    Toolchain, service_name,
 };
 use crate::error::ControllerError;
 use crate::owner;
@@ -354,6 +356,12 @@ pub fn netpol_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }
 
+/// Nom de l'Ingress d'une Sandbox — `sandbox-<name>`, même convention que
+/// le Pod/Service/NetworkPolicy.
+pub fn ingress_name(sandbox_name: &str) -> String {
+    format!("sandbox-{sandbox_name}")
+}
+
 /// Nom de la NetworkPolicy egress — objet distinct de la netpol ingress
 /// (`netpol_name`), car elle est conditionnelle (absente si aucun niveau ne
 /// déclare d'egress) alors que l'ingress est toujours produite.
@@ -472,6 +480,74 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
                 target_port: Some(IntOrString::Int(MCP_PORT)),
                 ..Default::default()
             }]),
+            ..Default::default()
+        }),
+        status: None,
+    }
+}
+
+/// Ingress de Sandbox : host `{sandbox}.sandboxes.{application.spec.host}`,
+/// `ingressClassName`/`ingress_annotations` repris de `application.spec`,
+/// bloc `tls` posé seulement si `sandbox_tls_secret_name` est `Some`,
+/// backend = Service `sandbox-<name>` (`vanyline_crds::service_name`) port
+/// `MCP_PORT`, path `/` Prefix. `ownerReference` vers la Sandbox (GC en
+/// cascade), même patron que les autres builders de ce fichier.
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> Ingress {
+    let host = format!(
+        "{}.sandboxes.{}",
+        sandbox.name_any(),
+        application.spec.host
+    );
+
+    // TLS conditionnel : posé seulement si `sandbox_tls_secret_name` est Some
+    let tls = application
+        .spec
+        .sandbox_tls_secret_name
+        .clone()
+        .map(|secret| {
+            vec![IngressTLS {
+                hosts: Some(vec![host.clone()]),
+                secret_name: Some(secret),
+            }]
+        });
+
+    Ingress {
+        metadata: ObjectMeta {
+            name: Some(ingress_name(&sandbox.name_any())),
+            namespace: sandbox.namespace(),
+            annotations: if application.spec.ingress_annotations.is_empty() {
+                None
+            } else {
+                Some(application.spec.ingress_annotations.clone())
+            },
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
+            ..Default::default()
+        },
+        spec: Some(IngressSpec {
+            ingress_class_name: Some(application.spec.ingress_class_name.clone()),
+            rules: Some(vec![IngressRule {
+                host: Some(host),
+                http: Some(HTTPIngressRuleValue {
+                    paths: vec![HTTPIngressPath {
+                        path: Some("/".to_string()),
+                        path_type: "Prefix".to_string(),
+                        backend: IngressBackend {
+                            service: Some(IngressServiceBackend {
+                                name: service_name(&sandbox.name_any()),
+                                port: Some(ServiceBackendPort {
+                                    name: None,
+                                    number: Some(MCP_PORT),
+                                }),
+                            }),
+                            ..Default::default()
+                        },
+                    }],
+                }),
+            }]),
+            tls,
             ..Default::default()
         }),
         status: None,
@@ -690,6 +766,18 @@ async fn fetch_owner(project: &Project, ctx: &Context, ns: &str) -> Result<Owner
     Ok(owners.get(&project.spec.owner).await?)
 }
 
+async fn fetch_application(
+    owner: &Owner,
+    ctx: &Context,
+    ns: &str,
+) -> Result<Option<Application>, ControllerError> {
+    let Some(name) = owner.spec.application_ref.as_deref() else {
+        return Ok(None);
+    };
+    let applications: Api<Application> = Api::namespaced(ctx.client.clone(), ns);
+    Ok(Some(applications.get(name).await?))
+}
+
 async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
     let project = fetch_project(sandbox, ctx, ns).await?;
     if !project.status.as_ref().map(|s| s.cloned).unwrap_or(false) {
@@ -801,6 +889,18 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
                 netpols.delete(&name, &DeleteParams::default()).await?;
             }
         }
+    }
+
+    if let Some(application) = fetch_application(&owner, ctx, ns).await? {
+        let ingresses: Api<Ingress> = Api::namespaced(ctx.client.clone(), ns);
+        let ingress = build_sandbox_ingress(sandbox, &application);
+        ingresses
+            .patch(
+                &ingress_name(&sandbox.name_any()),
+                &pp,
+                &Patch::Apply(&ingress),
+            )
+            .await?;
     }
 
     let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
@@ -922,7 +1022,7 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use vanyline_crds::{ProjectSpec, PvcRef, SandboxSpec};
+    use vanyline_crds::{ApplicationSpec, ProjectSpec, PvcRef, SandboxSpec};
 
     fn make_ctx() -> SandboxPodContext {
         SandboxPodContext {
@@ -2100,5 +2200,122 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].kind, "Sandbox");
         assert_eq!(refs[0].name, "demo-branch");
+    }
+
+    // ===== ingress_name =====
+
+    #[test]
+    fn ingress_name_format() {
+        assert_eq!(ingress_name("demo-branch"), "sandbox-demo-branch");
+    }
+
+    fn make_application(name: &str, sandbox_tls_secret_name: Option<String>) -> Application {
+        let mut app = Application::new(
+            name,
+            ApplicationSpec {
+                image: None,
+                replicas: None,
+                oidc_secret_ref: "oidc-secret".to_string(),
+                database_secret_ref: "db-secret".to_string(),
+                cookie_secret_ref: None,
+                host: "app.example.com".to_string(),
+                ingress_class_name: "nginx".to_string(),
+                ingress_annotations: BTreeMap::new(),
+                sandbox_tls_secret_name,
+                ingress_controller: None,
+            },
+        );
+        app.meta_mut().namespace = Some("ns".into());
+        app.meta_mut().uid = Some(format!("test-uid-{name}"));
+        app
+    }
+
+    // ===== build_sandbox_ingress =====
+
+    #[test]
+    fn build_sandbox_ingress_shape_no_tls() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let app = make_application("main", None);
+        let ingress = build_sandbox_ingress(&sandbox, &app);
+
+        // metadata
+        assert_eq!(ingress.metadata.name, Some("sandbox-demo-branch".to_string()));
+        assert_eq!(ingress.metadata.namespace, Some("ns".to_string()));
+
+        // ownerReferences
+        let refs = ingress
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "demo-branch");
+        assert_eq!(refs[0].kind, "Sandbox");
+
+        // spec.ingress_class_name
+        let spec = ingress.spec.as_ref().expect("should have spec");
+        assert_eq!(spec.ingress_class_name, Some("nginx".to_string()));
+
+        // rules
+        let rules = spec.rules.as_ref().expect("should have rules");
+        assert_eq!(rules.len(), 1);
+        assert_eq!(
+            rules[0].host,
+            Some("demo-branch.sandboxes.app.example.com".to_string())
+        );
+
+        // paths
+        let http = rules[0].http.as_ref().expect("should have http");
+        let paths = &http.paths;
+        assert_eq!(paths.len(), 1);
+        assert_eq!(paths[0].path, Some("/".to_string()));
+        assert_eq!(paths[0].path_type, "Prefix".to_string());
+
+        // backend
+        assert_eq!(paths[0].backend.service.as_ref().unwrap().name, "sandbox-demo-branch");
+        assert_eq!(
+            paths[0].backend.service.as_ref().unwrap().port.as_ref().unwrap().number,
+            Some(MCP_PORT)
+        );
+        assert!(paths[0].backend.service.as_ref().unwrap().port.as_ref().unwrap().name.is_none());
+
+        // no TLS
+        assert!(spec.tls.is_none());
+
+        // no annotations
+        assert!(ingress.metadata.annotations.is_none());
+    }
+
+    #[test]
+    fn build_sandbox_ingress_tls_secret() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let app = make_application("main", Some("wildcard-tls".to_string()));
+        let ingress = build_sandbox_ingress(&sandbox, &app);
+
+        let spec = ingress.spec.as_ref().expect("should have spec");
+        let tls = spec.tls.as_ref().expect("should have tls");
+        assert_eq!(tls.len(), 1);
+        assert_eq!(
+            tls[0].hosts,
+            Some(vec!["demo-branch.sandboxes.app.example.com".to_string()])
+        );
+        assert_eq!(tls[0].secret_name, Some("wildcard-tls".to_string()));
+    }
+
+    #[test]
+    fn build_sandbox_ingress_annotations_passthrough() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut app = make_application("main", None);
+        app.spec.ingress_annotations =
+            BTreeMap::from([("cert-manager.io/cluster-issuer".to_string(), "self-sign".to_string())]);
+
+        let ingress = build_sandbox_ingress(&sandbox, &app);
+
+        let annotations = ingress.metadata.annotations.as_ref().expect("should have annotations");
+        assert_eq!(annotations.len(), 1);
+        assert_eq!(
+            annotations.get("cert-manager.io/cluster-issuer"),
+            Some(&"self-sign".to_string())
+        );
     }
 }
