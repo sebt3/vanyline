@@ -1,12 +1,41 @@
 <script setup lang="ts">
+import { onMounted, provide, shallowRef, ref } from 'vue';
 import { DockviewVue, type DockviewReadyEvent, type VueComponent } from 'dockview-vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
 import Workflow from './panels/Workflow.vue';
 import Chat from './panels/Chat.vue';
 import Terminal from './panels/Terminal.vue';
+import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
 
-defineProps<{ sandboxName: string }>();
+const props = defineProps<{ sandboxName: string }>();
+
+// Client /ws/fs partagé Explorer/Editor — UNE instance par sandbox ouverte.
+// shallowRef : le client contient un WebSocket brut qu'il ne faut pas rendre
+// profondément réactif. null tant que le ticket/minage n'est pas résolu.
+const fsClient = shallowRef<SandboxFsClient | null>(null);
+// Fichier ouvert : état remonté d'Explorer vers IdeShell, transmis à Editor.
+const openFilePath = ref<string | null>(null);
+
+provide('sandbox-fs', fsClient);
+provide('sandbox-name', props.sandboxName);
+provide('open-file-path', openFilePath);
+// Handler fourni à Explorer : remonter l'ouverture d'un fichier.
+provide('open-file', (path: string) => {
+  openFilePath.value = path;
+});
+
+onMounted(() => {
+  openSandboxWs(props.sandboxName, '/ws/fs')
+    .then((ws) => {
+      fsClient.value = new SandboxFsClient(ws);
+    })
+    .catch(() => {
+      // Ticket/ingress indisponible (dépendance d'infra) : les panneaux
+      // restent vides (fsClient === null), sans planter l'IDE.
+      fsClient.value = null;
+    });
+});
 
 const components = {
   explorer: Explorer,
