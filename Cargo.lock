@@ -5155,10 +5155,12 @@ dependencies = [
 name = "vanyline-controller"
 version = "0.0.1-alpha.1"
 dependencies = [
+ "base64 0.22.1",
  "clap",
  "futures",
  "k8s-openapi",
  "kube",
+ "rand 0.8.6",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
