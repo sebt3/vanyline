@@ -1,6 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
+import { createMemoryHistory, createRouter } from 'vue-router';
 import SandboxesScreen from './SandboxesScreen.vue';
+
+function makeRouter() {
+  return createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', redirect: '/settings' },
+      { path: '/settings', component: { template: '<div>Settings</div>' } },
+      { path: '/ide/:sandboxName', component: { template: '<div>IDE</div>' } },
+    ],
+  });
+}
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -28,7 +40,9 @@ describe('SandboxesScreen', () => {
         ]),
     } as unknown as Response);
 
-    const wrapper = mount(SandboxesScreen);
+    const router = makeRouter();
+    await router.replace('/');
+    const wrapper = mount(SandboxesScreen, { global: { plugins: [router] } });
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
@@ -38,7 +52,7 @@ describe('SandboxesScreen', () => {
     expect(wrapper.text()).toContain('proj-b');
     expect(wrapper.text()).toContain('main');
     expect(wrapper.text()).toContain('develop');
-  });
+    });
 
   it('remplir le formulaire + "Créer" appelle POST avec corps camelCase puis re-fetch', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
@@ -80,7 +94,9 @@ describe('SandboxesScreen', () => {
       return new Response(null, { status: 500 });
     });
 
-    const wrapper = mount(SandboxesScreen);
+    const router = makeRouter();
+    await router.replace('/');
+    const wrapper = mount(SandboxesScreen, { global: { plugins: [router] } });
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
@@ -158,7 +174,9 @@ describe('SandboxesScreen', () => {
       return new Response(null, { status: 500 });
     });
 
-    const wrapper = mount(SandboxesScreen);
+    const router = makeRouter();
+    await router.replace('/');
+    const wrapper = mount(SandboxesScreen, { global: { plugins: [router] } });
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
@@ -230,7 +248,9 @@ describe('SandboxesScreen', () => {
       return new Response(null, { status: 500 });
     });
 
-    const wrapper = mount(SandboxesScreen);
+    const router = makeRouter();
+    await router.replace('/');
+    const wrapper = mount(SandboxesScreen, { global: { plugins: [router] } });
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
@@ -280,7 +300,9 @@ describe('SandboxesScreen', () => {
       return new Response(null, { status: 500 });
     });
 
-    const wrapper = mount(SandboxesScreen);
+    const router = makeRouter();
+    await router.replace('/');
+    const wrapper = mount(SandboxesScreen, { global: { plugins: [router] } });
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
@@ -298,5 +320,38 @@ describe('SandboxesScreen', () => {
     });
 
     expect(wrapper.text()).toContain('Aucune sandbox');
+  });
+
+  it('cliquer Ouvrir navigue vers /ide/<name>', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () =>
+        Promise.resolve([
+          {
+            metadata: { name: 'sb-alpha' },
+            spec: { project: 'p', branch: 'b', suspended: false },
+            status: { phase: 'Running' },
+          },
+        ]),
+    } as unknown as Response);
+
+    const router = makeRouter();
+    await router.replace('/settings');
+    const wrapper = mount(SandboxesScreen, { global: { plugins: [router] } });
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const openBtn = wrapper.find('.btn-open');
+    await openBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(router.currentRoute.value.path).toBe('/ide/sb-alpha');
   });
 });

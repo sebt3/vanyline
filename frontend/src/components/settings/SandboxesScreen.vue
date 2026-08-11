@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import { useRouter } from 'vue-router';
 import { ApiError, createApiClient } from '../../api/client';
 
 interface Toolchain {
@@ -28,6 +29,14 @@ interface CreateSandboxBody {
 }
 
 const client = createApiClient();
+const router = useRouter();
+
+/** Ouvre l'IDE sur la sandbox choisie. La route /ide/:sandboxName est définie
+ *  dans router.ts (task-02). */
+function openSandbox(name: string) {
+  router.push(`/ide/${name}`);
+}
+
 const fetchedSandboxes = ref<Sandbox[]>([]);
 const error = ref<string | null>(null);
 const loading = ref(true);
@@ -126,6 +135,7 @@ async function deleteSandbox(name: string) {
               }}
             </td>
             <td>
+              <button class="btn btn-open" @click="openSandbox(s.metadata.name)">Ouvrir</button>
               <button
                 class="btn btn-suspend"
                 :class="{ 'btn-suspended': s.spec.suspended }"
@@ -283,6 +293,16 @@ async function deleteSandbox(name: string) {
 
 .btn-delete:hover {
   background: #e85d5d33;
+}
+
+.btn-open {
+  background: #4c90f0;
+  color: white;
+  margin-right: 6px;
+}
+
+.btn-open:hover {
+  background: #3a7de0;
 }
 
 .field {
