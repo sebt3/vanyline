@@ -1,21 +1,22 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, useTemplateRef } from 'vue';
+import { onMounted, onBeforeUnmount, useTemplateRef, inject } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import { openSandboxWs } from '../../api/sandboxWs';
 
-const lines = [
-  '\x1b[32m❯\x1b[0m python jobs/sync_library.py --source /mnt/nas/media --dest ./library',
-  '[sync_library] scanning /mnt/nas/media…',
-  '[sync_library] 214 fichiers, 6 modifiés depuis le dernier run',
-  '[sync_library] copie: Documentaires/2025/passage-nord.mkv',
-  '[sync_library] terminé — 6 fichiers copiés en 3.2s',
-];
+const sandboxName = inject<string>('sandbox-name', '');
 
 const hostRef = useTemplateRef<HTMLDivElement>('host');
 let term: Terminal | undefined;
 let fit: FitAddon | undefined;
 let resizeObserver: ResizeObserver | undefined;
+let ws: WebSocket | undefined;
+
+function sendResize() {
+  if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
+  ws.send(JSON.stringify({ type: 'resize', cols: term.cols, rows: term.rows }));
+}
 
 onMounted(() => {
   term = new Terminal({
@@ -28,8 +29,8 @@ onMounted(() => {
       selectionBackground: '#2b2b4a',
     },
     cursorBlink: true,
-    disableStdin: true,
     scrollback: 200,
+    // disableStdin retiré — l'entrée utilisateur part vers le PTY.
   });
 
   fit = new FitAddon();
@@ -37,16 +38,36 @@ onMounted(() => {
   term.open(hostRef.value!);
   fit.fit();
 
-  lines.forEach((l) => term!.writeln(l));
-  term!.write('\x1b[32m❯\x1b[0m ');
-
-  resizeObserver = new ResizeObserver(() => fit?.fit());
+  resizeObserver = new ResizeObserver(() => {
+    fit?.fit();
+    sendResize();
+  });
   resizeObserver.observe(hostRef.value!);
+
+  // Connexion binaire dédiée — un ticket propre pour /ws/terminal (jamais
+  // réutilisé depuis /ws/fs, cf. sandbox-ws-runtime).
+  openSandboxWs(sandboxName, '/ws/terminal')
+    .then((socket) => {
+      ws = socket;
+      // binaryType 'arraybuffer' : event.data des frames binaires est un
+      // ArrayBuffer (sinon Blob) — nécessaire pour new Uint8Array(ev.data).
+      ws.binaryType = 'arraybuffer';
+      term!.onData((data) => ws!.send(new TextEncoder().encode(data)));
+      ws.addEventListener('message', (ev: MessageEvent) => {
+        if (typeof ev.data === 'string') return; // le serveur n'envoie que du binaire
+        term!.write(new Uint8Array(ev.data));
+      });
+      sendResize(); // synchronise la taille initiale après l'ouverture
+    })
+    .catch(() => {
+      // ticket/ingress indisponible (dépendance d'infra) : terminal vide, pas de PTY.
+    });
 });
 
 onBeforeUnmount(() => {
   resizeObserver?.disconnect();
   term?.dispose();
+  ws?.close();
 });
 </script>
 
@@ -54,6 +75,7 @@ onBeforeUnmount(() => {
   <div ref="host" class="terminal-host"></div>
 </template>
 
+<!-- styles inchangés (le mock n'écrit plus de lignes statiques) -->
 <style scoped>
 .terminal-host {
   height: 100%;
