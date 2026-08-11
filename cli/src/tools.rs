@@ -55,6 +55,7 @@ impl ToolDyn for ReadFileTool {
                 path: args.path,
                 offset: args.offset,
                 limit: args.limit,
+                raw: false,
             })
             .await
             .map_err(|e| ToolError::ToolCallError(Box::new(e)))

@@ -87,14 +87,16 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
         "read" => {
             let offset = msg["offset"].as_u64().unwrap_or(0);
             let limit = msg["limit"].as_u64().unwrap_or(0);
+            let raw = msg["raw"].as_bool().unwrap_or(false);
             let opts = vanyline_tools::filesystem::ReadFileOptions {
                 path: resolved.clone(),
                 offset: offset as usize,
                 limit: limit as usize,
+                raw,
             };
             match vanyline_tools::filesystem::read_file(opts).await {
                 Ok(text) => {
-                    let truncated = text.contains("truncated");
+                    let truncated = !raw && text.contains("truncated");
                     serde_json::json!({ "ok": true, "content": text, "truncated": truncated })
                 }
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -363,7 +365,45 @@ mod tests {
         assert_eq!(resp["error"].as_str().unwrap(), "invalid JSON");
     }
 
-    // Test 10: ticket_query_required — missing ticket → 401
+    /// Test 10a: raw mode returns untouched content
+    #[tokio::test]
+    async fn read_raw_returns_untouched_content() {
+        let state = make_state("read_raw");
+        let resp =
+            dispatch_fs_message(&state, r#"{"op":"read","path":"sub/file.txt","raw":true}"#).await;
+        assert!(ok(&resp));
+        let content = resp["content"].as_str().unwrap();
+        // Raw content must NOT have line-number prefix "    1\t"
+        assert!(
+            !content.contains("  1\t"),
+            "raw content must not be numbered, got: {content}"
+        );
+        // Should contain the original first line
+        assert!(
+            content.starts_with("hello\n"),
+            "raw content should start with file content, got: {content}"
+        );
+        // Must not mention truncation
+        assert!(!content.contains("truncated"));
+        // truncated field must be false
+        assert!(!resp["truncated"].as_bool().unwrap());
+    }
+
+    /// Test 10b: default (non-raw) still numbers lines — regression test
+    #[tokio::test]
+    async fn read_default_still_numbered() {
+        let state = make_state("read_default");
+        let resp = dispatch_fs_message(&state, r#"{"op":"read","path":"sub/file.txt"}"#).await;
+        assert!(ok(&resp));
+        let content = resp["content"].as_str().unwrap();
+        // Default mode must start with numbered line
+        assert!(
+            content.starts_with("    1\t"),
+            "default content should start with numbered line, got: {content}"
+        );
+    }
+
+    // Test 11: ticket_query_required — missing ticket → 401
     // Test 10b: unknown ticket → 401 (and consumed)
     #[tokio::test]
     async fn ticket_query_required() {

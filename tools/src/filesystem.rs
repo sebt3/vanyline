@@ -21,6 +21,11 @@ pub struct ReadFileOptions {
     /// (même convention que `ExecuteCommandOptions::timeout_secs`).
     #[serde(default)]
     pub limit: usize,
+    /// Lecture brute pour éditeur : renvoie le contenu réel, sans numérotation
+    /// ni troncature. Le mode par défaut numérote + tronque (taillé pour les
+    /// sorties LLM/MCP) — pas adapté à afficher/éditer un fichier.
+    #[serde(default)]
+    pub raw: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -92,6 +97,7 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
     let path = opts.path.clone();
     let offset = opts.offset;
     let limit = opts.limit;
+    let raw = opts.raw;
 
     Box::pin(async move {
         // 1. metadata → file not found / io / dir
@@ -107,7 +113,7 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
                 return Err(ToolsError::Io {
                     path: path.clone(),
                     source: e,
-                })
+                });
             }
         };
 
@@ -123,6 +129,13 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
             }
             Err(e) => return Err(ToolsError::Io { path, source: e }),
         };
+
+        // 2b. lecture brute (éditeur) : contenu réel, sans numérotation ni
+        // troncature — les étapes 3..6 (fichier vide, offset, bornage) sont
+        // volontairement ignorées.
+        if raw {
+            return Ok(content);
+        }
 
         // 3. empty file check
         let total = content.lines().count();
@@ -286,7 +299,7 @@ pub fn edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, ToolsError
                 return Err(ToolsError::Io {
                     path: path.clone(),
                     source: e,
-                })
+                });
             }
         };
 
@@ -568,7 +581,7 @@ pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError
                 return Err(ToolsError::Io {
                     path: path.clone(),
                     source: e,
-                })
+                });
             }
         };
 
@@ -622,6 +635,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             offset: 0,
             limit: 0, // use default READ_MAX_LINES
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -648,6 +662,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             offset: 5,
             limit: 0,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -671,6 +686,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             offset: 0,
             limit: 50,
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -695,6 +711,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             offset: 0,
             limit: 0,
+            ..Default::default()
         })
         .await;
 
@@ -719,6 +736,7 @@ mod tests {
             path: path.clone(),
             offset: 0,
             limit: 0,
+            ..Default::default()
         })
         .await;
 
@@ -742,6 +760,7 @@ mod tests {
             path: dir.path().to_string_lossy().to_string(),
             offset: 0,
             limit: 0,
+            ..Default::default()
         })
         .await;
 
@@ -763,6 +782,7 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             offset: 10,
             limit: 0,
+            ..Default::default()
         })
         .await;
 
@@ -785,11 +805,106 @@ mod tests {
             path: path.to_string_lossy().to_string(),
             offset: 0,
             limit: 0,
+            ..Default::default()
         })
         .await
         .unwrap();
 
         assert_eq!(result, "");
+    }
+
+    /// -----------------------------------------------------------------------
+    /// read_file raw mode tests
+    /// -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn read_file_raw_returns_untouched_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.txt");
+        // Use a line that starts with digits — raw must return it untouched,
+        // not stripped/prefixed by number_lines.
+        tokio::fs::write(&path, "42 apples\nhello world\n")
+            .await
+            .unwrap();
+
+        let result = read_file(ReadFileOptions {
+            path: path.to_string_lossy().to_string(),
+            offset: 0,
+            limit: 0,
+            raw: true,
+        })
+        .await
+        .unwrap();
+
+        // Must be exactly the file content — no line-number prefix "    1\t", no "truncated"
+        assert_eq!(result, "42 apples\nhello world\n");
+        assert!(!result.contains("    1\t"));
+        assert!(!result.contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn read_file_raw_ignores_limit_and_no_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("many.txt");
+        // Create a file of more than 200 lines (> READ_MAX_LINES)
+        let lines: Vec<String> = (0..300).map(|i| format!("line {}", i)).collect();
+        tokio::fs::write(&path, lines.join("\n") + "\n")
+            .await
+            .unwrap();
+
+        let result = read_file(ReadFileOptions {
+            path: path.to_string_lossy().to_string(),
+            offset: 0,
+            limit: 0,
+            raw: true,
+        })
+        .await
+        .unwrap();
+
+        // All 300 lines are returned, no truncation marker
+        assert!(result.lines().count() == 300);
+        assert!(!result.contains("truncated"));
+    }
+
+    #[tokio::test]
+    async fn read_file_raw_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.txt");
+
+        let result = read_file(ReadFileOptions {
+            path: path.to_string_lossy().to_string(),
+            offset: 0,
+            limit: 0,
+            raw: true,
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::FileNotFound { path: p, .. }) => {
+                assert!(p.contains("nonexistent.txt"));
+            }
+            other => panic!("Expected FileNotFound, got: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_file_raw_on_directory() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let result = read_file(ReadFileOptions {
+            path: dir.path().to_string_lossy().to_string(),
+            offset: 0,
+            limit: 0,
+            raw: true,
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::NotAFile(p)) => {
+                assert!(p.contains(dir.path().to_str().unwrap_or("")));
+            }
+            other => panic!("Expected NotAFile, got: {:?}", other),
+        }
     }
 
     // -----------------------------------------------------------------------
