@@ -2,7 +2,6 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use k8s_openapi::ByteString;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentCondition, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PodSpec, PodTemplateSpec, Probe,
@@ -16,6 +15,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     Condition, LabelSelector, ObjectMeta, OwnerReference,
 };
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
+use k8s_openapi::ByteString;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::{Client, Resource, ResourceExt};
@@ -505,6 +505,8 @@ mod tests {
                 host: "app.example.com".to_string(),
                 ingress_class_name: "nginx".to_string(),
                 ingress_annotations: BTreeMap::new(),
+                sandbox_tls_secret_name: None,
+                ingress_controller: None,
             },
         );
         app.meta_mut().namespace = Some("ns".into());

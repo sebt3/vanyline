@@ -687,6 +687,7 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
                 home_size,
                 home_storage_class,
                 project_defaults,
+                application_ref: None,
                 egress: Vec::new(),
             };
             let _owner = client.create_owner(&name, spec).await.unwrap_or_else(|e| {

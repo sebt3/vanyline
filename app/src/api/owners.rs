@@ -74,6 +74,7 @@ pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, Ap
                     home_size: None,
                     home_storage_class: None,
                     project_defaults: None,
+                    application_ref: None,
                     egress: Vec::new(),
                 },
             )

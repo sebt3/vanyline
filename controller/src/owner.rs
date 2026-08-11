@@ -11,8 +11,8 @@ use kube::api::{Api, ListParams, ObjectMeta, Patch, PatchParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::{Owner, OwnerStatus, Project, Sandbox};
 use crate::error::ControllerError;
+use vanyline_crds::{Owner, OwnerStatus, Project, Sandbox};
 
 /// Field manager utilisé pour tous les server-side apply du controller.
 pub const FIELD_MANAGER: &str = "vanyline-controller";
@@ -224,6 +224,7 @@ mod tests {
                 home_size,
                 home_storage_class,
                 project_defaults: None,
+                application_ref: None,
                 egress: Vec::new(),
             },
         );

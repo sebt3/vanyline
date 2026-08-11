@@ -24,6 +24,10 @@ pub struct OwnerSpec {
     pub home_size: Option<String>, // défaut appliqué au reconcile: "1Gi"
     pub home_storage_class: Option<String>, // RWX recommandé (CephFS)
     pub project_defaults: Option<ProjectDefaults>,
+    /// Nom de la CR Application dont l'Ingress sert de base aux sous-domaines
+    /// de sandbox (`{sandbox}.sandboxes.{application.host}`). None => la
+    /// Sandbox reste ClusterIP-only (comportement actuel, pas d'erreur).
+    pub application_ref: Option<String>,
     #[serde(default)]
     pub egress: Vec<EgressRule>,
 }
@@ -33,6 +37,17 @@ pub struct OwnerSpec {
 pub struct ProjectDefaults {
     pub storage_size: Option<String>,
     pub storage_class: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct IngressControllerRef {
+    /// Namespace des pods du controller d'Ingress (ex. "kydah-core").
+    pub namespace: String,
+    /// Labels identifiant les pods du controller (ex.
+    /// `app.kubernetes.io/name: traefik`, `app.kubernetes.io/component:
+    /// controller`).
+    pub pod_labels: BTreeMap<String, String>,
 }
 
 /// Une règle d'une white-list egress. `cidr` et `pod_selector` sont
@@ -201,6 +216,19 @@ pub struct ApplicationSpec {
     /// même esprit que `Toolchain.env`, pas de champ dédié par convention connue.
     #[serde(default)]
     pub ingress_annotations: BTreeMap<String, String>,
+    /// Secret TLS wildcard pré-provisionné (`*.sandboxes.{host}`), référencé
+    /// tel quel par chaque Ingress de Sandbox — jamais un Certificate par
+    /// sandbox (cf. design, "Risques", rate-limit/churn). None => Ingress de
+    /// Sandbox sans bloc `tls` explicite (repli sur les annotations
+    /// cert-manager si présentes — comportement moins prévisible, à éviter
+    /// en usage réel).
+    pub sandbox_tls_secret_name: Option<String>,
+    /// Pods du controller d'Ingress (ex. traefik) : namespace + labels.
+    /// Utilisé comme peer NetworkPolicy sur la netpol ingress de chaque
+    /// Sandbox (le trafic navigateur transite par l'Ingress avant d'atteindre
+    /// le Service). None => pas de peer dédié (la netpol sandbox ne laisse
+    /// passer que les pods du même Owner + le pod app).
+    pub ingress_controller: Option<IngressControllerRef>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -332,6 +360,10 @@ mod tests {
             spec_props.contains_key("egress"),
             "Owner schema should contain 'egress', got: {spec_props:?}"
         );
+        assert!(
+            spec_props.contains_key("applicationRef"),
+            "Owner schema should contain 'applicationRef', got: {spec_props:?}"
+        );
     }
 
     #[test]
@@ -449,6 +481,14 @@ mod tests {
             spec_props.contains_key("ingressAnnotations"),
             "Application schema should contain 'ingressAnnotations', got: {spec_props:?}"
         );
+        assert!(
+            spec_props.contains_key("sandboxTlsSecretName"),
+            "Application schema should contain 'sandboxTlsSecretName', got: {spec_props:?}"
+        );
+        assert!(
+            spec_props.contains_key("ingressController"),
+            "Application schema should contain 'ingressController', got: {spec_props:?}"
+        );
     }
 
     #[test]
@@ -459,12 +499,23 @@ mod tests {
         assert!(spec.replicas.is_none());
         assert!(spec.cookie_secret_ref.is_none());
         assert!(spec.ingress_annotations.is_empty());
+        assert!(spec.sandbox_tls_secret_name.is_none());
+        assert!(spec.ingress_controller.is_none());
     }
 
     #[test]
     fn application_camel_case() {
         let mut annotations = BTreeMap::new();
-        annotations.insert("cert-manager.io/cluster-issuer".to_string(), "letsencrypt".to_string());
+        annotations.insert(
+            "cert-manager.io/cluster-issuer".to_string(),
+            "letsencrypt".to_string(),
+        );
+        let mut pod_labels = BTreeMap::new();
+        pod_labels.insert("app.kubernetes.io/name".to_string(), "traefik".to_string());
+        pod_labels.insert(
+            "app.kubernetes.io/component".to_string(),
+            "controller".to_string(),
+        );
         let spec = ApplicationSpec {
             image: Some("vanyline-app:latest".to_string()),
             replicas: Some(3),
@@ -474,6 +525,11 @@ mod tests {
             host: "app.example.com".to_string(),
             ingress_class_name: "nginx".to_string(),
             ingress_annotations: annotations,
+            sandbox_tls_secret_name: Some("wildcard-tls".to_string()),
+            ingress_controller: Some(IngressControllerRef {
+                namespace: "kydah-core".to_string(),
+                pod_labels,
+            }),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(
@@ -497,6 +553,18 @@ mod tests {
             "should contain ingressAnnotations (camelCase), got: {json}"
         );
         assert!(
+            json.contains(r#""sandboxTlsSecretName""#),
+            "should contain sandboxTlsSecretName (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""ingressController""#),
+            "should contain ingressController (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""podLabels""#),
+            "should contain podLabels (camelCase), got: {json}"
+        );
+        assert!(
             !json.contains("oidc_secret_ref"),
             "should not contain oidc_secret_ref (snake_case), got: {json}"
         );
@@ -515,6 +583,62 @@ mod tests {
         assert!(
             !json.contains("ingress_annotations"),
             "should not contain ingress_annotations (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("sandbox_tls_secret_name"),
+            "should not contain sandbox_tls_secret_name (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("ingress_controller"),
+            "should not contain ingress_controller (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("pod_labels"),
+            "should not contain pod_labels (snake_case), got: {json}"
+        );
+    }
+
+    #[test]
+    fn owner_application_ref_camel_case() {
+        let spec = OwnerSpec {
+            existing_pvc: None,
+            home_size: None,
+            home_storage_class: None,
+            project_defaults: None,
+            application_ref: Some("my-app".to_string()),
+            egress: Vec::new(),
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains(r#""applicationRef""#),
+            "should contain applicationRef (camelCase), got: {json}"
+        );
+        assert!(
+            !json.contains("application_ref"),
+            "should not contain application_ref (snake_case), got: {json}"
+        );
+    }
+
+    #[test]
+    fn ingress_controller_ref_camel_case() {
+        let mut pod_labels = BTreeMap::new();
+        pod_labels.insert("app".to_string(), "traefik".to_string());
+        let ref_ = IngressControllerRef {
+            namespace: "kydah-core".to_string(),
+            pod_labels,
+        };
+        let json = serde_json::to_string(&ref_).unwrap();
+        assert!(
+            json.contains(r#""namespace""#),
+            "should contain namespace, got: {json}"
+        );
+        assert!(
+            json.contains(r#""podLabels""#),
+            "should contain podLabels (camelCase), got: {json}"
+        );
+        assert!(
+            !json.contains("pod_labels"),
+            "should not contain pod_labels (snake_case), got: {json}"
         );
     }
 }
