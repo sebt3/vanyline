@@ -8,6 +8,7 @@ import {
   MenubarItem,
   MenubarSeparator,
 } from 'reka-ui';
+import { useRouter } from 'vue-router';
 
 interface Item {
   label: string;
@@ -19,7 +20,7 @@ interface Sep {
   sep: true;
 }
 
-const emit = defineEmits<{ 'toggle-settings': [] }>();
+const router = useRouter();
 
 const menus: { label: string; items: (Item | Sep)[] }[] = [
   {
@@ -73,7 +74,9 @@ function isSep(item: Item | Sep): item is Sep {
 }
 
 function onSelect(item: Item) {
-  if (item.action === 'toggle-settings') emit('toggle-settings');
+  if (item.action === 'toggle-settings') {
+    router.push('/settings');
+  }
 }
 </script>
 

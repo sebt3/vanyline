@@ -1,95 +1,28 @@
 <script setup lang="ts">
-import { ref } from 'vue';
-import { DockviewVue, type DockviewReadyEvent, type VueComponent } from 'dockview-vue';
-import Explorer from './components/panels/Explorer.vue';
-import Editor from './components/panels/Editor.vue';
-import Workflow from './components/panels/Workflow.vue';
-import Chat from './components/panels/Chat.vue';
-import Terminal from './components/panels/Terminal.vue';
-import StatusBar from './components/StatusBar.vue';
+import { computed } from 'vue';
+import { useRoute } from 'vue-router';
 import MenuBar from './components/MenuBar.vue';
-import SettingsView from './components/SettingsView.vue';
+import StatusBar from './components/StatusBar.vue';
 
-const activeView = ref<'shell' | 'settings'>('shell');
-function toggleSettings() {
-  activeView.value = activeView.value === 'settings' ? 'shell' : 'settings';
-}
-
-// Pas d'écran de connexion dédié : OIDC est le seul mécanisme d'auth,
-// un utilisateur non authentifié est redirigé vers le provider en amont
-// de ce shell — il n'y a rien à afficher ici dans ce cas.
-
-const components = {
-  explorer: Explorer,
-  editor: Editor,
-  workflow: Workflow,
-  chat: Chat,
-  terminal: Terminal,
-} as unknown as Record<string, VueComponent>;
-
-function onReady(event: DockviewReadyEvent) {
-  const { api } = event;
-
-  api.addPanel({
-    id: 'explorer',
-    component: 'explorer',
-    title: 'Explorer',
-    initialWidth: 230,
-  });
-
-  api.addPanel({
-    id: 'editor',
-    component: 'editor',
-    title: 'sync_library.py',
-    position: { referencePanel: 'explorer', direction: 'right' },
-  });
-
-  api.addPanel({
-    id: 'workflow',
-    component: 'workflow',
-    title: 'sync-media.dag',
-    position: { referencePanel: 'editor', direction: 'within' },
-  });
-
-  api.addPanel({
-    id: 'terminal',
-    component: 'terminal',
-    title: 'Terminal',
-    position: { referencePanel: 'editor', direction: 'below' },
-    initialHeight: 170,
-  });
-
-  api.addPanel({
-    id: 'chat',
-    component: 'chat',
-    title: 'Assistant',
-    position: { referencePanel: 'editor', direction: 'right' },
-    initialWidth: 330,
-  });
-
-  api.getPanel('editor')?.api.setActive();
-}
+const route = useRoute();
+// Plus de "media-station" en dur : le workspace vient de la route.
+// Sur /settings (pas de sandbox) → chaîne vide.
+const workspace = computed(() =>
+  typeof route.params.sandboxName === 'string' ? route.params.sandboxName : '',
+);
 </script>
 
 <template>
   <div class="shell">
     <div class="topbar">
-      <MenuBar @toggle-settings="toggleSettings" />
+      <MenuBar />
       <span class="grow" />
-      <span class="workspace">media-station</span>
+      <span class="workspace">{{ workspace }}</span>
     </div>
-    <div class="dock" v-show="activeView === 'shell'">
-      <DockviewVue
-        class="dockview-theme-abyss"
-        style="width: 100%; height: 100%"
-        :components="components"
-        @ready="onReady"
-      />
+    <div class="dock">
+      <router-view />
     </div>
-    <div class="dock" v-show="activeView === 'settings'">
-      <SettingsView />
-    </div>
-    <StatusBar workspace="media-station" />
+    <StatusBar :workspace="workspace" />
   </div>
 </template>
 
