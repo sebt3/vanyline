@@ -28,7 +28,7 @@ async fn main() {
     }
 
     let _ = tracing_subscriber::fmt::try_init();
-    tracing::info!("controller starting (owner + project + sandbox reconcilers active)");
+    tracing::info!("controller starting (owner + project + sandbox + application reconcilers active)");
 
     let client = kube::Client::try_default().await.unwrap_or_else(|e| {
         tracing::error!(
@@ -65,6 +65,18 @@ async fn main() {
             }
         });
 
+    let app_ctx = Arc::new(application::Context {
+        client: client.clone(),
+    });
+
+    let application_run = application::build_controller(client.clone())
+        .run(application::reconcile, application::error_policy, app_ctx)
+        .for_each(|res| async move {
+            if let Err(e) = res {
+                tracing::warn!(error = %e, "application reconcile loop error");
+            }
+        });
+
     let sandbox_ctx = Arc::new(sandbox::Context {
         client: client.clone(),
         default_image: sandbox_image.clone(),
@@ -78,5 +90,5 @@ async fn main() {
             }
         });
 
-    tokio::join!(owner_run, project_run, sandbox_run);
+    tokio::join!(owner_run, project_run, sandbox_run, application_run);
 }

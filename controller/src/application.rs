@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
+use std::time::Duration;
 
-use k8s_openapi::api::apps::v1::{Deployment, DeploymentSpec};
+use k8s_openapi::api::apps::v1::{Deployment, DeploymentCondition, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PodSpec, PodTemplateSpec,
     Probe, Secret, SecretKeySelector, Service, ServicePort, ServiceSpec,
@@ -9,12 +11,16 @@ use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule, IngressServiceBackend,
     IngressSpec, ServiceBackendPort,
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{LabelSelector, ObjectMeta, OwnerReference};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, ObjectMeta, OwnerReference};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use k8s_openapi::ByteString;
-use kube::{Resource, ResourceExt};
+use kube::api::{Api, Patch, PatchParams, PostParams};
+use kube::runtime::controller::{Action, Controller};
+use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::Application;
+use vanyline_crds::{Application, ApplicationStatus};
+use crate::error::ControllerError;
+use crate::owner::FIELD_MANAGER;
 
 /// Port HTTP du Deployment `app` — défaut de `LISTEN_ADDR` côté
 /// `app/src/config.rs` (`0.0.0.0:8080`).
@@ -68,7 +74,6 @@ fn app_owner_ref(app: &Application) -> OwnerReference {
 /// - `DeploymentSpec.selector` sans wrapper `Option` (type `LabelSelector` direct)
 /// - `DeploymentSpec.template` sans wrapper `Option` (type `PodTemplateSpec` direct)
 /// - `PodTemplateSpec.metadata` optionnel (type `Option<ObjectMeta>`)
-#[allow(dead_code)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_application_deployment(app: &Application) -> Deployment {
     let mut labels = BTreeMap::new();
@@ -210,7 +215,6 @@ pub fn build_application_deployment(app: &Application) -> Deployment {
 /// Service ClusterIP exposant le port HTTP du Deployment `app` (sélecteur =
 /// `vanyline.solidite.fr/application: <name>`, seul label garanti unique posé
 /// par `build_application_deployment`). `ownerReference` vers l'Application.
-#[allow(dead_code)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_application_service(app: &Application) -> Service {
     let mut selector = BTreeMap::new();
@@ -247,7 +251,6 @@ pub fn build_application_service(app: &Application) -> Service {
 /// - `HTTPIngressPath.path_type` : `String` (pas Option)
 /// - `HTTPIngressPath.backend` : `IngressBackend` (pas Option)
 /// - `IngressServiceBackend.name` : `String` (pas Option)
-#[allow(dead_code)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_application_ingress(app: &Application) -> Ingress {
     Ingress {
@@ -299,7 +302,6 @@ pub fn build_application_ingress(app: &Application) -> Ingress {
 /// `Option<BTreeMap<String, ByteString>>` — les valeurs sont encodées en
 /// base64 lors de la sérialisation, mais le stockage interne (ByteString)
 /// utilise un `Vec<u8>`. Le builder prend une `String` et la convertit en bytes.
-#[allow(dead_code)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_cookie_secret(app: &Application, cookie_data_value: String) -> Secret {
     let mut data = BTreeMap::new();
@@ -315,6 +317,169 @@ pub fn build_cookie_secret(app: &Application, cookie_data_value: String) -> Secr
         data: Some(data),
         ..Default::default()
     }
+}
+
+pub struct Context {
+    pub client: Client,
+}
+
+/// Génère la valeur de `data["cookieSecret"]` pour le Secret cookie auto-généré :
+/// 64 octets aléatoires encodés en base64 standard (encodage simple). Voir la
+/// décision "Encodage du cookie" au contexte : `build_cookie_secret` enveloppe
+/// cette valeur dans un `ByteString` que la sérialisation K8s encode une seconde
+/// fois — l'env `COOKIE_SECRET` du pod sera `base64(raw)`.
+fn generate_cookie_secret_value() -> String {
+    use base64::Engine;
+    use rand::RngCore;
+    let mut bytes = [0u8; 64];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// Garantit le Secret cookie auto-généré quand `spec.cookie_secret_ref` est `None` :
+/// cherche `<application-name>-cookie`, le crée s'il est absent, le laisse tel quel
+/// s'il existe (jamais régénéré — une régénération invaliderait les sessions cookie
+/// actives ; le check "existe déjà ?" précède toute écriture). Quand
+/// `spec.cookie_secret_ref` est `Some(...)`, ne fait rien (secret fourni par ailleurs).
+async fn ensure_cookie_secret(
+    app: &Application,
+    ctx: &Context,
+    ns: &str,
+) -> Result<(), ControllerError> {
+    if app.spec.cookie_secret_ref.is_some() {
+        return Ok(());
+    }
+    let secrets: Api<Secret> = Api::namespaced(ctx.client.clone(), ns);
+    let name = cookie_secret_name(&app.name_any());
+    if secrets.get_opt(&name).await?.is_some() {
+        return Ok(());
+    }
+    let value = generate_cookie_secret_value();
+    let secret = build_cookie_secret(app, value);
+    secrets.create(&PostParams::default(), &secret).await?;
+    Ok(())
+}
+
+/// Mappe les conditions `Available` d'un Deployment sur une phase CRD :
+/// `"Running"` si une condition `Available/True` existe, `"Failed"` si une
+/// condition `Available/False` a `reason == "Failed"` ou
+/// `"ProgressDeadlineExceeded"`, sinon `"Provisioning"`. `None`/vide =>
+/// `"Provisioning"`.
+///
+/// Note : k8s-openapi 0.28 utilise `DeploymentCondition` (apps/v1) pour
+/// `DeploymentStatus.conditions`, avec les mêmes champs `type_`/`status`/`reason`.
+fn deployment_phase(conditions: Option<&Vec<DeploymentCondition>>) -> String {
+    let available = conditions.map(|cs| {
+        cs.iter()
+            .any(|c| c.type_ == "Available" && c.status == "True")
+    }).unwrap_or(false);
+    let failed = conditions.map(|cs| {
+        cs.iter().any(|c| {
+            c.type_ == "Available"
+                && c.status == "False"
+                && (c.reason.as_deref() == Some("Failed") || c.reason.as_deref() == Some("ProgressDeadlineExceeded"))
+        })
+    }).unwrap_or(false);
+
+    if available {
+        "Running".to_string()
+    } else if failed {
+        "Failed".to_string()
+    } else {
+        "Provisioning".to_string()
+    }
+}
+
+/// Status attendu : `phase`, condition `Ready` reflétant `phase == "Running"`
+/// (`True`/`"DeploymentReady"`, sinon `False`/`"NotReady"`).
+pub fn compute_status(app: &Application, phase: &str) -> ApplicationStatus {
+    let (status, reason) = if phase == "Running" {
+        ("True", "DeploymentReady")
+    } else {
+        ("False", "NotReady")
+    };
+    ApplicationStatus {
+        phase: Some(phase.to_string()),
+        conditions: vec![Condition {
+            type_: "Ready".to_string(),
+            status: status.to_string(),
+            reason: reason.to_string(),
+            message: format!("phase={phase}"),
+            last_transition_time: k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ),
+            observed_generation: app.meta().generation,
+        }],
+    }
+}
+
+/// Reconciler kube-rs : garantit le Secret cookie auto-généré (si
+/// `spec.cookie_secret_ref` est `None`), puis server-side apply idempotent du
+/// Deployment, du Service et de l'Ingress, puis status. Pas de finalizer — la GC
+/// K8s (ownerReferences) nettoie les objets créés à la suppression de l'Application.
+pub async fn reconcile(
+    app: Arc<Application>,
+    ctx: Arc<Context>,
+) -> Result<Action, ControllerError> {
+    let ns = app.namespace().unwrap_or_else(|| "default".to_string());
+    let pp = PatchParams::apply(FIELD_MANAGER).force();
+
+    ensure_cookie_secret(&app, &ctx, &ns).await?;
+
+    let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
+    let name = application_name(&app.name_any());
+    let phase = match deployments.get_opt(&name).await? {
+        None => "Provisioning".to_string(),
+        Some(d) => deployment_phase(d.status.as_ref().and_then(|s| s.conditions.as_ref())),
+    };
+
+    let deployment = build_application_deployment(&app);
+    deployments
+        .patch(&name, &pp, &Patch::Apply(&deployment))
+        .await?;
+
+    let services: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
+    let service = build_application_service(&app);
+    services
+        .patch(&name, &pp, &Patch::Apply(&service))
+        .await?;
+
+    let ingresses: Api<Ingress> = Api::namespaced(ctx.client.clone(), &ns);
+    let ingress = build_application_ingress(&app);
+    ingresses
+        .patch(&name, &pp, &Patch::Apply(&ingress))
+        .await?;
+
+    let applications: Api<Application> = Api::namespaced(ctx.client.clone(), &ns);
+    let status = compute_status(&app, &phase);
+    let patch = serde_json::json!({ "status": status });
+    applications
+        .patch_status(
+            &app.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(&patch),
+        )
+        .await?;
+
+    Ok(Action::requeue(Duration::from_secs(if phase == "Running" {
+        300
+    } else {
+        15
+    })))
+}
+
+/// Politique d'erreur : requeue à 30s, quelle que soit l'erreur (patron
+/// `owner::error_policy` — pas de distinction transitoire/fatale en v1).
+pub fn error_policy(_app: Arc<Application>, error: &ControllerError, _ctx: Arc<Context>) -> Action {
+    tracing::warn!(%error, "application reconcile error, requeue in 30s");
+    Action::requeue(Duration::from_secs(30))
+}
+
+/// Construit le `Controller<Application>` prêt à tourner (`.run(...)` reste à
+/// l'appelant dans `main.rs`, qui pilote aussi l'arrêt).
+pub fn build_controller(client: Client) -> Controller<Application> {
+    let applications: Api<Application> = Api::all(client);
+    Controller::new(applications, kube::runtime::watcher::Config::default())
 }
 
 #[cfg(test)]
@@ -674,5 +839,118 @@ mod tests {
         let data = secret.data.as_ref().expect("should have data");
         // ByteString stocke les bytes bruts (Vec<u8>), pas de String
         assert_eq!(data.get("cookieSecret").unwrap().0.as_slice(), b"YWJj");
+    }
+
+    // 11. deployment_phase_running
+    #[test]
+    fn deployment_phase_running() {
+        let conditions = Some(vec![DeploymentCondition {
+            type_: "Available".to_string(),
+            status: "True".to_string(),
+            reason: Some("MinimumReplicasAvailable".to_string()),
+            message: Some("Deployment has minimum availability".to_string()),
+            last_transition_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            )),
+            last_update_time: None,
+        }]);
+        assert_eq!(deployment_phase(conditions.as_ref()), "Running");
+    }
+
+    // 12. deployment_phase_failed
+    #[test]
+    fn deployment_phase_failed() {
+        // reason "Failed"
+        let conditions = Some(vec![DeploymentCondition {
+            type_: "Available".to_string(),
+            status: "False".to_string(),
+            reason: Some("Failed".to_string()),
+            message: Some("replicas are failed".to_string()),
+            last_transition_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            )),
+            last_update_time: None,
+        }]);
+        assert_eq!(deployment_phase(conditions.as_ref()), "Failed");
+
+        // reason "ProgressDeadlineExceeded"
+        let conditions2 = Some(vec![DeploymentCondition {
+            type_: "Available".to_string(),
+            status: "False".to_string(),
+            reason: Some("ProgressDeadlineExceeded".to_string()),
+            message: Some("Deadline exceeded".to_string()),
+            last_transition_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            )),
+            last_update_time: None,
+        }]);
+        assert_eq!(deployment_phase(conditions2.as_ref()), "Failed");
+    }
+
+    // 13. deployment_phase_provisioning
+    #[test]
+    fn deployment_phase_provisioning() {
+        // None
+        assert_eq!(deployment_phase(None), "Provisioning");
+
+        // empty vec
+        assert_eq!(deployment_phase(Some(&vec![])), "Provisioning");
+
+        // Available/False with reason "ScalingReplicaSet" => not "Failed"
+        let conditions = Some(vec![DeploymentCondition {
+            type_: "Available".to_string(),
+            status: "False".to_string(),
+            reason: Some("ScalingReplicaSet".to_string()),
+            message: Some("replica set is scaling".to_string()),
+            last_transition_time: Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            )),
+            last_update_time: None,
+        }]);
+        assert_eq!(deployment_phase(conditions.as_ref()), "Provisioning");
+    }
+
+    // 14. compute_status_running
+    #[test]
+    fn compute_status_running() {
+        let app = make_application("demo");
+        let status = compute_status(&app, "Running");
+        assert_eq!(status.phase.as_ref().unwrap(), "Running");
+        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions[0].type_, "Ready");
+        assert_eq!(status.conditions[0].status, "True");
+        assert_eq!(status.conditions[0].reason, "DeploymentReady");
+    }
+
+    // 15. compute_status_provisioning
+    #[test]
+    fn compute_status_provisioning() {
+        let app = make_application("demo");
+        let status = compute_status(&app, "Provisioning");
+        assert_eq!(status.phase.as_ref().unwrap(), "Provisioning");
+        assert_eq!(status.conditions.len(), 1);
+        assert_eq!(status.conditions[0].type_, "Ready");
+        assert_eq!(status.conditions[0].status, "False");
+        assert_eq!(status.conditions[0].reason, "NotReady");
+    }
+
+    // 16. test_generate_cookie_secret_value
+    #[test]
+    fn test_generate_cookie_secret_value() {
+        use base64::Engine;
+
+        let value = generate_cookie_secret_value();
+        assert!(!value.is_empty());
+
+        // STANDARD.decode gives exactly 64 bytes
+        let decoded = base64::engine::general_purpose::STANDARD.decode(&value).expect("decode");
+        assert_eq!(decoded.len(), 64);
+
+        // Decoded bytes must be nonZero (random)
+        assert!(decoded.iter().any(|&b| b != 0));
+
+        // Two calls should produce different values
+        let value2 = generate_cookie_secret_value();
+        assert_ne!(value, value2);
     }
 }
