@@ -92,7 +92,14 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   direction (réorientation) pour l'instant.
 
 **Hors scope pour cette phase :**
-- Intégration app ↔ sandbox (nécessite le controller à maturité)
+- Intégration app ↔ sandbox — **correction du 2026-08-09** : la raison invoquée jusqu'ici
+  ("nécessite le controller à maturité") était fausse, le controller est implémenté et
+  déployé depuis `controller-bootstrap` (2026-07-11, cf. `.claude/memory/controller-bootstrap.md`).
+  L'écart trouvé en creusant l'écart code/contrat visuel du frontend (2026-08-09) : `app`
+  ne branche même pas la feature Cargo `k8s` de `vanyline-lib`, donc `VnlK8sClient`
+  n'est pas compilé côté `app` — c'est ça le vrai blocage, pas la maturité du controller.
+  Reste hors scope pour l'instant par choix de séquencement (famille de features
+  "arrimage fonctionnel", cf. `docs/features/frontend-ui-shell.md`), pas par nécessité.
 - Multi-utilisateur complet, quotas
 - Permissions/approbation des tools ; compaction automatique du contexte
 - Ouverture aux autres contributeurs

@@ -91,7 +91,10 @@ script shell assemblé par le controller. Les arguments passent en **argv**
 commande shell. Conséquences : une seule image à maintenir, et l'outillage git/langages
 disponible au même endroit pour la maintenance ET pour les sessions LLM.
 
-**Statut : déféré.** Pour le dev/test de la sandbox, un script shell/Python crée les pods directement.
+**Statut : implémenté et déployé** (sorti du statut déféré depuis WS-4/`controller-bootstrap`,
+2026-07-11) — reconcilers Owner/Project/Sandbox, NetworkPolicies egress trois niveaux,
+suspension manuelle, endpoints git de la sandbox (WS-11/WS-13). Détails : `docs/architecture.md`
+section "Opérateur Kubernetes — `vanyline-controller`".
 
 ## Clients de la sandbox
 
@@ -162,9 +165,9 @@ cargo clippy --workspace       # linter
 ### Frontend
 
 ```bash
-npm run build                  # vite build
+npm run build                  # vue-tsc -b && vite build
 npm run test                   # vitest run
-npx svelte-check               # vérification TypeScript/Svelte
+npm run check                  # vue-tsc --noEmit — vérification TypeScript/Vue
 ```
 
 ## Conventions
