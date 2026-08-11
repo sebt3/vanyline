@@ -13,7 +13,7 @@ use k8s_openapi::api::networking::v1::{
     NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
     ServiceBackendPort,
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, LabelSelectorRequirement};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
@@ -24,6 +24,7 @@ use vanyline_crds::{
     Application, EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
     Toolchain, service_name,
 };
+use crate::application::APP_LABEL;
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
@@ -621,22 +622,69 @@ fn dns_egress_rule() -> NetworkPolicyEgressRule {
 }
 
 /// NetworkPolicy : cible le Pod de cette Sandbox, autorise l'ingress
-/// uniquement depuis les pods du même namespace portant
+/// uniquement depuis (1) les pods du même namespace portant
 /// `vanyline.solidite.fr/owner: <owner_name>` (même Owner — code-server,
-/// autres sandboxes du même utilisateur).
+/// autres sandboxes du même utilisateur), (2) le(s) pod(s) `app` portant
+/// `APP_LABEL` (minage du ticket `POST /ws/ticket` — matchExpressions
+/// `Exists` sur la clé, valeur inconnue ici), (3) si
+/// `application.spec.ingress_controller` est `Some`, le(s) pod(s) du
+/// controller d'Ingress dans le namespace donné (trafic navigateur transitant
+/// par l'Ingress — peer `namespace_selector` + `pod_selector`).
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
-pub fn build_sandbox_netpol(sandbox: &Sandbox, owner_name: &str) -> NetworkPolicy {
+pub fn build_sandbox_netpol(
+    sandbox: &Sandbox,
+    owner_name: &str,
+    application: Option<&Application>,
+) -> NetworkPolicy {
     let mut pod_selector_labels = BTreeMap::new();
     pod_selector_labels.insert(
         "vanyline.solidite.fr/sandbox".to_string(),
         sandbox.name_any(),
     );
 
-    let mut peer_labels = BTreeMap::new();
-    peer_labels.insert(
+    // from : peer 1 = même Owner (inchangé), peer 2 = pod(s) app (toujours
+    // posé), peer 3 = ingress controller (si application.spec.ingress_controller Some)
+    let mut owner_peer_labels = BTreeMap::new();
+    owner_peer_labels.insert(
         "vanyline.solidite.fr/owner".to_string(),
         owner_name.to_string(),
     );
+    let mut from = vec![
+        NetworkPolicyPeer {
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(owner_peer_labels),
+                ..Default::default()
+            }),
+            ..Default::default()
+        },
+        NetworkPolicyPeer {
+            pod_selector: Some(LabelSelector {
+                match_labels: None,
+                match_expressions: Some(vec![LabelSelectorRequirement {
+                    key: APP_LABEL.to_string(),
+                    operator: "Exists".to_string(),
+                    values: None,
+                }]),
+            }),
+            ..Default::default()
+        },
+    ];
+    if let Some(ic) = application.and_then(|a| a.spec.ingress_controller.as_ref()) {
+        from.push(NetworkPolicyPeer {
+            namespace_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([(
+                    "kubernetes.io/metadata.name".to_string(),
+                    ic.namespace.clone(),
+                )])),
+                ..Default::default()
+            }),
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(ic.pod_labels.clone()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        });
+    }
 
     NetworkPolicy {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
@@ -654,13 +702,7 @@ pub fn build_sandbox_netpol(sandbox: &Sandbox, owner_name: &str) -> NetworkPolic
             }),
             policy_types: Some(vec!["Ingress".to_string()]),
             ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(vec![NetworkPolicyPeer {
-                    pod_selector: Some(LabelSelector {
-                        match_labels: Some(peer_labels),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                }]),
+                from: Some(from),
                 ports: Some(vec![NetworkPolicyPort {
                     port: Some(IntOrString::Int(MCP_PORT)),
                     protocol: Some("TCP".to_string()),
@@ -853,6 +895,8 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         }
     };
 
+    let app_opt = fetch_application(&owner, ctx, ns).await?;
+
     let services: Api<Service> = Api::namespaced(ctx.client.clone(), ns);
     let service = build_sandbox_service(sandbox);
     services
@@ -864,7 +908,7 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         .await?;
 
     let netpols: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), ns);
-    let netpol = build_sandbox_netpol(sandbox, &project.spec.owner);
+    let netpol = build_sandbox_netpol(sandbox, &project.spec.owner, app_opt.as_ref());
     netpols
         .patch(
             &netpol_name(&sandbox.name_any()),
@@ -891,7 +935,7 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         }
     }
 
-    if let Some(application) = fetch_application(&owner, ctx, ns).await? {
+    if let Some(application) = app_opt {
         let ingresses: Api<Ingress> = Api::namespaced(ctx.client.clone(), ns);
         let ingress = build_sandbox_ingress(sandbox, &application);
         ingresses
@@ -1022,7 +1066,7 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use vanyline_crds::{ApplicationSpec, ProjectSpec, PvcRef, SandboxSpec};
+    use vanyline_crds::{IngressControllerRef, ApplicationSpec, ProjectSpec, PvcRef, SandboxSpec};
 
     fn make_ctx() -> SandboxPodContext {
         SandboxPodContext {
@@ -1698,7 +1742,8 @@ mod tests {
     #[test]
     fn build_sandbox_netpol_shape() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let netpol = build_sandbox_netpol(&sandbox, "alice");
+        let app: Option<Application> = None;
+        let netpol = build_sandbox_netpol(&sandbox, "alice", app.as_ref());
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let pod_sel = spec
@@ -1720,27 +1765,97 @@ mod tests {
         assert_eq!(ingress.len(), 1);
 
         let from = ingress[0].from.as_ref().expect("should have from");
-        assert_eq!(from.len(), 1);
-        let peer_pod_sel = from[0]
+        assert_eq!(from.len(), 2);
+
+        // Peer 0: owner peer (inchangé)
+        let peer0_pod_sel = from[0]
             .pod_selector
             .as_ref()
-            .expect("should have pod_selector in peer");
-        let peer_labels = peer_pod_sel
+            .expect("should have pod_selector in peer 0");
+        let peer0_labels = peer0_pod_sel
             .match_labels
             .as_ref()
             .expect("should have match_labels");
         assert_eq!(
-            peer_labels
+            peer0_labels
                 .get("vanyline.solidite.fr/owner")
                 .map(String::as_str),
             Some("alice")
         );
+        assert!(from[0].namespace_selector.is_none());
+
+        // Peer 1: app peer (Exists sur APP_LABEL)
+        let peer1_pod_sel = from[1]
+            .pod_selector
+            .as_ref()
+            .expect("should have pod_selector in peer 1");
+        assert!(peer1_pod_sel.match_labels.is_none());
+        let match_exprs = peer1_pod_sel
+            .match_expressions
+            .as_ref()
+            .expect("should have match_expressions");
+        assert_eq!(match_exprs.len(), 1);
+        assert_eq!(match_exprs[0].key, APP_LABEL);
+        assert_eq!(match_exprs[0].operator, "Exists");
+        assert!(match_exprs[0].values.is_none());
+        assert!(from[1].namespace_selector.is_none());
 
         let ports = ingress[0].ports.as_ref().expect("should have ports");
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].port, Some(IntOrString::Int(MCP_PORT)));
 
         assert_eq!(spec.policy_types, Some(vec!["Ingress".to_string()]));
+    }
+
+    #[test]
+    fn build_sandbox_netpol_ingress_controller_peer() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut app = make_application("main", None);
+        app.spec.ingress_controller = Some(IngressControllerRef {
+            namespace: "kydah-core".to_string(),
+            pod_labels: BTreeMap::from([
+                ("app.kubernetes.io/name".to_string(), "traefik".to_string()),
+                ("app.kubernetes.io/component".to_string(), "controller".to_string()),
+            ]),
+        });
+        let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app));
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let ingress = spec.ingress.as_ref().expect("should have ingress");
+        let from = ingress[0].from.as_ref().expect("should have from");
+        assert_eq!(from.len(), 3);
+
+        // Peer 2: ingress controller peer
+        let peer2_ns_sel = from[2]
+            .namespace_selector
+            .as_ref()
+            .expect("peer 2 must have namespace_selector");
+        let ns_labels = peer2_ns_sel
+            .match_labels
+            .as_ref()
+            .expect("namespace_selector must have match_labels");
+        assert_eq!(
+            ns_labels.get("kubernetes.io/metadata.name"),
+            Some(&"kydah-core".to_string())
+        );
+
+        let peer2_pod_sel = from[2]
+            .pod_selector
+            .as_ref()
+            .expect("peer 2 must have pod_selector");
+        let pod_labels = peer2_pod_sel
+            .match_labels
+            .as_ref()
+            .expect("pod_selector must have match_labels");
+        assert_eq!(
+            pod_labels.get("app.kubernetes.io/name"),
+            Some(&"traefik".to_string())
+        );
+        assert_eq!(
+            pod_labels.get("app.kubernetes.io/component"),
+            Some(&"controller".to_string())
+        );
+        assert!(from[2].ip_block.is_none());
     }
 
     // ===== compute_status =====
