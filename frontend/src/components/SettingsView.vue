@@ -9,6 +9,7 @@ import ModelProfilesScreen from './settings/ModelProfilesScreen.vue';
 import ToolsetsScreen from './settings/ToolsetsScreen.vue';
 import SkillsScreen from './settings/SkillsScreen.vue';
 import AgentsScreen from './settings/AgentsScreen.vue';
+import McpServersScreen from './settings/McpServersScreen.vue';
 
 interface NavSub {
   id: string;
@@ -72,9 +73,7 @@ function setSubScreen(subId: string) {
 }
 
 // Liste des écrans qui n'ont pas encore été implémentés (rendent un placeholder)
-const pendingScreenIds = [
-  'mcp-servers',
-];
+const pendingScreenIds: string[] = [];
 
 const isPending = computed(() => pendingScreenIds.includes(activeScreen.value));
 
@@ -87,6 +86,7 @@ const screens: Record<string, Component> = {
   toolsets: ToolsetsScreen,
   skills: SkillsScreen,
   agents: AgentsScreen,
+  'mcp-servers': McpServersScreen,
 };
 
 const Pending: Component = {
