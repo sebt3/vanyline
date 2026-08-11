@@ -167,13 +167,58 @@ pub struct SandboxStatus {
     pub conditions: Vec<Condition>,
 }
 
-/// Returns the three CRD manifests as YAML, separated by `---\n`.
+#[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[kube(
+    group = "vanyline.solidite.fr",
+    version = "v1alpha1",
+    kind = "Application",
+    namespaced,
+    status = "ApplicationStatus",
+    printcolumn = r#"{"name":"Host","type":"string","jsonPath":".spec.host"}"#,
+    printcolumn = r#"{"name":"Ready","type":"string","jsonPath":".status.phase"}"#
+)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationSpec {
+    /// Image du Deployment `app`. None => défaut du controller (constante, cf.
+    /// controller/src/application.rs). Même convention de repli que `SANDBOX_IMAGE`
+    /// côté sandbox.rs.
+    pub image: Option<String>,
+    pub replicas: Option<i32>,
+    /// Secret contenant issuerUrl/clientId/clientSecret/scopes (+ caCert optionnel).
+    /// PAS redirectUrl — dérivé de `host` au reconcile, jamais dupliqué dans le
+    /// secret (source unique de vérité, évite un désync silencieux si `host` change).
+    pub oidc_secret_ref: String,
+    /// Secret contenant `databaseUrl` (chaîne de connexion complète).
+    pub database_secret_ref: String,
+    /// Secret contenant le cookie secret (clé `cookieSecret`). None => généré et
+    /// stocké par le reconciler lui-même (`<application-name>-cookie`).
+    pub cookie_secret_ref: Option<String>,
+    /// Nom de domaine public de l'Ingress. Sert aussi à dériver
+    /// `OIDC_REDIRECT_URL` (`https://{host}/auth/callback`).
+    pub host: String,
+    pub ingress_class_name: String,
+    /// Annotations libres posées sur l'Ingress (ex. cert-manager.io/cluster-issuer) —
+    /// même esprit que `Toolchain.env`, pas de champ dédié par convention connue.
+    #[serde(default)]
+    pub ingress_annotations: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationStatus {
+    pub phase: Option<String>, // Provisioning | Running | Failed
+    #[serde(default)]
+    pub conditions: Vec<Condition>,
+}
+
+/// Returns the four CRD manifests as YAML, separated by `---\n`.
 #[allow(clippy::unwrap_used)] // serialisation YAML d un schema Rust connu a la compilation, sans entree externe : ne peut pas echouer en pratique
 pub fn crd_manifests() -> String {
     let docs = [
         serde_yaml::to_string(&Owner::crd()).unwrap(),
         serde_yaml::to_string(&Project::crd()).unwrap(),
         serde_yaml::to_string(&Sandbox::crd()).unwrap(),
+        serde_yaml::to_string(&Application::crd()).unwrap(),
     ];
     docs.join("---\n")
 }
@@ -207,18 +252,22 @@ mod tests {
             Sandbox::crd().metadata.name.as_deref(),
             Some("sandboxes.vanyline.solidite.fr")
         );
+        assert_eq!(
+            Application::crd().metadata.name.as_deref(),
+            Some("applications.vanyline.solidite.fr")
+        );
     }
 
     #[test]
     fn crd_manifests_yaml() {
         let m = crd_manifests();
         let parts: Vec<_> = m.split("---").filter(|s| !s.trim().is_empty()).collect();
-        assert_eq!(parts.len(), 3);
+        assert_eq!(parts.len(), 4);
         for part in parts {
             serde_yaml::from_str::<Value>(part).expect("each CRD section must be valid YAML");
         }
         let count = m.matches("kind: CustomResourceDefinition").count();
-        assert_eq!(count, 3);
+        assert_eq!(count, 4);
         assert!(m.contains("vanyline.solidite.fr"));
     }
 
@@ -358,6 +407,114 @@ mod tests {
         assert!(
             spec_props.contains_key("suspended"),
             "Sandbox schema should contain 'suspended', got: {spec_props:?}"
+        );
+    }
+
+    #[test]
+    fn application_schema_fields() {
+        let crd = Application::crd();
+        let oas = &crd.spec.versions[0]
+            .schema
+            .as_ref()
+            .unwrap()
+            .open_api_v3_schema
+            .as_ref()
+            .unwrap();
+        let spec_props = &oas.properties.as_ref().unwrap()["spec"]
+            .properties
+            .as_ref()
+            .unwrap();
+
+        assert!(
+            spec_props.contains_key("host"),
+            "Application schema should contain 'host', got: {spec_props:?}"
+        );
+        assert!(
+            spec_props.contains_key("ingressClassName"),
+            "Application schema should contain 'ingressClassName', got: {spec_props:?}"
+        );
+        assert!(
+            spec_props.contains_key("oidcSecretRef"),
+            "Application schema should contain 'oidcSecretRef', got: {spec_props:?}"
+        );
+        assert!(
+            spec_props.contains_key("databaseSecretRef"),
+            "Application schema should contain 'databaseSecretRef', got: {spec_props:?}"
+        );
+        assert!(
+            spec_props.contains_key("cookieSecretRef"),
+            "Application schema should contain 'cookieSecretRef', got: {spec_props:?}"
+        );
+        assert!(
+            spec_props.contains_key("ingressAnnotations"),
+            "Application schema should contain 'ingressAnnotations', got: {spec_props:?}"
+        );
+    }
+
+    #[test]
+    fn application_defaults() {
+        let spec: ApplicationSpec =
+            serde_json::from_str(r#"{"host":"app.example.com","ingressClassName":"nginx","oidcSecretRef":"oidc","databaseSecretRef":"db"}"#).expect("should deserialize");
+        assert!(spec.image.is_none());
+        assert!(spec.replicas.is_none());
+        assert!(spec.cookie_secret_ref.is_none());
+        assert!(spec.ingress_annotations.is_empty());
+    }
+
+    #[test]
+    fn application_camel_case() {
+        let mut annotations = BTreeMap::new();
+        annotations.insert("cert-manager.io/cluster-issuer".to_string(), "letsencrypt".to_string());
+        let spec = ApplicationSpec {
+            image: Some("vanyline-app:latest".to_string()),
+            replicas: Some(3),
+            oidc_secret_ref: "my-oidc".to_string(),
+            database_secret_ref: "my-db".to_string(),
+            cookie_secret_ref: Some("my-cookie".to_string()),
+            host: "app.example.com".to_string(),
+            ingress_class_name: "nginx".to_string(),
+            ingress_annotations: annotations,
+        };
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            json.contains(r#""oidcSecretRef""#),
+            "should contain oidcSecretRef (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""databaseSecretRef""#),
+            "should contain databaseSecretRef (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""cookieSecretRef""#),
+            "should contain cookieSecretRef (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""ingressClassName""#),
+            "should contain ingressClassName (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""ingressAnnotations""#),
+            "should contain ingressAnnotations (camelCase), got: {json}"
+        );
+        assert!(
+            !json.contains("oidc_secret_ref"),
+            "should not contain oidc_secret_ref (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("database_secret_ref"),
+            "should not contain database_secret_ref (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("cookie_secret_ref"),
+            "should not contain cookie_secret_ref (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("ingress_class_name"),
+            "should not contain ingress_class_name (snake_case), got: {json}"
+        );
+        assert!(
+            !json.contains("ingress_annotations"),
+            "should not contain ingress_annotations (snake_case), got: {json}"
         );
     }
 }
