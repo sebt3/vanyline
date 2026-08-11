@@ -129,8 +129,5 @@ pub fn api_router() -> Router<AppState> {
             "/sandboxes/{name}/suspend",
             post(sandboxes::set_sandbox_suspended),
         )
-        .route(
-            "/sandboxes/{name}/ws-ticket",
-            post(sandboxes::ws_ticket),
-        )
+        .route("/sandboxes/{name}/ws-ticket", post(sandboxes::ws_ticket))
 }

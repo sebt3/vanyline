@@ -8,30 +8,32 @@ use k8s_openapi::api::core::v1::{
     PodSpec, Probe, Service, Volume, VolumeMount,
 };
 use k8s_openapi::api::networking::v1::{
-    HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
-    IngressServiceBackend, IngressSpec, IngressTLS, IPBlock, NetworkPolicy, NetworkPolicyEgressRule,
+    HTTPIngressPath, HTTPIngressRuleValue, IPBlock, Ingress, IngressBackend, IngressRule,
+    IngressServiceBackend, IngressSpec, IngressTLS, NetworkPolicy, NetworkPolicyEgressRule,
     NetworkPolicyIngressRule, NetworkPolicyPeer, NetworkPolicyPort, NetworkPolicySpec,
     ServiceBackendPort,
 };
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, LabelSelector, LabelSelectorRequirement};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
+    Condition, LabelSelector, LabelSelectorRequirement,
+};
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
-use kube::runtime::finalizer::{finalizer, Event};
+use kube::runtime::finalizer::{Event, finalizer};
 use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::{
-    Application, EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
-    Toolchain, service_name,
-};
 use crate::application::APP_LABEL;
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 use crate::project::{self, ProjectJobContext};
 use crate::project::{
-    cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path,
-    WORKSPACE_MOUNT_PATH,
+    WORKSPACE_MOUNT_PATH, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path,
+    worktree_path,
+};
+use vanyline_crds::{
+    Application, EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
+    Toolchain, service_name,
 };
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
@@ -301,9 +303,11 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
             name: Some(pod_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
             labels: Some(labels),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(PodSpec {
@@ -400,9 +404,11 @@ pub fn build_checkout_job(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(checkout_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -438,9 +444,11 @@ pub fn build_worktree_remove_job(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(worktree_remove_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -468,9 +476,11 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(service_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(k8s_openapi::api::core::v1::ServiceSpec {
@@ -495,11 +505,7 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
 /// cascade), même patron que les autres builders de ce fichier.
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> Ingress {
-    let host = format!(
-        "{}.sandboxes.{}",
-        sandbox.name_any(),
-        application.spec.host
-    );
+    let host = format!("{}.sandboxes.{}", sandbox.name_any(), application.spec.host);
 
     // TLS conditionnel : posé seulement si `sandbox_tls_secret_name` est Some
     let tls = application
@@ -522,9 +528,11 @@ pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> In
             } else {
                 Some(application.spec.ingress_annotations.clone())
             },
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(IngressSpec {
@@ -690,9 +698,11 @@ pub fn build_sandbox_netpol(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(netpol_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(NetworkPolicySpec {
@@ -754,9 +764,11 @@ pub fn build_sandbox_egress_netpol(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(netpol_egress_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(NetworkPolicySpec {
@@ -935,16 +947,28 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         }
     }
 
-    if let Some(application) = app_opt {
-        let ingresses: Api<Ingress> = Api::namespaced(ctx.client.clone(), ns);
-        let ingress = build_sandbox_ingress(sandbox, &application);
-        ingresses
-            .patch(
-                &ingress_name(&sandbox.name_any()),
-                &pp,
-                &Patch::Apply(&ingress),
-            )
-            .await?;
+    let ingresses: Api<Ingress> = Api::namespaced(ctx.client.clone(), ns);
+    match app_opt {
+        Some(application) => {
+            let ingress = build_sandbox_ingress(sandbox, &application);
+            ingresses
+                .patch(
+                    &ingress_name(&sandbox.name_any()),
+                    &pp,
+                    &Patch::Apply(&ingress),
+                )
+                .await?;
+        }
+        // `application_ref` absent ou retiré après coup : pas d'Ingress à
+        // maintenir. Miroir du traitement de la netpol egress ci-dessus —
+        // sans ce nettoyage, un Ingress déjà créé resterait orphelin
+        // indéfiniment si l'Owner perd son `application_ref`.
+        None => {
+            let name = ingress_name(&sandbox.name_any());
+            if ingresses.get_opt(&name).await?.is_some() {
+                ingresses.delete(&name, &DeleteParams::default()).await?;
+            }
+        }
     }
 
     let sandboxes: Api<Sandbox> = Api::namespaced(ctx.client.clone(), ns);
@@ -1066,7 +1090,7 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use vanyline_crds::{IngressControllerRef, ApplicationSpec, ProjectSpec, PvcRef, SandboxSpec};
+    use vanyline_crds::{ApplicationSpec, IngressControllerRef, ProjectSpec, PvcRef, SandboxSpec};
 
     fn make_ctx() -> SandboxPodContext {
         SandboxPodContext {
@@ -1245,10 +1269,12 @@ mod tests {
         assert!(path_val.ends_with(BASE_PATH));
 
         // No LD_LIBRARY_PATH because custom has none
-        assert!(env_result
-            .iter()
-            .find(|e| e.name == "LD_LIBRARY_PATH")
-            .is_none());
+        assert!(
+            env_result
+                .iter()
+                .find(|e| e.name == "LD_LIBRARY_PATH")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1269,10 +1295,12 @@ mod tests {
         assert_eq!(path_val, BASE_PATH);
 
         // No LD_LIBRARY_PATH
-        assert!(env_result
-            .iter()
-            .find(|e| e.name == "LD_LIBRARY_PATH")
-            .is_none());
+        assert!(
+            env_result
+                .iter()
+                .find(|e| e.name == "LD_LIBRARY_PATH")
+                .is_none()
+        );
     }
 
     // ===== build_sandbox_pod =====
@@ -1597,9 +1625,11 @@ mod tests {
         // Without resources
         let sandbox_no_res = make_sandbox("demo-branch", vec![], None);
         let pod_no_res = build_sandbox_pod(&sandbox_no_res, &project, &ctx);
-        assert!(pod_no_res.spec.as_ref().unwrap().containers[0]
-            .resources
-            .is_none());
+        assert!(
+            pod_no_res.spec.as_ref().unwrap().containers[0]
+                .resources
+                .is_none()
+        );
     }
 
     // ===== Job name helpers =====
@@ -1815,7 +1845,10 @@ mod tests {
             namespace: "kydah-core".to_string(),
             pod_labels: BTreeMap::from([
                 ("app.kubernetes.io/name".to_string(), "traefik".to_string()),
-                ("app.kubernetes.io/component".to_string(), "controller".to_string()),
+                (
+                    "app.kubernetes.io/component".to_string(),
+                    "controller".to_string(),
+                ),
             ]),
         });
         let netpol = build_sandbox_netpol(&sandbox, "alice", Some(&app));
@@ -1920,10 +1953,7 @@ mod tests {
             .find(|m| m.mount_path == "/workspace/repo.git")
             .expect("should have bare repo mount at /workspace/repo.git");
 
-        assert_eq!(
-            bare_repo_mount.sub_path,
-            Some("repo.git".to_string())
-        );
+        assert_eq!(bare_repo_mount.sub_path, Some("repo.git".to_string()));
     }
 
     #[test]
@@ -1950,10 +1980,7 @@ mod tests {
             .find(|m| m.mount_path == "/workspace/repo.git")
             .expect("should have bare repo mount at /workspace/repo.git");
 
-        assert_eq!(
-            bare_repo_mount.sub_path,
-            Some("demo/repo.git".to_string())
-        );
+        assert_eq!(bare_repo_mount.sub_path, Some("demo/repo.git".to_string()));
     }
 
     #[test]
@@ -2021,16 +2048,19 @@ mod tests {
 
         // First rule is DNS: to = None, ports must include 53 UDP and 53 TCP
         let dns_rule = &egress[0];
-        assert!(dns_rule.to.is_none(), "DNS rule must have no destination restriction");
+        assert!(
+            dns_rule.to.is_none(),
+            "DNS rule must have no destination restriction"
+        );
         let dns_ports = dns_rule.ports.as_ref().expect("DNS rule must have ports");
         assert!(dns_ports.len() >= 2, "DNS rule must have UDP and TCP");
 
-        let has_udp = dns_ports.iter().any(|p| {
-            p.port == Some(IntOrString::Int(53)) && p.protocol.as_deref() == Some("UDP")
-        });
-        let has_tcp = dns_ports.iter().any(|p| {
-            p.port == Some(IntOrString::Int(53)) && p.protocol.as_deref() == Some("TCP")
-        });
+        let has_udp = dns_ports
+            .iter()
+            .any(|p| p.port == Some(IntOrString::Int(53)) && p.protocol.as_deref() == Some("UDP"));
+        let has_tcp = dns_ports
+            .iter()
+            .any(|p| p.port == Some(IntOrString::Int(53)) && p.protocol.as_deref() == Some("TCP"));
         assert!(has_udp, "DNS rule must have 53/UDP");
         assert!(has_tcp, "DNS rule must have 53/TCP");
     }
@@ -2073,7 +2103,8 @@ mod tests {
         let mut found_cidrs: Vec<String> = egress[1..]
             .iter()
             .filter_map(|rule| {
-                rule.to.as_ref()
+                rule.to
+                    .as_ref()
                     .and_then(|peers| peers.first())
                     .and_then(|peer| peer.ip_block.as_ref())
                     .map(|ip| ip.cidr.clone())
@@ -2098,15 +2129,20 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
-            .expect("should return Some");
+        let netpol =
+            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
 
         // The CIDR rule is egress[1] (second after DNS)
         let cidr_rule = &egress[1];
-        let peer = cidr_rule.to.as_ref().expect("rule must have to").first().expect("must have one peer");
+        let peer = cidr_rule
+            .to
+            .as_ref()
+            .expect("rule must have to")
+            .first()
+            .expect("must have one peer");
         let ip_block = peer.ip_block.as_ref().expect("peer must have ip_block");
         assert_eq!(ip_block.cidr, "10.42.7.0/24");
         assert!(peer.pod_selector.is_none());
@@ -2132,22 +2168,39 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
-            .expect("should return Some");
+        let netpol =
+            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
 
         let selector_rule = &egress[1];
-        let peer = selector_rule.to.as_ref().expect("rule must have to").first().expect("must have one peer");
+        let peer = selector_rule
+            .to
+            .as_ref()
+            .expect("rule must have to")
+            .first()
+            .expect("must have one peer");
         assert!(peer.ip_block.is_none());
 
-        let pod_sel = peer.pod_selector.as_ref().expect("pod_selector must be set");
-        let pod_labels = pod_sel.match_labels.as_ref().expect("pod_selector match_labels");
+        let pod_sel = peer
+            .pod_selector
+            .as_ref()
+            .expect("pod_selector must be set");
+        let pod_labels = pod_sel
+            .match_labels
+            .as_ref()
+            .expect("pod_selector match_labels");
         assert_eq!(pod_labels.get("app"), Some(&"registry".to_string()));
 
-        let ns_sel = peer.namespace_selector.as_ref().expect("namespace_selector must be set");
-        let ns_labels = ns_sel.match_labels.as_ref().expect("namespace_selector match_labels");
+        let ns_sel = peer
+            .namespace_selector
+            .as_ref()
+            .expect("namespace_selector must be set");
+        let ns_labels = ns_sel
+            .match_labels
+            .as_ref()
+            .expect("namespace_selector match_labels");
         assert_eq!(
             ns_labels.get("kubernetes.io/metadata.name"),
             Some(&"tools".to_string())
@@ -2168,17 +2221,28 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
-            .expect("should return Some");
+        let netpol =
+            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
 
         let rule = &egress[1];
-        let peer = rule.to.as_ref().expect("rule must have to").first().expect("must have one peer");
-        let ip_block = peer.ip_block.as_ref().expect("cidr wins, ip_block must be set");
+        let peer = rule
+            .to
+            .as_ref()
+            .expect("rule must have to")
+            .first()
+            .expect("must have one peer");
+        let ip_block = peer
+            .ip_block
+            .as_ref()
+            .expect("cidr wins, ip_block must be set");
         assert_eq!(ip_block.cidr, "10.0.0.0/24");
-        assert!(peer.pod_selector.is_none(), "pod_selector must be None when cidr wins");
+        assert!(
+            peer.pod_selector.is_none(),
+            "pod_selector must be None when cidr wins"
+        );
     }
 
     #[test]
@@ -2195,8 +2259,8 @@ mod tests {
             }],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
-            .expect("should return Some");
+        let netpol =
+            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -2225,15 +2289,18 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
-            .expect("should return Some");
+        let netpol =
+            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
 
         // Rule at index 1 (second after DNS) has no port restriction
         let rule = &egress[1];
-        assert!(rule.ports.is_none(), "empty ports => None (all ports allowed)");
+        assert!(
+            rule.ports.is_none(),
+            "empty ports => None (all ports allowed)"
+        );
     }
 
     #[test]
@@ -2250,8 +2317,8 @@ mod tests {
             }],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
-            .expect("should return Some");
+        let netpol =
+            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -2276,8 +2343,8 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[])
-            .expect("should return Some");
+        let netpol =
+            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
 
         assert_eq!(
             netpol.metadata.name,
@@ -2301,10 +2368,7 @@ mod tests {
             Some("demo-branch")
         );
 
-        assert_eq!(
-            spec.policy_types,
-            Some(vec!["Egress".to_string()])
-        );
+        assert_eq!(spec.policy_types, Some(vec!["Egress".to_string()]));
 
         // Verify owner_references
         let refs = netpol
@@ -2354,7 +2418,10 @@ mod tests {
         let ingress = build_sandbox_ingress(&sandbox, &app);
 
         // metadata
-        assert_eq!(ingress.metadata.name, Some("sandbox-demo-branch".to_string()));
+        assert_eq!(
+            ingress.metadata.name,
+            Some("sandbox-demo-branch".to_string())
+        );
         assert_eq!(ingress.metadata.namespace, Some("ns".to_string()));
 
         // ownerReferences
@@ -2387,12 +2454,34 @@ mod tests {
         assert_eq!(paths[0].path_type, "Prefix".to_string());
 
         // backend
-        assert_eq!(paths[0].backend.service.as_ref().unwrap().name, "sandbox-demo-branch");
         assert_eq!(
-            paths[0].backend.service.as_ref().unwrap().port.as_ref().unwrap().number,
+            paths[0].backend.service.as_ref().unwrap().name,
+            "sandbox-demo-branch"
+        );
+        assert_eq!(
+            paths[0]
+                .backend
+                .service
+                .as_ref()
+                .unwrap()
+                .port
+                .as_ref()
+                .unwrap()
+                .number,
             Some(MCP_PORT)
         );
-        assert!(paths[0].backend.service.as_ref().unwrap().port.as_ref().unwrap().name.is_none());
+        assert!(
+            paths[0]
+                .backend
+                .service
+                .as_ref()
+                .unwrap()
+                .port
+                .as_ref()
+                .unwrap()
+                .name
+                .is_none()
+        );
 
         // no TLS
         assert!(spec.tls.is_none());
@@ -2421,12 +2510,18 @@ mod tests {
     fn build_sandbox_ingress_annotations_passthrough() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let mut app = make_application("main", None);
-        app.spec.ingress_annotations =
-            BTreeMap::from([("cert-manager.io/cluster-issuer".to_string(), "self-sign".to_string())]);
+        app.spec.ingress_annotations = BTreeMap::from([(
+            "cert-manager.io/cluster-issuer".to_string(),
+            "self-sign".to_string(),
+        )]);
 
         let ingress = build_sandbox_ingress(&sandbox, &app);
 
-        let annotations = ingress.metadata.annotations.as_ref().expect("should have annotations");
+        let annotations = ingress
+            .metadata
+            .annotations
+            .as_ref()
+            .expect("should have annotations");
         assert_eq!(annotations.len(), 1);
         assert_eq!(
             annotations.get("cert-manager.io/cluster-issuer"),

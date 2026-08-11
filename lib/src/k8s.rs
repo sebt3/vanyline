@@ -23,8 +23,8 @@ impl VnlK8sClient {
             .await
             .map_err(|e| VnyError::K8sConfigError(e.to_string()))?;
         let namespace = namespace_override.unwrap_or_else(|| config.default_namespace.clone());
-        let client = kube::Client::try_from(config)
-            .map_err(|e| VnyError::K8sConfigError(e.to_string()))?;
+        let client =
+            kube::Client::try_from(config).map_err(|e| VnyError::K8sConfigError(e.to_string()))?;
         Ok(Self { client, namespace })
     }
 

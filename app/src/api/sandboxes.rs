@@ -180,7 +180,10 @@ pub async fn ws_ticket(
         .map_err(AppError::RequestError)?;
     let resp = http
         .post(&url)
-        .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", user.id_token))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {}", user.id_token),
+        )
         .send()
         .await?
         .error_for_status()?;
