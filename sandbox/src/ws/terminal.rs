@@ -323,6 +323,33 @@ mod tests {
         );
     }
 
+    /// Bloque jusqu'au premier octet reçu du PTY (le prompt initial de bash),
+    /// ou jusqu'au timeout. Remplace un `sleep` fixe par une synchronisation
+    /// réelle : le temps de démarrage de `bash` (fork/exec, rc file éventuel)
+    /// varie avec la charge de la machine, un délai figé ne fait que déplacer
+    /// le seuil de flakiness plutôt que l'éliminer. Volontairement PAS un
+    /// `echo <marqueur>` suivi d'une attente du marqueur : le pty réécho les
+    /// octets tapés indépendamment de leur exécution par bash (écho canonique
+    /// du driver tty), donc un marqueur choisi par l'appelant se retrouverait
+    /// dans sa propre frappe et le test ne synchroniserait sur rien de réel
+    /// (piège constaté en pratique — la première version de ce helper faisait
+    /// exactement ça). Attendre le tout premier octet, avant d'avoir rien
+    /// tapé, n'a pas cette ambiguïté : bash n'écrit son prompt qu'une fois
+    /// son initialisation terminée et son `read()` sur stdin effectivement
+    /// bloquant.
+    fn wait_for_shell_ready(reader: &mut (impl Read + ?Sized), timeout: std::time::Duration) {
+        let start = std::time::Instant::now();
+        let mut buf = [0u8; 4096];
+        while start.elapsed() < timeout {
+            match reader.read(&mut buf) {
+                Ok(0) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Ok(_) => return,
+                Err(_) => break,
+            }
+        }
+        panic!("timed out waiting for the shell's initial prompt");
+    }
+
     // Test 2a: kill_process_group_kills_foreground_child — la garantie réelle.
     // Un job FOREGROUND (pas de `&`) meurt à la fermeture : la mort du leader
     // de session (le shell) déclenche un hangup noyau du terminal contrôlant,
@@ -335,18 +362,19 @@ mod tests {
         let (master, mut child) = spawn_shell(&state.config.sandbox_root, PtySize::default())
             .expect("spawn_shell should succeed");
 
-        let reader = master.try_clone_reader().expect("should have a reader");
+        let mut reader = master.try_clone_reader().expect("should have a reader");
         let mut writer = master.take_writer().expect("should have a writer");
+
+        // Attendre le prompt initial élimine la variance de démarrage de bash
+        // avant d'envoyer la vraie commande.
+        wait_for_shell_ready(&mut reader, std::time::Duration::from_secs(10));
 
         // Job foreground : pas de `&`, le shell attend dessus.
         write!(writer, "sleep 2 && touch _should_not_exist\r\n").unwrap();
 
-        // Laisser le shell (fork/exec bash + lecture de la commande) démarrer
-        // le job foreground — marge large façon
-        // `vanyline-tools::command::test_timeout_kills_process_group_not_just_direct_child`,
-        // 200ms s'est révélé flaky sous charge (bash pas encore prêt à forker
-        // le job au moment du kill).
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        // bash est déjà chaud (sondé ci-dessus) : le fork du job lui-même est
+        // rapide et stable, une marge modeste suffit ici.
+        std::thread::sleep(std::time::Duration::from_millis(300));
 
         kill_process_group(&mut child);
 
@@ -379,12 +407,14 @@ mod tests {
         let (master, mut child) = spawn_shell(&state.config.sandbox_root, PtySize::default())
             .expect("spawn_shell should succeed");
 
-        let reader = master.try_clone_reader().expect("should have a reader");
+        let mut reader = master.try_clone_reader().expect("should have a reader");
         let mut writer = master.take_writer().expect("should have a writer");
 
+        // Même synchronisation que le test jumeau ci-dessus.
+        wait_for_shell_ready(&mut reader, std::time::Duration::from_secs(10));
+
         write!(writer, "(sleep 2 && touch _should_exist) &\r\n").unwrap();
-        // Marge large, même raison que le test jumeau ci-dessus.
-        std::thread::sleep(std::time::Duration::from_millis(500));
+        std::thread::sleep(std::time::Duration::from_millis(300));
 
         kill_process_group(&mut child);
 
