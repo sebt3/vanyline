@@ -50,6 +50,8 @@ pub enum AppError {
     K8sApiError(String),
     #[error("VNL-K8S-003: Kubernetes resource not found: {0}")]
     K8sNotFound(String),
+    #[error("VNL-SBX-001: sandbox has no public endpoint (owner has no application_ref)")]
+    SandboxNotExposed,
 }
 
 impl From<vanyline_lib::VnyError> for AppError {
@@ -93,6 +95,7 @@ impl IntoResponse for AppError {
             AppError::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             AppError::K8sApiError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             AppError::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            AppError::SandboxNotExposed => (StatusCode::CONFLICT, self.to_string()),
         };
 
         let body = Json(json!({ "error": message }));

@@ -3,7 +3,7 @@ use axum::{
     http::StatusCode,
     Json,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use vanyline_crds::{Sandbox, SandboxSpec};
 
 use crate::{
@@ -131,6 +131,70 @@ pub async fn set_sandbox_suspended(
     Ok(Json(updated))
 }
 
+/// Réponse de `POST /api/sandboxes/{name}/ws-ticket` : le ticket court-vécu
+/// miné auprès de la sandbox + le host public WS
+/// (`{name}.sandboxes.{application.host}`). Le JWT OIDC n'y figure jamais.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WsTicketOut {
+    pub ticket: String,
+    pub ws_host: String,
+}
+
+/// Relais de ticket WS : scoping owner identique à `get_sandbox`, host
+/// public résolu via la CR Application (owner → `application_ref` →
+/// `spec.host`), ticket miné auprès de la sandbox en présentant le
+/// `id_token` OIDC de l'utilisateur (Bearer). Le navigateur reçoit
+/// `{ ticket, wsHost }` — jamais le JWT.
+pub async fn ws_ticket(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(name): Path<String>,
+) -> Result<Json<WsTicketOut>, AppError> {
+    // 1. scoping owner identique à get_sandbox/delete_sandbox (déjà en place)
+    let db_user = get_or_create_user(&state, &user).await?;
+    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+        Some(o) => o,
+        None => return Err(AppError::Forbidden),
+    };
+    let client = k8s::client(&state).await?;
+    let sandbox = client.get_sandbox(&name).await?;
+    let project = client.get_project(&sandbox.spec.project).await?;
+    if project.spec.owner != owner {
+        return Err(AppError::Forbidden);
+    }
+
+    // 2. host public depuis la CR Application (chaîne owner -> application_ref)
+    let owner_obj = client.get_owner(&owner).await?;
+    let Some(app_ref) = owner_obj.spec.application_ref else {
+        return Err(AppError::SandboxNotExposed);
+    };
+    let application = client.get_application(&app_ref).await?;
+    let ws_host = format!("{name}.sandboxes.{}", application.spec.host);
+
+    // 3. relais : POST /ws/ticket interne avec le id_token OIDC (Bearer)
+    let url = client.sandbox_ws_ticket_url(&name).await?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(AppError::RequestError)?;
+    let resp = http
+        .post(&url)
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {}", user.id_token))
+        .send()
+        .await?
+        .error_for_status()?;
+    let body: serde_json::Value = resp.json().await?;
+    let ticket = body["ticket"].as_str().ok_or_else(|| {
+        AppError::InternalError("VNL-SBX-002: sandbox ticket response missing 'ticket'".into())
+    })?;
+
+    Ok(Json(WsTicketOut {
+        ticket: ticket.to_string(),
+        ws_host,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -139,7 +203,7 @@ mod tests {
     use axum::{
         body::Body,
         http::{Request, StatusCode},
-        routing::get,
+        routing::{get, post},
         Router,
     };
     use tower::ServiceExt;
@@ -175,6 +239,7 @@ mod tests {
         Router::new()
             .route("/sandboxes", get(list_sandboxes).post(create_sandbox))
             .route("/sandboxes/{name}", get(get_sandbox).delete(delete_sandbox))
+            .route("/sandboxes/{name}/ws-ticket", post(ws_ticket))
             .with_state(state)
     }
 
@@ -205,6 +270,18 @@ mod tests {
         let app = make_app(test_key());
         let req = Request::builder()
             .uri("/sandboxes")
+            .method("POST")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn ws_ticket_without_cookie_returns_401() {
+        let app = make_app(test_key());
+        let req = Request::builder()
+            .uri("/sandboxes/my-sandbox/ws-ticket")
             .method("POST")
             .body(Body::empty())
             .unwrap();
