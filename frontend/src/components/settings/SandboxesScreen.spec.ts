@@ -52,7 +52,7 @@ describe('SandboxesScreen', () => {
     expect(wrapper.text()).toContain('proj-b');
     expect(wrapper.text()).toContain('main');
     expect(wrapper.text()).toContain('develop');
-    });
+  });
 
   it('remplir le formulaire + "Créer" appelle POST avec corps camelCase puis re-fetch', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
