@@ -4,37 +4,41 @@ import { describe, expect, it } from 'vitest';
 import MenuBar from './MenuBar.vue';
 
 describe('MenuBar', () => {
-  it('navigate vers /settings quand on clique sur Configuration', async () => {
+  it('navigue vers /settings quand on clique sur Configuration', async () => {
+    // Route initiale ≠ /settings : le test échoue si le clic ne déclenche pas
+    // la navigation (pas de faux positif via un redirect initial).
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/', redirect: '/settings' }],
+      routes: [
+        { path: '/start', component: { template: '<div>Start</div>' } },
+        { path: '/settings', component: { template: '<div>Settings</div>' } },
+      ],
     });
 
     const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+    expect(router.currentRoute.value.path).toBe('/start');
 
-    // Ouvrir le menu "Affichage" via l'API reka-ui
-    const menus = wrapper.findAllComponents({ name: 'MenubarMenu' });
-    const affichageMenu = menus.find(
-      (m) => (m.vm as any).$props?.value === 'Affichage' || m.props('value') === 'Affichage'
+    // 1. Ouvrir le menu "Affichage" : le trigger reka-ui ouvre le menu sur
+    //    pointerdown (bouton gauche, sans ctrl) — pas un simple click.
+    const trigger = wrapper.find('[data-value="Affichage"]');
+    expect(trigger.exists()).toBe(true);
+    trigger.element.dispatchEvent(
+      new PointerEvent('pointerdown', { button: 0, bubbles: true, cancelable: true }),
     );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
 
-    if (affichageMenu) {
-      // Ouvrir le menu via select
-      await (affichageMenu.vm as any).$props?.onSelect?.();
-      // Attendre que le menu soit rendu
-      await new Promise((r) => setTimeout(r, 50));
-
-      // L'item "Configuration" est téléporté dans document.body
-      const items = document.querySelectorAll('[role="menuitem"]');
-      const configItem = Array.from(items).find((el) =>
-        el.textContent?.includes('Configuration')
-      );
-      if (configItem) {
-        // Émettre @select comme le ferait le clavier/souris
-        await configItem.dispatchEvent(new Event('select', { bubbles: true }));
-        await wrapper.vm.$nextTick();
-      }
-    }
+    // 2. Le contenu du menu est téléporté dans document.body (MenubarPortal).
+    //    L'item "Configuration" est rendu avec role="menuitem" : un click DOM
+    //    déclenche le handler onClick de reka-ui qui émet @select.
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    const configItem = items.find((el) => el.textContent?.includes('Configuration'));
+    expect(configItem).toBeTruthy();
+    configItem!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
 
     expect(router.currentRoute.value.path).toBe('/settings');
   });
