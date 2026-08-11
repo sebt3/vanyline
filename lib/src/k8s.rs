@@ -1,4 +1,4 @@
-use vanyline_crds::{Owner, OwnerSpec, Project, ProjectSpec, Sandbox, SandboxSpec};
+use vanyline_crds::{Application, Owner, OwnerSpec, Project, ProjectSpec, Sandbox, SandboxSpec};
 
 use crate::error::VnyError;
 
@@ -39,6 +39,10 @@ impl VnlK8sClient {
     }
     pub async fn delete_owner(&self, name: &str) -> Result<(), VnyError> {
         delete::<Owner>(&self.client, &self.namespace, name).await
+    }
+
+    pub async fn get_application(&self, name: &str) -> Result<Application, VnyError> {
+        get(&self.client, &self.namespace, name).await
     }
 
     pub async fn list_projects(&self) -> Result<Vec<Project>, VnyError> {
@@ -96,6 +100,20 @@ impl VnlK8sClient {
         self.get_sandbox(name).await?;
         Ok(format!(
             "http://{}.{}.svc:{}/mcp",
+            vanyline_crds::service_name(name),
+            self.namespace,
+            vanyline_crds::MCP_PORT
+        ))
+    }
+
+    /// URL interne de `POST /ws/ticket` de la sandbox `name` (même patron que
+    /// `sandbox_mcp_url`, chemin `/ws/ticket`). Vérifie d'abord que la sandbox
+    /// existe (`get_sandbox`) — erreur claire si ce n'est pas le cas, plutôt
+    /// qu'un échec de connexion confus plus tard.
+    pub async fn sandbox_ws_ticket_url(&self, name: &str) -> Result<String, VnyError> {
+        self.get_sandbox(name).await?;
+        Ok(format!(
+            "http://{}.{}.svc:{}/ws/ticket",
             vanyline_crds::service_name(name),
             self.namespace,
             vanyline_crds::MCP_PORT
