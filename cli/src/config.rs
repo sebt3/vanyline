@@ -290,19 +290,21 @@ pub fn skill_entry_source(layers: &Layers, name: &str) -> &'static str {
 /// valeur n'est pas une chaîne. Ne consulte JAMAIS le kubeconfig — c'est
 /// `VnlK8sClient::discover` qui s'en charge en dernier recours.
 pub fn configured_namespace(layers: &Layers) -> Option<String> {
-    layers
-        .load_merged_config()
-        .ok()
-        .and_then(|raw| raw.defaults.get("namespace").and_then(|v| v.as_str().map(String::from)))
+    layers.load_merged_config().ok().and_then(|raw| {
+        raw.defaults
+            .get("namespace")
+            .and_then(|v| v.as_str().map(String::from))
+    })
 }
 
 /// Nom de la sandbox toolbox configuree par defaut (`defaults.toolbox`
 /// du `config.yaml` fusionne). Meme mecanique que `configured_namespace`.
 pub fn configured_toolbox(layers: &Layers) -> Option<String> {
-    layers
-        .load_merged_config()
-        .ok()
-        .and_then(|raw| raw.defaults.get("toolbox").and_then(|v| v.as_str().map(String::from)))
+    layers.load_merged_config().ok().and_then(|raw| {
+        raw.defaults
+            .get("toolbox")
+            .and_then(|v| v.as_str().map(String::from))
+    })
 }
 
 /// Écrit `defaults.agent = name` dans le `config.yaml` de la couche globale

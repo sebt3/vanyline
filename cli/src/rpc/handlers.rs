@@ -885,7 +885,11 @@ async fn handle_owners_list(state: &mut ServerState, id: Value) -> String {
 }
 
 /// `owners/get` : params -> `NameParams`, puis `client.get_owner(&name)`.
-async fn handle_owners_get(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_owners_get(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -906,7 +910,11 @@ async fn handle_owners_get(state: &mut ServerState, id: Value, params: serde_jso
 }
 
 /// `owners/create` : params -> `OwnerCreateParams` (name + spec aplati).
-async fn handle_owners_create(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_owners_create(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: OwnerCreateParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -927,7 +935,11 @@ async fn handle_owners_create(state: &mut ServerState, id: Value, params: serde_
 }
 
 /// `owners/delete` : params -> `NameParams`, puis `client.delete_owner(&name)`.
-async fn handle_owners_delete(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_owners_delete(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -957,7 +969,11 @@ async fn handle_projects_list(state: &mut ServerState, id: Value) -> String {
 }
 
 /// `projects/get` : params -> `NameParams`, puis `client.get_project(&name)`.
-async fn handle_projects_get(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_projects_get(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -978,7 +994,11 @@ async fn handle_projects_get(state: &mut ServerState, id: Value, params: serde_j
 }
 
 /// `projects/create` : params -> `ProjectCreateParams` (name + spec aplati).
-async fn handle_projects_create(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_projects_create(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: ProjectCreateParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -999,7 +1019,11 @@ async fn handle_projects_create(state: &mut ServerState, id: Value, params: serd
 }
 
 /// `projects/delete` : params -> `NameParams`, puis `client.delete_project(&name)`.
-async fn handle_projects_delete(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_projects_delete(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1029,7 +1053,11 @@ async fn handle_sandboxes_list(state: &mut ServerState, id: Value) -> String {
 }
 
 /// `sandboxes/get` : params -> `NameParams`, puis `client.get_sandbox(&name)`.
-async fn handle_sandboxes_get(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_sandboxes_get(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1050,7 +1078,11 @@ async fn handle_sandboxes_get(state: &mut ServerState, id: Value, params: serde_
 }
 
 /// `sandboxes/create` : params -> `SandboxCreateParams` (name + spec aplati).
-async fn handle_sandboxes_create(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_sandboxes_create(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: SandboxCreateParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1071,7 +1103,11 @@ async fn handle_sandboxes_create(state: &mut ServerState, id: Value, params: ser
 }
 
 /// `sandboxes/delete` : params -> `NameParams`, puis `client.delete_sandbox(&name)`.
-async fn handle_sandboxes_delete(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_sandboxes_delete(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1093,7 +1129,11 @@ async fn handle_sandboxes_delete(state: &mut ServerState, id: Value, params: ser
 
 /// `sandboxes/stop` : params -> `NameParams`, puis
 /// `client.set_sandbox_suspended(&name, true)`.
-async fn handle_sandboxes_stop(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_sandboxes_stop(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1115,7 +1155,11 @@ async fn handle_sandboxes_stop(state: &mut ServerState, id: Value, params: serde
 
 /// `sandboxes/start` : params -> `NameParams`, puis
 /// `client.set_sandbox_suspended(&name, false)`.
-async fn handle_sandboxes_start(state: &mut ServerState, id: Value, params: serde_json::Value) -> String {
+async fn handle_sandboxes_start(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -2398,11 +2442,7 @@ defaults:
         handle_line(&mut state, &init_line).await;
         assert!(state.initialized);
 
-        let line = make_request_json(
-            203,
-            "owners/create",
-            Some(json!({"homeSize": "1Gi"})),
-        );
+        let line = make_request_json(203, "owners/create", Some(json!({"homeSize": "1Gi"})));
         let result = handle_line(&mut state, &line).await.unwrap();
         let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
 

@@ -15,11 +15,11 @@ use kube::runtime::controller::{Action, Controller};
 use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
-use vanyline_crds::Project;
-use vanyline_crds::{Owner, ProjectStatus, Sandbox};
 use crate::error::ControllerError;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
+use vanyline_crds::Project;
+use vanyline_crds::{Owner, ProjectStatus, Sandbox};
 
 /// Point de montage du PVC workspace dans les pods (Jobs et, plus tard, Sandbox).
 #[allow(dead_code)]

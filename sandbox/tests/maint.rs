@@ -354,11 +354,14 @@ fn init_sets_fetch_refspec() {
         ])
         .output()
         .expect("git config failed");
-    assert!(output.status.success(), "git config failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git config failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     assert_eq!(
-        stdout,
-        "+refs/heads/*:refs/remotes/origin/*",
+        stdout, "+refs/heads/*:refs/remotes/origin/*",
         "fetch refspec should be set on the bare repo"
     );
 }
@@ -439,7 +442,11 @@ fn init_idempotent_refspec_not_duplicated() {
         ])
         .output()
         .expect("git config --get-all failed");
-    assert!(output.status.success(), "git config --get-all failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git config --get-all failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let lines: Vec<&str> = stdout.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(

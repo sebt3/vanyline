@@ -41,7 +41,11 @@ fn no_auth_state() -> AppState {
         sandbox_root: std::path::Path::new("/workspace").into(),
     });
     let auth = Arc::new(AuthState::new(config.clone()).unwrap());
-    AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() }
+    AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    }
 }
 
 fn no_auth_state_with_root(root: &std::path::Path) -> AppState {
@@ -62,7 +66,11 @@ fn no_auth_state_with_root(root: &std::path::Path) -> AppState {
         sandbox_root: root.to_path_buf(),
     });
     let auth = Arc::new(AuthState::new(config.clone()).unwrap());
-    AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() }
+    AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    }
 }
 
 fn auth_state() -> AppState {
@@ -83,7 +91,11 @@ fn auth_state() -> AppState {
         sandbox_root: std::path::Path::new("/workspace").into(),
     });
     let auth = Arc::new(AuthState::new(config.clone()).unwrap());
-    AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() }
+    AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    }
 }
 
 fn static_token_state() -> AppState {
@@ -104,7 +116,11 @@ fn static_token_state() -> AppState {
         sandbox_root: std::path::Path::new("/workspace").into(),
     });
     let auth = Arc::new(AuthState::new(config.clone()).unwrap());
-    AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() }
+    AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    }
 }
 
 fn mcp_request(method: &str) -> Request<Body> {
@@ -1246,7 +1262,11 @@ fn init_repo(root: &std::path::Path) {
         .current_dir(root)
         .output()
         .expect("git commit failed");
-    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[tokio::test]
@@ -1280,7 +1300,11 @@ async fn git_status_endpoint_nominal() {
         sandbox_root: tmpdir.path().to_path_buf(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
-    let state = vanyline_sandbox::AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() };
+    let state = vanyline_sandbox::AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    };
 
     let app = build_app(state);
     let resp = app
@@ -1300,7 +1324,10 @@ async fn git_status_endpoint_nominal() {
 
     assert_eq!(json["clean"], false);
     let files = json["files"].as_array().unwrap();
-    assert!(!files.is_empty(), "expected at least one file in status: {json}");
+    assert!(
+        !files.is_empty(),
+        "expected at least one file in status: {json}"
+    );
 }
 
 #[tokio::test]
@@ -1329,7 +1356,11 @@ async fn git_status_endpoint_clean() {
         sandbox_root: tmpdir.path().to_path_buf(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
-    let state = vanyline_sandbox::AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() };
+    let state = vanyline_sandbox::AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    };
 
     let app = build_app(state);
     let resp = app
@@ -1378,7 +1409,11 @@ async fn git_status_endpoint_not_a_repo() {
         sandbox_root: tmpdir.path().to_path_buf(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
-    let state = vanyline_sandbox::AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() };
+    let state = vanyline_sandbox::AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    };
 
     let app = build_app(state);
     let resp = app
@@ -1431,11 +1466,22 @@ fn make_worktree_topology(tmp: &std::path::Path, worktree_branch: &str) -> std::
     let bare = tmp.join("bare.git");
     run_git(
         tmp,
-        &["clone", "-q", "--bare", remote.to_str().unwrap(), bare.to_str().unwrap()],
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            remote.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
     );
     run_git(
         &bare,
-        &["config", "--replace-all", "remote.origin.fetch", "+refs/heads/*:refs/remotes/origin/*"],
+        &[
+            "config",
+            "--replace-all",
+            "remote.origin.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
     );
     run_git(&bare, &["fetch", "-q", "--prune"]);
 
@@ -1443,15 +1489,27 @@ fn make_worktree_topology(tmp: &std::path::Path, worktree_branch: &str) -> std::
     if worktree_branch == "main" {
         run_git(
             tmp,
-            &["--git-dir", bare.to_str().unwrap(), "worktree", "add", wt.to_str().unwrap(), "main"],
+            &[
+                "--git-dir",
+                bare.to_str().unwrap(),
+                "worktree",
+                "add",
+                wt.to_str().unwrap(),
+                "main",
+            ],
         );
     } else {
         run_git(
             tmp,
             &[
-                "--git-dir", bare.to_str().unwrap(),
-                "worktree", "add", "-b", worktree_branch,
-                wt.to_str().unwrap(), "main",
+                "--git-dir",
+                bare.to_str().unwrap(),
+                "worktree",
+                "add",
+                "-b",
+                worktree_branch,
+                wt.to_str().unwrap(),
+                "main",
             ],
         );
     }
@@ -1474,7 +1532,10 @@ async fn git_unpushed_endpoint_with_upstream() {
     let wt = make_worktree_topology(tmpdir.path(), "main");
 
     // Add a local commit on the worktree
-    run_git(&wt, &["commit", "-q", "--allow-empty", "-m", "local change"]);
+    run_git(
+        &wt,
+        &["commit", "-q", "--allow-empty", "-m", "local change"],
+    );
 
     let config = std::sync::Arc::new(Config {
         listen: "0.0.0.0:3000".into(),
@@ -1493,7 +1554,11 @@ async fn git_unpushed_endpoint_with_upstream() {
         sandbox_root: wt.to_path_buf(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
-    let state = vanyline_sandbox::AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() };
+    let state = vanyline_sandbox::AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    };
 
     let app = build_app(state);
     let resp = app
@@ -1531,7 +1596,10 @@ async fn git_unpushed_endpoint_without_upstream() {
     let wt = make_worktree_topology(tmpdir.path(), "feat-new");
 
     // Add a local commit on the worktree
-    run_git(&wt, &["commit", "-q", "--allow-empty", "-m", "wip on feature"]);
+    run_git(
+        &wt,
+        &["commit", "-q", "--allow-empty", "-m", "wip on feature"],
+    );
 
     let config = std::sync::Arc::new(Config {
         listen: "0.0.0.0:3000".into(),
@@ -1550,7 +1618,11 @@ async fn git_unpushed_endpoint_without_upstream() {
         sandbox_root: wt.to_path_buf(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
-    let state = vanyline_sandbox::AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() };
+    let state = vanyline_sandbox::AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    };
 
     let app = build_app(state);
     let resp = app
@@ -1604,7 +1676,11 @@ async fn git_unpushed_endpoint_no_local_commits() {
         sandbox_root: wt.to_path_buf(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
-    let state = vanyline_sandbox::AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() };
+    let state = vanyline_sandbox::AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    };
 
     let app = build_app(state);
     let resp = app
@@ -1658,7 +1734,11 @@ async fn git_unpushed_endpoint_detached_head() {
         sandbox_root: wt.to_path_buf(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
-    let state = vanyline_sandbox::AppState { config, auth, tickets: vanyline_sandbox::ws::ticket::TicketStore::new() };
+    let state = vanyline_sandbox::AppState {
+        config,
+        auth,
+        tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
+    };
 
     let app = build_app(state);
     let resp = app

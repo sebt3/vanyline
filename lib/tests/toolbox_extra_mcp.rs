@@ -17,8 +17,8 @@ use rmcp::{
 use tokio_util::sync::CancellationToken;
 
 use vanyline_lib::domain::{
-    Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider,
-    ProviderType, SkillSelection,
+    Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
+    SkillSelection,
 };
 use vanyline_lib::event::{ChatEvent, EventSink};
 use vanyline_lib::session::{run_agent_turn, SessionContext};

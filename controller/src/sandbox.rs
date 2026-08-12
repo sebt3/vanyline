@@ -19,7 +19,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
-use kube::runtime::finalizer::{Event, finalizer};
+use kube::runtime::finalizer::{finalizer, Event};
 use kube::{Client, Resource, ResourceExt};
 
 use crate::application::APP_LABEL;
@@ -28,12 +28,12 @@ use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 use crate::project::{self, ProjectJobContext};
 use crate::project::{
-    WORKSPACE_MOUNT_PATH, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path,
-    worktree_path,
+    cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path,
+    WORKSPACE_MOUNT_PATH,
 };
 use vanyline_crds::{
-    Application, EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
-    Toolchain, service_name,
+    service_name, Application, EgressPort, EgressRule, Owner, Project, Sandbox, SandboxStatus,
+    Toolchain, MCP_PORT,
 };
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
@@ -303,11 +303,9 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
             name: Some(pod_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
             labels: Some(labels),
-            owner_references: Some(vec![
-                sandbox
-                    .controller_owner_ref(&())
-                    .expect("Sandbox a apiVersion/kind"),
-            ]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(PodSpec {
@@ -404,11 +402,9 @@ pub fn build_checkout_job(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(checkout_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![
-                sandbox
-                    .controller_owner_ref(&())
-                    .expect("Sandbox a apiVersion/kind"),
-            ]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -444,11 +440,9 @@ pub fn build_worktree_remove_job(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(worktree_remove_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![
-                sandbox
-                    .controller_owner_ref(&())
-                    .expect("Sandbox a apiVersion/kind"),
-            ]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -476,11 +470,9 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(service_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![
-                sandbox
-                    .controller_owner_ref(&())
-                    .expect("Sandbox a apiVersion/kind"),
-            ]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(k8s_openapi::api::core::v1::ServiceSpec {
@@ -528,11 +520,9 @@ pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> In
             } else {
                 Some(application.spec.ingress_annotations.clone())
             },
-            owner_references: Some(vec![
-                sandbox
-                    .controller_owner_ref(&())
-                    .expect("Sandbox a apiVersion/kind"),
-            ]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(IngressSpec {
@@ -698,11 +688,9 @@ pub fn build_sandbox_netpol(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(netpol_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![
-                sandbox
-                    .controller_owner_ref(&())
-                    .expect("Sandbox a apiVersion/kind"),
-            ]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(NetworkPolicySpec {
@@ -764,11 +752,9 @@ pub fn build_sandbox_egress_netpol(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(netpol_egress_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![
-                sandbox
-                    .controller_owner_ref(&())
-                    .expect("Sandbox a apiVersion/kind"),
-            ]),
+            owner_references: Some(vec![sandbox
+                .controller_owner_ref(&())
+                .expect("Sandbox a apiVersion/kind")]),
             ..Default::default()
         },
         spec: Some(NetworkPolicySpec {
@@ -1269,12 +1255,10 @@ mod tests {
         assert!(path_val.ends_with(BASE_PATH));
 
         // No LD_LIBRARY_PATH because custom has none
-        assert!(
-            env_result
-                .iter()
-                .find(|e| e.name == "LD_LIBRARY_PATH")
-                .is_none()
-        );
+        assert!(env_result
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .is_none());
     }
 
     #[test]
@@ -1295,12 +1279,10 @@ mod tests {
         assert_eq!(path_val, BASE_PATH);
 
         // No LD_LIBRARY_PATH
-        assert!(
-            env_result
-                .iter()
-                .find(|e| e.name == "LD_LIBRARY_PATH")
-                .is_none()
-        );
+        assert!(env_result
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .is_none());
     }
 
     // ===== build_sandbox_pod =====
@@ -1625,11 +1607,9 @@ mod tests {
         // Without resources
         let sandbox_no_res = make_sandbox("demo-branch", vec![], None);
         let pod_no_res = build_sandbox_pod(&sandbox_no_res, &project, &ctx);
-        assert!(
-            pod_no_res.spec.as_ref().unwrap().containers[0]
-                .resources
-                .is_none()
-        );
+        assert!(pod_no_res.spec.as_ref().unwrap().containers[0]
+            .resources
+            .is_none());
     }
 
     // ===== Job name helpers =====
@@ -2470,18 +2450,16 @@ mod tests {
                 .number,
             Some(MCP_PORT)
         );
-        assert!(
-            paths[0]
-                .backend
-                .service
-                .as_ref()
-                .unwrap()
-                .port
-                .as_ref()
-                .unwrap()
-                .name
-                .is_none()
-        );
+        assert!(paths[0]
+            .backend
+            .service
+            .as_ref()
+            .unwrap()
+            .port
+            .as_ref()
+            .unwrap()
+            .name
+            .is_none());
 
         // no TLS
         assert!(spec.tls.is_none());

@@ -235,14 +235,15 @@ pub async fn run_status(sandbox_root: &Path) -> Result<GitStatus, GitError> {
         ]
         .into_iter()
         .collect();
-        let output = Command::new("git")
-            .args(&args)
-            .output()
-            .map_err(|e| GitError::CommandFailed {
-                args: args.clone(),
-                status: e.to_string(),
-                stderr: String::new(),
-            })?;
+        let output =
+            Command::new("git")
+                .args(&args)
+                .output()
+                .map_err(|e| GitError::CommandFailed {
+                    args: args.clone(),
+                    status: e.to_string(),
+                    stderr: String::new(),
+                })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -312,7 +313,14 @@ fn run_git(args: &[&str]) -> Result<String, GitError> {
 /// `true` si `refname` existe (`git show-ref --verify --quiet`).
 fn ref_exists(worktree_root: &str, refname: &str) -> Result<bool, GitError> {
     let status = Command::new("git")
-        .args(["-C", worktree_root, "show-ref", "--verify", "--quiet", refname])
+        .args([
+            "-C",
+            worktree_root,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            refname,
+        ])
         .status()
         .map_err(|e| GitError::CommandFailed {
             args: vec![
@@ -424,7 +432,9 @@ pub async fn run_unpushed(sandbox_root: &Path) -> Result<UnpushedStatus, GitErro
     .expect("run_unpushed blocking task panicked")
 }
 
-pub async fn handle_unpushed(State(state): State<AppState>) -> Result<Json<UnpushedStatus>, GitError> {
+pub async fn handle_unpushed(
+    State(state): State<AppState>,
+) -> Result<Json<UnpushedStatus>, GitError> {
     run_unpushed(&state.config.sandbox_root).await.map(Json)
 }
 

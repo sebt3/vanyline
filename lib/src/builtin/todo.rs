@@ -56,8 +56,7 @@ impl ToolDyn for TodoWriteTool {
     }
 
     fn definition(&self, _prompt: String) -> WasmBoxedFuture<'_, ToolDefinition> {
-        let description = "Remplace toute la liste de taches par la liste fournie. "
-            .to_string();
+        let description = "Remplace toute la liste de taches par la liste fournie. ".to_string();
         Box::pin(async move {
             ToolDefinition {
                 name: "todowrite".to_string(),

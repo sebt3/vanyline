@@ -74,12 +74,14 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let oidc_client = Arc::new(auth::oidc::OidcClient::new(&config).await.unwrap_or_else(
-        |e| {
-            tracing::error!("{}", e);
-            std::process::exit(1);
-        },
-    ));
+    let oidc_client = Arc::new(
+        auth::oidc::OidcClient::new(&config)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::error!("{}", e);
+                std::process::exit(1);
+            }),
+    );
 
     let static_dir = config.static_dir.clone();
     let state = AppState {

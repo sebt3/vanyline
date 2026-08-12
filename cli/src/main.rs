@@ -10,9 +10,9 @@ mod mcp_cmd;
 mod model_cmd;
 mod owner_cmd;
 mod project_cmd;
+mod sandbox_cmd;
 mod skill_cmd;
 mod toolset_cmd;
-mod sandbox_cmd;
 
 mod rpc;
 
@@ -560,10 +560,12 @@ async fn run_mcp(cmd: mcp_cmd::Commands) {
 async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8s::VnlK8sClient {
     let store = discover_fs_store();
     let namespace = namespace_flag.or_else(|| config::configured_namespace(store.layers()));
-    vanyline_lib::k8s::VnlK8sClient::discover(namespace).await.unwrap_or_else(|e| {
-        eprintln!("{e}");
-        std::process::exit(1);
-    })
+    vanyline_lib::k8s::VnlK8sClient::discover(namespace)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        })
 }
 
 /// Resout l'URL MCP de la toolbox pour ce lancement, ou `None` si aucune
@@ -585,8 +587,8 @@ async fn resolve_toolbox_mcp_url(
 }
 
 async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
-    use owner_cmd::Commands::*;
     use kube::ResourceExt;
+    use owner_cmd::Commands::*;
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {
@@ -601,8 +603,14 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
                     println!(
                         "  {} | {} | {}",
                         o.name_any(),
-                        o.status.as_ref().and_then(|s| s.pvc_name.as_deref()).unwrap_or("-"),
-                        o.status.as_ref().and_then(|s| s.service_account.as_deref()).unwrap_or("-")
+                        o.status
+                            .as_ref()
+                            .and_then(|s| s.pvc_name.as_deref())
+                            .unwrap_or("-"),
+                        o.status
+                            .as_ref()
+                            .and_then(|s| s.service_account.as_deref())
+                            .unwrap_or("-")
                     );
                 }
             }
@@ -641,10 +649,7 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
             println!("Status:");
             match &owner.status {
                 Some(status) => {
-                    println!(
-                        "  pvcName: {}",
-                        status.pvc_name.as_deref().unwrap_or("-")
-                    );
+                    println!("  pvcName: {}", status.pvc_name.as_deref().unwrap_or("-"));
                     println!(
                         "  serviceAccount: {}",
                         status.service_account.as_deref().unwrap_or("-")
@@ -707,8 +712,8 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
 }
 
 async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) {
-    use project_cmd::Commands::*;
     use kube::ResourceExt;
+    use project_cmd::Commands::*;
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {
@@ -723,7 +728,10 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                     let cloned = p.status.as_ref().map(|s| s.cloned).unwrap_or(false);
                     println!(
                         "  {} | owner={} | {} | cloned={}",
-                        p.name_any(), p.spec.owner, p.spec.repo_url, cloned
+                        p.name_any(),
+                        p.spec.owner,
+                        p.spec.repo_url,
+                        cloned
                     );
                 }
             }
@@ -736,19 +744,38 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
             println!("Project: {}", project.name_any());
             println!("  owner: {}", project.spec.owner);
             println!("  repoUrl: {}", project.spec.repo_url);
-            println!("  defaultBranch: {}", project.spec.default_branch.as_deref().unwrap_or("-"));
+            println!(
+                "  defaultBranch: {}",
+                project.spec.default_branch.as_deref().unwrap_or("-")
+            );
             match &project.spec.existing_pvc {
-                Some(pvc) => println!("  existingPvc: {} (subPath={})", pvc.name, pvc.sub_path.as_deref().unwrap_or("-")),
+                Some(pvc) => println!(
+                    "  existingPvc: {} (subPath={})",
+                    pvc.name,
+                    pvc.sub_path.as_deref().unwrap_or("-")
+                ),
                 None => println!("  existingPvc: -"),
             }
-            println!("  storageSize: {}", project.spec.storage_size.as_deref().unwrap_or("-"));
-            println!("  storageClass: {}", project.spec.storage_class.as_deref().unwrap_or("-"));
-            println!("  gitSecret: {}", project.spec.git_secret.as_deref().unwrap_or("-"));
+            println!(
+                "  storageSize: {}",
+                project.spec.storage_size.as_deref().unwrap_or("-")
+            );
+            println!(
+                "  storageClass: {}",
+                project.spec.storage_class.as_deref().unwrap_or("-")
+            );
+            println!(
+                "  gitSecret: {}",
+                project.spec.git_secret.as_deref().unwrap_or("-")
+            );
             match &project.spec.caches {
                 Some(c) if !c.is_empty() => println!("  caches: {}", c.join(", ")),
                 _ => println!("  caches: -"),
             }
-            println!("  fetchInterval: {}", project.spec.fetch_interval.as_deref().unwrap_or("-"));
+            println!(
+                "  fetchInterval: {}",
+                project.spec.fetch_interval.as_deref().unwrap_or("-")
+            );
             println!("Status:");
             match &project.status {
                 Some(status) => {
@@ -764,7 +791,10 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                     } else {
                         println!("  conditions:");
                         for c in &status.conditions {
-                            println!("    - {} status={} message={}", c.type_, c.status, c.message);
+                            println!(
+                                "    - {} status={} message={}",
+                                c.type_, c.status, c.message
+                            );
                         }
                     }
                 }
@@ -796,14 +826,21 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                 storage_size,
                 storage_class,
                 git_secret,
-                caches: if caches.is_empty() { None } else { Some(caches) },
+                caches: if caches.is_empty() {
+                    None
+                } else {
+                    Some(caches)
+                },
                 fetch_interval,
                 egress: Vec::new(),
             };
-            client.create_project(&name, spec).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            client
+                .create_project(&name, spec)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             println!("Created project: {name}");
         }
         Delete { name } => {
@@ -817,8 +854,8 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
 }
 
 async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) {
-    use sandbox_cmd::Commands::*;
     use kube::ResourceExt;
+    use sandbox_cmd::Commands::*;
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {
@@ -837,7 +874,10 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
                         .unwrap_or("-");
                     println!(
                         "  {} | project={} | branch={} | phase={}",
-                        s.name_any(), s.spec.project, s.spec.branch, phase
+                        s.name_any(),
+                        s.spec.project,
+                        s.spec.branch,
+                        phase
                     );
                 }
             }
@@ -869,7 +909,10 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
                     } else {
                         println!("  conditions:");
                         for c in &status.conditions {
-                            println!("    - {} status={} message={}", c.type_, c.status, c.message);
+                            println!(
+                                "    - {} status={} message={}",
+                                c.type_, c.status, c.message
+                            );
                         }
                     }
                 }
@@ -892,10 +935,13 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
                 egress: Vec::new(),
                 suspended: false,
             };
-            client.create_sandbox(&name, spec).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            client
+                .create_sandbox(&name, spec)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             println!("Created sandbox: {name}");
         }
         Delete { name } => {
@@ -906,17 +952,23 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
             println!("Deleted sandbox: {name}");
         }
         Stop { name } => {
-            client.set_sandbox_suspended(&name, true).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            client
+                .set_sandbox_suspended(&name, true)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             println!("Stopped sandbox: {name}");
         }
         Start { name } => {
-            client.set_sandbox_suspended(&name, false).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            client
+                .set_sandbox_suspended(&name, false)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             println!("Started sandbox: {name}");
         }
     }
