@@ -32,12 +32,28 @@ let view: EditorView | undefined;
 
 const extensions = [basicSetup, python(), oneDark, denseTheme, saveKeymap()];
 
+// Visible le temps d'informer l'utilisateur — un échec de save/read silencieux
+// laisserait croire que l'édition est enregistrée alors qu'elle ne l'est pas.
+const statusMessage = ref<string | null>(null);
+let statusTimer: ReturnType<typeof setTimeout> | undefined;
+function showStatus(message: string) {
+  statusMessage.value = message;
+  clearTimeout(statusTimer);
+  statusTimer = setTimeout(() => {
+    statusMessage.value = null;
+  }, 4000);
+}
+
 /** Ctrl+S / Cmd+S : écrit le document courant sur la sandbox (op write, contenu brut). */
 function save() {
   const path = openFilePath?.value ?? null;
   if (!view || !path || !fsClient.value) return;
   const content = view.state.doc.toString();
-  void fsClient.value.request<{ ok: boolean }>('write', { path, content });
+  fsClient.value
+    .request<{ ok: boolean }>('write', { path, content })
+    .catch((e: unknown) => {
+      showStatus(`Échec de l'enregistrement : ${e instanceof Error ? e.message : String(e)}`);
+    });
 }
 
 /** Exposé pour les tests (fallback si keydown jsdom est fragile). */
@@ -71,8 +87,10 @@ async function loadFile(path: string): Promise<void> {
         extensions,
       }),
     );
-  } catch {
-    // lecture impossible (fichier supprimé, confinement…) : on laisse le contenu actuel.
+  } catch (e) {
+    showStatus(
+      `Impossible d'ouvrir le fichier : ${e instanceof Error ? e.message : String(e)}`,
+    );
   }
 }
 
@@ -91,20 +109,42 @@ onMounted(() => {
   if (openFilePath.value) void loadFile(openFilePath.value);
 });
 
-onBeforeUnmount(() => view?.destroy());
+onBeforeUnmount(() => {
+  view?.destroy();
+  clearTimeout(statusTimer);
+});
 </script>
 
 <template>
-  <div ref="host" class="editor-host"></div>
+  <div class="editor-wrap">
+    <div ref="host" class="editor-host"></div>
+    <div v-if="statusMessage" class="editor-status" role="alert">{{ statusMessage }}</div>
+  </div>
 </template>
 
 <!-- styles inchangés -->
 <style scoped>
+.editor-wrap {
+  height: 100%;
+  position: relative;
+}
 .editor-host {
   height: 100%;
   overflow: hidden;
 }
 :deep(.cm-editor) {
   height: 100%;
+}
+.editor-status {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  max-width: 70%;
+  padding: 6px 12px;
+  background: #5b1e3fdd;
+  color: #ffb4c8;
+  font-size: 12px;
+  border-radius: 6px;
+  pointer-events: none;
 }
 </style>

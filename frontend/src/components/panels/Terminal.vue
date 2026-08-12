@@ -57,7 +57,11 @@ onMounted(() => {
         if (typeof ev.data === 'string') return; // le serveur n'envoie que du binaire
         term!.write(new Uint8Array(ev.data));
       });
-      sendResize(); // synchronise la taille initiale après l'ouverture
+      // La promesse d'ouverture se résout à la construction du WebSocket
+      // (état CONNECTING), pas à l'ouverture réelle — un sendResize() ici
+      // serait un no-op silencieux (readyState !== OPEN). Attendre l'event
+      // 'open' pour que la taille initiale soit vraiment envoyée au serveur.
+      ws.addEventListener('open', sendResize, { once: true });
     })
     .catch(() => {
       // ticket/ingress indisponible (dépendance d'infra) : terminal vide, pas de PTY.
