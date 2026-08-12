@@ -50,18 +50,18 @@ jobs:
       - name: Count pedantic/nursery warnings
         env:
           CARGO_INCREMENTAL: "0"
-        run: |
-          set -o pipefail
-          cargo clippy --workspace --all-targets --message-format=short -- -W clippy::pedantic -W clippy::nursery > pedantic-report.txt 2>&1 || true
-          TOTAL=$(grep -c ': warning: ' pedantic-report.txt)
-          echo "pedantic/nursery warnings total: $TOTAL"
+        run: |-
+          set -o pipefail;
+          cargo clippy --workspace --all-targets --message-format=short -- -W clippy::pedantic -W clippy::nursery > pedantic-report.txt 2>&1 || true;
+          TOTAL=$(grep -c ': warning: ' pedantic-report.txt);
+          echo "pedantic/nursery warnings total: $TOTAL";
           if [ "$TOTAL" -lt 50 ]; then
-            echo "::error::Total suspicieusement bas ($TOTAL) — le parsing a probablement casse (changement de format clippy ?), pas une vraie amelioration. Verifier pedantic-report.txt."
-            exit 1
-          fi
-          BASELINE=585
-          if [ "$TOTAL" -gt "$BASELINE" ]; then
-            echo "::warning::Regression: $TOTAL warnings pedantic/nursery > baseline $BASELINE (non bloquant, a corriger dans une future iteration)"
+            echo "::error::Total suspicieusement bas ($TOTAL) — le parsing a probablement casse (changement de format clippy ?), pas une vraie amelioration. Verifier pedantic-report.txt.";
+            exit 1;
+          fi;
+          BASELINE=585;
+          if [ "$TOTAL" -gt "$BASELINE" ]; then;
+            echo "::warning::Regression: $TOTAL warnings pedantic/nursery > baseline $BASELINE (non bloquant, a corriger dans une future iteration)";
           fi
       - name: Upload pedantic report
         uses: actions/upload-artifact@v4
@@ -87,13 +87,13 @@ jobs:
             cargo rustc -p vanyline-tools --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
             cargo rustc -p vanyline-crds --lib -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
             cargo rustc -p vanyline-app --bin vanyline-app -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation'; \
-            cargo rustc -p vanyline-controller --bin vanyline-controller -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation')
-          TOTAL=0
-          for n in $COUNT; do TOTAL=$((TOTAL + n)); done
-          echo "missing_docs warnings total: $TOTAL"
-          BASELINE=621
+            cargo rustc -p vanyline-controller --bin vanyline-controller -- -W missing_docs 2>&1 | grep -c 'warning: missing documentation');
+          TOTAL=0;
+          for n in $COUNT; do TOTAL=$((TOTAL + n)); done;
+          echo "missing_docs warnings total: $TOTAL";
+          BASELINE=621;
           if [ "$TOTAL" -gt "$BASELINE" ]; then
-            echo "::error::Regression: $TOTAL missing_docs warnings > baseline $BASELINE"
+            echo "::error::Regression: $TOTAL missing_docs warnings > baseline $BASELINE";
             exit 1
           fi
 

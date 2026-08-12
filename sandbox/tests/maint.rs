@@ -117,8 +117,7 @@ fn init_bad_repo_fails() {
         maint::MaintError::GitFailed { stderr, .. } => {
             assert!(
                 err.to_string().contains("VNL-MAINT-004"),
-                "error should contain VNL-MAINT-004: {}",
-                err
+                "error should contain VNL-MAINT-004: {err}"
             );
             assert!(!stderr.is_empty(), "stderr should not be empty: {stderr}");
         }

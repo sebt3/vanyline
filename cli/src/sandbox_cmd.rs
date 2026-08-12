@@ -39,7 +39,7 @@ pub enum Commands {
         /// Repetable : --toolchain rust=rust:slim-trixie --toolchain node=node:trixie-slim
         #[arg(long = "toolchain", value_parser = parse_toolchain)]
         toolchains: Vec<vanyline_crds::Toolchain>,
-        /// Image du serveur sandbox. Omis: defaut du controller (env SANDBOX_IMAGE).
+        /// Image du serveur sandbox. Omis: defaut du controller (env `SANDBOX_IMAGE`).
         #[arg(long)]
         image: Option<String>,
     },

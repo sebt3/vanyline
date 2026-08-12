@@ -52,8 +52,8 @@ pub async fn create_toolset(
     validate_mcp_servers(&state, db_user.id, &body.mcp).await?;
 
     sqlx::query(
-        r#"INSERT INTO toolsets (user_id, name, description, prompt, local_tools, mcp)
-           VALUES ($1, $2, $3, $4, $5, $6)"#,
+        r"INSERT INTO toolsets (user_id, name, description, prompt, local_tools, mcp)
+           VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(db_user.id)
     .bind(&body.name)
@@ -108,13 +108,13 @@ pub async fn update_toolset(
         .map(|v| serde_json::to_value(v).unwrap_or_else(|_| serde_json::json!([])));
 
     let rows = sqlx::query(
-        r#"UPDATE toolsets SET
+        r"UPDATE toolsets SET
             description = COALESCE($3, description),
             prompt = COALESCE($4, prompt),
             local_tools = COALESCE($5, local_tools),
             mcp = COALESCE($6, mcp),
             updated_at = NOW()
-           WHERE user_id = $1 AND name = $2"#,
+           WHERE user_id = $1 AND name = $2",
     )
     .bind(db_user.id)
     .bind(&name)

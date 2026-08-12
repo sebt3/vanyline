@@ -3,7 +3,7 @@ use vanyline_crds::OwnerSpec;
 
 use crate::{db::models::User, error::AppError, AppState};
 
-/// Détecte d'un raw (email ou oidc_sub) une étiquette DNS `RFC1123` :
+/// Détecte d'un raw (email ou `oidc_sub`) une étiquette DNS `RFC1123` :
 /// minuscules/chiffres/tirets, début alphanumérique, ≤ 63 caractères.
 /// Préfixe le local-part de l'email (`@`), remplace les caractères invalides
 /// par `-`, coupe aux 63, et retombe sur `"owner"` si le résultat est vide.

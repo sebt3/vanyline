@@ -24,6 +24,7 @@ pub struct ExecuteCommandOptions {
 
 /// Retourne un `String` formaté (exit code, duration, stdout, stderr).
 /// Erreurs remontent via `ToolsError`.
+#[must_use]
 pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let command = opts.command;
     let timeout_secs = opts.timeout_secs;
@@ -154,7 +155,7 @@ mod tests {
     #[tokio::test]
     async fn test_quotes_respected() {
         let result = execute(ExecuteCommandOptions {
-            command: r##"echo "hello world""##.to_string(),
+            command: r#"echo "hello world""#.to_string(),
             timeout_secs: 5,
             ..Default::default()
         })
@@ -225,7 +226,7 @@ mod tests {
     #[tokio::test]
     async fn test_empty_command() {
         let result = execute(ExecuteCommandOptions {
-            command: "".to_string(),
+            command: String::new(),
             timeout_secs: 5,
             ..Default::default()
         })
@@ -236,7 +237,7 @@ mod tests {
                 assert_eq!(name, "command");
                 assert!(reason.contains("must not be empty"));
             }
-            other => panic!("Expected InvalidArgument, got: {:?}", other),
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
 
@@ -258,7 +259,7 @@ mod tests {
         // "duration: " followed by a number followed by "s"
         assert!(res.contains("duration: "));
         let duration_line = res.lines().find(|l| l.starts_with("duration: ")).unwrap();
-        assert!(duration_line.contains("s"));
+        assert!(duration_line.contains('s'));
     }
 
     #[tokio::test]
@@ -296,7 +297,7 @@ mod tests {
             Err(ToolsError::FileNotFound { path, .. }) => {
                 assert!(path.contains("nonexistent"));
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
@@ -317,7 +318,7 @@ mod tests {
             Err(ToolsError::NotADirectory(path)) => {
                 assert!(path.contains("afile"));
             }
-            other => panic!("Expected NotADirectory, got: {:?}", other),
+            other => panic!("Expected NotADirectory, got: {other:?}"),
         }
     }
 

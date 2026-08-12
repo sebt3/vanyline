@@ -1,4 +1,9 @@
-use crate::rpc::protocol::*;
+use crate::rpc::protocol::{
+    jsonrpc_code, vnl_code, ChatCancelParams, ChatEventNotificationParams, ChatSendParams,
+    ChatSendResult, ConversationCreateParams, ConversationIdParams, ConversationSummary,
+    InitializeParams, InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    NameParams, OwnerCreateParams, ProjectCreateParams, SandboxCreateParams, PROTOCOL_VERSION,
+};
 
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
@@ -55,9 +60,10 @@ impl ServerState {
 /// la connaît (workspace folder VS Code), pas le cwd"). Fallback sur le
 /// cwd uniquement si `workspace` est `None` (usage CLI direct / tests).
 fn resolve_layers(workspace: Option<&str>) -> crate::config::Layers {
-    let root = workspace.map(std::path::PathBuf::from).unwrap_or_else(|| {
-        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
-    });
+    let root = workspace.map_or_else(
+        || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
+        std::path::PathBuf::from,
+    );
     crate::config::Layers::discover(&root)
 }
 
@@ -681,17 +687,17 @@ async fn handle_chat_send(
         Some(a) => Some(a),
         None => store.default_agent().await.ok().flatten(),
     };
-    let agent_name = match agent_name {
-        Some(a) => a,
-        None => {
+    let agent_name =
+        if let Some(a) = agent_name {
+            a
+        } else {
             state.busy.lock().unwrap().remove(&conv_id);
             return Some(serde_json::to_string(&JsonRpcResponse::error(
-                id, jsonrpc_code::SERVER_ERROR,
-                "No agent specified, no agent on the conversation, and no default agent configured",
-                vnl_code::NO_AGENT_RESOLVED,
-            )).expect("serialize chat/send error response"));
-        }
-    };
+            id, jsonrpc_code::SERVER_ERROR,
+            "No agent specified, no agent on the conversation, and no default agent configured",
+            vnl_code::NO_AGENT_RESOLVED,
+        )).expect("serialize chat/send error response"));
+        };
 
     let tx = state.tx.clone();
     let busy = state.busy.clone();
@@ -1361,7 +1367,7 @@ mod tests {
 
     // -- New tests for task 02a --
 
-    /// initialize_resolves_workspace_root — `workspace` pointant vers un
+    /// `initialize_resolves_workspace_root` — `workspace` pointant vers un
     /// tempdir contenant `.vanyline/` (créer
     /// `<tempdir>/.vanyline/agents/build.md` avec un frontmatter minimal, cf.
     /// `cli/src/chat.rs::tests::workspace_agent_reported` pour le format) ->
@@ -1404,12 +1410,11 @@ mod tests {
         let ws_root = r["workspaceRoot"].as_str().unwrap();
         assert!(
             ws_root.contains(tmp.path().to_str().unwrap()),
-            "workspaceRoot should contain tempdir path, got: {}",
-            ws_root
+            "workspaceRoot should contain tempdir path, got: {ws_root}"
         );
     }
 
-    /// initialize_no_workspace_marker_yields_none_root — `workspace` pointant
+    /// `initialize_no_workspace_marker_yields_none_root` — `workspace` pointant
     /// vers un tempdir SANS `.vanyline/` ni `.git/` -> `result.workspaceRoot ==
     /// null`.
     #[test]
@@ -1448,7 +1453,7 @@ mod tests {
         );
     }
 
-    /// config_agents_before_and_after_initialize — sans `initialize` d'abord,
+    /// `config_agents_before_and_after_initialize` — sans `initialize` d'abord,
     /// `config/agents` -> `VNL-RPC-001` (non initialisé). Avec `initialize`,
     /// retourne un tableau valide.
     #[test]
@@ -1466,7 +1471,7 @@ mod tests {
         assert!(!state.initialized);
     }
 
-    /// config_agents_lists_workspace_agent — `initialize` avec `workspace` =
+    /// `config_agents_lists_workspace_agent` — `initialize` avec `workspace` =
     /// tempdir contenant `.vanyline/agents/build.md` -> `config/agents` ->
     /// `result` est un tableau JSON contenant un objet avec `"name":"build"`.
     #[test]
@@ -1518,7 +1523,7 @@ mod tests {
         assert_eq!(arr[0]["name"], "build");
     }
 
-    /// config_models_empty_list — `initialize` avec un tempdir vide ->
+    /// `config_models_empty_list` — `initialize` avec un tempdir vide ->
     /// `config/models` -> `result == []` (pas d'erreur).
     #[test]
     async fn config_models_empty_list() {
@@ -1557,7 +1562,7 @@ mod tests {
         assert_eq!(models.as_array().unwrap().len(), 0);
     }
 
-    /// config_toolsets_and_skills_dispatch — vérifie que `config/toolsets` et
+    /// `config_toolsets_and_skills_dispatch` — vérifie que `config/toolsets` et
     /// `config/skills` sont bien dispatchées (pas `VNL-RPC-004` méthode inconnue).
     #[test]
     async fn config_toolsets_and_skills_dispatch() {
@@ -1594,8 +1599,7 @@ mod tests {
         assert!(
             resp.result
                 .as_ref()
-                .map(|v| v.is_array())
-                .unwrap_or_default(),
+                .is_some_and(serde_json::Value::is_array),
             "result should be an array"
         );
 
@@ -1612,8 +1616,7 @@ mod tests {
         assert!(
             resp.result
                 .as_ref()
-                .map(|v| v.is_array())
-                .unwrap_or_default(),
+                .is_some_and(serde_json::Value::is_array),
             "result should be an array"
         );
     }
@@ -1628,7 +1631,9 @@ mod tests {
     /// dropper le guard laisse un autre test muter la variable pendant que
     /// celui-ci tourne encore.
     fn isolated_data_dir() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
-        let guard = DATA_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let guard = DATA_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("XDG_DATA_HOME", tmp.path());
         (tmp, guard)
@@ -2010,7 +2015,7 @@ mod tests {
 
     // -- New tests for task 03b-fix-01 --
 
-    /// chat_send_malformed_params — après `initialize`, `chat/send` avec
+    /// `chat_send_malformed_params` — après `initialize`, `chat/send` avec
     /// `params: {}` (ni `conversationId` ni `message`) -> `error.data.code
     /// == "VNL-RPC-000"`. Un vide deserialise en `ChatSendParams` avec
     /// `conversation_id=""` `message=""` (deux champs `#[serde(default)]`) —
@@ -2034,7 +2039,7 @@ mod tests {
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// chat_send_malformed_conversation_id — `{"conversationId":"nope",
+    /// `chat_send_malformed_conversation_id` — `{"conversationId":"nope",
     /// "message":"hi"}` -> `VNL-RPC-000` (cette fixture couvre le bug
     /// corrigé : avant le fix, `handle_line` retournait `None` ici).
     #[tokio::test]
@@ -2067,7 +2072,7 @@ mod tests {
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// chat_send_conversation_not_found — UUID valide jamais créé via
+    /// `chat_send_conversation_not_found` — UUID valide jamais créé via
     /// `conversations/create` -> `VNL-RPC-005`.
     #[tokio::test]
     async fn chat_send_conversation_not_found() {
@@ -2095,7 +2100,7 @@ mod tests {
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-005");
     }
 
-    /// chat_send_busy_conversation_rejected — `conversations/create`
+    /// `chat_send_busy_conversation_rejected` — `conversations/create`
     /// d'abord, insérer `conv_id` dans `state.busy`, puis `chat/send` ->
     /// `VNL-RPC-002`. Vérifier que `handle_line` retourne `Some(...)`.
     #[tokio::test]
@@ -2152,7 +2157,7 @@ mod tests {
         assert!(state.busy.lock().unwrap().contains(&conv_id));
     }
 
-    /// chat_send_no_agent_resolved — `conversations/create` avec params
+    /// `chat_send_no_agent_resolved` — `conversations/create` avec params
     /// `{} ` (pas d'`agent`), `initialize` sur un workspace SANS agent par
     /// défaut (ne pas appeler l'équivalent de `set_default_agent`),
     /// `chat/send` SANS `agent` dans les params -> `VNL-RPC-008`. Vérifier
@@ -2214,7 +2219,7 @@ mod tests {
         assert!(!state.busy.lock().unwrap().contains(&conv_id));
     }
 
-    /// chat_send_spawns_and_clears_busy_on_turn_error — test principal,
+    /// `chat_send_spawns_and_clears_busy_on_turn_error` — test principal,
     /// bout-en-bout sur le chemin d'échec réseau (AUCUN de ces tests n'a
     /// besoin d'un vrai LLM joignable).
     ///
@@ -2233,7 +2238,7 @@ mod tests {
         // config.yaml with a broken ollama provider
         std::fs::write(
             vanyline.join("config.yaml"),
-            r#"providers:
+            r"providers:
   ollama-bad:
     type: openai-compatible
     endpoint: http://127.0.0.1:1
@@ -2243,7 +2248,7 @@ models:
     model: qwen2.5
 defaults:
   agent: build
-"#,
+",
         )
         .unwrap();
 
@@ -2349,7 +2354,7 @@ defaults:
         assert_eq!(persisted.messages[0].content, "hi");
     }
 
-    /// conversations_delete_purges_seq_and_busy — supprimer une conversation
+    /// `conversations_delete_purges_seq_and_busy` — supprimer une conversation
     /// doit purger ses entrées dans `state.seq` et `state.busy` (R13).
     #[tokio::test]
     async fn conversations_delete_purges_seq_and_busy() {
@@ -2414,7 +2419,7 @@ defaults:
 
     // -- New tests for task 04a --
 
-    /// owners_get_missing_name_returns_malformed — `owners/get` avec
+    /// `owners_get_missing_name_returns_malformed` — `owners/get` avec
     /// `params: {}` -> `error.data.code == "VNL-RPC-000"`.
     #[tokio::test]
     async fn owners_get_missing_name_returns_malformed() {
@@ -2432,7 +2437,7 @@ defaults:
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// owners_create_missing_name_returns_malformed — `owners/create` avec
+    /// `owners_create_missing_name_returns_malformed` — `owners/create` avec
     /// `params: {"homeSize": "1Gi"}` (pas de `name`) -> `VNL-RPC-000`.
     #[tokio::test]
     async fn owners_create_missing_name_returns_malformed() {
@@ -2450,7 +2455,7 @@ defaults:
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// owners_delete_missing_name_returns_malformed — `owners/delete` avec
+    /// `owners_delete_missing_name_returns_malformed` — `owners/delete` avec
     /// `params: {}` -> `VNL-RPC-000`.
     #[tokio::test]
     async fn owners_delete_missing_name_returns_malformed() {
@@ -2470,7 +2475,7 @@ defaults:
 
     // -- New tests for task 04b --
 
-    /// projects_get_missing_name_returns_malformed — `projects/get` avec
+    /// `projects_get_missing_name_returns_malformed` — `projects/get` avec
     /// `params: {}` -> `error.data.code == "VNL-RPC-000"`.
     #[tokio::test]
     async fn projects_get_missing_name_returns_malformed() {
@@ -2488,7 +2493,7 @@ defaults:
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// projects_create_missing_name_returns_malformed — `projects/create` avec
+    /// `projects_create_missing_name_returns_malformed` — `projects/create` avec
     /// `params: {"repoUrl": "https://example.com/repo.git"}` (pas de `name`) ->
     /// `VNL-RPC-000`.
     #[tokio::test]
@@ -2511,7 +2516,7 @@ defaults:
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// projects_delete_missing_name_returns_malformed — `projects/delete` avec
+    /// `projects_delete_missing_name_returns_malformed` — `projects/delete` avec
     /// `params: {}` -> `VNL-RPC-000`.
     #[tokio::test]
     async fn projects_delete_missing_name_returns_malformed() {
@@ -2531,7 +2536,7 @@ defaults:
 
     // -- New tests for task 04c --
 
-    /// sandboxes_get_missing_name_returns_malformed — `sandboxes/get` avec
+    /// `sandboxes_get_missing_name_returns_malformed` — `sandboxes/get` avec
     /// `params: {}` -> `error.data.code == "VNL-RPC-000"`.
     #[tokio::test]
     async fn sandboxes_get_missing_name_returns_malformed() {
@@ -2549,7 +2554,7 @@ defaults:
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// sandboxes_create_missing_name_returns_malformed — `sandboxes/create` avec
+    /// `sandboxes_create_missing_name_returns_malformed` — `sandboxes/create` avec
     /// `params: {"project": "demo", "branch": "main"}` (pas de `name`) ->
     /// `VNL-RPC-000`.
     #[tokio::test]
@@ -2572,7 +2577,7 @@ defaults:
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// sandboxes_delete_missing_name_returns_malformed — `sandboxes/delete` avec
+    /// `sandboxes_delete_missing_name_returns_malformed` — `sandboxes/delete` avec
     /// `params: {}` -> `VNL-RPC-000`.
     #[tokio::test]
     async fn sandboxes_delete_missing_name_returns_malformed() {
@@ -2592,7 +2597,7 @@ defaults:
 
     // -- New tests for task 06 --
 
-    /// sandboxes_stop_missing_name_returns_malformed — `sandboxes/stop` avec
+    /// `sandboxes_stop_missing_name_returns_malformed` — `sandboxes/stop` avec
     /// `params: {}` -> `VNL-RPC-000`.
     #[tokio::test]
     async fn sandboxes_stop_missing_name_returns_malformed() {
@@ -2610,7 +2615,7 @@ defaults:
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 
-    /// sandboxes_start_missing_name_returns_malformed — `sandboxes/start` avec
+    /// `sandboxes_start_missing_name_returns_malformed` — `sandboxes/start` avec
     /// `params: {}` -> `VNL-RPC-000`.
     #[tokio::test]
     async fn sandboxes_start_missing_name_returns_malformed() {

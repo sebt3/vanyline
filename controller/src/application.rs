@@ -214,7 +214,7 @@ pub fn build_application_deployment(app: &Application) -> Deployment {
     }
 }
 
-/// Service ClusterIP exposant le port HTTP du Deployment `app` (sélecteur =
+/// Service `ClusterIP` exposant le port HTTP du Deployment `app` (sélecteur =
 /// `vanyline.solidite.fr/application: <name>`, seul label garanti unique posé
 /// par `build_application_deployment`). `ownerReference` vers l'Application.
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
@@ -302,7 +302,7 @@ pub fn build_application_ingress(app: &Application) -> Ingress {
 ///
 /// Note d'adaptation k8s-openapi 0.28 : `Secret.data` est
 /// `Option<BTreeMap<String, ByteString>>` — les valeurs sont encodées en
-/// base64 lors de la sérialisation, mais le stockage interne (ByteString)
+/// base64 lors de la sérialisation, mais le stockage interne (`ByteString`)
 /// utilise un `Vec<u8>`. Le builder prend une `String` et la convertit en bytes.
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_cookie_secret(app: &Application, cookie_data_value: String) -> Secret {
@@ -374,22 +374,18 @@ async fn ensure_cookie_secret(
 /// Note : k8s-openapi 0.28 utilise `DeploymentCondition` (apps/v1) pour
 /// `DeploymentStatus.conditions`, avec les mêmes champs `type_`/`status`/`reason`.
 fn deployment_phase(conditions: Option<&Vec<DeploymentCondition>>) -> String {
-    let available = conditions
-        .map(|cs| {
-            cs.iter()
-                .any(|c| c.type_ == "Available" && c.status == "True")
+    let available = conditions.is_some_and(|cs| {
+        cs.iter()
+            .any(|c| c.type_ == "Available" && c.status == "True")
+    });
+    let failed = conditions.is_some_and(|cs| {
+        cs.iter().any(|c| {
+            c.type_ == "Available"
+                && c.status == "False"
+                && (c.reason.as_deref() == Some("Failed")
+                    || c.reason.as_deref() == Some("ProgressDeadlineExceeded"))
         })
-        .unwrap_or(false);
-    let failed = conditions
-        .map(|cs| {
-            cs.iter().any(|c| {
-                c.type_ == "Available"
-                    && c.status == "False"
-                    && (c.reason.as_deref() == Some("Failed")
-                        || c.reason.as_deref() == Some("ProgressDeadlineExceeded"))
-            })
-        })
-        .unwrap_or(false);
+    });
 
     if available {
         "Running".to_string()

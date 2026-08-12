@@ -45,12 +45,10 @@ async fn handler_login(State(state): State<AppState>) -> Result<impl IntoRespons
     private_jar.add(Cookie::new("oidc_pending", pending_value));
 
     let encrypted = jar.get("oidc_pending");
-    let encrypted_value = encrypted.map(|c: &Cookie| c.value()).unwrap_or("");
+    let encrypted_value = encrypted.map_or("", |c: &Cookie| c.value());
 
-    let set_cookie_pending = format!(
-        "oidc_pending={}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300",
-        encrypted_value
-    );
+    let set_cookie_pending =
+        format!("oidc_pending={encrypted_value}; HttpOnly; SameSite=Lax; Path=/; Max-Age=300");
 
     Response::builder()
         .status(StatusCode::FOUND)
@@ -68,13 +66,13 @@ async fn handler_callback(
     let cookie_header = headers
         .get("Cookie")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
+        .map(std::string::ToString::to_string);
 
     let pending_value = cookie_header
         .as_ref()
         .and_then(|h| {
             h.split(';')
-                .map(|s| s.trim())
+                .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .find_map(|c| {
                     c.split_once('=').and_then(|(name, value)| {

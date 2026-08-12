@@ -52,8 +52,8 @@ pub async fn create_model_profile(
     let provider_id = resolve_provider_id(&state, db_user.id, &body.provider).await?;
 
     sqlx::query(
-        r#"INSERT INTO model_profiles (user_id, name, provider_id, model, temperature, max_tokens, options)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)"#,
+        r"INSERT INTO model_profiles (user_id, name, provider_id, model, temperature, max_tokens, options)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)",
     )
     .bind(db_user.id)
     .bind(&body.name)
@@ -101,14 +101,14 @@ pub async fn update_model_profile(
     };
 
     let rows = sqlx::query(
-        r#"UPDATE model_profiles SET
+        r"UPDATE model_profiles SET
             provider_id = COALESCE($3, provider_id),
             model = COALESCE($4, model),
             temperature = COALESCE($5, temperature),
             max_tokens = COALESCE($6, max_tokens),
             options = COALESCE($7, options),
             updated_at = NOW()
-           WHERE user_id = $1 AND name = $2"#,
+           WHERE user_id = $1 AND name = $2",
     )
     .bind(db_user.id)
     .bind(&name)

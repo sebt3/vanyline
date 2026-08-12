@@ -66,9 +66,9 @@ pub async fn create_provider(
     }
 
     let provider = sqlx::query_as::<_, LlmProvider>(
-        r#"INSERT INTO llm_providers (user_id, name, provider_type, endpoint, api_key, is_default)
+        r"INSERT INTO llm_providers (user_id, name, provider_type, endpoint, api_key, is_default)
            VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING *"#,
+           RETURNING *",
     )
     .bind(db_user.id)
     .bind(&body.name)
@@ -121,7 +121,7 @@ pub async fn update_provider(
     }
 
     let provider = sqlx::query_as::<_, LlmProvider>(
-        r#"UPDATE llm_providers SET
+        r"UPDATE llm_providers SET
             name = COALESCE($3, name),
             provider_type = COALESCE($4, provider_type),
             endpoint = COALESCE($5, endpoint),
@@ -129,7 +129,7 @@ pub async fn update_provider(
             is_default = COALESCE($7, is_default),
             updated_at = NOW()
            WHERE id = $1 AND user_id = $2
-           RETURNING *"#,
+           RETURNING *",
     )
     .bind(id)
     .bind(db_user.id)
@@ -241,7 +241,7 @@ async fn discover_models(provider: &LlmProvider) -> Result<Vec<String>, AppError
                 .as_array()
                 .unwrap_or(&vec![])
                 .iter()
-                .filter_map(|m| m["name"].as_str().map(|s| s.to_string()))
+                .filter_map(|m| m["name"].as_str().map(std::string::ToString::to_string))
                 .collect();
             Ok(models)
         }
@@ -249,7 +249,7 @@ async fn discover_models(provider: &LlmProvider) -> Result<Vec<String>, AppError
             let url = format!("{}/v1/models", provider.endpoint.trim_end_matches('/'));
             let mut req = client.get(&url);
             if let Some(ref key) = provider.api_key {
-                req = req.header("Authorization", format!("Bearer {}", key));
+                req = req.header("Authorization", format!("Bearer {key}"));
             }
             let resp: serde_json::Value = req
                 .send()
@@ -263,7 +263,7 @@ async fn discover_models(provider: &LlmProvider) -> Result<Vec<String>, AppError
                 .as_array()
                 .unwrap_or(&vec![])
                 .iter()
-                .filter_map(|m| m["id"].as_str().map(|s| s.to_string()))
+                .filter_map(|m| m["id"].as_str().map(std::string::ToString::to_string))
                 .collect();
             Ok(models)
         }

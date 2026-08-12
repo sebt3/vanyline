@@ -10,7 +10,7 @@ pub fn extract_token(cookie_header: Option<&str>, key: &Key) -> Result<(String, 
 
     let cookie_value = cookie_header
         .split(';')
-        .map(|s| s.trim())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .find_map(|c| {
             c.split_once('=').and_then(|(name, value)| {
@@ -70,12 +70,11 @@ fn extract_exp_claim(jwt: &str) -> Option<u64> {
 }
 
 pub fn build_set_cookie(id_token: &str, email: &str, key: &Key) -> String {
-    let value = format!("{}|{}", id_token, email);
+    let value = format!("{id_token}|{email}");
     let exp = extract_exp_claim(id_token).unwrap_or(0);
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+        .map_or(0, |d| d.as_secs());
     let max_age = exp.saturating_sub(now);
 
     let mut jar = cookie::CookieJar::new();
@@ -83,19 +82,13 @@ pub fn build_set_cookie(id_token: &str, email: &str, key: &Key) -> String {
     private_jar.add(cookie::Cookie::new(COOKIE_NAME, value));
 
     let encrypted = jar.get(COOKIE_NAME);
-    let encrypted_value = encrypted.map(|c| c.value()).unwrap_or("");
+    let encrypted_value = encrypted.map_or("", cookie::Cookie::value);
 
-    format!(
-        "{}={}; HttpOnly; SameSite=Lax; Path=/; Max-Age={}",
-        COOKIE_NAME, encrypted_value, max_age
-    )
+    format!("{COOKIE_NAME}={encrypted_value}; HttpOnly; SameSite=Lax; Path=/; Max-Age={max_age}")
 }
 
 pub fn clear_cookie() -> String {
-    format!(
-        "{}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0",
-        COOKIE_NAME
-    )
+    format!("{COOKIE_NAME}=; HttpOnly; SameSite=Lax; Path=/; Max-Age=0")
 }
 
 #[cfg(test)]

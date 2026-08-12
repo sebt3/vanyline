@@ -41,7 +41,7 @@ pub async fn list_sandboxes(
     let owner_projects: Vec<String> = projects
         .into_iter()
         .filter(|p| p.spec.owner == owner)
-        .filter_map(|p| p.metadata.name.clone())
+        .filter_map(|p| p.metadata.name)
         .collect();
     let sandboxes = client.list_sandboxes().await?;
     Ok(Json(

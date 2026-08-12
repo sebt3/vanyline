@@ -81,7 +81,7 @@ async fn send_http_request(
 impl OidcClient {
     pub async fn new(config: &Config) -> Result<Self, AppError> {
         let issuer_url = IssuerUrl::new(config.oidc_issuer_url.clone()).map_err(|e| {
-            AppError::OidcError(format!("VNL-AUTH-004: invalid OIDC issuer URL: {:?}", e))
+            AppError::OidcError(format!("VNL-AUTH-004: invalid OIDC issuer URL: {e:?}"))
         })?;
 
         let http_client = build_http_client(config)?;
@@ -94,12 +94,12 @@ impl OidcClient {
             })
             .await
             .map_err(|e| {
-                AppError::OidcError(format!("VNL-AUTH-005: OIDC discovery failed: {:?}", e))
+                AppError::OidcError(format!("VNL-AUTH-005: OIDC discovery failed: {e:?}"))
             })?
         };
 
         let redirect_url = RedirectUrl::new(config.oidc_redirect_url.clone()).map_err(|e| {
-            AppError::OidcError(format!("VNL-AUTH-006: invalid OIDC redirect URL: {:?}", e))
+            AppError::OidcError(format!("VNL-AUTH-006: invalid OIDC redirect URL: {e:?}"))
         })?;
 
         let client = CoreClient::from_provider_metadata(

@@ -50,9 +50,9 @@ pub async fn create_server(
     let db_user = get_or_create_user(&state, &user).await?;
 
     let server = sqlx::query_as::<_, McpServer>(
-        r#"INSERT INTO mcp_servers (user_id, name, server_type, url, headers)
+        r"INSERT INTO mcp_servers (user_id, name, server_type, url, headers)
            VALUES ($1, $2, $3, $4, $5)
-           RETURNING *"#,
+           RETURNING *",
     )
     .bind(db_user.id)
     .bind(&body.name)
@@ -95,14 +95,14 @@ pub async fn update_server(
     let db_user = get_or_create_user(&state, &user).await?;
 
     let server = sqlx::query_as::<_, McpServer>(
-        r#"UPDATE mcp_servers SET
+        r"UPDATE mcp_servers SET
             name = COALESCE($3, name),
             server_type = COALESCE($4, server_type),
             url = COALESCE($5, url),
             headers = COALESCE($6, headers),
             updated_at = NOW()
            WHERE id = $1 AND user_id = $2
-           RETURNING *"#,
+           RETURNING *",
     )
     .bind(id)
     .bind(db_user.id)

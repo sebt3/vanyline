@@ -28,7 +28,7 @@ struct ClientMessage {
     content: String,
 }
 
-/// Pont EventSink -> canal mpsc : chaque événement est poussé sur `tx` dès
+/// Pont `EventSink` -> canal mpsc : chaque événement est poussé sur `tx` dès
 /// qu'il est émis, sans attendre la fin du tour. Remplace l'ancien
 /// `CollectingSink` (bufferisait tout un tour avant le premier octet
 /// envoyé) — la tâche `forward_events` (une par connexion, pas une par
@@ -130,12 +130,11 @@ async fn run_socket(
             continue;
         }
 
-        let agent_id = match conv.agent_id {
-            Some(id) => id,
-            None => {
-                send_error(&tx, "VNL-AGT-001", "No agent assigned to conversation");
-                continue;
-            }
+        let agent_id = if let Some(id) = conv.agent_id {
+            id
+        } else {
+            send_error(&tx, "VNL-AGT-001", "No agent assigned to conversation");
+            continue;
         };
 
         // R4 : verrou busy par conversation — un tour ne bloque plus la
@@ -202,7 +201,7 @@ fn send_error(tx: &mpsc::UnboundedSender<ChatEvent>, code: &str, message: &str) 
 /// Persistance (R9) : le message user est enregistré AVANT l'appel à
 /// `run_agent_turn` (il a bien été envoyé, qu'importe l'issue du tour) ;
 /// le message assistant seulement APRÈS un tour réussi (le `?` sur
-/// `run_agent_turn` empêche d'atteindre le persist_message final en cas
+/// `run_agent_turn` empêche d'atteindre le `persist_message` final en cas
 /// d'échec). C'est cette sémantique qui fait référence — le RPC
 /// (`cli/src/rpc/handlers.rs`) est aligné dessus séparément.
 #[allow(clippy::unwrap_used)] // mutex empoisonne = etat deja corrompu ailleurs, panic attendu
@@ -337,9 +336,9 @@ async fn persist_message(
         "tool_calls": tool_calls,
     });
     let id: Uuid = sqlx::query_scalar(
-        r#"INSERT INTO messages (conversation_id, role, payload)
+        r"INSERT INTO messages (conversation_id, role, payload)
            VALUES ($1, $2, $3)
-           RETURNING id"#,
+           RETURNING id",
     )
     .bind(conversation_id)
     .bind(role)

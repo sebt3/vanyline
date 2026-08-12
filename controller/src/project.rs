@@ -41,8 +41,7 @@ pub fn effective_pvc_name(project: &Project) -> String {
         .spec
         .existing_pvc
         .as_ref()
-        .map(|r| r.name.clone())
-        .unwrap_or_else(|| project_pvc_name(&project.name_any()))
+        .map_or_else(|| project_pvc_name(&project.name_any()), |r| r.name.clone())
 }
 
 /// `subPath` à utiliser lors du montage du PVC — `Some` uniquement quand le repo
@@ -61,7 +60,7 @@ pub fn effective_sub_path(project: &Project) -> Option<String> {
 /// Chemin (relatif à la racine du volume, donc à `WORKSPACE_MOUNT_PATH` une fois
 /// monté) du clone bare du remote.
 #[allow(dead_code)]
-pub fn bare_repo_path() -> &'static str {
+pub const fn bare_repo_path() -> &'static str {
     "repo.git"
 }
 
@@ -121,7 +120,7 @@ fn owner_reference(
 /// fonction reste pure et ne fait aucun appel réseau). Priorité :
 /// `spec.storage_size`/`spec.storage_class` > défauts passés en paramètre >
 /// `DEFAULT_WORKSPACE_SIZE` ("10Gi") pour la taille ; pas de valeur de repli pour
-/// la storage class (`None` => StorageClass par défaut du cluster).
+/// la storage class (`None` => `StorageClass` par défaut du cluster).
 pub fn build_workspace_pvc(
     project: &Project,
     default_size: Option<&str>,
@@ -171,7 +170,7 @@ pub fn build_workspace_pvc(
 pub struct ProjectJobContext {
     /// Image utilisée par tous les Jobs git (elle contient git — c'est l'image sandbox).
     pub sandbox_image: String,
-    /// Nom du PVC home de l'Owner du Project (résolu par l'appelant depuis owner::effective_pvc_name).
+    /// Nom du PVC home de l'Owner du Project (résolu par l'appelant depuis `owner::effective_pvc_name`).
     pub owner_pvc_name: String,
 }
 
@@ -190,7 +189,7 @@ pub fn purge_job_name(project_name: &str) -> String {
     format!("project-{project_name}-purge")
 }
 
-/// `schedule` de CronJob pour `spec.fetch_interval` (défaut `"1h"`) — cf. note `@every` dans le contexte de cette tâche.
+/// `schedule` de `CronJob` pour `spec.fetch_interval` (défaut `"1h"`) — cf. note `@every` dans le contexte de cette tâche.
 #[allow(dead_code)]
 pub fn fetch_schedule(project: &Project) -> String {
     let interval = project
@@ -205,7 +204,7 @@ pub fn fetch_schedule(project: &Project) -> String {
 /// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
 /// `git` exécutant `command` en argv direct.
 #[allow(dead_code)]
-pub(crate) fn git_pod_template(
+pub fn git_pod_template(
     project: &Project,
     ctx: &ProjectJobContext,
     command: Vec<String>,
@@ -335,7 +334,7 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
     }
 }
 
-/// CronJob périodique : `git fetch --prune` sur le clone bare.
+/// `CronJob` périodique : `git fetch --prune` sur le clone bare.
 #[allow(dead_code)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJob {
@@ -419,7 +418,7 @@ pub struct Context {
 /// Status attendu : `pvc_name`, `cloned`, condition `Ready` reflétant `cloned`
 /// (`True`/`"Init job succeeded"` une fois cloné, `False`/`"Waiting for init job"`
 /// sinon). `last_fetch` et `worktrees` restent vides en v1 (pas encore suivis —
-/// `last_fetch` viendrait du status du CronJob, `worktrees` du reconciler Sandbox,
+/// `last_fetch` viendrait du status du `CronJob`, `worktrees` du reconciler Sandbox,
 /// tous deux hors scope ici).
 pub fn compute_status(project: &Project, cloned: bool) -> ProjectStatus {
     let (status, reason, message) = if cloned {
@@ -457,7 +456,7 @@ async fn fetch_owner(project: &Project, ctx: &Context, ns: &str) -> Result<Owner
     Ok(owners.get(&project.spec.owner).await?)
 }
 
-/// `Event::Apply` : PVC workspace (si à créer) + Job init (une fois) + CronJob
+/// `Event::Apply` : PVC workspace (si à créer) + Job init (une fois) + `CronJob`
 /// fetch (une fois cloné) + status.
 async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
     let owner = fetch_owner(project, ctx, ns).await?;
@@ -500,13 +499,12 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
     };
 
     let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
-    let cloned = match jobs.get_opt(&init_job_name(&project.name_any())).await? {
-        Some(job) => job.status.and_then(|s| s.succeeded).unwrap_or(0) > 0,
-        None => {
-            let job = build_init_job(project, &job_ctx);
-            jobs.create(&PostParams::default(), &job).await?;
-            false
-        }
+    let cloned = if let Some(job) = jobs.get_opt(&init_job_name(&project.name_any())).await? {
+        job.status.and_then(|s| s.succeeded).unwrap_or(0) > 0
+    } else {
+        let job = build_init_job(project, &job_ctx);
+        jobs.create(&PostParams::default(), &job).await?;
+        false
     };
 
     if cloned {
@@ -619,15 +617,12 @@ pub async fn reconcile(
 }
 
 pub fn error_policy(_project: Arc<Project>, error: &ControllerError, _ctx: Arc<Context>) -> Action {
-    match error {
-        ControllerError::PurgePending { .. } => {
-            tracing::info!(%error, "purge job pending, requeue in 10s");
-            Action::requeue(Duration::from_secs(10))
-        }
-        _ => {
-            tracing::warn!(%error, "project reconcile error, requeue in 30s");
-            Action::requeue(Duration::from_secs(30))
-        }
+    if let ControllerError::PurgePending { .. } = error {
+        tracing::info!(%error, "purge job pending, requeue in 10s");
+        Action::requeue(Duration::from_secs(10))
+    } else {
+        tracing::warn!(%error, "project reconcile error, requeue in 30s");
+        Action::requeue(Duration::from_secs(30))
     }
 }
 
@@ -886,10 +881,7 @@ mod tests {
         assert_eq!(job.metadata.name, Some("project-demo-init".to_string()));
 
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        assert_eq!(
-            pod_spec.containers[0].image,
-            Some(ctx.sandbox_image.clone())
-        );
+        assert_eq!(pod_spec.containers[0].image, Some(ctx.sandbox_image));
 
         let command = pod_spec.containers[0].command.as_ref().unwrap();
         assert_eq!(

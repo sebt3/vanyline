@@ -1,6 +1,7 @@
 use serde_json::json;
 
-/// read_file, write_file, edit_file, delete_file, list_directory.
+/// `read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`.
+#[must_use]
 pub fn filesystem_tools() -> Vec<serde_json::Value> {
     vec![
         json!({
@@ -68,7 +69,8 @@ pub fn filesystem_tools() -> Vec<serde_json::Value> {
     ]
 }
 
-/// find_files, search.
+/// `find_files`, search.
+#[must_use]
 pub fn search_tools() -> Vec<serde_json::Value> {
     vec![
         json!({
@@ -99,7 +101,8 @@ pub fn search_tools() -> Vec<serde_json::Value> {
     ]
 }
 
-/// execute_command.
+/// `execute_command`.
+#[must_use]
 pub fn command_tools() -> Vec<serde_json::Value> {
     vec![json!({
         "name": "execute_command",

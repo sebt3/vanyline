@@ -105,7 +105,7 @@ pub async fn check_config(store: &dyn ConfigStore) -> Vec<VnyError> {
         if !agents.iter().any(|a| &a.name == name) {
             problems.push(VnyError::UnknownReference(
                 "agent",
-                format!("{} (defaults.agent)", name),
+                format!("{name} (defaults.agent)"),
             ));
         }
     }
@@ -194,8 +194,7 @@ mod tests {
         let problems = check_config(&store).await;
         assert!(
             problems.is_empty(),
-            "expected no problems, got: {:?}",
-            problems
+            "expected no problems, got: {problems:?}"
         );
     }
 
@@ -393,7 +392,7 @@ mod tests {
         assert!(dup_err.is_some(), "expected DuplicateName(agent, dup)");
     }
 
-    /// Custom ConfigStore that always errors on list_skills() but works for everything else.
+    /// Custom `ConfigStore` that always errors on `list_skills()` but works for everything else.
     struct ErrSkillsStore {
         inner: InMemoryConfigStore,
     }

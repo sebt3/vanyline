@@ -34,7 +34,7 @@ struct Cli {
     #[arg(short, long, global = true)]
     namespace: Option<String>,
     /// Nom de la sandbox a utiliser comme toolbox d'inference (remplace les
-    /// local_tools par les tools MCP de la sandbox). Surcharge
+    /// `local_tools` par les tools MCP de la sandbox). Surcharge
     /// `defaults.toolbox`.
     #[arg(long, global = true)]
     toolbox: Option<String>,
@@ -180,7 +180,7 @@ async fn main() {
                 false,
                 None,
             )
-            .await
+            .await;
         }
         Some(Commands::Run {
             message,
@@ -199,7 +199,7 @@ async fn main() {
                 json,
                 model,
             )
-            .await
+            .await;
         }
         Some(Commands::Conversations(cmd)) => run_conversation(cmd).await,
         Some(Commands::Agents(cmd)) => run_agent(cmd).await,
@@ -224,7 +224,7 @@ async fn main() {
 }
 
 async fn run_conversation(cmd: conversation::Commands) {
-    use conversation::Commands::*;
+    use conversation::Commands::{Delete, List, New, Set, Show};
     match cmd {
         List => {
             let convs = store::list_conversations().unwrap_or_default();
@@ -255,7 +255,7 @@ async fn run_conversation(cmd: conversation::Commands) {
                 todo: None,
             };
             store::save_conversation(&conv).expect("failed to save conversation");
-            println!("Created conversation: {}", id);
+            println!("Created conversation: {id}");
         }
         Show { reference } => {
             let convs = store::list_conversations().unwrap_or_default();
@@ -277,7 +277,7 @@ async fn run_conversation(cmd: conversation::Commands) {
                     std::process::exit(1);
                 });
             store::delete_conversation(&id).expect("failed to delete conversation");
-            println!("Deleted conversation: {}", id);
+            println!("Deleted conversation: {id}");
         }
         Set { reference } => {
             let convs = store::list_conversations().unwrap_or_default();
@@ -288,13 +288,13 @@ async fn run_conversation(cmd: conversation::Commands) {
                 });
             store::get_conversation(&id).expect("conversation not found");
             store::set_active_conversation(&id).expect("failed to set active conversation");
-            println!("Active conversation: {}", id);
+            println!("Active conversation: {id}");
         }
     }
 }
 
 async fn run_agent(cmd: agent::Commands) {
-    use agent::Commands::*;
+    use agent::Commands::{List, SetDefault, Show};
     use vanyline_lib::store::ConfigStore;
     let store = discover_fs_store();
 
@@ -410,7 +410,7 @@ async fn run_agent(cmd: agent::Commands) {
 }
 
 async fn run_provider(cmd: provider::Commands) {
-    use provider::Commands::*;
+    use provider::Commands::List;
     use vanyline_lib::store::ConfigStore;
     let store = discover_fs_store();
 
@@ -442,7 +442,7 @@ pub(crate) fn discover_fs_store() -> fs_store::FsConfigStore {
 }
 
 async fn run_config(cmd: config_cmd::Commands) {
-    use config_cmd::Commands::*;
+    use config_cmd::Commands::Check;
     match cmd {
         Check => {
             let store = discover_fs_store();
@@ -460,7 +460,7 @@ async fn run_config(cmd: config_cmd::Commands) {
 }
 
 async fn run_models(cmd: model_cmd::Commands) {
-    use model_cmd::Commands::*;
+    use model_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
     let store = discover_fs_store();
     match cmd {
@@ -483,7 +483,7 @@ async fn run_models(cmd: model_cmd::Commands) {
 }
 
 async fn run_toolsets(cmd: toolset_cmd::Commands) {
-    use toolset_cmd::Commands::*;
+    use toolset_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
     let store = discover_fs_store();
     match cmd {
@@ -506,7 +506,7 @@ async fn run_toolsets(cmd: toolset_cmd::Commands) {
 }
 
 async fn run_skills(cmd: skill_cmd::Commands) {
-    use skill_cmd::Commands::*;
+    use skill_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
     let store = discover_fs_store();
     match cmd {
@@ -528,7 +528,7 @@ async fn run_skills(cmd: skill_cmd::Commands) {
 }
 
 async fn run_mcp(cmd: mcp_cmd::Commands) {
-    use mcp_cmd::Commands::*;
+    use mcp_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
     let store = discover_fs_store();
     match cmd {
@@ -588,7 +588,7 @@ async fn resolve_toolbox_mcp_url(
 
 async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
     use kube::ResourceExt;
-    use owner_cmd::Commands::*;
+    use owner_cmd::Commands::{Create, Delete, List, Show};
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {
@@ -713,7 +713,7 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
 
 async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) {
     use kube::ResourceExt;
-    use project_cmd::Commands::*;
+    use project_cmd::Commands::{Create, Delete, List, Show};
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {
@@ -725,7 +725,7 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                 println!("No projects found.");
             } else {
                 for p in &projects {
-                    let cloned = p.status.as_ref().map(|s| s.cloned).unwrap_or(false);
+                    let cloned = p.status.as_ref().is_some_and(|s| s.cloned);
                     println!(
                         "  {} | owner={} | {} | cloned={}",
                         p.name_any(),
@@ -855,7 +855,7 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
 
 async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) {
     use kube::ResourceExt;
-    use sandbox_cmd::Commands::*;
+    use sandbox_cmd::Commands::{Create, Delete, List, Show, Start, Stop};
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {

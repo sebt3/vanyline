@@ -21,7 +21,7 @@ impl FromRequestParts<AppState> for AuthUser {
             .headers
             .get("Cookie")
             .and_then(|v| v.to_str().ok())
-            .map(|s| s.to_string());
+            .map(std::string::ToString::to_string);
 
         let (id_token, email) = extract_token(cookie_header.as_deref(), &state.cookie_key)
             .map_err(|e| {
@@ -30,7 +30,7 @@ impl FromRequestParts<AppState> for AuthUser {
             })?;
 
         tracing::debug!(email = %email, "auth ok");
-        Ok(AuthUser { id_token, email })
+        Ok(Self { id_token, email })
     }
 }
 

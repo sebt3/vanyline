@@ -59,7 +59,7 @@ pub struct DeleteFileOptions {
 pub(crate) fn file_not_found_hint(path: &str) -> String {
     let parent = std::path::Path::new(&path)
         .parent()
-        .map(|p| p.as_os_str())
+        .map(std::path::Path::as_os_str)
         .filter(|p| !p.is_empty());
 
     match parent {
@@ -72,7 +72,7 @@ pub(crate) fn file_not_found_hint(path: &str) -> String {
         Some(parent) => match std::fs::read_dir(parent) {
             Ok(entries) => {
                 let names: Vec<String> = entries
-                    .filter_map(|e| e.ok())
+                    .filter_map(std::result::Result::ok)
                     .map(|e| e.file_name().to_string_lossy().to_string())
                     .collect();
                 let mut sorted = names;
@@ -81,7 +81,7 @@ pub(crate) fn file_not_found_hint(path: &str) -> String {
                     ", parent directory contains: []".to_string()
                 } else {
                     let display = sorted.join(", ");
-                    format!(", parent directory contains: [{}]", display)
+                    format!(", parent directory contains: [{display}]")
                 }
             }
             Err(_) => ", parent directory does not exist either".to_string(),
@@ -93,6 +93,7 @@ pub(crate) fn file_not_found_hint(path: &str) -> String {
 // read_file
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let path = opts.path.clone();
     let offset = opts.offset;
@@ -142,22 +143,18 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
         if total == 0 {
             if offset == 0 {
                 return Ok(String::new());
-            } else {
-                return Err(ToolsError::InvalidArgument {
-                    name: "offset".into(),
-                    reason: "file is empty".into(),
-                });
             }
+            return Err(ToolsError::InvalidArgument {
+                name: "offset".into(),
+                reason: "file is empty".into(),
+            });
         }
 
         // 4. offset out of range
         if offset >= total {
             return Err(ToolsError::InvalidArgument {
                 name: "offset".into(),
-                reason: format!(
-                    "file has {} lines, offset {} is out of range",
-                    total, offset
-                ),
+                reason: format!("file has {total} lines, offset {offset} is out of range"),
             });
         }
 
@@ -224,6 +221,7 @@ async fn atomic_write(path: &str, content: impl AsRef<[u8]>) -> std::io::Result<
 // write_file
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn write_file(opts: WriteFileOptions) -> BoxedFuture<Result<(), ToolsError>> {
     let path = opts.path.clone();
     let content = opts.content;
@@ -271,6 +269,7 @@ pub fn write_file(opts: WriteFileOptions) -> BoxedFuture<Result<(), ToolsError>>
 // edit_file
 // ---------------------------------------------------------------------------
 
+#[must_use]
 pub fn edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let path = opts.path.clone();
     let old_string = opts.old_string.clone();
@@ -356,7 +355,7 @@ pub fn edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, ToolsError
         }?;
 
         // 8. return message
-        Ok(format!("edited {}: {} replacement(s)", path, n))
+        Ok(format!("edited {path}: {n} replacement(s)"))
     })
 }
 
@@ -385,11 +384,7 @@ fn levenshtein_distance(a: &str, b: &str) -> usize {
     for i in 1..=len_a {
         curr[0] = i;
         for j in 1..=len_b {
-            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
-                0
-            } else {
-                1
-            };
+            let cost = usize::from(a_bytes[i - 1] != b_bytes[j - 1]);
             curr[j] = (prev[j] + 1).min(curr[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut curr);
@@ -422,7 +417,7 @@ fn closest_line_hint(content: &str, needle: &str) -> String {
         }
     }
 
-    format!(". Closest line in file: '{}'", best_line)
+    format!(". Closest line in file: '{best_line}'")
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +432,7 @@ pub struct ListDirectoryOptions {
     pub depth: usize,
 }
 
+#[must_use]
 pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let path = opts.path;
     let path_for_err = path.clone();
@@ -454,10 +450,7 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
                     });
                 }
                 Err(e) => {
-                    return Err(ToolsError::Io {
-                        path: path.clone(),
-                        source: e,
-                    });
+                    return Err(ToolsError::Io { path, source: e });
                 }
             };
             if !meta.is_dir() {
@@ -543,7 +536,7 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
             );
 
             if output.is_empty() {
-                Ok(format!("{} is empty", path))
+                Ok(format!("{path} is empty"))
             } else {
                 let mut result = output.join("\n");
                 if limit_reached.get() {
@@ -565,8 +558,9 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
     })
 }
 
+#[must_use]
 pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError>> {
-    let path = opts.path.clone();
+    let path = opts.path;
     Box::pin(async move {
         // 1. metadata — not found → FileNotFound, other → Io
         let meta = match tokio::fs::metadata(&path).await {
@@ -620,7 +614,7 @@ mod tests {
     use super::*;
 
     /// -----------------------------------------------------------------------
-    /// read_file tests
+    /// `read_file` tests
     /// -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -653,7 +647,7 @@ mod tests {
     async fn read_file_offset() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        let lines: Vec<String> = (0..10).map(|i| format!("line {}", i)).collect();
+        let lines: Vec<String> = (0..10).map(|i| format!("line {i}")).collect();
         tokio::fs::write(&path, lines.join("\n") + "\n")
             .await
             .unwrap();
@@ -677,7 +671,7 @@ mod tests {
     async fn read_file_limit_truncates() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.txt");
-        let lines: Vec<String> = (0..300).map(|i| format!("line {}", i)).collect();
+        let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
         tokio::fs::write(&path, lines.join("\n") + "\n")
             .await
             .unwrap();
@@ -720,11 +714,10 @@ mod tests {
                 assert!(p.contains("nonexistent.txt"));
                 assert!(
                     hint.contains("parent directory contains:"),
-                    "hint should mention parent directory, got: {}",
-                    hint
+                    "hint should mention parent directory, got: {hint}"
                 );
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
@@ -744,11 +737,10 @@ mod tests {
             Err(ToolsError::FileNotFound { hint, .. }) => {
                 assert!(
                     hint.contains("does not exist either"),
-                    "hint should say 'does not exist either', got: {}",
-                    hint
+                    "hint should say 'does not exist either', got: {hint}"
                 );
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
@@ -768,7 +760,7 @@ mod tests {
             Err(ToolsError::NotAFile(p)) => {
                 assert!(p.contains(dir.path().to_str().unwrap_or("")));
             }
-            other => panic!("Expected NotAFile, got: {:?}", other),
+            other => panic!("Expected NotAFile, got: {other:?}"),
         }
     }
 
@@ -791,7 +783,7 @@ mod tests {
                 assert_eq!(name, "offset");
                 assert!(reason.contains("3 lines"));
             }
-            other => panic!("Expected InvalidArgument, got: {:?}", other),
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
 
@@ -814,7 +806,7 @@ mod tests {
     }
 
     /// -----------------------------------------------------------------------
-    /// read_file raw mode tests
+    /// `read_file` raw mode tests
     /// -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -847,7 +839,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("many.txt");
         // Create a file of more than 200 lines (> READ_MAX_LINES)
-        let lines: Vec<String> = (0..300).map(|i| format!("line {}", i)).collect();
+        let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
         tokio::fs::write(&path, lines.join("\n") + "\n")
             .await
             .unwrap();
@@ -862,7 +854,7 @@ mod tests {
         .unwrap();
 
         // All 300 lines are returned, no truncation marker
-        assert!(result.lines().count() == 300);
+        assert_eq!(result.lines().count(), 300);
         assert!(!result.contains("truncated"));
     }
 
@@ -883,7 +875,7 @@ mod tests {
             Err(ToolsError::FileNotFound { path: p, .. }) => {
                 assert!(p.contains("nonexistent.txt"));
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
@@ -903,12 +895,12 @@ mod tests {
             Err(ToolsError::NotAFile(p)) => {
                 assert!(p.contains(dir.path().to_str().unwrap_or("")));
             }
-            other => panic!("Expected NotAFile, got: {:?}", other),
+            other => panic!("Expected NotAFile, got: {other:?}"),
         }
     }
 
     // -----------------------------------------------------------------------
-    /// write_file tests
+    /// `write_file` tests
     /// -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -967,12 +959,12 @@ mod tests {
             Err(ToolsError::NotAFile(p)) => {
                 assert!(p.contains(dir.path().to_str().unwrap_or("")));
             }
-            other => panic!("Expected NotAFile, got: {:?}", other),
+            other => panic!("Expected NotAFile, got: {other:?}"),
         }
     }
 
     // -----------------------------------------------------------------------
-    /// edit_file tests
+    /// `edit_file` tests
     /// -----------------------------------------------------------------------
 
     #[tokio::test]
@@ -1018,7 +1010,7 @@ mod tests {
                 assert!(p.contains("test.txt"));
                 assert!(hint.contains("Closest line in file:"));
             }
-            other => panic!("Expected EditNoMatch, got: {:?}", other),
+            other => panic!("Expected EditNoMatch, got: {other:?}"),
         }
     }
 
@@ -1041,11 +1033,10 @@ mod tests {
                 // Should not panic, hint should be empty
                 assert!(
                     hint.is_empty(),
-                    "hint should be empty for empty file, got: '{}'",
-                    hint
+                    "hint should be empty for empty file, got: '{hint}'"
                 );
             }
-            other => panic!("Expected EditNoMatch, got: {:?}", other),
+            other => panic!("Expected EditNoMatch, got: {other:?}"),
         }
     }
 
@@ -1070,7 +1061,7 @@ mod tests {
                 assert!(p.contains("test.txt"));
                 assert_eq!(count, 3);
             }
-            other => panic!("Expected EditAmbiguous, got: {:?}", other),
+            other => panic!("Expected EditAmbiguous, got: {other:?}"),
         }
     }
 
@@ -1104,7 +1095,7 @@ mod tests {
 
         let result = edit_file(EditFileOptions {
             path: path.to_string_lossy().to_string(),
-            old_string: "".into(),
+            old_string: String::new(),
             new_string: "world".into(),
             replace_all: false,
         })
@@ -1115,7 +1106,7 @@ mod tests {
                 assert_eq!(name, "old_string");
                 assert!(reason.contains("must not be empty"));
             }
-            other => panic!("Expected InvalidArgument, got: {:?}", other),
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
 
@@ -1136,7 +1127,7 @@ mod tests {
             Err(ToolsError::FileNotFound { path: p, .. }) => {
                 assert!(p.contains("nonexistent.txt"));
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
@@ -1164,8 +1155,8 @@ mod tests {
         let lines: Vec<&str> = result.lines().collect();
         assert_eq!(lines.len(), 2);
         // alpha.txt first (alphabetically), then beta/
-        assert!(lines[0] == "alpha.txt");
-        assert!(lines[1] == "beta/");
+        assert_eq!(lines[0], "alpha.txt");
+        assert_eq!(lines[1], "beta/");
     }
 
     #[tokio::test]
@@ -1186,8 +1177,8 @@ mod tests {
         let lines: Vec<&str> = result.lines().collect();
         assert_eq!(lines.len(), 2);
         // a/ at depth 0, then "  b.txt" at depth 1 (indented)
-        assert!(lines[0] == "a/");
-        assert!(lines[1] == "  b.txt");
+        assert_eq!(lines[0], "a/");
+        assert_eq!(lines[1], "  b.txt");
     }
 
     #[tokio::test]
@@ -1208,7 +1199,7 @@ mod tests {
 
         let lines: Vec<&str> = result.lines().collect();
         assert_eq!(lines.len(), 1);
-        assert!(lines[0] == "a/");
+        assert_eq!(lines[0], "a/");
         // b.txt should NOT be in the output (not descended)
         assert!(!lines.join("").contains("b.txt"));
     }
@@ -1239,7 +1230,7 @@ mod tests {
             Err(ToolsError::FileNotFound { path: ref p, .. }) => {
                 assert!(p.contains("nonexistent"));
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
@@ -1259,7 +1250,7 @@ mod tests {
             Err(ToolsError::NotADirectory(ref p)) => {
                 assert!(p.contains("test.txt"));
             }
-            other => panic!("Expected NotADirectory, got: {:?}", other),
+            other => panic!("Expected NotADirectory, got: {other:?}"),
         }
     }
 
@@ -1268,7 +1259,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // Create 201 files to exceed LIST_MAX_ENTRIES (200)
         for i in 0..201 {
-            let f = dir.path().join(format!("file_{:04}.txt", i));
+            let f = dir.path().join(format!("file_{i:04}.txt"));
             tokio::fs::write(&f, "x").await.unwrap();
         }
 
@@ -1341,7 +1332,7 @@ mod tests {
                 assert_eq!(name, "path");
                 assert!(reason.contains("not empty"));
             }
-            other => panic!("Expected InvalidArgument, got: {:?}", other),
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
 
@@ -1356,12 +1347,12 @@ mod tests {
             Err(ToolsError::FileNotFound { path: ref p, .. }) => {
                 assert!(p.contains("/nonexistent/fake/path/file.txt"));
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
     // -----------------------------------------------------------------------
-    /// R15 — atomic_write tests
+    /// R15 — `atomic_write` tests
     /// -----------------------------------------------------------------------
 
     #[tokio::test]

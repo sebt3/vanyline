@@ -21,12 +21,14 @@ fn tool_definition(name: &str) -> ToolDefinition {
         .chain(mcp::search_tools())
         .chain(mcp::command_tools())
         .find(|t| t["name"] == name)
-        .map(|t| ToolDefinition {
-            name: t["name"].as_str().unwrap().to_string(),
-            description: t["description"].as_str().unwrap().to_string(),
-            parameters: t["inputSchema"].clone(),
-        })
-        .unwrap_or_else(|| panic!("no schema found for tool '{name}' in vanyline_tools::mcp"))
+        .map_or_else(
+            || panic!("no schema found for tool '{name}' in vanyline_tools::mcp"),
+            |t| ToolDefinition {
+                name: t["name"].as_str().unwrap().to_string(),
+                description: t["description"].as_str().unwrap().to_string(),
+                parameters: t["inputSchema"].clone(),
+            },
+        )
 }
 
 #[derive(Debug, serde::Deserialize)]

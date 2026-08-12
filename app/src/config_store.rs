@@ -174,7 +174,7 @@ pub struct PgConfigStore {
 }
 
 impl PgConfigStore {
-    pub fn new(pool: PgPool, user_id: Uuid) -> Self {
+    pub const fn new(pool: PgPool, user_id: Uuid) -> Self {
         Self { pool, user_id }
     }
 
@@ -242,13 +242,14 @@ impl ConfigStore for PgConfigStore {
             .map_err(|e| VnyError::ConfigError(e.to_string()))?;
         let mut result = Vec::new();
         for row in &rows {
-            match domain_mcp_server(row) {
-                Some(server) => result.push(server),
-                None => tracing::warn!(
+            if let Some(server) = domain_mcp_server(row) {
+                result.push(server)
+            } else {
+                tracing::warn!(
                     "Skipping MCP server '{}': unknown server_type '{}'",
                     row.name,
                     row.server_type
-                ),
+                );
             }
         }
         Ok(result)
@@ -539,7 +540,7 @@ mod tests {
         let id = Uuid::new_v4();
         let local_tools = serde_json::json!(["read_file", "search"]);
         let mcp = serde_json::json!([{"server": "fs", "tools": ["read"]}]);
-        let row = sample_toolset(id, uid, "test-toolset", local_tools.clone(), mcp.clone());
+        let row = sample_toolset(id, uid, "test-toolset", local_tools, mcp);
         let toolset = domain_toolset(&row);
         assert_eq!(
             toolset.local_tools,
@@ -645,7 +646,7 @@ mod tests {
             id: Uuid::new_v4(),
             user_id: Uuid::new_v4(),
             name: "blank".to_string(),
-            description: "".to_string(),
+            description: String::new(),
             body: "body".to_string(),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

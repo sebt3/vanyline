@@ -20,12 +20,13 @@ pub struct FindFilesOptions {
     pub path: String,
 }
 
+#[must_use]
 pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let pattern = opts.pattern.clone();
     let effective_path = if opts.path.is_empty() {
         ".".to_string()
     } else {
-        opts.path.clone()
+        opts.path
     };
 
     Box::pin(async move {
@@ -76,8 +77,7 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
                 entry
                     .file_name()
                     .to_str()
-                    .map(|name| name != ".git" && name != "target" && name != "node_modules")
-                    .unwrap_or(true)
+                    .is_none_or(|name| name != ".git" && name != "target" && name != "node_modules")
             })
             .build();
 
@@ -116,8 +116,7 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
 
         if results.is_empty() {
             Ok(format!(
-                "no files matching '{}' under {}",
-                pattern, effective_path
+                "no files matching '{pattern}' under {effective_path}"
             ))
         } else {
             let mut line = results.join("\n");
@@ -147,6 +146,7 @@ pub struct SearchOptions {
     pub glob: String,
 }
 
+#[must_use]
 pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let pattern = opts.pattern.clone();
     let effective_path = if opts.path.is_empty() {
@@ -154,7 +154,7 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
     } else {
         opts.path.clone()
     };
-    let glob_filter = opts.glob.clone();
+    let glob_filter = opts.glob;
 
     Box::pin(async move {
         // 1. Resolve path
@@ -189,7 +189,9 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
         };
 
         // 3. Compile optional glob filter
-        let glob_matcher: Option<globset::GlobMatcher> = if !glob_filter.is_empty() {
+        let glob_matcher: Option<globset::GlobMatcher> = if glob_filter.is_empty() {
+            None
+        } else {
             let g = match globset::Glob::new(&glob_filter) {
                 Ok(g) => g,
                 Err(e) => {
@@ -201,8 +203,6 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
             };
             // compile_matcher() returns GlobMatcher directly
             Some(g.compile_matcher())
-        } else {
-            None
         };
 
         // 4. Walk the tree
@@ -217,8 +217,7 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
                 entry
                     .file_name()
                     .to_str()
-                    .map(|name| name != ".git" && name != "target" && name != "node_modules")
-                    .unwrap_or(true)
+                    .is_none_or(|name| name != ".git" && name != "target" && name != "node_modules")
             })
             .build();
 
@@ -273,10 +272,7 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
         }
 
         if results.is_empty() {
-            Ok(format!(
-                "no matches for '{}' under {}",
-                pattern, effective_path
-            ))
+            Ok(format!("no matches for '{pattern}' under {effective_path}"))
         } else {
             let mut line = results.join("\n");
             if limit_reached.get() {
@@ -391,7 +387,7 @@ mod tests {
             Err(ToolsError::InvalidArgument { name, .. }) => {
                 assert_eq!(name, "pattern");
             }
-            other => panic!("Expected InvalidArgument, got: {:?}", other),
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
 
@@ -407,7 +403,7 @@ mod tests {
             Err(ToolsError::FileNotFound { path: ref p, .. }) => {
                 assert!(p.contains("nonexistent"));
             }
-            other => panic!("Expected FileNotFound, got: {:?}", other),
+            other => panic!("Expected FileNotFound, got: {other:?}"),
         }
     }
 
@@ -515,7 +511,7 @@ mod tests {
             Err(ToolsError::InvalidArgument { name, .. }) => {
                 assert_eq!(name, "pattern");
             }
-            other => panic!("Expected InvalidArgument, got: {:?}", other),
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
 
@@ -537,7 +533,7 @@ mod tests {
             Err(ToolsError::InvalidArgument { name, .. }) => {
                 assert_eq!(name, "glob");
             }
-            other => panic!("Expected InvalidArgument, got: {:?}", other),
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
         }
     }
 
@@ -546,7 +542,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("big.txt");
         let content: String = (0..200)
-            .map(|i| format!("fn foo{}() {{}}", i))
+            .map(|i| format!("fn foo{i}() {{}}"))
             .collect::<Vec<_>>()
             .join("\n");
         tokio::fs::write(&file, content).await.unwrap();

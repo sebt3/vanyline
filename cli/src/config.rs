@@ -41,10 +41,8 @@ pub fn discover_workspace_root(start: &std::path::Path) -> Option<PathBuf> {
         if current.join(".vanyline").is_dir() || current.join(".git").exists() {
             return Some(current);
         }
-        match current.parent() {
-            Some(parent) => current = parent.to_path_buf(),
-            None => return None,
-        }
+        let parent = current.parent()?;
+        current = parent.to_path_buf();
     }
 }
 
@@ -61,8 +59,8 @@ pub struct Layers {
 impl Layers {
     /// `start` : répertoire depuis lequel lancer la découverte workspace
     /// (typiquement `std::env::current_dir()` — doit être absolu).
-    pub fn discover(start: &std::path::Path) -> Layers {
-        Layers {
+    pub fn discover(start: &std::path::Path) -> Self {
+        Self {
             global_dir: config_dir(),
             workspace_dir: discover_workspace_root(start).map(|root| root.join(".vanyline")),
         }
@@ -430,7 +428,7 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
                 msg.contains(&path.display().to_string()),
                 "Error message should contain the path"
             ),
-            other => panic!("Expected ConfigError, got {:?}", other),
+            other => panic!("Expected ConfigError, got {other:?}"),
         }
     }
 
@@ -443,7 +441,7 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
             ..Default::default()
         };
         let result = merge_config_layers(global.clone(), None);
-        assert_eq!(format!("{:?}", result), format!("{:?}", global));
+        assert_eq!(format!("{result:?}"), format!("{:?}", global));
     }
 
     #[test]
@@ -560,7 +558,7 @@ providers:\n  strix:\n    type: openai\nmodels:\n  qwen-code:\n    max_tokens: 1
             "build should be overridden by workspace path"
         );
         assert!(result.contains_key("debug"));
-        assert!(result["debug"] == tmp_c.path());
+        assert_eq!(result["debug"], tmp_c.path());
     }
 
     // --- resolve_named_files ---

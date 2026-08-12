@@ -1,4 +1,4 @@
-//! Test dintegration : SessionContext.extra_mcp connecte bien un serveur
+//! Test dintegration : `SessionContext.extra_mcp` connecte bien un serveur
 //! MCP reel pendant un tour, independamment des toolsets de l'agent -- c'est
 //! le mecanisme sur lequel repose la toolbox (--toolbox, tache 05b).
 
@@ -113,7 +113,7 @@ impl EventSink for NoopSink {
 /// Store minimal : un agent SANS toolset -- la connexion testee doit venir
 /// UNIQUEMENT de `ctx.extra_mcp`, pas d'un toolset. Le provider pointe sur
 /// un port ferme (127.0.0.1:1) pour un echec rapide et deterministe a
-/// l'etape LLM, APRES que le cablage MCP (y compris extra_mcp) ait eu lieu.
+/// l'etape LLM, APRES que le cablage MCP (y compris `extra_mcp`) ait eu lieu.
 fn broken_llm_store() -> InMemoryConfigStore {
     InMemoryConfigStore {
         providers: vec![Provider {

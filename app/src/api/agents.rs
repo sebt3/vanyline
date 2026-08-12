@@ -15,11 +15,11 @@ use crate::{
     config_store::PgConfigStore, error::AppError, AppState,
 };
 
-fn default_mode() -> AgentMode {
+const fn default_mode() -> AgentMode {
     AgentMode::Primary
 }
 
-fn mode_to_str(mode: &AgentMode) -> &'static str {
+const fn mode_to_str(mode: &AgentMode) -> &'static str {
     match mode {
         AgentMode::Primary => "primary",
         AgentMode::Subagent => "subagent",
@@ -72,8 +72,8 @@ pub async fn create_agent(
     validate_skills(&state, db_user.id, &body.skills).await?;
 
     sqlx::query(
-        r#"INSERT INTO agents (user_id, name, description, mode, model_profile_id, toolsets, skills, system_prompt)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#,
+        r"INSERT INTO agents (user_id, name, description, mode, model_profile_id, toolsets, skills, system_prompt)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
     )
     .bind(db_user.id)
     .bind(&body.name)
@@ -138,7 +138,7 @@ pub async fn update_agent(
         .map(|v| serde_json::to_value(v).unwrap_or_else(|_| serde_json::json!("auto")));
 
     let rows = sqlx::query(
-        r#"UPDATE agents SET
+        r"UPDATE agents SET
             description = COALESCE($3, description),
             mode = COALESCE($4, mode),
             model_profile_id = COALESCE($5, model_profile_id),
@@ -146,7 +146,7 @@ pub async fn update_agent(
             skills = COALESCE($7, skills),
             system_prompt = COALESCE($8, system_prompt),
             updated_at = NOW()
-           WHERE user_id = $1 AND name = $2"#,
+           WHERE user_id = $1 AND name = $2",
     )
     .bind(db_user.id)
     .bind(&name)

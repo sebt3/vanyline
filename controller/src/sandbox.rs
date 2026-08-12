@@ -87,10 +87,10 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
 /// `{root}` par `toolchain_root(&toolchain.name)` dans chaque valeur.
 fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
     let root = toolchain_root(&toolchain.name);
-    let raw = if !toolchain.env.is_empty() {
-        toolchain.env.clone()
-    } else {
+    let raw = if toolchain.env.is_empty() {
         toolchain_preset(&toolchain.name).unwrap_or_default()
+    } else {
+        toolchain.env.clone()
     };
     raw.into_iter()
         .map(|(k, v)| (k, v.replace("{root}", &root)))
@@ -365,7 +365,7 @@ pub fn ingress_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }
 
-/// Nom de la NetworkPolicy egress — objet distinct de la netpol ingress
+/// Nom de la `NetworkPolicy` egress — objet distinct de la netpol ingress
 /// (`netpol_name`), car elle est conditionnelle (absente si aucun niveau ne
 /// déclare d'egress) alors que l'ingress est toujours produite.
 pub fn netpol_egress_name(sandbox_name: &str) -> String {
@@ -455,7 +455,7 @@ pub fn build_worktree_remove_job(
     }
 }
 
-/// Service ClusterIP exposant le port MCP du Pod sandbox (sélecteur =
+/// Service `ClusterIP` exposant le port MCP du Pod sandbox (sélecteur =
 /// `vanyline.solidite.fr/sandbox: <sandbox>`, seul label garanti unique à ce
 /// pod parmi ceux posés par `build_sandbox_pod`).
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
@@ -619,7 +619,7 @@ fn dns_egress_rule() -> NetworkPolicyEgressRule {
     }
 }
 
-/// NetworkPolicy : cible le Pod de cette Sandbox, autorise l'ingress
+/// `NetworkPolicy` : cible le Pod de cette Sandbox, autorise l'ingress
 /// uniquement depuis (1) les pods du même namespace portant
 /// `vanyline.solidite.fr/owner: <owner_name>` (même Owner — code-server,
 /// autres sandboxes du même utilisateur), (2) le(s) pod(s) `app` portant
@@ -712,13 +712,13 @@ pub fn build_sandbox_netpol(
     }
 }
 
-/// Construit la NetworkPolicy egress d'une Sandbox à partir de l'union des
+/// Construit la `NetworkPolicy` egress d'une Sandbox à partir de l'union des
 /// règles `owner_egress` + `project_egress` + `sandbox.spec.egress` (dans
 /// cet ordre). `None` si les trois sont vides — pas de netpol egress
 /// produite (l'egress du pod reste libre, cf. design section 2). Sinon,
 /// une règle par `EgressRule` de l'union, plus toujours `dns_egress_rule()`
 /// en tête. `ownerReference` vers la Sandbox (GC en cascade), même
-/// pod_selector ciblant `vanyline.solidite.fr/sandbox` que la netpol
+/// `pod_selector` ciblant `vanyline.solidite.fr/sandbox` que la netpol
 /// ingress (`build_sandbox_netpol`).
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_egress_netpol(
@@ -820,7 +820,7 @@ async fn fetch_application(
 
 async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
     let project = fetch_project(sandbox, ctx, ns).await?;
-    if !project.status.as_ref().map(|s| s.cloned).unwrap_or(false) {
+    if !project.status.as_ref().is_some_and(|s| s.cloned) {
         return Err(ControllerError::ProjectNotReady {
             project: sandbox.spec.project.clone(),
             sandbox: sandbox.name_any(),
@@ -850,16 +850,15 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
     };
 
     let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), ns);
-    let checked_out = match jobs
+    let checked_out = if let Some(job) = jobs
         .get_opt(&checkout_job_name(&sandbox.name_any()))
         .await?
     {
-        Some(job) => job.status.and_then(|s| s.succeeded).unwrap_or(0) > 0,
-        None => {
-            let job = build_checkout_job(sandbox, &project, &job_ctx);
-            jobs.create(&PostParams::default(), &job).await?;
-            false
-        }
+        job.status.and_then(|s| s.succeeded).unwrap_or(0) > 0
+    } else {
+        let job = build_checkout_job(sandbox, &project, &job_ctx);
+        jobs.create(&PostParams::default(), &job).await?;
+        false
     };
 
     let pp = PatchParams::apply(owner::FIELD_MANAGER).force();
@@ -879,17 +878,16 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             owner_service_account,
             default_image: ctx.default_image.clone(),
         };
-        match pods.get_opt(&pod_name(&sandbox.name_any())).await? {
-            Some(pod) => match pod.status.and_then(|s| s.phase) {
+        if let Some(pod) = pods.get_opt(&pod_name(&sandbox.name_any())).await? {
+            match pod.status.and_then(|s| s.phase) {
                 Some(p) if p == "Running" => "Running".to_string(),
                 Some(p) if p == "Failed" => "Failed".to_string(),
                 _ => "Provisioning".to_string(),
-            },
-            None => {
-                let pod = build_sandbox_pod(sandbox, &project, &pod_ctx);
-                pods.create(&PostParams::default(), &pod).await?;
-                "Provisioning".to_string()
             }
+        } else {
+            let pod = build_sandbox_pod(sandbox, &project, &pod_ctx);
+            pods.create(&PostParams::default(), &pod).await?;
+            "Provisioning".to_string()
         }
     };
 
@@ -915,21 +913,20 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         )
         .await?;
 
-    match build_sandbox_egress_netpol(sandbox, &owner.spec.egress, &project.spec.egress) {
-        Some(egress_netpol) => {
-            netpols
-                .patch(
-                    &netpol_egress_name(&sandbox.name_any()),
-                    &pp,
-                    &Patch::Apply(&egress_netpol),
-                )
-                .await?;
-        }
-        None => {
-            let name = netpol_egress_name(&sandbox.name_any());
-            if netpols.get_opt(&name).await?.is_some() {
-                netpols.delete(&name, &DeleteParams::default()).await?;
-            }
+    if let Some(egress_netpol) =
+        build_sandbox_egress_netpol(sandbox, &owner.spec.egress, &project.spec.egress)
+    {
+        netpols
+            .patch(
+                &netpol_egress_name(&sandbox.name_any()),
+                &pp,
+                &Patch::Apply(&egress_netpol),
+            )
+            .await?;
+    } else {
+        let name = netpol_egress_name(&sandbox.name_any());
+        if netpols.get_opt(&name).await?.is_some() {
+            netpols.delete(&name, &DeleteParams::default()).await?;
         }
     }
 
@@ -978,15 +975,14 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
 }
 
 async fn cleanup(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
-    let project = match fetch_project(sandbox, ctx, ns).await {
-        Ok(p) => p,
-        Err(_) => {
-            tracing::warn!(
-                sandbox = %sandbox.name_any(),
-                "project introuvable pendant le cleanup — retrait de worktree ignoré (best-effort v1)"
-            );
-            return Ok(Action::await_change());
-        }
+    let project = if let Ok(p) = fetch_project(sandbox, ctx, ns).await {
+        p
+    } else {
+        tracing::warn!(
+            sandbox = %sandbox.name_any(),
+            "project introuvable pendant le cleanup — retrait de worktree ignoré (best-effort v1)"
+        );
+        return Ok(Action::await_change());
     };
     let owner_pvc_name = match fetch_owner(&project, ctx, ns).await {
         Ok(o) => o.status.and_then(|s| s.pvc_name),
@@ -1204,7 +1200,7 @@ mod tests {
         assert!(ld_val.contains("/toolchains/node/usr/lib/aarch64-linux-gnu"));
 
         // No RUSTUP_HOME for node
-        assert!(env.iter().find(|e| e.name == "RUSTUP_HOME").is_none());
+        assert!(!env.iter().any(|e| e.name == "RUSTUP_HOME"));
     }
 
     #[test]
@@ -1255,10 +1251,7 @@ mod tests {
         assert!(path_val.ends_with(BASE_PATH));
 
         // No LD_LIBRARY_PATH because custom has none
-        assert!(env_result
-            .iter()
-            .find(|e| e.name == "LD_LIBRARY_PATH")
-            .is_none());
+        assert!(!env_result.iter().any(|e| e.name == "LD_LIBRARY_PATH"));
     }
 
     #[test]
@@ -1279,10 +1272,7 @@ mod tests {
         assert_eq!(path_val, BASE_PATH);
 
         // No LD_LIBRARY_PATH
-        assert!(env_result
-            .iter()
-            .find(|e| e.name == "LD_LIBRARY_PATH")
-            .is_none());
+        assert!(!env_result.iter().any(|e| e.name == "LD_LIBRARY_PATH"));
     }
 
     // ===== build_sandbox_pod =====
@@ -1590,7 +1580,7 @@ mod tests {
 
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let mut sandbox = sandbox;
-        sandbox.spec.resources = Some(rr.clone());
+        sandbox.spec.resources = Some(rr);
 
         let project = make_project(None, None);
         let ctx = make_ctx();

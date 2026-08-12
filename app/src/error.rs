@@ -57,14 +57,14 @@ pub enum AppError {
 impl From<vanyline_lib::VnyError> for AppError {
     fn from(e: vanyline_lib::VnyError) -> Self {
         match &e {
-            vanyline_lib::VnyError::K8sConfigError(_) => AppError::K8sConfigError(e.to_string()),
+            vanyline_lib::VnyError::K8sConfigError(_) => Self::K8sConfigError(e.to_string()),
             vanyline_lib::VnyError::K8sApiError(s)
                 if s.contains("404") || s.contains("NotFound") || s.contains("not found") =>
             {
-                AppError::K8sNotFound(e.to_string())
+                Self::K8sNotFound(e.to_string())
             }
-            vanyline_lib::VnyError::K8sApiError(_) => AppError::K8sApiError(e.to_string()),
-            _ => AppError::InternalError(e.to_string()),
+            vanyline_lib::VnyError::K8sApiError(_) => Self::K8sApiError(e.to_string()),
+            _ => Self::InternalError(e.to_string()),
         }
     }
 }
@@ -72,30 +72,28 @@ impl From<vanyline_lib::VnyError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            AppError::NotAuthenticated => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AppError::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
-            AppError::OidcError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
-            AppError::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            AppError::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            AppError::LlmError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::ToolsetNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::SkillNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::UnprocessableReference(_) => {
-                (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
-            }
-            AppError::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
-            AppError::RequestError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            AppError::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            AppError::K8sApiError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            AppError::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
-            AppError::SandboxNotExposed => (StatusCode::CONFLICT, self.to_string()),
+            Self::NotAuthenticated => (StatusCode::UNAUTHORIZED, self.to_string()),
+            Self::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
+            Self::OidcError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            Self::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            Self::LlmError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            Self::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            Self::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::ToolsetNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::SkillNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            Self::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
+            Self::RequestError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            Self::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            Self::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            Self::K8sApiError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
+            Self::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::SandboxNotExposed => (StatusCode::CONFLICT, self.to_string()),
         };
 
         let body = Json(json!({ "error": message }));

@@ -90,12 +90,13 @@ async fn run_one_shot(
     );
     let result = match timeout_secs {
         Some(secs) if secs > 0 => {
-            match tokio::time::timeout(std::time::Duration::from_secs(secs), turn).await {
-                Ok(inner) => inner,
-                Err(_) => {
-                    eprintln!("[VNL-CLI-001] run timed out after {secs} seconds");
-                    std::process::exit(1);
-                }
+            if let Ok(inner) =
+                tokio::time::timeout(std::time::Duration::from_secs(secs), turn).await
+            {
+                inner
+            } else {
+                eprintln!("[VNL-CLI-001] run timed out after {secs} seconds");
+                std::process::exit(1);
             }
         }
         _ => turn.await,
@@ -176,13 +177,16 @@ async fn run_repl(agent: Option<String>, continue_active: bool, toolbox_mcp_url:
 /// un panic dans un tool call ne doit pas empêcher de persister l'état posé
 /// avant le panic.
 fn read_todo_state(state: &std::sync::Mutex<Option<String>>) -> Option<String> {
-    state.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    state
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
 }
 
 /// Construit le `SessionContext` de la session CLI. `toolbox_mcp_url` :
 /// `Some(url)` -> `local_tools` vide + la sandbox injectee comme serveur
 /// MCP nomme "toolbox" dans `extra_mcp` (design "Toolbox en inference" de
-/// ws12-sandbox-clients) ; `None` -> comportement inchange (local_tools du
+/// ws12-sandbox-clients) ; `None` -> comportement inchange (`local_tools` du
 /// CLI, `extra_mcp` vide). Le paramètre `json` choisit le sink de sortie :
 /// `JsonSink` (ligne JSON par événement) ou `StdoutSink` (sortie lisible).
 /// `todo_seed` : valeur optionnelle issue de `Conversation.todo` pour le
@@ -282,7 +286,7 @@ async fn process_turn(
     run_agent_turn(ctx, agent_name, history, user_msg, workspace_context).await
 }
 
-/// Convertit le résultat d'un tour (`event::ChatTurnResult`, tool_calls avec
+/// Convertit le résultat d'un tour (`event::ChatTurnResult`, `tool_calls` avec
 /// `id`) en `types::Message` à persister dans la conversation CLI
 /// (`types::ToolCall`, PAS d'`id` — champ abandonné à la persistance, la
 /// corrélation call/result n'a de sens que pendant le tour lui-même).
@@ -477,12 +481,13 @@ async fn resolve_context(
     };
 
     let (conv, is_new) = if continue_active {
-        match store::get_active_conversation().and_then(|id| store::get_conversation(&id).ok()) {
-            Some(existing) => (existing, false),
-            None => {
-                println!("No active conversation found, starting a new one.");
-                (new_conversation(), true)
-            }
+        if let Some(existing) =
+            store::get_active_conversation().and_then(|id| store::get_conversation(&id).ok())
+        {
+            (existing, false)
+        } else {
+            println!("No active conversation found, starting a new one.");
+            (new_conversation(), true)
         }
     } else {
         (new_conversation(), true)
@@ -580,7 +585,7 @@ mod tests {
         };
         let store = FsConfigStore::new(layers);
         let result = workspace_source_summary(&store).await;
-        assert!(result.len() == 2);
+        assert_eq!(result.len(), 2);
         let mcp_line = result.iter().find(|l| l.contains("mcp")).unwrap();
         assert!(mcp_line.contains("internal"));
         let ts_line = result.iter().find(|l| l.contains("toolsets")).unwrap();

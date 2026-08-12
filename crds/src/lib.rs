@@ -107,7 +107,7 @@ pub struct ProjectSpec {
     pub git_secret: Option<String>,
     /// Caches partagés. None => ["cargo", "pnpm"].
     pub caches: Option<Vec<String>>,
-    /// Intervalle du CronJob de fetch. None => "1h".
+    /// Intervalle du `CronJob` de fetch. None => "1h".
     pub fetch_interval: Option<String>,
     #[serde(default)]
     pub egress: Vec<EgressRule>,
@@ -156,7 +156,7 @@ pub struct SandboxSpec {
     #[serde(default)]
     pub egress: Vec<EgressRule>,
     /// Arrêt manuel : true => le reconciler supprime le Pod (worktree, PVC,
-    /// Service, NetworkPolicies conservés), status.phase devient
+    /// Service, `NetworkPolicies` conservés), status.phase devient
     /// "Suspended". false => le Pod est recréé (chemin nominal).
     #[serde(default)]
     pub suspended: bool,
@@ -224,7 +224,7 @@ pub struct ApplicationSpec {
     /// en usage réel).
     pub sandbox_tls_secret_name: Option<String>,
     /// Pods du controller d'Ingress (ex. traefik) : namespace + labels.
-    /// Utilisé comme peer NetworkPolicy sur la netpol ingress de chaque
+    /// Utilisé comme peer `NetworkPolicy` sur la netpol ingress de chaque
     /// Sandbox (le trafic navigateur transite par l'Ingress avant d'atteindre
     /// le Service). None => pas de peer dédié (la netpol sandbox ne laisse
     /// passer que les pods du même Owner + le pod app).
@@ -240,7 +240,9 @@ pub struct ApplicationStatus {
 }
 
 /// Returns the four CRD manifests as YAML, separated by `---\n`.
-#[allow(clippy::unwrap_used)] // serialisation YAML d un schema Rust connu a la compilation, sans entree externe : ne peut pas echouer en pratique
+#[allow(clippy::unwrap_used)]
+// serialisation YAML d un schema Rust connu a la compilation, sans entree externe : ne peut pas echouer en pratique
+#[must_use]
 pub fn crd_manifests() -> String {
     let docs = [
         serde_yaml::to_string(&Owner::crd()).unwrap(),
@@ -256,6 +258,7 @@ pub fn crd_manifests() -> String {
 pub const MCP_PORT: i32 = 3000;
 
 /// Nom du Service K8s exposeant le port MCP d'une sandbox.
+#[must_use]
 pub fn service_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }

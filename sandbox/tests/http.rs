@@ -1551,7 +1551,7 @@ async fn git_unpushed_endpoint_with_upstream() {
         oidc_ca_cert: None,
         metrics_listen: "0.0.0.0:9090".into(),
         otel_endpoint: None,
-        sandbox_root: wt.to_path_buf(),
+        sandbox_root: wt.clone(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState {
@@ -1615,7 +1615,7 @@ async fn git_unpushed_endpoint_without_upstream() {
         oidc_ca_cert: None,
         metrics_listen: "0.0.0.0:9090".into(),
         otel_endpoint: None,
-        sandbox_root: wt.to_path_buf(),
+        sandbox_root: wt.clone(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState {
@@ -1673,7 +1673,7 @@ async fn git_unpushed_endpoint_no_local_commits() {
         oidc_ca_cert: None,
         metrics_listen: "0.0.0.0:9090".into(),
         otel_endpoint: None,
-        sandbox_root: wt.to_path_buf(),
+        sandbox_root: wt.clone(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState {
@@ -1731,7 +1731,7 @@ async fn git_unpushed_endpoint_detached_head() {
         oidc_ca_cert: None,
         metrics_listen: "0.0.0.0:9090".into(),
         otel_endpoint: None,
-        sandbox_root: wt.to_path_buf(),
+        sandbox_root: wt.clone(),
     });
     let auth = std::sync::Arc::new(vanyline_sandbox::auth::AuthState::new(config.clone()).unwrap());
     let state = vanyline_sandbox::AppState {

@@ -103,8 +103,7 @@ async fn main() {
         )
         .with_state(state)
         .fallback_service(
-            ServeDir::new(&static_dir)
-                .fallback(ServeFile::new(format!("{}/index.html", static_dir))),
+            ServeDir::new(&static_dir).fallback(ServeFile::new(format!("{static_dir}/index.html"))),
         );
 
     let listener = tokio::net::TcpListener::bind(listen_addr)

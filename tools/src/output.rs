@@ -7,11 +7,13 @@ pub const SEARCH_MAX_MATCHES: usize = 50;
 pub const COMMAND_MAX_BYTES: usize = 8 * 1024;
 
 /// Tronque `text` à `max_lines`/`max_bytes` (première limite atteinte).
+///
 /// Si tronqué, ajoute une ligne finale actionnable :
 /// `[truncated — {n} more lines, call again with offset={next}]`
 /// où `next` = offset + nombre de lignes retournées.
 /// `offset` est l'offset (en lignes, 0-based) déjà appliqué par l'appelant,
 /// utilisé uniquement pour calculer le `next` du message.
+#[must_use]
 pub fn bound_lines(text: &str, offset: usize, max_lines: usize, max_bytes: usize) -> String {
     if text.is_empty() {
         return String::new();
@@ -46,10 +48,8 @@ pub fn bound_lines(text: &str, offset: usize, max_lines: usize, max_bytes: usize
     if truncated {
         let remaining = total_lines - returned_count;
         let next_offset = offset + returned_count;
-        let marker = format!(
-            "\n[truncated — {} more lines, call again with offset={}]",
-            remaining, next_offset
-        );
+        let marker =
+            format!("\n[truncated — {remaining} more lines, call again with offset={next_offset}]");
         format!("{result}{marker}")
     } else {
         result
@@ -61,6 +61,7 @@ pub fn bound_lines(text: &str, offset: usize, max_lines: usize, max_bytes: usize
 /// fin, séparées par :
 /// `[... {n} bytes truncated ...]`
 /// La coupure se fait sur des frontières de lignes (jamais au milieu d'une ligne).
+#[must_use]
 pub fn bound_head_tail(text: &str, max_bytes: usize) -> String {
     if text.is_empty() || text.len() <= max_bytes {
         return text.to_string();
@@ -149,7 +150,8 @@ fn find_count_from_end(lines: &[&str], max_bytes: usize) -> usize {
 }
 
 /// Numérote les lignes façon `cat -n` : `{num:>5}\t{ligne}`, numérotation
-/// 1-based commençant à `start_line`. Utilisé par read_file (tâche suivante).
+/// 1-based commençant à `start_line`. Utilisé par `read_file` (tâche suivante).
+#[must_use]
 pub fn number_lines(text: &str, start_line: usize) -> String {
     if text.is_empty() {
         return String::new();
@@ -168,7 +170,7 @@ mod tests {
     #[test]
     fn bound_lines_untouched() {
         let text = (0..10)
-            .map(|i| format!("line {}", i))
+            .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         let result = bound_lines(&text, 0, 200, 16 * 1024);
@@ -179,7 +181,7 @@ mod tests {
     #[test]
     fn bound_lines_truncates() {
         let lines: Vec<String> = (0..300)
-            .map(|i| format!("line {} with some content to make it longer", i))
+            .map(|i| format!("line {i} with some content to make it longer"))
             .collect();
         let text = lines.join("\n");
 
@@ -195,7 +197,7 @@ mod tests {
 
     #[test]
     fn bound_lines_respects_offset() {
-        let lines: Vec<String> = (0..300).map(|i| format!("line {}", i)).collect();
+        let lines: Vec<String> = (0..300).map(|i| format!("line {i}")).collect();
         let text = lines.join("\n");
 
         let result = bound_lines(&text, 200, 200, 16 * 1024);
@@ -254,7 +256,7 @@ mod tests {
     #[test]
     fn head_tail_utf8() {
         let lines: Vec<String> = (0..40)
-            .map(|i| format!("Ligne {} avec des accents éàù et emoji 🎉", i))
+            .map(|i| format!("Ligne {i} avec des accents éàù et emoji 🎉"))
             .collect();
         let text = lines.join("\n");
 

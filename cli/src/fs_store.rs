@@ -21,12 +21,12 @@ pub struct FsConfigStore {
 
 impl FsConfigStore {
     #[allow(dead_code)]
-    pub fn new(layers: Layers) -> Self {
+    pub const fn new(layers: Layers) -> Self {
         Self { layers }
     }
 
     #[allow(dead_code)]
-    pub fn layers(&self) -> &Layers {
+    pub const fn layers(&self) -> &Layers {
         &self.layers
     }
 }
@@ -120,7 +120,7 @@ struct RawAgentFrontmatter {
     skills: SkillSelection,
 }
 
-fn default_agent_mode() -> AgentMode {
+const fn default_agent_mode() -> AgentMode {
     AgentMode::Primary
 }
 
@@ -381,7 +381,10 @@ mod tests {
         assert_eq!(s.name, "grafana-kydah");
         assert_eq!(s.transport, McpTransport::HttpStreamable);
         assert_eq!(s.url, "http://mcp:3000");
-        assert_eq!(s.headers.get("X-Token").map(|s| s.as_str()), Some("secret"));
+        assert_eq!(
+            s.headers.get("X-Token").map(std::string::String::as_str),
+            Some("secret")
+        );
     }
 
     // 4. default_agent_reads_defaults_agent
@@ -481,7 +484,7 @@ mod tests {
             VnyError::ConfigError(msg) => {
                 assert!(msg.contains("strix"));
             }
-            _ => panic!("Expected ConfigError, got {:?}", err),
+            _ => panic!("Expected ConfigError, got {err:?}"),
         }
     }
 
@@ -562,7 +565,7 @@ Tu es un agent d'implémentation.",
                 assert!(msg.contains("bad.md"));
                 assert!(msg.contains("must start with '---'"));
             }
-            other => panic!("Expected ConfigError, got {:?}", other),
+            other => panic!("Expected ConfigError, got {other:?}"),
         }
     }
 
@@ -584,7 +587,7 @@ Tu es un agent d'implémentation.",
                 assert!(msg.contains("bad.md"));
                 assert!(msg.contains("missing closing '---'"));
             }
-            other => panic!("Expected ConfigError, got {:?}", other),
+            other => panic!("Expected ConfigError, got {other:?}"),
         }
     }
 
@@ -772,7 +775,7 @@ Tu es un agent d'implémentation.",
                 assert_eq!(kind, "skill");
                 assert_eq!(name, "nope");
             }
-            other => panic!("Expected UnknownReference, got {:?}", other),
+            other => panic!("Expected UnknownReference, got {other:?}"),
         }
     }
 
@@ -855,7 +858,7 @@ Tu es un agent d'implémentation.",
             Err(VnyError::ConfigError(msg)) => {
                 assert!(msg.contains("SKILL.md") || msg.contains("bad"));
             }
-            other => panic!("Expected ConfigError, got {:?}", other),
+            other => panic!("Expected ConfigError, got {other:?}"),
         }
     }
 }

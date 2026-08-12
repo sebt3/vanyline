@@ -52,9 +52,9 @@ pub async fn create_skill(
 ) -> Result<(StatusCode, Json<SkillDetail>), AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
     let skill = sqlx::query_as::<_, SkillDetail>(
-        r#"INSERT INTO skills (user_id, name, description, body)
+        r"INSERT INTO skills (user_id, name, description, body)
            VALUES ($1, $2, $3, $4)
-           RETURNING name, description, body"#,
+           RETURNING name, description, body",
     )
     .bind(db_user.id)
     .bind(&body.name)
@@ -90,12 +90,12 @@ pub async fn update_skill(
 ) -> Result<Json<SkillDetail>, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
     let skill = sqlx::query_as::<_, SkillDetail>(
-        r#"UPDATE skills SET
+        r"UPDATE skills SET
             description = COALESCE($3, description),
             body = COALESCE($4, body),
             updated_at = NOW()
            WHERE user_id = $1 AND name = $2
-           RETURNING name, description, body"#,
+           RETURNING name, description, body",
     )
     .bind(db_user.id)
     .bind(&name)

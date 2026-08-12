@@ -32,7 +32,7 @@ pub fn home_pvc_name(owner_name: &str) -> String {
     format!("owner-{owner_name}-home")
 }
 
-/// Nom du ServiceAccount de l'Owner — toujours `owner-<name>`, que le PVC home
+/// Nom du `ServiceAccount` de l'Owner — toujours `owner-<name>`, que le PVC home
 /// soit créé ou référencé.
 pub fn service_account_name(owner_name: &str) -> String {
     format!("owner-{owner_name}")
@@ -48,7 +48,7 @@ pub fn effective_pvc_name(owner: &Owner) -> String {
 }
 
 /// `ownerReference` vers cet Owner, pour la GC en cascade des objets créés
-/// par le controller (PVC home si créé, ServiceAccount).
+/// par le controller (PVC home si créé, `ServiceAccount`).
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 fn owner_reference(owner: &Owner) -> OwnerReference {
     owner
@@ -90,7 +90,7 @@ pub fn build_home_pvc(owner: &Owner) -> Option<PersistentVolumeClaim> {
     })
 }
 
-/// Construit le ServiceAccount de l'Owner — toujours créé par le controller,
+/// Construit le `ServiceAccount` de l'Owner — toujours créé par le controller,
 /// que le PVC home soit créé ou référencé.
 pub fn build_service_account(owner: &Owner) -> ServiceAccount {
     ServiceAccount {
@@ -104,7 +104,7 @@ pub fn build_service_account(owner: &Owner) -> ServiceAccount {
     }
 }
 
-/// Status attendu une fois PVC et ServiceAccount en place : `pvc_name`,
+/// Status attendu une fois PVC et `ServiceAccount` en place : `pvc_name`,
 /// `service_account`, condition `Ready: True`.
 pub fn compute_status(owner: &Owner) -> OwnerStatus {
     OwnerStatus {
@@ -121,7 +121,7 @@ pub fn compute_status(owner: &Owner) -> OwnerStatus {
     }
 }
 
-/// Reconciler kube-rs : garantit le PVC home (si besoin) et le ServiceAccount via
+/// Reconciler kube-rs : garantit le PVC home (si besoin) et le `ServiceAccount` via
 /// server-side apply (idempotent), puis met à jour le status. Pas de finalizer —
 /// la GC K8s (ownerReferences) nettoie les objets créés à la suppression de l'Owner.
 pub async fn reconcile(owner: Arc<Owner>, ctx: Arc<Context>) -> Result<Action, ControllerError> {
@@ -189,7 +189,7 @@ pub async fn reconcile(owner: Arc<Owner>, ctx: Arc<Context>) -> Result<Action, C
         }
     }
 
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(Duration::from_mins(5)))
 }
 
 /// Politique d'erreur : requeue à 30s, quelle que soit l'erreur (pas de
