@@ -3,7 +3,7 @@
 ## Nature du projet
 
 Environnement de développement cloud-native, multi-utilisateur, piloté par l'IA pour Kubernetes.
-Monorepo. Langages : Rust (app, sandbox, controller) + TypeScript/Svelte 5 (frontend).
+Monorepo. Langages : Rust (app, sandbox, controller) + TypeScript/Vue 3 (frontend).
 Licence : BSD-3.
 
 ## Architecture
@@ -11,20 +11,27 @@ Licence : BSD-3.
 ```
 [ vanyline frontend ]          [ kydah-code (dans code-server K8s) ]
         │                                      │
-   HTTP REST                         MCP (K8s service interne)
-   WS direct (JWT)                   + NetworkPolicy + SA TokenReview
-        │                                      │
-        ▼                                      ▼
-     [ app ]◄──────MCP HTTP streaming──── [ sandbox pod ]
-  auth · config                          WS (JWT) · MCP
-  LLM orchestration                      Rust server
-                                         + toolchains OCI image volumes
-                                         + base : cc/ld · libc-dev · make
-                                         + git · curl · pkg-config · vim
+   HTTP REST (app)                    MCP (K8s service interne)
+   WS via ticket (sandbox)            + NetworkPolicy (SA TokenReview
+        │                               jamais implémenté, cf. note)
+        ▼                                      │
+     [ app ]◄──────ticket WS (JWT)─────────────┤
+  auth · config · K8s client                   ▼
+  relais de ticket                    [ sandbox pod ]
+                                       WS (ticket) · MCP
+                                       Rust server
+                                       + toolchains OCI image volumes
+                                       + base : cc/ld · libc-dev · make
+                                       + git · curl · pkg-config · vim
 
-         [ controller ] (déféré)
-         kube-rs · CRDs : Application, Owner, Sandbox
+         [ controller ]
+         kube-rs · CRDs : Application, Owner, Project, Sandbox
 ```
+
+**Note (2026-08-12)** : ce diagramme a longtemps documenté un mécanisme SA TokenReview
+pour kydah-code/l'app qui n'a jamais été implémenté (seul JWT/JWKS existe côté
+sandbox, cf. `docs/architecture.md` section "Serveur MCP"). Corrigé ici ; kydah-code
+ne consomme toujours pas la sandbox en pratique (pas démarré).
 
 **L'app n'est pas sur le chemin chaud éditeur.** Le frontend et kydah-code se connectent
 directement à la sandbox. L'app gère l'auth, le LLM, la config.
@@ -32,13 +39,16 @@ directement à la sandbox. L'app gère l'auth, le LLM, la config.
 ## Composants
 
 ### frontend/
-Interface utilisateur : éditeur de code web + conversation LLM.
-TypeScript, Svelte 5, CodeMirror 6, svelte-spa-router, Tailwind CSS 4.
-Build : Vite. Tests : Vitest. Composants : Storybook.
-Se connecte directement à la sandbox en WebSocket (JWT validé par la sandbox).
+Shell IDE web : coquille dockable (Explorer/Editor/Terminal/Workflow/Chat) + vue
+Configuration. TypeScript, Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js,
+Element Plus, Reka UI. Build : Vite. Tests : Vitest. Détails complets :
+`docs/architecture.md` section "Frontend — shell IDE Vue".
+Se connecte directement à la sandbox en WebSocket, authentifié par un ticket court-vécu
+à usage unique miné via `app` (`POST /api/sandboxes/{name}/ws-ticket`) — le navigateur
+ne voit jamais le JWT OIDC brut.
 
 ### app/
-Backend du frontend. Authentification OIDC native, cache Redis, stockage PostgreSQL+PGVector.
+Backend du frontend. Authentification OIDC native, stockage PostgreSQL.
 Focus initial : interaction humain/LLM, gestion utilisateurs, API de configuration.
 Rôle MCP : client — orchestre les appels LLM et les tools exposés par la sandbox.
 **Ne proxifie pas** le WebSocket éditeur ni le MCP kydah-code.
@@ -46,7 +56,10 @@ Rôle MCP : client — orchestre les appels LLM et les tools exposés par la san
 ### sandbox/
 Serveur Rust embarqué dans un pod Kubernetes.
 Expose deux interfaces :
-- **WebSocket** : accès éditeur (commandes, filesystem, terminal) — auth JWT
+- **WebSocket** : accès éditeur (`/ws/fs` filesystem, `/ws/terminal` PTY réel) — auth
+  par ticket court-vécu à usage unique (`POST /ws/ticket`, cf. `docs/architecture.md`
+  section "Serveur MCP" pour le détail : l'API WebSocket du navigateur ne permet pas
+  de header `Authorization` sur le handshake)
 - **MCP HTTP streaming** : tools pour les LLM et pour kydah-code
 
 Image de base : Debian slim + binaire serveur + **substrat natif commun** (compilateur C
@@ -70,18 +83,30 @@ devient utilisable par **injection d'env au démarrage**, jamais par magie :
 **Contrainte** : base et images toolchain doivent être sur la **même famille de distro**
 (trixie) — le loader du base résout la glibc ; un mismatch de distro est du hasard, pas du design.
 
-**Deux modes d'authentification :**
-- **JWT** (frontend → sandbox via ingress) : token OIDC émis par l'app, validé par la sandbox
-- **SA TokenReview + NetworkPolicy** (kydah-code → sandbox via service K8s interne) :
-  la sandbox valide le service account du pod appelant via l'API K8s TokenReview ;
-  une NetworkPolicy par sandbox restreint l'accès aux pods du même namespace avec les bons labels
+**Un seul mode d'authentification réellement implémenté : JWT/JWKS OIDC**
+(`sandbox/src/auth.rs`, `require_auth`). Ce fichier a longtemps documenté un second
+mode, SA TokenReview + NetworkPolicy, pour kydah-code → sandbox — **jamais construit**,
+corrigé le 2026-08-12 (découverte pendant `sandbox-ingress-wiring`). En pratique :
+- **frontend → sandbox** (`/ws/fs`, `/ws/terminal`) : ticket court-vécu à usage
+  unique, miné par `app` en présentant le JWT OIDC (`id_token`) de l'utilisateur
+  authentifié — cf. section `frontend/` ci-dessus.
+- **kydah-code → sandbox** : toujours pas câblé (pas démarré) ; NetworkPolicy par
+  sandbox déjà en place (restreint aux pods du même namespace/owner + désormais aussi
+  au pod `app` et au controller Ingress réel, cf. `docs/architecture.md`), mais aucun
+  mécanisme d'auth applicatif pour ce client précis n'existe encore.
 
 ### controller/
-Opérateur Kubernetes (kube-rs). Gère 3 CRDs namespacés :
-- **Application** : instance deployée de vanyline
+Opérateur Kubernetes (kube-rs). Gère 4 CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) :
 - **Owner** : identité cluster d'un utilisateur — crée/référence un PVC (vanyline ou existant,
-  ex: PVC du pod code-server pour kydah-code) + crée un ServiceAccount + attributs quota
-- **Sandbox** : pod de travail — référence un Owner (sous-répertoire PVC) + liste de toolchains
+  ex: PVC du pod code-server pour kydah-code) + crée un ServiceAccount + attributs quota +
+  référence optionnelle vers une Application (`application_ref`)
+- **Project** : dépôt git d'un Owner — PVC workspace, repo bare, caches, Jobs/CronJob de
+  maintenance (clone initial, fetch périodique)
+- **Sandbox** : pod de travail — référence un Project + une branche + liste de toolchains ;
+  Ingress public si son Owner référence une Application
+- **Application** (`controller-application-crd`) : instance déployée d'`app` — Deployment
+  + Service + Ingress, secrets OIDC/base de données/cookie référencés (ou cookie
+  auto-généré) via `secretRef`, jamais en clair dans la CR
 
 **Règle — maintenance des projets** : toute action de maintenance du controller sur les
 projets (clone, fetch, purge, worktrees, détection de langages) s'exécute dans un pod
@@ -92,26 +117,29 @@ commande shell. Conséquences : une seule image à maintenir, et l'outillage git
 disponible au même endroit pour la maintenance ET pour les sessions LLM.
 
 **Statut : implémenté et déployé** (sorti du statut déféré depuis WS-4/`controller-bootstrap`,
-2026-07-11) — reconcilers Owner/Project/Sandbox, NetworkPolicies egress trois niveaux,
-suspension manuelle, endpoints git de la sandbox (WS-11/WS-13). Détails : `docs/architecture.md`
+2026-07-11) — reconcilers Owner/Project/Sandbox/Application, NetworkPolicies egress
+trois niveaux, suspension manuelle, endpoints git de la sandbox (WS-11/WS-13), Ingress
+Application + Ingress par Sandbox (`controller-application-crd`/
+`sandbox-ingress-wiring`, 2026-08-12). Détails : `docs/architecture.md`
 section "Opérateur Kubernetes — `vanyline-controller`".
 
 ## Clients de la sandbox
 
 | Client | Accès | Auth | Usage |
 |--------|-------|------|-------|
-| vanyline frontend | Ingress K8s | JWT (OIDC via app) | Éditeur web, terminal |
-| kydah-code (dans code-server) | Service K8s interne, même namespace | SA TokenReview + NetworkPolicy | MCP tools pour Qwen |
-| app (LLM orchestration) | Service K8s interne | SA TokenReview (SA du Owner concerné) | MCP HTTP streaming pour les tool calls LLM |
+| vanyline frontend | Ingress par sandbox (`{name}.sandboxes.{host}`) | Ticket court-vécu à usage unique (miné par `app`) | Éditeur web, terminal |
+| kydah-code (dans code-server) | Service K8s interne, même namespace | Pas encore câblé (NetworkPolicy en place, aucun mécanisme d'auth applicatif) | MCP tools pour Qwen — pas démarré |
+| app | Service K8s interne | JWT OIDC (`id_token` de l'utilisateur, pas un compte de service) | Relais de ticket WS (`/ws/ticket`) — pas d'orchestration MCP par `app` à ce jour |
 
 ## Interfaces inter-composants
 
 | Source | Destination | Protocole | Auth |
 |--------|-------------|-----------|------|
-| frontend | app | HTTP REST | OIDC token |
-| frontend | sandbox | WebSocket | JWT |
-| kydah-code | sandbox | MCP HTTP streaming | SA TokenReview + NetPol |
-| app | sandbox | MCP HTTP streaming | SA TokenReview (SA du Owner concerné) |
+| frontend | app | HTTP REST | Cookie OIDC (`HttpOnly`, stateless) |
+| frontend | app | WebSocket (chat, priorité basse — pas branché au shell IDE) | Cookie OIDC |
+| frontend | sandbox | WebSocket (`/ws/fs`, `/ws/terminal`) | Ticket court-vécu à usage unique |
+| app | sandbox | HTTP (`POST /ws/ticket`, relais de ticket) | JWT OIDC (`id_token` de l'utilisateur) |
+| kydah-code | sandbox | MCP HTTP streaming | Pas encore câblé — pas démarré |
 | controller | K8s API | K8s API | Service account |
 
 ## Logging
@@ -123,10 +151,10 @@ Convention : jamais `println!`, `dbg!`, `console.log` dans les sources.
 
 | Composant | Langage | Dépendances clés |
 |-----------|---------|-----------------|
-| frontend | TypeScript | Svelte 5, CodeMirror 6, svelte-spa-router, Tailwind CSS 4 |
-| app | Rust | TBD (axum probable), sqlx, redis, client API Ollama-compatible |
-| sandbox | Rust | TBD |
-| controller | Rust | kube-rs |
+| frontend | TypeScript | Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI |
+| app | Rust | axum, sqlx/PostgreSQL, `openidconnect`, `vanyline-lib` (+ feature `k8s`) |
+| sandbox | Rust | axum, `portable-pty`, `vanyline-tools` |
+| controller | Rust | kube-rs, `vanyline-crds` |
 
 ## Structure des répertoires
 
@@ -134,7 +162,7 @@ Convention : jamais `println!`, `dbg!`, `console.log` dans les sources.
 vanyline/
 ├── Cargo.toml          # workspace Cargo racine
 ├── package.json        # workspace npm racine
-├── frontend/           # frontend Svelte 5
+├── frontend/           # shell IDE Vue 3
 │   └── src/
 ├── app/                # backend Rust
 │   ├── Cargo.toml      # sous-workspace
@@ -142,7 +170,7 @@ vanyline/
 ├── sandbox/            # sandbox Rust
 │   ├── Cargo.toml      # sous-workspace
 │   └── src/
-├── controller/         # opérateur K8s (déféré)
+├── controller/         # opérateur K8s
 │   ├── Cargo.toml      # sous-workspace
 │   └── src/
 ├── docs/

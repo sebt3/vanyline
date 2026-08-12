@@ -13,25 +13,28 @@ Sept crates : **trois bibliothèques feuilles** partagées (`vanyline-tools`, `v
 | Crate | Type | Rôle | Contenu clé |
 |-------|------|------|-------------|
 | `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic, SLM-friendly (v2) | `filesystem` (read/write/edit/delete/list), `search` (find_files/search), `command` (`execute` via `sh -c`, timeout, cwd), `error` (`ToolsError`, codes `VNL-TLS-*`), `output` (bornage centralisé), `mcp` (schémas JSON — source unique consommée par `cli` et `sandbox`) |
-| `vanyline-crds` | lib feuille | Types CRD Owner/Project/Sandbox (spec/status/derives kube), sans runtime opérateur | `Owner`/`Project`/`Sandbox` + specs/status, `Toolchain`/`PvcRef`/`ProjectDefaults`, `crd_manifests()`, `service_name`/`MCP_PORT` (convention de nommage du Service MCP d'une sandbox, partagée avec `vanyline-lib`) — voir section "Client K8s CLI" plus bas |
+| `vanyline-crds` | lib feuille | Types CRD Owner/Project/Sandbox/Application (spec/status/derives kube), sans runtime opérateur | `Owner`/`Project`/`Sandbox`/`Application` + specs/status, `Toolchain`/`PvcRef`/`ProjectDefaults`/`IngressControllerRef`, `crd_manifests()`, `service_name`/`MCP_PORT` (convention de nommage du Service MCP d'une sandbox, partagée avec `vanyline-lib`) — voir sections "Client K8s CLI" et "Opérateur Kubernetes" plus bas |
 | `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), `k8s` (`VnlK8sClient`, **feature Cargo optionnelle `k8s`**, désactivée par défaut — voir "Client K8s CLI" plus bas), erreurs `VNL-*` |
 | `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux, active la feature `k8s` de `vanyline-lib` (commandes owner/project/sandbox + toolbox) |
-| `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib` — voir section "Backend web" plus bas |
-| `vanyline-sandbox` | binaire | Pod serveur MCP | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) — voir section "Serveur MCP" plus bas ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
-| `vanyline-controller` | binaire | Opérateur Kubernetes | kube-rs, reconcilers des CRDs Owner/Project/Sandbox v1alpha1 (types importés de `vanyline-crds`) — voir section dédiée plus bas |
+| `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib`, client `VnlK8sClient` (feature `k8s`) pour piloter Owner/Project/Sandbox/Application et relayer les tickets WS de la sandbox — voir section "Backend web" plus bas |
+| `vanyline-sandbox` | binaire | Pod serveur MCP + éditeur | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) + WebSocket éditeur (`/ws/ticket`, `/ws/fs`, `/ws/terminal`) — voir section "Serveur MCP" plus bas ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
+| `vanyline-controller` | binaire | Opérateur Kubernetes | kube-rs, reconcilers des CRDs Owner/Project/Sandbox/Application v1alpha1 (types importés de `vanyline-crds`) — voir section dédiée plus bas |
 
 ## Graphe de dépendances
 
 ```
 vanyline-tools  ◄──  vanyline (cli),  vanyline-sandbox
 vanyline-lib    ◄──  vanyline (cli),  vanyline-app
-vanyline-crds   ◄──  vanyline-controller,  vanyline-lib (feature k8s, via vanyline (cli))
+vanyline-crds   ◄──  vanyline-controller,  vanyline-lib (feature k8s, via vanyline (cli)
+                  et vanyline-app)
 
 vanyline-tools  : aucune dépendance interne, pas de rig/rmcp
 vanyline-lib    : aucune dépendance interne obligatoire (rig-core + rmcp externes) ;
                   feature optionnelle k8s -> vanyline-crds + kube (default-features = false,
-                  "client" seulement — jamais "runtime", le CLI ne doit pas embarquer le
-                  reconciler)
+                  "client" seulement — jamais "runtime", ni le CLI ni l'app ne doivent
+                  embarquer le reconciler). Activée par `cli` (commandes owner/project/
+                  sandbox + toolbox) et par `app` (routes REST /api/projects,
+                  /api/sandboxes — app-k8s-provisioning) ; jamais par défaut.
 vanyline-crds   : aucune dépendance interne, kube en "derive" seul (pas de "client"/"runtime")
 vanyline-controller : dépend uniquement de vanyline-crds (types CRD) parmi les crates du
                   workspace — aucune autre dépendance interne
@@ -330,7 +333,9 @@ l'extractor `AuthUser` (`auth/middleware.rs`) — tout endpoint `/api/*` scope s
 requêtes par utilisateur (`get_or_create_user`), aucune notion d'admin distincte
 (`AdminAuth`/`ADMIN_SECRET` du MVP initial ont été retirés une fois l'API CRUD
 name-keyed en place — l'ancienne distinction admin/utilisateur n'avait plus de sens
-dès que providers/mcp servers sont eux aussi scopés par utilisateur).
+dès que providers/mcp servers sont eux aussi scopés par utilisateur). `AuthUser.id_token`
+(le JWT OIDC brut, jamais exposé au JS — cf. section "WebSocket éditeur" plus bas) sert
+depuis `sandbox-ingress-wiring` au relais de ticket WS vers la sandbox.
 
 **Stockage** : PostgreSQL/sqlx, migrations `app/migrations/0001_initial.sql` (schéma
 MVP) + `0002_harness_parity.sql` (tables `model_profiles`/`toolsets`/`skills`, `agents`
@@ -342,8 +347,9 @@ côté cli). `load_skill` lit `skills.body` à la demande, même paresse que le 
 
 **API REST** (`api/*.rs`, `api::api_router`) : CRUD par nom pour `model-profiles`,
 `toolsets`, `skills`, `agents` ; CRUD par id pour `llm-providers`/`mcp-servers`
-(`{id}/test` = discovery modèles, `{id}/default`) ; `conversations` + `messages`.
-Toutes les routes exigent `AuthUser` et scopent par utilisateur.
+(`{id}/test` = discovery modèles, `{id}/default`) ; `conversations` + `messages` ;
+`projects`/`sandboxes` (feature `k8s`, cf. ci-dessous) ; `/me` (email +
+`k8s_owner_name`). Toutes les routes exigent `AuthUser` et scopent par utilisateur.
 
 **WebSocket chat** (`ws/chat.rs`) : `run_agent_turn` avec `local_tools` vide (l'app
 reste sur le chemin froid — cf. règle de dépendances plus haut). `ChannelSink` pousse
@@ -351,20 +357,45 @@ chaque `ChatEvent` sur un canal mpsc dès son émission ; une tâche `forward_ev
 connexion (pas par tour) draine le canal et écrit sur le socket au fil de l'eau — vrai
 streaming token-par-token, contrairement à l'ancien `CollectingSink` qui bufferisait
 tout un tour avant le premier octet (limite documentée pendant la migration
-harness-core, résolue par la tâche `ws-chatevent`).
+harness-core, résolue par la tâche `ws-chatevent`). **Persistance todo**
+(`chat-todo-live`) : `SessionContext.todo_state` (builtin `todowrite`/`todoread` de
+`vanyline-lib`, inconditionnels sur tout `run_agent_turn`) est semé depuis
+`conversations.todo` au début de `handle_message`, relu et persisté après le tour
+seulement s'il a changé (jamais d'update systématique qui écraserait un état
+antérieur à `NULL`) — même patron que le fix `f4dfbf9` déjà en place côté CLI, migré
+ici (`app/migrations/0003_conversation_todo.sql`).
+
+**Résolution Owner** (`api/owners.rs`, `app-k8s-provisioning`) : `users.k8s_owner_name`
+(colonne nullable) fait le lien entre un utilisateur OIDC et un Owner K8s — aucun
+mécanisme automatique avant cette feature (l'Owner se créait jusque-là uniquement à la
+main via le CLI). `resolve_owner_name` (lecture, ne crée rien — routes GET répondent
+« aucun Owner » si absent) et `ensure_owner` (crée l'Owner si nécessaire et persiste le
+nom résolu, **réservé au seul `POST /api/projects`** — décision développeur : lazy
+provisioning restreint, pas de création implicite sur une route de lecture).
+`sanitize_owner_name` dérive un nom de ressource K8s valide (RFC1123 : début **et
+fin** alphanumériques) depuis l'email ou l'`oidc_sub` — la troncature à 63 caractères
+retrim explicitement les tirets de fin (un bug corrigé en revue : une coupe pile sur
+un `-` produisait un nom invalide).
+
+**Routes `projects`/`sandboxes`** (`api/projects.rs`, `api/sandboxes.rs`,
+`app-k8s-provisioning` + `sandbox-ingress-wiring`) : wrappers fins autour de
+`VnlK8sClient` (feature `k8s` de `vanyline-lib`, activée côté `app` — absente par
+défaut). Scoping IDOR systématique : chaque `get`/`delete`/`update` vérifie que le
+Project référencé (directement, ou via la Sandbox pour les routes sandbox)
+appartient bien à l'Owner de l'utilisateur authentifié, pas seulement au moment de la
+création. `POST /api/sandboxes/{name}/ws-ticket` : relais de ticket WS (cf. section
+"WebSocket éditeur" de `vanyline-sandbox` plus bas) — résout `owner →
+application_ref → host` via K8s, appelle `POST /ws/ticket` de la sandbox en
+interne (ClusterIP, `Authorization: Bearer {id_token OIDC de l'utilisateur}`) et ne
+renvoie au navigateur que `{ ticket, wsHost }`, jamais le JWT.
 
 **Déploiement** : image `docker.io/sebt3/vanyline-app:0.0.1-alpha.1`, build podman
 multi-stage (node → rust → debian-slim), manifestes `deploy/web/` (dont
-`RestEndPoint_sso.yaml` — kuberest provisionne l'app OIDC dans Authentik).
-
-**Frontend actuel** (`frontend/src/`) : deux pages (`Login.svelte`, `Chat.svelte`),
-routage hash-based. `Chat.svelte` assemble `ConversationList` + `AgentSelector` +
-`ChatMessage` + `ChatInput`. `ChatMessage` rend le texte + les tool calls à plat —
-pas encore de repli/dépliage par tool result, de badge usage ni de sous-fil pour les
-événements subagent, et aucun écran de gestion CRUD (model profiles/toolsets/skills/
-agents n'ont pas d'UI, seule l'API existe) : ce sont les tâches `front-chat` et
-`front-crud` de `app-harness-parity`, pas encore faites — cf.
-`docs/features/app-harness-parity.md`, laissé ouvert pour cette raison.
+`RestEndPoint_sso.yaml` — kuberest provisionne l'app OIDC dans Authentik). Depuis
+`controller-application-crd`, peut aussi être déployé via la CR `Application` du
+controller (Deployment/Service/Ingress générés, secrets OIDC/DB/cookie référencés ou
+auto-générés — cf. section "Opérateur Kubernetes" plus bas) ; les deux méthodes de
+déploiement coexistent, aucune n'a remplacé l'autre.
 
 ## Outils (`vanyline-tools`) — conventions SLM-friendly
 
@@ -424,10 +455,13 @@ que `cli/src/tools.rs`, source unique `tools/src/mcp.rs`).
 
 **Auth** (`auth.rs`, héritée du template telle quelle) : OIDC/JWKS + niveaux d'accès
 par groupe (`AUTH_GROUPS_ADMIN`/`AUTH_GROUPS_READ`), `--no-auth` (dev, refuse de
-démarrer sans le flag explicite) ou `STATIC_TOKEN` (démo, bypasse l'OIDC). C'est un
-modèle **distinct** des deux modes JWT-app/SA-TokenReview décrits dans `AGENTS.md`
-pour le frontend et kydah-code — celui-ci reste à câbler quand ces clients
-consommeront réellement la sandbox (P2/P3 du design d'origine, pas encore démarrés).
+démarrer sans le flag explicite) ou `STATIC_TOKEN` (démo, bypasse l'OIDC). **Correction
+(2026-08-12, découverte pendant `sandbox-ingress-wiring`)** : `AGENTS.md` documentait
+un second mécanisme, SA TokenReview, pour `app`/kydah-code — jamais implémenté, seul le
+JWT/JWKS existe réellement. `app` l'utilise désormais pour de vrai (relais de ticket
+WS, cf. section "Backend web" plus haut), en présentant le `id_token` OIDC de
+l'utilisateur authentifié — pas un compte de service anonyme, `app` agit en son nom.
+kydah-code ne consomme toujours pas la sandbox (pas démarré).
 
 **Confinement** (`tools_impl.rs`, garde-fou d'ergonomie — la frontière de sécurité
 réelle est le pod) : tout chemin est résolu sous `VNL_SANDBOX_ROOT` (canonicalisation
@@ -487,21 +521,93 @@ mensonger), `VNL-SBX-006` (HEAD détachée, seulement pour `/git/unpushed`).
   deux fixes (découverts pendant WS-11, préexistants au design initial), aucune
   commande git ne fonctionnait dans le pod sandbox.
 
+### WebSocket éditeur — `/ws/ticket`, `/ws/fs`, `/ws/terminal` (`sandbox-ws-runtime`)
+
+Trois routes ajoutées au serveur MCP existant (même port, `MCP_PORT`) — le prérequis
+pour qu'un navigateur puisse éditer/utiliser un terminal sur une sandbox, jusque-là
+seulement accessible en JSON-RPC MCP.
+
+**Auth par ticket, pas par header.** L'API WebSocket native du navigateur ne permet
+pas de poser un header `Authorization` sur le handshake. `POST /ws/ticket` (derrière
+le `require_auth` JWT standard) émet un ticket opaque, court-vécu (30s,
+`TICKET_TTL_SECS`), à usage unique — stocké en mémoire (`TicketStore`, un `HashMap`
+sous mutex, pas de persistance : une sandbox = un process). `GET /ws/fs` et
+`GET /ws/terminal` sortent du router `require_auth` classique : un middleware dédié
+(`ws_auth_middleware`) lit `?ticket=` en query string, le consomme (`redeem` — retiré
+de la map qu'il soit valide ou expiré, jamais réutilisable) avant l'upgrade
+WebSocket. Contourne un piège axum connu : un handler `WebSocketUpgrade` qui
+retournerait une réponse d'erreur (401) après extraction se ferait convertir en 426
+par le framework — le rejet doit avoir lieu **avant** l'extracteur d'upgrade, d'où le
+middleware plutôt qu'une vérification inline dans le handler.
+
+**`/ws/fs`** : protocole JSON requête/réponse dédié (pas le JSON-RPC MCP, taillé pour
+des tool calls LLM) — `{"op":"read|write|edit|delete|list","path":...}` →
+`{"ok":true|false,...}`, dispatch vers les mêmes fonctions `vanyline_tools::filesystem::*`
+que le chemin MCP, même confinement (`tools_impl::confine_path`). **Aucun champ de
+corrélation** : strictement une requête lue, une réponse écrite, dans cet ordre — un
+client qui partage la connexion entre plusieurs consommateurs (cf. `SandboxFsClient`
+côté frontend) doit sérialiser ses appels, pas un détail d'implémentation optionnel.
+`read` numérote les lignes et tronque par défaut (`vanyline_tools::filesystem::read_file`
+réutilisé tel quel, taillé pour des sorties LLM/MCP) — **mode brut** ajouté
+(`explorer-editor-terminal-wiring`, découverte en implémentant l'éditeur) :
+`{"op":"read","path":...,"raw":true}` renvoie le contenu réel, non numéroté, non
+tronqué (`ReadFileOptions.raw: bool`, `#[serde(default)]` → `false`, comportement par
+défaut inchangé) — sans lui, `Ctrl+S` aurait réécrit un fichier corrompu (contenu
+numéroté/tronqué). Aucune limite de taille en mode brut au-delà de ce que `read_to_string`
+lisait déjà en mémoire dans les deux modes — pas un nouveau risque, juste un plafond
+de troncature qui ne s'applique plus à la réponse envoyée.
+
+**`/ws/terminal`** : PTY réel (`portable-pty`), pas un simulateur. Frames WS binaires =
+octets stdin/stdout du PTY ; frame texte JSON de contrôle pour le resize
+(`{"type":"resize","cols":N,"rows":N}`) ; axum répond automatiquement aux `Ping` par
+un `Pong` — les traiter comme une fermeture (erreur corrigée en revue) coupe le
+terminal au premier keepalive d'un proxy/client. Boucle de proxy `tokio::select!`
+**volontairement non `biased`** : avec `biased`, un flux de sortie continu (commande
+verbeuse) rendrait la lecture PTY quasi toujours prête en premier et affamerait
+indéfiniment la lecture WS — donc le clavier de l'utilisateur, Ctrl-C compris.
+
+**Cycle de vie du process — décidé après une fausse piste, vérifiée empiriquement.**
+`kill_process_group` (SIGKILL sur `-pgid` du shell) tue le shell et ses jobs
+**foreground** — via un mécanisme à deux étages, pas le kill seul : le shell est
+leader de session (`setsid`), sa mort déclenche un hangup **noyau** du terminal
+contrôlant qui envoie SIGHUP au groupe de processus **actuellement foreground** ; sous
+contrôle de job bash, chaque commande externe (foreground ou backgroundée) reçoit son
+propre pgid, distinct de celui du shell. Un job explicitement backgroundé (`cmd &`)
+n'est jamais le groupe foreground du terminal — **il survit délibérément** à la
+fermeture du terminal, vérifié via `/proc/<pid>/stat` (champ pgrp) avant d'écrire ce
+paragraphe, pas supposé. Ce n'est pas qu'une tolérance de la sémantique Unix standard :
+c'est nécessaire pour un cas d'usage déjà identifié (lancer un serveur de dev en
+arrière-plan dans la sandbox, l'exposer ensuite via un Service/Ingress) — le tuer à la
+fermeture du terminal casserait ce cas d'usage avant même qu'il existe. Contre-partie
+notée, pas traitée : un job backgroundé oublié consomme des ressources du pod sans
+limite garantie (`SandboxSpec.resources` reste optionnel).
+
 ## Opérateur Kubernetes — `vanyline-controller`
 
-kube-rs, trois CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) réconciliées par un
+kube-rs, quatre CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) réconciliées par un
 reconciler chacun, tournant en parallèle dans le même process (`main.rs::tokio::join!`) :
 
 ```
 Owner (1) ────────── (n) Project ─────────── (n) Sandbox
 SA + PVC home RWX       PVC workspace RWO       pod = worktree d'une branche
 (clés, dotfiles)        repo git bare + caches   (monte home + workspace + toolchains)
+  │
+  │ application_ref (optionnel)
+  ▼
+Application (0..1 référencée par Owner)
+Deployment + Service + Ingress d'app — voir sous-section dédiée
 ```
 
-**Pourquoi trois CRDs** : un CRD se justifie par un état désiré à réconcilier, pas par la
-possession d'un objet natif. Owner = identité (ServiceAccount `owner-<name>` — pilier de
-l'auth TokenReview pour kydah-code et l'app), home. Project = workspace, repo git,
-caches, Jobs/CronJob de maintenance. Sandbox = pod + branche. Zéro chevauchement.
+**Pourquoi quatre CRDs** : un CRD se justifie par un état désiré à réconcilier, pas par
+la possession d'un objet natif. Owner = identité (ServiceAccount `owner-<name>` — la
+seule chose réellement implémentée aujourd'hui pour l'auth machine-à-machine ; le SA
+TokenReview décrit ailleurs pour kydah-code/l'app n'a jamais été construit, cf.
+correction dans la section "Serveur MCP" plus haut), home, référence optionnelle vers
+une Application. Project = workspace, repo git, caches, Jobs/CronJob de maintenance.
+Sandbox = pod + branche + (si l'Owner référence une Application) Ingress public.
+Application = instance déployée d'`app` (Deployment/Service/Ingress), indépendante de
+la chaîne Owner/Project/Sandbox — un Owner la référence, pas l'inverse. Zéro
+chevauchement.
 
 **Répartition du stockage — dictée par les filewatchers** : openvscode-server et
 rust-analyzer reposent sur inotify, qui ne traverse pas les filesystems réseau. PVC
@@ -514,7 +620,8 @@ nœuds sans contrainte de colocalisation.
 |---|---|
 | `owner.rs` | PVC home (créé ou référence `existing_pvc` vérifiée) + ServiceAccount `owner-<name>` + condition `Ready`. Pas de finalizer (rien à nettoyer côté cluster que la suppression K8s de l'Owner n'efface pas déjà via owner references). |
 | `project.rs` | PVC workspace (créé ou référence vérifiée) + Job `project-init` (clone bare + mkdir caches, une fois) + CronJob `project-fetch` (`git fetch --prune`, planning dérivé de `fetch_interval`) + finalizer (Job purge puis suppression du PVC créé — un PVC référencé n'est jamais supprimé). |
-| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches — supprimé si `spec.suspended`, cf. ci-dessous) + Service ClusterIP (port MCP) + NetworkPolicy ingress (restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`) + NetworkPolicy egress conditionnelle (WS-13, cf. ci-dessous) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
+| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches — supprimé si `spec.suspended`, cf. ci-dessous) + Service ClusterIP (port MCP) + NetworkPolicy ingress (restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`, **+ le pod `app` + le controller Ingress réel si l'Owner référence une Application, cf. sous-section dédiée**) + NetworkPolicy egress conditionnelle (WS-13, cf. ci-dessous) + **Ingress** (`sandbox-ingress-wiring`, seulement si l'Owner référence une Application — patché/supprimé explicitement selon l'état, même patron que la netpol egress) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
+| `application.rs` (`controller-application-crd`) | Deployment (1 container, env assemblé depuis 3 `secretRef` OIDC/DB/cookie + `VNL_K8S_NAMESPACE` + `OIDC_REDIRECT_URL` calculé) + Service ClusterIP + Ingress + Secret cookie auto-généré si absent — cf. sous-section dédiée. Pas de finalizer, ownerReferences suffisent. |
 
 Tous les Jobs git (`project.rs`/`sandbox.rs`) invoquent `vanyline-maint` (image sandbox)
 en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une commande shell
@@ -586,14 +693,79 @@ stable (`Running` et `Suspended`), comme pour le reste du reconciler. Piloté pa
 `vanyline sandbox stop|start` — commandes CLI **pas encore câblées** : périmètre
 restant de `ws12-sandbox-clients`, qui n'attendait que ce champ.
 
+### CRD Application (`controller-application-crd`)
+
+Comble un écart doc/code : `AGENTS.md` listait "Application" comme une des CRDs du
+controller depuis le début, mais elle n'existait pas avant cette feature.
+`ApplicationSpec` référence trois `secretRef` (OIDC, base de données, cookie —
+**jamais** de valeur en clair dans la CR) plutôt que de provisionner quoi que ce soit
+elle-même (pas de Postgres géré par le controller — cohérent avec "on assemble sur
+étagère", la base est provisionnée ailleurs, ex. vynil/kuberest). `app` sert déjà le
+frontend buildé (`ServeDir`/`ServeFile`) : un seul Deployment/Service pour les deux,
+pas de composant frontend séparé.
+
+**`OIDC_REDIRECT_URL` calculé, jamais dupliqué dans le secret** (`https://{spec.host}/auth/callback`)
+— une source unique de vérité, pas de désync silencieux si `host` change sans que le
+secret suive.
+
+**Secret cookie : auto-généré si `spec.cookie_secret_ref` est `None`** (décision
+développeur, cohérente avec la philosophie Kydah — un cookie secret n'a aucune valeur
+métier à faire relire par un humain, contrairement à l'OIDC client secret ou la chaîne
+Postgres). Le reconciler cherche `<application-name>-cookie` ; absent → génère 64
+octets aléatoires encodés en base64 standard et crée le Secret ; présent → **jamais
+régénéré** (une régénération invaliderait toutes les sessions cookie actives — le
+check "existe déjà ?" précède toute écriture). Point d'encodage à retenir si le sujet
+revient : la valeur générée (déjà une chaîne base64) est enveloppée dans un
+`ByteString` (`k8s-openapi`, qui base64-encode lui-même à la sérialisation JSON pour
+le wire K8s) — deux couches d'encodage dans l'appel API, mais le pod, via
+`secretKeyRef`, ne voit que la couche K8s décodée automatiquement : `COOKIE_SECRET`
+reçu par le container est la chaîne base64 simple attendue par `app/src/main.rs`
+(`base64::STANDARD.decode(...)`, ≥ 64 octets). Vérifié en lisant l'implémentation
+`serde` de `ByteString`, pas supposé.
+
+### Ingress par Sandbox (`sandbox-ingress-wiring`)
+
+`Owner.spec.application_ref: Option<String>` (cascade, même esprit que
+`egress`/`project_defaults` déjà en place) — `None` = Sandbox reste ClusterIP-only
+(comportement historique, pas une erreur). Si renseigné : sous-domaine par sandbox
+(`{sandbox}.sandboxes.{application.spec.host}`, décision développeur — pas de routage
+par chemin sur l'host de l'app), `ingressClassName`/annotations repris de
+l'Application. **TLS partagé, jamais un `Certificate` par sandbox** :
+`Application.spec.sandbox_tls_secret_name` référence un secret wildcard
+pré-provisionné — laisser cert-manager auto-provisionner un certificat par host
+poserait un risque réel de rate-limit/churn avec des sandboxes créées/détruites en
+continu.
+
+**NetworkPolicy ingress étendue à deux peers de plus** (en plus du peer historique
+"même Owner") : le pod `app` (label `vanyline.solidite.fr/application`, `Exists` —
+pas de valeur exacte, pas de couplage au nom de l'Application — pour l'appel
+serveur-à-serveur `POST /ws/ticket`, avant même que le navigateur ne se connecte), et
+le controller Ingress réel du cluster (`Application.spec.ingress_controller`,
+`namespace_selector` + `pod_selector` combinés sur le même peer pour cibler
+précisément ses pods dans son propre namespace — valeurs du cluster de dev : namespace
+`kydah-core`, labels `app.kubernetes.io/name: traefik` +
+`app.kubernetes.io/component: controller`).
+
+**Nettoyage symétrique à la netpol egress** (bug trouvé en revue, corrigé) :
+l'Ingress n'était supprimé nulle part si `application_ref` était retiré (ou
+l'Application visée supprimée) après avoir déjà été créé — resterait orphelin
+indéfiniment. Même patron que la netpol egress (patch si nécessaire, delete explicite
+sinon), pas un nouveau mécanisme.
+
+**Dépendances d'infra externes, hors périmètre de ce repo** : DNS wildcard
+`*.sandboxes.{host}` et certificat TLS wildcard correspondant doivent exister
+(provisionnés ailleurs) — sans eux, l'Ingress créé ne sert à rien en pratique.
+
 **Tests** : unitaires purs sur les builders (spec → Pod/Job/Service/NetworkPolicy
 attendus, sans cluster) — pas de mock de l'API K8s. `--crds` (flag CLI) imprime les
 manifests CRD générés par `schemars`, source de `deploy/controller/crds.yaml`
 (régénéré via `deploy/controller/generate-crds.sh`).
 
 **Déploiement** : `deploy/controller/` (RBAC ClusterRole/ClusterRoleBinding — le
-controller watche les trois CRDs sur tout le cluster via `Api::all`, donc pas de
-Role/RoleBinding namespacé même si les CRDs elles-mêmes le sont — + Deployment) et
+controller watche les quatre CRDs sur tout le cluster via `Api::all`, donc pas de
+Role/RoleBinding namespacé même si les CRDs elles-mêmes le sont — + Deployment,
+étendu pour `applications`(`/status`)/`deployments`/`ingresses`/`secrets` avec
+`controller-application-crd`, vérifié manquant avant l'ajout, pas supposé) et
 `controller/Dockerfile` (cargo-chef, rustls-tls, pas de libssl). Image publiée :
 `docker.io/sebt3/vanyline-controller:0.0.1-alpha.1`. Validé en e2e sur le cluster de
 dev (Owner + Project + Sandbox de démo) — a débusqué un bug réel : les trois
@@ -602,23 +774,26 @@ reconcilers réutilisaient les mêmes `PatchParams` (avec `force()`, nécessaire
 `Patch::Merge`, que kube-rs rejette hors contexte Apply — corrigé en isolant
 `PatchParams::default()` pour le patch de status.
 
-**Limites connues** (v1, assumées) : pas de CRD Application (viendra avec la
-convergence app ↔ sandbox), pas de quotas (champ réservé dans `OwnerSpec`, non
-réconcilié), pas d'ingress/JWT sur la Sandbox (le frontend n'y accède pas encore), pas
-de webhook d'admission (validation par schéma CRD uniquement), pas de merge/push
-automatique des branches (le controller gère la plomberie git, pas le contenu), pas
-d'openvscode-server dans le pod. Changement de spec Sandbox = recréation du pod
-(immutable en v1). Pas de résolution FQDN dans les règles egress (limite K8s :
+**Limites connues** (v1, assumées) : pas de quotas (champ réservé dans `OwnerSpec`, non
+réconcilié), pas de webhook d'admission (validation par schéma CRD uniquement), pas de
+merge/push automatique des branches (le controller gère la plomberie git, pas le
+contenu), pas d'openvscode-server dans le pod. Changement de spec Sandbox = recréation
+du pod (immutable en v1). Pas de résolution FQDN dans les règles egress (limite K8s :
 `ipBlock`/selectors, pas de nom de domaine — si le besoin FQDN devient réel, chantier
 CNI type CiliumNetworkPolicy, hors scope v1). Pas d'auto-arrêt sur inactivité
-(`suspended` est manuel uniquement, décision 2026-07-12).
+(`suspended` est manuel uniquement, décision 2026-07-12). Pas de provisioning
+Postgres/DNS wildcard/certificat TLS wildcard par le controller (`controller-application-crd`/
+`sandbox-ingress-wiring`) — références à des ressources provisionnées ailleurs, jamais
+créées par ce repo.
 
 ## Client K8s CLI — `vanyline-crds`, `VnlK8sClient`, toolbox
 
 Rend les Owners/Projects/Sandboxes pilotables **hors du cluster-admin** —
 `kubectl`/accès direct au cluster n'est plus le seul moyen d'agir dessus.
-Pas d'UI app/frontend pour ces objets en v1 (viendra avec la convergence
-app ↔ sandbox) : API/CLI d'abord.
+Un vrai frontend existe désormais aussi (`app-k8s-provisioning`/
+`settings-real-config` : `/api/projects`, `/api/sandboxes`, écrans CRUD dans
+`SettingsView`) — API/CLI n'est plus le seul chemin, cf. section "Backend
+web" plus haut.
 
 **`vanyline-crds`** (lib feuille, voir "Vue d'ensemble") : extraction
 mécanique des types CRD depuis `controller/src/crds.rs`, `kube` en
@@ -630,17 +805,21 @@ sandbox) y vivent aussi désormais — seule source de vérité pour
 la même URL depuis le CLI).
 
 **`VnlK8sClient`** (`lib/src/k8s.rs`, feature Cargo `k8s` de
-`vanyline-lib`, désactivée par défaut — seul le CLI l'active) :
+`vanyline-lib`, désactivée par défaut — activée par le CLI **et par `app`**
+depuis `app-k8s-provisioning`, jamais par défaut) :
 - `discover(namespace_override: Option<String>)` — `kube::Config::infer()`
   (in-cluster ou kubeconfig), erreur `VNL-K8S-001` si injoignable.
   `namespace_override` prime sur le namespace du contexte kubeconfig
   courant si fourni.
-- `list/get/create/delete_{owner,project,sandbox}` — CRUD générique par
+- `list/get/create/delete_{owner,project,sandbox,application}` — CRUD générique par
   petites fonctions privées paramétrées sur `K: kube::Resource<...>`
-  (évite la répétition x3 types x4 opérations), erreurs `VNL-K8S-002`.
+  (évite la répétition x4 types x4 opérations), erreurs `VNL-K8S-002`.
 - `sandbox_mcp_url(name)` — vérifie d'abord que la sandbox existe
   (`get_sandbox`, erreur claire plutôt qu'un échec de connexion confus
   plus tard) puis construit `http://<service_name(name)>.<ns>.svc:<MCP_PORT>/mcp`.
+- `sandbox_ws_ticket_url(name)` (`sandbox-ingress-wiring`) — même patron que
+  `sandbox_mcp_url`, cible `/ws/ticket` — utilisé par `app` pour le relais de
+  ticket (cf. section "Backend web" plus haut), jamais par le CLI.
 - `set_sandbox_suspended(name, suspended)` — patch merge JSON ciblé sur
   `spec.suspended` (pas de fonction générique partagée avec le CRUD
   ci-dessus : un seul type appelant, une abstraction à un seul site
@@ -692,6 +871,83 @@ port-forward manuel fonctionne déjà pour le reste) ; auth SA TokenReview
 sur la sandbox pour ce chemin (les sandboxes tournent en `--no-auth`
 derrière NetworkPolicy — le CLI dans le cluster passe si ses
 labels/namespace le permettent, cf. "Serveur MCP" plus haut).
+
+## Frontend — shell IDE Vue (`frontend/`)
+
+Remplace intégralement l'ancien frontend Svelte 5 (`Login.svelte`/`Chat.svelte`,
+routage hash-based) — plus aucune trace de Svelte dans `frontend/`. Vue 3 +
+`vue-router`, coquille dockable [dockview-vue](https://dockview.dev) (thème
+`dockview-theme-abyss`, réutilisé comme design system transversal via ses custom
+properties `--dv-color-abyss-*`) hébergeant les panneaux Explorer/Editor/Terminal/
+Workflow/Chat, plus une vue Configuration séparée.
+
+**Stack par rôle** :
+
+| Rôle | Choix |
+|---|---|
+| Éditeur | [CodeMirror 6](https://codemirror.net) |
+| Terminal | [xterm.js](https://xtermjs.org) (`@xterm/xterm` + `@xterm/addon-fit`) |
+| Arbre de fichiers | [Element Plus](https://element-plus.org) (`el-tree`, restylé via ses custom properties CSS) |
+| Menu / vue Configuration | [Reka UI](https://reka-ui.com) (`Menubar`, `Tabs`) — portage Vue headless de Radix |
+| Chat | [vue-advanced-chat](https://github.com/advanced-chat/vue-advanced-chat) — theming non résolu, cf. "Limites connues" |
+| Routing | `vue-router` (`/ide/:sandboxName`, `/settings`) |
+
+**Routing** (`router.ts`) : `/` redirige vers `/settings` (pas de sandbox par défaut) ;
+`/ide/:sandboxName` monte `IdeShell.vue` (`props: true` — le param de route devient une
+prop du composant) ; `App.vue` est le layout persistant (`MenuBar` + `StatusBar` +
+`<router-view/>`), plus de nom de workspace en dur. Point d'entrée : bouton « Ouvrir »
+sur l'écran Sandboxes (`SandboxesScreen.vue`, `router.push('/ide/' + name)`).
+
+**Panneaux dockview et `provide`/`inject`** : `DockviewVue` monte Explorer/Editor/
+Terminal via son propre registre de composants (`components: Record<string,
+VueComponent>`), **pas** comme enfants déclarés dans le template d'`IdeShell.vue` — un
+`emit`/listener parent-enfant classique n'a donc aucun effet. `IdeShell.vue` fournit
+(`provide`) le client `/ws/fs` partagé, le nom de la sandbox, et un handler
+`open-file` + un `Ref` `open-file-path` ; Explorer/Editor les `inject`ent. Pattern à
+réutiliser pour tout futur état partagé entre panneaux dockview, pas un cas
+particulier.
+
+**`SandboxFsClient`** (`api/sandboxWs.ts`) : le protocole `/ws/fs` côté serveur n'a
+aucun champ de corrélation (cf. section "Serveur MCP" plus haut) — ce wrapper
+sérialise les requêtes sur la connexion partagée Explorer/Editor (une requête en vol à
+la fois, la suivante attend la réponse de la précédente via une chaîne de promesses).
+`openSandboxWs(sandboxName, path)` mine **un ticket par connexion** (`POST
+/api/sandboxes/{name}/ws-ticket`, jamais partagé entre `/ws/fs` et `/ws/terminal` —
+les tickets sont à usage unique côté serveur). Dégradation propre si le ticket/l'Ingress
+sont indisponibles (dépendance d'infra externe, cf. "Opérateur Kubernetes" plus haut) :
+`fsClient` reste `null`, les panneaux affichent un état vide plutôt que de planter.
+
+**Editor** : `read` envoie systématiquement `raw: true` (cf. mode brut, section
+"Serveur MCP" plus haut) — sans ça `Ctrl+S` réécrirait un contenu numéroté/tronqué.
+Échec de `read`/`write` affiché à l'utilisateur (bandeau temporaire) plutôt qu'avalé
+silencieusement — un save silencieusement échoué serait pire qu'une fonctionnalité
+manquante.
+
+**Terminal** : `ws.binaryType = 'arraybuffer'` obligatoire (défaut navigateur = `Blob`,
+incompatible avec `new Uint8Array(event.data)`). La taille initiale du PTY doit être
+envoyée sur l'event `'open'` du WebSocket, **pas** juste après la résolution de la
+promesse d'ouverture — celle-ci se résout à la *construction* du WebSocket
+(`CONNECTING`), pas à l'ouverture réelle ; un envoi prématuré est un no-op silencieux
+(`readyState !== OPEN`), bug trouvé en revue (le mock de test avait `readyState` à
+`OPEN` dès la construction, ce qui le masquait).
+
+**SettingsView** (`settings-real-config`) : 9 écrans CRUD réels (Projets, Sandboxes,
+Fournisseurs LLM, Profils de modèle, Toolsets, Skills, Agents, Serveurs MCP, Compte) —
+remplace le gabarit visuel à 4 catégories du POC initial, qui ne cadrait qu'un visuel
+global, pas les écrans réels. **Aucun gating admin** sur Agents/Serveurs MCP : le
+commentaire "write: admin" du code backend (`app/src/api/mod.rs`) ne correspond à
+aucun mécanisme réel (pas de colonne `role`, pas de contrôle serveur) — décision
+cohérente avec l'état mono-utilisateur du projet, pas un oubli.
+
+**Limites connues (dette assumée)** : pas de multi-onglets Editor, pas de
+multi-terminal, pas de reconnexion WS automatique (déconnexion réseau/sandbox
+suspendue → recharger la page), pas de filesystem watch/push (Explorer ne se
+rafraîchit pas si le contenu change côté serveur pendant que l'utilisateur regarde),
+pas de code-splitting (bundle ~576 Ko gzippé, CodeMirror + xterm + Element Plus +
+vue-advanced-chat + dockview-vue). Chat reste un mock complet (aucun appel réseau) —
+priorité très basse, pas planifié. Le theming `vue-advanced-chat` reste non résolu
+(plusieurs tentatives sans effet sur une partie des couleurs, cause racine jamais
+identifiée faute d'inspection DOM réelle) — sans conséquence tant que Chat reste mock.
 
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 
@@ -873,7 +1129,7 @@ WS-2/WS-6 de `docs/roadmap.md`) :
 
 | Package | Type | Rôle | Stack |
 |---------|------|------|-------|
-| `frontend/` | app | Web app : éditeur + chat LLM, cliente de l'app Rust (REST + WS) | Vite, Svelte 5, CodeMirror 6, Tailwind 4, Vitest, Storybook |
+| `frontend/` | app | Shell IDE web : éditeur/explorer/terminal + configuration, cliente de l'app Rust (REST + WS) — voir section "Frontend — shell IDE Vue" plus haut | Vite, Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI, Vitest |
 | `packages/protocol` *(à venir)* | lib feuille | Types partagés `ChatEvent` + protocole JSON-RPC stdio, client ndjson | TypeScript pur, zéro dépendance UI |
 | `ext/` *(à venir)* | app | Extension VS Code : front-end graphique du CLI via JSON-RPC stdio | Host TS + webview Svelte 5/Tailwind |
 | `packages/ui` *(plus tard)* | lib | Composants de chat partagés frontend ↔ webview — extrait quand les deux fronts auront convergé | Svelte 5 |

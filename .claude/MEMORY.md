@@ -14,7 +14,7 @@ peuvent le lire, le corriger ou le compléter à tout moment.
 **But** : Environnement de développement cloud-native, multi-utilisateur, piloté par l'IA pour Kubernetes
 **Licence** : BSD-3, public sur GitHub
 **Gitea** : shuss/vanyline (privé, solo pour l'instant)
-**Stack** : Rust (app, sandbox, controller) + TypeScript/Svelte 5/CodeMirror 6 (frontend)
+**Stack** : Rust (app, sandbox, controller) + TypeScript/Vue 3/CodeMirror 6 (frontend)
 **Monorepo** : Cargo workspace racine + package.json racine, chaque composant Rust a son sous-workspace
 
 ---
@@ -47,6 +47,16 @@ pilotés par une session DeepSeek mal configurée, retrait du MCP Penpot, suppre
 design doc `app-harness-parity`) et travail restant :
 **`.claude/memory/reorientation-2026-08-09.md`**.
 
+**Mise à jour (2026-08-12)** : le web IDE mentionné ci-dessus comme "gardé, pas
+abandonné" est maintenant réellement branché sur une sandbox K8s (Explorer/Editor/
+Terminal, plus CRD Application/Ingress par sandbox côté controller) — cf.
+`.claude/memory/arrimage-fonctionnel-2026-08.md`. Le choix UI concret qui a émergé du
+POC diffère de la piste envisagée ici le 2026-08-09 (Bits UI/Melt UI + shadcn-svelte) :
+Vue 3 + dockview-vue + Element Plus + Reka UI, cf. `docs/architecture.md` section
+"Frontend — shell IDE Vue" pour le détail et les raisons. Le webchat (priorité basse) et
+le workflow/DAG (ajouté) restent non démarrés — cette famille de features n'a touché
+que le web IDE et ses prérequis d'infra.
+
 ---
 
 ## Index — fondations et features livrées
@@ -71,6 +81,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/ws13-sandbox-runtime.md` | Socle CLI sandbox, egress NetworkPolicy trois niveaux, suspension manuelle |
 | `.claude/memory/ws14-cli-backend-llm-exec.md` | Flags `run` `-m/-t/-j`, builtin todo, mapping agents ; correction svelte-check/storybook |
 | `.claude/memory/reorientation-2026-08-09.md` | Pivot stratégique complet (cf. "Direction actuelle" ci-dessus) |
+| `.claude/memory/arrimage-fonctionnel-2026-08.md` | 7 features (2026-08-10 → 08-12) : web IDE Vue réellement branché sur une sandbox K8s — ticket WS, CRD Application, Ingress par sandbox, todo persistant, config réelle. Process Claude/Cadence/Qwen qui a fonctionné, motif récurrent de doc drift trouvé 4 fois, décisions actées, pièges techniques |
 
 ---
 
@@ -87,19 +98,23 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 
 - **tools-v2** (refonte SLM-friendly de `vanyline-tools`, 8 outils finaux) avance en parallèle.
 - **vscode-ext-bootstrap** (extension VS Code consommant le RPC stdio) pas encore démarré.
-- Toutes les features de l'index ci-dessus sont terminées et closes ; leurs design docs
-  (`docs/features/*.md`) sont supprimés. Pas de design doc formel écrit pour la nouvelle
-  direction (réorientation) pour l'instant.
+- **Web IDE réellement branché** (2026-08-12) : famille de 7 features
+  (`.claude/memory/arrimage-fonctionnel-2026-08.md`) — Explorer/Editor/Terminal
+  connectés à une vraie sandbox K8s, CRD Application + Ingress par sandbox côté
+  controller, config réelle (`SettingsView`). Toutes les features de l'index ci-dessus
+  sont terminées et closes ; leurs design docs (`docs/features/*.md`) sont supprimés.
+  Pas de design doc formel écrit pour la nouvelle direction (réorientation) pour
+  l'instant.
 
-**Hors scope pour cette phase :**
-- Intégration app ↔ sandbox — **correction du 2026-08-09** : la raison invoquée jusqu'ici
-  ("nécessite le controller à maturité") était fausse, le controller est implémenté et
-  déployé depuis `controller-bootstrap` (2026-07-11, cf. `.claude/memory/controller-bootstrap.md`).
-  L'écart trouvé en creusant l'écart code/contrat visuel du frontend (2026-08-09) : `app`
-  ne branche même pas la feature Cargo `k8s` de `vanyline-lib`, donc `VnlK8sClient`
-  n'est pas compilé côté `app` — c'est ça le vrai blocage, pas la maturité du controller.
-  Reste hors scope pour l'instant par choix de séquencement (famille de features
-  "arrimage fonctionnel", cf. `docs/features/frontend-ui-shell.md`), pas par nécessité.
+**Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
+attaqué) :
+- Auth kydah-code → sandbox (NetworkPolicy en place, aucun mécanisme applicatif) et
+  orchestration MCP par `app` (le relais de ticket WS existe, pas d'appel MCP par `app`
+  à la sandbox).
+- `vanyline sandbox stop|start` (CLI) — champ `suspended` posé côté CRD depuis
+  `ws13-sandbox-runtime`, jamais câblé côté CLI.
+- Workflow/DAG (capacité "ajoutée" par la réorientation du 2026-08-09) et webchat
+  (priorité très basse) — le panneau Workflow/Chat du shell IDE reste mock.
 - Multi-utilisateur complet, quotas
 - Permissions/approbation des tools ; compaction automatique du contexte
 - Ouverture aux autres contributeurs
@@ -118,9 +133,16 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 
 ## Points ouverts (TBD)
 
-- ~~Framework frontend~~ — décidé : Vite + svelte-spa-router (même stack que gramophone/frontend dans vynil)
-- Web framework Rust pour app : axum probable, pas encore décidé
-- ~~Auth app→sandbox~~ — décidé : SA TokenReview (SA du Owner concerné), même mécanisme que kydah-code
+- ~~Framework frontend~~ — décidé, révisé le 2026-08-12 : Vite + Vue 3 + `vue-router`
+  (abandon de svelte-spa-router — tout `frontend/` réécrit en Vue par `frontend-ui-shell`,
+  cf. `docs/architecture.md` section "Frontend — shell IDE Vue")
+- ~~Web framework Rust pour app~~ — décidé : axum
+- ~~Auth app→sandbox~~ — **corrigé le 2026-08-12** : l'entrée précédente ("SA TokenReview,
+  même mécanisme que kydah-code") était fausse — jamais implémenté. Le mécanisme
+  réellement construit (`sandbox-ingress-wiring`) : `app` relaie un ticket WS en
+  présentant le `id_token` OIDC de l'utilisateur authentifié, pas un compte de service.
+  kydah-code ne consomme toujours pas la sandbox (pas démarré, mécanisme d'auth pour ce
+  client encore à concevoir).
 - ~~Providers LLM~~ — décidé : Ollama/llama.cpp/vllm auto-hébergés dans le cluster ou via un proxy avec API Ollama-compatible. Aucun provider cloud. Endpoint configurable.
 - Format des identifiants d'erreur
 - Logger projet (app et sandbox)
