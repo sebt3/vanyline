@@ -1635,7 +1635,10 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_DATA_HOME", tmp.path());
+        // SAFETY: guarded by DATA_DIR_ENV_LOCK above — no concurrent env access.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
         (tmp, guard)
     }
 
@@ -2170,7 +2173,10 @@ mod tests {
         // checking busy is cleaned up.
 
         let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("XDG_DATA_HOME", tmp.path());
+        // SAFETY: guarded by DATA_DIR_ENV_LOCK (see isolated_data_dir) — no concurrent env access.
+        unsafe {
+            std::env::set_var("XDG_DATA_HOME", tmp.path());
+        }
 
         let (tx, _rx) = mpsc::unbounded_channel();
         let mut state = ServerState::new(tx);
