@@ -9,3 +9,8 @@ members = [
     "crds",
 ]
 resolver = "2"
+[workspace.package]
+version = "0.1.0"
+authors = ["Sébastien Huss <sebastien.huss@gmail.com>"]
+edition = "2024"
+license = "BSD-3-Clause"

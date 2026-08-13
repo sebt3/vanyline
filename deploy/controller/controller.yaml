@@ -79,11 +79,13 @@ spec:
       serviceAccountName: vanyline-controller
       containers:
         - name: controller
-          image: docker.io/sebt3/vanyline-controller:0.0.1-alpha.1
+          image: ghcr.io/sebt3/vanyline-controller:0.1.0
           imagePullPolicy: Always
           env:
-            - name: SANDBOX_IMAGE
-              value: "docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1"
+            - name: SANDBOX_IMAGE_TAG
+              value: "0.1.0"
+            - name: APP_IMAGE_TAG
+              value: "0.1.0"
             - name: RUST_LOG
               value: "info,vanyline_controller=debug"
           resources:

@@ -389,7 +389,7 @@ application_ref → host` via K8s, appelle `POST /ws/ticket` de la sandbox en
 interne (ClusterIP, `Authorization: Bearer {id_token OIDC de l'utilisateur}`) et ne
 renvoie au navigateur que `{ ticket, wsHost }`, jamais le JWT.
 
-**Déploiement** : image `docker.io/sebt3/vanyline-app:0.0.1-alpha.1`, build podman
+**Déploiement** : image `ghcr.io/sebt3/vanyline-app:0.1.0`, build podman
 multi-stage (node → rust → debian-slim), manifestes `deploy/web/` (dont
 `RestEndPoint_sso.yaml` — kuberest provisionne l'app OIDC dans Authentik). Depuis
 `controller-application-crd`, peut aussi être déployé via la CR `Application` du
@@ -480,7 +480,7 @@ natif validé). `deploy/sandbox/sandbox-test.yaml` (pod + PVC + toolchains rust/
 une fois la recette absorbée par le Dockerfile et le controller — validée en
 conditions réelles le 2026-07-01 sur cluster K8s 1.36.2/cri-o 1.36.1 (cf. section
 "vanyline-maint" pour la recette elle-même). Image publiée :
-`docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1`.
+`ghcr.io/sebt3/vanyline-sandbox:0.1.0`.
 
 **Socle CLI étendu** (WS-13, 2026-08-01) : en plus du substrat natif (`gcc`/`libc6-dev`/
 `binutils`/`make`/`pkg-config`/`git`/`curl`/`vim`/`ca-certificates`), l'image embarque
@@ -767,7 +767,7 @@ Role/RoleBinding namespacé même si les CRDs elles-mêmes le sont — + Deploym
 étendu pour `applications`(`/status`)/`deployments`/`ingresses`/`secrets` avec
 `controller-application-crd`, vérifié manquant avant l'ajout, pas supposé) et
 `controller/Dockerfile` (cargo-chef, rustls-tls, pas de libssl). Image publiée :
-`docker.io/sebt3/vanyline-controller:0.0.1-alpha.1`. Validé en e2e sur le cluster de
+`ghcr.io/sebt3/vanyline-controller:0.1.0`. Validé en e2e sur le cluster de
 dev (Owner + Project + Sandbox de démo) — a débusqué un bug réel : les trois
 reconcilers réutilisaient les mêmes `PatchParams` (avec `force()`, nécessaire aux
 `Patch::Apply` de PVC/SA/Service/NetworkPolicy) pour le patch de status en

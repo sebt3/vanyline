@@ -34,7 +34,7 @@ spec:
   restartPolicy: Always
   containers:
     - name: sandbox
-      image: docker.io/sebt3/vanyline-sandbox:0.0.1-alpha.1
+      image: ghcr.io/sebt3/vanyline-sandbox:0.1.0
       args: ["--no-auth"]
       ports:
         - name: mcp

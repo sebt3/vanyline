@@ -48,9 +48,10 @@ kubectl apply -f deploy/controller/crds.yaml
 kubectl apply -f deploy/controller/controller.yaml
 ```
 
-Le controller lit `SANDBOX_IMAGE` (variable d'env de son déploiement) pour
-savoir quelle image utiliser pour les pods sandbox qu'il crée — sans cette
-variable, il retombe sur `vanyline-sandbox:latest`.
+Le controller lit `SANDBOX_IMAGE_TAG` et `APP_IMAGE_TAG` (args `--sandbox-image-tag`/
+`--app-image-tag` ou variables d'env de son déploiement) pour savoir quel tag utiliser
+sur `ghcr.io/sebt3/vanyline-{sandbox,app}` — sans ces variables, il retombe sur sa
+propre version (`CARGO_PKG_VERSION`).
 
 ## Build local
 

@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: vanyline
-        image: docker.io/sebt3/vanyline-app:0.0.1-alpha.1
+        image: ghcr.io/sebt3/vanyline-app:0.1.0
         ports:
         - containerPort: 8080
         envFrom:

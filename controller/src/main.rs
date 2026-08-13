@@ -16,6 +16,24 @@ struct Cli {
     /// Print CRD manifests and exit
     #[arg(long)]
     crds: bool,
+
+    /// Tag de l'image sandbox (ghcr.io/sebt3/vanyline-sandbox) utilisée pour
+    /// les pods sandbox et les Jobs de maintenance des projets, quand
+    /// `Sandbox.spec.image` est absent. Défaut : version du controller — les
+    /// composants sont versionnés et publiés ensemble.
+    #[arg(long, env = "SANDBOX_IMAGE_TAG", default_value = env!("CARGO_PKG_VERSION"))]
+    sandbox_image_tag: String,
+
+    #[arg(long, env = "SANDBOX_IMAGE_REPO", default_value = "ghcr.io/sebt3/vanyline-sandbox")]
+    sandbox_image_repo: String,
+
+    /// Tag de l'image app (ghcr.io/sebt3/vanyline-app) utilisée pour le
+    /// Deployment `app`, quand `Application.spec.image` est absent.
+    #[arg(long, env = "APP_IMAGE_TAG", default_value = env!("CARGO_PKG_VERSION"))]
+    app_image_tag: String,
+
+    #[arg(long, env = "APP_IMAGE_REPO", default_value = "ghcr.io/sebt3/vanyline-app")]
+    app_image_repo: String,
 }
 
 #[tokio::main]
@@ -40,8 +58,8 @@ async fn main() {
         std::process::exit(1);
     });
 
-    let sandbox_image: String =
-        std::env::var("SANDBOX_IMAGE").unwrap_or_else(|_| "vanyline-sandbox:latest".to_string());
+    let sandbox_image = format!("{}:{}", cli.sandbox_image_repo, cli.sandbox_image_tag);
+    let app_image = format!("{}:{}", cli.app_image_repo, cli.app_image_tag);
 
     let owner_ctx = Arc::new(owner::Context {
         client: client.clone(),
@@ -69,6 +87,7 @@ async fn main() {
 
     let app_ctx = Arc::new(application::Context {
         client: client.clone(),
+        default_image: app_image,
     });
 
     let application_run = application::build_controller(client.clone())

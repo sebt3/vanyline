@@ -32,10 +32,6 @@ pub const APP_PORT: i32 = 8080;
 /// Service — même patron que `build_sandbox_service`.
 pub const APP_LABEL: &str = "vanyline.solidite.fr/application";
 
-/// Image par défaut du Deployment `app` quand `spec.image` est `None`
-/// (repli du design : `ghcr.io/…-app:latest` — valeur à ajuster au déploiement).
-pub const DEFAULT_APP_IMAGE: &str = "ghcr.io/vanyline/vanyline-app:latest";
-
 /// Nom commun des objets créés pour une Application : Deployment, Service et
 /// Ingress — `application-<name>` (même convention que `sandbox-<name>`).
 pub fn application_name(app_name: &str) -> String {
@@ -65,7 +61,8 @@ fn app_owner_ref(app: &Application) -> OwnerReference {
 }
 
 /// Construit le Deployment `app` : un seul container, image résolue
-/// (`spec.image` ou `DEFAULT_APP_IMAGE`), env depuis les trois `secretRef`
+/// (`spec.image` ou `default_image`, le tag précis lu par le controller via
+/// `--app-image-tag`/`APP_IMAGE_TAG`), env depuis les trois `secretRef`
 /// (`secretKeyRef` par variable) + `VNL_K8S_NAMESPACE` + `OIDC_REDIRECT_URL`
 /// calculé (`https://{spec.host}/auth/callback`, jamais lu du secret). Probe
 /// readiness/liveness sur `GET /health`. `ownerReference` vers l'Application.
@@ -77,7 +74,7 @@ fn app_owner_ref(app: &Application) -> OwnerReference {
 /// - `DeploymentSpec.template` sans wrapper `Option` (type `PodTemplateSpec` direct)
 /// - `PodTemplateSpec.metadata` optionnel (type `Option<ObjectMeta>`)
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
-pub fn build_application_deployment(app: &Application) -> Deployment {
+pub fn build_application_deployment(app: &Application, default_image: &str) -> Deployment {
     let mut labels = BTreeMap::new();
     labels.insert(APP_LABEL.to_string(), app.name_any());
 
@@ -193,7 +190,7 @@ pub fn build_application_deployment(app: &Application) -> Deployment {
                             app.spec
                                 .image
                                 .clone()
-                                .unwrap_or_else(|| DEFAULT_APP_IMAGE.to_string()),
+                                .unwrap_or_else(|| default_image.to_string()),
                         ),
                         ports: Some(vec![ContainerPort {
                             container_port: APP_PORT,
@@ -326,6 +323,9 @@ pub fn build_cookie_secret(app: &Application, cookie_data_value: String) -> Secr
 
 pub struct Context {
     pub client: Client,
+    /// Image `app` par défaut (`--app-image-tag`/`APP_IMAGE_TAG` du
+    /// controller), utilisée quand `Application.spec.image` est `None`.
+    pub default_image: String,
 }
 
 /// Génère la valeur de `data["cookieSecret"]` pour le Secret cookie auto-généré :
@@ -439,7 +439,7 @@ pub async fn reconcile(
         Some(d) => deployment_phase(d.status.as_ref().and_then(|s| s.conditions.as_ref())),
     };
 
-    let deployment = build_application_deployment(&app);
+    let deployment = build_application_deployment(&app, &ctx.default_image);
     deployments
         .patch(&name, &pp, &Patch::Apply(&deployment))
         .await?;
@@ -489,6 +489,8 @@ mod tests {
     use super::*;
     use vanyline_crds::ApplicationSpec;
 
+    const TEST_APP_IMAGE: &str = "ghcr.io/sebt3/vanyline-app:test";
+
     fn make_application(name: &str) -> Application {
         let mut app = Application::new(
             name,
@@ -536,7 +538,7 @@ mod tests {
     #[test]
     fn build_application_deployment_shape() {
         let app = make_application("demo");
-        let deployment = build_application_deployment(&app);
+        let deployment = build_application_deployment(&app, TEST_APP_IMAGE);
 
         assert_eq!(
             deployment.metadata.name,
@@ -605,13 +607,13 @@ mod tests {
         // replicas = Some(3)
         let mut app = make_application("demo");
         app.spec.replicas = Some(3);
-        let dep = build_application_deployment(&app);
+        let dep = build_application_deployment(&app, TEST_APP_IMAGE);
         assert_eq!(dep.spec.as_ref().unwrap().replicas, Some(3));
 
         // image = None -> default
         let mut app = make_application("demo");
         app.spec.image = None;
-        let dep = build_application_deployment(&app);
+        let dep = build_application_deployment(&app, TEST_APP_IMAGE);
         let container = dep
             .spec
             .as_ref()
@@ -623,12 +625,12 @@ mod tests {
             .containers
             .first()
             .unwrap();
-        assert_eq!(container.image, Some(DEFAULT_APP_IMAGE.to_string()));
+        assert_eq!(container.image, Some(TEST_APP_IMAGE.to_string()));
 
         // image = Some("custom:tag")
         let mut app = make_application("demo");
         app.spec.image = Some("custom:tag".to_string());
-        let dep = build_application_deployment(&app);
+        let dep = build_application_deployment(&app, TEST_APP_IMAGE);
         let container = dep
             .spec
             .as_ref()
@@ -647,7 +649,7 @@ mod tests {
     #[test]
     fn build_application_deployment_env() {
         let app = make_application("demo");
-        let deployment = build_application_deployment(&app);
+        let deployment = build_application_deployment(&app, TEST_APP_IMAGE);
         let container = deployment
             .spec
             .as_ref()

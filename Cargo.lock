@@ -5098,7 +5098,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 
 [[package]]
 name = "vanyline"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5124,7 +5124,7 @@ dependencies = [
 
 [[package]]
 name = "vanyline-app"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
@@ -5153,7 +5153,7 @@ dependencies = [
 
 [[package]]
 name = "vanyline-controller"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -5172,7 +5172,7 @@ dependencies = [
 
 [[package]]
 name = "vanyline-crds"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 dependencies = [
  "k8s-openapi",
  "kube",
@@ -5184,7 +5184,7 @@ dependencies = [
 
 [[package]]
 name = "vanyline-lib"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -5211,7 +5211,7 @@ dependencies = [
 
 [[package]]
 name = "vanyline-sandbox"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -5243,7 +5243,7 @@ dependencies = [
 
 [[package]]
 name = "vanyline-tools"
-version = "0.0.1-alpha.1"
+version = "0.1.0"
 dependencies = [
  "futures",
  "globset",
