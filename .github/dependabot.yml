@@ -1,0 +1,62 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "cargo"
+  - package-ecosystem: "cargo"
+    directory: "/app"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "app"
+  - package-ecosystem: "cargo"
+    directory: "/cli"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "cli"
+  - package-ecosystem: "cargo"
+    directory: "/controller"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "controller"
+  - package-ecosystem: "cargo"
+    directory: "/crds"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "crds"
+  - package-ecosystem: "cargo"
+    directory: "/lib"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "lib"
+  - package-ecosystem: "cargo"
+    directory: "/sandbox"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "sandbox"
+  - package-ecosystem: "cargo"
+    directory: "/tools"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "tools"
+  - package-ecosystem: "npm"
+    directory: "/frontend"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "frontend"
