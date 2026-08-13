@@ -133,6 +133,38 @@ describe('createApiClient', () => {
     }
   });
 
+  it('réponse 401 redirige vers /auth/login', async () => {
+    vi.stubGlobal('location', { href: '' });
+    const client = createApiClient();
+    (fetchSpy as any).mockResolvedValue(
+      new Response(JSON.stringify({ error: 'VNL-AUTH-001: Not authenticated' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await expect(client.get('/api/me')).rejects.toBeInstanceOf(ApiError);
+    expect(window.location.href).toBe('/auth/login');
+
+    vi.unstubAllGlobals();
+  });
+
+  it('delete avec réponse 401 redirige vers /auth/login', async () => {
+    vi.stubGlobal('location', { href: '' });
+    const client = createApiClient();
+    (fetchSpy as any).mockResolvedValue(
+      new Response(JSON.stringify({ error: 'VNL-AUTH-001: Not authenticated' }), {
+        status: 401,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+
+    await expect(client.delete('/api/resource')).rejects.toBeInstanceOf(ApiError);
+    expect(window.location.href).toBe('/auth/login');
+
+    vi.unstubAllGlobals();
+  });
+
   it("delete sur 204 ne tente pas de parser et résout void", async () => {
     const client = createApiClient();
 

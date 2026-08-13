@@ -77,6 +77,10 @@ async function request<T>(
     throw new ApiError(0, undefined, msg);
   }
 
+  if (response.status === 401) {
+    redirectToLogin();
+  }
+
   if (!response.ok) {
     const contentType = response.headers.get('content-type') ?? '';
     let error: string;
@@ -128,6 +132,9 @@ async function requestVoid(
 
   try {
     const response = await globalThis.fetch(url, init);
+    if (response.status === 401) {
+      redirectToLogin();
+    }
     if (!response.ok) {
       const contentType = response.headers.get('content-type') ?? '';
       let error: string;
@@ -155,6 +162,12 @@ async function requestVoid(
     const msg = `Network error: ${path}`;
     throw new ApiError(0, undefined, msg);
   }
+}
+
+/** Session cookie absente/expirée : seule issue possible côté SPA, on renvoie
+ *  vers le flow OIDC (`app` redirige lui-même vers Authentik). */
+function redirectToLogin(): void {
+  globalThis.location.href = '/auth/login';
 }
 
 /** Extrait `VNL-XXX-\d+` d'une chaîne de message, sinon `undefined`. */
