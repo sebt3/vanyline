@@ -203,7 +203,9 @@ pub struct ApplicationSpec {
     /// PAS redirectUrl — dérivé de `host` au reconcile, jamais dupliqué dans le
     /// secret (source unique de vérité, évite un désync silencieux si `host` change).
     pub oidc_secret_ref: String,
-    /// Secret contenant `databaseUrl` (chaîne de connexion complète).
+    /// Secret contenant `uri` (chaîne de connexion complète) — clé produite
+    /// nativement par le secret `<cluster>-app` de CNPG, pointable directement
+    /// sans arrimage manuel.
     pub database_secret_ref: String,
     /// Secret contenant le cookie secret (clé `cookieSecret`). None => généré et
     /// stocké par le reconciler lui-même (`<application-name>-cookie`).
@@ -212,8 +214,17 @@ pub struct ApplicationSpec {
     /// `OIDC_REDIRECT_URL` (`https://{host}/auth/callback`).
     pub host: String,
     pub ingress_class_name: String,
-    /// Annotations libres posées sur l'Ingress (ex. cert-manager.io/cluster-issuer) —
-    /// même esprit que `Toolchain.env`, pas de champ dédié par convention connue.
+    /// Nom du CertManager (Cluster)Issuer utilisé pour l'Ingress de l'application
+    /// (`cert-manager.io/cluster-issuer` ou `cert-manager.io/issuer` selon
+    /// `tls_issuer_kind`). Pose aussi `spec.tls` sur l'Ingress (secret
+    /// `<application-name>-cert`, même convention que les autres Ingress du
+    /// cluster). On part du principe que cert-manager est présent.
+    pub tls_issuer_name: String,
+    /// `ClusterIssuer` (défaut, None) ou `Issuer` (namespaced).
+    pub tls_issuer_kind: Option<String>,
+    /// Annotations libres posées sur l'Ingress, en plus de l'annotation
+    /// cert-manager dérivée de `tls_issuer_name`/`tls_issuer_kind` — même
+    /// esprit que `Toolchain.env`, pas de champ dédié par convention connue.
     #[serde(default)]
     pub ingress_annotations: BTreeMap<String, String>,
     /// Secret TLS wildcard pré-provisionné (`*.sandboxes.{host}`), référencé
@@ -485,6 +496,14 @@ mod tests {
             "Application schema should contain 'ingressAnnotations', got: {spec_props:?}"
         );
         assert!(
+            spec_props.contains_key("tlsIssuerName"),
+            "Application schema should contain 'tlsIssuerName', got: {spec_props:?}"
+        );
+        assert!(
+            spec_props.contains_key("tlsIssuerKind"),
+            "Application schema should contain 'tlsIssuerKind', got: {spec_props:?}"
+        );
+        assert!(
             spec_props.contains_key("sandboxTlsSecretName"),
             "Application schema should contain 'sandboxTlsSecretName', got: {spec_props:?}"
         );
@@ -497,13 +516,14 @@ mod tests {
     #[test]
     fn application_defaults() {
         let spec: ApplicationSpec =
-            serde_json::from_str(r#"{"host":"app.example.com","ingressClassName":"nginx","oidcSecretRef":"oidc","databaseSecretRef":"db"}"#).expect("should deserialize");
+            serde_json::from_str(r#"{"host":"app.example.com","ingressClassName":"nginx","oidcSecretRef":"oidc","databaseSecretRef":"db","tlsIssuerName":"self-sign"}"#).expect("should deserialize");
         assert!(spec.image.is_none());
         assert!(spec.replicas.is_none());
         assert!(spec.cookie_secret_ref.is_none());
         assert!(spec.ingress_annotations.is_empty());
         assert!(spec.sandbox_tls_secret_name.is_none());
         assert!(spec.ingress_controller.is_none());
+        assert!(spec.tls_issuer_kind.is_none());
     }
 
     #[test]
@@ -527,6 +547,8 @@ mod tests {
             cookie_secret_ref: Some("my-cookie".to_string()),
             host: "app.example.com".to_string(),
             ingress_class_name: "nginx".to_string(),
+            tls_issuer_name: "letsencrypt".to_string(),
+            tls_issuer_kind: Some("Issuer".to_string()),
             ingress_annotations: annotations,
             sandbox_tls_secret_name: Some("wildcard-tls".to_string()),
             ingress_controller: Some(IngressControllerRef {
@@ -550,6 +572,14 @@ mod tests {
         assert!(
             json.contains(r#""ingressClassName""#),
             "should contain ingressClassName (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""tlsIssuerName""#),
+            "should contain tlsIssuerName (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""tlsIssuerKind""#),
+            "should contain tlsIssuerKind (camelCase), got: {json}"
         );
         assert!(
             json.contains(r#""ingressAnnotations""#),

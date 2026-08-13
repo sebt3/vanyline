@@ -2369,6 +2369,8 @@ mod tests {
                 cookie_secret_ref: None,
                 host: "app.example.com".to_string(),
                 ingress_class_name: "nginx".to_string(),
+                tls_issuer_name: "self-sign".to_string(),
+                tls_issuer_kind: None,
                 ingress_annotations: BTreeMap::new(),
                 sandbox_tls_secret_name,
                 ingress_controller: None,

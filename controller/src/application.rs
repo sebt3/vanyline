@@ -9,7 +9,7 @@ use k8s_openapi::api::core::v1::{
 };
 use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
-    IngressServiceBackend, IngressSpec, ServiceBackendPort,
+    IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
 };
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     Condition, LabelSelector, ObjectMeta, OwnerReference,
@@ -41,6 +41,21 @@ pub fn application_name(app_name: &str) -> String {
 /// Nom du Secret cookie auto-généré : `<application-name>-cookie`.
 pub fn cookie_secret_name(app_name: &str) -> String {
     format!("{app_name}-cookie")
+}
+
+/// Nom du Secret TLS cert-manager de l'Ingress : `<application-name>-cert` —
+/// même convention que les autres Ingress du cluster (`penpot-cert`, etc.).
+pub fn tls_secret_name(app_name: &str) -> String {
+    format!("{app_name}-cert")
+}
+
+/// Nom de l'annotation cert-manager pour poser l'issuer, selon `tls_issuer_kind`
+/// (`Some("Issuer")` => namespaced, sinon `ClusterIssuer`).
+fn cert_manager_annotation_key(tls_issuer_kind: Option<&str>) -> &'static str {
+    match tls_issuer_kind {
+        Some("Issuer") => "cert-manager.io/issuer",
+        _ => "cert-manager.io/cluster-issuer",
+    }
 }
 
 /// Nom du Secret cookie effectif : `spec.cookie_secret_ref` s'il est fourni,
@@ -128,7 +143,7 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
         value_from: Some(EnvVarSource {
             secret_key_ref: Some(SecretKeySelector {
                 name: app.spec.database_secret_ref.clone(),
-                key: "databaseUrl".to_string(),
+                key: "uri".to_string(),
                 optional: None,
             }),
             ..Default::default()
@@ -241,9 +256,13 @@ pub fn build_application_service(app: &Application) -> Service {
 }
 
 /// Ingress : host `spec.host`, `ingressClassName: spec.ingress_class_name`,
-/// annotations `spec.ingress_annotations` (None si vide), backend = le Service
-/// `application-<name>` port 8080, path `/` Prefix. `ownerReference` vers
-/// l'Application.
+/// annotations `spec.ingress_annotations` fusionnées avec l'annotation
+/// cert-manager dérivée de `spec.tls_issuer_name`/`spec.tls_issuer_kind`
+/// (`cert-manager.io/cluster-issuer` ou `cert-manager.io/issuer`), bloc `tls`
+/// (host `spec.host`, secret `<application-name>-cert`) — on part du principe
+/// que cert-manager est présent, même convention que les autres Ingress du
+/// cluster. Backend = le Service `application-<name>` port 8080, path `/`
+/// Prefix. `ownerReference` vers l'Application.
 ///
 /// Notes d'adaptation k8s-openapi 0.28 :
 /// - `HTTPIngressRuleValue.paths` : `Vec<HTTPIngressPath>` (pas Option)
@@ -252,20 +271,27 @@ pub fn build_application_service(app: &Application) -> Service {
 /// - `IngressServiceBackend.name` : `String` (pas Option)
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_application_ingress(app: &Application) -> Ingress {
+    let mut annotations = app.spec.ingress_annotations.clone();
+    annotations.insert(
+        cert_manager_annotation_key(app.spec.tls_issuer_kind.as_deref()).to_string(),
+        app.spec.tls_issuer_name.clone(),
+    );
+    let tls_secret = tls_secret_name(&application_name(&app.name_any()));
+
     Ingress {
         metadata: ObjectMeta {
             name: Some(application_name(&app.name_any())),
             namespace: app.namespace(),
-            annotations: if app.spec.ingress_annotations.is_empty() {
-                None
-            } else {
-                Some(app.spec.ingress_annotations.clone())
-            },
+            annotations: Some(annotations),
             owner_references: Some(vec![app_owner_ref(app)]),
             ..Default::default()
         },
         spec: Some(IngressSpec {
             ingress_class_name: Some(app.spec.ingress_class_name.clone()),
+            tls: Some(vec![IngressTLS {
+                hosts: Some(vec![app.spec.host.clone()]),
+                secret_name: Some(tls_secret),
+            }]),
             rules: Some(vec![IngressRule {
                 host: Some(app.spec.host.clone()),
                 http: Some(HTTPIngressRuleValue {
@@ -502,6 +528,8 @@ mod tests {
                 cookie_secret_ref: None,
                 host: "app.example.com".to_string(),
                 ingress_class_name: "nginx".to_string(),
+                tls_issuer_name: "self-sign".to_string(),
+                tls_issuer_kind: None,
                 ingress_annotations: BTreeMap::new(),
                 sandbox_tls_secret_name: None,
                 ingress_controller: None,
@@ -763,7 +791,7 @@ mod tests {
             .as_ref()
             .unwrap();
         assert_eq!(skr.name, "db-secret");
-        assert_eq!(skr.key, "databaseUrl");
+        assert_eq!(skr.key, "uri");
 
         // COOKIE_SECRET (auto-generated cookie secret)
         let cookie = find("COOKIE_SECRET");
@@ -827,16 +855,25 @@ mod tests {
         let svc = paths[0].backend.service.as_ref().unwrap();
         assert_eq!(svc.name, "application-demo");
         assert_eq!(svc.port.as_ref().unwrap().number, Some(APP_PORT));
+
+        let tls = ingress.spec.as_ref().unwrap().tls.as_ref().unwrap();
+        assert_eq!(tls.len(), 1);
+        assert_eq!(tls[0].hosts, Some(vec!["app.example.com".to_string()]));
+        assert_eq!(
+            tls[0].secret_name,
+            Some("application-demo-cert".to_string())
+        );
     }
 
     // 9. build_application_ingress_annotations
     #[test]
     fn build_application_ingress_annotations() {
-        // With annotations
+        // tls_issuer_kind None => cert-manager.io/cluster-issuer, plus les
+        // annotations libres fournies par l'utilisateur
         let mut app = make_application("demo");
         app.spec.ingress_annotations = BTreeMap::from([(
-            "cert-manager.io/cluster-issuer".to_string(),
-            "letsencrypt".to_string(),
+            "custom.example.com/foo".to_string(),
+            "bar".to_string(),
         )]);
         let ingress = build_application_ingress(&app);
         let ann = ingress
@@ -846,13 +883,21 @@ mod tests {
             .expect("should have annotations");
         assert_eq!(
             ann.get("cert-manager.io/cluster-issuer"),
-            Some(&"letsencrypt".to_string())
+            Some(&"self-sign".to_string())
         );
+        assert_eq!(ann.get("custom.example.com/foo"), Some(&"bar".to_string()));
 
-        // Without annotations
-        let app = make_application("demo");
+        // tls_issuer_kind Some("Issuer") => cert-manager.io/issuer (namespaced)
+        let mut app = make_application("demo");
+        app.spec.tls_issuer_kind = Some("Issuer".to_string());
         let ingress = build_application_ingress(&app);
-        assert!(ingress.metadata.annotations.is_none());
+        let ann = ingress
+            .metadata
+            .annotations
+            .as_ref()
+            .expect("should have annotations");
+        assert_eq!(ann.get("cert-manager.io/issuer"), Some(&"self-sign".to_string()));
+        assert!(ann.get("cert-manager.io/cluster-issuer").is_none());
     }
 
     // 10. build_cookie_secret_shape

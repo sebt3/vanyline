@@ -26,6 +26,13 @@ spec:
         properties:
           spec:
             properties:
+              applicationRef:
+                description: |-
+                  Nom de la CR Application dont l'Ingress sert de base aux sous-domaines
+                  de sandbox (`{sandbox}.sandboxes.{application.host}`). None => la
+                  Sandbox reste ClusterIP-only (comportement actuel, pas d'erreur).
+                nullable: true
+                type: string
               egress:
                 default: []
                 items:
@@ -344,7 +351,7 @@ spec:
                 - name
                 type: object
               fetchInterval:
-                description: Intervalle du CronJob de fetch. None => "1h".
+                description: Intervalle du `CronJob` de fetch. None => "1h".
                 nullable: true
                 type: string
               gitSecret:
@@ -603,7 +610,7 @@ spec:
                 default: false
                 description: |-
                   Arrêt manuel : true => le reconciler supprime le Pod (worktree, PVC,
-                  Service, NetworkPolicies conservés), status.phase devient
+                  Service, `NetworkPolicies` conservés), status.phase devient
                   "Suspended". false => le Pod est recréé (chemin nominal).
                 type: boolean
               toolchains:
@@ -717,7 +724,10 @@ spec:
                 nullable: true
                 type: string
               databaseSecretRef:
-                description: Secret contenant `databaseUrl` (chaîne de connexion complète).
+                description: |-
+                  Secret contenant `uri` (chaîne de connexion complète) — clé produite
+                  nativement par le secret `<cluster>-app` de CNPG, pointable directement
+                  sans arrimage manuel.
                 type: string
               host:
                 description: |-
@@ -736,11 +746,36 @@ spec:
                   type: string
                 default: {}
                 description: |-
-                  Annotations libres posées sur l'Ingress (ex. cert-manager.io/cluster-issuer) —
-                  même esprit que `Toolchain.env`, pas de champ dédié par convention connue.
+                  Annotations libres posées sur l'Ingress, en plus de l'annotation
+                  cert-manager dérivée de `tls_issuer_name`/`tls_issuer_kind` — même
+                  esprit que `Toolchain.env`, pas de champ dédié par convention connue.
                 type: object
               ingressClassName:
                 type: string
+              ingressController:
+                description: |-
+                  Pods du controller d'Ingress (ex. traefik) : namespace + labels.
+                  Utilisé comme peer `NetworkPolicy` sur la netpol ingress de chaque
+                  Sandbox (le trafic navigateur transite par l'Ingress avant d'atteindre
+                  le Service). None => pas de peer dédié (la netpol sandbox ne laisse
+                  passer que les pods du même Owner + le pod app).
+                nullable: true
+                properties:
+                  namespace:
+                    description: Namespace des pods du controller d'Ingress (ex. "kydah-core").
+                    type: string
+                  podLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Labels identifiant les pods du controller (ex.
+                      `app.kubernetes.io/name: traefik`, `app.kubernetes.io/component:
+                      controller`).
+                    type: object
+                required:
+                - namespace
+                - podLabels
+                type: object
               oidcSecretRef:
                 description: |-
                   Secret contenant issuerUrl/clientId/clientSecret/scopes (+ caCert optionnel).
@@ -751,11 +786,34 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
+              sandboxTlsSecretName:
+                description: |-
+                  Secret TLS wildcard pré-provisionné (`*.sandboxes.{host}`), référencé
+                  tel quel par chaque Ingress de Sandbox — jamais un Certificate par
+                  sandbox (cf. design, "Risques", rate-limit/churn). None => Ingress de
+                  Sandbox sans bloc `tls` explicite (repli sur les annotations
+                  cert-manager si présentes — comportement moins prévisible, à éviter
+                  en usage réel).
+                nullable: true
+                type: string
+              tlsIssuerKind:
+                description: '`ClusterIssuer` (défaut, None) ou `Issuer` (namespaced).'
+                nullable: true
+                type: string
+              tlsIssuerName:
+                description: |-
+                  Nom du CertManager (Cluster)Issuer utilisé pour l'Ingress de l'application
+                  (`cert-manager.io/cluster-issuer` ou `cert-manager.io/issuer` selon
+                  `tls_issuer_kind`). Pose aussi `spec.tls` sur l'Ingress (secret
+                  `<application-name>-cert`, même convention que les autres Ingress du
+                  cluster). On part du principe que cert-manager est présent.
+                type: string
             required:
             - databaseSecretRef
             - host
             - ingressClassName
             - oidcSecretRef
+            - tlsIssuerName
             type: object
           status:
             nullable: true
