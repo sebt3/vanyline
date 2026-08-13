@@ -35,11 +35,8 @@ pub struct OidcClient {
 fn build_http_client(config: &Config) -> Result<reqwest::Client, AppError> {
     let mut builder = reqwest::Client::builder().redirect(reqwest::redirect::Policy::none());
 
-    if let Some(ref ca_path) = config.oidc_ca_cert {
-        let pem = std::fs::read(ca_path).map_err(|e| {
-            AppError::OidcError(format!("VNL-AUTH-007: OIDC CA read {ca_path}: {e}"))
-        })?;
-        let cert = reqwest::Certificate::from_pem(&pem)
+    if let Some(ref ca_pem) = config.oidc_ca_cert {
+        let cert = reqwest::Certificate::from_pem(ca_pem.as_bytes())
             .map_err(|e| AppError::OidcError(format!("VNL-AUTH-007: invalid OIDC CA cert: {e}")))?;
         builder = builder.add_root_certificate(cert);
     }
