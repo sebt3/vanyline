@@ -82,6 +82,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/ws14-cli-backend-llm-exec.md` | Flags `run` `-m/-t/-j`, builtin todo, mapping agents ; correction svelte-check/storybook |
 | `.claude/memory/reorientation-2026-08-09.md` | Pivot stratégique complet (cf. "Direction actuelle" ci-dessus) |
 | `.claude/memory/arrimage-fonctionnel-2026-08.md` | 7 features (2026-08-10 → 08-12) : web IDE Vue réellement branché sur une sandbox K8s — ticket WS, CRD Application, Ingress par sandbox, todo persistant, config réelle. Process Claude/Cadence/Qwen qui a fonctionné, motif récurrent de doc drift trouvé 4 fois, décisions actées, pièges techniques |
+| `.claude/memory/v0.1.1-first-live-deploy.md` | Premier déploiement réel de la CRD Application (media-test, 2026-08-13) : 5 bugs trouvés en live (caCert PEM inline, TLS cert-manager absent, clé DB `uri` vs `databaseUrl`, dependabot npm mal ciblé sous workspaces, frontend sans redirect 401→login) → release v0.1.1, v0.1.2 en attente (tests en cours avant publication) |
 
 ---
 
