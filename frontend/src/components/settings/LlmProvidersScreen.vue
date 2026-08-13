@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import {
+  DialogRoot, DialogPortal, DialogContent, DialogTitle, DialogClose,
+} from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 
 interface LlmProvider {
@@ -53,6 +56,10 @@ const editError = ref<string | null>(null);
 // Résultat du test
 const testResults = ref<Record<string, string>>({});
 
+// Modales
+const createModalOpen = ref(false);
+const editModalOpen = ref(false);
+
 async function fetchProviders() {
   try {
     fetchedProviders.value = await client.get<LlmProvider[]>('/api/llm-providers');
@@ -79,6 +86,7 @@ async function createProvider() {
     formProviderType.value = 'ollama';
     formEndpoint.value = '';
     formApiKey.value = '';
+    createModalOpen.value = false;
     await fetchProviders();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
@@ -92,6 +100,7 @@ function startEdit(provider: LlmProvider) {
   editEndpoint.value = provider.endpoint;
   editApiKey.value = provider.api_key ?? '';
   editError.value = null;
+  editModalOpen.value = true;
 }
 
 function cancelEdit() {
@@ -101,6 +110,7 @@ function cancelEdit() {
   editEndpoint.value = '';
   editApiKey.value = '';
   editError.value = null;
+  editModalOpen.value = false;
 }
 
 async function saveEdit(id: string) {
@@ -196,104 +206,115 @@ async function deleteProvider(id: string) {
         </tbody>
       </table>
 
-      <div class="card form-card">
-        <h3 class="form-title">Créer un fournisseur</h3>
-        <label class="field">
-          <span class="field-label">Nom</span>
-          <input
-            class="field-input"
-            v-model="formName"
-            type="text"
-            placeholder="mon-fournisseur"
-            aria-label="Nom du fournisseur"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Type</span>
-          <select
-            class="field-input"
-            v-model="formProviderType"
-            aria-label="Type de fournisseur"
-          >
-            <option value="ollama">ollama</option>
-            <option value="openai-compatible">openai-compatible</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Endpoint</span>
-          <input
-            class="field-input"
-            v-model="formEndpoint"
-            type="text"
-            placeholder="http://localhost:11434"
-            aria-label="Endpoint"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Clé API (optionnel)</span>
-          <input
-            class="field-input"
-            v-model="formApiKey"
-            type="text"
-            placeholder="sk-..."
-            aria-label="Clé API"
-          />
-        </label>
-        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-        <button class="btn btn-create" @click="createProvider">Créer</button>
-      </div>
+      <button class="btn btn-create" @click="createModalOpen = true">Créer un fournisseur</button>
 
-      <template v-for="p in fetchedProviders" :key="p.id">
-        <div v-if="p.id === editingId" class="card form-card">
-          <h3 class="form-title">Modifier : {{ p.name }}</h3>
-          <label class="field">
-            <span class="field-label">Nom</span>
-            <input
-              class="field-input"
-              v-model="editName"
-              type="text"
-              placeholder="nom"
-              aria-label="Nom"
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">Type</span>
-            <select
-              class="field-input"
-              v-model="editProviderType"
-              aria-label="Type de fournisseur"
-            >
-              <option value="ollama">ollama</option>
-              <option value="openai-compatible">openai-compatible</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Endpoint</span>
-            <input
-              class="field-input"
-              v-model="editEndpoint"
-              type="text"
-              placeholder="http://localhost:11434"
-              aria-label="Endpoint"
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">Clé API (optionnel)</span>
-            <input
-              class="field-input"
-              v-model="editApiKey"
-              type="text"
-              placeholder="sk-..."
-              aria-label="Clé API"
-            />
-          </label>
-          <div v-if="editError" class="creation-error">{{ editError }}</div>
-          <div class="edit-actions">
-            <button class="btn btn-success" @click="saveEdit(p.id)">Sauvegarder</button>
-            <button class="btn btn-cancel" @click="cancelEdit">Annuler</button>
-          </div>
-        </div>
-      </template>
+      <DialogRoot v-model:open="createModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Créer un fournisseur</DialogTitle>
+            <label class="field">
+              <span class="field-label">Nom</span>
+              <input
+                class="field-input"
+                v-model="formName"
+                type="text"
+                placeholder="mon-fournisseur"
+                aria-label="Nom du fournisseur"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Type</span>
+              <select
+                class="field-input"
+                v-model="formProviderType"
+                aria-label="Type de fournisseur"
+              >
+                <option value="ollama">ollama</option>
+                <option value="openai-compatible">openai-compatible</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Endpoint</span>
+              <input
+                class="field-input"
+                v-model="formEndpoint"
+                type="text"
+                placeholder="http://localhost:11434"
+                aria-label="Endpoint"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Clé API (optionnel)</span>
+              <input
+                class="field-input"
+                v-model="formApiKey"
+                type="text"
+                placeholder="sk-..."
+                aria-label="Clé API"
+              />
+            </label>
+            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-create" @click="createProvider">Créer</button>
+              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
+
+      <DialogRoot v-model:open="editModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Modifier : {{ editName }}</DialogTitle>
+            <label class="field">
+              <span class="field-label">Nom</span>
+              <input
+                class="field-input"
+                v-model="editName"
+                type="text"
+                placeholder="nom"
+                aria-label="Nom"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Type</span>
+              <select
+                class="field-input"
+                v-model="editProviderType"
+                aria-label="Type de fournisseur"
+              >
+                <option value="ollama">ollama</option>
+                <option value="openai-compatible">openai-compatible</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Endpoint</span>
+              <input
+                class="field-input"
+                v-model="editEndpoint"
+                type="text"
+                placeholder="http://localhost:11434"
+                aria-label="Endpoint"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Clé API (optionnel)</span>
+              <input
+                class="field-input"
+                v-model="editApiKey"
+                type="text"
+                placeholder="sk-..."
+                aria-label="Clé API"
+              />
+            </label>
+            <div v-if="editError" class="creation-error">{{ editError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
+              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
 
       <div v-for="p in fetchedProviders" :key="'test-' + p.id" class="results">
         <div v-if="testResults[p.id]" class="test-result">
@@ -519,9 +540,15 @@ async function deleteProvider(id: string) {
   color: #e6e9f0;
 }
 
-.edit-actions {
+.dialog-actions {
   display: flex;
-  gap: 8px;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.dialog-actions .btn:first-child {
+  margin-left: 0;
 }
 
 .results {
@@ -536,5 +563,29 @@ async function deleteProvider(id: string) {
   border-radius: 6px;
   color: #3fb56d;
   font-size: 13px;
+}
+</style>
+
+<style>
+[role='dialog'] {
+  background: #101828;
+  border: 1px solid #1c1c2a;
+  border-radius: 10px;
+  padding: 24px 28px;
+  max-width: 480px;
+}
+
+.dialog-title {
+  margin: 0 0 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #e6e9f0;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 </style>

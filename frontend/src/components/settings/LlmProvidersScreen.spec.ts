@@ -4,6 +4,9 @@ import LlmProvidersScreen from './LlmProvidersScreen.vue';
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // Nettoyer le body après chaque test (téléport reka-ui)
+  const dialogs = document.body.querySelectorAll('[role="dialog"]');
+  dialogs.forEach((d) => d.remove());
 });
 
 describe('LlmProvidersScreen', () => {
@@ -50,7 +53,7 @@ describe('LlmProvidersScreen', () => {
     expect(wrapper.text()).toContain('Défaut');
   });
 
-  it('remplir le formulaire de création + "Créer" appelle POST avec corps attendu puis re-fetch', async () => {
+  it('création en modale : dialog apparaît → remplir → créer → dialog fermé', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
@@ -60,7 +63,6 @@ describe('LlmProvidersScreen', () => {
       if (method === 'GET' && u === '/api/llm-providers') {
         fetchCount++;
         if (fetchCount === 1) {
-          // premier GET au montage
           return {
             ok: true,
             status: 200,
@@ -68,7 +70,6 @@ describe('LlmProvidersScreen', () => {
             json: () => Promise.resolve([]),
           } as unknown as Response;
         }
-        // re-fetch après CREATE → retourne les données avec le nouveau
         return {
           ok: true,
           status: 200,
@@ -120,31 +121,83 @@ describe('LlmProvidersScreen', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    const inputs = wrapper.findAll('input');
-    const nameInput = inputs[0] as any;
-    const providerTypeSelect = wrapper.find('select') as any;
-    const endpointInput = inputs[1] as any;
-    const apiKeyInput = inputs[2] as any;
-
-    await nameInput.setValue('new-provider');
-    await providerTypeSelect.setValue('ollama');
-    await endpointInput.setValue('http://localhost:11434');
-    await apiKeyInput.setValue('');
-
+    // Cliquer "Créer un fournisseur" → dialog apparaît
     const createBtn = wrapper.find('.btn-create');
     await createBtn.trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
+    expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+
+    const dialog = document.querySelector('[role="dialog"]')!;
+
+    // Remplir les champs
+    const inputs = dialog.querySelectorAll('input');
+    const setInput = (el: Element, val: string) => {
+      (el as HTMLInputElement).value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setInput(inputs[0], 'new-provider');
+    setInput(inputs[1], 'http://localhost:11434');
+    // api_key reste vide
+
+    // Cliquer "Créer" du dialog
+    const dialogCreateBtn = dialog.querySelector('.btn-create');
+    await (dialogCreateBtn as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Dialog fermé
+    expect(document.querySelector('[role="dialog"]')).toBeFalsy();
+
+    // Nouvelle donnée apparaît
     expect(wrapper.text()).toContain('new-provider');
   });
 
-  it('cliquer "Modifier" charge les valeurs ; "Sauvegarder" appelle PUT avec corps update puis re-fetch', async () => {
+  it('cliquer "Modifier" ouvre la modale avec valeurs pré-remplies', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
+
+      if (method === 'GET' && u === '/api/llm-providers') {
+        fetchCount++;
+        if (fetchCount === 1) {
+          return {
+            ok: true,
+            status: 200,
+            headers: new Map([['content-type', 'application/json']]),
+            json: () => [
+              {
+                id: 'aaa',
+                name: 'ollama-local',
+                provider_type: 'ollama',
+                endpoint: 'http://localhost:11434',
+                api_key: null,
+                is_default: true,
+                available_models: null,
+              },
+            ],
+          } as unknown as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: new Map([['content-type', 'application/json']]),
+          json: () => [
+            {
+              id: 'aaa',
+              name: 'updated-ollama',
+              provider_type: 'ollama',
+              endpoint: 'http://localhost:11435',
+              api_key: null,
+              is_default: true,
+              available_models: null,
+            },
+          ],
+        } as unknown as Response;
+      }
 
       if (method === 'PUT' && u.includes('/api/llm-providers/aaa')) {
         const body = JSON.parse((init?.body as string | undefined) ?? '{}');
@@ -157,57 +210,15 @@ describe('LlmProvidersScreen', () => {
           ok: true,
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
-          json: () =>
-            Promise.resolve({
-              id: 'aaa',
-              name: 'updated-ollama',
-              provider_type: 'ollama',
-              endpoint: 'http://localhost:11435',
-              api_key: null,
-              is_default: true,
-              available_models: null,
-            }),
-        } as unknown as Response;
-      }
-
-      if (method === 'GET' && u === '/api/llm-providers') {
-        fetchCount++;
-        if (fetchCount === 1) {
-          return {
-            ok: true,
-            status: 200,
-            headers: new Map([['content-type', 'application/json']]),
-            json: () =>
-              Promise.resolve([
-                {
-                  id: 'aaa',
-                  name: 'ollama-local',
-                  provider_type: 'ollama',
-                  endpoint: 'http://localhost:11434',
-                  api_key: null,
-                  is_default: true,
-                  available_models: null,
-                },
-              ]),
-          } as unknown as Response;
-        }
-        // re-fetch après SAVE
-        return {
-          ok: true,
-          status: 200,
-          headers: new Map([['content-type', 'application/json']]),
-          json: () =>
-            Promise.resolve([
-              {
-                id: 'aaa',
-                name: 'updated-ollama',
-                provider_type: 'ollama',
-                endpoint: 'http://localhost:11435',
-                api_key: null,
-                is_default: true,
-                available_models: null,
-              },
-            ]),
+          json: () => ({
+            id: 'aaa',
+            name: 'updated-ollama',
+            provider_type: 'ollama',
+            endpoint: 'http://localhost:11435',
+            api_key: null,
+            is_default: true,
+            available_models: null,
+          }),
         } as unknown as Response;
       }
 
@@ -219,27 +230,87 @@ describe('LlmProvidersScreen', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    const editBtns = wrapper.findAll('.btn-edit');
-    await editBtns[0].trigger('click');
-    await wrapper.vm.$nextTick();
-
-    // Vérifier que le formulaire d'édition est affiché avec les pré-remplis
-    expect(wrapper.text()).toContain('Modifier : ollama-local');
-    const editForm = wrapper.findAll('.form-card');
-    const editInputs = editForm[1].findAll('input') as any;
-    expect(editInputs[0].element.value).toBe('ollama-local');
-    expect(editInputs[1].element.value).toBe('http://localhost:11434');
-
-    // Remplir les valeurs modifiées
-    await editInputs[0].setValue('updated-ollama');
-    await editInputs[1].setValue('http://localhost:11435');
-
-    const saveBtns = wrapper.findAll('.btn-success');
-    await saveBtns[0].trigger('click');
+    // Cliquer "Modifier" sur une ligne
+    const editBtn = wrapper.find('.btn-edit');
+    await editBtn.trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
+    // Le dialog existe avec le titre pré-rempli
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain('Modifier : ollama-local');
+
+    // Les champs sont pré-remplis
+    const inputs = dialog!.querySelectorAll('input');
+    expect((inputs[0] as HTMLInputElement).value).toBe('ollama-local');
+    expect((inputs[1] as HTMLInputElement).value).toBe('http://localhost:11434');
+
+    // Remplir les valeurs modifiées
+    (inputs[0] as HTMLInputElement).value = 'updated-ollama';
+    (inputs[0] as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
+    (inputs[1] as HTMLInputElement).value = 'http://localhost:11435';
+    (inputs[1] as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
+
+    // Cliquer "Sauvegarder"
+    (dialog!.querySelector('.btn-success') as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Dialog fermé
+    expect(document.querySelector('[role="dialog"]')).toBeFalsy();
+
+    // Re-fetch → valeurs mises à jour
     expect(wrapper.text()).toContain('updated-ollama');
+  });
+
+  it('annuler (bouton Annuler) la modale d\'édition → pas de PUT, dialog fermé', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () =>
+        Promise.resolve([
+          {
+            id: 'aaa',
+            name: 'ollama-local',
+            provider_type: 'ollama',
+            endpoint: 'http://localhost:11434',
+            api_key: null,
+            is_default: true,
+            available_models: null,
+          },
+        ]),
+    } as unknown as Response);
+
+    const wrapper = mount(LlmProvidersScreen);
+
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Cliquer "Modifier"
+    const editBtn = wrapper.find('.btn-edit');
+    await editBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+
+    // Cliquer "Annuler"
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const cancelButton = dialog.querySelector('.btn-cancel');
+    await (cancelButton as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+
+    // Dialog fermé — état du composant
+    expect((wrapper.vm as any).editModalOpen).toBe(false);
+
+    // Aucun PUT appelé
+    const putCalls = fetchSpy.mock.calls.filter(
+      ([_url, init]) => (init?.method ?? 'GET') === 'PUT',
+    );
+    expect(putCalls.length).toBe(0);
   });
 
   it('cliquer "Tester" → POST /{id}/test, et les modèles retournés s\'affichent', async () => {
