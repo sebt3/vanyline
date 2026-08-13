@@ -4,6 +4,9 @@ import McpServersScreen from './McpServersScreen.vue';
 
 beforeEach(() => {
   vi.restoreAllMocks();
+  // Nettoyer le body après chaque test (téléport reka-ui)
+  const dialogs = document.body.querySelectorAll('[role="dialog"]');
+  dialogs.forEach((d) => d.remove());
 });
 
 describe('McpServersScreen', () => {
@@ -42,33 +45,12 @@ describe('McpServersScreen', () => {
     expect(wrapper.text()).toContain('https://http.example.com/mcp');
   });
 
-  it('remplir le formulaire de création + "Créer" appelle POST avec le corps attendu puis re-fetch', async () => {
+  it('création en modale : dialog apparaît → remplir → créer → dialog fermé', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
-
-      if (method === 'POST' && u === '/api/mcp-servers') {
-        const body = JSON.parse(String((init as RequestInit)?.body));
-        expect(body).toEqual({
-          name: 'new-server',
-          server_type: 'sse',
-          url: 'https://new.example.com/mcp',
-        });
-        return new Response(
-          JSON.stringify({
-            id: 'new1111-2222-3333-4444-555566667777',
-            name: 'new-server',
-            server_type: 'sse',
-            url: 'https://new.example.com/mcp',
-          }),
-          {
-            status: 201,
-            headers: { 'content-type': 'application/json' },
-          },
-        );
-      }
 
       if (method === 'GET' && u === '/api/mcp-servers') {
         fetchCount++;
@@ -102,6 +84,27 @@ describe('McpServersScreen', () => {
         );
       }
 
+      if (method === 'POST' && u === '/api/mcp-servers') {
+        const body = JSON.parse(String((init as RequestInit)?.body));
+        expect(body).toEqual({
+          name: 'new-server',
+          server_type: 'sse',
+          url: 'https://new.example.com/mcp',
+        });
+        return new Response(
+          JSON.stringify({
+            id: 'new1111-2222-3333-4444-555566667777',
+            name: 'new-server',
+            server_type: 'sse',
+            url: 'https://new.example.com/mcp',
+          }),
+          {
+            status: 201,
+            headers: { 'content-type': 'application/json' },
+          },
+        );
+      }
+
       return new Response(null, { status: 500 });
     });
 
@@ -109,23 +112,44 @@ describe('McpServersScreen', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    const nameInput = wrapper.find<any>('input[aria-label="Nom du serveur"]');
-    const serverTypeSelect = wrapper.find<any>('select[aria-label="Type de serveur"]');
-    const urlInput = wrapper.find<any>('input[aria-label="URL"]');
-
-    await nameInput.setValue('new-server');
-    await serverTypeSelect.setValue('sse');
-    await urlInput.setValue('https://new.example.com/mcp');
-
+    // Cliquer "Créer un serveur MCP" → dialog apparaît
     const createBtn = wrapper.find('.btn-create');
     await createBtn.trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
+    expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+
+    const dialog = document.querySelector('[role="dialog"]')!;
+
+    // Remplir les champs
+    const setInput = (el: Element, val: string) => {
+      (el as HTMLInputElement).value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setInput(dialog.querySelector('input')!, 'new-server');
+    
+    const select = dialog.querySelector('select')! as HTMLSelectElement;
+    select.value = 'sse';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const urlInput = dialog.querySelectorAll('input')[1];
+    setInput(urlInput, 'https://new.example.com/mcp');
+
+    // Cliquer "Créer" du dialog
+    const dialogCreateBtn = dialog.querySelector('.btn-create') as HTMLElement;
+    await dialogCreateBtn.click();
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Dialog fermé
+    expect(document.querySelector('[role="dialog"]')).toBeFalsy();
+
+    // Nouvelle donnée apparaît
     expect(wrapper.text()).toContain('new-server');
   });
 
-  it('cliquer "Modifier" charge les valeurs ; "Sauvegarder" appelle PUT avec corps update puis re-fetch', async () => {
+  it('cliquer "Modifier" ouvre la modale avec valeurs pré-remplies', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     let capturedPutBody: unknown = null;
@@ -179,39 +203,94 @@ describe('McpServersScreen', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
+    // Cliquer "Modifier" sur une ligne
     const editBtn = wrapper.find('.btn-edit');
     await editBtn.trigger('click');
     await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
 
-    expect(wrapper.text()).toContain('Modifier : old-name');
-    const editForm = wrapper.findAll<any>('.form-card');
+    // Le dialog existe
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog?.textContent).toContain('Modifier : old-name');
 
-    const editNameInput = editForm[1].find<HTMLInputElement>(
-      'input[aria-label="Nom du serveur"]',
-    );
-    expect(editNameInput!.element.value).toBe('old-name');
+    // Les champs sont pré-remplis
+    const inputs = dialog!.querySelectorAll('input');
+    expect((inputs[0] as HTMLInputElement).value).toBe('old-name');
 
-    await editNameInput!.setValue('updated-name');
+    // Remplir les valeurs modifiées
+    (inputs[0] as HTMLInputElement).value = 'updated-name';
+    (inputs[0] as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
 
-    const editServerTypeSelect = editForm[1].find<any>('select[aria-label="Type de serveur"]');
-    await editServerTypeSelect.setValue('http-streamable');
+    const select = dialog!.querySelector('select') as HTMLSelectElement;
+    select.value = 'http-streamable';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
 
-    const editUrlInput = editForm[1].find<HTMLInputElement>(
-      'input[aria-label="URL"]',
-    );
-    await editUrlInput!.setValue('https://updated.example.com/mcp');
+    const urlInput = dialog!.querySelectorAll('input')[1];
+    (urlInput as HTMLInputElement).value = 'https://updated.example.com/mcp';
+    (urlInput as HTMLInputElement).dispatchEvent(new Event('input', { bubbles: true }));
 
-    const saveBtns = wrapper.findAll('.btn-success');
-    await saveBtns[0].trigger('click');
+    // Cliquer "Sauvegarder"
+    (dialog!.querySelector('.btn-success') as HTMLElement).click();
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
+    // Dialog fermé
+    expect(document.querySelector('[role="dialog"]')).toBeFalsy();
+
+    // Vérifier les appels PUT
     expect(capturedPutUrl).toBe('/api/mcp-servers/edit-me-id');
     expect(capturedPutBody).toEqual({
       name: 'updated-name',
       server_type: 'http-streamable',
       url: 'https://updated.example.com/mcp',
     });
+  });
+
+  it('annuler (bouton Annuler) la modale d\'édition → pas de PUT, dialog fermé', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      headers: new Map([['content-type', 'application/json']]),
+      json: () =>
+        Promise.resolve([
+          {
+            id: 'aaa',
+            name: 'ollama-local',
+            server_type: 'sse',
+            url: 'https://ollama.example.com/mcp',
+          },
+        ]),
+    } as unknown as Response);
+
+    const wrapper = mount(McpServersScreen);
+
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Cliquer "Modifier"
+    const editBtn = wrapper.find('.btn-edit');
+    await editBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(document.querySelector('[role="dialog"]')).toBeTruthy();
+
+    // Cliquer "Annuler"
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const cancelButton = dialog.querySelector('.btn-cancel');
+    await (cancelButton as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+
+    // Dialog fermé — état du composant
+    expect((wrapper.vm as any).editModalOpen).toBe(false);
+
+    // Aucun PUT appelé
+    const putCalls = fetchSpy.mock.calls.filter(
+      ([_url, init]) => (init?.method ?? 'GET') === 'PUT',
+    );
+    expect(putCalls.length).toBe(0);
   });
 
   it('cliquer "Supprimer" → DELETE /{id} puis re-fetch', async () => {
