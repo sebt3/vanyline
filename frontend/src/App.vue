@@ -3,8 +3,10 @@ import { computed } from 'vue';
 import { useRoute } from 'vue-router';
 import MenuBar from './components/MenuBar.vue';
 import StatusBar from './components/StatusBar.vue';
+import AppBreadcrumb from './components/AppBreadcrumb.vue';
 
 const route = useRoute();
+const isIdeRoute = computed(() => route.name === 'ide');
 // Plus de "media-station" en dur : le workspace vient de la route.
 // Sur /settings (pas de sandbox) → chaîne vide.
 const workspace = computed(() =>
@@ -14,15 +16,26 @@ const workspace = computed(() =>
 
 <template>
   <div class="shell">
-    <div class="topbar">
-      <MenuBar />
-      <span class="grow" />
-      <span class="workspace">{{ workspace }}</span>
-    </div>
-    <div class="dock">
-      <router-view />
-    </div>
-    <StatusBar :workspace="workspace" />
+    <template v-if="isIdeRoute">
+      <div class="topbar">
+        <MenuBar />
+        <span class="grow" />
+        <span class="workspace">{{ workspace }}</span>
+      </div>
+      <div class="dock">
+        <router-view />
+      </div>
+      <StatusBar :workspace="workspace" />
+    </template>
+    <template v-else>
+      <div class="topbar">
+        <AppBreadcrumb />
+        <span class="grow" />
+      </div>
+      <div class="dock">
+        <router-view />
+      </div>
+    </template>
   </div>
 </template>
 

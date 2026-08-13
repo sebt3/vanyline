@@ -10,17 +10,34 @@ function createTestRouter(): Router {
 }
 
 describe('router', () => {
-  it('redirige / vers /settings', async () => {
+  it('/ résout sur / (plus de redirect)', async () => {
     const router = createTestRouter();
     await router.push('/');
     await router.isReady();
-    expect(router.currentRoute.value.path).toBe('/settings');
+    expect(router.currentRoute.value.path).toBe('/');
   });
 
-  it('résout /ide/foo avec sandboxName', async () => {
+  it('/p/:projectName résout params.projectName et route.name', async () => {
+    const router = createTestRouter();
+    await router.push('/p/foo');
+    await router.isReady();
+    expect(router.currentRoute.value.params.projectName).toBe('foo');
+    expect(router.currentRoute.value.name).toBe('project');
+  });
+
+  it('/p/:projectName/s/:sandboxName résout les deux params et route.name', async () => {
+    const router = createTestRouter();
+    await router.push('/p/foo/s/bar');
+    await router.isReady();
+    expect(router.currentRoute.value.params.sandboxName).toBe('bar');
+    expect(router.currentRoute.value.params.projectName).toBe('foo');
+    expect(router.currentRoute.value.name).toBe('ide');
+  });
+
+  it('/ide/foo ne matche aucune route', async () => {
     const router = createTestRouter();
     await router.push('/ide/foo');
     await router.isReady();
-    expect(router.currentRoute.value.params.sandboxName).toBe('foo');
+    expect(router.currentRoute.value.matched.length).toBe(0);
   });
 });
