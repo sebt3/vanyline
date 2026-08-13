@@ -2,6 +2,7 @@ import { createMemoryHistory, createRouter } from 'vue-router';
 import { mount, type VueWrapper } from '@vue/test-utils';
 import { describe, expect, it } from 'vitest';
 import AppBreadcrumb from './AppBreadcrumb.vue';
+import { activeNav } from './settings/navState';
 
 describe('AppBreadcrumb', () => {
   function mountBreadcrumb(): VueWrapper {
@@ -47,17 +48,34 @@ describe('AppBreadcrumb', () => {
     expect(wrapper.find('.current').text()).toBe('foo');
   });
 
-  it('affiche Accueil + Paramètres sur /settings', async () => {
+  it('affiche Accueil / Paramètres / Modèles / Fournisseurs LLM sur /settings', async () => {
+    // Reset activeNav aux valeurs par défaut
+    activeNav.value = { groupLabel: 'Modèles', screenLabel: 'Fournisseurs LLM' };
+
     const wrapper = mountBreadcrumb();
     await wrapper.vm.$router.push('/settings');
     await wrapper.vm.$router.isReady();
     expect(wrapper.text()).toContain('Accueil');
     expect(wrapper.text()).toContain('Paramètres');
+    expect(wrapper.text()).toContain('Modèles');
+    expect(wrapper.text()).toContain('Fournisseurs LLM');
 
-    // "Paramètres" est le dernier segment → texte simple, pas un lien.
+    // 3 liens (Accueil, Paramètres, Modèles) — le dernier segment "Fournisseurs LLM" n'est pas un lien
     const links = wrapper.findAll('a');
-    expect(links.length).toBe(1);
+    expect(links.length).toBe(3);
     expect(links[0].attributes('href')).toBe('/');
-    expect(wrapper.find('.current').text()).toBe('Paramètres');
+    expect(links[1].attributes('href')).toBe('/settings');
+    expect(links[2].attributes('href')).toBe('/settings');
+    expect(wrapper.find('.current').text()).toBe('Fournisseurs LLM');
+  });
+
+  it('affiche Agents quand activeNav est modifié', async () => {
+    activeNav.value = { groupLabel: 'Agents', screenLabel: 'Agents' };
+
+    const wrapper = mountBreadcrumb();
+    await wrapper.vm.$router.push('/settings');
+    await wrapper.vm.$router.isReady();
+    expect(wrapper.text()).toContain('Agents');
+    expect(wrapper.find('.current').text()).toBe('Agents');
   });
 });

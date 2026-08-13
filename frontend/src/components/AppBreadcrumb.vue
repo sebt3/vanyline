@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRoute } from 'vue-router';
+import { activeNav } from './settings/navState';
 
 const route = useRoute();
 
@@ -8,7 +9,9 @@ const route = useRoute();
 const segments = computed<[string, string][]>(() => {
   // '/'          → [['Accueil', '/']]
   // '/p/:project' → [['Accueil', '/'], [projectName, '/p/' + projectName]]
-  // '/settings'   → [['Accueil', '/'], ['Paramètres', '/settings']]
+  // '/settings'   → [['Accueil', '/'], ['Paramètres', '/settings'],
+  //                   [activeNav.groupLabel, '/settings'],
+  //                   [activeNav.screenLabel, '/settings']]
   if (route.path === '/') {
     return [['Accueil', '/']];
   }
@@ -26,6 +29,8 @@ const segments = computed<[string, string][]>(() => {
     return [
       ['Accueil', '/'],
       ['Paramètres', '/settings'],
+      [activeNav.value.groupLabel, '/settings'],
+      [activeNav.value.screenLabel, '/settings'],
     ];
   }
 
@@ -71,4 +76,3 @@ const segments = computed<[string, string][]>(() => {
   color: white;
 }
 </style>
-

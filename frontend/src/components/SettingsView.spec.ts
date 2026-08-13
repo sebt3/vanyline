@@ -1,48 +1,81 @@
 import { describe, expect, it } from 'vitest';
 import { mount } from '@vue/test-utils';
 import SettingsView from './SettingsView.vue';
+import { activeNav } from './settings/navState';
 
 describe('SettingsView', () => {
-  it('affiche les 4 groupes de navigation', () => {
+  it('affiche 5 groupes sans Projets ni Sandboxes', () => {
     const wrapper = mount(SettingsView);
     const items = wrapper.findAll('.nav-item');
-    expect(items).toHaveLength(4);
-    expect(wrapper.text()).toContain('Projets');
-    expect(wrapper.text()).toContain('Sandboxes');
-    expect(wrapper.text()).toContain('Agent & modèle');
+    expect(items).toHaveLength(5);
+    expect(wrapper.text()).toContain('Modèles');
+    expect(wrapper.text()).toContain('Outils');
+    expect(wrapper.text()).toContain('Agents');
+    expect(wrapper.text()).toContain('Skills');
     expect(wrapper.text()).toContain('Compte');
+    expect(wrapper.text()).not.toContain('Projets');
+    expect(wrapper.text()).not.toContain('Sandboxes');
   });
 
-  it('révèle les 6 sous-items quand on clique sur "Agent & modèle"', async () => {
+  it('révèle 2 sous-items quand on clique sur "Modèles"', async () => {
     const wrapper = mount(SettingsView);
-    const agentItem = wrapper.find('[data-group="agent"]');
-    await agentItem.trigger('click');
+    const modelesItem = wrapper.find('[data-group="modeles"]');
+    await modelesItem.trigger('click');
     await wrapper.vm.$nextTick();
 
     const subItems = wrapper.findAll('.nav-sub-item');
-    expect(subItems).toHaveLength(6);
+    expect(subItems).toHaveLength(2);
     expect(wrapper.text()).toContain('Fournisseurs LLM');
     expect(wrapper.text()).toContain('Profils de modèle');
-    expect(wrapper.text()).toContain('Toolsets');
-    expect(wrapper.text()).toContain('Skills');
-    expect(wrapper.text()).toContain('Agents');
-    expect(wrapper.text()).toContain('Serveurs MCP');
   });
 
-  it('monte AccountScreen quand on sélectionne le groupe "account"', async () => {
-    // Projects est maintenant un écran réel, pas pending → "À venir" n'est plus affiché par défaut
+  it('révèle 2 sous-items quand on clique sur "Outils"', async () => {
+    // D'abord cliquer sur un autre groupe pour reset
     const wrapper = mount(SettingsView);
-    expect(wrapper.text()).not.toContain('À venir');
+    await wrapper.find('[data-group="agents"]').trigger('click');
+    await wrapper.vm.$nextTick();
 
-    // Le 4ème bouton de nav (index 3) est "Compte"
+    // Maintenant cliquer Outils
+    await wrapper.find('[data-group="outils"]').trigger('click');
+    await wrapper.vm.$nextTick();
+
+    const subItems = wrapper.findAll('.nav-sub-item');
+    expect(subItems).toHaveLength(2);
+    expect(wrapper.text()).toContain('Serveurs MCPs');
+    expect(wrapper.text()).toContain('Toolsets');
+  });
+
+  it('monte les écrans Agents, Skills et Account', async () => {
+    const wrapper = mount(SettingsView);
+
     const navItems = wrapper.findAll('.nav-item');
+
+    // Agents → AgentsScreen
+    await navItems[2].trigger('click');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findComponent({ name: 'AgentsScreen' }).exists()).toBe(true);
+
+    // Skills → SkillsScreen
     await navItems[3].trigger('click');
     await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    expect(wrapper.findComponent({ name: 'SkillsScreen' }).exists()).toBe(true);
 
-    // L'API n'est pas mockée en test, mais AccountScreen doit être monté
-    // (il affiche un message d'erreur réseau au lieu des champs)
-    const rendered = wrapper.findComponent({ name: 'AccountScreen' });
-    expect(rendered.exists()).toBe(true);
+    // Compte → AccountScreen
+    await navItems[4].trigger('click');
+    await wrapper.vm.$nextTick();
+    expect(wrapper.findComponent({ name: 'AccountScreen' }).exists()).toBe(true);
+  });
+
+  it('synchronise activeNav après clic sur Outils', async () => {
+    const wrapper = mount(SettingsView);
+
+    // Cliquer Outils
+    await wrapper.find('[data-group="outils"]').trigger('click');
+    await wrapper.vm.$nextTick();
+
+    expect(activeNav.value).toEqual({
+      groupLabel: 'Outils',
+      screenLabel: 'Serveurs MCPs',
+    });
   });
 });

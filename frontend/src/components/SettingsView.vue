@@ -2,14 +2,13 @@
 import type { Component } from 'vue';
 import { computed, ref } from 'vue';
 import AccountScreen from './settings/AccountScreen.vue';
-import ProjectsScreen from './settings/ProjectsScreen.vue';
-import SandboxesScreen from './settings/SandboxesScreen.vue';
 import LlmProvidersScreen from './settings/LlmProvidersScreen.vue';
 import ModelProfilesScreen from './settings/ModelProfilesScreen.vue';
 import ToolsetsScreen from './settings/ToolsetsScreen.vue';
 import SkillsScreen from './settings/SkillsScreen.vue';
 import AgentsScreen from './settings/AgentsScreen.vue';
 import McpServersScreen from './settings/McpServersScreen.vue';
+import { activeNav } from './settings/navState';
 
 interface NavSub {
   id: string;
@@ -25,28 +24,34 @@ interface NavGroup {
 }
 
 const groups: NavGroup[] = [
-  { id: 'projects', label: 'Projets', icon: '⌥', accent: '#4c90f0' },
-  { id: 'sandboxes', label: 'Sandboxes', icon: '▣', accent: '#3fb56d' },
   {
-    id: 'agent',
-    label: 'Agent & modèle',
+    id: 'modeles',
+    label: 'Modèles',
     icon: '✦',
     accent: '#5b1ecf',
     sub: [
       { id: 'llm-providers', label: 'Fournisseurs LLM' },
       { id: 'model-profiles', label: 'Profils de modèle' },
-      { id: 'toolsets', label: 'Toolsets' },
-      { id: 'skills', label: 'Skills' },
-      { id: 'agents', label: 'Agents' },
-      { id: 'mcp-servers', label: 'Serveurs MCP' },
     ],
   },
+  {
+    id: 'outils',
+    label: 'Outils',
+    icon: '⚙',
+    accent: '#4c90f0',
+    sub: [
+      { id: 'mcp-servers', label: 'Serveurs MCPs' },
+      { id: 'toolsets', label: 'Toolsets' },
+    ],
+  },
+  { id: 'agents', label: 'Agents', icon: '✦', accent: '#e0a83d' },
+  { id: 'skills', label: 'Skills', icon: '⚡', accent: '#3fb56d' },
   { id: 'account', label: 'Compte', icon: '●', accent: '#e0a83d' },
 ];
 
 const activeGroup = ref(groups[0].id);
 const activeScreen = ref(getScreenId(groups[0]));
-const expandedAgent = ref(false);
+const expandedGroupId = ref<string | null>(null);
 
 function getScreenId(group: NavGroup): string {
   if (group.sub && group.sub.length > 0) {
@@ -60,16 +65,34 @@ function setActiveGroup(groupId: string) {
   if (!group) return;
   activeGroup.value = groupId;
   if (group.sub) {
-    expandedAgent.value = true;
+    expandedGroupId.value = groupId;
     activeScreen.value = group.sub[0].id;
   } else {
-    expandedAgent.value = false;
+    expandedGroupId.value = null;
     activeScreen.value = groupId;
   }
+  syncNav();
 }
 
 function setSubScreen(subId: string) {
   activeScreen.value = subId;
+  syncNav();
+}
+
+function toggleExpanded(groupId: string) {
+  expandedGroupId.value = expandedGroupId.value === groupId ? null : groupId;
+}
+
+function syncNav() {
+  const group = groups.find((g) => g.id === activeGroup.value);
+  const screenLabel =
+    group?.sub?.find((s) => s.id === activeScreen.value)?.label ??
+    group?.label ??
+    '';
+  activeNav.value = {
+    groupLabel: group?.label ?? '',
+    screenLabel,
+  };
 }
 
 // Liste des écrans qui n'ont pas encore été implémentés (rendent un placeholder)
@@ -79,8 +102,6 @@ const isPending = computed(() => pendingScreenIds.includes(activeScreen.value));
 
 const screens: Record<string, Component> = {
   account: AccountScreen,
-  projects: ProjectsScreen,
-  sandboxes: SandboxesScreen,
   'llm-providers': LlmProvidersScreen,
   'model-profiles': ModelProfilesScreen,
   toolsets: ToolsetsScreen,
@@ -107,6 +128,8 @@ const Pending: Component = {
 `,
   ],
 };
+
+syncNav();
 </script>
 
 <template>
@@ -125,12 +148,12 @@ const Pending: Component = {
           <template v-if="group.sub">
             <span
               class="nav-arrow"
-              :class="{ expanded: group.id === 'agent' && expandedAgent }"
-              @click.stop="expandedAgent = !expandedAgent"
+              :class="{ expanded: expandedGroupId === group.id }"
+              @click.stop="toggleExpanded(group.id)"
             >▼</span>
           </template>
         </button>
-        <template v-if="group.sub && expandedAgent">
+        <template v-if="group.sub && expandedGroupId === group.id">
           <button
             v-for="sub in group.sub"
             :key="sub.id"
