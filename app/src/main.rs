@@ -32,6 +32,17 @@ pub struct AppState {
 
 #[tokio::main]
 async fn main() {
+    // reqwest (rustls-tls) et kube (rustls-tls) tirent chacun un backend crypto
+    // rustls différent (ring / aws-lc-rs) — les deux finissent compilés dans le
+    // même binaire (unification des features Cargo). Sans provider explicite,
+    // rustls panique au premier client TLS construit sans provider déjà
+    // installé (observé en pratique sur le client K8s, jamais sur le client
+    // OIDC/reqwest qui résout son provider en interne sans passer par le
+    // helper global ambigu).
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .ok();
+
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
