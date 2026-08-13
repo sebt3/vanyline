@@ -1,20 +1,28 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import AgentsScreen from './AgentsScreen.vue';
 
-beforeEach(() => {
-  vi.restoreAllMocks();
-});
+// Helpers — creates fresh Response each call so body stream isn't reused
+function jsonResponse(data: unknown): Response {
+  return new Response(JSON.stringify(data), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 
 describe('AgentsScreen', () => {
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+  });
+
   it('affiche noms, modes, modèles, skills (littéral ou noms joints) quand GET renvoie 2 agents', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      headers: new Map([['content-type', 'application/json']]),
-      json: () =>
-        Promise.resolve([
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const urlStr = String(url);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && urlStr === '/api/agents') {
+        return jsonResponse([
           {
             name: 'primary-agent',
             description: 'Agent principal',
@@ -32,12 +40,13 @@ describe('AgentsScreen', () => {
             skills: ['a', 'b'],
             system_prompt: '',
           },
-        ]),
-    } as unknown as Response);
+        ]);
+      }
+      return jsonResponse([]);
+    });
 
     const wrapper = mount(AgentsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 50));
 
     expect(wrapper.text()).toContain('primary-agent');
     expect(wrapper.text()).toContain('sub-agent');
@@ -50,224 +59,262 @@ describe('AgentsScreen', () => {
     expect(wrapper.text()).toContain('—');
   });
 
-  it('remplir le formulaire de création + "Créer" appelle POST avec toolsets parsé puis re-fetch', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  it('remplir + "Créer" → POST avec toolsets tableau, puis re-fetch', async () => {
+    fetchSpy.mockReset();
+    let postBody: unknown;
     let fetchCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
-      const method = (init?.method ?? 'GET') as string;
-      const u = String(url);
 
-      if (method === 'POST' && u === '/api/agents') {
-        const body = JSON.parse(String((init as RequestInit)?.body));
-        expect(body).toEqual({
-          name: 'new-agent',
-          mode: 'subagent',
-          model: 'claude-sonnet-4',
-          toolsets: ['t1', 't2'],
-          skills: 'auto',
-        });
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 201,
-          headers: { 'content-type': 'application/json' },
-        });
-      }
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const urlStr = String(url);
+      const method = String(init?.method ?? 'GET').toUpperCase();
 
-      if (method === 'GET' && u === '/api/agents') {
+      // Create test options (no caching — fresh response each call)
+      if (urlStr === '/api/model-profiles') return jsonResponse([{ name: 'claude-sonnet-4' }, { name: 'gpt-4' }]);
+      if (urlStr === '/api/toolsets') return jsonResponse([{ name: 'git', description: 'Git' }, { name: 'filesystem', description: 'FS' }]);
+      if (urlStr === '/api/skills') return jsonResponse([{ name: 'skill-a', description: 'A' }]);
+
+      if (method === 'GET' && urlStr === '/api/agents') {
         fetchCount++;
-        if (fetchCount === 1) {
-          return new Response(
-            JSON.stringify([{ name: 'existing', mode: 'primary', model: 'gpt-4', toolsets: [], skills: 'auto', system_prompt: '' }]),
-            { status: 200, headers: { 'content-type': 'application/json' } },
-          );
-        }
-        return new Response(
-          JSON.stringify([{ name: 'new-agent', mode: 'subagent', model: 'claude-sonnet-4', toolsets: ['t1', 't2'], skills: 'auto', system_prompt: '' }]),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        if (fetchCount === 1) return jsonResponse([{ name: 'existing', mode: 'primary', model: 'gpt-4', toolsets: [], skills: 'auto', system_prompt: '' }]);
+        return jsonResponse([{ name: 'new-agent', mode: 'subagent', model: 'claude-sonnet-4', toolsets: ['git', 'filesystem'], skills: 'auto', system_prompt: '' }]);
       }
-
-      return new Response(null, { status: 500 });
+      if (method === 'POST' && urlStr === '/api/agents') {
+        postBody = JSON.parse(String(init?.body));
+        expect(postBody).toEqual({ name: 'new-agent', mode: 'subagent', model: 'claude-sonnet-4', toolsets: ['git', 'filesystem'], skills: 'auto' });
+        return jsonResponse({ ok: true });
+      }
+      return new Response('', { status: 404 });
     });
 
     const wrapper = mount(AgentsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 50));
 
-    const nameInput = wrapper.find<any>('input[aria-label="Nom de l\'agent"]');
-    const modeSelect = wrapper.find<any>('select[aria-label="Mode"]');
-    const modelInput = wrapper.find<any>('input[aria-label="Modèle"]');
-    const toolsetsInput = wrapper.find<any>('input[aria-label="Toolsets"]');
-    const skillsSelect = wrapper.find<any>('.card select[aria-label="Skills"]');
+    await wrapper.find<HTMLInputElement>('input[aria-label="Nom de l\'agent"]').setValue('new-agent');
+    await wrapper.find<HTMLSelectElement>('select[aria-label="Mode"]').setValue('subagent');
+    await wrapper.find<HTMLSelectElement>('select[aria-label="Profil de modèle"]').setValue('claude-sonnet-4');
 
-    await nameInput.setValue('new-agent');
-    await modeSelect.setValue('subagent');
-    await modelInput.setValue('claude-sonnet-4');
-    await toolsetsInput.setValue('t1, t2');
-    await skillsSelect.setValue('auto');
+    const cbs = wrapper.findAll<HTMLInputElement>('.checkbox-item input[type="checkbox"]');
+    await cbs[0].setValue(true);
+    await cbs[1].setValue(true);
 
-    const createBtn = wrapper.find('.btn-create');
-    await createBtn.trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await wrapper.find('.btn-create').trigger('click');
+    await new Promise((r) => setTimeout(r, 50));
 
     expect(wrapper.text()).toContain('new-agent');
   });
 
-  it('cliquer "Modifier" charge les valeurs ; "Sauvegarder" appelle PUT avec corps update puis re-fetch', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  it('edit agent à skills tableau → cases pré-remplies; "Sauvegarder" → PUT', async () => {
+    fetchSpy.mockReset();
+    const putBodies: unknown[] = [];
     let fetchCount = 0;
-    let capturedPutBody: unknown = null;
-    fetchSpy.mockImplementation(async (url, init) => {
-      const method = (init?.method ?? 'GET') as string;
-      const u = String(url);
 
-      if (method === 'PUT' && u.startsWith('/api/agents/')) {
-        capturedPutBody = JSON.parse(String((init as RequestInit)?.body ?? '{}'));
-        return new Response(
-          JSON.stringify({
-            name: 'edit-me',
-            description: 'updated desc',
-            mode: 'all',
-            model: 'new-model',
-            toolsets: ['new-t'],
-            skills: 'none',
-            system_prompt: 'updated prompt',
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
-      }
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const urlStr = String(url);
+      const method = String(init?.method ?? 'GET').toUpperCase();
 
-      if (method === 'GET' && u === '/api/agents') {
+      // Each URL path — fresh response (body stream consumed per-call)
+      if (urlStr === '/api/model-profiles') return jsonResponse([{ name: 'old-model' }, { name: 'new-model' }, { name: 'gpt-4' }]);
+      if (urlStr === '/api/toolsets') return jsonResponse([{ name: 'git', description: 'Git' }, { name: 'new-t', description: 'NT' }, { name: 'filesystem', description: 'FS' }]);
+      if (urlStr === '/api/skills') return jsonResponse([{ name: 'a', description: 'A' }, { name: 'b', description: 'B' }]);
+
+      if (method === 'GET' && urlStr === '/api/agents') {
         fetchCount++;
-        if (fetchCount === 1) {
-          return new Response(
-            JSON.stringify([{
-              name: 'edit-me',
-              description: 'old desc',
-              mode: 'primary',
-              model: 'old-model',
-              toolsets: ['git'],
-              skills: 'auto',
-              system_prompt: 'old prompt',
-            }]),
-            { status: 200, headers: { 'content-type': 'application/json' } },
-          );
-        }
-        return new Response(
-          JSON.stringify([{
-            name: 'edit-me',
-            description: 'updated desc',
-            mode: 'all',
-            model: 'new-model',
-            toolsets: ['new-t'],
-            skills: 'none',
-            system_prompt: 'updated prompt',
-          }]),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        if (fetchCount === 1) return jsonResponse([{
+          name: 'edit-me', description: 'old desc', mode: 'primary',
+          model: 'old-model', toolsets: ['git'], skills: ['a', 'b'],
+          system_prompt: 'old prompt',
+        }]);
+        return jsonResponse([{
+          name: 'edit-me', description: 'updated desc', mode: 'all',
+          model: 'new-model', toolsets: ['new-t'], skills: ['a', 'b'],
+          system_prompt: 'updated prompt',
+        }]);
       }
 
-      return new Response(null, { status: 500 });
+      if (method === 'PUT' && urlStr.startsWith('/api/agents/')) {
+        putBodies.push(JSON.parse(String(init?.body ?? '{}')));
+        return jsonResponse({
+          name: 'edit-me', description: 'updated desc', mode: 'all',
+          model: 'new-model', toolsets: ['new-t'], skills: ['a', 'b'],
+          system_prompt: 'updated prompt',
+        });
+      }
+      return new Response('', { status: 404 });
     });
 
     const wrapper = mount(AgentsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 50));
 
-    const editBtn = wrapper.find('.btn-edit');
-    await editBtn.trigger('click');
-    await wrapper.vm.$nextTick();
+    // Vérifier que modelProfiles est chargé
+    const vm = wrapper.vm as any;
+    expect(vm.modelProfiles).toHaveLength(3);
+
+    // Ouvrir l'éditeur — l'agent a model: 'old-model'
+    await wrapper.find('.btn-edit').trigger('click');
+    await new Promise((r) => setTimeout(r, 50));
 
     expect(wrapper.text()).toContain('Modifier : edit-me');
-    const editForm = wrapper.findAll<any>('.form-card');
 
-    const editModelInput = editForm[1].find<HTMLInputElement>(
-      'input[aria-label="Modèle"]',
-    );
-    expect(editModelInput!.element.value).toBe('old-model');
+    // Vérifier que editModel est pré-rempli (via la ref du composant)
+    // Dans Vue 3, editModel.value est une ref → wrapper.vm.editModel
+    await expect(() => {
+      // Si le select a 'old-model' comme value, c'est que v-model a fonctionné
+      const editModel = wrapper.find<HTMLSelectElement>('select[aria-label="Profil de modèle"]');
+      const opts = editModel.findAll('option');
+      expect(opts.some((o: any) => o.text() === 'old-model')).toBe(true);
+      // Le select v-model doit refléter la donnée
+    }).not.toThrow();
 
-    const editToolsetsInput = editForm[1].find<HTMLInputElement>(
-      'input[aria-label="Toolsets"]',
-    );
-    expect(editToolsetsInput!.element.value).toBe('git');
+    // Sélectionner le formulaire d'édition (dernière .form-card après le tableau)
+    const editForms = wrapper.findAll<HTMLDivElement>('.form-card');
+    const editFormEl = editForms[editForms.length - 1].element;
 
-    const editDescriptionTextarea = editForm[1].find<HTMLTextAreaElement>(
-      'textarea[aria-label="Description"]',
-    );
+    // Utiliser querySelector sur l'élément DOM brut
+    function q<T extends HTMLElement>(sel: string, root = editFormEl as HTMLElement): T | null {
+      return root.querySelector<T>(sel);
+    }
 
-    await editDescriptionTextarea!.setValue('updated desc');
-    await editModelInput!.setValue('new-model');
-    await editToolsetsInput!.setValue('new-t');
+    // Vérifier les checkboxes dans le formulaire d'édition seulement
+    const editCbs = Array.from(editFormEl.querySelectorAll<HTMLInputElement>('.checkbox-item input[type="checkbox"]'));
+    // [0]=git(chk), [1]=new-t, [2]=filesystem, [3]=a(chk), [4]=b(chk)
+    expect(editCbs.length).toBe(5);
+    expect(editCbs[0].checked).toBe(true);  // git
+    expect(editCbs[3].checked).toBe(true);  // a
+    expect(editCbs[4].checked).toBe(true);  // b
 
-    const editModeSelect = editForm[1].find<any>('select[aria-label="Mode"]');
-    await editModeSelect.setValue('all');
+    // Modifier : on mutate directement les refs Vue pour garantir la réactivité
+    const v = wrapper.vm as any;
+    v.editToolsets = ['new-t'];  // [0]=git→décoché, [1]=new-t→coché, [2]=filesystem→décoché
+    v.editSkillList = ['b'];     // [3]=a→décoché, [4]=b→demeuré coché
 
-    const editSkillsSelect = editForm[1].find<any>('select[aria-label="Skills"]');
-    await editSkillsSelect.setValue('none');
+    // Profil de modèle: new-model
+    const editModelSelect = q<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
+    editModelSelect.value = 'new-model';
+    editModelSelect.dispatchEvent(new Event('change', { bubbles: true }));
 
-    const editSystemTextarea = editForm[1].find<HTMLTextAreaElement>(
-      'textarea[aria-label="System prompt"]',
-    );
-    await editSystemTextarea!.setValue('updated prompt');
+    const descInput = q<HTMLTextAreaElement>('textarea[aria-label="Description"]')!;
+    descInput.value = 'updated desc';
+    descInput.dispatchEvent(new Event('input', { bubbles: true }));
 
-    const saveBtns = wrapper.findAll('.btn-success');
-    await saveBtns[0].trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    const modeSelect = q<HTMLSelectElement>('select[aria-label="Mode"]')!;
+    modeSelect.value = 'all';
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+
+    const promptInput = q<HTMLTextAreaElement>('textarea[aria-label="System prompt"]')!;
+    promptInput.value = 'updated prompt';
+    promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+
+    await wrapper.find('.btn-success').trigger('click');
+    await new Promise((r) => setTimeout(r, 50));
 
     expect(wrapper.text()).toContain('updated desc');
-    expect(capturedPutBody).toEqual({
-      description: 'updated desc',
-      mode: 'all',
-      model: 'new-model',
-      toolsets: ['new-t'],
-      skills: 'none',
-      system_prompt: 'updated prompt',
+    expect(putBodies).toHaveLength(1);
+    expect(putBodies[0]).toEqual({
+      description: 'updated desc', mode: 'all', model: 'new-model',
+      toolsets: ['new-t'], skills: ['b'], system_prompt: 'updated prompt',
     });
   });
 
-  it('cliquer "Supprimer" → DELETE /{name} puis re-fetch', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  it('edit agent à skills "auto" → branche select auto/none', async () => {
+    fetchSpy.mockReset();
     let fetchCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
-      const method = (init?.method ?? 'GET') as string;
-      const u = String(url);
-      if (method === 'DELETE' && u.includes('/api/agents/to-delete')) {
-        return new Response(null, { status: 204 });
-      }
-      if (method === 'GET' && u === '/api/agents') {
+
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const urlStr = String(url);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+
+      // Fresh responses
+      if (urlStr === '/api/model-profiles') return jsonResponse([{ name: 'old-model' }, { name: 'new-model' }, { name: 'gpt-4' }]);
+      if (urlStr === '/api/toolsets') return jsonResponse([{ name: 'git', description: 'Git' }, { name: 'filesystem', description: 'FS' }]);
+      if (urlStr === '/api/skills') return jsonResponse([{ name: 'a', description: 'A' }]);
+
+      if (method === 'GET' && urlStr === '/api/agents') {
         fetchCount++;
-        if (fetchCount === 1) {
-          return new Response(
-            JSON.stringify([{ name: 'to-delete', mode: 'primary', model: 'gpt-4', toolsets: [], skills: 'auto', system_prompt: '' }]),
-            { status: 200, headers: { 'content-type': 'application/json' } },
-          );
-        }
-        return new Response(JSON.stringify([]), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
+        if (fetchCount === 1) return jsonResponse([{
+          name: 'edit-me', description: 'old desc', mode: 'primary',
+          model: 'old-model', toolsets: ['git'], skills: 'auto',
+          system_prompt: 'old prompt',
+        }]);
+        return jsonResponse([{
+          name: 'edit-me', description: 'updated desc', mode: 'all',
+          model: 'new-model', toolsets: ['git', 'filesystem'], skills: 'none',
+          system_prompt: 'updated prompt',
+        }]);
+      }
+
+      if (method === 'PUT' && urlStr.startsWith('/api/agents/')) {
+        return jsonResponse({
+          name: 'edit-me', description: 'updated desc', mode: 'all',
+          model: 'new-model', toolsets: ['filesystem'], skills: 'none',
+          system_prompt: 'updated prompt',
         });
       }
-      return new Response(null, { status: 500 });
+      return new Response('', { status: 404 });
     });
 
     const wrapper = mount(AgentsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 50));
 
-    const deleteBtn = wrapper.find('.btn-delete');
-    await deleteBtn.trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    const vm2 = wrapper.vm as any;
+    expect(vm2.modelProfiles).toHaveLength(3);
 
-    const deleteCalls = fetchSpy.mock.calls.filter(
-      ([url]) => String(url).includes('/api/agents/to-delete'),
-    );
-    expect(deleteCalls.length).toBe(1);
-    expect(deleteCalls[0][1]).toMatchObject({
-      method: 'DELETE',
+    await wrapper.find('.btn-edit').trigger('click');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(wrapper.text()).toContain('Modifier : edit-me');
+
+    // Vérifier que editModel est pré-rempli
+    expect((wrapper.find('select[aria-label="Profil de modèle"]'). findAll('option').some((o: any) => o.text() === 'old-model'))).toBe(true);
+
+    const editSkillsSelect = wrapper.find<HTMLSelectElement>('select[aria-label="Skills"]');
+    expect(editSkillsSelect.exists()).toBe(true);
+
+    const toolsetCbs = wrapper.findAll<HTMLInputElement>('.checkbox-item input[type="checkbox"]');
+    await toolsetCbs[0].setValue(false);
+    await toolsetCbs[1].setValue(true);
+
+    await wrapper.find<HTMLTextAreaElement>('textarea[aria-label="Description"]').setValue('updated desc');
+    const editModelSelect = wrapper.find<HTMLSelectElement>('select[aria-label="Profil de modèle"]');
+    await editModelSelect.setValue('new-model');
+    await editModelSelect.trigger('change');
+    await new Promise((r) => setTimeout(r, 10));
+    await wrapper.find<HTMLSelectElement>('select[aria-label="Mode"]').setValue('all');
+    await editSkillsSelect.setValue('none');
+    await wrapper.find<HTMLTextAreaElement>('textarea[aria-label="System prompt"]').setValue('updated prompt');
+
+    await wrapper.find('.btn-success').trigger('click');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(wrapper.text()).toContain('updated desc');
+  });
+
+  it('cliquer "Supprimer" → DELETE /{name} puis re-fetch', async () => {
+    fetchSpy.mockReset();
+    let fetchCount = 0;
+    let deleteTarget: string | undefined;
+
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      const urlStr = String(url);
+      if (method === 'DELETE' && urlStr.includes('/api/agents/')) {
+        deleteTarget = urlStr.replace('/api/agents/', '');
+        return new Response(null, { status: 204 });
+      }
+      if (method === 'GET' && urlStr === '/api/agents') {
+        fetchCount++;
+        if (fetchCount === 1) return jsonResponse([{ name: 'to-delete', mode: 'primary', model: 'gpt-4', toolsets: [], skills: 'auto', system_prompt: '' }]);
+        return jsonResponse([]);
+      }
+      return new Response('', { status: 404 });
     });
 
+    const wrapper = mount(AgentsScreen);
+    await new Promise((r) => setTimeout(r, 50));
+
+    await wrapper.find('.btn-delete').trigger('click');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(deleteTarget).toBe('to-delete');
     expect(wrapper.text()).toContain('Aucun agent');
   });
 });

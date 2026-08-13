@@ -34,17 +34,35 @@ interface UpdateAgent {
   system_prompt?: string;
 }
 
+interface ModelProfileOption {
+  name: string;
+}
+
+interface ToolsetOption {
+  name: string;
+}
+
+interface SkillOption {
+  name: string;
+  description: string;
+}
+
 const client = createApiClient();
 const fetchedAgents = ref<Agent[]>([]);
 const error = ref<string | null>(null);
 const loading = ref(true);
+
+const modelProfiles = ref<ModelProfileOption[]>([]);
+const toolsetOptions = ref<ToolsetOption[]>([]);
+const skillOptions = ref<SkillOption[]>([]);
+const optionsError = ref<string | null>(null);
 
 // Formulaire de création
 const formName = ref('');
 const formDescription = ref('');
 const formMode = ref<AgentMode>('primary');
 const formModel = ref('');
-const formToolsets = ref('');
+const formToolsets = ref<string[]>([]);
 const formSkills = ref<'auto' | 'none'>('auto');
 const formSystemPrompt = ref('');
 const creationError = ref<string | null>(null);
@@ -54,8 +72,10 @@ const editingName = ref<string | null>(null);
 const editDescription = ref('');
 const editMode = ref<AgentMode>('primary');
 const editModel = ref('');
-const editToolsets = ref('');
-const editSkills = ref<string>('auto');
+const editToolsets = ref<string[]>([]);
+const editSkills = ref<'auto' | 'none'>('auto');
+const editSkillList = ref<string[]>([]);
+const editingSkillsIsList = ref(false);
 const editSystemPrompt = ref('');
 const editError = ref<string | null>(null);
 
@@ -69,24 +89,29 @@ async function fetchAgents() {
   }
 }
 
-onMounted(fetchAgents);
-
-function parseToolsets(input: string): string[] {
-  return input
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+async function fetchOptions() {
+  try {
+    const [mp, ts, sk] = await Promise.all([
+      client.get<ModelProfileOption[]>('/api/model-profiles'),
+      client.get<ToolsetOption[]>('/api/toolsets'),
+      client.get<SkillOption[]>('/api/skills'),
+    ]);
+    modelProfiles.value = mp;
+    toolsetOptions.value = ts;
+    skillOptions.value = sk;
+  } catch (e) {
+    optionsError.value = e instanceof ApiError ? e.message : String(e);
+  }
 }
+
+onMounted(async () => {
+  await Promise.all([fetchAgents(), fetchOptions()]);
+});
 
 function skillsToDisplay(s: SkillSelection): string {
   if (s === 'auto' || s === 'none') return s;
   if (Array.isArray(s)) return s.length ? s.join(', ') : '—';
   return '—';
-}
-
-function arrayToCommaString(s: SkillSelection): string {
-  if (typeof s === 'string') return s;
-  return Array.isArray(s) ? s.join(', ') : '';
 }
 
 async function createAgent() {
@@ -96,7 +121,7 @@ async function createAgent() {
     ...(formDescription.value ? { description: formDescription.value } : {}),
     mode: formMode.value,
     model: formModel.value,
-    toolsets: parseToolsets(formToolsets.value),
+    toolsets: formToolsets.value.length ? formToolsets.value : undefined,
     skills: formSkills.value,
     ...(formSystemPrompt.value ? { system_prompt: formSystemPrompt.value } : {}),
   };
@@ -106,7 +131,7 @@ async function createAgent() {
     formDescription.value = '';
     formMode.value = 'primary';
     formModel.value = '';
-    formToolsets.value = '';
+    formToolsets.value = [];
     formSkills.value = 'auto';
     formSystemPrompt.value = '';
     await fetchAgents();
@@ -120,8 +145,14 @@ function startEdit(agent: Agent) {
   editDescription.value = agent.description ?? '';
   editMode.value = agent.mode;
   editModel.value = agent.model;
-  editToolsets.value = agent.toolsets.join(', ');
-  editSkills.value = arrayToCommaString(agent.skills);
+  editToolsets.value = [...agent.toolsets];
+  if (Array.isArray(agent.skills)) {
+    editingSkillsIsList.value = true;
+    editSkillList.value = [...agent.skills];
+  } else {
+    editingSkillsIsList.value = false;
+    editSkills.value = agent.skills as 'auto' | 'none';
+  }
   editSystemPrompt.value = agent.system_prompt ?? '';
   editError.value = null;
 }
@@ -131,7 +162,9 @@ function cancelEdit() {
   editDescription.value = '';
   editMode.value = 'primary';
   editModel.value = '';
-  editToolsets.value = '';
+  editToolsets.value = [];
+  editSkillList.value = [];
+  editingSkillsIsList.value = false;
   editSkills.value = 'auto';
   editSystemPrompt.value = '';
   editError.value = null;
@@ -143,9 +176,8 @@ async function saveEdit(name: string) {
   if (editDescription.value) body.description = editDescription.value;
   body.mode = editMode.value;
   if (editModel.value) body.model = editModel.value;
-  const toolsets = parseToolsets(editToolsets.value);
-  if (toolsets.length) body.toolsets = toolsets;
-  body.skills = editSkills.value as SkillSelection;
+  if (editToolsets.value.length > 0) body.toolsets = editToolsets.value;
+  body.skills = editingSkillsIsList.value ? editSkillList.value : editSkills.value;
   if (editSystemPrompt.value) body.system_prompt = editSystemPrompt.value;
   try {
     await client.put<Agent>(`/api/agents/${name}`, body);
@@ -247,24 +279,20 @@ async function deleteAgent(name: string) {
           </select>
         </label>
         <label class="field">
-          <span class="field-label">Modèle</span>
-          <input
-            class="field-input"
-            v-model="formModel"
-            type="text"
-            placeholder="claude-sonnet-4-20250514"
-            aria-label="Modèle"
-          />
+          <span class="field-label">Profil de modèle</span>
+          <select class="field-input" v-model="formModel" aria-label="Profil de modèle">
+            <option value="">—</option>
+            <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
+          </select>
         </label>
         <label class="field">
-          <span class="field-label">Toolsets (séparés par des virgules)</span>
-          <input
-            class="field-input"
-            v-model="formToolsets"
-            type="text"
-            placeholder="git, filesystem"
-            aria-label="Toolsets"
-          />
+          <span class="field-label">Toolsets</span>
+          <div class="checkbox-list">
+            <label v-for="t in toolsetOptions" :key="t.name" class="checkbox-item">
+              <input type="checkbox" :value="t.name" v-model="formToolsets" />
+              <span>{{ t.name }}</span>
+            </label>
+          </div>
         </label>
         <label class="field">
           <span class="field-label">Skills</span>
@@ -288,6 +316,7 @@ async function deleteAgent(name: string) {
           />
         </label>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+        <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
         <button class="btn btn-create" @click="createAgent">Créer</button>
       </div>
 
@@ -317,24 +346,20 @@ async function deleteAgent(name: string) {
             </select>
           </label>
           <label class="field">
-            <span class="field-label">Modèle</span>
-            <input
-              class="field-input"
-              v-model="editModel"
-              type="text"
-              placeholder="claude-sonnet-4-20250514"
-              aria-label="Modèle"
-            />
+            <span class="field-label">Profil de modèle</span>
+            <select class="field-input" v-model="editModel" aria-label="Profil de modèle">
+              <option value="">—</option>
+              <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
+            </select>
           </label>
           <label class="field">
-            <span class="field-label">Toolsets (séparés par des virgules)</span>
-            <input
-              class="field-input"
-              v-model="editToolsets"
-              type="text"
-              placeholder="git, filesystem"
-              aria-label="Toolsets"
-            />
+            <span class="field-label">Toolsets</span>
+            <div class="checkbox-list">
+              <label v-for="t in toolsetOptions" :key="t.name" class="checkbox-item">
+                <input type="checkbox" :value="t.name" v-model="editToolsets" />
+                <span>{{ t.name }}</span>
+              </label>
+            </div>
           </label>
           <template v-if="typeof a.skills === 'string'">
             <label class="field">
@@ -352,13 +377,12 @@ async function deleteAgent(name: string) {
           <template v-else>
             <label class="field">
               <span class="field-label">Skills</span>
-              <input
-                class="field-input"
-                v-model="editSkills"
-                type="text"
-                placeholder="skill-a, skill-b"
-                aria-label="Skills"
-              />
+              <div class="checkbox-list">
+                <label v-for="s in skillOptions" :key="s.name" class="checkbox-item">
+                  <input type="checkbox" :value="s.name" v-model="editSkillList" />
+                  <span>{{ s.name }}</span>
+                </label>
+              </div>
             </label>
           </template>
           <label class="field">
@@ -572,5 +596,24 @@ async function deleteAgent(name: string) {
 .edit-actions {
   display: flex;
   gap: 8px;
+}
+
+.checkbox-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.checkbox-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  color: #e6e9f0;
+}
+
+.checkbox-item input[type="checkbox"] {
+  width: 14px;
+  height: 14px;
 }
 </style>
