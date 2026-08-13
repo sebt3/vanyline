@@ -55,7 +55,7 @@ updates:
     labels:
       - "tools"
   - package-ecosystem: "npm"
-    directory: "/frontend"
+    directory: "/"
     schedule:
       interval: "weekly"
     labels:
