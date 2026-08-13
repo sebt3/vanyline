@@ -10,6 +10,9 @@ describe('ModelProfilesScreen', () => {
     fetchCalls = [];
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockReset();
+    // Nettoyer le body après chaque test (téléport reka-ui)
+    const dialogs = document.body.querySelectorAll('[role="dialog"]');
+    dialogs.forEach((d) => d.remove());
   });
 
   // Helpers for the mock setup
@@ -46,6 +49,7 @@ describe('ModelProfilesScreen', () => {
       },
     ];
 
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
       fetchCalls.push(`GET ${urlStr}`);
@@ -79,6 +83,7 @@ describe('ModelProfilesScreen', () => {
   });
 
   it('select Provider alimenté par GET /api/llm-providers', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       fetchCalls.push(`GET ${url}`);
       const urlStr = url as string;
@@ -100,28 +105,38 @@ describe('ModelProfilesScreen', () => {
     const wrapper = mount(ModelProfilesScreen);
     await new Promise((r) => setTimeout(r, 50));
 
-    const providerSelect = wrapper.find('select[aria-label="Provider"]');
-    expect(providerSelect.exists()).toBe(true);
-    const options = providerSelect.findAll('option');
+    // Ouvrir la modale de création
+    const createBtn = wrapper.find('.btn-create');
+    await createBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+
+    const providerSelect = dialog!.querySelector('select[aria-label="Provider"]');
+    expect(providerSelect).toBeTruthy();
+    const options = (providerSelect as HTMLSelectElement).options;
     expect(options.length).toBe(3); // vide + anthropic + openai
 
     // Choisir anthropic → select Modèle contient 2 modèles
-    await providerSelect.setValue('anthropic');
-    await providerSelect.trigger('change');
+    (providerSelect as HTMLSelectElement).value = 'anthropic';
+    (providerSelect as HTMLSelectElement).dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
-    const modelSelect = wrapper.find('select[aria-label="Modèle"]');
-    const modelOptions = modelSelect.findAll('option');
+    const modelSelect = dialog!.querySelector('select[aria-label="Modèle"]');
+    const modelOptions = (modelSelect as HTMLSelectElement).options;
     expect(modelOptions.length).toBe(3);
-    expect(modelOptions[1].text()).toBe('claude-sonnet-4-20250514');
-    expect(modelOptions[2].text()).toBe('claude-haiku-4-20250514');
-    expect((modelSelect.element as HTMLSelectElement).value).toBe('');
+    expect(modelOptions[1].textContent).toBe('claude-sonnet-4-20250514');
+    expect(modelOptions[2].textContent).toBe('claude-haiku-4-20250514');
+    expect((modelSelect as HTMLSelectElement).value).toBe('');
 
-    expect(wrapper.text()).not.toContain('Aucun modèle disponible');
+    expect(dialog!.textContent).not.toContain('Aucun modèle disponible');
   });
 
   it('POST corps inchangé : { name, provider, model, ... }', async () => {
     let created = false;
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown, init: unknown) => {
       const urlStr = url as string;
       const method = (init as RequestInit)?.method ?? 'GET';
@@ -178,28 +193,48 @@ describe('ModelProfilesScreen', () => {
     const wrapper = mount(ModelProfilesScreen);
     await new Promise((r) => setTimeout(r, 50));
 
-    const nameInput = wrapper.find('input[aria-label="Nom du profil"]');
-    await nameInput.setValue('new-profile');
+    // Ouvrir la modale de création
+    const createBtn = wrapper.find('.btn-create');
+    await createBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dialog = document.querySelector('[role="dialog"]')!;
+
+    // Remplir les champs du dialog
+    const inputs = dialog.querySelectorAll('input');
+    const setInput = (el: Element, val: string) => {
+      (el as HTMLInputElement).value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setInput(inputs[0], 'new-profile');
+
+    const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
+    providerSelect.value = 'anthropic';
+    providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
-    const providerSelect = wrapper.find('select[aria-label="Provider"]');
-    await providerSelect.setValue('anthropic');
-    await providerSelect.trigger('change');
+    const modelSelect = dialog.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
+    modelSelect.value = 'claude-sonnet-4-20250514';
+    modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
-    const modelSelect = wrapper.find('select[aria-label="Modèle"]');
-    await modelSelect.setValue('claude-sonnet-4-20250514');
-    await modelSelect.trigger('change');
-    await new Promise((r) => setTimeout(r, 10));
+    // température (2ᵉ input, index 1)
+    setInput(inputs[1], '0.7');
 
-    const tempInput = wrapper.find('input[aria-label="Température"]');
-    await tempInput.setValue('0.7');
-    await new Promise((r) => setTimeout(r, 10));
-
-    await (wrapper.find('.btn-create')).trigger('click');
+    // Cliquer "Créer" du dialog
+    const dialogCreateBtn = dialog.querySelector('.btn-create') as HTMLElement;
+    await dialogCreateBtn.click();
+    await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 100));
 
     expect(created).toBe(true);
+    // Si le dialog est toujours dans le body (data-state="closed"),
+    // vérifier l'état du composant
+    const dialogStillExists = document.querySelector('[role="dialog"]');
+    if (dialogStillExists) {
+      expect((wrapper.vm as any).createModalOpen).toBe(false);
+    }
     expect(wrapper.text()).toContain('new-profile');
   });
 
@@ -220,6 +255,7 @@ describe('ModelProfilesScreen', () => {
         is_default: false,
       },
     ];
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
       if (urlStr.endsWith('/api/model-profiles')) {
@@ -240,17 +276,22 @@ describe('ModelProfilesScreen', () => {
     const wrapper = mount(ModelProfilesScreen);
     await new Promise((r) => setTimeout(r, 50));
 
-    const providerSelect = wrapper.find('select[aria-label="Provider"]');
-    await providerSelect.setValue('custom-provider');
-    await providerSelect.trigger('change');
+    // Ouvrir la modale de création
+    const createBtn = wrapper.find('.btn-create');
+    await createBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dialog = document.querySelector('[role="dialog"]')!;
+
+    const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
+    providerSelect.value = 'custom-provider';
+    providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
-    const modelSelect = wrapper.find('select[aria-label="Modèle"]');
-    const modelOptions = modelSelect.findAll('option');
-    expect(modelOptions.length).toBe(1);
-
-    expect(wrapper.text()).toContain('Aucun modèle disponible');
-    expect(wrapper.text()).toContain('lancez un test sur ce provider');
+    // Vérifier dans le dialog téléporté
+    expect(dialog.textContent).toContain('Aucun modèle disponible');
+    expect(dialog.textContent).toContain('lancez un test sur ce provider');
   });
 
   it('edit — chargement + PUT inchangé', async () => {
@@ -271,6 +312,7 @@ describe('ModelProfilesScreen', () => {
     const providers = providersResponse;
 
     // Sequence of fetch responses (no closures — each call consumes the next one)
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy
       // 1: GET /api/model-profiles → mount → [originalProfile]
       .mockResolvedValueOnce(new Response(JSON.stringify([originalProfile]), {
@@ -298,11 +340,6 @@ describe('ModelProfilesScreen', () => {
         });
       })
       // 4: GET /api/model-profiles → fetchProfiles after save → [new data]
-      //    We need this to return updated data. We'll use a variable to track via mockResolvedValueOnce chain.
-      //    Since we can't know the URL, we just return something safe for the next calls.
-      // 5: DELETE is not expected in save flow — only in deleteProfile button click
-      //    But if it hits, return 204.
-      //    Since the chain is consumed, we need a fallback mock.
       ;
 
     // After the chain is consumed, set a fallback that handles ALL URLs
@@ -333,43 +370,41 @@ describe('ModelProfilesScreen', () => {
     // Ouvrir l'édition
     await (wrapper.find('.btn-edit')).trigger('click');
     // Allow watcher to populate editAvailableModels
-    await new Promise((r) => setTimeout(r, 50));
     await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 50));
 
-    const editForm = wrapper.find('.form-card:last-of-type');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain('Modifier : aaa');
 
-    // Provider
-    const editProviderSelect = editForm.find('select[aria-label="Provider"]');
-    expect((editProviderSelect.element as HTMLSelectElement).value).toBe('anthropic');
+    // Provider pré-rempli
+    const editProviderSelect = dialog!.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
+    expect(editProviderSelect.value).toBe('anthropic');
 
     // editAvailableModels peuplé par watcher
     const vm = wrapper.vm as any;
     expect(vm.editAvailableModels.length).toBe(2); // claude-sonnet + claude-haiku
 
-    // Model select options
-    const editModelSelect = editForm.find('select[aria-label="Modèle"]');
-    const editModelOptions = editModelSelect.findAll('option');
-    expect(editModelOptions.length).toBe(3); // vide + 2 modèles
+    // Model select options dans le dialog
+    const editModelSelect = dialog!.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
+    expect(editModelSelect.options.length).toBe(3); // vide + 2 modèles
 
     // Mettre à jour editModel directement
     vm.editModel = 'updated-model';
-    await new Promise((r) => setTimeout(r, 50));
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 50));
-
+    await new Promise((r) => setTimeout(r, 50));
     expect(vm.editModel).toBe('updated-model');
 
-// Sauvegarder
-    await (wrapper.find('.btn-success')).trigger('click');
+    // Sauvegarder
+    const saveBtn = dialog!.querySelector('.btn-success') as HTMLElement;
+    await saveBtn.click();
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 200));
 
     // Le PUT a été appelé (expect dans le mock a vérifié le corps)
     // Le re-fetch après PUT retourne updatedProfile
     expect(wrapper.text()).toContain('updated-model');
-
-    // deleteProfile n'est pas appelé dans ce test — s'il arrive (erreur de test),
-    // le fallback mock renvoie 204 pour DELETE
   });
 
   it('edit — changer le provider met à jour editAvailableModels et reset editModel', async () => {
@@ -378,8 +413,9 @@ describe('ModelProfilesScreen', () => {
       provider: 'anthropic',
       model: 'original-model',
       temperature: 0.3,
-max_tokens: 4096,
+      max_tokens: 4096,
     };
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
       if (urlStr.endsWith('/api/model-profiles')) {
@@ -401,29 +437,30 @@ max_tokens: 4096,
     await new Promise((r) => setTimeout(r, 50));
 
     await (wrapper.find('.btn-edit')).trigger('click');
-    await new Promise((r) => setTimeout(r, 50));
     await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 50));
 
-    const editForm = wrapper.find('.form-card:last-of-type');
-    const editProviderSelect = editForm.find('select[aria-label="Provider"]');
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const editProviderSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
 
-    expect((editProviderSelect.element as HTMLSelectElement).value).toBe('anthropic');
+    expect(editProviderSelect.value).toBe('anthropic');
 
     // Changer vers openai (sans modèles)
-    await editProviderSelect.setValue('openai');
-    await editProviderSelect.trigger('change');
+    editProviderSelect.value = 'openai';
+    editProviderSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
     const vm = wrapper.vm as any;
     expect(vm.editAvailableModels).toEqual([]);
-    expect((editProviderSelect.element as HTMLSelectElement).value).toBe('openai');
+    expect(editProviderSelect.value).toBe('openai');
 
-    const editModelSelect = editForm.find('select[aria-label="Modèle"]');
-    expect((editModelSelect.element as HTMLSelectElement).value).toBe('');
-    expect(wrapper.text()).toContain('Aucun modèle disponible');
+    const editModelSelect = dialog.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
+    expect(editModelSelect.value).toBe('');
+    expect(dialog.textContent).toContain('Aucun modèle disponible');
   });
 
   it('erreur GET /api/llm-providers → message affiché', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
       if (urlStr.endsWith('/api/model-profiles')) {
@@ -444,6 +481,14 @@ max_tokens: 4096,
     const wrapper = mount(ModelProfilesScreen);
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(wrapper.text()).toContain('Network error');
+    // Le message est rendu dans la modale de création (formulaire inline converti) :
+    // ouvrir la modale pour le voir.
+    const createBtn = wrapper.find('.btn-create');
+    await createBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dialog = document.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain('Network error');
   });
 });

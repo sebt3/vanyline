@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue';
+import {
+  DialogRoot, DialogPortal, DialogContent, DialogTitle, DialogClose,
+} from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 
 interface ModelProfile {
@@ -58,6 +61,10 @@ const editAvailableModels = ref<string[]>([]);
 const editTemperature = ref('');
 const editMaxTokens = ref('');
 const editError = ref<string | null>(null);
+
+// Modales
+const createModalOpen = ref(false);
+const editModalOpen = ref(false);
 
 async function fetchProfiles() {
   try {
@@ -124,6 +131,7 @@ async function createProfile() {
     formModel.value = '';
     formTemperature.value = '';
     formMaxTokens.value = '';
+    createModalOpen.value = false;
     await fetchProfiles();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
@@ -138,6 +146,7 @@ function startEdit(profile: ModelProfile) {
   editTemperature.value = profile.temperature?.toString() ?? '';
   editMaxTokens.value = profile.max_tokens?.toString() ?? '';
   editError.value = null;
+  editModalOpen.value = true;
 }
 
 function cancelEdit() {
@@ -148,6 +157,7 @@ function cancelEdit() {
   editTemperature.value = '';
   editMaxTokens.value = '';
   editError.value = null;
+  editModalOpen.value = false;
 }
 
 async function saveEdit(name: string) {
@@ -219,137 +229,148 @@ async function deleteProfile(name: string) {
         </tbody>
       </table>
 
-      <div class="card form-card">
-        <h3 class="form-title">Créer un profil</h3>
-        <label class="field">
-          <span class="field-label">Nom</span>
-          <input
-            class="field-input"
-            v-model="formName"
-            type="text"
-            placeholder="chat-moderate"
-            aria-label="Nom du profil"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Provider</span>
-          <select
-            class="field-input"
-            v-model="formProvider"
-            aria-label="Provider"
-            @change="onFormProviderChange"
-          >
-            <option value="">—</option>
-            <option v-for="p in providers" :key="p.name" :value="p.name">
-              {{ p.name }}
-            </option>
-          </select>
-        </label>
-        <p v-if="providersError" class="creation-error">{{ providersError }}</p>
-        <label class="field">
-          <span class="field-label">Modèle</span>
-          <select
-            class="field-input"
-            v-model="formModel"
-            aria-label="Modèle"
-          >
-            <option value="">—</option>
-            <option v-for="m in formAvailableModels" :key="m" :value="m">
-              {{ m }}
-            </option>
-          </select>
-          <p v-if="formProvider && formAvailableModels.length === 0" class="empty-state">
-            Aucun modèle disponible — lancez un test sur ce provider.
-          </p>
-        </label>
-        <label class="field">
-          <span class="field-label">Température (optionnel)</span>
-          <input
-            class="field-input"
-            v-model="formTemperature"
-            type="number"
-            step="0.1"
-            min="0"
-            max="2"
-            placeholder="0.7"
-            aria-label="Température"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Max tokens (optionnel)</span>
-          <input
-            class="field-input"
-            v-model="formMaxTokens"
-            type="number"
-            placeholder="4096"
-            aria-label="Max tokens"
-          />
-        </label>
-        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-        <button class="btn btn-create" @click="createProfile">Créer</button>
-      </div>
+      <button class="btn btn-create" @click="createModalOpen = true">Créer un profil</button>
 
-      <template v-for="p in fetchedProfiles" :key="'edit-' + p.name">
-        <div v-if="p.name === editingName" class="card form-card">
-          <h3 class="form-title">Modifier : {{ p.name }}</h3>
-          <label class="field">
-            <span class="field-label">Provider</span>
-            <select
-              class="field-input"
-              v-model="editProvider"
-              aria-label="Provider"
-              @change="onEditProviderChange"
-            >
-              <option value="">—</option>
-              <option v-for="p in providers" :key="p.name" :value="p.name">
-                {{ p.name }}
-              </option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Modèle</span>
-            <select
-              class="field-input"
-              v-model="editModel"
-              aria-label="Modèle"
-            >
-              <option value="">—</option>
-              <option v-for="m in editAvailableModels" :key="m" :value="m">
-                {{ m }}
-              </option>
-            </select>
-            <p v-if="editProvider && editAvailableModels.length === 0" class="empty-state">
-              Aucun modèle disponible — lancez un test sur ce provider.
-            </p>
-          </label>
-          <label class="field">
-            <span class="field-label">Température</span>
-            <input
-              class="field-input"
-              v-model="editTemperature"
-              type="number"
-              step="0.1"
-              min="0"
-              max="2"
-              aria-label="Température"
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">Max tokens</span>
-            <input
-              class="field-input"
-              v-model="editMaxTokens"
-              type="number"
-              aria-label="Max tokens"
-            />
-          </label>
-          <div v-if="editError" class="creation-error">{{ editError }}</div>
-          <div class="edit-actions">
-            <button class="btn btn-success" @click="saveEdit(p.name)">Sauvegarder</button>
-            <button class="btn btn-cancel" @click="cancelEdit">Annuler</button>
-          </div>
-        </div>
-      </template>
+      <DialogRoot v-model:open="createModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Créer un profil</DialogTitle>
+            <label class="field">
+              <span class="field-label">Nom</span>
+              <input
+                class="field-input"
+                v-model="formName"
+                type="text"
+                placeholder="chat-moderate"
+                aria-label="Nom du profil"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Provider</span>
+              <select
+                class="field-input"
+                v-model="formProvider"
+                aria-label="Provider"
+                @change="onFormProviderChange"
+              >
+                <option value="">—</option>
+                <option v-for="p in providers" :key="p.name" :value="p.name">
+                  {{ p.name }}
+                </option>
+              </select>
+            </label>
+            <p v-if="providersError" class="creation-error">{{ providersError }}</p>
+            <label class="field">
+              <span class="field-label">Modèle</span>
+              <select
+                class="field-input"
+                v-model="formModel"
+                aria-label="Modèle"
+              >
+                <option value="">—</option>
+                <option v-for="m in formAvailableModels" :key="m" :value="m">
+                  {{ m }}
+                </option>
+              </select>
+              <p v-if="formProvider && formAvailableModels.length === 0" class="empty-state">
+                Aucun modèle disponible — lancez un test sur ce provider.
+              </p>
+            </label>
+            <label class="field">
+              <span class="field-label">Température (optionnel)</span>
+              <input
+                class="field-input"
+                v-model="formTemperature"
+                type="number"
+                step="0.1"
+                min="0"
+                max="2"
+                placeholder="0.7"
+                aria-label="Température"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Max tokens (optionnel)</span>
+              <input
+                class="field-input"
+                v-model="formMaxTokens"
+                type="number"
+                placeholder="4096"
+                aria-label="Max tokens"
+              />
+            </label>
+            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-create" @click="createProfile">Créer</button>
+              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
+
+      <DialogRoot v-model:open="editModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Modifier : {{ editingName }}</DialogTitle>
+            <label class="field">
+              <span class="field-label">Provider</span>
+              <select
+                class="field-input"
+                v-model="editProvider"
+                aria-label="Provider"
+                @change="onEditProviderChange"
+              >
+                <option value="">—</option>
+                <option v-for="p in providers" :key="p.name" :value="p.name">
+                  {{ p.name }}
+                </option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Modèle</span>
+              <select
+                class="field-input"
+                v-model="editModel"
+                aria-label="Modèle"
+              >
+                <option value="">—</option>
+                <option v-for="m in editAvailableModels" :key="m" :value="m">
+                  {{ m }}
+                </option>
+              </select>
+              <p v-if="editProvider && editAvailableModels.length === 0" class="empty-state">
+                Aucun modèle disponible — lancez un test sur ce provider.
+              </p>
+            </label>
+            <label class="field">
+              <span class="field-label">Température</span>
+              <input
+                class="field-input"
+                v-model="editTemperature"
+                type="number"
+                step="0.1"
+                min="0"
+                max="2"
+                aria-label="Température"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Max tokens</span>
+              <input
+                class="field-input"
+                v-model="editMaxTokens"
+                type="number"
+                aria-label="Max tokens"
+              />
+            </label>
+            <div v-if="editError" class="creation-error">{{ editError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
     </div>
   </div>
 </template>
@@ -531,21 +552,38 @@ async function deleteProfile(name: string) {
   margin: 4px 0 0 0;
 }
 
-.form-card {
-  grid-template-columns: 1fr;
-  padding: 24px 28px;
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 
-.form-title {
-  grid-column: 1 / -1;
-  margin: 0 0 12px 0;
+.dialog-actions .btn:first-child {
+  margin-left: 0;
+}
+</style>
+
+<style>
+[role='dialog'] {
+  background: #101828;
+  border: 1px solid #1c1c2a;
+  border-radius: 10px;
+  padding: 24px 28px;
+  max-width: 480px;
+}
+
+.dialog-title {
+  margin: 0 0 16px 0;
   font-size: 15px;
   font-weight: 600;
   color: #e6e9f0;
 }
 
-.edit-actions {
+.dialog-actions {
   display: flex;
-  gap: 8px;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 </style>
