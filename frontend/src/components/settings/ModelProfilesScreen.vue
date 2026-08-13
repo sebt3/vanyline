@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onMounted, ref, watch } from 'vue';
 import { ApiError, createApiClient } from '../../api/client';
 
 interface ModelProfile {
@@ -25,10 +25,21 @@ interface UpdateModelProfile {
   max_tokens?: number;
 }
 
+interface LlmProvider {
+  name: string;
+  provider_type: string;
+  endpoint: string;
+  available_models: string[];
+  is_default: boolean;
+}
+
 const client = createApiClient();
 const fetchedProfiles = ref<ModelProfile[]>([]);
 const error = ref<string | null>(null);
 const loading = ref(true);
+
+const providers = ref<LlmProvider[]>([]);
+const providersError = ref<string | null>(null);
 
 // Formulaire de création
 const formName = ref('');
@@ -36,12 +47,14 @@ const formProvider = ref('');
 const formModel = ref('');
 const formTemperature = ref('');
 const formMaxTokens = ref('');
+const formAvailableModels = ref<string[]>([]);
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
 const editingName = ref<string | null>(null);
 const editProvider = ref('');
 const editModel = ref('');
+const editAvailableModels = ref<string[]>([]);
 const editTemperature = ref('');
 const editMaxTokens = ref('');
 const editError = ref<string | null>(null);
@@ -56,7 +69,44 @@ async function fetchProfiles() {
   }
 }
 
-onMounted(fetchProfiles);
+async function fetchProviders() {
+  try {
+    providers.value = await client.get<LlmProvider[]>('/api/llm-providers');
+  } catch (e) {
+    // Erreur de chargement des providers consignée (visuelle via providersError)
+    // mais ne bloque pas l'affichage des profils existants.
+    providersError.value = e instanceof ApiError ? e.message : String(e);
+  }
+}
+
+/** Lorsque les providers sont chargés (après startEdit), pré-remplir les modèles. */
+watch(() => providers.value, () => {
+  if (editProvider.value) {
+    editAvailableModels.value = modelsForProvider(editProvider.value);
+  }
+}, { immediate: false });
+
+onMounted(async () => {
+  // Fetch des profils (gère loading/error)
+  await fetchProfiles();
+  // Fetch des providers (erreurs non-critiques : affichées sans bloquer)
+  await fetchProviders();
+});
+
+/** available_models du provider donné (dépendance du select modèle). */
+function modelsForProvider(name: string): string[] {
+  return providers.value.find((p) => p.name === name)?.available_models ?? [];
+}
+
+function onFormProviderChange() {
+  formAvailableModels.value = modelsForProvider(formProvider.value);
+  formModel.value = '';
+}
+
+function onEditProviderChange() {
+  editAvailableModels.value = modelsForProvider(editProvider.value);
+  editModel.value = '';
+}
 
 async function createProfile() {
   creationError.value = null;
@@ -83,6 +133,7 @@ async function createProfile() {
 function startEdit(profile: ModelProfile) {
   editingName.value = profile.name;
   editProvider.value = profile.provider;
+  editAvailableModels.value = modelsForProvider(profile.provider);
   editModel.value = profile.model;
   editTemperature.value = profile.temperature?.toString() ?? '';
   editMaxTokens.value = profile.max_tokens?.toString() ?? '';
@@ -92,6 +143,7 @@ function startEdit(profile: ModelProfile) {
 function cancelEdit() {
   editingName.value = null;
   editProvider.value = '';
+  editAvailableModels.value = [];
   editModel.value = '';
   editTemperature.value = '';
   editMaxTokens.value = '';
@@ -181,23 +233,34 @@ async function deleteProfile(name: string) {
         </label>
         <label class="field">
           <span class="field-label">Provider</span>
-          <input
+          <select
             class="field-input"
             v-model="formProvider"
-            type="text"
-            placeholder="anthropic"
             aria-label="Provider"
-          />
+            @change="onFormProviderChange"
+          >
+            <option value="">—</option>
+            <option v-for="p in providers" :key="p.name" :value="p.name">
+              {{ p.name }}
+            </option>
+          </select>
         </label>
+        <p v-if="providersError" class="creation-error">{{ providersError }}</p>
         <label class="field">
           <span class="field-label">Modèle</span>
-          <input
+          <select
             class="field-input"
             v-model="formModel"
-            type="text"
-            placeholder="claude-sonnet-4-20250514"
             aria-label="Modèle"
-          />
+          >
+            <option value="">—</option>
+            <option v-for="m in formAvailableModels" :key="m" :value="m">
+              {{ m }}
+            </option>
+          </select>
+          <p v-if="formProvider && formAvailableModels.length === 0" class="empty-state">
+            Aucun modèle disponible — lancez un test sur ce provider.
+          </p>
         </label>
         <label class="field">
           <span class="field-label">Température (optionnel)</span>
@@ -231,23 +294,33 @@ async function deleteProfile(name: string) {
           <h3 class="form-title">Modifier : {{ p.name }}</h3>
           <label class="field">
             <span class="field-label">Provider</span>
-            <input
+            <select
               class="field-input"
               v-model="editProvider"
-              type="text"
-              placeholder="anthropic"
               aria-label="Provider"
-            />
+              @change="onEditProviderChange"
+            >
+              <option value="">—</option>
+              <option v-for="p in providers" :key="p.name" :value="p.name">
+                {{ p.name }}
+              </option>
+            </select>
           </label>
           <label class="field">
             <span class="field-label">Modèle</span>
-            <input
+            <select
               class="field-input"
               v-model="editModel"
-              type="text"
-              placeholder="claude-sonnet-4-20250514"
               aria-label="Modèle"
-            />
+            >
+              <option value="">—</option>
+              <option v-for="m in editAvailableModels" :key="m" :value="m">
+                {{ m }}
+              </option>
+            </select>
+            <p v-if="editProvider && editAvailableModels.length === 0" class="empty-state">
+              Aucun modèle disponible — lancez un test sur ce provider.
+            </p>
           </label>
           <label class="field">
             <span class="field-label">Température</span>
@@ -450,6 +523,12 @@ async function deleteProfile(name: string) {
   font-size: 12px;
   margin-top: 4px;
   margin-bottom: 12px;
+}
+
+.empty-state {
+  color: #6a7185;
+  font-size: 12px;
+  margin: 4px 0 0 0;
 }
 
 .form-card {
