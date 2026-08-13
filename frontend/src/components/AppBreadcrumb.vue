@@ -14,24 +14,11 @@ const segments = computed<[string, string][]>(() => {
   }
 
   if (route.name === 'project') {
-    const projectName = typeof route.params.projectName === 'string' ? route.params.projectName : '';
+    const projectName =
+      typeof route.params.projectName === 'string' ? route.params.projectName : '';
     return [
       ['Accueil', '/'],
       [projectName, `/p/${projectName}`],
-    ];
-  }
-
-  if (route.name === 'ide') {
-    return [
-      ['Accueil', '/'],
-      [
-        typeof route.params.projectName === 'string' ? route.params.projectName : '',
-        `/p/${typeof route.params.projectName === 'string' ? route.params.projectName : ''}`,
-      ],
-      [
-        typeof route.params.sandboxName === 'string' ? route.params.sandboxName : '',
-        `/p/${typeof route.params.projectName === 'string' ? route.params.projectName : ''}/s/${typeof route.params.sandboxName === 'string' ? route.params.sandboxName : ''}`,
-      ],
     ];
   }
 
@@ -48,14 +35,13 @@ const segments = computed<[string, string][]>(() => {
 
 <template>
   <nav class="breadcrumb">
-    <router-link
-      v-for="segment in segments"
-      :key="segment[1]"
-      :to="segment[1]"
-    >
-      {{ segment[0] }}
-    </router-link>
-    <span v-if="segments.length > 1" class="separator"> / </span>
+    <template v-for="(segment, i) in segments" :key="segment[1]">
+      <span v-if="i > 0" class="separator"> / </span>
+      <router-link v-if="i < segments.length - 1" :to="segment[1]">
+        {{ segment[0] }}
+      </router-link>
+      <span v-else class="current">{{ segment[0] }}</span>
+    </template>
   </nav>
 </template>
 
@@ -80,4 +66,9 @@ const segments = computed<[string, string][]>(() => {
   color: rgba(255, 255, 255, 0.35);
   padding: 0 4px;
 }
+
+.breadcrumb .current {
+  color: white;
+}
 </style>
+

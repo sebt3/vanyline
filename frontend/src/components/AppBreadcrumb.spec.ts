@@ -27,10 +27,10 @@ describe('AppBreadcrumb', () => {
     await wrapper.vm.$router.push('/');
     await wrapper.vm.$router.isReady();
     expect(wrapper.text()).toContain('Accueil');
+    // Un seul segment = segment courant → texte simple, pas un lien.
     const links = wrapper.findAll('a');
-    // Un seul segment → un seul lien
-    expect(links.length).toBe(1);
-    expect(links[0].attributes('href')).toBe('/');
+    expect(links.length).toBe(0);
+    expect(wrapper.find('.current').text()).toBe('Accueil');
   });
 
   it('affiche Accueil + projectName sur /p/:projectName', async () => {
@@ -40,11 +40,11 @@ describe('AppBreadcrumb', () => {
     expect(wrapper.text()).toContain('Accueil');
     expect(wrapper.text()).toContain('foo');
 
+    // Un seul lien : Accueil. "foo" est le dernier segment → texte simple, pas un lien.
     const links = wrapper.findAll('a');
-    // Deux segments → deux liens
-    expect(links.length).toBe(2);
+    expect(links.length).toBe(1);
     expect(links[0].attributes('href')).toBe('/');
-    expect(links[1].attributes('href')).toBe('/p/foo');
+    expect(wrapper.find('.current').text()).toBe('foo');
   });
 
   it('affiche Accueil + Paramètres sur /settings', async () => {
@@ -54,9 +54,10 @@ describe('AppBreadcrumb', () => {
     expect(wrapper.text()).toContain('Accueil');
     expect(wrapper.text()).toContain('Paramètres');
 
+    // "Paramètres" est le dernier segment → texte simple, pas un lien.
     const links = wrapper.findAll('a');
-    expect(links.length).toBe(2);
+    expect(links.length).toBe(1);
     expect(links[0].attributes('href')).toBe('/');
-    expect(links[1].attributes('href')).toBe('/settings');
+    expect(wrapper.find('.current').text()).toBe('Paramètres');
   });
 });
