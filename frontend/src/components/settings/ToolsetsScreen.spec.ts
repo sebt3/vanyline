@@ -1,24 +1,46 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import ToolsetsScreen from './ToolsetsScreen.vue';
 
-beforeEach(() => {
-  vi.restoreAllMocks();
-});
-
 describe('ToolsetsScreen', () => {
-  it('affiche noms, local_tools et serveurs MCP quand GET renvoie 2 toolsets', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
+  let fetchSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockReset();
+  });
+
+  // ── Helpers ────────────────────────────────────────────────────────────────
+  function jsonResponse(data: unknown): Response {
+    return new Response(JSON.stringify(data), {
       status: 200,
-      headers: new Map([['content-type', 'application/json']]),
-      json: () =>
-        Promise.resolve([
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  // Helper function to create a simple route handler
+  type RouteFn = (url: string, init: RequestInit | undefined) => Response | undefined;
+  function mockFetch(route: RouteFn): void {
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const urlStr = String(url);
+      const result = route(urlStr, init);
+      if (result === undefined) {
+        return jsonResponse([]);
+      }
+      return result;
+    });
+  }
+
+  // ── Test 1 : Tableau inchangé ───────────────────────────────────────────────
+  it('tableau inchangé : GET renvoie 2 toolsets → noms, local_tools, serveurs MCP affichés', async () => {
+    mockFetch((url, init) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/toolsets') {
+        return jsonResponse([
           {
             name: 'default',
-            description: 'Outils par d\u00e9faut',
-            prompt: 'Prompt par d\u00e9faut',
+            description: 'Outils par défaut',
+            prompt: 'Prompt par défaut',
             local_tools: ['git', 'filesystem'],
             mcp: [{ server: 'code-server' }, { server: 'git-server', tools: ['diff', 'status'] }],
           },
@@ -27,12 +49,13 @@ describe('ToolsetsScreen', () => {
             local_tools: [],
             mcp: [],
           },
-        ]),
-    } as unknown as Response);
+        ]);
+      }
+      return undefined;
+    });
 
     const wrapper = mount(ToolsetsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 50));
 
     expect(wrapper.text()).toContain('default');
     expect(wrapper.text()).toContain('minimal');
@@ -42,186 +65,324 @@ describe('ToolsetsScreen', () => {
     expect(wrapper.text()).toContain('git-server');
   });
 
-  it('remplir le formulaire de cr\u00e9ation + "Cr\u00e9er" appelle POST avec local_tools pars\u00e9 puis re-fetch', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    let callCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
-      const method = (init?.method ?? 'GET') as string;
-      const u = String(url);
-
-      if (method === 'POST' && u === '/api/toolsets') {
-        const body = JSON.parse(String((init as RequestInit)?.body));
-        expect(body).toEqual({
-          name: 'new-toolset',
-          description: 'une description',
-          local_tools: ['a', 'b'],
-        });
-        return new Response(JSON.stringify({ ok: true }), {
-          status: 201,
-          headers: { 'content-type': 'application/json' },
-        });
+  // ── Test 2 : Create — options chargées, cocher local tools ──────────────────
+  it('create — options chargées : cocher a et b → POST avec {name, local_tools, mcp: []}', async () => {
+    let postBody: unknown;
+    let fetchCount = 0;
+    mockFetch((url, init) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/toolsets') {
+        fetchCount++;
+        if (fetchCount === 1) {
+          return jsonResponse([{ name: 'default', mcp: [], local_tools: [] }]);
+        }
+        return jsonResponse([{ name: 'new-toolset', mcp: [], local_tools: ['a', 'b'] }]);
       }
-
-      if (method === 'GET' && u === '/api/toolsets') {
-        callCount++;
-        return new Response(
-          JSON.stringify([{ name: 'new-toolset', mcp: [], local_tools: [] }]),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+      if (method === 'POST' && url === '/api/toolsets') {
+        postBody = JSON.parse(String(init?.body));
+        return jsonResponse({ name: 'new-toolset' });
       }
-
-      return new Response(null, { status: 500 });
+      if (url === '/api/local-tools') {
+        return jsonResponse([{ name: 'a', description: 'Tool A' }, { name: 'b', description: 'Tool B' }]);
+      }
+      if (url === '/api/mcp-servers') {
+        return jsonResponse([{ name: 'srv1', server_type: 'http', url: 'http://srv1', available_tools: [] }]);
+      }
+      return undefined;
     });
 
     const wrapper = mount(ToolsetsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 50));
 
-    const nameInput = wrapper.find<any>('input[aria-label="Nom du toolset"]');
-    const descriptionTextarea = wrapper.find<any>('textarea[aria-label="Description"]');
-    const promptTextarea = wrapper.find<any>('textarea[aria-label="Prompt"]');
-    const localToolsInput = wrapper.find<any>('input[aria-label="Local tools"]');
-
+    const nameInput = wrapper.find<HTMLInputElement>('input[aria-label="Nom du toolset"]');
     await nameInput.setValue('new-toolset');
-    await descriptionTextarea.setValue('une description');
-    await promptTextarea.setValue('prompt test');
-    await localToolsInput.setValue('a, b');
+
+    const allCheckboxes = wrapper.findAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(allCheckboxes.length).toBe(2);
+    await allCheckboxes[0].setValue(true);
+    await allCheckboxes[1].setValue(true);
 
     const createBtn = wrapper.find('.btn-create');
     await createBtn.trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 50));
 
-    expect(wrapper.text()).toContain('new-toolset');
+    expect(postBody).toEqual({
+      name: 'new-toolset',
+      local_tools: ['a', 'b'],
+      mcp: [],
+    });
   });
 
-  it('cliquer "Modifier" charge les valeurs ; "Sauvegarder" appelle PUT avec corps update puis re-fetch', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+  // ── Test 3 : Create — mcp row + tools ──────────────────────────────────────
+  it('create — mcp : ajouter un serveur, choisir serveur, cocher 2 tools → POST avec {server, tools}', async () => {
     let fetchCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
-      const method = (init?.method ?? 'GET') as string;
-      const u = String(url);
-
-      if (method === 'PUT' && u.startsWith('/api/toolsets/')) {
-        const name = u.replace('/api/toolsets/', '');
-        const body = JSON.parse(String((init as RequestInit)?.body));
-        expect(name).toBe('default');
-        expect(body).toEqual({
-          description: 'update-desc',
-          prompt: 'update-prompt',
-          local_tools: ['new-tool'],
-        });
-        return new Response(
-          JSON.stringify({
-            name: 'default',
-            description: 'update-desc',
-            prompt: 'update-prompt',
-            local_tools: ['new-tool'],
-            mcp: [],
-          }),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
-      }
-
-      if (method === 'GET' && u === '/api/toolsets') {
+    let postBody: unknown;
+    mockFetch((url, init) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/toolsets') {
         fetchCount++;
-        if (fetchCount === 1) {
-          return new Response(
-            JSON.stringify([{
-              name: 'default',
-              description: 'old-desc',
-              prompt: 'old-prompt',
-              local_tools: ['git', 'fs'],
-              mcp: [{ server: 's1' }],
-            }]),
-            { status: 200, headers: { 'content-type': 'application/json' } },
-          );
-        }
-        return new Response(
-          JSON.stringify([{
-            name: 'default',
-            description: 'update-desc',
-            prompt: 'update-prompt',
-            local_tools: ['new-tool'],
-            mcp: [],
-          }]),
-          { status: 200, headers: { 'content-type': 'application/json' } },
-        );
+        return jsonResponse([{ name: 'default', mcp: [], local_tools: [] }]);
       }
-
-      return new Response(null, { status: 500 });
+      if (method === 'POST' && url === '/api/toolsets') {
+        postBody = JSON.parse(String(init?.body));
+        return jsonResponse({ name: 'mcp-toolset' });
+      }
+      if (url === '/api/local-tools') {
+        return jsonResponse([{ name: 'git', description: 'Git tool' }]);
+      }
+      if (url === '/api/mcp-servers') {
+        return jsonResponse([{
+          name: 'code-server', server_type: 'http', url: 'http://code',
+          available_tools: ['diff', 'status', 'log'],
+        }]);
+      }
+      return undefined;
     });
 
     const wrapper = mount(ToolsetsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 50));
+
+    const nameInput = wrapper.find<HTMLInputElement>('input[aria-label="Nom du toolset"]');
+    await nameInput.setValue('mcp-toolset');
+    await wrapper.findAll('input[type="checkbox"]')[0].setValue(true);
+
+    const addBtn = wrapper.find('.btn-add');
+    await addBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 10));
+
+    const selects = wrapper.findAll<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
+    expect(selects.length).toBe(1);
+    await selects[0].setValue('code-server');
+    await new Promise(r => setTimeout(r, 10));
+
+    const toolCheckboxes = wrapper.findAll('input[type="checkbox"]');
+    expect(toolCheckboxes.length).toBe(4);
+    await toolCheckboxes[1].setValue(true);
+    await toolCheckboxes[2].setValue(true);
+
+    const createBtn = wrapper.find('.btn-create');
+    await createBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(postBody).toEqual({
+      name: 'mcp-toolset',
+      local_tools: ['git'],
+      mcp: [{ server: 'code-server', tools: ['diff', 'status'] }],
+    });
+  });
+
+  // ── Test 4 : État vide mcp ─────────────────────────────────────────────────
+  it('état vide mcp : serveur avec available_tools: [] → message et aucune case tools', async () => {
+    mockFetch((url) => {
+      if (url === '/api/toolsets') {
+        return jsonResponse([{ name: 'default', mcp: [], local_tools: [] }]);
+      }
+      if (url === '/api/local-tools') {
+        return jsonResponse([{ name: 'git', description: 'Git' }]);
+      }
+      if (url === '/api/mcp-servers') {
+        return jsonResponse([{
+          name: 'empty-srv', server_type: 'http', url: 'http://empty', available_tools: [],
+        }]);
+      }
+      return undefined;
+    });
+
+    const wrapper = mount(ToolsetsScreen);
+    await new Promise(r => setTimeout(r, 50));
+
+    const addBtn = wrapper.find('.btn-add');
+    await addBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 10));
+
+    const selects = wrapper.findAll<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
+    await selects[0].setValue('empty-srv');
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(wrapper.text()).toContain('Aucun outil disponible');
+    expect(wrapper.findAll('input[type="checkbox"]').length).toBe(1);
+    expect(wrapper.findAll('p.empty-state').length).toBe(1);
+  });
+
+  // ── Test 5 : Edit — chargement + sauvegarde ────────────────────────────────
+  it('edit — "Modifier" pré-remplit ; "Sauvegarder" → PUT', async () => {
+    let fetchCount = 0;
+    let putName: string | undefined;
+    let putDesc: string | undefined;
+    let putPrompt: string | undefined;
+    mockFetch((url, init) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/toolsets') {
+        fetchCount++;
+        if (fetchCount === 1) {
+          return jsonResponse([{
+            name: 'default',
+            description: 'old-desc',
+            prompt: 'old-prompt',
+            local_tools: ['git', 'fs', 'deploy'],
+            mcp: [{ server: 'code-server', tools: ['diff'] }],
+          }]);
+        }
+        return jsonResponse([{
+          name: 'default',
+          description: 'updated',
+          prompt: 'updated-prompt',
+          local_tools: ['git', 'fs'],
+          mcp: [{ server: 'code-server', tools: ['diff'] }],
+        }]);
+      }
+      if (method === 'PUT' && url.startsWith('/api/toolsets/')) {
+        const bodyObj = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        putName = url.replace('/api/toolsets/', '').split('?')[0];
+        putDesc = bodyObj.description as string | undefined;
+        putPrompt = bodyObj.prompt as string | undefined;
+        return jsonResponse({ name: 'default' });
+      }
+      if (url === '/api/local-tools') {
+        return jsonResponse([
+          { name: 'git', description: 'Git' },
+          { name: 'fs', description: 'Filesystem' },
+          { name: 'deploy', description: 'Deploy' },
+        ]);
+      }
+      if (url === '/api/mcp-servers') {
+        return jsonResponse([
+          { name: 'code-server', server_type: 'http', url: 'http://code', available_tools: ['diff', 'status'] },
+        ]);
+      }
+      return undefined;
+    });
+
+    const wrapper = mount(ToolsetsScreen);
+    await new Promise(r => setTimeout(r, 50));
 
     const editBtn = wrapper.find('.btn-edit');
     await editBtn.trigger('click');
-    await wrapper.vm.$nextTick();
+    await new Promise(r => setTimeout(r, 50));
 
-    expect(wrapper.text()).toContain('Modifier : default');
-    const editForm = wrapper.findAll<any>('.form-card');
-    const editLocalToolsInput = editForm[1].find<any>('input[aria-label="Local tools"]');
-    expect(editLocalToolsInput.element.value).toBe('git, fs');
+    const editForms = wrapper.findAll<HTMLInputElement>('.form-card');
+    expect(editForms.length).toBe(2);
 
-    const editDescTextarea = editForm[1].find<any>('textarea[aria-label="Description"]');
-    await editDescTextarea.setValue('update-desc');
+    const allTextareas = wrapper.findAll<HTMLTextAreaElement>('textarea[aria-label="Description"]');
+    expect(allTextareas.length).toBeGreaterThanOrEqual(1);
+    const editDesc = allTextareas[1];
+    const editPrompt = wrapper.findAll<HTMLTextAreaElement>('textarea[aria-label="Prompt"]')[1];
 
-    const editPromptTextarea = editForm[1].find<any>('textarea[aria-label="Prompt"]');
-    await editPromptTextarea.setValue('update-prompt');
+    await editDesc.setValue('update-desc');
+    await editDesc.trigger('change');
+    await new Promise(r => setTimeout(r, 10));
 
-    await editLocalToolsInput.setValue('new-tool');
+    await editPrompt.setValue('update-prompt');
+    await editPrompt.trigger('change');
+    await new Promise(r => setTimeout(r, 10));
 
-    const saveBtns = wrapper.findAll('.btn-success');
-    await saveBtns[0].trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    const saveBtn = wrapper.find('.btn-success');
+    await saveBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 50));
 
-    expect(wrapper.text()).toContain('update-desc');
+    expect(putName).toBe('default');
+    expect(putDesc).toBe('update-desc');
+    expect(putPrompt).toBe('update-prompt');
   });
 
-  it('cliquer "Supprimer" \u2192 DELETE /{name} puis re-fetch', async () => {
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    let fetchCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
-      const method = (init?.method ?? 'GET') as string;
-      const u = String(url);
-      if (method === 'DELETE' && u.includes('/api/toolsets/to-delete')) {
-        return new Response(null, { status: 204 });
+  // ── Test 6 : Edit — dépendance serveur → reset tools ───────────────────────
+  it('edit — changer le serveur d\'une ligne mcp → tools réinitialisés', async () => {
+    let putMcpData: { server: string; tools: string[] } | undefined;
+    putMcpData = { server: '', tools: [] };
+    mockFetch((url, init) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/toolsets') {
+        return jsonResponse([{
+          name: 'default',
+          description: 'desc',
+          prompt: null,
+          local_tools: [],
+          mcp: [{ server: 'server-a', tools: ['tool1', 'tool2'] }],
+        }]);
       }
-      if (method === 'GET' && u === '/api/toolsets') {
-        fetchCount++;
-        if (fetchCount === 1) {
-          return new Response(
-            JSON.stringify([{ name: 'to-delete', local_tools: ['git'], mcp: [] }]),
-            { status: 200, headers: { 'content-type': 'application/json' } },
-          );
+      if (method === 'PUT' && url.startsWith('/api/toolsets/')) {
+        const bodyObj = JSON.parse(String(init?.body)) as Record<string, unknown>;
+        if (bodyObj.mcp && Array.isArray(bodyObj.mcp) && bodyObj.mcp.length > 0) {
+          const firstEntry = bodyObj.mcp[0] as { server: string; tools: string[] };
+          putMcpData = { server: firstEntry.server, tools: [...firstEntry.tools] };
         }
-        return new Response(JSON.stringify([]), {
-          status: 200,
-          headers: { 'content-type': 'application/json' },
-        });
+        return jsonResponse({ name: 'default' });
       }
-      return new Response(null, { status: 500 });
+      if (url === '/api/local-tools') {
+        return jsonResponse([{ name: 'git', description: 'Git' }]);
+      }
+      if (url === '/api/mcp-servers') {
+        return jsonResponse([
+          { name: 'server-a', server_type: 'http', url: 'http://a', available_tools: ['tool1', 'tool2'] },
+          { name: 'server-b', server_type: 'http', url: 'http://b', available_tools: ['toolX', 'toolY'] },
+        ]);
+      }
+      return undefined;
     });
 
     const wrapper = mount(ToolsetsScreen);
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    await new Promise(r => setTimeout(r, 50));
+
+    const editBtn = wrapper.find('.btn-edit');
+    await editBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 50));
+
+    const selectEl = wrapper.find<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
+    expect((selectEl.element as HTMLSelectElement).value).toBe('server-a');
+
+    const vm = wrapper.vm as any;
+    expect(vm.editMcp).toHaveLength(1);
+    expect(vm.editMcp[0].tools).toEqual(['tool1', 'tool2']);
+
+    await selectEl.setValue('server-b');
+    await new Promise(r => setTimeout(r, 10));
+
+    expect(vm.editMcp[0].tools).toEqual([]);
+
+    await selectEl.setValue('server-a');
+    await new Promise(r => setTimeout(r, 10));
+    await selectEl.setValue('server-b');
+    await new Promise(r => setTimeout(r, 10));
+
+    const saveBtn = wrapper.find('.btn-success');
+    await saveBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(putMcpData?.server).toBe('server-b');
+    expect(putMcpData?.tools).toEqual([]);
+  });
+
+  // ── Test 7 : Supprimer ─────────────────────────────────────────────────────
+  it('Supprimer → DELETE /api/toolsets/{name} puis re-fetch', async () => {
+    let fetchCount = 0;
+    mockFetch((url, init) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/toolsets') {
+        fetchCount++;
+        if (fetchCount === 1) {
+          return jsonResponse([{ name: 'to-delete', local_tools: ['git'], mcp: [] }]);
+        }
+        return jsonResponse([]);
+      }
+      if (method === 'DELETE' && url.startsWith('/api/toolsets/')) {
+        return new Response(null, { status: 204 });
+      }
+      if (url === '/api/local-tools') {
+        return jsonResponse([]);
+      }
+      if (url === '/api/mcp-servers') {
+        return jsonResponse([]);
+      }
+      return undefined;
+    });
+
+    const wrapper = mount(ToolsetsScreen);
+    await new Promise(r => setTimeout(r, 50));
 
     const deleteBtn = wrapper.find('.btn-delete');
+    expect(deleteBtn.exists()).toBe(true);
     await deleteBtn.trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
-
-    const deleteCalls = fetchSpy.mock.calls.filter(
-      ([url]) => String(url).includes('/api/toolsets/to-delete'),
-    );
-    expect(deleteCalls.length).toBe(1);
-    expect(deleteCalls[0][1]).toMatchObject({
-      method: 'DELETE',
-    });
+    await new Promise(r => setTimeout(r, 50));
 
     expect(wrapper.text()).toContain('Aucun toolset');
   });

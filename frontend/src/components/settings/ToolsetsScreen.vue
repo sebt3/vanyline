@@ -19,13 +19,27 @@ interface CreateToolset {
   name: string;
   description?: string;
   prompt?: string;
-  local_tools: string[];
+  local_tools?: string[];
+  mcp?: McpSelection[];
 }
 
 interface UpdateToolset {
   description?: string;
   prompt?: string;
   local_tools?: string[];
+  mcp?: McpSelection[];
+}
+
+interface LocalTool {
+  name: string;
+  description: string;
+}
+
+interface McpServerOption {
+  name: string;
+  server_type: string;
+  url: string;
+  available_tools: string[];
 }
 
 const client = createApiClient();
@@ -33,18 +47,22 @@ const fetchedToolsets = ref<Toolset[]>([]);
 const error = ref<string | null>(null);
 const loading = ref(true);
 
-// Formulaire de création
+const localTools = ref<LocalTool[]>([]);
+const mcpServers = ref<McpServerOption[]>([]);
+const optionsError = ref<string | null>(null);
+
 const formName = ref('');
 const formDescription = ref('');
 const formPrompt = ref('');
-const formLocalTools = ref('');
+const formLocalTools = ref<string[]>([]);
+const formMcp = ref<McpSelection[]>([]);
 const creationError = ref<string | null>(null);
 
-// Formulaire d'édition
 const editingName = ref<string | null>(null);
 const editDescription = ref('');
 const editPrompt = ref('');
-const editLocalTools = ref('');
+const editLocalTools = ref<string[]>([]);
+const editMcp = ref<McpSelection[]>([]);
 const editError = ref<string | null>(null);
 
 async function fetchToolsets() {
@@ -57,14 +75,51 @@ async function fetchToolsets() {
   }
 }
 
-onMounted(fetchToolsets);
-
-function parseLocalTools(input: string): string[] {
-  return input
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
+async function fetchOptions() {
+  try {
+    const [lt, servers] = await Promise.all([
+      client.get<LocalTool[]>('/api/local-tools'),
+      client.get<McpServerOption[]>('/api/mcp-servers'),
+    ]);
+    localTools.value = lt;
+    mcpServers.value = servers;
+  } catch (e) {
+    optionsError.value = e instanceof ApiError ? e.message : String(e);
+  }
 }
+
+function mcpToolsForServer(server: string): string[] {
+  return mcpServers.value.find((s) => s.name === server)?.available_tools ?? [];
+}
+
+function addMcpRow() {
+  formMcp.value.push({ server: '', tools: [] });
+}
+
+function removeMcpRow(index: number) {
+  formMcp.value.splice(index, 1);
+}
+
+function onMcpServerChange(index: number) {
+  formMcp.value[index].tools = [];
+}
+
+function addEditMcpRow() {
+  editMcp.value.push({ server: '', tools: [] });
+}
+
+function removeEditMcpRow(index: number) {
+  editMcp.value.splice(index, 1);
+}
+
+function onEditMcpServerChange(index: number) {
+  editMcp.value[index].tools = [];
+}
+
+onMounted(() => {
+  fetchToolsets();
+  fetchOptions();
+});
 
 async function createToolset() {
   creationError.value = null;
@@ -72,14 +127,16 @@ async function createToolset() {
     name: formName.value,
     ...(formDescription.value ? { description: formDescription.value } : {}),
     ...(formPrompt.value ? { prompt: formPrompt.value } : {}),
-    local_tools: parseLocalTools(formLocalTools.value),
+    local_tools: formLocalTools.value,
+    mcp: formMcp.value,
   };
   try {
     await client.post<Toolset>('/api/toolsets', body);
     formName.value = '';
     formDescription.value = '';
     formPrompt.value = '';
-    formLocalTools.value = '';
+    formLocalTools.value = [];
+    formMcp.value = [];
     await fetchToolsets();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
@@ -90,7 +147,8 @@ function startEdit(toolset: Toolset) {
   editingName.value = toolset.name;
   editDescription.value = toolset.description ?? '';
   editPrompt.value = toolset.prompt ?? '';
-  editLocalTools.value = toolset.local_tools.join(', ');
+  editLocalTools.value = [...toolset.local_tools];
+  editMcp.value = toolset.mcp.map((m) => ({ server: m.server, tools: m.tools ?? [] }));
   editError.value = null;
 }
 
@@ -98,7 +156,8 @@ function cancelEdit() {
   editingName.value = null;
   editDescription.value = '';
   editPrompt.value = '';
-  editLocalTools.value = '';
+  editLocalTools.value = [];
+  editMcp.value = [];
   editError.value = null;
 }
 
@@ -107,8 +166,8 @@ async function saveEdit(name: string) {
   const body: UpdateToolset = {};
   if (editDescription.value) body.description = editDescription.value;
   if (editPrompt.value) body.prompt = editPrompt.value;
-  const lt = parseLocalTools(editLocalTools.value);
-  if (lt.length) body.local_tools = lt;
+  if (editLocalTools.value.length > 0) body.local_tools = editLocalTools.value;
+  if (editMcp.value.length > 0) body.mcp = editMcp.value;
   try {
     await client.put<Toolset>(`/api/toolsets/${name}`, body);
     cancelEdit();
@@ -201,15 +260,35 @@ async function deleteToolset(name: string) {
           />
         </label>
         <label class="field">
-          <span class="field-label">Local tools (séparés par des virgules)</span>
-          <input
-            class="field-input"
-            v-model="formLocalTools"
-            type="text"
-            placeholder="git, filesystem"
-            aria-label="Local tools"
-          />
+          <span class="field-label">Local tools</span>
+          <div class="checkbox-list">
+            <label v-for="t in localTools" :key="t.name" class="checkbox-item">
+              <input type="checkbox" :value="t.name" v-model="formLocalTools" />
+              <span>{{ t.name }}</span>
+            </label>
+          </div>
         </label>
+        <label class="field">
+          <span class="field-label">Serveurs MCP</span>
+          <div v-for="(sel, i) in formMcp" :key="i" class="mcp-row">
+            <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onMcpServerChange(i)">
+              <option value="">—</option>
+              <option v-for="s in mcpServers" :key="s.name" :value="s.name">{{ s.name }}</option>
+            </select>
+            <div class="checkbox-list">
+              <label v-for="tools in mcpToolsForServer(sel.server)" :key="tools" class="checkbox-item">
+                <input type="checkbox" :value="tools" v-model="sel.tools" />
+                <span>{{ tools }}</span>
+              </label>
+            </div>
+            <p v-if="sel.server && mcpToolsForServer(sel.server).length === 0" class="empty-state">
+              Aucun outil disponible — lancez un test sur ce serveur MCP.
+            </p>
+            <button class="btn btn-cancel" @click="removeMcpRow(i)">Retirer</button>
+          </div>
+          <button class="btn btn-add" @click="addMcpRow">Ajouter un serveur</button>
+        </label>
+        <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <button class="btn btn-create" @click="createToolset">Créer</button>
       </div>
@@ -238,14 +317,33 @@ async function deleteToolset(name: string) {
             />
           </label>
           <label class="field">
-            <span class="field-label">Local tools (séparés par des virgules)</span>
-            <input
-              class="field-input"
-              v-model="editLocalTools"
-              type="text"
-              placeholder="git, filesystem"
-              aria-label="Local tools"
-            />
+            <span class="field-label">Local tools</span>
+            <div class="checkbox-list">
+              <label v-for="t in localTools" :key="t.name" class="checkbox-item">
+                <input type="checkbox" :value="t.name" v-model="editLocalTools" />
+                <span>{{ t.name }}</span>
+              </label>
+            </div>
+          </label>
+          <label class="field">
+            <span class="field-label">Serveurs MCP</span>
+            <div v-for="(sel, i) in editMcp" :key="i" class="mcp-row">
+              <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onEditMcpServerChange(i)">
+                <option value="">—</option>
+                <option v-for="s in mcpServers" :key="s.name" :value="s.name">{{ s.name }}</option>
+              </select>
+              <div class="checkbox-list">
+                <label v-for="tools in mcpToolsForServer(sel.server)" :key="tools" class="checkbox-item">
+                  <input type="checkbox" :value="tools" v-model="sel.tools" />
+                  <span>{{ tools }}</span>
+                </label>
+              </div>
+              <p v-if="sel.server && mcpToolsForServer(sel.server).length === 0" class="empty-state">
+                Aucun outil disponible — lancez un test sur ce serveur MCP.
+              </p>
+              <button class="btn btn-cancel" @click="removeEditMcpRow(i)">Retirer</button>
+            </div>
+            <button class="btn btn-add" @click="addEditMcpRow">Ajouter un serveur</button>
           </label>
           <div v-if="editError" class="creation-error">{{ editError }}</div>
           <div class="edit-actions">
@@ -384,6 +482,13 @@ async function deleteToolset(name: string) {
   color: white;
 }
 
+.btn-add {
+  background: #2b3a4d;
+  color: #6a7185;
+  border: 1px dashed #3a4a5e;
+  padding: 4px 10px;
+}
+
 .btn-success {
   background: #3fb56d;
   color: white;
@@ -444,5 +549,11 @@ async function deleteToolset(name: string) {
 .edit-actions {
   display: flex;
   gap: 8px;
+}
+
+.empty-state {
+  color: #6a7185;
+  font-size: 12px;
+  margin: 4px 0;
 }
 </style>
