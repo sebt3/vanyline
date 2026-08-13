@@ -47,6 +47,7 @@ pub struct McpServer {
     pub server_type: String,
     pub url: String,
     pub headers: serde_json::Value,
+    pub available_tools: serde_json::Value,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }

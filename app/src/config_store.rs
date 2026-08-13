@@ -415,6 +415,7 @@ mod tests {
             server_type: "http-streamable".to_string(),
             url: "http://localhost:8080".to_string(),
             headers: serde_json::json!({"X-Custom": "value"}),
+            available_tools: serde_json::json!([]),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };
@@ -435,6 +436,7 @@ mod tests {
             server_type: "sse".to_string(),
             url: "http://localhost:9090".to_string(),
             headers: serde_json::json!({}),
+            available_tools: serde_json::json!([]),
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
         };

@@ -258,6 +258,16 @@ async fn connect_domain_mcp_server_inner(
     }
 }
 
+/// Liste les noms des tools exposés par un serveur MCP, sans les ajouter à un
+/// handle. Réutilise `connect_domain_mcp_server_inner` (même logique de
+/// connexion/listing) — alimente `POST /api/mcp-servers/{id}/test` (app).
+pub async fn list_mcp_server_tools(
+    server: &DomainMcpServer,
+) -> Result<Vec<String>, VnyError> {
+    let (tools, _client, _running) = connect_domain_mcp_server_inner(server).await?;
+    Ok(tools.into_iter().map(|t| t.name.to_string()).collect())
+}
+
 /// Connecte UNIQUEMENT les serveurs référencés par `selections` (jamais
 /// `all_servers` en entier) et n'ajoute au handle que les tools du serveur dont
 /// le nom matche `tool_matches(&selection.tools, ..)`. Échec de connexion à un

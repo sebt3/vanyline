@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 vanyline-lib = { path = "../lib", features = ["k8s"] }
 vanyline-crds = { path = "../crds" }
+vanyline-tools = { path = "../tools" }
 axum = { version = "0.8.8", features = ["ws", "macros"] }
 openidconnect = "4.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }

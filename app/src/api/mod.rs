@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod conversations;
 pub mod llm_providers;
+pub mod local_tools;
 pub mod mcp_servers;
 pub mod me;
 pub mod model_profiles;
@@ -19,6 +20,7 @@ use crate::AppState;
 
 pub fn api_router() -> Router<AppState> {
     Router::new()
+        .route("/local-tools", get(local_tools::list_local_tools))
         .route("/me", get(me::handler_me))
         // LLM providers (admin)
         .route(
@@ -49,6 +51,10 @@ pub fn api_router() -> Router<AppState> {
             get(mcp_servers::get_server)
                 .put(mcp_servers::update_server)
                 .delete(mcp_servers::delete_server),
+        )
+        .route(
+            "/mcp-servers/{id}/test",
+            post(mcp_servers::test_server),
         )
         // Model profiles (OIDC, by name)
         .route(
