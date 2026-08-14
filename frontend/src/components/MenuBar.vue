@@ -32,13 +32,13 @@ const router = useRouter();
 const route = useRoute();
 const { ideActions } = useIdeSession();
 
+// Uniquement les entrées réellement câblées (un `action` géré par onSelect) —
+// pas d'items décoratifs qui ne font rien au clic. Menus "Édition" et "Aide"
+// supprimés en entier : aucune de leurs entrées n'a jamais eu de handler.
 const menus: { label: string; items: (Item | Sep)[] }[] = [
   {
     label: 'Fichier',
     items: [
-      { label: 'Nouveau fichier', shortcut: '⌘N' },
-      { label: "Ouvrir l'espace de travail" },
-      { sep: true },
       { label: 'Enregistrer', shortcut: '⌘S', action: 'save-file' },
       { sep: true },
       { label: "Fermer l'onglet", shortcut: '⌘W', action: 'close-tab' },
@@ -47,39 +47,17 @@ const menus: { label: string; items: (Item | Sep)[] }[] = [
     ],
   },
   {
-    label: 'Édition',
-    items: [
-      { label: 'Annuler', shortcut: '⌘Z' },
-      { label: 'Rétablir', shortcut: '⇧⌘Z' },
-      { sep: true },
-      { label: 'Rechercher', shortcut: '⌘F' },
-      { label: 'Rechercher dans les fichiers', shortcut: '⇧⌘F' },
-    ],
-  },
-  {
     label: 'Affichage',
     items: [
       { label: 'Explorer', action: 'open-explorer' },
       { label: 'Nouveau terminal', shortcut: '⌃`', action: 'new-terminal' },
-      { label: 'Assistant' },
-      { sep: true },
-      { label: 'Palette de commandes', shortcut: '⇧⌘P' },
       { sep: true },
       { label: 'Configuration', shortcut: '⌘,', action: 'toggle-settings' },
     ],
   },
   {
     label: 'Exécution',
-    items: [
-      { label: 'Nouvelle session agent', action: 'start-agent-session' },
-      { sep: true },
-      { label: 'Lancer sync-media.dag' },
-      { label: "Arrêter l'exécution" },
-    ],
-  },
-  {
-    label: 'Aide',
-    items: [{ label: 'Documentation' }, { label: 'Raccourcis clavier' }],
+    items: [{ label: 'Nouvelle session agent', action: 'start-agent-session' }],
   },
 ];
 
