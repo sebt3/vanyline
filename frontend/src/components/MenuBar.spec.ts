@@ -1,9 +1,121 @@
 import { createMemoryHistory, createRouter } from 'vue-router';
 import { mount } from '@vue/test-utils';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import MenuBar from './MenuBar.vue';
+import { clearIdeActions, registerIdeActions, useIdeSession } from '../composables/useIdeSession';
+
+/** Ouvre `menuLabel` (pointerdown, pas click — cf. reka-ui) puis clique
+ *  l'item dont le texte contient `itemLabel`. Le contenu du menu est
+ *  téléporté dans document.body (MenubarPortal). */
+async function openMenuAndClick(wrapper: ReturnType<typeof mount>, menuLabel: string, itemLabel: string) {
+  const trigger = wrapper.find(`[data-value="${menuLabel}"]`);
+  expect(trigger.exists()).toBe(true);
+  trigger.element.dispatchEvent(
+    new PointerEvent('pointerdown', { button: 0, bubbles: true, cancelable: true }),
+  );
+  await wrapper.vm.$nextTick();
+  await new Promise((r) => setTimeout(r, 0));
+
+  const items = [...document.querySelectorAll('[role="menuitem"]')];
+  const item = items.find((el) => el.textContent?.includes(itemLabel));
+  expect(item).toBeTruthy();
+  item!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+  await wrapper.vm.$nextTick();
+  await new Promise((r) => setTimeout(r, 0));
+}
 
 describe('MenuBar', () => {
+  afterEach(() => {
+    clearIdeActions();
+  });
+
+  it("Enregistrer appelle ideActions.saveActiveFile", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+
+    const save = vi.fn();
+    registerIdeActions({ saveActiveFile: save });
+
+    await openMenuAndClick(wrapper, 'Fichier', 'Enregistrer');
+
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("Fermer l'onglet appelle ideActions.closeActiveTab", async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+
+    const closeTab = vi.fn();
+    registerIdeActions({ closeActiveTab: closeTab });
+
+    await openMenuAndClick(wrapper, 'Fichier', "Fermer l'onglet");
+
+    expect(closeTab).toHaveBeenCalledTimes(1);
+  });
+
+  it('Vers le projet navigue vers /p/:projectName depuis la route sandbox', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/p/:projectName', component: { template: '<div>Project</div>' } },
+        {
+          path: '/p/:projectName/s/:sandboxName',
+          component: { template: '<div>Sandbox</div>' },
+        },
+      ],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/p/demo/s/main');
+    await router.isReady();
+
+    await openMenuAndClick(wrapper, 'Fichier', 'Vers le projet');
+
+    expect(router.currentRoute.value.path).toBe('/p/demo');
+  });
+
+  it('Nouvelle session agent déclenche startAgentSession (POST /api/conversations)', async () => {
+    const fetchSpy = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/agents') {
+        return Promise.resolve(
+          new Response(JSON.stringify([{ name: 'default' }]), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({ id: 'conv-1' }), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+
+    await openMenuAndClick(wrapper, 'Exécution', 'Nouvelle session agent');
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(useIdeSession().activeConversationId.value).toBe('conv-1');
+    vi.unstubAllGlobals();
+  });
   it('navigue vers /settings quand on clique sur Configuration', async () => {
     // Route initiale ≠ /settings : le test échoue si le clic ne déclenche pas
     // la navigation (pas de faux positif via un redirect initial).

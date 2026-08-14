@@ -1,5 +1,8 @@
 <script setup lang="ts">
-import { onMounted, ref, useTemplateRef } from 'vue';
+import { onBeforeUnmount, onMounted, ref, useTemplateRef, watch } from 'vue';
+import { createApiClient } from '../../api/client';
+import { openChatWs } from '../../api/chatWs';
+import { useIdeSession } from '../../composables/useIdeSession';
 
 interface ChatMessage {
   _id: string;
@@ -11,6 +14,29 @@ interface ChatMessage {
   distributed?: boolean;
   seen?: boolean;
 }
+
+/** Ligne persistée (`GET /conversations/{id}/messages`) — `payload` est un
+ *  JSON libre côté backend (`vanyline_app::ws::chat::persist_message`),
+ *  seul `content` nous intéresse ici. */
+interface MessageRow {
+  id: string;
+  role: string;
+  payload: { content?: string };
+  created_at: string;
+}
+
+/** Miroir de `vanyline_lib::event::ChatEvent` (tag `type`, snake_case) —
+ *  seuls les variants avec un rendu dans ce MVP sont détaillés, les autres
+ *  (`skill_loaded`, `subagent_*`, `usage`) passent par le cas générique. */
+type ChatEventMsg =
+  | { type: 'token'; content: string }
+  | { type: 'tool_call'; id: string; name: string; args: unknown }
+  | { type: 'error'; code: string; message: string }
+  | { type: 'done' }
+  | { type: string; [key: string]: unknown };
+
+const { activeConversationId } = useIdeSession();
+const client = createApiClient();
 
 const rooms = [
   {
@@ -24,35 +50,6 @@ const rooms = [
   },
 ];
 
-const initialMessages: ChatMessage[] = [
-  {
-    _id: '1',
-    senderId: 'me',
-    content: 'Relance la synchro de la bibliothèque depuis le NAS, le dossier "Documentaires" a bougé.',
-    timestamp: '10:41',
-    saved: true,
-    distributed: true,
-    seen: true,
-  },
-  {
-    _id: '2',
-    senderId: 'assistant',
-    username: 'Assistant',
-    content:
-      'Le DAG sync-media est lancé. fetch-metadata et transcode sont terminés, generate-thumbnails est en cours (~40 fichiers). Je te préviens si extract-subtitles échoue.',
-    timestamp: '10:41',
-  },
-  {
-    _id: '3',
-    senderId: 'me',
-    content: 'Ok, montre-moi sync_library.py pendant que ça tourne.',
-    timestamp: '10:42',
-    saved: true,
-    distributed: true,
-    seen: true,
-  },
-];
-
 // vue-advanced-chat attend une vraie transition false -> true pour lever
 // son spinner de chargement, pas juste une prop toujours à `true` (voir
 // son README, section "Follow the UI loading pattern") : sans ça, il
@@ -60,6 +57,120 @@ const initialMessages: ChatMessage[] = [
 const messages = ref<ChatMessage[]>([]);
 const messagesLoaded = ref(false);
 const roomsLoaded = ref(false);
+
+let ws: WebSocket | undefined;
+// _id du message assistant en cours de streaming (accumulation des tokens
+// d'un même tour) — null entre deux tours.
+let streamingId: string | null = null;
+
+function timeLabel(iso: string): string {
+  return new Date(iso).toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' });
+}
+
+function appendMessage(msg: ChatMessage) {
+  messages.value = [...messages.value, msg];
+}
+
+async function loadHistory(conversationId: string) {
+  const rows = await client.get<MessageRow[]>(`/api/conversations/${conversationId}/messages`);
+  messages.value = rows.map((m) => ({
+    _id: m.id,
+    senderId: m.role === 'user' ? 'me' : 'assistant',
+    username: m.role === 'user' ? undefined : 'Assistant',
+    content: m.payload.content ?? '',
+    timestamp: timeLabel(m.created_at),
+    saved: true,
+    distributed: true,
+    seen: true,
+  }));
+}
+
+function handleChatEvent(event: ChatEventMsg) {
+  switch (event.type) {
+    case 'token': {
+      const content = (event as { content: string }).content;
+      if (streamingId) {
+        messages.value = messages.value.map((m) =>
+          m._id === streamingId ? { ...m, content: m.content + content } : m,
+        );
+      } else {
+        streamingId = crypto.randomUUID();
+        appendMessage({
+          _id: streamingId,
+          senderId: 'assistant',
+          username: 'Assistant',
+          content,
+          timestamp: timeLabel(new Date().toISOString()),
+        });
+      }
+      break;
+    }
+    case 'tool_call':
+      appendMessage({
+        _id: crypto.randomUUID(),
+        senderId: 'assistant',
+        username: 'Assistant',
+        content: `🔧 ${(event as { name: string }).name}`,
+        timestamp: timeLabel(new Date().toISOString()),
+      });
+      break;
+    case 'error':
+      appendMessage({
+        _id: crypto.randomUUID(),
+        senderId: 'assistant',
+        username: 'Assistant',
+        content: `⚠️ ${(event as { message: string }).message}`,
+        timestamp: timeLabel(new Date().toISOString()),
+      });
+      streamingId = null;
+      break;
+    case 'done':
+      streamingId = null;
+      break;
+    default:
+      // skill_loaded/subagent_*/usage : pas de rendu dans ce MVP.
+      break;
+  }
+}
+
+async function connect(conversationId: string) {
+  ws = await openChatWs(conversationId);
+  ws.addEventListener('message', (ev: MessageEvent) => {
+    try {
+      handleChatEvent(JSON.parse(ev.data as string) as ChatEventMsg);
+    } catch {
+      // Frame non-JSON : ignorée.
+    }
+  });
+}
+
+async function openConversation(conversationId: string) {
+  messagesLoaded.value = false;
+  roomsLoaded.value = false;
+  try {
+    await loadHistory(conversationId);
+  } finally {
+    messagesLoaded.value = true;
+    roomsLoaded.value = true;
+    applyChatTheme();
+  }
+  await connect(conversationId);
+}
+
+watch(activeConversationId, (id) => {
+  ws?.close();
+  ws = undefined;
+  streamingId = null;
+  if (id) {
+    void openConversation(id);
+  } else {
+    messages.value = [];
+  }
+});
+
+onBeforeUnmount(() => {
+  ws?.close();
+});
 
 const chatEl = useTemplateRef<HTMLElement>('chatEl');
 
@@ -105,33 +216,26 @@ function applyChatTheme() {
 
 onMounted(() => {
   applyChatTheme();
-  setTimeout(() => {
-    messages.value = initialMessages;
-    messagesLoaded.value = true;
-    roomsLoaded.value = true;
-    applyChatTheme();
-  });
   setTimeout(applyChatTheme, 300);
+  if (activeConversationId.value) void openConversation(activeConversationId.value);
 });
 
 function onSendMessage(event: Event) {
   const detail = (event as CustomEvent).detail;
   const payload = Array.isArray(detail) ? detail[0] : detail;
   const content: string = payload?.content ?? '';
-  if (!content.trim()) return;
+  if (!content.trim() || !ws) return;
 
-  messages.value = [
-    ...messages.value,
-    {
-      _id: String(messages.value.length + 1),
-      senderId: 'me',
-      content,
-      timestamp: new Date().toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }),
-      saved: true,
-      distributed: true,
-      seen: true,
-    },
-  ];
+  appendMessage({
+    _id: crypto.randomUUID(),
+    senderId: 'me',
+    content,
+    timestamp: timeLabel(new Date().toISOString()),
+    saved: true,
+    distributed: true,
+    seen: true,
+  });
+  ws.send(JSON.stringify({ type: 'message', content }));
 }
 </script>
 

@@ -8,19 +8,22 @@ import {
   MenubarItem,
   MenubarSeparator,
 } from 'reka-ui';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
+import { startAgentSession, useIdeSession } from '../composables/useIdeSession';
 
 interface Item {
   label: string;
   shortcut?: string;
   sep?: false;
-  action?: 'toggle-settings';
+  action?: 'toggle-settings' | 'save-file' | 'close-tab' | 'goto-project' | 'start-agent-session';
 }
 interface Sep {
   sep: true;
 }
 
 const router = useRouter();
+const route = useRoute();
+const { ideActions } = useIdeSession();
 
 const menus: { label: string; items: (Item | Sep)[] }[] = [
   {
@@ -29,9 +32,11 @@ const menus: { label: string; items: (Item | Sep)[] }[] = [
       { label: 'Nouveau fichier', shortcut: '⌘N' },
       { label: "Ouvrir l'espace de travail" },
       { sep: true },
-      { label: 'Enregistrer', shortcut: '⌘S' },
+      { label: 'Enregistrer', shortcut: '⌘S', action: 'save-file' },
       { sep: true },
-      { label: "Fermer l'onglet", shortcut: '⌘W' },
+      { label: "Fermer l'onglet", shortcut: '⌘W', action: 'close-tab' },
+      { sep: true },
+      { label: 'Vers le projet', action: 'goto-project' },
     ],
   },
   {
@@ -59,6 +64,8 @@ const menus: { label: string; items: (Item | Sep)[] }[] = [
   {
     label: 'Exécution',
     items: [
+      { label: 'Nouvelle session agent', action: 'start-agent-session' },
+      { sep: true },
       { label: 'Lancer sync-media.dag' },
       { label: "Arrêter l'exécution" },
     ],
@@ -74,8 +81,26 @@ function isSep(item: Item | Sep): item is Sep {
 }
 
 function onSelect(item: Item) {
-  if (item.action === 'toggle-settings') {
-    router.push('/settings');
+  switch (item.action) {
+    case 'toggle-settings':
+      router.push('/settings');
+      break;
+    case 'save-file':
+      ideActions.value.saveActiveFile?.();
+      break;
+    case 'close-tab':
+      ideActions.value.closeActiveTab?.();
+      break;
+    case 'goto-project': {
+      const projectName = route.params.projectName;
+      if (typeof projectName === 'string') router.push(`/p/${projectName}`);
+      break;
+    }
+    case 'start-agent-session':
+      void startAgentSession();
+      break;
+    default:
+      break;
   }
 }
 </script>

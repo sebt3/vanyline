@@ -5,6 +5,7 @@ import { keymap } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { languageExtensionForPath } from './editorLanguage';
+import { registerIdeActions } from '../../composables/useIdeSession';
 import type { Ref } from 'vue';
 import type { SandboxFsClient } from '../../api/sandboxWs';
 
@@ -109,6 +110,9 @@ onMounted(() => {
     parent: hostRef.value!,
   });
   if (openFilePath.value) void loadFile(openFilePath.value);
+  // Fusionné avec les autres handlers (ex. closeActiveTab posé par
+  // IdeShell) — cf. useIdeSession.ts. Pont pour le menu 'Enregistrer'.
+  registerIdeActions({ saveActiveFile: save });
 });
 
 onBeforeUnmount(() => {

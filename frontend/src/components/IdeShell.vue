@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, provide, shallowRef, ref } from 'vue';
+import { onBeforeUnmount, onMounted, provide, shallowRef, ref, watch } from 'vue';
 import { DockviewVue, type DockviewReadyEvent, type VueComponent } from 'dockview-vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
@@ -8,6 +8,7 @@ import Chat from './panels/Chat.vue';
 import Terminal from './panels/Terminal.vue';
 import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
 import { debounce, loadLayout, saveLayout } from './ideLayoutPersistence';
+import { clearIdeActions, registerIdeActions, useIdeSession } from '../composables/useIdeSession';
 
 const props = defineProps<{ sandboxName: string }>();
 
@@ -26,6 +27,8 @@ provide('open-file', (path: string) => {
   openFilePath.value = path;
 });
 
+const { activeConversationId, sessionError } = useIdeSession();
+
 onMounted(() => {
   openSandboxWs(props.sandboxName, '/ws/fs')
     .then((ws) => {
@@ -36,6 +39,12 @@ onMounted(() => {
       // restent vides (fsClient === null), sans planter l'IDE.
       fsClient.value = null;
     });
+});
+
+// Démonté = route sandbox quittée : plus de handlers valides côté menu,
+// plus de session active à afficher.
+onBeforeUnmount(() => {
+  clearIdeActions();
 });
 
 const components = {
@@ -76,6 +85,14 @@ function addDefaultPanels(api: DockviewReadyEvent['api']) {
     initialHeight: 170,
   });
 
+  // Pas de panel 'chat' par défaut : la colonne assistant n'existe que si
+  // une vraie session agent est démarrée (cf. useIdeSession, watcher
+  // ci-dessous). addChatPanel() la pose le moment venu.
+  api.getPanel('editor')?.api.setActive();
+}
+
+function addChatPanel(api: DockviewReadyEvent['api']) {
+  if (api.getPanel('chat')) return;
   api.addPanel({
     id: 'chat',
     component: 'chat',
@@ -83,8 +100,6 @@ function addDefaultPanels(api: DockviewReadyEvent['api']) {
     position: { referencePanel: 'editor', direction: 'right' },
     initialWidth: 330,
   });
-
-  api.getPanel('editor')?.api.setActive();
 }
 
 function onReady(event: DockviewReadyEvent) {
@@ -96,6 +111,10 @@ function onReady(event: DockviewReadyEvent) {
   const saved = loadLayout(props.sandboxName);
   if (saved) {
     api.fromJSON(saved);
+    // Une session ne survit pas au rechargement de page (activeConversationId
+    // repart à null) — un panel 'chat' resté dans un layout sauvegardé ne
+    // correspond donc plus à une session réelle : on le referme.
+    api.getPanel('chat')?.api.close();
   } else {
     addDefaultPanels(api);
   }
@@ -104,11 +123,27 @@ function onReady(event: DockviewReadyEvent) {
   // avant d'écrire dans localStorage.
   const persist = debounce(() => saveLayout(props.sandboxName, api.toJSON()), 400);
   api.onDidLayoutChange(persist);
+
+  registerIdeActions({
+    closeActiveTab: () => api.activePanel?.api.close(),
+  });
+
+  watch(activeConversationId, (id) => {
+    if (id) {
+      addChatPanel(api);
+      api.getPanel('chat')?.api.setActive();
+    } else {
+      api.getPanel('chat')?.api.close();
+    }
+  });
 }
 </script>
 
 <template>
   <div class="dock">
+    <div v-if="sessionError" class="session-error" role="alert">
+      {{ sessionError }}
+    </div>
     <DockviewVue
       class="dockview-theme-abyss"
       style="width: 100%; height: 100%"
@@ -119,5 +154,17 @@ function onReady(event: DockviewReadyEvent) {
 </template>
 
 <style scoped>
-.dock { height: 100%; min-height: 0; }
+.dock { height: 100%; min-height: 0; position: relative; }
+.session-error {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 20;
+  max-width: 60%;
+  padding: 6px 12px;
+  background: #5b1e3fdd;
+  color: #ffb4c8;
+  font-size: 12px;
+  border-radius: 6px;
+}
 </style>
