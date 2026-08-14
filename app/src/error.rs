@@ -52,6 +52,8 @@ pub enum AppError {
     K8sNotFound(String),
     #[error("VNL-SBX-001: sandbox has no public endpoint (owner has no application_ref)")]
     SandboxNotExposed,
+    #[error("VNL-SBX-002: branch must not be empty")]
+    SandboxBranchEmpty,
 }
 
 impl From<vanyline_lib::VnyError> for AppError {
@@ -94,6 +96,7 @@ impl IntoResponse for AppError {
             Self::K8sApiError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             Self::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             Self::SandboxNotExposed => (StatusCode::CONFLICT, self.to_string()),
+            Self::SandboxBranchEmpty => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
         };
 
         let body = Json(json!({ "error": message }));
@@ -140,5 +143,11 @@ mod tests {
     fn k8s_not_found_maps_to_404() {
         let resp = AppError::K8sNotFound("x".into()).into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn sandbox_branch_empty_maps_to_422() {
+        let resp = AppError::SandboxBranchEmpty.into_response();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
     }
 }

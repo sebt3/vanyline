@@ -154,6 +154,46 @@ describe('ProjectDashboard', () => {
     expect(router.currentRoute.value.path).toBe('/p/foo/s/sb-alpha');
   });
 
+  it('sandbox pas Running → clic ligne/bouton Ouvrir sans effet, bouton désactivé', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo'),
+      {
+        url: '/api/sandboxes',
+        method: 'GET',
+        body: [
+          {
+            metadata: { name: 'sb-provisioning' },
+            spec: { project: 'foo', branch: 'main', suspended: false },
+            status: { phase: 'Provisioning' },
+          },
+        ],
+      },
+    ]);
+
+    const router = createTestRouter();
+    await router.push('/p/foo');
+    await router.isReady();
+
+    const wrapper = mount(ProjectDashboard, {
+      global: { plugins: [router] },
+      props: { projectName: 'foo' },
+    });
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const openBtn = wrapper.find('.btn-open');
+    expect(openBtn.attributes('disabled')).toBeDefined();
+    expect(wrapper.find('tr.row-clickable').exists()).toBe(false);
+
+    await wrapper.find('tbody tr').trigger('click');
+    await openBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(router.currentRoute.value.path).toBe('/p/foo');
+  });
+
   it('cliquer "Supprimer" → DELETE /api/sandboxes/sb-to-del puis re-fetch → "Aucune sandbox"', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let sandboxFetchCount = 0;

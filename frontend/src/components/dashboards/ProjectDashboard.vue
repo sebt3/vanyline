@@ -67,8 +67,9 @@ const projectSandboxes = computed(() =>
   fetchedSandboxes.value.filter((s) => s.spec.project === props.projectName),
 );
 
-function openSandbox(name: string) {
-  router.push(`/p/${props.projectName}/s/${name}`);
+function openSandbox(sandbox: Sandbox) {
+  if (sandbox.status?.phase !== 'Running') return;
+  router.push(`/p/${props.projectName}/s/${sandbox.metadata.name}`);
 }
 
 const formName = ref('');
@@ -88,7 +89,7 @@ async function createSandbox() {
   const body: CreateSandboxBody = {
     name: formName.value,
     project: props.projectName,
-    branch: formBranch.value,
+    branch: formBranch.value.trim() || 'main',
   };
   try {
     await resource.create(body);
@@ -153,7 +154,8 @@ async function deleteSandbox(name: string) {
           </thead>
           <tbody>
             <tr v-for="s in projectSandboxes" :key="s.metadata.name"
-                @click="openSandbox(s.metadata.name)" class="row-clickable">
+                @click="openSandbox(s)"
+                :class="{ 'row-clickable': s.status?.phase === 'Running' }">
               <td>{{ s.metadata.name }}</td>
               <td>{{ s.spec.branch }}</td>
               <td>{{ s.status?.phase ?? '—' }}</td>
@@ -165,7 +167,14 @@ async function deleteSandbox(name: string) {
                 }}
               </td>
               <td>
-                <button class="btn btn-open" @click.stop="openSandbox(s.metadata.name)">Ouvrir</button>
+                <button
+                  class="btn btn-open"
+                  :disabled="s.status?.phase !== 'Running'"
+                  :title="s.status?.phase !== 'Running' ? 'La sandbox n\'est pas encore prête' : undefined"
+                  @click.stop="openSandbox(s)"
+                >
+                  Ouvrir
+                </button>
                 <button
                   class="btn btn-suspend"
                   :class="{ 'btn-suspended': s.spec.suspended }"
@@ -297,6 +306,16 @@ h1 {
 
 .btn-open:hover {
   background: #3a7de0;
+}
+
+.btn-open:disabled {
+  background: #2b3550;
+  color: #6a7185;
+  cursor: not-allowed;
+}
+
+.btn-open:disabled:hover {
+  background: #2b3550;
 }
 
 .btn-back {

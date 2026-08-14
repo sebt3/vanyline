@@ -76,6 +76,9 @@ pub async fn create_sandbox(
     user: AuthUser,
     Json(body): Json<CreateSandboxBody>,
 ) -> Result<(StatusCode, Json<Sandbox>), AppError> {
+    if body.spec.branch.trim().is_empty() {
+        return Err(AppError::SandboxBranchEmpty);
+    }
     let db_user = get_or_create_user(&state, &user).await?;
     let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
         Some(o) => o,
