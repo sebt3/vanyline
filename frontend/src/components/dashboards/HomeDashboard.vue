@@ -206,15 +206,4 @@ h1 {
 .btn-settings:hover {
   background: #2b2b4a;
 }
-
-.btn-cancel {
-  background: #1c1c2a;
-  color: #6a7185;
-  border: 1px solid #2b2b4a;
-}
-
-.btn-cancel:hover {
-  background: #2b2b4a;
-  color: #e6e9f0;
-}
 </style>

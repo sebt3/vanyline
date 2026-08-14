@@ -242,14 +242,4 @@ async function deleteSkill(name: string) {
 .btn:first-child {
   margin-left: 0;
 }
-
-.btn-cancel {
-  background: #1c1c2a;
-  color: #9497a9;
-  padding: 6px 16px;
-}
-.btn-cancel:hover {
-  background: #26263a;
-  color: white;
-}
 </style>

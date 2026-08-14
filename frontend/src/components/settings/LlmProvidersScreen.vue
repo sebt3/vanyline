@@ -360,16 +360,6 @@ async function deleteProvider(id: string) {
   margin-left: 0;
 }
 
-.btn-cancel {
-  background: #1c1c2a;
-  color: #9497a9;
-  padding: 6px 16px;
-}
-.btn-cancel:hover {
-  background: #26263a;
-  color: white;
-}
-
 .results {
   max-width: 760px;
   margin-bottom: 12px;

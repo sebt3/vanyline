@@ -16,10 +16,7 @@ body {
   font-size: 13px;
 }
 
-/* Thème boutons — commun aux 6 écrans Settings et aux 2 dashboards.
-   .btn-cancel n'y figure pas : Settings et dashboards ont deux styles
-   de bouton Annuler réellement différents (padding/couleur/bordure),
-   pas juste dupliqués — chaque famille garde le sien en local. */
+/* Thème boutons — commun aux 6 écrans Settings et aux 2 dashboards. */
 .btn {
   appearance: none;
   border: none;
@@ -62,6 +59,18 @@ body {
   background: #3fb56d;
   color: white;
   padding: 6px 16px;
+}
+
+/* Style dashboards choisi comme canonique — les 6 écrans Settings avaient un
+   second design (padding 6px 16px, couleur #9497a9, sans bordure), fondu ici. */
+.btn-cancel {
+  background: #1c1c2a;
+  color: #6a7185;
+  border: 1px solid #2b2b4a;
+}
+.btn-cancel:hover {
+  background: #2b2b4a;
+  color: #e6e9f0;
 }
 
 .creation-error {
