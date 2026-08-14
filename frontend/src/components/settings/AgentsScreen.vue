@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import {
+  DialogRoot, DialogPortal, DialogContent, DialogTitle, DialogClose,
+} from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 
 type AgentMode = 'primary' | 'subagent' | 'all';
@@ -79,6 +82,10 @@ const editingSkillsIsList = ref(false);
 const editSystemPrompt = ref('');
 const editError = ref<string | null>(null);
 
+// Modales
+const createModalOpen = ref(false);
+const editModalOpen = ref(false);
+
 async function fetchAgents() {
   try {
     fetchedAgents.value = await client.get<Agent[]>('/api/agents');
@@ -134,6 +141,7 @@ async function createAgent() {
     formToolsets.value = [];
     formSkills.value = 'auto';
     formSystemPrompt.value = '';
+    createModalOpen.value = false;
     await fetchAgents();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
@@ -155,6 +163,7 @@ function startEdit(agent: Agent) {
   }
   editSystemPrompt.value = agent.system_prompt ?? '';
   editError.value = null;
+  editModalOpen.value = true;
 }
 
 function cancelEdit() {
@@ -168,6 +177,7 @@ function cancelEdit() {
   editSkills.value = 'auto';
   editSystemPrompt.value = '';
   editError.value = null;
+  editModalOpen.value = false;
 }
 
 async function saveEdit(name: string) {
@@ -244,164 +254,175 @@ async function deleteAgent(name: string) {
         </tbody>
       </table>
 
-      <div class="card form-card">
-        <h3 class="form-title">Créer un agent</h3>
-        <label class="field">
-          <span class="field-label">Nom</span>
-          <input
-            class="field-input"
-            v-model="formName"
-            type="text"
-            placeholder="mon-agent"
-            aria-label="Nom de l'agent"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Description</span>
-          <textarea
-            class="field-input"
-            v-model="formDescription"
-            rows="2"
-            placeholder="Description optionnelle"
-            aria-label="Description"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Mode</span>
-          <select
-            class="field-input"
-            v-model="formMode"
-            aria-label="Mode"
-          >
-            <option value="primary">primary</option>
-            <option value="subagent">subagent</option>
-            <option value="all">all</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Profil de modèle</span>
-          <select class="field-input" v-model="formModel" aria-label="Profil de modèle">
-            <option value="">—</option>
-            <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Toolsets</span>
-          <div class="checkbox-list">
-            <label v-for="t in toolsetOptions" :key="t.name" class="checkbox-item">
-              <input type="checkbox" :value="t.name" v-model="formToolsets" />
-              <span>{{ t.name }}</span>
-            </label>
-          </div>
-        </label>
-        <label class="field">
-          <span class="field-label">Skills</span>
-          <select
-            class="field-input"
-            v-model="formSkills"
-            aria-label="Skills"
-          >
-            <option value="auto">auto</option>
-            <option value="none">none</option>
-          </select>
-        </label>
-        <label class="field">
-          <span class="field-label">System prompt</span>
-          <textarea
-            class="field-input"
-            v-model="formSystemPrompt"
-            rows="4"
-            placeholder="Prompt système optionnel"
-            aria-label="System prompt"
-          />
-        </label>
-        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-        <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
-        <button class="btn btn-create" @click="createAgent">Créer</button>
-      </div>
+      <button class="btn btn-create" @click="createModalOpen = true">Créer un agent</button>
 
-      <template v-for="a in fetchedAgents" :key="'edit-' + a.name">
-        <div v-if="a.name === editingName" class="card form-card">
-          <h3 class="form-title">Modifier : {{ a.name }}</h3>
-          <label class="field">
-            <span class="field-label">Description</span>
-            <textarea
-              class="field-input"
-              v-model="editDescription"
-              rows="2"
-              placeholder="Description"
-              aria-label="Description"
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">Mode</span>
-            <select
-              class="field-input"
-              v-model="editMode"
-              aria-label="Mode"
-            >
-              <option value="primary">primary</option>
-              <option value="subagent">subagent</option>
-              <option value="all">all</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Profil de modèle</span>
-            <select class="field-input" v-model="editModel" aria-label="Profil de modèle">
-              <option value="">—</option>
-              <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
-            </select>
-          </label>
-          <label class="field">
-            <span class="field-label">Toolsets</span>
-            <div class="checkbox-list">
-              <label v-for="t in toolsetOptions" :key="t.name" class="checkbox-item">
-                <input type="checkbox" :value="t.name" v-model="editToolsets" />
-                <span>{{ t.name }}</span>
-              </label>
-            </div>
-          </label>
-          <template v-if="typeof a.skills === 'string'">
+      <DialogRoot v-model:open="createModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Créer un agent</DialogTitle>
+            <label class="field">
+              <span class="field-label">Nom</span>
+              <input
+                class="field-input"
+                v-model="formName"
+                type="text"
+                placeholder="mon-agent"
+                aria-label="Nom de l'agent"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Description</span>
+              <textarea
+                class="field-input"
+                v-model="formDescription"
+                rows="2"
+                placeholder="Description optionnelle"
+                aria-label="Description"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Mode</span>
+              <select
+                class="field-input"
+                v-model="formMode"
+                aria-label="Mode"
+              >
+                <option value="primary">primary</option>
+                <option value="subagent">subagent</option>
+                <option value="all">all</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Profil de modèle</span>
+              <select class="field-input" v-model="formModel" aria-label="Profil de modèle">
+                <option value="">—</option>
+                <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Toolsets</span>
+              <div class="checkbox-list">
+                <label v-for="t in toolsetOptions" :key="t.name" class="checkbox-item">
+                  <input type="checkbox" :value="t.name" v-model="formToolsets" />
+                  <span>{{ t.name }}</span>
+                </label>
+              </div>
+            </label>
             <label class="field">
               <span class="field-label">Skills</span>
               <select
                 class="field-input"
-                v-model="editSkills"
+                v-model="formSkills"
                 aria-label="Skills"
               >
                 <option value="auto">auto</option>
                 <option value="none">none</option>
               </select>
             </label>
-          </template>
-          <template v-else>
             <label class="field">
-              <span class="field-label">Skills</span>
+              <span class="field-label">System prompt</span>
+              <textarea
+                class="field-input"
+                v-model="formSystemPrompt"
+                rows="4"
+                placeholder="Prompt système optionnel"
+                aria-label="System prompt"
+              />
+            </label>
+            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+            <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-create" @click="createAgent">Créer</button>
+              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
+
+      <DialogRoot v-model:open="editModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Modifier : {{ editingName }}</DialogTitle>
+            <label class="field">
+              <span class="field-label">Description</span>
+              <textarea
+                class="field-input"
+                v-model="editDescription"
+                rows="2"
+                placeholder="Description"
+                aria-label="Description"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Mode</span>
+              <select
+                class="field-input"
+                v-model="editMode"
+                aria-label="Mode"
+              >
+                <option value="primary">primary</option>
+                <option value="subagent">subagent</option>
+                <option value="all">all</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Profil de modèle</span>
+              <select class="field-input" v-model="editModel" aria-label="Profil de modèle">
+                <option value="">—</option>
+                <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
+              </select>
+            </label>
+            <label class="field">
+              <span class="field-label">Toolsets</span>
               <div class="checkbox-list">
-                <label v-for="s in skillOptions" :key="s.name" class="checkbox-item">
-                  <input type="checkbox" :value="s.name" v-model="editSkillList" />
-                  <span>{{ s.name }}</span>
+                <label v-for="t in toolsetOptions" :key="t.name" class="checkbox-item">
+                  <input type="checkbox" :value="t.name" v-model="editToolsets" />
+                  <span>{{ t.name }}</span>
                 </label>
               </div>
             </label>
-          </template>
-          <label class="field">
-            <span class="field-label">System prompt</span>
-            <textarea
-              class="field-input"
-              v-model="editSystemPrompt"
-              rows="4"
-              placeholder="Prompt système"
-              aria-label="System prompt"
-            />
-          </label>
-          <div v-if="editError" class="creation-error">{{ editError }}</div>
-          <div class="edit-actions">
-            <button class="btn btn-success" @click="saveEdit(a.name)">Sauvegarder</button>
-            <button class="btn btn-cancel" @click="cancelEdit">Annuler</button>
-          </div>
-        </div>
-      </template>
+            <template v-if="!editingSkillsIsList">
+              <label class="field">
+                <span class="field-label">Skills</span>
+                <select
+                  class="field-input"
+                  v-model="editSkills"
+                  aria-label="Skills"
+                >
+                  <option value="auto">auto</option>
+                  <option value="none">none</option>
+                </select>
+              </label>
+            </template>
+            <template v-else>
+              <label class="field">
+                <span class="field-label">Skills</span>
+                <div class="checkbox-list">
+                  <label v-for="s in skillOptions" :key="s.name" class="checkbox-item">
+                    <input type="checkbox" :value="s.name" v-model="editSkillList" />
+                    <span>{{ s.name }}</span>
+                  </label>
+                </div>
+              </label>
+            </template>
+            <label class="field">
+              <span class="field-label">System prompt</span>
+              <textarea
+                class="field-input"
+                v-model="editSystemPrompt"
+                rows="4"
+                placeholder="Prompt système"
+                aria-label="System prompt"
+              />
+            </label>
+            <div v-if="editError" class="creation-error">{{ editError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
     </div>
   </div>
 </template>
@@ -598,6 +619,17 @@ async function deleteAgent(name: string) {
   gap: 8px;
 }
 
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.dialog-actions .btn:first-child {
+  margin-left: 0;
+}
+
 .checkbox-list {
   display: flex;
   flex-wrap: wrap;
@@ -615,5 +647,29 @@ async function deleteAgent(name: string) {
 .checkbox-item input[type="checkbox"] {
   width: 14px;
   height: 14px;
+}
+</style>
+
+<style>
+[role='dialog'] {
+  background: #101828;
+  border: 1px solid #1c1c2a;
+  border-radius: 10px;
+  padding: 24px 28px;
+  max-width: 480px;
+}
+
+.dialog-title {
+  margin: 0 0 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #e6e9f0;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 </style>

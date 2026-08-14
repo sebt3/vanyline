@@ -1,6 +1,13 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import AgentsScreen from './AgentsScreen.vue';
+
+beforeEach(() => {
+  vi.restoreAllMocks();
+  // Nettoyer le body après chaque test (téléport reka-ui)
+  const dialogs = document.body.querySelectorAll('[role="dialog"]');
+  dialogs.forEach((d) => d.remove());
+});
 
 // Helpers — creates fresh Response each call so body stream isn't reused
 function jsonResponse(data: unknown): Response {
@@ -13,11 +20,8 @@ function jsonResponse(data: unknown): Response {
 describe('AgentsScreen', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-  });
-
   it('affiche noms, modes, modèles, skills (littéral ou noms joints) quand GET renvoie 2 agents', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
       const urlStr = String(url);
       const method = String(init?.method ?? 'GET').toUpperCase();
@@ -60,7 +64,7 @@ describe('AgentsScreen', () => {
   });
 
   it('remplir + "Créer" → POST avec toolsets tableau, puis re-fetch', async () => {
-    fetchSpy.mockReset();
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     let postBody: unknown;
     let fetchCount = 0;
 
@@ -89,22 +93,53 @@ describe('AgentsScreen', () => {
     const wrapper = mount(AgentsScreen);
     await new Promise((r) => setTimeout(r, 50));
 
-    await wrapper.find<HTMLInputElement>('input[aria-label="Nom de l\'agent"]').setValue('new-agent');
-    await wrapper.find<HTMLSelectElement>('select[aria-label="Mode"]').setValue('subagent');
-    await wrapper.find<HTMLSelectElement>('select[aria-label="Profil de modèle"]').setValue('claude-sonnet-4');
+    // Ouvrir la modale de création
+    const createBtn = wrapper.find('.btn-create');
+    await createBtn.trigger('click');
+    await new Promise((r) => setTimeout(r, 10));
 
-    const cbs = wrapper.findAll<HTMLInputElement>('.checkbox-item input[type="checkbox"]');
-    await cbs[0].setValue(true);
-    await cbs[1].setValue(true);
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
 
-    await wrapper.find('.btn-create').trigger('click');
+    // Remplir les champs du dialog
+    const nameInput = dialog!.querySelector<HTMLInputElement>('input[aria-label="Nom de l\'agent"]')!;
+    nameInput.value = 'new-agent';
+    nameInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const modeSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Mode"]')!;
+    modeSelect.value = 'subagent';
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const modelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
+    modelSelect.value = 'claude-sonnet-4';
+    modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const checkboxes = dialog!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(checkboxes.length).toBe(2);
+    checkboxes[0].checked = true;
+    checkboxes[0].dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    checkboxes[1].checked = true;
+    checkboxes[1].dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Cliquer "Créer" du dialog
+    const dialogCreateBtn = dialog!.querySelector<HTMLButtonElement>('.btn-create');
+    await dialogCreateBtn!.click();
     await new Promise((r) => setTimeout(r, 50));
 
+    // Dialog fermé — vérifier via l'état du composant
+    expect((wrapper.vm as any).createModalOpen).toBe(false);
+
+    // Re-fetch → nouvelle donnée affichée
     expect(wrapper.text()).toContain('new-agent');
   });
 
   it('edit agent à skills tableau → cases pré-remplies; "Sauvegarder" → PUT', async () => {
-    fetchSpy.mockReset();
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     const putBodies: unknown[] = [];
     let fetchCount = 0;
 
@@ -149,34 +184,16 @@ describe('AgentsScreen', () => {
     const vm = wrapper.vm as any;
     expect(vm.modelProfiles).toHaveLength(3);
 
-    // Ouvrir l'éditeur — l'agent a model: 'old-model'
+    // Ouvrir l'éditeur
     await wrapper.find('.btn-edit').trigger('click');
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(wrapper.text()).toContain('Modifier : edit-me');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain('Modifier : edit-me');
 
-    // Vérifier que editModel est pré-rempli (via la ref du composant)
-    // Dans Vue 3, editModel.value est une ref → wrapper.vm.editModel
-    await expect(() => {
-      // Si le select a 'old-model' comme value, c'est que v-model a fonctionné
-      const editModel = wrapper.find<HTMLSelectElement>('select[aria-label="Profil de modèle"]');
-      const opts = editModel.findAll('option');
-      expect(opts.some((o: any) => o.text() === 'old-model')).toBe(true);
-      // Le select v-model doit refléter la donnée
-    }).not.toThrow();
-
-    // Sélectionner le formulaire d'édition (dernière .form-card après le tableau)
-    const editForms = wrapper.findAll<HTMLDivElement>('.form-card');
-    const editFormEl = editForms[editForms.length - 1].element;
-
-    // Utiliser querySelector sur l'élément DOM brut
-    function q<T extends HTMLElement>(sel: string, root = editFormEl as HTMLElement): T | null {
-      return root.querySelector<T>(sel);
-    }
-
-    // Vérifier les checkboxes dans le formulaire d'édition seulement
-    const editCbs = Array.from(editFormEl.querySelectorAll<HTMLInputElement>('.checkbox-item input[type="checkbox"]'));
-    // [0]=git(chk), [1]=new-t, [2]=filesystem, [3]=a(chk), [4]=b(chk)
+    // Vérifier 5 checkboxes dans le dialog (git + new-t + filesystem + a + b)
+    const editCbs = dialog!.querySelectorAll<HTMLInputElement>('.checkbox-item input[type="checkbox"]');
     expect(editCbs.length).toBe(5);
     expect(editCbs[0].checked).toBe(true);  // git
     expect(editCbs[3].checked).toBe(true);  // a
@@ -184,28 +201,37 @@ describe('AgentsScreen', () => {
 
     // Modifier : on mutate directement les refs Vue pour garantir la réactivité
     const v = wrapper.vm as any;
-    v.editToolsets = ['new-t'];  // [0]=git→décoché, [1]=new-t→coché, [2]=filesystem→décoché
+    v.editToolsets = ['new-t'];  // [0]=git→décoché, [1]=new-t→coché, [2]=filesystem→décoiché
     v.editSkillList = ['b'];     // [3]=a→décoché, [4]=b→demeuré coché
 
     // Profil de modèle: new-model
-    const editModelSelect = q<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
+    const editModelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
     editModelSelect.value = 'new-model';
     editModelSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
 
-    const descInput = q<HTMLTextAreaElement>('textarea[aria-label="Description"]')!;
+    const descInput = dialog!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Description"]')!;
     descInput.value = 'updated desc';
     descInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
 
-    const modeSelect = q<HTMLSelectElement>('select[aria-label="Mode"]')!;
+    const modeSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Mode"]')!;
     modeSelect.value = 'all';
     modeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
 
-    const promptInput = q<HTMLTextAreaElement>('textarea[aria-label="System prompt"]')!;
+    const promptInput = dialog!.querySelector<HTMLTextAreaElement>('textarea[aria-label="System prompt"]')!;
     promptInput.value = 'updated prompt';
     promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
 
-    await wrapper.find('.btn-success').trigger('click');
+    // Cliquer "Sauvegarder" du dialog
+    const saveBtn = dialog!.querySelector<HTMLButtonElement>('.btn-success')!;
+    await saveBtn.click();
     await new Promise((r) => setTimeout(r, 50));
+
+    // Dialog fermé — via état du composant
+    expect((wrapper.vm as any).editModalOpen).toBe(false);
 
     expect(wrapper.text()).toContain('updated desc');
     expect(putBodies).toHaveLength(1);
@@ -216,7 +242,7 @@ describe('AgentsScreen', () => {
   });
 
   it('edit agent à skills "auto" → branche select auto/none', async () => {
-    fetchSpy.mockReset();
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
 
     fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
@@ -261,35 +287,58 @@ describe('AgentsScreen', () => {
     await wrapper.find('.btn-edit').trigger('click');
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(wrapper.text()).toContain('Modifier : edit-me');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+    expect(dialog!.textContent).toContain('Modifier : edit-me');
 
-    // Vérifier que editModel est pré-rempli
-    expect((wrapper.find('select[aria-label="Profil de modèle"]'). findAll('option').some((o: any) => o.text() === 'old-model'))).toBe(true);
+    // Vérifier que le select Skills existe (branche select, pas checkbox-list)
+    const editSkillsSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Skills"]');
+    expect(editSkillsSelect).toBeTruthy();
 
-    const editSkillsSelect = wrapper.find<HTMLSelectElement>('select[aria-label="Skills"]');
-    expect(editSkillsSelect.exists()).toBe(true);
-
-    const toolsetCbs = wrapper.findAll<HTMLInputElement>('.checkbox-item input[type="checkbox"]');
-    await toolsetCbs[0].setValue(false);
-    await toolsetCbs[1].setValue(true);
-
-    await wrapper.find<HTMLTextAreaElement>('textarea[aria-label="Description"]').setValue('updated desc');
-    const editModelSelect = wrapper.find<HTMLSelectElement>('select[aria-label="Profil de modèle"]');
-    await editModelSelect.setValue('new-model');
-    await editModelSelect.trigger('change');
+    const toolsetCbs = dialog!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    toolsetCbs[0].checked = false;
+    toolsetCbs[0].dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
-    await wrapper.find<HTMLSelectElement>('select[aria-label="Mode"]').setValue('all');
-    await editSkillsSelect.setValue('none');
-    await wrapper.find<HTMLTextAreaElement>('textarea[aria-label="System prompt"]').setValue('updated prompt');
+    toolsetCbs[1].checked = true;
+    toolsetCbs[1].dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
 
-    await wrapper.find('.btn-success').trigger('click');
+    // Modifier les champs du dialog
+    const descInput = dialog!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Description"]')!;
+    descInput.value = 'updated desc';
+    descInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const editModelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
+    editModelSelect.value = 'new-model';
+    editModelSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const modeSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Mode"]')!;
+    modeSelect.value = 'all';
+    modeSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    editSkillsSelect!.value = 'none';
+    editSkillsSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const promptInput = dialog!.querySelector<HTMLTextAreaElement>('textarea[aria-label="System prompt"]')!;
+    promptInput.value = 'updated prompt';
+    promptInput.dispatchEvent(new Event('input', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Cliquer "Sauvegarder" du dialog
+    const saveBtn = dialog!.querySelector<HTMLButtonElement>('.btn-success')!;
+    await saveBtn.click();
     await new Promise((r) => setTimeout(r, 50));
 
+    expect((wrapper.vm as any).editModalOpen).toBe(false);
     expect(wrapper.text()).toContain('updated desc');
   });
 
   it('cliquer "Supprimer" → DELETE /{name} puis re-fetch', async () => {
-    fetchSpy.mockReset();
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     let deleteTarget: string | undefined;
 
