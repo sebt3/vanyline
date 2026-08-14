@@ -333,6 +333,7 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
                 ..Default::default()
             }],
             volumes: Some(volumes),
+            security_context: Some(project::sandbox_security_context()),
             ..Default::default()
         }),
         status: None,
@@ -1288,6 +1289,26 @@ mod tests {
 
         assert_eq!(pod.metadata.name, Some("sandbox-demo-branch".to_string()));
         assert_eq!(pod.metadata.namespace, Some("ns".to_string()));
+    }
+
+    #[test]
+    fn pod_runs_as_non_root() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let sc = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .security_context
+            .as_ref()
+            .unwrap();
+        assert_eq!(sc.run_as_user, Some(project::SANDBOX_UID));
+        assert_eq!(sc.run_as_group, Some(project::SANDBOX_UID));
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.fs_group, Some(project::SANDBOX_UID));
     }
 
     #[test]

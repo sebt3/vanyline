@@ -31,5 +31,14 @@ RUN ln -s /usr/bin/fdfind /usr/local/bin/fd
 COPY --from=builder /app/target/release/vanyline-sandbox /usr/local/bin/vanyline-sandbox
 COPY --from=builder /app/target/release/vanyline-maint /usr/local/bin/vanyline-maint
 
+# Non-root : le terminal utilisateur et le tool shell MCP héritent de l'UID
+# du process serveur (aucun switch explicite dans le code Rust — PTY/tool
+# shell spawnent avec l'UID courant). UID 1000, aligné sur
+# project::SANDBOX_UID (controller/src/project.rs) — le pod pose en plus
+# runAsUser/runAsNonRoot/fsGroup explicitement, ce USER est une défense en
+# profondeur pour un usage hors K8s (ex. podman run).
+RUN useradd --create-home --uid 1000 --shell /bin/bash user
+USER user
+
 EXPOSE 3000 9090
 ENTRYPOINT ["/usr/local/bin/vanyline-sandbox"]

@@ -5,8 +5,8 @@ use std::time::Duration;
 use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
-    PersistentVolumeClaimVolumeSource, PodSpec, PodTemplateSpec, SecretVolumeSource, Volume,
-    VolumeMount, VolumeResourceRequirements,
+    PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
+    SecretVolumeSource, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time};
@@ -211,6 +211,24 @@ pub fn fetch_schedule(project: &Project) -> String {
     format!("@every {interval}")
 }
 
+/// UID/GID non-root partagé par tous les workloads utilisant l'image sandbox
+/// (pod sandbox long-running + Jobs `vanyline-maint` : init/fetch/purge/
+/// checkout/remove) — ni le terminal utilisateur ni le tool shell MCP ne
+/// doivent tourner root. `fs_group` aligne la propriété des PVC déjà montés
+/// en écriture (home/workspace) sur ce même GID au montage (mécanisme K8s
+/// standard, cf. `fsGroupPolicy` du CSI driver).
+pub const SANDBOX_UID: i64 = 1000;
+
+pub fn sandbox_security_context() -> PodSecurityContext {
+    PodSecurityContext {
+        run_as_user: Some(SANDBOX_UID),
+        run_as_group: Some(SANDBOX_UID),
+        run_as_non_root: Some(true),
+        fs_group: Some(SANDBOX_UID),
+        ..Default::default()
+    }
+}
+
 /// Construit le `PodTemplateSpec` commun aux trois Jobs git : image sandbox,
 /// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
 /// `git` exécutant `command` en argv direct.
@@ -303,6 +321,7 @@ pub fn git_pod_template(
             }],
             restart_policy: Some("Never".to_string()),
             volumes: Some(volumes),
+            security_context: Some(sandbox_security_context()),
             ..Default::default()
         }),
     }
@@ -909,6 +928,24 @@ mod tests {
         let mut project = make_project(None, None);
         project.spec.fetch_interval = Some("30m".to_string());
         assert_eq!(fetch_schedule(&project), "@every 30m");
+    }
+
+    #[test]
+    fn git_pod_template_runs_as_non_root() {
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+        let template = git_pod_template(&project, &ctx, vec!["vanyline-maint".to_string()]);
+        let sc = template
+            .spec
+            .as_ref()
+            .unwrap()
+            .security_context
+            .as_ref()
+            .unwrap();
+        assert_eq!(sc.run_as_user, Some(SANDBOX_UID));
+        assert_eq!(sc.run_as_group, Some(SANDBOX_UID));
+        assert_eq!(sc.run_as_non_root, Some(true));
+        assert_eq!(sc.fs_group, Some(SANDBOX_UID));
     }
 
     // 18. build_init_job_shape
