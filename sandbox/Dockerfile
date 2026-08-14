@@ -37,8 +37,14 @@ COPY --from=builder /app/target/release/vanyline-maint /usr/local/bin/vanyline-m
 # project::SANDBOX_UID (controller/src/project.rs) — le pod pose en plus
 # runAsUser/runAsNonRoot/fsGroup explicitement, ce USER est une défense en
 # profondeur pour un usage hors K8s (ex. podman run).
-RUN useradd --create-home --uid 1000 --shell /bin/bash user
-USER user
+#
+# Nom "vanyline" et --home-dir /home/vanyline (pas --create-home — le vrai
+# contenu est le PVC Owner monté à ce chemin au runtime, cf. HOME_MOUNT_PATH
+# dans controller/src/owner.rs) : requis pour que le home de l'utilisateur
+# Linux corresponde réellement au home monté du Owner, pas un
+# /home/<nom-quelconque> sans rapport.
+RUN useradd --uid 1000 --home-dir /home/vanyline --shell /bin/bash vanyline
+USER vanyline
 
 EXPOSE 3000 9090
 ENTRYPOINT ["/usr/local/bin/vanyline-sandbox"]
