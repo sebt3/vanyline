@@ -146,6 +146,7 @@ describe('Terminal.vue — PTY réel', () => {
 
   it('ouvre une connexion /ws/terminal dédiée', async () => {
     const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen(); // openSandboxWs ne résout qu'à l'event 'open' réel (cf. sandboxWs.ts)
     (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
 
     mount(Terminal, {
@@ -161,13 +162,13 @@ describe('Terminal.vue — PTY réel', () => {
     expect(w.listeners['message']).toHaveLength(1);
   });
 
-  it("n'envoie pas de resize avant l'event 'open' du WebSocket", async () => {
-    // Régression : la promesse d'ouverture se résout à la construction du
-    // WebSocket (CONNECTING), pas à l'ouverture réelle. Un sendResize()
-    // envoyé à ce moment-là serait un no-op silencieux dans un vrai
-    // navigateur (readyState !== OPEN) — ce test verrouille qu'on attend
-    // bien l'event 'open' plutôt que d'appeler sendResize() trop tôt.
+  it("envoie le resize initial dès la résolution — le socket est déjà OPEN", async () => {
+    // openSandboxWs (cf. sandboxWs.ts) ne résout sa promesse qu'à l'event
+    // 'open' réel du WebSocket — jamais à sa construction (CONNECTING).
+    // Terminal.vue peut donc envoyer dès son .then(), sans attendre un
+    // second event local.
     const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
     (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
 
     mount(Terminal, {
@@ -176,17 +177,14 @@ describe('Terminal.vue — PTY réel', () => {
 
     await flushTwo();
 
-    expect(ws.readyState).toBe(FakeWebSocket.CONNECTING);
-    expect(ws.sent).toHaveLength(0);
-
-    ws.emitOpen();
-
+    expect(ws.readyState).toBe(FakeWebSocket.OPEN);
     expect(ws.sent).toHaveLength(1);
     expect(ws.sent[0]).toBe('{"type":"resize","cols":80,"rows":24}');
   });
 
   it('entrée utilisateur → frame binaire', async () => {
     const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
     (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
 
     mount(Terminal, {
@@ -194,7 +192,6 @@ describe('Terminal.vue — PTY réel', () => {
     });
 
     await flushTwo();
-    ws.emitOpen(); // déclenche le sendResize initial (listener 'open')
 
     const term = (terminalInstances as any[])[0];
     expect(term.onDataCb).toBeDefined();
@@ -232,14 +229,14 @@ describe('Terminal.vue — PTY réel', () => {
 
   it('resize → frame texte {"type":"resize",cols,rows}', async () => {
     const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
     (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
 
     mount(Terminal, {
       global: { provide: { 'sandbox-name': 'foo' } },
     });
 
-    await flushTwo();
-    ws.emitOpen(); // déclenche le sendResize initial (listener 'open')
+    await flushTwo(); // envoie le resize initial (socket déjà OPEN)
 
     const term = (terminalInstances as any[])[0];
     expect(term.onDataCb).toBeDefined();

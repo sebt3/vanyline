@@ -2,16 +2,18 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import { SandboxFsClient, openSandboxWs } from './sandboxWs';
 
 class FakeWebSocket {
+  static instances: FakeWebSocket[] = [];
   url: string;
   sent: string[] = [];
-  private listeners: Record<string, Array<(ev: { data: string }) => void>> = {};
+  private listeners: Record<string, Array<(ev: { data?: string; type?: string }) => void>> = {};
   constructor(url: string) {
     this.url = url;
+    FakeWebSocket.instances.push(this);
   }
-  addEventListener(type: string, cb: (ev: { data: string }) => void) {
+  addEventListener(type: string, cb: (ev: { data?: string; type?: string }) => void) {
     (this.listeners[type] ??= []).push(cb);
   }
-  removeEventListener(type: string, cb: (ev: { data: string }) => void) {
+  removeEventListener(type: string, cb: (ev: { data?: string; type?: string }) => void) {
     this.listeners[type] = (this.listeners[type] ?? []).filter((f) => f !== cb);
   }
   send(data: string) {
@@ -20,6 +22,21 @@ class FakeWebSocket {
   emitMessage(data: string) {
     for (const cb of [...(this.listeners['message'] ?? [])]) cb({ data });
   }
+  emitOpen() {
+    for (const cb of [...(this.listeners['open'] ?? [])]) cb({ type: 'open' });
+  }
+  emitError() {
+    for (const cb of [...(this.listeners['error'] ?? [])]) cb({ type: 'error' });
+  }
+}
+
+/** Laisse la chaîne `client.post(...)` (plusieurs `await` internes : fetch,
+ *  response.json()) construire le WebSocket avant qu'on aille chercher
+ *  l'instance dans `FakeWebSocket.instances`. Un macrotask flush plutôt
+ *  qu'un nombre fixe de microtasks — robuste au nombre réel d'`await`
+ *  traversés dans `client.ts`. */
+async function flushMicrotasks() {
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 /** La file `queue: Promise.resolve()` de `SandboxFsClient` programme
@@ -33,6 +50,7 @@ describe('openSandboxWs', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
   beforeEach(() => {
+    FakeWebSocket.instances = [];
     vi.stubGlobal('WebSocket', FakeWebSocket);
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockClear();
@@ -42,7 +60,7 @@ describe('openSandboxWs', () => {
     vi.restoreAllMocks();
   });
 
-  it('mine le ticket et ouvre wss://<wsHost><path>?ticket=...', async () => {
+  it('mine le ticket et ouvre wss://<wsHost><path>?ticket=... — résout à l\'event open', async () => {
     (fetchSpy as any).mockResolvedValue(
       new Response(
         JSON.stringify({ ticket: 'abc', wsHost: 'my-sandbox.sandboxes.example.com' }),
@@ -50,12 +68,26 @@ describe('openSandboxWs', () => {
       ),
     );
 
-    const ws = await openSandboxWs('my-sandbox', '/ws/fs');
+    const promise = openSandboxWs('my-sandbox', '/ws/fs');
+    await flushMicrotasks();
 
     expect(fetchSpy).toHaveBeenCalledWith(
       '/api/sandboxes/my-sandbox/ws-ticket',
       expect.any(Object),
     );
+    // Régression : la promesse ne doit PAS résoudre avant l'event 'open'
+    // (sinon un appelant qui envoie immédiatement — ex. Explorer.vue sur
+    // l'auto-expand de la racine — cible un socket encore CONNECTING).
+    let resolved = false;
+    promise.then(() => {
+      resolved = true;
+    });
+    await flushMicrotasks();
+    expect(resolved).toBe(false);
+
+    FakeWebSocket.instances[0].emitOpen();
+    const ws = await promise;
+
     expect((ws as any).url).toBe(
       'wss://my-sandbox.sandboxes.example.com/ws/fs?ticket=abc',
     );
@@ -69,11 +101,29 @@ describe('openSandboxWs', () => {
       ),
     );
 
-    const ws = await openSandboxWs('my-sandbox', '/ws/terminal');
+    const promise = openSandboxWs('my-sandbox', '/ws/terminal');
+    await flushMicrotasks();
+    FakeWebSocket.instances[0].emitOpen();
+    const ws = await promise;
 
     expect((ws as any).url).toBe(
       'wss://my-sandbox.sandboxes.example.com/ws/terminal?ticket=xyz',
     );
+  });
+
+  it("rejette si le WebSocket émet 'error' avant 'open'", async () => {
+    (fetchSpy as any).mockResolvedValue(
+      new Response(
+        JSON.stringify({ ticket: 'abc', wsHost: 'my-sandbox.sandboxes.example.com' }),
+        { status: 200 },
+      ),
+    );
+
+    const promise = openSandboxWs('my-sandbox', '/ws/fs');
+    await flushMicrotasks();
+    FakeWebSocket.instances[0].emitError();
+
+    await expect(promise).rejects.toThrow();
   });
 });
 

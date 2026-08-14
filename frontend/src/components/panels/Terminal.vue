@@ -57,11 +57,9 @@ onMounted(() => {
         if (typeof ev.data === 'string') return; // le serveur n'envoie que du binaire
         term!.write(new Uint8Array(ev.data));
       });
-      // La promesse d'ouverture se résout à la construction du WebSocket
-      // (état CONNECTING), pas à l'ouverture réelle — un sendResize() ici
-      // serait un no-op silencieux (readyState !== OPEN). Attendre l'event
-      // 'open' pour que la taille initiale soit vraiment envoyée au serveur.
-      ws.addEventListener('open', sendResize, { once: true });
+      // openSandboxWs ne résout qu'à l'event 'open' réel (cf. sandboxWs.ts) :
+      // le socket est déjà OPEN ici, la taille initiale part immédiatement.
+      sendResize();
     })
     .catch(() => {
       // ticket/ingress indisponible (dépendance d'infra) : terminal vide, pas de PTY.

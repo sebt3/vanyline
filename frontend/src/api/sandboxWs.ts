@@ -11,7 +11,13 @@ interface WsTicketOut {
 
 /** Mine un ticket court-vécu à usage unique pour `sandboxName` et ouvre la
  *  connexion WS correspondante. Un ticket par connexion — jamais réutilisé
- *  (cf. sandbox-ws-runtime : consommé au premier GET /ws/* qui le présente). */
+ *  (cf. sandbox-ws-runtime : consommé au premier GET /ws/* qui le présente).
+ *
+ *  La promesse ne résout qu'à l'event `open` réel — pas à la construction du
+ *  `WebSocket` (état `CONNECTING`). Envoyer sur un socket `CONNECTING` lève
+ *  une `InvalidStateError` : sans cette attente, tout appelant qui envoie
+ *  dès la résolution (ex. `Explorer.vue` sur l'auto-expand de la racine)
+ *  perd sa première requête silencieusement. */
 export async function openSandboxWs(
   sandboxName: string,
   path: '/ws/fs' | '/ws/terminal',
@@ -19,7 +25,19 @@ export async function openSandboxWs(
   const { ticket, wsHost } = await client.post<WsTicketOut>(
     `/api/sandboxes/${sandboxName}/ws-ticket`,
   );
-  return new WebSocket(`wss://${wsHost}${path}?ticket=${encodeURIComponent(ticket)}`);
+  const ws = new WebSocket(`wss://${wsHost}${path}?ticket=${encodeURIComponent(ticket)}`);
+  return new Promise<WebSocket>((resolve, reject) => {
+    const onOpen = () => {
+      ws.removeEventListener('error', onError);
+      resolve(ws);
+    };
+    const onError = (ev: Event) => {
+      ws.removeEventListener('open', onOpen);
+      reject(new Error(`sandbox WebSocket ${path}: ${ev.type}`));
+    };
+    ws.addEventListener('open', onOpen, { once: true });
+    ws.addEventListener('error', onError, { once: true });
+  });
 }
 
 /** Wrapper autour d'une connexion /ws/fs : sérialise les requêtes (pas de
