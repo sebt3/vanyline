@@ -347,9 +347,23 @@ côté cli). `load_skill` lit `skills.body` à la demande, même paresse que le 
 
 **API REST** (`api/*.rs`, `api::api_router`) : CRUD par nom pour `model-profiles`,
 `toolsets`, `skills`, `agents` ; CRUD par id pour `llm-providers`/`mcp-servers`
-(`{id}/test` = discovery modèles, `{id}/default`) ; `conversations` + `messages` ;
-`projects`/`sandboxes` (feature `k8s`, cf. ci-dessous) ; `/me` (email +
+(`{id}/test` = discovery, `{id}/default` pour les providers) ; `conversations` +
+`messages` ; `projects`/`sandboxes` (feature `k8s`, cf. ci-dessous) ; `/me` (email +
 `k8s_owner_name`). Toutes les routes exigent `AuthUser` et scopent par utilisateur.
+
+**Discovery — providers et serveurs MCP** (`frontend-dashboards-nav`) : même patron sur
+les deux entités qui référencent une liste de choix, jamais peuplée à la création,
+seulement après un test explicite. `POST /api/llm-providers/{id}/test` interroge le
+provider et persiste les noms de modèles dans `llm_providers.available_models`.
+`POST /api/mcp-servers/{id}/test` fait de même pour les tools exposés par un serveur
+MCP : réutilise `connect_domain_mcp_server_inner`/`list_all_tools()` de
+`lib/src/prefixed_mcp.rs` (déjà écrit pour la connexion runtime des toolsets, pas un
+nouveau client), persiste dans `mcp_servers.available_tools` (colonne ajoutée par
+`frontend-dashboards-nav`). Les deux listes alimentent des dropdowns dépendants côté
+frontend (cf. section Frontend plus bas) — état vide explicite tant que le test n'a
+jamais été lancé. `GET /api/local-tools` (nouveau, lecture seule, pas de DB) expose le
+registre statique `tools::mcp::{filesystem_tools, search_tools, command_tools}` — les 8
+tools intégrés de `vanyline-tools` — pour le même usage de dropdown côté `Toolset.local_tools`.
 
 **WebSocket chat** (`ws/chat.rs`) : `run_agent_turn` avec `local_tools` vide (l'app
 reste sur le chemin froid — cf. règle de dépendances plus haut). `ChannelSink` pousse
@@ -888,15 +902,32 @@ Workflow/Chat, plus une vue Configuration séparée.
 | Éditeur | [CodeMirror 6](https://codemirror.net) |
 | Terminal | [xterm.js](https://xtermjs.org) (`@xterm/xterm` + `@xterm/addon-fit`) |
 | Arbre de fichiers | [Element Plus](https://element-plus.org) (`el-tree`, restylé via ses custom properties CSS) |
-| Menu / vue Configuration | [Reka UI](https://reka-ui.com) (`Menubar`, `Tabs`) — portage Vue headless de Radix |
+| Menu / vue Configuration / modales | [Reka UI](https://reka-ui.com) (`Menubar`, `Tabs`, `Dialog`) — portage Vue headless de Radix |
 | Chat | [vue-advanced-chat](https://github.com/advanced-chat/vue-advanced-chat) — theming non résolu, cf. "Limites connues" |
-| Routing | `vue-router` (`/ide/:sandboxName`, `/settings`) |
+| Routing | `vue-router` (`/`, `/p/:projectName`, `/p/:projectName/s/:sandboxName`, `/settings`) |
 
-**Routing** (`router.ts`) : `/` redirige vers `/settings` (pas de sandbox par défaut) ;
-`/ide/:sandboxName` monte `IdeShell.vue` (`props: true` — le param de route devient une
-prop du composant) ; `App.vue` est le layout persistant (`MenuBar` + `StatusBar` +
-`<router-view/>`), plus de nom de workspace en dur. Point d'entrée : bouton « Ouvrir »
-sur l'écran Sandboxes (`SandboxesScreen.vue`, `router.push('/ide/' + name)`).
+**Routing** (`router.ts`, `frontend-dashboards-nav`) : trois niveaux — `/` (accueil,
+liste des projets), `/p/:projectName` (dashboard du projet, liste des sandboxes),
+`/p/:projectName/s/:sandboxName` (`IdeShell.vue`, `props: true`) — plus `/settings`.
+Remplace l'ancien `/ide/:sandboxName` (route supprimée, aucun redirect de compat, décision
+assumée). `App.vue` bascule entre deux layouts selon la route (`route.name === 'ide'`) :
+`MenuBar` + `StatusBar` uniquement sur l'IDE (inchangé) ; `AppBreadcrumb.vue` sur les
+trois autres routes (fil d'ariane « Accueil / … »). Point d'entrée IDE : ligne cliquable
+d'un tableau de sandboxes (`ProjectDashboard.vue`) → `router.push('/p/' + projectName +
+'/s/' + name)`.
+
+**Dashboards** (`HomeDashboard.vue`, `ProjectDashboard.vue`, sous
+`components/dashboards/`) : absorbent la logique des anciens écrans Settings
+`ProjectsScreen.vue`/`SandboxesScreen.vue` (supprimés). Chaque dashboard = tableau
+(lignes cliquables → niveau suivant, actions par ligne type Supprimer avec
+`@click.stop` pour ne pas déclencher la navigation) + bouton « Créer » ouvrant une
+modale reka-ui `DialogRoot` + bouton « Paramètres » → `/settings`. Pas de bouton
+« gérer » séparé — le tableau *est* la gestion. `ProjectDashboard.vue` scope la
+création de sandbox au projet courant (pas de champ projet éditable dans sa modale).
+Fil d'ariane : `AppBreadcrumb.vue` lit un état de sélection partagé
+(`settings/navState.ts`, un `ref` exporté) pour afficher le groupe/sous-groupe actif de
+`/settings` — évite le prop-drilling entre `SettingsView.vue` (enfant, via
+`router-view`) et `AppBreadcrumb.vue` (dans `App.vue`, parent).
 
 **Panneaux dockview et `provide`/`inject`** : `DockviewVue` monte Explorer/Editor/
 Terminal via son propre registre de composants (`components: Record<string,
@@ -931,13 +962,53 @@ promesse d'ouverture — celle-ci se résout à la *construction* du WebSocket
 (`readyState !== OPEN`), bug trouvé en revue (le mock de test avait `readyState` à
 `OPEN` dès la construction, ce qui le masquait).
 
-**SettingsView** (`settings-real-config`) : 9 écrans CRUD réels (Projets, Sandboxes,
-Fournisseurs LLM, Profils de modèle, Toolsets, Skills, Agents, Serveurs MCP, Compte) —
-remplace le gabarit visuel à 4 catégories du POC initial, qui ne cadrait qu'un visuel
-global, pas les écrans réels. **Aucun gating admin** sur Agents/Serveurs MCP : le
-commentaire "write: admin" du code backend (`app/src/api/mod.rs`) ne correspond à
-aucun mécanisme réel (pas de colonne `role`, pas de contrôle serveur) — décision
-cohérente avec l'état mono-utilisateur du projet, pas un oubli.
+**SettingsView** (`settings-real-config`, réorganisé par `frontend-dashboards-nav`) :
+Projets/Sandboxes en sont sortis (absorbés par les dashboards, cf. ci-dessus) ; les 7
+écrans CRUD restants sont groupés en chemin de configuration explicite plutôt qu'un
+tas plat :
+
+```
+Modèles  → Fournisseurs LLM, Profils de modèle
+Outils   → Serveurs MCP, Toolsets
+Agents
+Skills
+Compte   (lecture seule, pas de formulaire)
+```
+
+**Champs relationnels** : les six écrans à formulaire (tous sauf Compte) utilisent des
+`<select>`/multi-select plutôt que du texte libre pour tout champ qui référence une
+autre entité — la table ci-dessous est la carte de référence (vérifiée contre le code
+backend, pas une supposition) :
+
+| Champ | Référence réelle | Source |
+|---|---|---|
+| `ModelProfile.provider` | `LlmProvider` (résolu par nom côté serveur) | `GET /api/llm-providers` |
+| `ModelProfile.model` | `LlmProvider.available_models` | select dépendant du provider choisi |
+| `Agent.model` (libellé affiché : « Profil de modèle ») | `ModelProfile` (résolu via `resolve_model_profile_id` — **pas** un provider/modèle brut malgré le nom du champ API) | `GET /api/model-profiles` |
+| `Agent.toolsets` | `Toolset[]` | `GET /api/toolsets`, multi-select |
+| `Agent.skills` (branche liste) | `Skill[]` | `GET /api/skills`, multi-select |
+| `Toolset.mcp[].server` | `McpServer` | `GET /api/mcp-servers` |
+| `Toolset.mcp[].tools` | tools exposés par le serveur choisi | `available_tools` (après test, cf. section Backend) |
+| `Toolset.local_tools` | registre `tools::mcp::*` | `GET /api/local-tools` |
+
+Tous les états « liste vide car jamais testé » (provider/serveur MCP) sont gérés
+explicitement, pas silencieusement.
+
+**Modales** (reka-ui `DialogRoot`) : les six écrans ont converti leurs formulaires
+création/édition (auparavant inline sous le tableau) en modales — même contrat partout
+(`DialogRoot`/`DialogPortal`/`DialogContent`/`DialogTitle`/`DialogClose`). Piège reka-ui
+partagé avec `MenuBar.vue` (`Menubar*`) : `DialogContent`/`DismissableLayer` ne
+forwardent pas `class` de manière fiable jusqu'au DOM — la surface de la modale est
+stylée globalement via le sélecteur `[role='dialog']`, pas via une classe scoped.
+Régression trouvée et corrigée après la conversion : les erreurs de chargement des
+listes de choix (`providersError`/`optionsError`) doivent vivre dans le corps principal
+de l'écran, pas dans le `DialogContent` de création — sinon invisibles au chargement de
+la page et absentes de la modale d'édition.
+
+**Aucun gating admin** sur Agents/Serveurs MCP : le commentaire "write: admin" du code
+backend (`app/src/api/mod.rs`) ne correspond à aucun mécanisme réel (pas de colonne
+`role`, pas de contrôle serveur) — décision cohérente avec l'état mono-utilisateur du
+projet, pas un oubli.
 
 **Limites connues (dette assumée)** : pas de multi-onglets Editor, pas de
 multi-terminal, pas de reconnexion WS automatique (déconnexion réseau/sandbox
@@ -1105,6 +1176,13 @@ non identifiée, à creuser si ça se reproduit après le passage à 262144.
   texte (fragile, faux positifs/négatifs) — limite documentée et acceptée
   plutôt que contournée. À revisiter si une version future de `rig-core`
   expose l'information.
+- **Discovery de tools MCP limitée au transport `http-streamable`** :
+  `POST /api/mcp-servers/{id}/test` (`frontend-dashboards-nav`) réutilise
+  `connect_domain_mcp_server_inner`, dont le `match` sur `McpTransport` n'a qu'un seul
+  variant (`HttpStreamable`) — un serveur `mcp_servers.server_type = "sse"` n'a pas
+  d'implémentation de transport, la découverte échoue pour ce type. Limite
+  pré-existante (pas introduite par cette feature), à lever le jour où `McpTransport`
+  gagne un variant `Sse`.
 - **Pas de `vanyline sandbox stop/start`** : bloqué sur WS-13 (champ
   `suspended` absent de `SandboxSpec`), cf. section "Client K8s CLI"
   ci-dessus et `docs/features/ws12-sandbox-clients.md`.

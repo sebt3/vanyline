@@ -83,6 +83,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/reorientation-2026-08-09.md` | Pivot stratégique complet (cf. "Direction actuelle" ci-dessus) |
 | `.claude/memory/arrimage-fonctionnel-2026-08.md` | 7 features (2026-08-10 → 08-12) : web IDE Vue réellement branché sur une sandbox K8s — ticket WS, CRD Application, Ingress par sandbox, todo persistant, config réelle. Process Claude/Cadence/Qwen qui a fonctionné, motif récurrent de doc drift trouvé 4 fois, décisions actées, pièges techniques |
 | `.claude/memory/v0.1.1-first-live-deploy.md` | Premier déploiement réel de la CRD Application (media-test, 2026-08-13) : 5 bugs trouvés en live (caCert PEM inline, TLS cert-manager absent, clé DB `uri` vs `databaseUrl`, dependabot npm mal ciblé sous workspaces, frontend sans redirect 401→login) → release v0.1.1, v0.1.2 en attente (tests en cours avant publication) |
+| `.claude/memory/frontend-dashboards-nav.md` | Navigation à 3 niveaux (`/` → `/p/:project` → `/p/:project/s/:sandbox`), dashboards Projets/Sandboxes sortis des Settings, Settings restant regroupé (Modèles/Outils/Agents/Skills/Compte) + converti en modales reka-ui, champs relationnels (provider→profil→agent, mcp discovery, local-tools) remplacent le texte libre, 2 endpoints backend ajoutés |
 
 ---
 
@@ -102,10 +103,14 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
 - **Web IDE réellement branché** (2026-08-12) : famille de 7 features
   (`.claude/memory/arrimage-fonctionnel-2026-08.md`) — Explorer/Editor/Terminal
   connectés à une vraie sandbox K8s, CRD Application + Ingress par sandbox côté
-  controller, config réelle (`SettingsView`). Toutes les features de l'index ci-dessus
-  sont terminées et closes ; leurs design docs (`docs/features/*.md`) sont supprimés.
-  Pas de design doc formel écrit pour la nouvelle direction (réorientation) pour
-  l'instant.
+  controller, config réelle (`SettingsView`).
+- **Navigation et Settings restructurés** (2026-08-14,
+  `.claude/memory/frontend-dashboards-nav.md`) : dashboards Projets/Sandboxes (`/`,
+  `/p/:project`) sortis des Settings, Settings restant réorganisé et converti en
+  modales, champs relationnels (dropdowns) remplaçant le texte libre partout où un
+  champ référençait une autre entité. Toutes les features de l'index ci-dessus sont
+  terminées et closes ; leurs design docs (`docs/features/*.md`) sont supprimés. Pas
+  de design doc formel écrit pour la nouvelle direction (réorientation) pour l'instant.
 
 **Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
 attaqué) :
