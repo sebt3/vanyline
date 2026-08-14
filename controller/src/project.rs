@@ -12,7 +12,7 @@ use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time};
 use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
-use kube::runtime::finalizer::{finalizer, Event};
+use kube::runtime::finalizer::{Event, finalizer};
 use kube::{Client, Resource, ResourceExt};
 
 use crate::error::ControllerError;
@@ -123,7 +123,7 @@ fn owner_reference(
 /// appel réseau). Priorité : `spec.storage_size`/`spec.storage_class`/
 /// `spec.storage_access_mode` > défauts passés en paramètre >
 /// `DEFAULT_WORKSPACE_SIZE` ("10Gi")/`DEFAULT_WORKSPACE_ACCESS_MODE`
-/// ("ReadWriteOnce") ; pas de valeur de repli pour la storage class (`None`
+/// ("`ReadWriteOnce`") ; pas de valeur de repli pour la storage class (`None`
 /// => `StorageClass` par défaut du cluster).
 pub fn build_workspace_pvc(
     project: &Project,
@@ -349,9 +349,11 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         metadata: ObjectMeta {
             name: Some(init_job_name(&project.name_any())),
             namespace: project.namespace(),
-            owner_references: Some(vec![project
-                .controller_owner_ref(&())
-                .expect("Project a apiVersion/kind")]),
+            owner_references: Some(vec![
+                project
+                    .controller_owner_ref(&())
+                    .expect("Project a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -379,9 +381,11 @@ pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJo
         metadata: ObjectMeta {
             name: Some(fetch_cronjob_name(&project.name_any())),
             namespace: project.namespace(),
-            owner_references: Some(vec![project
-                .controller_owner_ref(&())
-                .expect("Project a apiVersion/kind")]),
+            owner_references: Some(vec![
+                project
+                    .controller_owner_ref(&())
+                    .expect("Project a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: CronJobSpec {
@@ -419,9 +423,11 @@ pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         metadata: ObjectMeta {
             name: Some(purge_job_name(&project.name_any())),
             namespace: project.namespace(),
-            owner_references: Some(vec![project
-                .controller_owner_ref(&())
-                .expect("Project a apiVersion/kind")]),
+            owner_references: Some(vec![
+                project
+                    .controller_owner_ref(&())
+                    .expect("Project a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -828,7 +834,8 @@ mod tests {
     #[test]
     fn build_workspace_pvc_owner_default_size() {
         let project = make_project(None, None);
-        let pvc = build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
+        let pvc =
+            build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
         let requests = pvc
             .spec
             .as_ref()
@@ -869,7 +876,8 @@ mod tests {
     #[test]
     fn build_workspace_pvc_spec_overrides_default() {
         let project = make_project(None, Some("5Gi".to_string()));
-        let pvc = build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
+        let pvc =
+            build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
         let requests = pvc
             .spec
             .as_ref()
@@ -1027,11 +1035,13 @@ mod tests {
             .iter()
             .find(|e| e.name == "GIT_SSH_COMMAND")
             .expect("should have GIT_SSH_COMMAND");
-        assert!(ssh_env
-            .value
-            .as_ref()
-            .unwrap()
-            .contains("/git-secret/ssh-privatekey"));
+        assert!(
+            ssh_env
+                .value
+                .as_ref()
+                .unwrap()
+                .contains("/git-secret/ssh-privatekey")
+        );
     }
 
     // 20. build_init_job_existing_pvc_sub_path
@@ -1136,42 +1146,48 @@ mod tests {
         let ctx = make_ctx();
 
         let init_job = build_init_job(&project, &ctx);
-        assert!(init_job
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap()
-            .service_account_name
-            .is_none());
+        assert!(
+            init_job
+                .spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .service_account_name
+                .is_none()
+        );
 
         let fetch_cronjob = build_fetch_cronjob(&project, &ctx);
-        assert!(fetch_cronjob
-            .spec
-            .job_template
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap()
-            .service_account_name
-            .is_none());
+        assert!(
+            fetch_cronjob
+                .spec
+                .job_template
+                .spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .service_account_name
+                .is_none()
+        );
 
         let purge_job = build_purge_job(&project, &ctx);
-        assert!(purge_job
-            .spec
-            .as_ref()
-            .unwrap()
-            .template
-            .spec
-            .as_ref()
-            .unwrap()
-            .service_account_name
-            .is_none());
+        assert!(
+            purge_job
+                .spec
+                .as_ref()
+                .unwrap()
+                .template
+                .spec
+                .as_ref()
+                .unwrap()
+                .service_account_name
+                .is_none()
+        );
     }
 
     // 24. git_pod_template_no_shell

@@ -1,11 +1,10 @@
-use axum::{extract::State, Json};
+use axum::{Json, extract::State};
 use serde::Serialize;
 
 use vanyline_tools::mcp::{command_tools, filesystem_tools, search_tools};
 
 use crate::{
-    api::conversations::get_or_create_user, auth::middleware::AuthUser, error::AppError,
-    AppState,
+    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser, error::AppError,
 };
 
 #[derive(Serialize)]
@@ -48,9 +47,9 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
-        Router,
     };
     use tower::ServiceExt;
 

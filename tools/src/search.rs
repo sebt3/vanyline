@@ -43,7 +43,7 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
                 return Err(ToolsError::Io {
                     path: effective_path.clone(),
                     source: e,
-                })
+                });
             }
         };
         if !meta.is_dir() {
@@ -170,7 +170,7 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
                 return Err(ToolsError::Io {
                     path: effective_path.clone(),
                     source: e,
-                })
+                });
             }
         };
         if !meta.is_dir() {

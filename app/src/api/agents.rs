@@ -1,18 +1,18 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 use uuid::Uuid;
 
+use vanyline_lib::VnyError;
 use vanyline_lib::domain::{Agent, AgentMode, SkillSelection};
 use vanyline_lib::store::ConfigStore;
-use vanyline_lib::VnyError;
 
 use crate::{
-    api::conversations::get_or_create_user, auth::middleware::AuthUser,
-    config_store::PgConfigStore, error::AppError, AppState,
+    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    config_store::PgConfigStore, error::AppError,
 };
 
 const fn default_mode() -> AgentMode {
@@ -262,10 +262,10 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         routing::get,
-        Router,
     };
     use tower::ServiceExt;
 

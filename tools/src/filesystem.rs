@@ -202,11 +202,11 @@ async fn atomic_write(path: &str, content: impl AsRef<[u8]>) -> std::io::Result<
         return Err(e);
     }
 
-    if let Ok(existing_meta) = tokio::fs::metadata(path_ref).await {
-        if let Err(e) = tokio::fs::set_permissions(&tmp_path, existing_meta.permissions()).await {
-            let _ = tokio::fs::remove_file(&tmp_path).await;
-            return Err(e);
-        }
+    if let Ok(existing_meta) = tokio::fs::metadata(path_ref).await
+        && let Err(e) = tokio::fs::set_permissions(&tmp_path, existing_meta.permissions()).await
+    {
+        let _ = tokio::fs::remove_file(&tmp_path).await;
+        return Err(e);
     }
 
     if let Err(e) = tokio::fs::rename(&tmp_path, path_ref).await {
@@ -228,27 +228,26 @@ pub fn write_file(opts: WriteFileOptions) -> BoxedFuture<Result<(), ToolsError>>
 
     Box::pin(async move {
         // 1. create parent dirs
-        if let Some(parent) = std::path::Path::new(&path).parent() {
-            if !parent.as_os_str().is_empty() {
-                if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                    if e.kind() == std::io::ErrorKind::PermissionDenied {
-                        return Err(ToolsError::PermissionDenied(
-                            parent.to_string_lossy().to_string(),
-                        ));
-                    }
-                    return Err(ToolsError::Io {
-                        path: parent.to_string_lossy().to_string(),
-                        source: e,
-                    });
-                }
+        if let Some(parent) = std::path::Path::new(&path).parent()
+            && !parent.as_os_str().is_empty()
+            && let Err(e) = tokio::fs::create_dir_all(parent).await
+        {
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                return Err(ToolsError::PermissionDenied(
+                    parent.to_string_lossy().to_string(),
+                ));
             }
+            return Err(ToolsError::Io {
+                path: parent.to_string_lossy().to_string(),
+                source: e,
+            });
         }
 
         // 2. check if path exists and is a directory
-        if let Ok(meta) = tokio::fs::metadata(&path).await {
-            if meta.is_dir() {
-                return Err(ToolsError::NotAFile(path));
-            }
+        if let Ok(meta) = tokio::fs::metadata(&path).await
+            && meta.is_dir()
+        {
+            return Err(ToolsError::NotAFile(path));
         }
 
         // 3. write file
@@ -439,7 +438,7 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
     let depth = opts.depth;
 
     Box::pin(async move {
-        let result = tokio::task::spawn_blocking(move || {
+        tokio::task::spawn_blocking(move || {
             // 1. Resolve path
             let meta = match std::fs::metadata(&path) {
                 Ok(m) => m,
@@ -552,9 +551,7 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
         .map_err(|e| ToolsError::Io {
             path: path_for_err,
             source: std::io::Error::other(e.to_string()),
-        })?;
-
-        result
+        })?
     })
 }
 

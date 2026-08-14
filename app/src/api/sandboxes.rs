@@ -1,14 +1,14 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use vanyline_crds::{Sandbox, SandboxSpec};
 
 use crate::{
-    api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
-    error::AppError, k8s, AppState,
+    AppState, api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
+    error::AppError, k8s,
 };
 
 /// Body de `POST /api/sandboxes`. `name` porte le nom du CRD Sandbox ;
@@ -207,10 +207,10 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         routing::{get, post},
-        Router,
     };
     use tower::ServiceExt;
 

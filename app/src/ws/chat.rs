@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 
 use axum::{
     extract::{
-        ws::{Message, WebSocket},
         Path, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
     },
     response::IntoResponse,
 };
@@ -18,8 +18,8 @@ use vanyline_lib::event::{ChatEvent, EventSink, ToolCallRecord};
 use vanyline_lib::session::SessionContext;
 
 use crate::{
-    api::conversations::get_or_create_user, auth::middleware::AuthUser,
-    config_store::PgConfigStore, error::AppError, AppState,
+    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    config_store::PgConfigStore, error::AppError,
 };
 
 #[derive(Deserialize)]

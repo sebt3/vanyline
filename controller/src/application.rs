@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use k8s_openapi::ByteString;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentCondition, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PodSpec, PodTemplateSpec, Probe,
@@ -16,7 +17,6 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     Condition, LabelSelector, ObjectMeta, OwnerReference,
 };
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
-use k8s_openapi::ByteString;
 use kube::api::{Api, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
 use kube::{Client, Resource, ResourceExt};
@@ -214,7 +214,10 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
     // (jamais lus par ce reconciler lui-même).
     if let Some(defaults) = &app.spec.storage_defaults {
         for (value, name) in [
-            (&defaults.home_storage_class, "VNL_DEFAULT_HOME_STORAGE_CLASS"),
+            (
+                &defaults.home_storage_class,
+                "VNL_DEFAULT_HOME_STORAGE_CLASS",
+            ),
             (&defaults.home_access_mode, "VNL_DEFAULT_HOME_ACCESS_MODE"),
             (
                 &defaults.project_storage_class,
@@ -603,7 +606,11 @@ pub async fn reconcile(
     let roles: Api<Role> = Api::namespaced(ctx.client.clone(), &ns);
     let role = build_application_role(&app);
     roles
-        .patch(&application_name(&app.name_any()), &pp, &Patch::Apply(&role))
+        .patch(
+            &application_name(&app.name_any()),
+            &pp,
+            &Patch::Apply(&role),
+        )
         .await?;
 
     let role_bindings: Api<RoleBinding> = Api::namespaced(ctx.client.clone(), &ns);
@@ -1080,11 +1087,13 @@ mod tests {
                     .is_some_and(|r| r.contains(&"owners".to_string()))
             })
             .expect("should have a rule for owners/projects");
-        assert!(owners_projects
-            .resources
-            .as_ref()
-            .unwrap()
-            .contains(&"projects".to_string()));
+        assert!(
+            owners_projects
+                .resources
+                .as_ref()
+                .unwrap()
+                .contains(&"projects".to_string())
+        );
         assert_eq!(
             owners_projects.verbs,
             vec!["get", "list", "create", "delete"]
@@ -1174,10 +1183,8 @@ mod tests {
         // tls_issuer_kind None => cert-manager.io/cluster-issuer, plus les
         // annotations libres fournies par l'utilisateur
         let mut app = make_application("demo");
-        app.spec.ingress_annotations = BTreeMap::from([(
-            "custom.example.com/foo".to_string(),
-            "bar".to_string(),
-        )]);
+        app.spec.ingress_annotations =
+            BTreeMap::from([("custom.example.com/foo".to_string(), "bar".to_string())]);
         let ingress = build_application_ingress(&app);
         let ann = ingress
             .metadata
@@ -1199,7 +1206,10 @@ mod tests {
             .annotations
             .as_ref()
             .expect("should have annotations");
-        assert_eq!(ann.get("cert-manager.io/issuer"), Some(&"self-sign".to_string()));
+        assert_eq!(
+            ann.get("cert-manager.io/issuer"),
+            Some(&"self-sign".to_string())
+        );
         assert!(ann.get("cert-manager.io/cluster-issuer").is_none());
     }
 

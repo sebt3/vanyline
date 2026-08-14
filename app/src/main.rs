@@ -13,7 +13,7 @@ use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use config::Config;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};

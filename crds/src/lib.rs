@@ -23,9 +23,9 @@ pub struct OwnerSpec {
     pub existing_pvc: Option<String>,
     pub home_size: Option<String>, // défaut appliqué au reconcile: "1Gi"
     pub home_storage_class: Option<String>, // RWX recommandé (CephFS)
-    /// Mode d'accès du PVC home. None => "ReadWriteMany" (défaut historique —
+    /// Mode d'accès du PVC home. None => "`ReadWriteMany`" (défaut historique —
     /// le home est partagé entre les sandboxes concurrentes d'un même Owner).
-    /// À ajuster (ex. "ReadWriteOnce") sur un cluster sans StorageClass RWX
+    /// À ajuster (ex. "`ReadWriteOnce`") sur un cluster sans `StorageClass` RWX
     /// (ex. single-node local-path) — aucun partage concurrent alors possible.
     pub home_access_mode: Option<String>,
     pub project_defaults: Option<ProjectDefaults>,
@@ -43,7 +43,7 @@ pub struct ProjectDefaults {
     pub storage_size: Option<String>,
     pub storage_class: Option<String>,
     /// Défaut de repli pour `ProjectSpec.storage_access_mode` quand ce
-    /// dernier est absent. None => "ReadWriteOnce" (défaut historique).
+    /// dernier est absent. None => "`ReadWriteOnce`" (défaut historique).
     pub storage_access_mode: Option<String>,
 }
 
@@ -113,7 +113,7 @@ pub struct ProjectSpec {
     pub storage_class: Option<String>,
     /// Mode d'accès du PVC workspace. None => repli sur
     /// `Owner.spec.project_defaults.storage_access_mode`, puis
-    /// "ReadWriteOnce" (défaut historique).
+    /// "`ReadWriteOnce`" (défaut historique).
     pub storage_access_mode: Option<String>,
     /// Auth git dédiée (Secret). Défaut: ~/.ssh du home Owner.
     pub git_secret: Option<String>,
@@ -226,7 +226,7 @@ pub struct ApplicationSpec {
     /// `OIDC_REDIRECT_URL` (`https://{host}/auth/callback`).
     pub host: String,
     pub ingress_class_name: String,
-    /// Nom du CertManager (Cluster)Issuer utilisé pour l'Ingress de l'application
+    /// Nom du `CertManager` (Cluster)Issuer utilisé pour l'Ingress de l'application
     /// (`cert-manager.io/cluster-issuer` ou `cert-manager.io/issuer` selon
     /// `tls_issuer_kind`). Pose aussi `spec.tls` sur l'Ingress (secret
     /// `<application-name>-cert`, même convention que les autres Ingress du
@@ -257,7 +257,7 @@ pub struct ApplicationSpec {
 /// Défauts de stockage propagés par `app` lors de ses créations lazily
 /// d'Owner/Project — permet à l'outillage de déploiement de fournir la
 /// StorageClass/accessMode adaptée au cluster cible (ex. RWO + local-path
-/// sur un cluster single-node, RWX + CephFS ailleurs) sans toucher au code.
+/// sur un cluster single-node, RWX + `CephFS` ailleurs) sans toucher au code.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationStorageDefaults {

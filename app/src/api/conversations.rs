@@ -1,7 +1,7 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -9,10 +9,10 @@ use uuid::Uuid;
 use vanyline_lib::VnyError;
 
 use crate::{
+    AppState,
     auth::middleware::AuthUser,
     db::models::{Conversation, Message, User},
     error::AppError,
-    AppState,
 };
 
 #[derive(Deserialize)]
@@ -205,10 +205,10 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         routing::get,
-        Router,
     };
     use tower::ServiceExt;
 

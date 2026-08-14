@@ -24,7 +24,11 @@ struct Cli {
     #[arg(long, env = "SANDBOX_IMAGE_TAG", default_value = env!("CARGO_PKG_VERSION"))]
     sandbox_image_tag: String,
 
-    #[arg(long, env = "SANDBOX_IMAGE_REPO", default_value = "ghcr.io/sebt3/vanyline-sandbox")]
+    #[arg(
+        long,
+        env = "SANDBOX_IMAGE_REPO",
+        default_value = "ghcr.io/sebt3/vanyline-sandbox"
+    )]
     sandbox_image_repo: String,
 
     /// Tag de l'image app (ghcr.io/sebt3/vanyline-app) utilisée pour le
@@ -32,7 +36,11 @@ struct Cli {
     #[arg(long, env = "APP_IMAGE_TAG", default_value = env!("CARGO_PKG_VERSION"))]
     app_image_tag: String,
 
-    #[arg(long, env = "APP_IMAGE_REPO", default_value = "ghcr.io/sebt3/vanyline-app")]
+    #[arg(
+        long,
+        env = "APP_IMAGE_REPO",
+        default_value = "ghcr.io/sebt3/vanyline-app"
+    )]
     app_image_repo: String,
 }
 

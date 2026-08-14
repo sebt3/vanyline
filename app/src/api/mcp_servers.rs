@@ -1,19 +1,19 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+use vanyline_lib::VnyError;
 use vanyline_lib::domain::McpServer as DomainMcpServer;
 use vanyline_lib::domain::McpTransport;
-use vanyline_lib::VnyError;
 
 use crate::{
-    api::conversations::get_or_create_user, auth::middleware::AuthUser, db::models::McpServer,
-    error::AppError, AppState,
+    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    db::models::McpServer, error::AppError,
 };
 
 #[derive(Deserialize)]
@@ -193,16 +193,13 @@ pub async fn test_server(
     Path(id): Path<Uuid>,
 ) -> Result<Json<McpTestResult>, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
-    let server = sqlx::query_as::<_, McpServer>(
-        "SELECT * FROM mcp_servers WHERE id = $1 AND user_id = $2",
-    )
-    .bind(id)
-    .bind(db_user.id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or_else(|| {
-        AppError::McpError("VNL-MCP-002: MCP server not found".to_string())
-    })?;
+    let server =
+        sqlx::query_as::<_, McpServer>("SELECT * FROM mcp_servers WHERE id = $1 AND user_id = $2")
+            .bind(id)
+            .bind(db_user.id)
+            .fetch_optional(&state.pool)
+            .await?
+            .ok_or_else(|| AppError::McpError("VNL-MCP-002: MCP server not found".to_string()))?;
 
     let domain = build_domain_server(&server)?;
     let tools = vanyline_lib::prefixed_mcp::list_mcp_server_tools(&domain)
@@ -212,13 +209,11 @@ pub async fn test_server(
     let tools_json = serde_json::to_value(&tools)
         .map_err(|e| AppError::InternalError(format!("VNL-MCP-007: serialization error: {e}")))?;
 
-    sqlx::query(
-        "UPDATE mcp_servers SET available_tools = $1, updated_at = NOW() WHERE id = $2",
-    )
-    .bind(&tools_json)
-    .bind(id)
-    .execute(&state.pool)
-    .await?;
+    sqlx::query("UPDATE mcp_servers SET available_tools = $1, updated_at = NOW() WHERE id = $2")
+        .bind(&tools_json)
+        .bind(id)
+        .execute(&state.pool)
+        .await?;
 
     Ok(Json(McpTestResult { tools }))
 }
@@ -229,9 +224,9 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
-        Router,
     };
     use tower::ServiceExt;
 
@@ -271,10 +266,7 @@ mod tests {
 
         Router::new()
             .route("/mcp-servers", axum::routing::get(list_servers))
-            .route(
-                "/mcp-servers/{id}/test",
-                axum::routing::post(test_server),
-            )
+            .route("/mcp-servers/{id}/test", axum::routing::post(test_server))
             .with_state(state)
     }
 
@@ -318,7 +310,10 @@ mod tests {
         assert_eq!(result.name, "test-server");
         assert_eq!(result.transport, McpTransport::HttpStreamable);
         assert_eq!(result.url, "http://localhost:3000/mcp");
-        assert_eq!(result.headers.get("Authorization"), Some(&"Bearer token".to_string()));
+        assert_eq!(
+            result.headers.get("Authorization"),
+            Some(&"Bearer token".to_string())
+        );
     }
 
     #[test]

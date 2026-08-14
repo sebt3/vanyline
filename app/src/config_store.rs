@@ -4,12 +4,12 @@ use async_trait::async_trait;
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use vanyline_lib::VnyError;
 use vanyline_lib::domain::{
     Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
     SkillMeta, SkillSelection, Toolset,
 };
 use vanyline_lib::store::ConfigStore;
-use vanyline_lib::VnyError;
 
 use crate::db::models::{
     AgentRecord, LlmProvider as DbLlmProvider, McpServer as DbMcpServer,
@@ -243,7 +243,7 @@ impl ConfigStore for PgConfigStore {
         let mut result = Vec::new();
         for row in &rows {
             if let Some(server) = domain_mcp_server(row) {
-                result.push(server)
+                result.push(server);
             } else {
                 tracing::warn!(
                     "Skipping MCP server '{}': unknown server_type '{}'",

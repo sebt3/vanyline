@@ -1,7 +1,7 @@
 use uuid::Uuid;
 use vanyline_crds::{OwnerSpec, ProjectDefaults};
 
-use crate::{db::models::User, error::AppError, AppState};
+use crate::{AppState, db::models::User, error::AppError};
 
 /// Détecte d'un raw (email ou `oidc_sub`) une étiquette DNS `RFC1123` :
 /// minuscules/chiffres/tirets, début alphanumérique, ≤ 63 caractères.
@@ -64,34 +64,31 @@ pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, Ap
     let name = sanitize_owner_name(raw);
 
     let k8s = crate::k8s::client(state).await?;
-    match k8s.get_owner(&name).await {
-        Ok(_) => {}
-        Err(_) => {
-            let project_defaults = if state.config.default_project_storage_class.is_some()
-                || state.config.default_project_access_mode.is_some()
-            {
-                Some(ProjectDefaults {
-                    storage_size: None,
-                    storage_class: state.config.default_project_storage_class.clone(),
-                    storage_access_mode: state.config.default_project_access_mode.clone(),
-                })
-            } else {
-                None
-            };
-            k8s.create_owner(
-                &name,
-                OwnerSpec {
-                    existing_pvc: None,
-                    home_size: None,
-                    home_storage_class: state.config.default_home_storage_class.clone(),
-                    home_access_mode: state.config.default_home_access_mode.clone(),
-                    project_defaults,
-                    application_ref: state.config.application_name.clone(),
-                    egress: Vec::new(),
-                },
-            )
-            .await?;
-        }
+    if k8s.get_owner(&name).await.is_err() {
+        let project_defaults = if state.config.default_project_storage_class.is_some()
+            || state.config.default_project_access_mode.is_some()
+        {
+            Some(ProjectDefaults {
+                storage_size: None,
+                storage_class: state.config.default_project_storage_class.clone(),
+                storage_access_mode: state.config.default_project_access_mode.clone(),
+            })
+        } else {
+            None
+        };
+        k8s.create_owner(
+            &name,
+            OwnerSpec {
+                existing_pvc: None,
+                home_size: None,
+                home_storage_class: state.config.default_home_storage_class.clone(),
+                home_access_mode: state.config.default_home_access_mode.clone(),
+                project_defaults,
+                application_ref: state.config.application_name.clone(),
+                egress: Vec::new(),
+            },
+        )
+        .await?;
     }
     sqlx::query("UPDATE users SET k8s_owner_name = $1 WHERE id = $2")
         .bind(&name)

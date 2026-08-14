@@ -1,9 +1,9 @@
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 
+use crate::AppState;
 use crate::auth::cookie::extract_token;
 use crate::error::AppError;
-use crate::AppState;
 
 pub struct AuthUser {
     pub id_token: String,
@@ -40,9 +40,9 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
-        Router,
     };
     use base64::Engine;
     use tower::ServiceExt;

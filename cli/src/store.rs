@@ -13,10 +13,10 @@ pub fn list_conversations() -> Result<Vec<vanyline_lib::Conversation>, std::io::
     for entry in std::fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
-        if path.extension().is_some_and(|ext| ext == "json") {
-            if let Ok(c) = load_json::<vanyline_lib::Conversation>(&path) {
-                convs.push(c);
-            }
+        if path.extension().is_some_and(|ext| ext == "json")
+            && let Ok(c) = load_json::<vanyline_lib::Conversation>(&path)
+        {
+            convs.push(c);
         }
     }
     convs.sort_by_key(|c| c.id);
@@ -92,16 +92,14 @@ pub fn resolve_conversation_reference(
         && !reference.is_empty()
         && (reference.len() == 1 || reference.as_bytes()[0] != b'0');
 
-    if is_clean_decimal {
-        if let Ok(index) = reference.parse::<usize>() {
-            if index >= 1 && index <= convs.len() {
-                return Ok(convs[index - 1].id);
-            }
-            return Err(format!(
-                "No conversation at index {index} (have {})",
-                convs.len()
-            ));
+    if is_clean_decimal && let Ok(index) = reference.parse::<usize>() {
+        if index >= 1 && index <= convs.len() {
+            return Ok(convs[index - 1].id);
         }
+        return Err(format!(
+            "No conversation at index {index} (have {})",
+            convs.len()
+        ));
     }
 
     let lower = reference.to_lowercase();

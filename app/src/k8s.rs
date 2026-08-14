@@ -1,4 +1,4 @@
-use crate::{error::AppError, AppState};
+use crate::{AppState, error::AppError};
 use vanyline_lib::k8s::VnlK8sClient;
 
 /// Retourne le client K8s, découvert lazily à la première requête qui en a besoin

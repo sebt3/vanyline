@@ -6,13 +6,13 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use rmcp::{
+    ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{ServerCapabilities, ServerInfo},
     schemars, tool, tool_handler, tool_router,
     transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
     },
-    ServerHandler,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -21,7 +21,7 @@ use vanyline_lib::domain::{
     SkillSelection,
 };
 use vanyline_lib::event::{ChatEvent, EventSink};
-use vanyline_lib::session::{run_agent_turn, SessionContext};
+use vanyline_lib::session::{SessionContext, run_agent_turn};
 use vanyline_lib::store::InMemoryConfigStore;
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]

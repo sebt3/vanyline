@@ -1,8 +1,9 @@
 use crate::rpc::protocol::{
-    jsonrpc_code, vnl_code, ChatCancelParams, ChatEventNotificationParams, ChatSendParams,
-    ChatSendResult, ConversationCreateParams, ConversationIdParams, ConversationSummary,
-    InitializeParams, InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-    NameParams, OwnerCreateParams, ProjectCreateParams, SandboxCreateParams, PROTOCOL_VERSION,
+    ChatCancelParams, ChatEventNotificationParams, ChatSendParams, ChatSendResult,
+    ConversationCreateParams, ConversationIdParams, ConversationSummary, InitializeParams,
+    InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, NameParams,
+    OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, SandboxCreateParams, jsonrpc_code,
+    vnl_code,
 };
 
 use serde_json::Value;
@@ -12,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use uuid::Uuid;
 use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
-use vanyline_lib::session::{run_agent_turn, SessionContext};
+use vanyline_lib::session::{SessionContext, run_agent_turn};
 use vanyline_lib::store::ConfigStore;
 
 use crate::store;
@@ -392,7 +393,7 @@ fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
                 "Malformed request: params could not be deserialized as ConversationIdParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize get error response")
+            .expect("serialize get error response");
         }
     };
     let uuid = match Uuid::parse_str(&params.id) {
@@ -404,7 +405,7 @@ fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
                 format!("Invalid UUID in id: {}", params.id),
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize get error response")
+            .expect("serialize get error response");
         }
     };
     match store::get_conversation(&uuid) {
@@ -505,7 +506,7 @@ fn handle_conversations_delete(
                 "Malformed request: params could not be deserialized as ConversationIdParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize delete error response")
+            .expect("serialize delete error response");
         }
     };
     let uuid = match Uuid::parse_str(&params.id) {
@@ -517,7 +518,7 @@ fn handle_conversations_delete(
                 format!("Invalid UUID in id: {}", params.id),
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize delete error response")
+            .expect("serialize delete error response");
         }
     };
     match store::delete_conversation(&uuid) {
@@ -552,7 +553,7 @@ fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
                 "Malformed request: params could not be deserialized as ChatCancelParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize cancel error response")
+            .expect("serialize cancel error response");
         }
     };
     if Uuid::parse_str(&params.conversation_id).is_err() {
@@ -619,7 +620,7 @@ async fn handle_chat_send(
                     vnl_code::MALFORMED_REQUEST,
                 ))
                 .expect("serialize chat/send error response"),
-            )
+            );
         }
     };
     let conv_id = match Uuid::parse_str(&params.conversation_id) {
@@ -633,7 +634,7 @@ async fn handle_chat_send(
                     vnl_code::MALFORMED_REQUEST,
                 ))
                 .expect("serialize chat/send error response"),
-            )
+            );
         }
     };
     let conv = match store::get_conversation(&conv_id) {
@@ -647,7 +648,7 @@ async fn handle_chat_send(
                     vnl_code::CONVERSATION_NOT_FOUND,
                 ))
                 .expect("serialize chat/send error response"),
-            )
+            );
         }
         Err(e) => {
             return Some(
@@ -658,7 +659,7 @@ async fn handle_chat_send(
                     vnl_code::CONVERSATION_STORAGE_ERROR,
                 ))
                 .expect("serialize chat/send error response"),
-            )
+            );
         }
     };
 
@@ -905,7 +906,7 @@ async fn handle_owners_get(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize get error response")
+            .expect("serialize get error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -930,7 +931,7 @@ async fn handle_owners_create(
                 "Malformed request: params could not be deserialized as OwnerCreateParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize create error response")
+            .expect("serialize create error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -955,7 +956,7 @@ async fn handle_owners_delete(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize delete error response")
+            .expect("serialize delete error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -989,7 +990,7 @@ async fn handle_projects_get(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize get error response")
+            .expect("serialize get error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -1014,7 +1015,7 @@ async fn handle_projects_create(
                 "Malformed request: params could not be deserialized as ProjectCreateParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize create error response")
+            .expect("serialize create error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -1039,7 +1040,7 @@ async fn handle_projects_delete(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize delete error response")
+            .expect("serialize delete error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -1073,7 +1074,7 @@ async fn handle_sandboxes_get(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize get error response")
+            .expect("serialize get error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -1098,7 +1099,7 @@ async fn handle_sandboxes_create(
                 "Malformed request: params could not be deserialized as SandboxCreateParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize create error response")
+            .expect("serialize create error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -1123,7 +1124,7 @@ async fn handle_sandboxes_delete(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize delete error response")
+            .expect("serialize delete error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -1149,7 +1150,7 @@ async fn handle_sandboxes_stop(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize stop error response")
+            .expect("serialize stop error response");
         }
     };
     let client = match ensure_k8s_client(state).await {
@@ -1175,7 +1176,7 @@ async fn handle_sandboxes_start(
                 "Malformed request: params could not be deserialized as NameParams",
                 vnl_code::MALFORMED_REQUEST,
             ))
-            .expect("serialize start error response")
+            .expect("serialize start error response");
         }
     };
     let client = match ensure_k8s_client(state).await {

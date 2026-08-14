@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
+use vanyline_lib::VnyError;
 use vanyline_lib::domain::{
     Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
     SkillMeta, SkillSelection, Toolset,
 };
 use vanyline_lib::store::ConfigStore;
-use vanyline_lib::VnyError;
 
 use crate::config::Layers;
 
@@ -85,7 +85,7 @@ fn split_frontmatter(path: &Path, content: &str) -> Result<(String, String), Vny
             return Err(VnyError::ConfigError(format!(
                 "{}: must start with '---' frontmatter delimiter",
                 path.display()
-            )))
+            )));
         }
     }
     let mut frontmatter = Vec::new();

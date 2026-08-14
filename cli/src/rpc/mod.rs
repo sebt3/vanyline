@@ -34,10 +34,10 @@ pub async fn run_stdio_server() {
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Some(response) = handlers::handle_line(&mut state, &line).await {
-                    if tx.send(response).is_err() {
-                        break;
-                    }
+                if let Some(response) = handlers::handle_line(&mut state, &line).await
+                    && tx.send(response).is_err()
+                {
+                    break;
                 }
                 if state.shutdown_requested {
                     break;

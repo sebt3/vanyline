@@ -256,11 +256,11 @@ where
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use rig_core::OneOrMany;
     use rig_core::agent::CompletionCall;
     use rig_core::completion::Usage;
     use rig_core::message::{Text, ToolCall, ToolFunction, ToolResult, ToolResultContent};
     use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
-    use rig_core::OneOrMany;
     use std::sync::Mutex;
 
     /// Test de sérialisation des tags "type" pour chaque variante.

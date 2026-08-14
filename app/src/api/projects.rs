@@ -1,14 +1,14 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::Deserialize;
 use vanyline_crds::{EgressRule, Project, ProjectSpec, PvcRef};
 
 use crate::{
-    api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
-    error::AppError, k8s, AppState,
+    AppState, api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
+    error::AppError, k8s,
 };
 
 /// Body de `POST /api/projects`. Reprend les champs de `ProjectSpec` SAUF `owner`,
@@ -126,10 +126,10 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
         routing::get,
-        Router,
     };
     use tower::ServiceExt;
 

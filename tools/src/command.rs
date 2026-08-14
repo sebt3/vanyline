@@ -54,7 +54,7 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
                     return Err(ToolsError::Io {
                         path: cwd.clone(),
                         source: e,
-                    })
+                    });
                 }
             };
             if !meta.is_dir() {

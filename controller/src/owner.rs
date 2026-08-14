@@ -79,11 +79,13 @@ pub fn build_home_pvc(owner: &Owner) -> Option<PersistentVolumeClaim> {
             ..Default::default()
         },
         spec: Some(PersistentVolumeClaimSpec {
-            access_modes: Some(vec![owner
-                .spec
-                .home_access_mode
-                .clone()
-                .unwrap_or_else(|| DEFAULT_HOME_ACCESS_MODE.to_string())]),
+            access_modes: Some(vec![
+                owner
+                    .spec
+                    .home_access_mode
+                    .clone()
+                    .unwrap_or_else(|| DEFAULT_HOME_ACCESS_MODE.to_string()),
+            ]),
             storage_class_name: owner.spec.home_storage_class.clone(),
             resources: Some(VolumeResourceRequirements {
                 requests: Some(requests),

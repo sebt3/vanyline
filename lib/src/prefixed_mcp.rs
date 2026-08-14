@@ -1,6 +1,6 @@
 use rig_core::completion::ToolDefinition;
-use rig_core::tool::server::ToolServerHandle;
 use rig_core::tool::ToolDyn;
+use rig_core::tool::server::ToolServerHandle;
 use rig_core::wasm_compat::WasmBoxedFuture;
 use rmcp::model::Tool;
 use rmcp::service::ServerSink;
@@ -149,14 +149,14 @@ impl ToolDyn for PrefixedMcpTool {
                             McpToolCallError(
                                 "MCP tool returned audio content (not supported)".to_string(),
                             ),
-                        )))
+                        )));
                     }
                     thing => {
                         return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
                             McpToolCallError(format!(
                                 "MCP tool returned unsupported content: {thing:?}"
                             )),
-                        )))
+                        )));
                     }
                 };
                 content.push_str(&chunk);
@@ -261,9 +261,7 @@ async fn connect_domain_mcp_server_inner(
 /// Liste les noms des tools exposés par un serveur MCP, sans les ajouter à un
 /// handle. Réutilise `connect_domain_mcp_server_inner` (même logique de
 /// connexion/listing) — alimente `POST /api/mcp-servers/{id}/test` (app).
-pub async fn list_mcp_server_tools(
-    server: &DomainMcpServer,
-) -> Result<Vec<String>, VnyError> {
+pub async fn list_mcp_server_tools(server: &DomainMcpServer) -> Result<Vec<String>, VnyError> {
     let (tools, _client, _running) = connect_domain_mcp_server_inner(server).await?;
     Ok(tools.into_iter().map(|t| t.name.to_string()).collect())
 }

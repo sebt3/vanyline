@@ -19,7 +19,7 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
 use k8s_openapi::apimachinery::pkg::util::intstr::IntOrString;
 use kube::api::{Api, DeleteParams, ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::{Action, Controller};
-use kube::runtime::finalizer::{finalizer, Event};
+use kube::runtime::finalizer::{Event, finalizer};
 use kube::{Client, Resource, ResourceExt};
 
 use crate::application::APP_LABEL;
@@ -28,12 +28,12 @@ use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 use crate::project::{self, ProjectJobContext};
 use crate::project::{
-    cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path, worktree_path,
-    WORKSPACE_MOUNT_PATH,
+    WORKSPACE_MOUNT_PATH, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path,
+    worktree_path,
 };
 use vanyline_crds::{
-    service_name, Application, EgressPort, EgressRule, Owner, Project, Sandbox, SandboxStatus,
-    Toolchain, MCP_PORT,
+    Application, EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
+    Toolchain, service_name,
 };
 
 /// Fin de `PATH` commune à tous les pods sandbox (PATH standard Debian), reprise
@@ -303,9 +303,11 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
             name: Some(pod_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
             labels: Some(labels),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(PodSpec {
@@ -392,20 +394,22 @@ pub fn build_checkout_job(
         "--branch".to_string(),
         sandbox.spec.branch.clone(),
     ];
-    if let Some(db) = &project.spec.default_branch {
-        if !db.is_empty() {
-            command.push("--default-branch".to_string());
-            command.push(db.clone());
-        }
+    if let Some(db) = &project.spec.default_branch
+        && !db.is_empty()
+    {
+        command.push("--default-branch".to_string());
+        command.push(db.clone());
     }
 
     Job {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(checkout_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -441,9 +445,11 @@ pub fn build_worktree_remove_job(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(worktree_remove_job_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(JobSpec {
@@ -471,9 +477,11 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(service_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(k8s_openapi::api::core::v1::ServiceSpec {
@@ -519,9 +527,11 @@ pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> In
             name: Some(name),
             namespace: sandbox.namespace(),
             annotations: Some(annotations),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(IngressSpec {
@@ -690,9 +700,11 @@ pub fn build_sandbox_netpol(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(netpol_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(NetworkPolicySpec {
@@ -754,9 +766,11 @@ pub fn build_sandbox_egress_netpol(
         metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
             name: Some(netpol_egress_name(&sandbox.name_any())),
             namespace: sandbox.namespace(),
-            owner_references: Some(vec![sandbox
-                .controller_owner_ref(&())
-                .expect("Sandbox a apiVersion/kind")]),
+            owner_references: Some(vec![
+                sandbox
+                    .controller_owner_ref(&())
+                    .expect("Sandbox a apiVersion/kind"),
+            ]),
             ..Default::default()
         },
         spec: Some(NetworkPolicySpec {
@@ -1620,9 +1634,11 @@ mod tests {
         // Without resources
         let sandbox_no_res = make_sandbox("demo-branch", vec![], None);
         let pod_no_res = build_sandbox_pod(&sandbox_no_res, &project, &ctx);
-        assert!(pod_no_res.spec.as_ref().unwrap().containers[0]
-            .resources
-            .is_none());
+        assert!(
+            pod_no_res.spec.as_ref().unwrap().containers[0]
+                .resources
+                .is_none()
+        );
     }
 
     // ===== Job name helpers =====
@@ -2465,16 +2481,18 @@ mod tests {
                 .number,
             Some(MCP_PORT)
         );
-        assert!(paths[0]
-            .backend
-            .service
-            .as_ref()
-            .unwrap()
-            .port
-            .as_ref()
-            .unwrap()
-            .name
-            .is_none());
+        assert!(
+            paths[0]
+                .backend
+                .service
+                .as_ref()
+                .unwrap()
+                .port
+                .as_ref()
+                .unwrap()
+                .name
+                .is_none()
+        );
 
         // TLS : un Ingress = un Certificate, comme build_application_ingress
         let tls = spec.tls.as_ref().expect("should have tls");
@@ -2512,7 +2530,10 @@ mod tests {
             .annotations
             .as_ref()
             .expect("should have annotations");
-        assert_eq!(annotations.get("cert-manager.io/issuer"), Some(&"self-sign".to_string()));
+        assert_eq!(
+            annotations.get("cert-manager.io/issuer"),
+            Some(&"self-sign".to_string())
+        );
         assert!(annotations.get("cert-manager.io/cluster-issuer").is_none());
     }
 
@@ -2520,10 +2541,8 @@ mod tests {
     fn build_sandbox_ingress_annotations_passthrough() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let mut app = make_application("main");
-        app.spec.ingress_annotations = BTreeMap::from([(
-            "custom.example.com/foo".to_string(),
-            "bar".to_string(),
-        )]);
+        app.spec.ingress_annotations =
+            BTreeMap::from([("custom.example.com/foo".to_string(), "bar".to_string())]);
 
         let ingress = build_sandbox_ingress(&sandbox, &app);
 
@@ -2532,7 +2551,10 @@ mod tests {
             .annotations
             .as_ref()
             .expect("should have annotations");
-        assert_eq!(annotations.get("custom.example.com/foo"), Some(&"bar".to_string()));
+        assert_eq!(
+            annotations.get("custom.example.com/foo"),
+            Some(&"bar".to_string())
+        );
         assert_eq!(
             annotations.get("cert-manager.io/cluster-issuer"),
             Some(&"self-sign".to_string())

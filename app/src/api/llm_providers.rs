@@ -1,14 +1,14 @@
 use axum::{
+    Json,
     extract::{Path, State},
     http::StatusCode,
-    Json,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    api::conversations::get_or_create_user, auth::middleware::AuthUser, db::models::LlmProvider,
-    error::AppError, AppState,
+    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    db::models::LlmProvider, error::AppError,
 };
 
 #[derive(Deserialize)]
@@ -289,9 +289,9 @@ mod tests {
     use super::*;
     use crate::auth::MockOidcClient;
     use axum::{
+        Router,
         body::Body,
         http::{Request, StatusCode},
-        Router,
     };
     use tower::ServiceExt;
 

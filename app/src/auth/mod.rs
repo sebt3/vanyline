@@ -8,14 +8,14 @@ pub use oidc::OidcClientTrait;
 pub use oidc::MockOidcClient;
 
 use axum::{
-    extract::{Query, State},
-    http::{header::SET_COOKIE, StatusCode},
-    response::{IntoResponse, Response},
     Router,
+    extract::{Query, State},
+    http::{StatusCode, header::SET_COOKIE},
+    response::{IntoResponse, Response},
 };
 use serde::Deserialize;
 
-use crate::{error::AppError, AppState};
+use crate::{AppState, error::AppError};
 
 use ::cookie::{Cookie, CookieJar};
 

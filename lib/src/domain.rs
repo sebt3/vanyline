@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{ser::SerializeSeq, Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {

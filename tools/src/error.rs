@@ -24,7 +24,9 @@ pub enum ToolsError {
     EditNoMatch { path: String, hint: String },
     // `hint` : ". Closest line in file: '<ligne>'" — aide le modèle à corriger
     // son old_string (indentation, espaces).
-    #[error("VNL-TLS-007: {count} occurrences of old_string in {path} — pass replace_all=true or provide a more specific old_string")]
+    #[error(
+        "VNL-TLS-007: {count} occurrences of old_string in {path} — pass replace_all=true or provide a more specific old_string"
+    )]
     EditAmbiguous { path: String, count: usize },
 
     #[error("VNL-TLS-008: command timed out after {0}s (partial output kept)")]

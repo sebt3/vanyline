@@ -185,10 +185,11 @@ pub fn list_layer_files(
     for entry in entries {
         let entry = entry.map_err(VnyError::from)?;
         let path = entry.path();
-        if path.is_file() && path.extension().and_then(|s| s.to_str()) == Some(ext) {
-            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                result.insert(stem.to_string(), path);
-            }
+        if path.is_file()
+            && path.extension().and_then(|s| s.to_str()) == Some(ext)
+            && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+        {
+            result.insert(stem.to_string(), path);
         }
     }
     Ok(result)
@@ -228,10 +229,10 @@ pub fn list_layer_skill_dirs(dir: &std::path::Path) -> Result<BTreeMap<String, P
             continue;
         }
         let skill_file = path.join("SKILL.md");
-        if skill_file.is_file() {
-            if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
-                result.insert(name.to_string(), skill_file);
-            }
+        if skill_file.is_file()
+            && let Some(name) = path.file_name().and_then(|s| s.to_str())
+        {
+            result.insert(name.to_string(), skill_file);
         }
     }
     Ok(result)

@@ -1,8 +1,8 @@
 use std::collections::HashSet;
 
+use vanyline_lib::VnyError;
 use vanyline_lib::domain::SkillSelection;
 use vanyline_lib::store::ConfigStore;
-use vanyline_lib::VnyError;
 
 /// Charge toutes les listes du store et croise les références. Ne s'arrête
 /// PAS à la première erreur : chaque `list_x()` est tenté indépendamment
@@ -101,13 +101,13 @@ pub async fn check_config(store: &dyn ConfigStore) -> Vec<VnyError> {
         }
         // SkillSelection::Auto / ::None -> rien à valider, jamais de problème.
     }
-    if let Some(name) = &default_agent {
-        if !agents.iter().any(|a| &a.name == name) {
-            problems.push(VnyError::UnknownReference(
-                "agent",
-                format!("{name} (defaults.agent)"),
-            ));
-        }
+    if let Some(name) = &default_agent
+        && !agents.iter().any(|a| &a.name == name)
+    {
+        problems.push(VnyError::UnknownReference(
+            "agent",
+            format!("{name} (defaults.agent)"),
+        ));
     }
 
     problems
