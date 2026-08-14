@@ -13,6 +13,11 @@ pub struct Config {
     pub listen_addr: String,
     pub static_dir: String,
     pub k8s_namespace: Option<String>,
+    /// Nom de la CR Application dont ce pod `app` est le Deployment — posé par
+    /// le reconciler Application (`VNL_APPLICATION_NAME`). Utilisé par
+    /// `ensure_owner` pour remplir `OwnerSpec.application_ref` lors de ses
+    /// créations lazily (condition d'exposition publique des Sandboxes).
+    pub application_name: Option<String>,
     /// Défauts de stockage propagés vers `OwnerSpec`/`ProjectSpec` lors des
     /// créations lazily par `ensure_owner`/`create_project` — posés en env
     /// par le reconciler Application depuis `Application.spec.storageDefaults`
@@ -48,6 +53,7 @@ impl Config {
             listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             static_dir: env::var("STATIC_DIR").unwrap_or_else(|_| "./static".to_string()),
             k8s_namespace: env::var("VNL_K8S_NAMESPACE").ok(),
+            application_name: env::var("VNL_APPLICATION_NAME").ok(),
             default_home_storage_class: env::var("VNL_DEFAULT_HOME_STORAGE_CLASS").ok(),
             default_home_access_mode: env::var("VNL_DEFAULT_HOME_ACCESS_MODE").ok(),
             default_project_storage_class: env::var("VNL_DEFAULT_PROJECT_STORAGE_CLASS").ok(),

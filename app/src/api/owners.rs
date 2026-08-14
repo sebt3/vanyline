@@ -86,7 +86,7 @@ pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, Ap
                     home_storage_class: state.config.default_home_storage_class.clone(),
                     home_access_mode: state.config.default_home_access_mode.clone(),
                     project_defaults,
-                    application_ref: None,
+                    application_ref: state.config.application_name.clone(),
                     egress: Vec::new(),
                 },
             )

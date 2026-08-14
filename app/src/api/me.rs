@@ -53,6 +53,7 @@ mod tests {
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
             k8s_namespace: None,
+            application_name: None,
             default_home_storage_class: None,
             default_home_access_mode: None,
             default_project_storage_class: None,

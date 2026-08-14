@@ -198,6 +198,15 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
             value: Some(app.namespace().unwrap_or_else(|| "default".to_string())),
             ..Default::default()
         },
+        // Nom de cette CR Application elle-même — `app` s'en sert pour poser
+        // `applicationRef` sur les Owner qu'il crée lazily (ensure_owner),
+        // condition nécessaire à l'exposition publique des Sandboxes
+        // (`{sandbox}.sandboxes.{application.host}`, cf. ws_ticket).
+        EnvVar {
+            name: "VNL_APPLICATION_NAME".to_string(),
+            value: Some(app.name_any()),
+            ..Default::default()
+        },
     ];
     // Défauts de stockage (storageClass/accessMode) posés en env, seulement
     // si présents — `app` les lit pour ses créations lazily d'Owner/Project
@@ -847,8 +856,8 @@ mod tests {
         let env = container.env.as_ref().expect("should have env");
         assert_eq!(
             env.len(),
-            9,
-            "expected 9 environment variables, got {}",
+            10,
+            "expected 10 environment variables, got {}",
             env.len()
         );
 
@@ -870,6 +879,11 @@ mod tests {
         let vnl_ns = find("VNL_K8S_NAMESPACE");
         assert_eq!(vnl_ns.value, Some("ns".to_string()));
         assert!(vnl_ns.value_from.is_none());
+
+        // VNL_APPLICATION_NAME
+        let vnl_app_name = find("VNL_APPLICATION_NAME");
+        assert_eq!(vnl_app_name.value, Some("demo".to_string()));
+        assert!(vnl_app_name.value_from.is_none());
 
         // OIDC_ISSUER_URL (name=issuerUrl)
         let oidc_issuer = find("OIDC_ISSUER_URL");
