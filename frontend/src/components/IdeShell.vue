@@ -7,6 +7,7 @@ import Workflow from './panels/Workflow.vue';
 import Chat from './panels/Chat.vue';
 import Terminal from './panels/Terminal.vue';
 import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
+import { debounce, loadLayout, saveLayout } from './ideLayoutPersistence';
 
 const props = defineProps<{ sandboxName: string }>();
 
@@ -45,9 +46,7 @@ const components = {
   terminal: Terminal,
 } as unknown as Record<string, VueComponent>;
 
-function onReady(event: DockviewReadyEvent) {
-  const { api } = event;
-
+function addDefaultPanels(api: DockviewReadyEvent['api']) {
   api.addPanel({
     id: 'explorer',
     component: 'explorer',
@@ -86,6 +85,25 @@ function onReady(event: DockviewReadyEvent) {
   });
 
   api.getPanel('editor')?.api.setActive();
+}
+
+function onReady(event: DockviewReadyEvent) {
+  const { api } = event;
+
+  // Répartition sauvegardée pour cette sandbox : la restaurer plutôt que
+  // rebâtir le layout par défaut. Un layout absent/corrompu retombe sur le
+  // layout par défaut sans planter (cf. loadLayout).
+  const saved = loadLayout(props.sandboxName);
+  if (saved) {
+    api.fromJSON(saved);
+  } else {
+    addDefaultPanels(api);
+  }
+
+  // onDidLayoutChange se déclenche à chaque frame d'un drag — anti-rebond
+  // avant d'écrire dans localStorage.
+  const persist = debounce(() => saveLayout(props.sandboxName, api.toJSON()), 400);
+  api.onDidLayoutChange(persist);
 }
 </script>
 
