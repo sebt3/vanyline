@@ -170,3 +170,40 @@ Même limite pour tout PVC déjà provisionné avec un `accessModes` devenu
 incompatible (le champ est immuable une fois le PVC créé) : supprimer le pod
 qui le référence, puis le PVC lui-même, avant de retrigger le reconcile du
 parent (Owner/Project) qui le recrée avec la bonne valeur.
+
+## 7. Champ requis à la création d'une Application : `ingressController`
+
+Piège vécu (2026-08-14) : sans ce champ, l'ingress public de **toute**
+sandbox de cette Application timeout en 504 sur **toute** requête (pas
+spécifique au WebSocket) — le terminal et l'explorateur de fichiers
+semblent "ne pas marcher" alors que le code frontend/sandbox est correct.
+
+Cause : `build_sandbox_netpol` (`controller/src/sandbox.rs`) n'autorise
+l'ingress vers le pod sandbox que depuis (1) les pods du même Owner et (2)
+le pod `app` — jamais depuis le controller d'Ingress lui-même (Traefik),
+sauf si `Application.spec.ingressController` est renseigné. Ce champ n'est
+**pas auto-détecté** : il se règle manuellement à la création de
+l'Application, exactement comme `ingressClassName`/`tlsIssuerName` — donc
+à poser en même temps que ces deux-là, jamais après coup en réaction à un
+symptôme :
+
+```yaml
+spec:
+  ingressClassName: traefik
+  tlsIssuerName: self-sign
+  ingressController:
+    namespace: kydah-core        # namespace des pods Traefik
+    podLabels:
+      app.kubernetes.io/name: traefik
+```
+
+Si le champ manque sur une Application déjà créée, le patcher et forcer le
+reconcile de chaque Sandbox concernée (la NetworkPolicy sandbox n'est
+recalculée qu'au reconcile de la Sandbox, pas automatiquement au patch de
+l'Application) :
+
+```bash
+kubectl -n media-test patch application.vanyline.solidite.fr <name> --type merge \
+  -p '{"spec":{"ingressController":{"namespace":"kydah-core","podLabels":{"app.kubernetes.io/name":"traefik"}}}}'
+kubectl -n media-test annotate sandbox.vanyline.solidite.fr <name> reconcile-trigger="$(date +%s)" --overwrite
+```
