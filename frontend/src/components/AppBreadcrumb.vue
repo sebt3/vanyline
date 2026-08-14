@@ -9,11 +9,25 @@ const route = useRoute();
 const segments = computed<[string, string][]>(() => {
   // '/'          → [['Accueil', '/']]
   // '/p/:project' → [['Accueil', '/'], [projectName, '/p/' + projectName]]
+  // '/p/:project/s/:sandbox' → [['Accueil', '/'], [projectName, '/p/' + projectName],
+  //                              [sandboxName, '/p/' + projectName + '/s/' + sandboxName]]
   // '/settings'   → [['Accueil', '/'], ['Paramètres', '/settings'],
   //                   [activeNav.groupLabel, '/settings'],
   //                   [activeNav.screenLabel, '/settings']]
   if (route.path === '/') {
     return [['Accueil', '/']];
+  }
+
+  if (route.name === 'ide') {
+    const projectName =
+      typeof route.params.projectName === 'string' ? route.params.projectName : '';
+    const sandboxName =
+      typeof route.params.sandboxName === 'string' ? route.params.sandboxName : '';
+    return [
+      ['Accueil', '/'],
+      [projectName, `/p/${projectName}`],
+      [sandboxName, `/p/${projectName}/s/${sandboxName}`],
+    ];
   }
 
   if (route.name === 'project') {

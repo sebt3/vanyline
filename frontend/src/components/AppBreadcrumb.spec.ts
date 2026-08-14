@@ -69,6 +69,22 @@ describe('AppBreadcrumb', () => {
     expect(wrapper.find('.current').text()).toBe('Fournisseurs LLM');
   });
 
+  it('affiche Accueil / projectName / sandboxName sur /p/:projectName/s/:sandboxName', async () => {
+    const wrapper = mountBreadcrumb();
+    await wrapper.vm.$router.push('/p/foo/s/bar');
+    await wrapper.vm.$router.isReady();
+    expect(wrapper.text()).toContain('Accueil');
+    expect(wrapper.text()).toContain('foo');
+    expect(wrapper.text()).toContain('bar');
+
+    // 2 liens : Accueil, foo. "bar" est le dernier segment → texte simple, pas un lien.
+    const links = wrapper.findAll('a');
+    expect(links.length).toBe(2);
+    expect(links[0].attributes('href')).toBe('/');
+    expect(links[1].attributes('href')).toBe('/p/foo');
+    expect(wrapper.find('.current').text()).toBe('bar');
+  });
+
   it('affiche Agents quand activeNav est modifié', async () => {
     activeNav.value = { groupLabel: 'Agents', screenLabel: 'Agents' };
 
