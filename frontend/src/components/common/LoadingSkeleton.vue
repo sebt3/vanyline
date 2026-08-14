@@ -9,7 +9,7 @@
 <style scoped>
 .skeleton-card {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 22px 28px;
   max-width: 760px;
   padding: 28px 32px;

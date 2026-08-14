@@ -1,10 +1,13 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import {
-  DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogClose,
-} from 'reka-ui';
+import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
+import { useCrudResource } from '../../composables/useCrudResource';
+import LoadingSkeleton from '../common/LoadingSkeleton.vue';
+import ErrorCard from '../common/ErrorCard.vue';
+import EmptyState from '../common/EmptyState.vue';
+import DialogShell from '../common/DialogShell.vue';
 
 interface ProjectSpec {
   owner: string;
@@ -25,26 +28,12 @@ interface CreateProjectBody {
 
 const client = createApiClient();
 const router = useRouter();
+const resource = useCrudResource<Project>(client, '/api/projects');
+const { items: fetchedProjects, loading, error } = resource;
 
 function openProject(name: string) {
   router.push(`/p/${name}`);
 }
-
-const fetchedProjects = ref<Project[]>([]);
-const error = ref<string | null>(null);
-const loading = ref(true);
-
-async function fetchProjects() {
-  try {
-    fetchedProjects.value = await client.get<Project[]>('/api/projects');
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-onMounted(fetchProjects);
 
 const formName = ref('');
 const formRepo = ref('');
@@ -52,6 +41,8 @@ const formBranch = ref('');
 const creationError = ref<string | null>(null);
 
 const modalOpen = ref(false);
+
+onMounted(resource.fetch);
 
 async function createProject() {
   creationError.value = null;
@@ -61,24 +52,18 @@ async function createProject() {
     defaultBranch: formBranch.value || undefined,
   };
   try {
-    await client.post<Project>('/api/projects', body);
+    await resource.create(body);
     formName.value = '';
     formRepo.value = '';
     formBranch.value = '';
     modalOpen.value = false;
-    await fetchProjects();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
 async function deleteProject(name: string) {
-  try {
-    await client.delete(`/api/projects/${name}`);
-    await fetchProjects();
-  } catch (e) {
-    creationError.value = e instanceof ApiError ? e.message : String(e);
-  }
+  await resource.remove(name);
 }
 </script>
 
@@ -90,17 +75,11 @@ async function deleteProject(name: string) {
       <button class="btn btn-settings" @click="router.push('/settings')">Paramètres</button>
     </div>
 
-    <div v-if="loading" class="card">
-      <div class="skeleton" />
-      <div class="skeleton short" />
-      <div class="skeleton short" />
-    </div>
+    <LoadingSkeleton v-if="loading" />
     <div v-else>
-      <div class="card" v-if="error" role="alert">
-        <p class="error-text">{{ error }}</p>
-      </div>
+      <ErrorCard v-if="error" :message="error" />
       <div v-else>
-        <div class="card" v-if="fetchedProjects.length === 0">Aucun projet.</div>
+        <EmptyState v-if="fetchedProjects.length === 0" message="Aucun projet." />
         <table class="table" v-else>
           <thead>
             <tr>
@@ -126,49 +105,43 @@ async function deleteProject(name: string) {
         </table>
       </div>
 
-      <DialogRoot v-model:open="modalOpen">
-        <DialogPortal>
-          <DialogOverlay class="dialog-overlay" />
-          <DialogContent class="dialog-content" role="dialog">
-            <DialogTitle class="dialog-title">Créer un projet</DialogTitle>
-            <label class="field">
-              <span class="field-label">Nom</span>
-              <input
-                class="field-input"
-                v-model="formName"
-                type="text"
-                placeholder="mon-projet"
-                aria-label="Nom du projet"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Repo URL</span>
-              <input
-                class="field-input"
-                v-model="formRepo"
-                type="text"
-                placeholder="https://github.com/org/repo"
-                aria-label="URL du dépôt"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Branche par défaut</span>
-              <input
-                class="field-input"
-                v-model="formBranch"
-                type="text"
-                placeholder="main (optionnel)"
-                aria-label="Branche par défaut"
-              />
-            </label>
-            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-            <div class="dialog-actions">
-              <button class="btn btn-create" @click="createProject">Créer</button>
-              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
-            </div>
-          </DialogContent>
-        </DialogPortal>
-      </DialogRoot>
+      <DialogShell v-model:open="modalOpen" title="Créer un projet">
+        <label class="field">
+          <span class="field-label">Nom</span>
+          <input
+            class="field-input"
+            v-model="formName"
+            type="text"
+            placeholder="mon-projet"
+            aria-label="Nom du projet"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Repo URL</span>
+          <input
+            class="field-input"
+            v-model="formRepo"
+            type="text"
+            placeholder="https://github.com/org/repo"
+            aria-label="URL du dépôt"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Branche par défaut</span>
+          <input
+            class="field-input"
+            v-model="formBranch"
+            type="text"
+            placeholder="main (optionnel)"
+            aria-label="Branche par défaut"
+          />
+        </label>
+        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+        <template #actions>
+          <button class="btn btn-create" @click="createProject">Créer</button>
+          <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+        </template>
+      </DialogShell>
     </div>
   </div>
 </template>
@@ -190,35 +163,6 @@ h1 {
   display: flex;
   gap: 12px;
   margin-bottom: 24px;
-}
-
-.card {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.card .error-text {
-  color: #e85d5d;
-  font-size: 13px;
-  margin: 0;
-}
-
-.skeleton {
-  height: 16px;
-  border-radius: 4px;
-  background: linear-gradient(90deg, #1a2332 25%, #1f2b3d 50%, #1a2332 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-}
-.skeleton.short {
-  width: 60%;
 }
 
 .table {
@@ -343,43 +287,5 @@ h1 {
   font-size: 12px;
   margin-top: 4px;
   margin-bottom: 12px;
-}
-</style>
-
-<style>
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  z-index: 1000;
-}
-
-[role='dialog'] {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 1001;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  padding: 24px 28px;
-  max-width: 480px;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.dialog-title {
-  margin: 0 0 16px 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: #e6e9f0;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 12px;
 }
 </style>
