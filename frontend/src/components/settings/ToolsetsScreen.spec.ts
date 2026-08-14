@@ -1,14 +1,16 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { mount } from '@vue/test-utils';
 import ToolsetsScreen from './ToolsetsScreen.vue';
 
+beforeEach(() => {
+  vi.restoreAllMocks();
+  // Nettoyer le body après chaque test (téléport reka-ui)
+  const dialogs = document.body.querySelectorAll('[role="dialog"]');
+  dialogs.forEach((d) => d.remove());
+});
+
 describe('ToolsetsScreen', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockReset();
-  });
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   function jsonResponse(data: unknown): Response {
@@ -21,6 +23,7 @@ describe('ToolsetsScreen', () => {
   // Helper function to create a simple route handler
   type RouteFn = (url: string, init: RequestInit | undefined) => Response | undefined;
   function mockFetch(route: RouteFn): void {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
       const urlStr = String(url);
       const result = route(urlStr, init);
@@ -94,16 +97,33 @@ describe('ToolsetsScreen', () => {
     const wrapper = mount(ToolsetsScreen);
     await new Promise(r => setTimeout(r, 50));
 
-    const nameInput = wrapper.find<HTMLInputElement>('input[aria-label="Nom du toolset"]');
-    await nameInput.setValue('new-toolset');
-
-    const allCheckboxes = wrapper.findAll<HTMLInputElement>('input[type="checkbox"]');
-    expect(allCheckboxes.length).toBe(2);
-    await allCheckboxes[0].setValue(true);
-    await allCheckboxes[1].setValue(true);
-
+    // Ouvrir la modale de création
     const createBtn = wrapper.find('.btn-create');
     await createBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 10));
+
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+
+    // Remplir les champs du dialog
+    const nameInput = dialog!.querySelector<HTMLInputElement>('input[aria-label="Nom du toolset"]');
+    nameInput!.value = 'new-toolset';
+    nameInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    nameInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+
+    const checkboxes = dialog!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(checkboxes.length).toBe(2);
+    checkboxes[0].checked = true;
+    checkboxes[0].dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+    checkboxes[1].checked = true;
+    checkboxes[1].dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+
+    // Cliquer Créer du dialog
+    const dialogCreateBtn = dialog!.querySelector<HTMLButtonElement>('.btn-create');
+    await dialogCreateBtn!.click();
     await new Promise(r => setTimeout(r, 50));
 
     expect(postBody).toEqual({
@@ -111,6 +131,9 @@ describe('ToolsetsScreen', () => {
       local_tools: ['a', 'b'],
       mcp: [],
     });
+
+    // Dialog fermé
+    expect((wrapper.vm as any).createModalOpen).toBe(false);
   });
 
   // ── Test 3 : Create — mcp row + tools ──────────────────────────────────────
@@ -142,26 +165,49 @@ describe('ToolsetsScreen', () => {
     const wrapper = mount(ToolsetsScreen);
     await new Promise(r => setTimeout(r, 50));
 
-    const nameInput = wrapper.find<HTMLInputElement>('input[aria-label="Nom du toolset"]');
-    await nameInput.setValue('mcp-toolset');
-    await wrapper.findAll('input[type="checkbox"]')[0].setValue(true);
-
-    const addBtn = wrapper.find('.btn-add');
-    await addBtn.trigger('click');
-    await new Promise(r => setTimeout(r, 10));
-
-    const selects = wrapper.findAll<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
-    expect(selects.length).toBe(1);
-    await selects[0].setValue('code-server');
-    await new Promise(r => setTimeout(r, 10));
-
-    const toolCheckboxes = wrapper.findAll('input[type="checkbox"]');
-    expect(toolCheckboxes.length).toBe(4);
-    await toolCheckboxes[1].setValue(true);
-    await toolCheckboxes[2].setValue(true);
-
+    // Ouvrir la modale
     const createBtn = wrapper.find('.btn-create');
     await createBtn.trigger('click');
+    await new Promise(r => setTimeout(r, 10));
+
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+
+    // Remplir le nom et cocher 1 local tool
+    const nameInput = dialog!.querySelector<HTMLInputElement>('input[aria-label="Nom du toolset"]');
+    nameInput!.value = 'mcp-toolset';
+    nameInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    nameInput!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+    const firstCheckbox = dialog!.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+    firstCheckbox.checked = true;
+    firstCheckbox.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+
+    // Ajouter un serveur MCP
+    const addBtn = dialog!.querySelector<HTMLButtonElement>('button.btn-add');
+    await addBtn!.click();
+    await new Promise(r => setTimeout(r, 10));
+
+    // Choisir le serveur
+    const select = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
+    select!.value = 'code-server';
+    select!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+
+    // Cocher 2 MCP tools (checkboxes[1] = 'diff', checkboxes[2] = 'status')
+    const allCheckboxes = dialog!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]');
+    expect(allCheckboxes.length).toBe(4);
+    allCheckboxes[1].checked = true;
+    allCheckboxes[1].dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 20));
+    allCheckboxes[2].checked = true;
+    allCheckboxes[2].dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 20));
+
+    // Cliquer Créer du dialog
+    const dialogCreateBtn = dialog!.querySelector<HTMLButtonElement>('.btn-create');
+    await dialogCreateBtn!.click();
     await new Promise(r => setTimeout(r, 50));
 
     expect(postBody).toEqual({
@@ -169,6 +215,8 @@ describe('ToolsetsScreen', () => {
       local_tools: ['git'],
       mcp: [{ server: 'code-server', tools: ['diff', 'status'] }],
     });
+
+    expect((wrapper.vm as any).createModalOpen).toBe(false);
   });
 
   // ── Test 4 : État vide mcp ─────────────────────────────────────────────────
@@ -191,17 +239,29 @@ describe('ToolsetsScreen', () => {
     const wrapper = mount(ToolsetsScreen);
     await new Promise(r => setTimeout(r, 50));
 
-    const addBtn = wrapper.find('.btn-add');
-    await addBtn.trigger('click');
+    // Ouvrir la modale
+    const createBtn = wrapper.find('.btn-create');
+    await createBtn.trigger('click');
     await new Promise(r => setTimeout(r, 10));
 
-    const selects = wrapper.findAll<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
-    await selects[0].setValue('empty-srv');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+
+    // Ajouter un serveur MCP via le dialog
+    const addBtn = dialog!.querySelector<HTMLButtonElement>('button.btn-add');
+    await addBtn!.click();
     await new Promise(r => setTimeout(r, 10));
 
-    expect(wrapper.text()).toContain('Aucun outil disponible');
-    expect(wrapper.findAll('input[type="checkbox"]').length).toBe(1);
-    expect(wrapper.findAll('p.empty-state').length).toBe(1);
+    // Choisir le serveur
+    const select = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
+    select!.value = 'empty-srv';
+    select!.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 10));
+
+    // Vérifier dans le dialog téléporté
+    expect(dialog!.textContent).toContain('Aucun outil disponible');
+    expect(dialog!.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').length).toBe(1);
+    expect(dialog!.querySelectorAll('p.empty-state').length).toBe(1);
   });
 
   // ── Test 5 : Edit — chargement + sauvegarde ────────────────────────────────
@@ -256,33 +316,45 @@ describe('ToolsetsScreen', () => {
     const wrapper = mount(ToolsetsScreen);
     await new Promise(r => setTimeout(r, 50));
 
+    // Cliquer "Modifier" sur une ligne
     const editBtn = wrapper.find('.btn-edit');
     await editBtn.trigger('click');
     await new Promise(r => setTimeout(r, 50));
 
-    const editForms = wrapper.findAll<HTMLInputElement>('.form-card');
-    expect(editForms.length).toBe(2);
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
 
-    const allTextareas = wrapper.findAll<HTMLTextAreaElement>('textarea[aria-label="Description"]');
-    expect(allTextareas.length).toBeGreaterThanOrEqual(1);
-    const editDesc = allTextareas[1];
-    const editPrompt = wrapper.findAll<HTMLTextAreaElement>('textarea[aria-label="Prompt"]')[1];
+    // Trouver les textareas dans le dialog
+    const allTextareas = dialog!.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label="Description"]');
+    expect(allTextareas.length).toBe(1);
+    const editDesc = allTextareas[0];
+    const allPromptTextareas = dialog!.querySelectorAll<HTMLTextAreaElement>('textarea[aria-label="Prompt"]');
+    expect(allPromptTextareas.length).toBe(1);
+    const editPrompt = allPromptTextareas[0];
 
-    await editDesc.setValue('update-desc');
-    await editDesc.trigger('change');
+    // Vérifier les valeurs pré-remplies
+    expect((editDesc as HTMLTextAreaElement).value).toBe('old-desc');
+    expect((editPrompt as HTMLTextAreaElement).value).toBe('old-prompt');
+
+    // Modifier les valeurs
+    (editDesc as HTMLTextAreaElement).value = 'update-desc';
+    editDesc!.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise(r => setTimeout(r, 10));
 
-    await editPrompt.setValue('update-prompt');
-    await editPrompt.trigger('change');
+    (editPrompt as HTMLTextAreaElement).value = 'update-prompt';
+    editPrompt!.dispatchEvent(new Event('input', { bubbles: true }));
     await new Promise(r => setTimeout(r, 10));
 
-    const saveBtn = wrapper.find('.btn-success');
-    await saveBtn.trigger('click');
+    // Cliquer Sauvegarder du dialog
+    const saveBtn = dialog!.querySelector<HTMLButtonElement>('.btn-success')!;
+    await saveBtn.click();
     await new Promise(r => setTimeout(r, 50));
 
     expect(putName).toBe('default');
     expect(putDesc).toBe('update-desc');
     expect(putPrompt).toBe('update-prompt');
+
+    expect((wrapper.vm as any).editModalOpen).toBe(false);
   });
 
   // ── Test 6 : Edit — dépendance serveur → reset tools ───────────────────────
@@ -323,33 +395,45 @@ describe('ToolsetsScreen', () => {
     const wrapper = mount(ToolsetsScreen);
     await new Promise(r => setTimeout(r, 50));
 
+    // Cliquer "Modifier"
     const editBtn = wrapper.find('.btn-edit');
     await editBtn.trigger('click');
     await new Promise(r => setTimeout(r, 50));
 
-    const selectEl = wrapper.find<HTMLSelectElement>('select[aria-label="Serveur MCP"]');
-    expect((selectEl.element as HTMLSelectElement).value).toBe('server-a');
+    const dialog = document.querySelector('[role="dialog"]');
+    expect(dialog).toBeTruthy();
+
+    const selectEl = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Serveur MCP"]')!;
+    expect(selectEl.value).toBe('server-a');
 
     const vm = wrapper.vm as any;
     expect(vm.editMcp).toHaveLength(1);
     expect(vm.editMcp[0].tools).toEqual(['tool1', 'tool2']);
 
-    await selectEl.setValue('server-b');
+    // Changer de serveur
+    (selectEl as HTMLSelectElement).value = 'server-b';
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 10));
 
     expect(vm.editMcp[0].tools).toEqual([]);
 
-    await selectEl.setValue('server-a');
+    // Relancer change pour trigger le pattern test
+    selectEl.value = 'server-a';
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 10));
-    await selectEl.setValue('server-b');
+    selectEl.value = 'server-b';
+    selectEl.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise(r => setTimeout(r, 10));
 
-    const saveBtn = wrapper.find('.btn-success');
-    await saveBtn.trigger('click');
+    // Cliquer Sauvegarder du dialog
+    const saveBtn = dialog!.querySelector<HTMLButtonElement>('.btn-success')!;
+    await saveBtn.click();
     await new Promise(r => setTimeout(r, 50));
 
     expect(putMcpData?.server).toBe('server-b');
     expect(putMcpData?.tools).toEqual([]);
+
+    expect(vm.editModalOpen).toBe(false);
   });
 
   // ── Test 7 : Supprimer ─────────────────────────────────────────────────────

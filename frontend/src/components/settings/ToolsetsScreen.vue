@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import {
+  DialogRoot, DialogPortal, DialogContent, DialogTitle, DialogClose,
+} from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 
 interface McpSelection {
@@ -64,6 +67,10 @@ const editPrompt = ref('');
 const editLocalTools = ref<string[]>([]);
 const editMcp = ref<McpSelection[]>([]);
 const editError = ref<string | null>(null);
+
+// Modales
+const createModalOpen = ref(false);
+const editModalOpen = ref(false);
 
 async function fetchToolsets() {
   try {
@@ -137,6 +144,7 @@ async function createToolset() {
     formPrompt.value = '';
     formLocalTools.value = [];
     formMcp.value = [];
+    createModalOpen.value = false;
     await fetchToolsets();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
@@ -150,6 +158,7 @@ function startEdit(toolset: Toolset) {
   editLocalTools.value = [...toolset.local_tools];
   editMcp.value = toolset.mcp.map((m) => ({ server: m.server, tools: m.tools ?? [] }));
   editError.value = null;
+  editModalOpen.value = true;
 }
 
 function cancelEdit() {
@@ -159,6 +168,7 @@ function cancelEdit() {
   editLocalTools.value = [];
   editMcp.value = [];
   editError.value = null;
+  editModalOpen.value = false;
 }
 
 async function saveEdit(name: string) {
@@ -227,131 +237,142 @@ async function deleteToolset(name: string) {
         </tbody>
       </table>
 
-      <div class="card form-card">
-        <h3 class="form-title">Créer un toolset</h3>
-        <label class="field">
-          <span class="field-label">Nom</span>
-          <input
-            class="field-input"
-            v-model="formName"
-            type="text"
-            placeholder="mon-toolset"
-            aria-label="Nom du toolset"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Description</span>
-          <textarea
-            class="field-input"
-            v-model="formDescription"
-            rows="2"
-            placeholder="Description optionnelle"
-            aria-label="Description"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Prompt</span>
-          <textarea
-            class="field-input"
-            v-model="formPrompt"
-            rows="3"
-            placeholder="Prompt optionnel"
-            aria-label="Prompt"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Local tools</span>
-          <div class="checkbox-list">
-            <label v-for="t in localTools" :key="t.name" class="checkbox-item">
-              <input type="checkbox" :value="t.name" v-model="formLocalTools" />
-              <span>{{ t.name }}</span>
-            </label>
-          </div>
-        </label>
-        <label class="field">
-          <span class="field-label">Serveurs MCP</span>
-          <div v-for="(sel, i) in formMcp" :key="i" class="mcp-row">
-            <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onMcpServerChange(i)">
-              <option value="">—</option>
-              <option v-for="s in mcpServers" :key="s.name" :value="s.name">{{ s.name }}</option>
-            </select>
-            <div class="checkbox-list">
-              <label v-for="tools in mcpToolsForServer(sel.server)" :key="tools" class="checkbox-item">
-                <input type="checkbox" :value="tools" v-model="sel.tools" />
-                <span>{{ tools }}</span>
-              </label>
-            </div>
-            <p v-if="sel.server && mcpToolsForServer(sel.server).length === 0" class="empty-state">
-              Aucun outil disponible — lancez un test sur ce serveur MCP.
-            </p>
-            <button class="btn btn-cancel" @click="removeMcpRow(i)">Retirer</button>
-          </div>
-          <button class="btn btn-add" @click="addMcpRow">Ajouter un serveur</button>
-        </label>
-        <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
-        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-        <button class="btn btn-create" @click="createToolset">Créer</button>
-      </div>
+      <button class="btn btn-create" @click="createModalOpen = true">Créer un toolset</button>
 
-      <template v-for="t in fetchedToolsets" :key="'edit-' + t.name">
-        <div v-if="t.name === editingName" class="card form-card">
-          <h3 class="form-title">Modifier : {{ t.name }}</h3>
-          <label class="field">
-            <span class="field-label">Description</span>
-            <textarea
-              class="field-input"
-              v-model="editDescription"
-              rows="2"
-              placeholder="Description"
-              aria-label="Description"
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">Prompt</span>
-            <textarea
-              class="field-input"
-              v-model="editPrompt"
-              rows="3"
-              placeholder="Prompt"
-              aria-label="Prompt"
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">Local tools</span>
-            <div class="checkbox-list">
-              <label v-for="t in localTools" :key="t.name" class="checkbox-item">
-                <input type="checkbox" :value="t.name" v-model="editLocalTools" />
-                <span>{{ t.name }}</span>
-              </label>
-            </div>
-          </label>
-          <label class="field">
-            <span class="field-label">Serveurs MCP</span>
-            <div v-for="(sel, i) in editMcp" :key="i" class="mcp-row">
-              <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onEditMcpServerChange(i)">
-                <option value="">—</option>
-                <option v-for="s in mcpServers" :key="s.name" :value="s.name">{{ s.name }}</option>
-              </select>
+      <DialogRoot v-model:open="createModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Créer un toolset</DialogTitle>
+            <label class="field">
+              <span class="field-label">Nom</span>
+              <input
+                class="field-input"
+                v-model="formName"
+                type="text"
+                placeholder="mon-toolset"
+                aria-label="Nom du toolset"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Description</span>
+              <textarea
+                class="field-input"
+                v-model="formDescription"
+                rows="2"
+                placeholder="Description optionnelle"
+                aria-label="Description"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Prompt</span>
+              <textarea
+                class="field-input"
+                v-model="formPrompt"
+                rows="3"
+                placeholder="Prompt optionnel"
+                aria-label="Prompt"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Local tools</span>
               <div class="checkbox-list">
-                <label v-for="tools in mcpToolsForServer(sel.server)" :key="tools" class="checkbox-item">
-                  <input type="checkbox" :value="tools" v-model="sel.tools" />
-                  <span>{{ tools }}</span>
+                <label v-for="t in localTools" :key="t.name" class="checkbox-item">
+                  <input type="checkbox" :value="t.name" v-model="formLocalTools" />
+                  <span>{{ t.name }}</span>
                 </label>
               </div>
-              <p v-if="sel.server && mcpToolsForServer(sel.server).length === 0" class="empty-state">
-                Aucun outil disponible — lancez un test sur ce serveur MCP.
-              </p>
-              <button class="btn btn-cancel" @click="removeEditMcpRow(i)">Retirer</button>
+            </label>
+            <label class="field">
+              <span class="field-label">Serveurs MCP</span>
+              <div v-for="(sel, i) in formMcp" :key="i" class="mcp-row">
+                <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onMcpServerChange(i)">
+                  <option value="">—</option>
+                  <option v-for="s in mcpServers" :key="s.name" :value="s.name">{{ s.name }}</option>
+                </select>
+                <div class="checkbox-list">
+                  <label v-for="tools in mcpToolsForServer(sel.server)" :key="tools" class="checkbox-item">
+                    <input type="checkbox" :value="tools" v-model="sel.tools" />
+                    <span>{{ tools }}</span>
+                  </label>
+                </div>
+                <p v-if="sel.server && mcpToolsForServer(sel.server).length === 0" class="empty-state">
+                  Aucun outil disponible — lancez un test sur ce serveur MCP.
+                </p>
+                <button class="btn btn-cancel" @click="removeMcpRow(i)">Retirer</button>
+              </div>
+              <button class="btn btn-add" @click="addMcpRow">Ajouter un serveur</button>
+            </label>
+            <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
+            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-create" @click="createToolset">Créer</button>
+              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
             </div>
-            <button class="btn btn-add" @click="addEditMcpRow">Ajouter un serveur</button>
-          </label>
-          <div v-if="editError" class="creation-error">{{ editError }}</div>
-          <div class="edit-actions">
-            <button class="btn btn-success" @click="saveEdit(t.name)">Sauvegarder</button>
-            <button class="btn btn-cancel" @click="cancelEdit">Annuler</button>
-          </div>
-        </div>
-      </template>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
+
+      <DialogRoot v-model:open="editModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Modifier : {{ editingName }}</DialogTitle>
+            <label class="field">
+              <span class="field-label">Description</span>
+              <textarea
+                class="field-input"
+                v-model="editDescription"
+                rows="2"
+                placeholder="Description"
+                aria-label="Description"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Prompt</span>
+              <textarea
+                class="field-input"
+                v-model="editPrompt"
+                rows="3"
+                placeholder="Prompt"
+                aria-label="Prompt"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Local tools</span>
+              <div class="checkbox-list">
+                <label v-for="t in localTools" :key="t.name" class="checkbox-item">
+                  <input type="checkbox" :value="t.name" v-model="editLocalTools" />
+                  <span>{{ t.name }}</span>
+                </label>
+              </div>
+            </label>
+            <label class="field">
+              <span class="field-label">Serveurs MCP</span>
+              <div v-for="(sel, i) in editMcp" :key="i" class="mcp-row">
+                <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onEditMcpServerChange(i)">
+                  <option value="">—</option>
+                  <option v-for="s in mcpServers" :key="s.name" :value="s.name">{{ s.name }}</option>
+                </select>
+                <div class="checkbox-list">
+                  <label v-for="tools in mcpToolsForServer(sel.server)" :key="tools" class="checkbox-item">
+                    <input type="checkbox" :value="tools" v-model="sel.tools" />
+                    <span>{{ tools }}</span>
+                  </label>
+                </div>
+                <p v-if="sel.server && mcpToolsForServer(sel.server).length === 0" class="empty-state">
+                  Aucun outil disponible — lancez un test sur ce serveur MCP.
+                </p>
+                <button class="btn btn-cancel" @click="removeEditMcpRow(i)">Retirer</button>
+              </div>
+              <button class="btn btn-add" @click="addEditMcpRow">Ajouter un serveur</button>
+            </label>
+            <div v-if="editError" class="creation-error">{{ editError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
     </div>
   </div>
 </template>
@@ -555,5 +576,40 @@ async function deleteToolset(name: string) {
   color: #6a7185;
   font-size: 12px;
   margin: 4px 0;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.dialog-actions .btn:first-child {
+  margin-left: 0;
+}
+</style>
+
+<style>
+[role='dialog'] {
+  background: #101828;
+  border: 1px solid #1c1c2a;
+  border-radius: 10px;
+  padding: 24px 28px;
+  max-width: 480px;
+}
+
+.dialog-title {
+  margin: 0 0 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #e6e9f0;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 </style>
