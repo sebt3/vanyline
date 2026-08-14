@@ -8,6 +8,7 @@ import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import CheckboxList from '../common/CheckboxList.vue';
+import Field from '../common/Field.vue';
 
 interface McpSelection {
   server: string;
@@ -233,8 +234,7 @@ async function deleteToolset(name: string) {
       <ErrorCard v-if="optionsError" :message="optionsError" />
 
       <DialogShell v-model:open="createModalOpen" title="Créer un toolset">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom" top-align>
           <input
             class="field-input"
             v-model="formName"
@@ -242,9 +242,8 @@ async function deleteToolset(name: string) {
             placeholder="mon-toolset"
             aria-label="Nom du toolset"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Description</span>
+        </Field>
+        <Field label="Description" top-align>
           <textarea
             class="field-input"
             v-model="formDescription"
@@ -252,9 +251,8 @@ async function deleteToolset(name: string) {
             placeholder="Description optionnelle"
             aria-label="Description"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Prompt</span>
+        </Field>
+        <Field label="Prompt" top-align>
           <textarea
             class="field-input"
             v-model="formPrompt"
@@ -262,13 +260,11 @@ async function deleteToolset(name: string) {
             placeholder="Prompt optionnel"
             aria-label="Prompt"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Local tools</span>
+        </Field>
+        <Field label="Local tools" top-align>
           <CheckboxList :options="toOptions(localTools.map((t) => t.name))" v-model="formLocalTools" />
-        </label>
-        <label class="field">
-          <span class="field-label">Serveurs MCP</span>
+        </Field>
+        <Field label="Serveurs MCP" top-align>
           <div v-for="(sel, i) in formMcp" :key="i" class="mcp-row">
             <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onMcpServerChange(i)">
               <option value="">—</option>
@@ -281,7 +277,7 @@ async function deleteToolset(name: string) {
             <button class="btn btn-cancel" @click="removeMcpRow(i)">Retirer</button>
           </div>
           <button class="btn btn-add" @click="addMcpRow">Ajouter un serveur</button>
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createToolset">Créer</button>
@@ -290,8 +286,7 @@ async function deleteToolset(name: string) {
       </DialogShell>
 
       <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
-        <label class="field">
-          <span class="field-label">Description</span>
+        <Field label="Description" top-align>
           <textarea
             class="field-input"
             v-model="editDescription"
@@ -299,9 +294,8 @@ async function deleteToolset(name: string) {
             placeholder="Description"
             aria-label="Description"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Prompt</span>
+        </Field>
+        <Field label="Prompt" top-align>
           <textarea
             class="field-input"
             v-model="editPrompt"
@@ -309,13 +303,11 @@ async function deleteToolset(name: string) {
             placeholder="Prompt"
             aria-label="Prompt"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Local tools</span>
+        </Field>
+        <Field label="Local tools" top-align>
           <CheckboxList :options="toOptions(localTools.map((t) => t.name))" v-model="editLocalTools" />
-        </label>
-        <label class="field">
-          <span class="field-label">Serveurs MCP</span>
+        </Field>
+        <Field label="Serveurs MCP" top-align>
           <div v-for="(sel, i) in editMcp" :key="i" class="mcp-row">
             <select class="field-input" v-model="sel.server" aria-label="Serveur MCP" @change="onEditMcpServerChange(i)">
               <option value="">—</option>
@@ -328,7 +320,7 @@ async function deleteToolset(name: string) {
             <button class="btn btn-cancel" @click="removeEditMcpRow(i)">Retirer</button>
           </div>
           <button class="btn btn-add" @click="addEditMcpRow">Ajouter un serveur</button>
-        </label>
+        </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
           <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
@@ -394,37 +386,6 @@ async function deleteToolset(name: string) {
   color: #6a7185;
   border: 1px dashed #3a4a5e;
   padding: 4px 10px;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: start;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-  padding-top: 6px;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 
 .empty-state {

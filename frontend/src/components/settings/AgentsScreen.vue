@@ -8,6 +8,7 @@ import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import CheckboxList from '../common/CheckboxList.vue';
+import Field from '../common/Field.vue';
 
 type AgentMode = 'primary' | 'subagent' | 'all';
 type SkillSelection = 'auto' | 'none' | string[];
@@ -243,8 +244,7 @@ async function deleteAgent(name: string) {
       <ErrorCard v-if="optionsError" :message="optionsError" />
 
       <DialogShell v-model:open="createModalOpen" title="Créer un agent">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom" top-align>
           <input
             class="field-input"
             v-model="formName"
@@ -252,9 +252,8 @@ async function deleteAgent(name: string) {
             placeholder="mon-agent"
             aria-label="Nom de l'agent"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Description</span>
+        </Field>
+        <Field label="Description" top-align>
           <textarea
             class="field-input"
             v-model="formDescription"
@@ -262,9 +261,8 @@ async function deleteAgent(name: string) {
             placeholder="Description optionnelle"
             aria-label="Description"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Mode</span>
+        </Field>
+        <Field label="Mode" top-align>
           <select
             class="field-input"
             v-model="formMode"
@@ -274,20 +272,17 @@ async function deleteAgent(name: string) {
             <option value="subagent">subagent</option>
             <option value="all">all</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Profil de modèle</span>
+        </Field>
+        <Field label="Profil de modèle" top-align>
           <select class="field-input" v-model="formModel" aria-label="Profil de modèle">
             <option value="">—</option>
             <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Toolsets</span>
+        </Field>
+        <Field label="Toolsets" top-align>
           <CheckboxList :options="toOptions(toolsetOptions.map((t) => t.name))" v-model="formToolsets" />
-        </label>
-        <label class="field">
-          <span class="field-label">Skills</span>
+        </Field>
+        <Field label="Skills" top-align>
           <select
             class="field-input"
             v-model="formSkills"
@@ -296,9 +291,8 @@ async function deleteAgent(name: string) {
             <option value="auto">auto</option>
             <option value="none">none</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">System prompt</span>
+        </Field>
+        <Field label="System prompt" top-align>
           <textarea
             class="field-input"
             v-model="formSystemPrompt"
@@ -306,7 +300,7 @@ async function deleteAgent(name: string) {
             placeholder="Prompt système optionnel"
             aria-label="System prompt"
           />
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createAgent">Créer</button>
@@ -315,8 +309,7 @@ async function deleteAgent(name: string) {
       </DialogShell>
 
       <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
-        <label class="field">
-          <span class="field-label">Description</span>
+        <Field label="Description" top-align>
           <textarea
             class="field-input"
             v-model="editDescription"
@@ -324,9 +317,8 @@ async function deleteAgent(name: string) {
             placeholder="Description"
             aria-label="Description"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Mode</span>
+        </Field>
+        <Field label="Mode" top-align>
           <select
             class="field-input"
             v-model="editMode"
@@ -336,39 +328,30 @@ async function deleteAgent(name: string) {
             <option value="subagent">subagent</option>
             <option value="all">all</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Profil de modèle</span>
+        </Field>
+        <Field label="Profil de modèle" top-align>
           <select class="field-input" v-model="editModel" aria-label="Profil de modèle">
             <option value="">—</option>
             <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Toolsets</span>
+        </Field>
+        <Field label="Toolsets" top-align>
           <CheckboxList :options="toOptions(toolsetOptions.map((t) => t.name))" v-model="editToolsets" />
-        </label>
-        <template v-if="!editingSkillsIsList">
-          <label class="field">
-            <span class="field-label">Skills</span>
-            <select
-              class="field-input"
-              v-model="editSkills"
-              aria-label="Skills"
-            >
-              <option value="auto">auto</option>
-              <option value="none">none</option>
-            </select>
-          </label>
-        </template>
-        <template v-else>
-          <label class="field">
-            <span class="field-label">Skills</span>
-            <CheckboxList :options="toOptions(skillOptions.map((s) => s.name))" v-model="editSkillList" />
-          </label>
-        </template>
-        <label class="field">
-          <span class="field-label">System prompt</span>
+        </Field>
+        <Field v-if="!editingSkillsIsList" label="Skills" top-align>
+          <select
+            class="field-input"
+            v-model="editSkills"
+            aria-label="Skills"
+          >
+            <option value="auto">auto</option>
+            <option value="none">none</option>
+          </select>
+        </Field>
+        <Field v-else label="Skills" top-align>
+          <CheckboxList :options="toOptions(skillOptions.map((s) => s.name))" v-model="editSkillList" />
+        </Field>
+        <Field label="System prompt" top-align>
           <textarea
             class="field-input"
             v-model="editSystemPrompt"
@@ -376,7 +359,7 @@ async function deleteAgent(name: string) {
             placeholder="Prompt système"
             aria-label="System prompt"
           />
-        </label>
+        </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
           <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
@@ -439,36 +422,5 @@ async function deleteAgent(name: string) {
 .btn-cancel:hover {
   background: #26263a;
   color: white;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: start;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-  padding-top: 6px;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 </style>

@@ -7,6 +7,7 @@ import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
+import Field from '../common/Field.vue';
 
 interface ModelProfile {
   name: string;
@@ -211,8 +212,7 @@ async function deleteProfile(name: string) {
       <ErrorCard v-if="providersError" :message="providersError" />
 
       <DialogShell v-model:open="createModalOpen" title="Créer un profil">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom">
           <input
             class="field-input"
             v-model="formName"
@@ -220,9 +220,8 @@ async function deleteProfile(name: string) {
             placeholder="chat-moderate"
             aria-label="Nom du profil"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Provider</span>
+        </Field>
+        <Field label="Provider">
           <select
             class="field-input"
             v-model="formProvider"
@@ -234,9 +233,8 @@ async function deleteProfile(name: string) {
               {{ p.name }}
             </option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Modèle</span>
+        </Field>
+        <Field label="Modèle">
           <select
             class="field-input"
             v-model="formModel"
@@ -250,9 +248,8 @@ async function deleteProfile(name: string) {
           <p v-if="formProvider && formAvailableModels.length === 0" class="empty-state">
             Aucun modèle disponible — lancez un test sur ce provider.
           </p>
-        </label>
-        <label class="field">
-          <span class="field-label">Température (optionnel)</span>
+        </Field>
+        <Field label="Température (optionnel)">
           <input
             class="field-input"
             v-model="formTemperature"
@@ -263,9 +260,8 @@ async function deleteProfile(name: string) {
             placeholder="0.7"
             aria-label="Température"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Max tokens (optionnel)</span>
+        </Field>
+        <Field label="Max tokens (optionnel)">
           <input
             class="field-input"
             v-model="formMaxTokens"
@@ -273,7 +269,7 @@ async function deleteProfile(name: string) {
             placeholder="4096"
             aria-label="Max tokens"
           />
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createProfile">Créer</button>
@@ -282,8 +278,7 @@ async function deleteProfile(name: string) {
       </DialogShell>
 
       <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
-        <label class="field">
-          <span class="field-label">Provider</span>
+        <Field label="Provider">
           <select
             class="field-input"
             v-model="editProvider"
@@ -295,9 +290,8 @@ async function deleteProfile(name: string) {
               {{ p.name }}
             </option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Modèle</span>
+        </Field>
+        <Field label="Modèle">
           <select
             class="field-input"
             v-model="editModel"
@@ -311,9 +305,8 @@ async function deleteProfile(name: string) {
           <p v-if="editProvider && editAvailableModels.length === 0" class="empty-state">
             Aucun modèle disponible — lancez un test sur ce provider.
           </p>
-        </label>
-        <label class="field">
-          <span class="field-label">Température</span>
+        </Field>
+        <Field label="Température">
           <input
             class="field-input"
             v-model="editTemperature"
@@ -323,16 +316,15 @@ async function deleteProfile(name: string) {
             max="2"
             aria-label="Température"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Max tokens</span>
+        </Field>
+        <Field label="Max tokens">
           <input
             class="field-input"
             v-model="editMaxTokens"
             type="number"
             aria-label="Max tokens"
           />
-        </label>
+        </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
           <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
@@ -393,36 +385,6 @@ async function deleteProfile(name: string) {
 .btn-cancel:hover {
   background: #26263a;
   color: white;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 
 .empty-state {

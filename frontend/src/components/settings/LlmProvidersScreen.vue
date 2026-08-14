@@ -7,6 +7,7 @@ import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
+import Field from '../common/Field.vue';
 
 interface LlmProvider {
   id: string;
@@ -188,8 +189,7 @@ async function deleteProvider(id: string) {
       <button class="btn btn-create" @click="createModalOpen = true">Créer un fournisseur</button>
 
       <DialogShell v-model:open="createModalOpen" title="Créer un fournisseur">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom">
           <input
             class="field-input"
             v-model="formName"
@@ -197,9 +197,8 @@ async function deleteProvider(id: string) {
             placeholder="mon-fournisseur"
             aria-label="Nom du fournisseur"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Type</span>
+        </Field>
+        <Field label="Type">
           <select
             class="field-input"
             v-model="formProviderType"
@@ -208,9 +207,8 @@ async function deleteProvider(id: string) {
             <option value="ollama">ollama</option>
             <option value="openai-compatible">openai-compatible</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Endpoint</span>
+        </Field>
+        <Field label="Endpoint">
           <input
             class="field-input"
             v-model="formEndpoint"
@@ -218,9 +216,8 @@ async function deleteProvider(id: string) {
             placeholder="http://localhost:11434"
             aria-label="Endpoint"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Clé API (optionnel)</span>
+        </Field>
+        <Field label="Clé API (optionnel)">
           <input
             class="field-input"
             v-model="formApiKey"
@@ -228,7 +225,7 @@ async function deleteProvider(id: string) {
             placeholder="sk-..."
             aria-label="Clé API"
           />
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createProvider">Créer</button>
@@ -237,8 +234,7 @@ async function deleteProvider(id: string) {
       </DialogShell>
 
       <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editName}`">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom">
           <input
             class="field-input"
             v-model="editName"
@@ -246,9 +242,8 @@ async function deleteProvider(id: string) {
             placeholder="nom"
             aria-label="Nom"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Type</span>
+        </Field>
+        <Field label="Type">
           <select
             class="field-input"
             v-model="editProviderType"
@@ -257,9 +252,8 @@ async function deleteProvider(id: string) {
             <option value="ollama">ollama</option>
             <option value="openai-compatible">openai-compatible</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">Endpoint</span>
+        </Field>
+        <Field label="Endpoint">
           <input
             class="field-input"
             v-model="editEndpoint"
@@ -267,9 +261,8 @@ async function deleteProvider(id: string) {
             placeholder="http://localhost:11434"
             aria-label="Endpoint"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Clé API (optionnel)</span>
+        </Field>
+        <Field label="Clé API (optionnel)">
           <input
             class="field-input"
             v-model="editApiKey"
@@ -277,7 +270,7 @@ async function deleteProvider(id: string) {
             placeholder="sk-..."
             aria-label="Clé API"
           />
-        </label>
+        </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
           <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
@@ -375,36 +368,6 @@ async function deleteProvider(id: string) {
 .btn-cancel:hover {
   background: #26263a;
   color: white;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 
 .results {

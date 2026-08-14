@@ -70,3 +70,21 @@ body {
   margin-top: 4px;
   margin-bottom: 12px;
 }
+
+/* Contrôle d'un composant Field (frontend/src/components/common/Field.vue) —
+   authoré dans le template de l'écran appelant (contenu de slot), donc hors
+   d'atteinte du CSS scoped de Field lui-même. */
+.field-input {
+  width: 100%;
+  padding: 6px 10px;
+  background: #0c1420;
+  border: 1px solid #1c1c2a;
+  border-radius: 6px;
+  color: #e6e9f0;
+  font: inherit;
+  font-size: 13px;
+}
+.field-input:focus {
+  outline: none;
+  border-color: #4c90f0;
+}

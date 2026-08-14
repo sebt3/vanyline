@@ -8,6 +8,7 @@ import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
+import Field from '../common/Field.vue';
 
 interface ProjectSpec {
   owner: string;
@@ -106,8 +107,7 @@ async function deleteProject(name: string) {
       </div>
 
       <DialogShell v-model:open="modalOpen" title="Créer un projet">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom">
           <input
             class="field-input"
             v-model="formName"
@@ -115,9 +115,8 @@ async function deleteProject(name: string) {
             placeholder="mon-projet"
             aria-label="Nom du projet"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Repo URL</span>
+        </Field>
+        <Field label="Repo URL">
           <input
             class="field-input"
             v-model="formRepo"
@@ -125,9 +124,8 @@ async function deleteProject(name: string) {
             placeholder="https://github.com/org/repo"
             aria-label="URL du dépôt"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Branche par défaut</span>
+        </Field>
+        <Field label="Branche par défaut">
           <input
             class="field-input"
             v-model="formBranch"
@@ -135,7 +133,7 @@ async function deleteProject(name: string) {
             placeholder="main (optionnel)"
             aria-label="Branche par défaut"
           />
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createProject">Créer</button>
@@ -218,36 +216,5 @@ h1 {
 .btn-cancel:hover {
   background: #2b2b4a;
   color: #e6e9f0;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 </style>

@@ -7,6 +7,7 @@ import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
+import Field from '../common/Field.vue';
 
 interface McpServer {
   id: string;
@@ -141,8 +142,7 @@ async function deleteServer(id: string) {
       <button class="btn btn-create" @click="createModalOpen = true">Créer un serveur MCP</button>
 
       <DialogShell v-model:open="createModalOpen" title="Créer un serveur MCP">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom" top-align>
           <input
             class="field-input"
             v-model="formName"
@@ -150,9 +150,8 @@ async function deleteServer(id: string) {
             placeholder="mon-mcp-server"
             aria-label="Nom du serveur"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Type</span>
+        </Field>
+        <Field label="Type" top-align>
           <select
             class="field-input"
             v-model="formServerType"
@@ -161,9 +160,8 @@ async function deleteServer(id: string) {
             <option value="sse">sse</option>
             <option value="http-streamable">http-streamable</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">URL</span>
+        </Field>
+        <Field label="URL" top-align>
           <input
             class="field-input"
             v-model="formUrl"
@@ -171,7 +169,7 @@ async function deleteServer(id: string) {
             placeholder="https://example.com/mcp"
             aria-label="URL"
           />
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createServer">Créer</button>
@@ -180,8 +178,7 @@ async function deleteServer(id: string) {
       </DialogShell>
 
       <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editName}`">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom" top-align>
           <input
             class="field-input"
             v-model="editName"
@@ -189,9 +186,8 @@ async function deleteServer(id: string) {
             placeholder="Nom du serveur"
             aria-label="Nom du serveur"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Type</span>
+        </Field>
+        <Field label="Type" top-align>
           <select
             class="field-input"
             v-model="editServerType"
@@ -200,9 +196,8 @@ async function deleteServer(id: string) {
             <option value="sse">sse</option>
             <option value="http-streamable">http-streamable</option>
           </select>
-        </label>
-        <label class="field">
-          <span class="field-label">URL</span>
+        </Field>
+        <Field label="URL" top-align>
           <input
             class="field-input"
             v-model="editUrl"
@@ -210,7 +205,7 @@ async function deleteServer(id: string) {
             placeholder="https://example.com/mcp"
             aria-label="URL"
           />
-        </label>
+        </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
           <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
@@ -294,36 +289,5 @@ async function deleteServer(id: string) {
 .btn-cancel:hover {
   background: #26263a;
   color: white;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: start;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-  padding-top: 6px;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 </style>

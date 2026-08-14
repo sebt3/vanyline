@@ -8,6 +8,7 @@ import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
+import Field from '../common/Field.vue';
 
 interface Toolchain {
   name: string;
@@ -182,8 +183,7 @@ async function deleteSandbox(name: string) {
       </div>
 
       <DialogShell v-model:open="modalOpen" title="Créer une sandbox">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom">
           <input
             class="field-input"
             v-model="formName"
@@ -191,9 +191,8 @@ async function deleteSandbox(name: string) {
             placeholder="ma-sandbox"
             aria-label="Nom de la sandbox"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Branche</span>
+        </Field>
+        <Field label="Branche">
           <input
             class="field-input"
             v-model="formBranch"
@@ -201,7 +200,7 @@ async function deleteSandbox(name: string) {
             placeholder="main"
             aria-label="Branche"
           />
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" :disabled="!projectReady" @click="createSandbox">
@@ -345,36 +344,5 @@ h1 {
   color: #6a7185;
   font-size: 13px;
   margin: -12px 0 20px;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: center;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 </style>

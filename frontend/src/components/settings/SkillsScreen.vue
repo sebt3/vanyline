@@ -7,6 +7,7 @@ import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
+import Field from '../common/Field.vue';
 
 interface SkillMeta {
   name: string;
@@ -143,8 +144,7 @@ async function deleteSkill(name: string) {
       <button class="btn btn-create" @click="createModalOpen = true">Créer un skill</button>
 
       <DialogShell v-model:open="createModalOpen" title="Créer un skill">
-        <label class="field">
-          <span class="field-label">Nom</span>
+        <Field label="Nom" top-align>
           <input
             class="field-input"
             v-model="formName"
@@ -152,9 +152,8 @@ async function deleteSkill(name: string) {
             placeholder="git-skill"
             aria-label="Nom du skill"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Description</span>
+        </Field>
+        <Field label="Description" top-align>
           <textarea
             class="field-input"
             v-model="formDescription"
@@ -162,9 +161,8 @@ async function deleteSkill(name: string) {
             placeholder="Description optionnelle"
             aria-label="Description"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Body</span>
+        </Field>
+        <Field label="Body" top-align>
           <textarea
             class="field-input"
             v-model="formBody"
@@ -172,7 +170,7 @@ async function deleteSkill(name: string) {
             placeholder="Body du skill (optionnel)"
             aria-label="Body"
           />
-        </label>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createSkill">Créer</button>
@@ -181,8 +179,7 @@ async function deleteSkill(name: string) {
       </DialogShell>
 
       <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
-        <label class="field">
-          <span class="field-label">Description</span>
+        <Field label="Description" top-align>
           <textarea
             class="field-input"
             v-model="editDescription"
@@ -190,9 +187,8 @@ async function deleteSkill(name: string) {
             placeholder="Description"
             aria-label="Description"
           />
-        </label>
-        <label class="field">
-          <span class="field-label">Body</span>
+        </Field>
+        <Field label="Body" top-align>
           <textarea
             class="field-input"
             v-model="editBody"
@@ -200,7 +196,7 @@ async function deleteSkill(name: string) {
             placeholder="Body du skill"
             aria-label="Body"
           />
-        </label>
+        </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
           <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
@@ -255,36 +251,5 @@ async function deleteSkill(name: string) {
 .btn-cancel:hover {
   background: #26263a;
   color: white;
-}
-
-.field {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 8px 12px;
-  align-items: start;
-  margin-bottom: 12px;
-}
-
-.field-label {
-  font-size: 12px;
-  font-weight: 600;
-  color: #6a7185;
-  text-transform: uppercase;
-  padding-top: 6px;
-}
-
-.field-input {
-  width: 100%;
-  padding: 6px 10px;
-  background: #0c1420;
-  border: 1px solid #1c1c2a;
-  border-radius: 6px;
-  color: #e6e9f0;
-  font: inherit;
-  font-size: 13px;
-}
-.field-input:focus {
-  outline: none;
-  border-color: #4c90f0;
 }
 </style>
