@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
+import {
+  DialogRoot, DialogPortal, DialogContent, DialogTitle, DialogClose,
+} from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 
 interface SkillMeta {
@@ -41,6 +44,10 @@ const editDescription = ref('');
 const editBody = ref('');
 const editError = ref<string | null>(null);
 
+// Modales
+const createModalOpen = ref(false);
+const editModalOpen = ref(false);
+
 async function fetchSkills() {
   try {
     fetchedSkills.value = await client.get<SkillMeta[]>('/api/skills');
@@ -65,6 +72,7 @@ async function createSkill() {
     formName.value = '';
     formDescription.value = '';
     formBody.value = '';
+    createModalOpen.value = false;
     await fetchSkills();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
@@ -82,6 +90,7 @@ async function editSkill(name: string) {
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
+  editModalOpen.value = true;
 }
 
 function cancelEdit() {
@@ -89,6 +98,7 @@ function cancelEdit() {
   editDescription.value = '';
   editBody.value = '';
   editError.value = null;
+  editModalOpen.value = false;
 }
 
 async function saveEdit(name: string) {
@@ -151,72 +161,83 @@ async function deleteSkill(name: string) {
         </tbody>
       </table>
 
-      <div class="card form-card">
-        <h3 class="form-title">Créer un skill</h3>
-        <label class="field">
-          <span class="field-label">Nom</span>
-          <input
-            class="field-input"
-            v-model="formName"
-            type="text"
-            placeholder="git-skill"
-            aria-label="Nom du skill"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Description</span>
-          <textarea
-            class="field-input"
-            v-model="formDescription"
-            rows="2"
-            placeholder="Description optionnelle"
-            aria-label="Description"
-          />
-        </label>
-        <label class="field">
-          <span class="field-label">Body</span>
-          <textarea
-            class="field-input"
-            v-model="formBody"
-            rows="4"
-            placeholder="Body du skill (optionnel)"
-            aria-label="Body"
-          />
-        </label>
-        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-        <button class="btn btn-create" @click="createSkill">Créer</button>
-      </div>
+      <button class="btn btn-create" @click="createModalOpen = true">Créer un skill</button>
 
-      <template v-for="s in fetchedSkills" :key="'edit-' + s.name">
-        <div v-if="s.name === editingName" class="card form-card">
-          <h3 class="form-title">Modifier : {{ s.name }}</h3>
-          <label class="field">
-            <span class="field-label">Description</span>
-            <textarea
-              class="field-input"
-              v-model="editDescription"
-              rows="2"
-              placeholder="Description"
-              aria-label="Description"
-            />
-          </label>
-          <label class="field">
-            <span class="field-label">Body</span>
-            <textarea
-              class="field-input"
-              v-model="editBody"
-              rows="4"
-              placeholder="Body du skill"
-              aria-label="Body"
-            />
-          </label>
-          <div v-if="editError" class="creation-error">{{ editError }}</div>
-          <div class="edit-actions">
-            <button class="btn btn-success" @click="saveEdit(s.name)">Sauvegarder</button>
-            <button class="btn btn-cancel" @click="cancelEdit">Annuler</button>
-          </div>
-        </div>
-      </template>
+      <DialogRoot v-model:open="createModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Créer un skill</DialogTitle>
+            <label class="field">
+              <span class="field-label">Nom</span>
+              <input
+                class="field-input"
+                v-model="formName"
+                type="text"
+                placeholder="git-skill"
+                aria-label="Nom du skill"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Description</span>
+              <textarea
+                class="field-input"
+                v-model="formDescription"
+                rows="2"
+                placeholder="Description optionnelle"
+                aria-label="Description"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Body</span>
+              <textarea
+                class="field-input"
+                v-model="formBody"
+                rows="4"
+                placeholder="Body du skill (optionnel)"
+                aria-label="Body"
+              />
+            </label>
+            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-create" @click="createSkill">Créer</button>
+              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
+
+      <DialogRoot v-model:open="editModalOpen">
+        <DialogPortal>
+          <DialogContent class="dialog-content" role="dialog">
+            <DialogTitle class="dialog-title">Modifier : {{ editingName }}</DialogTitle>
+            <label class="field">
+              <span class="field-label">Description</span>
+              <textarea
+                class="field-input"
+                v-model="editDescription"
+                rows="2"
+                placeholder="Description"
+                aria-label="Description"
+              />
+            </label>
+            <label class="field">
+              <span class="field-label">Body</span>
+              <textarea
+                class="field-input"
+                v-model="editBody"
+                rows="4"
+                placeholder="Body du skill"
+                aria-label="Body"
+              />
+            </label>
+            <div v-if="editError" class="creation-error">{{ editError }}</div>
+            <div class="dialog-actions">
+              <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+            </div>
+          </DialogContent>
+        </DialogPortal>
+      </DialogRoot>
     </div>
   </div>
 </template>
@@ -403,5 +424,40 @@ async function deleteSkill(name: string) {
 .edit-actions {
   display: flex;
   gap: 8px;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.dialog-actions .btn:first-child {
+  margin-left: 0;
+}
+</style>
+
+<style>
+[role='dialog'] {
+  background: #101828;
+  border: 1px solid #1c1c2a;
+  border-radius: 10px;
+  padding: 24px 28px;
+  max-width: 480px;
+}
+
+.dialog-title {
+  margin: 0 0 16px 0;
+  font-size: 15px;
+  font-weight: 600;
+  color: #e6e9f0;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 12px;
 }
 </style>
