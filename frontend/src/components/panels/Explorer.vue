@@ -69,12 +69,23 @@ function parseEntries(parentPath: string, text: string): FsNode[] {
 }
 
 /** load el-tree : une requête list par dossier déplié. node.data.path est le
- *  chemin relatif du dossier. */
+ *  chemin relatif du dossier — SAUF le tout premier appel : un arbre `lazy`
+ *  fait charger sa propre racine invisible avant celle de nos données
+ *  (`TreeStore.initialize()`, element-plus), et pour cet appel-là
+ *  `node.data` est le tableau `treeData` passé en prop (pas un FsNode) — on
+ *  le lui rend tel quel (c'est déjà exactement l'entrée racine "."), sans
+ *  round-trip serveur. Sans ce cas, `data.path` vaut `undefined` : le
+ *  serveur répond `{"error":"missing path","ok":false}` et l'arbre affiche
+ *  "No Data" sans autre signal. */
 async function loadNode(
   node: { data: unknown },
   resolve: (data: FsNode[]) => void,
   reject: (e: Error) => void,
 ): Promise<void> {
+  if (Array.isArray(node.data)) {
+    resolve(node.data as FsNode[]);
+    return;
+  }
   const data = node.data as FsNode;
   const fs = fsClient.value;
   if (!fs) {

@@ -164,6 +164,34 @@ describe('Explorer.vue — arbre réel', () => {
     expect(openFileSpy.mock.calls.length).toBe(appelsAvant);
   });
 
+  it("charge la racine automatiquement (sans appel manuel a loadNode) via l'auto-expand d'el-tree", async () => {
+    // Régression : un arbre `lazy` (element-plus) appelle `load` une
+    // première fois pour sa propre racine invisible avant celle de nos
+    // données — `node.data` est alors le tableau `treeData` lui-même, pas
+    // un FsNode. Sans le gérer, `data.path` valait `undefined`, le serveur
+    // répondait `{"error":"missing path"}` et l'arbre affichait "No Data"
+    // sans le moindre signal d'erreur visible. Ce test n'appelle PAS
+    // loadNode manuellement — il vérifie le déclenchement automatique réel.
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': openFileSpy,
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(client.request).toHaveBeenCalledWith('list', { path: '.' });
+    expect(wrapper.text()).toContain('README.md');
+    expect(wrapper.text()).toContain('src');
+  });
+
   it('client non prêt → placeholder, pas de requête', async () => {
     const nullClient = ref(null) as ReturnType<typeof ref>;
 
