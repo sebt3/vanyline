@@ -1528,6 +1528,12 @@ mod tests {
     /// `config/models` -> `result == []` (pas d'erreur).
     #[test]
     async fn config_models_empty_list() {
+        // Isole XDG_CONFIG_HOME : sans ça, un ~/.config/vanyline réel (usage
+        // CLI/llm-exec sur la machine qui exécute le test) fuite ses
+        // providers/modèles dans le résultat — le test attend [] pour un
+        // workspace ET une couche globale vides.
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+
         // Create an empty tempdir with no .vanyline/ config
         let tmp = tempdir().unwrap();
 
@@ -1620,6 +1626,28 @@ mod tests {
                 .is_some_and(serde_json::Value::is_array),
             "result should be an array"
         );
+    }
+
+    /// Isolation lock and helper for tests that touch `crate::config::Layers`
+    /// (reads `XDG_CONFIG_HOME` via `dirs` crate without injection parameter) —
+    /// même pattern que `DATA_DIR_ENV_LOCK`/`isolated_data_dir` ci-dessous,
+    /// var différente (une machine avec un vrai `~/.config/vanyline` — usage
+    /// CLI réel — fait sinon fuiter ses providers/modèles dans le test).
+    static CONFIG_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Pointe `XDG_CONFIG_HOME` vers un tempdir frais et retourne (tempdir,
+    /// guard) — cf. `isolated_data_dir` pour le contrat complet (les deux
+    /// valeurs de retour doivent rester en vie jusqu'à la fin du test).
+    fn isolated_config_dir() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+        let guard = CONFIG_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        // SAFETY: guarded by CONFIG_DIR_ENV_LOCK above — no concurrent env access.
+        unsafe {
+            std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+        }
+        (tmp, guard)
     }
 
     /// Isolation lock and helper for tests that touch `crate::store` (reads
