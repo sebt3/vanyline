@@ -49,6 +49,20 @@ function jsonResponse(body: unknown) {
   );
 }
 
+/** Route par URL plutôt que par ordre d'appel — `Chat.vue` fait maintenant
+ *  plusieurs GET /api/conversations (liste, pour le sélecteur de session)
+ *  en plus du GET .../messages, dans un ordre qui ne doit pas être un
+ *  détail d'implémentation testé. `messagesByConv` : historique par id de
+ *  conversation, vide par défaut. */
+function mockFetchRouting(messagesByConv: Record<string, unknown[]> = {}) {
+  fetchSpy.mockImplementation((url: string) => {
+    if (url === '/api/conversations') return jsonResponse([]);
+    const match = url.match(/^\/api\/conversations\/([^/]+)\/messages$/);
+    if (match) return jsonResponse(messagesByConv[match[1]] ?? []);
+    return jsonResponse([]);
+  });
+}
+
 /** Macrotask flush plutôt qu'un nombre fixe de microtasks : `Response.json()`
  *  traverse plusieurs `await` internes dont le nombre exact n'est pas
  *  garanti (cf. la même leçon dans sandboxWs.spec.ts). */
@@ -68,16 +82,16 @@ describe('Chat.vue — session réelle', () => {
   });
 
   it("charge l'historique puis ouvre le WS quand une conversation est active", async () => {
-    fetchSpy.mockReturnValueOnce(
-      jsonResponse([
+    mockFetchRouting({
+      'conv-1': [
         {
           id: 'm1',
           role: 'user',
           payload: { content: 'salut' },
           created_at: '2026-01-01T10:00:00Z',
         },
-      ]),
-    );
+      ],
+    });
 
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-1';
@@ -95,7 +109,7 @@ describe('Chat.vue — session réelle', () => {
   });
 
   it('accumule les tokens en un seul message assistant jusqu\'à "done"', async () => {
-    fetchSpy.mockReturnValueOnce(jsonResponse([]));
+    mockFetchRouting();
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-2';
 
@@ -119,7 +133,7 @@ describe('Chat.vue — session réelle', () => {
   });
 
   it("envoie {type:'message', content} sur le WS", async () => {
-    fetchSpy.mockReturnValueOnce(jsonResponse([]));
+    mockFetchRouting();
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-3';
 
@@ -137,6 +151,46 @@ describe('Chat.vue — session réelle', () => {
 
     const ws = wsInstances[0];
     expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'message', content: 'salut agent' }));
+    wrapper.unmount();
+  });
+
+  it('le sélecteur de session liste les conversations et change activeConversationId', async () => {
+    fetchSpy.mockImplementation((url: string) => {
+      if (url === '/api/conversations') {
+        return jsonResponse([
+          { id: 'conv-a', title: 'Session A', created_at: '2026-01-01T10:00:00Z' },
+          { id: 'conv-b', title: 'Session B', created_at: '2026-01-02T10:00:00Z' },
+        ]);
+      }
+      return jsonResponse([]);
+    });
+
+    const { activeConversationId } = useIdeSession();
+    activeConversationId.value = 'conv-a';
+
+    const wrapper = mount(Chat);
+    await flush();
+
+    const options = wrapper.findAll('option');
+    expect(options.map((o) => o.text())).toEqual(['Session A', 'Session B']);
+
+    await wrapper.find('.session-select').setValue('conv-b');
+
+    expect(activeConversationId.value).toBe('conv-b');
+    wrapper.unmount();
+  });
+
+  it('"Fermer la session" appelle endAgentSession (activeConversationId → null)', async () => {
+    mockFetchRouting();
+    const { activeConversationId } = useIdeSession();
+    activeConversationId.value = 'conv-x';
+
+    const wrapper = mount(Chat);
+    await flush();
+
+    await wrapper.find('.session-btn[title="Fermer la session"]').trigger('click');
+
+    expect(activeConversationId.value).toBeNull();
     wrapper.unmount();
   });
 });
