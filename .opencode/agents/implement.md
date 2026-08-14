@@ -1,7 +1,7 @@
 ---
 description: Implémente une tâche à partir d'un fichier de tâche structuré contenant des prototypes de code
 mode: subagent
-model: strix/qwen3.6:35b-a3b
+model: smart/qwen3.6:35b-a3b
 temperature: 0.3
 color: success
 permission:

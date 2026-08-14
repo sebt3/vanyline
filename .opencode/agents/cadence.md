@@ -1,6 +1,7 @@
 ---
 description: Cadence l'implémentation d'une feature déjà designée — découpe en tâches just-in-time, dispatche chacune à l'agent implement, valide avant de passer à la suivante. Ne conçoit pas l'architecture et ne fait pas la revue finale avant merge.
 mode: primary
+model: smart/deepseek-v4-flash
 temperature: 0.2
 color: info
 permission:
