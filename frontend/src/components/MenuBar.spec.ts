@@ -83,6 +83,40 @@ describe('MenuBar', () => {
     expect(router.currentRoute.value.path).toBe('/p/demo');
   });
 
+  it('Explorer (Affichage) appelle ideActions.openExplorer', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+
+    const openExplorer = vi.fn();
+    registerIdeActions({ openExplorer });
+
+    await openMenuAndClick(wrapper, 'Affichage', 'Explorer');
+
+    expect(openExplorer).toHaveBeenCalledTimes(1);
+  });
+
+  it('Nouveau terminal (Affichage) appelle ideActions.newTerminal', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+
+    const newTerminal = vi.fn();
+    registerIdeActions({ newTerminal });
+
+    await openMenuAndClick(wrapper, 'Affichage', 'Nouveau terminal');
+
+    expect(newTerminal).toHaveBeenCalledTimes(1);
+  });
+
   it('Nouvelle session agent déclenche startAgentSession (POST /api/conversations)', async () => {
     const fetchSpy = vi.fn().mockImplementation((url: string) => {
       if (url === '/api/agents') {

@@ -102,6 +102,45 @@ function addChatPanel(api: DockviewReadyEvent['api']) {
   });
 }
 
+/** Réactive l'Explorer s'il est déjà ouvert, le recrée sinon — un seul
+ *  Explorer possible (contrairement au terminal), donc pas besoin d'id
+ *  généré. */
+function openExplorer(api: DockviewReadyEvent['api']) {
+  const existing = api.getPanel('explorer');
+  if (existing) {
+    existing.api.setActive();
+    return;
+  }
+  api.addPanel({
+    id: 'explorer',
+    component: 'explorer',
+    title: 'Explorer',
+    position: { referencePanel: 'editor', direction: 'left' },
+    initialWidth: 230,
+  });
+}
+
+/** 'terminal' pour le premier onglet (id stable, restauré par le layout
+ *  persisté), 'terminal-N' pour les suivants — chaque panel Terminal.vue
+ *  ouvre sa propre connexion /ws/terminal indépendante (pas d'état partagé
+ *  entre onglets), donc aucun changement requis côté Terminal.vue. */
+function addTerminalPanel(api: DockviewReadyEvent['api']) {
+  let id = 'terminal';
+  let n = 2;
+  while (api.getPanel(id)) {
+    id = `terminal-${n}`;
+    n += 1;
+  }
+  api.addPanel({
+    id,
+    component: 'terminal',
+    title: id === 'terminal' ? 'Terminal' : `Terminal ${n - 1}`,
+    position: { referencePanel: 'editor', direction: 'below' },
+    initialHeight: 170,
+  });
+  api.getPanel(id)?.api.setActive();
+}
+
 function onReady(event: DockviewReadyEvent) {
   const { api } = event;
 
@@ -126,6 +165,8 @@ function onReady(event: DockviewReadyEvent) {
 
   registerIdeActions({
     closeActiveTab: () => api.activePanel?.api.close(),
+    openExplorer: () => openExplorer(api),
+    newTerminal: () => addTerminalPanel(api),
   });
 
   watch(activeConversationId, (id) => {

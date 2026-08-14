@@ -15,7 +15,14 @@ interface Item {
   label: string;
   shortcut?: string;
   sep?: false;
-  action?: 'toggle-settings' | 'save-file' | 'close-tab' | 'goto-project' | 'start-agent-session';
+  action?:
+    | 'toggle-settings'
+    | 'save-file'
+    | 'close-tab'
+    | 'goto-project'
+    | 'start-agent-session'
+    | 'open-explorer'
+    | 'new-terminal';
 }
 interface Sep {
   sep: true;
@@ -52,8 +59,8 @@ const menus: { label: string; items: (Item | Sep)[] }[] = [
   {
     label: 'Affichage',
     items: [
-      { label: 'Explorer' },
-      { label: 'Terminal', shortcut: '⌃`' },
+      { label: 'Explorer', action: 'open-explorer' },
+      { label: 'Nouveau terminal', shortcut: '⌃`', action: 'new-terminal' },
       { label: 'Assistant' },
       { sep: true },
       { label: 'Palette de commandes', shortcut: '⇧⌘P' },
@@ -98,6 +105,12 @@ function onSelect(item: Item) {
     }
     case 'start-agent-session':
       void startAgentSession();
+      break;
+    case 'open-explorer':
+      ideActions.value.openExplorer?.();
+      break;
+    case 'new-terminal':
+      ideActions.value.newTerminal?.();
       break;
     default:
       break;
