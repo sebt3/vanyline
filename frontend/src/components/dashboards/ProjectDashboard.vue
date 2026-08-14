@@ -269,16 +269,6 @@ h1 {
   font-size: 13px;
 }
 
-.btn {
-  appearance: none;
-  border: none;
-  font: inherit;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-}
-
 .btn-suspend {
   background: #e0a83d22;
   color: #e0a83d;
@@ -298,16 +288,6 @@ h1 {
 
 .btn-suspended:hover {
   background: #3fb56d33;
-}
-
-.btn-delete {
-  background: #5b1e3f22;
-  color: #e85d5d;
-  border: 1px solid #e85d5d44;
-}
-
-.btn-delete:hover {
-  background: #e85d5d33;
 }
 
 .btn-open {
@@ -349,17 +329,6 @@ h1 {
 .btn-cancel:hover {
   background: #2b2b4a;
   color: #e6e9f0;
-}
-
-.btn-create {
-  background: #4c90f0;
-  color: white;
-  font-weight: 600;
-  padding: 6px 16px;
-}
-
-.btn-create:hover {
-  background: #3a7de0;
 }
 
 .btn-create:disabled {
@@ -407,12 +376,5 @@ h1 {
 .field-input:focus {
   outline: none;
   border-color: #4c90f0;
-}
-
-.creation-error {
-  color: #e85d5d;
-  font-size: 12px;
-  margin-top: 4px;
-  margin-bottom: 12px;
 }
 </style>
