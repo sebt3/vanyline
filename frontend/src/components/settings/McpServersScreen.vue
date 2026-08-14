@@ -14,6 +14,11 @@ interface McpServer {
   name: string;
   server_type: string;
   url: string;
+  available_tools?: string[];
+}
+
+interface McpTestResult {
+  tools: string[];
 }
 
 interface CreateMcpServer {
@@ -105,6 +110,28 @@ async function saveEdit(id: string) {
 async function deleteServer(id: string) {
   await resource.remove(id);
 }
+
+// Découverte des tools : par serveur, un état de chargement/erreur dédié —
+// tester un serveur ne doit pas bloquer/masquer les autres lignes.
+const discovering = ref<Record<string, boolean>>({});
+const discoverError = ref<Record<string, string | null>>({});
+
+async function discoverTools(id: string) {
+  discovering.value = { ...discovering.value, [id]: true };
+  discoverError.value = { ...discoverError.value, [id]: null };
+  try {
+    const result = await client.post<McpTestResult>(`/api/mcp-servers/${id}/test`);
+    const server = fetchedServers.value.find((s) => s.id === id);
+    if (server) server.available_tools = result.tools;
+  } catch (e) {
+    discoverError.value = {
+      ...discoverError.value,
+      [id]: e instanceof ApiError ? e.message : String(e),
+    };
+  } finally {
+    discovering.value = { ...discovering.value, [id]: false };
+  }
+}
 </script>
 
 <template>
@@ -119,6 +146,7 @@ async function deleteServer(id: string) {
             <th class="th-name">Nom</th>
             <th class="th-type">Type</th>
             <th class="th-url">URL</th>
+            <th class="th-tools">Tools</th>
             <th class="th-actions"></th>
           </tr>
         </thead>
@@ -127,7 +155,25 @@ async function deleteServer(id: string) {
             <td>{{ s.name }}</td>
             <td>{{ s.server_type }}</td>
             <td>{{ s.url }}</td>
+            <td>
+              <span
+                v-if="s.available_tools?.length"
+                class="tools-list"
+                :title="s.available_tools.join(', ')"
+              >
+                {{ s.available_tools.length }} tool{{ s.available_tools.length > 1 ? 's' : '' }}
+              </span>
+              <span v-else class="tools-empty">jamais testé</span>
+              <div v-if="discoverError[s.id]" class="discover-error">{{ discoverError[s.id] }}</div>
+            </td>
             <td class="th-actions">
+              <button
+                class="btn btn-discover"
+                :disabled="discovering[s.id]"
+                @click="discoverTools(s.id)"
+              >
+                {{ discovering[s.id] ? 'Découverte…' : 'Découvrir' }}
+              </button>
               <button class="btn btn-edit" @click="startEdit(s)">
                 Modifier
               </button>
@@ -219,7 +265,7 @@ async function deleteServer(id: string) {
 <style scoped>
 .table {
   width: 100%;
-  max-width: 760px;
+  max-width: 900px;
   border-collapse: collapse;
   margin-bottom: 24px;
 }
@@ -232,7 +278,7 @@ async function deleteServer(id: string) {
   font-size: 12px;
   text-transform: uppercase;
   color: #6a7185;
-  width: 28%;
+  width: 22%;
 }
 
 .th-type {
@@ -243,7 +289,7 @@ async function deleteServer(id: string) {
   font-size: 12px;
   text-transform: uppercase;
   color: #6a7185;
-  width: 18%;
+  width: 14%;
 }
 
 .th-url {
@@ -254,7 +300,49 @@ async function deleteServer(id: string) {
   font-size: 12px;
   text-transform: uppercase;
   color: #6a7185;
-  width: 40%;
+  width: 30%;
+}
+
+.th-tools {
+  text-align: left;
+  padding: 8px 12px;
+  border-bottom: 1px solid #1c1c2a;
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: #6a7185;
+  width: 14%;
+}
+
+.tools-list {
+  color: #3fb56d;
+  font-size: 13px;
+}
+
+.tools-empty {
+  color: #6a7185;
+  font-size: 13px;
+}
+
+.discover-error {
+  margin-top: 4px;
+  color: #ff9db3;
+  font-size: 11px;
+}
+
+.btn-discover {
+  background: #2b3550;
+  color: #9db4f0;
+  border: 1px solid #3a4570;
+}
+
+.btn-discover:hover {
+  background: #354168;
+}
+
+.btn-discover:disabled {
+  color: #6a7185;
+  cursor: not-allowed;
 }
 
 .th-actions {

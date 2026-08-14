@@ -342,4 +342,91 @@ describe('McpServersScreen', () => {
 
     expect(wrapper.text()).toContain('Aucun serveur MCP');
   });
+
+  it('"Découvrir" appelle POST /test et affiche les tools renvoyés', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockImplementation(async (url, init) => {
+      const method = (init?.method ?? 'GET') as string;
+      const u = String(url);
+
+      if (method === 'GET' && u === '/api/mcp-servers') {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'srv-1',
+              name: 'git-server',
+              server_type: 'http-streamable',
+              url: 'https://git.example.com/mcp',
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (method === 'POST' && u === '/api/mcp-servers/srv-1/test') {
+        return new Response(
+          JSON.stringify({ tools: ['read_file', 'write_file', 'list_dir'] }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const wrapper = mount(McpServersScreen);
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(wrapper.text()).toContain('jamais testé');
+
+    await wrapper.find('.btn-discover').trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/mcp-servers/srv-1/test',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(wrapper.text()).toContain('3 tools');
+    expect(wrapper.text()).not.toContain('jamais testé');
+  });
+
+  it('"Découvrir" en échec affiche une erreur par ligne, sans planter', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockImplementation(async (url, init) => {
+      const method = (init?.method ?? 'GET') as string;
+      const u = String(url);
+
+      if (method === 'GET' && u === '/api/mcp-servers') {
+        return new Response(
+          JSON.stringify([
+            {
+              id: 'srv-2',
+              name: 'flaky-server',
+              server_type: 'sse',
+              url: 'https://flaky.example.com/mcp',
+            },
+          ]),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      if (method === 'POST' && u === '/api/mcp-servers/srv-2/test') {
+        return new Response(
+          JSON.stringify({ error: 'VNL-MCP-004: transport SSE non implémenté' }),
+          { status: 400, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return new Response(null, { status: 500 });
+    });
+
+    const wrapper = mount(McpServersScreen);
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    await wrapper.find('.btn-discover').trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(wrapper.text()).toContain('VNL-MCP-004');
+    // La ligne reste utilisable — pas de crash du composant.
+    expect(wrapper.text()).toContain('flaky-server');
+  });
 });
