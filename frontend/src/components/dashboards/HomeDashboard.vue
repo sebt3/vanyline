@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import {
-  DialogRoot, DialogPortal, DialogContent, DialogTitle, DialogClose,
+  DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogClose,
 } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 
@@ -128,6 +128,7 @@ async function deleteProject(name: string) {
 
       <DialogRoot v-model:open="modalOpen">
         <DialogPortal>
+          <DialogOverlay class="dialog-overlay" />
           <DialogContent class="dialog-content" role="dialog">
             <DialogTitle class="dialog-title">Créer un projet</DialogTitle>
             <label class="field">
@@ -346,12 +347,26 @@ h1 {
 </style>
 
 <style>
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+}
+
 [role='dialog'] {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1001;
   background: #101828;
   border: 1px solid #1c1c2a;
   border-radius: 10px;
   padding: 24px 28px;
   max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
 }
 
 .dialog-title {

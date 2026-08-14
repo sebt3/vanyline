@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import {
-  DialogRoot, DialogPortal, DialogContent, DialogTitle, DialogClose,
+  DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogClose,
 } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 
@@ -210,6 +210,7 @@ async function deleteProvider(id: string) {
 
       <DialogRoot v-model:open="createModalOpen">
         <DialogPortal>
+          <DialogOverlay class="dialog-overlay" />
           <DialogContent class="dialog-content" role="dialog">
             <DialogTitle class="dialog-title">Créer un fournisseur</DialogTitle>
             <label class="field">
@@ -264,6 +265,7 @@ async function deleteProvider(id: string) {
 
       <DialogRoot v-model:open="editModalOpen">
         <DialogPortal>
+          <DialogOverlay class="dialog-overlay" />
           <DialogContent class="dialog-content" role="dialog">
             <DialogTitle class="dialog-title">Modifier : {{ editName }}</DialogTitle>
             <label class="field">
@@ -567,12 +569,26 @@ async function deleteProvider(id: string) {
 </style>
 
 <style>
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 1000;
+}
+
 [role='dialog'] {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1001;
   background: #101828;
   border: 1px solid #1c1c2a;
   border-radius: 10px;
   padding: 24px 28px;
   max-width: 480px;
+  max-height: 85vh;
+  overflow-y: auto;
 }
 
 .dialog-title {
