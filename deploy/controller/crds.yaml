@@ -807,16 +807,6 @@ spec:
                 format: int32
                 nullable: true
                 type: integer
-              sandboxTlsSecretName:
-                description: |-
-                  Secret TLS wildcard pré-provisionné (`*.sandboxes.{host}`), référencé
-                  tel quel par chaque Ingress de Sandbox — jamais un Certificate par
-                  sandbox (cf. design, "Risques", rate-limit/churn). None => Ingress de
-                  Sandbox sans bloc `tls` explicite (repli sur les annotations
-                  cert-manager si présentes — comportement moins prévisible, à éviter
-                  en usage réel).
-                nullable: true
-                type: string
               storageDefaults:
                 description: |-
                   Défauts de stockage (storageClass + accessMode) posés en env sur le

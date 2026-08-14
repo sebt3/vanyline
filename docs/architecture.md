@@ -744,11 +744,15 @@ reçu par le container est la chaîne base64 simple attendue par `app/src/main.r
 (comportement historique, pas une erreur). Si renseigné : sous-domaine par sandbox
 (`{sandbox}.sandboxes.{application.spec.host}`, décision développeur — pas de routage
 par chemin sur l'host de l'app), `ingressClassName`/annotations repris de
-l'Application. **TLS partagé, jamais un `Certificate` par sandbox** :
-`Application.spec.sandbox_tls_secret_name` référence un secret wildcard
-pré-provisionné — laisser cert-manager auto-provisionner un certificat par host
-poserait un risque réel de rate-limit/churn avec des sandboxes créées/détruites en
-continu.
+l'Application. **TLS : un Ingress = un Certificate**, même mécanisme que
+`build_application_ingress` — annotation cert-manager dérivée de
+`Application.spec.tls_issuer_name`/`tls_issuer_kind` + bloc `spec.tls` (secret
+`sandbox-<name>-cert`), cert-manager (ingress-shim) émet lui-même le certificat.
+Décision développeur (2026-08-14, revirement sur le design initial qui
+pré-provisionnait un secret wildcard `*.sandboxes.{host}` hors du repo pour éviter
+un risque de rate-limit/churn côté issuer ACME sous churn de sandboxes) : le risque
+ne s'applique pas à un issuer CA type `self-sign`, et la cohérence avec l'Ingress de
+l'app (déjà auto-géré de cette façon) l'emporte pour le cas par défaut.
 
 **NetworkPolicy ingress étendue à deux peers de plus** (en plus du peer historique
 "même Owner") : le pod `app` (label `vanyline.solidite.fr/application`, `Exists` —
@@ -766,9 +770,11 @@ l'Application visée supprimée) après avoir déjà été créé — resterait 
 indéfiniment. Même patron que la netpol egress (patch si nécessaire, delete explicite
 sinon), pas un nouveau mécanisme.
 
-**Dépendances d'infra externes, hors périmètre de ce repo** : DNS wildcard
-`*.sandboxes.{host}` et certificat TLS wildcard correspondant doivent exister
-(provisionnés ailleurs) — sans eux, l'Ingress créé ne sert à rien en pratique.
+**Dépendance d'infra externe, hors périmètre de ce repo** : DNS wildcard
+`*.sandboxes.{host}` doit exister (provisionné ailleurs) — sans lui, l'Ingress créé
+ne sert à rien en pratique. Le certificat TLS, lui, est désormais auto-provisionné
+(cert-manager doit être présent dans le cluster, même prérequis que pour l'Ingress
+de l'app).
 
 **Tests** : unitaires purs sur les builders (spec → Pod/Job/Service/NetworkPolicy
 attendus, sans cluster) — pas de mock de l'API K8s. `--crds` (flag CLI) imprime les

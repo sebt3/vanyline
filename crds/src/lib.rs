@@ -239,13 +239,6 @@ pub struct ApplicationSpec {
     /// esprit que `Toolchain.env`, pas de champ dédié par convention connue.
     #[serde(default)]
     pub ingress_annotations: BTreeMap<String, String>,
-    /// Secret TLS wildcard pré-provisionné (`*.sandboxes.{host}`), référencé
-    /// tel quel par chaque Ingress de Sandbox — jamais un Certificate par
-    /// sandbox (cf. design, "Risques", rate-limit/churn). None => Ingress de
-    /// Sandbox sans bloc `tls` explicite (repli sur les annotations
-    /// cert-manager si présentes — comportement moins prévisible, à éviter
-    /// en usage réel).
-    pub sandbox_tls_secret_name: Option<String>,
     /// Pods du controller d'Ingress (ex. traefik) : namespace + labels.
     /// Utilisé comme peer `NetworkPolicy` sur la netpol ingress de chaque
     /// Sandbox (le trafic navigateur transite par l'Ingress avant d'atteindre
@@ -537,10 +530,6 @@ mod tests {
             "Application schema should contain 'tlsIssuerKind', got: {spec_props:?}"
         );
         assert!(
-            spec_props.contains_key("sandboxTlsSecretName"),
-            "Application schema should contain 'sandboxTlsSecretName', got: {spec_props:?}"
-        );
-        assert!(
             spec_props.contains_key("ingressController"),
             "Application schema should contain 'ingressController', got: {spec_props:?}"
         );
@@ -554,7 +543,6 @@ mod tests {
         assert!(spec.replicas.is_none());
         assert!(spec.cookie_secret_ref.is_none());
         assert!(spec.ingress_annotations.is_empty());
-        assert!(spec.sandbox_tls_secret_name.is_none());
         assert!(spec.ingress_controller.is_none());
         assert!(spec.tls_issuer_kind.is_none());
     }
@@ -583,7 +571,6 @@ mod tests {
             tls_issuer_name: "letsencrypt".to_string(),
             tls_issuer_kind: Some("Issuer".to_string()),
             ingress_annotations: annotations,
-            sandbox_tls_secret_name: Some("wildcard-tls".to_string()),
             ingress_controller: Some(IngressControllerRef {
                 namespace: "kydah-core".to_string(),
                 pod_labels,
@@ -625,10 +612,6 @@ mod tests {
             "should contain ingressAnnotations (camelCase), got: {json}"
         );
         assert!(
-            json.contains(r#""sandboxTlsSecretName""#),
-            "should contain sandboxTlsSecretName (camelCase), got: {json}"
-        );
-        assert!(
             json.contains(r#""ingressController""#),
             "should contain ingressController (camelCase), got: {json}"
         );
@@ -667,10 +650,6 @@ mod tests {
         assert!(
             !json.contains("ingress_annotations"),
             "should not contain ingress_annotations (snake_case), got: {json}"
-        );
-        assert!(
-            !json.contains("sandbox_tls_secret_name"),
-            "should not contain sandbox_tls_secret_name (snake_case), got: {json}"
         );
         assert!(
             !json.contains("ingress_controller"),

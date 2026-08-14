@@ -490,36 +490,34 @@ pub fn build_sandbox_service(sandbox: &Sandbox) -> Service {
 }
 
 /// Ingress de Sandbox : host `{sandbox}.sandboxes.{application.spec.host}`,
-/// `ingressClassName`/`ingress_annotations` repris de `application.spec`,
-/// bloc `tls` posé seulement si `sandbox_tls_secret_name` est `Some`,
-/// backend = Service `sandbox-<name>` (`vanyline_crds::service_name`) port
-/// `MCP_PORT`, path `/` Prefix. `ownerReference` vers la Sandbox (GC en
-/// cascade), même patron que les autres builders de ce fichier.
+/// `ingressClassName`/`ingress_annotations` repris de `application.spec`, TLS
+/// posé inconditionnellement — même mécanisme que `build_application_ingress`
+/// (annotation cert-manager dérivée de `tls_issuer_name`/`tls_issuer_kind` +
+/// bloc `spec.tls`, secret `<ingress-name>-cert`) : un Ingress = un
+/// Certificate, cert-manager (ingress-shim) l'émet lui-même. Backend = Service
+/// `sandbox-<name>` (`vanyline_crds::service_name`) port `MCP_PORT`, path `/`
+/// Prefix. `ownerReference` vers la Sandbox (GC en cascade), même patron que
+/// les autres builders de ce fichier.
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> Ingress {
     let host = format!("{}.sandboxes.{}", sandbox.name_any(), application.spec.host);
+    let name = ingress_name(&sandbox.name_any());
 
-    // TLS conditionnel : posé seulement si `sandbox_tls_secret_name` est Some
-    let tls = application
-        .spec
-        .sandbox_tls_secret_name
-        .clone()
-        .map(|secret| {
-            vec![IngressTLS {
-                hosts: Some(vec![host.clone()]),
-                secret_name: Some(secret),
-            }]
-        });
+    let mut annotations = application.spec.ingress_annotations.clone();
+    annotations.insert(
+        crate::application::cert_manager_annotation_key(
+            application.spec.tls_issuer_kind.as_deref(),
+        )
+        .to_string(),
+        application.spec.tls_issuer_name.clone(),
+    );
+    let tls_secret = crate::application::tls_secret_name(&name);
 
     Ingress {
         metadata: ObjectMeta {
-            name: Some(ingress_name(&sandbox.name_any())),
+            name: Some(name),
             namespace: sandbox.namespace(),
-            annotations: if application.spec.ingress_annotations.is_empty() {
-                None
-            } else {
-                Some(application.spec.ingress_annotations.clone())
-            },
+            annotations: Some(annotations),
             owner_references: Some(vec![sandbox
                 .controller_owner_ref(&())
                 .expect("Sandbox a apiVersion/kind")]),
@@ -527,6 +525,10 @@ pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> In
         },
         spec: Some(IngressSpec {
             ingress_class_name: Some(application.spec.ingress_class_name.clone()),
+            tls: Some(vec![IngressTLS {
+                hosts: Some(vec![host.clone()]),
+                secret_name: Some(tls_secret),
+            }]),
             rules: Some(vec![IngressRule {
                 host: Some(host),
                 http: Some(HTTPIngressRuleValue {
@@ -546,7 +548,6 @@ pub fn build_sandbox_ingress(sandbox: &Sandbox, application: &Application) -> In
                     }],
                 }),
             }]),
-            tls,
             ..Default::default()
         }),
         status: None,
@@ -1811,7 +1812,7 @@ mod tests {
     #[test]
     fn build_sandbox_netpol_ingress_controller_peer() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let mut app = make_application("main", None);
+        let mut app = make_application("main");
         app.spec.ingress_controller = Some(IngressControllerRef {
             namespace: "kydah-core".to_string(),
             pod_labels: BTreeMap::from([
@@ -2359,7 +2360,7 @@ mod tests {
         assert_eq!(ingress_name("demo-branch"), "sandbox-demo-branch");
     }
 
-    fn make_application(name: &str, sandbox_tls_secret_name: Option<String>) -> Application {
+    fn make_application(name: &str) -> Application {
         let mut app = Application::new(
             name,
             ApplicationSpec {
@@ -2373,7 +2374,6 @@ mod tests {
                 tls_issuer_name: "self-sign".to_string(),
                 tls_issuer_kind: None,
                 ingress_annotations: BTreeMap::new(),
-                sandbox_tls_secret_name,
                 ingress_controller: None,
                 storage_defaults: None,
             },
@@ -2386,9 +2386,9 @@ mod tests {
     // ===== build_sandbox_ingress =====
 
     #[test]
-    fn build_sandbox_ingress_shape_no_tls() {
+    fn build_sandbox_ingress_shape() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let app = make_application("main", None);
+        let app = make_application("main");
         let ingress = build_sandbox_ingress(&sandbox, &app);
 
         // metadata
@@ -2455,36 +2455,53 @@ mod tests {
             .name
             .is_none());
 
-        // no TLS
-        assert!(spec.tls.is_none());
-
-        // no annotations
-        assert!(ingress.metadata.annotations.is_none());
-    }
-
-    #[test]
-    fn build_sandbox_ingress_tls_secret() {
-        let sandbox = make_sandbox("demo-branch", vec![], None);
-        let app = make_application("main", Some("wildcard-tls".to_string()));
-        let ingress = build_sandbox_ingress(&sandbox, &app);
-
-        let spec = ingress.spec.as_ref().expect("should have spec");
+        // TLS : un Ingress = un Certificate, comme build_application_ingress
         let tls = spec.tls.as_ref().expect("should have tls");
         assert_eq!(tls.len(), 1);
         assert_eq!(
             tls[0].hosts,
             Some(vec!["demo-branch.sandboxes.app.example.com".to_string()])
         );
-        assert_eq!(tls[0].secret_name, Some("wildcard-tls".to_string()));
+        assert_eq!(
+            tls[0].secret_name,
+            Some("sandbox-demo-branch-cert".to_string())
+        );
+
+        // annotation cert-manager dérivée de tls_issuer_name/tls_issuer_kind
+        let annotations = ingress
+            .metadata
+            .annotations
+            .as_ref()
+            .expect("should have annotations");
+        assert_eq!(
+            annotations.get("cert-manager.io/cluster-issuer"),
+            Some(&"self-sign".to_string())
+        );
+    }
+
+    #[test]
+    fn build_sandbox_ingress_tls_issuer_kind_issuer() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut app = make_application("main");
+        app.spec.tls_issuer_kind = Some("Issuer".to_string());
+        let ingress = build_sandbox_ingress(&sandbox, &app);
+
+        let annotations = ingress
+            .metadata
+            .annotations
+            .as_ref()
+            .expect("should have annotations");
+        assert_eq!(annotations.get("cert-manager.io/issuer"), Some(&"self-sign".to_string()));
+        assert!(annotations.get("cert-manager.io/cluster-issuer").is_none());
     }
 
     #[test]
     fn build_sandbox_ingress_annotations_passthrough() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let mut app = make_application("main", None);
+        let mut app = make_application("main");
         app.spec.ingress_annotations = BTreeMap::from([(
-            "cert-manager.io/cluster-issuer".to_string(),
-            "self-sign".to_string(),
+            "custom.example.com/foo".to_string(),
+            "bar".to_string(),
         )]);
 
         let ingress = build_sandbox_ingress(&sandbox, &app);
@@ -2494,7 +2511,7 @@ mod tests {
             .annotations
             .as_ref()
             .expect("should have annotations");
-        assert_eq!(annotations.len(), 1);
+        assert_eq!(annotations.get("custom.example.com/foo"), Some(&"bar".to_string()));
         assert_eq!(
             annotations.get("cert-manager.io/cluster-issuer"),
             Some(&"self-sign".to_string())

@@ -51,8 +51,9 @@ pub fn tls_secret_name(app_name: &str) -> String {
 }
 
 /// Nom de l'annotation cert-manager pour poser l'issuer, selon `tls_issuer_kind`
-/// (`Some("Issuer")` => namespaced, sinon `ClusterIssuer`).
-fn cert_manager_annotation_key(tls_issuer_kind: Option<&str>) -> &'static str {
+/// (`Some("Issuer")` => namespaced, sinon `ClusterIssuer`). `pub` : réutilisé par
+/// `sandbox::build_sandbox_ingress` (même mécanisme TLS, un Ingress = un Certificate).
+pub fn cert_manager_annotation_key(tls_issuer_kind: Option<&str>) -> &'static str {
     match tls_issuer_kind {
         Some("Issuer") => "cert-manager.io/issuer",
         _ => "cert-manager.io/cluster-issuer",
@@ -688,7 +689,6 @@ mod tests {
                 tls_issuer_name: "self-sign".to_string(),
                 tls_issuer_kind: None,
                 ingress_annotations: BTreeMap::new(),
-                sandbox_tls_secret_name: None,
                 ingress_controller: None,
                 storage_defaults: None,
             },
