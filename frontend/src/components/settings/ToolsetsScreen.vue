@@ -3,11 +3,11 @@ import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 import { useCrudResource } from '../../composables/useCrudResource';
-import LoadingSkeleton from './common/LoadingSkeleton.vue';
-import ErrorCard from './common/ErrorCard.vue';
-import EmptyState from './common/EmptyState.vue';
-import DialogShell from './common/DialogShell.vue';
-import CheckboxList from './common/CheckboxList.vue';
+import LoadingSkeleton from '../common/LoadingSkeleton.vue';
+import ErrorCard from '../common/ErrorCard.vue';
+import EmptyState from '../common/EmptyState.vue';
+import DialogShell from '../common/DialogShell.vue';
+import CheckboxList from '../common/CheckboxList.vue';
 
 interface McpSelection {
   server: string;

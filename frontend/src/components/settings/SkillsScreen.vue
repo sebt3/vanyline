@@ -3,10 +3,10 @@ import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 import { useCrudResource } from '../../composables/useCrudResource';
-import LoadingSkeleton from './common/LoadingSkeleton.vue';
-import ErrorCard from './common/ErrorCard.vue';
-import EmptyState from './common/EmptyState.vue';
-import DialogShell from './common/DialogShell.vue';
+import LoadingSkeleton from '../common/LoadingSkeleton.vue';
+import ErrorCard from '../common/ErrorCard.vue';
+import EmptyState from '../common/EmptyState.vue';
+import DialogShell from '../common/DialogShell.vue';
 
 interface SkillMeta {
   name: string;
