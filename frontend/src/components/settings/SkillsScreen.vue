@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import {
-  DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogClose,
-} from 'reka-ui';
+import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
+import { useCrudResource } from '../../composables/useCrudResource';
+import LoadingSkeleton from './common/LoadingSkeleton.vue';
+import ErrorCard from './common/ErrorCard.vue';
+import EmptyState from './common/EmptyState.vue';
+import DialogShell from './common/DialogShell.vue';
 
 interface SkillMeta {
   name: string;
@@ -28,9 +31,8 @@ interface UpdateSkill {
 }
 
 const client = createApiClient();
-const fetchedSkills = ref<SkillMeta[]>([]);
-const error = ref<string | null>(null);
-const loading = ref(true);
+const resource = useCrudResource<SkillMeta>(client, '/api/skills');
+const { items: fetchedSkills, loading, error } = resource;
 
 // Formulaire de création
 const formName = ref('');
@@ -48,17 +50,7 @@ const editError = ref<string | null>(null);
 const createModalOpen = ref(false);
 const editModalOpen = ref(false);
 
-async function fetchSkills() {
-  try {
-    fetchedSkills.value = await client.get<SkillMeta[]>('/api/skills');
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-onMounted(fetchSkills);
+onMounted(resource.fetch);
 
 async function createSkill() {
   creationError.value = null;
@@ -68,12 +60,11 @@ async function createSkill() {
     ...(formBody.value ? { body: formBody.value } : {}),
   };
   try {
-    await client.post<SkillDetail>('/api/skills', body);
+    await resource.create(body);
     formName.value = '';
     formDescription.value = '';
     formBody.value = '';
     createModalOpen.value = false;
-    await fetchSkills();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
   }
@@ -107,36 +98,24 @@ async function saveEdit(name: string) {
   if (editDescription.value) body.description = editDescription.value;
   if (editBody.value) body.body = editBody.value;
   try {
-    await client.put<SkillDetail>(`/api/skills/${name}`, body);
+    await resource.update(name, body);
     cancelEdit();
-    await fetchSkills();
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
 async function deleteSkill(name: string) {
-  try {
-    await client.delete(`/api/skills/${name}`);
-    await fetchSkills();
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
-  }
+  await resource.remove(name);
 }
 </script>
 
 <template>
-  <div v-if="loading" class="skeleton-card">
-    <div class="skeleton" />
-    <div class="skeleton short" />
-    <div class="skeleton short" />
-  </div>
+  <LoadingSkeleton v-if="loading" />
   <div v-else>
-    <div class="card" v-if="error" role="alert">
-      <p class="error-text">{{ error }}</p>
-    </div>
+    <ErrorCard v-if="error" :message="error" />
     <div v-else>
-      <div class="card" v-if="fetchedSkills.length === 0">Aucun skill.</div>
+      <EmptyState v-if="fetchedSkills.length === 0" message="Aucun skill." />
       <table class="table" v-else>
         <thead>
           <tr>
@@ -163,129 +142,76 @@ async function deleteSkill(name: string) {
 
       <button class="btn btn-create" @click="createModalOpen = true">Créer un skill</button>
 
-      <DialogRoot v-model:open="createModalOpen">
-        <DialogPortal>
-          <DialogOverlay class="dialog-overlay" />
-          <DialogContent class="dialog-content" role="dialog">
-            <DialogTitle class="dialog-title">Créer un skill</DialogTitle>
-            <label class="field">
-              <span class="field-label">Nom</span>
-              <input
-                class="field-input"
-                v-model="formName"
-                type="text"
-                placeholder="git-skill"
-                aria-label="Nom du skill"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Description</span>
-              <textarea
-                class="field-input"
-                v-model="formDescription"
-                rows="2"
-                placeholder="Description optionnelle"
-                aria-label="Description"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Body</span>
-              <textarea
-                class="field-input"
-                v-model="formBody"
-                rows="4"
-                placeholder="Body du skill (optionnel)"
-                aria-label="Body"
-              />
-            </label>
-            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-            <div class="dialog-actions">
-              <button class="btn btn-create" @click="createSkill">Créer</button>
-              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
-            </div>
-          </DialogContent>
-        </DialogPortal>
-      </DialogRoot>
+      <DialogShell v-model:open="createModalOpen" title="Créer un skill">
+        <label class="field">
+          <span class="field-label">Nom</span>
+          <input
+            class="field-input"
+            v-model="formName"
+            type="text"
+            placeholder="git-skill"
+            aria-label="Nom du skill"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Description</span>
+          <textarea
+            class="field-input"
+            v-model="formDescription"
+            rows="2"
+            placeholder="Description optionnelle"
+            aria-label="Description"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Body</span>
+          <textarea
+            class="field-input"
+            v-model="formBody"
+            rows="4"
+            placeholder="Body du skill (optionnel)"
+            aria-label="Body"
+          />
+        </label>
+        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+        <template #actions>
+          <button class="btn btn-create" @click="createSkill">Créer</button>
+          <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+        </template>
+      </DialogShell>
 
-      <DialogRoot v-model:open="editModalOpen">
-        <DialogPortal>
-          <DialogOverlay class="dialog-overlay" />
-          <DialogContent class="dialog-content" role="dialog">
-            <DialogTitle class="dialog-title">Modifier : {{ editingName }}</DialogTitle>
-            <label class="field">
-              <span class="field-label">Description</span>
-              <textarea
-                class="field-input"
-                v-model="editDescription"
-                rows="2"
-                placeholder="Description"
-                aria-label="Description"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Body</span>
-              <textarea
-                class="field-input"
-                v-model="editBody"
-                rows="4"
-                placeholder="Body du skill"
-                aria-label="Body"
-              />
-            </label>
-            <div v-if="editError" class="creation-error">{{ editError }}</div>
-            <div class="dialog-actions">
-              <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
-              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
-            </div>
-          </DialogContent>
-        </DialogPortal>
-      </DialogRoot>
+      <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
+        <label class="field">
+          <span class="field-label">Description</span>
+          <textarea
+            class="field-input"
+            v-model="editDescription"
+            rows="2"
+            placeholder="Description"
+            aria-label="Description"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Body</span>
+          <textarea
+            class="field-input"
+            v-model="editBody"
+            rows="4"
+            placeholder="Body du skill"
+            aria-label="Body"
+          />
+        </label>
+        <div v-if="editError" class="creation-error">{{ editError }}</div>
+        <template #actions>
+          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+          <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+        </template>
+      </DialogShell>
     </div>
   </div>
 </template>
 
 <style scoped>
-.skeleton-card {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.card {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.card .error-text {
-  color: #e85d5d;
-  font-size: 13px;
-  margin: 0;
-}
-
-.skeleton {
-  height: 16px;
-  border-radius: 4px;
-  background: linear-gradient(90deg, #1a2332 25%, #1f2b3d 50%, #1a2332 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-}
-.skeleton.short {
-  width: 60%;
-}
-
 .table {
   width: 100%;
   max-width: 760px;
@@ -408,72 +334,5 @@ async function deleteSkill(name: string) {
   font-size: 12px;
   margin-top: 4px;
   margin-bottom: 12px;
-}
-
-.form-card {
-  grid-template-columns: 1fr;
-  padding: 24px 28px;
-}
-
-.form-title {
-  grid-column: 1 / -1;
-  margin: 0 0 12px 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: #e6e9f0;
-}
-
-.edit-actions {
-  display: flex;
-  gap: 8px;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-.dialog-actions .btn:first-child {
-  margin-left: 0;
-}
-</style>
-
-<style>
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  z-index: 1000;
-}
-
-[role='dialog'] {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 1001;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  padding: 24px 28px;
-  max-width: 480px;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.dialog-title {
-  margin: 0 0 16px 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: #e6e9f0;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 12px;
 }
 </style>

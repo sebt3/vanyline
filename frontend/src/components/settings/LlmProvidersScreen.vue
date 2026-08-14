@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
-import {
-  DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogClose,
-} from 'reka-ui';
+import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
+import { useCrudResource } from '../../composables/useCrudResource';
+import LoadingSkeleton from './common/LoadingSkeleton.vue';
+import ErrorCard from './common/ErrorCard.vue';
+import EmptyState from './common/EmptyState.vue';
+import DialogShell from './common/DialogShell.vue';
 
 interface LlmProvider {
   id: string;
@@ -34,9 +37,8 @@ interface TestResult {
 }
 
 const client = createApiClient();
-const fetchedProviders = ref<LlmProvider[]>([]);
-const error = ref<string | null>(null);
-const loading = ref(true);
+const resource = useCrudResource<LlmProvider>(client, '/api/llm-providers');
+const { items: fetchedProviders, loading, error } = resource;
 
 // Formulaire de création
 const formName = ref('');
@@ -60,17 +62,7 @@ const testResults = ref<Record<string, string>>({});
 const createModalOpen = ref(false);
 const editModalOpen = ref(false);
 
-async function fetchProviders() {
-  try {
-    fetchedProviders.value = await client.get<LlmProvider[]>('/api/llm-providers');
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
-onMounted(fetchProviders);
+onMounted(resource.fetch);
 
 async function createProvider() {
   creationError.value = null;
@@ -81,13 +73,12 @@ async function createProvider() {
     ...(formApiKey.value ? { api_key: formApiKey.value } : {}),
   };
   try {
-    await client.post<LlmProvider>('/api/llm-providers', body);
+    await resource.create(body);
     formName.value = '';
     formProviderType.value = 'ollama';
     formEndpoint.value = '';
     formApiKey.value = '';
     createModalOpen.value = false;
-    await fetchProviders();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
   }
@@ -122,9 +113,8 @@ async function saveEdit(id: string) {
     ...(editApiKey.value ? { api_key: editApiKey.value } : {}),
   };
   try {
-    await client.put<LlmProvider>(`/api/llm-providers/${id}`, body);
+    await resource.update(id, body);
     cancelEdit();
-    await fetchProviders();
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
@@ -142,34 +132,23 @@ async function testProvider(id: string) {
 async function setDefault(id: string) {
   try {
     await client.put<LlmProvider>(`/api/llm-providers/${id}/default`);
-    await fetchProviders();
+    await resource.fetch();
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
 async function deleteProvider(id: string) {
-  try {
-    await client.delete(`/api/llm-providers/${id}`);
-    await fetchProviders();
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
-  }
+  await resource.remove(id);
 }
 </script>
 
 <template>
-  <div v-if="loading" class="skeleton-card">
-    <div class="skeleton" />
-    <div class="skeleton short" />
-    <div class="skeleton short" />
-  </div>
+  <LoadingSkeleton v-if="loading" />
   <div v-else>
-    <div class="card" v-if="error" role="alert">
-      <p class="error-text">{{ error }}</p>
-    </div>
+    <ErrorCard v-if="error" :message="error" />
     <div v-else>
-      <div class="card" v-if="fetchedProviders.length === 0">Aucun fournisseur LLM.</div>
+      <EmptyState v-if="fetchedProviders.length === 0" message="Aucun fournisseur LLM." />
       <table class="table" v-else>
         <thead>
           <tr>
@@ -208,115 +187,103 @@ async function deleteProvider(id: string) {
 
       <button class="btn btn-create" @click="createModalOpen = true">Créer un fournisseur</button>
 
-      <DialogRoot v-model:open="createModalOpen">
-        <DialogPortal>
-          <DialogOverlay class="dialog-overlay" />
-          <DialogContent class="dialog-content" role="dialog">
-            <DialogTitle class="dialog-title">Créer un fournisseur</DialogTitle>
-            <label class="field">
-              <span class="field-label">Nom</span>
-              <input
-                class="field-input"
-                v-model="formName"
-                type="text"
-                placeholder="mon-fournisseur"
-                aria-label="Nom du fournisseur"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Type</span>
-              <select
-                class="field-input"
-                v-model="formProviderType"
-                aria-label="Type de fournisseur"
-              >
-                <option value="ollama">ollama</option>
-                <option value="openai-compatible">openai-compatible</option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">Endpoint</span>
-              <input
-                class="field-input"
-                v-model="formEndpoint"
-                type="text"
-                placeholder="http://localhost:11434"
-                aria-label="Endpoint"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Clé API (optionnel)</span>
-              <input
-                class="field-input"
-                v-model="formApiKey"
-                type="text"
-                placeholder="sk-..."
-                aria-label="Clé API"
-              />
-            </label>
-            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-            <div class="dialog-actions">
-              <button class="btn btn-create" @click="createProvider">Créer</button>
-              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
-            </div>
-          </DialogContent>
-        </DialogPortal>
-      </DialogRoot>
+      <DialogShell v-model:open="createModalOpen" title="Créer un fournisseur">
+        <label class="field">
+          <span class="field-label">Nom</span>
+          <input
+            class="field-input"
+            v-model="formName"
+            type="text"
+            placeholder="mon-fournisseur"
+            aria-label="Nom du fournisseur"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Type</span>
+          <select
+            class="field-input"
+            v-model="formProviderType"
+            aria-label="Type de fournisseur"
+          >
+            <option value="ollama">ollama</option>
+            <option value="openai-compatible">openai-compatible</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Endpoint</span>
+          <input
+            class="field-input"
+            v-model="formEndpoint"
+            type="text"
+            placeholder="http://localhost:11434"
+            aria-label="Endpoint"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Clé API (optionnel)</span>
+          <input
+            class="field-input"
+            v-model="formApiKey"
+            type="text"
+            placeholder="sk-..."
+            aria-label="Clé API"
+          />
+        </label>
+        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+        <template #actions>
+          <button class="btn btn-create" @click="createProvider">Créer</button>
+          <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+        </template>
+      </DialogShell>
 
-      <DialogRoot v-model:open="editModalOpen">
-        <DialogPortal>
-          <DialogOverlay class="dialog-overlay" />
-          <DialogContent class="dialog-content" role="dialog">
-            <DialogTitle class="dialog-title">Modifier : {{ editName }}</DialogTitle>
-            <label class="field">
-              <span class="field-label">Nom</span>
-              <input
-                class="field-input"
-                v-model="editName"
-                type="text"
-                placeholder="nom"
-                aria-label="Nom"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Type</span>
-              <select
-                class="field-input"
-                v-model="editProviderType"
-                aria-label="Type de fournisseur"
-              >
-                <option value="ollama">ollama</option>
-                <option value="openai-compatible">openai-compatible</option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">Endpoint</span>
-              <input
-                class="field-input"
-                v-model="editEndpoint"
-                type="text"
-                placeholder="http://localhost:11434"
-                aria-label="Endpoint"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Clé API (optionnel)</span>
-              <input
-                class="field-input"
-                v-model="editApiKey"
-                type="text"
-                placeholder="sk-..."
-                aria-label="Clé API"
-              />
-            </label>
-            <div v-if="editError" class="creation-error">{{ editError }}</div>
-            <div class="dialog-actions">
-              <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
-              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
-            </div>
-          </DialogContent>
-        </DialogPortal>
-      </DialogRoot>
+      <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editName}`">
+        <label class="field">
+          <span class="field-label">Nom</span>
+          <input
+            class="field-input"
+            v-model="editName"
+            type="text"
+            placeholder="nom"
+            aria-label="Nom"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Type</span>
+          <select
+            class="field-input"
+            v-model="editProviderType"
+            aria-label="Type de fournisseur"
+          >
+            <option value="ollama">ollama</option>
+            <option value="openai-compatible">openai-compatible</option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Endpoint</span>
+          <input
+            class="field-input"
+            v-model="editEndpoint"
+            type="text"
+            placeholder="http://localhost:11434"
+            aria-label="Endpoint"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Clé API (optionnel)</span>
+          <input
+            class="field-input"
+            v-model="editApiKey"
+            type="text"
+            placeholder="sk-..."
+            aria-label="Clé API"
+          />
+        </label>
+        <div v-if="editError" class="creation-error">{{ editError }}</div>
+        <template #actions>
+          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
+          <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+        </template>
+      </DialogShell>
 
       <div v-for="p in fetchedProviders" :key="'test-' + p.id" class="results">
         <div v-if="testResults[p.id]" class="test-result">
@@ -328,47 +295,6 @@ async function deleteProvider(id: string) {
 </template>
 
 <style scoped>
-.skeleton-card {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.card {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.card .error-text {
-  color: #e85d5d;
-  font-size: 13px;
-  margin: 0;
-}
-
-.skeleton {
-  height: 16px;
-  border-radius: 4px;
-  background: linear-gradient(90deg, #1a2332 25%, #1f2b3d 50%, #1a2332 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-}
-.skeleton.short {
-  width: 60%;
-}
-
 .table {
   width: 100%;
   max-width: 760px;
@@ -411,20 +337,6 @@ async function deleteProvider(id: string) {
   border-radius: 9999px;
 }
 
-.btn {
-  appearance: none;
-  border: none;
-  font: inherit;
-  font-size: 12px;
-  padding: 4px 10px;
-  border-radius: 6px;
-  cursor: pointer;
-  margin-left: 6px;
-}
-.btn:first-child {
-  margin-left: 0;
-}
-
 .btn-test {
   background: #4c90f022;
   color: #4c90f0;
@@ -446,6 +358,20 @@ async function deleteProvider(id: string) {
   background: #e0a83d;
   color: white;
   font-weight: 600;
+}
+
+.btn {
+  appearance: none;
+  border: none;
+  font: inherit;
+  font-size: 12px;
+  padding: 4px 10px;
+  border-radius: 6px;
+  cursor: pointer;
+  margin-left: 6px;
+}
+.btn:first-child {
+  margin-left: 0;
 }
 
 .btn-edit {
@@ -529,30 +455,6 @@ async function deleteProvider(id: string) {
   margin-bottom: 12px;
 }
 
-.form-card {
-  grid-template-columns: 1fr;
-  padding: 24px 28px;
-}
-
-.form-title {
-  grid-column: 1 / -1;
-  margin: 0 0 12px 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: #e6e9f0;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-.dialog-actions .btn:first-child {
-  margin-left: 0;
-}
-
 .results {
   max-width: 760px;
   margin-bottom: 12px;
@@ -565,43 +467,5 @@ async function deleteProvider(id: string) {
   border-radius: 6px;
   color: #3fb56d;
   font-size: 13px;
-}
-</style>
-
-<style>
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  z-index: 1000;
-}
-
-[role='dialog'] {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 1001;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  padding: 24px 28px;
-  max-width: 480px;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.dialog-title {
-  margin: 0 0 16px 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: #e6e9f0;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 12px;
 }
 </style>

@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { onMounted, ref, watch } from 'vue';
-import {
-  DialogRoot, DialogPortal, DialogOverlay, DialogContent, DialogTitle, DialogClose,
-} from 'reka-ui';
+import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
+import { useCrudResource } from '../../composables/useCrudResource';
+import LoadingSkeleton from './common/LoadingSkeleton.vue';
+import ErrorCard from './common/ErrorCard.vue';
+import EmptyState from './common/EmptyState.vue';
+import DialogShell from './common/DialogShell.vue';
 
 interface ModelProfile {
   name: string;
@@ -37,9 +40,8 @@ interface LlmProvider {
 }
 
 const client = createApiClient();
-const fetchedProfiles = ref<ModelProfile[]>([]);
-const error = ref<string | null>(null);
-const loading = ref(true);
+const resource = useCrudResource<ModelProfile>(client, '/api/model-profiles');
+const { items: fetchedProfiles, loading, error } = resource;
 
 const providers = ref<LlmProvider[]>([]);
 const providersError = ref<string | null>(null);
@@ -66,16 +68,6 @@ const editError = ref<string | null>(null);
 const createModalOpen = ref(false);
 const editModalOpen = ref(false);
 
-async function fetchProfiles() {
-  try {
-    fetchedProfiles.value = await client.get<ModelProfile[]>('/api/model-profiles');
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
-  } finally {
-    loading.value = false;
-  }
-}
-
 async function fetchProviders() {
   try {
     providers.value = await client.get<LlmProvider[]>('/api/llm-providers');
@@ -94,9 +86,7 @@ watch(() => providers.value, () => {
 }, { immediate: false });
 
 onMounted(async () => {
-  // Fetch des profils (gère loading/error)
-  await fetchProfiles();
-  // Fetch des providers (erreurs non-critiques : affichées sans bloquer)
+  await resource.fetch();
   await fetchProviders();
 });
 
@@ -125,14 +115,13 @@ async function createProfile() {
     ...(formMaxTokens.value ? { max_tokens: Number(formMaxTokens.value) } : {}),
   };
   try {
-    await client.post<ModelProfile>('/api/model-profiles', body);
+    await resource.create(body);
     formName.value = '';
     formProvider.value = '';
     formModel.value = '';
     formTemperature.value = '';
     formMaxTokens.value = '';
     createModalOpen.value = false;
-    await fetchProfiles();
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
   }
@@ -169,36 +158,24 @@ async function saveEdit(name: string) {
     ...(editMaxTokens.value ? { max_tokens: Number(editMaxTokens.value) } : {}),
   };
   try {
-    await client.put<ModelProfile>(`/api/model-profiles/${name}`, body);
+    await resource.update(name, body);
     cancelEdit();
-    await fetchProfiles();
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
 async function deleteProfile(name: string) {
-  try {
-    await client.delete(`/api/model-profiles/${name}`);
-    await fetchProfiles();
-  } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
-  }
+  await resource.remove(name);
 }
 </script>
 
 <template>
-  <div v-if="loading" class="skeleton-card">
-    <div class="skeleton" />
-    <div class="skeleton short" />
-    <div class="skeleton short" />
-  </div>
+  <LoadingSkeleton v-if="loading" />
   <div v-else>
-    <div class="card" v-if="error" role="alert">
-      <p class="error-text">{{ error }}</p>
-    </div>
+    <ErrorCard v-if="error" :message="error" />
     <div v-else>
-      <div class="card" v-if="fetchedProfiles.length === 0">Aucun profil de modèle.</div>
+      <EmptyState v-if="fetchedProfiles.length === 0" message="Aucun profil de modèle." />
       <table class="table" v-else>
         <thead>
           <tr>
@@ -231,197 +208,142 @@ async function deleteProfile(name: string) {
 
       <button class="btn btn-create" @click="createModalOpen = true">Créer un profil</button>
 
-      <div class="card" v-if="providersError" role="alert">
-        <p class="error-text">{{ providersError }}</p>
-      </div>
+      <ErrorCard v-if="providersError" :message="providersError" />
 
-      <DialogRoot v-model:open="createModalOpen">
-        <DialogPortal>
-          <DialogOverlay class="dialog-overlay" />
-          <DialogContent class="dialog-content" role="dialog">
-            <DialogTitle class="dialog-title">Créer un profil</DialogTitle>
-            <label class="field">
-              <span class="field-label">Nom</span>
-              <input
-                class="field-input"
-                v-model="formName"
-                type="text"
-                placeholder="chat-moderate"
-                aria-label="Nom du profil"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Provider</span>
-              <select
-                class="field-input"
-                v-model="formProvider"
-                aria-label="Provider"
-                @change="onFormProviderChange"
-              >
-                <option value="">—</option>
-                <option v-for="p in providers" :key="p.name" :value="p.name">
-                  {{ p.name }}
-                </option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">Modèle</span>
-              <select
-                class="field-input"
-                v-model="formModel"
-                aria-label="Modèle"
-              >
-                <option value="">—</option>
-                <option v-for="m in formAvailableModels" :key="m" :value="m">
-                  {{ m }}
-                </option>
-              </select>
-              <p v-if="formProvider && formAvailableModels.length === 0" class="empty-state">
-                Aucun modèle disponible — lancez un test sur ce provider.
-              </p>
-            </label>
-            <label class="field">
-              <span class="field-label">Température (optionnel)</span>
-              <input
-                class="field-input"
-                v-model="formTemperature"
-                type="number"
-                step="0.1"
-                min="0"
-                max="2"
-                placeholder="0.7"
-                aria-label="Température"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Max tokens (optionnel)</span>
-              <input
-                class="field-input"
-                v-model="formMaxTokens"
-                type="number"
-                placeholder="4096"
-                aria-label="Max tokens"
-              />
-            </label>
-            <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-            <div class="dialog-actions">
-              <button class="btn btn-create" @click="createProfile">Créer</button>
-              <DialogClose class="btn btn-cancel">Annuler</DialogClose>
-            </div>
-          </DialogContent>
-        </DialogPortal>
-      </DialogRoot>
+      <DialogShell v-model:open="createModalOpen" title="Créer un profil">
+        <label class="field">
+          <span class="field-label">Nom</span>
+          <input
+            class="field-input"
+            v-model="formName"
+            type="text"
+            placeholder="chat-moderate"
+            aria-label="Nom du profil"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Provider</span>
+          <select
+            class="field-input"
+            v-model="formProvider"
+            aria-label="Provider"
+            @change="onFormProviderChange"
+          >
+            <option value="">—</option>
+            <option v-for="p in providers" :key="p.name" :value="p.name">
+              {{ p.name }}
+            </option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Modèle</span>
+          <select
+            class="field-input"
+            v-model="formModel"
+            aria-label="Modèle"
+          >
+            <option value="">—</option>
+            <option v-for="m in formAvailableModels" :key="m" :value="m">
+              {{ m }}
+            </option>
+          </select>
+          <p v-if="formProvider && formAvailableModels.length === 0" class="empty-state">
+            Aucun modèle disponible — lancez un test sur ce provider.
+          </p>
+        </label>
+        <label class="field">
+          <span class="field-label">Température (optionnel)</span>
+          <input
+            class="field-input"
+            v-model="formTemperature"
+            type="number"
+            step="0.1"
+            min="0"
+            max="2"
+            placeholder="0.7"
+            aria-label="Température"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Max tokens (optionnel)</span>
+          <input
+            class="field-input"
+            v-model="formMaxTokens"
+            type="number"
+            placeholder="4096"
+            aria-label="Max tokens"
+          />
+        </label>
+        <div v-if="creationError" class="creation-error">{{ creationError }}</div>
+        <template #actions>
+          <button class="btn btn-create" @click="createProfile">Créer</button>
+          <DialogClose class="btn btn-cancel">Annuler</DialogClose>
+        </template>
+      </DialogShell>
 
-      <DialogRoot v-model:open="editModalOpen">
-        <DialogPortal>
-          <DialogOverlay class="dialog-overlay" />
-          <DialogContent class="dialog-content" role="dialog">
-            <DialogTitle class="dialog-title">Modifier : {{ editingName }}</DialogTitle>
-            <label class="field">
-              <span class="field-label">Provider</span>
-              <select
-                class="field-input"
-                v-model="editProvider"
-                aria-label="Provider"
-                @change="onEditProviderChange"
-              >
-                <option value="">—</option>
-                <option v-for="p in providers" :key="p.name" :value="p.name">
-                  {{ p.name }}
-                </option>
-              </select>
-            </label>
-            <label class="field">
-              <span class="field-label">Modèle</span>
-              <select
-                class="field-input"
-                v-model="editModel"
-                aria-label="Modèle"
-              >
-                <option value="">—</option>
-                <option v-for="m in editAvailableModels" :key="m" :value="m">
-                  {{ m }}
-                </option>
-              </select>
-              <p v-if="editProvider && editAvailableModels.length === 0" class="empty-state">
-                Aucun modèle disponible — lancez un test sur ce provider.
-              </p>
-            </label>
-            <label class="field">
-              <span class="field-label">Température</span>
-              <input
-                class="field-input"
-                v-model="editTemperature"
-                type="number"
-                step="0.1"
-                min="0"
-                max="2"
-                aria-label="Température"
-              />
-            </label>
-            <label class="field">
-              <span class="field-label">Max tokens</span>
-              <input
-                class="field-input"
-                v-model="editMaxTokens"
-                type="number"
-                aria-label="Max tokens"
-              />
-            </label>
-            <div v-if="editError" class="creation-error">{{ editError }}</div>
-            <div class="dialog-actions">
-              <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
-              <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
-            </div>
-          </DialogContent>
-        </DialogPortal>
-      </DialogRoot>
+      <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
+        <label class="field">
+          <span class="field-label">Provider</span>
+          <select
+            class="field-input"
+            v-model="editProvider"
+            aria-label="Provider"
+            @change="onEditProviderChange"
+          >
+            <option value="">—</option>
+            <option v-for="p in providers" :key="p.name" :value="p.name">
+              {{ p.name }}
+            </option>
+          </select>
+        </label>
+        <label class="field">
+          <span class="field-label">Modèle</span>
+          <select
+            class="field-input"
+            v-model="editModel"
+            aria-label="Modèle"
+          >
+            <option value="">—</option>
+            <option v-for="m in editAvailableModels" :key="m" :value="m">
+              {{ m }}
+            </option>
+          </select>
+          <p v-if="editProvider && editAvailableModels.length === 0" class="empty-state">
+            Aucun modèle disponible — lancez un test sur ce provider.
+          </p>
+        </label>
+        <label class="field">
+          <span class="field-label">Température</span>
+          <input
+            class="field-input"
+            v-model="editTemperature"
+            type="number"
+            step="0.1"
+            min="0"
+            max="2"
+            aria-label="Température"
+          />
+        </label>
+        <label class="field">
+          <span class="field-label">Max tokens</span>
+          <input
+            class="field-input"
+            v-model="editMaxTokens"
+            type="number"
+            aria-label="Max tokens"
+          />
+        </label>
+        <div v-if="editError" class="creation-error">{{ editError }}</div>
+        <template #actions>
+          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+          <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
+        </template>
+      </DialogShell>
     </div>
   </div>
 </template>
 
 <style scoped>
-.skeleton-card {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.card {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 22px 28px;
-  max-width: 760px;
-  padding: 28px 32px;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  margin-bottom: 12px;
-}
-
-.card .error-text {
-  color: #e85d5d;
-  font-size: 13px;
-  margin: 0;
-}
-
-.skeleton {
-  height: 16px;
-  border-radius: 4px;
-  background: linear-gradient(90deg, #1a2332 25%, #1f2b3d 50%, #1a2332 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-}
-.skeleton.short {
-  width: 60%;
-}
-
 .table {
   width: 100%;
   max-width: 760px;
@@ -555,54 +477,5 @@ async function deleteProfile(name: string) {
   color: #6a7185;
   font-size: 12px;
   margin: 4px 0 0 0;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 12px;
-}
-
-.dialog-actions .btn:first-child {
-  margin-left: 0;
-}
-</style>
-
-<style>
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  background: rgba(0, 0, 0, 0.6);
-  z-index: 1000;
-}
-
-[role='dialog'] {
-  position: fixed;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  z-index: 1001;
-  background: #101828;
-  border: 1px solid #1c1c2a;
-  border-radius: 10px;
-  padding: 24px 28px;
-  max-width: 480px;
-  max-height: 85vh;
-  overflow-y: auto;
-}
-
-.dialog-title {
-  margin: 0 0 16px 0;
-  font-size: 15px;
-  font-weight: 600;
-  color: #e6e9f0;
-}
-
-.dialog-actions {
-  display: flex;
-  gap: 12px;
-  justify-content: flex-end;
-  margin-top: 12px;
 }
 </style>
