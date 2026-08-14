@@ -3,8 +3,8 @@ import { onMounted, onBeforeUnmount, useTemplateRef, inject, ref, watch } from '
 import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
-import { python } from '@codemirror/lang-python';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { languageExtensionForPath } from './editorLanguage';
 import type { Ref } from 'vue';
 import type { SandboxFsClient } from '../../api/sandboxWs';
 
@@ -30,7 +30,9 @@ const denseTheme = EditorView.theme({
 const hostRef = useTemplateRef<HTMLDivElement>('host');
 let view: EditorView | undefined;
 
-const extensions = [basicSetup, python(), oneDark, denseTheme, saveKeymap()];
+/** Extensions communes à tout fichier — le langage (dépendant du chemin
+ *  ouvert) est ajouté séparément par `loadFile`, cf. `editorLanguage.ts`. */
+const baseExtensions = [basicSetup, oneDark, denseTheme, saveKeymap()];
 
 // Visible le temps d'informer l'utilisateur — un échec de save/read silencieux
 // laisserait croire que l'édition est enregistrée alors qu'elle ne l'est pas.
@@ -84,7 +86,7 @@ async function loadFile(path: string): Promise<void> {
     view.setState(
       EditorState.create({
         doc: resp.content,
-        extensions,
+        extensions: [...baseExtensions, ...languageExtensionForPath(path)],
       }),
     );
   } catch (e) {
@@ -102,7 +104,7 @@ onMounted(() => {
   view = new EditorView({
     state: EditorState.create({
       doc: '',
-      extensions,
+      extensions: baseExtensions,
     }),
     parent: hostRef.value!,
   });
