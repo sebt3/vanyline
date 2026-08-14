@@ -366,4 +366,103 @@ describe('AgentsScreen', () => {
     expect(deleteTarget).toBe('to-delete');
     expect(wrapper.text()).toContain('Aucun agent');
   });
+
+  it('erreur GET options → message affiché dans le corps principal', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    let agentsReturned = false;
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const urlStr = String(url);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+
+      if (method === 'GET' && urlStr === '/api/agents') {
+        if (!agentsReturned) {
+          agentsReturned = true;
+          return jsonResponse([{
+            name: 'agent-ok',
+            mode: 'primary',
+            model: 'gpt-4',
+            toolsets: [],
+            skills: 'auto',
+            system_prompt: '',
+          }]);
+        }
+        return jsonResponse([{
+          name: 'agent-ok',
+          mode: 'primary',
+          model: 'gpt-4',
+          toolsets: [],
+          skills: 'none',
+          system_prompt: '',
+        }]);
+      }
+      if (urlStr === '/api/model-profiles') {
+        return jsonResponse([]);
+      }
+      if (urlStr === '/api/toolsets') {
+        return jsonResponse([]);
+      }
+      if (urlStr === '/api/skills') {
+        return new Response(JSON.stringify({ error: 'Skill server unreachable' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const wrapper = mount(AgentsScreen);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Le message d'erreur des options est dans le corps principal, visible sans modale.
+    expect(wrapper.text()).toContain('Skill server unreachable');
+  });
+
+  it('erreur GET options → message visible avec modale d\'édition ouverte', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+
+    fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
+      const urlStr = String(url);
+      const method = String(init?.method ?? 'GET').toUpperCase();
+
+      if (method === 'GET' && urlStr === '/api/agents') {
+        return jsonResponse([{
+          name: 'edit-test',
+          mode: 'primary',
+          model: 'claude-sonnet-4',
+          toolsets: [],
+          skills: 'auto',
+          system_prompt: 'prompt',
+        }]);
+      }
+      if (method === 'PUT' && urlStr.startsWith('/api/agents/')) {
+        return jsonResponse({ name: 'edit-test' });
+      }
+      if (urlStr === '/api/model-profiles') {
+        return jsonResponse([]);
+      }
+      if (urlStr === '/api/toolsets') {
+        return jsonResponse([]);
+      }
+      if (urlStr === '/api/skills') {
+        return new Response(JSON.stringify({ error: 'Skill server unreachable' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response('', { status: 404 });
+    });
+
+    const wrapper = mount(AgentsScreen);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Dans le corps principal, message visible.
+    expect(wrapper.text()).toContain('Skill server unreachable');
+
+    // Ouvrir la modale d'édition → le message est toujours visible.
+    await wrapper.find('.btn-edit').trigger('click');
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(wrapper.text()).toContain('Skill server unreachable');
+  });
 });

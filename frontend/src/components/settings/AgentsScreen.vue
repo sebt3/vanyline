@@ -108,6 +108,7 @@ async function fetchOptions() {
     skillOptions.value = sk;
   } catch (e) {
     optionsError.value = e instanceof ApiError ? e.message : String(e);
+    loading.value = false;
   }
 }
 
@@ -256,6 +257,10 @@ async function deleteAgent(name: string) {
 
       <button class="btn btn-create" @click="createModalOpen = true">Créer un agent</button>
 
+      <div class="card" v-if="optionsError" role="alert">
+        <p class="error-text">{{ optionsError }}</p>
+      </div>
+
       <DialogRoot v-model:open="createModalOpen">
         <DialogPortal>
           <DialogContent class="dialog-content" role="dialog">
@@ -330,7 +335,6 @@ async function deleteAgent(name: string) {
               />
             </label>
             <div v-if="creationError" class="creation-error">{{ creationError }}</div>
-            <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
             <div class="dialog-actions">
               <button class="btn btn-create" @click="createAgent">Créer</button>
               <DialogClose class="btn btn-cancel">Annuler</DialogClose>

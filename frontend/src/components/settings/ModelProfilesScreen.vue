@@ -231,6 +231,10 @@ async function deleteProfile(name: string) {
 
       <button class="btn btn-create" @click="createModalOpen = true">Créer un profil</button>
 
+      <div class="card" v-if="providersError" role="alert">
+        <p class="error-text">{{ providersError }}</p>
+      </div>
+
       <DialogRoot v-model:open="createModalOpen">
         <DialogPortal>
           <DialogContent class="dialog-content" role="dialog">
@@ -259,7 +263,6 @@ async function deleteProfile(name: string) {
                 </option>
               </select>
             </label>
-            <p v-if="providersError" class="creation-error">{{ providersError }}</p>
             <label class="field">
               <span class="field-label">Modèle</span>
               <select

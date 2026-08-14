@@ -92,6 +92,7 @@ async function fetchOptions() {
     mcpServers.value = servers;
   } catch (e) {
     optionsError.value = e instanceof ApiError ? e.message : String(e);
+    loading.value = false;
   }
 }
 
@@ -239,6 +240,10 @@ async function deleteToolset(name: string) {
 
       <button class="btn btn-create" @click="createModalOpen = true">Créer un toolset</button>
 
+      <div class="card" v-if="optionsError" role="alert">
+        <p class="error-text">{{ optionsError }}</p>
+      </div>
+
       <DialogRoot v-model:open="createModalOpen">
         <DialogPortal>
           <DialogContent class="dialog-content" role="dialog">
@@ -302,7 +307,6 @@ async function deleteToolset(name: string) {
               </div>
               <button class="btn btn-add" @click="addMcpRow">Ajouter un serveur</button>
             </label>
-            <div v-if="optionsError" class="creation-error">{{ optionsError }}</div>
             <div v-if="creationError" class="creation-error">{{ creationError }}</div>
             <div class="dialog-actions">
               <button class="btn btn-create" @click="createToolset">Créer</button>

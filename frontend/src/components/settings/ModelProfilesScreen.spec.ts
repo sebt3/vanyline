@@ -459,7 +459,7 @@ describe('ModelProfilesScreen', () => {
     expect(dialog.textContent).toContain('Aucun modèle disponible');
   });
 
-  it('erreur GET /api/llm-providers → message affiché', async () => {
+  it('erreur GET /api/llm-providers → message affiché dans le corps principal', async () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
@@ -481,14 +481,38 @@ describe('ModelProfilesScreen', () => {
     const wrapper = mount(ModelProfilesScreen);
     await new Promise((r) => setTimeout(r, 50));
 
-    // Le message est rendu dans la modale de création (formulaire inline converti) :
-    // ouvrir la modale pour le voir.
-    const createBtn = wrapper.find('.btn-create');
-    await createBtn.trigger('click');
-    await wrapper.vm.$nextTick();
-    await new Promise((r) => setTimeout(r, 0));
+    // Le message est rendu dans le corps principal (avant le bouton Créer), visible sans ouvrir de modale.
+    expect(wrapper.text()).toContain('Network error');
+  });
 
-    const dialog = document.querySelector('[role="dialog"]')!;
-    expect(dialog.textContent).toContain('Network error');
+  it('erreur GET /api/llm-providers → message visible même avec modale d\'édition ouverte', async () => {
+    const profile = {
+      name: 'aaa',
+      provider: 'anthropic',
+      model: 'model-1',
+      temperature: 0.5,
+      max_tokens: 4096,
+    };
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy
+      .mockResolvedValueOnce(new Response(JSON.stringify([profile]), {
+        status: 200, headers: { 'Content-Type': 'application/json' },
+      }))
+      .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Network error' }), {
+        status: 502, headers: { 'Content-Type': 'application/json' },
+      }));
+
+    const wrapper = mount(ModelProfilesScreen);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Le message d'erreur des providers est dans le corps principal.
+    expect(wrapper.text()).toContain('Network error');
+
+    // Ouvrir la modale d'édition → le message reste visible (dans le corps principal).
+    await (wrapper.find('.btn-edit')).trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(wrapper.text()).toContain('Network error');
   });
 });

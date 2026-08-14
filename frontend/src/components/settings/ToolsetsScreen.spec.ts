@@ -470,4 +470,98 @@ describe('ToolsetsScreen', () => {
 
     expect(wrapper.text()).toContain('Aucun toolset');
   });
+
+  // ── Test 8 : erreur options → message visible sans modale ──────────────────
+  it('erreur GET options → message affiché dans le corps principal', async () => {
+    // Corps JSON `{error: ...}` — c'est le seul format que client.ts sait extraire
+    // (cf. test voisin ci-dessous) ; un corps texte brut sans Content-Type JSON
+    // retombe toujours sur "HTTP {status}" côté client, comportement établi.
+    mockFetch((url) => {
+      if (url === '/api/toolsets') {
+        return jsonResponse([{
+          name: 'default',
+          description: 'Outils par défaut',
+          prompt: null,
+          local_tools: ['git'],
+          mcp: [],
+        }]);
+      }
+      if (url === '/api/local-tools') {
+        return new Response(JSON.stringify({ error: 'Connection refused' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/mcp-servers') {
+        // Retourne JSON pour que l'erreur ait un message lisible, sinon l'API
+        // client ne renvoie que "HTTP 500" (sans corps JSON détecté).
+        return new Response(JSON.stringify({ error: 'Connection refused' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return undefined;
+    });
+
+    const wrapper = mount(ToolsetsScreen);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Le message d'erreur des options est dans le corps principal, visible sans modale.
+    expect(wrapper.text()).toContain('Connection refused');
+  });
+
+  // ── Test 9 : erreur options → message visible même avec modale d'édition ───
+  it('erreur GET options → message visible avec modale édition ouverte', async () => {
+    let fetchCount = 0;
+    mockFetch((url, init) => {
+      const method = String(init?.method ?? 'GET').toUpperCase();
+      if (method === 'GET' && url === '/api/toolsets') {
+        fetchCount++;
+        if (fetchCount === 1) {
+          return jsonResponse([{
+            name: 'default',
+            description: 'old-desc',
+            prompt: null,
+            local_tools: ['git'],
+            mcp: [],
+          }]);
+        }
+        return jsonResponse([{
+          name: 'default',
+          description: 'updated',
+          prompt: null,
+          local_tools: ['git'],
+          mcp: [],
+        }]);
+      }
+      if (method === 'PUT' && url.startsWith('/api/toolsets/')) {
+        return jsonResponse({ name: 'default' });
+      }
+      if (url === '/api/local-tools') {
+        return new Response(JSON.stringify({ error: 'Connection refused' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url === '/api/mcp-servers') {
+        return new Response(JSON.stringify({ error: 'Connection refused' }), {
+          status: 502,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return undefined;
+    });
+
+    const wrapper = mount(ToolsetsScreen);
+    await new Promise(r => setTimeout(r, 50));
+
+    // Le message d'erreur est dans le corps principal.
+    expect(wrapper.text()).toContain('Connection refused');
+
+    // Ouvrir la modale d'édition → le message reste visible.
+    await wrapper.find('.btn-edit').trigger('click');
+    await new Promise(r => setTimeout(r, 50));
+
+    expect(wrapper.text()).toContain('Connection refused');
+  });
 });
