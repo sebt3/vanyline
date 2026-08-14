@@ -26,6 +26,8 @@ use vanyline_crds::{Owner, ProjectStatus, Sandbox};
 pub const WORKSPACE_MOUNT_PATH: &str = "/workspace";
 #[allow(dead_code)]
 const DEFAULT_WORKSPACE_SIZE: &str = "10Gi";
+#[allow(dead_code)]
+const DEFAULT_WORKSPACE_ACCESS_MODE: &str = "ReadWriteOnce";
 
 /// Nom du PVC workspace créé par le controller — utilisé seulement quand
 /// `spec.existing_pvc` est `None`.
@@ -115,16 +117,19 @@ fn owner_reference(
 /// règles que `owner::build_home_pvc`).
 #[allow(dead_code)]
 ///
-/// `default_size`/`default_class` sont les valeurs `Owner.spec.project_defaults`
-/// résolues par l'appelant (le reconciler Project ira chercher l'Owner — cette
-/// fonction reste pure et ne fait aucun appel réseau). Priorité :
-/// `spec.storage_size`/`spec.storage_class` > défauts passés en paramètre >
-/// `DEFAULT_WORKSPACE_SIZE` ("10Gi") pour la taille ; pas de valeur de repli pour
-/// la storage class (`None` => `StorageClass` par défaut du cluster).
+/// `default_size`/`default_class`/`default_access_mode` sont les valeurs
+/// `Owner.spec.project_defaults` résolues par l'appelant (le reconciler
+/// Project ira chercher l'Owner — cette fonction reste pure et ne fait aucun
+/// appel réseau). Priorité : `spec.storage_size`/`spec.storage_class`/
+/// `spec.storage_access_mode` > défauts passés en paramètre >
+/// `DEFAULT_WORKSPACE_SIZE` ("10Gi")/`DEFAULT_WORKSPACE_ACCESS_MODE`
+/// ("ReadWriteOnce") ; pas de valeur de repli pour la storage class (`None`
+/// => `StorageClass` par défaut du cluster).
 pub fn build_workspace_pvc(
     project: &Project,
     default_size: Option<&str>,
     default_class: Option<&str>,
+    default_access_mode: Option<&str>,
 ) -> Option<PersistentVolumeClaim> {
     if project.spec.existing_pvc.is_some() {
         return None;
@@ -140,6 +145,12 @@ pub fn build_workspace_pvc(
         .storage_class
         .clone()
         .or_else(|| default_class.map(str::to_string));
+    let access_mode = project
+        .spec
+        .storage_access_mode
+        .clone()
+        .or_else(|| default_access_mode.map(str::to_string))
+        .unwrap_or_else(|| DEFAULT_WORKSPACE_ACCESS_MODE.to_string());
 
     let mut requests = BTreeMap::new();
     requests.insert("storage".to_string(), Quantity(size));
@@ -152,7 +163,7 @@ pub fn build_workspace_pvc(
             ..Default::default()
         },
         spec: Some(PersistentVolumeClaimSpec {
-            access_modes: Some(vec!["ReadWriteOnce".to_string()]),
+            access_modes: Some(vec![access_mode]),
             storage_class_name: class,
             resources: Some(VolumeResourceRequirements {
                 requests: Some(requests),
@@ -483,6 +494,11 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
             .project_defaults
             .as_ref()
             .and_then(|d| d.storage_class.as_deref()),
+        owner
+            .spec
+            .project_defaults
+            .as_ref()
+            .and_then(|d| d.storage_access_mode.as_deref()),
     ) {
         let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
         pvcs.patch(
@@ -647,6 +663,7 @@ mod tests {
                 existing_pvc,
                 storage_size,
                 storage_class: None,
+                storage_access_mode: None,
                 git_secret: None,
                 caches: None,
                 fetch_interval: None,
@@ -763,14 +780,14 @@ mod tests {
             }),
             None,
         );
-        assert!(build_workspace_pvc(&project, None, None).is_none());
+        assert!(build_workspace_pvc(&project, None, None, None).is_none());
     }
 
     // 11. build_workspace_pvc_default_size
     #[test]
     fn build_workspace_pvc_default_size() {
         let project = make_project(None, None);
-        let pvc = build_workspace_pvc(&project, None, None).expect("PVC should be built");
+        let pvc = build_workspace_pvc(&project, None, None, None).expect("PVC should be built");
         let requests = pvc
             .spec
             .as_ref()
@@ -792,7 +809,7 @@ mod tests {
     #[test]
     fn build_workspace_pvc_owner_default_size() {
         let project = make_project(None, None);
-        let pvc = build_workspace_pvc(&project, Some("20Gi"), None).expect("PVC should be built");
+        let pvc = build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
         let requests = pvc
             .spec
             .as_ref()
@@ -806,11 +823,34 @@ mod tests {
         assert_eq!(requests.get("storage").unwrap(), &Quantity("20Gi".into()));
     }
 
+    #[test]
+    fn build_workspace_pvc_access_mode_owner_default() {
+        let project = make_project(None, None);
+        let pvc = build_workspace_pvc(&project, None, None, Some("ReadWriteMany"))
+            .expect("PVC should be built");
+        assert_eq!(
+            pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
+            &vec!["ReadWriteMany".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_workspace_pvc_access_mode_spec_overrides_default() {
+        let mut project = make_project(None, None);
+        project.spec.storage_access_mode = Some("ReadWriteOncePod".to_string());
+        let pvc = build_workspace_pvc(&project, None, None, Some("ReadWriteMany"))
+            .expect("PVC should be built");
+        assert_eq!(
+            pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
+            &vec!["ReadWriteOncePod".to_string()]
+        );
+    }
+
     // 13. build_workspace_pvc_spec_overrides_default
     #[test]
     fn build_workspace_pvc_spec_overrides_default() {
         let project = make_project(None, Some("5Gi".to_string()));
-        let pvc = build_workspace_pvc(&project, Some("20Gi"), None).expect("PVC should be built");
+        let pvc = build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
         let requests = pvc
             .spec
             .as_ref()
@@ -828,7 +868,7 @@ mod tests {
     #[test]
     fn build_workspace_pvc_owner_reference() {
         let project = make_project(None, None);
-        let pvc = build_workspace_pvc(&project, None, None).expect("PVC should be built");
+        let pvc = build_workspace_pvc(&project, None, None, None).expect("PVC should be built");
         let refs = pvc
             .metadata
             .owner_references

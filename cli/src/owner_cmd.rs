@@ -16,11 +16,16 @@ pub enum Commands {
         home_size: Option<String>,
         #[arg(long)]
         home_storage_class: Option<String>,
+        /// Mode d'accès du PVC home. Omis: "ReadWriteMany" (défaut historique).
+        #[arg(long)]
+        home_access_mode: Option<String>,
         /// Taille par défaut appliquée aux futurs Projects de cet Owner.
         #[arg(long)]
         project_default_storage_size: Option<String>,
         #[arg(long)]
         project_default_storage_class: Option<String>,
+        #[arg(long)]
+        project_default_storage_access_mode: Option<String>,
     },
     /// Delete an Owner
     Delete { name: String },

@@ -31,10 +31,30 @@ interface CreateSandboxBody {
   branch: string;
 }
 
+interface Project {
+  metadata: { name: string };
+  status?: { cloned?: boolean } | null;
+}
+
 const props = defineProps<{ projectName: string }>();
 
 const client = createApiClient();
 const router = useRouter();
+
+/** Le clone initial du Project doit être terminé avant de pouvoir créer une
+ *  sandbox dessus (le worktree n'existe pas encore sinon). `null` tant que
+ *  le Project n'est pas chargé — traité comme "pas prêt" (bouton désactivé
+ *  par défaut, jamais un flash de faux-positif). */
+const project = ref<Project | null>(null);
+const projectReady = computed(() => project.value?.status?.cloned === true);
+
+async function fetchProject() {
+  try {
+    project.value = await client.get<Project>(`/api/projects/${props.projectName}`);
+  } catch (e) {
+    error.value = e instanceof ApiError ? e.message : String(e);
+  }
+}
 
 /** Sandboxes du projet courant, filtrées côté client (fetch global /api/sandboxes). */
 const projectSandboxes = computed(() =>
@@ -63,11 +83,15 @@ async function fetchSandboxes() {
   }
 }
 
-onMounted(fetchSandboxes);
+onMounted(() => {
+  fetchSandboxes();
+  fetchProject();
+});
 
 const modalOpen = ref(false);
 
 async function createSandbox() {
+  if (!projectReady.value) return;
   creationError.value = null;
   const body: CreateSandboxBody = {
     name: formName.value,
@@ -111,10 +135,20 @@ async function deleteSandbox(name: string) {
   <div class="dashboard">
     <h1>Sandboxes de {{ projectName }}</h1>
     <div class="actions-row">
-      <button class="btn btn-create" @click="modalOpen = true">Créer une sandbox</button>
+      <button
+        class="btn btn-create"
+        :disabled="!projectReady"
+        :title="projectReady ? undefined : 'Le clone initial du projet n\'est pas encore terminé'"
+        @click="modalOpen = true"
+      >
+        Créer une sandbox
+      </button>
       <button class="btn btn-back" @click="router.push('/')">Retour</button>
       <button class="btn btn-settings" @click="router.push('/settings')">Paramètres</button>
     </div>
+    <p v-if="project && !projectReady" class="not-ready-hint">
+      Clone du projet en cours — la création de sandbox sera disponible une fois terminé.
+    </p>
 
     <div v-if="loading" class="card">
       <div class="skeleton" />
@@ -195,7 +229,9 @@ async function deleteSandbox(name: string) {
             </label>
             <div v-if="creationError" class="creation-error">{{ creationError }}</div>
             <div class="dialog-actions">
-              <button class="btn btn-create" @click="createSandbox">Créer</button>
+              <button class="btn btn-create" :disabled="!projectReady" @click="createSandbox">
+                Créer
+              </button>
               <DialogClose class="btn btn-cancel">Annuler</DialogClose>
             </div>
           </DialogContent>
@@ -380,6 +416,22 @@ h1 {
 
 .btn-create:hover {
   background: #3a7de0;
+}
+
+.btn-create:disabled {
+  background: #2b3550;
+  color: #6a7185;
+  cursor: not-allowed;
+}
+
+.btn-create:disabled:hover {
+  background: #2b3550;
+}
+
+.not-ready-hint {
+  color: #6a7185;
+  font-size: 13px;
+  margin: -12px 0 20px;
 }
 
 .field {

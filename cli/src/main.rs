@@ -674,15 +674,19 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
             existing_pvc,
             home_size,
             home_storage_class,
+            home_access_mode,
             project_default_storage_size,
             project_default_storage_class,
+            project_default_storage_access_mode,
         } => {
             let project_defaults = if project_default_storage_size.is_some()
                 || project_default_storage_class.is_some()
+                || project_default_storage_access_mode.is_some()
             {
                 Some(vanyline_crds::ProjectDefaults {
                     storage_size: project_default_storage_size,
                     storage_class: project_default_storage_class,
+                    storage_access_mode: project_default_storage_access_mode,
                 })
             } else {
                 None
@@ -691,6 +695,7 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
                 existing_pvc,
                 home_size,
                 home_storage_class,
+                home_access_mode,
                 project_defaults,
                 application_ref: None,
                 egress: Vec::new(),
@@ -810,6 +815,7 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
             existing_pvc_subpath,
             storage_size,
             storage_class,
+            storage_access_mode,
             git_secret,
             caches,
             fetch_interval,
@@ -825,6 +831,7 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                 existing_pvc,
                 storage_size,
                 storage_class,
+                storage_access_mode,
                 git_secret,
                 caches: if caches.is_empty() {
                     None

@@ -23,6 +23,11 @@ pub struct OwnerSpec {
     pub existing_pvc: Option<String>,
     pub home_size: Option<String>, // défaut appliqué au reconcile: "1Gi"
     pub home_storage_class: Option<String>, // RWX recommandé (CephFS)
+    /// Mode d'accès du PVC home. None => "ReadWriteMany" (défaut historique —
+    /// le home est partagé entre les sandboxes concurrentes d'un même Owner).
+    /// À ajuster (ex. "ReadWriteOnce") sur un cluster sans StorageClass RWX
+    /// (ex. single-node local-path) — aucun partage concurrent alors possible.
+    pub home_access_mode: Option<String>,
     pub project_defaults: Option<ProjectDefaults>,
     /// Nom de la CR Application dont l'Ingress sert de base aux sous-domaines
     /// de sandbox (`{sandbox}.sandboxes.{application.host}`). None => la
@@ -37,6 +42,9 @@ pub struct OwnerSpec {
 pub struct ProjectDefaults {
     pub storage_size: Option<String>,
     pub storage_class: Option<String>,
+    /// Défaut de repli pour `ProjectSpec.storage_access_mode` quand ce
+    /// dernier est absent. None => "ReadWriteOnce" (défaut historique).
+    pub storage_access_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -103,6 +111,10 @@ pub struct ProjectSpec {
     pub existing_pvc: Option<PvcRef>,
     pub storage_size: Option<String>,
     pub storage_class: Option<String>,
+    /// Mode d'accès du PVC workspace. None => repli sur
+    /// `Owner.spec.project_defaults.storage_access_mode`, puis
+    /// "ReadWriteOnce" (défaut historique).
+    pub storage_access_mode: Option<String>,
     /// Auth git dédiée (Secret). Défaut: ~/.ssh du home Owner.
     pub git_secret: Option<String>,
     /// Caches partagés. None => ["cargo", "pnpm"].
@@ -240,6 +252,26 @@ pub struct ApplicationSpec {
     /// le Service). None => pas de peer dédié (la netpol sandbox ne laisse
     /// passer que les pods du même Owner + le pod app).
     pub ingress_controller: Option<IngressControllerRef>,
+    /// Défauts de stockage (storageClass + accessMode) posés en env sur le
+    /// Deployment `app` — utilisés par `app` quand il crée lazily un Owner ou
+    /// un Project pour un utilisateur (jamais lus par le reconciler
+    /// Application lui-même). None => `app` ne pose aucun défaut, les
+    /// reconcilers Owner/Project retombent sur leurs valeurs historiques
+    /// (RWX pour le home, RWO pour le workspace projet).
+    pub storage_defaults: Option<ApplicationStorageDefaults>,
+}
+
+/// Défauts de stockage propagés par `app` lors de ses créations lazily
+/// d'Owner/Project — permet à l'outillage de déploiement de fournir la
+/// StorageClass/accessMode adaptée au cluster cible (ex. RWO + local-path
+/// sur un cluster single-node, RWX + CephFS ailleurs) sans toucher au code.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplicationStorageDefaults {
+    pub home_storage_class: Option<String>,
+    pub home_access_mode: Option<String>,
+    pub project_storage_class: Option<String>,
+    pub project_access_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -322,6 +354,7 @@ mod tests {
             existing_pvc: None,
             storage_size: None,
             storage_class: None,
+            storage_access_mode: None,
             git_secret: None,
             caches: None,
             fetch_interval: None,
@@ -555,6 +588,12 @@ mod tests {
                 namespace: "kydah-core".to_string(),
                 pod_labels,
             }),
+            storage_defaults: Some(ApplicationStorageDefaults {
+                home_storage_class: Some("local-path".to_string()),
+                home_access_mode: Some("ReadWriteOnce".to_string()),
+                project_storage_class: None,
+                project_access_mode: None,
+            }),
         };
         let json = serde_json::to_string(&spec).unwrap();
         assert!(
@@ -598,6 +637,18 @@ mod tests {
             "should contain podLabels (camelCase), got: {json}"
         );
         assert!(
+            json.contains(r#""storageDefaults""#),
+            "should contain storageDefaults (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""homeStorageClass""#),
+            "should contain homeStorageClass (camelCase), got: {json}"
+        );
+        assert!(
+            json.contains(r#""homeAccessMode""#),
+            "should contain homeAccessMode (camelCase), got: {json}"
+        );
+        assert!(
             !json.contains("oidc_secret_ref"),
             "should not contain oidc_secret_ref (snake_case), got: {json}"
         );
@@ -637,6 +688,7 @@ mod tests {
             existing_pvc: None,
             home_size: None,
             home_storage_class: None,
+            home_access_mode: None,
             project_defaults: None,
             application_ref: Some("my-app".to_string()),
             egress: Vec::new(),

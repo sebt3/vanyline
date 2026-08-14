@@ -1,5 +1,5 @@
 use uuid::Uuid;
-use vanyline_crds::OwnerSpec;
+use vanyline_crds::{OwnerSpec, ProjectDefaults};
 
 use crate::{db::models::User, error::AppError, AppState};
 
@@ -67,13 +67,25 @@ pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, Ap
     match k8s.get_owner(&name).await {
         Ok(_) => {}
         Err(_) => {
+            let project_defaults = if state.config.default_project_storage_class.is_some()
+                || state.config.default_project_access_mode.is_some()
+            {
+                Some(ProjectDefaults {
+                    storage_size: None,
+                    storage_class: state.config.default_project_storage_class.clone(),
+                    storage_access_mode: state.config.default_project_access_mode.clone(),
+                })
+            } else {
+                None
+            };
             k8s.create_owner(
                 &name,
                 OwnerSpec {
                     existing_pvc: None,
                     home_size: None,
-                    home_storage_class: None,
-                    project_defaults: None,
+                    home_storage_class: state.config.default_home_storage_class.clone(),
+                    home_access_mode: state.config.default_home_access_mode.clone(),
+                    project_defaults,
                     application_ref: None,
                     egress: Vec::new(),
                 },

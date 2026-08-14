@@ -17,6 +17,7 @@ use vanyline_crds::{Owner, OwnerStatus, Project, Sandbox};
 /// Field manager utilisé pour tous les server-side apply du controller.
 pub const FIELD_MANAGER: &str = "vanyline-controller";
 const DEFAULT_HOME_SIZE: &str = "1Gi";
+const DEFAULT_HOME_ACCESS_MODE: &str = "ReadWriteMany";
 
 /// Point de montage du PVC home (Owner) — sert de `$HOME` partout où il est monté
 /// (Jobs git du Project, futur pod Sandbox).
@@ -78,7 +79,11 @@ pub fn build_home_pvc(owner: &Owner) -> Option<PersistentVolumeClaim> {
             ..Default::default()
         },
         spec: Some(PersistentVolumeClaimSpec {
-            access_modes: Some(vec!["ReadWriteMany".to_string()]),
+            access_modes: Some(vec![owner
+                .spec
+                .home_access_mode
+                .clone()
+                .unwrap_or_else(|| DEFAULT_HOME_ACCESS_MODE.to_string())]),
             storage_class_name: owner.spec.home_storage_class.clone(),
             resources: Some(VolumeResourceRequirements {
                 requests: Some(requests),
@@ -223,6 +228,7 @@ mod tests {
                 existing_pvc,
                 home_size,
                 home_storage_class,
+                home_access_mode: None,
                 project_defaults: None,
                 application_ref: None,
                 egress: Vec::new(),
@@ -276,6 +282,17 @@ mod tests {
         assert_eq!(
             pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
             &["ReadWriteMany".to_string()]
+        );
+    }
+
+    #[test]
+    fn build_home_pvc_custom_access_mode() {
+        let mut owner = make_owner(None, None, None);
+        owner.spec.home_access_mode = Some("ReadWriteOnce".to_string());
+        let pvc = build_home_pvc(&owner).expect("should build PVC");
+        assert_eq!(
+            pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
+            &["ReadWriteOnce".to_string()]
         );
     }
 

@@ -27,6 +27,8 @@ pub enum Commands {
         #[arg(long)]
         storage_class: Option<String>,
         #[arg(long)]
+        storage_access_mode: Option<String>,
+        #[arg(long)]
         git_secret: Option<String>,
         /// Répétable : --cache cargo --cache pnpm
         #[arg(long = "cache")]

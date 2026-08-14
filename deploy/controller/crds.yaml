@@ -133,6 +133,14 @@ spec:
                 description: 'PVC home existant (ex. celui de code-server). None: créé (`owner-<name>-home`).'
                 nullable: true
                 type: string
+              homeAccessMode:
+                description: |-
+                  Mode d'accès du PVC home. None => "ReadWriteMany" (défaut historique —
+                  le home est partagé entre les sandboxes concurrentes d'un même Owner).
+                  À ajuster (ex. "ReadWriteOnce") sur un cluster sans StorageClass RWX
+                  (ex. single-node local-path) — aucun partage concurrent alors possible.
+                nullable: true
+                type: string
               homeSize:
                 nullable: true
                 type: string
@@ -142,6 +150,12 @@ spec:
               projectDefaults:
                 nullable: true
                 properties:
+                  storageAccessMode:
+                    description: |-
+                      Défaut de repli pour `ProjectSpec.storage_access_mode` quand ce
+                      dernier est absent. None => "ReadWriteOnce" (défaut historique).
+                    nullable: true
+                    type: string
                   storageClass:
                     nullable: true
                     type: string
@@ -361,6 +375,13 @@ spec:
               owner:
                 type: string
               repoUrl:
+                type: string
+              storageAccessMode:
+                description: |-
+                  Mode d'accès du PVC workspace. None => repli sur
+                  `Owner.spec.project_defaults.storage_access_mode`, puis
+                  "ReadWriteOnce" (défaut historique).
+                nullable: true
                 type: string
               storageClass:
                 nullable: true
@@ -796,6 +817,29 @@ spec:
                   en usage réel).
                 nullable: true
                 type: string
+              storageDefaults:
+                description: |-
+                  Défauts de stockage (storageClass + accessMode) posés en env sur le
+                  Deployment `app` — utilisés par `app` quand il crée lazily un Owner ou
+                  un Project pour un utilisateur (jamais lus par le reconciler
+                  Application lui-même). None => `app` ne pose aucun défaut, les
+                  reconcilers Owner/Project retombent sur leurs valeurs historiques
+                  (RWX pour le home, RWO pour le workspace projet).
+                nullable: true
+                properties:
+                  homeAccessMode:
+                    nullable: true
+                    type: string
+                  homeStorageClass:
+                    nullable: true
+                    type: string
+                  projectAccessMode:
+                    nullable: true
+                    type: string
+                  projectStorageClass:
+                    nullable: true
+                    type: string
+                type: object
               tlsIssuerKind:
                 description: '`ClusterIssuer` (défaut, None) ou `Issuer` (namespaced).'
                 nullable: true

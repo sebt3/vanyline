@@ -28,6 +28,8 @@ pub struct CreateProjectBody {
     #[serde(default)]
     pub storage_class: Option<String>,
     #[serde(default)]
+    pub storage_access_mode: Option<String>,
+    #[serde(default)]
     pub git_secret: Option<String>,
     #[serde(default)]
     pub caches: Option<Vec<String>>,
@@ -88,6 +90,7 @@ pub async fn create_project(
         existing_pvc: body.existing_pvc,
         storage_size: body.storage_size,
         storage_class: body.storage_class,
+        storage_access_mode: body.storage_access_mode,
         git_secret: body.git_secret,
         caches: body.caches,
         fetch_interval: body.fetch_interval,
@@ -147,6 +150,10 @@ mod tests {
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
             k8s_namespace: None,
+            default_home_storage_class: None,
+            default_home_access_mode: None,
+            default_project_storage_class: None,
+            default_project_access_mode: None,
         };
 
         let state = AppState {

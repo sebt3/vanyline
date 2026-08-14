@@ -1127,6 +1127,7 @@ mod tests {
                 existing_pvc,
                 storage_size: None,
                 storage_class: None,
+                storage_access_mode: None,
                 git_secret: None,
                 caches,
                 fetch_interval: None,
@@ -2374,6 +2375,7 @@ mod tests {
                 ingress_annotations: BTreeMap::new(),
                 sandbox_tls_secret_name,
                 ingress_controller: None,
+                storage_defaults: None,
             },
         );
         app.meta_mut().namespace = Some("ns".into());

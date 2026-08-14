@@ -199,6 +199,31 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
             ..Default::default()
         },
     ];
+    // Défauts de stockage (storageClass/accessMode) posés en env, seulement
+    // si présents — `app` les lit pour ses créations lazily d'Owner/Project
+    // (jamais lus par ce reconciler lui-même).
+    if let Some(defaults) = &app.spec.storage_defaults {
+        for (value, name) in [
+            (&defaults.home_storage_class, "VNL_DEFAULT_HOME_STORAGE_CLASS"),
+            (&defaults.home_access_mode, "VNL_DEFAULT_HOME_ACCESS_MODE"),
+            (
+                &defaults.project_storage_class,
+                "VNL_DEFAULT_PROJECT_STORAGE_CLASS",
+            ),
+            (
+                &defaults.project_access_mode,
+                "VNL_DEFAULT_PROJECT_ACCESS_MODE",
+            ),
+        ] {
+            if let Some(value) = value {
+                env.push(EnvVar {
+                    name: name.to_string(),
+                    value: Some(value.clone()),
+                    ..Default::default()
+                });
+            }
+        }
+    }
     for (key, name) in [
         ("issuerUrl", "OIDC_ISSUER_URL"),
         ("clientId", "OIDC_CLIENT_ID"),
@@ -656,6 +681,7 @@ mod tests {
                 ingress_annotations: BTreeMap::new(),
                 sandbox_tls_secret_name: None,
                 ingress_controller: None,
+                storage_defaults: None,
             },
         );
         app.meta_mut().namespace = Some("ns".into());
@@ -933,6 +959,55 @@ mod tests {
             .unwrap();
         assert_eq!(skr.name, "demo-cookie");
         assert_eq!(skr.key, "cookieSecret");
+    }
+
+    #[test]
+    fn build_application_deployment_storage_defaults_env() {
+        let mut app = make_application("demo");
+        app.spec.storage_defaults = Some(vanyline_crds::ApplicationStorageDefaults {
+            home_storage_class: Some("local-path".to_string()),
+            home_access_mode: Some("ReadWriteOnce".to_string()),
+            project_storage_class: None,
+            project_access_mode: Some("ReadWriteOnce".to_string()),
+        });
+        let deployment = build_application_deployment(&app, TEST_APP_IMAGE);
+        let container = deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers
+            .first()
+            .expect("should have 1 container");
+        let env = container.env.as_ref().expect("should have env");
+
+        let find = |name: &str| env.iter().find(|e| e.name == name);
+
+        assert_eq!(
+            find("VNL_DEFAULT_HOME_STORAGE_CLASS")
+                .expect("should have VNL_DEFAULT_HOME_STORAGE_CLASS")
+                .value,
+            Some("local-path".to_string())
+        );
+        assert_eq!(
+            find("VNL_DEFAULT_HOME_ACCESS_MODE")
+                .expect("should have VNL_DEFAULT_HOME_ACCESS_MODE")
+                .value,
+            Some("ReadWriteOnce".to_string())
+        );
+        assert!(
+            find("VNL_DEFAULT_PROJECT_STORAGE_CLASS").is_none(),
+            "should not push env var for a None field"
+        );
+        assert_eq!(
+            find("VNL_DEFAULT_PROJECT_ACCESS_MODE")
+                .expect("should have VNL_DEFAULT_PROJECT_ACCESS_MODE")
+                .value,
+            Some("ReadWriteOnce".to_string())
+        );
     }
 
     // 7. build_application_service_shape

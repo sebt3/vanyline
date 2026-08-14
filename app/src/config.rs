@@ -13,6 +13,15 @@ pub struct Config {
     pub listen_addr: String,
     pub static_dir: String,
     pub k8s_namespace: Option<String>,
+    /// Défauts de stockage propagés vers `OwnerSpec`/`ProjectSpec` lors des
+    /// créations lazily par `ensure_owner`/`create_project` — posés en env
+    /// par le reconciler Application depuis `Application.spec.storageDefaults`
+    /// (None si le champ CRD est absent). Jamais requis : les reconcilers
+    /// Owner/Project ont leurs propres défauts historiques (RWX/RWO).
+    pub default_home_storage_class: Option<String>,
+    pub default_home_access_mode: Option<String>,
+    pub default_project_storage_class: Option<String>,
+    pub default_project_access_mode: Option<String>,
 }
 
 impl Config {
@@ -39,6 +48,10 @@ impl Config {
             listen_addr: env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string()),
             static_dir: env::var("STATIC_DIR").unwrap_or_else(|_| "./static".to_string()),
             k8s_namespace: env::var("VNL_K8S_NAMESPACE").ok(),
+            default_home_storage_class: env::var("VNL_DEFAULT_HOME_STORAGE_CLASS").ok(),
+            default_home_access_mode: env::var("VNL_DEFAULT_HOME_ACCESS_MODE").ok(),
+            default_project_storage_class: env::var("VNL_DEFAULT_PROJECT_STORAGE_CLASS").ok(),
+            default_project_access_mode: env::var("VNL_DEFAULT_PROJECT_ACCESS_MODE").ok(),
         })
     }
 }

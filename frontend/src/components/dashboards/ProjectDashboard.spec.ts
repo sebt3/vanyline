@@ -31,15 +31,54 @@ function createTestRouter() {
   });
 }
 
+function jsonResponse(body: unknown, status = 200) {
+  return {
+    ok: status < 400,
+    status,
+    headers: new Map([['content-type', 'application/json']]),
+    json: () => Promise.resolve(body),
+  } as unknown as Response;
+}
+
+/** Mock GET /api/projects/:name — `cloned: true` par défaut (projet prêt),
+ *  pour ne pas avoir à s'en soucier dans chaque test qui ne teste pas
+ *  spécifiquement ce garde-fou. */
+function mockProjectFetch(name: string, cloned = true) {
+  return { url: `/api/projects/${name}`, method: 'GET', body: { metadata: { name }, status: { cloned } } };
+}
+
+/** Route `fetch` par (méthode, URL exacte ou testée avec `.includes`) parmi
+ *  `routes`, dans l'ordre — chaque route peut être appelée plusieurs fois
+ *  (les callers ré-invoquent souvent la même route après une mutation). */
+function routeFetch(
+  fetchSpy: ReturnType<typeof vi.spyOn>,
+  routes: Array<{ url: string; method: string; body: unknown; status?: number; once?: boolean }>,
+) {
+  const used = new Set<number>();
+  (fetchSpy as any).mockImplementation(async (url: string, init?: RequestInit) => {
+    const m = (init?.method ?? 'GET') as string;
+    const u = String(url);
+    for (let i = 0; i < routes.length; i++) {
+      const r = routes[i];
+      if (r.once && used.has(i)) continue;
+      if (r.method === m && u === r.url) {
+        used.add(i);
+        return jsonResponse(r.body, r.status ?? 200);
+      }
+    }
+    return new Response(null, { status: 500 });
+  });
+}
+
 describe('ProjectDashboard', () => {
   it('filtre les sandboxes : GET renvoie 3 sandboxes (2 foo, 1 bar) → rendu ne contient que foo', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      headers: new Map([['content-type', 'application/json']]),
-      json: () =>
-        Promise.resolve([
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo'),
+      {
+        url: '/api/sandboxes',
+        method: 'GET',
+        body: [
           {
             metadata: { name: 'sb-alpha' },
             spec: { project: 'foo', branch: 'main', suspended: false },
@@ -59,8 +98,9 @@ describe('ProjectDashboard', () => {
             spec: { project: 'bar', branch: 'main', suspended: false },
             status: { phase: 'Running' },
           },
-        ]),
-    } as unknown as Response);
+        ],
+      },
+    ]);
 
     const router = createTestRouter();
     await router.push('/p/foo');
@@ -80,19 +120,20 @@ describe('ProjectDashboard', () => {
 
   it('cliquer une ligne navigue vers /p/<project>/s/<sandbox>', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      headers: new Map([['content-type', 'application/json']]),
-      json: () =>
-        Promise.resolve([
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo'),
+      {
+        url: '/api/sandboxes',
+        method: 'GET',
+        body: [
           {
             metadata: { name: 'sb-alpha' },
             spec: { project: 'foo', branch: 'main', suspended: false },
             status: { phase: 'Running' },
           },
-        ]),
-    } as unknown as Response);
+        ],
+      },
+    ]);
 
     const router = createTestRouter();
     await router.push('/p/foo');
@@ -115,36 +156,28 @@ describe('ProjectDashboard', () => {
 
   it('cliquer "Supprimer" → DELETE /api/sandboxes/sb-to-del puis re-fetch → "Aucune sandbox"', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    let fetchCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
+    let sandboxFetchCount = 0;
+    (fetchSpy as any).mockImplementation(async (url: string, init?: RequestInit) => {
       const m = (init?.method ?? 'GET') as string;
       const u = String(url);
+      if (m === 'GET' && u === '/api/projects/foo') {
+        return jsonResponse({ metadata: { name: 'foo' }, status: { cloned: true } });
+      }
       if (m === 'DELETE' && u.includes('/api/sandboxes/sb-to-del')) {
         return new Response(null, { status: 204 });
       }
       if (m === 'GET' && u === '/api/sandboxes') {
-        fetchCount++;
-        if (fetchCount === 1) {
-          return {
-            ok: true,
-            status: 200,
-            headers: new Map([['content-type', 'application/json']]),
-            json: () =>
-              Promise.resolve([
-                {
-                  metadata: { name: 'sb-to-del' },
-                  spec: { project: 'foo', branch: 'b', suspended: false },
-                  status: { phase: 'Running' },
-                },
-              ]),
-          } as unknown as Response;
+        sandboxFetchCount++;
+        if (sandboxFetchCount === 1) {
+          return jsonResponse([
+            {
+              metadata: { name: 'sb-to-del' },
+              spec: { project: 'foo', branch: 'b', suspended: false },
+              status: { phase: 'Running' },
+            },
+          ]);
         }
-        return {
-          ok: true,
-          status: 200,
-          headers: new Map([['content-type', 'application/json']]),
-          json: () => Promise.resolve([]),
-        } as unknown as Response;
+        return jsonResponse([]);
       }
       return new Response(null, { status: 500 });
     });
@@ -178,54 +211,40 @@ describe('ProjectDashboard', () => {
   it('cliquer "Suspendre" → POST avec suspended: true puis re-fetch → libellé devient "Reprendre"', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
+    (fetchSpy as any).mockImplementation(async (url: string, init?: RequestInit) => {
       fetchCount++;
       const m = init?.method as string;
       const u = String(url);
 
+      if (m === 'GET' && u === '/api/projects/foo') {
+        return jsonResponse({ metadata: { name: 'foo' }, status: { cloned: true } });
+      }
+
       if (m === 'POST' && u.includes('/api/sandboxes/sb-to-suspend/suspend')) {
-        return {
-          ok: true,
-          status: 200,
-          headers: new Map([['content-type', 'application/json']]),
-          json: () =>
-            Promise.resolve({
-              metadata: { name: 'sb-to-suspend' },
-              spec: { project: 'foo', branch: 'b', suspended: true },
-              status: { phase: 'Suspended' },
-            }),
-        } as unknown as Response;
+        return jsonResponse({
+          metadata: { name: 'sb-to-suspend' },
+          spec: { project: 'foo', branch: 'b', suspended: true },
+          status: { phase: 'Suspended' },
+        });
       }
 
       if (m === 'GET' && u === '/api/sandboxes') {
-        if (fetchCount === 1) {
-          return {
-            ok: true,
-            status: 200,
-            headers: new Map([['content-type', 'application/json']]),
-            json: () =>
-              Promise.resolve([
-                {
-                  metadata: { name: 'sb-to-suspend' },
-                  spec: { project: 'foo', branch: 'b', suspended: false },
-                  status: { phase: 'Running' },
-                },
-              ]),
-          } as unknown as Response;
+        if (fetchCount <= 2) {
+          return jsonResponse([
+            {
+              metadata: { name: 'sb-to-suspend' },
+              spec: { project: 'foo', branch: 'b', suspended: false },
+              status: { phase: 'Running' },
+            },
+          ]);
         }
-        return {
-          ok: true,
-          status: 200,
-          headers: new Map([['content-type', 'application/json']]),
-          json: () =>
-            Promise.resolve([
-              {
-                metadata: { name: 'sb-to-suspend' },
-                spec: { project: 'foo', branch: 'b', suspended: true },
-                status: { phase: 'Suspended' },
-              },
-            ]),
-        } as unknown as Response;
+        return jsonResponse([
+          {
+            metadata: { name: 'sb-to-suspend' },
+            spec: { project: 'foo', branch: 'b', suspended: true },
+            status: { phase: 'Suspended' },
+          },
+        ]);
       }
 
       return new Response(null, { status: 500 });
@@ -255,12 +274,10 @@ describe('ProjectDashboard', () => {
 
   it('cliquer Retour → / ; cliquer Paramètres → /settings', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      headers: new Map([['content-type', 'application/json']]),
-      json: () => Promise.resolve([]),
-    } as unknown as Response);
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo'),
+      { url: '/api/sandboxes', method: 'GET', body: [] },
+    ]);
 
     const router = createTestRouter();
     await router.push('/p/foo');
@@ -291,33 +308,25 @@ describe('ProjectDashboard', () => {
   it('création en modale : dialog apparaît → remplir Nom + Branche → POST avec project: projectName → dialog fermé', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
-    fetchSpy.mockImplementation(async (url, init) => {
+    (fetchSpy as any).mockImplementation(async (url: string, init?: RequestInit) => {
       const u = String(url);
       const m = init?.method as string;
 
+      if (m === 'GET' && u === '/api/projects/foo') {
+        return jsonResponse({ metadata: { name: 'foo' }, status: { cloned: true } });
+      }
       if (m === 'GET' && u === '/api/sandboxes') {
         fetchCount++;
         if (fetchCount === 1) {
-          return {
-            ok: true,
-            status: 200,
-            headers: new Map([['content-type', 'application/json']]),
-            json: () => Promise.resolve([]),
-          } as unknown as Response;
+          return jsonResponse([]);
         }
-        return {
-          ok: true,
-          status: 200,
-          headers: new Map([['content-type', 'application/json']]),
-          json: () =>
-            Promise.resolve([
-              {
-                metadata: { name: 'new-sb' },
-                spec: { project: 'foo', branch: 'develop', suspended: false },
-                status: { phase: 'Pending' },
-              },
-            ]),
-        } as unknown as Response;
+        return jsonResponse([
+          {
+            metadata: { name: 'new-sb' },
+            spec: { project: 'foo', branch: 'develop', suspended: false },
+            status: { phase: 'Pending' },
+          },
+        ]);
       }
       if (m === 'POST' && u === '/api/sandboxes') {
         const body = JSON.parse(((init as RequestInit)?.body as string) ?? '{}');
@@ -326,17 +335,14 @@ describe('ProjectDashboard', () => {
           project: 'foo',
           branch: 'develop',
         });
-        return {
-          ok: true,
-          status: 201,
-          headers: new Map([['content-type', 'application/json']]),
-          json: () =>
-            Promise.resolve({
-              metadata: { name: 'ma-sandbox' },
-              spec: { project: 'foo', branch: 'develop', suspended: false },
-              status: { phase: 'Pending' },
-            }),
-        } as unknown as Response;
+        return jsonResponse(
+          {
+            metadata: { name: 'ma-sandbox' },
+            spec: { project: 'foo', branch: 'develop', suspended: false },
+            status: { phase: 'Pending' },
+          },
+          201,
+        );
       }
       return new Response(null, { status: 500 });
     });
@@ -384,14 +390,17 @@ describe('ProjectDashboard', () => {
     expect(document.querySelector('[role="dialog"]')).toBeFalsy();
   });
 
-  it('GET en erreur → message d\'erreur affiché, pas de tableau', async () => {
+  it('GET sandboxes en erreur → message d\'erreur affiché, pas de tableau', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
-    fetchSpy.mockResolvedValueOnce({
-      ok: false,
-      status: 401,
-      headers: new Map([['content-type', 'application/json']]),
-      json: () => Promise.resolve({ error: 'VNL-AUTH-001: Non autorisé' }),
-    } as unknown as Response);
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo'),
+      {
+        url: '/api/sandboxes',
+        method: 'GET',
+        body: { error: 'VNL-AUTH-001: Non autorisé' },
+        status: 401,
+      },
+    ]);
 
     const router = createTestRouter();
     await router.push('/p/foo');
@@ -406,5 +415,56 @@ describe('ProjectDashboard', () => {
 
     expect(wrapper.text()).toContain('VNL-AUTH-001');
     expect(wrapper.text()).not.toContain('sb-alpha');
+  });
+
+  it('projet pas encore cloné → bouton "Créer une sandbox" désactivé, message affiché', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo', false),
+      { url: '/api/sandboxes', method: 'GET', body: [] },
+    ]);
+
+    const router = createTestRouter();
+    await router.push('/p/foo');
+    await router.isReady();
+
+    const wrapper = mount(ProjectDashboard, {
+      global: { plugins: [router] },
+      props: { projectName: 'foo' },
+    });
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const createBtn = wrapper.find('.btn-create');
+    expect(createBtn.attributes('disabled')).toBeDefined();
+    expect(wrapper.text()).toContain('Clone du projet en cours');
+
+    // Cliquer sur le bouton désactivé ne doit pas ouvrir le dialog
+    await createBtn.trigger('click');
+    await wrapper.vm.$nextTick();
+    expect(document.querySelector('[role="dialog"]')).toBeFalsy();
+  });
+
+  it('projet cloné → bouton "Créer une sandbox" actif, pas de message', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    routeFetch(fetchSpy, [
+      mockProjectFetch('foo', true),
+      { url: '/api/sandboxes', method: 'GET', body: [] },
+    ]);
+
+    const router = createTestRouter();
+    await router.push('/p/foo');
+    await router.isReady();
+
+    const wrapper = mount(ProjectDashboard, {
+      global: { plugins: [router] },
+      props: { projectName: 'foo' },
+    });
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const createBtn = wrapper.find('.btn-create');
+    expect(createBtn.attributes('disabled')).toBeUndefined();
+    expect(wrapper.text()).not.toContain('Clone du projet en cours');
   });
 });
