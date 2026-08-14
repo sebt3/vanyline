@@ -939,10 +939,20 @@ Fil d'ariane : `AppBreadcrumb.vue` lit un état de sélection partagé
 Terminal via son propre registre de composants (`components: Record<string,
 VueComponent>`), **pas** comme enfants déclarés dans le template d'`IdeShell.vue` — un
 `emit`/listener parent-enfant classique n'a donc aucun effet. `IdeShell.vue` fournit
-(`provide`) le client `/ws/fs` partagé, le nom de la sandbox, et un handler
-`open-file` + un `Ref` `open-file-path` ; Explorer/Editor les `inject`ent. Pattern à
-réutiliser pour tout futur état partagé entre panneaux dockview, pas un cas
-particulier.
+(`provide`) le client `/ws/fs` partagé et le nom de la sandbox ; Explorer/Editor les
+`inject`ent. Pattern à réutiliser pour tout futur état partagé entre panneaux dockview,
+pas un cas particulier.
+
+**Editor multi-onglets** : un panel dockview par fichier ouvert (id `editor:<path>`,
+posé dans le groupe centre via `params: { path }` — pas un état partagé injecté).
+`IdeShell.openFile(path)` réactive l'onglet s'il existe déjà (`api.getPanel(id)`), le
+crée sinon ancré sur un onglet fichier déjà ouvert ou, à défaut, sur le panel Workflow
+(seul panel fixe du groupe centre — cf. `centerAnchor`/`relativeToCenter`). Chaque
+instance d'`Editor.vue` reçoit son `path` via les props dockview (`params`, `api`) et
+ne (ré)enregistre `saveActiveFile` (l'action Ctrl+S/menu) que lorsqu'elle devient active
+(`api.onDidActiveChange`) — nécessaire dès qu'il existe plusieurs instances
+simultanées, sans quoi `registerIdeActions` (fusion "dernier appelant gagne") pointerait
+vers le dernier onglet **monté**, pas le dernier **actif**.
 
 **`SandboxFsClient`** (`api/sandboxWs.ts`) : le protocole `/ws/fs` côté serveur n'a
 aucun champ de corrélation (cf. section "Serveur MCP" plus haut) — ce wrapper
@@ -1016,9 +1026,9 @@ backend (`app/src/api/mod.rs`) ne correspond à aucun mécanisme réel (pas de c
 `role`, pas de contrôle serveur) — décision cohérente avec l'état mono-utilisateur du
 projet, pas un oubli.
 
-**Limites connues (dette assumée)** : pas de multi-onglets Editor, pas de
-multi-terminal, pas de reconnexion WS automatique (déconnexion réseau/sandbox
-suspendue → recharger la page), pas de filesystem watch/push (Explorer ne se
+**Limites connues (dette assumée)** : pas de reconnexion WS automatique
+(déconnexion réseau/sandbox suspendue → recharger la page), pas de filesystem
+watch/push (Explorer ne se
 rafraîchit pas si le contenu change côté serveur pendant que l'utilisateur regarde),
 pas de code-splitting (bundle ~576 Ko gzippé, CodeMirror + xterm + Element Plus +
 vue-advanced-chat + dockview-vue). Chat reste un mock complet (aucun appel réseau) —

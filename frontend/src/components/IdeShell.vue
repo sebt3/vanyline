@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, provide, shallowRef, ref, watch } from 'vue';
+import { onBeforeUnmount, onMounted, provide, shallowRef, watch } from 'vue';
 import { DockviewVue, type DockviewReadyEvent, type VueComponent } from 'dockview-vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
@@ -16,16 +16,15 @@ const props = defineProps<{ sandboxName: string }>();
 // shallowRef : le client contient un WebSocket brut qu'il ne faut pas rendre
 // profondément réactif. null tant que le ticket/minage n'est pas résolu.
 const fsClient = shallowRef<SandboxFsClient | null>(null);
-// Fichier ouvert : état remonté d'Explorer vers IdeShell, transmis à Editor.
-const openFilePath = ref<string | null>(null);
+// api dockview — résolue par onReady, nécessaire à openFile() (appelée par
+// Explorer via provide, potentiellement avant que ready n'ait eu lieu).
+const dockviewApi = shallowRef<DockviewReadyEvent['api'] | null>(null);
 
 provide('sandbox-fs', fsClient);
 provide('sandbox-name', props.sandboxName);
-provide('open-file-path', openFilePath);
-// Handler fourni à Explorer : remonter l'ouverture d'un fichier.
-provide('open-file', (path: string) => {
-  openFilePath.value = path;
-});
+// Handler fourni à Explorer : ouvre (ou active) l'onglet Editor du fichier —
+// un panel dockview par fichier, cf. openFile ci-dessous.
+provide('open-file', openFile);
 
 const { activeConversationId, sessionError } = useIdeSession();
 
@@ -55,6 +54,67 @@ const components = {
   terminal: Terminal,
 } as unknown as Record<string, VueComponent>;
 
+/** Id de panel dockview pour un fichier ouvert — un panel Editor par fichier
+ *  (task multi-onglets), stable pour retrouver un fichier déjà ouvert via
+ *  api.getPanel(). */
+function editorPanelId(path: string): string {
+  return `editor:${path}`;
+}
+
+function basename(path: string): string {
+  const idx = path.lastIndexOf('/');
+  return idx === -1 ? path : path.slice(idx + 1);
+}
+
+/** Ancre pour poser un panel dans le groupe centre (rôle "éditeurs" : onglets
+ *  fichiers + Workflow) : un onglet fichier déjà ouvert en priorité (le
+ *  groupe existe déjà, le référencer le garde stable), sinon 'workflow'
+ *  (présent par défaut, seul panel fixe du groupe), sinon aucune ancre —
+ *  dockview place alors le panel lui-même (cas dégradé : groupe centre
+ *  entièrement vidé par l'utilisateur). */
+function centerAnchor(api: DockviewReadyEvent['api']): string | undefined {
+  const openFilePanel = api.panels.find((p) => p.id.startsWith('editor:'));
+  if (openFilePanel) return openFilePanel.id;
+  if (api.getPanel('workflow')) return 'workflow';
+  return undefined;
+}
+
+/** `position` prêt à l'emploi pour `addPanel`, relatif au groupe centre —
+ *  `undefined` (pas de `position`) si aucune ancre n'existe, cas dégradé où
+ *  dockview place le panel lui-même. */
+function relativeToCenter(
+  api: DockviewReadyEvent['api'],
+  direction: 'left' | 'right' | 'below' | 'within',
+): { referencePanel: string; direction: typeof direction } | undefined {
+  const anchor = centerAnchor(api);
+  return anchor ? { referencePanel: anchor, direction } : undefined;
+}
+
+/** Ouvre l'onglet Editor d'un fichier — un panel dockview par fichier
+ *  (id `editor:<path>`) : réactive l'onglet s'il existe déjà, le crée sinon
+ *  dans le groupe centre (cf. centerAnchor). Résolu au moment de l'appel
+ *  (dockviewApi peut ne pas encore être prête si Explorer appelle avant
+ *  onReady — no-op silencieux dans ce cas, l'Explorer n'est de toute façon
+ *  affichable qu'une fois l'IDE monté). */
+function openFile(path: string) {
+  const api = dockviewApi.value;
+  if (!api) return;
+  const id = editorPanelId(path);
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.api.setActive();
+    return;
+  }
+  api.addPanel({
+    id,
+    component: 'editor',
+    title: basename(path),
+    params: { path },
+    position: relativeToCenter(api, 'within'),
+  });
+  api.getPanel(id)?.api.setActive();
+}
+
 function addDefaultPanels(api: DockviewReadyEvent['api']) {
   api.addPanel({
     id: 'explorer',
@@ -64,31 +124,24 @@ function addDefaultPanels(api: DockviewReadyEvent['api']) {
   });
 
   api.addPanel({
-    id: 'editor',
-    component: 'editor',
-    title: 'sync_library.py',
-    position: { referencePanel: 'explorer', direction: 'right' },
-  });
-
-  api.addPanel({
     id: 'workflow',
     component: 'workflow',
     title: 'sync-media.dag',
-    position: { referencePanel: 'editor', direction: 'within' },
+    position: { referencePanel: 'explorer', direction: 'right' },
   });
 
   api.addPanel({
     id: 'terminal',
     component: 'terminal',
     title: 'Terminal',
-    position: { referencePanel: 'editor', direction: 'below' },
+    position: { referencePanel: 'workflow', direction: 'below' },
     initialHeight: 170,
   });
 
   // Pas de panel 'chat' par défaut : la colonne assistant n'existe que si
   // une vraie session agent est démarrée (cf. useIdeSession, watcher
   // ci-dessous). addChatPanel() la pose le moment venu.
-  api.getPanel('editor')?.api.setActive();
+  api.getPanel('workflow')?.api.setActive();
 }
 
 function addChatPanel(api: DockviewReadyEvent['api']) {
@@ -97,7 +150,7 @@ function addChatPanel(api: DockviewReadyEvent['api']) {
     id: 'chat',
     component: 'chat',
     title: 'Assistant',
-    position: { referencePanel: 'editor', direction: 'right' },
+    position: relativeToCenter(api, 'right'),
     initialWidth: 330,
   });
 }
@@ -115,7 +168,7 @@ function openExplorer(api: DockviewReadyEvent['api']) {
     id: 'explorer',
     component: 'explorer',
     title: 'Explorer',
-    position: { referencePanel: 'editor', direction: 'left' },
+    position: relativeToCenter(api, 'left'),
     initialWidth: 230,
   });
 }
@@ -135,7 +188,7 @@ function addTerminalPanel(api: DockviewReadyEvent['api']) {
     id,
     component: 'terminal',
     title: id === 'terminal' ? 'Terminal' : `Terminal ${n - 1}`,
-    position: { referencePanel: 'editor', direction: 'below' },
+    position: relativeToCenter(api, 'below'),
     initialHeight: 170,
   });
   api.getPanel(id)?.api.setActive();
@@ -143,6 +196,7 @@ function addTerminalPanel(api: DockviewReadyEvent['api']) {
 
 function onReady(event: DockviewReadyEvent) {
   const { api } = event;
+  dockviewApi.value = api;
 
   // Répartition sauvegardée pour cette sandbox : la restaurer plutôt que
   // rebâtir le layout par défaut. Un layout absent/corrompu retombe sur le

@@ -1,19 +1,22 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, useTemplateRef, inject, ref, watch } from 'vue';
+import { onMounted, onBeforeUnmount, useTemplateRef, inject, ref } from 'vue';
 import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { languageExtensionForPath } from './editorLanguage';
 import { registerIdeActions } from '../../composables/useIdeSession';
+import type { DockviewPanelApi } from 'dockview-vue';
 import type { Ref } from 'vue';
 import type { SandboxFsClient } from '../../api/sandboxWs';
 
-// Fournis par IdeShell (task-05) :
-// - 'sandbox-fs' : Ref<SandboxFsClient | null>
-// - 'open-file-path' : Ref<string | null>
+// Un panel Editor par fichier ouvert (IdeShell.openFile) : `params.path` est
+// fixe pour la durée de vie de cette instance — pas un ref partagé entre
+// onglets (cf. docs/architecture.md, section Frontend, limite levée).
+const props = defineProps<{ params: { path: string }; api: DockviewPanelApi }>();
+
+// Fourni par IdeShell (task-05) : 'sandbox-fs' : Ref<SandboxFsClient | null>
 const fsClient = inject<Ref<SandboxFsClient | null>>('sandbox-fs', ref(null) as Ref<SandboxFsClient | null>);
-const openFilePath = inject<Ref<string | null>>('open-file-path', ref(null) as Ref<string | null>);
 
 const denseTheme = EditorView.theme({
   '&': { height: '100%', fontSize: '12.5px' },
@@ -49,7 +52,7 @@ function showStatus(message: string) {
 
 /** Ctrl+S / Cmd+S : écrit le document courant sur la sandbox (op write, contenu brut). */
 function save() {
-  const path = openFilePath?.value ?? null;
+  const path = props.params.path;
   if (!view || !path || !fsClient.value) return;
   const content = view.state.doc.toString();
   fsClient.value
@@ -97,9 +100,15 @@ async function loadFile(path: string): Promise<void> {
   }
 }
 
-watch(openFilePath, (path) => {
-  if (path) void loadFile(path);
-});
+// `saveActiveFile` doit cibler l'onglet visible, pas "le dernier Editor
+// monté" — avec un panel par fichier, plusieurs instances coexistent.
+// Chaque instance ne (ré)enregistre son `save` que lorsqu'elle devient
+// active (cf. useIdeSession.registerIdeActions : fusion, dernier appelant
+// gagne pour la même clé — l'instance active gagne donc bien la course).
+function claimSaveActionIfActive() {
+  if (props.api.isActive) registerIdeActions({ saveActiveFile: save });
+}
+let activeChangeDisposable: { dispose(): void } | undefined;
 
 onMounted(() => {
   view = new EditorView({
@@ -109,14 +118,15 @@ onMounted(() => {
     }),
     parent: hostRef.value!,
   });
-  if (openFilePath.value) void loadFile(openFilePath.value);
-  // Fusionné avec les autres handlers (ex. closeActiveTab posé par
-  // IdeShell) — cf. useIdeSession.ts. Pont pour le menu 'Enregistrer'.
-  registerIdeActions({ saveActiveFile: save });
+  if (props.params.path) void loadFile(props.params.path);
+  claimSaveActionIfActive();
+  activeChangeDisposable = props.api.onDidActiveChange(claimSaveActionIfActive);
 });
 
 onBeforeUnmount(() => {
+  activeChangeDisposable?.dispose();
   view?.destroy();
+  view = undefined;
   clearTimeout(statusTimer);
 });
 </script>

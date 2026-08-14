@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ref } from 'vue';
 import { mount } from '@vue/test-utils';
 import Editor from './Editor.vue';
+import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
+import type { DockviewPanelApi } from 'dockview-vue';
 
 function makeClient() {
   return {
@@ -13,6 +15,16 @@ function makeClient() {
       },
     ),
   };
+}
+
+/** Un panel Editor par fichier (task multi-onglets) : `path` est fixe pour la
+ *  durée de vie de l'instance, reçu via `params`/`api` (props dockview),
+ *  plus `sandbox-fs` toujours injecté par IdeShell. */
+function makePanelApi(isActive = true): DockviewPanelApi {
+  return {
+    isActive,
+    onDidActiveChange: vi.fn(() => ({ dispose: vi.fn() })),
+  } as unknown as DockviewPanelApi;
 }
 
 async function flushMicrotasks() {
@@ -27,14 +39,10 @@ describe('Editor.vue — contenu réel', () => {
     client = makeClient();
   });
 
-  it('lit le fichier au changement de openFilePath (raw: true)', async () => {
+  it('lit le fichier de params.path au montage (raw: true)', async () => {
     const wrapper = mount(Editor, {
-      global: {
-        provide: {
-          'sandbox-fs': ref(client),
-          'open-file-path': ref('src/main.py'),
-        },
-      },
+      props: { params: { path: 'src/main.py' }, api: makePanelApi() },
+      global: { provide: { 'sandbox-fs': ref(client) } },
     });
 
     // 2 flush : onMounted + read async résolu
@@ -49,41 +57,10 @@ describe('Editor.vue — contenu réel', () => {
     expect(wrapper.element.textContent).toContain('ligne1');
   });
 
-  it('change de openFilePath relit le nouveau fichier', async () => {
-    const openFileRef = ref('a.py');
-    const c = makeClient();
-
-    // mount() est un side-effect : initialise le composant + loadFile dans onMounted
-    mount(Editor, {
-      global: {
-        provide: {
-          'sandbox-fs': ref(c),
-          'open-file-path': openFileRef,
-        },
-      },
-    });
-
-    await flushMicrotasks();
-
-    client.request.mockClear();
-
-    openFileRef.value = 'b.py';
-    await flushMicrotasks();
-
-    expect(c.request).toHaveBeenCalledWith('read', {
-      path: 'b.py',
-      raw: true,
-    });
-  });
-
   it('Ctrl+S écrit le contenu courant', async () => {
     const wrapper = mount(Editor, {
-      global: {
-        provide: {
-          'sandbox-fs': ref(client),
-          'open-file-path': ref('src/main.py'),
-        },
-      },
+      props: { params: { path: 'src/main.py' }, api: makePanelApi() },
+      global: { provide: { 'sandbox-fs': ref(client) } },
     });
 
     // 2 flush : onMounted(async read) + read async résolu
@@ -95,10 +72,40 @@ describe('Editor.vue — contenu réel', () => {
 
     await flushMicrotasks();
 
-    // read appelé en premier (watch), write depuis save()
+    // read appelé en premier (montage), write depuis save()
     expect(client.request).toHaveBeenCalledWith('write', {
       path: 'src/main.py',
       content: 'ligne1\nligne2\n',
     });
+  });
+
+  it("n'enregistre saveActiveFile que pour l'onglet actif (plusieurs instances possibles)", async () => {
+    const { ideActions } = useIdeSession();
+    clearIdeActions();
+
+    mount(Editor, {
+      props: { params: { path: 'inactive.py' }, api: makePanelApi(false) },
+      global: { provide: { 'sandbox-fs': ref(makeClient()) } },
+    });
+    await flushMicrotasks();
+    expect(ideActions.value.saveActiveFile).toBeUndefined();
+
+    const activeWrapper = mount(Editor, {
+      props: { params: { path: 'active.py' }, api: makePanelApi(true) },
+      global: { provide: { 'sandbox-fs': ref(client) } },
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(ideActions.value.saveActiveFile).toBeDefined();
+    ideActions.value.saveActiveFile?.();
+    await flushMicrotasks();
+
+    expect(client.request).toHaveBeenCalledWith('write', {
+      path: 'active.py',
+      content: 'ligne1\nligne2\n',
+    });
+    // Vérifie que c'est bien l'instance active qui a écrit, pas l'inactive.
+    expect((activeWrapper.vm as { save: () => void }).save).toBeDefined();
   });
 });
