@@ -1,14 +1,19 @@
 <script setup lang="ts">
-defineProps<{ workspace: string }>();
+import AppBreadcrumb from './AppBreadcrumb.vue';
+
+defineProps<{ workspace?: string; extended?: boolean }>();
 </script>
 
 <template>
   <div class="statusbar">
-    <span class="item">⎇ main</span>
-    <span class="item">{{ workspace }}</span>
+    <AppBreadcrumb />
     <span class="grow" />
-    <span class="item">● connecté — strix-cluster</span>
-    <span class="item">UTF-8</span>
+    <template v-if="extended">
+      <span class="item">⎇ main</span>
+      <span class="item">{{ workspace }}</span>
+      <span class="item">● connecté — strix-cluster</span>
+      <span class="item">UTF-8</span>
+    </template>
   </div>
 </template>
 

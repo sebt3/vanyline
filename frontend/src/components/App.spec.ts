@@ -25,36 +25,40 @@ describe('App', () => {
     return mount(App, { global: { plugins: [router] } });
   }
 
-  it('affiche MenuBar et StatusBar sur la route IDE', async () => {
+  it('affiche MenuBar et StatusBar en mode étendu sur la route IDE', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/p/foo/s/bar');
     expect(wrapper.findComponent(MenuBar).exists()).toBe(true);
     expect(wrapper.findComponent(StatusBar).exists()).toBe(true);
-    expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(false);
+    expect(wrapper.findComponent(StatusBar).props('extended')).toBe(true);
     expect(wrapper.findComponent(StatusBar).props('workspace')).toBe('bar');
+    expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
   });
 
-  it('naffiche pas MenuBar/StatusBar affiche AppBreadcrumb sur /', async () => {
+  it('naffiche pas MenuBar, affiche StatusBar en mode non étendu sur /', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/');
     expect(wrapper.findComponent(MenuBar).exists()).toBe(false);
-    expect(wrapper.findComponent(StatusBar).exists()).toBe(false);
+    expect(wrapper.findComponent(StatusBar).exists()).toBe(true);
+    expect(wrapper.findComponent(StatusBar).props('extended')).toBeFalsy();
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
   });
 
-  it('naffiche pas MenuBar/StatusBar affiche AppBreadcrumb sur /p/:projectName', async () => {
+  it('naffiche pas MenuBar, affiche StatusBar en mode non étendu sur /p/:projectName', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/p/foo');
     expect(wrapper.findComponent(MenuBar).exists()).toBe(false);
-    expect(wrapper.findComponent(StatusBar).exists()).toBe(false);
+    expect(wrapper.findComponent(StatusBar).exists()).toBe(true);
+    expect(wrapper.findComponent(StatusBar).props('extended')).toBeFalsy();
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
   });
 
-  it('naffiche pas MenuBar/StatusBar affiche AppBreadcrumb sur /settings', async () => {
+  it('naffiche pas MenuBar, affiche StatusBar en mode non étendu sur /settings', async () => {
     const wrapper = mountApp();
     await wrapper.vm.$router.push('/settings');
     expect(wrapper.findComponent(MenuBar).exists()).toBe(false);
-    expect(wrapper.findComponent(StatusBar).exists()).toBe(false);
+    expect(wrapper.findComponent(StatusBar).exists()).toBe(true);
+    expect(wrapper.findComponent(StatusBar).props('extended')).toBeFalsy();
     expect(wrapper.findComponent(AppBreadcrumb).exists()).toBe(true);
   });
 });
