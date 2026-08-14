@@ -175,9 +175,15 @@ vanyline/
 │   └── src/
 ├── docs/
 │   ├── architecture.md
+│   ├── release-runbook.md  # procédure release + redéploiement sur un cluster de test
 │   └── features/       # design docs en cours
 └── .tasks/             # tâches Qwen (jamais commité)
 ```
+
+## Release et déploiement sur un cluster de test
+
+Procédure complète (validation → bump de version → tag → suivi CI →
+redéploiement, pièges connus inclus) : `docs/release-runbook.md`.
 
 ## Commandes de validation
 
