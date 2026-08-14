@@ -5,12 +5,13 @@ use std::time::Duration;
 use k8s_openapi::api::apps::v1::{Deployment, DeploymentCondition, DeploymentSpec};
 use k8s_openapi::api::core::v1::{
     Container, ContainerPort, EnvVar, EnvVarSource, HTTPGetAction, PodSpec, PodTemplateSpec, Probe,
-    Secret, SecretKeySelector, Service, ServicePort, ServiceSpec,
+    Secret, SecretKeySelector, Service, ServiceAccount, ServicePort, ServiceSpec,
 };
 use k8s_openapi::api::networking::v1::{
     HTTPIngressPath, HTTPIngressRuleValue, Ingress, IngressBackend, IngressRule,
     IngressServiceBackend, IngressSpec, IngressTLS, ServiceBackendPort,
 };
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{
     Condition, LabelSelector, ObjectMeta, OwnerReference,
 };
@@ -75,6 +76,97 @@ fn app_owner_ref(app: &Application) -> OwnerReference {
         .expect("Application a apiVersion/kind renseignés par le derive CustomResource")
 }
 
+/// `ServiceAccount` du Deployment `app` — `application-<name>`, référencé par
+/// `build_application_deployment` (`spec.serviceAccountName`). Sans lui `app`
+/// tourne avec le `default` du namespace, qui n'a aucun droit sur les CRDs
+/// vanyline (`VNL-K8S-002: ... is forbidden`).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_application_service_account(app: &Application) -> ServiceAccount {
+    ServiceAccount {
+        metadata: ObjectMeta {
+            name: Some(application_name(&app.name_any())),
+            namespace: app.namespace(),
+            owner_references: Some(vec![app_owner_ref(app)]),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// `Role` (namespaced, jamais `ClusterRole` — `app` ne gère que les CRs de son
+/// propre namespace) donnant à `app` exactement les verbes utilisés par
+/// `vanyline_lib::k8s::VnlK8sClient` : CRUD sur owners/projects, CRUD + patch
+/// (suspension) sur sandboxes, lecture seule sur applications (`app` ne
+/// modifie jamais sa propre CR).
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_application_role(app: &Application) -> Role {
+    Role {
+        metadata: ObjectMeta {
+            name: Some(application_name(&app.name_any())),
+            namespace: app.namespace(),
+            owner_references: Some(vec![app_owner_ref(app)]),
+            ..Default::default()
+        },
+        rules: Some(vec![
+            PolicyRule {
+                api_groups: Some(vec!["vanyline.solidite.fr".to_string()]),
+                resources: Some(vec!["owners".to_string(), "projects".to_string()]),
+                verbs: vec![
+                    "get".to_string(),
+                    "list".to_string(),
+                    "create".to_string(),
+                    "delete".to_string(),
+                ],
+                ..Default::default()
+            },
+            PolicyRule {
+                api_groups: Some(vec!["vanyline.solidite.fr".to_string()]),
+                resources: Some(vec!["sandboxes".to_string()]),
+                verbs: vec![
+                    "get".to_string(),
+                    "list".to_string(),
+                    "create".to_string(),
+                    "delete".to_string(),
+                    "patch".to_string(),
+                ],
+                ..Default::default()
+            },
+            PolicyRule {
+                api_groups: Some(vec!["vanyline.solidite.fr".to_string()]),
+                resources: Some(vec!["applications".to_string()]),
+                verbs: vec!["get".to_string()],
+                ..Default::default()
+            },
+        ]),
+    }
+}
+
+/// `RoleBinding` liant le `ServiceAccount` `app` au `Role` ci-dessus — même nom
+/// (`application-<name>`) pour les trois objets.
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+pub fn build_application_role_binding(app: &Application) -> RoleBinding {
+    let name = application_name(&app.name_any());
+    RoleBinding {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            namespace: app.namespace(),
+            owner_references: Some(vec![app_owner_ref(app)]),
+            ..Default::default()
+        },
+        role_ref: RoleRef {
+            api_group: Some("rbac.authorization.k8s.io".to_string()),
+            kind: "Role".to_string(),
+            name: name.clone(),
+        },
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".to_string(),
+            name,
+            namespace: app.namespace(),
+            ..Default::default()
+        }]),
+    }
+}
+
 /// Construit le Deployment `app` : un seul container, image résolue
 /// (`spec.image` ou `default_image`, le tag précis lu par le controller via
 /// `--app-image-tag`/`APP_IMAGE_TAG`), env depuis les trois `secretRef`
@@ -82,7 +174,9 @@ fn app_owner_ref(app: &Application) -> OwnerReference {
 /// calculé (`https://{spec.host}/auth/callback`, jamais lu du secret). Probe
 /// readiness/liveness sur `GET /health`. `ownerReference` vers l'Application.
 /// `replicas` = `spec.replicas` ou 1. Label `vanyline.solidite.fr/application`
-/// posé sur metadata/selector/template.
+/// posé sur metadata/selector/template. `serviceAccountName` = même nom que
+/// `build_application_service_account` (le compte que `VnlK8sClient` utilise
+/// en in-cluster pour ses propres appels K8s).
 ///
 /// Notes d'adaptation k8s-openapi 0.28 :
 /// - `DeploymentSpec.selector` sans wrapper `Option` (type `LabelSelector` direct)
@@ -199,6 +293,7 @@ pub fn build_application_deployment(app: &Application, default_image: &str) -> D
                     ..Default::default()
                 }),
                 spec: Some(PodSpec {
+                    service_account_name: Some(application_name(&app.name_any())),
                     containers: vec![Container {
                         name: "app".to_string(),
                         image: Some(
@@ -446,9 +541,11 @@ pub fn compute_status(app: &Application, phase: &str) -> ApplicationStatus {
 }
 
 /// Reconciler kube-rs : garantit le Secret cookie auto-généré (si
-/// `spec.cookie_secret_ref` est `None`), puis server-side apply idempotent du
-/// Deployment, du Service et de l'Ingress, puis status. Pas de finalizer — la GC
-/// K8s (ownerReferences) nettoie les objets créés à la suppression de l'Application.
+/// `spec.cookie_secret_ref` est `None`), le ServiceAccount/Role/RoleBinding
+/// d'`app` (droits sur les CRs owners/projects/sandboxes/applications), puis
+/// server-side apply idempotent du Deployment, du Service et de l'Ingress,
+/// puis status. Pas de finalizer — la GC K8s (ownerReferences) nettoie les
+/// objets créés à la suppression de l'Application.
 pub async fn reconcile(
     app: Arc<Application>,
     ctx: Arc<Context>,
@@ -457,6 +554,32 @@ pub async fn reconcile(
     let pp = PatchParams::apply(FIELD_MANAGER).force();
 
     ensure_cookie_secret(&app, &ctx, &ns).await?;
+
+    let service_accounts: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), &ns);
+    let service_account = build_application_service_account(&app);
+    service_accounts
+        .patch(
+            &application_name(&app.name_any()),
+            &pp,
+            &Patch::Apply(&service_account),
+        )
+        .await?;
+
+    let roles: Api<Role> = Api::namespaced(ctx.client.clone(), &ns);
+    let role = build_application_role(&app);
+    roles
+        .patch(&application_name(&app.name_any()), &pp, &Patch::Apply(&role))
+        .await?;
+
+    let role_bindings: Api<RoleBinding> = Api::namespaced(ctx.client.clone(), &ns);
+    let role_binding = build_application_role_binding(&app);
+    role_bindings
+        .patch(
+            &application_name(&app.name_any()),
+            &pp,
+            &Patch::Apply(&role_binding),
+        )
+        .await?;
 
     let deployments: Api<Deployment> = Api::namespaced(ctx.client.clone(), &ns);
     let name = application_name(&app.name_any());
@@ -585,14 +708,20 @@ mod tests {
 
         assert_eq!(deployment.spec.as_ref().unwrap().replicas, Some(1));
 
-        let container = deployment
+        let pod_spec = deployment
             .spec
             .as_ref()
             .unwrap()
             .template
             .spec
             .as_ref()
-            .unwrap()
+            .unwrap();
+        assert_eq!(
+            pod_spec.service_account_name,
+            Some("application-demo".to_string())
+        );
+
+        let container = pod_spec
             .containers
             .first()
             .expect("should have 1 container");
@@ -827,6 +956,91 @@ mod tests {
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0].port, APP_PORT);
         assert_eq!(ports[0].name, Some("http".to_string()));
+    }
+
+    #[test]
+    fn build_application_service_account_shape() {
+        let app = make_application("demo");
+        let sa = build_application_service_account(&app);
+
+        assert_eq!(sa.metadata.name, Some("application-demo".to_string()));
+        assert_eq!(sa.metadata.namespace, Some("ns".to_string()));
+        let refs = sa
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "demo");
+    }
+
+    #[test]
+    fn build_application_role_shape() {
+        let app = make_application("demo");
+        let role = build_application_role(&app);
+
+        assert_eq!(role.metadata.name, Some("application-demo".to_string()));
+        let rules = role.rules.as_ref().expect("should have rules");
+        assert_eq!(rules.len(), 3);
+
+        let owners_projects = rules
+            .iter()
+            .find(|r| {
+                r.resources
+                    .as_ref()
+                    .is_some_and(|r| r.contains(&"owners".to_string()))
+            })
+            .expect("should have a rule for owners/projects");
+        assert!(owners_projects
+            .resources
+            .as_ref()
+            .unwrap()
+            .contains(&"projects".to_string()));
+        assert_eq!(
+            owners_projects.verbs,
+            vec!["get", "list", "create", "delete"]
+        );
+        assert!(!owners_projects.verbs.contains(&"patch".to_string()));
+
+        let sandboxes = rules
+            .iter()
+            .find(|r| {
+                r.resources
+                    .as_ref()
+                    .is_some_and(|r| r.contains(&"sandboxes".to_string()))
+            })
+            .expect("should have a rule for sandboxes");
+        assert!(sandboxes.verbs.contains(&"patch".to_string()));
+
+        let applications = rules
+            .iter()
+            .find(|r| {
+                r.resources
+                    .as_ref()
+                    .is_some_and(|r| r.contains(&"applications".to_string()))
+            })
+            .expect("should have a rule for applications");
+        assert_eq!(applications.verbs, vec!["get"]);
+    }
+
+    #[test]
+    fn build_application_role_binding_shape() {
+        let app = make_application("demo");
+        let rb = build_application_role_binding(&app);
+
+        assert_eq!(rb.metadata.name, Some("application-demo".to_string()));
+        assert_eq!(rb.role_ref.kind, "Role");
+        assert_eq!(rb.role_ref.name, "application-demo");
+        assert_eq!(
+            rb.role_ref.api_group,
+            Some("rbac.authorization.k8s.io".to_string())
+        );
+
+        let subjects = rb.subjects.as_ref().expect("should have subjects");
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].kind, "ServiceAccount");
+        assert_eq!(subjects[0].name, "application-demo");
+        assert_eq!(subjects[0].namespace, Some("ns".to_string()));
     }
 
     // 8. build_application_ingress_shape

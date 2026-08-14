@@ -45,6 +45,14 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies", "ingresses"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Role/RoleBinding namespacés du Deployment `app` de chaque Application (accès
+  # de VnlK8sClient aux CRs owners/projects/sandboxes/applications de son propre
+  # namespace) — pas d'escalade de privilèges : le controller possède déjà, via
+  # les règles vanyline.solidite.fr ci-dessus, un sur-ensemble cluster-wide des
+  # droits qu'il délègue ici en scope namespace.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
