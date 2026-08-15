@@ -500,7 +500,7 @@ describe('Explorer.vue — CRUD arbre', () => {
 
     await flushMicrotasks();
 
-const { entriesForNode } = wrapper.vm as { entriesForNode: (n: unknown) => unknown[] };
+    const { entriesForNode } = wrapper.vm as { entriesForNode: (n: unknown) => unknown[] };
 
     // racine { path: '.', leaf: false } → Nouveau fichier, Nouveau dossier
     const rootEntries = entriesForNode({ id: '.', label: 'foo', path: '.', leaf: false });
