@@ -467,11 +467,92 @@ pub fn run_remove(workspace: &Path, sandbox: &str) -> Result<(), MaintError> {
     }
 }
 
-/// `detect` : stub — retourne le JSON `{}`. Implémentation réelle : WS-10.
-/// Le paramètre `workspace` est ignoré pour l'instant (underscore) mais fait
-/// partie du contrat d'interface.
-pub fn run_detect(_workspace: &Path) -> Result<String, MaintError> {
-    Ok("{}".to_string())
+/// Nom de fichier marquant la présence de Rust — racine ou sous-chemin
+/// (membre de workspace Cargo).
+const RUST_MARKER: &str = "Cargo.toml";
+
+/// Noms de fichiers marquant la présence de JS/TS — racine uniquement.
+const JS_TS_MARKERS: [&str; 2] = ["package.json", "tsconfig.json"];
+
+/// Liste les chemins de fichiers de l'arbre HEAD du clone bare
+/// `workspace/repo.git` (`git --git-dir <bare> ls-tree -r --name-only HEAD`).
+/// Chaque chemin est relatif à la racine du dépôt, séparateur `/` (format git,
+/// indépendant de l'OS). Erreur `MaintError::GitFailed` si la commande échoue
+/// (ex: `repo.git` absent — `detect` appelé avant `init`).
+#[allow(clippy::unwrap_used)] // chemin construit en interne a partir d un nom deja valide (MaintError valide les entrees en amont), toujours UTF-8 dans ce deploiement
+fn list_head_tree(workspace: &Path) -> Result<Vec<String>, MaintError> {
+    let bare_path = workspace.join(BARE_REPO_DIR);
+    let output = Command::new("git")
+        .args([
+            "--git-dir",
+            bare_path.to_str().unwrap(),
+            "ls-tree",
+            "-r",
+            "--name-only",
+            "HEAD",
+        ])
+        .current_dir(workspace)
+        .output()
+        .map_err(|e| MaintError::GitFailed {
+            args: vec![
+                "--git-dir".into(),
+                bare_path.to_string_lossy().to_string(),
+                "ls-tree".into(),
+                "-r".into(),
+                "--name-only".into(),
+                "HEAD".into(),
+            ],
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        return Err(MaintError::GitFailed {
+            args: vec![
+                "--git-dir".into(),
+                bare_path.to_string_lossy().to_string(),
+                "ls-tree".into(),
+                "-r".into(),
+                "--name-only".into(),
+                "HEAD".into(),
+            ],
+            status: output.status.to_string(),
+            stderr,
+        });
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Ok(stdout
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect())
+}
+
+/// Détecte les langages utilisés à partir des marqueurs de fichiers de
+/// l'arbre HEAD. Résultat dans l'ordre fixe `["rust", "js-ts"]` (filtré).
+pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
+    let paths = list_head_tree(workspace)?;
+    let has_rust = paths
+        .iter()
+        .any(|p| p == RUST_MARKER || p.ends_with(&format!("/{RUST_MARKER}")));
+    let has_js_ts = paths.iter().any(|p| JS_TS_MARKERS.contains(&p.as_str()));
+
+    let mut languages = Vec::new();
+    if has_rust {
+        languages.push("rust".to_string());
+    }
+    if has_js_ts {
+        languages.push("js-ts".to_string());
+    }
+    Ok(languages)
+}
+
+/// `detect` : sérialise `detect_languages` en JSON `{"languages": [...]}`.
+pub fn run_detect(workspace: &Path) -> Result<String, MaintError> {
+    let languages = detect_languages(workspace)?;
+    Ok(serde_json::json!({ "languages": languages }).to_string())
 }
 
 /// `purge` : supprime récursivement `repo.git`, `worktrees` et `cache` sous
@@ -639,15 +720,6 @@ mod tests {
     #[test]
     fn worktree_path_value() {
         assert_eq!(worktree_path("sb1"), "worktrees/sb1");
-    }
-
-    // ===== run_detect =====
-
-    #[test]
-    fn detect_stub_returns_empty_json() {
-        let result = run_detect(Path::new("/tmp"));
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), "{}");
     }
 
     // ===== run_checkout validation =====

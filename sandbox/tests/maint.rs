@@ -456,3 +456,362 @@ fn init_idempotent_refspec_not_duplicated() {
         stdout
     );
 }
+
+// ===== detect_rust_only =====
+#[test]
+fn detect_rust_only() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    // Write Cargo.toml at root.
+    std::fs::write(
+        src.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["rust"]}"#);
+}
+
+// ===== detect_js_ts_package_json =====
+#[test]
+fn detect_js_ts_package_json() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    std::fs::write(src.join("package.json"), r#"{"name":"app"}"#).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["js-ts"]}"#);
+}
+
+// ===== detect_js_ts_tsconfig_json =====
+#[test]
+fn detect_js_ts_tsconfig_json() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    std::fs::write(
+        src.join("tsconfig.json"),
+        r#"{"compilerOptions":{}}"#,
+    )
+    .unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["js-ts"]}"#);
+}
+
+// ===== detect_both_rust_js_ts =====
+#[test]
+fn detect_both_rust_js_ts() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    std::fs::write(
+        src.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+    std::fs::write(src.join("package.json"), r#"{"name":"app"}"#).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["rust","js-ts"]}"#);
+}
+
+// ===== detect_nested_cargo_toml_workspace_member =====
+#[test]
+fn detect_nested_cargo_toml_workspace_member() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    // Create crates/foo/Cargo.toml (nested, simulates a workspace member).
+    std::fs::create_dir_all(src.join("crates/foo")).unwrap();
+    std::fs::write(
+        src.join("crates/foo/Cargo.toml"),
+        "[package]\nname=\"foo\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["rust"]}"#);
+}
+
+// ===== detect_nested_package_json_ignored =====
+#[test]
+fn detect_nested_package_json_ignored() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    // Create frontend/package.json (nested — should be ignored for JS/TS).
+    std::fs::create_dir_all(src.join("frontend")).unwrap();
+    std::fs::write(
+        src.join("frontend/package.json"),
+        r#"{"name":"web"}"#,
+    )
+    .unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":[]}"#);
+}
+
+// ===== detect_no_markers =====
+#[test]
+fn detect_no_markers() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo(&tmp.path().join("src"));
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":[]}"#);
+}
+
+// ===== detect_without_bare_fails =====
+#[test]
+fn detect_without_bare_fails() {
+    let tmp = TempDir::new().unwrap();
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+
+    let err = maint::run_detect(&ws).unwrap_err();
+    assert!(
+        matches!(err, maint::MaintError::GitFailed { .. }),
+        "expected GitFailed, got {err:?}"
+    );
+}
