@@ -393,11 +393,6 @@ pub fn git_pod_template(
         let init_env = env.clone();
         let init_mounts = mounts.clone();
 
-        // Re-add git-secret env/mounts to init if they exist (they're in `env`/`mounts`)
-        if project.spec.git_secret.is_some() {
-            // git-secret env/mounts are already in the cloned `env`/`mounts`
-        }
-
         (
             Some(vec![Container {
                 name: "git".to_string(),
