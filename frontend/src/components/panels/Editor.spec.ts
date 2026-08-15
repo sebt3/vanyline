@@ -18,13 +18,22 @@ function makeClient() {
 }
 
 /** Un panel Editor par fichier (task multi-onglets) : `path` est fixe pour la
- *  durée de vie de l'instance, reçu via `params`/`api` (props dockview),
- *  plus `sandbox-fs` toujours injecté par IdeShell. */
+ *  durée de vie de l'instance, plus `sandbox-fs` toujours injecté par
+ *  IdeShell. dockview-vue ne lie qu'UN prop réel (`params`) sur les
+ *  composants enregistrés via `components:` — sa valeur enveloppe le
+ *  `params` passé à `addPanel` ET `api` ensemble (vérifié à l'exécution,
+ *  cf. commentaire en tête d'Editor.vue) : la forme imbriquée ci-dessous
+ *  n'est pas arbitraire, c'est celle que le composant reçoit vraiment.
+ */
 function makePanelApi(isActive = true): DockviewPanelApi {
   return {
     isActive,
     onDidActiveChange: vi.fn(() => ({ dispose: vi.fn() })),
   } as unknown as DockviewPanelApi;
+}
+
+function editorProps(path: string, isActive = true) {
+  return { params: { params: { path }, api: makePanelApi(isActive) } };
 }
 
 async function flushMicrotasks() {
@@ -41,7 +50,7 @@ describe('Editor.vue — contenu réel', () => {
 
   it('lit le fichier de params.path au montage (raw: true)', async () => {
     const wrapper = mount(Editor, {
-      props: { params: { path: 'src/main.py' }, api: makePanelApi() },
+      props: editorProps('src/main.py'),
       global: { provide: { 'sandbox-fs': ref(client) } },
     });
 
@@ -59,7 +68,7 @@ describe('Editor.vue — contenu réel', () => {
 
   it('Ctrl+S écrit le contenu courant', async () => {
     const wrapper = mount(Editor, {
-      props: { params: { path: 'src/main.py' }, api: makePanelApi() },
+      props: editorProps('src/main.py'),
       global: { provide: { 'sandbox-fs': ref(client) } },
     });
 
@@ -84,14 +93,14 @@ describe('Editor.vue — contenu réel', () => {
     clearIdeActions();
 
     mount(Editor, {
-      props: { params: { path: 'inactive.py' }, api: makePanelApi(false) },
+      props: editorProps('inactive.py', false),
       global: { provide: { 'sandbox-fs': ref(makeClient()) } },
     });
     await flushMicrotasks();
     expect(ideActions.value.saveActiveFile).toBeUndefined();
 
     const activeWrapper = mount(Editor, {
-      props: { params: { path: 'active.py' }, api: makePanelApi(true) },
+      props: editorProps('active.py', true),
       global: { provide: { 'sandbox-fs': ref(client) } },
     });
     await flushMicrotasks();

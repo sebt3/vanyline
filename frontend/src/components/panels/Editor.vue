@@ -10,10 +10,22 @@ import type { DockviewPanelApi } from 'dockview-vue';
 import type { Ref } from 'vue';
 import type { SandboxFsClient } from '../../api/sandboxWs';
 
-// Un panel Editor par fichier ouvert (IdeShell.openFile) : `params.path` est
+// Un panel Editor par fichier ouvert (IdeShell.openFile) : le chemin est
 // fixe pour la durée de vie de cette instance — pas un ref partagé entre
 // onglets (cf. docs/architecture.md, section Frontend, limite levée).
-const props = defineProps<{ params: { path: string }; api: DockviewPanelApi }>();
+//
+// dockview-vue (composants enregistrés via `components:`, pas via slot) ne
+// lie qu'UN SEUL prop réel sur le composant de contenu : `params`, dont la
+// valeur enveloppe TOUT — `{ params: <params passé à addPanel>, api,
+// containerApi, tabLocation }` (vérifié à l'exécution, cf. commit qui a
+// introduit ce commentaire : un `defineProps<{ params; api }>()` avec `api`
+// en prop top-level séparée — pattern documenté pour `gridview`, pas pour
+// `dockview` — laissait `props.api` systématiquement `undefined`).
+const props = defineProps<{
+  params: { params: { path: string }; api: DockviewPanelApi };
+}>();
+const filePath = props.params.params.path;
+const panelApi = props.params.api;
 
 // Fourni par IdeShell (task-05) : 'sandbox-fs' : Ref<SandboxFsClient | null>
 const fsClient = inject<Ref<SandboxFsClient | null>>('sandbox-fs', ref(null) as Ref<SandboxFsClient | null>);
@@ -52,7 +64,7 @@ function showStatus(message: string) {
 
 /** Ctrl+S / Cmd+S : écrit le document courant sur la sandbox (op write, contenu brut). */
 function save() {
-  const path = props.params.path;
+  const path = filePath;
   if (!view || !path || !fsClient.value) return;
   const content = view.state.doc.toString();
   fsClient.value
@@ -106,7 +118,7 @@ async function loadFile(path: string): Promise<void> {
 // active (cf. useIdeSession.registerIdeActions : fusion, dernier appelant
 // gagne pour la même clé — l'instance active gagne donc bien la course).
 function claimSaveActionIfActive() {
-  if (props.api.isActive) registerIdeActions({ saveActiveFile: save });
+  if (panelApi.isActive) registerIdeActions({ saveActiveFile: save });
 }
 let activeChangeDisposable: { dispose(): void } | undefined;
 
@@ -118,9 +130,9 @@ onMounted(() => {
     }),
     parent: hostRef.value!,
   });
-  if (props.params.path) void loadFile(props.params.path);
+  if (filePath) void loadFile(filePath);
   claimSaveActionIfActive();
-  activeChangeDisposable = props.api.onDidActiveChange(claimSaveActionIfActive);
+  activeChangeDisposable = panelApi.onDidActiveChange(claimSaveActionIfActive);
 });
 
 onBeforeUnmount(() => {
