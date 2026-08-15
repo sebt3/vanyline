@@ -135,9 +135,9 @@ spec:
                 type: string
               homeAccessMode:
                 description: |-
-                  Mode d'accès du PVC home. None => "ReadWriteMany" (défaut historique —
+                  Mode d'accès du PVC home. None => "`ReadWriteMany`" (défaut historique —
                   le home est partagé entre les sandboxes concurrentes d'un même Owner).
-                  À ajuster (ex. "ReadWriteOnce") sur un cluster sans StorageClass RWX
+                  À ajuster (ex. "`ReadWriteOnce`") sur un cluster sans `StorageClass` RWX
                   (ex. single-node local-path) — aucun partage concurrent alors possible.
                 nullable: true
                 type: string
@@ -153,7 +153,7 @@ spec:
                   storageAccessMode:
                     description: |-
                       Défaut de repli pour `ProjectSpec.storage_access_mode` quand ce
-                      dernier est absent. None => "ReadWriteOnce" (défaut historique).
+                      dernier est absent. None => "`ReadWriteOnce`" (défaut historique).
                     nullable: true
                     type: string
                   storageClass:
@@ -380,7 +380,7 @@ spec:
                 description: |-
                   Mode d'accès du PVC workspace. None => repli sur
                   `Owner.spec.project_defaults.storage_access_mode`, puis
-                  "ReadWriteOnce" (défaut historique).
+                  "`ReadWriteOnce`" (défaut historique).
                 nullable: true
                 type: string
               storageClass:
@@ -431,6 +431,25 @@ spec:
                   - status
                   - type
                   type: object
+                type: array
+              detectedAt:
+                description: |-
+                  Horodatage du dernier `detect` réussi. Même raison `skip_serializing_if`
+                  que `languages`.
+                format: date-time
+                nullable: true
+                type: string
+              languages:
+                description: |-
+                  Langages détectés ("rust", "js-ts", ordre fixe — cf.
+                  `vanyline_sandbox::maint::detect_languages`. Écrit uniquement par le
+                  Job `detect` (tâche 03) via un patch dédié — jamais par
+                  `compute_status`. `skip_serializing_if` : voir note "Point
+                  d'attention" dans le fichier de tâche — indispensable pour que le
+                  merge patch de routine du reconciler Project n'écrase pas cette
+                  valeur.
+                items:
+                  type: string
                 type: array
               lastFetch:
                 description: Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.
@@ -836,7 +855,7 @@ spec:
                 type: string
               tlsIssuerName:
                 description: |-
-                  Nom du CertManager (Cluster)Issuer utilisé pour l'Ingress de l'application
+                  Nom du `CertManager` (Cluster)Issuer utilisé pour l'Ingress de l'application
                   (`cert-manager.io/cluster-issuer` ou `cert-manager.io/issuer` selon
                   `tls_issuer_kind`). Pose aussi `spec.tls` sur l'Ingress (secret
                   `<application-name>-cert`, même convention que les autres Ingress du

@@ -143,6 +143,19 @@ pub struct ProjectStatus {
     pub worktrees: Vec<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
+    /// Langages détectés ("rust", "js-ts", ordre fixe — cf.
+    /// `vanyline_sandbox::maint::detect_languages`. Écrit uniquement par le
+    /// Job `detect` (tâche 03) via un patch dédié — jamais par
+    /// `compute_status`. `skip_serializing_if` : voir note "Point
+    /// d'attention" dans le fichier de tâche — indispensable pour que le
+    /// merge patch de routine du reconciler Project n'écrase pas cette
+    /// valeur.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub languages: Vec<String>,
+    /// Horodatage du dernier `detect` réussi. Même raison `skip_serializing_if`
+    /// que `languages`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detected_at: Option<Time>,
 }
 
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -703,6 +716,73 @@ mod tests {
         assert!(
             !json.contains("pod_labels"),
             "should not contain pod_labels (snake_case), got: {json}"
+        );
+    }
+
+    // 16. project_status_languages_default_empty
+    #[test]
+    fn project_status_languages_default_empty() {
+        let status: ProjectStatus = serde_json::from_str("{}").expect("should deserialize from empty object");
+        assert!(status.languages.is_empty());
+        assert!(status.detected_at.is_none());
+    }
+
+    // 17. project_status_languages_skipped_when_empty
+    #[test]
+    fn project_status_languages_skipped_when_empty() {
+        let status = ProjectStatus::default();
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json.contains("languages"),
+            "should not contain 'languages' key when empty, got: {json}"
+        );
+        assert!(
+            !json.contains("detectedAt"),
+            "should not contain 'detectedAt' key when none, got: {json}"
+        );
+    }
+
+    // 18. project_status_languages_present_when_set
+    #[test]
+    fn project_status_languages_present_when_set() {
+        let mut status = ProjectStatus {
+            pvc_name: Some("workspace".to_string()),
+            cloned: true,
+            last_fetch: None,
+            worktrees: Vec::new(),
+            conditions: Vec::new(),
+            languages: vec!["rust".to_string(), "js-ts".to_string()],
+            detected_at: Some(Time(k8s_openapi::jiff::Timestamp::now())),
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(
+            json.contains(r#""languages""#),
+            "should contain 'languages' key when set, got: {json}"
+        );
+        assert!(
+            json.contains(r#""rust""#),
+            "should contain 'rust' in languages, got: {json}"
+        );
+        assert!(
+            json.contains(r#""js-ts""#),
+            "should contain 'js-ts' in languages, got: {json}"
+        );
+        assert!(
+            json.contains("detectedAt"),
+            "should contain 'detectedAt' key when set, got: {json}"
+        );
+
+        // Now test with empty languages and detected_at = None — should be omitted again
+        status.languages = Vec::new();
+        status.detected_at = None;
+        let json2 = serde_json::to_string(&status).unwrap();
+        assert!(
+            !json2.contains("languages"),
+            "should not contain 'languages' when cleared, got: {json2}"
+        );
+        assert!(
+            !json2.contains("detectedAt"),
+            "should not contain 'detectedAt' when cleared, got: {json2}"
         );
     }
 }

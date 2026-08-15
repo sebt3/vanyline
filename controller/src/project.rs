@@ -483,6 +483,8 @@ pub fn compute_status(project: &Project, cloned: bool) -> ProjectStatus {
             last_transition_time: Time(k8s_openapi::jiff::Timestamp::now()),
             observed_generation: project.meta().generation,
         }],
+        languages: Vec::new(),
+        detected_at: None,
     }
 }
 
