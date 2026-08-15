@@ -49,7 +49,7 @@ describe('Editor.vue — contenu réel', () => {
 
   beforeEach(() => {
     client = makeClient();
-    writeText = vi.fn();
+    writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, 'clipboard', {
       value: { writeText },
       configurable: true,
