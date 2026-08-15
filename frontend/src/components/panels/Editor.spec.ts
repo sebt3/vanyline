@@ -117,4 +117,40 @@ describe('Editor.vue — contenu réel', () => {
     // Vérifie que c'est bien l'instance active qui a écrit, pas l'inactive.
     expect((activeWrapper.vm as { save: () => void }).save).toBeDefined();
   });
+
+  it('enregistre findInActiveFile/replaceInActiveFile quand l\'onglet est actif et ouvre le panneau de recherche', async () => {
+    const { ideActions } = useIdeSession();
+    clearIdeActions();
+
+    const activeWrapper = mount(Editor, {
+      props: editorProps('a.py', true),
+      global: { provide: { 'sandbox-fs': ref(makeClient()) } },
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(ideActions.value.findInActiveFile).toBeDefined();
+    expect(ideActions.value.replaceInActiveFile).toBeDefined();
+
+    ideActions.value.findInActiveFile?.();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(activeWrapper.find('.cm-search').exists()).toBe(true);
+    expect(activeWrapper.text()).toContain('replace');
+  });
+
+  it('instance inactive ne enregistre pas findInActiveFile', async () => {
+    const { ideActions } = useIdeSession();
+    clearIdeActions();
+
+    mount(Editor, {
+      props: editorProps('inactive.py', false),
+      global: { provide: { 'sandbox-fs': ref(makeClient()) } },
+    });
+    await flushMicrotasks();
+
+    expect(ideActions.value.findInActiveFile).toBeUndefined();
+  });
 });

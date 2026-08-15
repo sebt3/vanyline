@@ -4,6 +4,7 @@ import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { search, openSearchPanel } from '@codemirror/search';
 import { languageExtensionForPath } from './editorLanguage';
 import { registerIdeActions } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
@@ -48,7 +49,7 @@ let view: EditorView | undefined;
 
 /** Extensions communes à tout fichier — le langage (dépendant du chemin
  *  ouvert) est ajouté séparément par `loadFile`, cf. `editorLanguage.ts`. */
-const baseExtensions = [basicSetup, oneDark, denseTheme, saveKeymap()];
+const baseExtensions = [basicSetup, oneDark, denseTheme, saveKeymap(), search({ top: true })];
 
 // Visible le temps d'informer l'utilisateur — un échec de save/read silencieux
 // laisserait croire que l'édition est enregistrée alors qu'elle ne l'est pas.
@@ -118,7 +119,13 @@ async function loadFile(path: string): Promise<void> {
 // active (cf. useIdeSession.registerIdeActions : fusion, dernier appelant
 // gagne pour la même clé — l'instance active gagne donc bien la course).
 function claimSaveActionIfActive() {
-  if (panelApi.isActive) registerIdeActions({ saveActiveFile: save });
+  if (panelApi.isActive) {
+    registerIdeActions({
+      saveActiveFile: save,
+      findInActiveFile: () => { if (view) openSearchPanel(view); },
+      replaceInActiveFile: () => { if (view) openSearchPanel(view); },
+    });
+  }
 }
 let activeChangeDisposable: { dispose(): void } | undefined;
 

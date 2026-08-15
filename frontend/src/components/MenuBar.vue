@@ -22,7 +22,9 @@ interface Item {
     | 'goto-project'
     | 'start-agent-session'
     | 'open-explorer'
-    | 'new-terminal';
+    | 'new-terminal'
+    | 'find-in-active-file'
+    | 'replace-in-active-file';
 }
 interface Sep {
   sep: true;
@@ -33,8 +35,8 @@ const route = useRoute();
 const { ideActions } = useIdeSession();
 
 // Uniquement les entrées réellement câblées (un `action` géré par onSelect) —
-// pas d'items décoratifs qui ne font rien au clic. Menus "Édition" et "Aide"
-// supprimés en entier : aucune de leurs entrées n'a jamais eu de handler.
+// pas d'items décoratifs qui ne font rien au clic. Menu "Aide" supprimé en
+// entier : aucune de ses entrées n'a jamais eu de handler.
 const menus: { label: string; items: (Item | Sep)[] }[] = [
   {
     label: 'Fichier',
@@ -44,6 +46,13 @@ const menus: { label: string; items: (Item | Sep)[] }[] = [
       { label: "Fermer l'onglet", shortcut: '⌘W', action: 'close-tab' },
       { sep: true },
       { label: 'Vers le projet', action: 'goto-project' },
+    ],
+  },
+  {
+    label: 'Édition',
+    items: [
+      { label: 'Rechercher', shortcut: '⌘F', action: 'find-in-active-file' },
+      { label: 'Remplacer', action: 'replace-in-active-file' },
     ],
   },
   {
@@ -89,6 +98,12 @@ function onSelect(item: Item) {
       break;
     case 'new-terminal':
       ideActions.value.newTerminal?.();
+      break;
+    case 'find-in-active-file':
+      ideActions.value.findInActiveFile?.();
+      break;
+    case 'replace-in-active-file':
+      ideActions.value.replaceInActiveFile?.();
       break;
     default:
       break;
