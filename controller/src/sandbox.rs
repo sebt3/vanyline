@@ -145,6 +145,43 @@ pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
     env
 }
 
+/// Toolchains effectives d'une Sandbox : `spec.toolchains` s'il est non vide
+/// (priorité explicite — jamais fusionnée avec la dérivation), sinon dérivées
+/// de `project.status.languages` : `"rust"` → toolchain `rust` avec
+/// `ctx.toolchain_image_rust` ; `"js-ts"` → toolchain `node` avec
+/// `ctx.toolchain_image_node`. Env vide => preset connu (`toolchain_preset`)
+/// appliqué par `resolve_toolchain_env`. Ordre fixe : rust puis node.
+pub fn effective_toolchains(
+    sandbox: &Sandbox,
+    project: &Project,
+    ctx: &SandboxPodContext,
+) -> Vec<Toolchain> {
+    if !sandbox.spec.toolchains.is_empty() {
+        return sandbox.spec.toolchains.clone();
+    }
+    let languages = project
+        .status
+        .as_ref()
+        .map(|s| s.languages.clone())
+        .unwrap_or_default();
+    let mut toolchains = Vec::new();
+    if languages.iter().any(|l| l == "rust") {
+        toolchains.push(Toolchain {
+            name: "rust".to_string(),
+            image: ctx.toolchain_image_rust.clone(),
+            env: Default::default(),
+        });
+    }
+    if languages.iter().any(|l| l == "js-ts") {
+        toolchains.push(Toolchain {
+            name: "node".to_string(),
+            image: ctx.toolchain_image_node.clone(),
+            env: Default::default(),
+        });
+    }
+    toolchains
+}
+
 /// Variable d'env pour un cache donné, `None` si le cache n'a pas de convention
 /// connue (seuls `"cargo"` et `"pnpm"` en ont une en v1).
 fn cache_env_var(cache: &str) -> Option<(&'static str, String)> {
@@ -176,6 +213,12 @@ pub struct SandboxPodContext {
     /// Image sandbox par défaut (env `SANDBOX_IMAGE` du controller), utilisée
     /// quand `sandbox.spec.image` est `None`.
     pub default_image: String,
+    /// Image toolchain par défaut pour le langage "rust" (env
+    /// `TOOLCHAIN_IMAGE_RUST` du controller). Utilisée par
+    /// `effective_toolchains` quand `spec.toolchains` est vide.
+    pub toolchain_image_rust: String,
+    /// Idem pour "js-ts" (env `TOOLCHAIN_IMAGE_NODE`).
+    pub toolchain_image_node: String,
 }
 
 /// Construit le Pod sandbox : home Owner + worktree + caches + toolchains,
@@ -256,7 +299,8 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         }
     }
 
-    for toolchain in &sandbox.spec.toolchains {
+    let toolchains = effective_toolchains(sandbox, project, ctx);
+    for toolchain in &toolchains {
         volumes.push(Volume {
             name: format!("toolchain-{}", toolchain.name),
             image: Some(k8s_openapi::api::core::v1::ImageVolumeSource {
@@ -271,7 +315,7 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
             ..Default::default()
         });
     }
-    env.extend(aggregate_toolchain_env(&sandbox.spec.toolchains));
+    env.extend(aggregate_toolchain_env(&toolchains));
 
     let mut labels = BTreeMap::new();
     labels.insert(
@@ -348,6 +392,10 @@ const SERVICE_PORT_NAME: &str = "mcp";
 pub struct Context {
     pub client: Client,
     pub default_image: String,
+    /// Image toolchain par défaut pour "rust" (env `TOOLCHAIN_IMAGE_RUST`).
+    pub toolchain_image_rust: String,
+    /// Image toolchain par défaut pour "js-ts" (env `TOOLCHAIN_IMAGE_NODE`).
+    pub toolchain_image_node: String,
 }
 
 pub fn checkout_job_name(sandbox_name: &str) -> String {
@@ -905,6 +953,8 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             owner_pvc_name,
             owner_service_account,
             default_image: ctx.default_image.clone(),
+            toolchain_image_rust: ctx.toolchain_image_rust.clone(),
+            toolchain_image_node: ctx.toolchain_image_node.clone(),
         };
         if let Some(pod) = pods.get_opt(&pod_name(&sandbox.name_any())).await? {
             match pod.status.and_then(|s| s.phase) {
@@ -1100,7 +1150,7 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use vanyline_crds::{ApplicationSpec, IngressControllerRef, ProjectSpec, PvcRef, SandboxSpec};
+    use vanyline_crds::{ApplicationSpec, IngressControllerRef, ProjectSpec, ProjectStatus, PvcRef, SandboxSpec};
 
     fn make_ctx() -> SandboxPodContext {
         SandboxPodContext {
@@ -1108,6 +1158,8 @@ mod tests {
             owner_pvc_name: "owner-alice-home".to_string(),
             owner_service_account: "owner-alice".to_string(),
             default_image: "registry.example/vanyline-sandbox:latest".to_string(),
+            toolchain_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
+            toolchain_image_node: "docker.io/library/node:trixie-slim".to_string(),
         }
     }
 
@@ -1171,6 +1223,15 @@ mod tests {
             sandbox_image: "registry.example/vanyline-sandbox:latest".to_string(),
             owner_pvc_name: "owner-alice-home".to_string(),
         }
+    }
+
+    fn make_project_with_languages(languages: Vec<&str>) -> Project {
+        let mut project = make_project(None, None);
+        project.status = Some(ProjectStatus {
+            languages: languages.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        });
+        project
     }
 
     // ===== aggregate_toolchain_env =====
@@ -1302,6 +1363,113 @@ mod tests {
 
         // No LD_LIBRARY_PATH
         assert!(!env_result.iter().any(|e| e.name == "LD_LIBRARY_PATH"));
+    }
+
+    // ===== effective_toolchains =====
+
+    #[test]
+    fn effective_toolchains_explicit_spec_priority() {
+        let rust = make_rust_tc(Default::default());
+        let sandbox = make_sandbox("sb", vec![rust], None);
+        let project = make_project_with_languages(vec!["rust"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "rust");
+        assert_eq!(result[0].image, "rust:slim-trixie");
+        assert!(result[0].env.is_empty());
+    }
+
+    #[test]
+    fn effective_toolchains_derives_rust() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["rust"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "rust");
+        assert_eq!(result[0].image, ctx.toolchain_image_rust);
+        assert!(result[0].env.is_empty());
+    }
+
+    #[test]
+    fn effective_toolchains_derives_js_ts() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["js-ts"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "node");
+        assert_eq!(result[0].image, ctx.toolchain_image_node);
+        assert!(result[0].env.is_empty());
+    }
+
+    #[test]
+    fn effective_toolchains_derives_both() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["rust", "js-ts"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "rust");
+        assert_eq!(result[0].image, ctx.toolchain_image_rust);
+        assert_eq!(result[1].name, "node");
+        assert_eq!(result[1].image, ctx.toolchain_image_node);
+    }
+
+    #[test]
+    fn effective_toolchains_empty_when_no_languages() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project(None, None); // no status
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_sandbox_pod_derived_toolchain_volumes() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["rust"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
+
+        let names: Vec<_> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(names.contains(&"toolchain-rust"));
+
+        let rust_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-rust")
+            .expect("should have toolchain-rust volume");
+        let src = rust_vol
+            .image
+            .as_ref()
+            .expect("toolchain-rust should have image source");
+        assert_eq!(src.reference, Some(ctx.toolchain_image_rust.clone()));
+        assert_eq!(src.pull_policy, Some("IfNotPresent".to_string()));
+
+        // The PATH env must contain the rust preset path
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        let path = env
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
+        let path_val = path.value.as_ref().expect("PATH must have value");
+        assert!(path_val.contains("/toolchains/rust/usr/local/cargo/bin"));
     }
 
     // ===== build_sandbox_pod =====

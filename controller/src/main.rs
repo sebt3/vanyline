@@ -31,6 +31,25 @@ struct Cli {
     )]
     sandbox_image_repo: String,
 
+    /// Image toolchain par défaut pour le langage "rust"
+    /// (`docker.io/library/rust:slim-trixie`, recette deploy/sandbox-test.yaml),
+    /// utilisée quand `Sandbox.spec.toolchains` est vide et que la détection
+    /// a trouvé `rust`. Surchargée par l'env `TOOLCHAIN_IMAGE_RUST`.
+    #[arg(
+        long,
+        env = "TOOLCHAIN_IMAGE_RUST",
+        default_value = "docker.io/library/rust:slim-trixie"
+    )]
+    toolchain_image_rust: String,
+
+    /// Idem pour "js-ts" (`docker.io/library/node:trixie-slim`).
+    #[arg(
+        long,
+        env = "TOOLCHAIN_IMAGE_NODE",
+        default_value = "docker.io/library/node:trixie-slim"
+    )]
+    toolchain_image_node: String,
+
     /// Tag de l'image app (ghcr.io/sebt3/vanyline-app) utilisée pour le
     /// Deployment `app`, quand `Application.spec.image` est absent.
     #[arg(long, env = "APP_IMAGE_TAG", default_value = env!("CARGO_PKG_VERSION"))]
@@ -109,6 +128,8 @@ async fn main() {
     let sandbox_ctx = Arc::new(sandbox::Context {
         client: client.clone(),
         default_image: sandbox_image.clone(),
+        toolchain_image_rust: cli.toolchain_image_rust.clone(),
+        toolchain_image_node: cli.toolchain_image_node.clone(),
     });
 
     let sandbox_run = sandbox::build_controller(client)
