@@ -464,11 +464,8 @@ pub fn build_checkout_job(
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
             template: project::git_pod_template(
-                project,
-                job_ctx,
-                None, // no init container for checkout
-                command,
-                None, // no service account for checkout
+                project, job_ctx, None, // no init container for checkout
+                command, None, // no service account for checkout
             ),
             ..Default::default()
         }),
@@ -510,11 +507,8 @@ pub fn build_worktree_remove_job(
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
             template: project::git_pod_template(
-                project,
-                job_ctx,
-                None, // no init container for worktree remove
-                command,
-                None, // no service account for worktree remove
+                project, job_ctx, None, // no init container for worktree remove
+                command, None, // no service account for worktree remove
             ),
             ..Default::default()
         }),
@@ -1150,7 +1144,9 @@ pub fn build_controller(client: Client) -> Controller<Sandbox> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use vanyline_crds::{ApplicationSpec, IngressControllerRef, ProjectSpec, ProjectStatus, PvcRef, SandboxSpec};
+    use vanyline_crds::{
+        ApplicationSpec, IngressControllerRef, ProjectSpec, ProjectStatus, PvcRef, SandboxSpec,
+    };
 
     fn make_ctx() -> SandboxPodContext {
         SandboxPodContext {

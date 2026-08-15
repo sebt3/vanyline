@@ -722,7 +722,8 @@ mod tests {
     // 16. project_status_languages_default_empty
     #[test]
     fn project_status_languages_default_empty() {
-        let status: ProjectStatus = serde_json::from_str("{}").expect("should deserialize from empty object");
+        let status: ProjectStatus =
+            serde_json::from_str("{}").expect("should deserialize from empty object");
         assert!(status.languages.is_empty());
         assert!(status.detected_at.is_none());
     }

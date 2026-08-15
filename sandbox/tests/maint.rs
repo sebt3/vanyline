@@ -503,7 +503,11 @@ fn detect_rust_only() {
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -554,7 +558,11 @@ fn detect_js_ts_package_json() {
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -581,11 +589,7 @@ fn detect_js_ts_tsconfig_json() {
         "git init failed"
     );
 
-    std::fs::write(
-        src.join("tsconfig.json"),
-        r#"{"compilerOptions":{}}"#,
-    )
-    .unwrap();
+    std::fs::write(src.join("tsconfig.json"), r#"{"compilerOptions":{}}"#).unwrap();
 
     assert!(
         Command::new("git")
@@ -609,7 +613,11 @@ fn detect_js_ts_tsconfig_json() {
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -665,7 +673,11 @@ fn detect_both_rust_js_ts() {
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -722,7 +734,11 @@ fn detect_nested_cargo_toml_workspace_member() {
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -751,11 +767,7 @@ fn detect_nested_package_json_ignored() {
 
     // Create frontend/package.json (nested — should be ignored for JS/TS).
     std::fs::create_dir_all(src.join("frontend")).unwrap();
-    std::fs::write(
-        src.join("frontend/package.json"),
-        r#"{"name":"web"}"#,
-    )
-    .unwrap();
+    std::fs::write(src.join("frontend/package.json"), r#"{"name":"web"}"#).unwrap();
 
     assert!(
         Command::new("git")
@@ -779,7 +791,11 @@ fn detect_nested_package_json_ignored() {
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(output.status.success(), "git commit failed: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -833,18 +849,39 @@ async fn detect_and_patch_without_project_matches_plain_detect() {
         "git init failed"
     );
 
-    std::fs::write(src.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.1.0\"\n").unwrap();
+    std::fs::write(
+        src.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
 
     assert!(
-        Command::new("git").args(["add", "."]).current_dir(&src).status().unwrap().success(),
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
         "git add failed"
     );
     let commit = Command::new("git")
-        .args(["-c", "user.email=test@test", "-c", "user.name=test", "commit", "-m", "init"])
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(commit.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit.stderr));
+    assert!(
+        commit.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();
@@ -879,15 +916,32 @@ async fn detect_and_patch_with_project_fails_without_cluster() {
     .unwrap();
 
     assert!(
-        Command::new("git").args(["add", "."]).current_dir(&src).status().unwrap().success(),
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
         "git add failed"
     );
     let commit = Command::new("git")
-        .args(["-c", "user.email=test@test", "-c", "user.name=test", "commit", "-m", "init"])
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
         .current_dir(&src)
         .output()
         .expect("git commit failed");
-    assert!(commit.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit.stderr));
+    assert!(
+        commit.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&commit.stderr)
+    );
 
     let ws = tmp.path().join("ws");
     std::fs::create_dir_all(&ws).unwrap();

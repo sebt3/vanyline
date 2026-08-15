@@ -494,7 +494,6 @@ fn list_head_tree(workspace: &Path) -> Result<Vec<String>, MaintError> {
             "--name-only",
             "HEAD",
         ])
-        .current_dir(workspace)
         .output()
         .map_err(|e| MaintError::GitFailed {
             args: vec![
@@ -604,9 +603,8 @@ async fn patch_project_languages(
     })?;
 
     let api: kube::Api<vanyline_crds::Project> = kube::Api::namespaced(client, &ns);
-    let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
-        k8s_openapi::jiff::Timestamp::now(),
-    );
+    let now =
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now());
     let patch = serde_json::json!({
         "status": {
             "languages": languages,
