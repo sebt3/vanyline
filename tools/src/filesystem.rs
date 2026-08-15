@@ -111,8 +111,8 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
     let limit = opts.limit;
     let raw = opts.raw;
 
-Box::pin(async move {
-        // 1. metadata — not found → FileNotFound, other → Io
+    Box::pin(async move {
+        // 1. metadata → file not found / io / dir
         let meta = match tokio::fs::metadata(&path).await {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -622,6 +622,9 @@ pub fn mkdir(opts: MkdirOptions) -> BoxedFuture<Result<(), ToolsError>> {
     Box::pin(async move {
         match tokio::fs::create_dir_all(&path).await {
             Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ToolsError::NotADirectory(path))
+            }
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 Err(ToolsError::PermissionDenied(path))
             }
@@ -1576,12 +1579,11 @@ mod tests {
         })
         .await;
 
-        // OS: EEXIST on Linux when a file exists at the same path
         match result {
-            Err(ToolsError::Io { path, .. }) => {
-                assert!(path.contains("f.txt"));
+            Err(ToolsError::NotADirectory(p)) => {
+                assert!(p.contains("f.txt"));
             }
-            other => panic!("Expected Io (EEXIST), got: {other:?}"),
+            other => panic!("Expected NotADirectory (VNL-TLS-003), got: {other:?}"),
         }
     }
 
