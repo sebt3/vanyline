@@ -25,6 +25,8 @@ provide('sandbox-name', props.sandboxName);
 // Handler fourni à Explorer : ouvre (ou active) l'onglet Editor du fichier —
 // un panel dockview par fichier, cf. openFile ci-dessous.
 provide('open-file', openFile);
+// Handler fourni à Explorer : ferme l'onglet Editor d'un chemin s'il est ouvert.
+provide('close-file', closeFile);
 
 const { activeConversationId, sessionError } = useIdeSession();
 
@@ -113,6 +115,14 @@ function openFile(path: string) {
     position: relativeToCenter(api, 'within'),
   });
   api.getPanel(id)?.api.setActive();
+}
+
+/** Ferme l'onglet Editor d'un chemin s'il est ouvert (renommage/suppression
+ *  côté Explorer : le panel `editor:<path>` devient obsolète). */
+function closeFile(path: string): void {
+  const api = dockviewApi.value;
+  if (!api) return;
+  api.getPanel(editorPanelId(path))?.api.close();
 }
 
 function addDefaultPanels(api: DockviewReadyEvent['api']) {
@@ -232,6 +242,8 @@ function onReady(event: DockviewReadyEvent) {
     }
   });
 }
+
+defineExpose({ closeFile });
 </script>
 
 <template>
