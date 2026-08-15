@@ -592,6 +592,12 @@ async fn patch_project_languages(
             message: format!("config: {e}"),
         })?;
     let ns = config.default_namespace.clone();
+    // rustls peut voir les features aws_lc_rs ET ring activées selon les
+    // dépendances (axum-server/reqwest activent aws_lc_rs, kube active ring) :
+    // l'auto-détection du provider échoue alors. Installe explicitement le
+    // provider ring avant de construire le client TLS — idempotent (un Err ici
+    // signifie qu'un provider est déjà installé, acceptable).
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let client = kube::Client::try_from(config).map_err(|e| MaintError::K8sPatch {
         project: project_name.to_string(),
         message: format!("client: {e}"),

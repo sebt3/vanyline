@@ -1,16 +1,5 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-// Ensure rustls has a default crypto provider before kube constructs any HTTPS client.
-// This runs during program static initialisation before any thread starts.
-#[unsafe(link_section = ".init_array")]
-pub static _RUSTLS_INIT: fn() = rustls_init;
-
-fn rustls_init() {
-    rustls::crypto::ring::default_provider()
-        .install_default()
-        .expect("rustls/crypto: install default crypto provider");
-}
-
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
