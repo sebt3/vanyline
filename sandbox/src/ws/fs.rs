@@ -75,6 +75,14 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
             return serde_json::json!({ "ok": false, "error": "missing op" });
         }
     };
+    // "root" op — no path required, returns the canonical sandbox root.
+    if op == "root" {
+        let root_path = match crate::tools_impl::confine_path(root, "") {
+            Ok(p) => p.to_string_lossy().into_owned(),
+            Err(e) => return serde_json::json!({ "ok": false, "error": e.to_string() }),
+        };
+        return serde_json::json!({ "ok": true, "root": root_path });
+    }
     let path = match msg["path"].as_str() {
         Some(p) => p.to_string(),
         None => return serde_json::json!({ "ok": false, "error": "missing path" }),
@@ -591,5 +599,34 @@ mod tests {
         .await;
         assert!(!ok(&resp));
         assert_eq!(resp["error"].as_str().unwrap(), "missing to");
+    }
+
+    /// Test 14: root_op_returns_canonical_root
+    #[tokio::test]
+    async fn root_op_returns_canonical_root() {
+        let state = make_state("root");
+        let resp = dispatch_fs_message(&state, r#"{"op":"root"}"#).await;
+        assert!(ok(&resp));
+        let root = resp["root"].as_str().unwrap();
+        assert!(
+            root.ends_with("/sandbox"),
+            "root should end with /sandbox, got {root}"
+        );
+        assert!(
+            !root.is_empty(),
+            "root must not be empty"
+        );
+    }
+
+    /// Test 15: root_op_needs_no_path
+    #[tokio::test]
+    async fn root_op_needs_no_path() {
+        let state = make_state("root_nopath");
+        let resp = dispatch_fs_message(&state, r#"{"op":"root"}"#).await;
+        assert!(ok(&resp));
+        assert!(
+            resp["root"].as_str().is_some(),
+            "root op without path should succeed, not return 'missing path'"
+        );
     }
 }
