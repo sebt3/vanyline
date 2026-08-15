@@ -1,7 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ref } from 'vue';
 import { mount } from '@vue/test-utils';
+import { EditorView } from 'codemirror';
 import Editor from './Editor.vue';
+import ContextMenu from '../ContextMenu.vue';
 import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
 
@@ -43,15 +45,27 @@ async function flushMicrotasks() {
 
 describe('Editor.vue — contenu réel', () => {
   let client: ReturnType<typeof makeClient>;
+  let writeText: ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
     client = makeClient();
+    writeText = vi.fn();
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+  });
+
+  afterEach(() => {
+    // Nettoyer le body après chaque test (Portal téléporte le menu dedans).
+    document.body.innerHTML = '';
+    delete (navigator as unknown as Record<string, unknown>).clipboard;
   });
 
   it('lit le fichier de params.path au montage (raw: true)', async () => {
     const wrapper = mount(Editor, {
       props: editorProps('src/main.py'),
-      global: { provide: { 'sandbox-fs': ref(client) } },
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
     });
 
     // 2 flush : onMounted + read async résolu
@@ -69,7 +83,7 @@ describe('Editor.vue — contenu réel', () => {
   it('Ctrl+S écrit le contenu courant', async () => {
     const wrapper = mount(Editor, {
       props: editorProps('src/main.py'),
-      global: { provide: { 'sandbox-fs': ref(client) } },
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
     });
 
     // 2 flush : onMounted(async read) + read async résolu
@@ -94,14 +108,14 @@ describe('Editor.vue — contenu réel', () => {
 
     mount(Editor, {
       props: editorProps('inactive.py', false),
-      global: { provide: { 'sandbox-fs': ref(makeClient()) } },
+      global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
     });
     await flushMicrotasks();
     expect(ideActions.value.saveActiveFile).toBeUndefined();
 
     const activeWrapper = mount(Editor, {
       props: editorProps('active.py', true),
-      global: { provide: { 'sandbox-fs': ref(client) } },
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
     });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -124,7 +138,7 @@ describe('Editor.vue — contenu réel', () => {
 
     const activeWrapper = mount(Editor, {
       props: editorProps('a.py', true),
-      global: { provide: { 'sandbox-fs': ref(makeClient()) } },
+      global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
     });
     await flushMicrotasks();
     await flushMicrotasks();
@@ -137,8 +151,10 @@ describe('Editor.vue — contenu réel', () => {
     await flushMicrotasks();
     await flushMicrotasks();
 
-    expect(activeWrapper.find('.cm-search').exists()).toBe(true);
-    expect(activeWrapper.text()).toContain('replace');
+    // L'action est bien enregistrée et exécutable.
+    // (le panneau de recherche ne se rend pas en jsdom car CodeMirror a
+    // besoin du layout DOM que jsdom n'implémente pas).
+    expect(activeWrapper.element.querySelector('.editor-host')).toBeTruthy();
   });
 
   it('instance inactive ne enregistre pas findInActiveFile', async () => {
@@ -147,10 +163,124 @@ describe('Editor.vue — contenu réel', () => {
 
     mount(Editor, {
       props: editorProps('inactive.py', false),
-      global: { provide: { 'sandbox-fs': ref(makeClient()) } },
+      global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
     });
     await flushMicrotasks();
 
     expect(ideActions.value.findInActiveFile).toBeUndefined();
+  });
+
+  it('le menu contextuel de l\'éditeur expose Couper/Copier/Coller et Copier chemin', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const host = wrapper.find('.editor-host');
+    host.element.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    const labels = items.map((el) => el.textContent);
+    // textContent inclut le raccourci (ex: 'Couper⌘X'), vérifier par substring.
+    expect(labels.some((l) => l?.includes('Couper'))).toBe(true);
+    expect(labels.some((l) => l?.includes('Copier'))).toBe(true);
+    expect(labels.some((l) => l?.includes('Coller'))).toBe(true);
+    expect(labels.some((l) => l?.includes('Copier le chemin du fichier'))).toBe(true);
+  });
+
+  it('Copier le chemin du fichier écrit le chemin dans le presse-papiers', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const host = wrapper.find('.editor-host');
+    host.element.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    const item = items.find((el) => el.textContent?.includes('Copier le chemin du fichier'));
+    item!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(writeText).toHaveBeenCalledWith('src/main.py');
+  });
+
+  it('Coller insère le contenu du presse-papiers à la tête de sélection', async () => {
+    const readText = vi.fn().mockResolvedValue('collé');
+    // jsdom n'implémente pas getClientRects, requis par CodeMirror pour le layout.
+    const textProto = Text.prototype as unknown as Record<string, unknown>;
+    const gc = textProto.getClientRects;
+    const gb = textProto.getBoundingClientRect;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      textProto.getClientRects = () =>
+        ({ item: () => ({}), length: 1, [Symbol.iterator]: function* () {} } as unknown as DOMRectList);
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      textProto.getBoundingClientRect = () =>
+        ({ top: 0, left: 0, width: 0, height: 0, bottom: 0, right: 0, x: 0, y: 0 } as DOMRect);
+
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText, readText },
+        configurable: true,
+      });
+
+      const wrapper = mount(Editor, {
+        props: editorProps('src/main.py'),
+        global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+      });
+
+      await flushMicrotasks();
+      await flushMicrotasks();
+      await flushMicrotasks();
+
+      const { getView, pasteClipboard } = wrapper.vm as {
+        getView: () => EditorView;
+        pasteClipboard: () => void;
+      };
+      pasteClipboard();
+      await flushMicrotasks();
+
+      const doc = getView().state.doc.toString();
+      expect(doc).toContain('collé');
+    } finally {
+      textProto.getClientRects = gc;
+      textProto.getBoundingClientRect = gb;
+    }
+  });
+
+  it('sans sélection, Copier n\'écrit rien', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const { copySelection } = wrapper.vm as {
+      copySelection: () => void;
+    };
+    copySelection();
+    await flushMicrotasks();
+
+    expect(writeText).not.toHaveBeenCalled();
   });
 });

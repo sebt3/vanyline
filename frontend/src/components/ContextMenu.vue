@@ -18,7 +18,7 @@ export interface ContextMenuSeparatorEntry {
 }
 export type ContextMenuEntry = ContextMenuAction | ContextMenuSeparatorEntry;
 
-defineProps<{ entries: ContextMenuEntry[] }>();
+defineProps<{ entries: ContextMenuEntry[]; asChild?: boolean }>();
 
 function isSep(entry: ContextMenuEntry): entry is ContextMenuSeparatorEntry {
   return 'sep' in entry && entry.sep === true;
@@ -30,7 +30,7 @@ function onSelect(entry: ContextMenuAction): void {
 
 <template>
   <ContextMenuRoot>
-    <ContextMenuTrigger class="trigger">
+    <ContextMenuTrigger class="trigger" :as-child="asChild ?? false">
       <slot />
     </ContextMenuTrigger>
     <ContextMenuPortal>

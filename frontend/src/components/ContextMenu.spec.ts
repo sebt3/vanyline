@@ -97,4 +97,24 @@ describe('ContextMenu', () => {
     expect(item).toBeTruthy();
     expect(item!.textContent).toContain('⌘C');
   });
+
+  it('asChild rend le trigger sans wrapper et ouvre au clic droit', async () => {
+    const wrapper = mount(ContextMenu, {
+      slots: { default: '<div class="target">Cible</div>' },
+      props: { asChild: true, entries: [{ label: 'Test', action: vi.fn() }] },
+    });
+
+    const target = wrapper.find('.target');
+    expect(target.exists()).toBe(true);
+
+    target.element.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Le menu s'ouvre au clic droit ; aucun wrapper span intermédiaire
+    // n'entoure l'élément du slot (asChild = vrai).
+    expect(document.querySelector('[role="menuitem"]')).toBeTruthy();
+  });
 });

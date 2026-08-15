@@ -10,6 +10,7 @@ import { registerIdeActions } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
 import type { Ref } from 'vue';
 import type { SandboxFsClient } from '../../api/sandboxWs';
+import ContextMenu, { type ContextMenuEntry } from '../ContextMenu.vue';
 
 // Un panel Editor par fichier ouvert (IdeShell.openFile) : le chemin est
 // fixe pour la durée de vie de cette instance — pas un ref partagé entre
@@ -75,8 +76,54 @@ function save() {
     });
 }
 
+const editorEntries: ContextMenuEntry[] = [
+  { label: 'Couper', shortcut: '⌘X', action: cutSelection },
+  { label: 'Copier', shortcut: '⌘C', action: copySelection },
+  { label: 'Coller', shortcut: '⌘V', action: pasteClipboard },
+  { sep: true },
+  { label: 'Copier le chemin du fichier', action: copyFilePath },
+];
+
+function copySelection(): void {
+  if (!view) return;
+  const { from, to } = view.state.selection.main;
+  if (from === to) return;
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  void navigator.clipboard.writeText(view.state.sliceDoc(from, to))
+    .catch((e: unknown) => showStatus(`Copie impossible : ${msg(e)}`));
+}
+
+function cutSelection(): void {
+  if (!view) return;
+  const { from, to } = view.state.selection.main;
+  if (from === to) return;
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  const text = view.state.sliceDoc(from, to);
+  void navigator.clipboard.writeText(text)
+    .then(() => { view?.dispatch({ changes: { from, to, insert: '' } }); })
+    .catch((e: unknown) => showStatus(`Coupe impossible : ${msg(e)}`));
+}
+
+function pasteClipboard(): void {
+  if (!view) return;
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  void navigator.clipboard.readText()
+    .then((text) => { view?.dispatch({ changes: { from: view.state.selection.main.head, insert: text } }); })
+    .catch((e: unknown) => showStatus(`Collage impossible : ${msg(e)}`));
+}
+
+function copyFilePath(): void {
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  void navigator.clipboard.writeText(filePath)
+    .catch((e: unknown) => showStatus(`Copie impossible : ${msg(e)}`));
+}
+
+function msg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 /** Exposé pour les tests (fallback si keydown jsdom est fragile). */
-defineExpose({ save });
+defineExpose({ save, copySelection, cutSelection, pasteClipboard, copyFilePath, getView: () => view });
 
 function saveKeymap() {
   return keymap.of([
@@ -152,7 +199,9 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="editor-wrap">
-    <div ref="host" class="editor-host"></div>
+    <ContextMenu :entries="editorEntries" :as-child="true">
+      <div ref="host" class="editor-host"></div>
+    </ContextMenu>
     <div v-if="statusMessage" class="editor-status" role="alert">{{ statusMessage }}</div>
   </div>
 </template>
