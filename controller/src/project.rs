@@ -6,8 +6,10 @@ use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
     PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    SecretVolumeSource, Volume, VolumeMount, VolumeResourceRequirements,
+    SecretVolumeSource, ServiceAccount, Volume, VolumeMount,
+    VolumeResourceRequirements,
 };
+use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, ObjectMeta, Time};
 use kube::api::{Api, ListParams, Patch, PatchParams, PostParams};
@@ -110,6 +112,81 @@ fn owner_reference(
     project
         .controller_owner_ref(&())
         .expect("Project a apiVersion/kind renseignés par le derive CustomResource")
+}
+
+/// Nom commun des objets RBAC des Jobs de maintenance d'un Project :
+/// ServiceAccount, Role et RoleBinding — `project-<name>-maint` (même patron
+/// que `owner-<name>` / `application-<name>`).
+#[allow(dead_code)]
+pub fn maint_sa_name(project_name: &str) -> String {
+    format!("project-{project_name}-maint")
+}
+
+/// `ServiceAccount` des Jobs git (init/fetch exécutent `detect`, qui patche
+/// `Project.status` via l'API K8s). `ownerReference` vers le Project — la GC
+/// en cascade nettoie SA/Role/RoleBinding à la suppression du Project.
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+#[allow(dead_code)]
+pub fn build_maint_service_account(project: &Project) -> ServiceAccount {
+    ServiceAccount {
+        metadata: ObjectMeta {
+            name: Some(maint_sa_name(&project.name_any())),
+            namespace: project.namespace(),
+            owner_references: Some(vec![owner_reference(project)]),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+/// `Role` (namespaced) donnant aux Jobs de maintenance exactement le droit
+/// utilisé par `vanyline-maint detect --project` : `patch` sur le status
+/// subresource des Projects (`projects/status: patch`). Rien de plus — les
+/// Jobs n'ont pas besoin de CRUD sur les CRs.
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+#[allow(dead_code)]
+pub fn build_maint_role(project: &Project) -> Role {
+    Role {
+        metadata: ObjectMeta {
+            name: Some(maint_sa_name(&project.name_any())),
+            namespace: project.namespace(),
+            owner_references: Some(vec![owner_reference(project)]),
+            ..Default::default()
+        },
+        rules: Some(vec![PolicyRule {
+            api_groups: Some(vec!["vanyline.solidite.fr".to_string()]),
+            resources: Some(vec!["projects/status".to_string()]),
+            verbs: vec!["patch".to_string()],
+            ..Default::default()
+        }]),
+    }
+}
+
+/// `RoleBinding` liant le `ServiceAccount` des Jobs au `Role` ci-dessus —
+/// même nom (`project-<name>-maint`) pour les trois objets.
+#[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
+#[allow(dead_code)]
+pub fn build_maint_role_binding(project: &Project) -> RoleBinding {
+    let name = maint_sa_name(&project.name_any());
+    RoleBinding {
+        metadata: ObjectMeta {
+            name: Some(name.clone()),
+            namespace: project.namespace(),
+            owner_references: Some(vec![owner_reference(project)]),
+            ..Default::default()
+        },
+        role_ref: RoleRef {
+            api_group: Some("rbac.authorization.k8s.io".to_string()),
+            kind: "Role".to_string(),
+            name: name.clone(),
+        },
+        subjects: Some(vec![Subject {
+            kind: "ServiceAccount".to_string(),
+            name,
+            namespace: project.namespace(),
+            ..Default::default()
+        }]),
+    }
 }
 
 /// Construit le PVC workspace à créer. Retourne `None` si `existing_pvc` est
@@ -229,14 +306,21 @@ pub fn sandbox_security_context() -> PodSecurityContext {
     }
 }
 
-/// Construit le `PodTemplateSpec` commun aux trois Jobs git : image sandbox,
-/// volumes (workspace + home Owner + secret git optionnel), env, conteneur unique
-/// `git` exécutant `command` en argv direct.
+/// Construit le `PodTemplateSpec` commun aux Jobs git. `init_command` :
+/// si `Some`, un initContainer nommé `"git"` l'exécute AVANT le container
+/// principal nommé `"detect"` qui exécute `command` (argv direct, jamais de
+/// shell) — c'est le mécanisme qui garantit `detect` après `init`/`fetch`.
+/// Si `None`, un seul container nommé `"git"` exécute `command` (comportement
+/// actuel, ex: `purge`). `service_account_name` : posé sur `PodSpec` quand le
+/// job appelle l'API K8s (`detect`). Les env (HOME, GIT_SSH_COMMAND) et les
+/// volumeMounts sont appliqués aux deux containers (init et principal).
 #[allow(dead_code)]
 pub fn git_pod_template(
     project: &Project,
     ctx: &ProjectJobContext,
+    init_command: Option<Vec<String>>,
     command: Vec<String>,
+    service_account_name: Option<&str>,
 ) -> PodTemplateSpec {
     let mut volumes = vec![
         Volume {
@@ -305,13 +389,37 @@ pub fn git_pod_template(
         project.name_any(),
     );
 
-    PodTemplateSpec {
-        metadata: Some(ObjectMeta {
-            labels: Some(labels),
-            ..Default::default()
-        }),
-        spec: Some(PodSpec {
-            containers: vec![Container {
+    let (init_containers, containers) = if let Some(init) = init_command {
+        let init_env = env.clone();
+        let init_mounts = mounts.clone();
+
+        // Re-add git-secret env/mounts to init if they exist (they're in `env`/`mounts`)
+        if project.spec.git_secret.is_some() {
+            // git-secret env/mounts are already in the cloned `env`/`mounts`
+        }
+
+        (
+            Some(vec![Container {
+                name: "git".to_string(),
+                image: Some(ctx.sandbox_image.clone()),
+                command: Some(init),
+                env: Some(init_env),
+                volume_mounts: Some(init_mounts),
+                ..Default::default()
+            }]),
+            vec![Container {
+                name: "detect".to_string(),
+                image: Some(ctx.sandbox_image.clone()),
+                command: Some(command),
+                env: Some(env),
+                volume_mounts: Some(mounts),
+                ..Default::default()
+            }],
+        )
+    } else {
+        (
+            None,
+            vec![Container {
                 name: "git".to_string(),
                 image: Some(ctx.sandbox_image.clone()),
                 command: Some(command),
@@ -319,20 +427,32 @@ pub fn git_pod_template(
                 volume_mounts: Some(mounts),
                 ..Default::default()
             }],
+        )
+    };
+
+    PodTemplateSpec {
+        metadata: Some(ObjectMeta {
+            labels: Some(labels),
+            ..Default::default()
+        }),
+        spec: Some(PodSpec {
+            init_containers,
+            containers,
             restart_policy: Some("Never".to_string()),
             volumes: Some(volumes),
             security_context: Some(sandbox_security_context()),
+            service_account_name: service_account_name.map(str::to_string),
             ..Default::default()
         }),
     }
 }
 
-/// Job une fois : crée les répertoires de cache puis clone bare le remote si
-/// n'existe pas déjà (idempotent — le controller peut réappliquer sans réétat).
+/// Job une fois : clone bare le remote (initContainer git) puis lance
+/// `detect --project` (container detect) qui patche `Project.status`.
 #[allow(dead_code)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
-    let mut command = vec![
+    let mut init_command = vec![
         "vanyline-maint".to_string(),
         "init".to_string(),
         "--repo".to_string(),
@@ -341,10 +461,17 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         WORKSPACE_MOUNT_PATH.to_string(),
     ];
     for cache in effective_caches(project) {
-        command.push("--cache".to_string());
-        command.push(cache);
+        init_command.push("--cache".to_string());
+        init_command.push(cache);
     }
-
+    let detect_command = vec![
+        "vanyline-maint".to_string(),
+        "detect".to_string(),
+        "--workspace".to_string(),
+        WORKSPACE_MOUNT_PATH.to_string(),
+        "--project".to_string(),
+        project.name_any(),
+    ];
     Job {
         metadata: ObjectMeta {
             name: Some(init_job_name(&project.name_any())),
@@ -359,22 +486,37 @@ pub fn build_init_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         spec: Some(JobSpec {
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
-            template: git_pod_template(project, ctx, command),
+            template: git_pod_template(
+                project,
+                ctx,
+                Some(init_command),
+                detect_command,
+                Some(&maint_sa_name(&project.name_any())),
+            ),
             ..Default::default()
         }),
         ..Default::default()
     }
 }
 
-/// `CronJob` périodique : `git fetch --prune` sur le clone bare.
+/// `CronJob` périodique : `git fetch --prune` (initContainer git) puis
+/// `detect --project` (container detect) pour rafraîchir la détection.
 #[allow(dead_code)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJob {
-    let command = vec![
+    let init_command = vec![
         "vanyline-maint".to_string(),
         "fetch".to_string(),
         "--workspace".to_string(),
         WORKSPACE_MOUNT_PATH.to_string(),
+    ];
+    let detect_command = vec![
+        "vanyline-maint".to_string(),
+        "detect".to_string(),
+        "--workspace".to_string(),
+        WORKSPACE_MOUNT_PATH.to_string(),
+        "--project".to_string(),
+        project.name_any(),
     ];
 
     CronJob {
@@ -395,7 +537,13 @@ pub fn build_fetch_cronjob(project: &Project, ctx: &ProjectJobContext) -> CronJo
                 spec: Some(JobSpec {
                     backoff_limit: Some(3),
                     ttl_seconds_after_finished: Some(3600),
-                    template: git_pod_template(project, ctx, command),
+                    template: git_pod_template(
+                        project,
+                        ctx,
+                        Some(init_command),
+                        detect_command,
+                        Some(&maint_sa_name(&project.name_any())),
+                    ),
                     ..Default::default()
                 }),
             },
@@ -433,7 +581,7 @@ pub fn build_purge_job(project: &Project, ctx: &ProjectJobContext) -> Job {
         spec: Some(JobSpec {
             backoff_limit: Some(3),
             ttl_seconds_after_finished: Some(3600),
-            template: git_pod_template(project, ctx, command),
+            template: git_pod_template(project, ctx, None, command, None),
             ..Default::default()
         }),
         ..Default::default()
@@ -508,6 +656,25 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
         })?;
 
     let pp = PatchParams::apply(owner::FIELD_MANAGER).force();
+
+    // RBAC des Jobs de maintenance : SA + Role (projects/status: patch) + RoleBinding
+    let service_accounts: Api<ServiceAccount> = Api::namespaced(ctx.client.clone(), ns);
+    let service_account = build_maint_service_account(project);
+    service_accounts
+        .patch(&maint_sa_name(&project.name_any()), &pp, &Patch::Apply(&service_account))
+        .await?;
+
+    let roles: Api<Role> = Api::namespaced(ctx.client.clone(), ns);
+    let role = build_maint_role(project);
+    roles
+        .patch(&maint_sa_name(&project.name_any()), &pp, &Patch::Apply(&role))
+        .await?;
+
+    let role_bindings: Api<RoleBinding> = Api::namespaced(ctx.client.clone(), ns);
+    let role_binding = build_maint_role_binding(project);
+    role_bindings
+        .patch(&maint_sa_name(&project.name_any()), &pp, &Patch::Apply(&role_binding))
+        .await?;
 
     if let Some(pvc) = build_workspace_pvc(
         project,
@@ -944,7 +1111,13 @@ mod tests {
     fn git_pod_template_runs_as_non_root() {
         let project = make_project(None, None);
         let ctx = make_ctx();
-        let template = git_pod_template(&project, &ctx, vec!["vanyline-maint".to_string()]);
+        let template = git_pod_template(
+            &project,
+            &ctx,
+            None,                           // no init container (purge path)
+            vec!["vanyline-maint".to_string()],
+            None,                           // no service account
+        );
         let sc = template
             .spec
             .as_ref()
@@ -968,11 +1141,17 @@ mod tests {
         assert_eq!(job.metadata.name, Some("project-demo-init".to_string()));
 
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-        assert_eq!(pod_spec.containers[0].image, Some(ctx.sandbox_image));
 
-        let command = pod_spec.containers[0].command.as_ref().unwrap();
+        // initContainer[0] = "git", command = init argv
+        let init_cmd = pod_spec
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap();
+        assert_eq!(init_cmd.name, "git");
         assert_eq!(
-            command,
+            init_cmd.command.as_ref().unwrap(),
             &vec![
                 "vanyline-maint".to_string(),
                 "init".to_string(),
@@ -985,6 +1164,31 @@ mod tests {
                 "--cache".to_string(),
                 "pnpm".to_string(),
             ]
+        );
+        assert_eq!(init_cmd.image, Some(ctx.sandbox_image.clone()));
+
+        // containers[0] = "detect", command = detect argv
+        let detect_cmd = pod_spec.containers[0].command.as_ref().unwrap();
+        assert_eq!(
+            pod_spec.containers[0].name,
+            "detect".to_string()
+        );
+        assert_eq!(
+            detect_cmd,
+            &vec![
+                "vanyline-maint".to_string(),
+                "detect".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+                "--project".to_string(),
+                "demo".to_string(),
+            ]
+        );
+
+        // service_account_name
+        assert_eq!(
+            pod_spec.service_account_name,
+            Some("project-demo-maint".to_string())
         );
 
         let volumes = pod_spec.volumes.as_ref().unwrap();
@@ -1099,23 +1303,52 @@ mod tests {
         assert_eq!(cronjob.spec.schedule, "@every 1h");
 
         let job_spec = cronjob.spec.job_template.spec.as_ref().unwrap();
-        let container = job_spec
+        let pod_spec = job_spec
             .template
             .spec
             .as_ref()
+            .unwrap();
+
+        // init_containers[0] = "git" runs fetch argv
+        let init_cmd = pod_spec
+            .init_containers
+            .as_ref()
             .unwrap()
-            .containers
             .first()
             .unwrap();
-        let command = container.command.as_ref().unwrap();
+        assert_eq!(init_cmd.name, "git");
         assert_eq!(
-            command,
+            init_cmd.command.as_ref().unwrap(),
             &vec![
                 "vanyline-maint".to_string(),
                 "fetch".to_string(),
                 "--workspace".to_string(),
                 "/workspace".to_string(),
             ]
+        );
+
+        // containers[0] = "detect" runs detect argv with --project demo
+        let detect_cmd = pod_spec.containers[0].command.as_ref().unwrap();
+        assert_eq!(
+            pod_spec.containers[0].name,
+            "detect".to_string()
+        );
+        assert_eq!(
+            detect_cmd,
+            &vec![
+                "vanyline-maint".to_string(),
+                "detect".to_string(),
+                "--workspace".to_string(),
+                "/workspace".to_string(),
+                "--project".to_string(),
+                "demo".to_string(),
+            ]
+        );
+
+        // service_account_name
+        assert_eq!(
+            pod_spec.service_account_name,
+            Some("project-demo-maint".to_string())
         );
     }
 
@@ -1141,14 +1374,14 @@ mod tests {
         );
     }
 
-    // 23. git_jobs_no_service_account
+    // 23. git_jobs_service_account
     #[test]
-    fn git_jobs_no_service_account() {
+    fn git_jobs_service_account() {
         let project = make_project(None, None);
         let ctx = make_ctx();
 
         let init_job = build_init_job(&project, &ctx);
-        assert!(
+        assert_eq!(
             init_job
                 .spec
                 .as_ref()
@@ -1157,12 +1390,12 @@ mod tests {
                 .spec
                 .as_ref()
                 .unwrap()
-                .service_account_name
-                .is_none()
+                .service_account_name,
+            Some("project-demo-maint".to_string())
         );
 
         let fetch_cronjob = build_fetch_cronjob(&project, &ctx);
-        assert!(
+        assert_eq!(
             fetch_cronjob
                 .spec
                 .job_template
@@ -1173,8 +1406,8 @@ mod tests {
                 .spec
                 .as_ref()
                 .unwrap()
-                .service_account_name
-                .is_none()
+                .service_account_name,
+            Some("project-demo-maint".to_string())
         );
 
         let purge_job = build_purge_job(&project, &ctx);
@@ -1199,24 +1432,35 @@ mod tests {
         let ctx = make_ctx();
 
         let init_job = build_init_job(&project, &ctx);
-        let init_cmd = init_job
+        let init_p = init_job
             .spec
             .as_ref()
             .unwrap()
             .template
             .spec
             .as_ref()
+            .unwrap();
+        // initContainer[0] (git)
+        let init_cmd = init_p
+            .init_containers
+            .as_ref()
             .unwrap()
-            .containers[0]
+            .first()
+            .unwrap()
             .command
             .as_ref()
             .unwrap();
         assert_eq!(init_cmd[0], "vanyline-maint");
         assert!(!init_cmd.iter().any(|a| a == "sh"));
         assert!(!init_cmd.iter().any(|a| a == "-c"));
+        // containers[0] (detect)
+        let detect_cmd = init_p.containers[0].command.as_ref().unwrap();
+        assert_eq!(detect_cmd[0], "vanyline-maint");
+        assert!(!detect_cmd.iter().any(|a| a == "sh"));
+        assert!(!detect_cmd.iter().any(|a| a == "-c"));
 
         let fetch_cronjob = build_fetch_cronjob(&project, &ctx);
-        let fetch_cmd = fetch_cronjob
+        let fetch_p = fetch_cronjob
             .spec
             .job_template
             .spec
@@ -1225,28 +1469,37 @@ mod tests {
             .template
             .spec
             .as_ref()
+            .unwrap();
+        // initContainer[0] (git)
+        let fetch_init_cmd = fetch_p
+            .init_containers
+            .as_ref()
             .unwrap()
-            .containers[0]
+            .first()
+            .unwrap()
             .command
             .as_ref()
             .unwrap();
-        assert_eq!(fetch_cmd[0], "vanyline-maint");
-        assert!(!fetch_cmd.iter().any(|a| a == "sh"));
-        assert!(!fetch_cmd.iter().any(|a| a == "-c"));
+        assert_eq!(fetch_init_cmd[0], "vanyline-maint");
+        assert!(!fetch_init_cmd.iter().any(|a| a == "sh"));
+        assert!(!fetch_init_cmd.iter().any(|a| a == "-c"));
+        // containers[0] (detect)
+        let detect_cmd2 = fetch_p.containers[0].command.as_ref().unwrap();
+        assert_eq!(detect_cmd2[0], "vanyline-maint");
+        assert!(!detect_cmd2.iter().any(|a| a == "sh"));
+        assert!(!detect_cmd2.iter().any(|a| a == "-c"));
 
         let purge_job = build_purge_job(&project, &ctx);
-        let purge_cmd = purge_job
+        let purge_p = purge_job
             .spec
             .as_ref()
             .unwrap()
             .template
             .spec
             .as_ref()
-            .unwrap()
-            .containers[0]
-            .command
-            .as_ref()
             .unwrap();
+        // single container (git)
+        let purge_cmd = purge_p.containers[0].command.as_ref().unwrap();
         assert_eq!(purge_cmd[0], "vanyline-maint");
         assert!(!purge_cmd.iter().any(|a| a == "sh"));
         assert!(!purge_cmd.iter().any(|a| a == "-c"));
@@ -1291,5 +1544,114 @@ mod tests {
         let status_false = compute_status(&project, false);
         assert!(status_false.worktrees.is_empty());
         assert!(status_false.last_fetch.is_none());
+    }
+
+    // ===== New tests for RBAC + detect chaining =====
+
+    // 28. maint_sa_name_value
+    #[test]
+    fn maint_sa_name_value() {
+        assert_eq!(maint_sa_name("demo"), "project-demo-maint");
+    }
+
+    // 29. build_maint_service_account_shape
+    #[test]
+    fn build_maint_service_account_shape() {
+        let project = make_project(None, None);
+        let sa = build_maint_service_account(&project);
+
+        assert_eq!(sa.metadata.name, Some("project-demo-maint".to_string()));
+        assert_eq!(sa.metadata.namespace, Some("ns".to_string()));
+        let refs = sa
+            .metadata
+            .owner_references
+            .as_ref()
+            .expect("should have ownerReferences");
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].name, "demo");
+        assert_eq!(refs[0].kind, "Project");
+    }
+
+    // 30. build_maint_role_shape
+    #[test]
+    fn build_maint_role_shape() {
+        let project = make_project(None, None);
+        let role = build_maint_role(&project);
+
+        assert_eq!(role.metadata.name, Some("project-demo-maint".to_string()));
+        let rules = role.rules.as_ref().expect("should have rules");
+        assert_eq!(rules.len(), 1);
+        let rule = &rules[0];
+        assert_eq!(
+            rule.api_groups.as_ref().unwrap().as_slice(),
+            &["vanyline.solidite.fr".to_string()]
+        );
+        assert_eq!(
+            rule.resources.as_ref().unwrap().as_slice(),
+            &["projects/status".to_string()]
+        );
+        assert_eq!(
+            rule.verbs.as_slice(),
+            &["patch".to_string()]
+        );
+    }
+
+    // 31. build_maint_role_binding_shape
+    #[test]
+    fn build_maint_role_binding_shape() {
+        let project = make_project(None, None);
+        let rb = build_maint_role_binding(&project);
+
+        assert_eq!(rb.metadata.name, Some("project-demo-maint".to_string()));
+        assert_eq!(rb.role_ref.kind, "Role");
+        assert_eq!(rb.role_ref.name, "project-demo-maint");
+        assert_eq!(
+            rb.role_ref.api_group,
+            Some("rbac.authorization.k8s.io".to_string())
+        );
+
+        let subjects = rb.subjects.as_ref().expect("should have subjects");
+        assert_eq!(subjects.len(), 1);
+        assert_eq!(subjects[0].kind, "ServiceAccount");
+        assert_eq!(subjects[0].name, "project-demo-maint");
+        assert_eq!(subjects[0].namespace, Some("ns".to_string()));
+    }
+
+    // 32. init_job_detect_container_order
+    #[test]
+    fn init_job_detect_container_order() {
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+        let job = build_init_job(&project, &ctx);
+        let p = job
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap();
+
+        // initContainer[0] runs "init"
+        let init_cmd = p
+            .init_containers
+            .as_ref()
+            .unwrap()
+            .first()
+            .unwrap()
+            .command
+            .as_ref()
+            .unwrap();
+        assert_eq!(init_cmd[1], "init");
+
+        // containers[0] runs "detect" with --project demo
+        let detect_cmd = p.containers[0].command.as_ref().unwrap();
+        assert_eq!(detect_cmd[1], "detect");
+        // argv order: --project -> demo
+        let project_idx = detect_cmd
+            .iter()
+            .position(|a| a == "--project")
+            .expect("should have --project");
+        assert_eq!(detect_cmd[project_idx + 1], "demo");
     }
 }
