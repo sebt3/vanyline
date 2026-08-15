@@ -633,8 +633,8 @@ nœuds sans contrainte de colocalisation.
 | Reconciler (`controller/src/*.rs`) | Objets gérés |
 |---|---|
 | `owner.rs` | PVC home (créé ou référence `existing_pvc` vérifiée) + ServiceAccount `owner-<name>` + condition `Ready`. Pas de finalizer (rien à nettoyer côté cluster que la suppression K8s de l'Owner n'efface pas déjà via owner references). |
-| `project.rs` | PVC workspace (créé ou référence vérifiée) + Job `project-init` (clone bare + mkdir caches, une fois) + CronJob `project-fetch` (`git fetch --prune`, planning dérivé de `fetch_interval`) + finalizer (Job purge puis suppression du PVC créé — un PVC référencé n'est jamais supprimé). |
-| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain + env agrégé PATH/LD_LIBRARY_PATH/caches — supprimé si `spec.suspended`, cf. ci-dessous) + Service ClusterIP (port MCP) + NetworkPolicy ingress (restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`, **+ le pod `app` + le controller Ingress réel si l'Owner référence une Application, cf. sous-section dédiée**) + NetworkPolicy egress conditionnelle (WS-13, cf. ci-dessous) + **Ingress** (`sandbox-ingress-wiring`, seulement si l'Owner référence une Application — patché/supprimé explicitement selon l'état, même patron que la netpol egress) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
+| `project.rs` | PVC workspace (créé ou référence vérifiée) + ServiceAccount/Role/RoleBinding `project-<name>-maint` (droit `projects/status: patch` scopé à ce seul Project, cf. sous-section "Détection de langages" ci-dessous) + Job `project-init` (clone bare + mkdir caches + `detect`, une fois) + CronJob `project-fetch` (`git fetch --prune` + `detect`, planning dérivé de `fetch_interval`) + finalizer (Job purge puis suppression du PVC créé — un PVC référencé n'est jamais supprimé). |
+| `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain, **explicite ou dérivée de `project.status.languages`, cf. sous-section "Détection de langages"** + env agrégé PATH/LD_LIBRARY_PATH/caches — supprimé si `spec.suspended`, cf. ci-dessous) + Service ClusterIP (port MCP) + NetworkPolicy ingress (restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`, **+ le pod `app` + le controller Ingress réel si l'Owner référence une Application, cf. sous-section dédiée**) + NetworkPolicy egress conditionnelle (WS-13, cf. ci-dessous) + **Ingress** (`sandbox-ingress-wiring`, seulement si l'Owner référence une Application — patché/supprimé explicitement selon l'état, même patron que la netpol egress) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
 | `application.rs` (`controller-application-crd`) | Deployment (1 container, env assemblé depuis 3 `secretRef` OIDC/DB/cookie + `VNL_K8S_NAMESPACE` + `OIDC_REDIRECT_URL` calculé) + Service ClusterIP + Ingress + Secret cookie auto-généré si absent — cf. sous-section dédiée. Pas de finalizer, ownerReferences suffisent. |
 
 Tous les Jobs git (`project.rs`/`sandbox.rs`) invoquent `vanyline-maint` (image sandbox)
@@ -644,7 +644,10 @@ en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une comman
 **Presets toolchain** (`sandbox.rs::toolchain_preset`) : la recette d'env validée (PATH,
 `LD_LIBRARY_PATH` deux arches, `RUSTUP_HOME`…) vit ici, pas répétée dans chaque CR —
 `Toolchain.env` vide déclenche le preset si `Toolchain.name` matche (`rust`, `node`),
-sinon aucune variable ; `Toolchain.env` explicite remplace le preset entièrement.
+sinon aucune variable ; `Toolchain.env` explicite remplace le preset entièrement. La
+liste de `Toolchain` elle-même peut être explicite (`spec.toolchains`) ou dérivée
+automatiquement de la détection de langages — cf. sous-section "Détection de langages
+et toolchains automatiques (WS-10)" ci-dessous.
 
 **Mount `repo.git` dans le pod Sandbox** (`build_sandbox_pod`, WS-11) : `git worktree
 add` (Job checkout, monté sur tout le PVC à `/workspace`) écrit dans le `.git` du
@@ -706,6 +709,58 @@ sur inactivité (décision 2026-07-12 : manuel uniquement). Requeue 300s en rég
 stable (`Running` et `Suspended`), comme pour le reste du reconciler. Piloté par
 `vanyline sandbox stop|start` — commandes CLI **pas encore câblées** : périmètre
 restant de `ws12-sandbox-clients`, qui n'attendait que ce champ.
+
+### Détection de langages et toolchains automatiques (WS-10)
+
+**Détection** (`vanyline-maint detect`, cf. section "Maintenance des workspaces"
+ci-dessous pour l'outil) : marqueurs de fichiers sur l'arbre HEAD du clone bare —
+`rust` si un `Cargo.toml` existe (racine ou n'importe quel sous-chemin, membre de
+workspace compris), `js-ts` si `package.json` **ou** `tsconfig.json` existe **à la
+racine uniquement** (un `package.json` imbriqué ne compte pas). **Présence
+seulement, jamais de version** (décision 2026-08-15 : ni `rust-toolchain.toml`/
+`rust-version`/edition, ni `.nvmrc`/`engines.node` — si le besoin apparaît, ce sera
+une extension explicite, pas une déduction implicite). Périmètre définitivement
+limité à Rust et JS/TS.
+
+**Chaînage dans les Jobs `init`/`fetch`** (`project::git_pod_template`) : le pod du
+Job exécute la commande git (`init` ou `fetch`) comme **initContainer**, puis
+`vanyline-maint detect --workspace /workspace --project <name>` comme container
+principal — toujours en argv, jamais de shell (même règle que le reste). Les Jobs
+`purge`/`checkout`/`remove` restent à un seul container, inchangés.
+
+**Remontée au status — patch dédié, pas le reconciler** : `detect` patche
+directement `Project.status.{languages,detectedAt}` via l'API K8s (merge patch
+JSON ciblé, `kube::Api::patch_status`), pas via `compute_status`/le reconciler
+Project. Nécessaire car `compute_status` tourne sur un rythme différent (chaque
+reconcile, ~300s) et ne connaît rien de la détection. Piège évité : `ProjectStatus`
+sérialiserait `languages`/`detectedAt` à leur valeur par défaut (`[]`/`null`) à
+chaque reconcile de routine, et un merge patch écraserait alors ce que `detect` a
+écrit — les deux champs portent donc `skip_serializing_if` pour qu'une valeur par
+défaut n'apparaisse jamais dans le corps du patch, laissant le merge JSON (RFC
+7386) intact sur ces clés. Symétriquement, le patch dédié de `detect` ne doit
+**jamais** sérialiser un `ProjectStatus` complet (écraserait `cloned`/`worktrees`/
+`conditions`) — il construit son JSON à la main avec seulement ces deux clés.
+
+**RBAC des Jobs** : `vanyline-maint` n'avait auparavant aucun droit K8s (pur
+filesystem/git). `detect --project` a besoin de `projects/status: patch` — le Job
+tourne donc avec un ServiceAccount dédié `project-<name>-maint`, un `Role`
+namespaced scopé via `resourceNames: [<name>]` (pas de droit sur les autres
+Projects du même namespace) et un `RoleBinding`, tous les trois avec
+`ownerReference` vers le Project (GC en cascade à sa suppression) — même patron
+que `application::build_application_service_account`/`build_application_role`.
+
+**Toolchains automatiques** (`sandbox.rs::effective_toolchains`) : si
+`Sandbox.spec.toolchains` est non vide, il est utilisé tel quel — **jamais
+fusionné** avec la dérivation automatique (tout ou rien). C'est le mécanisme par
+lequel un utilisateur choisit une image de toolchain custom (version pinnée,
+registry privé) quand le défaut ne convient pas. Sinon, dérivé de
+`project.status.languages` : `rust` → toolchain `rust` (image
+`TOOLCHAIN_IMAGE_RUST`, défaut `docker.io/library/rust:slim-trixie`), `js-ts` →
+toolchain `node` (image `TOOLCHAIN_IMAGE_NODE`, défaut
+`docker.io/library/node:trixie-slim`) — mêmes presets d'env que le mode manuel
+(`toolchain_preset`), ordre fixe rust puis node. Les deux images par défaut sont
+des flags CLI du controller (`env` clap), surchargeables sans rebuild, recette
+alignée sur `deploy/sandbox/sandbox-test.yaml`.
 
 ### CRD Application (`controller-application-crd`)
 
@@ -1051,7 +1106,7 @@ correspondante ("l'image sandbox est l'outil de maintenance du controller") est 
 | `purge --workspace <dir>` | supprime `repo.git`, `worktrees/`, `cache/` (idempotent) |
 | `checkout --workspace <dir> --sandbox <n> --branch <ref> [--default-branch <ref>]` | worktree idempotent ; branche créée depuis la default branch (résolue par `symbolic-ref`, repli `main`) si absente du bare |
 | `remove --workspace <dir> --sandbox <n>` | `worktree remove --force`, repli `rm -rf`, puis `worktree prune` |
-| `detect --workspace <dir>` | stub — sort `{}` ; implémentation réelle : WS-10 |
+| `detect --workspace <dir> [--project <name>]` | marqueurs de fichiers → JSON `{"languages": [...]}` sur stdout ; si `--project` est fourni, patche en plus `Project.status.{languages,detectedAt}` via l'API K8s (cf. section "Opérateur Kubernetes" pour le détail RBAC/chaînage) |
 
 Décisions structurantes :
 
@@ -1086,6 +1141,14 @@ Décisions structurantes :
   '+refs/heads/*:refs/remotes/origin/*'` (idempotent). Cible `refs/remotes/origin/*`, pas
   `refs/heads/*` — ne doit jamais écraser les branches locales des worktrees. C'est
   directement ce que `GET /git/unpushed` interroge (cf. section "Serveur MCP" ci-dessus).
+- **Provider TLS rustls ambigu** (WS-10, `detect --project`) : `kube` active la feature
+  `ring`, tandis qu'`axum-server`/`reqwest` (mêmes dépendances du crate `vanyline-sandbox`,
+  binaire commun) activent `aws_lc_rs` — rustls voit alors deux `CryptoProvider` possibles
+  et son auto-détection panique à la construction du premier `kube::Client`
+  (`get_default_or_install_from_crate_features`). Fix : `vanyline-maint` installe
+  explicitement `rustls::crypto::ring::default_provider().install_default()` avant tout
+  `Client::try_from` — idempotent, l'erreur (provider déjà installé) est ignorée sans
+  conséquence.
 
 ## Gouvernance qualité — jobs CI (WS-15)
 

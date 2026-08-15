@@ -84,6 +84,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/arrimage-fonctionnel-2026-08.md` | 7 features (2026-08-10 → 08-12) : web IDE Vue réellement branché sur une sandbox K8s — ticket WS, CRD Application, Ingress par sandbox, todo persistant, config réelle. Process Claude/Cadence/Qwen qui a fonctionné, motif récurrent de doc drift trouvé 4 fois, décisions actées, pièges techniques |
 | `.claude/memory/v0.1.1-first-live-deploy.md` | Premier déploiement réel de la CRD Application (media-test, 2026-08-13) : 5 bugs trouvés en live (caCert PEM inline, TLS cert-manager absent, clé DB `uri` vs `databaseUrl`, dependabot npm mal ciblé sous workspaces, frontend sans redirect 401→login) → release v0.1.1, v0.1.2 en attente (tests en cours avant publication) |
 | `.claude/memory/frontend-dashboards-nav.md` | Navigation à 3 niveaux (`/` → `/p/:project` → `/p/:project/s/:sandbox`), dashboards Projets/Sandboxes sortis des Settings, Settings restant regroupé (Modèles/Outils/Agents/Skills/Compte) + converti en modales reka-ui, champs relationnels (provider→profil→agent, mcp discovery, local-tools) remplacent le texte libre, 2 endpoints backend ajoutés |
+| `.claude/memory/ws10-language-support.md` | Détection Rust/JS-TS (présence seulement, pas de version) → `Project.status.languages` (patch dédié, pas le reconciler) → toolchains Sandbox auto-dérivées si `spec.toolchains` vide (tout ou rien). Livré par l'agent opencode `cadence` plutôt que Qwen/`.tasks/` ; review Claude a trouvé RBAC trop large + bug de chemin relatif + `fmt` non lancé, tous corrigés avant clôture. Tool `validate` (scope originel plus large) non démarré, laissé de côté |
 
 ---
 
@@ -111,6 +112,12 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   champ référençait une autre entité. Toutes les features de l'index ci-dessus sont
   terminées et closes ; leurs design docs (`docs/features/*.md`) sont supprimés. Pas
   de design doc formel écrit pour la nouvelle direction (réorientation) pour l'instant.
+- **Détection de langages + toolchains automatiques** (2026-08-15,
+  `.claude/memory/ws10-language-support.md`) : `vanyline-maint detect` (Rust/JS-TS,
+  présence seulement) → `Project.status.languages` → Sandbox monte automatiquement
+  les toolchains correspondantes si `spec.toolchains` est vide. Validation sur
+  cluster réel pas encore faite (code review + tests unitaires/intégration
+  seulement à ce stade).
 
 **Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
 attaqué) :
@@ -119,6 +126,8 @@ attaqué) :
   à la sandbox).
 - `vanyline sandbox stop|start` (CLI) — champ `suspended` posé côté CRD depuis
   `ws13-sandbox-runtime`, jamais câblé côté CLI.
+- Tool `validate` (test/lint/format par toolchain détectée, scope original plus
+  large de `ws10-language-support`) — jamais démarré, pas de design doc actif.
 - Workflow/DAG (capacité "ajoutée" par la réorientation du 2026-08-09) et webchat
   (priorité très basse) — le panneau Workflow/Chat du shell IDE reste mock.
 - Multi-utilisateur complet, quotas
