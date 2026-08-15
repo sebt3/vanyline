@@ -146,6 +146,33 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
                 Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
             }
         }
+        "mkdir" => {
+            let opts = vanyline_tools::filesystem::MkdirOptions {
+                path: resolved.clone(),
+            };
+            match vanyline_tools::filesystem::mkdir(opts).await {
+                Ok(()) => serde_json::json!({ "ok": true, "mkdir": resolved }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            }
+        }
+        "rename" => {
+            let to = match msg["to"].as_str() {
+                Some(t) => t.to_string(),
+                None => return serde_json::json!({ "ok": false, "error": "missing to" }),
+            };
+            let resolved_to = match crate::tools_impl::confine_path(root, &to) {
+                Ok(p) => p.to_string_lossy().into_owned(),
+                Err(e) => return serde_json::json!({ "ok": false, "error": e.to_string() }),
+            };
+            let opts = vanyline_tools::filesystem::RenameFileOptions {
+                path: resolved.clone(),
+                to: resolved_to.clone(),
+            };
+            match vanyline_tools::filesystem::rename_file(opts).await {
+                Ok(()) => serde_json::json!({ "ok": true, "renamed": resolved_to }),
+                Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+            }
+        }
         "list" => {
             let depth = msg["depth"].as_u64().unwrap_or(0);
             let opts = vanyline_tools::filesystem::ListDirectoryOptions {
@@ -475,5 +502,94 @@ mod tests {
             claims.unwrap_err(),
             crate::ws::ticket::WsAuthError::MissingTicket
         ));
+    }
+
+    /// Test 9: mkdir_creates
+    #[tokio::test]
+    async fn mkdir_creates() {
+        let state = make_state("mkdir_creates");
+        let resp = dispatch_fs_message(&state, r#"{"op":"mkdir","path":"newdir"}"#).await;
+        assert!(ok(&resp));
+        let mkdir_path = resp["mkdir"].as_str().unwrap();
+        assert!(
+            mkdir_path.ends_with("/newdir"),
+            "mkdir path should end with /newdir, got {mkdir_path}"
+        );
+        let sandbox_root = &state.config.sandbox_root;
+        assert!(
+            sandbox_root.join("newdir").exists(),
+            "newdir should exist on disk"
+        );
+    }
+
+    /// Test 10: mkdir_creates_parents
+    #[tokio::test]
+    async fn mkdir_creates_parents() {
+        let state = make_state("mkdir_parents");
+        let resp = dispatch_fs_message(&state, r#"{"op":"mkdir","path":"a/b/c"}"#).await;
+        assert!(ok(&resp));
+        let sandbox_root = &state.config.sandbox_root;
+        assert!(
+            sandbox_root.join("a/b/c").exists(),
+            "a/b/c should exist on disk"
+        );
+    }
+
+    /// Test 11: rename_moves
+    #[tokio::test]
+    async fn rename_moves() {
+        let state = make_state("rename_moves");
+        let resp = dispatch_fs_message(
+            &state,
+            r#"{"op":"rename","path":"sub/file.txt","to":"sub/renamed.txt"}"#,
+        )
+        .await;
+        assert!(ok(&resp));
+        let renamed = resp["renamed"].as_str().unwrap();
+        assert!(
+            renamed.ends_with("/sub/renamed.txt"),
+            "renamed path should end with /sub/renamed.txt, got {renamed}"
+        );
+        let sandbox_root = &state.config.sandbox_root;
+        assert!(
+            !sandbox_root.join("sub/file.txt").exists(),
+            "file.txt should no longer exist"
+        );
+        assert!(
+            sandbox_root.join("sub/renamed.txt").exists(),
+            "renamed.txt should exist"
+        );
+        let content = std::fs::read_to_string(sandbox_root.join("sub/renamed.txt")).unwrap();
+        assert!(content.contains("hello"));
+    }
+
+    /// Test 12: rename_escape_rejected
+    #[tokio::test]
+    async fn rename_escape_rejected() {
+        let state = make_state("rename_escape");
+        let resp = dispatch_fs_message(
+            &state,
+            r#"{"op":"rename","path":"sub/file.txt","to":"../../etc/passwd"}"#,
+        )
+        .await;
+        assert!(!ok(&resp));
+        let err = resp["error"].as_str().unwrap();
+        assert!(
+            err.contains("VNL-SBX-001"),
+            "expected VNL-SBX-001 in error, got: {err}"
+        );
+    }
+
+    /// Test 13: rename_missing_to_rejected
+    #[tokio::test]
+    async fn rename_missing_to_rejected() {
+        let state = make_state("rename_missing_to");
+        let resp = dispatch_fs_message(
+            &state,
+            r#"{"op":"rename","path":"sub/file.txt"}"#,
+        )
+        .await;
+        assert!(!ok(&resp));
+        assert_eq!(resp["error"].as_str().unwrap(), "missing to");
     }
 }
