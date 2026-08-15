@@ -53,14 +53,18 @@ enum Cmd {
         #[arg(long)]
         sandbox: String,
     },
-    /// Détection des langages du workspace (stub — implémenté par WS-10).
+    /// Détection des langages du workspace ; patche Project.status si
+    /// `--project` est fourni (sinon, imprime le JSON sans toucher au cluster).
     Detect {
         #[arg(long)]
         workspace: PathBuf,
+        #[arg(long)]
+        project: Option<String>,
     },
 }
 
-fn main() -> ExitCode {
+#[tokio::main]
+async fn main() -> ExitCode {
     let cli = Cli::parse();
     let result = match cli.command {
         Cmd::Init {
@@ -77,9 +81,15 @@ fn main() -> ExitCode {
             default_branch,
         } => maint::run_checkout(&workspace, &sandbox, &branch, default_branch.as_deref()),
         Cmd::Remove { workspace, sandbox } => maint::run_remove(&workspace, &sandbox),
-        Cmd::Detect { workspace } => maint::run_detect(&workspace).map(|json| {
-            println!("{json}");
-        }),
+        Cmd::Detect { workspace, project } => {
+            match maint::run_detect_and_patch(&workspace, project.as_deref()).await {
+                Ok(json) => {
+                    println!("{json}");
+                    Ok(())
+                }
+                Err(e) => Err(e),
+            }
+        }
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,

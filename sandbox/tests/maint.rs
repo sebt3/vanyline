@@ -1,5 +1,16 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+// Ensure rustls has a default crypto provider before kube constructs any HTTPS client.
+// This runs during program static initialisation before any thread starts.
+#[unsafe(link_section = ".init_array")]
+pub static _RUSTLS_INIT: fn() = rustls_init;
+
+fn rustls_init() {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("rustls/crypto: install default crypto provider");
+}
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
@@ -813,5 +824,89 @@ fn detect_without_bare_fails() {
     assert!(
         matches!(err, maint::MaintError::GitFailed { .. }),
         "expected GitFailed, got {err:?}"
+    );
+}
+
+// ===== detect_and_patch_without_project_matches_plain_detect =====
+#[tokio::test]
+async fn detect_and_patch_without_project_matches_plain_detect() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    std::fs::write(src.join("Cargo.toml"), "[package]\nname=\"x\"\nversion=\"0.1.0\"\n").unwrap();
+
+    assert!(
+        Command::new("git").args(["add", "."]).current_dir(&src).status().unwrap().success(),
+        "git add failed"
+    );
+    let commit = Command::new("git")
+        .args(["-c", "user.email=test@test", "-c", "user.name=test", "commit", "-m", "init"])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(commit.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect_and_patch(&ws, None).await.unwrap();
+    let plain = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, plain);
+}
+
+// ===== detect_and_patch_with_project_fails_without_cluster =====
+#[tokio::test]
+async fn detect_and_patch_with_project_fails_without_cluster() {
+    let tmp = TempDir::new().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(&src).unwrap();
+
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&src)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    std::fs::write(
+        src.join("Cargo.toml"),
+        "[package]\nname=\"x\"\nversion=\"0.1.0\"\n",
+    )
+    .unwrap();
+
+    assert!(
+        Command::new("git").args(["add", "."]).current_dir(&src).status().unwrap().success(),
+        "git add failed"
+    );
+    let commit = Command::new("git")
+        .args(["-c", "user.email=test@test", "-c", "user.name=test", "commit", "-m", "init"])
+        .current_dir(&src)
+        .output()
+        .expect("git commit failed");
+    assert!(commit.status.success(), "git commit failed: {}", String::from_utf8_lossy(&commit.stderr));
+
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect_and_patch(&ws, Some("whatever")).await;
+    assert!(
+        matches!(result, Err(maint::MaintError::K8sPatch { .. })),
+        "expected K8sPatch error, got {result:?}"
     );
 }

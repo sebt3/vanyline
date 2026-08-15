@@ -42,8 +42,12 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 tracing-opentelemetry = { version = "0.33", default-features = false }
 
 vanyline-tools = { path = "../tools" }
+vanyline-crds = { path = "../crds" }
+kube = { version = "4", default-features = false, features = ["client", "rustls-tls", "ring"] }
+k8s-openapi = { version = "0.28", features = ["latest", "schemars"] }
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+rustls = { version = "0.23", default-features = false, features = ["ring"] }

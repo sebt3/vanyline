@@ -55,6 +55,9 @@ pub enum MaintError {
         #[source]
         source: std::io::Error,
     },
+
+    #[error("VNL-MAINT-006: k8s patch status project '{project}' failed: {message}")]
+    K8sPatch { project: String, message: String },
 }
 
 /// Valide un nom de branche via `git check-ref-format --branch <name>`
@@ -553,6 +556,68 @@ pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
 pub fn run_detect(workspace: &Path) -> Result<String, MaintError> {
     let languages = detect_languages(workspace)?;
     Ok(serde_json::json!({ "languages": languages }).to_string())
+}
+
+/// `detect` + patch optionnel du status K8s. `project = None` : comportement
+/// identique à `run_detect` (pas d'appel réseau — mode local/test, ex: `vanyline
+/// sandbox` en CLI hors cluster). `project = Some(name)` : patche en plus
+/// `Project.status.{languages,detectedAt}` du Project `name`, dans le
+/// namespace résolu par `kube::Config::infer()` (in-cluster — le pod du Job
+/// tourne avec un ServiceAccount, cf. tâche 04 pour le RBAC).
+pub async fn run_detect_and_patch(
+    workspace: &Path,
+    project: Option<&str>,
+) -> Result<String, MaintError> {
+    let languages = detect_languages(workspace)?;
+    let json = serde_json::json!({ "languages": languages }).to_string();
+
+    if let Some(project_name) = project {
+        patch_project_languages(project_name, &languages).await?;
+    }
+
+    Ok(json)
+}
+
+/// Merge patch ciblé `status.{languages,detectedAt}` — voir "Point
+/// d'attention critique" dans le fichier de tâche : ne jamais construire ce
+/// patch via `ProjectStatus { .. }`.
+async fn patch_project_languages(
+    project_name: &str,
+    languages: &[String],
+) -> Result<(), MaintError> {
+    let config = kube::Config::infer()
+        .await
+        .map_err(|e| MaintError::K8sPatch {
+            project: project_name.to_string(),
+            message: format!("config: {e}"),
+        })?;
+    let ns = config.default_namespace.clone();
+    let client = kube::Client::try_from(config).map_err(|e| MaintError::K8sPatch {
+        project: project_name.to_string(),
+        message: format!("client: {e}"),
+    })?;
+
+    let api: kube::Api<vanyline_crds::Project> = kube::Api::namespaced(client, &ns);
+    let now = k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+        k8s_openapi::jiff::Timestamp::now(),
+    );
+    let patch = serde_json::json!({
+        "status": {
+            "languages": languages,
+            "detectedAt": now,
+        }
+    });
+    api.patch_status(
+        project_name,
+        &kube::api::PatchParams::default(),
+        &kube::api::Patch::Merge(&patch),
+    )
+    .await
+    .map_err(|e| MaintError::K8sPatch {
+        project: project_name.to_string(),
+        message: e.to_string(),
+    })?;
+    Ok(())
 }
 
 /// `purge` : supprime récursivement `repo.git`, `worktrees` et `cache` sous
