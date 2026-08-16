@@ -107,8 +107,9 @@ function cutSelection(): void {
 function pasteClipboard(): void {
   if (!view) return;
   if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  const { from, to } = view.state.selection.main;
   void navigator.clipboard.readText()
-    .then((text) => { view?.dispatch({ changes: { from: view.state.selection.main.head, insert: text } }); })
+    .then((text) => { view?.dispatch({ changes: { from, to, insert: text } }); })
     .catch((e: unknown) => showStatus(`Collage impossible : ${msg(e)}`));
 }
 

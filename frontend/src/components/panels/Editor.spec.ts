@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ref } from 'vue';
 import { mount } from '@vue/test-utils';
 import { EditorView } from 'codemirror';
+import { EditorSelection } from '@codemirror/state';
 import Editor from './Editor.vue';
 import ContextMenu from '../ContextMenu.vue';
 import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
@@ -263,6 +264,35 @@ describe('Editor.vue — contenu réel', () => {
       textProto.getClientRects = gc;
       textProto.getBoundingClientRect = gb;
     }
+  });
+
+  it('Coller remplace la sélection active au lieu de s\'insérer à côté', async () => {
+    const readText = vi.fn().mockResolvedValue('PASTE');
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText, readText },
+      configurable: true,
+    });
+
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const { getView, pasteClipboard } = wrapper.vm as {
+      getView: () => EditorView;
+      pasteClipboard: () => void;
+    };
+    const view = getView();
+    // Sélectionne "ligne1" (positions 0 à 6) avant de coller.
+    view.dispatch({ selection: EditorSelection.single(0, 6) });
+    pasteClipboard();
+    await flushMicrotasks();
+
+    expect(view.state.doc.toString()).toBe('PASTE\nligne2\n');
   });
 
   it('sans sélection, Copier n\'écrit rien', async () => {
