@@ -276,6 +276,7 @@ describe('Explorer.vue — CRUD arbre', () => {
     client = makeClient();
     closeFileSpy = vi.fn();
     vi.stubGlobal('prompt', vi.fn());
+    vi.stubGlobal('confirm', vi.fn().mockReturnValue(true));
   });
 
   afterEach(() => {
@@ -512,6 +513,35 @@ describe('Explorer.vue — CRUD arbre', () => {
     expect(client.request.mock.calls.length).toBe(callCountBefore);
   });
 
+  it('annulation de la confirmation de suppression n\'envoie aucune requête', async () => {
+    vi.mocked(window.confirm).mockReturnValue(false);
+
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': vi.fn(),
+          'close-file': closeFileSpy,
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+
+    await flushMicrotasks();
+
+    const callCountBefore = client.request.mock.calls.length;
+
+    const { deleteNode } = wrapper.vm as { deleteNode: (n: unknown) => void };
+    deleteNode({ path: 'src/main.py', label: 'main.py', leaf: true });
+
+    await flushMicrotasks();
+
+    expect(client.request.mock.calls.length).toBe(callCountBefore);
+    expect(closeFileSpy).not.toHaveBeenCalled();
+  });
+
   it('entriesForNode selon le type de nœud', async () => {
     const wrapper = mount(Explorer, {
       global: {
@@ -536,20 +566,87 @@ describe('Explorer.vue — CRUD arbre', () => {
     expect((rootEntries[0] as { label?: string }).label).toBe('Nouveau fichier');
     expect((rootEntries[1] as { label?: string }).label).toBe('Nouveau dossier');
 
-    // fichier { path: 'a.py', leaf: true } → séparateur + Renommer + Supprimer
+    // fichier { path: 'a.py', leaf: true } → séparateur + copie de chemins + séparateur + Renommer + Supprimer
     const fileEntries = entriesForNode({ id: 'a.py', label: 'a.py', path: 'a.py', leaf: true });
-    expect(fileEntries).toHaveLength(3);
+    expect(fileEntries).toHaveLength(6);
     expect((fileEntries[0] as { sep?: boolean }).sep).toBe(true);
-    expect((fileEntries[1] as { label?: string }).label).toBe('Renommer');
-    expect((fileEntries[2] as { label?: string }).label).toBe('Supprimer');
+    expect((fileEntries[1] as { label?: string }).label).toBe('Copier le chemin relatif');
+    expect((fileEntries[2] as { label?: string }).label).toBe('Copier le chemin absolu');
+    expect((fileEntries[3] as { sep?: boolean }).sep).toBe(true);
+    expect((fileEntries[4] as { label?: string }).label).toBe('Renommer');
+    expect((fileEntries[5] as { label?: string }).label).toBe('Supprimer');
 
-    // dossier { path: 'src', leaf: false } → Nouveau fichier, Nouveau dossier, séparateur, Renomer, Supprimer
+    // dossier { path: 'src', leaf: false } → Nouveau fichier, Nouveau dossier, séparateur,
+    // copie de chemins, séparateur, Renommer, Supprimer
     const dirEntries = entriesForNode({ id: 'src', label: 'src', path: 'src', leaf: false });
-    expect(dirEntries).toHaveLength(5);
+    expect(dirEntries).toHaveLength(8);
     expect((dirEntries[0] as { label?: string }).label).toBe('Nouveau fichier');
     expect((dirEntries[1] as { label?: string }).label).toBe('Nouveau dossier');
     expect((dirEntries[2] as { sep?: boolean }).sep).toBe(true);
-    expect((dirEntries[3] as { label?: string }).label).toBe('Renommer');
-    expect((dirEntries[4] as { label?: string }).label).toBe('Supprimer');
+    expect((dirEntries[3] as { label?: string }).label).toBe('Copier le chemin relatif');
+    expect((dirEntries[4] as { label?: string }).label).toBe('Copier le chemin absolu');
+    expect((dirEntries[5] as { sep?: boolean }).sep).toBe(true);
+    expect((dirEntries[6] as { label?: string }).label).toBe('Renommer');
+    expect((dirEntries[7] as { label?: string }).label).toBe('Supprimer');
+  });
+
+  it('copier le chemin relatif écrit le chemin dans le presse-papiers', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': vi.fn(),
+          'close-file': vi.fn(),
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+    await flushMicrotasks();
+
+    const { copyRelativePath } = wrapper.vm as { copyRelativePath: (n: unknown) => void };
+    copyRelativePath({ id: 'src/a.py', label: 'a.py', path: 'src/a.py', leaf: true });
+    await flushMicrotasks();
+
+    expect(writeText).toHaveBeenCalledWith('src/a.py');
+    expect(client.request).not.toHaveBeenCalledWith('root', {});
+  });
+
+  it('copier le chemin absolu appelle l\'op root et écrit le chemin joint', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    client.request.mockImplementation(async (op: string, params: Record<string, unknown>) => {
+      if (op === 'root') return { ok: true, root: '/home/vanyline/workspace' };
+      if (op === 'list' && params.path === '.') {
+        return { ok: true, entries: 'README.md\nsrc/\nworkflows/\n' };
+      }
+      return { ok: false, error: 'unknown' };
+    });
+
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': vi.fn(),
+          'close-file': vi.fn(),
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+    await flushMicrotasks();
+
+    const { copyAbsolutePath } = wrapper.vm as { copyAbsolutePath: (n: unknown) => void };
+    copyAbsolutePath({ id: 'src/a.py', label: 'a.py', path: 'src/a.py', leaf: true });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(client.request).toHaveBeenCalledWith('root', {});
+    expect(writeText).toHaveBeenCalledWith('/home/vanyline/workspace/src/a.py');
   });
 });

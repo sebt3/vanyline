@@ -122,9 +122,9 @@ function onNodeClick(data: FsNode) {
 
 /** Entrées du menu contextuel selon le type de nœud :
  *  - racine ('.') : Nouveau fichier, Nouveau dossier ;
- *  - dossier (non racine) : Nouveau fichier, Nouveau dossier, Renommer, Supprimer ;
- *  - fichier : Renommer, Supprimer.
- *  La copie de chemin sera ajoutée dans la tâche suivante. */
+ *  - dossier (non racine) : Nouveau fichier, Nouveau dossier, Copier les chemins,
+ *    Renommer, Supprimer ;
+ *  - fichier : Copier les chemins, Renommer, Supprimer. */
 function entriesForNode(node: FsNode): ContextMenuEntry[] {
   const entries: ContextMenuEntry[] = [];
   if (!node.leaf) {
@@ -132,6 +132,9 @@ function entriesForNode(node: FsNode): ContextMenuEntry[] {
     entries.push({ label: 'Nouveau dossier', action: () => createDir(node.path) });
   }
   if (node.path !== '.') {
+    entries.push({ sep: true });
+    entries.push({ label: 'Copier le chemin relatif', action: () => copyRelativePath(node) });
+    entries.push({ label: 'Copier le chemin absolu', action: () => copyAbsolutePath(node) });
     entries.push({ sep: true });
     entries.push({ label: 'Renommer', action: () => renameNode(node) });
     entries.push({ label: 'Supprimer', action: () => deleteNode(node) });
@@ -178,6 +181,9 @@ function renameNode(node: FsNode): void {
 }
 
 function deleteNode(node: FsNode): void {
+  // Irréversible côté sandbox (pas de corbeille) : confirmation systématique
+  // avant d'envoyer l'op.
+  if (!window.confirm(`Supprimer « ${node.label} » ? Cette action est irréversible.`)) return;
   const fs = fsClient.value;
   if (!fs) return;
   fs.request<{ ok: boolean; error?: string }>('delete', { path: node.path })
@@ -197,8 +203,47 @@ function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+// Racine absolue du sandbox (op `root`) — invariante pour la durée de la
+// session, récupérée une seule fois et mise en cache.
+let sandboxRootPromise: Promise<string | null> | undefined;
+function fetchSandboxRoot(): Promise<string | null> {
+  const fs = fsClient.value;
+  if (!fs) return Promise.resolve(null);
+  if (!sandboxRootPromise) {
+    sandboxRootPromise = fs
+      .request<{ ok: boolean; root: string }>('root', {})
+      .then((resp) => resp.root)
+      .catch((e: unknown) => {
+        setError(`Chemin absolu indisponible : ${msg(e)}`);
+        sandboxRootPromise = undefined;
+        return null;
+      });
+  }
+  return sandboxRootPromise;
+}
+
+function writeClipboard(text: string): void {
+  if (!navigator.clipboard) { setError('Presse-papiers indisponible'); return; }
+  navigator.clipboard.writeText(text)
+    .then(() => { errorMessage.value = null; })
+    .catch((e: unknown) => setError(`Copie impossible : ${msg(e)}`));
+}
+
+function copyRelativePath(node: FsNode): void {
+  writeClipboard(node.path);
+}
+
+function copyAbsolutePath(node: FsNode): void {
+  fetchSandboxRoot().then((root) => {
+    if (root) writeClipboard(`${root}/${node.path}`);
+  });
+}
+
 // Exposition des fonctions internes pour les tests unitaires
-defineExpose({ parseEntries, loadNode, onNodeClick, entriesForNode, createFile, createDir, renameNode, deleteNode, refresh, parentPath });
+defineExpose({
+  parseEntries, loadNode, onNodeClick, entriesForNode, createFile, createDir,
+  renameNode, deleteNode, refresh, parentPath, copyRelativePath, copyAbsolutePath,
+});
 </script>
 
 <template>
