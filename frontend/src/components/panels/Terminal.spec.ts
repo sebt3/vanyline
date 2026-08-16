@@ -2,7 +2,6 @@
 import { mount } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Terminal from './Terminal.vue';
-import { copySelection, pasteClipboard } from './TerminalActions';
 import { openSandboxWs } from '../../api/sandboxWs';
 
 // vi.hoisted : exécuté avant vi.mock — mêmes références entre module et test.
@@ -188,14 +187,14 @@ describe('Terminal.vue — PTY réel', () => {
     ws.emitOpen();
     (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
 
-    mount(Terminal, {
+    const wrapper = mount(Terminal, {
       global: { provide: { 'sandbox-name': 'foo' } },
     });
 
     await flushTwo();
 
     (terminalInstances[0] as any).getSelection = vi.fn(() => 'abc');
-    copySelection();
+    wrapper.vm.copySelection();
     await flushTwo();
 
     expect(spyClipboard.writeText).toHaveBeenCalledWith('abc');
@@ -212,14 +211,14 @@ describe('Terminal.vue — PTY réel', () => {
     ws.emitOpen();
     (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
 
-    mount(Terminal, {
+    const wrapper = mount(Terminal, {
       global: { provide: { 'sandbox-name': 'foo' } },
     });
 
     await flushTwo();
 
     (terminalInstances[0] as any).getSelection = vi.fn(() => '');
-    copySelection();
+    wrapper.vm.copySelection();
     await flushTwo();
 
     expect(spyClipboard.writeText).not.toHaveBeenCalled();
@@ -236,13 +235,13 @@ describe('Terminal.vue — PTY réel', () => {
     ws.emitOpen();
     (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
 
-    mount(Terminal, {
+    const wrapper = mount(Terminal, {
       global: { provide: { 'sandbox-name': 'foo' } },
     });
 
     await flushTwo();
 
-    pasteClipboard();
+    wrapper.vm.pasteClipboard();
     await flushTwo();
 
     expect(ws.sent).toContainEqual(new TextEncoder().encode('collé'));

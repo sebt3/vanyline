@@ -5,7 +5,6 @@ import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
 import ContextMenu, { type ContextMenuEntry } from '../ContextMenu.vue';
 import { openSandboxWs } from '../../api/sandboxWs';
-import { copySelection, pasteClipboard, setTerm, setWs } from './TerminalActions';
 
 const sandboxName = inject<string>('sandbox-name', '');
 
@@ -21,6 +20,20 @@ const terminalEntries: ContextMenuEntry[] = [
 ];
 
 defineExpose({ copySelection, pasteClipboard });
+
+function copySelection(): void {
+  if (!term || !navigator.clipboard) return;
+  const text = term.getSelection();
+  if (!text) return;
+  void navigator.clipboard.writeText(text).catch(() => {});
+}
+
+function pasteClipboard(): void {
+  if (!term || !ws || ws.readyState !== WebSocket.OPEN || !navigator.clipboard) return;
+  void navigator.clipboard.readText()
+    .then((text) => { ws?.send(new TextEncoder().encode(text)); })
+    .catch(() => {});
+}
 
 function sendResize() {
   if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -42,8 +55,6 @@ onMounted(() => {
     // disableStdin retiré — l'entrée utilisateur part vers le PTY.
   });
 
-  setTerm(term);
-
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(hostRef.value!);
@@ -60,9 +71,6 @@ onMounted(() => {
   openSandboxWs(sandboxName, '/ws/terminal')
     .then((socket) => {
       ws = socket;
-      setWs(ws);
-      // binaryType 'arraybuffer' : event.data des frames binaires est un
-      // ArrayBuffer (sinon Blob) — nécessaire pour new Uint8Array(ev.data).
       ws.binaryType = 'arraybuffer';
       term!.onData((data) => ws!.send(new TextEncoder().encode(data)));
       ws.addEventListener('message', (ev: MessageEvent) => {
