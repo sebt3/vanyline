@@ -3,7 +3,9 @@ import { onMounted, onBeforeUnmount, useTemplateRef, inject } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import ContextMenu, { type ContextMenuEntry } from '../ContextMenu.vue';
 import { openSandboxWs } from '../../api/sandboxWs';
+import { copySelection, pasteClipboard, setTerm, setWs } from './TerminalActions';
 
 const sandboxName = inject<string>('sandbox-name', '');
 
@@ -12,6 +14,13 @@ let term: Terminal | undefined;
 let fit: FitAddon | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let ws: WebSocket | undefined;
+
+const terminalEntries: ContextMenuEntry[] = [
+  { label: 'Copier', action: copySelection },
+  { label: 'Coller', action: pasteClipboard },
+];
+
+defineExpose({ copySelection, pasteClipboard });
 
 function sendResize() {
   if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -33,6 +42,8 @@ onMounted(() => {
     // disableStdin retiré — l'entrée utilisateur part vers le PTY.
   });
 
+  setTerm(term);
+
   fit = new FitAddon();
   term.loadAddon(fit);
   term.open(hostRef.value!);
@@ -49,6 +60,7 @@ onMounted(() => {
   openSandboxWs(sandboxName, '/ws/terminal')
     .then((socket) => {
       ws = socket;
+      setWs(ws);
       // binaryType 'arraybuffer' : event.data des frames binaires est un
       // ArrayBuffer (sinon Blob) — nécessaire pour new Uint8Array(ev.data).
       ws.binaryType = 'arraybuffer';
@@ -74,7 +86,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="host" class="terminal-host"></div>
+  <ContextMenu :entries="terminalEntries" :as-child="true">
+    <div ref="host" class="terminal-host"></div>
+  </ContextMenu>
 </template>
 
 <!-- styles inchangés (le mock n'écrit plus de lignes statiques) -->

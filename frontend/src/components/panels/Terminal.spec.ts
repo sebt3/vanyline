@@ -2,6 +2,7 @@
 import { mount } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import Terminal from './Terminal.vue';
+import { copySelection, pasteClipboard } from './TerminalActions';
 import { openSandboxWs } from '../../api/sandboxWs';
 
 // vi.hoisted : exécuté avant vi.mock — mêmes références entre module et test.
@@ -47,6 +48,10 @@ vi.mock('@xterm/xterm', () => ({
 
     loadAddon() {}
     open() {}
+
+    getSelection() {
+      return '';
+    }
 
     onData(cb: (d: string) => void) {
       this.onDataCb = cb;
@@ -142,6 +147,105 @@ describe('Terminal.vue — PTY réel', () => {
     (terminalInstances as any[]).length = 0;
     (wsInstances as any[]).length = 0;
     (resizeInstances as any[]).length = 0;
+    delete (globalThis as any).navigator.clipboard;
+  });
+
+  it("menu contextuel du terminal expose Copier et Coller", async () => {
+    const spyClipboard = {
+      writeText: vi.fn().mockResolvedValue(undefined),
+      readText: vi.fn(),
+    };
+    Object.defineProperty(navigator, 'clipboard', { value: spyClipboard, configurable: true });
+
+    const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
+    (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
+
+    const wrapper = mount(Terminal, {
+      global: { provide: { 'sandbox-name': 'foo' } },
+    });
+
+    await flushTwo();
+
+    const el = wrapper.get('.terminal-host');
+    el.trigger('contextmenu');
+    await flushTwo();
+
+    expect(document.body.querySelectorAll('[role="menuitem"]')).toHaveLength(2);
+    expect(document.body.querySelector('[role="menuitem"]')?.textContent).toBe('Copier');
+    const items = document.body.querySelectorAll('[role="menuitem"]');
+    expect(items[1]?.textContent).toBe('Coller');
+  });
+
+  it('Copier écrit la sélection xterm dans le presse-papiers', async () => {
+    const spyClipboard = {
+      writeText: vi.fn().mockResolvedValue(undefined),
+      readText: vi.fn(),
+    };
+    Object.defineProperty(navigator, 'clipboard', { value: spyClipboard, configurable: true });
+
+    const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
+    (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
+
+    mount(Terminal, {
+      global: { provide: { 'sandbox-name': 'foo' } },
+    });
+
+    await flushTwo();
+
+    (terminalInstances[0] as any).getSelection = vi.fn(() => 'abc');
+    copySelection();
+    await flushTwo();
+
+    expect(spyClipboard.writeText).toHaveBeenCalledWith('abc');
+  });
+
+  it('Copier sans sélection n\'écrit rien', async () => {
+    const spyClipboard = {
+      writeText: vi.fn().mockResolvedValue(undefined),
+      readText: vi.fn(),
+    };
+    Object.defineProperty(navigator, 'clipboard', { value: spyClipboard, configurable: true });
+
+    const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
+    (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
+
+    mount(Terminal, {
+      global: { provide: { 'sandbox-name': 'foo' } },
+    });
+
+    await flushTwo();
+
+    (terminalInstances[0] as any).getSelection = vi.fn(() => '');
+    copySelection();
+    await flushTwo();
+
+    expect(spyClipboard.writeText).not.toHaveBeenCalled();
+  });
+
+  it('Coller envoie le texte au PTY via le canal WS', async () => {
+    const spyClipboard = {
+      writeText: vi.fn(),
+      readText: vi.fn().mockResolvedValue('collé'),
+    };
+    Object.defineProperty(navigator, 'clipboard', { value: spyClipboard, configurable: true });
+
+    const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
+    (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
+
+    mount(Terminal, {
+      global: { provide: { 'sandbox-name': 'foo' } },
+    });
+
+    await flushTwo();
+
+    pasteClipboard();
+    await flushTwo();
+
+    expect(ws.sent).toContainEqual(new TextEncoder().encode('collé'));
   });
 
   it('ouvre une connexion /ws/terminal dédiée', async () => {
