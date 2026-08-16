@@ -71,6 +71,8 @@ onMounted(() => {
   openSandboxWs(sandboxName, '/ws/terminal')
     .then((socket) => {
       ws = socket;
+      // binaryType 'arraybuffer' : event.data des frames binaires est un
+      // ArrayBuffer (sinon Blob) — nécessaire pour new Uint8Array(ev.data).
       ws.binaryType = 'arraybuffer';
       term!.onData((data) => ws!.send(new TextEncoder().encode(data)));
       ws.addEventListener('message', (ev: MessageEvent) => {
