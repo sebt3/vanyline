@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, provide, shallowRef, watch } from 'vue';
-import { DockviewVue, type DockviewReadyEvent, type VueComponent } from 'dockview-vue';
+import { DockviewVue, type DockviewReadyEvent, type VueComponent, type ContextMenuItem, type GetTabContextMenuItemsParams } from 'dockview-vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
 import Workflow from './panels/Workflow.vue';
@@ -125,6 +125,25 @@ function closeFile(path: string): void {
   api.getPanel(editorPanelId(path))?.api.close();
 }
 
+/** Copie le chemin relatif d'un fichier ouvert dans un onglet éditeur. */
+function copyPanelPath(panelId: string): void {
+  if (!navigator.clipboard) return;
+  const path = panelId.startsWith('editor:') ? panelId.slice('editor:'.length) : '';
+  if (!path) return;
+  void navigator.clipboard.writeText(path).catch(() => {});
+}
+
+/** Menu contextuel natif des onglets : Fermer / Fermer les autres / Fermer
+ *  tout, séparateur, puis « Copier le chemin » pour les onglets éditeur
+ *  (`editor:<path>`). */
+function getTabContextMenuItems(params: GetTabContextMenuItemsParams): ContextMenuItem[] {
+  const items: ContextMenuItem[] = ['close', 'closeOthers', 'closeAll', 'separator'];
+  if (params.panel.id.startsWith('editor:')) {
+    items.push({ label: 'Copier le chemin', action: () => copyPanelPath(params.panel.id) });
+  }
+  return items;
+}
+
 function addDefaultPanels(api: DockviewReadyEvent['api']) {
   api.addPanel({
     id: 'explorer',
@@ -243,7 +262,7 @@ function onReady(event: DockviewReadyEvent) {
   });
 }
 
-defineExpose({ closeFile });
+defineExpose({ closeFile, getTabContextMenuItems });
 </script>
 
 <template>
@@ -255,6 +274,7 @@ defineExpose({ closeFile });
       class="dockview-theme-abyss"
       style="width: 100%; height: 100%"
       :components="components"
+      :get-tab-context-menu-items="getTabContextMenuItems"
       @ready="onReady"
     />
   </div>

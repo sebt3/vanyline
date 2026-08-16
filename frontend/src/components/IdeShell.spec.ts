@@ -1,5 +1,5 @@
 import { mount } from '@vue/test-utils';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import IdeShell from './IdeShell.vue';
 
 // Mock dockview-vue entièrement pour éviter dockview-core (ResizeObserver) en jsdom.
@@ -109,5 +109,70 @@ describe('IdeShell', () => {
 
     // Aucune erreur, close jamais appelé
     expect(mockGetPanelFn).toHaveBeenCalledWith('editor:inconnu.txt');
+  });
+
+  describe('menu contextuel des onglets', () => {
+    afterEach(() => {
+      // Restaurer le navigator.clipboard originel en jsdom
+      if (Object.prototype.hasOwnProperty.call(navigator, 'clipboard')) {
+        delete (navigator as unknown as Record<string, unknown>).clipboard;
+      }
+    });
+
+    it('menu des onglets : close/closeOthers/closeAll/séparateur + Copier le chemin pour un éditeur', async () => {
+      const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const { getTabContextMenuItems } = wrapper.vm as {
+        getTabContextMenuItems: (p: unknown) => unknown[];
+      };
+      const items = getTabContextMenuItems({ panel: { id: 'editor:src/main.py' } });
+
+      const strs = items.filter((i): i is string => typeof i === 'string');
+      expect(strs).toContain('close');
+      expect(strs).toContain('closeOthers');
+      expect(strs).toContain('closeAll');
+      expect(strs).toContain('separator');
+      const custom = items.find((i) => typeof i === 'object' && i !== null && 'label' in i!);
+      expect(custom).not.toBeUndefined();
+      expect((custom as { label: string })!.label).toBe('Copier le chemin');
+    });
+
+    it('Copier le chemin écrit le chemin du fichier', async () => {
+      const writeText = vi.fn(() => Promise.resolve());
+      Object.defineProperty(navigator, 'clipboard', {
+        value: { writeText },
+        configurable: true,
+      });
+
+      const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const { getTabContextMenuItems } = wrapper.vm as {
+        getTabContextMenuItems: (p: unknown) => unknown[];
+      };
+      const items = getTabContextMenuItems({ panel: { id: 'editor:src/main.py' } });
+      const custom = items.find(
+        (i) => typeof i === 'object' && i !== null && 'label' in i! && (i as { label: string }).label === 'Copier le chemin',
+      );
+      (custom as { action: () => void }).action();
+
+      expect(writeText).toHaveBeenCalledWith('src/main.py');
+    });
+
+    it('pas de Copier le chemin pour un onglet non éditeur', async () => {
+      const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+      await new Promise((r) => setTimeout(r, 0));
+
+      const { getTabContextMenuItems } = wrapper.vm as {
+        getTabContextMenuItems: (p: unknown) => unknown[];
+      };
+      const items = getTabContextMenuItems({ panel: { id: 'terminal' } });
+
+      const custom = items.find(
+        (i) => typeof i === 'object' && i !== null && 'label' in i! && (i as { label: string }).label === 'Copier le chemin',
+      );
+      expect(custom).toBeUndefined();
+    });
   });
 });
