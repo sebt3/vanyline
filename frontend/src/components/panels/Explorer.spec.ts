@@ -213,6 +213,34 @@ describe('Explorer.vue — arbre réel', () => {
     expect(wrapper.text()).toContain('src');
   });
 
+  it('une icône est rendue par nœud de l\'arbre', async () => {
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': openFileSpy,
+          'close-file': vi.fn(),
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+
+    await flushMicrotasks();
+
+    // Chaque `.label` contient un `.file-icon` (svg d'Element Plus Icon)
+    // 4 labels : "foo" (racine), README.md, src, workflows
+    const labels = wrapper.findAll('.label');
+    expect(labels).toHaveLength(4);
+
+    for (const label of labels) {
+      expect(label.find('.file-icon').exists()).toBe(true);
+    }
+    // Le dossier `src` est rendu par folderIcon (Folder) dont le tag est "el-icon"
+    // — vérifier par l'absence de distinction, les icônes sont dans chaque `.label`.
+  });
+
   it('client non prêt → placeholder, pas de requête', async () => {
     const nullClient = ref(null) as ReturnType<typeof ref>;
 

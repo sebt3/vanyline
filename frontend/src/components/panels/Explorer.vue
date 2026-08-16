@@ -4,6 +4,7 @@ import { ElTree } from 'element-plus';
 import type { SandboxFsClient } from '../../api/sandboxWs';
 import type { Ref } from 'vue';
 import ContextMenu, { type ContextMenuEntry } from '../ContextMenu.vue';
+import { iconForPath, folderIcon } from './fileIcon';
 
 interface FsNode {
   id: string;        // chemin relatif (unique dans l'arbre)
@@ -218,7 +219,10 @@ defineExpose({ parseEntries, loadNode, onNodeClick, entriesForNode, createFile, 
     >
       <template #default="{ data: node }">
         <ContextMenu :entries="entriesForNode(node)">
-          <span class="label">{{ node.label }}</span>
+          <span class="label">
+            <component :is="node.leaf ? iconForPath(node.path) : folderIcon" class="file-icon" />
+            {{ node.label }}
+          </span>
         </ContextMenu>
       </template>
     </el-tree>
@@ -244,6 +248,13 @@ defineExpose({ parseEntries, loadNode, onNodeClick, entriesForNode, createFile, 
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+.file-icon {
+  width: 13px;
+  height: 13px;
+  margin-right: 4px;
+  vertical-align: -2px;
+  color: var(--dv-color-abyss-secondary-text);
 }
 
 .explorer :deep(.el-tree) {
