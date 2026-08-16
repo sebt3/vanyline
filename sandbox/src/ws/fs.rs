@@ -592,11 +592,7 @@ mod tests {
     #[tokio::test]
     async fn rename_missing_to_rejected() {
         let state = make_state("rename_missing_to");
-        let resp = dispatch_fs_message(
-            &state,
-            r#"{"op":"rename","path":"sub/file.txt"}"#,
-        )
-        .await;
+        let resp = dispatch_fs_message(&state, r#"{"op":"rename","path":"sub/file.txt"}"#).await;
         assert!(!ok(&resp));
         assert_eq!(resp["error"].as_str().unwrap(), "missing to");
     }
@@ -612,10 +608,7 @@ mod tests {
             root.ends_with("/sandbox"),
             "root should end with /sandbox, got {root}"
         );
-        assert!(
-            !root.is_empty(),
-            "root must not be empty"
-        );
+        assert!(!root.is_empty(), "root must not be empty");
     }
 
     /// Test 15: root_op_needs_no_path

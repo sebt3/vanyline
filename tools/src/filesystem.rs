@@ -666,10 +666,7 @@ pub fn rename_file(opts: RenameFileOptions) -> BoxedFuture<Result<(), ToolsError
         {
             return Err(ToolsError::InvalidArgument {
                 name: "to".into(),
-                reason: format!(
-                    "parent of '{}' is a file, not a directory",
-                    to
-                ),
+                reason: format!("parent of '{}' is a file, not a directory", to),
             });
         }
         if let Some(parent) = std::path::Path::new(&to).parent()
@@ -678,14 +675,13 @@ pub fn rename_file(opts: RenameFileOptions) -> BoxedFuture<Result<(), ToolsError
             if e.kind() == std::io::ErrorKind::NotFound {
                 return Err(ToolsError::InvalidArgument {
                     name: "to".into(),
-                    reason: format!(
-                        "parent of '{}' does not exist or is not a directory",
-                        to
-                    ),
+                    reason: format!("parent of '{}' does not exist or is not a directory", to),
                 });
             }
             if e.kind() == std::io::ErrorKind::PermissionDenied {
-                return Err(ToolsError::PermissionDenied(parent.to_string_lossy().to_string()));
+                return Err(ToolsError::PermissionDenied(
+                    parent.to_string_lossy().to_string(),
+                ));
             }
         }
 
@@ -1619,7 +1615,9 @@ mod tests {
         let from = dir.path().join("old");
         let to = dir.path().join("new");
         tokio::fs::create_dir(&from).await.unwrap();
-        tokio::fs::write(from.join("inner.txt"), "data").await.unwrap();
+        tokio::fs::write(from.join("inner.txt"), "data")
+            .await
+            .unwrap();
 
         rename_file(RenameFileOptions {
             path: from.to_string_lossy().to_string(),
@@ -1637,7 +1635,11 @@ mod tests {
     async fn rename_file_not_found() {
         let dir = tempfile::tempdir().unwrap();
         let result = rename_file(RenameFileOptions {
-            path: dir.path().join("nonexistent.txt").to_string_lossy().to_string(),
+            path: dir
+                .path()
+                .join("nonexistent.txt")
+                .to_string_lossy()
+                .to_string(),
             to: dir.path().join("x.txt").to_string_lossy().to_string(),
         })
         .await;
