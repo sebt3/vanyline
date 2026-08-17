@@ -366,7 +366,12 @@ registre statique `tools::mcp::{filesystem_tools, search_tools, command_tools}` 
 tools intégrés de `vanyline-tools` — pour le même usage de dropdown côté `Toolset.local_tools`.
 
 **WebSocket chat** (`ws/chat.rs`) : `run_agent_turn` avec `local_tools` vide (l'app
-reste sur le chemin froid — cf. règle de dépendances plus haut). `ChannelSink` pousse
+reste sur le chemin froid — cf. règle de dépendances plus haut). `extra_mcp` est en
+revanche résolu dynamiquement depuis le contexte de la conversation
+(`chat_contexts`, `chat-app-fonctionnel`) — `kind = "sandbox"` résout l'URL MCP de la
+sandbox nommée (`VnlK8sClient::sandbox_mcp_url`, même scoping owner que
+`api::sandboxes::get_sandbox`), les autres `kind` n'ont pas encore de toolset associé
+(liste vide, pas une panne). `ChannelSink` pousse
 chaque `ChatEvent` sur un canal mpsc dès son émission ; une tâche `forward_events` par
 connexion (pas par tour) draine le canal et écrit sur le socket au fil de l'eau — vrai
 streaming token-par-token, contrairement à l'ancien `CollectingSink` qui bufferisait
@@ -397,7 +402,9 @@ un `-` produisait un nom invalide).
 défaut). Scoping IDOR systématique : chaque `get`/`delete`/`update` vérifie que le
 Project référencé (directement, ou via la Sandbox pour les routes sandbox)
 appartient bien à l'Owner de l'utilisateur authentifié, pas seulement au moment de la
-création. `POST /api/sandboxes/{name}/ws-ticket` : relais de ticket WS (cf. section
+création. Même scoping repris dans `ws/chat.rs::resolve_extra_mcp` pour la sandbox
+nommée dans le contexte d'une conversation (`chat-app-fonctionnel`) — absent de la
+version initiale, trouvé en revue Phase 3 (cf. section Chat, plus bas). `POST /api/sandboxes/{name}/ws-ticket` : relais de ticket WS (cf. section
 "WebSocket éditeur" de `vanyline-sandbox` plus bas) — résout `owner →
 application_ref → host` via K8s, appelle `POST /ws/ticket` de la sandbox en
 interne (ClusterIP, `Authorization: Bearer {id_token OIDC de l'utilisateur}`) et ne
@@ -975,7 +982,7 @@ Workflow/Chat, plus une vue Configuration séparée.
 | Terminal | [xterm.js](https://xtermjs.org) (`@xterm/xterm` + `@xterm/addon-fit`) |
 | Arbre de fichiers | [Element Plus](https://element-plus.org) (`el-tree`, restylé via ses custom properties CSS) |
 | Menu / vue Configuration / modales | [Reka UI](https://reka-ui.com) (`Menubar`, `Tabs`, `Dialog`) — portage Vue headless de Radix |
-| Chat | [vue-advanced-chat](https://github.com/advanced-chat/vue-advanced-chat) — theming non résolu, cf. "Limites connues" |
+| Chat | [Nuxt UI](https://ui.nuxt.com) — composant `Chat`, cf. section dédiée plus bas |
 | Routing | `vue-router` (`/`, `/p/:projectName`, `/p/:projectName/s/:sandboxName`, `/settings`) |
 
 **Routing** (`router.ts`, `frontend-dashboards-nav`) : trois niveaux — `/` (accueil,
@@ -1073,6 +1080,67 @@ via `@element-plus/icons-vue` plutôt qu'un pack d'icon-theme dédié — pas de
 correspondance visuelle par langage (ex. Rust → icône générique "connexion"), accepté
 en l'état, pas un pack de logos par langage.
 
+**Chat — contexte de conversation, tools sandbox, Nuxt UI** (`chat-app-fonctionnel`) :
+trois axes livrés ensemble.
+
+- **Contexte de conversation** : nouvelle table `chat_contexts` (`kind`/`data` JSONB,
+  `app/migrations/0006_chat_contexts.sql`), `conversations.context_id NOT NULL`. `kind
+  = "sandbox"` (`data = { "sandbox_name": "..." }`) est le seul type géré aujourd'hui —
+  le modèle est volontairement polymorphe pour accueillir un futur contexte "settings"
+  (chat d'aide au paramétrage) sans migration de schéma. `POST /api/conversations`
+  exige ce contexte ; `GET /api/conversations?sandbox_name=...` filtre l'historique en
+  conséquence (avant cette feature, l'historique de chat d'un utilisateur était global,
+  sans distinction de sandbox). Côté frontend, `Chat.vue` lit le nom de la sandbox
+  courante via `inject('sandbox-name', ...)` (même pattern qu'`Explorer.vue`).
+- **Tools sandbox réellement utilisables** (`app/src/ws/chat.rs::resolve_extra_mcp`) :
+  jusqu'à cette feature, `SessionContext.extra_mcp` restait `Vec::new()` en dur côté
+  `app` — un agent pouvait référencer des tools sandbox dans sa config sans jamais
+  pouvoir les utiliser en pratique. Résolution désormais dynamique via
+  `VnlK8sClient::sandbox_mcp_url` (`lib/src/k8s.rs`, déjà utilisée côté CLI par
+  `--toolbox`, jamais appelée côté `app` avant ce commit), avec le même scoping IDOR
+  que `api::sandboxes::get_sandbox` (`project.spec.owner == owner` de l'utilisateur
+  authentifié) — **trouvé en revue Phase 3** : la première version résolvait la
+  sandbox nommée dans le contexte sans vérifier qu'elle appartenait à l'utilisateur,
+  ce qui aurait permis à un utilisateur authentifié de faire résoudre les tools MCP
+  de la sandbox de quelqu'un d'autre en la nommant dans le contexte à la création.
+  Un échec de résolution (sandbox absente, hors périmètre, K8s injoignable) est non
+  bloquant pour le tour : `ChatEvent::ToolUnavailable { server, reason }` (nouvelle
+  variante, non terminale contrairement à `Error`) le signale à l'UI. Fix connexe dans
+  `lib/src/prefixed_mcp.rs::connect_mcp_servers_selected` : retourne désormais aussi
+  les échecs de connexion MCP (avant, `tracing::warn!` seul les absorbait
+  silencieusement — un serveur MCP indisponible ne produisait aucun signal utilisateur).
+- **Composant Chat** : `vue-advanced-chat` (pensé chat humain-humain — bulles,
+  statuts lu/distribué) remplacé par le composant `Chat` de [Nuxt UI](https://ui.nuxt.com),
+  conçu pour du chat LLM (tool calls, reasoning, streaming, markdown). Décision actée
+  avec le développeur après correction d'une annonce erronée : contrairement à ce qui
+  avait été dit en validant le plan, Nuxt UI **exige** Tailwind CSS + un wrapper
+  `<UApp>` autour de toute l'app (pas seulement le panneau Chat) — accepté en
+  connaissance de cause, coexiste avec Element Plus/Reka UI sans conflit constaté.
+  `VanylineChatTransport` (`frontend/src/api/chatTransport.ts`) est le pont entre le
+  WS existant d'`app` (`ChatEvent`, JSON custom) et le protocole `ChatTransport`/
+  `UIMessageChunk` du [Vercel AI SDK](https://ai-sdk.dev) qu'attend le composant Nuxt
+  UI (`ai` + `@ai-sdk/vue`) : une connexion WS par tour (`sendMessages` = un tour), pas
+  de connexion partagée entre tours — le backend (`run_socket`, boucle sur les messages
+  entrants) supporte les deux, pas de gain de latence mesurable à partager ici, et ça
+  évite de gérer l'état d'une connexion à cheval sur plusieurs tours. `tool_call`/
+  `tool_result` sont mappés en tool `dynamic-tool` (`dynamic: true` explicite sur le
+  chunk `tool-input-available`) — les noms de tools viennent du MCP de la sandbox, pas
+  d'un jeu de tools déclaré statiquement côté frontend. `ChatSession.vue` (un `useChat`
+  par conversation, remonté via `:key="activeConversationId"` plutôt que de gérer la
+  réinitialisation d'état à la main) appelle `stop()` à l'unmount — sans ça, fermer la
+  session ou changer de conversation en plein streaming laissait le WS ouvert côté
+  navigateur jusqu'au `done`/`error` naturel du tour. `skill_loaded`/`subagent_*`/
+  `usage` n'ont pas d'équivalent dans le modèle `UIMessage` de l'AI SDK (pensé
+  mono-agent) : ignorés pour ce v1, pas encore tranché pour une itération suivante.
+  `Markdown` (`@comark/vue`) a un `setup()` async — rendu sous `<Suspense>`, obligatoire
+  sinon Vue n'affiche rien et avertit en silence.
+- **Paramètres de profil de modèle** (`ModelProfilesScreen.vue`) : `ModelProfile.options`
+  (JSONB, déjà exposé de bout en bout côté API) gagne un éditeur clé/valeur libre côté
+  formulaire — pas de champs typés pour `top_p`/`top_k`/`min_p`/`repeat_penalty`/
+  `thinking_mode`/`reasoning_effort` etc., ces paramètres varient trop selon le backend
+  LLM (Ollama/vLLM/llama.cpp). Chaque valeur est tentée en JSON (nombre, booléen) avec
+  repli sur chaîne brute si elle n'est pas du JSON valide.
+
 **SettingsView** (`settings-real-config`, réorganisé par `frontend-dashboards-nav`) :
 Projets/Sandboxes en sont sortis (absorbés par les dashboards, cf. ci-dessus) ; les 7
 écrans CRUD restants sont groupés en chemin de configuration explicite plutôt qu'un
@@ -1125,12 +1193,12 @@ projet, pas un oubli.
 (déconnexion réseau/sandbox suspendue → recharger la page), pas de filesystem
 watch/push (Explorer ne se
 rafraîchit pas si le contenu change côté serveur pendant que l'utilisateur regarde),
-pas de code-splitting (bundle ~576 Ko gzippé, CodeMirror + xterm + Element Plus +
-vue-advanced-chat + dockview-vue). Chat reste un mock complet (aucun appel réseau) —
-priorité très basse, pas planifié. Le theming `vue-advanced-chat` reste non résolu
-(plusieurs tentatives sans effet sur une partie des couleurs, cause racine jamais
-identifiée faute d'inspection DOM réelle) — sans conséquence tant que Chat reste mock.
-Explorer force un remount complet de l'arbre (`el-tree`) après chaque création/
+pas de code-splitting (bundle ~755 Ko gzippé — CodeMirror + xterm + Element Plus +
+Tailwind CSS/Nuxt UI + dockview-vue, la CSS Tailwind/Nuxt UI ayant sensiblement
+augmenté le poids par rapport à `vue-advanced-chat`, cf. section Chat plus haut).
+`skill_loaded`/`subagent_*`/`usage` (`ChatEvent`) n'ont pas de rendu dans le chat —
+pas d'équivalent dans le modèle `UIMessage` de l'AI SDK, cf. section Chat. Explorer
+force un remount complet de l'arbre (`el-tree`) après chaque création/
 renommage/suppression (changement de `:key`) — replie les dossiers dépliés à chaque
 opération plutôt que de rafraîchir juste le nœud concerné. Pas d'undo applicatif sur
 delete/rename dans l'arbre (irréversible côté `/ws/fs`, cf. section "Serveur MCP"),
