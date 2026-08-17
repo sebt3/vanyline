@@ -96,10 +96,23 @@ pub struct Conversation {
     pub id: Uuid,
     pub user_id: Uuid,
     pub agent_id: Option<Uuid>,
+    pub context_id: Uuid,
     pub title: Option<String>,
     pub todo: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Contexte d'une conversation — `kind` détermine comment interpréter `data`
+/// (ex: `kind = "sandbox"` -> `data = { "sandbox_name": "..." }`). Extensible
+/// à d'autres types de contexte sans migration du schéma (cf.
+/// docs/features/chat-app-fonctionnel.md).
+#[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
+pub struct ChatContext {
+    pub id: Uuid,
+    pub kind: String,
+    pub data: serde_json::Value,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]

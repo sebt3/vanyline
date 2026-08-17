@@ -11,19 +11,30 @@ use vanyline_lib::VnyError;
 use crate::{
     AppState,
     auth::middleware::AuthUser,
-    db::models::{Conversation, Message, User},
+    db::models::{ChatContext, Conversation, Message, User},
     error::AppError,
 };
 
-#[derive(Deserialize)]
+/// Contexte transmis à la création d'une conversation. `kind = "sandbox"` est
+/// le seul type géré aujourd'hui (`data = { "sandbox_name": "..." }`) — cf.
+/// docs/features/chat-app-fonctionnel.md pour l'extensibilité prévue.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ChatContextInput {
+    pub kind: String,
+    pub data: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct CreateConversation {
     pub agent_name: Option<String>,
+    pub context: ChatContextInput,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ConversationOut {
     pub id: Uuid,
     pub agent_name: Option<String>,
+    pub context: ChatContext,
     pub title: Option<String>,
     pub todo: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
@@ -45,9 +56,16 @@ async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationO
         }
         None => None,
     };
+
+    let context = sqlx::query_as::<_, ChatContext>("SELECT * FROM chat_contexts WHERE id = $1")
+        .bind(conv.context_id)
+        .fetch_one(&state.pool)
+        .await?;
+
     Ok(ConversationOut {
         id: conv.id,
         agent_name,
+        context,
         title: conv.title,
         todo: conv.todo,
         created_at: conv.created_at,
@@ -104,11 +122,19 @@ pub async fn create_conversation(
         None => None,
     };
 
+    let context_id: Uuid =
+        sqlx::query_scalar("INSERT INTO chat_contexts (kind, data) VALUES ($1, $2) RETURNING id")
+            .bind(&body.context.kind)
+            .bind(&body.context.data)
+            .fetch_one(&state.pool)
+            .await?;
+
     let conv = sqlx::query_as::<_, Conversation>(
-        "INSERT INTO conversations (user_id, agent_id) VALUES ($1, $2) RETURNING *",
+        "INSERT INTO conversations (user_id, agent_id, context_id) VALUES ($1, $2, $3) RETURNING *",
     )
     .bind(db_user.id)
     .bind(agent_id)
+    .bind(context_id)
     .fetch_one(&state.pool)
     .await?;
 
@@ -259,5 +285,25 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn create_conversation_requires_context() {
+        let err = serde_json::from_str::<CreateConversation>(r#"{"agent_name":"foo"}"#)
+            .expect_err("context should be required, not optional");
+        assert!(err.to_string().contains("context"));
+    }
+
+    #[test]
+    fn create_conversation_parses_sandbox_context() {
+        let body: CreateConversation = serde_json::from_str(
+            r#"{"context":{"kind":"sandbox","data":{"sandbox_name":"my-sandbox"}}}"#,
+        )
+        .unwrap();
+        assert_eq!(body.context.kind, "sandbox");
+        assert_eq!(
+            body.context.data.get("sandbox_name").and_then(|v| v.as_str()),
+            Some("my-sandbox")
+        );
     }
 }
