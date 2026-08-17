@@ -5,6 +5,7 @@ import { openChatWs } from './chatWs';
  *  protocole réel qui circule sur le WS `app` (`/api/ws/chat/{id}`). */
 type ChatEvent =
   | { type: 'token'; content: string }
+  | { type: 'reasoning_delta'; content: string }
   | { type: 'tool_call'; id: string; name: string; args: unknown }
   | { type: 'tool_result'; id: string; name: string; result: string; is_error: boolean }
   | { type: 'skill_loaded'; name: string }
@@ -55,6 +56,7 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
     return new ReadableStream<UIMessageChunk>({
       start(controller) {
         let textId: string | null = null;
+        let reasoningId: string | null = null;
         let controllerClosed = false;
         const closeController = () => {
           if (controllerClosed) return;
@@ -80,7 +82,24 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
             return;
           }
           switch (event.type) {
+            case 'reasoning_delta':
+              if (!reasoningId) {
+                reasoningId = crypto.randomUUID();
+                controller.enqueue({ type: 'reasoning-start', id: reasoningId });
+              }
+              controller.enqueue({
+                type: 'reasoning-delta',
+                id: reasoningId,
+                delta: event.content,
+              });
+              break;
             case 'token':
+              // Le raisonnement précède toujours la réponse dans un tour —
+              // le premier token de réponse ferme le bloc reasoning ouvert.
+              if (reasoningId) {
+                controller.enqueue({ type: 'reasoning-end', id: reasoningId });
+                reasoningId = null;
+              }
               if (!textId) {
                 textId = crypto.randomUUID();
                 controller.enqueue({ type: 'text-start', id: textId });
@@ -115,6 +134,10 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
               });
               break;
             case 'error':
+              if (reasoningId) {
+                controller.enqueue({ type: 'reasoning-end', id: reasoningId });
+                reasoningId = null;
+              }
               if (textId) {
                 controller.enqueue({ type: 'text-end', id: textId });
                 textId = null;
@@ -124,6 +147,10 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
               closeWs();
               break;
             case 'done':
+              if (reasoningId) {
+                controller.enqueue({ type: 'reasoning-end', id: reasoningId });
+                reasoningId = null;
+              }
               if (textId) {
                 controller.enqueue({ type: 'text-end', id: textId });
                 textId = null;

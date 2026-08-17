@@ -88,6 +88,53 @@ describe('VanylineChatTransport', () => {
     expect(ws.close).toHaveBeenCalled();
   });
 
+  it('reasoning_delta(s) puis token -> reasoning-start/delta*/end avant le text-start', async () => {
+    const transport = new VanylineChatTransport();
+    const stream = await transport.sendMessages(sendOpts([userMessage('salut')]));
+    const ws = wsInstances[0];
+    const reader = stream.getReader();
+    const chunks: unknown[] = [];
+    const readOne = async () => chunks.push((await reader.read()).value);
+
+    await readOne(); // start
+    ws.emit('message', JSON.stringify({ type: 'reasoning_delta', content: 'je ré' }));
+    await readOne(); // reasoning-start
+    await readOne(); // reasoning-delta "je ré"
+    ws.emit('message', JSON.stringify({ type: 'reasoning_delta', content: 'fléchis' }));
+    await readOne(); // reasoning-delta "fléchis"
+    ws.emit('message', JSON.stringify({ type: 'token', content: 'Voici' }));
+    await readOne(); // reasoning-end (fermé par le premier token)
+    await readOne(); // text-start
+    await readOne(); // text-delta "Voici"
+
+    expect(chunks[1]).toMatchObject({ type: 'reasoning-start' });
+    const reasoningId = (chunks[1] as { id: string }).id;
+    expect(chunks[2]).toEqual({ type: 'reasoning-delta', id: reasoningId, delta: 'je ré' });
+    expect(chunks[3]).toEqual({ type: 'reasoning-delta', id: reasoningId, delta: 'fléchis' });
+    expect(chunks[4]).toEqual({ type: 'reasoning-end', id: reasoningId });
+    expect(chunks[5]).toMatchObject({ type: 'text-start' });
+  });
+
+  it('reasoning_delta seul (pas de texte) -> reasoning-end émis sur done', async () => {
+    const transport = new VanylineChatTransport();
+    const stream = await transport.sendMessages(sendOpts([userMessage('salut')]));
+    const ws = wsInstances[0];
+    const reader = stream.getReader();
+    const chunks: unknown[] = [];
+    const readOne = async () => chunks.push((await reader.read()).value);
+
+    await readOne(); // start
+    ws.emit('message', JSON.stringify({ type: 'reasoning_delta', content: 'hmm' }));
+    await readOne(); // reasoning-start
+    await readOne(); // reasoning-delta
+    ws.emit('message', JSON.stringify({ type: 'done' }));
+    await readOne(); // reasoning-end
+    await readOne(); // finish
+
+    expect(chunks[3]).toMatchObject({ type: 'reasoning-end' });
+    expect(chunks[4]).toEqual({ type: 'finish' });
+  });
+
   it('tool_call -> tool-input-available (dynamic:true), tool_result -> tool-output-available', async () => {
     const transport = new VanylineChatTransport();
     const stream = await transport.sendMessages(sendOpts([userMessage('salut')]));

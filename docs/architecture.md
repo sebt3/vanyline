@@ -1140,6 +1140,21 @@ trois axes livrés ensemble.
   `thinking_mode`/`reasoning_effort` etc., ces paramètres varient trop selon le backend
   LLM (Ollama/vLLM/llama.cpp). Chaque valeur est tentée en JSON (nombre, booléen) avec
   repli sur chaîne brute si elle n'est pas du JSON valide.
+- **Fix post-déploiement (2026-08-18)**, trouvés en usage réel sur `media-test` :
+  le raisonnement du modèle n'était pas affiché — pas un manque côté UI, `rig-core`
+  0.38.1 expose bien `StreamedAssistantContent::Reasoning`/`ReasoningDelta` dans son
+  stream mais `lib/src/event.rs::StreamAccumulator::apply` les jetait explicitement
+  (`_ => (Vec::new(), false)`). Nouvelle variante `ChatEvent::ReasoningDelta { content
+  }` (même sémantique que `Token`, canal séparé, pas accumulée dans
+  `response_text`/pas persistée — même limite que les tool calls, non rechargés non
+  plus à la réouverture d'une conversation) ; `VanylineChatTransport` la mappe en
+  `reasoning-start`/`reasoning-delta`/`reasoning-end` (fermé par le premier `token`,
+  le raisonnement précédant toujours la réponse), rendue via `UChatReasoning`. Contraste
+  illisible sur les couleurs du composant Chat : `@nuxt/ui/vue-plugin` pose son propre
+  plugin de dark mode (`useDark()` de `@vueuse/core`) qui suit par défaut la
+  préférence système, indépendant du thème sombre fixe du reste du shell — forcé
+  (`useDark().value = true` dans `main.ts`) plutôt que de suivre une préférence système
+  sans rapport avec le thème de l'app (qui n'a jamais eu de mode clair).
 
 **SettingsView** (`settings-real-config`, réorganisé par `frontend-dashboards-nav`) :
 Projets/Sandboxes en sont sortis (absorbés par les dashboards, cf. ci-dessus) ; les 7

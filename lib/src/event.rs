@@ -20,6 +20,14 @@ pub enum ChatEvent {
     Token {
         content: String,
     },
+    /// Contenu de raisonnement (thinking) — même sémantique que `Token`
+    /// (delta à accumuler côté client) mais un canal séparé, pour un rendu
+    /// distinct de la réponse finale. `rig-core` expose ce contenu
+    /// (`StreamedAssistantContent::Reasoning`/`ReasoningDelta`) mais rien ne
+    /// le captait avant ce fix — jeté silencieusement par `StreamAccumulator`.
+    ReasoningDelta {
+        content: String,
+    },
     ToolCall {
         id: String,
         name: String,
@@ -122,6 +130,36 @@ impl StreamAccumulator {
                 self.response_text.push_str(&text.text);
                 (vec![ChatEvent::Token { content: text.text }], false)
             }
+            MultiTurnStreamItem::StreamAssistantItem(
+                StreamedAssistantContent::ReasoningDelta { reasoning, .. },
+            ) => (
+                vec![ChatEvent::ReasoningDelta { content: reasoning }],
+                false,
+            ),
+            MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
+                reasoning,
+            )) => {
+                let text: String = reasoning
+                    .content
+                    .iter()
+                    .filter_map(|c| match c {
+                        rig_core::message::ReasoningContent::Text { text, .. } => {
+                            Some(text.clone())
+                        }
+                        rig_core::message::ReasoningContent::Summary(s) => Some(s.clone()),
+                        rig_core::message::ReasoningContent::Encrypted(_)
+                        | rig_core::message::ReasoningContent::Redacted { .. } => None,
+                        // `#[non_exhaustive]` côté rig-core : futures variantes ignorées
+                        // plutôt que de casser la compilation à chaque upgrade.
+                        _ => None,
+                    })
+                    .collect();
+                if text.is_empty() {
+                    (Vec::new(), false)
+                } else {
+                    (vec![ChatEvent::ReasoningDelta { content: text }], false)
+                }
+            }
             MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::ToolCall {
                 tool_call,
                 internal_call_id,
@@ -201,7 +239,7 @@ impl StreamAccumulator {
                 }
             }
             MultiTurnStreamItem::FinalResponse(_) => (Vec::new(), true),
-            // ToolCallDelta, Reasoning, ReasoningDelta, Final — ignorés
+            // ToolCallDelta, Final — ignorés (Reasoning/ReasoningDelta gérés ci-dessus)
             _ => (Vec::new(), false),
         }
     }
@@ -266,7 +304,9 @@ mod tests {
     use rig_core::OneOrMany;
     use rig_core::agent::CompletionCall;
     use rig_core::completion::Usage;
-    use rig_core::message::{Text, ToolCall, ToolFunction, ToolResult, ToolResultContent};
+    use rig_core::message::{
+        Reasoning, Text, ToolCall, ToolFunction, ToolResult, ToolResultContent,
+    };
     use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent};
     use std::sync::Mutex;
 
@@ -280,6 +320,14 @@ mod tests {
         .unwrap();
         assert_eq!(token["type"], "token");
         assert_eq!(token["content"], "hello");
+
+        // ReasoningDelta
+        let reasoning_delta = serde_json::to_value(&ChatEvent::ReasoningDelta {
+            content: "je réfléchis".into(),
+        })
+        .unwrap();
+        assert_eq!(reasoning_delta["type"], "reasoning_delta");
+        assert_eq!(reasoning_delta["content"], "je réfléchis");
 
         // ToolCall
         let tool_call = serde_json::to_value(&ChatEvent::ToolCall {
@@ -414,6 +462,46 @@ mod tests {
             }
         );
         assert_eq!(acc.response_text, "Hello");
+    }
+
+    /// `ReasoningDelta` (rig) émet `ChatEvent::ReasoningDelta`, canal séparé
+    /// de `response_text` (pas accumulé dedans).
+    #[test]
+    fn apply_reasoning_delta_emits_reasoning_delta_event() {
+        let mut acc = StreamAccumulator::new();
+        let (events, is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::ReasoningDelta {
+                id: None,
+                reasoning: "je réfl".into(),
+            },
+        ));
+        assert!(!is_final);
+        assert_eq!(
+            events,
+            vec![ChatEvent::ReasoningDelta {
+                content: "je réfl".into()
+            }]
+        );
+        assert_eq!(acc.response_text, "");
+    }
+
+    /// Bloc de reasoning complet (non-streaming) — le texte est extrait de
+    /// `Reasoning.content` et émis comme `ReasoningDelta` (même canal que
+    /// les deltas, un seul événement pour tout le bloc).
+    #[test]
+    fn apply_reasoning_complete_block_extracts_text() {
+        let mut acc = StreamAccumulator::new();
+        let reasoning = Reasoning::new("j'analyse la question");
+        let (events, is_final) = acc.apply(MultiTurnStreamItem::<()>::StreamAssistantItem(
+            StreamedAssistantContent::Reasoning(reasoning),
+        ));
+        assert!(!is_final);
+        assert_eq!(
+            events,
+            vec![ChatEvent::ReasoningDelta {
+                content: "j'analyse la question".into()
+            }]
+        );
     }
 
     /// ToolCall puis ToolResult — corrélation par internal_call_id.

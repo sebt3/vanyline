@@ -68,7 +68,12 @@ function onSubmit(e: Event) {
       <UChatMessages :messages="messages" :status="status" class="chat-messages">
         <template #content="{ parts }">
           <template v-for="(part, idx) in parts" :key="idx">
-            <Markdown v-if="part.type === 'text'" :value="part.text" streaming class="chat-markdown" />
+            <UChatReasoning
+              v-if="part.type === 'reasoning'"
+              :text="part.text"
+              :streaming="part.state === 'streaming'"
+            />
+            <Markdown v-else-if="part.type === 'text'" :value="part.text" streaming class="chat-markdown" />
             <UChatTool
               v-else-if="part.type === 'dynamic-tool'"
               :text="part.toolName"
