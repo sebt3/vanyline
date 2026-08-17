@@ -74,6 +74,31 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
           closeWs();
         });
 
+        // Un "bloc" (texte ou reasoning) est une suite ininterrompue de deltas
+        // du même type — dès qu'un événement d'un autre type arrive (reasoning,
+        // token, tool_call...), le bloc ouvert doit se fermer et un nouveau
+        // s'ouvrir au prochain delta du même type, sinon deux segments de texte
+        // séparés dans le temps par un tool_call se retrouvent fusionnés dans
+        // la même part `UIMessage` — mauvais ordre affiché (le texte, mergé,
+        // apparaît à la position de son PREMIER segment, avant les tool calls
+        // qui ont eu lieu entre les deux segments, cf. bug remonté en usage réel).
+        const closeText = () => {
+          if (textId) {
+            controller.enqueue({ type: 'text-end', id: textId });
+            textId = null;
+          }
+        };
+        const closeReasoning = () => {
+          if (reasoningId) {
+            controller.enqueue({ type: 'reasoning-end', id: reasoningId });
+            reasoningId = null;
+          }
+        };
+        const closeOpenBlocks = () => {
+          closeReasoning();
+          closeText();
+        };
+
         ws.addEventListener('message', (ev: MessageEvent) => {
           let event: ChatEvent;
           try {
@@ -83,6 +108,7 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
           }
           switch (event.type) {
             case 'reasoning_delta':
+              closeText();
               if (!reasoningId) {
                 reasoningId = crypto.randomUUID();
                 controller.enqueue({ type: 'reasoning-start', id: reasoningId });
@@ -94,12 +120,7 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
               });
               break;
             case 'token':
-              // Le raisonnement précède toujours la réponse dans un tour —
-              // le premier token de réponse ferme le bloc reasoning ouvert.
-              if (reasoningId) {
-                controller.enqueue({ type: 'reasoning-end', id: reasoningId });
-                reasoningId = null;
-              }
+              closeReasoning();
               if (!textId) {
                 textId = crypto.randomUUID();
                 controller.enqueue({ type: 'text-start', id: textId });
@@ -107,6 +128,7 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
               controller.enqueue({ type: 'text-delta', id: textId, delta: event.content });
               break;
             case 'tool_call':
+              closeOpenBlocks();
               // `dynamic: true` : les noms de tools viennent du MCP de la sandbox,
               // pas d'un jeu de tools déclaré statiquement côté frontend — le
               // reducer AI SDK doit produire un `dynamic-tool` (un seul type de
@@ -120,6 +142,7 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
               });
               break;
             case 'tool_result':
+              closeOpenBlocks();
               controller.enqueue({
                 type: 'tool-output-available',
                 toolCallId: event.id,
@@ -127,6 +150,7 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
               });
               break;
             case 'tool_unavailable':
+              closeOpenBlocks();
               controller.enqueue({
                 type: 'data-tool_unavailable',
                 id: crypto.randomUUID(),
@@ -134,27 +158,13 @@ export class VanylineChatTransport implements ChatTransport<UIMessage> {
               });
               break;
             case 'error':
-              if (reasoningId) {
-                controller.enqueue({ type: 'reasoning-end', id: reasoningId });
-                reasoningId = null;
-              }
-              if (textId) {
-                controller.enqueue({ type: 'text-end', id: textId });
-                textId = null;
-              }
+              closeOpenBlocks();
               controller.enqueue({ type: 'error', errorText: event.message });
               closeController();
               closeWs();
               break;
             case 'done':
-              if (reasoningId) {
-                controller.enqueue({ type: 'reasoning-end', id: reasoningId });
-                reasoningId = null;
-              }
-              if (textId) {
-                controller.enqueue({ type: 'text-end', id: textId });
-                textId = null;
-              }
+              closeOpenBlocks();
               controller.enqueue({ type: 'finish' });
               closeController();
               closeWs();

@@ -115,6 +115,55 @@ describe('VanylineChatTransport', () => {
     expect(chunks[5]).toMatchObject({ type: 'text-start' });
   });
 
+  it('deux segments de texte séparés par un tool_call restent deux parts distinctes, dans l\'ordre chronologique', async () => {
+    // Régression : reasoning -> "je cherche..." (texte) -> find_file -> reasoning ->
+    // "voici le résumé" (texte) -> done. Avant le fix, les deux segments de texte
+    // étaient fusionnés dans la même part `text` (même id jamais refermé au
+    // tool_call), ce qui faisait apparaître tout le texte à la position du
+    // PREMIER segment, avant les tool calls survenus entre les deux.
+    const transport = new VanylineChatTransport();
+    const stream = await transport.sendMessages(sendOpts([userMessage('résume le README')]));
+    const ws = wsInstances[0];
+    const reader = stream.getReader();
+    const chunks: unknown[] = [];
+    const readOne = async () => chunks.push((await reader.read()).value);
+
+    await readOne(); // start
+    ws.emit('message', JSON.stringify({ type: 'token', content: 'je cherche...' }));
+    await readOne(); // text-start (id A)
+    await readOne(); // text-delta A
+    ws.emit(
+      'message',
+      JSON.stringify({ type: 'tool_call', id: 't1', name: 'find_file', args: {} }),
+    );
+    await readOne(); // text-end (id A) — le tool_call doit fermer le bloc texte ouvert
+    await readOne(); // tool-input-available
+    ws.emit(
+      'message',
+      JSON.stringify({ type: 'tool_result', id: 't1', name: 'find_file', result: 'README.md', is_error: false }),
+    );
+    await readOne(); // tool-output-available
+    ws.emit('message', JSON.stringify({ type: 'token', content: 'voici le résumé' }));
+    await readOne(); // text-start (id B, différent de A)
+    await readOne(); // text-delta B
+    ws.emit('message', JSON.stringify({ type: 'done' }));
+    await readOne(); // text-end (id B)
+    await readOne(); // finish
+
+    expect(chunks[1]).toMatchObject({ type: 'text-start' });
+    const idA = (chunks[1] as { id: string }).id;
+    expect(chunks[2]).toEqual({ type: 'text-delta', id: idA, delta: 'je cherche...' });
+    expect(chunks[3]).toEqual({ type: 'text-end', id: idA });
+    expect(chunks[4]).toMatchObject({ type: 'tool-input-available', toolCallId: 't1' });
+    expect(chunks[5]).toMatchObject({ type: 'tool-output-available', toolCallId: 't1' });
+    expect(chunks[6]).toMatchObject({ type: 'text-start' });
+    const idB = (chunks[6] as { id: string }).id;
+    expect(idB).not.toBe(idA);
+    expect(chunks[7]).toEqual({ type: 'text-delta', id: idB, delta: 'voici le résumé' });
+    expect(chunks[8]).toEqual({ type: 'text-end', id: idB });
+    expect(chunks[9]).toEqual({ type: 'finish' });
+  });
+
   it('reasoning_delta seul (pas de texte) -> reasoning-end émis sur done', async () => {
     const transport = new VanylineChatTransport();
     const stream = await transport.sendMessages(sendOpts([userMessage('salut')]));
