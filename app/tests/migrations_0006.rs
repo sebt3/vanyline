@@ -33,7 +33,8 @@ fn indexes_present() {
         "idx_chat_contexts_kind should exist"
     );
     assert!(
-        MIGRATION.contains("CREATE INDEX idx_conversations_context_id ON conversations(context_id)"),
+        MIGRATION
+            .contains("CREATE INDEX idx_conversations_context_id ON conversations(context_id)"),
         "idx_conversations_context_id should exist"
     );
 }

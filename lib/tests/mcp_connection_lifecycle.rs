@@ -131,10 +131,14 @@ async fn test_mcp_custom_headers_reach_server() {
     let server = test_server(url, headers);
 
     let handle = new_tool_handle();
-    let (connections, failures) = connect_mcp_servers_selected(&test_selection(), &[server], &handle)
-        .await
-        .expect("connect_mcp_servers_selected should succeed");
-    assert!(failures.is_empty(), "no connection failure expected: {failures:?}");
+    let (connections, failures) =
+        connect_mcp_servers_selected(&test_selection(), &[server], &handle)
+            .await
+            .expect("connect_mcp_servers_selected should succeed");
+    assert!(
+        failures.is_empty(),
+        "no connection failure expected: {failures:?}"
+    );
 
     let captured = captured_headers.lock().await;
     let map = captured
@@ -163,10 +167,14 @@ async fn test_mcp_tool_survives_multiple_calls_in_same_connection() {
     let server = test_server(url, BTreeMap::new());
 
     let handle = new_tool_handle();
-    let (connections, failures) = connect_mcp_servers_selected(&test_selection(), &[server], &handle)
-        .await
-        .expect("connect_mcp_servers_selected should succeed");
-    assert!(failures.is_empty(), "no connection failure expected: {failures:?}");
+    let (connections, failures) =
+        connect_mcp_servers_selected(&test_selection(), &[server], &handle)
+            .await
+            .expect("connect_mcp_servers_selected should succeed");
+    assert!(
+        failures.is_empty(),
+        "no connection failure expected: {failures:?}"
+    );
 
     // Les connexions et le handle restent en vie pendant les deux appels —
     // c'est exactement le contrat que `session.rs` doit respecter après le

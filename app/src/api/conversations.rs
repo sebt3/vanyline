@@ -338,7 +338,10 @@ mod tests {
         .unwrap();
         assert_eq!(body.context.kind, "sandbox");
         assert_eq!(
-            body.context.data.get("sandbox_name").and_then(|v| v.as_str()),
+            body.context
+                .data
+                .get("sandbox_name")
+                .and_then(|v| v.as_str()),
             Some("my-sandbox")
         );
     }

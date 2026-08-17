@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { useChat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
 import { Markdown } from '@comark/vue';
@@ -21,9 +21,18 @@ interface MessageRow {
 const client = createApiClient();
 const transport = new VanylineChatTransport();
 
-const { messages, status, sendMessage, error } = useChat({
+const { messages, status, sendMessage, error, stop } = useChat({
   id: props.conversationId,
   transport,
+});
+
+// `Chat` (AI SDK) n'a pas de nettoyage automatique à l'unmount — sans ça,
+// fermer la session ou changer de conversation en plein streaming laisse le
+// WS ouvert côté navigateur jusqu'au `done`/`error` naturel du tour (le
+// composant qui le lisait n'existe plus). `stop()` avorte le flux, ce qui
+// déclenche `abortSignal` côté `VanylineChatTransport` et ferme le WS.
+onUnmounted(() => {
+  void stop();
 });
 
 onMounted(async () => {
