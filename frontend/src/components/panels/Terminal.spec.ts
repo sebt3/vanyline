@@ -12,6 +12,7 @@ const { terminalInstances, wsInstances, resizeInstances } = vi.hoisted(() => {
     cols: number;
     rows: number;
     options: Record<string, unknown>;
+    openedWith?: HTMLElement;
   }> = [];
   const wsInstances: Array<{
     url: string;
@@ -39,6 +40,7 @@ vi.mock('@xterm/xterm', () => ({
     onDataCb?: (d: string) => void;
     written: unknown[] = [];
     options: Record<string, unknown>;
+    openedWith?: HTMLElement;
 
     constructor(opts: Record<string, unknown>) {
       this.options = opts;
@@ -46,7 +48,9 @@ vi.mock('@xterm/xterm', () => ({
     }
 
     loadAddon() {}
-    open() {}
+    open(el: HTMLElement) {
+      this.openedWith = el;
+    }
 
     getSelection() {
       return '';
@@ -147,6 +151,20 @@ describe('Terminal.vue — PTY réel', () => {
     (wsInstances as any[]).length = 0;
     (resizeInstances as any[]).length = 0;
     delete (globalThis as any).navigator.clipboard;
+  });
+
+  it('term.open() reçoit le vrai DOM node .terminal-host (régression : le wrapper du menu contextuel pouvait le laisser undefined)', async () => {
+    const ws = new FakeWebSocket('wss://example.com/ws/terminal?ticket=abc');
+    ws.emitOpen();
+    (openSandboxWs as any).mockImplementation(() => Promise.resolve(ws));
+
+    const wrapper = mount(Terminal, {
+      global: { provide: { 'sandbox-name': 'foo' } },
+    });
+    await flushTwo();
+
+    expect(terminalInstances[0]?.openedWith).toBeInstanceOf(HTMLElement);
+    expect(terminalInstances[0]?.openedWith).toBe(wrapper.get('.terminal-host').element);
   });
 
   it("menu contextuel du terminal expose Copier et Coller", async () => {

@@ -81,6 +81,23 @@ describe('Editor.vue — contenu réel', () => {
     expect(wrapper.element.textContent).toContain('ligne1');
   });
 
+  it('CodeMirror est réellement monté dans .editor-host (régression : le wrapper du menu contextuel pouvait laisser hostRef non résolu)', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // Pas juste "la requête a été envoyée" : .cm-editor doit être un vrai
+    // enfant DOM de .editor-host, pas juste construit en mémoire avec un
+    // parent jamais attaché (bug trouvé en usage réel — read fonctionnait,
+    // rien n'était visible).
+    const host = wrapper.find('.editor-host');
+    expect(host.element.querySelector('.cm-editor')).toBeTruthy();
+  });
+
   it('charge le fichier dès que sandbox-fs devient prêt après le montage (fsClient null au départ)', async () => {
     // Reproduit la restauration d'un layout dockview sauvegardé : le panel
     // Editor est recréé avant que la connexion /ws/fs (async) soit établie.

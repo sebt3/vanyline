@@ -18,7 +18,7 @@ export interface ContextMenuSeparatorEntry {
 }
 export type ContextMenuEntry = ContextMenuAction | ContextMenuSeparatorEntry;
 
-defineProps<{ entries: ContextMenuEntry[]; asChild?: boolean }>();
+defineProps<{ entries: ContextMenuEntry[]; fill?: boolean }>();
 
 function isSep(entry: ContextMenuEntry): entry is ContextMenuSeparatorEntry {
   return 'sep' in entry && entry.sep === true;
@@ -30,7 +30,19 @@ function onSelect(entry: ContextMenuAction): void {
 
 <template>
   <ContextMenuRoot>
-    <ContextMenuTrigger class="trigger" :as-child="asChild ?? false">
+    <!--
+      Jamais `as-child` : `Primitive`/`Slot` de reka-ui (asChild) CLONENT le
+      vnode du slot et suppriment explicitement tout `ref` qu'il porte
+      (`delete firstNonCommentChildren.props?.ref` dans Slot.js) pour poser
+      le leur à la place — un `ref` du consommateur sur l'élément slotté
+      (Editor.vue/Terminal.vue montent CodeMirror/xterm dessus) ne se résout
+      alors jamais. Bug trouvé en usage réel : `view`/`term` se construisaient
+      quand même (accepte un parent absent sans planter), mais rien n'était
+      jamais attaché au DOM — aucune erreur, juste un panneau vide. `fill`
+      rend un vrai wrapper (`div`, jamais cloné) plutôt que d'éviter le
+      wrapper via asChild — le `ref` du consommateur reste donc valide.
+    -->
+    <ContextMenuTrigger :as="fill ? 'div' : 'span'" :class="['trigger', { 'trigger-fill': fill }]">
       <slot />
     </ContextMenuTrigger>
     <ContextMenuPortal>
@@ -55,6 +67,11 @@ function onSelect(entry: ContextMenuAction): void {
   color: inherit;
   font: inherit;
   cursor: default;
+}
+.trigger-fill {
+  display: block;
+  height: 100%;
+  width: 100%;
 }
 </style>
 

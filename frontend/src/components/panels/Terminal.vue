@@ -96,7 +96,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <ContextMenu :entries="terminalEntries" :as-child="true">
+  <ContextMenu :entries="terminalEntries" fill>
     <div ref="host" class="terminal-host"></div>
   </ContextMenu>
 </template>

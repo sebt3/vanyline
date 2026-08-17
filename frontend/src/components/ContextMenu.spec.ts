@@ -98,23 +98,54 @@ describe('ContextMenu', () => {
     expect(item!.textContent).toContain('⌘C');
   });
 
-  it('asChild rend le trigger sans wrapper et ouvre au clic droit', async () => {
+  it('fill rend un wrapper div rempli plutôt qu\'un span inline', async () => {
     const wrapper = mount(ContextMenu, {
       slots: { default: '<div class="target">Cible</div>' },
-      props: { asChild: true, entries: [{ label: 'Test', action: vi.fn() }] },
+      props: { fill: true, entries: [{ label: 'Test', action: vi.fn() }] },
     });
 
-    const target = wrapper.find('.target');
-    expect(target.exists()).toBe(true);
+    const trigger = wrapper.find('.trigger');
+    expect(trigger.exists()).toBe(true);
+    expect(trigger.element.tagName).toBe('DIV');
+    expect(trigger.classes()).toContain('trigger-fill');
 
-    target.element.dispatchEvent(
+    trigger.element.dispatchEvent(
       new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
     );
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    // Le menu s'ouvre au clic droit ; aucun wrapper span intermédiaire
-    // n'entoure l'élément du slot (asChild = vrai).
     expect(document.querySelector('[role="menuitem"]')).toBeTruthy();
+  });
+
+  it('un ref posé sur l\'élément slotté reste résolu avec fill (régression : asChild de reka-ui le supprimait silencieusement)', async () => {
+    // Reproduit exactement le pattern Editor.vue/Terminal.vue : un
+    // template ref sur l'élément passé dans le slot, utilisé au montage
+    // pour y attacher une librairie tierce (CodeMirror/xterm). Avec l'ancien
+    // `as-child`, reka-ui supprimait ce ref (Slot.js : `delete
+    // firstNonCommentChildren.props?.ref`) — la lib se construisait quand
+    // même (parent undefined accepté sans erreur) mais rien n'était jamais
+    // attaché au DOM, sans aucune erreur visible.
+    const Host = {
+      components: { ContextMenu },
+      template: `
+        <ContextMenu :entries="[]" fill>
+          <div ref="host" class="host-target"></div>
+        </ContextMenu>
+      `,
+      data() {
+        return { mountedRef: null as HTMLElement | null };
+      },
+      mounted() {
+        this.mountedRef = (this.$refs.host as HTMLElement | null);
+      },
+    };
+
+    const wrapper = mount(Host);
+
+    expect((wrapper.vm as unknown as { mountedRef: HTMLElement | null }).mountedRef).not.toBeNull();
+    expect(
+      (wrapper.vm as unknown as { mountedRef: HTMLElement | null }).mountedRef,
+    ).toBe(wrapper.find('.host-target').element);
   });
 });

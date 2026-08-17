@@ -223,7 +223,7 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="editor-wrap">
-    <ContextMenu :entries="editorEntries" :as-child="true">
+    <ContextMenu :entries="editorEntries" fill>
       <div ref="host" class="editor-host"></div>
     </ContextMenu>
     <div v-if="statusMessage" class="editor-status" role="alert">{{ statusMessage }}</div>
