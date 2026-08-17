@@ -14,6 +14,7 @@ use serde::Deserialize;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use vanyline_lib::domain::{McpSelection, McpServer, McpTransport};
 use vanyline_lib::event::{ChatEvent, EventSink, ToolCallRecord};
 use vanyline_lib::session::SessionContext;
 
@@ -160,6 +161,7 @@ async fn run_socket(
                 &spawn_tx,
                 &spawn_state,
                 conversation_id,
+                conv.context_id,
                 agent_id,
                 user_id,
                 &content,
@@ -198,6 +200,73 @@ fn send_error(tx: &mpsc::UnboundedSender<ChatEvent>, code: &str, message: &str) 
     });
 }
 
+fn send_tool_unavailable(tx: &mpsc::UnboundedSender<ChatEvent>, server: &str, reason: &str) {
+    let _ = tx.send(ChatEvent::ToolUnavailable {
+        server: server.to_string(),
+        reason: reason.to_string(),
+    });
+}
+
+/// Résout `extra_mcp` à partir du contexte de la conversation. Aujourd'hui,
+/// seul `kind = "sandbox"` produit un serveur MCP (l'URL de la sandbox
+/// elle-même, comme le fait `--toolbox` côté CLI) — les autres `kind` (à
+/// venir, cf. docs/features/chat-app-fonctionnel.md) n'ont pas encore de
+/// toolset associé et retournent une liste vide, silencieusement (ce n'est
+/// pas une panne, juste pas encore implémenté). Un échec de résolution
+/// (sandbox absente, K8s injoignable) est non bloquant pour le tour : signalé
+/// via `ChatEvent::ToolUnavailable` plutôt que d'échouer le tour entier.
+async fn resolve_extra_mcp(
+    state: &AppState,
+    tx: &mpsc::UnboundedSender<ChatEvent>,
+    context_id: Uuid,
+) -> Result<Vec<(McpServer, McpSelection)>, AppError> {
+    let context =
+        sqlx::query_as::<_, crate::db::models::ChatContext>(
+            "SELECT * FROM chat_contexts WHERE id = $1",
+        )
+        .bind(context_id)
+        .fetch_one(&state.pool)
+        .await?;
+
+    if context.kind != "sandbox" {
+        return Ok(Vec::new());
+    }
+
+    let Some(sandbox_name) = context.data.get("sandbox_name").and_then(|v| v.as_str()) else {
+        send_tool_unavailable(tx, "sandbox", "contexte sandbox invalide (sandbox_name absent)");
+        return Ok(Vec::new());
+    };
+
+    let client = match crate::k8s::client(state).await {
+        Ok(c) => c,
+        Err(e) => {
+            send_tool_unavailable(tx, sandbox_name, &e.to_string());
+            return Ok(Vec::new());
+        }
+    };
+
+    let url = match client.sandbox_mcp_url(sandbox_name).await {
+        Ok(url) => url,
+        Err(e) => {
+            send_tool_unavailable(tx, sandbox_name, &e.to_string());
+            return Ok(Vec::new());
+        }
+    };
+
+    Ok(vec![(
+        McpServer {
+            name: "sandbox".to_string(),
+            transport: McpTransport::HttpStreamable,
+            url,
+            headers: Default::default(),
+        },
+        McpSelection {
+            server: "sandbox".to_string(),
+            tools: vec![],
+        },
+    )])
+}
+
 /// Persistance (R9) : le message user est enregistré AVANT l'appel à
 /// `run_agent_turn` (il a bien été envoyé, qu'importe l'issue du tour) ;
 /// le message assistant seulement APRÈS un tour réussi (le `?` sur
@@ -209,6 +278,7 @@ async fn handle_message(
     tx: &mpsc::UnboundedSender<ChatEvent>,
     state: &AppState,
     conversation_id: Uuid,
+    context_id: Uuid,
     agent_id: Uuid,
     user_id: Uuid,
     user_msg: &str,
@@ -230,13 +300,15 @@ async fn handle_message(
             .await?
             .flatten();
 
+    let extra_mcp = resolve_extra_mcp(state, tx, context_id).await?;
+
     let sink = Arc::new(ChannelSink { tx: tx.clone() });
     let ctx = SessionContext {
         store: Arc::new(PgConfigStore::new(state.pool.clone(), user_id)),
         sink,
         local_tools: HashMap::new(),
         subagent_depth_max: 1,
-        extra_mcp: Vec::new(),
+        extra_mcp,
         model_override: None,
         todo_state: Arc::new(std::sync::Mutex::new(todo_initial.clone())),
     };

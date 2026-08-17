@@ -6,7 +6,7 @@ use crate::domain::{
     SkillSelection, Toolset,
 };
 use crate::error::VnyError;
-use crate::event::{ChatTurnResult, EventSink};
+use crate::event::{ChatEvent, ChatTurnResult, EventSink};
 use crate::store::ConfigStore;
 
 /// Assemble le system prompt final d'un tour d'agent, dans l'ordre fixe décrit
@@ -373,13 +373,21 @@ pub(crate) async fn run_agent_turn_at_depth(
         if selections.is_empty() {
             continue;
         }
-        let running = crate::prefixed_mcp::connect_mcp_servers_selected(
+        let (running, failed) = crate::prefixed_mcp::connect_mcp_servers_selected(
             &selections,
             std::slice::from_ref(server),
             &handle,
         )
         .await?;
         mcp_connections.extend(running);
+        for failure in failed {
+            ctx.sink
+                .emit(ChatEvent::ToolUnavailable {
+                    server: failure.server,
+                    reason: failure.reason,
+                })
+                .await;
+        }
     }
 
     for toolset in &resolved.resolved_toolsets {
@@ -409,13 +417,21 @@ pub(crate) async fn run_agent_turn_at_depth(
                 }
             }
         }
-        let running = crate::prefixed_mcp::connect_mcp_servers_selected(
+        let (running, failed) = crate::prefixed_mcp::connect_mcp_servers_selected(
             &mcp_selections,
             &validated_servers,
             &handle,
         )
         .await?;
         mcp_connections.extend(running);
+        for failure in failed {
+            ctx.sink
+                .emit(ChatEvent::ToolUnavailable {
+                    server: failure.server,
+                    reason: failure.reason,
+                })
+                .await;
+        }
     }
 
     if !resolved.skill_index.is_empty() {

@@ -266,19 +266,30 @@ pub async fn list_mcp_server_tools(server: &DomainMcpServer) -> Result<Vec<Strin
     Ok(tools.into_iter().map(|t| t.name.to_string()).collect())
 }
 
+/// Un serveur MCP sélectionné auquel la connexion a échoué — porté par
+/// l'appelant jusqu'à `ctx.sink` (`ChatEvent::ToolUnavailable`) plutôt que
+/// perdu dans les logs, comme c'était le cas avant ce fix.
+#[derive(Debug, Clone)]
+pub struct McpConnectFailure {
+    pub server: String,
+    pub reason: String,
+}
+
 /// Connecte UNIQUEMENT les serveurs référencés par `selections` (jamais
 /// `all_servers` en entier) et n'ajoute au handle que les tools du serveur dont
 /// le nom matche `tool_matches(&selection.tools, ..)`. Échec de connexion à un
-/// serveur sélectionné : log + skip, comme `connect_mcp_servers_prefixed`
-/// (existant) — une panne MCP n'abat pas les autres sélections.
+/// serveur sélectionné : log + skip (une panne MCP n'abat pas les autres
+/// sélections) + rapporté dans le second élément du tuple retourné, pour que
+/// l'appelant le signale au client plutôt que de le laisser silencieux.
 /// Retourne les `McpRunningService` connectés — l'appelant est responsable de
 /// les garder en vie (pour le fix R12) et de les annuler à la fin du tour.
 pub async fn connect_mcp_servers_selected(
     selections: &[McpSelection],
     all_servers: &[DomainMcpServer],
     handle: &ToolServerHandle,
-) -> Result<Vec<McpRunningService>, VnyError> {
+) -> Result<(Vec<McpRunningService>, Vec<McpConnectFailure>), VnyError> {
     let mut connections = Vec::new();
+    let mut failures = Vec::new();
     for (selection, server) in selected_servers(selections, all_servers) {
         match connect_domain_mcp_server_inner(server).await {
             Ok((tools, client, running)) => {
@@ -296,10 +307,14 @@ pub async fn connect_mcp_servers_selected(
             }
             Err(e) => {
                 tracing::warn!("skipping selected MCP server {}: {e}", server.name);
+                failures.push(McpConnectFailure {
+                    server: server.name.clone(),
+                    reason: e.to_string(),
+                });
             }
         }
     }
-    Ok(connections)
+    Ok((connections, failures))
 }
 
 /// Sélectionne, parmi les local tools fournis par l'hôte (`available` —

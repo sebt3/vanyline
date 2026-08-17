@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
@@ -91,17 +91,42 @@ async fn resolve_agent_id(
         })
 }
 
+/// Filtre optionnel de `list_conversations`. `sandbox_name` est le seul
+/// filtre géré aujourd'hui, à l'image du seul `kind = "sandbox"` supporté
+/// côté création (cf. `ChatContextInput`).
+#[derive(Debug, Deserialize)]
+pub struct ListConversationsQuery {
+    pub sandbox_name: Option<String>,
+}
+
 pub async fn list_conversations(
     State(state): State<AppState>,
     user: AuthUser,
+    Query(query): Query<ListConversationsQuery>,
 ) -> Result<Json<Vec<ConversationOut>>, AppError> {
     let db_user = get_or_create_user(&state, &user).await?;
-    let conversations = sqlx::query_as::<_, Conversation>(
-        "SELECT * FROM conversations WHERE user_id = $1 ORDER BY updated_at DESC",
-    )
-    .bind(db_user.id)
-    .fetch_all(&state.pool)
-    .await?;
+    let conversations = match &query.sandbox_name {
+        Some(sandbox_name) => {
+            sqlx::query_as::<_, Conversation>(
+                "SELECT c.* FROM conversations c
+                 JOIN chat_contexts ctx ON ctx.id = c.context_id
+                 WHERE c.user_id = $1 AND ctx.kind = 'sandbox' AND ctx.data->>'sandbox_name' = $2
+                 ORDER BY c.updated_at DESC",
+            )
+            .bind(db_user.id)
+            .bind(sandbox_name)
+            .fetch_all(&state.pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as::<_, Conversation>(
+                "SELECT * FROM conversations WHERE user_id = $1 ORDER BY updated_at DESC",
+            )
+            .bind(db_user.id)
+            .fetch_all(&state.pool)
+            .await?
+        }
+    };
 
     let mut out = Vec::with_capacity(conversations.len());
     for conv in conversations {
@@ -281,6 +306,17 @@ mod tests {
         let app = make_app(test_key());
         let req = Request::builder()
             .uri("/conversations")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn list_conversations_filtered_by_sandbox_without_cookie_returns_401() {
+        let app = make_app(test_key());
+        let req = Request::builder()
+            .uri("/conversations?sandbox_name=my-sandbox")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
