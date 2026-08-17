@@ -307,6 +307,22 @@ while True:
         method = msg.get("method", "")
         params = msg.get("params", {})
 
+        if msg_id is None:
+            # Notification : pas de réponse JSON-RPC. didOpen publie des diagnostics.
+            if method == "textDocument/didOpen":
+                uri = params.get("textDocument", {}).get("uri", "")
+                notif = {
+                    "jsonrpc": "2.0",
+                    "method": "textDocument/publishDiagnostics",
+                    "params": {
+                        "uri": uri,
+                        "diagnostics": [{"message": "fake diag", "severity": 1, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}}}]
+                    }
+                }
+                write_frame(json.dumps(notif).encode("utf-8"))
+            # initialized et autres notifications : aucune réponse.
+            continue
+
         if method == "initialize":
             count += 1
             result = {
@@ -343,17 +359,6 @@ while True:
                 "jsonrpc": "2.0", "id": msg_id,
                 "result": {"echo": method}
             }).encode("utf-8"))
-
-        if method == "textDocument/didOpen":
-            uri = params.get("textDocument", {}).get("uri", "")
-            notif = {
-                "method": "textDocument/publishDiagnostics",
-                "params": {
-                    "uri": uri,
-                    "diagnostics": [{"message": "fake diag", "severity": 1, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}}}]}
-            }
-            write_frame(
-                json.dumps(notif).encode("utf-8"))
     except Exception:
         pass
 "#;
@@ -400,6 +405,9 @@ while True:
         msg_id = msg.get("id")
         method = msg.get("method", "")
         params = msg.get("params", {})
+        if msg_id is None:
+            # Notification : aucune réponse (ce script ne publie jamais de diagnostics).
+            continue
         if method == "initialize":
             write_frame(json.dumps({
                 "jsonrpc": "2.0", "id": msg_id,
