@@ -122,6 +122,9 @@ struct LspSessionInner {
     child: Mutex<Option<Child>>,
     next_client: AtomicU64,
     next_req: AtomicU64,
+    /// `true` dès qu'un client a envoyé `initialize` au process (partagé entre tous
+    /// les clients de la session — le process LSP ne s'initialise qu'une fois).
+    initialized: AtomicBool,
     _toolchain_name: String,
 }
 
@@ -169,6 +172,7 @@ impl LspSession {
                 pending: Mutex::new(HashMap::new()),
                 subs: Mutex::new(HashMap::new()),
                 alive: AtomicBool::new(true),
+                initialized: AtomicBool::new(false),
                 child: Mutex::new(Some(child)),
                 next_client: AtomicU64::new(1),
                 next_req: AtomicU64::new(1),
@@ -382,6 +386,17 @@ impl LspSession {
     /// `true` tant que le process n'a pas rendu EOF stdout.
     pub fn is_alive(&self) -> bool {
         self.inner.alive.load(Ordering::SeqCst)
+    }
+
+    /// `true` si le process a déjà reçu `initialize`.
+    pub fn is_initialized(&self) -> bool {
+        self.inner.initialized.load(Ordering::SeqCst)
+    }
+
+    /// Test-and-set : rend `true` si CE client gagne le droit d'envoyer `initialize`
+    /// (le flag était à `false`), `false` si un autre client l'a déjà initialisé.
+    pub fn try_mark_initialized(&self) -> bool {
+        !self.inner.initialized.swap(true, Ordering::SeqCst)
     }
 }
 
