@@ -46,9 +46,57 @@ cette feature.
 
 ## Interfaces clés et modules touchés
 
-- `controller/src/sandbox.rs` — `Toolchain` : sous-champ optionnel `lsp` (binaire/
-  args), même mécanisme de montage que les toolchains actuelles (image volume,
-  `effective_toolchains`/`aggregate_toolchain_env`).
+### Forme de `Toolchain.lsp` (décidé)
+
+```rust
+// crds/src/lib.rs
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LspSpec {
+    pub image: String,
+    pub bin: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+pub struct Toolchain {
+    pub name: String,
+    pub image: String,
+    #[serde(default)]
+    pub env: BTreeMap<String, String>,
+    #[serde(default)]
+    pub lsp: Option<LspSpec>,
+}
+```
+
+Résolution (`controller/src/sandbox.rs`, `resolve_toolchain_lsp`, même forme que
+`resolve_toolchain_env`) :
+1. `toolchain.lsp` si `Some` → utilisé tel quel (LSP custom possible, y compris pour
+   une toolchain hors rust/node).
+2. Sinon preset par `toolchain.name` : `image` depuis `ctx.lsp_image_rust`/
+   `ctx.lsp_image_node` (nouveaux champs `Context`/CLI, env `LSP_IMAGE_RUST`/
+   `LSP_IMAGE_NODE` — même mécanisme que `TOOLCHAIN_IMAGE_RUST`/`NODE`, l'image reste
+   configurable au déploiement, donc pas hardcodée) ; `bin`/`args` hardcodés
+   (`rust-analyzer` sans args ; `typescript-language-server --stdio`).
+3. Sinon `None` → pas de route `/ws/lsp` montée pour cette toolchain (repli dégradé,
+   déjà décrit plus bas).
+
+S'applique uniformément que `spec.toolchains` soit explicite ou dérivé de
+`project.status.languages` — zero-config pour rust/node dans les deux cas, sans fermer
+la porte à un LSP custom. **Pourquoi cette forme plutôt qu'un champ minimal
+`{bin, args}` avec image purement en preset** : `Toolchain.image` lui-même n'a jamais
+de fallback preset invisible dans le CRD existant (toujours un champ explicite,
+rempli côté controller uniquement dans le chemin de dérivation) — un `LspSpec` sans
+`image` casserait ce précédent. Le comportement de fallback name-keyed, lui, suit le
+précédent de `Toolchain.env`/`toolchain_preset` (appliqué uniformément, explicite ou
+dérivé), pas celui de `image`.
+
+Montage : volume image séparé par toolchain, `/toolchains/<name>-lsp` (à côté de
+`/toolchains/<name>` du toolchain lui-même). Découverte côté sandbox : un seul env
+JSON `VNL_LSP_TOOLCHAINS` (`[{name, bin, args}]`) injecté par le controller — pas
+d'interpolation shell, argv array au spawn (même règle que la maintenance des
+projets, cf. AGENTS.md).
+
 - `sandbox/src/` — nouveau module de gestion du process LSP (spawn, framing
   `Content-Length`, multiplexage multi-clients) ; nouvelle route WS
   `/ws/lsp/:toolchain` ; nouveaux handlers `lsp_*` dans `tools_impl.rs`/`mcp.rs`.
@@ -100,8 +148,10 @@ cette feature.
 
 1. `lsp-process-bridge` — module sandbox : spawn LSP, framing `Content-Length`, route
    `/ws/lsp/:toolchain`, tests sur un process LSP factice.
-2. `lsp-toolchain-mount` — extension `Toolchain.lsp` côté controller, montage image,
-   présets rust/node.
+2. `lsp-toolchain-mount` — `LspSpec`/`Toolchain.lsp` dans `crds/src/lib.rs`,
+   `resolve_toolchain_lsp` + montage volume `/toolchains/<name>-lsp` + env
+   `VNL_LSP_TOOLCHAINS` côté `controller/src/sandbox.rs`, flags CLI
+   `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` dans `controller/src/main.rs`.
 3. `lsp-mcp-tools` — `lsp_diagnostics`/`lsp_definition`/`lsp_references`/`lsp_hover`
    côté MCP, consommant le process partagé.
 4. `lsp-editor-client` — branchement `@codemirror/lsp-client` dans Editor.vue,
