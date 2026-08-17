@@ -251,20 +251,16 @@ impl Drop for LspClient {
     }
 }
 
-// ── Tests ────────────────────────────────────────────────────────────────────
-
+/// Fakes LSP partagés entre les tests de `lsp_client` et `tools_impl`.
 #[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-
-    use super::*;
+#[allow(clippy::unwrap_used, clippy::expect_used)]
+pub mod lsp_test_fakes {
     use crate::lsp::{LspManager, LspToolchain};
-    use std::time::Duration;
 
     /// Script Python factice : implémente un mini LSP (initialize, hover, definition,
     /// references, didOpen→publishDiagnostics).
     /// Utilise le framing LSP (Content-Length) en entrée et en sortie.
-    const FAKE_LSP_PY: &str = r#"
+    pub const FAKE_LSP_PY: &str = r#"
 import sys, json
 
 def read_frame():
@@ -364,7 +360,7 @@ while True:
 "#;
 
     /// Script Python factice : ignore didOpen, ne publie aucun diagnostic. Timeout → vec![].
-    const FAKE_LSP_NODIAG_PY: &str = r#"
+    pub const FAKE_LSP_NODIAG_PY: &str = r#"
 import sys, json
 
 def read_frame():
@@ -423,7 +419,7 @@ while True:
 "#;
 
     /// Crée un LspManager avec un script Python factice.
-    async fn make_manager(name: &str, script: &str) -> (LspManager, tempfile::TempDir) {
+    pub async fn make_manager(name: &str, script: &str) -> (LspManager, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let script_path = tmpdir.path().join(format!("fake_lsp_{name}.py"));
         std::fs::write(&script_path, script).unwrap();
@@ -437,6 +433,17 @@ while True:
         );
         (manager, tmpdir)
     }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::lsp_client::lsp_test_fakes::*;
+    use std::time::Duration;
 
     // ── Tests de LspClient ──────────────────────────────────────────────────
 
