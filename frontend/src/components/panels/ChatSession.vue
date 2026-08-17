@@ -65,7 +65,12 @@ function onSubmit(e: Event) {
          sinon Vue avertit et ne monte pas le composant (cf. warning
          "component with async setup must be nested in a Suspense"). -->
     <Suspense>
-      <UChatMessages :messages="messages" :status="status" class="chat-messages">
+      <UChatMessages
+        :messages="messages"
+        :status="status"
+        should-auto-scroll
+        class="chat-messages"
+      >
         <template #content="{ parts }">
           <template v-for="(part, idx) in parts" :key="idx">
             <UChatReasoning
