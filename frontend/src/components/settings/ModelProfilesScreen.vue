@@ -15,6 +15,7 @@ interface ModelProfile {
   model: string;
   temperature?: number | null;
   max_tokens?: number | null;
+  options?: Record<string, unknown>;
 }
 
 interface CreateModelProfile {
@@ -23,6 +24,7 @@ interface CreateModelProfile {
   model: string;
   temperature?: number;
   max_tokens?: number;
+  options?: Record<string, unknown>;
 }
 
 interface UpdateModelProfile {
@@ -30,6 +32,47 @@ interface UpdateModelProfile {
   model?: string;
   temperature?: number;
   max_tokens?: number;
+  options?: Record<string, unknown>;
+}
+
+/** Une ligne du petit éditeur clé/valeur pour `options` — les noms de
+ *  paramètres (top_p, top_k, num_predict, thinking_mode...) varient trop
+ *  selon le backend LLM pour figer une liste de champs typés (cf.
+ *  docs/features/chat-app-fonctionnel.md, axe 2). */
+interface OptionRow {
+  key: string;
+  value: string;
+}
+
+/** `raw` tenté en JSON (nombre, booléen, objet...) ; repli sur la chaîne
+ *  brute si `raw` n'est pas du JSON valide (cas le plus courant : une
+ *  valeur texte comme `thinking_mode: "enabled"`). */
+function parseOptionValue(raw: string): unknown {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+
+/** `undefined` si aucune ligne n'a de clé non vide — pour ne jamais envoyer
+ *  `options: {}` alors que l'utilisateur n'a rien renseigné. */
+function optionsFromRows(rows: OptionRow[]): Record<string, unknown> | undefined {
+  const out: Record<string, unknown> = {};
+  for (const { key, value } of rows) {
+    const trimmedKey = key.trim();
+    if (!trimmedKey) continue;
+    out[trimmedKey] = parseOptionValue(value);
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function rowsFromOptions(options?: Record<string, unknown>): OptionRow[] {
+  if (!options) return [];
+  return Object.entries(options).map(([key, value]) => ({
+    key,
+    value: typeof value === 'string' ? value : JSON.stringify(value),
+  }));
 }
 
 interface LlmProvider {
@@ -53,6 +96,7 @@ const formProvider = ref('');
 const formModel = ref('');
 const formTemperature = ref('');
 const formMaxTokens = ref('');
+const formOptions = ref<OptionRow[]>([]);
 const formAvailableModels = ref<string[]>([]);
 const creationError = ref<string | null>(null);
 
@@ -63,6 +107,7 @@ const editModel = ref('');
 const editAvailableModels = ref<string[]>([]);
 const editTemperature = ref('');
 const editMaxTokens = ref('');
+const editOptions = ref<OptionRow[]>([]);
 const editError = ref<string | null>(null);
 
 // Modales
@@ -108,12 +153,14 @@ function onEditProviderChange() {
 
 async function createProfile() {
   creationError.value = null;
+  const options = optionsFromRows(formOptions.value);
   const body: CreateModelProfile = {
     name: formName.value,
     provider: formProvider.value,
     model: formModel.value,
     ...(formTemperature.value ? { temperature: Number(formTemperature.value) } : {}),
     ...(formMaxTokens.value ? { max_tokens: Number(formMaxTokens.value) } : {}),
+    ...(options ? { options } : {}),
   };
   try {
     await resource.create(body);
@@ -122,6 +169,7 @@ async function createProfile() {
     formModel.value = '';
     formTemperature.value = '';
     formMaxTokens.value = '';
+    formOptions.value = [];
     createModalOpen.value = false;
   } catch (e) {
     creationError.value = e instanceof ApiError ? e.message : String(e);
@@ -135,6 +183,7 @@ function startEdit(profile: ModelProfile) {
   editModel.value = profile.model;
   editTemperature.value = profile.temperature?.toString() ?? '';
   editMaxTokens.value = profile.max_tokens?.toString() ?? '';
+  editOptions.value = rowsFromOptions(profile.options);
   editError.value = null;
   editModalOpen.value = true;
 }
@@ -146,17 +195,20 @@ function cancelEdit() {
   editModel.value = '';
   editTemperature.value = '';
   editMaxTokens.value = '';
+  editOptions.value = [];
   editError.value = null;
   editModalOpen.value = false;
 }
 
 async function saveEdit(name: string) {
   editError.value = null;
+  const options = optionsFromRows(editOptions.value);
   const body: UpdateModelProfile = {
     ...(editProvider.value ? { provider: editProvider.value } : {}),
     ...(editModel.value ? { model: editModel.value } : {}),
     ...(editTemperature.value ? { temperature: Number(editTemperature.value) } : {}),
     ...(editMaxTokens.value ? { max_tokens: Number(editMaxTokens.value) } : {}),
+    ...(options ? { options } : {}),
   };
   try {
     await resource.update(name, body);
@@ -270,6 +322,44 @@ async function deleteProfile(name: string) {
             aria-label="Max tokens"
           />
         </Field>
+        <Field label="Options avancées (optionnel)" top-align>
+          <div class="options-editor">
+            <p class="options-hint">
+              top_p, top_k, min_p, repeat_penalty, thinking_mode... — dépend du backend LLM.
+            </p>
+            <div v-for="(row, idx) in formOptions" :key="idx" class="option-row">
+              <input
+                class="field-input option-key"
+                v-model="row.key"
+                type="text"
+                placeholder="top_p"
+                :aria-label="`Option ${idx + 1} clé`"
+              />
+              <input
+                class="field-input option-value"
+                v-model="row.value"
+                type="text"
+                placeholder="0.9"
+                :aria-label="`Option ${idx + 1} valeur`"
+              />
+              <button
+                class="btn btn-delete option-remove"
+                type="button"
+                aria-label="Supprimer cette option"
+                @click="formOptions.splice(idx, 1)"
+              >
+                ×
+              </button>
+            </div>
+            <button
+              class="btn option-add"
+              type="button"
+              @click="formOptions.push({ key: '', value: '' })"
+            >
+              + Ajouter une option
+            </button>
+          </div>
+        </Field>
         <div v-if="creationError" class="creation-error">{{ creationError }}</div>
         <template #actions>
           <button class="btn btn-create" @click="createProfile">Créer</button>
@@ -324,6 +414,44 @@ async function deleteProfile(name: string) {
             type="number"
             aria-label="Max tokens"
           />
+        </Field>
+        <Field label="Options avancées" top-align>
+          <div class="options-editor">
+            <p class="options-hint">
+              top_p, top_k, min_p, repeat_penalty, thinking_mode... — dépend du backend LLM.
+            </p>
+            <div v-for="(row, idx) in editOptions" :key="idx" class="option-row">
+              <input
+                class="field-input option-key"
+                v-model="row.key"
+                type="text"
+                placeholder="top_p"
+                :aria-label="`Option ${idx + 1} clé`"
+              />
+              <input
+                class="field-input option-value"
+                v-model="row.value"
+                type="text"
+                placeholder="0.9"
+                :aria-label="`Option ${idx + 1} valeur`"
+              />
+              <button
+                class="btn btn-delete option-remove"
+                type="button"
+                aria-label="Supprimer cette option"
+                @click="editOptions.splice(idx, 1)"
+              >
+                ×
+              </button>
+            </div>
+            <button
+              class="btn option-add"
+              type="button"
+              @click="editOptions.push({ key: '', value: '' })"
+            >
+              + Ajouter une option
+            </button>
+          </div>
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
@@ -381,5 +509,38 @@ async function deleteProfile(name: string) {
   color: #6a7185;
   font-size: 12px;
   margin: 4px 0 0 0;
+}
+
+.options-editor {
+  width: 100%;
+}
+
+.options-hint {
+  color: #6a7185;
+  font-size: 11px;
+  margin: 0 0 8px 0;
+}
+
+.option-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.option-key {
+  flex: 1;
+}
+
+.option-value {
+  flex: 1;
+}
+
+.option-remove {
+  flex: none;
+  width: 28px;
+}
+
+.option-add {
+  margin-left: 0;
 }
 </style>
