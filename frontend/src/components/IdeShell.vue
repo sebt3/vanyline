@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onBeforeUnmount, onMounted, provide, shallowRef, watch } from 'vue';
-import { DockviewVue, type DockviewReadyEvent, type VueComponent } from 'dockview-vue';
+import { DockviewVue, type DockviewReadyEvent, type VueComponent, type ContextMenuItem, type GetTabContextMenuItemsParams } from 'dockview-vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
 import Workflow from './panels/Workflow.vue';
@@ -25,6 +25,8 @@ provide('sandbox-name', props.sandboxName);
 // Handler fourni à Explorer : ouvre (ou active) l'onglet Editor du fichier —
 // un panel dockview par fichier, cf. openFile ci-dessous.
 provide('open-file', openFile);
+// Handler fourni à Explorer : ferme l'onglet Editor d'un chemin s'il est ouvert.
+provide('close-file', closeFile);
 
 const { activeConversationId, sessionError } = useIdeSession();
 
@@ -113,6 +115,33 @@ function openFile(path: string) {
     position: relativeToCenter(api, 'within'),
   });
   api.getPanel(id)?.api.setActive();
+}
+
+/** Ferme l'onglet Editor d'un chemin s'il est ouvert (renommage/suppression
+ *  côté Explorer : le panel `editor:<path>` devient obsolète). */
+function closeFile(path: string): void {
+  const api = dockviewApi.value;
+  if (!api) return;
+  api.getPanel(editorPanelId(path))?.api.close();
+}
+
+/** Copie le chemin relatif d'un fichier ouvert dans un onglet éditeur. */
+function copyPanelPath(panelId: string): void {
+  if (!navigator.clipboard) return;
+  const path = panelId.startsWith('editor:') ? panelId.slice('editor:'.length) : '';
+  if (!path) return;
+  void navigator.clipboard.writeText(path).catch(() => {});
+}
+
+/** Menu contextuel natif des onglets : Fermer / Fermer les autres / Fermer
+ *  tout, séparateur, puis « Copier le chemin » pour les onglets éditeur
+ *  (`editor:<path>`). */
+function getTabContextMenuItems(params: GetTabContextMenuItemsParams): ContextMenuItem[] {
+  const items: ContextMenuItem[] = ['close', 'closeOthers', 'closeAll', 'separator'];
+  if (params.panel.id.startsWith('editor:')) {
+    items.push({ label: 'Copier le chemin', action: () => copyPanelPath(params.panel.id) });
+  }
+  return items;
 }
 
 function addDefaultPanels(api: DockviewReadyEvent['api']) {
@@ -232,6 +261,8 @@ function onReady(event: DockviewReadyEvent) {
     }
   });
 }
+
+defineExpose({ closeFile, getTabContextMenuItems });
 </script>
 
 <template>
@@ -243,6 +274,7 @@ function onReady(event: DockviewReadyEvent) {
       class="dockview-theme-abyss"
       style="width: 100%; height: 100%"
       :components="components"
+      :get-tab-context-menu-items="getTabContextMenuItems"
       @ready="onReady"
     />
   </div>

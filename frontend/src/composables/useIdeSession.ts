@@ -6,6 +6,8 @@ export interface IdeActions {
   closeActiveTab?: () => void;
   openExplorer?: () => void;
   newTerminal?: () => void;
+  findInActiveFile?: () => void;
+  replaceInActiveFile?: () => void;
 }
 
 interface AgentOut {

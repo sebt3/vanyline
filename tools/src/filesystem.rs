@@ -48,6 +48,17 @@ pub struct DeleteFileOptions {
     pub path: String,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MkdirOptions {
+    pub path: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct RenameFileOptions {
+    pub path: String,
+    pub to: String,
+}
+
 // ---------------------------------------------------------------------------
 // Helper: FileNotFound hint
 // ---------------------------------------------------------------------------
@@ -597,6 +608,90 @@ pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError
                 }
                 Err(e) => Err(ToolsError::Io { path, source: e }),
             }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// mkdir
+// ---------------------------------------------------------------------------
+
+#[must_use]
+pub fn mkdir(opts: MkdirOptions) -> BoxedFuture<Result<(), ToolsError>> {
+    let path = opts.path;
+    Box::pin(async move {
+        match tokio::fs::create_dir_all(&path).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                Err(ToolsError::NotADirectory(path))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                Err(ToolsError::PermissionDenied(path))
+            }
+            Err(e) => Err(ToolsError::Io { path, source: e }),
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// rename_file
+// ---------------------------------------------------------------------------
+
+#[must_use]
+pub fn rename_file(opts: RenameFileOptions) -> BoxedFuture<Result<(), ToolsError>> {
+    let path = opts.path;
+    let to = opts.to;
+    Box::pin(async move {
+        // 1. metadata — not found → FileNotFound, other → Io
+        let _meta = match tokio::fs::metadata(&path).await {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ToolsError::FileNotFound {
+                    path: path.clone(),
+                    hint: file_not_found_hint(&path),
+                });
+            }
+            Err(e) => {
+                return Err(ToolsError::Io {
+                    path: path.clone(),
+                    source: e,
+                });
+            }
+        };
+
+        // 2. parent of `to` must exist and be a directory
+        if let Some(parent) = std::path::Path::new(&to).parent()
+            && let Ok(parent_meta) = tokio::fs::metadata(parent).await
+            && parent_meta.is_file()
+        {
+            return Err(ToolsError::InvalidArgument {
+                name: "to".into(),
+                reason: format!("parent of '{}' is a file, not a directory", to),
+            });
+        }
+        if let Some(parent) = std::path::Path::new(&to).parent()
+            && let Err(e) = tokio::fs::metadata(parent).await
+        {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err(ToolsError::InvalidArgument {
+                    name: "to".into(),
+                    reason: format!("parent of '{}' does not exist or is not a directory", to),
+                });
+            }
+            if e.kind() == std::io::ErrorKind::PermissionDenied {
+                return Err(ToolsError::PermissionDenied(
+                    parent.to_string_lossy().to_string(),
+                ));
+            }
+        }
+
+        // 3. rename
+        match tokio::fs::rename(&path, &to).await {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                Err(ToolsError::PermissionDenied(path))
+            }
+            Err(e) => Err(ToolsError::Io { path, source: e }),
         }
     })
 }
@@ -1420,5 +1515,163 @@ mod tests {
         assert!(result.is_ok());
         let meta = tokio::fs::metadata(&path).await.unwrap();
         assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+    }
+
+    // -----------------------------------------------------------------------
+    /// `mkdir` tests
+    /// -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn mkdir_creates_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new_dir");
+
+        mkdir(MkdirOptions {
+            path: path.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+
+        assert!(path.exists());
+        assert!(path.is_dir());
+    }
+
+    #[tokio::test]
+    async fn mkdir_creates_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a/b/c");
+
+        mkdir(MkdirOptions {
+            path: path.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+
+        assert!(path.exists());
+        assert!(path.is_dir());
+    }
+
+    #[tokio::test]
+    async fn mkdir_existing_dir_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dup");
+        tokio::fs::create_dir(&path).await.unwrap();
+
+        mkdir(MkdirOptions {
+            path: path.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn mkdir_on_file_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.txt");
+        tokio::fs::write(&path, "data").await.unwrap();
+
+        let result = mkdir(MkdirOptions {
+            path: path.to_string_lossy().to_string(),
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::NotADirectory(p)) => {
+                assert!(p.contains("f.txt"));
+            }
+            other => panic!("Expected NotADirectory (VNL-TLS-003), got: {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    /// `rename_file` tests
+    /// -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn rename_file_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("old.txt");
+        let to = dir.path().join("new.txt");
+        tokio::fs::write(&from, "hello rename").await.unwrap();
+
+        rename_file(RenameFileOptions {
+            path: from.to_string_lossy().to_string(),
+            to: to.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+
+        assert!(!from.exists());
+        assert!(to.exists());
+        assert_eq!(
+            tokio::fs::read_to_string(&to).await.unwrap(),
+            "hello rename"
+        );
+    }
+
+    #[tokio::test]
+    async fn rename_dir_moves() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("old");
+        let to = dir.path().join("new");
+        tokio::fs::create_dir(&from).await.unwrap();
+        tokio::fs::write(from.join("inner.txt"), "data")
+            .await
+            .unwrap();
+
+        rename_file(RenameFileOptions {
+            path: from.to_string_lossy().to_string(),
+            to: to.to_string_lossy().to_string(),
+        })
+        .await
+        .unwrap();
+
+        assert!(!from.exists());
+        assert!(to.exists());
+        assert!(to.join("inner.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn rename_file_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = rename_file(RenameFileOptions {
+            path: dir
+                .path()
+                .join("nonexistent.txt")
+                .to_string_lossy()
+                .to_string(),
+            to: dir.path().join("x.txt").to_string_lossy().to_string(),
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::FileNotFound { path: ref p, .. }) => {
+                assert!(p.contains("nonexistent.txt"));
+            }
+            other => panic!("Expected FileNotFound, got: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rename_to_missing_parent_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let from = dir.path().join("src.txt");
+        let to = dir.path().join("nope/dest.txt");
+        tokio::fs::write(&from, "data").await.unwrap();
+
+        let result = rename_file(RenameFileOptions {
+            path: from.to_string_lossy().to_string(),
+            to: to.to_string_lossy().to_string(),
+        })
+        .await;
+
+        match result {
+            Err(ToolsError::InvalidArgument { name, reason }) => {
+                assert_eq!(name, "to");
+                assert!(reason.contains("nope"));
+                assert!(reason.contains("does not exist"));
+            }
+            other => panic!("Expected InvalidArgument, got: {other:?}"),
+        }
     }
 }

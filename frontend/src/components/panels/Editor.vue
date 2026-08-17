@@ -4,11 +4,13 @@ import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
 import { oneDark } from '@codemirror/theme-one-dark';
+import { search, openSearchPanel } from '@codemirror/search';
 import { languageExtensionForPath } from './editorLanguage';
 import { registerIdeActions } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
 import type { Ref } from 'vue';
 import type { SandboxFsClient } from '../../api/sandboxWs';
+import ContextMenu, { type ContextMenuEntry } from '../ContextMenu.vue';
 
 // Un panel Editor par fichier ouvert (IdeShell.openFile) : le chemin est
 // fixe pour la durée de vie de cette instance — pas un ref partagé entre
@@ -48,7 +50,7 @@ let view: EditorView | undefined;
 
 /** Extensions communes à tout fichier — le langage (dépendant du chemin
  *  ouvert) est ajouté séparément par `loadFile`, cf. `editorLanguage.ts`. */
-const baseExtensions = [basicSetup, oneDark, denseTheme, saveKeymap()];
+const baseExtensions = [basicSetup, oneDark, denseTheme, saveKeymap(), search({ top: true })];
 
 // Visible le temps d'informer l'utilisateur — un échec de save/read silencieux
 // laisserait croire que l'édition est enregistrée alors qu'elle ne l'est pas.
@@ -74,8 +76,55 @@ function save() {
     });
 }
 
+const editorEntries: ContextMenuEntry[] = [
+  { label: 'Couper', shortcut: '⌘X', action: cutSelection },
+  { label: 'Copier', shortcut: '⌘C', action: copySelection },
+  { label: 'Coller', shortcut: '⌘V', action: pasteClipboard },
+  { sep: true },
+  { label: 'Copier le chemin du fichier', action: copyFilePath },
+];
+
+function copySelection(): void {
+  if (!view) return;
+  const { from, to } = view.state.selection.main;
+  if (from === to) return;
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  void navigator.clipboard.writeText(view.state.sliceDoc(from, to))
+    .catch((e: unknown) => showStatus(`Copie impossible : ${msg(e)}`));
+}
+
+function cutSelection(): void {
+  if (!view) return;
+  const { from, to } = view.state.selection.main;
+  if (from === to) return;
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  const text = view.state.sliceDoc(from, to);
+  void navigator.clipboard.writeText(text)
+    .then(() => { view?.dispatch({ changes: { from, to, insert: '' } }); })
+    .catch((e: unknown) => showStatus(`Coupe impossible : ${msg(e)}`));
+}
+
+function pasteClipboard(): void {
+  if (!view) return;
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  const { from, to } = view.state.selection.main;
+  void navigator.clipboard.readText()
+    .then((text) => { view?.dispatch({ changes: { from, to, insert: text } }); })
+    .catch((e: unknown) => showStatus(`Collage impossible : ${msg(e)}`));
+}
+
+function copyFilePath(): void {
+  if (!navigator.clipboard) { showStatus('Presse-papiers indisponible'); return; }
+  void navigator.clipboard.writeText(filePath)
+    .catch((e: unknown) => showStatus(`Copie impossible : ${msg(e)}`));
+}
+
+function msg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
+}
+
 /** Exposé pour les tests (fallback si keydown jsdom est fragile). */
-defineExpose({ save });
+defineExpose({ save, copySelection, cutSelection, pasteClipboard, copyFilePath, getView: () => view });
 
 function saveKeymap() {
   return keymap.of([
@@ -118,7 +167,13 @@ async function loadFile(path: string): Promise<void> {
 // active (cf. useIdeSession.registerIdeActions : fusion, dernier appelant
 // gagne pour la même clé — l'instance active gagne donc bien la course).
 function claimSaveActionIfActive() {
-  if (panelApi.isActive) registerIdeActions({ saveActiveFile: save });
+  if (panelApi.isActive) {
+    registerIdeActions({
+      saveActiveFile: save,
+      findInActiveFile: () => { if (view) openSearchPanel(view); },
+      replaceInActiveFile: () => { if (view) openSearchPanel(view); },
+    });
+  }
 }
 let activeChangeDisposable: { dispose(): void } | undefined;
 
@@ -145,7 +200,9 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="editor-wrap">
-    <div ref="host" class="editor-host"></div>
+    <ContextMenu :entries="editorEntries" :as-child="true">
+      <div ref="host" class="editor-host"></div>
+    </ContextMenu>
     <div v-if="statusMessage" class="editor-status" role="alert">{{ statusMessage }}</div>
   </div>
 </template>

@@ -3,6 +3,7 @@ import { onMounted, onBeforeUnmount, useTemplateRef, inject } from 'vue';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import '@xterm/xterm/css/xterm.css';
+import ContextMenu, { type ContextMenuEntry } from '../ContextMenu.vue';
 import { openSandboxWs } from '../../api/sandboxWs';
 
 const sandboxName = inject<string>('sandbox-name', '');
@@ -12,6 +13,27 @@ let term: Terminal | undefined;
 let fit: FitAddon | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let ws: WebSocket | undefined;
+
+const terminalEntries: ContextMenuEntry[] = [
+  { label: 'Copier', action: copySelection },
+  { label: 'Coller', action: pasteClipboard },
+];
+
+defineExpose({ copySelection, pasteClipboard });
+
+function copySelection(): void {
+  if (!term || !navigator.clipboard) return;
+  const text = term.getSelection();
+  if (!text) return;
+  void navigator.clipboard.writeText(text).catch(() => {});
+}
+
+function pasteClipboard(): void {
+  if (!term || !ws || ws.readyState !== WebSocket.OPEN || !navigator.clipboard) return;
+  void navigator.clipboard.readText()
+    .then((text) => { ws?.send(new TextEncoder().encode(text)); })
+    .catch(() => {});
+}
 
 function sendResize() {
   if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -74,7 +96,9 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div ref="host" class="terminal-host"></div>
+  <ContextMenu :entries="terminalEntries" :as-child="true">
+    <div ref="host" class="terminal-host"></div>
+  </ContextMenu>
 </template>
 
 <!-- styles inchangés (le mock n'écrit plus de lignes statiques) -->

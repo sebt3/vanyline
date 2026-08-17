@@ -85,6 +85,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/v0.1.1-first-live-deploy.md` | Premier déploiement réel de la CRD Application (media-test, 2026-08-13) : 5 bugs trouvés en live (caCert PEM inline, TLS cert-manager absent, clé DB `uri` vs `databaseUrl`, dependabot npm mal ciblé sous workspaces, frontend sans redirect 401→login) → release v0.1.1, v0.1.2 en attente (tests en cours avant publication) |
 | `.claude/memory/frontend-dashboards-nav.md` | Navigation à 3 niveaux (`/` → `/p/:project` → `/p/:project/s/:sandbox`), dashboards Projets/Sandboxes sortis des Settings, Settings restant regroupé (Modèles/Outils/Agents/Skills/Compte) + converti en modales reka-ui, champs relationnels (provider→profil→agent, mcp discovery, local-tools) remplacent le texte libre, 2 endpoints backend ajoutés |
 | `.claude/memory/ws10-language-support.md` | Détection Rust/JS-TS (présence seulement, pas de version) → `Project.status.languages` (patch dédié, pas le reconciler) → toolchains Sandbox auto-dérivées si `spec.toolchains` vide (tout ou rien). Livré par l'agent opencode `cadence` plutôt que Qwen/`.tasks/` ; review Claude a trouvé RBAC trop large + bug de chemin relatif + `fmt` non lancé, tous corrigés avant clôture. Tool `validate` (scope originel plus large) non démarré, laissé de côté |
+| `.claude/memory/editing-context-menus.md` | Menu Édition (Rechercher/Remplacer), menus contextuels (arbre/éditeur/terminal/onglets), icônes de fichier, CRUD complet sur l'arbre (mkdir/rename/root ajoutés côté sandbox). Livré par Cadence (2ᵉ feature sur ce mode, même motif que WS-10) ; review Claude a trouvé un pan du design jamais câblé (copier chemin sur l'arbre, malgré l'op backend construit pour ça), Coller qui ne remplaçait pas la sélection, suppression sans confirmation, `fmt` non lancé (3ᵉ occurrence) — et un claim de Cadence sur un "crash" de test jsdom non reproduit en review |
 
 ---
 
@@ -118,6 +119,13 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   les toolchains correspondantes si `spec.toolchains` est vide. Validation sur
   cluster réel pas encore faite (code review + tests unitaires/intégration
   seulement à ce stade).
+- **Menus contextuels & affordances d'édition** (2026-08-17,
+  `.claude/memory/editing-context-menus.md`) : arbre/éditeur/terminal/onglets
+  cliquables droit (clipboard, copie de chemin, CRUD arbre), menu Édition
+  Rechercher/Remplacer, icônes de fichier par extension. Branche
+  `feat/editing-context-menus` mergée localement dans `main`, pas encore poussée.
+  Web IDE toujours pas testé sur cluster réel (idem détection de langages
+  ci-dessus).
 
 **Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
 attaqué) :

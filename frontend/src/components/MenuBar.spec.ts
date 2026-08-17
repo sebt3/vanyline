@@ -188,4 +188,38 @@ describe('MenuBar', () => {
 
     expect(router.currentRoute.value.path).toBe('/settings');
   });
+
+  it('Rechercher (Édition) appelle ideActions.findInActiveFile', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+
+    const findInActiveFile = vi.fn();
+    registerIdeActions({ findInActiveFile });
+
+    await openMenuAndClick(wrapper, 'Édition', 'Rechercher');
+
+    expect(findInActiveFile).toHaveBeenCalledTimes(1);
+  });
+
+  it('Remplacer (Édition) appelle ideActions.replaceInActiveFile', async () => {
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+    });
+    const wrapper = mount(MenuBar, { global: { plugins: [router] } });
+    await router.push('/start');
+    await router.isReady();
+
+    const replaceInActiveFile = vi.fn();
+    registerIdeActions({ replaceInActiveFile });
+
+    await openMenuAndClick(wrapper, 'Édition', 'Remplacer');
+
+    expect(replaceInActiveFile).toHaveBeenCalledTimes(1);
+  });
 });
