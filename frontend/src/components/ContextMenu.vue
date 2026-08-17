@@ -59,7 +59,30 @@ function onSelect(entry: ContextMenuAction): void {
   </ContextMenuRoot>
 </template>
 
-<style scoped>
+<!--
+  Reka UI's Menu*/Menubar* internals drop consumer `class` on some deeply
+  nested layers (ContextMenu -> ... -> PopperContent chain): several
+  intermediate components only forward their own declared props, not
+  arbitrary attrs, so `class="content"` never reliably reaches the real
+  DOM node — it rendered with no background at all (see-through dropdown).
+  Styling against the library's own stable `data-*`/`role` hooks instead
+  is unaffected by that forwarding chain, so this block is deliberately
+  global (unscoped), not a workaround left in by mistake.
+
+  Same problem for `.trigger`/`.trigger-fill` below, different mechanism:
+  `ContextMenuTrigger` renders a `Fragment` with two root vnodes (an
+  invisible `MenuAnchor` + the actual `Primitive`) — Vue's scoped-style
+  `data-v-*` attribute is only auto-forwarded to a child component's root
+  when it has a *single* unambiguous root element, so it never reliably
+  lands on the real trigger div here. The class name itself does reach the
+  DOM (confirmed in tests), but the *scoped* rule silently never matched it
+  — `.trigger-fill`'s `height: 100%` never applied, `.editor-host`
+  (percentage height against an effectively `auto`-height parent) resolved
+  to `auto` too, so CodeMirror rendered its full document with nothing left
+  to scroll (found in real usage: editor visible, no scrollbar, can't
+  scroll — right after the DOM-attachment fix that made it visible at all).
+-->
+<style>
 .trigger {
   appearance: none;
   border: none;
@@ -73,19 +96,6 @@ function onSelect(entry: ContextMenuAction): void {
   height: 100%;
   width: 100%;
 }
-</style>
-
-<!--
-  Reka UI's Menu*/Menubar* internals drop consumer `class` on some deeply
-  nested layers (ContextMenu -> ... -> PopperContent chain): several
-  intermediate components only forward their own declared props, not
-  arbitrary attrs, so `class="content"` never reliably reaches the real
-  DOM node — it rendered with no background at all (see-through dropdown).
-  Styling against the library's own stable `data-*`/`role` hooks instead
-  is unaffected by that forwarding chain, so this block is deliberately
-  global (unscoped), not a workaround left in by mistake.
--->
-<style>
 [data-reka-menu-content] {
   min-width: 240px;
   background-color: #1c1c2a;
