@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onBeforeUnmount, useTemplateRef, inject, ref } from 'vue';
+import { onMounted, onBeforeUnmount, useTemplateRef, inject, ref, watch } from 'vue';
 import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState } from '@codemirror/state';
@@ -176,6 +176,7 @@ function claimSaveActionIfActive() {
   }
 }
 let activeChangeDisposable: { dispose(): void } | undefined;
+let stopFsClientWatch: (() => void) | undefined;
 
 onMounted(() => {
   view = new EditorView({
@@ -185,13 +186,35 @@ onMounted(() => {
     }),
     parent: hostRef.value!,
   });
-  if (filePath) void loadFile(filePath);
+  // `fsClient` (injecté depuis IdeShell) démarre à `null` et ne se résout
+  // qu'après un aller-retour réseau (ticket + handshake WS) — restaurer un
+  // layout dockview sauvegardé (`IdeShell.onReady` → `api.fromJSON`) recrée
+  // les panels Editor **avant** que cette connexion soit établie. Sans ce
+  // watch, `loadFile` s'exécutait une fois pour toutes au montage, voyait
+  // `fs === null` et abandonnait en silence — le fichier ne se chargeait
+  // jamais, sans erreur ni requête visible (bug trouvé en usage réel sur
+  // cluster, latence réseau jamais reproduite en local/tests). `immediate`
+  // couvre le cas déjà connecté (ouverture normale depuis l'Explorer, bien
+  // après le montage de l'IDE) ; l'arrêt manuel dès le premier succès évite
+  // un rechargement si `fsClient` change à nouveau plus tard.
+  if (filePath) {
+    stopFsClientWatch = watch(
+      fsClient,
+      (fs) => {
+        if (!fs) return;
+        stopFsClientWatch?.();
+        void loadFile(filePath);
+      },
+      { immediate: true },
+    );
+  }
   claimSaveActionIfActive();
   activeChangeDisposable = panelApi.onDidActiveChange(claimSaveActionIfActive);
 });
 
 onBeforeUnmount(() => {
   activeChangeDisposable?.dispose();
+  stopFsClientWatch?.();
   view?.destroy();
   view = undefined;
   clearTimeout(statusTimer);

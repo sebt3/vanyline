@@ -81,6 +81,34 @@ describe('Editor.vue — contenu réel', () => {
     expect(wrapper.element.textContent).toContain('ligne1');
   });
 
+  it('charge le fichier dès que sandbox-fs devient prêt après le montage (fsClient null au départ)', async () => {
+    // Reproduit la restauration d'un layout dockview sauvegardé : le panel
+    // Editor est recréé avant que la connexion /ws/fs (async) soit établie.
+    const fsClientRef = ref<typeof client | null>(null);
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': fsClientRef }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // fsClient toujours null au montage : aucune requête de lecture envoyée.
+    expect(client.request).not.toHaveBeenCalledWith('read', expect.anything());
+
+    // La connexion se résout après coup.
+    fsClientRef.value = client;
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(client.request).toHaveBeenCalledWith('read', {
+      path: 'src/main.py',
+      raw: true,
+    });
+    const { getView } = wrapper.vm as { getView: () => EditorView };
+    expect(getView().state.doc.toString()).toContain('ligne1');
+  });
+
   it('Ctrl+S écrit le contenu courant', async () => {
     const wrapper = mount(Editor, {
       props: editorProps('src/main.py'),
