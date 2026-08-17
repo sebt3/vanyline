@@ -1,3 +1,4 @@
+import { defineComponent } from 'vue';
 import { mount } from '@vue/test-utils';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import ContextMenu, { type ContextMenuEntry, type ContextMenuAction } from './ContextMenu.vue';
@@ -126,7 +127,7 @@ describe('ContextMenu', () => {
     // firstNonCommentChildren.props?.ref`) — la lib se construisait quand
     // même (parent undefined accepté sans erreur) mais rien n'était jamais
     // attaché au DOM, sans aucune erreur visible.
-    const Host = {
+    const Host = defineComponent({
       components: { ContextMenu },
       template: `
         <ContextMenu :entries="[]" fill>
@@ -137,9 +138,9 @@ describe('ContextMenu', () => {
         return { mountedRef: null as HTMLElement | null };
       },
       mounted() {
-        this.mountedRef = (this.$refs.host as HTMLElement | null);
+        this.mountedRef = this.$refs.host as HTMLElement | null;
       },
-    };
+    });
 
     const wrapper = mount(Host);
 
