@@ -14,15 +14,17 @@ const workspace = computed(() =>
 </script>
 
 <template>
-  <div class="shell">
-    <div v-if="isIdeRoute" class="topbar">
-      <MenuBar />
+  <UApp>
+    <div class="shell">
+      <div v-if="isIdeRoute" class="topbar">
+        <MenuBar />
+      </div>
+      <div class="dock">
+        <router-view />
+      </div>
+      <StatusBar :workspace="workspace" :extended="isIdeRoute" />
     </div>
-    <div class="dock">
-      <router-view />
-    </div>
-    <StatusBar :workspace="workspace" :extended="isIdeRoute" />
-  </div>
+  </UApp>
 </template>
 
 <style scoped>

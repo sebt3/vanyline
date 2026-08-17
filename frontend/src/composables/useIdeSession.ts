@@ -50,11 +50,14 @@ export function clearIdeActions(): void {
 }
 
 /** Démarre une session agent : résout le premier agent configuré et crée
- *  la conversation associée. Pas de sélecteur d'agent pour ce MVP — un
- *  seul agent existe dans l'usage courant ; à revoir si plusieurs agents
- *  coexistent en pratique (choix arbitraire du premier, documenté ici
- *  plutôt que caché). */
-export async function startAgentSession(): Promise<void> {
+ *  la conversation associée, dans le contexte de la sandbox `sandboxName`
+ *  (`POST /api/conversations` exige un `context` depuis
+ *  docs/features/chat-app-fonctionnel.md, axe 1 — c'est lui qui permet au
+ *  backend de résoudre les tools MCP de cette sandbox pour le tour). Pas de
+ *  sélecteur d'agent pour ce MVP — un seul agent existe dans l'usage
+ *  courant ; à revoir si plusieurs agents coexistent en pratique (choix
+ *  arbitraire du premier, documenté ici plutôt que caché). */
+export async function startAgentSession(sandboxName: string): Promise<void> {
   sessionError.value = null;
   startingSession.value = true;
   try {
@@ -66,6 +69,7 @@ export async function startAgentSession(): Promise<void> {
     }
     const conv = await client.post<ConversationOut>('/api/conversations', {
       agent_name: agents[0].name,
+      context: { kind: 'sandbox', data: { sandbox_name: sandboxName } },
     });
     activeConversationId.value = conv.id;
   } catch (e) {

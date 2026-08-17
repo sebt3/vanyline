@@ -90,9 +90,11 @@ function onSelect(item: Item) {
       if (typeof projectName === 'string') router.push(`/p/${projectName}`);
       break;
     }
-    case 'start-agent-session':
-      void startAgentSession();
+    case 'start-agent-session': {
+      const sandboxName = route.params.sandboxName;
+      if (typeof sandboxName === 'string') void startAgentSession(sandboxName);
       break;
+    }
     case 'open-explorer':
       ideActions.value.openExplorer?.();
       break;

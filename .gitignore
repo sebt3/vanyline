@@ -1,6 +1,8 @@
 node_modules/
 target/
 frontend/dist/
+frontend/auto-imports.d.ts
+frontend/components.d.ts
 .tasks/
 coverage.json
 coverage-summary.txt
