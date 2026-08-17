@@ -71,7 +71,7 @@ impl FrameReader {
     }
 
     /// Rend la première trame complète (`payload` pur), ou `None`.
-    pub fn next(&mut self) -> Option<Vec<u8>> {
+    pub fn next_frame(&mut self) -> Option<Vec<u8>> {
         // Chercher le terminateur \r\n\r\n
         let pos = self.buf.windows(4).position(|w| w == b"\r\n\r\n")?;
         let header_bytes = &self.buf[..pos];
@@ -206,7 +206,7 @@ impl LspSession {
                 };
 
                 frame_reader.push(&buf[..n]);
-                while let Some(payload) = frame_reader.next() {
+                while let Some(payload) = frame_reader.next_frame() {
                     // Trame non-JSON → ignored with warn
                     let msg: Value = match serde_json::from_slice(&payload) {
                         Ok(msg) => msg,
@@ -339,12 +339,12 @@ impl LspSession {
         let msg: Value = serde_json::from_slice(&payload)
             .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-001: invalid JSON payload"))?;
 
-        // Vérifier l'`id` : doit être un entier si présent
+        // Vérifier l'`id` : doit être un entier (i64) si présent
         if let Some(id_val) = msg.get("id")
-            && !id_val.is_number()
+            && id_val.as_i64().is_none()
         {
             return Err(anyhow::anyhow!(
-                "VNL-SBX-LSP-002: JSON-RPC id must be integer, got string"
+                "VNL-SBX-LSP-002: JSON-RPC id must be an integer, got non-integer"
             ));
         }
 
@@ -605,16 +605,16 @@ while True:
         let chunks: Vec<Vec<u8>> = encoded.chunks(3).map(|c| c.to_vec()).collect();
         // Pousser un par un
         for chunk in &chunks {
-            reader.push(&chunk);
+            reader.push(chunk);
         }
 
         // next() doit rendre le payload
-        let result = reader.next().expect("should yield the full payload");
+        let result = reader.next_frame().expect("should yield the full payload");
         assert_eq!(result, payload, "decoded payload must match original");
 
-        // next() supplémentaire → None
+        // next_frame() supplémentaire → None
         assert!(
-            reader.next().is_none(),
+            reader.next_frame().is_none(),
             "should return None after full frame decoded"
         );
     }
@@ -628,10 +628,10 @@ while True:
         reader.push(&p1);
         reader.push(&p2);
 
-        assert_eq!(reader.next().expect("msg1"), b"hello");
-        assert_eq!(reader.next().expect("msg2"), b"world");
+        assert_eq!(reader.next_frame().expect("msg1"), b"hello");
+        assert_eq!(reader.next_frame().expect("msg2"), b"world");
         assert!(
-            reader.next().is_none(),
+            reader.next_frame().is_none(),
             "should return None after both frames"
         );
     }
@@ -877,6 +877,27 @@ while True:
             .into_bytes();
         let result = session.send(client, payload).await;
         assert!(result.is_err(), "non-integer id should return Err");
+        assert!(
+            result.unwrap_err().to_string().contains("VNL-SBX-LSP-002"),
+            "error must contain VNL-SBX-LSP-002"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 13b: send_rejects_float_id — un id flottant est non-entier → VNL-SBX-LSP-002.
+    #[tokio::test]
+    async fn send_rejects_float_id() {
+        let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root).await.unwrap();
+        let (client, _) = session.subscribe();
+
+        let payload = serde_json::json!({"jsonrpc":"2.0","id":1.5,"method":"ping","params":{}})
+            .to_string()
+            .into_bytes();
+        let result = session.send(client, payload).await;
+        assert!(result.is_err(), "float id should return Err");
         assert!(
             result.unwrap_err().to_string().contains("VNL-SBX-LSP-002"),
             "error must contain VNL-SBX-LSP-002"
