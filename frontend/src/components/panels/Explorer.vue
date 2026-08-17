@@ -266,7 +266,7 @@ defineExpose({
         <ContextMenu :entries="entriesForNode(node)">
           <span class="label">
             <component :is="node.leaf ? iconForPath(node.path) : folderIcon" class="file-icon" />
-            {{ node.label }}
+            <span class="label-text">{{ node.label }}</span>
           </span>
         </ContextMenu>
       </template>
@@ -290,15 +290,27 @@ defineExpose({
   border-radius: 6px;
 }
 .label {
-  white-space: nowrap;
+  /* Le preflight Tailwind (chargé globalement depuis chat-app-fonctionnel)
+     force `svg { display: block }` — sans ce inline-flex explicite,
+     .file-icon repasse en display:block hérité et se place au-dessus du
+     texte au lieu d'être aligné à gauche. */
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+.label-text {
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 .file-icon {
+  display: inline-block;
+  flex-shrink: 0;
   width: 13px;
   height: 13px;
-  margin-right: 4px;
-  vertical-align: -2px;
   color: var(--dv-color-abyss-secondary-text);
 }
 
