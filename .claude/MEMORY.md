@@ -57,6 +57,11 @@ Vue 3 + dockview-vue + Element Plus + Reka UI, cf. `docs/architecture.md` sectio
 le workflow/DAG (ajouté) restent non démarrés — cette famille de features n'a touché
 que le web IDE et ses prérequis d'infra.
 
+**Mise à jour (2026-08-18)** : le webchat, classé "priorité très basse" ci-dessus, a
+finalement été traité — cf. `.claude/memory/chat-app-fonctionnel.md`. Décision prise
+directement avec le développeur en session, pas une reprise planifiée de la
+réorientation. Le workflow/DAG, lui, reste non démarré.
+
 ---
 
 ## Index — fondations et features livrées
@@ -86,6 +91,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/frontend-dashboards-nav.md` | Navigation à 3 niveaux (`/` → `/p/:project` → `/p/:project/s/:sandbox`), dashboards Projets/Sandboxes sortis des Settings, Settings restant regroupé (Modèles/Outils/Agents/Skills/Compte) + converti en modales reka-ui, champs relationnels (provider→profil→agent, mcp discovery, local-tools) remplacent le texte libre, 2 endpoints backend ajoutés |
 | `.claude/memory/ws10-language-support.md` | Détection Rust/JS-TS (présence seulement, pas de version) → `Project.status.languages` (patch dédié, pas le reconciler) → toolchains Sandbox auto-dérivées si `spec.toolchains` vide (tout ou rien). Livré par l'agent opencode `cadence` plutôt que Qwen/`.tasks/` ; review Claude a trouvé RBAC trop large + bug de chemin relatif + `fmt` non lancé, tous corrigés avant clôture. Tool `validate` (scope originel plus large) non démarré, laissé de côté |
 | `.claude/memory/editing-context-menus.md` | Menu Édition (Rechercher/Remplacer), menus contextuels (arbre/éditeur/terminal/onglets), icônes de fichier, CRUD complet sur l'arbre (mkdir/rename/root ajoutés côté sandbox). Livré par Cadence (2ᵉ feature sur ce mode, même motif que WS-10) ; review Claude a trouvé un pan du design jamais câblé (copier chemin sur l'arbre, malgré l'op backend construit pour ça), Coller qui ne remplaçait pas la sélection, suppression sans confirmation, `fmt` non lancé (3ᵉ occurrence) — et un claim de Cadence sur un "crash" de test jsdom non reproduit en review |
+| `.claude/memory/chat-app-fonctionnel.md` | Chat de l'app rendu fonctionnel (3 axes) : contexte de conversation polymorphe (`chat_contexts`, extensible au-delà de sandbox), tools sandbox réellement utilisables (`extra_mcp` résolu dynamiquement, jusque-là `Vec::new()` en dur), options avancées de `ModelProfile` éditables côté web, `vue-advanced-chat` remplacé par Nuxt UI Chat (Tailwind CSS global accepté après correction d'une annonce erronée). Implémenté directement par Claude (pas Qwen/`.tasks/`) à la demande du développeur. Review Phase 3 a trouvé une faille de scoping owner réelle (sandbox d'un autre utilisateur résolvable via le contexte), corrigée avant clôture ; `fmt` non lancé (4ᵉ occurrence du motif) |
 
 ---
 
@@ -126,6 +132,13 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   `feat/editing-context-menus` mergée localement dans `main`, pas encore poussée.
   Web IDE toujours pas testé sur cluster réel (idem détection de langages
   ci-dessus).
+- **Chat de l'app rendu fonctionnel** (2026-08-18,
+  `.claude/memory/chat-app-fonctionnel.md`) : le webchat sort du statut "mock" —
+  contexte de conversation (sandbox), tools sandbox réellement câblés, options
+  avancées de modèle éditables, composant Nuxt UI Chat (Tailwind CSS désormais une
+  dépendance globale du frontend, décision actée). Branche `feat/chat-app-fonctionnel`
+  pas encore mergée. Comme les deux features précédentes : pas testé sur cluster réel
+  (pas de backend Postgres/K8s dans l'environnement de dev de cette session).
 
 **Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
 attaqué) :
@@ -136,8 +149,10 @@ attaqué) :
   `ws13-sandbox-runtime`, jamais câblé côté CLI.
 - Tool `validate` (test/lint/format par toolchain détectée, scope original plus
   large de `ws10-language-support`) — jamais démarré, pas de design doc actif.
-- Workflow/DAG (capacité "ajoutée" par la réorientation du 2026-08-09) et webchat
-  (priorité très basse) — le panneau Workflow/Chat du shell IDE reste mock.
+- Workflow/DAG (capacité "ajoutée" par la réorientation du 2026-08-09) — le panneau
+  Workflow du shell IDE reste mock. Le panneau Chat, lui, est sorti du statut mock
+  (2026-08-18, cf. `.claude/memory/chat-app-fonctionnel.md`) — le webchat n'est plus
+  "priorité très basse" en pratique, la feature a été traitée.
 - Multi-utilisateur complet, quotas
 - Permissions/approbation des tools ; compaction automatique du contexte
 - Ouverture aux autres contributeurs

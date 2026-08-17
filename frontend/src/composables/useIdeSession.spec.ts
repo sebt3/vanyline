@@ -52,7 +52,7 @@ describe('useIdeSession', () => {
   it('startAgentSession : aucun agent configuré → sessionError, pas de conversation créée', async () => {
     fetchSpy.mockResolvedValueOnce(jsonResponse([]));
 
-    await startAgentSession();
+    await startAgentSession('my-sandbox');
 
     const { activeConversationId, sessionError } = useIdeSession();
     expect(activeConversationId.value).toBeNull();
@@ -65,7 +65,7 @@ describe('useIdeSession', () => {
       .mockResolvedValueOnce(jsonResponse([{ name: 'default' }, { name: 'other' }]))
       .mockResolvedValueOnce(jsonResponse({ id: 'conv-42' }));
 
-    await startAgentSession();
+    await startAgentSession('my-sandbox');
 
     const { activeConversationId, sessionError } = useIdeSession();
     expect(activeConversationId.value).toBe('conv-42');
@@ -73,13 +73,16 @@ describe('useIdeSession', () => {
 
     const createCall = fetchSpy.mock.calls[1];
     expect(createCall[0]).toBe('/api/conversations');
-    expect(JSON.parse(createCall[1].body)).toEqual({ agent_name: 'default' });
+    expect(JSON.parse(createCall[1].body)).toEqual({
+      agent_name: 'default',
+      context: { kind: 'sandbox', data: { sandbox_name: 'my-sandbox' } },
+    });
   });
 
   it('startAgentSession : erreur réseau → sessionError, conversation inchangée', async () => {
     fetchSpy.mockRejectedValueOnce(new Error('offline'));
 
-    await startAgentSession();
+    await startAgentSession('my-sandbox');
 
     const { activeConversationId, sessionError } = useIdeSession();
     expect(activeConversationId.value).toBeNull();

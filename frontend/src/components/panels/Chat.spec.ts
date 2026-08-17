@@ -1,26 +1,31 @@
+import { createMemoryHistory, createRouter } from 'vue-router';
 import { mount } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import Chat from './Chat.vue';
 import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
 
-// vue-advanced-chat est un vrai Web Component (isCustomElement dans
-// vite.config.ts) enregistré par main.ts au démarrage réel de l'app — ce
-// spec ne charge pas main.ts, donc jsdom voit une balise custom element
-// inerte (comportement DOM standard uniquement : addEventListener marche,
-// pas de logique interne de la lib). Suffisant pour tester Chat.vue seul.
+// La sandbox courante est fournie par `IdeShell.vue` via provide/inject
+// (même pattern qu'Explorer.vue) — sans elle Chat.vue ne peut ni filtrer
+// la liste des conversations ni poser le contexte à la création.
+const provideSandboxName = { 'sandbox-name': 'my-sandbox' };
+
+function router() {
+  return createRouter({ history: createMemoryHistory(), routes: [{ path: '/', component: {} }] });
+}
+
 const { wsInstances } = vi.hoisted(() => ({
   wsInstances: [] as Array<{
-    listeners: Record<string, Array<(ev: unknown) => void>>;
+    listeners: Record<string, Array<(ev: { data?: unknown }) => void>>;
     sent: string[];
     close: () => void;
     send: (data: string) => void;
-    emitMessage: (data: unknown) => void;
+    emit: (type: string, data?: unknown) => void;
   }>,
 }));
 
 vi.mock('../../api/chatWs', () => ({
   openChatWs: vi.fn(() => {
-    const listeners: Record<string, Array<(ev: unknown) => void>> = {};
+    const listeners: Record<string, Array<(ev: { data?: unknown }) => void>> = {};
     const instance = {
       listeners,
       sent: [] as string[],
@@ -28,11 +33,11 @@ vi.mock('../../api/chatWs', () => ({
       send: vi.fn(function (this: { sent: string[] }, data: string) {
         this.sent.push(data);
       }),
-      addEventListener(type: string, cb: (ev: unknown) => void) {
+      addEventListener(type: string, cb: (ev: { data?: unknown }) => void) {
         (listeners[type] ??= []).push(cb);
       },
-      emitMessage(data: unknown) {
-        for (const cb of [...(listeners['message'] ?? [])]) cb({ data });
+      emit(type: string, data?: unknown) {
+        for (const cb of [...(listeners[type] ?? [])]) cb({ data });
       },
     };
     wsInstances.push(instance as unknown as (typeof wsInstances)[number]);
@@ -49,23 +54,19 @@ function jsonResponse(body: unknown) {
   );
 }
 
-/** Route par URL plutôt que par ordre d'appel — `Chat.vue` fait maintenant
- *  plusieurs GET /api/conversations (liste, pour le sélecteur de session)
- *  en plus du GET .../messages, dans un ordre qui ne doit pas être un
- *  détail d'implémentation testé. `messagesByConv` : historique par id de
- *  conversation, vide par défaut. */
+/** Route par URL plutôt que par ordre d'appel. `messagesByConv` : historique
+ *  par id de conversation, vide par défaut. */
 function mockFetchRouting(messagesByConv: Record<string, unknown[]> = {}) {
   fetchSpy.mockImplementation((url: string) => {
-    if (url === '/api/conversations') return jsonResponse([]);
+    if (url.startsWith('/api/conversations?')) return jsonResponse([]);
     const match = url.match(/^\/api\/conversations\/([^/]+)\/messages$/);
     if (match) return jsonResponse(messagesByConv[match[1]] ?? []);
     return jsonResponse([]);
   });
 }
 
-/** Macrotask flush plutôt qu'un nombre fixe de microtasks : `Response.json()`
- *  traverse plusieurs `await` internes dont le nombre exact n'est pas
- *  garanti (cf. la même leçon dans sandboxWs.spec.ts). */
+/** Macrotask flush plutôt qu'un nombre fixe de microtasks — cf. la même
+ *  leçon dans sandboxWs.spec.ts / l'ancien Chat.spec.ts. */
 async function flush() {
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
@@ -81,7 +82,7 @@ describe('Chat.vue — session réelle', () => {
     clearIdeActions();
   });
 
-  it("charge l'historique puis ouvre le WS quand une conversation est active", async () => {
+  it("charge l'historique quand une conversation est active", async () => {
     mockFetchRouting({
       'conv-1': [
         {
@@ -96,67 +97,68 @@ describe('Chat.vue — session réelle', () => {
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-1';
 
-    const wrapper = mount(Chat);
+    const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
+    await flush();
     await flush();
 
     expect(fetchSpy).toHaveBeenCalledWith(
       '/api/conversations/conv-1/messages',
       expect.any(Object),
     );
-    expect(wrapper.vm).toBeTruthy();
-    expect(wsInstances.length).toBe(1);
+    // Contrairement à l'ancien vue-advanced-chat, le WS n'est plus ouvert
+    // par avance à l'activation de la conversation — le transport AI SDK
+    // (`VanylineChatTransport`) n'ouvre une connexion qu'au moment d'un
+    // envoi réel (cf. le test "envoie ... sur le WS" ci-dessous). Le backend
+    // ne pousse rien sans un message entrant, donc rien n'est perdu.
+    expect(wsInstances.length).toBe(0);
     wrapper.unmount();
   });
 
-  it('accumule les tokens en un seul message assistant jusqu\'à "done"', async () => {
+  it('liste les conversations filtrées par sandbox_name', async () => {
     mockFetchRouting();
-    const { activeConversationId } = useIdeSession();
-    activeConversationId.value = 'conv-2';
-
-    const wrapper = mount(Chat);
+    const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
     await flush();
 
-    const ws = wsInstances[0];
-    ws.emitMessage(JSON.stringify({ type: 'token', content: 'Bon' }));
-    ws.emitMessage(JSON.stringify({ type: 'token', content: 'jour' }));
-    ws.emitMessage(JSON.stringify({ type: 'done' }));
-    await flush();
-
-    // Un nouveau tour doit créer un NOUVEAU message, pas continuer l'ancien.
-    ws.emitMessage(JSON.stringify({ type: 'token', content: 'Suite' }));
-    await flush();
-
-    // Pas d'assertion directe sur messages.value (non exposé) — le test
-    // vérifie surtout l'absence de crash sur la séquence token/token/done/token,
-    // qui est le scénario de régression visé (accumulation puis reset).
+    expect(fetchSpy).toHaveBeenCalledWith(
+      '/api/conversations?sandbox_name=my-sandbox',
+      expect.any(Object),
+    );
     wrapper.unmount();
   });
 
-  it("envoie {type:'message', content} sur le WS", async () => {
+  it("soumettre le prompt ouvre le WS et envoie {type:'message', content}", async () => {
     mockFetchRouting();
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-3';
 
-    const wrapper = mount(Chat);
+    const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
+    await flush();
     await flush();
 
-    // onSendMessage n'est pas exposé — on simule l'event custom émis par
-    // vue-advanced-chat sur son propre élément (le listener @send-message
-    // est posé dessus, pas sur .chat-host).
-    const chatEl = wrapper.find('vue-advanced-chat');
-    expect(chatEl.exists()).toBe(true);
-    const event = new CustomEvent('send-message', { detail: [{ content: 'salut agent' }] });
-    chatEl.element.dispatchEvent(event);
+    const textarea = wrapper.find('textarea');
+    expect(textarea.exists()).toBe(true);
+    await textarea.setValue('hello agent');
+    await wrapper.find('form').trigger('submit');
     await flush();
 
-    const ws = wsInstances[0];
-    expect(ws.send).toHaveBeenCalledWith(JSON.stringify({ type: 'message', content: 'salut agent' }));
+    expect(wsInstances.length).toBe(1);
+    expect(wsInstances[0].sent).toEqual([
+      JSON.stringify({ type: 'message', content: 'hello agent' }),
+    ]);
+
+    // Le flux d'événements jusqu'au bout (token/done) est couvert en détail
+    // par chatTransport.spec.ts — ici on vérifie seulement que ça ne casse
+    // pas la stack Chat.vue/ChatSession/AI SDK.
+    wsInstances[0].emit('message', JSON.stringify({ type: 'token', content: 'salut' }));
+    wsInstances[0].emit('message', JSON.stringify({ type: 'done' }));
+    await flush();
+
     wrapper.unmount();
   });
 
   it('le sélecteur de session liste les conversations et change activeConversationId', async () => {
     fetchSpy.mockImplementation((url: string) => {
-      if (url === '/api/conversations') {
+      if (url.startsWith('/api/conversations?')) {
         return jsonResponse([
           { id: 'conv-a', title: 'Session A', created_at: '2026-01-01T10:00:00Z' },
           { id: 'conv-b', title: 'Session B', created_at: '2026-01-02T10:00:00Z' },
@@ -168,7 +170,8 @@ describe('Chat.vue — session réelle', () => {
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-a';
 
-    const wrapper = mount(Chat);
+    const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
+    await flush();
     await flush();
 
     const options = wrapper.findAll('option');
@@ -185,12 +188,35 @@ describe('Chat.vue — session réelle', () => {
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-x';
 
-    const wrapper = mount(Chat);
+    const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
+    await flush();
     await flush();
 
     await wrapper.find('.session-btn[title="Fermer la session"]').trigger('click');
 
     expect(activeConversationId.value).toBeNull();
+    wrapper.unmount();
+  });
+
+  it('"Nouvelle session" démarre une session dans le contexte de la sandbox courante', async () => {
+    fetchSpy.mockImplementation((url: string, init?: RequestInit) => {
+      if (url === '/api/agents') return jsonResponse([{ name: 'default' }]);
+      if (url === '/api/conversations' && init?.method === 'POST') {
+        const body = JSON.parse(init.body as string);
+        expect(body.context).toEqual({ kind: 'sandbox', data: { sandbox_name: 'my-sandbox' } });
+        return jsonResponse({ id: 'conv-new' });
+      }
+      if (url.startsWith('/api/conversations?')) return jsonResponse([]);
+      return jsonResponse([]);
+    });
+
+    const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
+    await flush();
+
+    await wrapper.find('.session-btn[title="Nouvelle session"]').trigger('click');
+    await flush();
+
+    expect(useIdeSession().activeConversationId.value).toBe('conv-new');
     wrapper.unmount();
   });
 });

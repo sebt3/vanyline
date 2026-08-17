@@ -138,16 +138,23 @@ describe('MenuBar', () => {
 
     const router = createRouter({
       history: createMemoryHistory(),
-      routes: [{ path: '/start', component: { template: '<div>Start</div>' } }],
+      routes: [
+        { path: '/p/:projectName/s/:sandboxName', component: { template: '<div>Sandbox</div>' } },
+      ],
     });
     const wrapper = mount(MenuBar, { global: { plugins: [router] } });
-    await router.push('/start');
+    await router.push('/p/demo/s/main');
     await router.isReady();
 
     await openMenuAndClick(wrapper, 'Exécution', 'Nouvelle session agent');
     await new Promise((r) => setTimeout(r, 0));
 
     expect(useIdeSession().activeConversationId.value).toBe('conv-1');
+    const createCall = fetchSpy.mock.calls.find(([url]) => url === '/api/conversations');
+    expect(JSON.parse((createCall?.[1] as RequestInit).body as string)).toEqual({
+      agent_name: 'default',
+      context: { kind: 'sandbox', data: { sandbox_name: 'main' } },
+    });
     vi.unstubAllGlobals();
   });
   it('navigue vers /settings quand on clique sur Configuration', async () => {

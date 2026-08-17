@@ -60,6 +60,13 @@ pub enum ChatEvent {
         code: String,
         message: String,
     },
+    /// Un serveur MCP sélectionné pour ce tour n'a pas pu être joint — contrairement
+    /// à `Error`, non terminale : le tour continue sans les tools de ce serveur
+    /// (cf. `connect_mcp_servers_selected`, avant ce fix l'échec était seulement loggé).
+    ToolUnavailable {
+        server: String,
+        reason: String,
+    },
 }
 
 #[async_trait]

@@ -485,6 +485,180 @@ describe('ModelProfilesScreen', () => {
     expect(wrapper.text()).toContain('Network error');
   });
 
+  it('options avancées : ligne clé/valeur → POST inclut options avec la valeur parsée en JSON', async () => {
+    let created = false;
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockImplementation(async (url: unknown, init: unknown) => {
+      const urlStr = url as string;
+      const method = (init as RequestInit)?.method ?? 'GET';
+
+      if (method === 'GET' && urlStr.endsWith('/api/model-profiles')) {
+        return new Response(JSON.stringify(created ? [{
+          name: 'new-profile',
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-20250514',
+          options: { top_p: 0.9 },
+        }] : []), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'GET' && urlStr.endsWith('/api/llm-providers')) {
+        return new Response(JSON.stringify(providersResponse), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'POST' && urlStr.endsWith('/api/model-profiles')) {
+        const body = JSON.parse((init as RequestInit)?.body as string ?? '{}');
+        expect(body.options).toEqual({ top_p: 0.9 });
+        created = true;
+        return new Response(JSON.stringify({
+          name: 'new-profile',
+          provider: 'anthropic',
+          model: 'claude-sonnet-4-20250514',
+          options: { top_p: 0.9 },
+        }), {
+          status: 201,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: 'not found' }), { status: 404 });
+    });
+
+    const wrapper = mount(ModelProfilesScreen);
+    await new Promise((r) => setTimeout(r, 50));
+
+    await wrapper.find('.btn-create').trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const setInput = (el: Element, val: string) => {
+      (el as HTMLInputElement).value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setInput(dialog.querySelectorAll('input')[0], 'new-profile');
+
+    const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
+    providerSelect.value = 'anthropic';
+    providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    const modelSelect = dialog.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
+    modelSelect.value = 'claude-sonnet-4-20250514';
+    modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    await (dialog.querySelector('.option-add') as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+    setInput(dialog.querySelector('[aria-label="Option 1 clé"]')!, 'top_p');
+    setInput(dialog.querySelector('[aria-label="Option 1 valeur"]')!, '0.9');
+
+    await (dialog.querySelector('.btn-create') as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(created).toBe(true);
+    expect(wrapper.text()).toContain('new-profile');
+  });
+
+  it('options avancées : ligne sans clé → POST n\'inclut pas options', async () => {
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    let posted = false;
+    fetchSpy.mockImplementation(async (url: unknown, init: unknown) => {
+      const urlStr = url as string;
+      const method = (init as RequestInit)?.method ?? 'GET';
+      if (method === 'GET' && urlStr.endsWith('/api/model-profiles')) {
+        return new Response(JSON.stringify([]), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'GET' && urlStr.endsWith('/api/llm-providers')) {
+        return new Response(JSON.stringify(providersResponse), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (method === 'POST' && urlStr.endsWith('/api/model-profiles')) {
+        const body = JSON.parse((init as RequestInit)?.body as string ?? '{}');
+        expect(body.options).toBeUndefined();
+        posted = true;
+        return new Response(JSON.stringify({ name: 'x', provider: 'anthropic', model: 'm' }), {
+          status: 201, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: 'not found' }), { status: 404 });
+    });
+
+    const wrapper = mount(ModelProfilesScreen);
+    await new Promise((r) => setTimeout(r, 50));
+    await wrapper.find('.btn-create').trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const setInput = (el: Element, val: string) => {
+      (el as HTMLInputElement).value = val;
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    setInput(dialog.querySelectorAll('input')[0], 'x');
+    const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
+    providerSelect.value = 'anthropic';
+    providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    const modelSelect = dialog.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
+    modelSelect.value = 'claude-sonnet-4-20250514';
+    modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+
+    // Ligne ajoutée mais laissée vide (pas de clé) — ne doit pas produire `options`.
+    await (dialog.querySelector('.option-add') as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+
+    await (dialog.querySelector('.btn-create') as HTMLElement).click();
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(posted).toBe(true);
+  });
+
+  it('edit — options existantes pré-remplissent l\'éditeur clé/valeur', async () => {
+    const profile = {
+      name: 'aaa',
+      provider: 'anthropic',
+      model: 'original-model',
+      options: { top_p: 0.9, thinking_mode: 'enabled' },
+    };
+    fetchSpy = vi.spyOn(globalThis, 'fetch');
+    fetchSpy.mockImplementation(async (url: unknown) => {
+      const urlStr = url as string;
+      if (urlStr.endsWith('/api/model-profiles')) {
+        return new Response(JSON.stringify([profile]), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (urlStr.endsWith('/api/llm-providers')) {
+        return new Response(JSON.stringify(providersResponse), {
+          status: 200, headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      return new Response(JSON.stringify({ error: 'not found' }), { status: 404 });
+    });
+
+    const wrapper = mount(ModelProfilesScreen);
+    await new Promise((r) => setTimeout(r, 50));
+
+    await wrapper.find('.btn-edit').trigger('click');
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 50));
+
+    const vm = wrapper.vm as any;
+    expect(vm.editOptions).toEqual([
+      { key: 'top_p', value: '0.9' },
+      { key: 'thinking_mode', value: 'enabled' },
+    ]);
+  });
+
   it('erreur GET /api/llm-providers → message visible même avec modale d\'édition ouverte', async () => {
     const profile = {
       name: 'aaa',
