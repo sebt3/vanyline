@@ -28,7 +28,7 @@
     "@xterm/xterm": "^6.0.0",
     "ai": "^7.0.66",
     "codemirror": "^6.0.2",
-    "dockview-vue": "^7.0.4",
+    "dockview-vue": "^8.1.0",
     "element-plus": "^2.14.4",
     "reka-ui": "^2.10.3",
     "tailwindcss": "^4.3.3",
