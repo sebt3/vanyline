@@ -244,15 +244,23 @@ mod tests {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         let ticket = json["ticket"].as_str().expect("ticket in response");
 
-        // GET /ws/lsp/rust avec un ticket valide.
-        // La route existe, le ticket est consommé par ws_auth_middleware.
-        // Le statut n'est pas 401 → auth middleware a passé.
+        // GET /ws/lsp/rust avec un ticket valide et une vraie poignée de main WS
+        // (headers d'upgrade). En test `oneshot`, l'extension
+        // `hyper::upgrade::OnUpgrade` est absente : l'extractor `WebSocketUpgrade`
+        // rejette à 426 (`ConnectionNotUpgradable`), donc le statut 101 n'est pas
+        // observable ici. On vérifie ce qui l'est :
+        // - le middleware ticket a laissé passer (statut ≠ 401) ;
+        // - la route est atteinte et le ticket a été consommé.
         let resp = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method(Method::GET)
                     .uri(format!("/ws/lsp/rust?ticket={ticket}"))
+                    .header(header::CONNECTION, "upgrade")
+                    .header(header::UPGRADE, "websocket")
+                    .header(header::SEC_WEBSOCKET_VERSION, "13")
+                    .header(header::SEC_WEBSOCKET_KEY, "dGhlIHNhbXBsZQ==")
                     .body(Body::empty())
                     .unwrap(),
             )
