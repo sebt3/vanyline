@@ -555,12 +555,23 @@ par le framework — le rejet doit avoir lieu **avant** l'extracteur d'upgrade, 
 middleware plutôt qu'une vérification inline dans le handler.
 
 **`/ws/fs`** : protocole JSON requête/réponse dédié (pas le JSON-RPC MCP, taillé pour
-des tool calls LLM) — `{"op":"read|write|edit|delete|list","path":...}` →
+des tool calls LLM) — `{"op":"read|write|edit|delete|list|mkdir|rename|root","path":...}` →
 `{"ok":true|false,...}`, dispatch vers les mêmes fonctions `vanyline_tools::filesystem::*`
 que le chemin MCP, même confinement (`tools_impl::confine_path`). **Aucun champ de
 corrélation** : strictement une requête lue, une réponse écrite, dans cet ordre — un
 client qui partage la connexion entre plusieurs consommateurs (cf. `SandboxFsClient`
 côté frontend) doit sérialiser ses appels, pas un détail d'implémentation optionnel.
+
+`mkdir`/`rename`/`root` (`editing-context-menus`, CRUD arbre côté frontend) :
+`mkdir` crée aussi les dossiers parents manquants (`create_dir_all`, cohérent avec
+`write_file`) et est idempotent sur un dossier déjà existant. `rename` confine
+**les deux** chemins (`path` source et `to` destination) via `confine_path` — même
+contrainte de sécurité que les autres ops, pas de mécanisme distinct pour la
+destination. `delete` sur un dossier utilise `remove_dir` (non récursif) : erreur
+explicite `directory is not empty` plutôt qu'une suppression en cascade silencieuse.
+`root` (sans `path`) renvoie la racine absolue confinée du sandbox — seul moyen pour
+le frontend de connaître `sandbox_root`, nécessaire pour afficher un chemin absolu
+(le frontend ne voit sinon que des chemins relatifs).
 `read` numérote les lignes et tronque par défaut (`vanyline_tools::filesystem::read_file`
 réutilisé tel quel, taillé pour des sorties LLM/MCP) — **mode brut** ajouté
 (`explorer-editor-terminal-wiring`, découverte en implémentant l'éditeur) :
@@ -1033,6 +1044,35 @@ promesse d'ouverture — celle-ci se résout à la *construction* du WebSocket
 (`readyState !== OPEN`), bug trouvé en revue (le mock de test avait `readyState` à
 `OPEN` dès la construction, ce qui le masquait).
 
+**Menus contextuels et affordances d'édition** (`editing-context-menus`) : composant
+partagé [`ContextMenu.vue`](../frontend/src/components/ContextMenu.vue) (`reka-ui`
+`ContextMenu*`), même pattern déclaratif que `MenuBar.vue` (liste d'entrées `{label,
+action}` + séparateurs). Appliqué à l'arbre (nouveau fichier/dossier, copier chemin
+relatif/absolu, renommer, supprimer avec confirmation), à l'éditeur (couper/copier/
+coller sur la sélection CodeMirror, copier le chemin du fichier), et au terminal
+(copier la sélection xterm, coller dans le PTY). **Sélecteur de style partagé avec
+`Menubar*`** : l'attribut réellement rendu par `ContextMenuContent` est
+`[data-reka-menu-content]` — pas `[data-reka-context-menu-content]`, à ne pas deviner
+par analogie avec `[data-reka-menubar-content]` (même piège de forwarding de `class`
+que documenté pour `Menubar`, cf. plus bas). Les **onglets** dockview utilisent en
+revanche le menu contextuel **natif** de dockview (`getTabContextMenuItems`), pas ce
+composant — envelopper les tabs internes de dockview dans un `ContextMenu` reka-ui
+aurait demandé un rendu custom des tabs pour un gain nul.
+
+Renommer un fichier actuellement ouvert ferme son onglet plutôt que de mettre à jour
+le `path` du panel en place — `Editor.vue` le fige à la création (cf. "Editor
+multi-onglets" plus haut), changer cet invariant pour ce seul cas n'en valait pas la
+peine. Coller (menu contextuel éditeur) remplace explicitement la plage sélectionnée
+(`changes: {from, to, insert}`) — une version initiale insérait seulement à la tête de
+sélection sans la supprimer, un comportement qui divergeait du Ctrl+V natif du
+navigateur. Le menu "Édition" de `MenuBar.vue` (Rechercher/Remplacer) route les deux
+vers le même panneau CodeMirror (`openSearchPanel`) : il n'existe pas d'API publique
+pour ouvrir directement avec le champ remplacement visible. Icônes de fichier par
+extension (`fileIcon.ts`, arbre) : réutilisent les icônes génériques déjà présentes
+via `@element-plus/icons-vue` plutôt qu'un pack d'icon-theme dédié — pas de
+correspondance visuelle par langage (ex. Rust → icône générique "connexion"), accepté
+en l'état, pas un pack de logos par langage.
+
 **SettingsView** (`settings-real-config`, réorganisé par `frontend-dashboards-nav`) :
 Projets/Sandboxes en sont sortis (absorbés par les dashboards, cf. ci-dessus) ; les 7
 écrans CRUD restants sont groupés en chemin de configuration explicite plutôt qu'un
@@ -1090,6 +1130,11 @@ vue-advanced-chat + dockview-vue). Chat reste un mock complet (aucun appel rése
 priorité très basse, pas planifié. Le theming `vue-advanced-chat` reste non résolu
 (plusieurs tentatives sans effet sur une partie des couleurs, cause racine jamais
 identifiée faute d'inspection DOM réelle) — sans conséquence tant que Chat reste mock.
+Explorer force un remount complet de l'arbre (`el-tree`) après chaque création/
+renommage/suppression (changement de `:key`) — replie les dossiers dépliés à chaque
+opération plutôt que de rafraîchir juste le nœud concerné. Pas d'undo applicatif sur
+delete/rename dans l'arbre (irréversible côté `/ws/fs`, cf. section "Serveur MCP"),
+compensé côté UI par une confirmation avant Supprimer, pas avant Renommer.
 
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 
