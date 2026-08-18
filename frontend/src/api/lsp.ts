@@ -1,6 +1,7 @@
 import type { LSPClient, Transport } from '@codemirror/lsp-client';
 import { LSPClient as LSPClientClass, languageServerExtensions } from '@codemirror/lsp-client';
 import { openSandboxWs } from './sandboxWs';
+import { VanylineWorkspace } from './lspWorkspace';
 
 /** Transport JSON-RPC sur le WS sandbox : un message JSON par frame texte (contrat
  *  `sandbox/src/ws/lsp.rs`), pas de framing Content-Length. `send` throw si le WS est
@@ -39,6 +40,7 @@ async function openAndConnect(sandboxName: string, toolchain: string): Promise<L
   const client = new LSPClientClass({
     extensions: languageServerExtensions(),
     timeout: 30_000,
+    workspace: (client) => new VanylineWorkspace(client),
   }).connect(wsTransport(ws));
 
   await client.initializing;
