@@ -665,6 +665,26 @@ spec:
                       type: object
                     image:
                       type: string
+                    lsp:
+                      description: |-
+                        Spec LSP de la toolchain. None => preset par `name` (rust/node), ou pas de
+                        LSP si le nom est inconnu (repli dégradé : pas de route /ws/lsp montée pour
+                        cette toolchain).
+                      nullable: true
+                      properties:
+                        args:
+                          default: []
+                          items:
+                            type: string
+                          type: array
+                        bin:
+                          type: string
+                        image:
+                          type: string
+                      required:
+                      - bin
+                      - image
+                      type: object
                     name:
                       description: Nom du mount /toolchains/<name>. "rust" et "node" ont des presets d'env.
                       type: string
