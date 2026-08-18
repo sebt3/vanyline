@@ -11,11 +11,92 @@ use crate::AppState;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
+use serde_json;
 
 /// Close code WS quand la toolchain n'a pas de LSP configuré (mode dégradé).
 pub const CLOSE_NO_LSP: u16 = 4004;
 /// Close code WS quand le spawn du process LSP échoue.
 pub const CLOSE_SPAWN_FAILED: u16 = 4005;
+
+/// Direction de réécriture des URIs du bridge WS navigateur.
+/// - `ToAbsolute` : `file:///<relatif>` → `file://{root}/<relatif>` (navigateur → process).
+/// - `ToRelative` : `file://{root}/<relatif>` → `file:///<relatif>` (process → navigateur).
+#[derive(Clone, Copy, Debug)]
+pub(super) enum UriDirection {
+    ToAbsolute,
+    ToRelative,
+}
+
+/// Réécrit une URI individuelle selon la direction. `root` est le chemin absolu du
+/// workspace (`config.sandbox_root`, attendu ASCII). Une URI déjà dans la forme cible
+/// (ou non-`file://`) reste inchangée. Utilise `strip_prefix` (aucun slicing par octets
+/// qui pourrait paniquer sur un chemin non-ASCII).
+pub(super) fn rewrite_uri_string(uri: &str, root: &str, direction: UriDirection) -> String {
+    match direction {
+        UriDirection::ToAbsolute => {
+            // Ne réécrit que `file:///…` (URI relative LSP, celle du navigateur).
+            // Une URI `file://{host}/…` (absolue, déjà normalisée) est ignorée.
+            if !uri.starts_with("file:///") {
+                return uri.to_string();
+            }
+            // `Display::fmt()` sur Path ajoute un slash de terminaison sous Unix.
+            // On le retire pour les concaténations.
+            let root = root.strip_suffix('/').unwrap_or(root);
+            // Déjà dans le workspace ? — inchangée.
+            let abs = format!("file://{root}");
+            if uri == abs || uri.starts_with(&format!("file://{root}/")) {
+                return uri.to_string();
+            }
+            // file:///… → file://{root}/…
+            // 7 car. = "file://" ; le 8e est le slash leading du path relatif LSP.
+            format!("file://{root}/{}", uri[7..].trim_start_matches('/'))
+        }
+        UriDirection::ToRelative => {
+            // `Display::fmt()` sur Path ajoute un slash de terminaison sous Unix.
+            let root = root.strip_suffix('/').unwrap_or(root);
+            let prefix = format!("file://{root}/");
+            if uri.starts_with(&prefix) {
+                let stripped = &uri[prefix.len()..];
+                format!("file:///{stripped}")
+            } else {
+                uri.to_string()
+            }
+        }
+    }
+}
+
+/// Une clé porte une URI si elle vaut `"uri"` ou se termine par `"Uri"` (couvre
+/// `rootUri`, `targetUri`, et tout `*Uri` futur).
+fn is_uri_key(key: &str) -> bool {
+    key == "uri" || key.ends_with("Uri")
+}
+
+/// Walker JSON récursif : réécrit toute valeur string `file://…` portée par une clé
+/// `uri`/`rootUri`/`targetUri`/`*Uri`, dans les objets et tableaux. Ne réécrit pas les
+/// CLÉS d'objet (`WorkspaceEdit.changes` reste pour `lsp-rename`).
+pub(super) fn rewrite_uris(value: &mut serde_json::Value, root: &str, direction: UriDirection) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, val) in map.iter_mut() {
+                if is_uri_key(key) {
+                    if let Some(s) = val.as_str() {
+                        *val = serde_json::Value::String(rewrite_uri_string(s, root, direction));
+                    }
+                } else {
+                    // Récursion (pas seulement les sous-objets / tableaux —
+                    // les string/number/bool peuvent aussi porter des URIs).
+                    rewrite_uris(val, root, direction);
+                }
+            }
+        }
+        serde_json::Value::Array(arr) => {
+            for item in arr.iter_mut() {
+                rewrite_uris(item, root, direction);
+            }
+        }
+        _ => {}
+    }
+}
 
 /// Handler de `GET /ws/lsp/:toolchain`. Le middleware
 /// [`crate::ws::ticket::ws_auth_middleware`] a déjà validé et consommé le ticket.
@@ -65,6 +146,9 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
     // Abonne le client
     let (client_id, mut rx) = session.subscribe();
 
+    // Root du workspace (pour la normalisation bidirectionnelle des URIs LSP)
+    let root = state.config.sandbox_root.display().to_string();
+
     // Boucle bidirectionnelle : WS ⇄ process LSP
     loop {
         tokio::select! {
@@ -72,12 +156,18 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
             server_payload = rx.recv() => {
                 match server_payload {
                     Some(payload) => {
-                        let text = match String::from_utf8(payload) {
-                            Ok(t) => t,
-                            Err(_) => {
-                                tracing::error!("LSP: non-UTF8 server payload, breaking");
-                                break;
+                        let text = match serde_json::from_slice::<serde_json::Value>(&payload) {
+                            Ok(mut msg) => {
+                                rewrite_uris(&mut msg, &root, UriDirection::ToRelative);
+                                serde_json::to_string(&msg).unwrap_or_default()
                             }
+                            Err(_) => match String::from_utf8(payload) {
+                                Ok(t) => t,
+                                Err(_) => {
+                                    tracing::error!("LSP: non-UTF8 server payload, breaking");
+                                    break;
+                                }
+                            },
                         };
                         if ws.send(Message::Text(text.into())).await.is_err() {
                             break;
@@ -92,19 +182,44 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                 match ws_frame {
                     Some(Ok(Message::Text(text))) => {
                         let bytes = text.as_bytes().to_vec();
-                        if session.send(client_id, bytes).await.is_err() {
-                            // ER : envoyer une frame texte JSON-RPC d'erreur
-                            let _ = ws
-                                .send(Message::Text(
-                                    serde_json::json!({
-                                        "jsonrpc": "2.0",
-                                        "id": null,
-                                        "error": { "code": -32600, "message": "invalid JSON-RPC request" }
-                                    })
-                                    .to_string()
-                                    .into(),
-                                ))
-                                .await;
+                        match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                            Ok(mut msg) => {
+                                rewrite_uris(&mut msg, &root, UriDirection::ToAbsolute);
+                                let payload = serde_json::to_string(&msg)
+                                    .unwrap_or_default()
+                                    .into_bytes();
+                                if session.send(client_id, payload).await.is_err() {
+                                    let _ = ws
+                                        .send(Message::Text(
+                                            serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": null,
+                                                "error": { "code": -32600, "message": "invalid JSON-RPC request" }
+                                            })
+                                            .to_string()
+                                            .into(),
+                                        ))
+                                        .await;
+                                }
+                            }
+                            Err(_) => {
+                                // JSON invalide : laisser tel quel — `session.send` rendra
+                                // VNL-SBX-LSP-001 et lsp_session enverra la frame d'erreur
+                                // (comportement actuel inchangé).
+                                if session.send(client_id, bytes).await.is_err() {
+                                    let _ = ws
+                                        .send(Message::Text(
+                                            serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": null,
+                                                "error": { "code": -32600, "message": "invalid JSON-RPC request" }
+                                            })
+                                            .to_string()
+                                            .into(),
+                                        ))
+                                        .await;
+                                }
+                            }
                         }
                     }
                     // Binaire, Ping, Pong → ignorés
@@ -125,6 +240,8 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
 
     use crate::{
         AppState, AuthState, LspManager, build_app, config::Config, ws::ticket::TicketStore,
@@ -277,5 +394,113 @@ mod tests {
         // Vérifier que le ticket a été consommé par le middleware
         let claims = crate::ws::ticket::redeem_from_query(&state.tickets, Some(ticket.to_string()));
         assert!(claims.is_err(), "ticket should be consumed after request");
+    }
+
+    // ── UriDirection — tests unitaires du walker ──────────────────────────────────
+
+    const TEST_ROOT: &str = "/home/coder/workspace";
+
+    #[test]
+    fn rewrite_inbound_makes_uri_absolute() {
+        let mut value = serde_json::json!({
+            "textDocument": { "uri": "file:///src/main.rs" }
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        assert_eq!(
+            value["textDocument"]["uri"],
+            "file:///home/coder/workspace/src/main.rs"
+        );
+    }
+
+    #[test]
+    fn rewrite_inbound_keeps_already_absolute() {
+        let mut value = serde_json::json!({
+            "uri": "file:///home/coder/workspace/src/main.rs"
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        assert_eq!(value["uri"], "file:///home/coder/workspace/src/main.rs");
+    }
+
+    #[test]
+    fn rewrite_outbound_makes_uri_relative() {
+        let mut value = serde_json::json!({
+            "result": [{ "uri": "file:///home/coder/workspace/src/main.rs" }]
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToRelative);
+        assert_eq!(value["result"][0]["uri"], "file:///src/main.rs");
+    }
+
+    #[test]
+    fn rewrite_outbound_keeps_foreign_uri() {
+        let mut value = serde_json::json!({
+            "uri": "file:///other/path"
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToRelative);
+        assert_eq!(value["uri"], "file:///other/path");
+    }
+
+    #[test]
+    fn rewrite_walker_covers_nested_keys() {
+        let mut value = serde_json::json!({
+            "params": { "textDocument": { "uri": "file:///src/main.rs" } },
+            "result": [
+                { "uri": "file:///src/a.rs" },
+                { "targetUri": "file:///src/b.rs" }
+            ],
+            "workspaceFolders": [
+                { "uri": "file:///home/coder/workspace" }
+            ],
+            "message": "file:///x"
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        assert_eq!(
+            value["params"]["textDocument"]["uri"],
+            "file:///home/coder/workspace/src/main.rs"
+        );
+        assert_eq!(
+            value["result"][0]["uri"],
+            "file:///home/coder/workspace/src/a.rs"
+        );
+        assert_eq!(
+            value["result"][1]["targetUri"],
+            "file:///home/coder/workspace/src/b.rs"
+        );
+        assert_eq!(
+            value["workspaceFolders"][0]["uri"],
+            "file:///home/coder/workspace"
+        );
+        // valeur string portée par une clé non-uri → non réécrite
+        assert_eq!(value["message"], "file:///x");
+    }
+
+    #[test]
+    fn rewrite_does_not_touch_non_file_uris() {
+        let mut value = serde_json::json!({ "uri": "http://example.com" });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        assert_eq!(value["uri"], "http://example.com");
+
+        let mut value = serde_json::json!({ "uri": "http://example.com" });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToRelative);
+        assert_eq!(value["uri"], "http://example.com");
+    }
+
+    #[test]
+    fn rewrite_ignores_changes_object_keys() {
+        let mut value = serde_json::json!({
+            "changes": { "file:///src/main.rs": [] }
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        // les CLÉS d'objet ne sont pas réécrites — le walker ne touche que les valeurs
+        assert!(value["changes"].get("file:///src/main.rs").is_some());
+    }
+
+    #[test]
+    fn rewrite_roundtrip_inbound_then_outbound() {
+        let mut value = serde_json::json!({ "uri": "file:///src/main.rs" });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        assert_eq!(value["uri"], "file:///home/coder/workspace/src/main.rs");
+
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToRelative);
+        assert_eq!(value["uri"], "file:///src/main.rs");
     }
 }
