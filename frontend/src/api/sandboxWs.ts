@@ -20,7 +20,7 @@ interface WsTicketOut {
  *  perd sa première requête silencieusement. */
 export async function openSandboxWs(
   sandboxName: string,
-  path: '/ws/fs' | '/ws/terminal',
+  path: '/ws/fs' | '/ws/terminal' | `/ws/lsp/${string}`,
 ): Promise<WebSocket> {
   const { ticket, wsHost } = await client.post<WsTicketOut>(
     `/api/sandboxes/${sandboxName}/ws-ticket`,

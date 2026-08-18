@@ -359,3 +359,95 @@ describe('Editor.vue — contenu réel', () => {
     expect(writeText).not.toHaveBeenCalled();
   });
 });
+
+describe('Editor.vue — plugin LSP', () => {
+  const flush = () => flushMicrotasks();
+
+  /** Crée un fake LSPClient avec une méthode `plugin` mockée. */
+  function fakeLspPlugin() {
+    return vi.fn(() => []);
+  }
+
+  /** Fournit `get-lsp-client` qui renvoie le fake ou null selon `shouldReturn`. */
+  function makeLspProvider(shouldReturn: unknown): () => Promise<unknown> {
+    return async () => shouldReturn;
+  }
+
+  it('ajoute le plugin LSP quand un client est fourni', async () => {
+    const pluginFn = fakeLspPlugin();
+    const fakeClient = { plugin: pluginFn };
+    const provider = makeLspProvider(fakeClient);
+
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.rs'),
+      global: {
+        provide: {
+          'sandbox-fs': ref(makeClient()),
+          'get-lsp-client': provider,
+        },
+        components: { ContextMenu },
+      },
+    });
+
+    // loadFile : read → getLspClient → reconfigure → 3-4 microtasks
+    await flush();
+    await flush();
+    await flush();
+    await flush();
+
+    expect(pluginFn).toHaveBeenCalledWith('file:///src/main.rs', 'rust');
+    const { getView } = wrapper.vm as { getView: () => EditorView };
+    expect(getView().state.doc.toString()).toContain('ligne1');
+  });
+
+  it("mode dégradé : sans client LSP, pas de plugin", async () => {
+    const pluginFn = fakeLspPlugin();
+    const provider = makeLspProvider(null);
+
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.rs'),
+      global: {
+        provide: {
+          'sandbox-fs': ref(makeClient()),
+          'get-lsp-client': provider,
+        },
+        components: { ContextMenu },
+      },
+    });
+
+    await flush();
+    await flush();
+    await flush();
+    await flush();
+
+    // plugin n'a pas été appelé parce que le client est null
+    expect(pluginFn).not.toHaveBeenCalled();
+    const { getView } = wrapper.vm as { getView: () => EditorView };
+    expect(getView().state.doc.toString()).toContain('ligne1');
+  });
+
+  it('pas de toolchain pour l\'extension → le provider n\'est pas appelé', async () => {
+    const pluginFn = fakeLspPlugin();
+    const fakeClient = { plugin: pluginFn };
+    const provider = vi.fn(() => Promise.resolve(fakeClient));
+
+    mount(Editor, {
+      props: editorProps('a.py'),
+      global: {
+        provide: {
+          'sandbox-fs': ref(makeClient()),
+          'get-lsp-client': provider,
+        },
+        components: { ContextMenu },
+      },
+    });
+
+    await flush();
+    await flush();
+    await flush();
+    await flush();
+
+    // Le provider n'a pas été appelé : pas de toolchain LSP pour .py
+    expect(provider).not.toHaveBeenCalled();
+  });
+});

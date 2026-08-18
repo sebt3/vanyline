@@ -30,6 +30,33 @@ const byExtension: Record<string, () => Extension> = {
   py: () => python(),
 };
 
+/** Mapping chemin → (toolchain, languageId LSP) — identique à `toolchain_for_path`
+ *  de la sandbox (task-04). `null` si l'extension n'est pas couverte (pas de LSP,
+ *  mode dégradé). */
+export function lspToolchainForPath(
+  path: string | null,
+): { toolchain: string; languageId: string } | null {
+  if (!path) return null;
+  const ext = path.split('.').pop()?.toLowerCase();
+  if (!ext) return null;
+  switch (ext) {
+    case 'rs':
+      return { toolchain: 'rust', languageId: 'rust' };
+    case 'ts':
+    case 'tsx':
+    case 'mts':
+    case 'cts':
+      return { toolchain: 'node', languageId: 'typescript' };
+    case 'js':
+    case 'jsx':
+    case 'mjs':
+    case 'cjs':
+      return { toolchain: 'node', languageId: 'javascript' };
+    default:
+      return null;
+  }
+}
+
 /** Retourne l'extension CodeMirror pour `path`, déduite de son extension de
  *  fichier. `null`/pas d'extension reconnue → tableau vide (texte brut). */
 export function languageExtensionForPath(path: string | null): Extension[] {

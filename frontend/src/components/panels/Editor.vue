@@ -2,10 +2,11 @@
 import { onMounted, onBeforeUnmount, useTemplateRef, inject, ref, watch } from 'vue';
 import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
-import { EditorState } from '@codemirror/state';
+import { EditorState, StateEffect } from '@codemirror/state';
+import type { LSPClient } from '@codemirror/lsp-client';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { search, openSearchPanel } from '@codemirror/search';
-import { languageExtensionForPath } from './editorLanguage';
+import { languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
 import { registerIdeActions } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
 import type { Ref } from 'vue';
@@ -31,6 +32,13 @@ const panelApi = props.params.api;
 
 // Fourni par IdeShell (task-05) : 'sandbox-fs' : Ref<SandboxFsClient | null>
 const fsClient = inject<Ref<SandboxFsClient | null>>('sandbox-fs', ref(null) as Ref<SandboxFsClient | null>);
+
+// Fourni par IdeShell : get-or-create d'un client LSP par toolchain pour cette sandbox.
+// Défaut `async () => null` (tests / IDE sans provider) → mode dégradé.
+const getLspClient = inject<(toolchain: string) => Promise<LSPClient | null>>(
+  'get-lsp-client',
+  async () => null,
+);
 
 const denseTheme = EditorView.theme({
   '&': { height: '100%', fontSize: '12.5px' },
@@ -148,12 +156,27 @@ async function loadFile(path: string): Promise<void> {
       path,
       raw: true,
     });
+    const langExts = languageExtensionForPath(path);
+    // 1. Afficher le document immédiatement (pas d'attente du LSP).
     view.setState(
       EditorState.create({
         doc: resp.content,
-        extensions: [...baseExtensions, ...languageExtensionForPath(path)],
+        extensions: [...baseExtensions, ...langExts],
       }),
     );
+    // 2. Puis, si une toolchain LSP couvre ce chemin, attendre le client et
+    //    RECONFIGURER l'état avec le plugin (diagnostics/hover/complétion/keymaps).
+    const lsp = lspToolchainForPath(path);
+    if (lsp) {
+      const client = await getLspClient(lsp.toolchain);
+      if (client && view) {
+        view.dispatch({ effects: StateEffect.reconfigure.of([
+          ...baseExtensions,
+          ...langExts,
+          client.plugin(`file:///${path}`, lsp.languageId),
+        ]) });
+      }
+    }
   } catch (e) {
     showStatus(
       `Impossible d'ouvrir le fichier : ${e instanceof Error ? e.message : String(e)}`,
