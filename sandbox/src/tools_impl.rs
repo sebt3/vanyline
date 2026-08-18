@@ -375,6 +375,17 @@ pub struct LspPositionArgs {
     pub character: u64,
 }
 
+/// Argument parsing for `lsp_rename`.
+#[derive(serde::Deserialize, Clone)]
+pub struct LspRenameArgs {
+    pub path: String,
+    #[serde(default)]
+    pub line: u64,
+    #[serde(default)]
+    pub character: u64,
+    pub new_name: String,
+}
+
 /// Mapping extension of a file → (toolchain name, LSP languageId).
 /// Known toolchains by convention with controller presets: `"rust"`, `"node"`.
 /// `None` if the extension is not covered (fallback: no LSP).
@@ -399,7 +410,7 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Schemas for the 4 LSP tools for `tools/list` (same shape as
+/// Schemas for the 5 LSP tools for `tools/list` (same shape as
 /// `vanyline_tools::mcp::filesystem_tools()` : name/description/inputSchema).
 pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
@@ -453,6 +464,20 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
                 }
             }
         }),
+        serde_json::json!({
+            "name": "lsp_rename",
+            "description": "Rename a symbol at a position in a file via the LSP server (applies the resulting WorkspaceEdit to the filesystem).",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path", "new_name"],
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
+                    "line": {"type": "integer", "description": "0-based line number (default 0)."},
+                    "character": {"type": "integer", "description": "0-based character offset (default 0)."},
+                    "new_name": {"type": "string", "description": "New name for the symbol."}
+                }
+            }
+        }),
     ]
 }
 
@@ -476,6 +501,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         "lsp_hover",
         "lsp_definition",
         "lsp_references",
+        "lsp_rename",
     ];
     if !lsp_tools.contains(&name) {
         return None;
@@ -488,6 +514,12 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
         };
         LspArgs::Diagnostics(args)
+    } else if name == "lsp_rename" {
+        let args: LspRenameArgs = match serde_json::from_value(arguments.clone()) {
+            Ok(a) => a,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        LspArgs::Rename(args)
     } else {
         let args: LspPositionArgs = match serde_json::from_value(arguments.clone()) {
             Ok(a) => a,
@@ -499,6 +531,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     let raw_path = match &args {
         LspArgs::Diagnostics(a) => &a.path,
         LspArgs::Position(a) => &a.path,
+        LspArgs::Rename(a) => &a.path,
     };
 
     // Step 3: confine
@@ -574,6 +607,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             let args: LspPositionArgs = match &args {
                 LspArgs::Diagnostics(_) => unreachable!(),
                 LspArgs::Position(a) => a.clone(),
+                LspArgs::Rename(_) => unreachable!(),
             };
             match (
                 client.initialize().await,
@@ -623,6 +657,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             let args: LspPositionArgs = match &args {
                 LspArgs::Diagnostics(_) => unreachable!(),
                 LspArgs::Position(a) => a.clone(),
+                LspArgs::Rename(_) => unreachable!(),
             };
             match (
                 client.initialize().await,
@@ -679,10 +714,49 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                 (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
             }
         }
+        "lsp_rename" => {
+            let args: LspRenameArgs = match &args {
+                LspArgs::Rename(a) => a.clone(),
+                _ => unreachable!(),
+            };
+            match (
+                client.initialize().await,
+                client.did_open(&file_uri, language_id, &text).await,
+            ) {
+                (Ok(_), Ok(())) => match client
+                    .request(
+                        "textDocument/rename",
+                        serde_json::json!({
+                            "textDocument": {"uri": file_uri},
+                            "position": {"line": args.line, "character": args.character},
+                            "newName": args.new_name
+                        }),
+                    )
+                    .await
+                {
+                    Ok(result) => {
+                        if result.is_null() {
+                            Some(ok_result("no rename".to_string()))
+                        } else {
+                            match apply_workspace_edit(&state.config.sandbox_root, &result).await {
+                                Ok(files) if files.is_empty() => {
+                                    Some(ok_result("no rename".to_string()))
+                                }
+                                Ok(files) => Some(ok_result(files.join("\n"))),
+                                Err(e) => Some(err_result(e.to_string())),
+                            }
+                        }
+                    }
+                    Err(e) => Some(err_result(e.to_string())),
+                },
+                (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
+            }
+        }
         "lsp_references" => {
             let args: LspPositionArgs = match &args {
                 LspArgs::Diagnostics(_) => unreachable!(),
                 LspArgs::Position(a) => a.clone(),
+                LspArgs::Rename(_) => unreachable!(),
             };
             match (
                 client.initialize().await,
@@ -742,10 +816,244 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     }
 }
 
+/// Extrait les `(uri, edits)` d'un `WorkspaceEdit` LSP : `changes` (map uri → TextEdit[])
+/// et `documentChanges` (array de `{ textDocument: { uri }, edits }`). Ordre : d'abord
+/// `changes`, puis `documentChanges` (déduplication par URI conservée — les edits d'une
+/// même URI sont concaténés).
+fn workspace_edit_files(edit: &Value) -> Vec<(String, Vec<Value>)> {
+    let mut result = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    // Process `changes` first (map uri → TextEdit[])
+    if let Some(changes) = edit.get("changes").and_then(|v| v.as_object()) {
+        for (uri, edits) in changes {
+            if let Some(edits_arr) = edits.as_array() {
+                seen.insert(uri.clone());
+                result.push((uri.clone(), edits_arr.clone()));
+            }
+        }
+    }
+
+    // Process `documentChanges` (array of { textDocument: { uri }, edits })
+    if let Some(doc_changes) = edit.get("documentChanges").and_then(|v| v.as_array()) {
+        for dc in doc_changes {
+            if let (Some(uri), Some(edits)) = (
+                dc.get("textDocument")
+                    .and_then(|td| td.get("uri"))
+                    .and_then(|u| u.as_str()),
+                dc.get("edits").and_then(|e| e.as_array()),
+            ) {
+                let uri_str = uri.to_string();
+                if seen.insert(uri_str.clone()) {
+                    result.push((uri_str, edits.clone()));
+                } else if let Some(pos) = result.iter().position(|(u, _)| u == &uri_str) {
+                    // Append edits to existing entry
+                    let existing = &result[pos].1;
+                    let new_edits = edits.clone();
+                    let mut merged = existing.clone();
+                    merged.extend(new_edits);
+                    result[pos] = (uri_str.clone(), merged);
+                }
+            }
+        }
+    }
+
+    result
+}
+
+/// Convertit une position LSP `{line, character}` (0-based) en offset dans `content`.
+/// `character` compté en caractères UTF-8 (approximation UTF-16 LSP, acceptée MVP).
+/// Clamp si `character` dépasse la fin de ligne. Erreur `VNL-SBX-LSP-007` si `line`
+/// hors limites.
+fn position_to_offset(content: &str, line: u64, character: u64) -> anyhow::Result<usize> {
+    let line = line as usize;
+    let char_offset = character as usize;
+    let lines: Vec<&str> = content.lines().collect();
+
+    if line >= lines.len() {
+        return Err(anyhow::anyhow!(
+            "VNL-SBX-LSP-007: line {} out of range ({} lines)",
+            line,
+            lines.len()
+        ));
+    }
+
+    let line_text = lines[line];
+    let chars: Vec<char> = line_text.chars().collect();
+    let actual_len = chars.len();
+
+    // Clamp character to line length
+    let clamped = char_offset.min(actual_len);
+
+    // Compute byte offset: sum of byte lengths of all previous lines + byte offset in current line
+    let mut byte_offset: usize = 0;
+    for &line_str in &lines[..line] {
+        byte_offset += line_str.len() + 1; // +1 for the newline
+    }
+    // Add the byte offset within the current line
+    byte_offset += chars[..clamped].iter().map(|c| c.len_utf8()).sum::<usize>();
+
+    Ok(byte_offset)
+}
+
+/// Applique des `TextEdit` LSP (`{ range: { start, end }, newText }`) à `content`.
+/// Convertit chaque range en offsets, vérifie `start <= end`, trie par `start`
+/// décroissant, puis `replace_range`. Erreur `VNL-SBX-LSP-008` si range manquant/
+/// malformé ou `start > end`.
+fn apply_text_edits(content: &str, edits: &[Value]) -> anyhow::Result<String> {
+    struct ParsedEdit {
+        start: usize,
+        end: usize,
+        new_text: String,
+    }
+
+    let mut parsed = Vec::new();
+
+    for edit in edits.iter() {
+        let range = match edit.get("range") {
+            Some(r) => r,
+            None => {
+                return Err(anyhow::anyhow!("VNL-SBX-LSP-008: TextEdit missing 'range'"));
+            }
+        };
+
+        let start_offset = {
+            let start_val = range.get("start");
+            let start_line_val = start_val.and_then(|s| s.get("line"));
+            let start_char_val = start_val.and_then(|s| s.get("character"));
+            let line = match start_line_val.and_then(|v| v.as_u64()) {
+                Some(n) => n as usize,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "VNL-SBX-LSP-008: TextEdit range missing 'start' line"
+                    ));
+                }
+            };
+            let char_off = match start_char_val.and_then(|v| v.as_u64()) {
+                Some(n) => n as usize,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "VNL-SBX-LSP-008: TextEdit range missing 'start' character"
+                    ));
+                }
+            };
+            match position_to_offset(content, line as u64, char_off as u64) {
+                Ok(offset) => offset,
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "VNL-SBX-LSP-008: invalid start position in TextEdit"
+                    ));
+                }
+            }
+        };
+
+        let end_offset = {
+            let end_val = range.get("end");
+            let end_line_val = end_val.and_then(|e| e.get("line"));
+            let end_char_val = end_val.and_then(|e| e.get("character"));
+            let line = match end_line_val.and_then(|v| v.as_u64()) {
+                Some(n) => n as usize,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "VNL-SBX-LSP-008: TextEdit range missing 'end' line"
+                    ));
+                }
+            };
+            let char_off = match end_char_val.and_then(|v| v.as_u64()) {
+                Some(n) => n as usize,
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "VNL-SBX-LSP-008: TextEdit range missing 'end' character"
+                    ));
+                }
+            };
+            match position_to_offset(content, line as u64, char_off as u64) {
+                Ok(offset) => offset,
+                Err(_) => {
+                    return Err(anyhow::anyhow!(
+                        "VNL-SBX-LSP-008: invalid end position in TextEdit"
+                    ));
+                }
+            }
+        };
+
+        if start_offset > end_offset {
+            return Err(anyhow::anyhow!(
+                "VNL-SBX-LSP-008: TextEdit range start > end ({start_offset} > {end_offset})"
+            ));
+        }
+
+        let new_text = match edit.get("newText").and_then(|n| n.as_str()) {
+            Some(s) => s.to_string(),
+            None => String::new(),
+        };
+
+        parsed.push(ParsedEdit {
+            start: start_offset,
+            end: end_offset,
+            new_text,
+        });
+    }
+
+    // Sort by start descending so offsets remain valid
+    parsed.sort_by_key(|edit| std::cmp::Reverse(edit.start));
+
+    let mut result = content.to_string();
+    for edit in &parsed {
+        result.replace_range(edit.start..edit.end, &edit.new_text);
+    }
+
+    Ok(result)
+}
+
+/// Applique un `WorkspaceEdit` sur le filesystem sandbox : pour chaque `(uri, edits)`,
+/// convertit l'URI en chemin (`strip_prefix("file://")`), confine sous `sandbox_root`
+/// (échec → `VNL-SBX-LSP-009` avec le message du confine), lit (read_file raw), applique
+/// `apply_text_edits`, écrit (write_file). Rend les chemins absolus résolus modifiés.
+async fn apply_workspace_edit(sandbox_root: &Path, edit: &Value) -> anyhow::Result<Vec<String>> {
+    let mut modified = Vec::new();
+
+    for (uri, edits) in workspace_edit_files(edit) {
+        let raw_path = uri.strip_prefix("file://").unwrap_or(&uri);
+        let confined_result = confine(sandbox_root, raw_path).await;
+
+        let resolved = match confined_result {
+            Ok(r) => r,
+            Err(val) => {
+                let msg = val["content"][0]["text"]
+                    .as_str()
+                    .unwrap_or("confinement failed");
+                return Err(anyhow::anyhow!("VNL-SBX-LSP-009: {msg}"));
+            }
+        };
+
+        let text = filesystem::read_file(ReadFileOptions {
+            path: resolved.clone(),
+            offset: 0,
+            limit: 0,
+            raw: true,
+        })
+        .await?;
+
+        let new_text = apply_text_edits(&text, &edits)?;
+
+        filesystem::write_file(WriteFileOptions {
+            path: resolved.clone(),
+            content: new_text,
+        })
+        .await?;
+
+        modified.push(resolved);
+    }
+
+    Ok(modified)
+}
+
 /// Internal enum to hold parsed LSP arguments.
 enum LspArgs {
     Diagnostics(LspDiagnosticsArgs),
     Position(LspPositionArgs),
+    Rename(LspRenameArgs),
 }
 
 #[cfg(test)]
@@ -1272,6 +1580,259 @@ mod tests {
         assert_eq!(
             toolchain_for_path("src/script.JS"),
             Some(("node", "javascript"))
+        );
+    }
+
+    // ── Rename arg parsing ────────────────────────────────────────────────────
+
+    #[test]
+    fn lsp_rename_args_parse_ok() {
+        let val = serde_json::json!({
+            "path": "src/main.rs",
+            "line": 5,
+            "character": 10,
+            "new_name": "bar"
+        });
+        let args: LspRenameArgs = serde_json::from_value(val).unwrap();
+        assert_eq!(args.path, "src/main.rs");
+        assert_eq!(args.line, 5);
+        assert_eq!(args.character, 10);
+        assert_eq!(args.new_name, "bar");
+    }
+
+    #[test]
+    fn lsp_rename_args_defaults() {
+        let val = serde_json::json!({ "path": "f.rs", "new_name": "x" });
+        let args: LspRenameArgs = serde_json::from_value(val).unwrap();
+        assert_eq!(args.line, 0);
+        assert_eq!(args.character, 0);
+    }
+
+    // ── position_to_offset unit tests ─────────────────────────────────────────
+
+    #[test]
+    fn position_to_offset_line_character() {
+        // line 0, char 2 in "abc\ndef" → offset 2 (byte index of 'c')
+        assert_eq!(
+            position_to_offset("abc\ndef", 0, 2).unwrap(),
+            2,
+            "line 0 char 2 → offset 2"
+        );
+        // line 1, char 2 in "abc\ndef" → 3 (line len) + 1 (newline) + 2 = 6
+        assert_eq!(
+            position_to_offset("abc\ndef", 1, 2).unwrap(),
+            6,
+            "line 1 char 2 → offset 6"
+        );
+        // line 2 is out of range
+        let err = position_to_offset("abc\ndef", 2, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("VNL-SBX-LSP-007"),
+            "out-of-range line should return VNL-SBX-LSP-007"
+        );
+    }
+
+    /// ── apply_text_edits unit tests ──────────────────────────────────────────
+
+    #[test]
+    fn apply_text_edits_replaces_range() {
+        let content = "fn main() {}";
+        let edit = serde_json::json!({
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 0, "character": 2}
+            },
+            "newText": "X"
+        });
+        let result = apply_text_edits(content, &[edit]).unwrap();
+        assert_eq!(result, "X main() {}");
+    }
+
+    #[test]
+    fn apply_text_edits_multiple_sorted_descending() {
+        let content = "abcd";
+        let e1 = serde_json::json!({
+            "range": {
+                "start": {"line": 0, "character": 1},
+                "end": {"line": 0, "character": 2}
+            },
+            "newText": "X"
+        });
+        let e2 = serde_json::json!({
+            "range": {
+                "start": {"line": 0, "character": 2},
+                "end": {"line": 0, "character": 3}
+            },
+            "newText": "Y"
+        });
+        let result = apply_text_edits(content, &[e1, e2]).unwrap();
+        // Sorted descending: (2,3,"Y") first → "aXcd", then (1,2,"X") → "aXYd"
+        assert_eq!(result, "aXYd");
+    }
+
+    #[test]
+    fn apply_text_edits_invalid_range_errors() {
+        let content = "foo";
+        let edit = serde_json::json!({
+            "range": {
+                "start": {"line": 0, "character": 5},
+                "end": {"line": 0, "character": 2}
+            },
+            "newText": "X"
+        });
+        let err = apply_text_edits(content, &[edit]).unwrap_err();
+        assert!(
+            err.to_string().contains("VNL-SBX-LSP-008"),
+            "start > end should return VNL-SBX-LSP-008, got: {}",
+            err
+        );
+    }
+
+    /// ── workspace_edit_files unit tests ──────────────────────────────────────
+
+    #[test]
+    fn workspace_edit_files_both_forms() {
+        let edit = serde_json::json!({
+            "changes": {
+                "file:///a": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "X"}]
+            },
+            "documentChanges": [{
+                "textDocument": {"uri": "file:///b"},
+                "edits": [{"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}, "newText": "Y"}]
+            }]
+        });
+        let files = workspace_edit_files(&edit);
+        assert_eq!(files.len(), 2);
+        assert_eq!(files[0].0, "file:///a");
+        assert_eq!(files[1].0, "file:///b");
+    }
+
+    #[test]
+    fn workspace_edit_files_empty_returns_empty() {
+        let edit = serde_json::json!({});
+        let files = workspace_edit_files(&edit);
+        assert!(files.is_empty());
+    }
+
+    /// ── Rename integration tests ─────────────────────────────────────────────
+    /// Helper: creates an AppState with a fake Rust LSP (nodiag script).
+    /// Writes `main.rs` with `"fn main() {}"` into the tempdir.
+    async fn make_lsp_state_nodiag(name: &str) -> (AppState, tempfile::TempDir) {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let script_path = tmpdir.path().join(format!("fake_lsp_{name}.py"));
+        std::fs::write(&script_path, lsp_test_fakes::FAKE_LSP_NODIAG_PY).unwrap();
+        let rust_home = tmpdir.path().join("main.rs");
+        std::fs::write(&rust_home, "fn main() {}").unwrap();
+
+        let config = Arc::new(Config {
+            listen: "0.0.0.0:3000".into(),
+            tls_cert: None,
+            tls_key: None,
+            oidc_issuer: None,
+            oidc_audience: None,
+            auth_groups_admin: "kubernetes-admin".into(),
+            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+            no_auth: true,
+            static_token: None,
+            public_url: None,
+            oidc_ca_cert: None,
+            metrics_listen: "0.0.0.0:9090".into(),
+            otel_endpoint: None,
+            sandbox_root: tmpdir.path().to_path_buf(),
+        });
+        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let lsp = Arc::new(LspManager::new(
+            vec![crate::lsp::LspToolchain {
+                name: "rust".to_string(),
+                bin: "python3".to_string(),
+                args: vec![script_path.to_string_lossy().to_string()],
+            }],
+            tmpdir.path().to_path_buf(),
+        ));
+        let state = AppState {
+            config,
+            auth,
+            tickets: crate::ws::ticket::TicketStore::new(),
+            lsp,
+        };
+        (state, tmpdir)
+    }
+
+    #[tokio::test]
+    async fn lsp_rename_modifies_file() {
+        let (state, _tmpdir) = make_lsp_state("rename").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_rename",
+                serde_json::json!({ "path": "main.rs", "line": 0, "character": 0, "new_name": "X" }),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap_or(false),
+            "should be OK (not isError)"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("/main.rs"),
+            "result should contain the resolved path"
+        );
+        // Check the file on disk was modified
+        let disk_content = std::fs::read_to_string(_tmpdir.path().join("main.rs")).unwrap();
+        assert_eq!(disk_content, "X main() {}");
+    }
+
+    #[tokio::test]
+    async fn lsp_rename_no_changes_returns_no_rename() {
+        let (state, tmpdir) = make_lsp_state_nodiag("rename_nodiag").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_rename",
+                serde_json::json!({ "path": "main.rs", "line": 0, "character": 0, "new_name": "X" }),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap_or(false),
+            "should be OK (not isError)"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert_eq!(text, "no rename");
+        // File should be unchanged
+        let disk_content = std::fs::read_to_string(tmpdir.path().join("main.rs")).unwrap();
+        assert_eq!(disk_content, "fn main() {}");
+    }
+
+    #[tokio::test]
+    async fn lsp_rename_invalid_args_errors() {
+        let (state, _tmpdir) = make_lsp_state("rename_bad_args").await;
+        // new_name must be a string, not a number
+        let result = dispatch_lsp(
+            &state,
+            "lsp_rename",
+            serde_json::json!({ "path": "main.rs", "new_name": 42 }),
+        )
+        .await
+        .expect("dispatch returned None");
+
+        assert!(
+            result["isError"].as_bool().unwrap_or(false),
+            "should be an error"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("invalid arguments"),
+            "should contain 'invalid arguments'"
         );
     }
 }

@@ -350,6 +350,18 @@ while True:
                 "jsonrpc": "2.0", "id": msg_id,
                 "result": [{"uri": uri, "range": {"start": {"line": 0}, "end": {"line": 0}}}]
             }).encode("utf-8"))
+        elif method == "textDocument/rename":
+            uri = params.get("textDocument", {}).get("uri", "")
+            write_frame(json.dumps({
+                "jsonrpc": "2.0", "id": msg_id,
+                "result": {
+                    "changes": {
+                        uri: [
+                            {"range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 2}}, "newText": "X"}
+                        ]
+                    }
+                }
+            }).encode("utf-8"))
         else:
             write_frame(json.dumps({
                 "jsonrpc": "2.0", "id": msg_id,
