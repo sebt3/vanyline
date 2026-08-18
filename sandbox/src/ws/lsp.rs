@@ -72,12 +72,27 @@ fn is_uri_key(key: &str) -> bool {
 }
 
 /// Walker JSON récursif : réécrit toute valeur string `file://…` portée par une clé
-/// `uri`/`rootUri`/`targetUri`/`*Uri`, dans les objets et tableaux. Ne réécrit pas les
-/// CLÉS d'objet (`WorkspaceEdit.changes` reste pour `lsp-rename`).
+/// `uri`/`rootUri`/`targetUri`/`*Uri`, dans les objets et tableaux. Réécrit aussi les
+/// CLÉS d'objet de `WorkspaceEdit.changes` (map `uri → TextEdit[]`) — les clés sont
+/// des URIs.
 pub(super) fn rewrite_uris(value: &mut serde_json::Value, root: &str, direction: UriDirection) {
     match value {
         serde_json::Value::Object(map) => {
             for (key, val) in map.iter_mut() {
+                // Cas spécial `WorkspaceEdit.changes` : l'URI est une CLÉ d'objet (map uri →
+                // TextEdit[]), pas une valeur de champ `*Uri`. Réécrire les clés selon la
+                // direction (le design le prévoit pour lsp-rename).
+                if key == "changes" {
+                    if let serde_json::Value::Object(inner) = val {
+                        let mut new_inner = serde_json::Map::new();
+                        for (k, v) in inner.iter() {
+                            let new_k = rewrite_uri_string(k, root, direction);
+                            new_inner.insert(new_k, v.clone());
+                        }
+                        *val = serde_json::Value::Object(new_inner);
+                    }
+                    continue;
+                }
                 if is_uri_key(key) {
                     if let Some(s) = val.as_str() {
                         *val = serde_json::Value::String(rewrite_uri_string(s, root, direction));
@@ -485,13 +500,68 @@ mod tests {
     }
 
     #[test]
-    fn rewrite_ignores_changes_object_keys() {
+    fn rewrite_changes_object_keys_inbound() {
         let mut value = serde_json::json!({
             "changes": { "file:///src/main.rs": [] }
         });
         rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
-        // les CLÉS d'objet ne sont pas réécrites — le walker ne touche que les valeurs
+        // la CLÉ est réécrite en absolu
+        assert!(
+            value["changes"]
+                .get("file:///home/coder/workspace/src/main.rs")
+                .is_some()
+        );
+        assert!(value["changes"].get("file:///src/main.rs").is_none());
+        // la valeur [] est conservée
+        assert!(value["changes"]["file:///home/coder/workspace/src/main.rs"].is_array());
+    }
+
+    #[test]
+    fn rewrite_changes_object_keys_outbound() {
+        let mut value = serde_json::json!({
+            "changes": { "file:///home/coder/workspace/src/main.rs": [] }
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToRelative);
+        // la CLÉ est réécrite en relatif
         assert!(value["changes"].get("file:///src/main.rs").is_some());
+        assert!(
+            value["changes"]
+                .get("file:///home/coder/workspace/src/main.rs")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rewrite_changes_keeps_non_uri_keys() {
+        let mut value = serde_json::json!({
+            "changes": { "other": [] }
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        // la clé non-URI reste inchangée
+        assert!(value["changes"].get("other").is_some());
+    }
+
+    #[test]
+    fn rewrite_changes_does_not_touch_text_document_uri() {
+        let mut value = serde_json::json!({
+            "documentChanges": [{
+                "textDocument": { "uri": "file:///src/main.rs" },
+                "edits": []
+            }],
+            "changes": { "file:///src/main.rs": [] }
+        });
+        rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToAbsolute);
+        // textDocument.uri réécrit par le walker générique
+        assert_eq!(
+            value["documentChanges"][0]["textDocument"]["uri"],
+            "file:///home/coder/workspace/src/main.rs"
+        );
+        // les clés de changes réécrites par le cas spécial
+        assert!(
+            value["changes"]
+                .get("file:///home/coder/workspace/src/main.rs")
+                .is_some()
+        );
     }
 
     #[test]
