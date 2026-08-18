@@ -7,6 +7,12 @@ import Editor from './Editor.vue';
 import ContextMenu from '../ContextMenu.vue';
 import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
+import { jumpToDefinition, renameSymbol } from '@codemirror/lsp-client';
+
+vi.mock('@codemirror/lsp-client', () => ({
+  jumpToDefinition: vi.fn(() => true),
+  renameSymbol: vi.fn(() => true),
+}));
 
 function makeClient() {
   return {
@@ -449,5 +455,120 @@ describe('Editor.vue — plugin LSP', () => {
 
     // Le provider n'a pas été appelé : pas de toolchain LSP pour .py
     expect(provider).not.toHaveBeenCalled();
+  });
+});
+
+describe('Editor.vue — menu contextuel LSP', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('le menu expose Aller à la définition et Renommer le symbole', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.rs'),
+      global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const host = wrapper.find('.editor-host');
+    host.element.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    const labels = items.map((el) => el.textContent);
+    expect(labels.some((l) => l?.includes('Aller à la définition'))).toBe(true);
+    expect(labels.some((l) => l?.includes('Renommer le symbole'))).toBe(true);
+  });
+
+  it('Renommer le symbole appelle renameSymbol avec le view', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.rs'),
+      global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const host = wrapper.find('.editor-host');
+    host.element.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    const item = items.find((el) => el.textContent?.includes('Renommer le symbole'));
+    item!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(renameSymbol).toHaveBeenCalled();
+  });
+
+  it('Aller à la définition appelle jumpToDefinition avec le view', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.rs'),
+      global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const host = wrapper.find('.editor-host');
+    host.element.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    const item = items.find((el) => el.textContent?.includes('Aller à la définition'));
+    item!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(jumpToDefinition).toHaveBeenCalled();
+  });
+
+  it('mode dégradé : les actions LSP restent sans plugin et ne plantent pas', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('a.py'),
+      global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const host = wrapper.find('.editor-host');
+    host.element.dispatchEvent(
+      new MouseEvent('contextmenu', { bubbles: true, cancelable: true }),
+    );
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    const items = [...document.querySelectorAll('[role="menuitem"]')];
+    const renameItem = items.find((el) => el.textContent?.includes('Renommer le symbole'));
+    renameItem!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    const gotoItem = items.find((el) => el.textContent?.includes('Aller à la définition'));
+    gotoItem!.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+    await wrapper.vm.$nextTick();
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Les commandes mockées sont appelées sans crash
+    expect(renameSymbol).toHaveBeenCalled();
+    expect(jumpToDefinition).toHaveBeenCalled();
   });
 });

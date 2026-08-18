@@ -4,6 +4,7 @@ import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState, StateEffect } from '@codemirror/state';
 import type { LSPClient } from '@codemirror/lsp-client';
+import { jumpToDefinition, renameSymbol } from '@codemirror/lsp-client';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { search, openSearchPanel } from '@codemirror/search';
 import { languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
@@ -88,6 +89,21 @@ const editorEntries: ContextMenuEntry[] = [
   { label: 'Couper', shortcut: '⌘X', action: cutSelection },
   { label: 'Copier', shortcut: '⌘C', action: copySelection },
   { label: 'Coller', shortcut: '⌘V', action: pasteClipboard },
+  { sep: true },
+  {
+    label: 'Aller à la définition',
+    shortcut: 'F12',
+    action: () => {
+      if (view) jumpToDefinition(view);
+    },
+  },
+  {
+    label: 'Renommer le symbole',
+    shortcut: 'F2',
+    action: () => {
+      if (view) renameSymbol(view);
+    },
+  },
   { sep: true },
   { label: 'Copier le chemin du fichier', action: copyFilePath },
 ];
