@@ -100,6 +100,39 @@ projets, cf. AGENTS.md).
 - `sandbox/src/` — nouveau module de gestion du process LSP (spawn, framing
   `Content-Length`, multiplexage multi-clients) ; nouvelle route WS
   `/ws/lsp/:toolchain` ; nouveaux handlers `lsp_*` dans `tools_impl.rs`/`mcp.rs`.
+
+### URIs LSP côté navigateur (décidé)
+
+Le navigateur ne connaît jamais le chemin absolu du workspace (`VNL_SANDBOX_ROOT`,
+posé par le controller, jamais exposé côté client — cohérent avec le pattern ticket
+existant, `POST /ws-ticket` ne rend que `{ ticket, wsHost }`). Le protocole LSP, lui,
+exige des URIs absolues (`file:///home/.../workspace/src/main.rs`) dans quasi tous ses
+messages (`textDocument.uri`, `rootUri`, `workspaceFolders[].uri`,
+`publishDiagnostics.uri`, `definition`/`references[].uri`…). Sans traduction, le
+`@codemirror/lsp-client` (comparaison d'URIs entre ce qu'il envoie et ce que le
+serveur répond) ne matche jamais rien — pas de diagnostics, pas de goto-definition,
+même intra-fichier.
+
+**Décision : normalisation bidirectionnelle côté sandbox**, dans le multiplexeur WS
+(`sandbox/src/ws/lsp.rs`) — pas d'exposition du root au navigateur (cohérent avec la
+convention relative déjà en place partout ailleurs dans l'app : `confine_path`, FS
+tree, `/ws/fs`). Le navigateur travaille exclusivement en `file:///<relatif>` ; le
+bridge réécrit vers `file://{sandbox_root}/<relatif>` en entrée et l'inverse en
+sortie.
+
+Mécanisme : walker JSON récursif (pas un allowlist de champs figé) — réécrit toute
+valeur string `file://…` portée par une clé `uri`/`rootUri`/`targetUri`/`*Uri`.
+Générique, donc valable pour les futurs types de message sans nouvelle itération de
+design.
+
+**Cas particulier déjà identifié pour la tâche `lsp-rename`** : `WorkspaceEdit.changes`
+(`workspace/applyEdit`) porte l'URI comme **clé d'objet**, pas comme valeur d'un champ
+`*Uri` — le walker générique ne l'attrape pas tel quel, prévoir un cas spécial dans
+`lsp-rename` plutôt que de découvrir le problème en implémentation.
+
+`sandbox/src/lsp_client.rs` (consommé par les tools MCP) n'est pas concerné — il
+construit déjà ses URIs absolues côté serveur, cette traduction ne concerne que le
+bridge WS navigateur.
 - `frontend/src/components/panels/Editor.vue` + `editorLanguage.ts` — branchement
   `@codemirror/lsp-client`, rendu diagnostics/hover/intellisense.
 - `frontend/src/components/ContextMenu.vue` — actions go-to-definition/rename dans le
@@ -134,7 +167,9 @@ projets, cf. AGENTS.md).
   `portable-pty`.
 - **Rename multi-fichiers** : `workspace/applyEdit` peut toucher des fichiers non
   ouverts dans un onglet — à confirmer que `/ws/fs` supporte une écriture atomique
-  groupée avant de le proposer côté UI/tool.
+  groupée avant de le proposer côté UI/tool. Prévoir aussi le cas `WorkspaceEdit.changes`
+  (URI en clé d'objet, cf. section "URIs LSP côté navigateur" ci-dessus) dans la
+  traduction d'URI.
 - **Maturité `@codemirror/lsp-client`** : package officiel mais tout jeune (v6.1.0,
   quelques jours au moment de l'écriture). À valider en usage réel ; repli possible sur
   `codemirror-languageserver` (communautaire, marimo-team) en cas de blocage.
