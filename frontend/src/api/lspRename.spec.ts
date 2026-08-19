@@ -157,7 +157,7 @@ describe('lspRename — renameSymbolCustom', () => {
       changes: [{ from: 0, to: 3, insert: 'FOO' }],
       userEvent: 'rename',
     });
-    expect(result).toEqual({ applied: ['src/main.rs'], failed: [] });
+    expect(result).toEqual({ savedToDisk: [], pendingSave: ['src/main.rs'], failed: [] });
   });
 
   it('applique fichier non ouvert via fs read/write', async () => {
@@ -190,7 +190,7 @@ describe('lspRename — renameSymbolCustom', () => {
 
     expect(fs.request).toHaveBeenCalledWith('read', { path: 'lib/other.rs', raw: true });
     expect(fs.request).toHaveBeenCalledWith('write', { path: 'lib/other.rs', content: 'FOO' });
-    expect(result).toEqual({ applied: ['lib/other.rs'], failed: [] });
+    expect(result).toEqual({ savedToDisk: ['lib/other.rs'], pendingSave: [], failed: [] });
   });
 
   it('pas de rename si result null', async () => {
@@ -213,7 +213,7 @@ describe('lspRename — renameSymbolCustom', () => {
       'FOO',
     );
 
-    expect(result).toEqual({ applied: [], failed: [] });
+    expect(result).toEqual({ savedToDisk: [], pendingSave: [], failed: [] });
     expect(view.dispatch).not.toHaveBeenCalled();
     expect(fs.request).not.toHaveBeenCalled();
   });
@@ -281,7 +281,7 @@ describe('lspRename — renameSymbolCustom', () => {
       'FOO',
     );
 
-    expect(result.applied).toContain('src/main.rs');
+    expect(result.pendingSave).toContain('src/main.rs');
     expect(result.failed).toContain('x.rs');
     expect(result.failed.length).toBe(1);
   });
@@ -316,7 +316,9 @@ describe('lspRename — renameSymbolFromView', () => {
       uri: 'file:///src/main.rs',
     } as unknown as LSPClient;
     spyPlugin.mockReturnValue(fakePlugin);
-    getFile.mockReturnValue({ getView: () => ({ state: { doc: Text.of(['abc']) } }) });
+    getFile.mockReturnValue({
+      getView: () => ({ state: { doc: Text.of(['abc']) }, dispatch: vi.fn() }),
+    });
     request.mockResolvedValue({
       changes: {
         'file:///src/main.rs': [
@@ -327,12 +329,54 @@ describe('lspRename — renameSymbolFromView', () => {
 
     const result = await renameSymbolFromView(view, fs);
 
-    expect(result).toContain('Renommé');
+    expect(result).toContain('non enregistré');
     expect(request).toHaveBeenCalledWith('textDocument/rename', {
       textDocument: { uri: 'file:///src/main.rs' },
       position: { line: 0, character: 0 },
       newName: 'FOO',
     });
+    spyPrompt.mockRestore();
+  });
+
+  it('distingue disque et éditeur dans le message', async () => {
+    const { request, getFile, sync } = makeLspClient();
+    const fs = makeFsClient();
+    const spyPrompt = vi.spyOn(window, 'prompt').mockReturnValue('FOO');
+
+    const realState = EditorState.create({ doc: 'foobar' });
+    const view = {
+      state: realState,
+      dispatch: vi.fn(),
+    } as unknown as EditorView;
+
+    const fakePlugin = {
+      client: { sync, request, workspace: { getFile } },
+      uri: 'file:///src/main.rs',
+    } as unknown as LSPClient;
+    spyPlugin.mockReturnValue(fakePlugin);
+    // src/main.rs ouvert (buffer), lib/other.rs fermé (disque)
+    getFile.mockImplementation((uri: string) =>
+      uri === 'file:///src/main.rs'
+        ? { getView: () => ({ state: { doc: Text.of(['abc']) }, dispatch: vi.fn() }) }
+        : null,
+    );
+    request.mockResolvedValue({
+      changes: {
+        'file:///src/main.rs': [
+          { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: 'FOO' },
+        ],
+        'file:///lib/other.rs': [
+          { range: { start: { line: 0, character: 0 }, end: { line: 0, character: 3 } }, newText: 'FOO' },
+        ],
+      },
+    } as WorkspaceEdit);
+
+    const result = await renameSymbolFromView(view, fs);
+
+    expect(result).toContain('Renommé sur disque');
+    expect(result).toContain('lib/other.rs');
+    expect(result).toContain("non enregistré");
+    expect(result).toContain('src/main.rs');
     spyPrompt.mockRestore();
   });
 

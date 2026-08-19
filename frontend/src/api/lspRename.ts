@@ -91,7 +91,13 @@ export function uriToPath(uri: string): string {
  *  (`{ changes, userEvent: 'rename' }`), fichiers non ouverts par `read` (raw) puis
  *  `applyTextEditsToString` puis `write` de `/ws/fs`, un par un. Séquentiel, best-effort :
  *  un fichier en échec → `failed`, on continue (pas de rollback). Throw si la requête
- *  échoue (renommage impossible). Retourne les chemins `applied` et `failed`. */
+ *  échoue (renommage impossible).
+ *
+ *  Distinction `savedToDisk`/`pendingSave` : un fichier ouvert n'est modifié que dans
+ *  le buffer CodeMirror (transaction), pas sur disque — il faut un save explicite
+ *  (⌘S) pour le persister, comme toute édition dans cet éditeur (pas d'autosave).
+ *  Un fichier non ouvert, lui, est écrit directement sur disque. Les deux ne doivent
+ *  pas être annoncés de la même façon à l'utilisateur (cf. `renameSymbolFromView`). */
 export async function renameSymbolCustom(
   client: LSPClient,
   view: EditorView,
@@ -99,7 +105,7 @@ export async function renameSymbolCustom(
   pos: number,
   fsClient: SandboxFsClient,
   newName: string,
-): Promise<{ applied: string[]; failed: string[] }> {
+): Promise<{ savedToDisk: string[]; pendingSave: string[]; failed: string[] }> {
   client.sync();
   const edit = await client.request<{
     textDocument: { uri: string };
@@ -113,9 +119,10 @@ export async function renameSymbolCustom(
       newName,
     },
   );
-  if (!edit) return { applied: [], failed: [] };
+  if (!edit) return { savedToDisk: [], pendingSave: [], failed: [] };
 
-  const applied: string[] = [];
+  const savedToDisk: string[] = [];
+  const pendingSave: string[] = [];
   const failed: string[] = [];
   for (const { uri: fileUri, edits } of workspaceEditFiles(edit)) {
     const path = uriToPath(fileUri);
@@ -131,7 +138,7 @@ export async function renameSymbolCustom(
           })),
           userEvent: 'rename',
         });
-        applied.push(path);
+        pendingSave.push(path);
       } catch (err) {
         failed.push(path);
       }
@@ -143,19 +150,23 @@ export async function renameSymbolCustom(
         });
         const content = applyTextEditsToString(resp.content, edits);
         await fsClient.request<{ ok: boolean }>('write', { path, content });
-        applied.push(path);
+        savedToDisk.push(path);
       } catch (err) {
         failed.push(path);
       }
     }
   }
-  return { applied, failed };
+  return { savedToDisk, pendingSave, failed };
 }
 
 /** Commande depuis une vue éditeur : extrait le mot sous le curseur
  *  (`view.state.wordAt(view.state.selection.main.head)`), demande le nouveau nom
  *  (`window.prompt`, défaut = mot courant), appelle `renameSymbolCustom`. Retourne un
- *  message de statut humain ('' si annulé / pas de plugin / pas de mot). */
+ *  message de statut humain ('' si annulé / pas de plugin / pas de mot) qui distingue
+ *  explicitement les fichiers écrits sur disque de ceux modifiés dans l'éditeur mais
+ *  pas encore enregistrés — cet éditeur n'a pas d'indicateur "non enregistré" sur les
+ *  onglets, un message qui ne ferait pas la différence laisserait croire le rename
+ *  entièrement persisté. */
 export async function renameSymbolFromView(
   view: EditorView,
   fsClient: SandboxFsClient,
@@ -170,7 +181,20 @@ export async function renameSymbolFromView(
   const res = await renameSymbolCustom(
     plugin.client, view, plugin.uri, word.from, fsClient, newName,
   );
-  if (res.applied.length === 0 && res.failed.length === 0) return 'Aucun renommage';
-  const msg = `Renommé dans ${res.applied.length} fichier(s) : ${res.applied.join(', ')}`;
-  return res.failed.length ? `${msg} ; Échecs : ${res.failed.join(', ')}` : msg;
+  if (!res.savedToDisk.length && !res.pendingSave.length && !res.failed.length) {
+    return 'Aucun renommage';
+  }
+  const parts: string[] = [];
+  if (res.savedToDisk.length) {
+    parts.push(`Renommé sur disque (${res.savedToDisk.length}) : ${res.savedToDisk.join(', ')}`);
+  }
+  if (res.pendingSave.length) {
+    parts.push(
+      `Modifié dans l'éditeur, non enregistré — ⌘S (${res.pendingSave.length}) : ${res.pendingSave.join(', ')}`,
+    );
+  }
+  if (res.failed.length) {
+    parts.push(`Échecs (${res.failed.length}) : ${res.failed.join(', ')}`);
+  }
+  return parts.join(' ; ');
 }
