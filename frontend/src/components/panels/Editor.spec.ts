@@ -7,11 +7,15 @@ import Editor from './Editor.vue';
 import ContextMenu from '../ContextMenu.vue';
 import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
-import { jumpToDefinition, renameSymbol } from '@codemirror/lsp-client';
+import { jumpToDefinition } from '@codemirror/lsp-client';
+import { renameSymbolFromView } from '../../api/lspRename';
 
 vi.mock('@codemirror/lsp-client', () => ({
   jumpToDefinition: vi.fn(() => true),
-  renameSymbol: vi.fn(() => true),
+}));
+
+vi.mock('../../api/lspRename', () => ({
+  renameSymbolFromView: vi.fn(async () => ''),
 }));
 
 function makeClient() {
@@ -487,7 +491,7 @@ describe('Editor.vue — menu contextuel LSP', () => {
     expect(labels.some((l) => l?.includes('Renommer le symbole'))).toBe(true);
   });
 
-  it('Renommer le symbole appelle renameSymbol avec le view', async () => {
+  it('Renommer le symbole appelle renameSymbolFromView', async () => {
     const wrapper = mount(Editor, {
       props: editorProps('src/main.rs'),
       global: { provide: { 'sandbox-fs': ref(makeClient()) }, components: { ContextMenu } },
@@ -511,7 +515,7 @@ describe('Editor.vue — menu contextuel LSP', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(renameSymbol).toHaveBeenCalled();
+    expect(renameSymbolFromView).toHaveBeenCalled();
   });
 
   it('Aller à la définition appelle jumpToDefinition avec le view', async () => {
@@ -567,8 +571,8 @@ describe('Editor.vue — menu contextuel LSP', () => {
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
 
-    // Les commandes mockées sont appelées sans crash
-    expect(renameSymbol).toHaveBeenCalled();
+    // Les commandes sont appelées sans crash
+    expect(renameSymbolFromView).toHaveBeenCalled();
     expect(jumpToDefinition).toHaveBeenCalled();
   });
 });

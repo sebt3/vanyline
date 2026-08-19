@@ -4,7 +4,8 @@ import { EditorView, basicSetup } from 'codemirror';
 import { keymap } from '@codemirror/view';
 import { EditorState, StateEffect } from '@codemirror/state';
 import type { LSPClient } from '@codemirror/lsp-client';
-import { jumpToDefinition, renameSymbol } from '@codemirror/lsp-client';
+import { jumpToDefinition } from '@codemirror/lsp-client';
+import { renameSymbolFromView } from '../../api/lspRename';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { search, openSearchPanel } from '@codemirror/search';
 import { languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
@@ -101,7 +102,11 @@ const editorEntries: ContextMenuEntry[] = [
     label: 'Renommer le symbole',
     shortcut: 'F2',
     action: () => {
-      if (view) renameSymbol(view);
+      if (view && fsClient.value) {
+        void renameSymbolFromView(view, fsClient.value).then((msg) => {
+          if (msg) showStatus(msg);
+        });
+      }
     },
   },
   { sep: true },
