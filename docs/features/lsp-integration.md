@@ -165,14 +165,24 @@ bridge WS navigateur.
 - **Multiplexage** : plusieurs `didOpen` sur une session LSP unique pour plusieurs
   clients (onglets navigateur + tools MCP) — plomberie neuve côté sandbox, absente de
   `portable-pty`.
-- **Rename multi-fichiers** : `workspace/applyEdit` peut toucher des fichiers non
-  ouverts dans un onglet — à confirmer que `/ws/fs` supporte une écriture atomique
-  groupée avant de le proposer côté UI/tool. Prévoir aussi le cas `WorkspaceEdit.changes`
-  (URI en clé d'objet, cf. section "URIs LSP côté navigateur" ci-dessus) dans la
-  traduction d'URI.
-- **Maturité `@codemirror/lsp-client`** : package officiel mais tout jeune (v6.1.0,
-  quelques jours au moment de l'écriture). À valider en usage réel ; repli possible sur
-  `codemirror-languageserver` (communautaire, marimo-team) en cas de blocage.
+- **Rename multi-fichiers (résolu)** : `renameSymbol`/`doRename` du package
+  (`@codemirror/lsp-client/src/rename.ts`) ignore silencieusement les fichiers non
+  ouverts (`getFile(uri)` → `null` → `continue`, jamais d'`updateFile`) — confirmé en
+  lisant la source lors de la tâche `lsp-rename-cross-file`. **Décision** : flux rename
+  custom côté frontend, pas `renameSymbol` — requête `textDocument/rename` directe
+  (API publique du client), application du `WorkspaceEdit` nous-mêmes : fichiers
+  ouverts via transaction CodeMirror, fichiers non ouverts via l'op `write` de
+  `/ws/fs`, un par un. Séquentiel, best-effort, pas de rollback si un fichier échoue en
+  cours de route — même comportement que `apply_workspace_edit` déjà livré côté tool
+  MCP `lsp_rename` (`sandbox/src/tools_impl.rs:1013`), pas de nouvel endpoint batch/
+  atomique sur `/ws/fs`. Cas `WorkspaceEdit.changes` (URI en clé d'objet, cf. section
+  "URIs LSP côté navigateur") à traiter dans ce flux custom, pas dans le helper du
+  package.
+- **Maturité `@codemirror/lsp-client` (risque matérialisé)** : package officiel mais
+  tout jeune (v6.1.0 au moment de l'écriture). Anticipé dans ce risque dès le design
+  initial — s'est concrétisé sur le rename cross-file (ci-dessus), résolu par flux
+  custom plutôt que par le helper du package. Rester vigilant sur la suite (menu
+  contextuel) mais pas de signal de blocage plus large à ce stade.
 - **Toolchain sans LSP connu / LSP absent de l'image** : comportement de repli si
   `toolchain.lsp` est vide — pas de route `/ws/lsp` montée, éditeur en mode dégradé
   (coloration seule, comportement actuel inchangé).
@@ -191,6 +201,8 @@ bridge WS navigateur.
    côté MCP, consommant le process partagé.
 4. `lsp-editor-client` — branchement `@codemirror/lsp-client` dans Editor.vue,
    diagnostics + hover + goto-definition.
-5. `lsp-rename` — `lsp_rename` (tool + UI), écriture multi-fichiers atomique si
-   `/ws/fs` ne le supporte pas déjà.
+5. `lsp-rename` — `lsp_rename` côté tool MCP (livré, `apply_workspace_edit`).
+   `lsp-rename-cross-file` — flux custom côté UI (`textDocument/rename` direct,
+   pas `renameSymbol`), écriture séquentielle best-effort : transaction CodeMirror
+   pour les fichiers ouverts, op `write` de `/ws/fs` un par un pour les autres.
 6. `lsp-context-menu` — actions go-to-definition/rename dans ContextMenu.vue.
