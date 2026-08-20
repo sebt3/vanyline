@@ -87,13 +87,13 @@ spec:
       serviceAccountName: vanyline-controller
       containers:
         - name: controller
-          image: ghcr.io/sebt3/vanyline-controller:v0.0.10-alpha.3
+          image: ghcr.io/sebt3/vanyline-controller:v0.0.10-alpha.4
           imagePullPolicy: Always
           env:
             - name: SANDBOX_IMAGE_TAG
-              value: "v0.0.10-alpha.3"
+              value: "v0.0.10-alpha.4"
             - name: APP_IMAGE_TAG
-              value: "v0.0.10-alpha.3"
+              value: "v0.0.10-alpha.4"
             - name: RUST_LOG
               value: "info,vanyline_controller=debug"
           resources:
