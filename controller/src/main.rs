@@ -39,7 +39,7 @@ struct Cli {
     #[arg(
         long,
         env = "TOOLCHAIN_IMAGE_RUST",
-        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-rust:", env!("CARGO_PKG_VERSION"))
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-rust:v", env!("CARGO_PKG_VERSION"))
     )]
     toolchain_image_rust: String,
 
@@ -48,7 +48,7 @@ struct Cli {
     #[arg(
         long,
         env = "TOOLCHAIN_IMAGE_NODE",
-        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-node:", env!("CARGO_PKG_VERSION"))
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-node:v", env!("CARGO_PKG_VERSION"))
     )]
     toolchain_image_node: String,
 
@@ -60,7 +60,7 @@ struct Cli {
     #[arg(
         long,
         env = "LSP_IMAGE_RUST",
-        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-rust:", env!("CARGO_PKG_VERSION"))
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-rust:v", env!("CARGO_PKG_VERSION"))
     )]
     lsp_image_rust: String,
 
@@ -68,7 +68,7 @@ struct Cli {
     #[arg(
         long,
         env = "LSP_IMAGE_NODE",
-        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-node:", env!("CARGO_PKG_VERSION"))
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-node:v", env!("CARGO_PKG_VERSION"))
     )]
     lsp_image_node: String,
 

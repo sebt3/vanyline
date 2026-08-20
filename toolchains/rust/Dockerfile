@@ -17,5 +17,12 @@
 # pin séparé sur une version upstream de rust-analyzer.
 FROM docker.io/library/rust:slim-trixie
 
+# `ln -sr` (symlink RELATIF) est indispensable ici : `rustup which` rend un
+# chemin absolu (/usr/local/rustup/toolchains/<triple>/bin/rust-analyzer), qui
+# ne résout plus une fois l'image montée en volume K8s à un chemin autre que
+# `/` (ex. /toolchains/rust-lsp/ côté pod sandbox) — un lien absolu pointe
+# alors dans le rootfs du pod, pas dans le volume. Vérifié en le cassant
+# d'abord sur un cluster réel : `ln -s` (absolu) donnait un lien mort une fois
+# monté, `ln -sr` (relatif) résout correctement quel que soit le mount path.
 RUN rustup component add rust-analyzer \
-    && ln -s "$(rustup which rust-analyzer)" /usr/local/bin/rust-analyzer
+    && ln -srf "$(rustup which rust-analyzer)" /usr/local/bin/rust-analyzer
