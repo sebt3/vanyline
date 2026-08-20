@@ -86,6 +86,30 @@ function save() {
     });
 }
 
+/** Le clic droit ne déplace pas nativement le curseur CodeMirror — sans ça, les
+ *  actions du menu contextuel qui dépendent de la sélection (Aller à la définition,
+ *  Renommer) opèrent sur la position du dernier clic *gauche*, pas sur l'endroit
+ *  cliqué. Repositionne la sélection au point cliqué avant que le menu ne s'ouvre
+ *  (le listener natif tourne avant celui de reka-ui, posé sur un ancêtre). */
+function onEditorContextMenu(event: MouseEvent): void {
+  if (!view) return;
+  const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+  if (pos !== null) view.dispatch({ selection: { anchor: pos } });
+}
+
+/** Ctrl/Cmd+clic → aller à la définition. `@codemirror/lsp-client` ne fournit pas
+ *  ce geste par défaut (juste F12/menu contextuel) — ajouté en plus, F12 reste
+ *  valide. Repositionne la sélection au point cliqué (même besoin que le clic
+ *  droit ci-dessus) avant d'appeler `jumpToDefinition`. */
+function onEditorMousedown(event: MouseEvent): void {
+  if (!view || !(event.ctrlKey || event.metaKey)) return;
+  const pos = view.posAtCoords({ x: event.clientX, y: event.clientY });
+  if (pos === null) return;
+  event.preventDefault();
+  view.dispatch({ selection: { anchor: pos } });
+  jumpToDefinition(view);
+}
+
 const editorEntries: ContextMenuEntry[] = [
   { label: 'Couper', shortcut: '⌘X', action: cutSelection },
   { label: 'Copier', shortcut: '⌘C', action: copySelection },
@@ -268,7 +292,12 @@ onBeforeUnmount(() => {
 <template>
   <div class="editor-wrap">
     <ContextMenu :entries="editorEntries" fill>
-      <div ref="host" class="editor-host"></div>
+      <div
+        ref="host"
+        class="editor-host"
+        @contextmenu="onEditorContextMenu"
+        @mousedown="onEditorMousedown"
+      ></div>
     </ContextMenu>
     <div v-if="statusMessage" class="editor-status" role="alert">{{ statusMessage }}</div>
   </div>

@@ -164,6 +164,12 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
     // Root du workspace (pour la normalisation bidirectionnelle des URIs LSP)
     let root = state.config.sandbox_root.display().to_string();
 
+    // Id (côté client, avant réécriture session) de la requête `initialize` que CE
+    // client a effectivement envoyée au process — posé seulement si ce client a
+    // gagné `try_mark_initialized`. Sert à repérer sa réponse dans le flux
+    // `server_payload` pour la mettre en cache (`set_initialize_result`).
+    let mut pending_initialize_id: Option<i64> = None;
+
     // Boucle bidirectionnelle : WS ⇄ process LSP
     loop {
         tokio::select! {
@@ -174,6 +180,13 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                         let text = match serde_json::from_slice::<serde_json::Value>(&payload) {
                             Ok(mut msg) => {
                                 rewrite_uris(&mut msg, &root, UriDirection::ToRelative);
+                                if pending_initialize_id.is_some()
+                                    && msg.get("id").and_then(serde_json::Value::as_i64) == pending_initialize_id
+                                    && let Some(result) = msg.get("result")
+                                {
+                                    session.set_initialize_result(result.clone());
+                                    pending_initialize_id = None;
+                                }
                                 serde_json::to_string(&msg).unwrap_or_default()
                             }
                             Err(_) => match String::from_utf8(payload) {
@@ -200,6 +213,45 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                         match serde_json::from_slice::<serde_json::Value>(&bytes) {
                             Ok(mut msg) => {
                                 rewrite_uris(&mut msg, &root, UriDirection::ToAbsolute);
+
+                                // `initialize` : un LSP réel rejette un second appel une
+                                // fois initialisé (protocole) — observé en usage réel,
+                                // rust-analyzer répond -32601 "unknown request" à un
+                                // nouvel onglet/rechargement de page sur une session déjà
+                                // initialisée par un premier client. Le client qui gagne
+                                // `try_mark_initialized` envoie réellement la requête (et
+                                // mémorise son id pour mettre sa réponse en cache
+                                // ci-dessus) ; les suivants reçoivent une réponse
+                                // synthétique construite depuis le cache, sans jamais
+                                // recontacter le process.
+                                if msg.get("method").and_then(|m| m.as_str()) == Some("initialize")
+                                    && let Some(client_msg_id) = msg.get("id").and_then(serde_json::Value::as_i64)
+                                {
+                                    if session.try_mark_initialized() {
+                                        pending_initialize_id = Some(client_msg_id);
+                                    } else {
+                                        let response = match session.wait_for_initialize_result().await {
+                                            Some(result) => serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": client_msg_id,
+                                                "result": result
+                                            }),
+                                            None => serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": client_msg_id,
+                                                "error": {
+                                                    "code": -32603,
+                                                    "message": "LSP initialize timed out (shared session)"
+                                                }
+                                            }),
+                                        };
+                                        let _ = ws
+                                            .send(Message::Text(response.to_string().into()))
+                                            .await;
+                                        continue;
+                                    }
+                                }
+
                                 let payload = serde_json::to_string(&msg)
                                     .unwrap_or_default()
                                     .into_bytes();

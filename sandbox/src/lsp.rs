@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 
 /// Spec d'une toolchain LSP : `bin` est un chemin absolu dans le volume toolchain
 /// monté. Lue depuis `VNL_LSP_TOOLCHAINS` (JSON array).
@@ -125,6 +125,14 @@ struct LspSessionInner {
     /// `true` dès qu'un client a envoyé `initialize` au process (partagé entre tous
     /// les clients de la session — le process LSP ne s'initialise qu'une fois).
     initialized: AtomicBool,
+    /// `result` de la réponse `initialize` réelle, posé par le premier client (celui
+    /// qui a gagné `try_mark_initialized`) une fois sa réponse reçue. Les clients
+    /// suivants (nouvel onglet, rechargement de page, nouveau tool MCP) doivent
+    /// recevoir une réponse `initialize` valide sans renvoyer la requête au process —
+    /// un LSP réel rejette un second `initialize` (violation du protocole ; observé en
+    /// usage réel : rust-analyzer répond `-32601 unknown request`).
+    initialize_result: Mutex<Option<Value>>,
+    initialize_notify: Notify,
     _toolchain_name: String,
 }
 
@@ -173,6 +181,8 @@ impl LspSession {
                 subs: Mutex::new(HashMap::new()),
                 alive: AtomicBool::new(true),
                 initialized: AtomicBool::new(false),
+                initialize_result: Mutex::new(None),
+                initialize_notify: Notify::new(),
                 child: Mutex::new(Some(child)),
                 next_client: AtomicU64::new(1),
                 next_req: AtomicU64::new(1),
@@ -397,6 +407,50 @@ impl LspSession {
     /// (le flag était à `false`), `false` si un autre client l'a déjà initialisé.
     pub fn try_mark_initialized(&self) -> bool {
         !self.inner.initialized.swap(true, Ordering::SeqCst)
+    }
+
+    /// Pose le `result` de la réponse `initialize` réelle (appelé par le client
+    /// gagnant de `try_mark_initialized` une fois sa réponse reçue) et réveille les
+    /// clients en attente dans `wait_for_initialize_result`.
+    pub fn set_initialize_result(&self, result: Value) {
+        if let Ok(mut guard) = self.inner.initialize_result.lock() {
+            *guard = Some(result);
+        }
+        self.inner.initialize_notify.notify_waiters();
+    }
+
+    /// Rend le `result` `initialize` mis en cache dès qu'il est disponible — pour un
+    /// client qui a perdu `try_mark_initialized` (déjà posé : retour immédiat ; pas
+    /// encore posé : attend `notify_waiters`, borné à 30s au cas où le client gagnant
+    /// n'aboutit jamais). `None` seulement en cas de timeout.
+    ///
+    /// Course bénigne assumée : `Notify::notify_waiters` (contrairement à
+    /// `notify_one`) ne mémorise pas de "permit" — un appelant qui n'a pas encore
+    /// atteint le `select!` ci-dessous au moment de l'appel à `set_initialize_result`
+    /// peut manquer le réveil. Sans conséquence sur l'exactitude (le re-check du
+    /// cache après le `select!` couvre ce cas), seulement sur la latence dans cette
+    /// fenêtre étroite : au pire les 30s complètes avant de relire un cache déjà
+    /// peuplé, plutôt qu'un réveil immédiat. Pas de mécanisme plus strict
+    /// (`notify_one` + compteur, boucle de poll courte) pour une fenêtre de course
+    /// aussi étroite et un pire cas qui reste correct, juste plus lent.
+    pub async fn wait_for_initialize_result(&self) -> Option<Value> {
+        if let Some(v) = self.cached_initialize_result() {
+            return Some(v);
+        }
+        let notified = self.inner.initialize_notify.notified();
+        tokio::select! {
+            () = notified => {}
+            () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
+        }
+        self.cached_initialize_result()
+    }
+
+    fn cached_initialize_result(&self) -> Option<Value> {
+        self.inner
+            .initialize_result
+            .lock()
+            .ok()
+            .and_then(|guard| guard.clone())
     }
 }
 
@@ -716,6 +770,61 @@ while True:
             "should return the same session (same Arc)"
         );
         drop(tmpdir);
+    }
+
+    // ── Tests cache initialize (bug réel : double initialize, cf. ws/lsp.rs) ─────
+
+    /// Un second appelant (`try_mark_initialized` déjà `false`) ne doit jamais
+    /// renvoyer `initialize` au process — mais doit récupérer le `result` du premier
+    /// via le cache, immédiatement si déjà posé.
+    #[tokio::test]
+    async fn initialize_result_cached_and_replayed_immediately() {
+        let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn should succeed");
+
+        assert!(session.try_mark_initialized(), "first caller should win");
+        assert!(!session.try_mark_initialized(), "second caller should lose");
+
+        let capabilities = serde_json::json!({"hoverProvider": true});
+        session.set_initialize_result(capabilities.clone());
+
+        let cached = session
+            .wait_for_initialize_result()
+            .await
+            .expect("result should be cached");
+        assert_eq!(cached, capabilities);
+    }
+
+    /// Un appelant qui attend AVANT que le premier ait fini son `initialize` réel
+    /// doit être réveillé par `notify_waiters` dès que le résultat est posé, pas
+    /// bloqué jusqu'au timeout de 30s.
+    #[tokio::test]
+    async fn initialize_result_wakes_pending_waiter() {
+        let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn should succeed");
+
+        assert!(session.try_mark_initialized());
+        assert!(!session.try_mark_initialized());
+
+        let waiter_session = Arc::clone(&session);
+        let waiter = tokio::spawn(async move { waiter_session.wait_for_initialize_result().await });
+
+        // Laisser le waiter s'enregistrer avant de poser le résultat.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let capabilities = serde_json::json!({"definitionProvider": true});
+        session.set_initialize_result(capabilities.clone());
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("waiter should be woken well before the 5s test timeout")
+            .expect("waiter task should not panic");
+        assert_eq!(result, Some(capabilities));
     }
 
     // ── Tests session ──────────────────────────────────────────────────────
