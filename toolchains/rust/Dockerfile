@@ -24,5 +24,9 @@ FROM docker.io/library/rust:slim-trixie
 # alors dans le rootfs du pod, pas dans le volume. Vérifié en le cassant
 # d'abord sur un cluster réel : `ln -s` (absolu) donnait un lien mort une fois
 # monté, `ln -sr` (relatif) résout correctement quel que soit le mount path.
-RUN rustup component add rust-analyzer \
+# `rust-src` : la base rust:slim-trixie fournit rustc/cargo/la std compilée,
+# pas la SOURCE de la std — sans elle rust-analyzer ne peut pas résoudre le
+# sysroot ("can't load standard library from sysroot ... try installing
+# rust-src the same way you installed rustc", trouvé en usage réel).
+RUN rustup component add rust-analyzer rust-src \
     && ln -srf "$(rustup which rust-analyzer)" /usr/local/bin/rust-analyzer
