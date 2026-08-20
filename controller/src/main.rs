@@ -31,41 +31,44 @@ struct Cli {
     )]
     sandbox_image_repo: String,
 
-    /// Image toolchain par défaut pour le langage "rust"
-    /// (`docker.io/library/rust:slim-trixie`, recette deploy/sandbox-test.yaml),
-    /// utilisée quand `Sandbox.spec.toolchains` est vide et que la détection
-    /// a trouvé `rust`. Surchargée par l'env `TOOLCHAIN_IMAGE_RUST`.
+    /// Image toolchain par défaut pour le langage "rust" — `rust:slim-trixie` +
+    /// rust-analyzer baké au build (`toolchains/rust/Dockerfile`, publiée avec le
+    /// même tag que app/sandbox/controller), utilisée quand `Sandbox.spec.toolchains`
+    /// est vide et que la détection a trouvé `rust`. Surchargée par l'env
+    /// `TOOLCHAIN_IMAGE_RUST`.
     #[arg(
         long,
         env = "TOOLCHAIN_IMAGE_RUST",
-        default_value = "docker.io/library/rust:slim-trixie"
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-rust:", env!("CARGO_PKG_VERSION"))
     )]
     toolchain_image_rust: String,
 
-    /// Idem pour "js-ts" (`docker.io/library/node:trixie-slim`).
+    /// Idem pour "js-ts" — `node:trixie-slim` + typescript-language-server
+    /// (`toolchains/node/Dockerfile`).
     #[arg(
         long,
         env = "TOOLCHAIN_IMAGE_NODE",
-        default_value = "docker.io/library/node:trixie-slim"
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-node:", env!("CARGO_PKG_VERSION"))
     )]
     toolchain_image_node: String,
 
-    /// Image LSP par défaut pour "rust". Valeur provisoire (= image toolchain) —
-    /// aucune recette d'image LSP validée à ce jour ; surcharger au déploiement
-    /// (env `LSP_IMAGE_RUST`) quand les images LSP seront construites. Utilisée par
-    /// `resolve_toolchain_lsp` quand `toolchain.lsp` est absent.
+    /// Image LSP par défaut pour "rust". Par défaut la même image que
+    /// `TOOLCHAIN_IMAGE_RUST` (rust-analyzer y est déjà baké, cf.
+    /// `toolchains/rust/Dockerfile`) — un flag séparé reste utile pour surcharger
+    /// juste le LSP sans toucher la toolchain. Utilisée par `resolve_toolchain_lsp`
+    /// quand `toolchain.lsp` est absent.
     #[arg(
         long,
         env = "LSP_IMAGE_RUST",
-        default_value = "docker.io/library/rust:slim-trixie"
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-rust:", env!("CARGO_PKG_VERSION"))
     )]
     lsp_image_rust: String,
 
-    /// Idem pour "js-ts" (`docker.io/library/node:trixie-slim`).
+    /// Idem pour "js-ts" — même défaut que `TOOLCHAIN_IMAGE_NODE`.
     #[arg(
         long,
         env = "LSP_IMAGE_NODE",
-        default_value = "docker.io/library/node:trixie-slim"
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-node:", env!("CARGO_PKG_VERSION"))
     )]
     lsp_image_node: String,
 

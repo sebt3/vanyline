@@ -105,6 +105,15 @@ fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
 /// `["--stdio"]`), sinon `None` (aucun LSP — pas de route `/ws/lsp` montée pour
 /// cette toolchain). S'applique uniformément que `spec.toolchains` soit explicite
 /// ou dérivé.
+///
+/// `ctx.lsp_image_rust`/`ctx.lsp_image_node` valent par défaut la même image que
+/// `ctx.toolchain_image_rust`/`ctx.toolchain_image_node` (`toolchains/rust/`,
+/// `toolchains/node/Dockerfile` — le LSP y est déjà baké) — d'où deux montages
+/// (`/toolchains/<name>` et `/toolchains/<name>-lsp`) de la même image par
+/// défaut. Redondant mais inoffensif (contenu en cache côté kubelet, un seul
+/// `ImageVolumeSource` de plus dans le pod spec) ; pas simplifié en un montage
+/// unique pour rester sur le mécanisme déjà testé plutôt que de rouvrir
+/// `LspSpec`/le montage pour un gain marginal.
 fn resolve_toolchain_lsp(toolchain: &Toolchain, ctx: &SandboxPodContext) -> Option<LspSpec> {
     if let Some(lsp) = &toolchain.lsp {
         return Some(lsp.clone());
