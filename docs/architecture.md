@@ -681,15 +681,27 @@ extension → toolchain/languageId de la sandbox — `.rs` → `rust`/`rust`, `.
 `.mts`/`.cts` → `node`/`typescript`, `.js`/`.jsx`/`.mjs`/`.cjs` → `node`/`javascript`.
 Extension non couverte → `null`, mode dégradé (coloration seule, pas de LSP).
 
-**Limite connue, pas un bug caché** : `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` (flags CLI du
-controller) pointent par défaut sur les mêmes images que les toolchains
-(`rust:slim-trixie`/`node:trixie-slim`), qui ne contiennent pas rust-analyzer/
-typescript-language-server — valeur provisoire documentée en commentaire
-(`controller/src/main.rs`), aucune recette d'image LSP construite à ce jour. Code
-complet et testé, mais **pas fonctionnel sur un cluster réel** tant que ces images
-ne sont pas publiées et les flags surchargés au déploiement — même motif que
-plusieurs features précédentes jamais validées en conditions réelles (cf. section
-"Limites connues" plus bas).
+**Images toolchain = images LSP, décidé après coup (2026-08-20)** : le premier jet de
+cette feature pointait `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` sur les mêmes images
+toolchain génériques (`rust:slim-trixie`/`node:trixie-slim`), qui ne contiennent pas
+le LSP — code complet mais non fonctionnel sur un cluster réel, confirmé en
+diagnostiquant `rustup component add rust-analyzer` en pod : `Read-only file system`,
+attendu, `volumes[].image` monte toujours en lecture seule (propriété K8s, pas une
+contrainte vanyline) — installer un LSP au runtime dans le pod est structurellement
+impossible, il faut le baker à la construction de l'image. Résolu par deux nouvelles
+images publiées avec le monorepo (`toolchains/rust/Dockerfile`,
+`toolchains/node/Dockerfile` — mêmes bases que les anciens défauts toolchain, LSP
+ajouté au build : `rustup component add rust-analyzer` + symlink vers
+`/usr/local/bin`, `npm install -g typescript-language-server`), publiées avec le même
+tag que app/sandbox/controller (`.github/workflows/release.yml`). `TOOLCHAIN_IMAGE_*`
+et `LSP_IMAGE_*` pointent désormais par défaut sur la **même image** par langage — un
+piste écartée en cours de route : `mcr.microsoft.com/devcontainers/typescript-node`
+semblait tout inclure, vérifié en lisant son Dockerfile réel, elle ne contient pas le
+LSP. Contre-partie acceptée : le pod monte deux fois la même image (`/toolchains/rust`
+et `/toolchains/rust-lsp`) — redondant mais inoffensif (contenu en cache côté
+kubelet), pas simplifié en un montage unique pour rester sur `LspSpec`/le mécanisme de
+montage déjà testé (cf. section "Serveur LSP" ci-dessus) plutôt que de le rouvrir pour
+un gain marginal.
 
 ## Opérateur Kubernetes — `vanyline-controller`
 
@@ -1315,9 +1327,10 @@ indicateur « modifications non enregistrées » sur les onglets éditeur, ni de
 la fermeture — préexistant, mais rendu plus sensible par le rename cross-file LSP
 (cf. section "Serveur LSP" plus haut) qui peut laisser un fichier ouvert modifié en
 mémoire sans autre signal que le message de statut ponctuel. LSP : images
-rust-analyzer/typescript-language-server pas encore construites (`LSP_IMAGE_RUST`/
-`LSP_IMAGE_NODE` pointent provisoirement sur les images toolchain), fonctionnalité
-non testée en conditions réelles.
+rust-analyzer/typescript-language-server désormais construites (`toolchains/rust/`,
+`toolchains/node/Dockerfile`, cf. section "Serveur LSP" plus haut), mais
+fonctionnalité toujours non testée en conditions réelles (aucun cluster K8s dans
+l'environnement de dev de ces sessions).
 
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 

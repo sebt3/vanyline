@@ -81,11 +81,25 @@ mot "Renommé". Corrigé aussi — **leçon** : un message de statut trop vague 
 distinguer succès/échec peut aussi maquiller un test qui ne teste pas ce qu'il croit
 tester.
 
-## Limite connue assumée, pas un bug caché
+## Suivi same-day — images LSP réelles (`fix/lsp-toolchain-images`, 2026-08-20)
 
-`LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` pointent par défaut sur les images toolchain
-(pas de rust-analyzer/typescript-language-server dedans) — documenté en commentaire
-par cadence dès l'implémentation. Code complet et testé, **pas fonctionnel sur un
-cluster réel** tant que ces images ne sont pas construites et publiées. Même motif
-que plusieurs features précédentes (web IDE, détection de langages) jamais validées
-en conditions réelles — pas une régression spécifique à cette feature.
+La limite notée à la clôture (`LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` = images toolchain
+génériques, sans LSP dedans) a été corrigée le jour même, sur retour développeur.
+Piste initiale envisagée (`mcr.microsoft.com/devcontainers/typescript-node`,
+supposée tout inclure) écartée après lecture du Dockerfile réel — ne contient pas le
+LSP. Piste rust-analyzer envisagée par le développeur (`rustup component add` en pod)
+confirmée impossible : `volumes[].image` monte toujours en lecture seule côté K8s,
+propriété de l'API, pas une contrainte vanyline — reproduit avec l'erreur exacte
+(`Read-only file system`) avant de conclure. Résolu par deux nouvelles images
+publiées avec le monorepo, LSP baké **au build** (pas au runtime) :
+`toolchains/rust/Dockerfile` (`rust:slim-trixie` + `rustup component add
+rust-analyzer` + symlink), `toolchains/node/Dockerfile` (`node:trixie-slim` + `npm
+install -g typescript-language-server`), publiées avec le même tag que
+app/sandbox/controller (`.github/workflows/release.yml`, matrix étendue).
+`TOOLCHAIN_IMAGE_*` et `LSP_IMAGE_*` pointent désormais par défaut sur la même
+image par langage — décision assumée de garder le double montage existant
+(`/toolchains/<name>` et `/toolchains/<name>-lsp`, même image deux fois) plutôt que
+de rouvrir `LspSpec`/le mécanisme de montage pour un gain marginal.
+
+Toujours pas testé sur un cluster réel (pas d'environnement K8s dans ces sessions de
+dev) — mais le code n'est plus structurellement mort comme à la clôture initiale.
