@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { languageExtensionForPath } from './editorLanguage';
+import { languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
 
 describe('languageExtensionForPath', () => {
   it.each([
@@ -28,5 +28,31 @@ describe('languageExtensionForPath', () => {
 
   it("l'extension est insensible à la casse", () => {
     expect(languageExtensionForPath('a.TS').length).toBeGreaterThan(0);
+  });
+});
+
+describe('lspToolchainForPath', () => {
+  it.each([
+    ['src/main.rs', { toolchain: 'rust', languageId: 'rust' }],
+    ['a.ts', { toolchain: 'node', languageId: 'typescript' }],
+    ['a.tsx', { toolchain: 'node', languageId: 'typescript' }],
+    ['a.mts', { toolchain: 'node', languageId: 'typescript' }],
+    ['a.cts', { toolchain: 'node', languageId: 'typescript' }],
+    ['a.js', { toolchain: 'node', languageId: 'javascript' }],
+    ['a.jsx', { toolchain: 'node', languageId: 'javascript' }],
+    ['a.mjs', { toolchain: 'node', languageId: 'javascript' }],
+    ['a.cjs', { toolchain: 'node', languageId: 'javascript' }],
+  ])('%s → %s', (path, expected) => {
+    expect(lspToolchainForPath(path)).toEqual(expected);
+  });
+
+  it.each(['a.py', 'Dockerfile', null])('retourne null pour %s', (path) => {
+    expect(lspToolchainForPath(path)).toBeNull();
+  });
+
+  it('l\'extension est insensible à la casse', () => {
+    expect(lspToolchainForPath('A.RS')).toEqual({ toolchain: 'rust', languageId: 'rust' });
+    expect(lspToolchainForPath('A.TS')).toEqual({ toolchain: 'node', languageId: 'typescript' });
+    expect(lspToolchainForPath('A.JS')).toEqual({ toolchain: 'node', languageId: 'javascript' });
   });
 });

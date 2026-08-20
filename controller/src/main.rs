@@ -50,6 +50,25 @@ struct Cli {
     )]
     toolchain_image_node: String,
 
+    /// Image LSP par défaut pour "rust". Valeur provisoire (= image toolchain) —
+    /// aucune recette d'image LSP validée à ce jour ; surcharger au déploiement
+    /// (env `LSP_IMAGE_RUST`) quand les images LSP seront construites. Utilisée par
+    /// `resolve_toolchain_lsp` quand `toolchain.lsp` est absent.
+    #[arg(
+        long,
+        env = "LSP_IMAGE_RUST",
+        default_value = "docker.io/library/rust:slim-trixie"
+    )]
+    lsp_image_rust: String,
+
+    /// Idem pour "js-ts" (`docker.io/library/node:trixie-slim`).
+    #[arg(
+        long,
+        env = "LSP_IMAGE_NODE",
+        default_value = "docker.io/library/node:trixie-slim"
+    )]
+    lsp_image_node: String,
+
     /// Tag de l'image app (ghcr.io/sebt3/vanyline-app) utilisée pour le
     /// Deployment `app`, quand `Application.spec.image` est absent.
     #[arg(long, env = "APP_IMAGE_TAG", default_value = env!("CARGO_PKG_VERSION"))]
@@ -130,6 +149,8 @@ async fn main() {
         default_image: sandbox_image.clone(),
         toolchain_image_rust: cli.toolchain_image_rust.clone(),
         toolchain_image_node: cli.toolchain_image_node.clone(),
+        lsp_image_rust: cli.lsp_image_rust.clone(),
+        lsp_image_node: cli.lsp_image_node.clone(),
     });
 
     let sandbox_run = sandbox::build_controller(client)

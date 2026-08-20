@@ -3,6 +3,8 @@
 pub mod auth;
 pub mod config;
 pub mod git;
+pub mod lsp;
+pub mod lsp_client;
 pub mod maint;
 pub mod mcp;
 pub mod telemetry;
@@ -24,6 +26,7 @@ use tower_http::trace::TraceLayer;
 
 use auth::AuthState;
 use config::Config;
+pub use lsp::LspManager;
 use ws::ticket::TicketStore;
 
 #[derive(Clone)]
@@ -31,6 +34,7 @@ pub struct AppState {
     pub config: Arc<Config>,
     pub auth: Arc<AuthState>,
     pub tickets: TicketStore,
+    pub lsp: Arc<LspManager>,
 }
 
 /// Build the main MCP application router (MCP + public routes).
@@ -63,6 +67,13 @@ pub fn build_app(state: AppState) -> Router {
         .route(
             "/ws/terminal",
             get(crate::ws::terminal::handle_ws_terminal).layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::ws::ticket::ws_auth_middleware,
+            )),
+        )
+        .route(
+            "/ws/lsp/{toolchain}",
+            get(crate::ws::lsp::handle_ws_lsp).layer(middleware::from_fn_with_state(
                 state.clone(),
                 crate::ws::ticket::ws_auth_middleware,
             )),

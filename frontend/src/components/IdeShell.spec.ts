@@ -2,6 +2,20 @@ import { mount } from '@vue/test-utils';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import IdeShell from './IdeShell.vue';
 
+// Mock ../api/lsp pour que IdeShell provide() et disposeLspClients
+// ne dépendent pas d'une implémentation réelle. Utilisation de vi.hoisted
+// car vi.mock est ascenseur (hoisted) : les variables doivent exister
+// avant que le mock ne soit évalué.
+const { getLspClient, disposeLspClients } = vi.hoisted(() => ({
+  getLspClient: vi.fn(async () => null),
+  disposeLspClients: vi.fn(),
+}));
+
+vi.mock('../api/lsp', () => ({
+  getLspClient,
+  disposeLspClients,
+}));
+
 // Mock dockview-vue entièrement pour éviter dockview-core (ResizeObserver) en jsdom.
 const mockPanelCloseSpy = vi.fn();
 const mockGetPanelFn = vi.fn((id: string) => {
@@ -57,6 +71,8 @@ describe('IdeShell', () => {
     openSandboxWs.mockReturnValue(Promise.resolve(mockWs));
     mockGetPanelFn.mockClear();
     mockPanelCloseSpy.mockClear();
+    getLspClient.mockClear();
+    disposeLspClients.mockClear();
   });
 
   it('reçoit la prop sandboxName', () => {
@@ -174,5 +190,14 @@ describe('IdeShell', () => {
       );
       expect(custom).toBeUndefined();
     });
+  });
+
+  it('démonte et dispose les clients LSP de la sandbox', async () => {
+    const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    wrapper.unmount();
+
+    expect(disposeLspClients).toHaveBeenCalledWith('foo');
   });
 });

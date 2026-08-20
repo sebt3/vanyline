@@ -240,6 +240,7 @@ mod tests {
             config,
             auth: Arc::new(auth),
             tickets: TicketStore::new(),
+            lsp: Arc::new(crate::lsp::LspManager::default()),
         });
 
         let resp = app
@@ -271,6 +272,7 @@ mod tests {
             config,
             auth: Arc::new(auth),
             tickets: external_store.clone(),
+            lsp: Arc::new(crate::lsp::LspManager::default()),
         });
 
         let resp = app

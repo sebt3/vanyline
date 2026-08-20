@@ -32,7 +32,7 @@ use crate::project::{
     worktree_path,
 };
 use vanyline_crds::{
-    Application, EgressPort, EgressRule, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
+    Application, EgressPort, EgressRule, LspSpec, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
     Toolchain, service_name,
 };
 
@@ -95,6 +95,33 @@ fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
     raw.into_iter()
         .map(|(k, v)| (k, v.replace("{root}", &root)))
         .collect()
+}
+
+/// Résout la spec LSP d'une toolchain : `toolchain.lsp` s'il est `Some` (utilisé
+/// tel quel — LSP custom), sinon preset par `toolchain.name` ("rust" → image
+/// `ctx.lsp_image_rust`, bin `/toolchains/rust-lsp/usr/local/bin/rust-analyzer`, args
+/// vide ; "node" → image `ctx.lsp_image_node`, bin
+/// `/toolchains/node-lsp/usr/local/bin/typescript-language-server`, args
+/// `["--stdio"]`), sinon `None` (aucun LSP — pas de route `/ws/lsp` montée pour
+/// cette toolchain). S'applique uniformément que `spec.toolchains` soit explicite
+/// ou dérivé.
+fn resolve_toolchain_lsp(toolchain: &Toolchain, ctx: &SandboxPodContext) -> Option<LspSpec> {
+    if let Some(lsp) = &toolchain.lsp {
+        return Some(lsp.clone());
+    }
+    match toolchain.name.as_str() {
+        "rust" => Some(LspSpec {
+            image: ctx.lsp_image_rust.clone(),
+            bin: "/toolchains/rust-lsp/usr/local/bin/rust-analyzer".to_string(),
+            args: Vec::new(),
+        }),
+        "node" => Some(LspSpec {
+            image: ctx.lsp_image_node.clone(),
+            bin: "/toolchains/node-lsp/usr/local/bin/typescript-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+        }),
+        _ => None,
+    }
 }
 
 /// Agrège l'environnement de toutes les toolchains d'une Sandbox, dans l'ordre
@@ -170,6 +197,7 @@ pub fn effective_toolchains(
             name: "rust".to_string(),
             image: ctx.toolchain_image_rust.clone(),
             env: Default::default(),
+            lsp: None,
         });
     }
     if languages.iter().any(|l| l == "js-ts") {
@@ -177,6 +205,7 @@ pub fn effective_toolchains(
             name: "node".to_string(),
             image: ctx.toolchain_image_node.clone(),
             env: Default::default(),
+            lsp: None,
         });
     }
     toolchains
@@ -219,6 +248,11 @@ pub struct SandboxPodContext {
     pub toolchain_image_rust: String,
     /// Idem pour "js-ts" (env `TOOLCHAIN_IMAGE_NODE`).
     pub toolchain_image_node: String,
+    /// Image LSP par défaut pour "rust" (env `LSP_IMAGE_RUST`). Utilisée par
+    /// `resolve_toolchain_lsp` quand `toolchain.lsp` est absent.
+    pub lsp_image_rust: String,
+    /// Idem pour "js-ts" (env `LSP_IMAGE_NODE`).
+    pub lsp_image_node: String,
 }
 
 /// Construit le Pod sandbox : home Owner + worktree + caches + toolchains,
@@ -317,6 +351,46 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
     }
     env.extend(aggregate_toolchain_env(&toolchains));
 
+    // Pour chaque toolchain effective, résoudre le LSP et monter le volume dédié
+    let mut lsp_entries: Vec<serde_json::Value> = Vec::new();
+    for toolchain in &toolchains {
+        if let Some(lsp) = resolve_toolchain_lsp(toolchain, ctx) {
+            volumes.push(Volume {
+                name: format!("toolchain-{}-lsp", toolchain.name),
+                image: Some(k8s_openapi::api::core::v1::ImageVolumeSource {
+                    reference: Some(lsp.image.clone()),
+                    pull_policy: Some("IfNotPresent".to_string()),
+                }),
+                ..Default::default()
+            });
+            mounts.push(VolumeMount {
+                name: format!("toolchain-{}-lsp", toolchain.name),
+                mount_path: format!("/toolchains/{}-lsp", toolchain.name),
+                ..Default::default()
+            });
+            lsp_entries.push(serde_json::json!({
+                "name": toolchain.name,
+                "bin": lsp.bin,
+                "args": lsp.args,
+            }));
+        }
+    }
+    if !lsp_entries.is_empty() {
+        match serde_json::to_string(&lsp_entries) {
+            Ok(json) => env.push(EnvVar {
+                name: "VNL_LSP_TOOLCHAINS".to_string(),
+                value: Some(json),
+                ..Default::default()
+            }),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "échec sérialisation VNL_LSP_TOOLCHAINS — env LSP absente (best-effort v1)"
+                );
+            }
+        }
+    }
+
     let mut labels = BTreeMap::new();
     labels.insert(
         "vanyline.solidite.fr/owner".to_string(),
@@ -396,6 +470,10 @@ pub struct Context {
     pub toolchain_image_rust: String,
     /// Image toolchain par défaut pour "js-ts" (env `TOOLCHAIN_IMAGE_NODE`).
     pub toolchain_image_node: String,
+    /// Image LSP par défaut pour "rust" (env `LSP_IMAGE_RUST`).
+    pub lsp_image_rust: String,
+    /// Image LSP par défaut pour "js-ts" (env `LSP_IMAGE_NODE`).
+    pub lsp_image_node: String,
 }
 
 pub fn checkout_job_name(sandbox_name: &str) -> String {
@@ -949,6 +1027,8 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             default_image: ctx.default_image.clone(),
             toolchain_image_rust: ctx.toolchain_image_rust.clone(),
             toolchain_image_node: ctx.toolchain_image_node.clone(),
+            lsp_image_rust: ctx.lsp_image_rust.clone(),
+            lsp_image_node: ctx.lsp_image_node.clone(),
         };
         if let Some(pod) = pods.get_opt(&pod_name(&sandbox.name_any())).await? {
             match pod.status.and_then(|s| s.phase) {
@@ -1156,6 +1236,8 @@ mod tests {
             default_image: "registry.example/vanyline-sandbox:latest".to_string(),
             toolchain_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
             toolchain_image_node: "docker.io/library/node:trixie-slim".to_string(),
+            lsp_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
+            lsp_image_node: "docker.io/library/node:trixie-slim".to_string(),
         }
     }
 
@@ -1182,6 +1264,7 @@ mod tests {
             name: "rust".to_string(),
             image: "rust:slim-trixie".to_string(),
             env,
+            lsp: None,
         }
     }
 
@@ -1190,6 +1273,7 @@ mod tests {
             name: "node".to_string(),
             image: "node:trixie-slim".to_string(),
             env,
+            lsp: None,
         }
     }
 
@@ -1325,6 +1409,7 @@ mod tests {
             name: "custom".to_string(),
             image: "x".to_string(),
             env,
+            lsp: None,
         };
         let env_result = aggregate_toolchain_env(&[toolchain]);
 
@@ -1346,6 +1431,7 @@ mod tests {
             name: "unknown".to_string(),
             image: "x".to_string(),
             env: Default::default(),
+            lsp: None,
         };
         let env_result = aggregate_toolchain_env(&[toolchain]);
 
@@ -1652,14 +1738,16 @@ mod tests {
             .as_ref()
             .expect("should have volumes");
 
-        // Should have: home, workspace, toolchain-rust, toolchain-node
-        assert_eq!(volumes.len(), 4);
+        // Should have: home, workspace, toolchain-rust, toolchain-node, toolchain-rust-lsp, toolchain-node-lsp
+        assert_eq!(volumes.len(), 6);
 
         let names: Vec<_> = volumes.iter().map(|v| v.name.as_str()).collect();
         assert!(names.contains(&"home"));
         assert!(names.contains(&"workspace"));
         assert!(names.contains(&"toolchain-rust"));
         assert!(names.contains(&"toolchain-node"));
+        assert!(names.contains(&"toolchain-rust-lsp"));
+        assert!(names.contains(&"toolchain-node-lsp"));
 
         // Check toolchain volumes have image reference and pull policy
         for vol in volumes {
@@ -2735,5 +2823,248 @@ mod tests {
             annotations.get("cert-manager.io/cluster-issuer"),
             Some(&"self-sign".to_string())
         );
+    }
+
+    // ===== resolve_toolchain_lsp =====
+
+    #[test]
+    fn resolve_toolchain_lsp_explicit_wins() {
+        let lsp = LspSpec {
+            image: "custom-lsp:1".to_string(),
+            bin: "/toolchains/rust-lsp/custom/bin".to_string(),
+            args: vec!["--x".to_string()],
+        };
+        let toolchain = Toolchain {
+            name: "rust".to_string(),
+            image: "rust:slim-trixie".to_string(),
+            env: Default::default(),
+            lsp: Some(lsp.clone()),
+        };
+        let ctx = make_ctx();
+        let result = resolve_toolchain_lsp(&toolchain, &ctx);
+        assert!(result.is_some());
+        let resolved = result.unwrap();
+        assert_eq!(resolved.image, "custom-lsp:1");
+        assert_eq!(resolved.bin, "/toolchains/rust-lsp/custom/bin");
+        assert_eq!(resolved.args, vec!["--x".to_string()]);
+    }
+
+    #[test]
+    fn resolve_toolchain_lsp_preset_rust() {
+        let toolchain = make_rust_tc(Default::default());
+        let ctx = make_ctx();
+        let result = resolve_toolchain_lsp(&toolchain, &ctx);
+        assert!(result.is_some());
+        let resolved = result.unwrap();
+        assert_eq!(resolved.image, ctx.lsp_image_rust);
+        assert_eq!(
+            resolved.bin,
+            "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
+        );
+        assert!(resolved.args.is_empty());
+    }
+
+    #[test]
+    fn resolve_toolchain_lsp_preset_node() {
+        let toolchain = make_node_tc(Default::default());
+        let ctx = make_ctx();
+        let result = resolve_toolchain_lsp(&toolchain, &ctx);
+        assert!(result.is_some());
+        let resolved = result.unwrap();
+        assert_eq!(resolved.image, ctx.lsp_image_node);
+        assert_eq!(
+            resolved.bin,
+            "/toolchains/node-lsp/usr/local/bin/typescript-language-server"
+        );
+        assert_eq!(resolved.args, vec!["--stdio".to_string()]);
+    }
+
+    #[test]
+    fn resolve_toolchain_lsp_unknown_is_none() {
+        let toolchain = Toolchain {
+            name: "custom".to_string(),
+            image: "x".to_string(),
+            env: Default::default(),
+            lsp: None,
+        };
+        let ctx = make_ctx();
+        let result = resolve_toolchain_lsp(&toolchain, &ctx);
+        assert!(result.is_none());
+    }
+
+    // ===== build_sandbox_pod LSP =====
+
+    #[test]
+    fn build_sandbox_pod_derived_lsp_volume_and_env() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["rust"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
+
+        let names: Vec<_> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(names.contains(&"toolchain-rust-lsp"));
+
+        let lsp_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-rust-lsp")
+            .expect("should have toolchain-rust-lsp volume");
+        let src = lsp_vol
+            .image
+            .as_ref()
+            .expect("toolchain-rust-lsp should have image source");
+        assert_eq!(src.reference, Some(ctx.lsp_image_rust.clone()));
+        assert_eq!(src.pull_policy, Some("IfNotPresent".to_string()));
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+        let lsp_mount = mounts
+            .iter()
+            .find(|m| m.name == "toolchain-rust-lsp")
+            .expect("should have toolchain-rust-lsp mount");
+        assert_eq!(lsp_mount.mount_path, "/toolchains/rust-lsp");
+
+        let env = container.env.as_ref().expect("should have env");
+        let lsp_env = env
+            .iter()
+            .find(|e| e.name == "VNL_LSP_TOOLCHAINS")
+            .expect("should have VNL_LSP_TOOLCHAINS");
+        let val = lsp_env
+            .value
+            .as_ref()
+            .expect("VNL_LSP_TOOLCHAINS must have value");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(val).expect("VNL_LSP_TOOLCHAINS must be valid JSON");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "rust");
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
+        );
+        assert!(entries[0]["args"].is_array());
+    }
+
+    #[test]
+    fn build_sandbox_pod_explicit_lsp_volume_and_env() {
+        let lsp = LspSpec {
+            image: "custom-lsp:1".to_string(),
+            bin: "/toolchains/rust-lsp/custom/bin".to_string(),
+            args: vec!["--x".to_string()],
+        };
+        let rust_tc = Toolchain {
+            name: "rust".to_string(),
+            image: "rust:slim-trixie".to_string(),
+            env: Default::default(),
+            lsp: Some(lsp),
+        };
+        let sandbox = make_sandbox("sb", vec![rust_tc], None);
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
+
+        let names: Vec<_> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(names.contains(&"toolchain-rust-lsp"));
+
+        let lsp_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-rust-lsp")
+            .expect("should have toolchain-rust-lsp volume");
+        let src = lsp_vol
+            .image
+            .as_ref()
+            .expect("toolchain-rust-lsp should have image source");
+        assert_eq!(src.reference, Some("custom-lsp:1".to_string()));
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        let lsp_env = env
+            .iter()
+            .find(|e| e.name == "VNL_LSP_TOOLCHAINS")
+            .expect("should have VNL_LSP_TOOLCHAINS");
+        let val = lsp_env
+            .value
+            .as_ref()
+            .expect("VNL_LSP_TOOLCHAINS must have value");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(val).expect("VNL_LSP_TOOLCHAINS must be valid JSON");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "rust");
+        assert_eq!(entries[0]["bin"], "/toolchains/rust-lsp/custom/bin");
+        assert_eq!(entries[0]["args"], serde_json::json!(["--x"]));
+    }
+
+    #[test]
+    fn build_sandbox_pod_no_lsp_when_unknown() {
+        let toolchain = Toolchain {
+            name: "custom".to_string(),
+            image: "x".to_string(),
+            env: Default::default(),
+            lsp: None,
+        };
+        let sandbox = make_sandbox("sb", vec![toolchain], None);
+        let project = make_project(None, None);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
+
+        let names: Vec<_> = volumes.iter().map(|v| v.name.as_str()).collect();
+        assert!(!names.contains(&"toolchain-custom-lsp"));
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        assert!(!env.iter().any(|e| e.name == "VNL_LSP_TOOLCHAINS"));
+    }
+
+    #[test]
+    fn build_sandbox_pod_lsp_env_order_rust_then_node() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["rust", "js-ts"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        let lsp_env = env
+            .iter()
+            .find(|e| e.name == "VNL_LSP_TOOLCHAINS")
+            .expect("should have VNL_LSP_TOOLCHAINS");
+        let val = lsp_env
+            .value
+            .as_ref()
+            .expect("VNL_LSP_TOOLCHAINS must have value");
+        let entries: Vec<serde_json::Value> =
+            serde_json::from_str(val).expect("VNL_LSP_TOOLCHAINS must be valid JSON");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "rust");
+        assert_eq!(entries[1]["name"], "node");
     }
 }

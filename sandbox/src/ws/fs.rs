@@ -239,6 +239,7 @@ fn make_state(test_name: &str) -> AppState {
         config,
         auth: std::sync::Arc::new(auth),
         tickets: crate::ws::ticket::TicketStore::new(),
+        lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
     }
 }
 

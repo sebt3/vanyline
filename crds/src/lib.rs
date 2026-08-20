@@ -187,6 +187,19 @@ pub struct SandboxSpec {
     pub suspended: bool,
 }
 
+/// Spec LSP d'une toolchain : `image` est l'image OCI du serveur LSP (montée sur
+/// `/toolchains/<name>-lsp`), `bin` un chemin absolu dans le pod (point de montage
+/// inclus), `args` les arguments du serveur. None sur `Toolchain.lsp` => preset
+/// name-keyed résolu par le controller (`resolve_toolchain_lsp`).
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LspSpec {
+    pub image: String,
+    pub bin: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Toolchain {
@@ -196,6 +209,11 @@ pub struct Toolchain {
     /// Env à injecter, template `{root}` = point de montage. Vide => preset.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// Spec LSP de la toolchain. None => preset par `name` (rust/node), ou pas de
+    /// LSP si le nom est inconnu (repli dégradé : pas de route /ws/lsp montée pour
+    /// cette toolchain).
+    #[serde(default)]
+    pub lsp: Option<LspSpec>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -785,5 +803,14 @@ mod tests {
             !json2.contains("detectedAt"),
             "should not contain 'detectedAt' when cleared, got: {json2}"
         );
+    }
+
+    // 19. lsp_spec_absent_defaults_to_none
+    #[test]
+    fn lsp_spec_absent_defaults_to_none() {
+        let tc: Toolchain =
+            serde_json::from_str(r#"{"name":"rust","image":"x"}"#).expect("should deserialize");
+        assert!(tc.lsp.is_none());
+        assert!(tc.env.is_empty());
     }
 }

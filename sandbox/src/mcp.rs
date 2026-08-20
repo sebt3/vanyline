@@ -70,8 +70,6 @@ pub async fn handle(
 
     metrics::counter!("mcp_requests_total", "method" => req.method.clone()).increment(1);
 
-    let sandbox_root = &state.config.sandbox_root;
-
     let response = match req.method.as_str() {
         "initialize" => handle_initialize(req.id, req.params),
         "notifications/initialized" => {
@@ -79,7 +77,7 @@ pub async fn handle(
             return StatusCode::ACCEPTED.into_response();
         }
         "tools/list" => handle_tools_list(req.id),
-        "tools/call" => handle_tools_call(req.id, req.params, sandbox_root).await,
+        "tools/call" => handle_tools_call(req.id, req.params, &state).await,
         _ => JsonRpcResponse::err(req.id, -32601, format!("Method not found: {}", req.method)),
     };
 
@@ -106,13 +104,14 @@ pub(crate) fn handle_tools_list(id: Option<Value>) -> JsonRpcResponse {
     let mut tools = vanyline_tools::mcp::filesystem_tools();
     tools.extend(vanyline_tools::mcp::search_tools());
     tools.extend(vanyline_tools::mcp::command_tools());
+    tools.extend(tools_impl::lsp_tools());
     JsonRpcResponse::ok(id, serde_json::json!({ "tools": tools }))
 }
 
 pub(crate) async fn handle_tools_call(
     id: Option<Value>,
     params: Value,
-    sandbox_root: &std::path::Path,
+    state: &AppState,
 ) -> JsonRpcResponse {
     let name = match params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n,
@@ -124,14 +123,18 @@ pub(crate) async fn handle_tools_call(
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);
 
     if let Some(result) =
-        tools_impl::dispatch_filesystem(sandbox_root, name, arguments.clone()).await
+        tools_impl::dispatch_filesystem(&state.config.sandbox_root, name, arguments.clone()).await
     {
         JsonRpcResponse::ok(id, result)
     } else if let Some(result) =
-        tools_impl::dispatch_search(sandbox_root, name, arguments.clone()).await
+        tools_impl::dispatch_search(&state.config.sandbox_root, name, arguments.clone()).await
     {
         JsonRpcResponse::ok(id, result)
-    } else if let Some(result) = tools_impl::dispatch_command(sandbox_root, name, arguments).await {
+    } else if let Some(result) =
+        tools_impl::dispatch_command(&state.config.sandbox_root, name, arguments.clone()).await
+    {
+        JsonRpcResponse::ok(id, result)
+    } else if let Some(result) = tools_impl::dispatch_lsp(state, name, arguments).await {
         JsonRpcResponse::ok(id, result)
     } else {
         JsonRpcResponse::err(id, -32602, format!("Unknown tool: {name}"))
@@ -167,6 +170,35 @@ pub async fn oauth_metadata(State(state): State<AppState>) -> Json<Value> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::auth::AuthState;
+    use crate::config::Config;
+    use std::sync::Arc;
+
+    fn make_state() -> AppState {
+        let config = Arc::new(Config {
+            listen: "0.0.0.0:3000".into(),
+            tls_cert: None,
+            tls_key: None,
+            oidc_issuer: None,
+            oidc_audience: None,
+            auth_groups_admin: "kubernetes-admin".into(),
+            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+            no_auth: true,
+            static_token: None,
+            public_url: None,
+            oidc_ca_cert: None,
+            metrics_listen: "0.0.0.0:9090".into(),
+            otel_endpoint: None,
+            sandbox_root: std::path::Path::new("/tmp").into(),
+        });
+        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        AppState {
+            config,
+            auth,
+            tickets: crate::ws::ticket::TicketStore::new(),
+            lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+        }
+    }
 
     #[test]
     fn initialize_returns_correct_protocol_version() {
@@ -190,7 +222,7 @@ mod tests {
         let resp = handle_tools_list(Some(serde_json::json!(1)));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 13);
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
@@ -200,17 +232,18 @@ mod tests {
         assert!(names.contains(&"find_files"));
         assert!(names.contains(&"search"));
         assert!(names.contains(&"execute_command"));
+        assert!(names.contains(&"lsp_diagnostics"));
+        assert!(names.contains(&"lsp_hover"));
+        assert!(names.contains(&"lsp_definition"));
+        assert!(names.contains(&"lsp_references"));
+        assert!(names.contains(&"lsp_rename"));
     }
 
     #[tokio::test]
     async fn tools_call_unknown_tool_returns_error() {
+        let state = make_state();
         let params = serde_json::json!({ "name": "nope", "arguments": {} });
-        let resp = handle_tools_call(
-            Some(serde_json::json!(1)),
-            params,
-            std::path::Path::new("/tmp"),
-        )
-        .await;
+        let resp = handle_tools_call(Some(serde_json::json!(1)), params, &state).await;
         let error = resp.error.unwrap();
         assert_eq!(error.code, -32602);
         assert_eq!(error.message, "Unknown tool: nope");
@@ -218,20 +251,14 @@ mod tests {
 
     #[test]
     fn tools_call_missing_name_returns_error() {
-        // handle_tools_call needs async — but we test the missing-name branch
-        // which is synchronous (just extracts and matches). Use a quick wrapper.
+        let state = make_state();
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
         let resp = rt.block_on(async {
             let params = serde_json::json!({ "arguments": {} });
-            handle_tools_call(
-                Some(serde_json::json!(1)),
-                params,
-                std::path::Path::new("/tmp"),
-            )
-            .await
+            handle_tools_call(Some(serde_json::json!(1)), params, &state).await
         });
         let error = resp.error.unwrap();
         assert_eq!(error.code, -32602);
