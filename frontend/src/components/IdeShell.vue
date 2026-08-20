@@ -23,7 +23,7 @@ const dockviewApi = shallowRef<DockviewReadyEvent['api'] | null>(null);
 
 provide('sandbox-fs', fsClient);
 provide('sandbox-name', props.sandboxName);
-provide('get-lsp-client', (toolchain: string) => getLspClient(props.sandboxName, toolchain));
+provide('get-lsp-client', (toolchain: string) => getLspClient(props.sandboxName, toolchain, openFile));
 // Handler fourni à Explorer : ouvre (ou active) l'onglet Editor du fichier —
 // un panel dockview par fichier, cf. openFile ci-dessous.
 provide('open-file', openFile);

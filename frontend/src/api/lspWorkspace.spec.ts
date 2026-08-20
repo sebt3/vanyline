@@ -156,4 +156,58 @@ describe('VanylineWorkspace', () => {
     expect(ws.files[0].version).toBe(previousFileVersion + 1);
     expect(clearSpy).toHaveBeenCalled();
   });
+
+  describe('displayFile', () => {
+    it('fichier déjà ouvert : rend son view directement, pas de callback', async () => {
+      const client = makeFakeClient();
+      const openFile = vi.fn();
+      const ws = new VanylineWorkspace(client, openFile);
+      const view = makeFakeView();
+      ws.openFile('file:///src/main.rs', 'rust', view);
+
+      const result = await ws.displayFile('file:///src/main.rs');
+
+      expect(result).toBe(view);
+      expect(openFile).not.toHaveBeenCalled();
+    });
+
+    it('fichier hors workspace (toolchains/...) : null, pas de callback', async () => {
+      const client = makeFakeClient();
+      const openFile = vi.fn();
+      const ws = new VanylineWorkspace(client, openFile);
+
+      const result = await ws.displayFile(
+        'file:///toolchains/rust/usr/local/rustup/toolchains/x/lib/rustlib/src/rust/library/core/src/option.rs',
+      );
+
+      expect(result).toBeNull();
+      expect(openFile).not.toHaveBeenCalled();
+    });
+
+    it('nouveau fichier workspace : appelle le callback, attend l\'enregistrement via openFile', async () => {
+      const client = makeFakeClient();
+      const view = makeFakeView();
+      let ws!: VanylineWorkspace;
+      const openFile = vi.fn((path: string) => {
+        // Simule Editor.vue qui monte, charge le fichier, et s'enregistre —
+        // asynchrone en pratique, ici volontairement différé d'un tick.
+        setTimeout(() => ws.openFile(`file:///${path}`, 'rust', view), 10);
+      });
+      ws = new VanylineWorkspace(client, openFile);
+
+      const result = await ws.displayFile('file:///src/lib.rs');
+
+      expect(openFile).toHaveBeenCalledWith('src/lib.rs');
+      expect(result).toBe(view);
+    });
+
+    it('sans callback fourni : null (pas de crash)', async () => {
+      const client = makeFakeClient();
+      const ws = new VanylineWorkspace(client);
+
+      const result = await ws.displayFile('file:///src/lib.rs');
+
+      expect(result).toBeNull();
+    });
+  });
 });

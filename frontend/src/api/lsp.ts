@@ -32,7 +32,11 @@ const cache = new Map<string, Promise<LSPClient | null>>();
 /** Ouvre la connexion `/ws/lsp/{toolchain}`, connecte un `LSPClient`
  *  ({ extensions: languageServerExtensions(), timeout: 30_000 }), attend
  *  `client.initializing` et rend le client. Rejette si ticket/WS/init échoue. */
-async function openAndConnect(sandboxName: string, toolchain: string): Promise<LSPClient> {
+async function openAndConnect(
+  sandboxName: string,
+  toolchain: string,
+  openFile?: (path: string) => void,
+): Promise<LSPClient> {
   const key = `${sandboxName}/${toolchain}`;
   const ws = await openSandboxWs(sandboxName, `/ws/lsp/${toolchain}`);
   sockets.set(key, ws);
@@ -40,7 +44,7 @@ async function openAndConnect(sandboxName: string, toolchain: string): Promise<L
   const client = new LSPClientClass({
     extensions: languageServerExtensions(),
     timeout: 30_000,
-    workspace: (client) => new VanylineWorkspace(client),
+    workspace: (client) => new VanylineWorkspace(client, openFile),
   }).connect(wsTransport(ws));
 
   await client.initializing;
@@ -53,12 +57,13 @@ async function openAndConnect(sandboxName: string, toolchain: string): Promise<L
 export async function getLspClient(
   sandboxName: string,
   toolchain: string,
+  openFile?: (path: string) => void,
 ): Promise<LSPClient | null> {
   const key = `${sandboxName}/${toolchain}`;
   const existing = cache.get(key);
   if (existing) return existing;
 
-  const promise = openAndConnect(sandboxName, toolchain).catch(() => null);
+  const promise = openAndConnect(sandboxName, toolchain, openFile).catch(() => null);
   cache.set(key, promise);
   return promise;
 }
