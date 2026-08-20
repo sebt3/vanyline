@@ -614,6 +614,83 @@ fermeture du terminal casserait ce cas d'usage avant même qu'il existe. Contre-
 notée, pas traitée : un job backgroundé oublié consomme des ressources du pod sans
 limite garantie (`SandboxSpec.resources` reste optionnel).
 
+### Serveur LSP — `/ws/lsp/:toolchain` et tools MCP `lsp_*` (`lsp-integration`)
+
+**Un process LSP par toolchain, partagé entre tous les clients** (`sandbox/src/lsp.rs`,
+`LspManager`/`LspSession`) — pas un process par session. `get_or_spawn` rend la
+session vivante existante ou en spawn une nouvelle (course au spawn concurrent
+gérée : la seconde tâche à finir accepte la session déjà posée par la première).
+Multiplexage par client (`ClientId`, `subscribe`/`unsubscribe`) : les `id` JSON-RPC
+entrants sont réécrits en id de session (`pending: HashMap<session_id, (ClientId,
+orig_id)>`) pour router chaque réponse vers le bon abonné sans collision entre
+clients. `try_mark_initialized` (test-and-set atomique) garantit qu'un seul client
+envoie `initialize` au process, peu importe lequel s'y prend en premier. Toutes les
+sessions voient le même état — le LSP dispatch sur le code réel de la sandbox, pas
+une vue par onglet.
+
+Deux surfaces consomment ce process unique :
+- **Navigateur** — `GET /ws/lsp/:toolchain` (`sandbox/src/ws/lsp.rs`), même
+  middleware ticket que `/ws/fs`/`/ws/terminal`. Un message JSON-RPC par frame texte
+  (le framing `Content-Length` ne concerne que le stdio du process LSP, pas la WS).
+  Repli dégradé si la toolchain n'a pas de LSP configuré (close code `4004`) ou si le
+  spawn échoue (`4005`).
+- **LLM** — tools MCP `lsp_diagnostics`/`lsp_hover`/`lsp_definition`/
+  `lsp_references`/`lsp_rename` (`sandbox/src/tools_impl.rs`, client dédié
+  `sandbox/src/lsp_client.rs` qui construit ses URIs absolues directement côté
+  serveur), **additifs** aux tools filesystem/search/command existants — ne les
+  remplacent pas.
+
+**Traduction d'URIs, uniquement côté bridge navigateur** (`ws/lsp.rs::rewrite_uris`) :
+le navigateur ne connaît jamais `VNL_SANDBOX_ROOT` (cohérent avec `/ws/fs`, jamais de
+chemin absolu exposé côté client — cf. section "WebSocket éditeur" ci-dessus), mais
+LSP exige des URIs absolues dans quasi tous ses messages. Walker JSON récursif —
+réécrit toute valeur string `file://…` portée par une clé `uri`/`*Uri` (pas un
+allowlist de champs figé, donc valable pour tout futur type de message LSP sans
+retouche) — **plus un cas spécial** pour `WorkspaceEdit.changes` (`workspace/
+applyEdit`) où l'URI est une **clé d'objet**, pas la valeur d'un champ `*Uri` : ce
+cas-là est réécrit séparément, le walker générique ne l'attrape pas. Direction
+`ToAbsolute` (navigateur → process) / `ToRelative` (process → navigateur), les deux
+sont l'inverse exacte l'une de l'autre (testé en roundtrip).
+
+**Rename cross-file côté UI — flux custom, pas le helper du package.**
+`renameSymbol`/`doRename` de `@codemirror/lsp-client` (v6.1.0, tout jeune — risque
+identifié en amont, matérialisé ici) ignore silencieusement les fichiers non ouverts
+dans un onglet (`workspace.getFile(uri)` → `null` → aucun `updateFile`). Décision :
+`frontend/src/api/lspRename.ts` envoie sa propre requête `textDocument/rename` (API
+publique du client) et applique le `WorkspaceEdit` lui-même — fichiers ouverts par
+transaction CodeMirror (buffer, **pas persisté sur disque**, l'éditeur n'a pas
+d'autosave), fichiers fermés par `read` (raw) + application locale des `TextEdit`
+(`applyTextEditsToString`, miroir TS de `apply_text_edits` côté sandbox) + `write` de
+`/ws/fs`. Séquentiel, best-effort — un fichier en échec n'interrompt pas les
+suivants, pas de rollback — même contrat que `apply_workspace_edit`
+(`sandbox/src/tools_impl.rs`, déjà utilisé par le tool MCP `lsp_rename`), donc pas de
+nouvel endpoint batch/atomique introduit sur `/ws/fs`. Le message de statut
+distingue explicitement les fichiers écrits sur disque de ceux modifiés seulement
+dans l'éditeur (« non enregistré — ⌘S ») — cet éditeur n'a aucun indicateur visuel
+« modifications non enregistrées » sur les onglets (cf. "Limites connues" plus bas),
+un message qui ne ferait pas la différence laisserait croire le rename entièrement
+persisté.
+
+**Menu contextuel éditeur** (`ContextMenu.vue`, étend `editing-context-menus`) :
+« Aller à la définition » (`jumpToDefinition` du package) et « Renommer le symbole »
+(`renameSymbolFromView`), en plus des entrées couper/copier/coller déjà en place.
+
+**Mapping toolchain LSP par chemin** (`frontend/src/components/panels/
+editorLanguage.ts::lspToolchainForPath`) : réplique côté frontend le mapping
+extension → toolchain/languageId de la sandbox — `.rs` → `rust`/`rust`, `.ts`/`.tsx`/
+`.mts`/`.cts` → `node`/`typescript`, `.js`/`.jsx`/`.mjs`/`.cjs` → `node`/`javascript`.
+Extension non couverte → `null`, mode dégradé (coloration seule, pas de LSP).
+
+**Limite connue, pas un bug caché** : `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` (flags CLI du
+controller) pointent par défaut sur les mêmes images que les toolchains
+(`rust:slim-trixie`/`node:trixie-slim`), qui ne contiennent pas rust-analyzer/
+typescript-language-server — valeur provisoire documentée en commentaire
+(`controller/src/main.rs`), aucune recette d'image LSP construite à ce jour. Code
+complet et testé, mais **pas fonctionnel sur un cluster réel** tant que ces images
+ne sont pas publiées et les flags surchargés au déploiement — même motif que
+plusieurs features précédentes jamais validées en conditions réelles (cf. section
+"Limites connues" plus bas).
+
 ## Opérateur Kubernetes — `vanyline-controller`
 
 kube-rs, quatre CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) réconciliées par un
@@ -779,6 +856,22 @@ toolchain `node` (image `TOOLCHAIN_IMAGE_NODE`, défaut
 (`toolchain_preset`), ordre fixe rust puis node. Les deux images par défaut sont
 des flags CLI du controller (`env` clap), surchargeables sans rebuild, recette
 alignée sur `deploy/sandbox/sandbox-test.yaml`.
+
+**LSP par toolchain** (`lsp-integration`, `Toolchain.lsp: Option<LspSpec>` —
+`{ image, bin, args }`, `crds/src/lib.rs`) : résolution (`resolve_toolchain_lsp`,
+même forme que `resolve_toolchain_env`) — `toolchain.lsp` explicite s'il est
+renseigné (LSP custom possible, y compris hors rust/node) ; sinon preset par
+`toolchain.name` (`image` depuis `ctx.lsp_image_rust`/`ctx.lsp_image_node`, flags CLI
+`LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` — l'image doit rester configurable au déploiement,
+contrairement à `bin`/`args` qui sont hardcodés : `rust-analyzer` sans args,
+`typescript-language-server --stdio`) ; sinon `None` (pas de route `/ws/lsp` montée
+pour cette toolchain, éditeur en mode dégradé). S'applique uniformément que
+`spec.toolchains` soit explicite ou dérivé — zero-config pour rust/node dans les deux
+cas. Monté en volume image séparé, `/toolchains/<name>-lsp` (à côté de
+`/toolchains/<name>` du toolchain lui-même) ; découverte côté sandbox via un seul env
+JSON `VNL_LSP_TOOLCHAINS` (`[{name, bin, args}]`, pas d'interpolation shell, argv
+array au spawn — cf. section "Serveur LSP" plus haut pour le process manager
+consommateur).
 
 ### CRD Application (`controller-application-crd`)
 
@@ -1217,7 +1310,14 @@ force un remount complet de l'arbre (`el-tree`) après chaque création/
 renommage/suppression (changement de `:key`) — replie les dossiers dépliés à chaque
 opération plutôt que de rafraîchir juste le nœud concerné. Pas d'undo applicatif sur
 delete/rename dans l'arbre (irréversible côté `/ws/fs`, cf. section "Serveur MCP"),
-compensé côté UI par une confirmation avant Supprimer, pas avant Renommer.
+compensé côté UI par une confirmation avant Supprimer, pas avant Renommer. Aucun
+indicateur « modifications non enregistrées » sur les onglets éditeur, ni de garde à
+la fermeture — préexistant, mais rendu plus sensible par le rename cross-file LSP
+(cf. section "Serveur LSP" plus haut) qui peut laisser un fichier ouvert modifié en
+mémoire sans autre signal que le message de statut ponctuel. LSP : images
+rust-analyzer/typescript-language-server pas encore construites (`LSP_IMAGE_RUST`/
+`LSP_IMAGE_NODE` pointent provisoirement sur les images toolchain), fonctionnalité
+non testée en conditions réelles.
 
 ## Maintenance des workspaces — `vanyline-maint` (crate sandbox)
 

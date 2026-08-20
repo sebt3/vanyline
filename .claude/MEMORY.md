@@ -92,6 +92,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/ws10-language-support.md` | Détection Rust/JS-TS (présence seulement, pas de version) → `Project.status.languages` (patch dédié, pas le reconciler) → toolchains Sandbox auto-dérivées si `spec.toolchains` vide (tout ou rien). Livré par l'agent opencode `cadence` plutôt que Qwen/`.tasks/` ; review Claude a trouvé RBAC trop large + bug de chemin relatif + `fmt` non lancé, tous corrigés avant clôture. Tool `validate` (scope originel plus large) non démarré, laissé de côté |
 | `.claude/memory/editing-context-menus.md` | Menu Édition (Rechercher/Remplacer), menus contextuels (arbre/éditeur/terminal/onglets), icônes de fichier, CRUD complet sur l'arbre (mkdir/rename/root ajoutés côté sandbox). Livré par Cadence (2ᵉ feature sur ce mode, même motif que WS-10) ; review Claude a trouvé un pan du design jamais câblé (copier chemin sur l'arbre, malgré l'op backend construit pour ça), Coller qui ne remplaçait pas la sélection, suppression sans confirmation, `fmt` non lancé (3ᵉ occurrence) — et un claim de Cadence sur un "crash" de test jsdom non reproduit en review |
 | `.claude/memory/chat-app-fonctionnel.md` | Chat de l'app rendu fonctionnel (3 axes) : contexte de conversation polymorphe (`chat_contexts`, extensible au-delà de sandbox), tools sandbox réellement utilisables (`extra_mcp` résolu dynamiquement, jusque-là `Vec::new()` en dur), options avancées de `ModelProfile` éditables côté web, `vue-advanced-chat` remplacé par Nuxt UI Chat (Tailwind CSS global accepté après correction d'une annonce erronée). Implémenté directement par Claude (pas Qwen/`.tasks/`) à la demande du développeur. Review Phase 3 a trouvé une faille de scoping owner réelle (sandbox d'un autre utilisateur résolvable via le contexte), corrigée avant clôture ; `fmt` non lancé (4ᵉ occurrence du motif) |
+| `.claude/memory/lsp-integration.md` | LSP par toolchain dans la sandbox : process unique partagé entre l'éditeur (CodeMirror `@codemirror/lsp-client` via `/ws/lsp/:toolchain`) et le LLM (tools MCP `lsp_*`, additifs). Livré par `cadence`, mais avec trois escalades explicites (forme de `Toolchain.lsp`, traduction d'URIs relatif↔absolu côté bridge WS, limite du helper `renameSymbol` du package pour le cross-file) résolues en session plutôt que découvertes en review — contraste avec WS-10/editing-context-menus. `fmt` lancé cette fois (5ᵉ feature déléguée, 1ʳᵉ où c'est fait). Review Phase 3 a trouvé un message de rename trompeur (fichiers ouverts vs écrits sur disque), corrigé. Images LSP réelles (rust-analyzer/typescript-language-server) pas encore construites — code complet, pas fonctionnel sur cluster réel |
 
 ---
 
@@ -139,9 +140,19 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   dépendance globale du frontend, décision actée). Branche `feat/chat-app-fonctionnel`
   pas encore mergée. Comme les deux features précédentes : pas testé sur cluster réel
   (pas de backend Postgres/K8s dans l'environnement de dev de cette session).
+- **Intégration LSP** (2026-08-20, `.claude/memory/lsp-integration.md`) : LSP par
+  toolchain dans la sandbox, process unique partagé entre l'éditeur web et le LLM
+  (tools MCP `lsp_*`), rename cross-file côté UI, menu contextuel étendu
+  (goto-definition/renommer). Branche `feat/lsp-integration` mergée dans `main` et
+  poussée. Pas fonctionnel sur cluster réel : `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE`
+  pointent provisoirement sur les images toolchain (pas de binaire LSP réel dedans),
+  aucune recette d'image LSP construite à ce jour.
 
 **Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
 attaqué) :
+- Images LSP réelles (rust-analyzer/typescript-language-server) à construire et
+  publier, puis surcharger `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` au déploiement — sans ça
+  l'intégration LSP ci-dessus reste du code mort en pratique.
 - Auth kydah-code → sandbox (NetworkPolicy en place, aucun mécanisme applicatif) et
   orchestration MCP par `app` (le relais de ticket WS existe, pas d'appel MCP par `app`
   à la sandbox).
