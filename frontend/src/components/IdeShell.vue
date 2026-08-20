@@ -8,6 +8,7 @@ import Chat from './panels/Chat.vue';
 import Terminal from './panels/Terminal.vue';
 import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
 import { getLspClient, disposeLspClients } from '../api/lsp';
+import { dirRootUri } from './panels/editorLanguage';
 import { debounce, loadLayout, saveLayout } from './ideLayoutPersistence';
 import { clearIdeActions, registerIdeActions, useIdeSession } from '../composables/useIdeSession';
 
@@ -23,7 +24,8 @@ const dockviewApi = shallowRef<DockviewReadyEvent['api'] | null>(null);
 
 provide('sandbox-fs', fsClient);
 provide('sandbox-name', props.sandboxName);
-provide('get-lsp-client', (toolchain: string) => getLspClient(props.sandboxName, toolchain, openFile));
+provide('get-lsp-client', (toolchain: string, path: string) =>
+  getLspClient(props.sandboxName, toolchain, dirRootUri(path), openFile));
 // Handler fourni à Explorer : ouvre (ou active) l'onglet Editor du fichier —
 // un panel dockview par fichier, cf. openFile ci-dessous.
 provide('open-file', openFile);

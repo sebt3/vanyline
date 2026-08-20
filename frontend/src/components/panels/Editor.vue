@@ -36,8 +36,10 @@ const panelApi = props.params.api;
 const fsClient = inject<Ref<SandboxFsClient | null>>('sandbox-fs', ref(null) as Ref<SandboxFsClient | null>);
 
 // Fourni par IdeShell : get-or-create d'un client LSP par toolchain pour cette sandbox.
-// Défaut `async () => null` (tests / IDE sans provider) → mode dégradé.
-const getLspClient = inject<(toolchain: string) => Promise<LSPClient | null>>(
+// `path` sert à dériver le rootUri (cf. dirRootUri) — n'a d'effet qu'à la création du
+// client pour ce toolchain (session partagée, cf. api/lsp.ts). Défaut
+// `async () => null` (tests / IDE sans provider) → mode dégradé.
+const getLspClient = inject<(toolchain: string, path: string) => Promise<LSPClient | null>>(
   'get-lsp-client',
   async () => null,
 );
@@ -213,7 +215,7 @@ async function loadFile(path: string): Promise<void> {
     //    RECONFIGURER l'état avec le plugin (diagnostics/hover/complétion/keymaps).
     const lsp = lspToolchainForPath(path);
     if (lsp) {
-      const client = await getLspClient(lsp.toolchain);
+      const client = await getLspClient(lsp.toolchain, path);
       if (client && view) {
         view.dispatch({ effects: StateEffect.reconfigure.of([
           ...baseExtensions,

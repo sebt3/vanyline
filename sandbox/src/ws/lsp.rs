@@ -167,7 +167,7 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
     // Id (côté client, avant réécriture session) de la requête `initialize` que CE
     // client a effectivement envoyée au process — posé seulement si ce client a
     // gagné `try_mark_initialized`. Sert à repérer sa réponse dans le flux
-    // `server_payload` pour la mettre en cache (`set_initialize_result`).
+    // `server_payload` pour mettre en cache son issue (`set_initialize_outcome`).
     let mut pending_initialize_id: Option<i64> = None;
 
     // Boucle bidirectionnelle : WS ⇄ process LSP
@@ -182,10 +182,18 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                                 rewrite_uris(&mut msg, &root, UriDirection::ToRelative);
                                 if pending_initialize_id.is_some()
                                     && msg.get("id").and_then(serde_json::Value::as_i64) == pending_initialize_id
-                                    && let Some(result) = msg.get("result")
                                 {
-                                    session.set_initialize_result(result.clone());
-                                    pending_initialize_id = None;
+                                    // Succès ou échec, l'un des deux doit être présent sur une
+                                    // vraie réponse JSON-RPC — les deux sont mis en cache (cf.
+                                    // doc `set_initialize_outcome` : un échec en cache évite un
+                                    // timeout de 30s pour rien aux clients suivants).
+                                    if let Some(result) = msg.get("result") {
+                                        session.set_initialize_outcome(Ok(result.clone()));
+                                        pending_initialize_id = None;
+                                    } else if let Some(error) = msg.get("error") {
+                                        session.set_initialize_outcome(Err(error.clone()));
+                                        pending_initialize_id = None;
+                                    }
                                 }
                                 serde_json::to_string(&msg).unwrap_or_default()
                             }
@@ -230,11 +238,21 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                                     if session.try_mark_initialized() {
                                         pending_initialize_id = Some(client_msg_id);
                                     } else {
-                                        let response = match session.wait_for_initialize_result().await {
-                                            Some(result) => serde_json::json!({
+                                        // L'issue rejouée peut être un succès OU l'échec réel du
+                                        // premier `initialize` (ex. typescript-language-server
+                                        // sans node_modules local) — dans les deux cas c'est
+                                        // l'information exacte que ce client aurait reçue s'il
+                                        // avait été le premier, pas une erreur générique.
+                                        let response = match session.wait_for_initialize_outcome().await {
+                                            Some(Ok(result)) => serde_json::json!({
                                                 "jsonrpc": "2.0",
                                                 "id": client_msg_id,
                                                 "result": result
+                                            }),
+                                            Some(Err(error)) => serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": client_msg_id,
+                                                "error": error
                                             }),
                                             None => serde_json::json!({
                                                 "jsonrpc": "2.0",

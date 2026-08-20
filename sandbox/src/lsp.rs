@@ -125,13 +125,18 @@ struct LspSessionInner {
     /// `true` dès qu'un client a envoyé `initialize` au process (partagé entre tous
     /// les clients de la session — le process LSP ne s'initialise qu'une fois).
     initialized: AtomicBool,
-    /// `result` de la réponse `initialize` réelle, posé par le premier client (celui
-    /// qui a gagné `try_mark_initialized`) une fois sa réponse reçue. Les clients
-    /// suivants (nouvel onglet, rechargement de page, nouveau tool MCP) doivent
-    /// recevoir une réponse `initialize` valide sans renvoyer la requête au process —
-    /// un LSP réel rejette un second `initialize` (violation du protocole ; observé en
-    /// usage réel : rust-analyzer répond `-32601 unknown request`).
-    initialize_result: Mutex<Option<Value>>,
+    /// Issue de la réponse `initialize` réelle, posée par le premier client (celui
+    /// qui a gagné `try_mark_initialized`) une fois sa réponse reçue — `Ok(result)`
+    /// ou `Err(error)`. Les clients suivants (nouvel onglet, rechargement de page,
+    /// nouveau tool MCP) doivent recevoir une réponse `initialize` sans renvoyer la
+    /// requête au process — un LSP réel rejette un second `initialize` (violation du
+    /// protocole ; observé en usage réel : rust-analyzer répond `-32601 unknown
+    /// request`). Cache aussi l'ÉCHEC (pas seulement le succès) : sans ça, un premier
+    /// `initialize` en échec (ex. typescript-language-server sans `node_modules`
+    /// local, observé en usage réel) laisse `initialized` à `true` pour toujours sans
+    /// rien à rejouer — tout client suivant attendrait le timeout de 30s pour rien
+    /// plutôt que de recevoir immédiatement la même erreur réelle.
+    initialize_outcome: Mutex<Option<Result<Value, Value>>>,
     initialize_notify: Notify,
     _toolchain_name: String,
 }
@@ -181,7 +186,7 @@ impl LspSession {
                 subs: Mutex::new(HashMap::new()),
                 alive: AtomicBool::new(true),
                 initialized: AtomicBool::new(false),
-                initialize_result: Mutex::new(None),
+                initialize_outcome: Mutex::new(None),
                 initialize_notify: Notify::new(),
                 child: Mutex::new(Some(child)),
                 next_client: AtomicU64::new(1),
@@ -409,32 +414,38 @@ impl LspSession {
         !self.inner.initialized.swap(true, Ordering::SeqCst)
     }
 
-    /// Pose le `result` de la réponse `initialize` réelle (appelé par le client
-    /// gagnant de `try_mark_initialized` une fois sa réponse reçue) et réveille les
-    /// clients en attente dans `wait_for_initialize_result`.
-    pub fn set_initialize_result(&self, result: Value) {
-        if let Ok(mut guard) = self.inner.initialize_result.lock() {
-            *guard = Some(result);
+    /// Pose l'issue de la réponse `initialize` réelle — `Ok(result)` en cas de
+    /// succès, `Err(error)` si le process a répondu une erreur (ex.
+    /// typescript-language-server sans `node_modules` local trouvable) — appelé par
+    /// le client gagnant de `try_mark_initialized` une fois sa réponse reçue, et
+    /// réveille les clients en attente dans `wait_for_initialize_outcome`. Un échec
+    /// EST mis en cache, pas seulement un succès : sans ça, tout client suivant
+    /// attendrait le timeout de 30s pour rien plutôt que de recevoir immédiatement la
+    /// même erreur réelle (bug trouvé en usage réel).
+    pub fn set_initialize_outcome(&self, outcome: Result<Value, Value>) {
+        if let Ok(mut guard) = self.inner.initialize_outcome.lock() {
+            *guard = Some(outcome);
         }
         self.inner.initialize_notify.notify_waiters();
     }
 
-    /// Rend le `result` `initialize` mis en cache dès qu'il est disponible — pour un
-    /// client qui a perdu `try_mark_initialized` (déjà posé : retour immédiat ; pas
-    /// encore posé : attend `notify_waiters`, borné à 30s au cas où le client gagnant
-    /// n'aboutit jamais). `None` seulement en cas de timeout.
+    /// Rend l'issue `initialize` mise en cache dès qu'elle est disponible — pour un
+    /// client qui a perdu `try_mark_initialized` (déjà posée : retour immédiat ; pas
+    /// encore posée : attend `notify_waiters`, borné à 30s au cas où le client
+    /// gagnant n'aboutit jamais — process tué avant toute réponse, par ex.). `None`
+    /// seulement dans ce cas de timeout réel.
     ///
     /// Course bénigne assumée : `Notify::notify_waiters` (contrairement à
     /// `notify_one`) ne mémorise pas de "permit" — un appelant qui n'a pas encore
-    /// atteint le `select!` ci-dessous au moment de l'appel à `set_initialize_result`
+    /// atteint le `select!` ci-dessous au moment de l'appel à `set_initialize_outcome`
     /// peut manquer le réveil. Sans conséquence sur l'exactitude (le re-check du
     /// cache après le `select!` couvre ce cas), seulement sur la latence dans cette
     /// fenêtre étroite : au pire les 30s complètes avant de relire un cache déjà
     /// peuplé, plutôt qu'un réveil immédiat. Pas de mécanisme plus strict
     /// (`notify_one` + compteur, boucle de poll courte) pour une fenêtre de course
     /// aussi étroite et un pire cas qui reste correct, juste plus lent.
-    pub async fn wait_for_initialize_result(&self) -> Option<Value> {
-        if let Some(v) = self.cached_initialize_result() {
+    pub async fn wait_for_initialize_outcome(&self) -> Option<Result<Value, Value>> {
+        if let Some(v) = self.cached_initialize_outcome() {
             return Some(v);
         }
         let notified = self.inner.initialize_notify.notified();
@@ -442,12 +453,12 @@ impl LspSession {
             () = notified => {}
             () = tokio::time::sleep(std::time::Duration::from_secs(30)) => {}
         }
-        self.cached_initialize_result()
+        self.cached_initialize_outcome()
     }
 
-    fn cached_initialize_result(&self) -> Option<Value> {
+    fn cached_initialize_outcome(&self) -> Option<Result<Value, Value>> {
         self.inner
-            .initialize_result
+            .initialize_outcome
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
@@ -775,10 +786,10 @@ while True:
     // ── Tests cache initialize (bug réel : double initialize, cf. ws/lsp.rs) ─────
 
     /// Un second appelant (`try_mark_initialized` déjà `false`) ne doit jamais
-    /// renvoyer `initialize` au process — mais doit récupérer le `result` du premier
-    /// via le cache, immédiatement si déjà posé.
+    /// renvoyer `initialize` au process — mais doit récupérer l'issue du premier via
+    /// le cache, immédiatement si déjà posée (cas succès).
     #[tokio::test]
-    async fn initialize_result_cached_and_replayed_immediately() {
+    async fn initialize_outcome_cached_and_replayed_immediately() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
         let root = tmpdir.path().to_path_buf();
         let session = LspSession::spawn(&spec, &root)
@@ -789,20 +800,48 @@ while True:
         assert!(!session.try_mark_initialized(), "second caller should lose");
 
         let capabilities = serde_json::json!({"hoverProvider": true});
-        session.set_initialize_result(capabilities.clone());
+        session.set_initialize_outcome(Ok(capabilities.clone()));
 
         let cached = session
-            .wait_for_initialize_result()
+            .wait_for_initialize_outcome()
             .await
-            .expect("result should be cached");
-        assert_eq!(cached, capabilities);
+            .expect("outcome should be cached");
+        assert_eq!(cached, Ok(capabilities));
+    }
+
+    /// Un premier `initialize` en ÉCHEC (ex. typescript-language-server sans
+    /// `node_modules` local) doit aussi être mis en cache et rejoué tel quel — sinon
+    /// tout client suivant attend le timeout de 30s pour rien (bug trouvé en usage
+    /// réel).
+    #[tokio::test]
+    async fn initialize_outcome_caches_failure_too() {
+        let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn should succeed");
+
+        assert!(session.try_mark_initialized());
+        assert!(!session.try_mark_initialized());
+
+        let error = serde_json::json!({"code": -32603, "message": "Could not find a valid TypeScript installation"});
+        session.set_initialize_outcome(Err(error.clone()));
+
+        let cached = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            session.wait_for_initialize_outcome(),
+        )
+        .await
+        .expect("failure must be cached immediately, not wait for the 30s timeout")
+        .expect("outcome should be cached");
+        assert_eq!(cached, Err(error));
     }
 
     /// Un appelant qui attend AVANT que le premier ait fini son `initialize` réel
-    /// doit être réveillé par `notify_waiters` dès que le résultat est posé, pas
-    /// bloqué jusqu'au timeout de 30s.
+    /// doit être réveillé par `notify_waiters` dès que l'issue est posée, pas bloqué
+    /// jusqu'au timeout de 30s.
     #[tokio::test]
-    async fn initialize_result_wakes_pending_waiter() {
+    async fn initialize_outcome_wakes_pending_waiter() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
         let root = tmpdir.path().to_path_buf();
         let session = LspSession::spawn(&spec, &root)
@@ -813,18 +852,19 @@ while True:
         assert!(!session.try_mark_initialized());
 
         let waiter_session = Arc::clone(&session);
-        let waiter = tokio::spawn(async move { waiter_session.wait_for_initialize_result().await });
+        let waiter =
+            tokio::spawn(async move { waiter_session.wait_for_initialize_outcome().await });
 
         // Laisser le waiter s'enregistrer avant de poser le résultat.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         let capabilities = serde_json::json!({"definitionProvider": true});
-        session.set_initialize_result(capabilities.clone());
+        session.set_initialize_outcome(Ok(capabilities.clone()));
 
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
             .await
             .expect("waiter should be woken well before the 5s test timeout")
             .expect("waiter task should not panic");
-        assert_eq!(result, Some(capabilities));
+        assert_eq!(result, Some(Ok(capabilities)));
     }
 
     // ── Tests session ──────────────────────────────────────────────────────

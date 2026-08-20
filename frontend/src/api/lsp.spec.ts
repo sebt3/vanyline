@@ -65,7 +65,7 @@ afterEach(() => {
 
 describe('getLspClient', () => {
   it('ouvre /ws/lsp/{toolchain} et connecte le client', async () => {
-    const client = await getLspClient('foo', 'rust');
+    const client = await getLspClient('foo', 'rust', 'file:///');
 
     expect(openSandboxWs).toHaveBeenCalledWith('foo', '/ws/lsp/rust');
     expect(client).not.toBeNull();
@@ -77,9 +77,17 @@ describe('getLspClient', () => {
     expect(initMsg.method).toBe('initialize');
   });
 
+  it('rootUri fourni est transmis dans la requête initialize', async () => {
+    await getLspClient('foo', 'rust', 'file:///frontend/src');
+
+    const fakeWs = FakeWebSocket.instances[0] as FakeWebSocket;
+    const initMsg = JSON.parse(fakeWs.sent[0]);
+    expect(initMsg.params.rootUri).toBe('file:///frontend/src');
+  });
+
   it('cache par sandbox/toolchain — openSandboxWs appelé une seule fois', async () => {
-    await getLspClient('foo', 'rust');
-    await getLspClient('foo', 'rust');
+    await getLspClient('foo', 'rust', 'file:///');
+    await getLspClient('foo', 'rust', 'file:///');
 
     expect(openSandboxWs).toHaveBeenCalledTimes(1);
   });
@@ -87,18 +95,18 @@ describe('getLspClient', () => {
   it('échec du ticket/WS → null (pas de throw)', async () => {
     (openSandboxWs as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('ticket failed'));
 
-    const result = await getLspClient('foo', 'rust');
+    const result = await getLspClient('foo', 'rust', 'file:///');
     expect(result).toBeNull();
 
     // Le cache garde le null : appel ultérieur ne rouvre pas
-    const result2 = await getLspClient('foo', 'rust');
+    const result2 = await getLspClient('foo', 'rust', 'file:///');
     expect(result2).toBeNull();
     // openSandboxWs n'a été appelé qu'une fois (l'échec initial)
     expect(openSandboxWs).toHaveBeenCalledTimes(1);
   });
 
   it('disposeLspClients ferme le ws et permet la réouverture', async () => {
-    const client = await getLspClient('foo', 'rust');
+    const client = await getLspClient('foo', 'rust', 'file:///');
     expect(client).not.toBeNull();
     expect(openSandboxWs).toHaveBeenCalledTimes(1);
 
@@ -109,14 +117,14 @@ describe('getLspClient', () => {
 
     // Réouverture : le cache est vidé, donc un nouveau WS est créé
     (openSandboxWs as ReturnType<typeof vi.fn>).mockClear();
-    await getLspClient('foo', 'rust');
+    await getLspClient('foo', 'rust', 'file:///');
 
     expect(openSandboxWs).toHaveBeenCalledWith('foo', '/ws/lsp/rust');
   });
 
   it('toolchains isolées — une connexion par toolchain', async () => {
-    await getLspClient('foo', 'rust');
-    await getLspClient('foo', 'node');
+    await getLspClient('foo', 'rust', 'file:///');
+    await getLspClient('foo', 'node', 'file:///');
 
     expect(openSandboxWs).toHaveBeenCalledTimes(2);
     expect(openSandboxWs).toHaveBeenNthCalledWith(1, 'foo', '/ws/lsp/rust');
@@ -124,8 +132,8 @@ describe('getLspClient', () => {
   });
 
   it('sandboxes isolées — disposeLspClients d\'une sandbox n\'affecte pas les autres', async () => {
-    await getLspClient('foo', 'rust');
-    await getLspClient('bar', 'rust');
+    await getLspClient('foo', 'rust', 'file:///');
+    await getLspClient('bar', 'rust', 'file:///');
 
     disposeLspClients('foo');
 

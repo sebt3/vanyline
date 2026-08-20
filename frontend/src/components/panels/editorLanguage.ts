@@ -57,6 +57,22 @@ export function lspToolchainForPath(
   }
 }
 
+/** `rootUri` LSP dérivé du répertoire contenant `path` — `@codemirror/lsp-client` ne
+ *  déduit jamais `rootUri` lui-même (vaut `null` si non fourni). Un LSP JS/TS remonte
+ *  l'arborescence depuis la racine fournie pour trouver `package.json`/
+ *  `node_modules` : un répertoire *sous* le projet suffit (pas besoin d'être pile
+ *  dessus), donc le répertoire du fichier ouvert convient même profondément niché.
+ *  Sans ce `rootUri`, le process retombe sur son cwd de spawn (racine du monorepo) —
+ *  qui ne correspond au vrai projet que par coïncidence (rust ici, `Cargo.toml` y
+ *  vit) ; pour un sous-projet comme `frontend/` (node/ts), ça ne trouve jamais le
+ *  bon `node_modules` même après un `npm install` réel — trouvé en usage réel.
+ *  Fichier à la racine (pas de `/`) → `file:///` (racine du workspace). */
+export function dirRootUri(path: string): string {
+  const idx = path.lastIndexOf('/');
+  const dir = idx === -1 ? '' : path.slice(0, idx);
+  return `file:///${dir}`;
+}
+
 /** Retourne l'extension CodeMirror pour `path`, déduite de son extension de
  *  fichier. `null`/pas d'extension reconnue → tableau vide (texte brut). */
 export function languageExtensionForPath(path: string | null): Extension[] {

@@ -31,10 +31,23 @@ const cache = new Map<string, Promise<LSPClient | null>>();
 
 /** Ouvre la connexion `/ws/lsp/{toolchain}`, connecte un `LSPClient`
  *  ({ extensions: languageServerExtensions(), timeout: 30_000 }), attend
- *  `client.initializing` et rend le client. Rejette si ticket/WS/init échoue. */
+ *  `client.initializing` et rend le client. Rejette si ticket/WS/init échoue.
+ *
+ *  `rootUri` : le package ne le déduit jamais lui-même — `LSPClientConfig.rootUri`
+ *  vaut `null` si on ne le fournit pas (vérifié dans la source du package). Laissé
+ *  `null`, le process retombe sur son cwd de spawn (`sandbox_root`, la racine du
+ *  monorepo) pour chercher un `tsserver`/`typescript` local — ça ne marche que si le
+ *  projet du langage vit exactement à cette racine (le cas de rust ici, par hasard :
+ *  `Cargo.toml` y est). Pour un projet dans un sous-répertoire (`frontend/` pour
+ *  node/ts), le process ne le trouve jamais avec `rootUri: null` même si
+ *  `npm install` a bien été fait — trouvé en usage réel. D'où le répertoire du
+ *  premier fichier ouvert comme racine : les serveurs LSP TS/JS remontent
+ *  l'arborescence depuis la racine fournie pour trouver le projet, un répertoire
+ *  sous ce projet (pas forcément exactement dessus) suffit. */
 async function openAndConnect(
   sandboxName: string,
   toolchain: string,
+  rootUri: string,
   openFile?: (path: string) => void,
 ): Promise<LSPClient> {
   const key = `${sandboxName}/${toolchain}`;
@@ -44,6 +57,7 @@ async function openAndConnect(
   const client = new LSPClientClass({
     extensions: languageServerExtensions(),
     timeout: 30_000,
+    rootUri,
     workspace: (client) => new VanylineWorkspace(client, openFile),
   }).connect(wsTransport(ws));
 
@@ -53,17 +67,20 @@ async function openAndConnect(
 }
 
 /** Get-or-create : une seule connexion par `{sandbox}/{toolchain}` (cache de promesses).
- *  Échec → `null` (pas de retry, le cache mémorise l'échec). */
+ *  Échec → `null` (pas de retry, le cache mémorise l'échec). `rootUri` n'a d'effet
+ *  qu'à la création (premier appel pour ce `{sandbox, toolchain}`) — la session est
+ *  partagée, cf. `openAndConnect`. */
 export async function getLspClient(
   sandboxName: string,
   toolchain: string,
+  rootUri: string,
   openFile?: (path: string) => void,
 ): Promise<LSPClient | null> {
   const key = `${sandboxName}/${toolchain}`;
   const existing = cache.get(key);
   if (existing) return existing;
 
-  const promise = openAndConnect(sandboxName, toolchain, openFile).catch(() => null);
+  const promise = openAndConnect(sandboxName, toolchain, rootUri, openFile).catch(() => null);
   cache.set(key, promise);
   return promise;
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
+import { dirRootUri, languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
 
 describe('languageExtensionForPath', () => {
   it.each([
@@ -54,5 +54,20 @@ describe('lspToolchainForPath', () => {
     expect(lspToolchainForPath('A.RS')).toEqual({ toolchain: 'rust', languageId: 'rust' });
     expect(lspToolchainForPath('A.TS')).toEqual({ toolchain: 'node', languageId: 'typescript' });
     expect(lspToolchainForPath('A.JS')).toEqual({ toolchain: 'node', languageId: 'javascript' });
+  });
+});
+
+describe('dirRootUri', () => {
+  it('fichier niché : répertoire contenant le fichier', () => {
+    expect(dirRootUri('frontend/src/components/panels/Editor.vue'))
+      .toBe('file:///frontend/src/components/panels');
+  });
+
+  it('fichier directement sous un répertoire : ce répertoire', () => {
+    expect(dirRootUri('frontend/App.vue')).toBe('file:///frontend');
+  });
+
+  it('fichier à la racine (pas de /) : racine du workspace', () => {
+    expect(dirRootUri('Cargo.toml')).toBe('file:///');
   });
 });
