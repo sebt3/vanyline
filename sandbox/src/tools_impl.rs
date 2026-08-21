@@ -416,7 +416,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "lsp_diagnostics",
-            "description": "Get diagnostics (errors/warnings) for a file via the LSP server.",
+            "description": "Get diagnostics (errors/warnings) for a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -427,58 +427,93 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_hover",
-            "description": "Get hover information (tooltip) for a position in a file via the LSP server.",
+            "description": "Get hover information (tooltip) for a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0)."},
+                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
                     "character": {"type": "integer", "description": "0-based character offset (default 0)."}
                 }
             }
         }),
         serde_json::json!({
             "name": "lsp_definition",
-            "description": "Go to definition of the symbol at a position in a file via the LSP server.",
+            "description": "Go to definition of the symbol at a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0)."},
+                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
                     "character": {"type": "integer", "description": "0-based character offset (default 0)."}
                 }
             }
         }),
         serde_json::json!({
             "name": "lsp_references",
-            "description": "Find all references of the symbol at a position in a file via the LSP server.",
+            "description": "Find all references of the symbol at a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0)."},
+                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
                     "character": {"type": "integer", "description": "0-based character offset (default 0)."}
                 }
             }
         }),
         serde_json::json!({
             "name": "lsp_rename",
-            "description": "Rename a symbol at a position in a file via the LSP server (applies the resulting WorkspaceEdit to the filesystem).",
+            "description": "Rename a symbol at a position in a file via the LSP server (applies the resulting WorkspaceEdit to the filesystem). Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "new_name"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0)."},
+                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
                     "character": {"type": "integer", "description": "0-based character offset (default 0)."},
                     "new_name": {"type": "string", "description": "New name for the symbol."}
                 }
             }
         }),
     ]
+}
+
+/// Extrait le texte de `Hover.contents` — `MarkedString | MarkedString[] |
+/// MarkupContent` (spec LSP). `MarkedString` = string brute ou `{language, value}` ;
+/// `MarkupContent` (forme moderne — c'est ce que rendent rust-analyzer et
+/// typescript-language-server par défaut) = `{kind, value}`. Seule la forme array
+/// d'objets `{value}` était gérée avant ce fix — la forme `MarkupContent` (un objet
+/// direct, pas un array) tombait dans aucun des cas gérés et rendait toujours "no
+/// hover" en usage réel, quel que soit le symbole.
+fn hover_contents_to_text(contents: &Value) -> String {
+    if let Some(s) = contents.as_str() {
+        return s.to_string();
+    }
+    if let Some(arr) = contents.as_array() {
+        return arr
+            .iter()
+            .map(hover_marked_string_to_text)
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n");
+    }
+    hover_marked_string_to_text(contents)
+}
+
+/// Un élément `MarkedString` (string ou `{language, value}`) ou un `MarkupContent`
+/// (`{kind, value}`) — les deux formes objet portent leur texte dans `value`.
+fn hover_marked_string_to_text(value: &Value) -> String {
+    if let Some(s) = value.as_str() {
+        return s.to_string();
+    }
+    value
+        .get("value")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string()
 }
 
 /// Severity helper: maps LSP severity code → display string.
@@ -611,7 +646,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             };
             match (
                 client.initialize().await,
-                client.did_open(&file_uri, language_id, &text).await,
+                client.ensure_open(&file_uri, language_id, &text).await,
             ) {
                 (Ok(_), Ok(())) => match client
                     .request(
@@ -624,28 +659,14 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                     .await
                 {
                     Ok(result) => {
-                        if let Some(contents) = result.get("contents") {
-                            let values: Vec<String> = if let Some(arr) = contents.as_array() {
-                                arr.iter()
-                                    .filter_map(|c| {
-                                        c.get("value")
-                                            .and_then(|v| v.as_str())
-                                            .map(|s| s.to_string())
-                                    })
-                                    .collect()
-                            } else if contents.is_string() {
-                                vec![contents.as_str().unwrap_or("").to_string()]
-                            } else {
-                                vec![]
-                            };
-                            let text = values.join("\n");
-                            if text.is_empty() {
-                                Some(ok_result("no hover".to_string()))
-                            } else {
-                                Some(ok_result(text))
-                            }
-                        } else {
+                        let text = result
+                            .get("contents")
+                            .map(hover_contents_to_text)
+                            .unwrap_or_default();
+                        if text.is_empty() {
                             Some(ok_result("no hover".to_string()))
+                        } else {
+                            Some(ok_result(text))
                         }
                     }
                     Err(e) => Some(err_result(e.to_string())),
@@ -661,7 +682,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             };
             match (
                 client.initialize().await,
-                client.did_open(&file_uri, language_id, &text).await,
+                client.ensure_open(&file_uri, language_id, &text).await,
             ) {
                 (Ok(_), Ok(())) => match client
                     .request(
@@ -721,7 +742,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             };
             match (
                 client.initialize().await,
-                client.did_open(&file_uri, language_id, &text).await,
+                client.ensure_open(&file_uri, language_id, &text).await,
             ) {
                 (Ok(_), Ok(())) => match client
                     .request(
@@ -760,7 +781,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             };
             match (
                 client.initialize().await,
-                client.did_open(&file_uri, language_id, &text).await,
+                client.ensure_open(&file_uri, language_id, &text).await,
             ) {
                 (Ok(_), Ok(())) => match client
                     .request(
@@ -1378,6 +1399,31 @@ mod tests {
             text.contains(":1:1:"),
             "should contain ':1:1:' for 0-based line/char +1"
         );
+    }
+
+    #[test]
+    fn hover_contents_to_text_handles_all_lsp_shapes() {
+        // MarkupContent — la forme réelle envoyée par rust-analyzer/
+        // typescript-language-server, jamais gérée avant ce fix.
+        assert_eq!(
+            hover_contents_to_text(&serde_json::json!({"kind": "markdown", "value": "Arc<T>"})),
+            "Arc<T>"
+        );
+        // MarkedString brute (string).
+        assert_eq!(
+            hover_contents_to_text(&serde_json::json!("plain hover")),
+            "plain hover"
+        );
+        // MarkedString[] — mélange string et {language, value}.
+        assert_eq!(
+            hover_contents_to_text(&serde_json::json!([
+                "line one",
+                {"language": "rust", "value": "line two"}
+            ])),
+            "line one\nline two"
+        );
+        // Contenu vide → chaîne vide (le dispatch rend "no hover" dans ce cas).
+        assert_eq!(hover_contents_to_text(&serde_json::json!({})), "");
     }
 
     #[tokio::test]

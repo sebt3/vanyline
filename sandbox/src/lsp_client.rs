@@ -141,6 +141,24 @@ impl LspClient {
         .await
     }
 
+    /// Envoie `didOpen` seulement si CET appelant est le premier, tous clients de la
+    /// session confondus (éditeur navigateur compris), à demander l'ouverture de
+    /// `uri` (`session.try_mark_uri_open`) — sinon no-op. Un second `didOpen` sur une
+    /// URI déjà ouverte est une violation de protocole LSP ; observé en usage réel
+    /// comme cause probable de `lsp_diagnostics` "one-shot" (chaque appel de tool MCP
+    /// envoyait son propre `didOpen` sur le même fichier).
+    pub async fn ensure_open(
+        &self,
+        uri: &str,
+        language_id: &str,
+        text: &str,
+    ) -> anyhow::Result<()> {
+        if !self.session.try_mark_uri_open(uri) {
+            return Ok(());
+        }
+        self.did_open(uri, language_id, text).await
+    }
+
     /// Envoie une requête `method` avec `params` et attend la réponse dont l'id correspond.
     /// Saute les notifications reçues avant la réponse. Rend le `result` de la réponse.
     /// Erreurs : process fermé en attendant (`VNL-SBX-LSP-004`), réponse `error` du serveur
@@ -191,10 +209,15 @@ impl LspClient {
         }
     }
 
-    /// `initialize` + `did_open(uri, language_id, text)`, puis collecte la première
-    /// notification `textDocument/publishDiagnostics` avec `params.uri == uri`. Rend le
-    /// tableau `params.diagnostics` (vide si timeout ou si le serveur n'en publie pas).
-    /// Erreur si `initialize`/`didOpen` échouent.
+    /// `initialize` + `ensure_open(uri, language_id, text)`, puis rend les
+    /// diagnostics en cache pour `uri` (`LspSession::wait_for_diagnostics` — alimenté
+    /// par TOUT abonné qui a jamais reçu un `publishDiagnostics` pour cette URI, pas
+    /// seulement cet appel-ci : sans ça, un push déjà arrivé avant l'abonnement de ce
+    /// `LspClient` — ex. diagnostics publiés dès l'ouverture du fichier par l'éditeur
+    /// navigateur, avant qu'un tool MCP ne s'y intéresse — serait perdu ; observé en
+    /// usage réel comme cause probable de "jamais de diagnostics Rust" côté tool MCP).
+    /// Vide si jamais publiés dans le délai, ou si le serveur n'en publie pas pour ce
+    /// fichier. Erreur si `initialize`/`didOpen` échouent.
     pub async fn diagnostics(
         &mut self,
         uri: &str,
@@ -202,46 +225,11 @@ impl LspClient {
         text: &str,
     ) -> anyhow::Result<Vec<Value>> {
         let _ = self.initialize().await?;
-        self.did_open(uri, language_id, text).await?;
-
-        let deadline = tokio::time::Instant::now() + DIAGNOSTICS_TIMEOUT;
-
-        loop {
-            match tokio::time::timeout_at(deadline, self.rx.recv()).await {
-                Ok(Some(raw)) => {
-                    let msg: Value = match serde_json::from_slice(&raw) {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::debug!("LSP client: failed to parse diagnostic message: {e}");
-                            continue;
-                        }
-                    };
-
-                    if let (Some(method_value), Some(params)) =
-                        (msg.get("method"), msg.get("params"))
-                        && matches!(
-                            method_value.as_str(),
-                            Some("textDocument/publishDiagnostics")
-                        )
-                        && let Some(params_uri) = params.get("uri").and_then(|u| u.as_str())
-                        && let Some(diag) = params
-                            .get("diagnostics")
-                            .and_then(|d| d.as_array().cloned())
-                        && params_uri == uri
-                    {
-                        return Ok(diag);
-                    }
-                }
-                Ok(None) => {
-                    return Err(anyhow::anyhow!(
-                        "VNL-SBX-LSP-004: LSP process closed while waiting for diagnostics"
-                    ));
-                }
-                Err(_) => {
-                    return Ok(Vec::new());
-                }
-            }
-        }
+        self.ensure_open(uri, language_id, text).await?;
+        Ok(self
+            .session
+            .wait_for_diagnostics(uri, DIAGNOSTICS_TIMEOUT)
+            .await)
     }
 }
 
@@ -293,6 +281,7 @@ def write_frame(data):
     sys.stdout.buffer.flush()
 
 count = 0
+opened_uris = set()
 while True:
     raw = read_frame()
     if not raw:
@@ -304,18 +293,23 @@ while True:
         params = msg.get("params", {})
 
         if msg_id is None:
-            # Notification : pas de réponse JSON-RPC. didOpen publie des diagnostics.
+            # Notification : pas de réponse JSON-RPC. didOpen publie des diagnostics —
+            # UNE SEULE FOIS par URI (comme un vrai serveur), pas à chaque appel : un
+            # test qui s'attendrait à un nouveau push sur un didOpen redondant sur la
+            # même URI masquerait le bug réel (cf. try_mark_uri_open côté Rust).
             if method == "textDocument/didOpen":
                 uri = params.get("textDocument", {}).get("uri", "")
-                notif = {
-                    "jsonrpc": "2.0",
-                    "method": "textDocument/publishDiagnostics",
-                    "params": {
-                        "uri": uri,
-                        "diagnostics": [{"message": "fake diag", "severity": 1, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}}}]
+                if uri not in opened_uris:
+                    opened_uris.add(uri)
+                    notif = {
+                        "jsonrpc": "2.0",
+                        "method": "textDocument/publishDiagnostics",
+                        "params": {
+                            "uri": uri,
+                            "diagnostics": [{"message": "fake diag", "severity": 1, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 10}}}]
+                        }
                     }
-                }
-                write_frame(json.dumps(notif).encode("utf-8"))
+                    write_frame(json.dumps(notif).encode("utf-8"))
             # initialized et autres notifications : aucune réponse.
             continue
 
@@ -330,11 +324,14 @@ while True:
                 "jsonrpc": "2.0", "id": msg_id, "result": result
             }).encode("utf-8"))
         elif method == "textDocument/hover":
+            # MarkupContent (objet direct, PAS un array) — la forme réellement rendue
+            # par rust-analyzer/typescript-language-server. Un array ici masquerait le
+            # vrai bug de parsing (cf. hover_contents_to_text côté tools_impl.rs).
             uri = params.get("textDocument", {}).get("uri", "")
             write_frame(json.dumps({
                 "jsonrpc": "2.0", "id": msg_id,
                 "result": {
-                    "contents": [{"kind": "plaintext", "value": f"hover:{uri}"}],
+                    "contents": {"kind": "plaintext", "value": f"hover:{uri}"},
                     "range": None
                 }
             }).encode("utf-8"))
@@ -527,7 +524,7 @@ mod tests {
                 .await
                 .expect("hover request ok");
             assert_eq!(
-                result["contents"][0]["value"].as_str().unwrap(),
+                result["contents"]["value"].as_str().unwrap(),
                 "hover:file:///workspace/main.rs",
                 "hover result value must match"
             );
@@ -571,6 +568,56 @@ mod tests {
             diags[0]["severity"].as_i64().unwrap(),
             1,
             "diagnostic severity must match"
+        );
+    }
+
+    /// Bug réel : chaque appel de tool MCP crée un nouveau `LspClient` (nouvel
+    /// abonnement) et appelait jusqu'ici `did_open` sans condition — un second appel
+    /// de `lsp_diagnostics` sur le MÊME fichier renvoyait `[]` (un didOpen redondant
+    /// n'a aucune raison de republier chez un serveur réel, cf. fake ci-dessus
+    /// modifié pour ne publier qu'une fois par URI). Avec `ensure_open` +
+    /// `LspSession::diagnostics_cache`, un second client sur la même URI doit obtenir
+    /// les MÊMES diagnostics, lus depuis le cache, sans déclencher un nouveau
+    /// `didOpen`.
+    #[tokio::test]
+    async fn client_diagnostics_second_call_same_uri_reads_cache() {
+        let (manager, _tmpdir) = make_manager("fake", FAKE_LSP_PY).await;
+        let session = manager
+            .get_or_spawn("fake")
+            .await
+            .expect("spawn ok")
+            .expect("should have session");
+        let uri = "file:///workspace/main.rs";
+
+        let mut client_a = LspClient::new(Arc::clone(&session), "file:///workspace".to_string());
+        let diags_a = tokio::time::timeout(
+            Duration::from_secs(10),
+            client_a.diagnostics(uri, "rust", "fn main(){}"),
+        )
+        .await
+        .expect("first call must complete within timeout")
+        .expect("diagnostics ok");
+        assert!(
+            !diags_a.is_empty(),
+            "first call should capture a diagnostic"
+        );
+
+        // Nouveau LspClient — même scénario qu'un deuxième appel de tool MCP.
+        let mut client_b = LspClient::new(Arc::clone(&session), "file:///workspace".to_string());
+        let diags_b = tokio::time::timeout(
+            Duration::from_secs(10),
+            client_b.diagnostics(uri, "rust", "fn main(){}"),
+        )
+        .await
+        .expect("second call must complete within timeout — not hang on a push that never comes")
+        .expect("diagnostics ok");
+        assert!(
+            !diags_b.is_empty(),
+            "second call on the same uri must also return the cached diagnostic, not []"
+        );
+        assert_eq!(
+            diags_a, diags_b,
+            "both calls should see the same diagnostic"
         );
     }
 

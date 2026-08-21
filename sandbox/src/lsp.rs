@@ -2,7 +2,7 @@
 //! multiplexage multi-clients. Un seul process par toolchain, partagé entre
 //! l'éditeur (route WS /ws/lsp/:toolchain) et les tools MCP `lsp_*`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -138,6 +138,30 @@ struct LspSessionInner {
     /// plutôt que de recevoir immédiatement la même erreur réelle.
     initialize_outcome: Mutex<Option<Result<Value, Value>>>,
     initialize_notify: Notify,
+    /// URIs pour lesquels un `didOpen` a déjà été envoyé au process, partagé entre
+    /// tous les clients (éditeur navigateur, chaque appel de tool MCP — un nouveau
+    /// `LspClient` par appel). Un LSP réel n'attend `didOpen` qu'une fois par URI tant
+    /// que rien ne l'a fermé (`didClose`) — un second `didOpen` sur une URI déjà
+    /// ouverte est une violation de protocole. Observé en usage réel comme cause
+    /// probable de `lsp_diagnostics` "one-shot" (diagnostics présents au premier
+    /// appel, absents ensuite) : chaque appel MCP renvoyait son propre `didOpen` sur
+    /// le même fichier.
+    open_uris: Mutex<HashSet<String>>,
+    /// Dernier `publishDiagnostics.diagnostics` connu par URI, alimenté par la tâche
+    /// lectrice pour TOUTE notification reçue — indépendamment de qui est abonné à ce
+    /// moment (cf. `wait_for_diagnostics`/`cached_diagnostics`). Nécessaire : un
+    /// `LspClient` MCP s'abonne fraîchement à chaque appel de tool ; sans ce cache, un
+    /// push déjà arrivé avant cet abonnement (ex. diagnostics publiés juste après
+    /// l'ouverture du fichier par l'éditeur navigateur, avant qu'un tool MCP ne
+    /// s'y intéresse) est perdu pour ce client — observé en usage réel comme cause
+    /// probable de "jamais de diagnostics Rust" alors que l'éditeur navigateur les
+    /// voit bien. Alimenté indépendamment du fait que `textDocument/diagnostic`
+    /// (pull) soit supporté ou non — vérifié : rust-analyzer le supporte,
+    /// typescript-language-server non (`"Unhandled method"`) — donc pas de solution
+    /// pull uniforme entre les deux, le cache push est la seule option qui marche
+    /// pour les deux serveurs.
+    diagnostics_cache: Mutex<HashMap<String, Vec<Value>>>,
+    diagnostics_notify: Notify,
     _toolchain_name: String,
 }
 
@@ -188,6 +212,9 @@ impl LspSession {
                 initialized: AtomicBool::new(false),
                 initialize_outcome: Mutex::new(None),
                 initialize_notify: Notify::new(),
+                open_uris: Mutex::new(HashSet::new()),
+                diagnostics_cache: Mutex::new(HashMap::new()),
+                diagnostics_notify: Notify::new(),
                 child: Mutex::new(Some(child)),
                 next_client: AtomicU64::new(1),
                 next_req: AtomicU64::new(1),
@@ -263,6 +290,22 @@ impl LspSession {
                             );
                         }
                     } else {
+                        // `publishDiagnostics` : mis en cache pour TOUT abonné, présent
+                        // ou futur — indépendant du broadcast ci-dessous (cf. doc du
+                        // champ `diagnostics_cache`).
+                        if msg.get("method").and_then(|m| m.as_str())
+                            == Some("textDocument/publishDiagnostics")
+                            && let Some(params) = msg.get("params")
+                            && let Some(uri) = params.get("uri").and_then(|u| u.as_str())
+                            && let Some(diags) =
+                                params.get("diagnostics").and_then(|d| d.as_array())
+                        {
+                            if let Ok(mut cache) = reader_session.inner.diagnostics_cache.lock() {
+                                cache.insert(uri.to_string(), diags.clone());
+                            }
+                            reader_session.inner.diagnostics_notify.notify_waiters();
+                        }
+
                         // Notification (pas d'id) : broadcast à tous les abonnés
                         let subs_map = match reader_session.inner.subs.lock() {
                             Ok(g) => g,
@@ -462,6 +505,68 @@ impl LspSession {
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
+    }
+
+    /// Test-and-set : rend `true` si CET appelant est le premier à demander l'ouverture
+    /// de `uri` (doit alors envoyer `didOpen`), `false` si `uri` est déjà ouverte par
+    /// un autre client (éditeur navigateur ou un appel de tool MCP précédent — il ne
+    /// faut RIEN envoyer, un second `didOpen` sur la même URI est une violation de
+    /// protocole LSP). Ne suit pas les fermetures (`didClose`) : une URI ouverte le
+    /// reste jusqu'à la mort du process — cohérent avec l'absence actuelle de
+    /// `didClose` côté `LspClient` (cf. son `Drop`, qui ne fait que `unsubscribe`).
+    pub fn try_mark_uri_open(&self, uri: &str) -> bool {
+        match self.inner.open_uris.lock() {
+            Ok(mut open) => open.insert(uri.to_string()),
+            Err(mut poisoned) => poisoned.get_mut().insert(uri.to_string()),
+        }
+    }
+
+    /// Diagnostics en cache pour `uri`, tel que publiés en dernier par le process —
+    /// `None` si jamais publiés pour cette URI.
+    pub fn cached_diagnostics(&self, uri: &str) -> Option<Vec<Value>> {
+        self.inner
+            .diagnostics_cache
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(uri).cloned())
+    }
+
+    /// Attend que `uri` ait des diagnostics en cache — retour immédiat si déjà
+    /// présents (même après un `didOpen` envoyé par un AUTRE client il y a longtemps,
+    /// cf. doc du champ `diagnostics_cache`), sinon attend `diagnostics_notify`, borné
+    /// à `timeout`. Rend un vecteur vide si jamais publiés dans ce délai (peut
+    /// légitimement signifier "aucun diagnostic", pas seulement "pas encore reçu" —
+    /// même ambiguïté qu'avant, inhérente au modèle push de LSP, non résolue ici).
+    ///
+    /// Même course bénigne que `wait_for_initialize_outcome` (`notify_waiters` sans
+    /// permit) — sans conséquence sur l'exactitude, seulement sur la latence dans une
+    /// fenêtre étroite.
+    pub async fn wait_for_diagnostics(
+        &self,
+        uri: &str,
+        timeout: std::time::Duration,
+    ) -> Vec<Value> {
+        if let Some(d) = self.cached_diagnostics(uri) {
+            return d;
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let notified = self.inner.diagnostics_notify.notified();
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return self.cached_diagnostics(uri).unwrap_or_default();
+            }
+            tokio::select! {
+                () = notified => {}
+                () = tokio::time::sleep(remaining) => {}
+            }
+            if let Some(d) = self.cached_diagnostics(uri) {
+                return d;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Vec::new();
+            }
+        }
     }
 }
 
