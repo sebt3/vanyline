@@ -20,7 +20,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, delete},
 };
 use tower_http::trace::TraceLayer;
 
@@ -49,6 +49,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/git/stage", post(git::handle_stage))
         .route("/git/unstage", post(git::handle_unstage))
         .route("/git/commit", post(git::handle_commit))
+        .route("/git/branches", get(git::handle_branches))
+        .route("/git/branches", post(git::handle_create_branch))
+        .route("/git/checkout", post(git::handle_checkout))
+        .route("/git/branches/{name}", delete(git::handle_delete_branch))
         .route("/ws/ticket", post(handle_ws_ticket))
         .layer(middleware::from_fn_with_state(
             state.clone(),

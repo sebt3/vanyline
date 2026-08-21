@@ -1,12 +1,12 @@
 //! `GET /git/status` — parse de `git status --porcelain=v2 --branch`
 //! exécuté dans `VNL_SANDBOX_ROOT`.
 
-use std::path::Path;
+use std::path::Path as StdPath;
 use std::process::Command;
 
 use axum::{
     Json,
-    extract::{State, Query},
+    extract::{Path, State, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -38,6 +38,9 @@ pub enum GitError {
 
     #[error("VNL-SBX-008: nothing staged to commit")]
     EmptyCommit,
+
+    #[error("VNL-SBX-011: checkout refused: working tree is dirty (branch: {branch})")]
+    CheckoutRefused { branch: String },
 
     #[error("VNL-SBX-015: path escapes sandbox root: {path}")]
     InvalidPath { path: String },
@@ -121,6 +124,33 @@ pub struct CommitRequest {
 pub struct CommitResponse {
     pub sha: String,    // SHA complet (40 hex), PAS tronqué à 7
     pub title: String,  // première ligne du message
+}
+
+// ── Types pour /git/branches ───────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BranchEntry {
+    pub name: String,                    // nom court : "main", "origin/main", ...
+    pub is_remote: bool,                 // true si ref sous refs/remotes/
+    pub upstream: Option<String>,         // upstream:short ; None si pas d'upstream
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct BranchesResponse {
+    pub current: String,                 // `git rev-parse --abbrev-ref HEAD` (brut ; "HEAD" si détaché)
+    pub merging: bool,                   // présence de `.git/MERGE_HEAD`
+    pub branches: Vec<BranchEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateBranchRequest {
+    pub name: String,
+    pub from: Option<String>,  // ref de départ (branche locale ou remote) ; None → HEAD
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CheckoutRequest {
+    pub branch: String,
 }
 
 /// Une seule lettre de colonne porcelain v2 -> `FileState`. `'.'` (pas de
@@ -280,7 +310,7 @@ fn entry_from_xy(
 /// Exécute `git -C <sandbox_root> status --porcelain=v2 --branch` et parse
 /// le résultat. Le `Command` bloquant tourne hors de l'executor tokio.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
-pub async fn run_status(sandbox_root: &Path) -> Result<GitStatus, GitError> {
+pub async fn run_status(sandbox_root: &StdPath) -> Result<GitStatus, GitError> {
     let root = sandbox_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let root_str = root.to_string_lossy().into_owned();
@@ -443,7 +473,7 @@ fn parse_commits(output: &str) -> Result<Vec<CommitEntry>, GitError> {
 /// Exécute la comparaison et retourne le résultat. `sandbox_root` est un
 /// worktree normal (pas bare) — `VNL_SANDBOX_ROOT`.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
-pub async fn run_unpushed(sandbox_root: &Path) -> Result<UnpushedStatus, GitError> {
+pub async fn run_unpushed(sandbox_root: &StdPath) -> Result<UnpushedStatus, GitError> {
     let root = sandbox_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let root_str = root.to_string_lossy().into_owned();
@@ -773,7 +803,249 @@ pub async fn handle_commit(
     Ok(Json(CommitResponse { sha, title }))
 }
 
-// ── Unit Tests ────────────────────────────────────────────────────────────────
+// ── Helpers purs (branches) ────────────────────────────────────────────────
+
+/// Args git pour `git for-each-ref --format='%(refname)%09%(upstream:short)' refs/heads refs/remotes`.
+fn branch_list_args() -> Vec<String> {
+    vec![
+        "for-each-ref".to_string(),
+        "--format=%(refname)%09%(upstream:short)".to_string(),
+        "refs/heads".to_string(),
+        "refs/remotes".to_string(),
+    ]
+}
+
+/// Args git pour `git branch <name> [<from>]`.
+fn create_branch_args(name: &str, from: Option<&str>) -> Vec<String> {
+    match from {
+        Some(f) => vec!["branch".to_string(), name.to_string(), f.to_string()],
+        None => vec!["branch".to_string(), name.to_string()],
+    }
+}
+
+/// Args git pour `git checkout <branch>`.
+fn checkout_args(branch: &str) -> Vec<String> {
+    vec!["checkout".to_string(), branch.to_string()]
+}
+
+/// Args git pour `git branch -D <name>` (suppression forcée — choix du design,
+/// pas de confirmation côté serveur).
+fn delete_branch_args(name: &str) -> Vec<String> {
+    vec!["branch".to_string(), "-D".to_string(), name.to_string()]
+}
+
+/// Parse la sortie de `git for-each-ref --format='%(refname)%09%(upstream:short)'`
+/// `refs/heads refs/remotes` → `Vec<BranchEntry>`.
+/// Une ligne = `refname\tupstream` (upstream vide si pas d'upstream).
+/// - `refname` est COMPLET ("refs/heads/main", "refs/remotes/origin/main") :
+///   `name` = refname sans le préfixe (`refs/heads/` ou `refs/remotes/`),
+///   `is_remote` = refname commence par `refs/remotes/`.
+/// - `upstream` vide → None.
+///
+/// Ligne sans `\t` → `ParseFailed { line_no, line }`.
+/// Sortie vide → `Ok(vec![])`.
+fn parse_branches(output: &str) -> Result<Vec<BranchEntry>, GitError> {
+    if output.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut branches = Vec::new();
+    for (idx, line) in output.lines().enumerate() {
+        let line_no = idx + 1;
+        let parts: Vec<&str> = line.split('\t').collect();
+        match parts.as_slice() {
+            [_refname] => {
+                return Err(GitError::ParseFailed {
+                    line_no,
+                    line: line.to_string(),
+                });
+            }
+            [refname, upstream] => {
+                let name = if refname.starts_with("refs/remotes/") {
+                    refname.strip_prefix("refs/remotes/").unwrap_or(refname).to_string()
+                } else if refname.starts_with("refs/heads/") {
+                    refname.strip_prefix("refs/heads/").unwrap_or(refname).to_string()
+                } else {
+                    refname.to_string()
+                };
+                // upstream:short de git peut être refs/remotes/origin/main ;
+                // on abrége en stripant refs/ (→ origin/main).
+                let upstream_short = if upstream.starts_with("refs/remotes/") {
+                    upstream.strip_prefix("refs/remotes/")
+                        .unwrap_or(upstream)
+                        .to_string()
+                } else if upstream.starts_with("refs/heads/") {
+                    upstream.strip_prefix("refs/heads/")
+                        .unwrap_or(upstream)
+                        .to_string()
+                } else {
+                    upstream.to_string()
+                };
+                branches.push(BranchEntry {
+                    name,
+                    is_remote: refname.starts_with("refs/remotes/"),
+                    upstream: if upstream.is_empty() {
+                        None
+                    } else {
+                        Some(upstream_short)
+                    },
+                });
+            }
+            _ => {
+                return Err(GitError::ParseFailed {
+                    line_no,
+                    line: line.to_string(),
+                });
+            }
+        }
+    }
+    Ok(branches)
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+/// GET /git/branches — liste des branches et statut de fusion.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_branches(
+    State(state): State<AppState>,
+) -> Result<Json<BranchesResponse>, GitError> {
+    let root = state.config.sandbox_root.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        // 1. `git -C root rev-parse --abbrev-ref HEAD` → current
+        let current = run_git(&[
+            "-C",
+            &root.to_string_lossy(),
+            "rev-parse",
+            "--abbrev-ref",
+            "HEAD",
+        ])?;
+        let current = current.trim().to_string();
+
+        // 2. merging = `git rev-parse --verify MERGE_HEAD` réussit → true
+        let merging = Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "rev-parse", "--verify", "MERGE_HEAD"])
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false);
+
+        // 3. `git for-each-ref` → parse
+        let list_args = branch_list_args();
+        let list_args_prefixed: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
+            .into_iter()
+            .chain(list_args)
+            .collect();
+        let list_refs_prefixed: Vec<&str> = list_args_prefixed.iter().map(|s| s.as_str()).collect();
+        let output = run_git(&list_refs_prefixed)?;
+        let branches = parse_branches(&output)?;
+
+        Ok((current, merging, branches))
+    })
+    .await
+    .expect("handle_branches blocking task panicked");
+
+    let (current, merging, branches) = result?;
+    Ok(Json(BranchesResponse {
+        current,
+        merging,
+        branches,
+    }))
+}
+
+/// POST /git/branches — créer une nouvelle branche.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_create_branch(
+    State(state): State<AppState>,
+    Json(body): Json<CreateBranchRequest>,
+) -> Result<Json<OkResponse>, GitError> {
+    let root = state.config.sandbox_root.to_path_buf();
+    let name = body.name.clone();
+    let from = body.from.clone();
+    tokio::task::spawn_blocking(move || {
+        let args = create_branch_args(&name, from.as_deref());
+        let args_prefixed: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
+            .into_iter()
+            .chain(args)
+            .collect();
+        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_create_branch blocking task panicked")?;
+
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// POST /git/checkout — changer de branche avec vérification dirty tree.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_checkout(
+    State(state): State<AppState>,
+    Json(body): Json<CheckoutRequest>,
+) -> Result<Json<OkResponse>, GitError> {
+    let branch = body.branch.clone();
+    let root = state.config.sandbox_root.to_path_buf();
+
+    // 1. Vérifier si le working tree est sale (avant checkout).
+    let root_ref = root.clone();
+    let dirty = tokio::task::spawn_blocking(move || {
+        let dirty_worktree = Command::new("git")
+            .args(["-C", &root_ref.to_string_lossy(), "diff", "--quiet"])
+            .output()
+            .map(|output| output.status.code() == Some(1))
+            .unwrap_or(false);
+
+        let dirty_staged = Command::new("git")
+            .args(["-C", &root_ref.to_string_lossy(), "diff", "--cached", "--quiet"])
+            .output()
+            .map(|output| output.status.code() == Some(1))
+            .unwrap_or(false);
+
+        dirty_worktree || dirty_staged
+    })
+    .await
+    .expect("handle_checkout dirty-check panicked");
+
+    if dirty {
+        return Err(GitError::CheckoutRefused { branch });
+    }
+
+    // 2. Aucun changement tracked/stagés : checkout direct.
+    let root_ref = root.clone();
+    let branch_ref = branch.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        let args = checkout_args(&branch_ref);
+        let root_owned: String = root_ref.to_string_lossy().into();
+        let mut args_prefixed: Vec<String> = vec!["-C".to_string(), root_owned];
+        args_prefixed.extend(args);
+        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_checkout blocking task panicked");
+
+    result.map(|_| Json(OkResponse { ok: true }))
+}
+
+/// DELETE /git/branches/{name} — supprimer une branche (force).
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_delete_branch(
+    State(state): State<AppState>,
+    Path(name): Path<String>,
+) -> Result<Json<OkResponse>, GitError> {
+    let root = state.config.sandbox_root.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let args = delete_branch_args(&name);
+        let args_prefixed: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
+            .into_iter()
+            .chain(args)
+            .collect();
+        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_delete_branch blocking task panicked")?;
+
+    Ok(Json(OkResponse { ok: true }))
+}
 
 #[cfg(test)]
 mod tests {
@@ -1023,6 +1295,65 @@ X foo\n\
             GitError::ParseFailed { line_no, line } => {
                 assert_eq!(line_no, 0);
                 assert_eq!(line, "empty output");
+            }
+            _ => panic!("expected ParseFailed"),
+        }
+    }
+
+    // ── Helpers branches ─────────────────────────────────────────────────────
+
+    #[test]
+    fn create_branch_args_with_from() {
+        assert_eq!(
+            create_branch_args("feat/x", Some("main")),
+            vec!["branch", "feat/x", "main"]
+        );
+        assert_eq!(
+            create_branch_args("feat/x", None),
+            vec!["branch", "feat/x"]
+        );
+    }
+
+    #[test]
+    fn checkout_args_nominal() {
+        assert_eq!(checkout_args("main"), vec!["checkout", "main"]);
+    }
+
+    #[test]
+    fn delete_branch_args_force() {
+        assert_eq!(delete_branch_args("feat/x"), vec!["branch", "-D", "feat/x"]);
+    }
+
+    #[test]
+    fn parse_branches_nominal() {
+        let input = "refs/heads/main\trefs/remotes/origin/main\nrefs/heads/feat/x\t\nrefs/remotes/origin/main\t\n";
+        let result = parse_branches(input).unwrap();
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].name, "main");
+        assert!(!result[0].is_remote);
+        assert_eq!(result[0].upstream, Some("origin/main".to_string()));
+        assert_eq!(result[1].name, "feat/x");
+        assert!(!result[1].is_remote);
+        assert_eq!(result[1].upstream, None);
+        assert_eq!(result[2].name, "origin/main");
+        assert!(result[2].is_remote);
+        assert_eq!(result[2].upstream, None);
+    }
+
+    #[test]
+    fn parse_branches_empty() {
+        let result = parse_branches("").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn parse_branches_malformed() {
+        let result = parse_branches("refs/heads/main\n");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GitError::ParseFailed { line_no, line } => {
+                assert_eq!(line_no, 1);
+                assert_eq!(line, "refs/heads/main");
             }
             _ => panic!("expected ParseFailed"),
         }
