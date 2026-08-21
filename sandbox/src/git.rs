@@ -6,11 +6,11 @@ use std::process::Command;
 
 use axum::{
     Json,
-    extract::State,
+    extract::{State, Query},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
@@ -28,6 +28,19 @@ pub enum GitError {
 
     #[error("VNL-SBX-006: cannot determine unpushed commits: HEAD is detached")]
     DetachedHead,
+
+    #[error("VNL-SBX-007: git diff failed for {path}: {status}: {stderr}")]
+    DiffFailed {
+        path: String,
+        status: String,
+        stderr: String,
+    },
+
+    #[error("VNL-SBX-008: nothing staged to commit")]
+    EmptyCommit,
+
+    #[error("VNL-SBX-015: path escapes sandbox root: {path}")]
+    InvalidPath { path: String },
 }
 
 impl IntoResponse for GitError {
@@ -63,6 +76,51 @@ pub struct GitStatus {
     pub branch: String,
     pub files: Vec<FileEntry>,
     pub clean: bool,
+}
+
+// ── Types pour /git/diff ───────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct DiffParams {
+    pub path: String,          // requis ; manquant → 400 automatique par axum
+    #[serde(default)]
+    pub staged: Option<bool>,  // absent/false → diff working tree ; true → diff index
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DiffResponse {
+    pub path: String,   // le chemin utilisateur brut (celui reçu dans DiffParams)
+    pub diff: String,   // patch unifié texte (stdout de git diff)
+}
+
+// ── Types pour /git/stage / /git/unstage ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct StageRequest {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UnstageRequest {
+    pub paths: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct OkResponse {
+    pub ok: bool,
+}
+
+// ── Types pour /git/commit ─────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct CommitRequest {
+    pub message: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CommitResponse {
+    pub sha: String,    // SHA complet (40 hex), PAS tronqué à 7
+    pub title: String,  // première ligne du message
 }
 
 /// Une seule lettre de colonne porcelain v2 -> `FileState`. `'.'` (pas de
@@ -438,6 +496,283 @@ pub async fn handle_unpushed(
     run_unpushed(&state.config.sandbox_root).await.map(Json)
 }
 
+// ── Pure helpers ─────────────────────────────────────────────────────────────
+
+/// Args git pour `git diff [--staged] -- <path>` (sans `-C` — ajouté par
+/// l'appelant). `path` est déjà le chemin relatif confiné.
+fn diff_args(path: &str, staged: bool) -> Vec<String> {
+    let mut args = vec!["diff".to_string()];
+    if staged {
+        args.push("--staged".to_string());
+    }
+    args.push("--".to_string());
+    args.push(path.to_string());
+    args
+}
+
+/// Args git pour `git add -- <paths...>` — chemins relatifs déjà confinés.
+fn stage_args(paths: &[String]) -> Vec<String> {
+    let mut args = vec!["add".to_string(), "--".to_string()];
+    for p in paths {
+        args.push(p.clone());
+    }
+    args
+}
+
+/// Args git pour `git restore --staged -- <paths...>`.
+fn unstage_args(paths: &[String]) -> Vec<String> {
+    let mut args = vec!["restore".to_string(), "--staged".to_string(), "--".to_string()];
+    for p in paths {
+        args.push(p.clone());
+    }
+    args
+}
+
+/// Parse la sortie de `git log -1 --pretty=format:%H%x1f%s` →
+/// `(sha_complet, titre)`. Une ligne attendue ; `\u{1f}` sépare sha et titre.
+/// Sortie vide → ParseFailed { line_no: 0, line: "empty output" }.
+fn parse_commit_output(output: &str) -> Result<(String, String), GitError> {
+    if output.is_empty() {
+        return Err(GitError::ParseFailed {
+            line_no: 0,
+            line: "empty output".to_string(),
+        });
+    }
+    // git log -… --quiet ne génère aucune ligne si l'index est vide ;
+    // ici on est dans la branche où un commit existe.
+    let line = output.lines().next().unwrap_or("");
+    let fields: Vec<&str> = line.split('\u{1f}').collect();
+    match fields.as_slice() {
+        [sha, title] => Ok((sha.to_string(), title.to_string())),
+        _ => Err(GitError::ParseFailed {
+            line_no: 1,
+            line: line.to_string(),
+        }),
+    }
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────────
+
+/// GET /git/diff — diff working tree ou index pour un chemin.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_diff(
+    State(state): State<AppState>,
+    Query(params): Query<DiffParams>,
+) -> Result<Json<DiffResponse>, GitError> {
+    use crate::tools_impl::confine_path;
+
+    let confined = confine_path(&state.config.sandbox_root, &params.path).map_err(|_| {
+        GitError::InvalidPath { path: params.path.clone() }
+    })?;
+    let rel = confined
+        .strip_prefix(&state.config.sandbox_root)
+        .map_err(|_e| GitError::InvalidPath {
+            path: confined.to_string_lossy().into_owned(),
+        })?
+        .to_string_lossy()
+        .into_owned();
+
+    let path = params.path;
+    let staged = params.staged == Some(true);
+    let root = state.config.sandbox_root.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        let args: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
+            .into_iter()
+            .chain(diff_args(&rel, staged))
+            .collect();
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_diff blocking task panicked");
+
+    match result {
+        Ok(stdout) => Ok(Json(DiffResponse {
+            path,
+            diff: stdout,
+        })),
+        Err(GitError::CommandFailed {
+            args: _,
+            status,
+            stderr,
+        }) => Err(GitError::DiffFailed {
+            path,
+            status,
+            stderr,
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+/// POST /git/stage — ajouter des chemins à l'index.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_stage(
+    State(state): State<AppState>,
+    Json(body): Json<StageRequest>,
+) -> Result<Json<OkResponse>, GitError> {
+    if body.paths.is_empty() {
+        return Ok(Json(OkResponse { ok: true }));
+    }
+
+    let root = state.config.sandbox_root.to_path_buf();
+    let confined_paths = body
+        .paths
+        .iter()
+        .map(|p| {
+            crate::tools_impl::confine_path(&root, p)
+                .map_err(|_| GitError::InvalidPath { path: p.clone() })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let rels: Vec<String> = confined_paths
+        .into_iter()
+        .map(|p| {
+            p.strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    let root_ref = root.clone();
+    tokio::task::spawn_blocking(move || {
+        let args: Vec<String> = ["-C".to_string(), root_ref.to_string_lossy().into_owned()]
+            .into_iter()
+            .chain(stage_args(&rels))
+            .collect();
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_stage blocking task panicked")?;
+
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// POST /git/unstage — retirer des chemins de l'index.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_unstage(
+    State(state): State<AppState>,
+    Json(body): Json<UnstageRequest>,
+) -> Result<Json<OkResponse>, GitError> {
+    if body.paths.is_empty() {
+        return Ok(Json(OkResponse { ok: true }));
+    }
+
+    let root = state.config.sandbox_root.to_path_buf();
+    let confined_paths = body
+        .paths
+        .iter()
+        .map(|p| {
+            crate::tools_impl::confine_path(&root, p)
+                .map_err(|_| GitError::InvalidPath { path: p.clone() })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let rels: Vec<String> = confined_paths
+        .into_iter()
+        .map(|p| {
+            p.strip_prefix(&root)
+                .unwrap_or(&p)
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+
+    let root_ref = root.clone();
+    tokio::task::spawn_blocking(move || {
+        let args: Vec<String> = ["-C".to_string(), root_ref.to_string_lossy().into_owned()]
+            .into_iter()
+            .chain(unstage_args(&rels))
+            .collect();
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_unstage blocking task panicked")?;
+
+    Ok(Json(OkResponse { ok: true }))
+}
+
+/// POST /git/commit — commit les changements stagés.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_commit(
+    State(state): State<AppState>,
+    Json(body): Json<CommitRequest>,
+) -> Result<Json<CommitResponse>, GitError> {
+    // Clone root (used in three separate blocking tasks).
+    let root = state.config.sandbox_root.to_path_buf();
+    let message = body.message.clone();
+
+    // 1. Vérifier s'il y a des changements stagés :
+    // `git diff --cached --quiet` → code 0 = propre (Ok ""),
+    // code 1 = des changes (Err CommandFailed).
+    // On s'intéresse à l'exit code.
+    let root_ref = root.clone();
+    let has_staged =
+        tokio::task::spawn_blocking(move || {
+            let args: Vec<String> = [
+                "-C".to_string(),
+                root_ref.to_string_lossy().into_owned(),
+                "diff".to_string(),
+                "--cached".to_string(),
+                "--quiet".to_string(),
+            ]
+            .into_iter()
+            .collect();
+            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            run_git(&refs)
+        })
+        .await
+        .expect("handle_commit check blocking task panicked");
+    if has_staged.is_ok() {
+        // git diff --cached --quiet est revenu avec code 0 : rien de stagé.
+        return Err(GitError::EmptyCommit);
+    }
+
+    // 2. Commit : `git -C root commit -m <message>` (pas de `-a` implicite).
+    let root_ref = root.clone();
+    let msg = message.clone();
+    tokio::task::spawn_blocking(move || {
+        let args: Vec<String> = [
+            "-C".to_string(),
+            root_ref.to_string_lossy().into_owned(),
+            "commit".to_string(),
+            "-m".to_string(),
+            msg,
+        ]
+        .into_iter()
+        .collect();
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_commit commit blocking task panicked")?;
+
+    // 3. `git -C root log -1 --pretty=format:%H%x1f%s` → parse_commit_output.
+    let root_ref = root.clone();
+    let log_output =
+        tokio::task::spawn_blocking(move || {
+            let args: Vec<String> = [
+                "-C".to_string(),
+                root_ref.to_string_lossy().into_owned(),
+                "log".to_string(),
+                "-1".to_string(),
+                "--pretty=format:%H\u{1f}%s".to_string(),
+            ]
+            .into_iter()
+            .collect();
+            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+            run_git(&refs)
+        })
+        .await
+        .expect("handle_commit log blocking task panicked")?;
+
+    let (sha, title) = parse_commit_output(&log_output)?;
+
+    Ok(Json(CommitResponse { sha, title }))
+}
+
 // ── Unit Tests ────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -622,6 +957,72 @@ X foo\n\
             GitError::ParseFailed { line_no, line } => {
                 assert_eq!(line_no, 1);
                 assert_eq!(line, "abc123 no separator");
+            }
+            _ => panic!("expected ParseFailed"),
+        }
+    }
+
+    // ── Helpers git (diff/stage/unstage/commit) ────────────────────────────
+
+    #[test]
+    fn diff_args_staged() {
+        assert_eq!(
+            diff_args("a/b.txt", true),
+            vec!["diff", "--staged", "--", "a/b.txt"]
+        );
+        assert_eq!(
+            diff_args("a/b.txt", false),
+            vec!["diff", "--", "a/b.txt"]
+        );
+    }
+
+    #[test]
+    fn stage_args_include_paths() {
+        assert_eq!(
+            stage_args(&["a.txt".to_string(), "b/c.txt".to_string()]),
+            vec!["add", "--", "a.txt", "b/c.txt"]
+        );
+    }
+
+    #[test]
+    fn unstage_args_include_paths() {
+        assert_eq!(
+            unstage_args(&["a.txt".to_string()]),
+            vec!["restore", "--staged", "--", "a.txt"]
+        );
+    }
+
+    #[test]
+    fn parse_commit_output_nominal() {
+        let input = "dce41965c9aa085042cef737c1eaa4141a055b5a\u{1f}Initial commit";
+        let result = parse_commit_output(input).unwrap();
+        assert_eq!(
+            result,
+            ("dce41965c9aa085042cef737c1eaa4141a055b5a".to_string(), "Initial commit".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_commit_output_malformed() {
+        let result = parse_commit_output("no separator");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GitError::ParseFailed { line_no, line } => {
+                assert_eq!(line_no, 1);
+                assert_eq!(line, "no separator");
+            }
+            _ => panic!("expected ParseFailed"),
+        }
+    }
+
+    #[test]
+    fn parse_commit_output_empty() {
+        let result = parse_commit_output("");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GitError::ParseFailed { line_no, line } => {
+                assert_eq!(line_no, 0);
+                assert_eq!(line, "empty output");
             }
             _ => panic!("expected ParseFailed"),
         }

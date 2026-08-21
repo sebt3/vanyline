@@ -45,6 +45,10 @@ pub fn build_app(state: AppState) -> Router {
         .route("/mcp", post(mcp::handle))
         .route("/git/status", get(git::handle_status))
         .route("/git/unpushed", get(git::handle_unpushed))
+        .route("/git/diff", get(git::handle_diff))
+        .route("/git/stage", post(git::handle_stage))
+        .route("/git/unstage", post(git::handle_unstage))
+        .route("/git/commit", post(git::handle_commit))
         .route("/ws/ticket", post(handle_ws_ticket))
         .layer(middleware::from_fn_with_state(
             state.clone(),
