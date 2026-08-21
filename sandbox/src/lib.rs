@@ -53,6 +53,7 @@ pub fn build_app(state: AppState) -> Router {
         .route("/git/branches", post(git::handle_create_branch))
         .route("/git/checkout", post(git::handle_checkout))
         .route("/git/branches/{name}", delete(git::handle_delete_branch))
+        .route("/git/push", post(git::handle_push))
         .route("/ws/ticket", post(handle_ws_ticket))
         .layer(middleware::from_fn_with_state(
             state.clone(),

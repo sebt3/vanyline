@@ -42,6 +42,12 @@ pub enum GitError {
     #[error("VNL-SBX-011: checkout refused: working tree is dirty (branch: {branch})")]
     CheckoutRefused { branch: String },
 
+    #[error("VNL-SBX-009: push rejected (non fast-forward): {stderr}")]
+    PushRejected { stderr: String },
+
+    #[error("VNL-SBX-010: git write failed (no credentials): {stderr}")]
+    GitWriteFailed { stderr: String },
+
     #[error("VNL-SBX-015: path escapes sandbox root: {path}")]
     InvalidPath { path: String },
 }
@@ -124,6 +130,22 @@ pub struct CommitRequest {
 pub struct CommitResponse {
     pub sha: String,    // SHA complet (40 hex), PAS tronqué à 7
     pub title: String,  // première ligne du message
+}
+
+// ── Types pour /git/push ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PushResponse {
+    pub ok: bool,   // true si succès
+    pub pushed: u32,  // nombre de commits poussés par cette opération
+}
+
+/// Classification du stderr d'un `git push` échoué.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushErrorKind {
+    Rejected,   // rejet non fast-forward → PushRejected
+    AuthFailed, // pas de credentials write → GitWriteFailed
+    Other,      // tout autre échec → CommandFailed
 }
 
 // ── Types pour /git/branches ───────────────────────────────────────────────
@@ -1047,6 +1069,136 @@ pub async fn handle_delete_branch(
     Ok(Json(OkResponse { ok: true }))
 }
 
+// ── Helpers purs (push) ────────────────────────────────────────────────────
+
+/// Args git pour `git push origin <refspec>` (refspec = nom court, ex "main").
+fn push_args(refspec: &str) -> Vec<String> {
+    vec!["push".to_string(), "origin".to_string(), refspec.to_string()]
+}
+
+/// Args git pour compter les commits à pousser.
+/// `Some(refspec)` → `rev-list --count <refspec>..HEAD` (delta local/upstream) ;
+/// `None` → `rev-list --count HEAD` (aucune ref cible côté remote : tous les commits).
+fn count_pushed_args(refspec: Option<&str>) -> Vec<String> {
+    match refspec {
+        Some(r) => vec![
+            "rev-list".to_string(),
+            "--count".to_string(),
+            format!("{r}..HEAD"),
+        ],
+        None => vec!["rev-list".to_string(), "--count".to_string(), "HEAD".to_string()],
+    }
+}
+
+/// Parse la sortie de `git rev-list --count` → u32. Trim avant parse.
+/// Entrée non numérique → ParseFailed { line_no: 1, line }.
+fn parse_count(output: &str) -> Result<u32, GitError> {
+    let trimmed = output.trim();
+    trimmed
+        .parse::<u32>()
+        .map_err(|_| GitError::ParseFailed {
+            line_no: 1,
+            line: trimmed.to_string(),
+        })
+}
+
+/// Classification du stderr d'un `git push` échoué (heuristique).
+pub fn classify_push_stderr(stderr: &str) -> PushErrorKind {
+    if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
+        PushErrorKind::Rejected
+    } else if stderr.contains("Authentication failed")
+        || stderr.contains("Permission denied")
+        || stderr.contains("Could not read from remote repository")
+        || stderr.contains("Host key verification failed")
+        || stderr.contains("failed to authenticate")
+        || stderr.contains("unable to get credential")
+    {
+        PushErrorKind::AuthFailed
+    } else {
+        PushErrorKind::Other
+    }
+}
+
+// ── Handler ──────────────────────────────────────────────────────────────────
+
+/// POST /git/push — pousser la branche courante vers le remote origin.
+///
+/// Pattern shared avec les autres handlers du module :
+/// `tokio::task::spawn_blocking` + `run_git`/`ref_exists`.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_push(
+    State(state): State<AppState>,
+) -> Result<Json<PushResponse>, GitError> {
+    let root = state.config.sandbox_root.to_path_buf();
+    let result = tokio::task::spawn_blocking(move || {
+        let root_str = root.to_string_lossy().into_owned();
+
+        // 1. `git -C root rev-parse --abbrev-ref HEAD` → branch
+        let branch = run_git(&["-C", &root_str, "rev-parse", "--abbrev-ref", "HEAD"])?
+            .trim()
+            .to_string();
+        if branch == "HEAD" {
+            return Err(GitError::DetachedHead);
+        }
+
+        // 2. Resolution de la cible comme /git/unpushed
+        let origin_branch_ref = format!("refs/remotes/origin/{branch}");
+        let target = if ref_exists(&root_str, &origin_branch_ref)? {
+            branch.clone()
+        } else {
+            resolve_default_branch(&root_str)
+        };
+
+        // 3. pushed (AVANT push) — compter les commits a pousser.
+        let origin_target_ref = format!("refs/remotes/origin/{target}");
+        let pushed = if ref_exists(&root_str, &origin_target_ref)? {
+            let count_args = count_pushed_args(Some(&format!("origin/{target}")));
+            // Build: -C <root> rev-list --count origin/<target>..HEAD
+            let full: Vec<String> = ["-C".to_string(), root_str.to_string()]
+                .into_iter()
+                .chain(count_args)
+                .collect();
+            let full_refs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
+            let output = run_git(&full_refs)?;
+            parse_count(&output)?
+        } else {
+            let count_args = count_pushed_args(None);
+            let full: Vec<String> = ["-C".to_string(), root_str.to_string()]
+                .into_iter()
+                .chain(count_args)
+                .collect();
+            let full_refs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
+            let output = run_git(&full_refs)?;
+            parse_count(&output)?
+        };
+
+        // 4. git -C root push origin <target>
+        let push_args_list = push_args(&target);
+        let mut push_cmd = vec!["-C".to_string(), root_str.to_string()];
+        push_cmd.extend(push_args_list);
+        let push_refs: Vec<&str> = push_cmd.iter().map(|s| s.as_str()).collect();
+        match run_git(&push_refs) {
+            Ok(_) => {}
+            Err(GitError::CommandFailed { args, status, stderr }) => {
+                let kind = classify_push_stderr(&stderr);
+                return Err(match kind {
+                    PushErrorKind::Rejected => GitError::PushRejected { stderr },
+                    PushErrorKind::AuthFailed => GitError::GitWriteFailed { stderr },
+                    PushErrorKind::Other => GitError::CommandFailed { args, status, stderr },
+                });
+            }
+            Err(e) => return Err(e),
+        }
+
+        // 5. Success
+        Ok::<_, GitError>(PushResponse { ok: true, pushed })
+    })
+    .await
+    .expect("handle_push blocking task panicked");
+
+    result.map(Json)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1357,5 +1509,72 @@ X foo\n\
             }
             _ => panic!("expected ParseFailed"),
         }
+    }
+
+    // ── Helpers push ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn push_args_nominal() {
+        assert_eq!(push_args("main"), vec!["push", "origin", "main"]);
+    }
+
+    #[test]
+    fn count_pushed_args_with_refspec() {
+        let r = "origin/main";
+        assert_eq!(
+            count_pushed_args(Some(r)),
+            vec!["rev-list", "--count", "origin/main..HEAD"]
+        );
+        assert_eq!(
+            count_pushed_args(None),
+            vec!["rev-list", "--count", "HEAD"]
+        );
+    }
+
+    #[test]
+    fn parse_count_nominal() {
+        assert_eq!(parse_count("3\n").unwrap(), 3);
+        assert_eq!(parse_count("0").unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_count_non_numeric() {
+        let result = parse_count("abc");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GitError::ParseFailed { line_no, line } => {
+                assert_eq!(line_no, 1);
+                assert_eq!(line, "abc");
+            }
+            _ => panic!("expected ParseFailed"),
+        }
+    }
+
+    #[test]
+    fn classify_push_stderr_rejected() {
+        assert!(matches!(
+            classify_push_stderr("remote: To prevent you from losing history, non-fast-forward"),
+            PushErrorKind::Rejected
+        ));
+    }
+
+    #[test]
+    fn classify_push_stderr_auth() {
+        assert!(matches!(
+            classify_push_stderr("Authentication failed"),
+            PushErrorKind::AuthFailed
+        ));
+        assert!(matches!(
+            classify_push_stderr("Permission denied"),
+            PushErrorKind::AuthFailed
+        ));
+    }
+
+    #[test]
+    fn classify_push_stderr_other() {
+        assert!(matches!(
+            classify_push_stderr("fatal: bad config"),
+            PushErrorKind::Other
+        ));
     }
 }
