@@ -216,14 +216,17 @@ impl LspClient {
     /// `LspClient` — ex. diagnostics publiés dès l'ouverture du fichier par l'éditeur
     /// navigateur, avant qu'un tool MCP ne s'y intéresse — serait perdu ; observé en
     /// usage réel comme cause probable de "jamais de diagnostics Rust" côté tool MCP).
-    /// Vide si jamais publiés dans le délai, ou si le serveur n'en publie pas pour ce
-    /// fichier. Erreur si `initialize`/`didOpen` échouent.
+    ///
+    /// `Some(vec)` (vide inclus) dès qu'une publication a été vue — `None` seulement
+    /// si rien n'a jamais été publié dans le délai, distinct d'un vecteur vide
+    /// (cf. doc `LspSession::wait_for_diagnostics` — un vecteur vide veut dire
+    /// "propre", pas "pas encore su"). Erreur si `initialize`/`didOpen` échouent.
     pub async fn diagnostics(
         &mut self,
         uri: &str,
         language_id: &str,
         text: &str,
-    ) -> anyhow::Result<Vec<Value>> {
+    ) -> anyhow::Result<Option<Vec<Value>>> {
         let _ = self.initialize().await?;
         self.ensure_open(uri, language_id, text).await?;
         Ok(self
@@ -557,7 +560,10 @@ mod tests {
             timeout.is_ok(),
             "diagnostics test must complete within timeout"
         );
-        let diags = timeout.unwrap().expect("diagnostics ok");
+        let diags = timeout
+            .unwrap()
+            .expect("diagnostics ok")
+            .expect("should be Some — a publish was seen");
         assert!(!diags.is_empty(), "should capture at least one diagnostic");
         assert_eq!(
             diags[0]["message"].as_str().unwrap(),
@@ -596,7 +602,8 @@ mod tests {
         )
         .await
         .expect("first call must complete within timeout")
-        .expect("diagnostics ok");
+        .expect("diagnostics ok")
+        .expect("should be Some — a publish was seen");
         assert!(
             !diags_a.is_empty(),
             "first call should capture a diagnostic"
@@ -610,7 +617,8 @@ mod tests {
         )
         .await
         .expect("second call must complete within timeout — not hang on a push that never comes")
-        .expect("diagnostics ok");
+        .expect("diagnostics ok")
+        .expect("should be Some — read from cache, not a fresh timeout");
         assert!(
             !diags_b.is_empty(),
             "second call on the same uri must also return the cached diagnostic, not []"
@@ -621,10 +629,13 @@ mod tests {
         );
     }
 
-    /// Test 4: client_diagnostics_empty_on_no_publish — script sans
-    /// publication de diags → timeout → vec![].
+    /// Test 4: client_diagnostics_empty_on_no_publish — script sans publication de
+    /// diags → timeout → `None`, PAS `Some(vec![])` : "jamais reçu" est distinct de
+    /// "reçu un vecteur vide" (le serveur a explicitement publié "rien à signaler"),
+    /// cf. doc `LspSession::wait_for_diagnostics` — un agent ne doit pas confondre
+    /// les deux (trouvé dans un retour d'usage réel).
     #[tokio::test]
-    async fn client_diagnostics_empty_on_no_publish() {
+    async fn client_diagnostics_none_on_no_publish() {
         let (manager, _tmpdir) = make_manager("nodiag", FAKE_LSP_NODIAG_PY).await;
         let session = manager
             .get_or_spawn("nodiag")
@@ -646,8 +657,8 @@ mod tests {
         );
         let diags = timeout.unwrap().expect("diagnostics ok");
         assert!(
-            diags.is_empty(),
-            "should return empty vec when no diagnostics published"
+            diags.is_none(),
+            "should return None when nothing was ever published, not Some(vec![])"
         );
     }
 }

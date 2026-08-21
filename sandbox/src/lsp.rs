@@ -534,9 +534,14 @@ impl LspSession {
     /// Attend que `uri` ait des diagnostics en cache — retour immédiat si déjà
     /// présents (même après un `didOpen` envoyé par un AUTRE client il y a longtemps,
     /// cf. doc du champ `diagnostics_cache`), sinon attend `diagnostics_notify`, borné
-    /// à `timeout`. Rend un vecteur vide si jamais publiés dans ce délai (peut
-    /// légitimement signifier "aucun diagnostic", pas seulement "pas encore reçu" —
-    /// même ambiguïté qu'avant, inhérente au modèle push de LSP, non résolue ici).
+    /// à `timeout`.
+    ///
+    /// Rend `Some(vec)` dès qu'un `publishDiagnostics` a été vu pour `uri` — `vec`
+    /// vide inclus, ça VEUT DIRE "le serveur a analysé et n'a rien trouvé", pas
+    /// "on n'a rien reçu". `None` seulement si rien n'a jamais été publié dans le
+    /// délai — état distinct, pas silencieusement confondu avec "propre" (trouvé
+    /// dans un retour d'usage réel : un agent ne peut pas distinguer les deux avec
+    /// un simple vecteur vide comme seul signal).
     ///
     /// Même course bénigne que `wait_for_initialize_outcome` (`notify_waiters` sans
     /// permit) — sans conséquence sur l'exactitude, seulement sur la latence dans une
@@ -545,26 +550,26 @@ impl LspSession {
         &self,
         uri: &str,
         timeout: std::time::Duration,
-    ) -> Vec<Value> {
+    ) -> Option<Vec<Value>> {
         if let Some(d) = self.cached_diagnostics(uri) {
-            return d;
+            return Some(d);
         }
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let notified = self.inner.diagnostics_notify.notified();
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return self.cached_diagnostics(uri).unwrap_or_default();
+                return self.cached_diagnostics(uri);
             }
             tokio::select! {
                 () = notified => {}
                 () = tokio::time::sleep(remaining) => {}
             }
             if let Some(d) = self.cached_diagnostics(uri) {
-                return d;
+                return Some(d);
             }
             if tokio::time::Instant::now() >= deadline {
-                return Vec::new();
+                return None;
             }
         }
     }

@@ -617,24 +617,33 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     // Step 8: per-tool dispatch
     match name {
         "lsp_diagnostics" => match client.diagnostics(&file_uri, language_id, &text).await {
-            Ok(diagnostics) => {
-                if diagnostics.is_empty() {
-                    Some(ok_result("no diagnostics".to_string()))
-                } else {
-                    let mut lines = Vec::new();
-                    for d in &diagnostics {
-                        let Some(start) = d["range"]["start"].as_object() else {
-                            continue;
-                        };
-                        let line = start["line"].as_i64().unwrap_or(0) + 1;
-                        let col = start["character"].as_i64().unwrap_or(0) + 1;
-                        let severity = d["severity"].as_i64().unwrap_or(1);
-                        let message = d["message"].as_str().unwrap_or("");
-                        let label = severity_label(severity);
-                        lines.push(format!("{resolved}:{line}:{col}: {label}: {message}"));
-                    }
-                    Some(ok_result(lines.join("\n")))
+            // Trois états distincts, pas deux — un vecteur vide et "jamais reçu"
+            // n'ont pas le même sens pour un agent (cf. doc `wait_for_diagnostics`) :
+            // un agent qui traiterait les deux comme "propre" pourrait croire à tort
+            // qu'une édition n'a rien cassé alors que l'analyse n'est simplement pas
+            // encore arrivée (trouvé dans un retour d'usage réel).
+            Ok(None) => Some(ok_result(
+                "not yet analyzed: no diagnostics received from the LSP server within the \
+                 timeout — this does NOT mean the file is clean, retry shortly"
+                    .to_string(),
+            )),
+            Ok(Some(diagnostics)) if diagnostics.is_empty() => Some(ok_result(
+                "no diagnostics: file analyzed, no issues found".to_string(),
+            )),
+            Ok(Some(diagnostics)) => {
+                let mut lines = Vec::new();
+                for d in &diagnostics {
+                    let Some(start) = d["range"]["start"].as_object() else {
+                        continue;
+                    };
+                    let line = start["line"].as_i64().unwrap_or(0) + 1;
+                    let col = start["character"].as_i64().unwrap_or(0) + 1;
+                    let severity = d["severity"].as_i64().unwrap_or(1);
+                    let message = d["message"].as_str().unwrap_or("");
+                    let label = severity_label(severity);
+                    lines.push(format!("{resolved}:{line}:{col}: {label}: {message}"));
                 }
+                Some(ok_result(lines.join("\n")))
             }
             Err(e) => Some(err_result(e.to_string())),
         },
@@ -1398,6 +1407,38 @@ mod tests {
         assert!(
             text.contains(":1:1:"),
             "should contain ':1:1:' for 0-based line/char +1"
+        );
+    }
+
+    /// Trois états distincts pour `lsp_diagnostics`, pas deux (bug réel trouvé dans un
+    /// retour d'usage : un agent qui traite "jamais reçu" comme "propre" peut croire
+    /// à tort qu'une édition n'a rien cassé). Ce test couvre le cas "jamais reçu" —
+    /// un LSP qui ne publie jamais rien doit produire un message clairement distinct
+    /// de "no issues found", pas juste "no diagnostics".
+    #[tokio::test]
+    async fn lsp_diagnostics_distinguishes_not_yet_analyzed_from_clean() {
+        let (state, _tmpdir) = make_lsp_state_nodiag("diag_nodiag").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_diagnostics",
+                serde_json::json!({"path": "main.rs"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("not yet analyzed"),
+            "should explicitly say not-yet-analyzed, got: {text}"
+        );
+        assert!(
+            !text.contains("no issues found"),
+            "must NOT read as a confirmed-clean message, got: {text}"
         );
     }
 
