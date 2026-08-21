@@ -1474,23 +1474,23 @@ pub async fn handle_ssh_key_create(
 }
 
 #[cfg(test)]
-    mod tests {
-        #![allow(clippy::unwrap_used, clippy::expect_used)]
-        use super::*;
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
 
-        fn clean_output() -> &'static str {
+    fn clean_output() -> &'static str {
         "# branch.oid dce41965c9aa085042cef737c1eaa4141a055b5a\n\
          # branch.head main\n"
-        }
+    }
 
-        #[test]
-        fn ssh_key_paths_nominal() {
-            let (priv_path, pub_path) = ssh_key_paths(std::path::Path::new("/home/vanyline"));
-            assert_eq!(priv_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519"));
-            assert_eq!(pub_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519.pub"));
-        }
+    #[test]
+    fn ssh_key_paths_nominal() {
+        let (priv_path, pub_path) = ssh_key_paths(std::path::Path::new("/home/vanyline"));
+        assert_eq!(priv_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519"));
+        assert_eq!(pub_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519.pub"));
+    }
 
-        #[test]
+    #[test]
     fn clean_repo() {
         let result = parse_status(clean_output()).unwrap();
         assert_eq!(result.branch, "main");
