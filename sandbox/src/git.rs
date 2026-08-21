@@ -148,6 +148,29 @@ pub enum PushErrorKind {
     Other,      // tout autre échec → CommandFailed
 }
 
+#[derive(Debug, Deserialize)]
+pub struct LogParams {
+    pub limit: Option<u32>,
+    pub all: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogCommit {
+    pub sha: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+    pub title: String,
+    pub author: String,
+    pub date: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct LogResponse {
+    pub branch: String,
+    pub commits: Vec<LogCommit>,
+    pub truncated: bool,
+}
+
 // ── Types pour /git/branches ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -1090,6 +1113,79 @@ fn count_pushed_args(refspec: Option<&str>) -> Vec<String> {
     }
 }
 
+/// Args git pour `git log [--all] --max-count=<n+1> --pretty=format:...`
+/// (sans `-C` — ajouté par l'appelant).
+/// Format : `%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%aI` (6 champs séparés par \u{1f}).
+/// `limit+1` pour détecter la troncature.
+pub fn log_args(limit: u32, all: bool) -> Vec<String> {
+    let mut args = vec![
+        "log".to_string(),
+        format!("--max-count={}", limit + 1),
+        "--pretty=format:%H\u{1f}%P\u{1f}%D\u{1f}%s\u{1f}%an\u{1f}%aI".to_string(),
+    ];
+    if all {
+        args.insert(1, "--all".to_string());
+    }
+    args
+}
+
+/// Parse UNE ligne de log git (6 champs séparés par \u{1f}).
+/// Format attendu : `sha\u{1f}parents\u{1f}refs\u{1f}title\u{1f}author\u{1f}date`.
+/// - `sha` : SHA complet (40 hex).
+/// - `parents` : shas complets séparés par des espaces ; champ vide → vec![]
+/// - `refs` : `%D` brut — split sur `", "` ; champ vide → vec![]
+/// - `title` : `%s`
+/// - `author` : `%an`
+/// - `date` : `%aI` (strict ISO 8601)
+///   Moins de 6 champs → `ParseFailed { line_no, line }`.
+pub fn parse_log_line(
+    line: &str,
+    line_no: usize,
+    full: &str,
+) -> Result<LogCommit, GitError> {
+    let fields: Vec<&str> = line.split('\u{1f}').collect();
+    match fields.as_slice() {
+        [sha, parents, refs, title, author, date] => {
+            let parents_vec: Vec<String> = if parents.is_empty() {
+                Vec::new()
+            } else {
+                parents.split(' ').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
+            };
+            let refs_vec: Vec<String> = if refs.is_empty() {
+                Vec::new()
+            } else {
+                refs.split(", ").map(|s| s.to_string()).collect()
+            };
+            Ok(LogCommit {
+                sha: sha.to_string(),
+                parents: parents_vec,
+                refs: refs_vec,
+                title: title.to_string(),
+                author: author.to_string(),
+                date: date.to_string(),
+            })
+        }
+        _ => Err(GitError::ParseFailed {
+            line_no,
+            line: full.to_string(),
+        }),
+    }
+}
+
+/// Parse la sortie de `git log` (une ligne par commit) → Vec<LogCommit>.
+/// Ligne vide → ignorée. Sortie vide → `Ok(vec![])`.
+pub fn parse_log(output: &str) -> Result<Vec<LogCommit>, GitError> {
+    let mut commits = Vec::new();
+    for (idx, line) in output.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        let line_no = idx + 1;
+        commits.push(parse_log_line(line, line_no, output)?);
+    }
+    Ok(commits)
+}
+
 /// Parse la sortie de `git rev-list --count` → u32. Trim avant parse.
 /// Entrée non numérique → ParseFailed { line_no: 1, line }.
 fn parse_count(output: &str) -> Result<u32, GitError> {
@@ -1197,6 +1293,54 @@ pub async fn handle_push(
     .expect("handle_push blocking task panicked");
 
     result.map(Json)
+}
+
+/// GET /git/log — historique de la branche courante (ou `--all`).
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_log(
+    State(state): State<AppState>,
+    Query(params): Query<LogParams>,
+) -> Result<Json<LogResponse>, GitError> {
+    let root = state.config.sandbox_root.to_path_buf();
+    let limit = params.limit.unwrap_or(100);
+    let all = params.all == Some(true);
+
+    let result = tokio::task::spawn_blocking(move || {
+        let root_str = root.to_string_lossy().into_owned();
+
+        // 1. Branch : `git -C root rev-parse --abbrev-ref HEAD`
+        let branch = run_git(&[
+            "-C", &root_str, "rev-parse", "--abbrev-ref", "HEAD",
+        ])?;
+        let branch = branch.trim().to_string();
+
+        // 2. Git log : `--all` si demandé, `--max-count=limit+1` pour détecter troncature
+        let args = log_args(limit, all);
+        let args_prefixed: Vec<String> = ["-C".to_string(), root_str]
+            .into_iter()
+            .chain(args)
+            .collect();
+        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        let output = run_git(&refs)?;
+
+        // 3. Parse : `parse_log` → Vec<LogCommit>
+        let mut commits = parse_log(&output)?;
+
+        // 4. Détection troncature et truncation
+        let truncated = commits.len() > limit as usize;
+        commits.truncate(limit as usize);
+
+        Ok((branch, commits, truncated))
+    })
+    .await
+    .expect("handle_log blocking task panicked");
+
+    let (branch, commits, truncated) = result?;
+    Ok(Json(LogResponse {
+        branch,
+        commits,
+        truncated,
+    }))
 }
 
 #[cfg(test)]
@@ -1576,5 +1720,97 @@ X foo\n\
             classify_push_stderr("fatal: bad config"),
             PushErrorKind::Other
         ));
+    }
+
+    // ── Helpers log ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn log_args_all_true() {
+        assert_eq!(
+            log_args(100, true),
+            vec![
+                "log".to_string(),
+                "--all".to_string(),
+                "--max-count=101".to_string(),
+                "--pretty=format:%H\u{1f}%P\u{1f}%D\u{1f}%s\u{1f}%an\u{1f}%aI"
+                    .to_string(),
+            ]
+        );
+        assert_eq!(
+            log_args(100, false),
+            vec![
+                "log".to_string(),
+                "--max-count=101".to_string(),
+                "--pretty=format:%H\u{1f}%P\u{1f}%D\u{1f}%s\u{1f}%an\u{1f}%aI"
+                    .to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_log_nominal() {
+        let sep = '\u{1f}';
+        let line = format!(
+            "dce41965c9aa085042cef737c1eaa4141a055b5a{sep}\
+             abc1111def2222 3333aaaa4444{sep}\
+             HEAD, origin/main{sep}\
+             Initial commit{sep}\
+             Alice{sep}\
+             2024-01-01T10:00:00Z",
+            sep = sep,
+        );
+        let result = parse_log(&line).unwrap();
+        assert_eq!(result.len(), 1);
+        let commit = &result[0];
+        assert_eq!(
+            commit.sha,
+            "dce41965c9aa085042cef737c1eaa4141a055b5a"
+        );
+        assert_eq!(commit.parents, vec!["abc1111def2222".to_string(), "3333aaaa4444".to_string()]);
+        assert_eq!(commit.refs, vec!["HEAD".to_string(), "origin/main".to_string()]);
+        assert_eq!(commit.title, "Initial commit");
+        assert_eq!(commit.author, "Alice");
+        assert_eq!(commit.date, "2024-01-01T10:00:00Z");
+    }
+
+    #[test]
+    fn parse_log_root_commit() {
+        let sep = '\u{1f}';
+        let line = format!(
+            "dce41965c9aa085042cef737c1eaa4141a055b5a{sep}{sep}\
+             {sep}Initial commit{sep}Alice{sep}2024-01-01T10:00:00Z",
+            sep = sep,
+        );
+        let result = parse_log(&line).unwrap();
+        assert_eq!(result.len(), 1);
+        let commit = &result[0];
+        assert_eq!(
+            commit.sha,
+            "dce41965c9aa085042cef737c1eaa4141a055b5a"
+        );
+        assert!(commit.parents.is_empty());
+        assert!(commit.refs.is_empty());
+        assert_eq!(commit.title, "Initial commit");
+        assert_eq!(commit.author, "Alice");
+        assert_eq!(commit.date, "2024-01-01T10:00:00Z");
+    }
+
+    #[test]
+    fn parse_log_malformed() {
+        let result = parse_log("abc no separator");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            GitError::ParseFailed { line_no, line } => {
+                assert_eq!(line_no, 1);
+                assert_eq!(line, "abc no separator");
+            }
+            _ => panic!("expected ParseFailed"),
+        }
+    }
+
+    #[test]
+    fn parse_log_empty() {
+        let result = parse_log("").unwrap();
+        assert!(result.is_empty());
     }
 }
