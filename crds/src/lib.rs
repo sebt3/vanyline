@@ -115,7 +115,9 @@ pub struct ProjectSpec {
     /// `Owner.spec.project_defaults.storage_access_mode`, puis
     /// "`ReadWriteOnce`" (défaut historique).
     pub storage_access_mode: Option<String>,
-    /// Auth git dédiée (Secret). Défaut: ~/.ssh du home Owner.
+    /// DÉPRÉCIÉ — plus consommé par le controller depuis git-integration
+    /// (la clé SSH vit dans le PVC Owner, cf. docs/features/git-integration.md
+    /// section 0). Champ conservé pour la migration, pas supprimé.
     pub git_secret: Option<String>,
     /// Caches partagés. None => ["cargo", "pnpm"].
     pub caches: Option<Vec<String>>,

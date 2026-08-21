@@ -1,6 +1,7 @@
 //! `GET /git/status` — parse de `git status --porcelain=v2 --branch`
 //! exécuté dans `VNL_SANDBOX_ROOT`.
 
+use std::fs;
 use std::path::Path as StdPath;
 use std::process::Command;
 
@@ -50,6 +51,9 @@ pub enum GitError {
 
     #[error("VNL-SBX-015: path escapes sandbox root: {path}")]
     InvalidPath { path: String },
+
+    #[error("VNL-SBX-016: ssh key provisioning failed: {stderr}")]
+    SshKeyFailed { stderr: String },
 }
 
 impl IntoResponse for GitError {
@@ -196,6 +200,50 @@ pub struct CreateBranchRequest {
 #[derive(Debug, Deserialize)]
 pub struct CheckoutRequest {
     pub branch: String,
+}
+
+// ── Types pour /git/ssh-key ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SshKeyStatus {
+    pub exists: bool,             // le fichier PRIVÉ existe
+    pub public_key: Option<String>, // contenu trimé de `<priv>.pub` si lisible, sinon None
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct SshKeyResponse {
+    pub public_key: String,       // contenu trimé de `<priv>.pub`
+}
+
+/// Chemins de la clé SSH sous `home` : (privée, publique).
+/// `home/.ssh/id_ed25519` et `home/.ssh/id_ed25519.pub`.
+pub fn ssh_key_paths(home: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let priv_path = home.join(".ssh").join("id_ed25519");
+    let pub_path = priv_path.with_extension("pub");
+    (priv_path, pub_path)
+}
+
+/// HOME du pod sandbox : `std::env::var("HOME")` si défini et non vide,
+/// sinon `/home/vanyline` (repli — le pod Sandbox monte le PVC Owner à ce
+/// chemin, cf. design section "Provisioning SSH"). Dépend de l'env.
+pub fn ssh_home() -> std::path::PathBuf {
+    std::env::var("HOME").map_or_else(
+        |_| std::path::PathBuf::from("/home/vanyline"),
+        |v| {
+            if v.is_empty() {
+                std::path::PathBuf::from("/home/vanyline")
+            } else {
+                std::path::PathBuf::from(v)
+            }
+        },
+    )
+}
+
+/// Lit le contenu du fichier public (`.pub`) et le trim. Retourne `None` si le
+/// fichier n'existe pas ou ne peut pas être lu.
+fn read_public_key(priv_path: &std::path::Path) -> Option<String> {
+    let pub_path = priv_path.with_extension("pub");
+    fs::read_to_string(&pub_path).map(|s| s.trim().to_string()).ok()
 }
 
 /// Une seule lettre de colonne porcelain v2 -> `FileState`. `'.'` (pas de
@@ -1343,17 +1391,106 @@ pub async fn handle_log(
     }))
 }
 
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
-    use super::*;
+// ── SSH key endpoints ──────────────────────────────────────────────────────
 
-    fn clean_output() -> &'static str {
-        "# branch.oid dce41965c9aa085042cef737c1eaa4141a055b5a\n\
-         # branch.head main\n"
+/// GET /git/ssh-key — check the SSH key status (idempotent, never errors if
+/// the key does not exist — that is a normal state).
+pub async fn handle_ssh_key_status(
+    _state: State<AppState>,
+) -> Result<Json<SshKeyStatus>, GitError> {
+    let home = ssh_home();
+    let (priv_path, pub_path) = ssh_key_paths(&home);
+    let exists = priv_path.is_file();
+    let public_key = if exists {
+        read_public_key(&priv_path)
+    } else {
+        // Try to read anyway — the .pub might exist without the private key.
+        fs::read_to_string(&pub_path).ok().map(|s| s.trim().to_string())
+    };
+    Ok(Json(SshKeyStatus { exists, public_key }))
+}
+
+/// POST /git/ssh-key — generate an ed25519 SSH keypair, idempotent.
+///
+/// If the private key already exists, reads and returns the public key without
+/// regenerating. Otherwise creates `~/.ssh/id_ed25519` via `ssh-keygen`.
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_ssh_key_create(
+    _state: State<AppState>,
+) -> Result<Json<SshKeyResponse>, GitError> {
+    // state is unused — we always provision in the pod HOME
+
+    let home = ssh_home();
+    let (priv_path, pub_path) = ssh_key_paths(&home);
+
+    // Idempotent: private key already exists → return current public key
+    if priv_path.is_file() {
+        let public_key = fs::read_to_string(&pub_path)
+            .map_err(|e| GitError::SshKeyFailed {
+                stderr: format!("could not read public key: {e}"),
+            })?
+            .trim()
+            .to_string();
+        return Ok(Json(SshKeyResponse { public_key }));
     }
 
-    #[test]
+    // Create ~/.ssh directory
+    let ssh_dir = priv_path.parent().ok_or_else(|| GitError::SshKeyFailed {
+        stderr: "could not determine .ssh directory parent".to_string(),
+    })?;
+    fs::create_dir_all(ssh_dir).map_err(|e| GitError::SshKeyFailed {
+        stderr: format!("could not create .ssh directory: {e}"),
+    })?;
+
+    // Generate keypair via ssh-keygen (blocking I/O)
+    let priv_abs = priv_path.to_string_lossy().into_owned();
+    let result = tokio::task::spawn_blocking(move || {
+        let output = Command::new("ssh-keygen")
+            .args(["-t", "ed25519", "-N", "", "-f", &priv_abs])
+            .output()
+            .map_err(|e| GitError::SshKeyFailed {
+                stderr: format!("could not execute ssh-keygen: {e}"),
+            })?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            return Err(GitError::SshKeyFailed { stderr });
+        }
+        Ok(output)
+    })
+    .await
+    .expect("handle_ssh_key_create blocking task panicked");
+
+    _ = result?;
+
+    // Read public key
+    let public_key = fs::read_to_string(&pub_path).map_err(|e| GitError::SshKeyFailed {
+        stderr: format!("could not read public key after generation: {e}"),
+    })?;
+
+    Ok(Json(SshKeyResponse {
+        public_key: public_key.trim().to_string(),
+    }))
+}
+
+#[cfg(test)]
+    mod tests {
+        #![allow(clippy::unwrap_used, clippy::expect_used)]
+        use super::*;
+
+        fn clean_output() -> &'static str {
+        "# branch.oid dce41965c9aa085042cef737c1eaa4141a055b5a\n\
+         # branch.head main\n"
+        }
+
+        #[test]
+        fn ssh_key_paths_nominal() {
+            let (priv_path, pub_path) = ssh_key_paths(std::path::Path::new("/home/vanyline"));
+            assert_eq!(priv_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519"));
+            assert_eq!(pub_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519.pub"));
+        }
+
+        #[test]
     fn clean_repo() {
         let result = parse_status(clean_output()).unwrap();
         assert_eq!(result.branch, "main");
