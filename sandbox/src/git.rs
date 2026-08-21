@@ -54,6 +54,12 @@ pub enum GitError {
 
     #[error("VNL-SBX-016: ssh key provisioning failed: {stderr}")]
     SshKeyFailed { stderr: String },
+
+    #[error("VNL-SBX-012: merge not started: {stderr}")]
+    MergeNotStarted { stderr: String },
+
+    #[error("VNL-SBX-013: no merge in progress to abort")]
+    NoMergeInProgress,
 }
 
 impl IntoResponse for GitError {
@@ -213,6 +219,20 @@ pub struct SshKeyStatus {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SshKeyResponse {
     pub public_key: String,       // contenu trimé de `<priv>.pub`
+}
+
+// ── Types pour /git/merge ────────────────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct MergeRequest {
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct MergeResponse {
+    pub conflicted: bool,     // true = conflit (résultat normal, réponse 200)
+    pub sha: Option<String>,  // SHA complet (40 hex) du merge auto-commité ;
+                              // présenté seulement si conflicted=false
 }
 
 /// Chemins de la clé SSH sous `home` : (privée, publique).
@@ -649,6 +669,16 @@ fn unstage_args(paths: &[String]) -> Vec<String> {
         args.push(p.clone());
     }
     args
+}
+
+/// Args git pour `git merge <branch>` (sans `-C` — ajouté par l'appelant).
+fn merge_args(branch: &str) -> Vec<String> {
+    vec!["merge".to_string(), branch.to_string()]
+}
+
+/// Args git pour `git merge --abort`.
+fn merge_abort_args() -> Vec<String> {
+    vec!["merge".to_string(), "--abort".to_string()]
 }
 
 /// Parse la sortie de `git log -1 --pretty=format:%H%x1f%s` →
@@ -1473,6 +1503,110 @@ pub async fn handle_ssh_key_create(
     }))
 }
 
+/// POST /git/merge — lancer un merge de la branche spécifiée.
+///
+/// Exit code 0 → succès auto-commité (réponse 200 avec SHA).
+/// Exit code 1 → conflit (réponse 200 avec `conflicted: true`, **pas une erreur HTTP**).
+/// Tout autre code → `MergeNotStarted` (erreur HTTP VNL-SBX-012).
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_merge(
+    State(state): State<AppState>,
+    Json(body): Json<MergeRequest>,
+) -> Result<Json<MergeResponse>, GitError> {
+    let root = state.config.sandbox_root.to_path_buf();
+    let branch = body.branch.clone();
+
+    #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+    let result = tokio::task::spawn_blocking(move || {
+        let root_str = root.to_string_lossy().into_owned();
+
+        // 1. Exécuter `git -C root merge <branch>` et récupérer le code de sortie.
+        let args = merge_args(&branch);
+        let cmd_args: Vec<String> = ["-C".to_string(), root_str.clone()]
+            .into_iter()
+            .chain(args)
+            .collect();
+        let refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+        let output = Command::new("git")
+            .args(&refs)
+            .output()
+            .map_err(|e| GitError::CommandFailed {
+                args: refs.into_iter().map(|s| s.to_string()).collect(),
+                status: e.to_string(),
+                stderr: String::new(),
+            })?;
+
+        match output.status.code() {
+            // 2. Exit code 0 → succès (merge auto-commité par git).
+            Some(0) => {
+                let sha_output = Command::new("git")
+                    .args(["-C", &root_str, "rev-parse", "HEAD"])
+                    .output()
+                    .map_err(|e| GitError::CommandFailed {
+                        args: vec![
+                            "-C".into(),
+                            root_str,
+                            "rev-parse".into(),
+                            "HEAD".into(),
+                        ],
+                        status: e.to_string(),
+                        stderr: String::new(),
+                    })?;
+                let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+                Ok(MergeResponse {
+                    conflicted: false,
+                    sha: Some(sha),
+                })
+            }
+            // 3. Exit code 1 → conflit (RÉSULTAT NORMAL, pas une erreur).
+            Some(1) => Ok(MergeResponse {
+                conflicted: true,
+                sha: None,
+            }),
+            // 4. Tout autre code → merge non démarré (erreur HTTP VNL-SBX-012).
+            _ => {
+                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                Err(GitError::MergeNotStarted { stderr })
+            }
+        }
+    })
+    .await
+    .expect("handle_merge blocking task panicked");
+
+    result.map(Json)
+}
+
+/// POST /git/merge/abort — annuler un merge en cours.
+///
+/// Succès → réponse 200 avec `{ ok: true }`.
+/// Échec (aucun merge en cours) → `NoMergeInProgress` (erreur HTTP VNL-SBX-013).
+#[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+pub async fn handle_merge_abort(
+    State(state): State<AppState>,
+) -> Result<Json<OkResponse>, GitError> {
+    let root = state.config.sandbox_root.to_path_buf();
+
+    #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
+    let result = tokio::task::spawn_blocking(move || {
+        let args = merge_abort_args();
+        let args_prefixed: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
+            .into_iter()
+            .chain(args)
+            .collect();
+        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_merge_abort blocking task panicked");
+
+    // Exécution de `run_git` → CommandFailed (non-zero exit) signifie aucun merge en cours.
+    match result {
+        Ok(_) => Ok(Json(OkResponse { ok: true })),
+        Err(GitError::CommandFailed { .. }) => Err(GitError::NoMergeInProgress),
+        Err(e) => Err(e),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -1949,5 +2083,17 @@ X foo\n\
     fn parse_log_empty() {
         let result = parse_log("").unwrap();
         assert!(result.is_empty());
+    }
+
+    // ── Helpers merge ────────────────────────────────────────────────────────
+
+    #[test]
+    fn merge_args_nominal() {
+        assert_eq!(merge_args("feature-x"), vec!["merge", "feature-x"]);
+    }
+
+    #[test]
+    fn merge_abort_args_nominal() {
+        assert_eq!(merge_abort_args(), vec!["merge", "--abort"]);
     }
 }

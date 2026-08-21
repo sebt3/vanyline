@@ -57,6 +57,8 @@ pub fn build_app(state: AppState) -> Router {
         .route("/git/log", get(git::handle_log))
         .route("/git/ssh-key", get(git::handle_ssh_key_status))
         .route("/git/ssh-key", post(git::handle_ssh_key_create))
+        .route("/git/merge", post(git::handle_merge))
+        .route("/git/merge/abort", post(git::handle_merge_abort))
         .route("/ws/ticket", post(handle_ws_ticket))
         .layer(middleware::from_fn_with_state(
             state.clone(),
