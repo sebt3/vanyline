@@ -1,9 +1,9 @@
-# Feature (ébauche) — interface LSP orientée agent + sélection des tools sandbox
+# Backlog — interface LSP orientée agent + sélection des tools sandbox
 
 Née d'un retour de test détaillé sur les 5 tools `lsp_*` (agent DeepSeek, testés à la
 main sur du Rust + TS réel) et d'une conversation de suivi sur l'évolution voulue.
 **Deux fils distincts**, regroupés ici parce qu'ils sont nés de la même session, mais
-séparables — probablement deux efforts d'implémentation différents.
+séparables — à trancher (1 ou 2 features) au moment de les sortir du backlog.
 
 Les correctifs déjà livrés le jour même (hors périmètre ici, pas à refaire) :
 `lsp_hover` cassé (mauvais parsing de `Hover.contents`), `lsp_diagnostics` one-shot
