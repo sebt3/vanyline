@@ -1,4 +1,9 @@
-# Backlog — interface LSP orientée agent + sélection des tools sandbox
+# Backlog
+
+Idées et pistes pas encore scopées en feature — à piocher, détailler et trancher (y
+compris le découpage en 1 ou plusieurs features) au moment de les sortir d'ici.
+
+## LSP orientée agent + sélection des tools sandbox
 
 Née d'un retour de test détaillé sur les 5 tools `lsp_*` (agent DeepSeek, testés à la
 main sur du Rust + TS réel) et d'une conversation de suivi sur l'évolution voulue.
@@ -12,15 +17,15 @@ analysé / pas de LSP). Cf. `.claude/memory/lsp-integration.md` pour le détail.
 
 ---
 
-## Partie 1 — Repenser l'interface `lsp_*` pour un agent, pas un IDE
+### Partie 1 — Repenser l'interface `lsp_*` pour un agent, pas un IDE
 
-### Ce que ça fait (une fois construit)
+#### Ce que ça fait (une fois construit)
 
 Remplace une collection de tools qui imitent des features d'IDE (hover, goto-def,
 rename bruts) par une interface orientée boucle agent : après une édition, savoir vite
 ce qui casse et qui est impacté — plutôt que des coordonnées à re-résoudre soi-même.
 
-### Ce que ça ne fait pas
+#### Ce que ça ne fait pas
 
 - Ne redesigne pas le protocole LSP lui-même ni la session partagée (process unique par
   toolchain, cache diagnostics/initialize) — cette couche reste telle quelle.
@@ -28,7 +33,7 @@ ce qui casse et qui est impacté — plutôt que des coordonnées à re-résoudr
   (`.vue` non couvert est attendu, pas un défaut de cette feature).
 - Ne touche pas à la sélection des tools par toolset (partie 2 ci-dessous).
 
-### Faits vérifiés à concevoir avec (pas des suppositions)
+#### Faits vérifiés à concevoir avec (pas des suppositions)
 
 - **`textDocument/diagnostic` (pull) n'est PAS uniforme** : rust-analyzer le supporte
   par fichier, mais annonce `"workspaceDiagnostics": false` dans ses capabilities —
@@ -43,7 +48,7 @@ ce qui casse et qui est impacté — plutôt que des coordonnées à re-résoudr
   côté sandbox (`tools_impl.rs`, qui connaît déjà et LSP et les tools filesystem), pas
   modifier les tools de base.
 
-### Propositions retenues pour l'ébauche, par priorité décroissante
+#### Propositions retenues pour l'ébauche, par priorité décroissante
 
 1. **`edit_and_check`** — applique une édition (réutilise `write_file`/`edit_file` de
    `vanyline-tools` en interne) puis attend/lit les diagnostics du fichier touché
@@ -84,7 +89,7 @@ ce qui casse et qui est impacté — plutôt que des coordonnées à re-résoudr
 7. **`inspect_symbol`** : combine definition + references + signature en un seul
    appel — pure composition des tools ci-dessus, pas de nouvelle surface LSP.
 
-### Risques et questions ouvertes
+#### Risques et questions ouvertes
 
 - `edit_and_check` est le seul morceau qui touche vraiment une autre couche
   (filesystem tools) — mérite sa propre validation de conception (comment borner
@@ -97,9 +102,9 @@ ce qui casse et qui est impacté — plutôt que des coordonnées à re-résoudr
 
 ---
 
-## Partie 2 — Sélection des tools sandbox par toolset (pas géré aujourd'hui)
+### Partie 2 — Sélection des tools sandbox par toolset (pas géré aujourd'hui)
 
-### Constat vérifié (pas une hypothèse)
+#### Constat vérifié (pas une hypothèse)
 
 Trouvé en creusant le retour "je n'ai pas pu configurer les tools, DeepSeek y avait
 quand même accès" : **ce n'est pas spécifique à `lsp_*`**. `resolve_extra_mcp`
@@ -118,7 +123,7 @@ choix (probablement involontaire, jamais revisité) de `chat-app-fonctionnel`
 (2026-08-18). Les nouveaux tools `lsp_*` rendent juste la surface toujours-exposée
 plus grande, donc le manque de contrôle plus visible.
 
-### Pourquoi ce n'est pas un simple retrait de `tools: vec![]`
+#### Pourquoi ce n'est pas un simple retrait de `tools: vec![]`
 
 Le mécanisme `Toolset.mcp[].tools` existant suppose un serveur MCP **statique**,
 enregistré en base (`mcp_servers`), avec un flux "tester la connexion" qui peuple
@@ -127,7 +132,7 @@ de sélection. La sandbox n'est **pas** un tel serveur : son URL est résolue
 dynamiquement par contexte de conversation (laquelle sandbox), il n'y a nulle part où
 stocker un `available_tools` figé pour elle.
 
-### Questions ouvertes pour la conception
+#### Questions ouvertes pour la conception
 
 - Réutiliser `Toolset.mcp[].tools` (même glob) pour la sandbox, ou un mécanisme
   dédié ? Si réutilisé : d'où vient la liste "tools disponibles" pour l'UI de
@@ -140,8 +145,37 @@ stocker un `available_tools` figé pour elle.
 - Est-ce que ça doit bloquer sur une décision UX (où ça se configure : par Agent, par
   Toolset, par conversation ?) avant tout code.
 
-### Ce que ça ne fait pas (pour l'instant)
+#### Ce que ça ne fait pas (pour l'instant)
 
 Ne change rien au comportement actuel (tout exposé) tant que la conception n'est pas
 tranchée — ce document ne fait qu'acter le constat et les questions, pas une décision
 de design.
+
+---
+
+## Support éditeur — autres langages
+
+- **Vue** (CodeMirror + LSP) — recoupe la note ".vue non couvert" de la partie LSP
+  ci-dessus (Volar/vue-language-server) ; candidat naturel pour absorber ce point du
+  backlog une fois attaqué.
+- **Dockerfile** (coloration CodeMirror + toolchain à monter pour fournir linter/LSP —
+  lequel reste à choisir, ex. hadolint côté lint, un langserver Dockerfile existe
+  aussi côté LSP).
+- **rhai et handlebars** — plugin CodeMirror à écrire (coloration syntaxique), pas de
+  LSP en backend pour ces deux-là.
+
+## Intégration Git dans l'IDE
+
+- Explorer : colorer les fichiers modifiés et les nouveaux fichiers.
+- Panel dédié (gauche) : état des changements en cours, commit avec message.
+- Vue diff des fichiers dans une fenêtre type éditeur (groupe centre).
+- Frontend graphique de "git log graph".
+
+## Markdown viewer
+
+## Auto-save
+
+## Amélioration du chat LLM
+
+- Fix du refresh en streaming.
+- `tool_call` : affichage des paramètres et des résultats.
