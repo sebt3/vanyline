@@ -6,6 +6,7 @@ import Editor from './panels/Editor.vue';
 import Workflow from './panels/Workflow.vue';
 import Chat from './panels/Chat.vue';
 import Terminal from './panels/Terminal.vue';
+import GitPanel from './panels/GitPanel.vue';
 import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
 import { getLspClient, disposeLspClients } from '../api/lsp';
 import { dirRootUri } from './panels/editorLanguage';
@@ -59,6 +60,7 @@ const components = {
   workflow: Workflow,
   chat: Chat,
   terminal: Terminal,
+  git: GitPanel,
 } as unknown as Record<string, VueComponent>;
 
 /** Id de panel dockview pour un fichier ouvert — un panel Editor par fichier
@@ -155,6 +157,14 @@ function addDefaultPanels(api: DockviewReadyEvent['api']) {
     component: 'explorer',
     title: 'Explorer',
     initialWidth: 230,
+  });
+
+  api.addPanel({
+    id: 'git',
+    component: 'git',
+    title: 'Git',
+    position: { referencePanel: 'explorer', direction: 'below' },
+    initialHeight: 240,
   });
 
   api.addPanel({
