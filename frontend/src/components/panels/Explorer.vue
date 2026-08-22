@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { inject, computed, ref, watch } from 'vue';
+import { inject, computed, ref, watch, onMounted } from 'vue';
 import { ElTree } from 'element-plus';
 import type { SandboxFsClient } from '../../api/sandboxWs';
 import type { Ref } from 'vue';
 import ContextMenu, { type ContextMenuEntry } from '../ContextMenu.vue';
 import { iconForPath, folderIcon } from './fileIcon';
+import { gitClient } from '../../api/gitClient';
 
 interface FsNode {
   id: string;        // chemin relatif (unique dans l'arbre)
@@ -142,8 +143,51 @@ function entriesForNode(node: FsNode): ContextMenuEntry[] {
   return entries;
 }
 
-function refresh(): void { refreshKey.value += 1; }
+/** État git par chemin relatif — indexé par chemin, alimenté par
+ *  `GET /git/status` (relayé par l'app). Vide si la sandbox n'est pas un repo
+ *  ou si le statut échoue (mode dégradé sans badge). */
+const fileStates = ref<Map<string, string>>(new Map());
+
+/** Refetch du statut git. Échec (pas de repo, erreur réseau) → Map vide,
+ *  jamais bloquant. */
+async function refreshStatus(): Promise<void> {
+  if (!sandboxName) return;
+  try {
+    const s = await gitClient.status(sandboxName);
+    const map = new Map<string, string>();
+    for (const f of s.files) map.set(f.path, f.state);
+    fileStates.value = map;
+  } catch {
+    fileStates.value = new Map();
+  }
+}
+
+function refresh(): void {
+  refreshKey.value += 1;
+  void refreshStatus();
+}
+
 function setError(message: string): void { errorMessage.value = message; }
+
+/** État git d'un chemin, ou undefined. */
+function stateOf(path: string): string | undefined {
+  return fileStates.value.get(path);
+}
+
+/** Classe du badge : 'conflicted' (distinct, rouge) vs 'changed' (les autres
+ *  états — modified/added/deleted/renamed/untracked). */
+function stateClass(path: string): string {
+  return stateOf(path) === 'conflicted' ? 'conflicted' : 'changed';
+}
+
+/** Libellé court du badge. */
+function stateLabel(path: string): string {
+  const s = stateOf(path);
+  if (s === 'conflicted') return 'conflit';
+  return s ?? '';
+}
+
+onMounted(() => { void refreshStatus(); });
 
 function createFile(dirPath: string): void {
   const name = window.prompt('Nom du fichier');
@@ -243,6 +287,7 @@ function copyAbsolutePath(node: FsNode): void {
 defineExpose({
   parseEntries, loadNode, onNodeClick, entriesForNode, createFile, createDir,
   renameNode, deleteNode, refresh, parentPath, copyRelativePath, copyAbsolutePath,
+  refreshStatus, stateOf, stateClass, stateLabel, fileStates,
 });
 </script>
 
@@ -267,6 +312,11 @@ defineExpose({
           <span class="label">
             <component :is="node.leaf ? iconForPath(node.path) : folderIcon" class="file-icon" />
             <span class="label-text">{{ node.label }}</span>
+            <span
+              v-if="node.leaf && stateOf(node.path)"
+              class="git-state"
+              :class="stateClass(node.path)"
+            >{{ stateLabel(node.path) }}</span>
           </span>
         </ContextMenu>
       </template>
@@ -312,6 +362,23 @@ defineExpose({
   width: 13px;
   height: 13px;
   color: var(--dv-color-abyss-secondary-text);
+}
+.git-state {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 4px;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  border-radius: 3px;
+}
+.git-state.changed {
+  color: #7ecfff;
+  background: #7ecfff22;
+}
+.git-state.conflicted {
+  color: #ffb4c8;
+  background: #ffb4c822;
 }
 
 .explorer :deep(.el-tree) {
