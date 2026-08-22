@@ -4,6 +4,7 @@ import {
   gitClient,
   type GitStatus,
   type BranchesResult,
+  type UnpushedResult,
 } from '../../api/gitClient';
 
 const sandboxName = inject<string>('sandbox-name', '');
@@ -13,6 +14,9 @@ const branches = ref<BranchesResult | null>(null);
 const commitMessage = ref('');
 const busy = ref(false);
 const errorMessage = ref<string | null>(null);
+const unpushed = ref<UnpushedResult | null>(null);
+const newBranchName = ref('');
+const newBranchFrom = ref('');
 
 /** Fichiers staged (hors conflits — les conflicted sont staged par nature mais
  *  traités à part pour le geste « marquer résolu »). */
@@ -36,22 +40,34 @@ const conflictedFiles = computed(() =>
 const merging = computed(() => branches.value?.merging ?? false);
 
 /** Commit possible : message non vide ET quelque chose de staged (y compris
- *  les conflits). Désactivé sinon. */
+  *  les conflits). Désactivé sinon. */
 const canCommit = computed(() =>
   commitMessage.value.trim() !== '' &&
   (stagedFiles.value.length + conflictedFiles.value.length) > 0,
 );
 
-/** Refetch status + branches (parallèle) — appelé au montage et après chaque
- *  action. Pas d'état local persistant au-delà des inputs de formulaire. */
+const currentBranch = computed(() => branches.value?.current ?? '');
+const localBranches = computed(() =>
+  (branches.value?.branches ?? []).filter((b) => !b.is_remote),
+);
+const remoteBranches = computed(() =>
+  (branches.value?.branches ?? []).filter((b) => b.is_remote),
+);
+const unpushedCount = computed(() => unpushed.value?.commits.length ?? 0);
+
+/** Refetch status + branches + unpushed (parallèle) — appelé au montage et
+ *  après chaque action. Pas d'état local persistant au-delà des inputs de
+ *  formulaire. */
 async function refresh(): Promise<void> {
   if (!sandboxName) return;
-  const [s, b] = await Promise.all([
+  const [s, b, u] = await Promise.all([
     gitClient.status(sandboxName),
     gitClient.branches(sandboxName),
+    gitClient.unpushed(sandboxName),
   ]);
   status.value = s;
   branches.value = b;
+  unpushed.value = u;
   errorMessage.value = null;
 }
 
@@ -110,6 +126,66 @@ async function commit(): Promise<void> {
   }
 }
 
+/** Crée une branche (from optionnel : branche locale ou remote). */
+async function createBranch(): Promise<void> {
+  if (!sandboxName || newBranchName.value.trim() === '') return;
+  busy.value = true;
+  try {
+    const from = newBranchFrom.value.trim();
+    await gitClient.createBranch(
+      sandboxName,
+      newBranchName.value.trim(),
+      from || undefined,
+    );
+    newBranchName.value = '';
+    newBranchFrom.value = '';
+    await refresh();
+  } catch (e) {
+    errorMessage.value = msg(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function checkout(branch: string): Promise<void> {
+  if (!sandboxName) return;
+  busy.value = true;
+  try {
+    await gitClient.checkout(sandboxName, branch);
+    await refresh();
+  } catch (e) {
+    errorMessage.value = msg(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function deleteBranch(branch: string): Promise<void> {
+  if (!sandboxName) return;
+  busy.value = true;
+  try {
+    await gitClient.deleteBranch(sandboxName, branch);
+    await refresh();
+  } catch (e) {
+    errorMessage.value = msg(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+async function push(): Promise<void> {
+  if (!sandboxName) return;
+  busy.value = true;
+  try {
+    await gitClient.push(sandboxName);
+    await refresh();
+  } catch (e) {
+    errorMessage.value = msg(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -119,6 +195,9 @@ onMounted(() => { void refresh(); });
 defineExpose({
   refresh, stageFile, unstageFile, markResolved, commit,
   stagedFiles, unstagedFiles, conflictedFiles, merging, canCommit,
+  createBranch, checkout, deleteBranch, push,
+  newBranchName, newBranchFrom, currentBranch, localBranches, remoteBranches,
+  unpushedCount,
 });
 </script>
 
@@ -160,6 +239,48 @@ defineExpose({
           placeholder="Message de commit"
         />
         <button :disabled="busy || !canCommit" @click="commit">Commit</button>
+      </section>
+      <section class="branches">
+        <h3>Branches</h3>
+        <div class="branch-current">
+          Courante : <strong>{{ currentBranch }}</strong>
+        </div>
+        <div class="branch-create">
+          <input v-model="newBranchName" placeholder="Nouvelle branche" />
+          <input v-model="newBranchFrom" placeholder="Depuis (ex. origin/main)" />
+          <button :disabled="busy || newBranchName.trim() === ''" @click="createBranch">
+            Créer
+          </button>
+        </div>
+        <ul class="branch-list">
+          <li
+            v-for="b in localBranches"
+            :key="b.name"
+            class="branch"
+            :class="{ current: b.name === currentBranch }"
+          >
+            <span class="branch-name">{{ b.name }}</span>
+            <span v-if="b.name === currentBranch" class="branch-mark">(courante)</span>
+            <button :disabled="busy || b.name === currentBranch" @click="checkout(b.name)">
+              Switcher
+            </button>
+            <button :disabled="busy || b.name === currentBranch" @click="deleteBranch(b.name)">
+              Supprimer
+            </button>
+          </li>
+          <li v-for="b in remoteBranches" :key="b.name" class="branch remote">
+            <span class="branch-name">{{ b.name }}</span>
+            <span class="branch-mark">(remote)</span>
+          </li>
+        </ul>
+      </section>
+      <section class="push">
+        <h3>Push</h3>
+        <p>
+          {{ unpushedCount }} commit{{ unpushedCount === 1 ? '' : 's' }} non poussé{{ unpushedCount === 1 ? '' : 's' }}
+          <span v-if="unpushed?.upstream">vers {{ unpushed.upstream }}</span>
+        </p>
+        <button :disabled="busy || unpushedCount === 0" @click="push">Push</button>
       </section>
     </template>
   </div>
@@ -289,6 +410,131 @@ defineExpose({
   background: var(--dv-color-abyss-light);
 }
 .commit button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.branches {
+  padding: 8px;
+}
+.branches h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--dv-color-abyss-secondary-text);
+  margin: 0 0 4px;
+  letter-spacing: 0.5px;
+}
+.branch-current {
+  font-size: 12px;
+  padding: 2px 0 4px;
+}
+.branch-create {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 4px;
+}
+.branch-create input {
+  flex: 1;
+  min-width: 0;
+  background: var(--dv-color-abyss-light);
+  border: 1px solid var(--dv-color-abyss-lighter);
+  border-radius: 4px;
+  color: var(--dv-color-abyss-primary-text);
+  padding: 2px 6px;
+  font-size: 11px;
+}
+.branch-create button {
+  padding: 2px 8px;
+  font-size: 11px;
+  border-radius: 3px;
+  border: 1px solid var(--dv-color-abyss-light);
+  background: transparent;
+  color: var(--dv-color-abyss-primary-text);
+  cursor: pointer;
+}
+.branch-create button:hover:not(:disabled) {
+  background: var(--dv-color-abyss-lighter);
+}
+.branch-create button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.branch-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.branch {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  font-size: 12px;
+  border-radius: 3px;
+}
+.branch:hover {
+  background: var(--dv-color-abyss-light);
+}
+.branch.current {
+  background: #7ecfff22;
+}
+.branch .branch-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.branch .branch-mark {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--dv-color-abyss-secondary-text);
+}
+.branch .branch button {
+  flex-shrink: 0;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  border: 1px solid var(--dv-color-abyss-light);
+  background: transparent;
+  color: var(--dv-color-abyss-primary-text);
+  cursor: pointer;
+}
+.branch .branch button:hover:not(:disabled) {
+  background: var(--dv-color-abyss-lighter);
+}
+.branch .branch button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.push {
+  padding: 8px;
+}
+.push h3 {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  color: var(--dv-color-abyss-secondary-text);
+  margin: 0 0 4px;
+  letter-spacing: 0.5px;
+}
+.push p {
+  font-size: 12px;
+  margin: 0 0 4px;
+}
+.push button {
+  padding: 4px 12px;
+  border-radius: 4px;
+  border: 1px solid var(--dv-color-abyss-lighter);
+  background: var(--dv-color-abyss-lighter);
+  color: var(--dv-color-abyss-primary-text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.push button:hover:not(:disabled) {
+  background: var(--dv-color-abyss-light);
+}
+.push button:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }

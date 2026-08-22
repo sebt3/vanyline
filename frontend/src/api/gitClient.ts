@@ -73,6 +73,20 @@ export interface SshKeyResult {
   public_key: string;
 }
 
+export interface UnpushedCommit {
+  sha: string;    // tronqué à 7 (convention /git/unpushed)
+  title: string;
+  author: string;
+  date: string;
+}
+
+export interface UnpushedResult {
+  branch: string;
+  upstream: string | null;
+  commits: UnpushedCommit[];
+  truncated: boolean;
+}
+
 /** Base URL du relais git : `/api/sandboxes/{name}/git` (name encodé). */
 const base = (name: string): string =>
   `/api/sandboxes/${encodeURIComponent(name)}/git`;
@@ -158,5 +172,10 @@ export const gitClient = {
   /** POST /git/ssh-key (pas de body) */
   sshKeyCreate(name: string): Promise<SshKeyResult> {
     return client.post(`${base(name)}/ssh-key`);
+  },
+
+  /** GET /git/unpushed — delta local/upstream (compteur du panel) */
+  unpushed(name: string): Promise<UnpushedResult> {
+    return client.get(`${base(name)}/unpushed`);
   },
 };

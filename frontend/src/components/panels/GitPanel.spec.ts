@@ -16,6 +16,16 @@ const { mockClient } = vi.hoisted(() => {
       stage: vi.fn(),
       unstage: vi.fn(),
       commit: vi.fn(),
+      unpushed: vi.fn().mockResolvedValue({
+        branch: 'main',
+        upstream: 'origin/main',
+        commits: [],
+        truncated: false,
+      }),
+      push: vi.fn(),
+      createBranch: vi.fn(),
+      checkout: vi.fn(),
+      deleteBranch: vi.fn(),
     };
   }
   return { mockClient: makeMockGitClient() };
@@ -32,6 +42,11 @@ describe('GitPanel.vue — statut, staging, commit', () => {
     mockClient.stage.mockReset();
     mockClient.unstage.mockReset();
     mockClient.commit.mockReset();
+    mockClient.unpushed.mockReset();
+    mockClient.push.mockReset();
+    mockClient.createBranch.mockReset();
+    mockClient.checkout.mockReset();
+    mockClient.deleteBranch.mockReset();
   });
 
   it('affiche staged, unstaged et conflicted depuis le statut', async () => {
@@ -256,5 +271,377 @@ describe('GitPanel.vue — statut, staging, commit', () => {
 
     // canCommit = false car stagedFiles + conflictedFiles = 0
     expect(commitBtn?.attributes('disabled')).toBeDefined();
+  });
+
+  it('affiche le compteur de commits non poussés', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [
+        { sha: 'aabbccd', title: 'feat: first', author: 'seb', date: '2026-01-01T00:00:00Z' },
+        { sha: 'eeffggh', title: 'fix: second', author: 'seb', date: '2026-01-02T00:00:00Z' },
+      ],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    expect(wrapper.text()).toContain('2 commits non poussés');
+
+    const pushBtn = wrapper.findAll('button').find((b) => b.text() === 'Push');
+    expect(pushBtn).toBeDefined();
+    expect(pushBtn?.attributes('disabled')).toBeUndefined();
+  });
+
+  it('cliquer Push appelle gitClient.push puis refresh', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [{ sha: 'abc1234', title: 'msg', author: 'seb', date: '2026-01-01T00:00:00Z' }],
+      truncated: false,
+    });
+
+    // push → refresh (status + branches + unpushed)
+    mockClient.push.mockResolvedValueOnce({ ok: true, pushed: 1 });
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const pushBtn = wrapper.findAll('button').find((b) => b.text() === 'Push');
+    expect(pushBtn).toBeDefined();
+    await pushBtn?.trigger('click');
+
+    await flushMicrotasks();
+
+    expect(mockClient.push).toHaveBeenCalledWith('s');
+    expect(mockClient.status).toHaveBeenCalled();
+  });
+
+  it('créer une branche appelle gitClient.createBranch sans from', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    // createBranch → refresh
+    mockClient.createBranch.mockResolvedValueOnce({ ok: true });
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const inputs = wrapper.findAll('input');
+    const [branchInput, fromInput] = [inputs[0], inputs[1]];
+    expect(branchInput).toBeDefined();
+    expect(fromInput).toBeDefined();
+    await branchInput!.setValue('feat/x');
+    await fromInput!.setValue('');
+
+    const createBtn = wrapper.findAll('button').find((b) => b.text() === 'Créer');
+    expect(createBtn).toBeDefined();
+    await createBtn?.trigger('click');
+
+    await flushMicrotasks();
+
+    expect(mockClient.createBranch).toHaveBeenCalledWith('s', 'feat/x', undefined);
+  });
+
+  it('créer une branche avec from appelle createBranch avec from', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    // createBranch → refresh
+    mockClient.createBranch.mockResolvedValueOnce({ ok: true });
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const inputs = wrapper.findAll('input');
+    const [branchInput, fromInput] = [inputs[0], inputs[1]];
+    await branchInput!.setValue('feat/x');
+    await fromInput!.setValue('origin/main');
+
+    const createBtn = wrapper.findAll('button').find((b) => b.text() === 'Créer');
+    await createBtn?.trigger('click');
+
+    await flushMicrotasks();
+
+    expect(mockClient.createBranch).toHaveBeenCalledWith('s', 'feat/x', 'origin/main');
+  });
+
+  it('cliquer Switcher appelle gitClient.checkout', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [
+        { name: 'main', is_remote: false, upstream: null },
+        { name: 'feat/x', is_remote: false, upstream: null },
+      ],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    // checkout → refresh
+    mockClient.checkout.mockResolvedValueOnce({ ok: true });
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'feat/x',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'feat/x',
+      merging: false,
+      branches: [
+        { name: 'main', is_remote: false, upstream: null },
+        { name: 'feat/x', is_remote: false, upstream: null },
+      ],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'feat/x',
+      upstream: null,
+      commits: [],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const switchBtns = wrapper.findAll('button').filter((b) => b.text() === 'Switcher');
+    expect(switchBtns.length).toBeGreaterThanOrEqual(2);
+    // Le deuxième Switcher (index 1) est sur feat/x, le premier est sur main (courante, disabled)
+    await switchBtns[1].trigger('click');
+
+    await flushMicrotasks();
+
+    expect(mockClient.checkout).toHaveBeenCalledWith('s', 'feat/x');
+  });
+
+  it('cliquer Supprimer appelle gitClient.deleteBranch', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [
+        { name: 'main', is_remote: false, upstream: null },
+        { name: 'feat/x', is_remote: false, upstream: null },
+      ],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    // deleteBranch → refresh
+    mockClient.deleteBranch.mockResolvedValueOnce(undefined);
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [
+        { name: 'main', is_remote: false, upstream: null },
+        { name: 'feat/x', is_remote: false, upstream: null },
+      ],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const deleteBtns = wrapper.findAll('button').filter((b) => b.text() === 'Supprimer');
+    expect(deleteBtns.length).toBeGreaterThanOrEqual(2);
+    // Le deuxième Supprimer (index 1) est sur feat/x
+    await deleteBtns[1].trigger('click');
+
+    await flushMicrotasks();
+
+    expect(mockClient.deleteBranch).toHaveBeenCalledWith('s', 'feat/x');
+  });
+
+  it('bouton Push désactivé quand aucun commit non poussé', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const pushBtn = wrapper.findAll('button').find((b) => b.text() === 'Push');
+    expect(pushBtn?.attributes('disabled')).toBeDefined();
   });
 });
