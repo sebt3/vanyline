@@ -1,8 +1,10 @@
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Request, State},
     http::StatusCode,
+    body::to_bytes,
 };
+use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use vanyline_crds::{Sandbox, SandboxSpec};
 
@@ -201,6 +203,87 @@ pub async fn ws_ticket(
     }))
 }
 
+/// Proxy générique vers la sandbox : construit la requête (méthode, URL,
+/// body, `Authorization: Bearer {token}`),
+/// l'envoie, et retourne `(statut, JSON)` de la réponse TELS QUELS — y compris
+/// les erreurs HTTP de la sandbox (pas de `error_for_status`, pas de
+/// transformation). Le token OIDC n'est jamais renvoyé au navigateur.
+async fn proxy_git_request(
+    http: &reqwest::Client,
+    url: &str,
+    method: reqwest::Method,
+    body: Bytes,
+    token: &str,
+) -> Result<(StatusCode, serde_json::Value), AppError> {
+    let resp = http
+        .request(method, url)
+        .header(
+            reqwest::header::AUTHORIZATION,
+            format!("Bearer {token}"),
+        )
+        .body(body)
+        .send()
+        .await?;
+
+    let status = StatusCode::from_u16(resp.status().as_u16())
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+    let value: serde_json::Value = resp.json().await?;
+    Ok((status, value))
+}
+
+/// Relais REST `ANY /api/sandboxes/{name}/git/{*path}` — scoping owner
+/// identique à `ws_ticket` (get_or_create_user → resolve_owner_name →
+/// get_sandbox → get_project → assert owner match), URL interne via
+/// `sandbox_git_url`, forward méthode + path + query + body vers la sandbox
+/// avec le `id_token` OIDC (Bearer), réponse passthrough.
+#[axum::debug_handler]
+pub async fn git_proxy(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path((name, path)): Path<(String, String)>,
+    req: Request, // dernier extractor, consuming (cf. task sp.)
+) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    // 1. scoping owner identique à ws_ticket
+    let _db_user = get_or_create_user(&state, &user).await?;
+    let Some(owner) = owners::resolve_owner_name(&state, _db_user.id).await? else {
+        return Err(AppError::Forbidden);
+    };
+    let client = k8s::client(&state).await?;
+    let sandbox = client.get_sandbox(&name).await?;
+    let project = client.get_project(&sandbox.spec.project).await?;
+    if project.spec.owner != owner {
+        return Err(AppError::Forbidden);
+    }
+
+    // 2. URL interne
+    let mut base_url = client.sandbox_git_url(&name, &path).await?;
+
+    // 3. Query string
+    let query = req.uri().query().map(String::from);
+    let method = req.method().clone();
+    if let Some(q) = &query {
+        base_url = format!("{base_url}?{q}");
+    }
+
+    // 4. Client reqwest (30s : les opérations git réseau peuvent dépasser 10s)
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(AppError::RequestError)?;
+
+    // 5. Body (to_bytes — 1 MiB max, git bodies are small)
+    let body = to_bytes(req.into_body(), 1024 * 1024)
+        .await
+        .map_err(|e| AppError::InternalError(e.to_string()))?;
+
+    // 6. Appel proxy + retour passthrough
+    let (status, value) =
+        proxy_git_request(&http, &base_url, method, body, &user.id_token)
+            .await?;
+
+    Ok((status, Json(value)))
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -210,7 +293,7 @@ mod tests {
         Router,
         body::Body,
         http::{Request, StatusCode},
-        routing::{get, post},
+        routing::{any, get, post},
     };
     use tower::ServiceExt;
 
@@ -251,6 +334,7 @@ mod tests {
             .route("/sandboxes", get(list_sandboxes).post(create_sandbox))
             .route("/sandboxes/{name}", get(get_sandbox).delete(delete_sandbox))
             .route("/sandboxes/{name}/ws-ticket", post(ws_ticket))
+            .route("/sandboxes/{name}/git/{*path}", any(git_proxy))
             .with_state(state)
     }
 
@@ -294,6 +378,17 @@ mod tests {
         let req = Request::builder()
             .uri("/sandboxes/my-sandbox/ws-ticket")
             .method("POST")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn git_proxy_without_cookie_returns_401() {
+        let app = make_app(test_key());
+        let req = Request::builder()
+            .uri("/sandboxes/my-sandbox/git/status")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();

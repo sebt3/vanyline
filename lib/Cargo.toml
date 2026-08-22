@@ -16,6 +16,7 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "2"
 tracing = "0.1"
+percent-encoding = "1"
 futures = "0.3"
 async-trait = "0.1"
 parking_lot = "0.12"

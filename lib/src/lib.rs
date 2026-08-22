@@ -1,5 +1,19 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+use percent_encoding::define_encode_set;
+use percent_encoding::utf8_percent_encode;
+use percent_encoding::SIMPLE_ENCODE_SET;
+
+define_encode_set! {
+    pub GIT_ENCODE_SET = [SIMPLE_ENCODE_SET] | {' ', '%'}
+}
+
+/// Encodage percent d'un chemin git, segment par segment, en PRÉSERVANT les
+/// séparateurs `/` et les caractères sûrs `-`, `_`, `.`, `~`.
+pub fn encode_git_path(path: &str) -> String {
+    utf8_percent_encode(path, GIT_ENCODE_SET).to_string()
+}
+
 pub mod builtin;
 pub mod domain;
 mod error;
