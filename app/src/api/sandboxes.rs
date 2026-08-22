@@ -204,7 +204,7 @@ pub async fn ws_ticket(
 }
 
 /// Proxy générique vers la sandbox : construit la requête (méthode, URL,
-/// body, `Authorization: Bearer {token}`),
+/// headers optionnels, body, `Authorization: Bearer {token}`),
 /// l'envoie, et retourne `(statut, JSON)` de la réponse TELS QUELS — y compris
 /// les erreurs HTTP de la sandbox (pas de `error_for_status`, pas de
 /// transformation). Le token OIDC n'est jamais renvoyé au navigateur.
@@ -212,18 +212,20 @@ async fn proxy_git_request(
     http: &reqwest::Client,
     url: &str,
     method: reqwest::Method,
+    headers: Vec<(String, String)>, // content-type, accept, si présents
     body: Bytes,
     token: &str,
 ) -> Result<(StatusCode, serde_json::Value), AppError> {
-    let resp = http
+    let mut req = http
         .request(method, url)
         .header(
             reqwest::header::AUTHORIZATION,
             format!("Bearer {token}"),
-        )
-        .body(body)
-        .send()
-        .await?;
+        );
+    for (k, v) in headers {
+        req = req.header(&k, &v);
+    }
+    let resp = req.body(body).send().await?;
 
     let status = StatusCode::from_u16(resp.status().as_u16())
         .map_err(|e| AppError::InternalError(e.to_string()))?;
@@ -271,6 +273,18 @@ pub async fn git_proxy(
         .build()
         .map_err(AppError::RequestError)?;
 
+    // 4bis. Headers à forwarder : content-type et accept, si présents
+    let mut headers: Vec<(String, String)> = Vec::new();
+    if let Some(v) = req.headers().get(axum::http::header::CONTENT_TYPE) {
+        headers.push((
+            "content-type".to_string(),
+            v.to_str().unwrap_or("").to_string(),
+        ));
+    }
+    if let Some(v) = req.headers().get(axum::http::header::ACCEPT) {
+        headers.push(("accept".to_string(), v.to_str().unwrap_or("").to_string()));
+    }
+
     // 5. Body (to_bytes — 1 MiB max, git bodies are small)
     let body = to_bytes(req.into_body(), 1024 * 1024)
         .await
@@ -278,7 +292,7 @@ pub async fn git_proxy(
 
     // 6. Appel proxy + retour passthrough
     let (status, value) =
-        proxy_git_request(&http, &base_url, method, body, &user.id_token)
+        proxy_git_request(&http, &base_url, method, headers, body, &user.id_token)
             .await?;
 
     Ok((status, Json(value)))
