@@ -31,6 +31,7 @@
     "ai": "^7.0.66",
     "codemirror": "^6.0.2",
     "dockview-vue": "^7.0.4",
+    "@gitgraph/js": "^1.4.0",
     "element-plus": "^2.14.4",
     "reka-ui": "^2.10.3",
     "tailwindcss": "^4.3.3",

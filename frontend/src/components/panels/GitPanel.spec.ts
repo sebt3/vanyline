@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mount } from '@vue/test-utils';
 import GitPanel from './GitPanel.vue';
+import type { LogCommit, LogResult } from '../../api/gitClient';
 
 async function flushMicrotasks() {
   await Promise.resolve();
@@ -26,6 +27,7 @@ const { mockClient } = vi.hoisted(() => {
       createBranch: vi.fn(),
       checkout: vi.fn(),
       deleteBranch: vi.fn(),
+      log: vi.fn(async () => ({ branch: 'main', commits: [] as LogCommit[], truncated: false })),
     };
   }
   return { mockClient: makeMockGitClient() };
@@ -47,6 +49,7 @@ describe('GitPanel.vue — statut, staging, commit', () => {
     mockClient.createBranch.mockReset();
     mockClient.checkout.mockReset();
     mockClient.deleteBranch.mockReset();
+    mockClient.log.mockReset();
   });
 
   it('affiche staged, unstaged et conflicted depuis le statut', async () => {
@@ -643,5 +646,112 @@ describe('GitPanel.vue — statut, staging, commit', () => {
 
     const pushBtn = wrapper.findAll('button').find((b) => b.text() === 'Push');
     expect(pushBtn?.attributes('disabled')).toBeDefined();
+  });
+});
+
+describe('GitPanel.vue — graphe historique', () => {
+  it('charge le log et expose les ref graphe pour un rendu ultérieur', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: false,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    mockClient.log.mockResolvedValueOnce({
+      branch: 'main',
+      commits: [
+        {
+          sha: 'c2',
+          parents: ['c1'],
+          refs: ['HEAD', 'v2'],
+          title: 'Second commit',
+          author: 'seb <seb@example.com>',
+          date: '2026-07-10T00:00:00Z',
+        },
+        {
+          sha: 'c1',
+          parents: [],
+          refs: ['tag/v1'],
+          title: 'First commit',
+          author: 'seb <seb@example.com>',
+          date: '2026-07-09T00:00:00Z',
+        },
+      ],
+      truncated: false,
+    } as LogResult);
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    // Le log doit avoir été chargé via gitClient.log
+    const panel = wrapper.vm as unknown as { log: { value: unknown } };
+    expect(panel.log.value).not.toBeNull();
+
+    // L'interface expose renderGraph et graphContainer
+    const exposed = wrapper.vm as unknown as {
+      renderGraph: Function;
+      graphContainer: HTMLElement | null;
+      refresh: Function;
+    };
+    expect(exposed.renderGraph).toBeDefined();
+    expect(exposed.graphContainer).toBeTruthy();
+  });
+
+  it('renderGraph ne plante pas lorsque log et container sont chargés', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    mockClient.log.mockResolvedValueOnce({
+      branch: 'main',
+      commits: [],
+      truncated: false,
+    } as LogResult);
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const panel = wrapper.vm as unknown as {
+      renderGraph: Function;
+      log: { value: unknown };
+    };
+    // renderGraph devrait être appelable sans erreur
+expect(() => panel.renderGraph()).not.toThrow();
   });
 });

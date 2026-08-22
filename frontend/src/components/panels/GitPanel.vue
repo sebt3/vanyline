@@ -1,9 +1,11 @@
 <script setup lang="ts">
 import { computed, inject, onMounted, ref } from 'vue';
+import { createGitgraph } from '@gitgraph/js';
 import {
   gitClient,
   type GitStatus,
   type BranchesResult,
+  type LogResult,
   type UnpushedResult,
 } from '../../api/gitClient';
 
@@ -17,6 +19,11 @@ const errorMessage = ref<string | null>(null);
 const unpushed = ref<UnpushedResult | null>(null);
 const newBranchName = ref('');
 const newBranchFrom = ref('');
+
+/** Container du graphe (template ref). */
+const graphContainer = ref<HTMLElement | null>(null);
+/** Dernier /git/log récupéré — source du graphe. */
+const log = ref<LogResult | null>(null);
 
 /** Fichiers staged (hors conflits — les conflicted sont staged par nature mais
  *  traités à part pour le geste « marquer résolu »). */
@@ -55,20 +62,22 @@ const remoteBranches = computed(() =>
 );
 const unpushedCount = computed(() => unpushed.value?.commits.length ?? 0);
 
-/** Refetch status + branches + unpushed (parallèle) — appelé au montage et
- *  après chaque action. Pas d'état local persistant au-delà des inputs de
- *  formulaire. */
+/** Refetch status + branches + unpushed + log (parallèle) — appelé au montage
+ *  et après chaque action. Le graphe est re-rendu après chaque refetch. */
 async function refresh(): Promise<void> {
   if (!sandboxName) return;
-  const [s, b, u] = await Promise.all([
+  const [s, b, u, l] = await Promise.all([
     gitClient.status(sandboxName),
     gitClient.branches(sandboxName),
     gitClient.unpushed(sandboxName),
+    gitClient.log(sandboxName, 50, false),
   ]);
   status.value = s;
   branches.value = b;
   unpushed.value = u;
+  log.value = l;
   errorMessage.value = null;
+  renderGraph();
 }
 
 async function stageFile(path: string): Promise<void> {
@@ -190,6 +199,29 @@ function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Rend le graphe linéaire de la branche courante (v1) : une branche, les
+ *  commits dans l'ordre chronologique (le log est retourné du plus récent au
+ *  plus ancien — inversion avant rendu), chaque commit décoré de ses refs. */
+function renderGraph(): void {
+  const container = graphContainer.value;
+  const current = log.value;
+  if (!container || !current) return;
+  container.innerHTML = '';
+  const gitgraph = createGitgraph(container);
+  const branch = gitgraph.branch(current.branch || 'HEAD');
+  const commits = [...current.commits].reverse();
+  for (const c of commits) {
+    const node = branch.commit({
+      subject: c.title,
+      hash: c.sha,
+      author: c.author,
+    });
+    if (c.refs.length > 0) {
+      node.tag(c.refs.join(', '));
+    }
+  }
+}
+
 onMounted(() => { void refresh(); });
 
 defineExpose({
@@ -197,7 +229,7 @@ defineExpose({
   stagedFiles, unstagedFiles, conflictedFiles, merging, canCommit,
   createBranch, checkout, deleteBranch, push,
   newBranchName, newBranchFrom, currentBranch, localBranches, remoteBranches,
-  unpushedCount,
+  unpushedCount, renderGraph, log, graphContainer,
 });
 </script>
 
@@ -281,6 +313,10 @@ defineExpose({
           <span v-if="unpushed?.upstream">vers {{ unpushed.upstream }}</span>
         </p>
         <button :disabled="busy || unpushedCount === 0" @click="push">Push</button>
+      </section>
+      <section class="graph">
+        <h3>Historique</h3>
+        <div ref="graphContainer" class="git-graph" />
       </section>
     </template>
   </div>
@@ -538,4 +574,8 @@ defineExpose({
   opacity: 0.4;
   cursor: not-allowed;
 }
+.graph { padding: 8px; }
+.graph h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--dv-color-abyss-secondary-text); margin: 0 0 4px; letter-spacing: 0.5px; }
+.git-graph { overflow-x: auto; }
+.git-graph svg { display: block; max-width: 100%; }
 </style>
