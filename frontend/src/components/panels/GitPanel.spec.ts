@@ -37,6 +37,21 @@ vi.mock('../../api/gitClient', () => ({
   gitClient: mockClient,
 }));
 
+// Mock @gitgraph/js : le composant appelle createGitgraph à chaque refresh.
+// Retour par défaut minimal pour les tests existants (statut/staging/commit) ;
+// les tests du graphe re-configurent mockReturnValue avec des vi.fn locaux.
+const { createGitgraphMock } = vi.hoisted(() => ({ createGitgraphMock: vi.fn() }));
+
+vi.mock('@gitgraph/js', () => ({
+  createGitgraph: createGitgraphMock,
+}));
+
+createGitgraphMock.mockReturnValue({
+  branch: vi.fn(() => ({
+    commit: vi.fn(() => ({ tag: vi.fn() })),
+  })),
+});
+
 describe('GitPanel.vue — statut, staging, commit', () => {
   beforeEach(() => {
     mockClient.status.mockReset();
