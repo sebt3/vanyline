@@ -194,7 +194,13 @@ cargo check --workspace        # vérification rapide
 cargo test --workspace         # tests
 cargo build --workspace        # build complet
 cargo clippy --workspace       # linter
+cargo fmt --all -- --check     # formatage — obligatoire avant de considérer une tâche terminée
 ```
+
+`cargo fmt --all -- --check` fait partie des commandes de validation au même titre que les
+autres : absent ici avant 2026-08-22, ce qui a laissé passer du code non formaté malgré la
+permission déjà accordée à Cadence (`.opencode/agents/cadence.md`) — l'instruction manquait,
+pas la permission.
 
 ### Frontend
 
