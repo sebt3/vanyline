@@ -11,6 +11,8 @@ import {
 
 const sandboxName = inject<string>('sandbox-name', '');
 
+const openDiff = inject<(path: string, staged?: boolean) => void>('open-diff', () => {});
+
 const status = ref<GitStatus | null>(null);
 const branches = ref<BranchesResult | null>(null);
 const commitMessage = ref('');
@@ -199,6 +201,13 @@ function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
+/** Ouvre le diff d'un fichier. `staged=true` pour un fichier staged (hors
+ *  conflit — HEAD → index) ; sans staged pour un fichier unstaged ou
+ *  conflicté (index → working tree, marqueurs de conflit visibles). */
+function openDiffFor(f: { path: string; state: string; staged: boolean }): void {
+  openDiff(f.path, f.staged && f.state !== 'conflicted' ? true : undefined);
+}
+
 /** Rend le graphe linéaire de la branche courante (v1) : une branche, les
  *  commits dans l'ordre chronologique (le log est retourné du plus récent au
  *  plus ancien — inversion avant rendu), chaque commit décoré de ses refs. */
@@ -230,6 +239,7 @@ defineExpose({
   createBranch, checkout, deleteBranch, push,
   newBranchName, newBranchFrom, currentBranch, localBranches, remoteBranches,
   unpushedCount, renderGraph, log, graphContainer,
+  openDiffFor,
 });
 </script>
 
@@ -247,11 +257,13 @@ defineExpose({
             <li v-for="f in stagedFiles" :key="f.path" class="file staged">
               <span class="state">staged</span>
               <span class="path">{{ f.path }}</span>
+              <button :disabled="busy" @click="openDiffFor(f)">Diff</button>
               <button :disabled="busy" @click="unstageFile(f.path)">Retirer</button>
             </li>
             <li v-for="f in conflictedFiles" :key="f.path" class="file conflicted">
               <span class="state">conflit</span>
               <span class="path">{{ f.path }}</span>
+              <button :disabled="busy" @click="openDiffFor(f)">Diff</button>
               <button v-if="merging" :disabled="busy" @click="markResolved(f.path)">
                 Marquer résolu
               </button>
@@ -259,6 +271,7 @@ defineExpose({
             <li v-for="f in unstagedFiles" :key="f.path" class="file unstaged">
               <span class="state">{{ f.state }}</span>
               <span class="path">{{ f.path }}</span>
+              <button :disabled="busy" @click="openDiffFor(f)">Diff</button>
               <button :disabled="busy" @click="stageFile(f.path)">Stager</button>
             </li>
           </ul>

@@ -7,6 +7,7 @@ import Workflow from './panels/Workflow.vue';
 import Chat from './panels/Chat.vue';
 import Terminal from './panels/Terminal.vue';
 import GitPanel from './panels/GitPanel.vue';
+import DiffView from './panels/DiffView.vue';
 import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
 import { getLspClient, disposeLspClients } from '../api/lsp';
 import { dirRootUri } from './panels/editorLanguage';
@@ -32,6 +33,8 @@ provide('get-lsp-client', (toolchain: string, path: string) =>
 provide('open-file', openFile);
 // Handler fourni à Explorer : ferme l'onglet Editor d'un chemin s'il est ouvert.
 provide('close-file', closeFile);
+// Handler fourni au reste de l'IDE : ouvre (ou active) un onglet Diff.
+provide('open-diff', openDiff);
 
 const { activeConversationId, sessionError } = useIdeSession();
 
@@ -61,6 +64,7 @@ const components = {
   chat: Chat,
   terminal: Terminal,
   git: GitPanel,
+  diff: DiffView,
 } as unknown as Record<string, VueComponent>;
 
 /** Id de panel dockview pour un fichier ouvert — un panel Editor par fichier
@@ -130,6 +134,33 @@ function closeFile(path: string): void {
   const api = dockviewApi.value;
   if (!api) return;
   api.getPanel(editorPanelId(path))?.api.close();
+}
+
+/** Id de panel dockview pour un diff de fichier — `diff:<path>`. */
+function diffPanelId(path: string): string {
+  return `diff:${path}`;
+}
+
+/** Ouvre l'onglet Diff d'un fichier — même pattern qu'openFile : réactive
+ *  l'onglet s'il existe, le crée sinon dans le groupe centre (même ancrage
+ *  que editor:<path>). `staged` optionnel transmis à DiffView via params. */
+function openDiff(path: string, staged?: boolean) {
+  const api = dockviewApi.value;
+  if (!api) return;
+  const id = diffPanelId(path);
+  const existing = api.getPanel(id);
+  if (existing) {
+    existing.api.setActive();
+    return;
+  }
+  api.addPanel({
+    id,
+    component: 'diff',
+    title: `Diff · ${basename(path)}`,
+    params: { path, staged },
+    position: relativeToCenter(api, 'within'),
+  });
+  api.getPanel(id)?.api.setActive();
 }
 
 /** Copie le chemin relatif d'un fichier ouvert dans un onglet éditeur. */
@@ -277,7 +308,7 @@ function onReady(event: DockviewReadyEvent) {
   });
 }
 
-defineExpose({ closeFile, getTabContextMenuItems });
+defineExpose({ closeFile, openDiff, getTabContextMenuItems });
 </script>
 
 <template>

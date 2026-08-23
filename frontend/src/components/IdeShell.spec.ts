@@ -205,6 +205,25 @@ describe('IdeShell', () => {
     });
   });
 
+  it('openDiff crée un panel diff:<path>', async () => {
+    const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const { openDiff } = wrapper.vm as {
+      openDiff: (p: string, s?: boolean) => void;
+    };
+    openDiff('a.txt', true);
+
+    const addCall = mockAddPanel.mock.calls.find(
+      (c): c is [{ id: string; component: string; params: unknown }] =>
+        c[0] != null &&
+        (c[0] as { id: string }).id === 'diff:a.txt' &&
+        (c[0] as { component: string }).component === 'diff',
+    );
+    expect(addCall).not.toBeUndefined();
+    expect(addCall![0].params).toEqual({ path: 'a.txt', staged: true });
+  });
+
   it('démonte et dispose les clients LSP de la sandbox', async () => {
     const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
     await new Promise((r) => setTimeout(r, 0));

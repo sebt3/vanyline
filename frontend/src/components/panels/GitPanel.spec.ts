@@ -766,7 +766,75 @@ describe('GitPanel.vue — graphe historique', () => {
       renderGraph: Function;
       log: { value: unknown };
     };
-    // renderGraph devrait être appelable sans erreur
-expect(() => panel.renderGraph()).not.toThrow();
+// renderGraph devrait être appelable sans erreur
+    expect(() => panel.renderGraph()).not.toThrow();
+  });
+});
+
+describe('GitPanel.vue — boutons Diff', () => {
+  it('cliquer Diff sur un fichier staged appelle openDiff(path, true)', async () => {
+    const openDiffMock = vi.fn();
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: false,
+      files: [
+        { path: 'a.txt', state: 'modified', staged: true },
+      ],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+          'open-diff': openDiffMock,
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const diffBtn = wrapper.findAll('button').find((b) => b.text() === 'Diff');
+    expect(diffBtn).toBeDefined();
+    await diffBtn!.trigger('click');
+
+    expect(openDiffMock).toHaveBeenCalledWith('a.txt', true);
+  });
+
+  it('cliquer Diff sur un fichier unstaged appelle openDiff(path, undefined)', async () => {
+    const openDiffMock = vi.fn();
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: false,
+      files: [
+        { path: 'b.txt', state: 'modified', staged: false },
+      ],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+          'open-diff': openDiffMock,
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const diffBtn = wrapper.findAll('button').find((b) => b.text() === 'Diff');
+    expect(diffBtn).toBeDefined();
+    await diffBtn!.trigger('click');
+
+    expect(openDiffMock).toHaveBeenCalledWith('b.txt', undefined);
   });
 });
