@@ -21,6 +21,7 @@ const errorMessage = ref<string | null>(null);
 const unpushed = ref<UnpushedResult | null>(null);
 const newBranchName = ref('');
 const newBranchFrom = ref('');
+const mergeBranch = ref('');
 
 /** Container du graphe (template ref). */
 const graphContainer = ref<HTMLElement | null>(null);
@@ -197,6 +198,39 @@ async function push(): Promise<void> {
   }
 }
 
+/** Lance `git merge <branch>`. Un conflit est un résultat normal (réponse
+ *  200 conflicted:true) : on refetch, le statut montre les fichiers en
+ *  conflit et merging=true active « Marquer résolu ». Erreur HTTP seulement
+ *  si le merge n'a pas pu être lancé (branche introuvable, merge déjà en
+ *  cours, working tree sale) → errorMessage. */
+async function mergeFrom(): Promise<void> {
+  if (!sandboxName || mergeBranch.value.trim() === '' || merging.value) return;
+  busy.value = true;
+  try {
+    await gitClient.merge(sandboxName, mergeBranch.value.trim());
+    mergeBranch.value = '';
+    await refresh();
+  } catch (e) {
+    errorMessage.value = msg(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
+/** Abandonne le merge en cours (`git merge --abort`). */
+async function abortMerge(): Promise<void> {
+  if (!sandboxName) return;
+  busy.value = true;
+  try {
+    await gitClient.mergeAbort(sandboxName);
+    await refresh();
+  } catch (e) {
+    errorMessage.value = msg(e);
+  } finally {
+    busy.value = false;
+  }
+}
+
 function msg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
@@ -236,8 +270,9 @@ onMounted(() => { void refresh(); });
 defineExpose({
   refresh, stageFile, unstageFile, markResolved, commit,
   stagedFiles, unstagedFiles, conflictedFiles, merging, canCommit,
-  createBranch, checkout, deleteBranch, push,
-  newBranchName, newBranchFrom, currentBranch, localBranches, remoteBranches,
+  createBranch, checkout, deleteBranch, push, mergeFrom, abortMerge,
+  newBranchName, newBranchFrom, mergeBranch,
+  currentBranch, localBranches, remoteBranches,
   unpushedCount, renderGraph, log, graphContainer,
   openDiffFor,
 });
@@ -326,6 +361,19 @@ defineExpose({
           <span v-if="unpushed?.upstream">vers {{ unpushed.upstream }}</span>
         </p>
         <button :disabled="busy || unpushedCount === 0" @click="push">Push</button>
+      </section>
+      <section class="merge">
+        <h3>Fusionner</h3>
+        <div class="merge-form">
+          <input v-model="mergeBranch" placeholder="Branche à fusionner" />
+          <button :disabled="busy || merging || mergeBranch.trim() === ''" @click="mergeFrom">
+            Fusionner
+          </button>
+        </div>
+        <p v-if="merging" class="merge-in-progress">
+          Merge en cours — résolvez les conflits puis committez, ou abandonnez.
+        </p>
+        <button v-if="merging" :disabled="busy" @click="abortMerge">Abandonner le merge</button>
       </section>
       <section class="graph">
         <h3>Historique</h3>
@@ -587,6 +635,14 @@ defineExpose({
   opacity: 0.4;
   cursor: not-allowed;
 }
+.merge { padding: 8px; }
+.merge h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--dv-color-abyss-secondary-text); margin: 0 0 4px; letter-spacing: 0.5px; }
+.merge-form { display: flex; gap: 4px; }
+.merge-form input { flex: 1; min-width: 0; background: var(--dv-color-abyss-light); border: 1px solid var(--dv-color-abyss-lighter); border-radius: 4px; color: var(--dv-color-abyss-primary-text); padding: 2px 6px; font-size: 11px; }
+.merge-form button { padding: 2px 8px; font-size: 11px; border-radius: 3px; border: 1px solid var(--dv-color-abyss-light); background: transparent; color: var(--dv-color-abyss-primary-text); cursor: pointer; }
+.merge-form button:hover:not(:disabled) { background: var(--dv-color-abyss-lighter); }
+.merge-form button:disabled { opacity: 0.4; cursor: not-allowed; }
+.merge-in-progress { font-size: 12px; margin: 0 0 4px; }
 .graph { padding: 8px; }
 .graph h3 { font-size: 11px; font-weight: 600; text-transform: uppercase; color: var(--dv-color-abyss-secondary-text); margin: 0 0 4px; letter-spacing: 0.5px; }
 .git-graph { overflow-x: auto; }

@@ -28,6 +28,8 @@ const { mockClient } = vi.hoisted(() => {
       checkout: vi.fn(),
       deleteBranch: vi.fn(),
       log: vi.fn(async () => ({ branch: 'main', commits: [] as LogCommit[], truncated: false })),
+      merge: vi.fn(),
+      mergeAbort: vi.fn(),
     };
   }
   return { mockClient: makeMockGitClient() };
@@ -65,6 +67,8 @@ describe('GitPanel.vue — statut, staging, commit', () => {
     mockClient.checkout.mockReset();
     mockClient.deleteBranch.mockReset();
     mockClient.log.mockReset();
+    mockClient.merge.mockReset();
+    mockClient.mergeAbort.mockReset();
   });
 
   it('affiche staged, unstaged et conflicted depuis le statut', async () => {
@@ -836,5 +840,212 @@ describe('GitPanel.vue — boutons Diff', () => {
     await diffBtn!.trigger('click');
 
     expect(openDiffMock).toHaveBeenCalledWith('b.txt', undefined);
+  });
+});
+
+describe('GitPanel.vue — merge', () => {
+  it('cliquer Fusionner appelle gitClient.merge puis refresh, input vidé', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [{ path: 'a.txt', state: 'modified', staged: true }],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    // merge → refresh (status + branches)
+    mockClient.merge.mockResolvedValueOnce({ conflicted: false, sha: 'abc123' });
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: false,
+      files: [{ path: 'a.txt', state: 'modified', staged: true }],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.log.mockResolvedValueOnce({
+      branch: 'main',
+      commits: [] as LogCommit[],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const inputs = wrapper.findAll('input');
+    const mergeInput = inputs[2];
+    expect(mergeInput).toBeDefined();
+    await mergeInput!.setValue('feature-x');
+
+    const mergeBtn = wrapper.findAll('button').find((b) => b.text() === 'Fusionner');
+    expect(mergeBtn).toBeDefined();
+    await mergeBtn!.trigger('click');
+
+    await flushMicrotasks();
+
+    expect(mockClient.merge).toHaveBeenCalledWith('s', 'feature-x');
+    expect(mockClient.status).toHaveBeenCalled();
+    // Input vidé après merge
+    expect((mergeInput!.element as HTMLInputElement).value).toBe('');
+  });
+
+  it('cliquer Fusionner sur un merge conflicté ne remonte pas d\'erreur', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    // merge conflicté → refresh
+    mockClient.merge.mockResolvedValueOnce({ conflicted: true, sha: null });
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: false,
+      files: [{ path: 'a.txt', state: 'conflicted', staged: true }],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: true,
+      branches: [],
+    });
+    mockClient.log.mockResolvedValueOnce({
+      branch: 'main',
+      commits: [] as LogCommit[],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    const inputs = wrapper.findAll('input');
+    const mergeInput = inputs[2];
+    await mergeInput!.setValue('feature-x');
+
+    const mergeBtn = wrapper.findAll('button').find((b) => b.text() === 'Fusionner');
+    await mergeBtn!.trigger('click');
+
+    await flushMicrotasks();
+
+    // Aucun errorMessage (la section .git-error n'est pas présente)
+    expect(wrapper.find('.git-error').exists()).toBe(false);
+    // merge a été appelé
+    expect(mockClient.merge).toHaveBeenCalledWith('s', 'feature-x');
+    // refresh a été appelé
+    expect(mockClient.status).toHaveBeenCalled();
+  });
+
+  it('merging=true désactive Fusionner et affiche Abandonner', async () => {
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: false,
+      files: [{ path: 'a.txt', state: 'conflicted', staged: true }],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: true,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    mockClient.log.mockResolvedValueOnce({
+      branch: 'main',
+      commits: [] as LogCommit[],
+      truncated: false,
+    });
+
+    const wrapper = mount(GitPanel, {
+      global: {
+        provide: {
+          'sandbox-name': 's',
+        } as Record<string, unknown>,
+      },
+    });
+
+    await flushMicrotasks();
+
+    // Le paragraphe "Merge en cours" s'affiche quand merging=true
+    const mergeSection = wrapper.find('.merge');
+    expect(mergeSection.exists()).toBe(true);
+    // Le paragraphe d'indication de merge en cours est présent
+    expect(mergeSection.text()).toContain('Merge en cours');
+
+    // Bouton Fusionner désactivé quand merging=true
+    const mergeBtn = wrapper.findAll('button').find((b) => b.text() === 'Fusionner');
+    expect(mergeBtn?.attributes('disabled')).toBeDefined();
+
+    // Bouton Abandonner présent (contient "Abandonner" dans son texte)
+    const abortBtn = wrapper.findAll('button').find((b) => b.text().includes('Abandonner'));
+    expect(abortBtn).toBeTruthy();
+    // Bouton désactivé car busy=false donc il est actif, pas disabled
+    // (merging=true → "Abandonner le merge" visible, pas disabled par busy)
+
+    mockClient.mergeAbort.mockResolvedValueOnce({ ok: true });
+    mockClient.status.mockResolvedValueOnce({
+      branch: 'main',
+      clean: true,
+      files: [],
+    });
+    mockClient.branches.mockResolvedValueOnce({
+      current: 'main',
+      merging: false,
+      branches: [],
+    });
+    mockClient.unpushed.mockResolvedValueOnce({
+      branch: 'main',
+      upstream: 'origin/main',
+      commits: [],
+      truncated: false,
+    });
+    mockClient.log.mockResolvedValueOnce({
+      branch: 'main',
+      commits: [] as LogCommit[],
+      truncated: false,
+    });
+
+    // Clic sur Abandonner
+    await abortBtn!.trigger('click');
+
+    await flushMicrotasks();
+
+    expect(mockClient.mergeAbort).toHaveBeenCalledWith('s');
+    expect(mockClient.status).toHaveBeenCalled();
   });
 });
