@@ -56,14 +56,14 @@ describe('reconstructBase', () => {
     const patch = [
       'diff --git a/x b/x',
       '@@ -1,3 +1,3 @@',
-      '-CHANGED_01',
-      '+01',
+      '-01',
+      '+CHANGED_01',
       ' 02',
       ' 03',
       '@@ -9,2 +9,2 @@',
       ' 09',
-      '-CHANGED_10',
-      '+10',
+      '-10',
+      '+CHANGED_10',
     ].join('\n');
     const result = reconstructBase(working, patch);
     expect(result).toBe('01\n02\n03\n04\n05\n06\n07\n08\n09\n10\n');
