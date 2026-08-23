@@ -766,7 +766,7 @@ describe('GitPanel.vue — graphe historique', () => {
       renderGraph: Function;
       log: { value: unknown };
     };
-// renderGraph devrait être appelable sans erreur
+    // renderGraph devrait être appelable sans erreur
     expect(() => panel.renderGraph()).not.toThrow();
   });
 });
