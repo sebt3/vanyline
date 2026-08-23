@@ -20,7 +20,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, delete},
+    routing::{delete, get, post},
 };
 use tower_http::trace::TraceLayer;
 

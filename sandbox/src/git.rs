@@ -7,7 +7,7 @@ use std::process::Command;
 
 use axum::{
     Json,
-    extract::{Path, State, Query},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
@@ -60,12 +60,22 @@ pub enum GitError {
 
     #[error("VNL-SBX-013: no merge in progress to abort")]
     NoMergeInProgress,
+
+    #[error("VNL-SBX-014: invalid ref/name {value:?}: must not start with '-'")]
+    InvalidRef { value: String },
 }
 
 impl IntoResponse for GitError {
     fn into_response(self) -> Response {
+        // Statut par défaut inchangé (500) pour toutes les variantes
+        // préexistantes — hors périmètre de ce fix. InvalidRef est neuve et
+        // correspond à une entrée utilisateur rejetée, donc 400.
+        let status = match &self {
+            GitError::InvalidRef { .. } => StatusCode::BAD_REQUEST,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
         (
-            StatusCode::INTERNAL_SERVER_ERROR,
+            status,
             Json(serde_json::json!({ "error": self.to_string() })),
         )
             .into_response()
@@ -101,15 +111,15 @@ pub struct GitStatus {
 
 #[derive(Debug, Deserialize)]
 pub struct DiffParams {
-    pub path: String,          // requis ; manquant → 400 automatique par axum
+    pub path: String, // requis ; manquant → 400 automatique par axum
     #[serde(default)]
-    pub staged: Option<bool>,  // absent/false → diff working tree ; true → diff index
+    pub staged: Option<bool>, // absent/false → diff working tree ; true → diff index
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DiffResponse {
-    pub path: String,   // le chemin utilisateur brut (celui reçu dans DiffParams)
-    pub diff: String,   // patch unifié texte (stdout de git diff)
+    pub path: String, // le chemin utilisateur brut (celui reçu dans DiffParams)
+    pub diff: String, // patch unifié texte (stdout de git diff)
 }
 
 // ── Types pour /git/stage / /git/unstage ────────────────────────────────────
@@ -138,16 +148,16 @@ pub struct CommitRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommitResponse {
-    pub sha: String,    // SHA complet (40 hex), PAS tronqué à 7
-    pub title: String,  // première ligne du message
+    pub sha: String,   // SHA complet (40 hex), PAS tronqué à 7
+    pub title: String, // première ligne du message
 }
 
 // ── Types pour /git/push ───────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PushResponse {
-    pub ok: bool,   // true si succès
-    pub pushed: u32,  // nombre de commits poussés par cette opération
+    pub ok: bool,    // true si succès
+    pub pushed: u32, // nombre de commits poussés par cette opération
 }
 
 /// Classification du stderr d'un `git push` échoué.
@@ -185,22 +195,22 @@ pub struct LogResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BranchEntry {
-    pub name: String,                    // nom court : "main", "origin/main", ...
-    pub is_remote: bool,                 // true si ref sous refs/remotes/
-    pub upstream: Option<String>,         // upstream:short ; None si pas d'upstream
+    pub name: String,             // nom court : "main", "origin/main", ...
+    pub is_remote: bool,          // true si ref sous refs/remotes/
+    pub upstream: Option<String>, // upstream:short ; None si pas d'upstream
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BranchesResponse {
-    pub current: String,                 // `git rev-parse --abbrev-ref HEAD` (brut ; "HEAD" si détaché)
-    pub merging: bool,                   // présence de `.git/MERGE_HEAD`
+    pub current: String, // `git rev-parse --abbrev-ref HEAD` (brut ; "HEAD" si détaché)
+    pub merging: bool,   // présence de `.git/MERGE_HEAD`
     pub branches: Vec<BranchEntry>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CreateBranchRequest {
     pub name: String,
-    pub from: Option<String>,  // ref de départ (branche locale ou remote) ; None → HEAD
+    pub from: Option<String>, // ref de départ (branche locale ou remote) ; None → HEAD
 }
 
 #[derive(Debug, Deserialize)]
@@ -212,13 +222,13 @@ pub struct CheckoutRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SshKeyStatus {
-    pub exists: bool,             // le fichier PRIVÉ existe
+    pub exists: bool,               // le fichier PRIVÉ existe
     pub public_key: Option<String>, // contenu trimé de `<priv>.pub` si lisible, sinon None
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SshKeyResponse {
-    pub public_key: String,       // contenu trimé de `<priv>.pub`
+    pub public_key: String, // contenu trimé de `<priv>.pub`
 }
 
 // ── Types pour /git/merge ────────────────────────────────────────────────
@@ -230,9 +240,9 @@ pub struct MergeRequest {
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MergeResponse {
-    pub conflicted: bool,     // true = conflit (résultat normal, réponse 200)
-    pub sha: Option<String>,  // SHA complet (40 hex) du merge auto-commité ;
-                              // présenté seulement si conflicted=false
+    pub conflicted: bool, // true = conflit (résultat normal, réponse 200)
+    pub sha: Option<String>, // SHA complet (40 hex) du merge auto-commité ;
+                          // présenté seulement si conflicted=false
 }
 
 /// Chemins de la clé SSH sous `home` : (privée, publique).
@@ -263,7 +273,9 @@ pub fn ssh_home() -> std::path::PathBuf {
 /// fichier n'existe pas ou ne peut pas être lu.
 fn read_public_key(priv_path: &std::path::Path) -> Option<String> {
     let pub_path = priv_path.with_extension("pub");
-    fs::read_to_string(&pub_path).map(|s| s.trim().to_string()).ok()
+    fs::read_to_string(&pub_path)
+        .map(|s| s.trim().to_string())
+        .ok()
 }
 
 /// Une seule lettre de colonne porcelain v2 -> `FileState`. `'.'` (pas de
@@ -511,6 +523,56 @@ fn run_git(args: &[&str]) -> Result<String, GitError> {
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
+/// `git diff [--cached] --quiet` : propre (0) → `Ok(false)`, sale (1) →
+/// `Ok(true)`, tout autre code de sortie ou échec de spawn → `Err`
+/// (ne jamais retomber silencieusement sur "propre" quand on n'a pas pu
+/// vérifier — cf. `handle_checkout`).
+fn is_dirty(root: &StdPath, staged: bool) -> Result<bool, GitError> {
+    let mut args = vec!["-C".to_string(), root.to_string_lossy().into_owned()];
+    args.push("diff".to_string());
+    if staged {
+        args.push("--cached".to_string());
+    }
+    args.push("--quiet".to_string());
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+
+    let output = Command::new("git")
+        .args(&refs)
+        .output()
+        .map_err(|e| GitError::CommandFailed {
+            args: args.clone(),
+            status: e.to_string(),
+            stderr: String::new(),
+        })?;
+    match output.status.code() {
+        Some(0) => Ok(false),
+        Some(1) => Ok(true),
+        _ => Err(GitError::CommandFailed {
+            args,
+            status: output.status.to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        }),
+    }
+}
+
+/// Rejette une valeur qui commencerait par `-` avant qu'elle ne devienne un
+/// argument positionnel de commande git (branche, nom, point de départ) —
+/// sans ce garde-fou, une valeur comme `--abort` passée à `git merge`
+/// (merge_args n'a pas de séparateur `--`, comme checkout_args/
+/// create_branch_args/delete_branch_args) serait interprétée comme un flag
+/// plutôt qu'une ref, avec des effets de bord (ex. annuler un merge en
+/// cours au lieu d'en démarrer un). Ajouter `--` partout ne suffit pas :
+/// `git checkout -- <x>` change le sens de `<x>` (pathspec, pas branche) —
+/// la validation en amont est le fix uniforme.
+fn reject_leading_dash(value: &str) -> Result<(), GitError> {
+    if value.starts_with('-') {
+        return Err(GitError::InvalidRef {
+            value: value.to_string(),
+        });
+    }
+    Ok(())
+}
+
 /// `true` si `refname` existe (`git show-ref --verify --quiet`).
 fn ref_exists(worktree_root: &str, refname: &str) -> Result<bool, GitError> {
     let status = Command::new("git")
@@ -664,7 +726,11 @@ fn stage_args(paths: &[String]) -> Vec<String> {
 
 /// Args git pour `git restore --staged -- <paths...>`.
 fn unstage_args(paths: &[String]) -> Vec<String> {
-    let mut args = vec!["restore".to_string(), "--staged".to_string(), "--".to_string()];
+    let mut args = vec![
+        "restore".to_string(),
+        "--staged".to_string(),
+        "--".to_string(),
+    ];
     for p in paths {
         args.push(p.clone());
     }
@@ -715,7 +781,9 @@ pub async fn handle_diff(
     use crate::tools_impl::confine_path;
 
     let confined = confine_path(&state.config.sandbox_root, &params.path).map_err(|_| {
-        GitError::InvalidPath { path: params.path.clone() }
+        GitError::InvalidPath {
+            path: params.path.clone(),
+        }
     })?;
     let rel = confined
         .strip_prefix(&state.config.sandbox_root)
@@ -740,10 +808,7 @@ pub async fn handle_diff(
     .expect("handle_diff blocking task panicked");
 
     match result {
-        Ok(stdout) => Ok(Json(DiffResponse {
-            path,
-            diff: stdout,
-        })),
+        Ok(stdout) => Ok(Json(DiffResponse { path, diff: stdout })),
         Err(GitError::CommandFailed {
             args: _,
             status,
@@ -862,22 +927,21 @@ pub async fn handle_commit(
     // code 1 = des changes (Err CommandFailed).
     // On s'intéresse à l'exit code.
     let root_ref = root.clone();
-    let has_staged =
-        tokio::task::spawn_blocking(move || {
-            let args: Vec<String> = [
-                "-C".to_string(),
-                root_ref.to_string_lossy().into_owned(),
-                "diff".to_string(),
-                "--cached".to_string(),
-                "--quiet".to_string(),
-            ]
-            .into_iter()
-            .collect();
-            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            run_git(&refs)
-        })
-        .await
-        .expect("handle_commit check blocking task panicked");
+    let has_staged = tokio::task::spawn_blocking(move || {
+        let args: Vec<String> = [
+            "-C".to_string(),
+            root_ref.to_string_lossy().into_owned(),
+            "diff".to_string(),
+            "--cached".to_string(),
+            "--quiet".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_commit check blocking task panicked");
     if has_staged.is_ok() {
         // git diff --cached --quiet est revenu avec code 0 : rien de stagé.
         return Err(GitError::EmptyCommit);
@@ -904,22 +968,21 @@ pub async fn handle_commit(
 
     // 3. `git -C root log -1 --pretty=format:%H%x1f%s` → parse_commit_output.
     let root_ref = root.clone();
-    let log_output =
-        tokio::task::spawn_blocking(move || {
-            let args: Vec<String> = [
-                "-C".to_string(),
-                root_ref.to_string_lossy().into_owned(),
-                "log".to_string(),
-                "-1".to_string(),
-                "--pretty=format:%H\u{1f}%s".to_string(),
-            ]
-            .into_iter()
-            .collect();
-            let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-            run_git(&refs)
-        })
-        .await
-        .expect("handle_commit log blocking task panicked")?;
+    let log_output = tokio::task::spawn_blocking(move || {
+        let args: Vec<String> = [
+            "-C".to_string(),
+            root_ref.to_string_lossy().into_owned(),
+            "log".to_string(),
+            "-1".to_string(),
+            "--pretty=format:%H\u{1f}%s".to_string(),
+        ]
+        .into_iter()
+        .collect();
+        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        run_git(&refs)
+    })
+    .await
+    .expect("handle_commit log blocking task panicked")?;
 
     let (sha, title) = parse_commit_output(&log_output)?;
 
@@ -985,20 +1048,28 @@ fn parse_branches(output: &str) -> Result<Vec<BranchEntry>, GitError> {
             }
             [refname, upstream] => {
                 let name = if refname.starts_with("refs/remotes/") {
-                    refname.strip_prefix("refs/remotes/").unwrap_or(refname).to_string()
+                    refname
+                        .strip_prefix("refs/remotes/")
+                        .unwrap_or(refname)
+                        .to_string()
                 } else if refname.starts_with("refs/heads/") {
-                    refname.strip_prefix("refs/heads/").unwrap_or(refname).to_string()
+                    refname
+                        .strip_prefix("refs/heads/")
+                        .unwrap_or(refname)
+                        .to_string()
                 } else {
                     refname.to_string()
                 };
                 // upstream:short de git peut être refs/remotes/origin/main ;
                 // on abrége en stripant refs/ (→ origin/main).
                 let upstream_short = if upstream.starts_with("refs/remotes/") {
-                    upstream.strip_prefix("refs/remotes/")
+                    upstream
+                        .strip_prefix("refs/remotes/")
                         .unwrap_or(upstream)
                         .to_string()
                 } else if upstream.starts_with("refs/heads/") {
-                    upstream.strip_prefix("refs/heads/")
+                    upstream
+                        .strip_prefix("refs/heads/")
                         .unwrap_or(upstream)
                         .to_string()
                 } else {
@@ -1046,17 +1117,24 @@ pub async fn handle_branches(
 
         // 2. merging = `git rev-parse --verify MERGE_HEAD` réussit → true
         let merging = Command::new("git")
-            .args(["-C", &root.to_string_lossy(), "rev-parse", "--verify", "MERGE_HEAD"])
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "rev-parse",
+                "--verify",
+                "MERGE_HEAD",
+            ])
             .output()
             .map(|output| output.status.success())
             .unwrap_or(false);
 
         // 3. `git for-each-ref` → parse
         let list_args = branch_list_args();
-        let list_args_prefixed: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
-            .into_iter()
-            .chain(list_args)
-            .collect();
+        let list_args_prefixed: Vec<String> =
+            ["-C".to_string(), root.to_string_lossy().into_owned()]
+                .into_iter()
+                .chain(list_args)
+                .collect();
         let list_refs_prefixed: Vec<&str> = list_args_prefixed.iter().map(|s| s.as_str()).collect();
         let output = run_git(&list_refs_prefixed)?;
         let branches = parse_branches(&output)?;
@@ -1080,6 +1158,10 @@ pub async fn handle_create_branch(
     State(state): State<AppState>,
     Json(body): Json<CreateBranchRequest>,
 ) -> Result<Json<OkResponse>, GitError> {
+    reject_leading_dash(&body.name)?;
+    if let Some(from) = &body.from {
+        reject_leading_dash(from)?;
+    }
     let root = state.config.sandbox_root.to_path_buf();
     let name = body.name.clone();
     let from = body.from.clone();
@@ -1104,28 +1186,24 @@ pub async fn handle_checkout(
     State(state): State<AppState>,
     Json(body): Json<CheckoutRequest>,
 ) -> Result<Json<OkResponse>, GitError> {
+    reject_leading_dash(&body.branch)?;
     let branch = body.branch.clone();
     let root = state.config.sandbox_root.to_path_buf();
 
-    // 1. Vérifier si le working tree est sale (avant checkout).
+    // 1. Vérifier si le working tree est sale (avant checkout). `git diff
+    // --quiet` : code 0 = propre, code 1 = sale, tout le reste (spawn
+    // impossible, dépôt corrompu...) est une VRAIE erreur — surtout ne pas
+    // la traiter comme "propre" (ça défairait le refus strict voulu par le
+    // design : mieux vaut échouer bruyamment que laisser passer un
+    // checkout sur un état qu'on n'a pas pu vérifier).
     let root_ref = root.clone();
-    let dirty = tokio::task::spawn_blocking(move || {
-        let dirty_worktree = Command::new("git")
-            .args(["-C", &root_ref.to_string_lossy(), "diff", "--quiet"])
-            .output()
-            .map(|output| output.status.code() == Some(1))
-            .unwrap_or(false);
-
-        let dirty_staged = Command::new("git")
-            .args(["-C", &root_ref.to_string_lossy(), "diff", "--cached", "--quiet"])
-            .output()
-            .map(|output| output.status.code() == Some(1))
-            .unwrap_or(false);
-
-        dirty_worktree || dirty_staged
+    let dirty = tokio::task::spawn_blocking(move || -> Result<bool, GitError> {
+        let dirty_worktree = is_dirty(&root_ref, false)?;
+        let dirty_staged = is_dirty(&root_ref, true)?;
+        Ok(dirty_worktree || dirty_staged)
     })
     .await
-    .expect("handle_checkout dirty-check panicked");
+    .expect("handle_checkout dirty-check panicked")?;
 
     if dirty {
         return Err(GitError::CheckoutRefused { branch });
@@ -1154,6 +1232,7 @@ pub async fn handle_delete_branch(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<OkResponse>, GitError> {
+    reject_leading_dash(&name)?;
     let root = state.config.sandbox_root.to_path_buf();
     tokio::task::spawn_blocking(move || {
         let args = delete_branch_args(&name);
@@ -1174,7 +1253,11 @@ pub async fn handle_delete_branch(
 
 /// Args git pour `git push origin <refspec>` (refspec = nom court, ex "main").
 fn push_args(refspec: &str) -> Vec<String> {
-    vec!["push".to_string(), "origin".to_string(), refspec.to_string()]
+    vec![
+        "push".to_string(),
+        "origin".to_string(),
+        refspec.to_string(),
+    ]
 }
 
 /// Args git pour compter les commits à pousser.
@@ -1187,7 +1270,11 @@ fn count_pushed_args(refspec: Option<&str>) -> Vec<String> {
             "--count".to_string(),
             format!("{r}..HEAD"),
         ],
-        None => vec!["rev-list".to_string(), "--count".to_string(), "HEAD".to_string()],
+        None => vec![
+            "rev-list".to_string(),
+            "--count".to_string(),
+            "HEAD".to_string(),
+        ],
     }
 }
 
@@ -1216,18 +1303,18 @@ pub fn log_args(limit: u32, all: bool) -> Vec<String> {
 /// - `author` : `%an`
 /// - `date` : `%aI` (strict ISO 8601)
 ///   Moins de 6 champs → `ParseFailed { line_no, line }`.
-pub fn parse_log_line(
-    line: &str,
-    line_no: usize,
-    full: &str,
-) -> Result<LogCommit, GitError> {
+pub fn parse_log_line(line: &str, line_no: usize, full: &str) -> Result<LogCommit, GitError> {
     let fields: Vec<&str> = line.split('\u{1f}').collect();
     match fields.as_slice() {
         [sha, parents, refs, title, author, date] => {
             let parents_vec: Vec<String> = if parents.is_empty() {
                 Vec::new()
             } else {
-                parents.split(' ').filter(|s| !s.is_empty()).map(|s| s.to_string()).collect()
+                parents
+                    .split(' ')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string())
+                    .collect()
             };
             let refs_vec: Vec<String> = if refs.is_empty() {
                 Vec::new()
@@ -1268,12 +1355,10 @@ pub fn parse_log(output: &str) -> Result<Vec<LogCommit>, GitError> {
 /// Entrée non numérique → ParseFailed { line_no: 1, line }.
 fn parse_count(output: &str) -> Result<u32, GitError> {
     let trimmed = output.trim();
-    trimmed
-        .parse::<u32>()
-        .map_err(|_| GitError::ParseFailed {
-            line_no: 1,
-            line: trimmed.to_string(),
-        })
+    trimmed.parse::<u32>().map_err(|_| GitError::ParseFailed {
+        line_no: 1,
+        line: trimmed.to_string(),
+    })
 }
 
 /// Classification du stderr d'un `git push` échoué (heuristique).
@@ -1300,9 +1385,7 @@ pub fn classify_push_stderr(stderr: &str) -> PushErrorKind {
 /// Pattern shared avec les autres handlers du module :
 /// `tokio::task::spawn_blocking` + `run_git`/`ref_exists`.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
-pub async fn handle_push(
-    State(state): State<AppState>,
-) -> Result<Json<PushResponse>, GitError> {
+pub async fn handle_push(State(state): State<AppState>) -> Result<Json<PushResponse>, GitError> {
     let root = state.config.sandbox_root.to_path_buf();
     let result = tokio::task::spawn_blocking(move || {
         let root_str = root.to_string_lossy().into_owned();
@@ -1353,12 +1436,20 @@ pub async fn handle_push(
         let push_refs: Vec<&str> = push_cmd.iter().map(|s| s.as_str()).collect();
         match run_git(&push_refs) {
             Ok(_) => {}
-            Err(GitError::CommandFailed { args, status, stderr }) => {
+            Err(GitError::CommandFailed {
+                args,
+                status,
+                stderr,
+            }) => {
                 let kind = classify_push_stderr(&stderr);
                 return Err(match kind {
                     PushErrorKind::Rejected => GitError::PushRejected { stderr },
                     PushErrorKind::AuthFailed => GitError::GitWriteFailed { stderr },
-                    PushErrorKind::Other => GitError::CommandFailed { args, status, stderr },
+                    PushErrorKind::Other => GitError::CommandFailed {
+                        args,
+                        status,
+                        stderr,
+                    },
                 });
             }
             Err(e) => return Err(e),
@@ -1387,9 +1478,7 @@ pub async fn handle_log(
         let root_str = root.to_string_lossy().into_owned();
 
         // 1. Branch : `git -C root rev-parse --abbrev-ref HEAD`
-        let branch = run_git(&[
-            "-C", &root_str, "rev-parse", "--abbrev-ref", "HEAD",
-        ])?;
+        let branch = run_git(&["-C", &root_str, "rev-parse", "--abbrev-ref", "HEAD"])?;
         let branch = branch.trim().to_string();
 
         // 2. Git log : `--all` si demandé, `--max-count=limit+1` pour détecter troncature
@@ -1435,7 +1524,9 @@ pub async fn handle_ssh_key_status(
         read_public_key(&priv_path)
     } else {
         // Try to read anyway — the .pub might exist without the private key.
-        fs::read_to_string(&pub_path).ok().map(|s| s.trim().to_string())
+        fs::read_to_string(&pub_path)
+            .ok()
+            .map(|s| s.trim().to_string())
     };
     Ok(Json(SshKeyStatus { exists, public_key }))
 }
@@ -1513,6 +1604,7 @@ pub async fn handle_merge(
     State(state): State<AppState>,
     Json(body): Json<MergeRequest>,
 ) -> Result<Json<MergeResponse>, GitError> {
+    reject_leading_dash(&body.branch)?;
     let root = state.config.sandbox_root.to_path_buf();
     let branch = body.branch.clone();
 
@@ -1527,14 +1619,15 @@ pub async fn handle_merge(
             .chain(args)
             .collect();
         let refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
-        let output = Command::new("git")
-            .args(&refs)
-            .output()
-            .map_err(|e| GitError::CommandFailed {
-                args: refs.into_iter().map(|s| s.to_string()).collect(),
-                status: e.to_string(),
-                stderr: String::new(),
-            })?;
+        let output =
+            Command::new("git")
+                .args(&refs)
+                .output()
+                .map_err(|e| GitError::CommandFailed {
+                    args: refs.into_iter().map(|s| s.to_string()).collect(),
+                    status: e.to_string(),
+                    stderr: String::new(),
+                })?;
 
         match output.status.code() {
             // 2. Exit code 0 → succès (merge auto-commité par git).
@@ -1543,16 +1636,13 @@ pub async fn handle_merge(
                     .args(["-C", &root_str, "rev-parse", "HEAD"])
                     .output()
                     .map_err(|e| GitError::CommandFailed {
-                        args: vec![
-                            "-C".into(),
-                            root_str,
-                            "rev-parse".into(),
-                            "HEAD".into(),
-                        ],
+                        args: vec!["-C".into(), root_str, "rev-parse".into(), "HEAD".into()],
                         status: e.to_string(),
                         stderr: String::new(),
                     })?;
-                let sha = String::from_utf8_lossy(&sha_output.stdout).trim().to_string();
+                let sha = String::from_utf8_lossy(&sha_output.stdout)
+                    .trim()
+                    .to_string();
                 Ok(MergeResponse {
                     conflicted: false,
                     sha: Some(sha),
@@ -1618,10 +1708,82 @@ mod tests {
     }
 
     #[test]
+    fn reject_leading_dash_rejects_flag_like_values() {
+        assert!(reject_leading_dash("--abort").is_err());
+        assert!(reject_leading_dash("-f").is_err());
+        assert!(reject_leading_dash("-").is_err());
+    }
+
+    #[test]
+    fn reject_leading_dash_accepts_normal_refs() {
+        assert!(reject_leading_dash("feature-x").is_ok());
+        assert!(reject_leading_dash("feature/x").is_ok());
+        assert!(reject_leading_dash("main").is_ok());
+    }
+
+    #[test]
+    fn is_dirty_clean_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "init", "-q"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "commit",
+                "--allow-empty",
+                "-q",
+                "-m",
+                "init",
+            ])
+            .output()
+            .unwrap();
+        assert!(!is_dirty(root, false).unwrap());
+        assert!(!is_dirty(root, true).unwrap());
+    }
+
+    #[test]
+    fn is_dirty_modified_worktree() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "init", "-q"])
+            .output()
+            .unwrap();
+        fs::write(root.join("a.txt"), "hello").unwrap();
+        Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "add", "a.txt"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .args(["-C", &root.to_string_lossy(), "commit", "-q", "-m", "init"])
+            .output()
+            .unwrap();
+        fs::write(root.join("a.txt"), "changed").unwrap();
+        assert!(is_dirty(root, false).unwrap());
+        assert!(!is_dirty(root, true).unwrap());
+    }
+
+    #[test]
+    fn is_dirty_errors_on_non_git_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(is_dirty(dir.path(), false).is_err());
+    }
+
+    #[test]
     fn ssh_key_paths_nominal() {
         let (priv_path, pub_path) = ssh_key_paths(std::path::Path::new("/home/vanyline"));
-        assert_eq!(priv_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519"));
-        assert_eq!(pub_path, std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519.pub"));
+        assert_eq!(
+            priv_path,
+            std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519")
+        );
+        assert_eq!(
+            pub_path,
+            std::path::PathBuf::from("/home/vanyline/.ssh/id_ed25519.pub")
+        );
     }
 
     #[test]
@@ -1809,10 +1971,7 @@ X foo\n\
             diff_args("a/b.txt", true),
             vec!["diff", "--staged", "--", "a/b.txt"]
         );
-        assert_eq!(
-            diff_args("a/b.txt", false),
-            vec!["diff", "--", "a/b.txt"]
-        );
+        assert_eq!(diff_args("a/b.txt", false), vec!["diff", "--", "a/b.txt"]);
     }
 
     #[test]
@@ -1837,7 +1996,10 @@ X foo\n\
         let result = parse_commit_output(input).unwrap();
         assert_eq!(
             result,
-            ("dce41965c9aa085042cef737c1eaa4141a055b5a".to_string(), "Initial commit".to_string())
+            (
+                "dce41965c9aa085042cef737c1eaa4141a055b5a".to_string(),
+                "Initial commit".to_string()
+            )
         );
     }
 
@@ -1875,10 +2037,7 @@ X foo\n\
             create_branch_args("feat/x", Some("main")),
             vec!["branch", "feat/x", "main"]
         );
-        assert_eq!(
-            create_branch_args("feat/x", None),
-            vec!["branch", "feat/x"]
-        );
+        assert_eq!(create_branch_args("feat/x", None), vec!["branch", "feat/x"]);
     }
 
     #[test]
@@ -1940,10 +2099,7 @@ X foo\n\
             count_pushed_args(Some(r)),
             vec!["rev-list", "--count", "origin/main..HEAD"]
         );
-        assert_eq!(
-            count_pushed_args(None),
-            vec!["rev-list", "--count", "HEAD"]
-        );
+        assert_eq!(count_pushed_args(None), vec!["rev-list", "--count", "HEAD"]);
     }
 
     #[test]
@@ -2003,8 +2159,7 @@ X foo\n\
                 "log".to_string(),
                 "--all".to_string(),
                 "--max-count=101".to_string(),
-                "--pretty=format:%H\u{1f}%P\u{1f}%D\u{1f}%s\u{1f}%an\u{1f}%aI"
-                    .to_string(),
+                "--pretty=format:%H\u{1f}%P\u{1f}%D\u{1f}%s\u{1f}%an\u{1f}%aI".to_string(),
             ]
         );
         assert_eq!(
@@ -2012,8 +2167,7 @@ X foo\n\
             vec![
                 "log".to_string(),
                 "--max-count=101".to_string(),
-                "--pretty=format:%H\u{1f}%P\u{1f}%D\u{1f}%s\u{1f}%an\u{1f}%aI"
-                    .to_string(),
+                "--pretty=format:%H\u{1f}%P\u{1f}%D\u{1f}%s\u{1f}%an\u{1f}%aI".to_string(),
             ]
         );
     }
@@ -2033,12 +2187,15 @@ X foo\n\
         let result = parse_log(&line).unwrap();
         assert_eq!(result.len(), 1);
         let commit = &result[0];
+        assert_eq!(commit.sha, "dce41965c9aa085042cef737c1eaa4141a055b5a");
         assert_eq!(
-            commit.sha,
-            "dce41965c9aa085042cef737c1eaa4141a055b5a"
+            commit.parents,
+            vec!["abc1111def2222".to_string(), "3333aaaa4444".to_string()]
         );
-        assert_eq!(commit.parents, vec!["abc1111def2222".to_string(), "3333aaaa4444".to_string()]);
-        assert_eq!(commit.refs, vec!["HEAD".to_string(), "origin/main".to_string()]);
+        assert_eq!(
+            commit.refs,
+            vec!["HEAD".to_string(), "origin/main".to_string()]
+        );
         assert_eq!(commit.title, "Initial commit");
         assert_eq!(commit.author, "Alice");
         assert_eq!(commit.date, "2024-01-01T10:00:00Z");
@@ -2055,10 +2212,7 @@ X foo\n\
         let result = parse_log(&line).unwrap();
         assert_eq!(result.len(), 1);
         let commit = &result[0];
-        assert_eq!(
-            commit.sha,
-            "dce41965c9aa085042cef737c1eaa4141a055b5a"
-        );
+        assert_eq!(commit.sha, "dce41965c9aa085042cef737c1eaa4141a055b5a");
         assert!(commit.parents.is_empty());
         assert!(commit.refs.is_empty());
         assert_eq!(commit.title, "Initial commit");

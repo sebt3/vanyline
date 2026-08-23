@@ -54,6 +54,8 @@ pub enum AppError {
     SandboxNotExposed,
     #[error("VNL-SBX-002: branch must not be empty")]
     SandboxBranchEmpty,
+    #[error("VNL-SBX-003: invalid git path segment")]
+    GitPathInvalid,
 }
 
 impl From<vanyline_lib::VnyError> for AppError {
@@ -97,6 +99,7 @@ impl IntoResponse for AppError {
             Self::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
             Self::SandboxNotExposed => (StatusCode::CONFLICT, self.to_string()),
             Self::SandboxBranchEmpty => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
+            Self::GitPathInvalid => (StatusCode::BAD_REQUEST, self.to_string()),
         };
 
         let body = Json(json!({ "error": message }));

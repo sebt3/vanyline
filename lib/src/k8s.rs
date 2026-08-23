@@ -1,6 +1,6 @@
 use vanyline_crds::{Application, Owner, OwnerSpec, Project, ProjectSpec, Sandbox, SandboxSpec};
 
-use crate::{encode_git_path, error::VnyError};
+use crate::error::VnyError;
 
 /// Client K8s typé pour les CRDs Owner/Project/Sandbox — namespace résolu
 /// par l'appelant (CLI, tâche 3 : `--namespace` > `defaults.namespace` du
@@ -121,17 +121,26 @@ impl VnlK8sClient {
     }
 
     /// URL interne de `/git/*` de la sandbox `name` (même patron que
-    /// `sandbox_ws_ticket_url`, chemin `/git/<path>`). Vérifie d'abord que la
-    /// sandbox existe (`get_sandbox`) — erreur claire si ce n'est pas le cas,
-    /// plutôt qu'un échec de connexion confus plus tard.
-    pub async fn sandbox_git_url(&self, name: &str, path: &str) -> Result<String, VnyError> {
+    /// `sandbox_ws_ticket_url`, chemin `/git/<raw_path>`). Vérifie d'abord que
+    /// la sandbox existe (`get_sandbox`) — erreur claire si ce n'est pas le
+    /// cas, plutôt qu'un échec de connexion confus plus tard.
+    ///
+    /// `raw_path` doit être **déjà** un chemin percent-encodé valide et
+    /// validé par l'appelant (pas de segment `.`/`..`) — cette fonction ne
+    /// ré-encode plus rien (contrairement à une version précédente qui
+    /// appelait `encode_git_path` ici : décoder puis ré-encoder perdait la
+    /// distinction entre un `%2F` légitime à l'intérieur d'un segment, ex.
+    /// un nom de branche contenant `/`, et un vrai séparateur de chemin).
+    /// Voir `app::api::sandboxes::raw_git_tail` pour la construction et la
+    /// validation de `raw_path` à partir de la requête brute.
+    pub async fn sandbox_git_url(&self, name: &str, raw_path: &str) -> Result<String, VnyError> {
         self.get_sandbox(name).await?;
         Ok(format!(
             "http://{}.{}.svc:{}/git/{}",
             vanyline_crds::service_name(name),
             self.namespace,
             vanyline_crds::MCP_PORT,
-            encode_git_path(path)
+            raw_path
         ))
     }
 }

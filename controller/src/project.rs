@@ -5,7 +5,8 @@ use std::time::Duration;
 use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
-    PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec, ServiceAccount, Volume, VolumeMount, VolumeResourceRequirements,
+    PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
+    ServiceAccount, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -365,8 +366,7 @@ pub fn git_pod_template(
     env.push(EnvVar {
         name: "GIT_SSH_COMMAND".to_string(),
         value: Some(
-            "ssh -i /home/vanyline/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"
-                .to_string(),
+            "ssh -i /home/vanyline/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new".to_string(),
         ),
         ..Default::default()
     });

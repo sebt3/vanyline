@@ -1,8 +1,8 @@
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 
+use percent_encoding::SIMPLE_ENCODE_SET;
 use percent_encoding::define_encode_set;
 use percent_encoding::utf8_percent_encode;
-use percent_encoding::SIMPLE_ENCODE_SET;
 
 define_encode_set! {
     pub GIT_ENCODE_SET = [SIMPLE_ENCODE_SET] | {' ', '%'}

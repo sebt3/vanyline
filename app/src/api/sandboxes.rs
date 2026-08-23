@@ -1,8 +1,8 @@
 use axum::{
     Json,
+    body::to_bytes,
     extract::{Path, Request, State},
     http::StatusCode,
-    body::to_bytes,
 };
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -218,10 +218,7 @@ async fn proxy_git_request(
 ) -> Result<(StatusCode, serde_json::Value), AppError> {
     let mut req = http
         .request(method, url)
-        .header(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {token}"),
-        );
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"));
     for (k, v) in headers {
         req = req.header(&k, &v);
     }
@@ -229,7 +226,14 @@ async fn proxy_git_request(
 
     let status = StatusCode::from_u16(resp.status().as_u16())
         .map_err(|e| AppError::InternalError(e.to_string()))?;
-    let value: serde_json::Value = resp.json().await?;
+    // Passthrough réel : un body non-JSON (ex. 404/405 texte brut renvoyé
+    // par axum pour une route sandbox non matchée) ne doit pas faire
+    // échouer le proxy — on le enveloppe plutôt que de perdre le vrai
+    // statut/message derrière une erreur générique.
+    let bytes = resp.bytes().await?;
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_else(
+        |_| serde_json::json!({ "error": String::from_utf8_lossy(&bytes).into_owned() }),
+    );
     Ok((status, value))
 }
 
@@ -238,13 +242,49 @@ async fn proxy_git_request(
 /// get_sandbox → get_project → assert owner match), URL interne via
 /// `sandbox_git_url`, forward méthode + path + query + body vers la sandbox
 /// avec le `id_token` OIDC (Bearer), réponse passthrough.
+/// Extrait le sous-chemin brut (encore percent-encodé) après
+/// `/sandboxes/{name}/git/`, à partir du chemin RAW de la requête — pas
+/// via l'extractor `Path`, qui décode le wildcard `{*path}` (vérifié
+/// empiriquement : axum décode `%2F` en `/` avant que le handler ne voie la
+/// valeur). Décoder puis reconstruire perdrait la distinction entre un `/`
+/// séparateur de segments et un `%2F` légitime À L'INTÉRIEUR d'un segment
+/// (ex. un nom de branche contenant `/`, comme `feature/x`) — d'où le
+/// découpage positionnel sur le chemin brut plutôt qu'une recherche de
+/// sous-chaîne (qui serait ambiguë si `name` contenait lui-même "git").
+///
+/// Rejette (`GitPathInvalid`) tout segment qui, une fois décodé, vaut `.`
+/// ou `..` (traversal, y compris `%2e%2e`) ou est vide (`//`) — la requête
+/// n'atteint jamais `sandbox_git_url`/reqwest si un segment est invalide,
+/// donc la normalisation d'URL du client HTTP ne peut plus faire sortir la
+/// requête du préfixe `/git/`.
+fn raw_git_tail(uri_path: &str) -> Result<String, AppError> {
+    let mut segments = uri_path.trim_start_matches('/').split('/');
+    segments.next(); // "sandboxes" (littéral de la route)
+    segments.next(); // "{name}"
+    segments.next(); // "git" (littéral de la route)
+    let tail_segments: Vec<&str> = segments.collect();
+    for seg in &tail_segments {
+        let decoded = percent_encoding::percent_decode_str(seg)
+            .decode_utf8()
+            .map_err(|_| AppError::GitPathInvalid)?;
+        if decoded.is_empty() || decoded == "." || decoded == ".." {
+            return Err(AppError::GitPathInvalid);
+        }
+    }
+    Ok(tail_segments.join("/"))
+}
+
 #[axum::debug_handler]
 pub async fn git_proxy(
     State(state): State<AppState>,
     user: AuthUser,
-    Path((name, path)): Path<(String, String)>,
+    Path((name, _path)): Path<(String, String)>,
     req: Request, // dernier extractor, consuming (cf. task sp.)
 ) -> Result<(StatusCode, Json<serde_json::Value>), AppError> {
+    // 0. Chemin brut validé (voir raw_git_tail) — _path (décodé par
+    // l'extractor Path) est délibérément ignoré, cf. doc de raw_git_tail.
+    let raw_path = raw_git_tail(req.uri().path())?;
+
     // 1. scoping owner identique à ws_ticket
     let _db_user = get_or_create_user(&state, &user).await?;
     let Some(owner) = owners::resolve_owner_name(&state, _db_user.id).await? else {
@@ -258,7 +298,7 @@ pub async fn git_proxy(
     }
 
     // 2. URL interne
-    let mut base_url = client.sandbox_git_url(&name, &path).await?;
+    let mut base_url = client.sandbox_git_url(&name, &raw_path).await?;
 
     // 3. Query string
     let query = req.uri().query().map(String::from);
@@ -292,8 +332,7 @@ pub async fn git_proxy(
 
     // 6. Appel proxy + retour passthrough
     let (status, value) =
-        proxy_git_request(&http, &base_url, method, headers, body, &user.id_token)
-            .await?;
+        proxy_git_request(&http, &base_url, method, headers, body, &user.id_token).await?;
 
     Ok((status, Json(value)))
 }
@@ -302,6 +341,37 @@ pub async fn git_proxy(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+
+    #[test]
+    fn raw_git_tail_nominal() {
+        assert_eq!(raw_git_tail("/sandboxes/foo/git/status").unwrap(), "status");
+        assert_eq!(
+            raw_git_tail("/sandboxes/foo/git/branches/feature%2Fx").unwrap(),
+            "branches/feature%2Fx"
+        );
+    }
+
+    #[test]
+    fn raw_git_tail_rejects_traversal() {
+        assert!(raw_git_tail("/sandboxes/foo/git/../mcp").is_err());
+        assert!(raw_git_tail("/sandboxes/foo/git/%2e%2e/mcp").is_err());
+        assert!(raw_git_tail("/sandboxes/foo/git/branches/../../ws/ticket").is_err());
+    }
+
+    #[test]
+    fn raw_git_tail_rejects_empty_segment() {
+        assert!(raw_git_tail("/sandboxes/foo/git/branches//x").is_err());
+    }
+
+    #[test]
+    fn raw_git_tail_name_containing_git_is_not_ambiguous() {
+        // Nom de sandbox == "git" : le split positionnel (pas une recherche
+        // de sous-chaîne "/git/") ne doit pas se tromper de frontière.
+        assert_eq!(
+            raw_git_tail("/sandboxes/git/git/branches/x").unwrap(),
+            "branches/x"
+        );
+    }
     use crate::auth::MockOidcClient;
     use axum::{
         Router,
