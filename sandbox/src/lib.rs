@@ -20,7 +20,7 @@ use axum::{
     http::StatusCode,
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use tower_http::trace::TraceLayer;
 
@@ -45,6 +45,20 @@ pub fn build_app(state: AppState) -> Router {
         .route("/mcp", post(mcp::handle))
         .route("/git/status", get(git::handle_status))
         .route("/git/unpushed", get(git::handle_unpushed))
+        .route("/git/diff", get(git::handle_diff))
+        .route("/git/stage", post(git::handle_stage))
+        .route("/git/unstage", post(git::handle_unstage))
+        .route("/git/commit", post(git::handle_commit))
+        .route("/git/branches", get(git::handle_branches))
+        .route("/git/branches", post(git::handle_create_branch))
+        .route("/git/checkout", post(git::handle_checkout))
+        .route("/git/branches/{name}", delete(git::handle_delete_branch))
+        .route("/git/push", post(git::handle_push))
+        .route("/git/log", get(git::handle_log))
+        .route("/git/ssh-key", get(git::handle_ssh_key_status))
+        .route("/git/ssh-key", post(git::handle_ssh_key_create))
+        .route("/git/merge", post(git::handle_merge))
+        .route("/git/merge/abort", post(git::handle_merge_abort))
         .route("/ws/ticket", post(handle_ws_ticket))
         .layer(middleware::from_fn_with_state(
             state.clone(),

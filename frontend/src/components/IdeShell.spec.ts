@@ -24,6 +24,7 @@ const mockGetPanelFn = vi.fn((id: string) => {
   }
   return null;
 });
+const mockAddPanel = vi.fn();
 
 vi.mock('dockview-vue', () => ({
   DockviewVue: {
@@ -34,7 +35,7 @@ vi.mock('dockview-vue', () => ({
       const fakeApi = {
         panels: [] as unknown[],
         getPanel: mockGetPanelFn,
-        addPanel: vi.fn(),
+        addPanel: mockAddPanel,
         onDidLayoutChange: vi.fn(),
         activePanel: undefined,
         toJSON: () => null,
@@ -70,6 +71,7 @@ describe('IdeShell', () => {
     openSandboxWs.mockClear();
     openSandboxWs.mockReturnValue(Promise.resolve(mockWs));
     mockGetPanelFn.mockClear();
+    mockAddPanel.mockClear();
     mockPanelCloseSpy.mockClear();
     getLspClient.mockClear();
     disposeLspClients.mockClear();
@@ -125,6 +127,17 @@ describe('IdeShell', () => {
 
     // Aucune erreur, close jamais appelé
     expect(mockGetPanelFn).toHaveBeenCalledWith('editor:inconnu.txt');
+  });
+
+  it('crée le panel Git par défaut', async () => {
+    mount(IdeShell, { props: { sandboxName: 'foo' } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const gitCall = mockAddPanel.mock.calls.find(
+      (c): c is [{ id: string; component: string }] =>
+        c[0] != null && c[0].id === 'git' && c[0].component === 'git',
+    );
+    expect(gitCall).not.toBeUndefined();
   });
 
   describe('menu contextuel des onglets', () => {
@@ -190,6 +203,25 @@ describe('IdeShell', () => {
       );
       expect(custom).toBeUndefined();
     });
+  });
+
+  it('openDiff crée un panel diff:<path>', async () => {
+    const wrapper = mount(IdeShell, { props: { sandboxName: 'foo' } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const { openDiff } = wrapper.vm as {
+      openDiff: (p: string, s?: boolean) => void;
+    };
+    openDiff('a.txt', true);
+
+    const addCall = mockAddPanel.mock.calls.find(
+      (c): c is [{ id: string; component: string; params: unknown }] =>
+        c[0] != null &&
+        (c[0] as { id: string }).id === 'diff:a.txt' &&
+        (c[0] as { component: string }).component === 'diff',
+    );
+    expect(addCall).not.toBeUndefined();
+    expect(addCall![0].params).toEqual({ path: 'a.txt', staged: true });
   });
 
   it('démonte et dispose les clients LSP de la sandbox', async () => {

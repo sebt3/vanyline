@@ -13,7 +13,7 @@ pub mod toolsets;
 
 use axum::{
     Router,
-    routing::{get, post, put},
+    routing::{any, get, post, put},
 };
 
 use crate::AppState;
@@ -133,4 +133,5 @@ pub fn api_router() -> Router<AppState> {
             post(sandboxes::set_sandbox_suspended),
         )
         .route("/sandboxes/{name}/ws-ticket", post(sandboxes::ws_ticket))
+        .route("/sandboxes/{name}/git/{*path}", any(sandboxes::git_proxy))
 }

@@ -6,7 +6,7 @@ use k8s_openapi::api::batch::v1::{CronJob, CronJobSpec, Job, JobSpec};
 use k8s_openapi::api::core::v1::{
     Container, EnvVar, PersistentVolumeClaim, PersistentVolumeClaimSpec,
     PersistentVolumeClaimVolumeSource, PodSecurityContext, PodSpec, PodTemplateSpec,
-    SecretVolumeSource, ServiceAccount, Volume, VolumeMount, VolumeResourceRequirements,
+    ServiceAccount, Volume, VolumeMount, VolumeResourceRequirements,
 };
 use k8s_openapi::api::rbac::v1::{PolicyRule, Role, RoleBinding, RoleRef, Subject};
 use k8s_openapi::apimachinery::pkg::api::resource::Quantity;
@@ -324,7 +324,7 @@ pub fn git_pod_template(
     command: Vec<String>,
     service_account_name: Option<&str>,
 ) -> PodTemplateSpec {
-    let mut volumes = vec![
+    let volumes = vec![
         Volume {
             name: "workspace".to_string(),
             persistent_volume_claim: Some(PersistentVolumeClaimVolumeSource {
@@ -342,7 +342,7 @@ pub fn git_pod_template(
             ..Default::default()
         },
     ];
-    let mut mounts = vec![
+    let mounts = vec![
         VolumeMount {
             name: "workspace".to_string(),
             mount_path: WORKSPACE_MOUNT_PATH.to_string(),
@@ -361,29 +361,15 @@ pub fn git_pod_template(
         ..Default::default()
     }];
 
-    if let Some(secret_name) = &project.spec.git_secret {
-        volumes.push(Volume {
-            name: "git-secret".to_string(),
-            secret: Some(SecretVolumeSource {
-                secret_name: Some(secret_name.clone()),
-                ..Default::default()
-            }),
-            ..Default::default()
-        });
-        mounts.push(VolumeMount {
-            name: "git-secret".to_string(),
-            mount_path: "/git-secret".to_string(),
-            read_only: Some(true),
-            ..Default::default()
-        });
-        env.push(EnvVar {
-            name: "GIT_SSH_COMMAND".to_string(),
-            value: Some(
-                "ssh -i /git-secret/ssh-privatekey -o StrictHostKeyChecking=no".to_string(),
-            ),
-            ..Default::default()
-        });
-    }
+    // SSH key in the Owner home PVC — unconditional (works for HTTPS remotes,
+    // inopérant pour un remote SSH tant que la clé n'existe pas).
+    env.push(EnvVar {
+        name: "GIT_SSH_COMMAND".to_string(),
+        value: Some(
+            "ssh -i /home/vanyline/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new".to_string(),
+        ),
+        ..Default::default()
+    });
 
     let mut labels = BTreeMap::new();
     labels.insert(
@@ -1204,9 +1190,9 @@ mod tests {
         assert_eq!(refs[0].kind, "Project");
     }
 
-    // 19. build_init_job_with_git_secret
+    // 19. build_init_job_ignores_git_secret
     #[test]
-    fn build_init_job_with_git_secret() {
+    fn build_init_job_ignores_git_secret() {
         let mut project = make_project(None, None);
         project.spec.git_secret = Some("demo-deploy-key".to_string());
         let ctx = make_ctx();
@@ -1215,17 +1201,14 @@ mod tests {
 
         let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
         let volumes = pod_spec.volumes.as_ref().unwrap();
-        assert_eq!(volumes.len(), 3);
+        assert_eq!(volumes.len(), 2);
+        let names: Vec<_> = volumes.iter().map(|v| &v.name).collect();
+        assert!(names.contains(&&"workspace".to_string()));
+        assert!(names.contains(&&"home".to_string()));
+        // aucun volume "git-secret"
+        assert!(!names.contains(&&"git-secret".to_string()));
 
-        let secret_vol = volumes
-            .iter()
-            .find(|v| v.name == "git-secret")
-            .expect("should have git-secret volume");
-        assert_eq!(
-            secret_vol.secret.as_ref().unwrap().secret_name,
-            Some("demo-deploy-key".to_string())
-        );
-
+        // GIT_SSH_COMMAND inconditionnel, pointant sur le home, pas sur /git-secret
         let env_vars = job
             .spec
             .as_ref()
@@ -1241,13 +1224,15 @@ mod tests {
         let ssh_env = env_vars
             .iter()
             .find(|e| e.name == "GIT_SSH_COMMAND")
-            .expect("should have GIT_SSH_COMMAND");
+            .expect("should have GIT_SSH_COMMAND unconditionally");
+        let ssh_value = ssh_env.value.as_ref().unwrap();
         assert!(
-            ssh_env
-                .value
-                .as_ref()
-                .unwrap()
-                .contains("/git-secret/ssh-privatekey")
+            ssh_value.contains("/home/vanyline/.ssh/id_ed25519"),
+            "GIT_SSH_COMMAND should point to home SSH key, got: {ssh_value}"
+        );
+        assert!(
+            !ssh_value.contains("/git-secret"),
+            "GIT_SSH_COMMAND must not reference /git-secret, got: {ssh_value}"
         );
     }
 

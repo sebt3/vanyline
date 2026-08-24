@@ -119,6 +119,30 @@ impl VnlK8sClient {
             vanyline_crds::MCP_PORT
         ))
     }
+
+    /// URL interne de `/git/*` de la sandbox `name` (même patron que
+    /// `sandbox_ws_ticket_url`, chemin `/git/<raw_path>`). Vérifie d'abord que
+    /// la sandbox existe (`get_sandbox`) — erreur claire si ce n'est pas le
+    /// cas, plutôt qu'un échec de connexion confus plus tard.
+    ///
+    /// `raw_path` doit être **déjà** un chemin percent-encodé valide et
+    /// validé par l'appelant (pas de segment `.`/`..`) — cette fonction ne
+    /// ré-encode plus rien (contrairement à une version précédente qui
+    /// appelait `encode_git_path` ici : décoder puis ré-encoder perdait la
+    /// distinction entre un `%2F` légitime à l'intérieur d'un segment, ex.
+    /// un nom de branche contenant `/`, et un vrai séparateur de chemin).
+    /// Voir `app::api::sandboxes::raw_git_tail` pour la construction et la
+    /// validation de `raw_path` à partir de la requête brute.
+    pub async fn sandbox_git_url(&self, name: &str, raw_path: &str) -> Result<String, VnyError> {
+        self.get_sandbox(name).await?;
+        Ok(format!(
+            "http://{}.{}.svc:{}/git/{}",
+            vanyline_crds::service_name(name),
+            self.namespace,
+            vanyline_crds::MCP_PORT,
+            raw_path
+        ))
+    }
 }
 
 async fn list<K>(client: &kube::Client, ns: &str) -> Result<Vec<K>, VnyError>
@@ -175,4 +199,25 @@ where
         .await
         .map_err(|e| VnyError::K8sApiError(e.to_string()))?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::encode_git_path;
+
+    #[test]
+    fn encode_git_path_preserves_separators() {
+        assert_eq!(encode_git_path("branches/feature-x"), "branches/feature-x");
+        assert_eq!(encode_git_path("status"), "status");
+    }
+
+    #[test]
+    fn encode_git_path_encodes_special() {
+        assert_eq!(
+            encode_git_path("branches/feature x"),
+            "branches/feature%20x"
+        );
+        // Le '%' est codé en %25, donc %20 devient %2520
+        assert_eq!(encode_git_path("a%20b"), "a%2520b");
+    }
 }

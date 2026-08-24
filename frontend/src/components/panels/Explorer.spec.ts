@@ -4,6 +4,20 @@ import { mount } from '@vue/test-utils';
 import { ElTree } from 'element-plus';
 import Explorer from './Explorer.vue';
 
+/** Mock singleton pour `gitClient.status` — partagé entre tous les tests
+ *  git states. Créé avec `vi.hoisted` pour éviter le TDZ. */
+const { mockGitStatus } = vi.hoisted(() => ({
+  mockGitStatus: vi.fn(),
+}));
+
+vi.mock('../../api/gitClient', () => ({
+  gitClient: { status: mockGitStatus },
+}));
+
+vi.mock('../../api/gitClient', () => ({
+  gitClient: { status: mockGitStatus },
+}));
+
 function makeClient() {
   const mockRequests: { resolved: boolean; rejects?: Error | null; called: Map<string, boolean> }[] = [];
 
@@ -648,5 +662,120 @@ describe('Explorer.vue — CRUD arbre', () => {
 
     expect(client.request).toHaveBeenCalledWith('root', {});
     expect(writeText).toHaveBeenCalledWith('/home/vanyline/workspace/src/a.py');
+  });
+});
+
+// ---------- Tests git states ----------
+
+describe('Explorer.vue — badges d\'état git', () => {
+  let client: ReturnType<typeof makeClient>;
+
+  beforeEach(() => {
+    client = makeClient();
+    mockGitStatus.mockResolvedValue({ branch: 'main', files: [], clean: true });
+  });
+
+  afterEach(() => {
+    mockGitStatus.mockReset();
+    mockGitStatus.mockResolvedValue({ branch: 'main', files: [], clean: true });
+    client.resetMocks();
+  });
+
+  it('affiche un badge conflit pour un fichier conflicted', async () => {
+    mockGitStatus.mockResolvedValueOnce({
+      branch: 'main',
+      files: [
+        { path: 'README.md', state: 'conflicted', staged: true },
+      ],
+      clean: false,
+    });
+
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': vi.fn(),
+          'close-file': vi.fn(),
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(wrapper.text()).toContain('conflit');
+    const badge = wrapper.find('.git-state.conflicted');
+    expect(badge.exists()).toBe(true);
+    expect(badge.text()).toBe('conflit');
+    // Vérifier aussi que stateOf retourne bien 'conflicted'
+    const { stateOf } = wrapper.vm as { stateOf: (p: string) => string | undefined };
+    expect(stateOf('README.md')).toBe('conflicted');
+  });
+
+  it('affiche un badge pour un fichier modifié', async () => {
+    mockGitStatus.mockResolvedValueOnce({
+      branch: 'main',
+      files: [
+        { path: 'README.md', state: 'modified', staged: false },
+      ],
+      clean: false,
+    });
+
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': vi.fn(),
+          'close-file': vi.fn(),
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const { stateOf, stateClass, stateLabel: stateLabelFn } = wrapper.vm as {
+      stateOf: (p: string) => string | undefined;
+      stateClass: (p: string) => string;
+      stateLabel: (p: string) => string;
+    };
+    expect(stateOf('README.md')).toBe('modified');
+    expect(stateClass('README.md')).toBe('changed');
+    expect(stateLabelFn('README.md')).toBe('modified');
+
+    // Le badge est présent (le label-text ne contient pas de texte git,
+    // mais le badge .git-state.changed oui)
+    const badge = wrapper.find('.git-state.changed');
+    expect(badge.exists()).toBe(true);
+  });
+
+  it('échec du statut git laisse aucun badge sans planter', async () => {
+    mockGitStatus.mockRejectedValueOnce(new Error('network error'));
+
+    const wrapper = mount(Explorer, {
+      global: {
+        provide: {
+          'sandbox-fs': ref(client),
+          'sandbox-name': 'foo',
+          'open-file': vi.fn(),
+          'close-file': vi.fn(),
+        } as Record<string, unknown>,
+        components: { ElTree },
+      },
+      attachTo: document.body,
+    });
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const { fileStates } = wrapper.vm as { fileStates: Map<string, string> };
+    expect(fileStates.size).toBe(0);
+    expect(wrapper.findAll('.git-state').length).toBe(0);
   });
 });

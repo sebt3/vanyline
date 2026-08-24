@@ -510,37 +510,110 @@ conditions réelles le 2026-07-01 sur cluster K8s 1.36.2/cri-o 1.36.1 (cf. secti
 `python3` — outils courants pour un agent LLM qui explore/édite du code. Pas d'outils
 réseau/debug (`dnsutils`, `netcat`, `strace`) tant qu'un besoin réel ne les réclame pas.
 
-### Endpoints git — `GET /git/status` et `GET /git/unpushed` (WS-11)
+### Endpoints git — statut, diff, staging, commit, branches, merge, push (WS-11 + `git-integration`)
 
-Deux endpoints REST (`sandbox/src/git.rs`), même middleware d'authentification que
-`/mcp`. Servent l'app/le frontend — pas de tool MCP git (les LLM ont déjà
-`execute_command` + git dans l'image). Pas d'action git (commit/push/merge), pas de
-diff de contenu — des listes, pas des patches. Erreurs `VNL-SBX-004` (commande git en
-échec), `VNL-SBX-005` (sortie git non reconnue par le parseur — préféré à un JSON
-mensonger), `VNL-SBX-006` (HEAD détachée, seulement pour `/git/unpushed`).
+`sandbox/src/git.rs`, même middleware d'authentification que `/mcp`. Servent l'app/le
+frontend via un relais REST (voir "Relais `app` → `/git/*`" ci-dessous) — pas de tool
+MCP git (les LLM ont déjà `execute_command` + git dans l'image). Historiquement
+(WS-11, jusqu'en 2026-08) limité à deux endpoints en lecture seule, explicitement
+« pas d'action git, pas de diff de contenu » — décision revue en session
+(`git-integration`, 2026-08-22) : c'était un arbitrage de scope pour livrer vite, pas
+une contrainte permanente. Rouvert jusqu'à diff/commit/branches/merge/push inclus ;
+restent hors périmètre : rebase interactif, cherry-pick, stash, résolution de conflit
+3-way (résolution = éditer les marqueurs `<<<<<<<` dans l'éditeur normal + geste
+« marquer résolu » = stage), staging par hunk, force-push, graphe multi-branches
+complet (`git log --graph --all` — le graphe livré est linéaire, branche courante +
+refs, cf. section Frontend).
+
+```
+GET  /git/status                          → { branch, files: [...], clean }
+GET  /git/unpushed                        → { branch, upstream, commits: [...], truncated }
+GET  /git/diff?path=<rel>[&staged=bool]   → { path, diff }             # patch unifié texte
+POST /git/stage    { paths: [...] }       → { ok }
+POST /git/unstage  { paths: [...] }       → { ok }
+POST /git/commit   { message }            → { sha, title }             # sur le contenu déjà staged
+POST /git/push                            → { ok, pushed }
+GET  /git/branches                        → { current, merging, branches: [...] }
+POST /git/branches { name, from? }        → { ok }
+POST /git/checkout { branch }             → { ok } | refus si working tree sale
+DELETE /git/branches/{name}               → { ok }
+POST /git/merge    { branch }             → 200 { conflicted, sha }    # conflit = résultat normal, pas une erreur
+POST /git/merge/abort                     → { ok }
+GET  /git/log?limit=<n>[&all=bool]        → { branch, commits: [{ sha, parents, refs, ... }], truncated }
+GET  /git/ssh-key                         → { exists, public_key }
+POST /git/ssh-key                         → { public_key }             # idempotent, ne régénère jamais
+```
 
 - **`GET /git/status`** : parse pur de `git status --porcelain=v2 --branch` (exécuté
-  dans `VNL_SANDBOX_ROOT`). `{ branch, files: [{ path, state, staged }], clean }`.
-  `state` ∈ `modified | added | deleted | renamed | untracked | conflicted` — mapping
-  depuis les colonnes X (staged)/Y (unstaged) porcelain v2, X prioritaire si non `.` ;
-  `typechange` traité comme `modified`, `copied` comme `renamed` (pas d'état dédié dans
-  ce schéma). HEAD détachée : `branch == "(detached)"` (littéral git, pas de sentinelle
-  inventée) — pas une erreur pour cet endpoint, contrairement à `/git/unpushed`.
-- **`GET /git/unpushed`** : `{ branch, upstream: Option<String>, commits: [{ sha,
-  title, author, date }], truncated }`. Si `refs/remotes/origin/<branch>` existe →
-  compare à `origin/<branch>` (`upstream` renseigné) ; sinon (branche créée par la
-  sandbox, jamais poussée) → compare à `origin/<default>`, `default` résolu
-  dynamiquement via le HEAD symbolique du dépôt bare (`git rev-parse
-  --git-common-dir` depuis le worktree, puis `symbolic-ref --short HEAD` sur ce
-  chemin — pas de chemin codé en dur côté sandbox), repli `"main"` sur tout échec.
-  Sortie bornée à 200 commits (`truncated: true` au-delà). HEAD détachée → erreur
-  `VNL-SBX-006` (la comparaison n'aurait pas de sens sans branche).
+  dans `VNL_SANDBOX_ROOT`). `state` ∈ `modified | added | deleted | renamed |
+  untracked | conflicted` — mapping depuis les colonnes X (staged)/Y (unstaged)
+  porcelain v2, X prioritaire si non `.` ; `typechange` traité comme `modified`,
+  `copied` comme `renamed`. HEAD détachée : `branch == "(detached)"` (littéral git) —
+  pas une erreur pour cet endpoint, contrairement à `/git/unpushed`.
+- **`GET /git/unpushed`** : compare à `origin/<branch>` si la ref existe, sinon à
+  `origin/<default>` (résolu dynamiquement via le HEAD symbolique du dépôt bare, repli
+  `"main"`). Bornée à 200 commits. HEAD détachée → erreur `VNL-SBX-006`. Coexiste avec
+  `/git/log` (historique complet, pas seulement le delta local/upstream) sans
+  dupliquer la logique de parsing — usages différents.
+- **`POST /git/checkout`** : refus strict si le working tree est sale (`git diff
+  --quiet` sur le worktree ET l'index) — pas de stash automatique. Le check propage
+  une vraie erreur (`VNL-SBX-004`) si `git` ne peut pas être lancé ou renvoie un code
+  inattendu, plutôt que de retomber silencieusement sur « propre » (bug trouvé et
+  corrigé en review Phase 3, 2026-08-22 — la première version avalait ces échecs).
+- **`POST /git/merge`** : conflit = `200 { conflicted: true, sha: None }`, pas une
+  erreur HTTP — l'état qui en résulte est bien défini (`MERGE_HEAD` présent, marqueurs
+  dans les fichiers), déjà exposé par `status.state: conflicted` et
+  `branches.merging`. Erreur HTTP seulement si le merge n'a pas pu être *lancé*
+  (branche introuvable, merge déjà en cours, working tree sale).
+- **Validation des refs/noms** (`merge`, `checkout`, `branches` create/delete) : toute
+  valeur commençant par `-` est rejetée (`VNL-SBX-014`) avant de devenir un argument
+  positionnel de commande git — sans ce garde-fou, une valeur comme `--abort` passée à
+  `branch` sur `/git/merge` est interprétée comme un flag (`git merge --abort` annule
+  un merge en cours au lieu d'en démarrer un) plutôt qu'une ref. Bug trouvé en review
+  Phase 3 (2026-08-22) ; le fix est une validation en amont, pas un séparateur `--`
+  partout — `git checkout -- <x>` a une sémantique différente (pathspec, pas branche).
+- **`GET`/`POST /git/ssh-key`** : provisionne une clé SSH ed25519 **dans le PVC Owner**
+  (`/home/vanyline/.ssh/id_ed25519`), pas dans un Secret K8s dédié — le PVC Owner
+  existe déjà pour ce cas d'usage (déjà monté au même chemin dans le pod Sandbox ET le
+  Job d'init/fetch du Project, cf. section "Opérateur Kubernetes" ci-dessous),
+  généraliser les Secrets dédiés par type de credential (SSH, GPG, kubeconfig...)
+  multiplierait les objets à gérer sans raison. `POST` est idempotent : ne régénère
+  **jamais** une clé existante (casserait les deploy keys déjà enregistrées côté host
+  git), retourne juste la clé publique existante. `Project.spec.git_secret` (ancien
+  mécanisme à Secret K8s référencé) est déprécié — le controller ne le consomme plus
+  (cf. section "Opérateur Kubernetes"), le champ CRD reste pour compatibilité, pas
+  supprimé.
 - **Fraîcheur** : les refs `origin/*` ont la fraîcheur du dernier `fetch` périodique du
   Project (cron), pas du remote instantané — aucun fetch déclenché par ces endpoints.
 - **Dépend du mount `repo.git`** (cf. section "Opérateur Kubernetes" ci-dessous) et de
-  la refspec de fetch (cf. section "Maintenance des workspaces" ci-dessous) — sans ces
-  deux fixes (découverts pendant WS-11, préexistants au design initial), aucune
-  commande git ne fonctionnait dans le pod sandbox.
+  la refspec de fetch (cf. section "Maintenance des workspaces" ci-dessous).
+
+### Relais `app` → `/git/*` (canal d'auth frontend → sandbox)
+
+`/git/*` est sous `require_auth` (JWT OIDC) côté sandbox ; le navigateur ne détient
+jamais de JWT brut (principe déjà acté plus haut). Le frontend n'appelle donc jamais
+la sandbox directement pour ces endpoints — `app` relaie (`ANY
+/api/sandboxes/{name}/git/{*path}`, `app/src/api/sandboxes.rs::git_proxy`), même
+pattern que le relais de ticket WS (JWT présenté à la sandbox, jamais renvoyé au
+navigateur), même scoping owner (get_or_create_user → resolve_owner_name →
+get_sandbox → get_project → assert owner match, dupliqué dans les deux handlers).
+
+- **Sous-chemin extrait positionnellement depuis l'URI brute de la requête**
+  (`raw_git_tail`), pas via l'extractor `Path` d'axum qui décode le wildcard
+  `{*path}` avant que le handler ne le voie — vérifié empiriquement : axum décode
+  `%2F` en `/` et ne le ré-encode jamais. Deux bugs trouvés en review Phase 3
+  (2026-08-22) partageaient cette cause : (1) traversal de chemin — `/git/../mcp`
+  atteignait un endpoint hors périmètre après normalisation d'URL côté client HTTP ;
+  (2) toute branche contenant un `/` dans son nom (`feature/x`, convention courante)
+  cassait systématiquement (`%2F` redevenu `/` littéral avant d'atteindre la route
+  sandbox à un seul segment). Fix : extraction positionnelle sur les octets bruts +
+  rejet explicite des segments décodés `.`/`..`/vides, plutôt qu'un décodage suivi
+  d'une reconstruction (qui perd l'information nécessaire pour distinguer les deux
+  cas).
+- **Passthrough réel** : le proxy retourne le statut/JSON de la sandbox tels quels —
+  y compris un body non-JSON (404/405 texte brut d'axum pour une route non matchée),
+  enveloppé plutôt que transformé en 502 générique (bug trouvé en review, même
+  session).
 
 ### WebSocket éditeur — `/ws/ticket`, `/ws/fs`, `/ws/terminal` (`sandbox-ws-runtime`)
 
@@ -743,6 +816,17 @@ nœuds sans contrainte de colocalisation.
 | `project.rs` | PVC workspace (créé ou référence vérifiée) + ServiceAccount/Role/RoleBinding `project-<name>-maint` (droit `projects/status: patch` scopé à ce seul Project, cf. sous-section "Détection de langages" ci-dessous) + Job `project-init` (clone bare + mkdir caches + `detect`, une fois) + CronJob `project-fetch` (`git fetch --prune` + `detect`, planning dérivé de `fetch_interval`) + finalizer (Job purge puis suppression du PVC créé — un PVC référencé n'est jamais supprimé). |
 | `sandbox.rs` | Job `sandbox-checkout` (`git worktree add`, création de branche depuis la default branch si absente) + Pod (home Owner + worktree en subPath + **second mount du même PVC sur `repo.git`, cf. ci-dessous** + un `volumes[].image` par toolchain, **explicite ou dérivée de `project.status.languages`, cf. sous-section "Détection de langages"** + env agrégé PATH/LD_LIBRARY_PATH/caches — supprimé si `spec.suspended`, cf. ci-dessous) + Service ClusterIP (port MCP) + NetworkPolicy ingress (restreint aux pods du namespace portant `vanyline.solidite.fr/owner: <owner>`, **+ le pod `app` + le controller Ingress réel si l'Owner référence une Application, cf. sous-section dédiée**) + NetworkPolicy egress conditionnelle (WS-13, cf. ci-dessous) + **Ingress** (`sandbox-ingress-wiring`, seulement si l'Owner référence une Application — patché/supprimé explicitement selon l'état, même patron que la netpol egress) + finalizer (Job `git worktree remove`, la branche survit sur le remote). |
 | `application.rs` (`controller-application-crd`) | Deployment (1 container, env assemblé depuis 3 `secretRef` OIDC/DB/cookie + `VNL_K8S_NAMESPACE` + `OIDC_REDIRECT_URL` calculé) + Service ClusterIP + Ingress + Secret cookie auto-généré si absent — cf. sous-section dédiée. Pas de finalizer, ownerReferences suffisent. |
+
+**Clé SSH git — PVC Owner, pas un Secret dédié** (`git-integration`, 2026-08-22) :
+`git_pod_template` (`project.rs`, Jobs `init`/`fetch`) monte le PVC Owner (volume
+`"home"`) au même chemin `HOME_MOUNT_PATH = /home/vanyline` que le pod Sandbox — déjà
+vrai avant cette feature, confirmé en l'utilisant. `GIT_SSH_COMMAND` est désormais
+**inconditionnel**, pointé en dur sur `/home/vanyline/.ssh/id_ed25519` (absence de
+fichier sans effet pour un remote HTTPS, juste inopérant pour un remote SSH tant que
+la clé n'existe pas — provisionnée à la demande via `POST /git/ssh-key`, cf. section
+"Serveur MCP"). Remplace l'ancien mécanisme (`project.spec.git_secret` → Secret K8s
+monté conditionnellement sur `/git-secret`) : le champ CRD reste (compatibilité, pas
+de migration forcée) mais n'est plus consommé par le controller.
 
 Tous les Jobs git (`project.rs`/`sandbox.rs`) invoquent `vanyline-maint` (image sandbox)
 en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une commande shell
@@ -974,8 +1058,12 @@ reconcilers réutilisaient les mêmes `PatchParams` (avec `force()`, nécessaire
 
 **Limites connues** (v1, assumées) : pas de quotas (champ réservé dans `OwnerSpec`, non
 réconcilié), pas de webhook d'admission (validation par schéma CRD uniquement), pas de
-merge/push automatique des branches (le controller gère la plomberie git, pas le
-contenu), pas d'openvscode-server dans le pod. Changement de spec Sandbox = recréation
+merge/push **automatique** des branches par le *controller* (il gère la plomberie git —
+clone/fetch/worktree —, pas le contenu ; toujours vrai). Ne pas confondre avec le merge/
+push **manuel, déclenché par l'utilisateur** désormais possible depuis la sandbox
+(`POST /git/merge`, `POST /git/push`, cf. section "Serveur MCP" ci-dessus,
+`git-integration`) — composant différent, portée différente. Pas d'openvscode-server
+dans le pod. Changement de spec Sandbox = recréation
 du pod (immutable en v1). Pas de résolution FQDN dans les règles egress (limite K8s :
 `ipBlock`/selectors, pas de nom de domaine — si le besoin FQDN devient réel, chantier
 CNI type CiliumNetworkPolicy, hors scope v1). Pas d'auto-arrêt sur inactivité
@@ -1309,10 +1397,31 @@ backend (`app/src/api/mod.rs`) ne correspond à aucun mécanisme réel (pas de c
 `role`, pas de contrôle serveur) — décision cohérente avec l'état mono-utilisateur du
 projet, pas un oubli.
 
+**Git dans l'IDE** (`GitPanel.vue`, `git-integration`) : rail gauche à côté d'Explorer
+— statut (staged/unstaged/conflits), staging, commit, branches (créer/switcher/
+supprimer), push, historique. Consomme `gitClient.ts` (`/api/sandboxes/{name}/git/*`,
+cf. section "Serveur MCP" pour le relais). `Explorer.vue` colore les fichiers modifiés/
+conflictés à partir de `GET /git/status` (même endpoint). Diff : onglet dockview
+dédié (`DiffView.vue`, pattern `diff:<path>` mêmes ancrages que `editor:<path>`),
+rendu via **`@codemirror/merge`** (`unifiedMergeView`) plutôt qu'un rendu texte
+maison — cohérent avec le reste de l'éditeur (`editorLanguage.ts` réutilisé pour la
+coloration). Le contenu « avant » est reconstruit côté client
+(`diffPatch.ts::reconstructBase`, rejoue le patch unifié à l'envers) plutôt que
+demandé à la sandbox — fragile sur les cas de hunks qui ne matchent plus exactement
+le working tree (silencieux, pas de repli propre), candidat à une meilleure approche
+(endpoint sandbox dédié type `git show`) si ça s'avère insuffisant à l'usage.
+Historique : **`@gitgraph/js`**, grain volontairement réduit à la branche courante +
+refs (pas `git log --graph --all` — l'API de `@gitgraph/js` est un rejouement
+d'actions, pas un import de DAG arbitraire ; le multi-branches complet resterait un
+problème de layout non trivial, différé). Résolution de conflit : pas de UI 3-way —
+un fichier `conflicted` s'ouvre dans l'éditeur normal (marqueurs visibles), bouton
+« marquer résolu » activé par `branches.merging`.
+
 **Limites connues (dette assumée)** : pas de reconnexion WS automatique
 (déconnexion réseau/sandbox suspendue → recharger la page), pas de filesystem
-watch/push (Explorer ne se
-rafraîchit pas si le contenu change côté serveur pendant que l'utilisateur regarde),
+watch/push (Explorer et GitPanel ne se
+rafraîchissent pas si le contenu change côté serveur pendant que l'utilisateur
+regarde — GitPanel ne refetch qu'après ses propres actions),
 pas de code-splitting (bundle ~755 Ko gzippé — CodeMirror + xterm + Element Plus +
 Tailwind CSS/Nuxt UI + dockview-vue, la CSS Tailwind/Nuxt UI ayant sensiblement
 augmenté le poids par rapport à `vue-advanced-chat`, cf. section Chat plus haut).
@@ -1518,6 +1627,18 @@ non identifiée, à creuser si ça se reproduit après le passage à 262144.
   `MutexGuard` tenu across `.await` dans les tests RPC (`isolated_data_dir()`, cf.
   section "RPC stdio" ci-dessus) déclenche un faux positif `clippy::await_holding_lock`
   — `allow` documenté au niveau du module de test plutôt que de restructurer les tests.
+- **`git-integration` (2026-08-22), dette non bloquante survivant à la review Phase 3** :
+  `CreateProjectBody.git_secret` (`app/src/api/projects.rs`) toujours accepté et
+  transmis silencieusement alors que le controller ne le consomme plus (cf. section
+  "Opérateur Kubernetes") — pas de warning à l'appelant, la dépréciation n'est écrite
+  que côté CRD. Duplication non résolue : boilerplate `-C <root>` + conversion
+  `Vec<&str>` répété ~15× dans `sandbox/src/git.rs` (un `run_git_in(root, args)`
+  manque), et le bloc de scoping owner dupliqué à l'identique dans 5 handlers
+  d'`app/src/api/sandboxes.rs` (`git_proxy` est le 5ᵉ). Le bouton « Diff » de
+  `GitPanel.vue` est proposé sur les fichiers `deleted` mais échoue toujours
+  (`DiffView.vue` lit le contenu working-tree actuel, qui n'existe plus). Pas de
+  validation sur cluster réel à ce jour (comme la plupart des features livrées
+  jusqu'ici, cf. entrées `.claude/memory/`).
 
 ## Workspace TypeScript (npm workspaces)
 
