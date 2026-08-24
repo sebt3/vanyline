@@ -25,6 +25,14 @@ Produit `docs/features/<feature>.md`, commité sur la branche feature. Contenu m
 - Ce qu'elle ne fait pas (périmètre explicite)
 - Les interfaces clés et les modules touchés
 - Les risques identifiés et les questions ouvertes
+- **Si une interface fait passer une entrée utilisateur/réseau dans une commande shell
+  (argv), une URL, ou un chemin de fichier** : la contrainte de validation/échappement
+  correspondante, explicitement — pas seulement la forme de l'endpoint. Un contrat de
+  comportement ("cet endpoint fait X") ne suffit pas à couvrir ce genre de risque ; sans
+  cette contrainte écrite, ni Cadence ni Qwen n'ont de raison de la deviner, et ça ne
+  remonte qu'à la review Phase 3 — trop tard, trouvé sur `git-integration` (2026-08-22) :
+  injection d'argument sur plusieurs endpoints git, traversal de chemin dans un proxy,
+  aucun des deux anticipé dans le design doc initial.
 
 Ce fichier est pour les développeurs et Claude — pas pour Qwen. Il est mis à jour si une découverte en cours d'implémentation change la compréhension.
 

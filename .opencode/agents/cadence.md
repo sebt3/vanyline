@@ -104,7 +104,15 @@ Une tâche à la fois, jamais plus d'une ou deux d'avance (voir `.claude/config.
   toi-même dès le départ.
 - Trancher une ambiguïté d'architecture que le design doc ne couvre pas. Si `docs/features/
   <feature>.md` ne permet pas d'écrire une tâche sans deviner, ARRÊTE-TOI et remonte au
-  développeur — ne complète pas le design toi-même, même partiellement.
+  développeur — ne complète pas le design toi-même, même partiellement. **Ça inclut les
+  contraintes de sécurité implicites**, pas seulement les choix de comportement visibles :
+  si une tâche fait passer une entrée utilisateur/réseau dans une commande shell (argv),
+  une URL, ou un chemin de fichier, et que le design doc ne précise pas comment cette
+  valeur doit être validée/échappée, c'est la même catégorie d'ambiguïté que l'architecture
+  — remonte plutôt que d'implémenter la version la plus simple qui compile (trouvé en
+  review Phase 3 sur `git-integration`, 2026-08-22 : injection d'argument sur plusieurs
+  endpoints, traversal de chemin dans un proxy — aucun des deux n'était couvert par le
+  design doc, et personne ne l'a signalé avant la review finale).
 - Merger ou pousser quoi que ce soit (`git push`/`git merge` refusés) — la revue finale et le
   merge sont réservés à Claude (Phase 3, `.claude/config.md`). Tu committes tes propres tâches et
   correctifs, jamais au-delà.
