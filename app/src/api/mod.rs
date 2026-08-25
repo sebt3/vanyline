@@ -20,17 +20,7 @@ pub fn api_router() -> Router<AppState> {
     Router::new()
         .route("/local-tools", get(local_tools::list_local_tools))
         .route("/me", get(me::handler_me))
-        // LLM providers (admin)
-        .route(
-            "/llm-providers",
-            get(llm_providers::list_providers).post(llm_providers::create_provider),
-        )
-        .route(
-            "/llm-providers/{id}",
-            get(llm_providers::get_provider)
-                .put(llm_providers::update_provider)
-                .delete(llm_providers::delete_provider),
-        )
+        // LLM providers (admin, resource_router handles CRUD on /api/v1/llm-providers)
         .route(
             "/llm-providers/{id}/test",
             post(llm_providers::test_provider),

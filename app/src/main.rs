@@ -144,6 +144,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .merge(miryad_core::auth::auth_router())
+        .merge(resource_router::<db::entities::llm_providers::Entity, AppState>())
         .merge(resource_router::<db::entities::skills::Entity, AppState>())
         .merge(resource_router::<db::entities::toolsets::Entity, AppState>())
         .nest("/api", api::api_router())
