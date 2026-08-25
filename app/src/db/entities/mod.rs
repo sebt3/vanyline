@@ -1,6 +1,9 @@
 pub mod agents;
+pub mod chat_contexts;
+pub mod conversations;
 pub mod llm_providers;
 pub mod mcp_servers;
+pub mod messages;
 pub mod model_profiles;
 pub mod skills;
 pub mod toolsets;

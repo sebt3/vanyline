@@ -4,15 +4,27 @@ use axum::{
     http::StatusCode,
 };
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
-
-use vanyline_lib::VnyError;
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
 
 use crate::{
     AppState,
-    db::models::{ChatContext, Conversation, Message, User},
+    db::entities::{
+        chat_contexts::{
+            ActiveModel as ChatContextActiveModel,
+            Entity as ChatContextEntity,
+            Model as ChatContextModel,
+        },
+        conversations::{
+            ActiveModel as ConversationActiveModel,
+            Entity as ConversationEntity,
+            Model as ConversationModel,
+        },
+        messages::{Entity as MessageEntity, Model as MessageModel},
+    },
+    db::models::User,
     error::AppError,
 };
 
@@ -31,37 +43,50 @@ pub struct CreateConversation {
     pub context: ChatContextInput,
 }
 
+/// Type alias pour la réponse de `get_messages` : `Message` (sqlx) est déjà
+/// importé via `crate::db::models`.
+type MessageOut = MessageModel;
+
+fn db_err(e: sea_orm::DbErr) -> AppError {
+    AppError::InternalError(format!("VNL-DB-006: {e}"))
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConversationOut {
-    pub id: Uuid,
+    pub id: i32,
     pub agent_name: Option<String>,
-    pub context: ChatContext,
+    pub context: ChatContextModel,
     pub title: Option<String>,
     pub todo: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Résout `conv.agent_id` (peut être `None` — conversation sans agent) en
-/// nom, via une requête séparée (N+1 accepté, cf. Contexte). `None` si
-/// `agent_id` est `None` OU si l'agent référencé a été supprimé depuis
-/// (FK `ON DELETE SET NULL` empêche normalement ce cas, mais la fonction
-/// reste défensive plutôt que de `.unwrap()`).
-async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationOut, AppError> {
+/// Résout `conv.agent_id` en nom (SELECT name FROM vanyline_agents WHERE id = $1),
+/// charge le ChatContext depuis vanyline_chat_contexts (N+1 accepté, comme aujourd'hui).
+async fn to_output(
+    state: &AppState,
+    conv: ConversationModel,
+) -> Result<ConversationOut, AppError> {
+    let db = &state.auth.db;
+
     let agent_name = match conv.agent_id {
         Some(id) => {
-            sqlx::query_scalar::<_, String>("SELECT name FROM agents WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&state.pool)
-                .await?
+            use crate::db::entities::agents::Entity as AgentEntity;
+            AgentEntity::find_by_id(id)
+                .one(db)
+                .await
+                .map_err(db_err)?
+                .map(|a| a.name)
         }
         None => None,
     };
 
-    let context = sqlx::query_as::<_, ChatContext>("SELECT * FROM chat_contexts WHERE id = $1")
-        .bind(conv.context_id)
-        .fetch_one(&state.pool)
-        .await?;
+    let context = ChatContextEntity::find_by_id(conv.context_id)
+        .one(db)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
 
     Ok(ConversationOut {
         id: conv.id,
@@ -74,22 +99,33 @@ async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationO
     })
 }
 
+/// Résout `agent_name` en id depuis `vanyline_agents`
+/// (WHERE owner_id = user_id AND name = agent_name).
+/// Retourne `AppError::UnprocessableReference(UnknownReference("agent", name))`
+/// si l'agent n'est pas trouvé.
 async fn resolve_agent_id(
     state: &AppState,
-    user_id: Uuid,
+    user_id: i32,
     agent_name: &str,
-) -> Result<Uuid, AppError> {
-    sqlx::query_scalar::<_, Uuid>("SELECT id FROM agents WHERE user_id = $1 AND name = $2")
-        .bind(user_id)
-        .bind(agent_name)
-        .fetch_optional(&state.pool)
-        .await?
+) -> Result<i32, AppError> {
+    use crate::db::entities::agents::Column;
+    use crate::db::entities::agents::Entity as AgentEntity;
+
+    let db = &state.auth.db;
+    let agent = AgentEntity::find()
+        .filter(Column::OwnerId.eq(user_id))
+        .filter(Column::Name.eq(agent_name))
+        .one(db)
+        .await
+        .map_err(db_err)?
         .ok_or_else(|| {
-            AppError::UnprocessableReference(VnyError::UnknownReference(
+            AppError::UnprocessableReference(vanyline_lib::VnyError::UnknownReference(
                 "agent",
                 agent_name.to_string(),
             ))
-        })
+        })?;
+
+    Ok(agent.id)
 }
 
 /// Filtre optionnel de `list_conversations`. `sandbox_name` est le seul
@@ -105,34 +141,42 @@ pub async fn list_conversations(
     user: AuthUser,
     Query(query): Query<ListConversationsQuery>,
 ) -> Result<Json<Vec<ConversationOut>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let conversations = match &query.sandbox_name {
-        Some(sandbox_name) => {
-            sqlx::query_as::<_, Conversation>(
-                "SELECT c.* FROM conversations c
-                 JOIN chat_contexts ctx ON ctx.id = c.context_id
-                 WHERE c.user_id = $1 AND ctx.kind = 'sandbox' AND ctx.data->>'sandbox_name' = $2
-                 ORDER BY c.updated_at DESC",
-            )
-            .bind(db_user.id)
-            .bind(sandbox_name)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as::<_, Conversation>(
-                "SELECT * FROM conversations WHERE user_id = $1 ORDER BY updated_at DESC",
-            )
-            .bind(db_user.id)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
 
-    let mut out = Vec::with_capacity(conversations.len());
-    for conv in conversations {
-        out.push(to_output(&state, conv).await?);
+    let conversations = ConversationEntity::find()
+        .filter(crate::db::entities::conversations::Column::OwnerId.eq(principal_user.id))
+        .order_by_desc(crate::db::entities::conversations::Column::UpdatedAt)
+        .all(db)
+        .await
+        .map_err(db_err)?;
+
+    let mut out: Vec<ConversationOut> = Vec::with_capacity(conversations.len());
+
+    if let Some(ref sandbox_name) = query.sandbox_name {
+        for conv in conversations {
+            let ctx = ChatContextEntity::find_by_id(conv.context_id)
+                .one(db)
+                .await
+                .map_err(db_err)?
+                .ok_or_else(|| {
+                    AppError::InternalError("VNL-DB-007: context not found".into())
+                })?;
+
+            if ctx.kind == "sandbox"
+                && ctx.data.get("sandbox_name").and_then(|v| v.as_str()) == Some(sandbox_name)
+            {
+                out.push(to_output(&state, conv).await?);
+            }
+        }
+    } else {
+        for conv in conversations {
+            out.push(to_output(&state, conv).await?);
+        }
     }
+
     Ok(Json(out))
 }
 
@@ -141,28 +185,51 @@ pub async fn create_conversation(
     user: AuthUser,
     Json(body): Json<CreateConversation>,
 ) -> Result<(StatusCode, Json<ConversationOut>), AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
 
     let agent_id = match &body.agent_name {
-        Some(name) => Some(resolve_agent_id(&state, db_user.id, name).await?),
+        Some(name) => Some(resolve_agent_id(&state, principal_user.id, name).await?),
         None => None,
     };
 
-    let context_id: Uuid =
-        sqlx::query_scalar("INSERT INTO chat_contexts (kind, data) VALUES ($1, $2) RETURNING id")
-            .bind(&body.context.kind)
-            .bind(&body.context.data)
-            .fetch_one(&state.pool)
-            .await?;
+    // Effect de bord : créer le ChatContext avant la Conversation
+    let now = chrono::Utc::now();
+    let ctx_active = ChatContextActiveModel {
+        id: Set(0),
+        kind: Set(body.context.kind.clone()),
+        data: Set(body.context.data.clone()),
+        created_at: Set(now),
+    };
+    let ctx_result = ChatContextEntity::insert(ctx_active)
+        .exec(db)
+        .await
+        .map_err(db_err)?;
+    let context_id = ctx_result.last_insert_id as i32;
 
-    let conv = sqlx::query_as::<_, Conversation>(
-        "INSERT INTO conversations (user_id, agent_id, context_id) VALUES ($1, $2, $3) RETURNING *",
-    )
-    .bind(db_user.id)
-    .bind(agent_id)
-    .bind(context_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let conv_active = ConversationActiveModel {
+        id: Set(0),
+        owner_id: Set(principal_user.id),
+        agent_id: Set(agent_id),
+        context_id: Set(context_id),
+        title: Set(None),
+        todo: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+    let conv_result = ConversationEntity::insert(conv_active)
+        .exec(db)
+        .await
+        .map_err(db_err)?;
+    let conv = ConversationEntity::find_by_id(conv_result.last_insert_id as i32)
+        .one(db)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| {
+            AppError::InternalError("VNL-DB-008: created conversation not found".into())
+        })?;
 
     let out = to_output(&state, conv).await?;
     Ok((StatusCode::CREATED, Json(out)))
@@ -171,16 +238,21 @@ pub async fn create_conversation(
 pub async fn get_conversation(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<i32>,
 ) -> Result<Json<ConversationOut>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+
+    let conv = ConversationEntity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(db_err)?
         .ok_or(AppError::ConversationNotFound)?;
 
-    if conv.user_id != db_user.id {
+    // RBAC : owner check à la main
+    if conv.owner_id != principal_user.id {
         return Err(AppError::ConversationAccessDenied);
     }
 
@@ -191,17 +263,32 @@ pub async fn get_conversation(
 pub async fn delete_conversation(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<i32>,
 ) -> Result<StatusCode, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let rows = sqlx::query("DELETE FROM conversations WHERE id = $1 AND user_id = $2")
-        .bind(id)
-        .bind(db_user.id)
-        .execute(&state.pool)
-        .await?
-        .rows_affected();
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
 
-    if rows == 0 {
+    let conv = ConversationEntity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(db_err)?
+        .ok_or(AppError::ConversationNotFound)?;
+
+    if conv.owner_id != principal_user.id {
+        return Err(AppError::ConversationAccessDenied);
+    }
+
+    let count = ConversationEntity::delete_many()
+        .filter(crate::db::entities::conversations::Column::Id.eq(id))
+        .filter(crate::db::entities::conversations::Column::OwnerId.eq(principal_user.id))
+        .exec(db)
+        .await
+        .map_err(db_err)?
+        .rows_affected;
+
+    if count == 0 {
         return Err(AppError::ConversationNotFound);
     }
     Ok(StatusCode::NO_CONTENT)
@@ -210,28 +297,35 @@ pub async fn delete_conversation(
 pub async fn get_messages(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Vec<Message>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
+    Path(id): Path<i32>,
+) -> Result<Json<Vec<MessageOut>>, AppError> {
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+
+    let conv = ConversationEntity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(db_err)?
         .ok_or(AppError::ConversationNotFound)?;
 
-    if conv.user_id != db_user.id {
+    if conv.owner_id != principal_user.id {
         return Err(AppError::ConversationAccessDenied);
     }
 
-    let messages = sqlx::query_as::<_, Message>(
-        "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
-    )
-    .bind(id)
-    .fetch_all(&state.pool)
-    .await?;
+    let messages = MessageEntity::find()
+        .filter(crate::db::entities::messages::Column::ConversationId.eq(id))
+        .order_by_asc(crate::db::entities::messages::Column::CreatedAt)
+        .all(db)
+        .await
+        .map_err(db_err)?;
+
     Ok(Json(messages))
 }
 
+/// Utilitaire sqlx conservé pour `me.rs`, `owners.rs`, `projects.rs`,
+/// `sandboxes.rs`, `ws/chat.rs` — ne pas retirer.
 pub async fn get_or_create_user(state: &AppState, auth_user: &AuthUser) -> Result<User, AppError> {
     if let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE oidc_sub = $1")
         .bind(&auth_user.subject)
@@ -298,7 +392,15 @@ mod tests {
         };
 
         Router::new()
-            .route("/conversations", get(list_conversations))
+            .route("/conversations", get(list_conversations).post(create_conversation))
+            .route(
+                "/conversations/{id}",
+                get(get_conversation).delete(delete_conversation),
+            )
+            .route(
+                "/conversations/{id}/messages",
+                get(get_messages),
+            )
             .with_state(state)
     }
 
