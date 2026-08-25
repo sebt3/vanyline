@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod llm_providers;
 pub mod mcp_servers;
 pub mod model_profiles;

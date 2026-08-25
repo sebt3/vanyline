@@ -149,6 +149,7 @@ async fn main() {
         .merge(resource_router::<db::entities::skills::Entity, AppState>())
         .merge(resource_router::<db::entities::toolsets::Entity, AppState>())
         .merge(resource_router::<db::entities::model_profiles::Entity, AppState>())
+        .merge(resource_router::<db::entities::agents::Entity, AppState>())
         .nest("/api", api::api_router())
         .route(
             "/api/ws/chat/{conversation_id}",

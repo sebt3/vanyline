@@ -3,6 +3,7 @@ mod m20260825_000002_create_vanyline_toolsets;
 mod m20260825_000003_create_vanyline_llm_providers;
 mod m20260825_000004_create_vanyline_mcp_servers;
 mod m20260825_000005_create_vanyline_model_profiles;
+mod m20260825_000006_create_vanyline_agents;
 
 use sea_orm::sea_query::{Alias, DynIden, IntoIden};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
@@ -17,6 +18,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260825_000003_create_vanyline_llm_providers::Migration),
             Box::new(m20260825_000004_create_vanyline_mcp_servers::Migration),
             Box::new(m20260825_000005_create_vanyline_model_profiles::Migration),
+            Box::new(m20260825_000006_create_vanyline_agents::Migration),
         ]
     }
 

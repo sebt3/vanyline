@@ -1,4 +1,3 @@
-pub mod agents;
 pub mod conversations;
 pub mod llm_providers;
 pub mod local_tools;
@@ -30,17 +29,6 @@ pub fn api_router() -> Router<AppState> {
         )
         // MCP servers (admin) — CRUD handled by resource_router, custom /test route below
         .route("/mcp-servers/{id}/test", post(mcp_servers::test_server))
-        // Agents (read: OIDC, write: admin)
-        .route(
-            "/agents",
-            get(agents::list_agents).post(agents::create_agent),
-        )
-        .route(
-            "/agents/{name}",
-            get(agents::get_agent)
-                .put(agents::update_agent)
-                .delete(agents::delete_agent),
-        )
         // Conversations (OIDC)
         .route(
             "/conversations",
