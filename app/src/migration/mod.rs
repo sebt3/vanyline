@@ -1,4 +1,5 @@
 mod m20260825_000001_create_vanyline_skills;
+mod m20260825_000002_create_vanyline_toolsets;
 
 use sea_orm::sea_query::{Alias, DynIden, IntoIden};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
@@ -7,7 +8,10 @@ pub struct Migrator;
 
 impl MigratorTrait for Migrator {
     fn migrations() -> Vec<Box<dyn MigrationTrait>> {
-        vec![Box::new(m20260825_000001_create_vanyline_skills::Migration)]
+        vec![
+            Box::new(m20260825_000001_create_vanyline_skills::Migration),
+            Box::new(m20260825_000002_create_vanyline_toolsets::Migration),
+        ]
     }
 
     fn migration_table_name() -> DynIden {

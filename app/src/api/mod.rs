@@ -8,7 +8,6 @@ pub mod model_profiles;
 pub mod owners;
 pub mod projects;
 pub mod sandboxes;
-pub mod toolsets;
 
 use axum::{
     Router,
@@ -62,17 +61,6 @@ pub fn api_router() -> Router<AppState> {
             get(model_profiles::get_model_profile)
                 .put(model_profiles::update_model_profile)
                 .delete(model_profiles::delete_model_profile),
-        )
-        // Toolsets (OIDC, by name)
-        .route(
-            "/toolsets",
-            get(toolsets::list_toolsets).post(toolsets::create_toolset),
-        )
-        .route(
-            "/toolsets/{name}",
-            get(toolsets::get_toolset)
-                .put(toolsets::update_toolset)
-                .delete(toolsets::delete_toolset),
         )
         // Agents (read: OIDC, write: admin)
         .route(

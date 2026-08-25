@@ -22,8 +22,6 @@ pub enum AppError {
     AgentNotFound,
     #[error("VNL-CFG-004: Model profile not found")]
     ModelProfileNotFound,
-    #[error("VNL-CFG-005: Toolset not found")]
-    ToolsetNotFound,
     #[error("{0}")]
     UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-CNV-001: Conversation not found")]
@@ -71,7 +69,6 @@ impl IntoResponse for AppError {
             Self::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::ToolsetNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
@@ -96,12 +93,6 @@ mod tests {
     #[test]
     fn model_profile_not_found_maps_to_404() {
         let resp = AppError::ModelProfileNotFound.into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn toolset_not_found_maps_to_404() {
-        let resp = AppError::ToolsetNotFound.into_response();
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 
