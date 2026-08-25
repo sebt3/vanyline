@@ -29,17 +29,7 @@ pub fn api_router() -> Router<AppState> {
             "/llm-providers/{id}/default",
             put(llm_providers::set_default_provider),
         )
-        // MCP servers (admin)
-        .route(
-            "/mcp-servers",
-            get(mcp_servers::list_servers).post(mcp_servers::create_server),
-        )
-        .route(
-            "/mcp-servers/{id}",
-            get(mcp_servers::get_server)
-                .put(mcp_servers::update_server)
-                .delete(mcp_servers::delete_server),
-        )
+        // MCP servers (admin) — CRUD handled by resource_router, custom /test route below
         .route("/mcp-servers/{id}/test", post(mcp_servers::test_server))
         // Model profiles (OIDC, by name)
         .route(
