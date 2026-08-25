@@ -24,8 +24,6 @@ pub enum AppError {
     ModelProfileNotFound,
     #[error("VNL-CFG-005: Toolset not found")]
     ToolsetNotFound,
-    #[error("VNL-CFG-006: Skill not found")]
-    SkillNotFound,
     #[error("{0}")]
     UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-CNV-001: Conversation not found")]
@@ -74,7 +72,6 @@ impl IntoResponse for AppError {
             Self::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::ToolsetNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::SkillNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),

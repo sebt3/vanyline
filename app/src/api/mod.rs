@@ -8,7 +8,6 @@ pub mod model_profiles;
 pub mod owners;
 pub mod projects;
 pub mod sandboxes;
-pub mod skills;
 pub mod toolsets;
 
 use axum::{
@@ -74,17 +73,6 @@ pub fn api_router() -> Router<AppState> {
             get(toolsets::get_toolset)
                 .put(toolsets::update_toolset)
                 .delete(toolsets::delete_toolset),
-        )
-        // Skills (OIDC, leaf resource)
-        .route(
-            "/skills",
-            get(skills::list_skills).post(skills::create_skill),
-        )
-        .route(
-            "/skills/{name}",
-            get(skills::get_skill)
-                .put(skills::update_skill)
-                .delete(skills::delete_skill),
         )
         // Agents (read: OIDC, write: admin)
         .route(

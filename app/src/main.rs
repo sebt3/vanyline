@@ -7,6 +7,7 @@ mod config_store;
 mod db;
 mod error;
 mod k8s;
+mod migration;
 mod ws;
 
 use std::collections::HashSet;
@@ -16,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use axum::{Router, extract::FromRef, routing::get};
 use config::Config;
 use miryad_core::auth::{MiryadAuthState, OidcClient};
+use miryad_core::rest::resource_router;
 use sea_orm_migration::MigratorTrait;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -107,6 +109,13 @@ async fn main() {
             std::process::exit(1);
         });
 
+    migration::Migrator::up(&db, None)
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!("VNL-DB-005: app migrations failed: {e}");
+            std::process::exit(1);
+        });
+
     let miryad_oidc_client = OidcClient::new(&config.oidc_config())
         .await
         .unwrap_or_else(|e| {
@@ -135,6 +144,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .merge(miryad_core::auth::auth_router())
+        .merge(resource_router::<db::entities::skills::Entity, AppState>())
         .nest("/api", api::api_router())
         .route(
             "/api/ws/chat/{conversation_id}",
