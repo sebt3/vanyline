@@ -20,8 +20,6 @@ pub enum AppError {
     McpError(String),
     #[error("VNL-AGT-001: Agent not found")]
     AgentNotFound,
-    #[error("VNL-CFG-004: Model profile not found")]
-    ModelProfileNotFound,
     #[error("{0}")]
     UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-CNV-001: Conversation not found")]
@@ -68,7 +66,6 @@ impl IntoResponse for AppError {
             Self::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
@@ -89,12 +86,6 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn model_profile_not_found_maps_to_404() {
-        let resp = AppError::ModelProfileNotFound.into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
 
     #[test]
     fn unprocessable_reference_maps_to_422() {

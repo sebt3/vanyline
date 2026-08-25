@@ -4,7 +4,6 @@ pub mod llm_providers;
 pub mod local_tools;
 pub mod mcp_servers;
 pub mod me;
-pub mod model_profiles;
 pub mod owners;
 pub mod projects;
 pub mod sandboxes;
@@ -31,17 +30,6 @@ pub fn api_router() -> Router<AppState> {
         )
         // MCP servers (admin) — CRUD handled by resource_router, custom /test route below
         .route("/mcp-servers/{id}/test", post(mcp_servers::test_server))
-        // Model profiles (OIDC, by name)
-        .route(
-            "/model-profiles",
-            get(model_profiles::list_model_profiles).post(model_profiles::create_model_profile),
-        )
-        .route(
-            "/model-profiles/{name}",
-            get(model_profiles::get_model_profile)
-                .put(model_profiles::update_model_profile)
-                .delete(model_profiles::delete_model_profile),
-        )
         // Agents (read: OIDC, write: admin)
         .route(
             "/agents",
