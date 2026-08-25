@@ -8,16 +8,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("VNL-AUTH-001: Not authenticated")]
-    NotAuthenticated,
-    #[error("VNL-AUTH-002: Invalid or expired token")]
-    InvalidToken,
-    #[error("VNL-AUTH-003: OIDC error: {0}")]
-    OidcError(String),
     #[error("VNL-AUTH-004: Forbidden")]
     Forbidden,
-    #[error("VNL-CFG-001: Configuration error: {0}")]
-    ConfigError(String),
     #[error("VNL-DB-001: Database error: {0}")]
     DatabaseError(#[from] sqlx::Error),
     #[error("VNL-LLM-001: LLM provider error: {0}")]
@@ -74,11 +66,7 @@ impl From<vanyline_lib::VnyError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            Self::NotAuthenticated => (StatusCode::UNAUTHORIZED, self.to_string()),
-            Self::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
-            Self::OidcError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             Self::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             Self::LlmError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),

@@ -11,8 +11,10 @@ use vanyline_lib::VnyError;
 use vanyline_lib::domain::McpServer as DomainMcpServer;
 use vanyline_lib::domain::McpTransport;
 
+use miryad_core::auth::AuthUser;
+
 use crate::{
-    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    AppState, api::conversations::get_or_create_user,
     db::models::McpServer, error::AppError,
 };
 
@@ -222,7 +224,6 @@ pub async fn test_server(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -257,7 +258,6 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key: test_key(),
             pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),

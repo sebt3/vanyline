@@ -18,8 +18,10 @@ use vanyline_lib::domain::{McpSelection, McpServer, McpTransport};
 use vanyline_lib::event::{ChatEvent, EventSink, ToolCallRecord};
 use vanyline_lib::session::SessionContext;
 
+use miryad_core::auth::AuthUser;
+
 use crate::{
-    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
+    AppState, api::conversations::get_or_create_user,
     config_store::PgConfigStore, error::AppError,
 };
 

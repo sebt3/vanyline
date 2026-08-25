@@ -6,9 +6,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use vanyline_crds::{Sandbox, SandboxSpec};
 
+use miryad_core::auth::AuthUser;
+
 use crate::{
-    AppState, api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
-    error::AppError, k8s,
+    AppState, api::conversations::get_or_create_user, api::owners, error::AppError, k8s,
 };
 
 /// Body de `POST /api/sandboxes`. `name` porte le nom du CRD Sandbox ;
@@ -205,7 +206,6 @@ pub async fn ws_ticket(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -240,7 +240,6 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
             pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),

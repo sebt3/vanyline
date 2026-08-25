@@ -8,9 +8,10 @@ use uuid::Uuid;
 
 use vanyline_lib::VnyError;
 
+use miryad_core::auth::AuthUser;
+
 use crate::{
     AppState,
-    auth::middleware::AuthUser,
     db::models::{ChatContext, Conversation, Message, User},
     error::AppError,
 };
@@ -232,8 +233,8 @@ pub async fn get_messages(
 }
 
 pub async fn get_or_create_user(state: &AppState, auth_user: &AuthUser) -> Result<User, AppError> {
-    if let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
-        .bind(&auth_user.email)
+    if let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE oidc_sub = $1")
+        .bind(&auth_user.subject)
         .fetch_optional(&state.pool)
         .await?
     {
@@ -241,10 +242,11 @@ pub async fn get_or_create_user(state: &AppState, auth_user: &AuthUser) -> Resul
     }
 
     let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (oidc_sub, email) VALUES ($1, $2) ON CONFLICT (oidc_sub) DO UPDATE SET email = EXCLUDED.email RETURNING *",
+        "INSERT INTO users (oidc_sub, email) VALUES ($1, $2)
+         ON CONFLICT (oidc_sub) DO UPDATE SET email = EXCLUDED.email RETURNING *",
     )
-    .bind(&auth_user.email)
-    .bind(&auth_user.email)
+    .bind(&auth_user.subject)
+    .bind(auth_user.email.as_deref().unwrap_or(""))
     .fetch_one(&state.pool)
     .await?;
     Ok(user)
@@ -254,7 +256,6 @@ pub async fn get_or_create_user(state: &AppState, auth_user: &AuthUser) -> Resul
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -289,7 +290,6 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
             pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),

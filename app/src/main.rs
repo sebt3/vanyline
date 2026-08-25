@@ -25,7 +25,6 @@ use vanyline_lib::k8s::VnlK8sClient;
 #[derive(Clone)]
 pub struct AppState {
     pub config: Config,
-    pub oidc_client: Arc<dyn auth::OidcClientTrait>,
     pub cookie_key: cookie::Key,
     pub pool: sqlx::PgPool,
     pub busy: Arc<Mutex<HashSet<Uuid>>>,
@@ -123,19 +122,9 @@ async fn main() {
         db,
     };
 
-    let oidc_client = Arc::new(
-        auth::oidc::OidcClient::new(&config)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!("{}", e);
-                std::process::exit(1);
-            }),
-    );
-
     let static_dir = config.static_dir.clone();
     let state = AppState {
         config,
-        oidc_client,
         cookie_key,
         pool,
         busy: Arc::new(Mutex::new(HashSet::new())),

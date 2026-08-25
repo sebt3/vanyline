@@ -10,9 +10,10 @@ use vanyline_lib::VnyError;
 use vanyline_lib::domain::{Agent, AgentMode, SkillSelection};
 use vanyline_lib::store::ConfigStore;
 
+use miryad_core::auth::AuthUser;
+
 use crate::{
-    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
-    config_store::PgConfigStore, error::AppError,
+    AppState, api::conversations::get_or_create_user, config_store::PgConfigStore, error::AppError,
 };
 
 const fn default_mode() -> AgentMode {
@@ -260,7 +261,6 @@ async fn validate_skills(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -296,7 +296,6 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
             pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
