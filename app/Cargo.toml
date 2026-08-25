@@ -35,3 +35,6 @@ futures = "0.3"
 base64 = "0.22"
 url = "2"
 parking_lot = "0.12"
+miryad-core = { version = "0.1", default-features = false }
+sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "mock"] }
+sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
