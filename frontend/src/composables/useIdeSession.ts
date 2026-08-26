@@ -1,5 +1,6 @@
 import { ref, type Ref } from 'vue';
 import { ApiError, createApiClient } from '../api/client';
+import type { PagedResult } from './useCrudResource';
 
 export interface IdeActions {
   saveActiveFile?: () => void;
@@ -9,8 +10,6 @@ export interface IdeActions {
   findInActiveFile?: () => void;
   replaceInActiveFile?: () => void;
 }
-
-import type { PagedResult } from './useCrudResource';
 
 interface AgentOut {
   name: string;
