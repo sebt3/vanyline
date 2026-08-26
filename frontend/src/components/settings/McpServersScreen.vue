@@ -10,7 +10,7 @@ import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
 
 interface McpServer {
-  id: string;
+  id: number;
   name: string;
   server_type: string;
   url: string;
@@ -34,7 +34,7 @@ interface UpdateMcpServer {
 }
 
 const client = createApiClient();
-const resource = useCrudResource<McpServer>(client, '/api/mcp-servers');
+const resource = useCrudResource<McpServer>(client, '/api/v1/mcp-servers');
 const { items: fetchedServers, loading, error } = resource;
 
 // Formulaire de création
@@ -44,7 +44,7 @@ const formUrl = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
-const editingId = ref<string | null>(null);
+const editingId = ref<number | null>(null);
 const editName = ref('');
 const editServerType = ref('sse');
 const editUrl = ref('');
@@ -92,7 +92,7 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(id: string) {
+async function saveEdit(id: number) {
   editError.value = null;
   const body: UpdateMcpServer = {
     name: editName.value,
@@ -107,16 +107,16 @@ async function saveEdit(id: string) {
   }
 }
 
-async function deleteServer(id: string) {
+async function deleteServer(id: number) {
   await resource.remove(id);
 }
 
 // Découverte des tools : par serveur, un état de chargement/erreur dédié —
 // tester un serveur ne doit pas bloquer/masquer les autres lignes.
-const discovering = ref<Record<string, boolean>>({});
-const discoverError = ref<Record<string, string | null>>({});
+const discovering = ref<Record<number, boolean>>({});
+const discoverError = ref<Record<number, string | null>>({});
 
-async function discoverTools(id: string) {
+async function discoverTools(id: number) {
   discovering.value = { ...discovering.value, [id]: true };
   discoverError.value = { ...discoverError.value, [id]: null };
   try {

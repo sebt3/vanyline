@@ -17,26 +17,32 @@ describe('LlmProvidersScreen', () => {
       status: 200,
       headers: new Map([['content-type', 'application/json']]),
       json: () =>
-        Promise.resolve([
-          {
-            id: 'aaa',
-            name: 'ollama-local',
-            provider_type: 'ollama',
-            endpoint: 'http://localhost:11434',
-            api_key: null,
-            is_default: true,
-            available_models: null,
-          },
-          {
-            id: 'bbb',
-            name: 'openai-proxy',
-            provider_type: 'openai-compatible',
-            endpoint: 'https://openai.example.com/v1',
-            api_key: 'sk-test',
-            is_default: false,
-            available_models: ['gpt-4'],
-          },
-        ]),
+        Promise.resolve({
+          items: [
+            {
+              id: 1,
+              name: 'ollama-local',
+              provider_type: 'ollama',
+              endpoint: 'http://localhost:11434',
+              api_key: null,
+              is_default: true,
+              available_models: null,
+            },
+            {
+              id: 2,
+              name: 'openai-proxy',
+              provider_type: 'openai-compatible',
+              endpoint: 'https://openai.example.com/v1',
+              api_key: 'sk-test',
+              is_default: false,
+              available_models: ['gpt-4'],
+            },
+          ],
+          page: 1,
+          per_page: 100,
+          total_items: 2,
+          total_pages: 1,
+        }),
     } as unknown as Response);
 
     const wrapper = mount(LlmProvidersScreen);
@@ -60,14 +66,21 @@ describe('LlmProvidersScreen', () => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'GET' && u === '/api/llm-providers') {
+      if (method === 'GET' && u === '/api/v1/llm-providers') {
         fetchCount++;
         if (fetchCount === 1) {
           return {
             ok: true,
             status: 200,
             headers: new Map([['content-type', 'application/json']]),
-            json: () => Promise.resolve([]),
+            json: () =>
+              Promise.resolve({
+                items: [],
+                page: 1,
+                per_page: 100,
+                total_items: 0,
+                total_pages: 1,
+              }),
           } as unknown as Response;
         }
         return {
@@ -75,21 +88,27 @@ describe('LlmProvidersScreen', () => {
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
           json: () =>
-            Promise.resolve([
-              {
-                id: 'new-id',
-                name: 'new-provider',
-                provider_type: 'ollama',
-                endpoint: 'http://localhost:11434',
-                api_key: null,
-                is_default: false,
-                available_models: null,
-              },
-            ]),
+            Promise.resolve({
+              items: [
+                {
+                  id: 3,
+                  name: 'new-provider',
+                  provider_type: 'ollama',
+                  endpoint: 'http://localhost:11434',
+                  api_key: null,
+                  is_default: false,
+                  available_models: null,
+                },
+              ],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
         } as unknown as Response;
       }
 
-      if (method === 'POST' && u === '/api/llm-providers') {
+      if (method === 'POST' && u === '/api/v1/llm-providers') {
         const body = JSON.parse((init?.body as string | undefined) ?? '{}');
         expect(body).toEqual({
           name: 'new-provider',
@@ -102,7 +121,7 @@ describe('LlmProvidersScreen', () => {
           headers: new Map([['content-type', 'application/json']]),
           json: () =>
             Promise.resolve({
-              id: 'new-id',
+              id: 3,
               name: 'new-provider',
               provider_type: 'ollama',
               endpoint: 'http://localhost:11434',
@@ -161,45 +180,59 @@ describe('LlmProvidersScreen', () => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'GET' && u === '/api/llm-providers') {
+      if (method === 'GET' && u === '/api/v1/llm-providers') {
         fetchCount++;
         if (fetchCount === 1) {
           return {
             ok: true,
             status: 200,
             headers: new Map([['content-type', 'application/json']]),
-            json: () => [
-              {
-                id: 'aaa',
-                name: 'ollama-local',
-                provider_type: 'ollama',
-                endpoint: 'http://localhost:11434',
-                api_key: null,
-                is_default: true,
-                available_models: null,
-              },
-            ],
+            json: () =>
+              Promise.resolve({
+                items: [
+                  {
+                    id: 1,
+                    name: 'ollama-local',
+                    provider_type: 'ollama',
+                    endpoint: 'http://localhost:11434',
+                    api_key: null,
+                    is_default: true,
+                    available_models: null,
+                  },
+                ],
+                page: 1,
+                per_page: 100,
+                total_items: 1,
+                total_pages: 1,
+              }),
           } as unknown as Response;
         }
         return {
           ok: true,
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
-          json: () => [
-            {
-              id: 'aaa',
-              name: 'updated-ollama',
-              provider_type: 'ollama',
-              endpoint: 'http://localhost:11435',
-              api_key: null,
-              is_default: true,
-              available_models: null,
-            },
-          ],
+          json: () =>
+            Promise.resolve({
+              items: [
+                {
+                  id: 1,
+                  name: 'updated-ollama',
+                  provider_type: 'ollama',
+                  endpoint: 'http://localhost:11435',
+                  api_key: null,
+                  is_default: true,
+                  available_models: null,
+                },
+              ],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
         } as unknown as Response;
       }
 
-      if (method === 'PUT' && u.includes('/api/llm-providers/aaa')) {
+      if (method === 'PUT' && u.includes('/api/v1/llm-providers/1')) {
         const body = JSON.parse((init?.body as string | undefined) ?? '{}');
         expect(body).toEqual({
           name: 'updated-ollama',
@@ -211,7 +244,7 @@ describe('LlmProvidersScreen', () => {
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
           json: () => ({
-            id: 'aaa',
+            id: 1,
             name: 'updated-ollama',
             provider_type: 'ollama',
             endpoint: 'http://localhost:11435',
@@ -271,17 +304,23 @@ describe('LlmProvidersScreen', () => {
       status: 200,
       headers: new Map([['content-type', 'application/json']]),
       json: () =>
-        Promise.resolve([
-          {
-            id: 'aaa',
-            name: 'ollama-local',
-            provider_type: 'ollama',
-            endpoint: 'http://localhost:11434',
-            api_key: null,
-            is_default: true,
-            available_models: null,
-          },
-        ]),
+        Promise.resolve({
+          items: [
+            {
+              id: 1,
+              name: 'ollama-local',
+              provider_type: 'ollama',
+              endpoint: 'http://localhost:11434',
+              api_key: null,
+              is_default: true,
+              available_models: null,
+            },
+          ],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        }),
     } as unknown as Response);
 
     const wrapper = mount(LlmProvidersScreen);
@@ -313,13 +352,13 @@ describe('LlmProvidersScreen', () => {
     expect(putCalls.length).toBe(0);
   });
 
-  it('cliquer "Tester" → POST /{id}/test, et les modèles retournés s\'affichent', async () => {
+  it('cliquer "Tester" → POST /api/llm-providers/{id}/test, et les modèles retournés s\'affichent', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'POST' && u.includes('/api/llm-providers/aaa/test')) {
+      if (method === 'POST' && u.includes('/api/llm-providers/1/test')) {
         return {
           ok: true,
           status: 200,
@@ -329,23 +368,29 @@ describe('LlmProvidersScreen', () => {
         } as unknown as Response;
       }
 
-      if (method === 'GET' && u === '/api/llm-providers') {
+      if (method === 'GET' && u === '/api/v1/llm-providers') {
         return {
           ok: true,
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
           json: () =>
-            Promise.resolve([
-              {
-                id: 'aaa',
-                name: 'ollama-local',
-                provider_type: 'ollama',
-                endpoint: 'http://localhost:11434',
-                api_key: null,
-                is_default: false,
-                available_models: null,
-              },
-            ]),
+            Promise.resolve({
+              items: [
+                {
+                  id: 1,
+                  name: 'ollama-local',
+                  provider_type: 'ollama',
+                  endpoint: 'http://localhost:11434',
+                  api_key: null,
+                  is_default: false,
+                  available_models: null,
+                },
+              ],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
         } as unknown as Response;
       }
 
@@ -367,21 +412,21 @@ describe('LlmProvidersScreen', () => {
     expect(wrapper.text()).toContain('gemma');
   });
 
-  it('cliquer "Défaut" → PUT /{id}/default, puis re-fetch', async () => {
+  it('cliquer "Défaut" → PUT /api/llm-providers/{id}/default, puis re-fetch', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'PUT' && u.includes('/api/llm-providers/bbb/default')) {
+      if (method === 'PUT' && u.includes('/api/llm-providers/2/default')) {
         return {
           ok: true,
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
           json: () =>
             Promise.resolve({
-              id: 'bbb',
+              id: 2,
               name: 'openai-proxy',
               provider_type: 'openai-compatible',
               endpoint: 'https://openai.example.com/v1',
@@ -392,7 +437,7 @@ describe('LlmProvidersScreen', () => {
         } as unknown as Response;
       }
 
-      if (method === 'GET' && u === '/api/llm-providers') {
+      if (method === 'GET' && u === '/api/v1/llm-providers') {
         fetchCount++;
         if (fetchCount === 1) {
           return {
@@ -400,26 +445,32 @@ describe('LlmProvidersScreen', () => {
             status: 200,
             headers: new Map([['content-type', 'application/json']]),
             json: () =>
-              Promise.resolve([
-                {
-                  id: 'aaa',
-                  name: 'ollama-local',
-                  provider_type: 'ollama',
-                  endpoint: 'http://localhost:11434',
-                  api_key: null,
-                  is_default: true,
-                  available_models: null,
-                },
-                {
-                  id: 'bbb',
-                  name: 'openai-proxy',
-                  provider_type: 'openai-compatible',
-                  endpoint: 'https://openai.example.com/v1',
-                  api_key: 'sk-test',
-                  is_default: false,
-                  available_models: ['gpt-4'],
-                },
-              ]),
+              Promise.resolve({
+                items: [
+                  {
+                    id: 1,
+                    name: 'ollama-local',
+                    provider_type: 'ollama',
+                    endpoint: 'http://localhost:11434',
+                    api_key: null,
+                    is_default: true,
+                    available_models: null,
+                  },
+                  {
+                    id: 2,
+                    name: 'openai-proxy',
+                    provider_type: 'openai-compatible',
+                    endpoint: 'https://openai.example.com/v1',
+                    api_key: 'sk-test',
+                    is_default: false,
+                    available_models: ['gpt-4'],
+                  },
+                ],
+                page: 1,
+                per_page: 100,
+                total_items: 2,
+                total_pages: 1,
+              }),
           } as unknown as Response;
         }
         // re-fetch après SET_DEFAULT — bbb est maintenant défaut
@@ -428,26 +479,32 @@ describe('LlmProvidersScreen', () => {
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
           json: () =>
-            Promise.resolve([
-              {
-                id: 'aaa',
-                name: 'ollama-local',
-                provider_type: 'ollama',
-                endpoint: 'http://localhost:11434',
-                api_key: null,
-                is_default: false,
-                available_models: null,
-              },
-              {
-                id: 'bbb',
-                name: 'openai-proxy',
-                provider_type: 'openai-compatible',
-                endpoint: 'https://openai.example.com/v1',
-                api_key: 'sk-test',
-                is_default: true,
-                available_models: ['gpt-4'],
-              },
-            ]),
+            Promise.resolve({
+              items: [
+                {
+                  id: 1,
+                  name: 'ollama-local',
+                  provider_type: 'ollama',
+                  endpoint: 'http://localhost:11434',
+                  api_key: null,
+                  is_default: false,
+                  available_models: null,
+                },
+                {
+                  id: 2,
+                  name: 'openai-proxy',
+                  provider_type: 'openai-compatible',
+                  endpoint: 'https://openai.example.com/v1',
+                  api_key: 'sk-test',
+                  is_default: true,
+                  available_models: ['gpt-4'],
+                },
+              ],
+              page: 1,
+              per_page: 100,
+              total_items: 2,
+              total_pages: 1,
+            }),
         } as unknown as Response;
       }
 
@@ -462,7 +519,7 @@ describe('LlmProvidersScreen', () => {
     expect(wrapper.text()).toContain('openai-proxy');
 
     const defaultBtns = wrapper.findAll('.btn-default');
-    // Le deuxième fournisseur (bbb) n'est pas défaut → cliquer sur le 2ème bouton
+    // Le deuxième fournisseur (2) n'est pas défaut → cliquer sur le 2ème bouton
     await defaultBtns[1].trigger('click');
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 0));
@@ -471,16 +528,16 @@ describe('LlmProvidersScreen', () => {
     expect(wrapper.text()).toContain('Défaut');
   });
 
-  it('cliquer "Supprimer" → DELETE /{id} puis re-fetch', async () => {
+  it('cliquer "Supprimer" → DELETE /api/v1/llm-providers/{id} puis re-fetch', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
-      if (method === 'DELETE' && u.includes('/api/llm-providers/aaa')) {
+      if (method === 'DELETE' && u.includes('/api/v1/llm-providers/1')) {
         return new Response(null, { status: 204 });
       }
-      if (method === 'GET' && u === '/api/llm-providers') {
+      if (method === 'GET' && u === '/api/v1/llm-providers') {
         fetchCount++;
         if (fetchCount === 1) {
           return {
@@ -488,24 +545,37 @@ describe('LlmProvidersScreen', () => {
             status: 200,
             headers: new Map([['content-type', 'application/json']]),
             json: () =>
-              Promise.resolve([
-                {
-                  id: 'aaa',
-                  name: 'to-delete',
-                  provider_type: 'ollama',
-                  endpoint: 'http://localhost:11434',
-                  api_key: null,
-                  is_default: false,
-                  available_models: null,
-                },
-              ]),
+              Promise.resolve({
+                items: [
+                  {
+                    id: 1,
+                    name: 'to-delete',
+                    provider_type: 'ollama',
+                    endpoint: 'http://localhost:11434',
+                    api_key: null,
+                    is_default: false,
+                    available_models: null,
+                  },
+                ],
+                page: 1,
+                per_page: 100,
+                total_items: 1,
+                total_pages: 1,
+              }),
           } as unknown as Response;
         }
         return {
           ok: true,
           status: 200,
           headers: new Map([['content-type', 'application/json']]),
-          json: () => Promise.resolve([]),
+          json: () =>
+            Promise.resolve({
+              items: [],
+              page: 1,
+              per_page: 100,
+              total_items: 0,
+              total_pages: 1,
+            }),
         } as unknown as Response;
       }
       return new Response(null, { status: 500 });
@@ -522,7 +592,7 @@ describe('LlmProvidersScreen', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     const deleteCalls = fetchSpy.mock.calls.filter(
-      ([url]) => String(url).includes('/api/llm-providers/aaa'),
+      ([url]) => String(url).includes('/api/v1/llm-providers/1'),
     );
     expect(deleteCalls.length).toBe(1);
     expect(deleteCalls[0][1]).toMatchObject({
