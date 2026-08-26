@@ -21,7 +21,6 @@ use miryad_core::rest::resource_router;
 use sea_orm_migration::MigratorTrait;
 use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
-use uuid::Uuid;
 use vanyline_lib::k8s::VnlK8sClient;
 
 #[derive(Clone)]
@@ -29,7 +28,7 @@ pub struct AppState {
     pub config: Config,
     pub cookie_key: cookie::Key,
     pub pool: sqlx::PgPool,
-    pub busy: Arc<Mutex<HashSet<Uuid>>>,
+    pub busy: Arc<Mutex<HashSet<i32>>>,
     pub k8s: Arc<tokio::sync::Mutex<Option<VnlK8sClient>>>,
     pub auth: MiryadAuthState,
 }

@@ -7,10 +7,15 @@ use serde::{Deserialize, Serialize};
 use vanyline_crds::{Sandbox, SandboxSpec};
 
 use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
 
 use crate::{
-    AppState, api::conversations::get_or_create_user, api::owners, error::AppError, k8s,
+    AppState, api::owners, error::AppError, k8s,
 };
+
+fn db_err(e: sea_orm::DbErr) -> AppError {
+    AppError::InternalError(format!("VNL-DB-006: {e}"))
+}
 
 /// Body de `POST /api/sandboxes`. `name` porte le nom du CRD Sandbox ;
 /// `#[serde(flatten)]` passe le reste (`SandboxSpec`) tel quel (passthrough).
@@ -32,8 +37,10 @@ pub async fn list_sandboxes(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<Sandbox>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
     };
@@ -58,8 +65,10 @@ pub async fn get_sandbox(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<Json<Sandbox>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -80,8 +89,10 @@ pub async fn create_sandbox(
     if body.spec.branch.trim().is_empty() {
         return Err(AppError::SandboxBranchEmpty);
     }
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -99,8 +110,10 @@ pub async fn delete_sandbox(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -120,8 +133,10 @@ pub async fn set_sandbox_suspended(
     Path(name): Path<String>,
     Json(body): Json<SuspendBody>,
 ) -> Result<Json<Sandbox>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -156,8 +171,10 @@ pub async fn ws_ticket(
     Path(name): Path<String>,
 ) -> Result<Json<WsTicketOut>, AppError> {
     // 1. scoping owner identique à get_sandbox/delete_sandbox (déjà en place)
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };

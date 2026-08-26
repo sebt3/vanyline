@@ -1,8 +1,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use sqlx::PgPool;
-use uuid::Uuid;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
 use vanyline_lib::VnyError;
 use vanyline_lib::domain::{
@@ -11,9 +10,13 @@ use vanyline_lib::domain::{
 };
 use vanyline_lib::store::ConfigStore;
 
-use crate::db::models::{
-    AgentRecord, LlmProvider as DbLlmProvider, McpServer as DbMcpServer,
-    ModelProfile as DbModelProfile, Skill as DbSkill, Toolset as DbToolset,
+use crate::db::entities::{
+    agents::Model as AgentRecord,
+    llm_providers::Model as DbLlmProvider,
+    mcp_servers::Model as DbMcpServer,
+    model_profiles::Model as DbModelProfile,
+    skills::Model as DbSkill,
+    toolsets::Model as DbToolset,
 };
 
 // ---------------------------------------------------------------------------
@@ -169,51 +172,54 @@ fn domain_skill_meta(row: &DbSkill) -> SkillMeta {
 // ---------------------------------------------------------------------------
 
 pub struct PgConfigStore {
-    pool: PgPool,
-    user_id: Uuid,
+    db: DatabaseConnection,
+    user_id: i32,
 }
 
 impl PgConfigStore {
-    pub const fn new(pool: PgPool, user_id: Uuid) -> Self {
-        Self { pool, user_id }
+    pub fn new(db: DatabaseConnection, user_id: i32) -> Self {
+        Self { db, user_id }
     }
 
     async fn load_providers(&self) -> Result<Vec<DbLlmProvider>, VnyError> {
-        sqlx::query_as::<_, DbLlmProvider>("SELECT * FROM llm_providers WHERE user_id = $1")
-            .bind(self.user_id)
-            .fetch_all(&self.pool)
+        crate::db::entities::llm_providers::Entity::find()
+            .all(&self.db)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 
     async fn load_model_profiles(&self) -> Result<Vec<DbModelProfile>, VnyError> {
-        sqlx::query_as::<_, DbModelProfile>("SELECT * FROM model_profiles WHERE user_id = $1")
-            .bind(self.user_id)
-            .fetch_all(&self.pool)
+        use crate::db::entities::model_profiles::Column;
+        crate::db::entities::model_profiles::Entity::find()
+            .filter(Column::OwnerId.eq(self.user_id))
+            .all(&self.db)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 
     async fn load_toolsets(&self) -> Result<Vec<DbToolset>, VnyError> {
-        sqlx::query_as::<_, DbToolset>("SELECT * FROM toolsets WHERE user_id = $1")
-            .bind(self.user_id)
-            .fetch_all(&self.pool)
+        use crate::db::entities::toolsets::Column;
+        crate::db::entities::toolsets::Entity::find()
+            .filter(Column::OwnerId.eq(self.user_id))
+            .all(&self.db)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 
     async fn load_agent_records(&self) -> Result<Vec<AgentRecord>, VnyError> {
-        sqlx::query_as::<_, AgentRecord>("SELECT * FROM agents WHERE user_id = $1")
-            .bind(self.user_id)
-            .fetch_all(&self.pool)
+        use crate::db::entities::agents::Column;
+        crate::db::entities::agents::Entity::find()
+            .filter(Column::OwnerId.eq(self.user_id))
+            .all(&self.db)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
 
     async fn load_skills(&self) -> Result<Vec<DbSkill>, VnyError> {
-        sqlx::query_as::<_, DbSkill>("SELECT * FROM skills WHERE user_id = $1")
-            .bind(self.user_id)
-            .fetch_all(&self.pool)
+        use crate::db::entities::skills::Column;
+        crate::db::entities::skills::Entity::find()
+            .filter(Column::OwnerId.eq(self.user_id))
+            .all(&self.db)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))
     }
@@ -235,9 +241,8 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
-        let rows = sqlx::query_as::<_, DbMcpServer>("SELECT * FROM mcp_servers WHERE user_id = $1")
-            .bind(self.user_id)
-            .fetch_all(&self.pool)
+        let rows = crate::db::entities::mcp_servers::Entity::find()
+            .all(&self.db)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))?;
         let mut result = Vec::new();
@@ -274,12 +279,14 @@ impl ConfigStore for PgConfigStore {
     }
 
     async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
-        sqlx::query_scalar::<_, String>("SELECT body FROM skills WHERE user_id = $1 AND name = $2")
-            .bind(self.user_id)
-            .bind(name)
-            .fetch_optional(&self.pool)
+        use crate::db::entities::skills::Column;
+        crate::db::entities::skills::Entity::find()
+            .filter(Column::OwnerId.eq(self.user_id))
+            .filter(Column::Name.eq(name))
+            .one(&self.db)
             .await
             .map_err(|e| VnyError::ConfigError(e.to_string()))?
+            .map(|row| row.body)
             .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))
     }
 
@@ -294,59 +301,53 @@ mod tests {
     use super::*;
 
     fn sample_provider(
-        id: Uuid,
-        user_id: Uuid,
+        id: i32,
         name: &str,
         provider_type: &str,
         is_default: bool,
     ) -> DbLlmProvider {
         DbLlmProvider {
             id,
-            user_id,
             name: name.to_string(),
             provider_type: provider_type.to_string(),
             endpoint: "http://localhost:11434".to_string(),
             api_key: None,
             available_models: serde_json::json!([]),
             is_default,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         }
     }
 
     fn sample_model_profile(
-        id: Uuid,
-        user_id: Uuid,
+        id: i32,
+        owner_id: i32,
         name: &str,
-        provider_id: Uuid,
+        provider_id: i32,
         model: &str,
     ) -> DbModelProfile {
         DbModelProfile {
             id,
-            user_id,
+            owner_id,
             name: name.to_string(),
             provider_id,
             model: model.to_string(),
             temperature: None,
             max_tokens: None,
             options: serde_json::json!({}),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         }
     }
 
     fn sample_agent_record(
-        id: Uuid,
-        user_id: Uuid,
+        id: i32,
+        owner_id: i32,
         name: &str,
         mode: &str,
-        model_profile_id: Uuid,
+        model_profile_id: i32,
         toolsets: serde_json::Value,
         skills: serde_json::Value,
     ) -> AgentRecord {
         AgentRecord {
             id,
-            user_id,
+            owner_id,
             name: name.to_string(),
             description: None,
             mode: mode.to_string(),
@@ -354,28 +355,24 @@ mod tests {
             toolsets,
             skills,
             system_prompt: "prompt".to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         }
     }
 
     fn sample_toolset(
-        id: Uuid,
-        user_id: Uuid,
+        id: i32,
+        owner_id: i32,
         name: &str,
         local_tools: serde_json::Value,
         mcp: serde_json::Value,
     ) -> DbToolset {
         DbToolset {
             id,
-            user_id,
+            owner_id,
             name: name.to_string(),
             description: None,
             prompt: None,
             local_tools,
             mcp,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         }
     }
 
@@ -409,15 +406,12 @@ mod tests {
     #[test]
     fn domain_mcp_server_http_streamable() {
         let row = DbMcpServer {
-            id: Uuid::new_v4(),
-            user_id: Uuid::new_v4(),
+            id: 1,
             name: "my-server".to_string(),
             server_type: "http-streamable".to_string(),
             url: "http://localhost:8080".to_string(),
             headers: serde_json::json!({"X-Custom": "value"}),
             available_tools: serde_json::json!([]),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
         let server = domain_mcp_server(&row).unwrap();
         assert_eq!(server.name, "my-server");
@@ -430,15 +424,12 @@ mod tests {
     #[test]
     fn domain_mcp_server_sse_skipped() {
         let row = DbMcpServer {
-            id: Uuid::new_v4(),
-            user_id: Uuid::new_v4(),
+            id: 1,
             name: "sse-srv".to_string(),
             server_type: "sse".to_string(),
             url: "http://localhost:9090".to_string(),
             headers: serde_json::json!({}),
             available_tools: serde_json::json!([]),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
         assert!(domain_mcp_server(&row).is_none());
     }
@@ -446,10 +437,9 @@ mod tests {
     // 5. domain_model_profile_resolves_provider_name
     #[test]
     fn domain_model_profile_resolves_provider_name() {
-        let pid = Uuid::new_v4();
-        let uid = Uuid::new_v4();
-        let row = sample_model_profile(Uuid::new_v4(), uid, "qwen", pid, "qwen2.5");
-        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let pid = 1;
+        let row = sample_model_profile(2, 10, "qwen", pid, "qwen2.5");
+        let provider = sample_provider(pid, "ollama", "ollama", false);
         let result = domain_model_profile(&row, &[provider]).unwrap();
         assert_eq!(result.provider, "ollama");
         assert_eq!(result.name, "qwen");
@@ -459,9 +449,8 @@ mod tests {
     // 11. domain_model_profile_unknown_provider_errors
     #[test]
     fn domain_model_profile_unknown_provider_errors() {
-        let uid = Uuid::new_v4();
-        let row = sample_model_profile(Uuid::new_v4(), uid, "qwen", Uuid::new_v4(), "qwen2.5");
-        let provider = sample_provider(Uuid::new_v4(), uid, "ollama", "ollama", false);
+        let row = sample_model_profile(2, 10, "qwen", 999, "qwen2.5"); // provider 999 absent
+        let provider = sample_provider(1, "ollama", "ollama", false);
         let err = domain_model_profile(&row, &[provider]).unwrap_err();
         assert!(matches!(err, VnyError::LlmProviderNotFound));
     }
@@ -469,21 +458,18 @@ mod tests {
     // 12. domain_model_profile_options_object_passthrough
     #[test]
     fn domain_model_profile_options_object_passthrough() {
-        let uid = Uuid::new_v4();
-        let pid = Uuid::new_v4();
+        let pid = 1;
         let row = DbModelProfile {
-            id: Uuid::new_v4(),
-            user_id: uid,
+            id: 2,
+            owner_id: 10,
             name: "qwen".to_string(),
             provider_id: pid,
             model: "qwen2.5".to_string(),
             temperature: None,
             max_tokens: None,
             options: serde_json::json!({"num_ctx": 65536}),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
-        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let provider = sample_provider(pid, "ollama", "ollama", false);
         let result = domain_model_profile(&row, &[provider]).unwrap();
         assert_eq!(
             result.options.get("num_ctx"),
@@ -494,21 +480,18 @@ mod tests {
     // 13. domain_model_profile_options_non_object_defaults_empty
     #[test]
     fn domain_model_profile_options_non_object_defaults_empty() {
-        let uid = Uuid::new_v4();
-        let pid = Uuid::new_v4();
+        let pid = 1;
         let row = DbModelProfile {
-            id: Uuid::new_v4(),
-            user_id: uid,
+            id: 2,
+            owner_id: 10,
             name: "qwen".to_string(),
             provider_id: pid,
             model: "qwen2.5".to_string(),
             temperature: None,
             max_tokens: None,
             options: serde_json::Value::Null,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
-        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let provider = sample_provider(pid, "ollama", "ollama", false);
         let result = domain_model_profile(&row, &[provider]).unwrap();
         assert!(result.options.is_empty());
     }
@@ -516,21 +499,18 @@ mod tests {
     // 14. domain_model_profile_max_tokens_conversion
     #[test]
     fn domain_model_profile_max_tokens_conversion() {
-        let uid = Uuid::new_v4();
-        let pid = Uuid::new_v4();
+        let pid = 1;
         let row = DbModelProfile {
-            id: Uuid::new_v4(),
-            user_id: uid,
+            id: 2,
+            owner_id: 10,
             name: "qwen".to_string(),
             provider_id: pid,
             model: "qwen2.5".to_string(),
             temperature: None,
             max_tokens: Some(4096),
             options: serde_json::json!({}),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
-        let provider = sample_provider(pid, uid, "ollama", "ollama", false);
+        let provider = sample_provider(pid, "ollama", "ollama", false);
         let result = domain_model_profile(&row, &[provider]).unwrap();
         assert_eq!(result.max_tokens, Some(4096u64));
     }
@@ -538,11 +518,9 @@ mod tests {
     // 15. domain_toolset_parses_local_tools_and_mcp
     #[test]
     fn domain_toolset_parses_local_tools_and_mcp() {
-        let uid = Uuid::new_v4();
-        let id = Uuid::new_v4();
         let local_tools = serde_json::json!(["read_file", "search"]);
         let mcp = serde_json::json!([{"server": "fs", "tools": ["read"]}]);
-        let row = sample_toolset(id, uid, "test-toolset", local_tools, mcp);
+        let row = sample_toolset(1, 10, "test-toolset", local_tools, mcp);
         let toolset = domain_toolset(&row);
         assert_eq!(
             toolset.local_tools,
@@ -556,18 +534,14 @@ mod tests {
     // 16. domain_toolset_defaults_on_invalid_json
     #[test]
     fn domain_toolset_defaults_on_invalid_json() {
-        let uid = Uuid::new_v4();
-        let id = Uuid::new_v4();
         let row = DbToolset {
-            id,
-            user_id: uid,
+            id: 1,
+            owner_id: 10,
             name: "test-toolset".to_string(),
             description: None,
             prompt: None,
             local_tools: serde_json::Value::Null,
             mcp: serde_json::Value::Null,
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
         let toolset = domain_toolset(&row);
         assert!(toolset.local_tools.is_empty());
@@ -577,18 +551,14 @@ mod tests {
     // 17. domain_toolset_preserves_description_and_prompt
     #[test]
     fn domain_toolset_preserves_description_and_prompt() {
-        let uid = Uuid::new_v4();
-        let id = Uuid::new_v4();
         let row = DbToolset {
-            id,
-            user_id: uid,
+            id: 1,
+            owner_id: 10,
             name: "desc-toolset".to_string(),
             description: Some("desc".to_string()),
             prompt: Some("frag".to_string()),
             local_tools: serde_json::json!([]),
             mcp: serde_json::json!([]),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
         let toolset = domain_toolset(&row);
         assert_eq!(toolset.description, Some("desc".to_string()));
@@ -596,15 +566,13 @@ mod tests {
 
         // second case: both None stay None
         let row2 = DbToolset {
-            id: Uuid::new_v4(),
-            user_id: uid,
+            id: 2,
+            owner_id: 10,
             name: "blank-toolset".to_string(),
             description: None,
             prompt: None,
             local_tools: serde_json::json!([]),
             mcp: serde_json::json!([]),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
         let toolset2 = domain_toolset(&row2);
         assert_eq!(toolset2.description, None);
@@ -615,43 +583,26 @@ mod tests {
     #[test]
     fn domain_skill_meta_index_only() {
         let row = DbSkill {
-            id: Uuid::new_v4(),
-            user_id: Uuid::new_v4(),
+            id: 1,
+            owner_id: 10,
             name: "pdf".to_string(),
             description: "PDF processing".to_string(),
             body: "# corps long...".to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
         let meta = domain_skill_meta(&row);
         assert_eq!(meta.name, "pdf");
         assert_eq!(meta.description, "PDF processing");
     }
 
-    #[allow(dead_code)]
-    fn sample_skill(id: Uuid, user_id: Uuid, name: &str, description: &str, body: &str) -> DbSkill {
-        DbSkill {
-            id,
-            user_id,
-            name: name.to_string(),
-            description: description.to_string(),
-            body: body.to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
-        }
-    }
-
     // 19. domain_skill_meta_empty_description
     #[test]
     fn domain_skill_meta_empty_description() {
         let row = DbSkill {
-            id: Uuid::new_v4(),
-            user_id: Uuid::new_v4(),
+            id: 1,
+            owner_id: 10,
             name: "blank".to_string(),
             description: String::new(),
             body: "body".to_string(),
-            created_at: chrono::Utc::now(),
-            updated_at: chrono::Utc::now(),
         };
         let meta = domain_skill_meta(&row);
         assert_eq!(meta.name, "blank");
@@ -681,16 +632,13 @@ mod tests {
     // 22. resolve_model_profile_name_found
     #[test]
     fn resolve_model_profile_name_found() {
-        let uid = Uuid::new_v4();
-        let pid = Uuid::new_v4();
-        let pid2 = Uuid::new_v4();
-        let row = sample_model_profile(pid2, uid, "qwen-pro", pid, "qwen2.5");
+        let row = sample_model_profile(2, 10, "qwen-pro", 1, "qwen2.5");
         let agent = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "coder",
             "primary",
-            pid2,
+            2,
             serde_json::json!([]),
             serde_json::json!([]),
         );
@@ -702,14 +650,11 @@ mod tests {
     // 23. resolve_model_profile_name_unknown_errors
     #[test]
     fn resolve_model_profile_name_unknown_errors() {
-        let uid = Uuid::new_v4();
-        let row_id = Uuid::new_v4();
-        let pid = Uuid::new_v4();
-        let row = sample_model_profile(row_id, uid, "qwen", pid, "qwen2.5");
-        let orphan_id = Uuid::new_v4(); // id qui n'appartient à aucun profil
+        let row = sample_model_profile(2, 10, "qwen", 1, "qwen2.5");
+        let orphan_id = 999; // id qui n'appartient à aucun profil
         let agent = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "coder",
             "primary",
             orphan_id, // id absent de profiles
@@ -725,15 +670,13 @@ mod tests {
     // 24. domain_agent_record_full_conversion
     #[test]
     fn domain_agent_record_full_conversion() {
-        let uid = Uuid::new_v4();
-        let row_id = Uuid::new_v4();
-        let row = sample_model_profile(row_id, uid, "qwen-pro", Uuid::new_v4(), "qwen2.5");
+        let row = sample_model_profile(2, 10, "qwen-pro", 1, "qwen2.5");
         let agent = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "coder",
             "subagent",
-            row_id, // model_profile_id pointe sur le row créé ci-dessus
+            2, // model_profile_id pointe sur le row créé ci-dessus
             serde_json::json!(["fs", "build"]),
             serde_json::json!(["pdf"]),
         );
@@ -750,24 +693,22 @@ mod tests {
     // 25. domain_agent_record_skills_auto_and_none
     #[test]
     fn domain_agent_record_skills_auto_and_none() {
-        let uid = Uuid::new_v4();
-        let row_id = Uuid::new_v4();
-        let row = sample_model_profile(row_id, uid, "qwen", Uuid::new_v4(), "qwen2.5");
+        let row = sample_model_profile(2, 10, "qwen", 1, "qwen2.5");
         let agent_auto = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "a",
             "primary",
-            row_id,
+            2,
             serde_json::json!([]),
             serde_json::json!("auto"),
         );
         let agent_none = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            4,
+            10,
             "b",
             "primary",
-            row_id,
+            2,
             serde_json::json!([]),
             serde_json::json!("none"),
         );
@@ -780,15 +721,13 @@ mod tests {
     // 27. domain_agent_record_invalid_toolsets_json_defaults_empty
     #[test]
     fn domain_agent_record_invalid_toolsets_json_defaults_empty() {
-        let uid = Uuid::new_v4();
-        let row_id = Uuid::new_v4();
-        let row = sample_model_profile(row_id, uid, "qwen", Uuid::new_v4(), "qwen2.5");
+        let row = sample_model_profile(2, 10, "qwen", 1, "qwen2.5");
         let agent = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "a",
             "primary",
-            row_id,
+            2,
             serde_json::Value::Null,
             serde_json::json!([]),
         );
@@ -799,15 +738,13 @@ mod tests {
     // 28. domain_agent_record_invalid_skills_json_defaults_auto
     #[test]
     fn domain_agent_record_invalid_skills_json_defaults_auto() {
-        let uid = Uuid::new_v4();
-        let row_id = Uuid::new_v4();
-        let row = sample_model_profile(row_id, uid, "qwen", Uuid::new_v4(), "qwen2.5");
+        let row = sample_model_profile(2, 10, "qwen", 1, "qwen2.5");
         let agent = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "a",
             "primary",
-            row_id,
+            2,
             serde_json::json!([]),
             serde_json::Value::Null,
         );
@@ -818,13 +755,12 @@ mod tests {
     // 29. domain_agent_record_unknown_model_profile_errors
     #[test]
     fn domain_agent_record_unknown_model_profile_errors() {
-        let uid = Uuid::new_v4();
         let agent_record = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "a",
             "primary",
-            Uuid::new_v4(), // absent de profiles
+            999, // absent de profiles
             serde_json::json!([]),
             serde_json::json!([]),
         );
@@ -836,16 +772,13 @@ mod tests {
     // 30. domain_agent_record_invalid_mode_errors
     #[test]
     fn domain_agent_record_invalid_mode_errors() {
-        let uid = Uuid::new_v4();
-        let pid = Uuid::new_v4();
-        let row_id = Uuid::new_v4();
-        let row = sample_model_profile(row_id, uid, "qwen", pid, "qwen2.5");
+        let row = sample_model_profile(2, 10, "qwen", 1, "qwen2.5");
         let agent = sample_agent_record(
-            Uuid::new_v4(),
-            uid,
+            3,
+            10,
             "a",
             "bogus",
-            row_id,
+            2,
             serde_json::json!([]),
             serde_json::json!([]),
         );

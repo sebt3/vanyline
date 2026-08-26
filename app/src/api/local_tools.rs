@@ -4,10 +4,15 @@ use serde::Serialize;
 use vanyline_tools::mcp::{command_tools, filesystem_tools, search_tools};
 
 use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
 
 use crate::{
-    AppState, api::conversations::get_or_create_user, error::AppError,
+    AppState, error::AppError,
 };
+
+fn db_err(e: sea_orm::DbErr) -> AppError {
+    AppError::InternalError(format!("VNL-DB-006: {e}"))
+}
 
 #[derive(Serialize)]
 pub struct LocalTool {
@@ -39,7 +44,9 @@ pub async fn list_local_tools(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<LocalTool>>, AppError> {
-    get_or_create_user(&state, &user).await?;
+    resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
     Ok(Json(flatten_local_tools()))
 }
 

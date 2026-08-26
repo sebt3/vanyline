@@ -2,10 +2,15 @@ use axum::{Json, extract::State};
 use serde::Serialize;
 
 use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
 
 use crate::{
-    AppState, api::conversations::get_or_create_user, error::AppError,
+    AppState, api::owners, error::AppError,
 };
+
+fn db_err(e: sea_orm::DbErr) -> AppError {
+    AppError::InternalError(format!("VNL-DB-006: {e}"))
+}
 
 #[derive(Serialize)]
 pub struct MeResponse {
@@ -17,10 +22,14 @@ pub async fn handler_me(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<MeResponse>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let k8s_owner_name = owners::resolve_owner_name(&state, principal_user.id).await?;
     Ok(Json(MeResponse {
-        email: db_user.email,
-        k8s_owner_name: db_user.k8s_owner_name,
+        email: principal_user.email.unwrap_or_default(),
+        k8s_owner_name,
     }))
 }
 

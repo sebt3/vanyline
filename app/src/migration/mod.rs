@@ -7,6 +7,7 @@ mod m20260825_000006_create_vanyline_agents;
 mod m20260825_000007_create_vanyline_chat_contexts;
 mod m20260825_000008_create_vanyline_conversations;
 mod m20260825_000009_create_vanyline_messages;
+mod m20260825_000010_create_vanyline_owner_links;
 
 use sea_orm::sea_query::{Alias, DynIden, IntoIden};
 use sea_orm_migration::{MigrationTrait, MigratorTrait};
@@ -25,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(m20260825_000007_create_vanyline_chat_contexts::Migration),
             Box::new(m20260825_000008_create_vanyline_conversations::Migration),
             Box::new(m20260825_000009_create_vanyline_messages::Migration),
+            Box::new(m20260825_000010_create_vanyline_owner_links::Migration),
         ]
     }
 

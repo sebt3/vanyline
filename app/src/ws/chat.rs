@@ -12,18 +12,22 @@ use futures::stream::SplitSink;
 use futures::{SinkExt, StreamExt};
 use serde::Deserialize;
 use tokio::sync::mpsc;
-use uuid::Uuid;
 
 use vanyline_lib::domain::{McpSelection, McpServer, McpTransport};
 use vanyline_lib::event::{ChatEvent, EventSink, ToolCallRecord};
 use vanyline_lib::session::SessionContext;
 
 use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
+use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set};
 
 use crate::{
-    AppState, api::conversations::get_or_create_user,
-    config_store::PgConfigStore, error::AppError,
+    AppState, config_store::PgConfigStore, error::AppError,
 };
+
+fn db_err(e: sea_orm::DbErr) -> AppError {
+    AppError::InternalError(format!("VNL-DB-006: {e}"))
+}
 
 #[derive(Deserialize)]
 struct ClientMessage {
@@ -50,13 +54,13 @@ impl EventSink for ChannelSink {
 pub async fn ws_chat_handler(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(conversation_id): Path<Uuid>,
+    Path(conversation_id): Path<i32>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_socket(socket, state, user, conversation_id))
 }
 
-async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conversation_id: Uuid) {
+async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conversation_id: i32) {
     if let Err(e) = run_socket(socket, state, user, conversation_id).await {
         tracing::error!("ws chat error: {e}");
     }
@@ -68,7 +72,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser, conve
 /// spawn). Extrait de `run_socket` pour être testable sans WebSocket/DB
 /// (R4).
 #[allow(clippy::unwrap_used)] // mutex empoisonne = etat deja corrompu ailleurs, panic attendu
-fn try_acquire_busy(busy: &Mutex<HashSet<Uuid>>, conversation_id: Uuid) -> bool {
+fn try_acquire_busy(busy: &Mutex<HashSet<i32>>, conversation_id: i32) -> bool {
     let mut guard = busy.lock().unwrap();
     if guard.contains(&conversation_id) {
         false
@@ -82,8 +86,8 @@ fn try_acquire_busy(busy: &Mutex<HashSet<Uuid>>, conversation_id: Uuid) -> bool 
 /// la tâche — `Drop` est synchrone, cohérent avec `busy: Mutex` (pas
 /// `tokio::sync::Mutex`). Même pattern que `BusyGuard` côté RPC.
 struct BusyGuard {
-    busy: Arc<Mutex<HashSet<Uuid>>>,
-    conversation_id: Uuid,
+    busy: Arc<Mutex<HashSet<i32>>>,
+    conversation_id: i32,
 }
 
 impl Drop for BusyGuard {
@@ -97,20 +101,21 @@ async fn run_socket(
     socket: WebSocket,
     state: AppState,
     user: AuthUser,
-    conversation_id: Uuid,
+    conversation_id: i32,
 ) -> Result<(), AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let user_id = db_user.id;
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let user_id = principal_user.id;
 
-    let conv = sqlx::query_as::<_, crate::db::models::Conversation>(
-        "SELECT * FROM conversations WHERE id = $1",
-    )
-    .bind(conversation_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::ConversationNotFound)?;
+    let conv = crate::db::entities::conversations::Entity::find_by_id(conversation_id)
+        .one(db)
+        .await
+        .map_err(db_err)?
+        .ok_or(AppError::ConversationNotFound)?;
 
-    if conv.user_id != db_user.id {
+    if conv.owner_id != user_id {
         return Err(AppError::ConversationAccessDenied);
     }
 
@@ -227,15 +232,15 @@ fn send_tool_unavailable(tx: &mpsc::UnboundedSender<ChatEvent>, server: &str, re
 async fn resolve_extra_mcp(
     state: &AppState,
     tx: &mpsc::UnboundedSender<ChatEvent>,
-    context_id: Uuid,
-    user_id: Uuid,
+    context_id: i32,
+    user_id: i32,
 ) -> Result<Vec<(McpServer, McpSelection)>, AppError> {
-    let context = sqlx::query_as::<_, crate::db::models::ChatContext>(
-        "SELECT * FROM chat_contexts WHERE id = $1",
-    )
-    .bind(context_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let db = &state.auth.db;
+    let context = crate::db::entities::chat_contexts::Entity::find_by_id(context_id)
+        .one(db)
+        .await
+        .map_err(db_err)?
+        .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
 
     if context.kind != "sandbox" {
         return Ok(Vec::new());
@@ -329,34 +334,36 @@ async fn resolve_extra_mcp(
 async fn handle_message(
     tx: &mpsc::UnboundedSender<ChatEvent>,
     state: &AppState,
-    conversation_id: Uuid,
-    context_id: Uuid,
-    agent_id: Uuid,
-    user_id: Uuid,
+    conversation_id: i32,
+    context_id: i32,
+    agent_id: i32,
+    user_id: i32,
     user_msg: &str,
 ) -> Result<(), AppError> {
-    let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-        .bind(agent_id)
-        .fetch_optional(&state.pool)
-        .await?
+    let db = &state.auth.db;
+    let agent_name: String = crate::db::entities::agents::Entity::find_by_id(agent_id)
+        .one(db)
+        .await
+        .map_err(db_err)?
+        .map(|a| a.name)
         .ok_or(AppError::AgentNotFound)?;
 
     let history = load_history(state, conversation_id).await?;
 
-    persist_message(state, conversation_id, "user", user_msg, None).await?;
+    persist_message(state, conversation_id, user_id, "user", user_msg, None).await?;
 
     let todo_initial: Option<String> =
-        sqlx::query_scalar("SELECT todo FROM conversations WHERE id = $1")
-            .bind(conversation_id)
-            .fetch_optional(&state.pool)
-            .await?
-            .flatten();
+        crate::db::entities::conversations::Entity::find_by_id(conversation_id)
+            .one(db)
+            .await
+            .map_err(db_err)?
+            .and_then(|conv| conv.todo);
 
     let extra_mcp = resolve_extra_mcp(state, tx, context_id, user_id).await?;
 
     let sink = Arc::new(ChannelSink { tx: tx.clone() });
     let ctx = SessionContext {
-        store: Arc::new(PgConfigStore::new(state.pool.clone(), user_id)),
+        store: Arc::new(PgConfigStore::new(state.auth.db.clone(), user_id)),
         sink,
         local_tools: HashMap::new(),
         subagent_depth_max: 1,
@@ -372,6 +379,7 @@ async fn handle_message(
     persist_message(
         state,
         conversation_id,
+        user_id,
         "assistant",
         &result.response_text,
         if tool_calls.is_empty() {
@@ -384,11 +392,18 @@ async fn handle_message(
 
     let current_todo = ctx.todo_state.lock().unwrap().clone();
     if let Some(todo) = todo_to_persist(current_todo, todo_initial) {
-        sqlx::query("UPDATE conversations SET todo = $1 WHERE id = $2")
-            .bind(&todo)
-            .bind(conversation_id)
-            .execute(&state.pool)
-            .await?;
+        let mut active: crate::db::entities::conversations::ActiveModel =
+            crate::db::entities::conversations::Entity::find_by_id(conversation_id)
+                .one(db)
+                .await
+                .map_err(db_err)?
+                .ok_or(AppError::ConversationNotFound)?
+                .into_active_model();
+        active.todo = Set(Some(todo));
+        crate::db::entities::conversations::Entity::update(active)
+            .exec(db)
+            .await
+            .map_err(db_err)?;
     }
 
     Ok(())
@@ -423,14 +438,15 @@ fn todo_to_persist(current: Option<String>, initial: Option<String>) -> Option<S
 
 async fn load_history(
     state: &AppState,
-    conversation_id: Uuid,
+    conversation_id: i32,
 ) -> Result<Vec<rig_core::message::Message>, AppError> {
-    let messages = sqlx::query_as::<_, crate::db::models::Message>(
-        "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
-    )
-    .bind(conversation_id)
-    .fetch_all(&state.pool)
-    .await?;
+    let db = &state.auth.db;
+    let messages = crate::db::entities::messages::Entity::find()
+        .filter(crate::db::entities::messages::Column::ConversationId.eq(conversation_id))
+        .order_by_asc(crate::db::entities::messages::Column::CreatedAt)
+        .all(db)
+        .await
+        .map_err(db_err)?;
 
     let history: Vec<rig_core::message::Message> = messages
         .into_iter()
@@ -449,31 +465,45 @@ async fn load_history(
 
 async fn persist_message(
     state: &AppState,
-    conversation_id: Uuid,
+    conversation_id: i32,
+    user_id: i32,
     role: &str,
     content: &str,
     tool_calls: Option<Vec<vanyline_lib::ToolCall>>,
-) -> Result<Uuid, AppError> {
+) -> Result<i32, AppError> {
+    let db = &state.auth.db;
     let payload = serde_json::json!({
         "role": role,
         "content": content,
         "tool_calls": tool_calls,
     });
-    let id: Uuid = sqlx::query_scalar(
-        r"INSERT INTO messages (conversation_id, role, payload)
-           VALUES ($1, $2, $3)
-           RETURNING id",
-    )
-    .bind(conversation_id)
-    .bind(role)
-    .bind(&payload)
-    .fetch_one(&state.pool)
-    .await?;
+    let active: crate::db::entities::messages::ActiveModel =
+        crate::db::entities::messages::ActiveModel {
+            id: Set(0),
+            owner_id: Set(user_id),
+            conversation_id: Set(conversation_id),
+            role: Set(role.to_string()),
+            payload: Set(payload),
+            created_at: Set(chrono::Utc::now()),
+        };
+    let res = crate::db::entities::messages::Entity::insert(active)
+        .exec(db)
+        .await
+        .map_err(db_err)?;
+    let id = res.last_insert_id as i32;
 
-    sqlx::query("UPDATE conversations SET updated_at = NOW() WHERE id = $1")
-        .bind(conversation_id)
-        .execute(&state.pool)
-        .await?;
+    let mut conv_active: crate::db::entities::conversations::ActiveModel =
+        crate::db::entities::conversations::Entity::find_by_id(conversation_id)
+            .one(db)
+            .await
+            .map_err(db_err)?
+            .ok_or(AppError::ConversationNotFound)?
+            .into_active_model();
+    conv_active.updated_at = Set(chrono::Utc::now());
+    crate::db::entities::conversations::Entity::update(conv_active)
+        .exec(db)
+        .await
+        .map_err(db_err)?;
 
     Ok(id)
 }
@@ -517,7 +547,7 @@ mod tests {
     #[test]
     fn try_acquire_busy_first_call_succeeds_second_fails() {
         let busy = Mutex::new(HashSet::new());
-        let conv = Uuid::new_v4();
+        let conv = 1;
         assert!(try_acquire_busy(&busy, conv));
         assert!(!try_acquire_busy(&busy, conv));
     }
@@ -525,8 +555,8 @@ mod tests {
     #[test]
     fn try_acquire_busy_different_conversations_independent() {
         let busy = Mutex::new(HashSet::new());
-        let a = Uuid::new_v4();
-        let b = Uuid::new_v4();
+        let a = 1;
+        let b = 2;
         assert!(try_acquire_busy(&busy, a));
         assert!(try_acquire_busy(&busy, b));
     }
@@ -534,7 +564,7 @@ mod tests {
     #[test]
     fn busy_guard_removes_conversation_on_drop() {
         let busy = Arc::new(Mutex::new(HashSet::new()));
-        let conv = Uuid::new_v4();
+        let conv = 1;
         busy.lock().unwrap().insert(conv);
         {
             let _guard = BusyGuard {

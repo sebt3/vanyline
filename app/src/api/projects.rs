@@ -7,10 +7,15 @@ use serde::Deserialize;
 use vanyline_crds::{EgressRule, Project, ProjectSpec, PvcRef};
 
 use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
 
 use crate::{
-    AppState, api::conversations::get_or_create_user, api::owners, error::AppError, k8s,
+    AppState, api::owners, error::AppError, k8s,
 };
+
+fn db_err(e: sea_orm::DbErr) -> AppError {
+    AppError::InternalError(format!("VNL-DB-006: {e}"))
+}
 
 /// Body de `POST /api/projects`. Reprend les champs de `ProjectSpec` SAUF `owner`,
 /// qui est dérivé de l'utilisateur authentifié (décision développeur : owner dérivé).
@@ -44,8 +49,10 @@ pub async fn list_projects(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<Project>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
     };
@@ -64,8 +71,10 @@ pub async fn get_project(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<Json<Project>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -82,8 +91,10 @@ pub async fn create_project(
     user: AuthUser,
     Json(body): Json<CreateProjectBody>,
 ) -> Result<(StatusCode, Json<Project>), AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = owners::ensure_owner(&state, &db_user).await?;
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = owners::ensure_owner(&state, principal_user.id, &user).await?;
     let spec = ProjectSpec {
         owner: owner.clone(),
         repo_url: body.repo_url,
@@ -107,8 +118,10 @@ pub async fn delete_project(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(db_err)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };

@@ -5,5 +5,6 @@ pub mod llm_providers;
 pub mod mcp_servers;
 pub mod messages;
 pub mod model_profiles;
+pub mod owner_links;
 pub mod skills;
 pub mod toolsets;

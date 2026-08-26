@@ -1,5 +1,4 @@
 pub mod entities;
-pub mod models;
 
 use sqlx::PgPool;
 

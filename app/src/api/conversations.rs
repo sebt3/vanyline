@@ -24,7 +24,6 @@ use crate::{
         },
         messages::{Entity as MessageEntity, Model as MessageModel},
     },
-    db::models::User,
     error::AppError,
 };
 
@@ -43,8 +42,8 @@ pub struct CreateConversation {
     pub context: ChatContextInput,
 }
 
-/// Type alias pour la réponse de `get_messages` : `Message` (sqlx) est déjà
-/// importé via `crate::db::models`.
+/// Type alias pour la réponse de `get_messages` : le Model SeaORM
+/// `vanyline_messages`.
 type MessageOut = MessageModel;
 
 fn db_err(e: sea_orm::DbErr) -> AppError {
@@ -322,28 +321,6 @@ pub async fn get_messages(
         .map_err(db_err)?;
 
     Ok(Json(messages))
-}
-
-/// Utilitaire sqlx conservé pour `me.rs`, `owners.rs`, `projects.rs`,
-/// `sandboxes.rs`, `ws/chat.rs` — ne pas retirer.
-pub async fn get_or_create_user(state: &AppState, auth_user: &AuthUser) -> Result<User, AppError> {
-    if let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE oidc_sub = $1")
-        .bind(&auth_user.subject)
-        .fetch_optional(&state.pool)
-        .await?
-    {
-        return Ok(user);
-    }
-
-    let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (oidc_sub, email) VALUES ($1, $2)
-         ON CONFLICT (oidc_sub) DO UPDATE SET email = EXCLUDED.email RETURNING *",
-    )
-    .bind(&auth_user.subject)
-    .bind(auth_user.email.as_deref().unwrap_or(""))
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(user)
 }
 
 #[cfg(test)]
