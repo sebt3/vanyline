@@ -2,14 +2,22 @@ import { ref, type Ref } from 'vue';
 import type { ApiClient } from '../api/client';
 import { ApiError } from '../api/client';
 
+export interface PagedResult<T> {
+  items: T[];
+  page: number;
+  per_page: number;
+  total_items: number;
+  total_pages: number;
+}
+
 export interface CrudResource<T> {
   items: Ref<T[]>;
   loading: Ref<boolean>;
   error: Ref<string | null>;
   fetch: () => Promise<void>;
   create: (body: unknown) => Promise<T>;
-  update: (id: string, body: unknown) => Promise<T>;
-  remove: (id: string) => Promise<void>;
+  update: (id: string | number, body: unknown) => Promise<T>;
+  remove: (id: string | number) => Promise<void>;
 }
 
 /** Fetch/loading/error + CRUD sur `basePath`, factorisant le pattern répété dans
@@ -25,7 +33,8 @@ export function useCrudResource<T>(client: ApiClient, basePath: string): CrudRes
 
   async function fetchAll(): Promise<void> {
     try {
-      items.value = await client.get<T[]>(basePath);
+      const data = await client.get<T[] | PagedResult<T>>(basePath);
+      items.value = Array.isArray(data) ? data : data.items;
     } catch (e) {
       error.value = e instanceof ApiError ? e.message : String(e);
     } finally {
@@ -39,13 +48,13 @@ export function useCrudResource<T>(client: ApiClient, basePath: string): CrudRes
     return created;
   }
 
-  async function update(id: string, body: unknown): Promise<T> {
+  async function update(id: string | number, body: unknown): Promise<T> {
     const updated = await client.put<T>(`${basePath}/${id}`, body);
     await fetchAll();
     return updated;
   }
 
-  async function remove(id: string): Promise<void> {
+  async function remove(id: string | number): Promise<void> {
     try {
       await client.delete(`${basePath}/${id}`);
       await fetchAll();
