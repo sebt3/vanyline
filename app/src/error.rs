@@ -10,8 +10,6 @@ use thiserror::Error;
 pub enum AppError {
     #[error("VNL-AUTH-004: Forbidden")]
     Forbidden,
-    #[error("VNL-DB-001: Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
     #[error("VNL-LLM-001: LLM provider error: {0}")]
     LlmError(String),
     #[error("VNL-LLM-002: LLM provider not found")]
@@ -61,7 +59,6 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             Self::LlmError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),

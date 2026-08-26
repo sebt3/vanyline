@@ -27,7 +27,6 @@ use vanyline_lib::k8s::VnlK8sClient;
 pub struct AppState {
     pub config: Config,
     pub cookie_key: cookie::Key,
-    pub pool: sqlx::PgPool,
     pub busy: Arc<Mutex<HashSet<i32>>>,
     pub k8s: Arc<tokio::sync::Mutex<Option<VnlK8sClient>>>,
     pub auth: MiryadAuthState,
@@ -82,18 +81,6 @@ async fn main() {
         cookie::Key::from(&bytes[..64])
     };
 
-    let pool = db::create_pool(&config.database_url)
-        .await
-        .unwrap_or_else(|e| {
-            tracing::error!("VNL-DB-001: cannot connect to database: {}", e);
-            std::process::exit(1);
-        });
-
-    db::run_migrations(&pool).await.unwrap_or_else(|e| {
-        tracing::error!("{}", e);
-        std::process::exit(1);
-    });
-
     let db = sea_orm::Database::connect(&config.database_url)
         .await
         .unwrap_or_else(|e| {
@@ -134,7 +121,6 @@ async fn main() {
     let state = AppState {
         config,
         cookie_key,
-        pool,
         busy: Arc::new(Mutex::new(HashSet::new())),
         k8s: Arc::new(tokio::sync::Mutex::new(None)),
         auth: auth_state,

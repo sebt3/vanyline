@@ -1,1 +1,0 @@
-ALTER TABLE mcp_servers ADD COLUMN available_tools JSONB NOT NULL DEFAULT '[]';

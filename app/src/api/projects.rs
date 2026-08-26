@@ -173,7 +173,6 @@ mod tests {
         let state = AppState {
             config,
             cookie_key,
-            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
             auth: crate::auth::test_support::test_auth_state(),
