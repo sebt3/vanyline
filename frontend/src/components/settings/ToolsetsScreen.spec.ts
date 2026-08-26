@@ -35,24 +35,32 @@ describe('ToolsetsScreen', () => {
   }
 
   // ── Test 1 : Tableau inchangé ───────────────────────────────────────────────
-  it('tableau inchangé : GET renvoie 2 toolsets → noms, local_tools, serveurs MCP affichés', async () => {
+  it('tableau inchangé : GET renvoie PagedResult → noms, local_tools, serveurs MCP affichés', async () => {
     mockFetch((url, init) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && url === '/api/toolsets') {
-        return jsonResponse([
-          {
-            name: 'default',
-            description: 'Outils par défaut',
-            prompt: 'Prompt par défaut',
-            local_tools: ['git', 'filesystem'],
-            mcp: [{ server: 'code-server' }, { server: 'git-server', tools: ['diff', 'status'] }],
-          },
-          {
-            name: 'minimal',
-            local_tools: [],
-            mcp: [],
-          },
-        ]);
+      if (method === 'GET' && url === '/api/v1/toolsets') {
+        return jsonResponse({
+          items: [
+            {
+              id: 1,
+              name: 'default',
+              description: 'Outils par défaut',
+              prompt: 'Prompt par défaut',
+              local_tools: ['git', 'filesystem'],
+              mcp: [{ server: 'code-server' }, { server: 'git-server', tools: ['diff', 'status'] }],
+            },
+            {
+              id: 2,
+              name: 'minimal',
+              local_tools: [],
+              mcp: [],
+            },
+          ],
+          page: 1,
+          per_page: 100,
+          total_items: 2,
+          total_pages: 1,
+        });
       }
       return undefined;
     });
@@ -74,22 +82,40 @@ describe('ToolsetsScreen', () => {
     let fetchCount = 0;
     mockFetch((url, init) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && url === '/api/toolsets') {
+      if (method === 'GET' && url === '/api/v1/toolsets') {
         fetchCount++;
         if (fetchCount === 1) {
-          return jsonResponse([{ name: 'default', mcp: [], local_tools: [] }]);
+          return jsonResponse({
+            items: [{ id: 1, name: 'default', mcp: [], local_tools: [] }],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          });
         }
-        return jsonResponse([{ name: 'new-toolset', mcp: [], local_tools: ['a', 'b'] }]);
+        return jsonResponse({
+          items: [{ id: 2, name: 'new-toolset', mcp: [], local_tools: ['a', 'b'] }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
-      if (method === 'POST' && url === '/api/toolsets') {
+      if (method === 'POST' && url === '/api/v1/toolsets') {
         postBody = JSON.parse(String(init?.body));
-        return jsonResponse({ name: 'new-toolset' });
+        return jsonResponse({ id: 2, name: 'new-toolset' });
       }
       if (url === '/api/local-tools') {
         return jsonResponse([{ name: 'a', description: 'Tool A' }, { name: 'b', description: 'Tool B' }]);
       }
-      if (url === '/api/mcp-servers') {
-        return jsonResponse([{ name: 'srv1', server_type: 'http', url: 'http://srv1', available_tools: [] }]);
+      if (url === '/api/v1/mcp-servers') {
+        return jsonResponse({
+          items: [{ id: 1, name: 'srv1', server_type: 'http', url: 'http://srv1', available_tools: [] }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
       return undefined;
     });
@@ -142,22 +168,31 @@ describe('ToolsetsScreen', () => {
     let postBody: unknown;
     mockFetch((url, init) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && url === '/api/toolsets') {
+      if (method === 'GET' && url === '/api/v1/toolsets') {
         fetchCount++;
-        return jsonResponse([{ name: 'default', mcp: [], local_tools: [] }]);
+        return jsonResponse({
+          items: [{ id: 1, name: 'default', mcp: [], local_tools: [] }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
-      if (method === 'POST' && url === '/api/toolsets') {
+      if (method === 'POST' && url === '/api/v1/toolsets') {
         postBody = JSON.parse(String(init?.body));
-        return jsonResponse({ name: 'mcp-toolset' });
+        return jsonResponse({ id: 2, name: 'mcp-toolset' });
       }
       if (url === '/api/local-tools') {
         return jsonResponse([{ name: 'git', description: 'Git tool' }]);
       }
-      if (url === '/api/mcp-servers') {
-        return jsonResponse([{
-          name: 'code-server', server_type: 'http', url: 'http://code',
-          available_tools: ['diff', 'status', 'log'],
-        }]);
+      if (url === '/api/v1/mcp-servers') {
+        return jsonResponse({
+          items: [{ id: 1, name: 'code-server', server_type: 'http', url: 'http://code', available_tools: ['diff', 'status', 'log'] }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
       return undefined;
     });
@@ -222,16 +257,26 @@ describe('ToolsetsScreen', () => {
   // ── Test 4 : État vide mcp ─────────────────────────────────────────────────
   it('état vide mcp : serveur avec available_tools: [] → message et aucune case tools', async () => {
     mockFetch((url) => {
-      if (url === '/api/toolsets') {
-        return jsonResponse([{ name: 'default', mcp: [], local_tools: [] }]);
+      if (url === '/api/v1/toolsets') {
+        return jsonResponse({
+          items: [{ id: 1, name: 'default', mcp: [], local_tools: [] }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
       if (url === '/api/local-tools') {
         return jsonResponse([{ name: 'git', description: 'Git' }]);
       }
-      if (url === '/api/mcp-servers') {
-        return jsonResponse([{
-          name: 'empty-srv', server_type: 'http', url: 'http://empty', available_tools: [],
-        }]);
+      if (url === '/api/v1/mcp-servers') {
+        return jsonResponse({
+          items: [{ id: 1, name: 'empty-srv', server_type: 'http', url: 'http://empty', available_tools: [] }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
       return undefined;
     });
@@ -267,36 +312,50 @@ describe('ToolsetsScreen', () => {
   // ── Test 5 : Edit — chargement + sauvegarde ────────────────────────────────
   it('edit — "Modifier" pré-remplit ; "Sauvegarder" → PUT', async () => {
     let fetchCount = 0;
-    let putName: string | undefined;
+    let putId: number | undefined;
     let putDesc: string | undefined;
     let putPrompt: string | undefined;
     mockFetch((url, init) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && url === '/api/toolsets') {
+      if (method === 'GET' && url === '/api/v1/toolsets') {
         fetchCount++;
         if (fetchCount === 1) {
-          return jsonResponse([{
-            name: 'default',
-            description: 'old-desc',
-            prompt: 'old-prompt',
-            local_tools: ['git', 'fs', 'deploy'],
-            mcp: [{ server: 'code-server', tools: ['diff'] }],
-          }]);
+          return jsonResponse({
+            items: [{
+              id: 1,
+              name: 'default',
+              description: 'old-desc',
+              prompt: 'old-prompt',
+              local_tools: ['git', 'fs', 'deploy'],
+              mcp: [{ server: 'code-server', tools: ['diff'] }],
+            }],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          });
         }
-        return jsonResponse([{
-          name: 'default',
-          description: 'updated',
-          prompt: 'updated-prompt',
-          local_tools: ['git', 'fs'],
-          mcp: [{ server: 'code-server', tools: ['diff'] }],
-        }]);
+        return jsonResponse({
+          items: [{
+            id: 1,
+            name: 'default',
+            description: 'updated',
+            prompt: 'updated-prompt',
+            local_tools: ['git', 'fs'],
+            mcp: [{ server: 'code-server', tools: ['diff'] }],
+          }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
-      if (method === 'PUT' && url.startsWith('/api/toolsets/')) {
+      if (method === 'PUT' && url.startsWith('/api/v1/toolsets/')) {
         const bodyObj = JSON.parse(String(init?.body)) as Record<string, unknown>;
-        putName = url.replace('/api/toolsets/', '').split('?')[0];
+        putId = parseInt(url.replace('/api/v1/toolsets/', ''), 10);
         putDesc = bodyObj.description as string | undefined;
         putPrompt = bodyObj.prompt as string | undefined;
-        return jsonResponse({ name: 'default' });
+        return jsonResponse({ id: 1, name: 'default' });
       }
       if (url === '/api/local-tools') {
         return jsonResponse([
@@ -305,10 +364,14 @@ describe('ToolsetsScreen', () => {
           { name: 'deploy', description: 'Deploy' },
         ]);
       }
-      if (url === '/api/mcp-servers') {
-        return jsonResponse([
-          { name: 'code-server', server_type: 'http', url: 'http://code', available_tools: ['diff', 'status'] },
-        ]);
+      if (url === '/api/v1/mcp-servers') {
+        return jsonResponse({
+          items: [{ id: 1, name: 'code-server', server_type: 'http', url: 'http://code', available_tools: ['diff', 'status'] }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
       return undefined;
     });
@@ -350,7 +413,7 @@ describe('ToolsetsScreen', () => {
     await saveBtn.click();
     await new Promise(r => setTimeout(r, 50));
 
-    expect(putName).toBe('default');
+    expect(putId).toBe(1);
     expect(putDesc).toBe('update-desc');
     expect(putPrompt).toBe('update-prompt');
 
@@ -363,31 +426,44 @@ describe('ToolsetsScreen', () => {
     putMcpData = { server: '', tools: [] };
     mockFetch((url, init) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && url === '/api/toolsets') {
-        return jsonResponse([{
-          name: 'default',
-          description: 'desc',
-          prompt: null,
-          local_tools: [],
-          mcp: [{ server: 'server-a', tools: ['tool1', 'tool2'] }],
-        }]);
+      if (method === 'GET' && url === '/api/v1/toolsets') {
+        return jsonResponse({
+          items: [{
+            id: 1,
+            name: 'default',
+            description: 'desc',
+            prompt: null,
+            local_tools: [],
+            mcp: [{ server: 'server-a', tools: ['tool1', 'tool2'] }],
+          }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
-      if (method === 'PUT' && url.startsWith('/api/toolsets/')) {
+      if (method === 'PUT' && url.startsWith('/api/v1/toolsets/')) {
         const bodyObj = JSON.parse(String(init?.body)) as Record<string, unknown>;
         if (bodyObj.mcp && Array.isArray(bodyObj.mcp) && bodyObj.mcp.length > 0) {
           const firstEntry = bodyObj.mcp[0] as { server: string; tools: string[] };
           putMcpData = { server: firstEntry.server, tools: [...firstEntry.tools] };
         }
-        return jsonResponse({ name: 'default' });
+        return jsonResponse({ id: 1, name: 'default' });
       }
       if (url === '/api/local-tools') {
         return jsonResponse([{ name: 'git', description: 'Git' }]);
       }
-      if (url === '/api/mcp-servers') {
-        return jsonResponse([
-          { name: 'server-a', server_type: 'http', url: 'http://a', available_tools: ['tool1', 'tool2'] },
-          { name: 'server-b', server_type: 'http', url: 'http://b', available_tools: ['toolX', 'toolY'] },
-        ]);
+      if (url === '/api/v1/mcp-servers') {
+        return jsonResponse({
+          items: [
+            { id: 1, name: 'server-a', server_type: 'http', url: 'http://a', available_tools: ['tool1', 'tool2'] },
+            { id: 2, name: 'server-b', server_type: 'http', url: 'http://b', available_tools: ['toolX', 'toolY'] },
+          ],
+          page: 1,
+          per_page: 100,
+          total_items: 2,
+          total_pages: 1,
+        });
       }
       return undefined;
     });
@@ -437,25 +513,31 @@ describe('ToolsetsScreen', () => {
   });
 
   // ── Test 7 : Supprimer ─────────────────────────────────────────────────────
-  it('Supprimer → DELETE /api/toolsets/{name} puis re-fetch', async () => {
+  it('Supprimer → DELETE /api/v1/toolsets/{id} puis re-fetch', async () => {
     let fetchCount = 0;
     mockFetch((url, init) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && url === '/api/toolsets') {
+      if (method === 'GET' && url === '/api/v1/toolsets') {
         fetchCount++;
         if (fetchCount === 1) {
-          return jsonResponse([{ name: 'to-delete', local_tools: ['git'], mcp: [] }]);
+          return jsonResponse({
+            items: [{ id: 1, name: 'to-delete', local_tools: ['git'], mcp: [] }],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          });
         }
-        return jsonResponse([]);
+        return jsonResponse({ items: [], page: 1, per_page: 100, total_items: 0, total_pages: 0 });
       }
-      if (method === 'DELETE' && url.startsWith('/api/toolsets/')) {
+      if (method === 'DELETE' && url.startsWith('/api/v1/toolsets/')) {
         return new Response(null, { status: 204 });
       }
       if (url === '/api/local-tools') {
         return jsonResponse([]);
       }
-      if (url === '/api/mcp-servers') {
-        return jsonResponse([]);
+      if (url === '/api/v1/mcp-servers') {
+        return jsonResponse({ items: [], page: 1, per_page: 100, total_items: 0, total_pages: 0 });
       }
       return undefined;
     });
@@ -477,14 +559,21 @@ describe('ToolsetsScreen', () => {
     // (cf. test voisin ci-dessous) ; un corps texte brut sans Content-Type JSON
     // retombe toujours sur "HTTP {status}" côté client, comportement établi.
     mockFetch((url) => {
-      if (url === '/api/toolsets') {
-        return jsonResponse([{
-          name: 'default',
-          description: 'Outils par défaut',
-          prompt: null,
-          local_tools: ['git'],
-          mcp: [],
-        }]);
+      if (url === '/api/v1/toolsets') {
+        return jsonResponse({
+          items: [{
+            id: 1,
+            name: 'default',
+            description: 'Outils par défaut',
+            prompt: null,
+            local_tools: ['git'],
+            mcp: [],
+          }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
       if (url === '/api/local-tools') {
         return new Response(JSON.stringify({ error: 'Connection refused' }), {
@@ -492,7 +581,7 @@ describe('ToolsetsScreen', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (url === '/api/mcp-servers') {
+      if (url === '/api/v1/mcp-servers') {
         // Retourne JSON pour que l'erreur ait un message lisible, sinon l'API
         // client ne renvoie que "HTTP 500" (sans corps JSON détecté).
         return new Response(JSON.stringify({ error: 'Connection refused' }), {
@@ -510,32 +599,46 @@ describe('ToolsetsScreen', () => {
     expect(wrapper.text()).toContain('Connection refused');
   });
 
-  // ── Test 9 : erreur options → message visible même avec modale d'édition ───
+  // ── Test 9 : erreur options → message visible avec modale d'édition ───
   it('erreur GET options → message visible avec modale édition ouverte', async () => {
     let fetchCount = 0;
     mockFetch((url, init) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && url === '/api/toolsets') {
+      if (method === 'GET' && url === '/api/v1/toolsets') {
         fetchCount++;
         if (fetchCount === 1) {
-          return jsonResponse([{
+          return jsonResponse({
+            items: [{
+              id: 1,
+              name: 'default',
+              description: 'old-desc',
+              prompt: null,
+              local_tools: ['git'],
+              mcp: [],
+            }],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          });
+        }
+        return jsonResponse({
+          items: [{
+            id: 1,
             name: 'default',
-            description: 'old-desc',
+            description: 'updated',
             prompt: null,
             local_tools: ['git'],
             mcp: [],
-          }]);
-        }
-        return jsonResponse([{
-          name: 'default',
-          description: 'updated',
-          prompt: null,
-          local_tools: ['git'],
-          mcp: [],
-        }]);
+          }],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        });
       }
-      if (method === 'PUT' && url.startsWith('/api/toolsets/')) {
-        return jsonResponse({ name: 'default' });
+      if (method === 'PUT' && url.startsWith('/api/v1/toolsets/')) {
+        return jsonResponse({ id: 1, name: 'default' });
       }
       if (url === '/api/local-tools') {
         return new Response(JSON.stringify({ error: 'Connection refused' }), {
@@ -543,7 +646,7 @@ describe('ToolsetsScreen', () => {
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (url === '/api/mcp-servers') {
+      if (url === '/api/v1/mcp-servers') {
         return new Response(JSON.stringify({ error: 'Connection refused' }), {
           status: 502,
           headers: { 'Content-Type': 'application/json' },

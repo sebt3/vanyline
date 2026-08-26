@@ -2,7 +2,7 @@
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
-import { useCrudResource } from '../../composables/useCrudResource';
+import { useCrudResource, type PagedResult } from '../../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
@@ -23,6 +23,7 @@ interface McpRow {
 }
 
 interface Toolset {
+  id: number;
   name: string;
   description?: string | null;
   prompt?: string | null;
@@ -58,7 +59,7 @@ interface McpServerOption {
 }
 
 const client = createApiClient();
-const resource = useCrudResource<Toolset>(client, '/api/toolsets');
+const resource = useCrudResource<Toolset>(client, '/api/v1/toolsets');
 const { items: fetchedToolsets, loading, error } = resource;
 
 const localTools = ref<LocalTool[]>([]);
@@ -72,7 +73,8 @@ const formLocalTools = ref<string[]>([]);
 const formMcp = ref<McpRow[]>([]);
 const creationError = ref<string | null>(null);
 
-const editingName = ref<string | null>(null);
+const editingId = ref<number | null>(null);
+const editingName = ref<string | null>(null); // titre du dialog
 const editDescription = ref('');
 const editPrompt = ref('');
 const editLocalTools = ref<string[]>([]);
@@ -87,10 +89,10 @@ async function fetchOptions() {
   try {
     const [lt, servers] = await Promise.all([
       client.get<LocalTool[]>('/api/local-tools'),
-      client.get<McpServerOption[]>('/api/mcp-servers'),
+      client.get<PagedResult<McpServerOption>>('/api/v1/mcp-servers'),
     ]);
     localTools.value = lt;
-    mcpServers.value = servers;
+    mcpServers.value = servers.items;
   } catch (e) {
     optionsError.value = e instanceof ApiError ? e.message : String(e);
   }
@@ -156,6 +158,7 @@ async function createToolset() {
 }
 
 function startEdit(toolset: Toolset) {
+  editingId.value = toolset.id;
   editingName.value = toolset.name;
   editDescription.value = toolset.description ?? '';
   editPrompt.value = toolset.prompt ?? '';
@@ -166,6 +169,7 @@ function startEdit(toolset: Toolset) {
 }
 
 function cancelEdit() {
+  editingId.value = null;
   editingName.value = null;
   editDescription.value = '';
   editPrompt.value = '';
@@ -175,7 +179,7 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(name: string) {
+async function saveEdit(id: number) {
   editError.value = null;
   const body: UpdateToolset = {};
   if (editDescription.value) body.description = editDescription.value;
@@ -183,15 +187,15 @@ async function saveEdit(name: string) {
   if (editLocalTools.value.length > 0) body.local_tools = editLocalTools.value;
   if (editMcp.value.length > 0) body.mcp = editMcp.value;
   try {
-    await resource.update(name, body);
+    await resource.update(id, body);
     cancelEdit();
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
-async function deleteToolset(name: string) {
-  await resource.remove(name);
+async function deleteToolset(id: number) {
+  await resource.remove(id);
 }
 </script>
 
@@ -212,7 +216,7 @@ async function deleteToolset(name: string) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in fetchedToolsets" :key="t.name">
+          <tr v-for="t in fetchedToolsets" :key="t.id">
             <td>{{ t.name }}</td>
             <td>{{ t.description ?? '—' }}</td>
             <td>
@@ -223,7 +227,7 @@ async function deleteToolset(name: string) {
             </td>
             <td>
               <button class="btn btn-edit" @click="startEdit(t)">Modifier</button>
-              <button class="btn btn-delete" @click="deleteToolset(t.name)">Supprimer</button>
+              <button class="btn btn-delete" @click="deleteToolset(t.id)">Supprimer</button>
             </td>
           </tr>
         </tbody>
@@ -323,7 +327,7 @@ async function deleteToolset(name: string) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>

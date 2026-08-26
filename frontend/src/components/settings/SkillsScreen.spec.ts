@@ -10,17 +10,23 @@ beforeEach(() => {
 });
 
 describe('SkillsScreen', () => {
-  it('affiche les 2 noms + descriptions quand GET renvoie 2 skills', async () => {
+  it('affiche les 2 noms + descriptions quand GET renvoie PagedResult', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockResolvedValueOnce({
       ok: true,
       status: 200,
       headers: new Map([['content-type', 'application/json']]),
       json: () =>
-        Promise.resolve([
-          { name: 'git-skill', description: 'Outils git' },
-          { name: 'deploy-skill', description: 'Déploiement K8s' },
-        ]),
+        Promise.resolve({
+          items: [
+            { id: 1, name: 'git-skill', description: 'Outils git' },
+            { id: 2, name: 'deploy-skill', description: 'Déploiement K8s' },
+          ],
+          page: 1,
+          per_page: 100,
+          total_items: 2,
+          total_pages: 1,
+        }),
     } as unknown as Response);
 
     const wrapper = mount(SkillsScreen);
@@ -40,7 +46,7 @@ describe('SkillsScreen', () => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'POST' && u === '/api/skills') {
+      if (method === 'POST' && u === '/api/v1/skills') {
         const body = JSON.parse((init?.body as string | undefined) ?? '{}');
         expect(body).toEqual({
           name: 'my-skill',
@@ -53,16 +59,28 @@ describe('SkillsScreen', () => {
         );
       }
 
-      if (method === 'GET' && u === '/api/skills') {
+      if (method === 'GET' && u === '/api/v1/skills') {
         fetchCount++;
         if (fetchCount === 1) {
           return new Response(
-            JSON.stringify([{ name: 'existing-skill', description: 'Existant' }]),
+            JSON.stringify({
+              items: [{ id: 1, name: 'existing-skill', description: 'Existant' }],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }
         return new Response(
-          JSON.stringify([{ name: 'my-skill', description: 'Ma description' }]),
+          JSON.stringify({
+            items: [{ id: 2, name: 'my-skill', description: 'Ma description' }],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
@@ -110,44 +128,56 @@ describe('SkillsScreen', () => {
     expect(wrapper.text()).toContain('my-skill');
   });
 
-  it('"Modifier" appelle GET /api/skills/{name} puis charge les valeurs ; "Sauvegarder" appelle PUT', async () => {
+  it('"Modifier" appelle GET /api/v1/skills/{id} puis charge les valeurs ; "Sauvegarder" appelle PUT', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'PUT' && u.startsWith('/api/skills/')) {
-        const name = u.replace('/api/skills/', '');
+      if (method === 'PUT' && u.startsWith('/api/v1/skills/')) {
+        const putId = parseInt(u.replace('/api/v1/skills/', ''), 10);
         const body = JSON.parse((init?.body as string | undefined) ?? '{}');
-        expect(name).toBe('git-skill');
+        expect(putId).toBe(1);
         expect(body).toEqual({
           description: 'updated-desc',
           body: '# updated body',
         });
         return new Response(
-          JSON.stringify({ name: 'git-skill', description: 'updated-desc', body: '# updated body' }),
+          JSON.stringify({ id: 1, name: 'git-skill', description: 'updated-desc', body: '# updated body' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
 
-      if (method === 'GET' && u.startsWith('/api/skills/') && u !== '/api/skills') {
+      if (method === 'GET' && u.startsWith('/api/v1/skills/') && u !== '/api/v1/skills') {
         return new Response(
-          JSON.stringify({ name: 'git-skill', description: 'old desc', body: '# old body' }),
+          JSON.stringify({ id: 1, name: 'git-skill', description: 'old desc', body: '# old body' }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
 
-      if (method === 'GET' && u === '/api/skills') {
+      if (method === 'GET' && u === '/api/v1/skills') {
         fetchCount++;
         if (fetchCount === 1) {
           return new Response(
-            JSON.stringify([{ name: 'git-skill', description: 'old desc' }]),
+            JSON.stringify({
+              items: [{ id: 1, name: 'git-skill', description: 'old desc' }],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }
         return new Response(
-          JSON.stringify([{ name: 'git-skill', description: 'updated-desc' }]),
+          JSON.stringify({
+            items: [{ id: 1, name: 'git-skill', description: 'updated-desc' }],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
@@ -199,29 +229,33 @@ describe('SkillsScreen', () => {
     expect(wrapper.text()).toContain('updated-desc');
   });
 
-  it('cliquer "Supprimer" → DELETE /api/skills/{name} puis re-fetch', async () => {
+  it('cliquer "Supprimer" → DELETE /api/v1/skills/{id} puis re-fetch', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'DELETE' && u.includes('/api/skills/to-delete')) {
+      if (method === 'DELETE' && u.includes('/api/v1/skills/2')) {
         fetchCount++;
         return new Response(null, { status: 204 });
       }
 
-      if (method === 'GET' && u === '/api/skills') {
+      if (method === 'GET' && u === '/api/v1/skills') {
         fetchCount++;
         if (fetchCount === 1) {
           return new Response(
-            JSON.stringify([
-              { name: 'to-delete', description: 'À supprimer' },
-            ]),
+            JSON.stringify({
+              items: [{ id: 2, name: 'to-delete', description: 'À supprimer' }],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }
-        return new Response(JSON.stringify([]), {
+        return new Response(JSON.stringify({ items: [], page: 1, per_page: 100, total_items: 0, total_pages: 0 }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -240,7 +274,7 @@ describe('SkillsScreen', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     const deleteCalls = fetchSpy.mock.calls.filter(
-      ([url]) => String(url).includes('/api/skills/to-delete'),
+      ([url]) => String(url).includes('/api/v1/skills/2'),
     );
     expect(deleteCalls.length).toBe(1);
     expect(deleteCalls[0][1]).toMatchObject({
