@@ -17,6 +17,15 @@ function jsonResponse(data: unknown): Response {
   });
 }
 
+function pagedResult(items: unknown[]): Response {
+  return new Response(JSON.stringify({
+    items, page: 1, per_page: 100, total_items: items.length, total_pages: 1,
+  }), {
+    status: 200,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
 describe('AgentsScreen', () => {
   let fetchSpy: ReturnType<typeof vi.spyOn>;
 
@@ -25,28 +34,30 @@ describe('AgentsScreen', () => {
     fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
       const urlStr = String(url);
       const method = String(init?.method ?? 'GET').toUpperCase();
-      if (method === 'GET' && urlStr === '/api/agents') {
-        return jsonResponse([
+      if (method === 'GET' && urlStr.endsWith('/api/v1/agents')) {
+        return pagedResult([
           {
+            id: 1,
             name: 'primary-agent',
             description: 'Agent principal',
             mode: 'primary',
-            model: 'claude-sonnet-4',
+            model_profile_id: 1,
             toolsets: ['git'],
             skills: 'auto',
             system_prompt: 'Prompt principal',
           },
           {
+            id: 2,
             name: 'sub-agent',
             mode: 'subagent',
-            model: 'gpt-4',
+            model_profile_id: 2,
             toolsets: [],
             skills: ['a', 'b'],
             system_prompt: '',
           },
         ]);
       }
-      return jsonResponse([]);
+      return pagedResult([]);
     });
 
     const wrapper = mount(AgentsScreen);
@@ -56,14 +67,14 @@ describe('AgentsScreen', () => {
     expect(wrapper.text()).toContain('sub-agent');
     expect(wrapper.text()).toContain('primary');
     expect(wrapper.text()).toContain('subagent');
-    expect(wrapper.text()).toContain('claude-sonnet-4');
-    expect(wrapper.text()).toContain('gpt-4');
+    expect(wrapper.text()).toContain('1');
+    expect(wrapper.text()).toContain('2');
     expect(wrapper.text()).toContain('auto');
     expect(wrapper.text()).toContain('a, b');
     expect(wrapper.text()).toContain('—');
   });
 
-  it('remplir + "Créer" → POST avec toolsets tableau, puis re-fetch', async () => {
+  it('remplir + "Créer" → POST avec model_profile_id, toolsets tableau, puis re-fetch', async () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     let postBody: unknown;
     let fetchCount = 0;
@@ -73,18 +84,18 @@ describe('AgentsScreen', () => {
       const method = String(init?.method ?? 'GET').toUpperCase();
 
       // Create test options (no caching — fresh response each call)
-      if (urlStr === '/api/model-profiles') return jsonResponse([{ name: 'claude-sonnet-4' }, { name: 'gpt-4' }]);
-      if (urlStr === '/api/toolsets') return jsonResponse([{ name: 'git', description: 'Git' }, { name: 'filesystem', description: 'FS' }]);
-      if (urlStr === '/api/skills') return jsonResponse([{ name: 'skill-a', description: 'A' }]);
+      if (urlStr.endsWith('/api/v1/model-profiles')) return pagedResult([{ id: 1, name: 'claude-sonnet-4' }, { id: 2, name: 'gpt-4' }]);
+      if (urlStr.endsWith('/api/v1/toolsets')) return pagedResult([{ name: 'git', description: 'Git' }, { name: 'filesystem', description: 'FS' }]);
+      if (urlStr.endsWith('/api/v1/skills')) return pagedResult([{ name: 'skill-a', description: 'A' }]);
 
-      if (method === 'GET' && urlStr === '/api/agents') {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/agents')) {
         fetchCount++;
-        if (fetchCount === 1) return jsonResponse([{ name: 'existing', mode: 'primary', model: 'gpt-4', toolsets: [], skills: 'auto', system_prompt: '' }]);
-        return jsonResponse([{ name: 'new-agent', mode: 'subagent', model: 'claude-sonnet-4', toolsets: ['git', 'filesystem'], skills: 'auto', system_prompt: '' }]);
+        if (fetchCount === 1) return pagedResult([{ id: 0, name: 'existing', mode: 'primary', model_profile_id: 2, toolsets: [], skills: 'auto', system_prompt: '' }]);
+        return pagedResult([{ id: 3, name: 'new-agent', mode: 'subagent', model_profile_id: 1, toolsets: ['git', 'filesystem'], skills: 'auto', system_prompt: '' }]);
       }
-      if (method === 'POST' && urlStr === '/api/agents') {
+      if (method === 'POST' && urlStr.endsWith('/api/v1/agents')) {
         postBody = JSON.parse(String(init?.body));
-        expect(postBody).toEqual({ name: 'new-agent', mode: 'subagent', model: 'claude-sonnet-4', toolsets: ['git', 'filesystem'], skills: 'auto' });
+        expect(postBody).toEqual({ name: 'new-agent', mode: 'subagent', model_profile_id: 1, toolsets: ['git', 'filesystem'], skills: 'auto' });
         return jsonResponse({ ok: true });
       }
       return new Response('', { status: 404 });
@@ -113,7 +124,7 @@ describe('AgentsScreen', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     const modelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
-    modelSelect.value = 'claude-sonnet-4';
+    modelSelect.value = '1';
     modelSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
@@ -138,7 +149,7 @@ describe('AgentsScreen', () => {
     expect(wrapper.text()).toContain('new-agent');
   });
 
-  it('edit agent à skills tableau → cases pré-remplies; "Sauvegarder" → PUT', async () => {
+  it('edit agent à skills tableau → cases pré-remplies; "Sauvegarder" → PUT par id', async () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     const putBodies: unknown[] = [];
     let fetchCount = 0;
@@ -148,29 +159,32 @@ describe('AgentsScreen', () => {
       const method = String(init?.method ?? 'GET').toUpperCase();
 
       // Each URL path — fresh response (body stream consumed per-call)
-      if (urlStr === '/api/model-profiles') return jsonResponse([{ name: 'old-model' }, { name: 'new-model' }, { name: 'gpt-4' }]);
-      if (urlStr === '/api/toolsets') return jsonResponse([{ name: 'git', description: 'Git' }, { name: 'new-t', description: 'NT' }, { name: 'filesystem', description: 'FS' }]);
-      if (urlStr === '/api/skills') return jsonResponse([{ name: 'a', description: 'A' }, { name: 'b', description: 'B' }]);
+      if (urlStr.endsWith('/api/v1/model-profiles')) return pagedResult([{ id: 1, name: 'old-model' }, { id: 2, name: 'new-model' }, { id: 3, name: 'gpt-4' }]);
+      if (urlStr.endsWith('/api/v1/toolsets')) return pagedResult([{ name: 'git', description: 'Git' }, { name: 'new-t', description: 'NT' }, { name: 'filesystem', description: 'FS' }]);
+      if (urlStr.endsWith('/api/v1/skills')) return pagedResult([{ name: 'a', description: 'A' }, { name: 'b', description: 'B' }]);
 
-      if (method === 'GET' && urlStr === '/api/agents') {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/agents')) {
         fetchCount++;
-        if (fetchCount === 1) return jsonResponse([{
+        if (fetchCount === 1) return pagedResult([{
+          id: 1,
           name: 'edit-me', description: 'old desc', mode: 'primary',
-          model: 'old-model', toolsets: ['git'], skills: ['a', 'b'],
+          model_profile_id: 1, toolsets: ['git'], skills: ['a', 'b'],
           system_prompt: 'old prompt',
         }]);
-        return jsonResponse([{
+        return pagedResult([{
+          id: 1,
           name: 'edit-me', description: 'updated desc', mode: 'all',
-          model: 'new-model', toolsets: ['new-t'], skills: ['a', 'b'],
+          model_profile_id: 2, toolsets: ['new-t'], skills: ['a', 'b'],
           system_prompt: 'updated prompt',
         }]);
       }
 
-      if (method === 'PUT' && urlStr.startsWith('/api/agents/')) {
+      if (method === 'PUT' && urlStr.endsWith('/api/v1/agents/1')) {
         putBodies.push(JSON.parse(String(init?.body ?? '{}')));
         return jsonResponse({
+          id: 1,
           name: 'edit-me', description: 'updated desc', mode: 'all',
-          model: 'new-model', toolsets: ['new-t'], skills: ['a', 'b'],
+          model_profile_id: 2, toolsets: ['new-t'], skills: ['a', 'b'],
           system_prompt: 'updated prompt',
         });
       }
@@ -204,9 +218,9 @@ describe('AgentsScreen', () => {
     v.editToolsets = ['new-t'];  // [0]=git→décoché, [1]=new-t→coché, [2]=filesystem→décoiché
     v.editSkillList = ['b'];     // [3]=a→décoché, [4]=b→demeuré coché
 
-    // Profil de modèle: new-model
+    // Profil de modèle: new-model (id=2)
     const editModelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
-    editModelSelect.value = 'new-model';
+    editModelSelect.value = '2';
     editModelSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
@@ -236,7 +250,7 @@ describe('AgentsScreen', () => {
     expect(wrapper.text()).toContain('updated desc');
     expect(putBodies).toHaveLength(1);
     expect(putBodies[0]).toEqual({
-      description: 'updated desc', mode: 'all', model: 'new-model',
+      description: 'updated desc', mode: 'all', model_profile_id: 2,
       toolsets: ['new-t'], skills: ['b'], system_prompt: 'updated prompt',
     });
   });
@@ -250,28 +264,31 @@ describe('AgentsScreen', () => {
       const method = String(init?.method ?? 'GET').toUpperCase();
 
       // Fresh responses
-      if (urlStr === '/api/model-profiles') return jsonResponse([{ name: 'old-model' }, { name: 'new-model' }, { name: 'gpt-4' }]);
-      if (urlStr === '/api/toolsets') return jsonResponse([{ name: 'git', description: 'Git' }, { name: 'filesystem', description: 'FS' }]);
-      if (urlStr === '/api/skills') return jsonResponse([{ name: 'a', description: 'A' }]);
+      if (urlStr.endsWith('/api/v1/model-profiles')) return pagedResult([{ id: 1, name: 'old-model' }, { id: 2, name: 'new-model' }, { id: 3, name: 'gpt-4' }]);
+      if (urlStr.endsWith('/api/v1/toolsets')) return pagedResult([{ name: 'git', description: 'Git' }, { name: 'filesystem', description: 'FS' }]);
+      if (urlStr.endsWith('/api/v1/skills')) return pagedResult([{ name: 'a', description: 'A' }]);
 
-      if (method === 'GET' && urlStr === '/api/agents') {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/agents')) {
         fetchCount++;
-        if (fetchCount === 1) return jsonResponse([{
+        if (fetchCount === 1) return pagedResult([{
+          id: 1,
           name: 'edit-me', description: 'old desc', mode: 'primary',
-          model: 'old-model', toolsets: ['git'], skills: 'auto',
+          model_profile_id: 1, toolsets: ['git'], skills: 'auto',
           system_prompt: 'old prompt',
         }]);
-        return jsonResponse([{
+        return pagedResult([{
+          id: 1,
           name: 'edit-me', description: 'updated desc', mode: 'all',
-          model: 'new-model', toolsets: ['git', 'filesystem'], skills: 'none',
+          model_profile_id: 2, toolsets: ['git', 'filesystem'], skills: 'none',
           system_prompt: 'updated prompt',
         }]);
       }
 
-      if (method === 'PUT' && urlStr.startsWith('/api/agents/')) {
+      if (method === 'PUT' && urlStr.endsWith('/api/v1/agents/1')) {
         return jsonResponse({
+          id: 1,
           name: 'edit-me', description: 'updated desc', mode: 'all',
-          model: 'new-model', toolsets: ['filesystem'], skills: 'none',
+          model_profile_id: 2, toolsets: ['filesystem'], skills: 'none',
           system_prompt: 'updated prompt',
         });
       }
@@ -310,7 +327,7 @@ describe('AgentsScreen', () => {
     await new Promise((r) => setTimeout(r, 10));
 
     const editModelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Profil de modèle"]')!;
-    editModelSelect.value = 'new-model';
+    editModelSelect.value = '2';
     editModelSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
@@ -337,7 +354,7 @@ describe('AgentsScreen', () => {
     expect(wrapper.text()).toContain('updated desc');
   });
 
-  it('cliquer "Supprimer" → DELETE /{name} puis re-fetch', async () => {
+  it('cliquer "Supprimer" → DELETE /{id} puis re-fetch', async () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     let deleteTarget: string | undefined;
@@ -345,14 +362,14 @@ describe('AgentsScreen', () => {
     fetchSpy.mockImplementation(async (url: string | URL, init: RequestInit | undefined) => {
       const method = String(init?.method ?? 'GET').toUpperCase();
       const urlStr = String(url);
-      if (method === 'DELETE' && urlStr.includes('/api/agents/')) {
-        deleteTarget = urlStr.replace('/api/agents/', '');
+      if (method === 'DELETE' && urlStr.startsWith('/api/v1/agents/')) {
+        deleteTarget = urlStr.split('/').pop();
         return new Response(null, { status: 204 });
       }
-      if (method === 'GET' && urlStr === '/api/agents') {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/agents')) {
         fetchCount++;
-        if (fetchCount === 1) return jsonResponse([{ name: 'to-delete', mode: 'primary', model: 'gpt-4', toolsets: [], skills: 'auto', system_prompt: '' }]);
-        return jsonResponse([]);
+        if (fetchCount === 1) return pagedResult([{ id: 1, name: 'to-delete', mode: 'primary', model_profile_id: 1, toolsets: [], skills: 'auto', system_prompt: '' }]);
+        return pagedResult([]);
       }
       return new Response('', { status: 404 });
     });
@@ -363,7 +380,7 @@ describe('AgentsScreen', () => {
     await wrapper.find('.btn-delete').trigger('click');
     await new Promise((r) => setTimeout(r, 50));
 
-    expect(deleteTarget).toBe('to-delete');
+    expect(deleteTarget).toBe('1');
     expect(wrapper.text()).toContain('Aucun agent');
   });
 
@@ -375,34 +392,36 @@ describe('AgentsScreen', () => {
       const urlStr = String(url);
       const method = String(init?.method ?? 'GET').toUpperCase();
 
-      if (method === 'GET' && urlStr === '/api/agents') {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/agents')) {
         if (!agentsReturned) {
           agentsReturned = true;
-          return jsonResponse([{
+          return pagedResult([{
+            id: 1,
             name: 'agent-ok',
             mode: 'primary',
-            model: 'gpt-4',
+            model_profile_id: 1,
             toolsets: [],
             skills: 'auto',
             system_prompt: '',
           }]);
         }
-        return jsonResponse([{
+        return pagedResult([{
+          id: 1,
           name: 'agent-ok',
           mode: 'primary',
-          model: 'gpt-4',
+          model_profile_id: 1,
           toolsets: [],
           skills: 'none',
           system_prompt: '',
         }]);
       }
-      if (urlStr === '/api/model-profiles') {
-        return jsonResponse([]);
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return pagedResult([]);
       }
-      if (urlStr === '/api/toolsets') {
-        return jsonResponse([]);
+      if (urlStr.endsWith('/api/v1/toolsets')) {
+        return pagedResult([]);
       }
-      if (urlStr === '/api/skills') {
+      if (urlStr.endsWith('/api/v1/skills')) {
         return new Response(JSON.stringify({ error: 'Skill server unreachable' }), {
           status: 502,
           headers: { 'Content-Type': 'application/json' },
@@ -425,26 +444,27 @@ describe('AgentsScreen', () => {
       const urlStr = String(url);
       const method = String(init?.method ?? 'GET').toUpperCase();
 
-      if (method === 'GET' && urlStr === '/api/agents') {
-        return jsonResponse([{
+      if (method === 'GET' && urlStr.endsWith('/api/v1/agents')) {
+        return pagedResult([{
+          id: 1,
           name: 'edit-test',
           mode: 'primary',
-          model: 'claude-sonnet-4',
+          model_profile_id: 1,
           toolsets: [],
           skills: 'auto',
           system_prompt: 'prompt',
         }]);
       }
-      if (method === 'PUT' && urlStr.startsWith('/api/agents/')) {
-        return jsonResponse({ name: 'edit-test' });
+      if (method === 'PUT' && urlStr.endsWith('/api/v1/agents/1')) {
+        return jsonResponse({ id: 1, name: 'edit-test' });
       }
-      if (urlStr === '/api/model-profiles') {
-        return jsonResponse([]);
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return pagedResult([]);
       }
-      if (urlStr === '/api/toolsets') {
-        return jsonResponse([]);
+      if (urlStr.endsWith('/api/v1/toolsets')) {
+        return pagedResult([]);
       }
-      if (urlStr === '/api/skills') {
+      if (urlStr.endsWith('/api/v1/skills')) {
         return new Response(JSON.stringify({ error: 'Skill server unreachable' }), {
           status: 502,
           headers: { 'Content-Type': 'application/json' },

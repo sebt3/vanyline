@@ -18,6 +18,7 @@ describe('ModelProfilesScreen', () => {
   // Helpers for the mock setup
   const providersResponse = [
     {
+      id: 1,
       name: 'anthropic',
       provider_type: 'openai_compatible',
       endpoint: 'https://api.anthropic.com/v1',
@@ -25,6 +26,7 @@ describe('ModelProfilesScreen', () => {
       is_default: false,
     },
     {
+      id: 2,
       name: 'openai',
       provider_type: 'openai_compatible',
       endpoint: 'https://api.openai.com/v1',
@@ -33,18 +35,20 @@ describe('ModelProfilesScreen', () => {
     },
   ];
 
-  it('GET /api/model-profiles renvoie 2 → affiche noms, providers, modèles', async () => {
+  it('GET /api/v1/model-profiles renvoie 2 → affiche noms, providers, modèles', async () => {
     const profiles = [
       {
+        id: 1,
         name: 'chat-moderate',
-        provider: 'anthropic',
+        provider_id: 1,
         model: 'claude-sonnet-4-20250514',
         temperature: 0.4,
         max_tokens: 4096,
       },
       {
+        id: 2,
         name: 'chat-fast',
-        provider: 'openai',
+        provider_id: 2,
         model: 'gpt-4o-mini',
       },
     ];
@@ -53,14 +57,18 @@ describe('ModelProfilesScreen', () => {
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
       fetchCalls.push(`GET ${urlStr}`);
-      if (urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify(profiles), {
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: profiles, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersResponse), {
+      if (urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersResponse, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -82,19 +90,23 @@ describe('ModelProfilesScreen', () => {
     expect(wrapper.text()).toContain('—');
   });
 
-  it('select Provider alimenté par GET /api/llm-providers', async () => {
+  it('select Provider alimenté par GET /api/v1/llm-providers', async () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       fetchCalls.push(`GET ${url}`);
       const urlStr = url as string;
-      if (urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify([]), {
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersResponse), {
+      if (urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersResponse, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -114,71 +126,79 @@ describe('ModelProfilesScreen', () => {
     const dialog = document.querySelector('[role="dialog"]');
     expect(dialog).toBeTruthy();
 
-    const providerSelect = dialog!.querySelector('select[aria-label="Provider"]');
+    const providerSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Provider"]');
     expect(providerSelect).toBeTruthy();
-    const options = (providerSelect as HTMLSelectElement).options;
+    const options = providerSelect!.options;
     expect(options.length).toBe(3); // vide + anthropic + openai
 
-    // Choisir anthropic → select Modèle contient 2 modèles
-    (providerSelect as HTMLSelectElement).value = 'anthropic';
-    (providerSelect as HTMLSelectElement).dispatchEvent(new Event('change', { bubbles: true }));
+    // Choisir anthropic (id=1) → select Modèle contient 2 modèles
+    providerSelect!.value = '1';
+    providerSelect!.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
-    const modelSelect = dialog!.querySelector('select[aria-label="Modèle"]');
-    const modelOptions = (modelSelect as HTMLSelectElement).options;
+    const modelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Modèle"]');
+    const modelOptions = modelSelect!.options;
     expect(modelOptions.length).toBe(3);
     expect(modelOptions[1].textContent).toBe('claude-sonnet-4-20250514');
     expect(modelOptions[2].textContent).toBe('claude-haiku-4-20250514');
-    expect((modelSelect as HTMLSelectElement).value).toBe('');
+    expect(modelSelect!.value).toBe('');
 
     expect(dialog!.textContent).not.toContain('Aucun modèle disponible');
   });
 
-  it('POST corps inchangé : { name, provider, model, ... }', async () => {
+  it('POST corps avec provider_id : { name, provider_id, model, ... }', async () => {
     let created = false;
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown, init: unknown) => {
       const urlStr = url as string;
       const method = (init as RequestInit)?.method ?? 'GET';
 
-      if (method === 'GET' && urlStr.endsWith('/api/model-profiles')) {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/model-profiles')) {
         fetchCalls.push(`GET ${urlStr}`);
         if (created) {
-          return new Response(JSON.stringify([{
-            name: 'new-profile',
-            provider: 'anthropic',
-            model: 'claude-sonnet-4-20250514',
-            temperature: 0.7,
-            max_tokens: null,
-          }]), {
+          return new Response(JSON.stringify({
+            items: [{
+              id: 3,
+              name: 'new-profile',
+              provider_id: 1,
+              model: 'claude-sonnet-4-20250514',
+              temperature: 0.7,
+              max_tokens: null,
+            }], page: 1, per_page: 100, total_items: 1, total_pages: 1,
+          }), {
             status: 200,
             headers: { 'Content-Type': 'application/json' },
           });
         }
-        return new Response(JSON.stringify([]), {
+        return new Response(JSON.stringify({
+          items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (method === 'GET' && urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersResponse), {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersResponse, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (method === 'POST' && urlStr.endsWith('/api/model-profiles')) {
-        fetchCalls.push('POST /api/model-profiles');
+      if (method === 'POST' && urlStr.endsWith('/api/v1/model-profiles')) {
+        fetchCalls.push('POST /api/v1/model-profiles');
         const body = JSON.parse((init as RequestInit)?.body as string ?? '{}');
         expect(body).toEqual({
           name: 'new-profile',
-          provider: 'anthropic',
+          provider_id: 1,
           model: 'claude-sonnet-4-20250514',
           temperature: 0.7,
         });
         created = true;
         return new Response(JSON.stringify({
+          id: 3,
           name: 'new-profile',
-          provider: 'anthropic',
+          provider_id: 1,
           model: 'claude-sonnet-4-20250514',
           temperature: 0.7,
           max_tokens: null,
@@ -210,7 +230,7 @@ describe('ModelProfilesScreen', () => {
     setInput(inputs[0], 'new-profile');
 
     const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
-    providerSelect.value = 'anthropic';
+    providerSelect.value = '1';
     providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
@@ -241,6 +261,7 @@ describe('ModelProfilesScreen', () => {
   it('état vide : provider choisi sans modèles → message affiché', async () => {
     const providersNoModels = [
       {
+        id: 1,
         name: 'anthropic',
         provider_type: 'openai_compatible',
         endpoint: 'https://api.anthropic.com/v1',
@@ -248,6 +269,7 @@ describe('ModelProfilesScreen', () => {
         is_default: false,
       },
       {
+        id: 2,
         name: 'custom-provider',
         provider_type: 'openai_compatible',
         endpoint: 'https://custom.example.com/v1',
@@ -258,14 +280,18 @@ describe('ModelProfilesScreen', () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
-      if (urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify([]), {
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersNoModels), {
+      if (urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersNoModels, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -285,7 +311,7 @@ describe('ModelProfilesScreen', () => {
     const dialog = document.querySelector('[role="dialog"]')!;
 
     const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
-    providerSelect.value = 'custom-provider';
+    providerSelect.value = '2';
     providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
@@ -294,17 +320,19 @@ describe('ModelProfilesScreen', () => {
     expect(dialog.textContent).toContain('lancez un test sur ce provider');
   });
 
-  it('edit — chargement + PUT inchangé', async () => {
+  it('edit — chargement + PUT par id numérique', async () => {
     const originalProfile = {
+      id: 1,
       name: 'aaa',
-      provider: 'anthropic',
+      provider_id: 1,
       model: 'original-model',
       temperature: 0.3,
       max_tokens: 4096,
     };
     const updatedProfile = {
+      id: 1,
       name: 'aaa',
-      provider: 'anthropic',
+      provider_id: 1,
       model: 'updated-model',
       temperature: 0.5,
       max_tokens: 8192,
@@ -314,23 +342,27 @@ describe('ModelProfilesScreen', () => {
     // Sequence of fetch responses (no closures — each call consumes the next one)
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy
-      // 1: GET /api/model-profiles → mount → [originalProfile]
-      .mockResolvedValueOnce(new Response(JSON.stringify([originalProfile]), {
+      // 1: GET /api/v1/model-profiles → mount → [originalProfile]
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: [originalProfile], page: 1, per_page: 100, total_items: 1, total_pages: 1,
+      }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       }))
-      // 2: GET /api/llm-providers → mount → providers
-      .mockResolvedValueOnce(new Response(JSON.stringify(providers), {
+      // 2: GET /api/v1/llm-providers → mount → providers
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: providers, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+      }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       }))
-      // 3: PUT /api/model-profiles/aaa → save → UPDATED (assert body in mock)
+      // 3: PUT /api/v1/model-profiles/1 → save → UPDATED (assert body in mock)
       .mockImplementationOnce(async (_url: unknown, init: unknown) => {
         const bodyStr = (init as RequestInit)?.body as string;
         const body = JSON.parse(bodyStr ?? '{}');
         // PUT body contains ALL fields from edit form:
-        // editProvider='anthropic', editModel='updated-model' (set in test),
+        // editProviderId=1, editModel='updated-model' (set in test),
         // editTemperature='0.3' (from startEdit), editMaxTokens='4096' (from startEdit)
         expect(body).toEqual({
-          provider: 'anthropic',
+          provider_id: 1,
           model: 'updated-model',
           temperature: 0.3,
           max_tokens: 4096,
@@ -339,20 +371,24 @@ describe('ModelProfilesScreen', () => {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       })
-      // 4: GET /api/model-profiles → fetchProfiles after save → [new data]
+      // 4: GET /api/v1/model-profiles → fetchProfiles after save → [new data]
       ;
 
     // After the chain is consumed, set a fallback that handles ALL URLs
     fetchSpy.mockImplementation(async (url: unknown, init: unknown) => {
       const method = (init as RequestInit)?.method ?? 'GET';
       const urlStr = url as string;
-      if (method === 'GET' && urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify([updatedProfile]), {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: [updatedProfile], page: 1, per_page: 100, total_items: 1, total_pages: 1,
+        }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (method === 'GET' && urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providers), {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providers, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       }
@@ -377,17 +413,17 @@ describe('ModelProfilesScreen', () => {
     expect(dialog).toBeTruthy();
     expect(dialog!.textContent).toContain('Modifier : aaa');
 
-    // Provider pré-rempli
-    const editProviderSelect = dialog!.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
-    expect(editProviderSelect.value).toBe('anthropic');
+    // Provider pré-rempli (value=1 pour anthropic)
+    const editProviderSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Provider"]');
+    expect(editProviderSelect?.value).toBe('1');
 
     // editAvailableModels peuplé par watcher
     const vm = wrapper.vm as any;
     expect(vm.editAvailableModels.length).toBe(2); // claude-sonnet + claude-haiku
 
     // Model select options dans le dialog
-    const editModelSelect = dialog!.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
-    expect(editModelSelect.options.length).toBe(3); // vide + 2 modèles
+    const editModelSelect = dialog!.querySelector<HTMLSelectElement>('select[aria-label="Modèle"]');
+    expect(editModelSelect?.options.length).toBe(3); // vide + 2 modèles
 
     // Mettre à jour editModel directement
     vm.editModel = 'updated-model';
@@ -397,7 +433,7 @@ describe('ModelProfilesScreen', () => {
     expect(vm.editModel).toBe('updated-model');
 
     // Sauvegarder
-    const saveBtn = dialog!.querySelector('.btn-success') as HTMLElement;
+    const saveBtn = dialog!.querySelector<HTMLButtonElement>('.btn-success')!;
     await saveBtn.click();
     await wrapper.vm.$nextTick();
     await new Promise((r) => setTimeout(r, 200));
@@ -409,8 +445,9 @@ describe('ModelProfilesScreen', () => {
 
   it('edit — changer le provider met à jour editAvailableModels et reset editModel', async () => {
     const profile = {
+      id: 1,
       name: 'aaa',
-      provider: 'anthropic',
+      provider_id: 1,
       model: 'original-model',
       temperature: 0.3,
       max_tokens: 4096,
@@ -418,14 +455,18 @@ describe('ModelProfilesScreen', () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
-      if (urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify([profile]), {
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: [profile], page: 1, per_page: 100, total_items: 1, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersResponse), {
+      if (urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersResponse, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
@@ -443,33 +484,35 @@ describe('ModelProfilesScreen', () => {
     const dialog = document.querySelector('[role="dialog"]')!;
     const editProviderSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
 
-    expect(editProviderSelect.value).toBe('anthropic');
+    expect(editProviderSelect.value).toBe('1');
 
-    // Changer vers openai (sans modèles)
-    editProviderSelect.value = 'openai';
+    // Changer vers openai (id=2, sans modèles)
+    editProviderSelect.value = '2';
     editProviderSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
     const vm = wrapper.vm as any;
     expect(vm.editAvailableModels).toEqual([]);
-    expect(editProviderSelect.value).toBe('openai');
+    expect(editProviderSelect.value).toBe('2');
 
     const editModelSelect = dialog.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
     expect(editModelSelect.value).toBe('');
     expect(dialog.textContent).toContain('Aucun modèle disponible');
   });
 
-  it('erreur GET /api/llm-providers → message affiché dans le corps principal', async () => {
+  it('erreur GET /api/v1/llm-providers → message affiché dans le corps principal', async () => {
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
-      if (urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify([]), {
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (urlStr.endsWith('/api/llm-providers')) {
+      if (urlStr.endsWith('/api/v1/llm-providers')) {
         return new Response(JSON.stringify({ error: 'Network error' }), {
           status: 502,
           headers: { 'Content-Type': 'application/json' },
@@ -492,30 +535,38 @@ describe('ModelProfilesScreen', () => {
       const urlStr = url as string;
       const method = (init as RequestInit)?.method ?? 'GET';
 
-      if (method === 'GET' && urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify(created ? [{
-          name: 'new-profile',
-          provider: 'anthropic',
-          model: 'claude-sonnet-4-20250514',
-          options: { top_p: 0.9 },
-        }] : []), {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify(created ? {
+          items: [{
+            id: 3,
+            name: 'new-profile',
+            provider_id: 1,
+            model: 'claude-sonnet-4-20250514',
+            options: { top_p: 0.9 },
+          }], page: 1, per_page: 100, total_items: 1, total_pages: 1,
+        } : {
+          items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (method === 'GET' && urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersResponse), {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersResponse, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (method === 'POST' && urlStr.endsWith('/api/model-profiles')) {
+      if (method === 'POST' && urlStr.endsWith('/api/v1/model-profiles')) {
         const body = JSON.parse((init as RequestInit)?.body as string ?? '{}');
         expect(body.options).toEqual({ top_p: 0.9 });
         created = true;
         return new Response(JSON.stringify({
+          id: 3,
           name: 'new-profile',
-          provider: 'anthropic',
+          provider_id: 1,
           model: 'claude-sonnet-4-20250514',
           options: { top_p: 0.9 },
         }), {
@@ -541,7 +592,7 @@ describe('ModelProfilesScreen', () => {
     setInput(dialog.querySelectorAll('input')[0], 'new-profile');
 
     const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
-    providerSelect.value = 'anthropic';
+    providerSelect.value = '1';
     providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
 
@@ -569,21 +620,25 @@ describe('ModelProfilesScreen', () => {
     fetchSpy.mockImplementation(async (url: unknown, init: unknown) => {
       const urlStr = url as string;
       const method = (init as RequestInit)?.method ?? 'GET';
-      if (method === 'GET' && urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify([]), {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1,
+        }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (method === 'GET' && urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersResponse), {
+      if (method === 'GET' && urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersResponse, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (method === 'POST' && urlStr.endsWith('/api/model-profiles')) {
+      if (method === 'POST' && urlStr.endsWith('/api/v1/model-profiles')) {
         const body = JSON.parse((init as RequestInit)?.body as string ?? '{}');
         expect(body.options).toBeUndefined();
         posted = true;
-        return new Response(JSON.stringify({ name: 'x', provider: 'anthropic', model: 'm' }), {
+        return new Response(JSON.stringify({ id: 3, name: 'x', provider_id: 1, model: 'm' }), {
           status: 201, headers: { 'Content-Type': 'application/json' },
         });
       }
@@ -603,7 +658,7 @@ describe('ModelProfilesScreen', () => {
     };
     setInput(dialog.querySelectorAll('input')[0], 'x');
     const providerSelect = dialog.querySelector('select[aria-label="Provider"]') as HTMLSelectElement;
-    providerSelect.value = 'anthropic';
+    providerSelect.value = '1';
     providerSelect.dispatchEvent(new Event('change', { bubbles: true }));
     await new Promise((r) => setTimeout(r, 10));
     const modelSelect = dialog.querySelector('select[aria-label="Modèle"]') as HTMLSelectElement;
@@ -624,21 +679,26 @@ describe('ModelProfilesScreen', () => {
 
   it('edit — options existantes pré-remplissent l\'éditeur clé/valeur', async () => {
     const profile = {
+      id: 1,
       name: 'aaa',
-      provider: 'anthropic',
+      provider_id: 1,
       model: 'original-model',
       options: { top_p: 0.9, thinking_mode: 'enabled' },
     };
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url: unknown) => {
       const urlStr = url as string;
-      if (urlStr.endsWith('/api/model-profiles')) {
-        return new Response(JSON.stringify([profile]), {
+      if (urlStr.endsWith('/api/v1/model-profiles')) {
+        return new Response(JSON.stringify({
+          items: [profile], page: 1, per_page: 100, total_items: 1, total_pages: 1,
+        }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       }
-      if (urlStr.endsWith('/api/llm-providers')) {
-        return new Response(JSON.stringify(providersResponse), {
+      if (urlStr.endsWith('/api/v1/llm-providers')) {
+        return new Response(JSON.stringify({
+          items: providersResponse, page: 1, per_page: 100, total_items: 2, total_pages: 1,
+        }), {
           status: 200, headers: { 'Content-Type': 'application/json' },
         });
       }
@@ -659,17 +719,20 @@ describe('ModelProfilesScreen', () => {
     ]);
   });
 
-  it('erreur GET /api/llm-providers → message visible même avec modale d\'édition ouverte', async () => {
+  it('erreur GET /api/v1/llm-providers → message visible même avec modale d\'édition ouverte', async () => {
     const profile = {
+      id: 1,
       name: 'aaa',
-      provider: 'anthropic',
+      provider_id: 1,
       model: 'model-1',
       temperature: 0.5,
       max_tokens: 4096,
     };
     fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy
-      .mockResolvedValueOnce(new Response(JSON.stringify([profile]), {
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        items: [profile], page: 1, per_page: 100, total_items: 1, total_pages: 1,
+      }), {
         status: 200, headers: { 'Content-Type': 'application/json' },
       }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ error: 'Network error' }), {
