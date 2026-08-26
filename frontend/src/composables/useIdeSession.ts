@@ -10,12 +10,14 @@ export interface IdeActions {
   replaceInActiveFile?: () => void;
 }
 
+import type { PagedResult } from './useCrudResource';
+
 interface AgentOut {
   name: string;
 }
 
 interface ConversationOut {
-  id: string;
+  id: number;
 }
 
 /** Singleton partagé — pont entre le menu global (`MenuBar.vue`, monté une
@@ -62,7 +64,8 @@ export async function startAgentSession(sandboxName: string): Promise<void> {
   startingSession.value = true;
   try {
     const client = createApiClient();
-    const agents = await client.get<AgentOut[]>('/api/agents');
+    const agentsPage = await client.get<PagedResult<AgentOut>>('/api/v1/agents');
+    const agents = agentsPage.items;
     if (agents.length === 0) {
       sessionError.value = 'Aucun agent configuré — configure un agent dans Paramètres.';
       return;
@@ -71,7 +74,7 @@ export async function startAgentSession(sandboxName: string): Promise<void> {
       agent_name: agents[0].name,
       context: { kind: 'sandbox', data: { sandbox_name: sandboxName } },
     });
-    activeConversationId.value = conv.id;
+    activeConversationId.value = String(conv.id);
   } catch (e) {
     sessionError.value = e instanceof ApiError ? e.message : String(e);
   } finally {

@@ -5,7 +5,10 @@ import { endAgentSession, startAgentSession, useIdeSession } from '../../composa
 import ChatSession from './ChatSession.vue';
 
 /** Ligne renvoyée par `GET /api/conversations` — alimente le sélecteur de
- *  session (reprendre une conversation passée plutôt que d'en recréer une). */
+ *  session (reprendre une conversation passée plutôt que d'en recréer une).
+ *  Type local : le backend renvoie `id` en i32, on le convertit en `string`
+ *  au chargement (`loadConversations`) pour garder `activeConversationId`,
+ *  le sélecteur et les URLs WS typés string. */
 interface ConversationOut {
   id: string;
   title: string | null;
@@ -27,7 +30,8 @@ const conversations = ref<ConversationOut[]>([]);
 async function loadConversations() {
   try {
     const query = sandboxName ? `?sandbox_name=${encodeURIComponent(sandboxName)}` : '';
-    conversations.value = await client.get<ConversationOut[]>(`/api/conversations${query}`);
+    const rows = await client.get<ConversationOut[]>(`/api/conversations${query}`);
+    conversations.value = rows.map((c) => ({ ...c, id: String(c.id) }));
   } catch {
     // Liste optionnelle pour le sélecteur — un échec ne doit pas bloquer
     // la session déjà active.

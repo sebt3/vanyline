@@ -119,16 +119,16 @@ describe('MenuBar', () => {
 
   it('Nouvelle session agent déclenche startAgentSession (POST /api/conversations)', async () => {
     const fetchSpy = vi.fn().mockImplementation((url: string) => {
-      if (url === '/api/agents') {
+      if (url === '/api/v1/agents') {
         return Promise.resolve(
-          new Response(JSON.stringify([{ name: 'default' }]), {
+          new Response(JSON.stringify({ items: [{ name: 'default' }], page: 1, per_page: 100, total_items: 1, total_pages: 1 }), {
             status: 200,
             headers: { 'content-type': 'application/json' },
           }),
         );
       }
       return Promise.resolve(
-        new Response(JSON.stringify({ id: 'conv-1' }), {
+        new Response(JSON.stringify({ id: 42 }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         }),
@@ -149,7 +149,7 @@ describe('MenuBar', () => {
     await openMenuAndClick(wrapper, 'Exécution', 'Nouvelle session agent');
     await new Promise((r) => setTimeout(r, 0));
 
-    expect(useIdeSession().activeConversationId.value).toBe('conv-1');
+    expect(useIdeSession().activeConversationId.value).toBe('42');
     const createCall = fetchSpy.mock.calls.find(([url]) => url === '/api/conversations');
     expect(JSON.parse((createCall?.[1] as RequestInit).body as string)).toEqual({
       agent_name: 'default',
