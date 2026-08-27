@@ -12,8 +12,12 @@ COPY frontend/ frontend/
 RUN npm run build
 
 # ── Stage 2 : chef ──────────────────────────────────────────────────────────
+# ca-certificates + curl : utoipa-swagger-ui (feature swagger-ui de miryad-core) télécharge les
+# assets statiques de Swagger UI via curl à la compilation (son build.rs) — absent de l'image
+# rust de base, jamais eu besoin jusqu'ici.
 FROM rust:1-slim-trixie AS chef
-RUN apt-get update && apt-get install -y --no-install-recommends pkg-config && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends pkg-config ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
