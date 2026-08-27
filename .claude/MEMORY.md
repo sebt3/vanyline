@@ -94,6 +94,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/chat-app-fonctionnel.md` | Chat de l'app rendu fonctionnel (3 axes) : contexte de conversation polymorphe (`chat_contexts`, extensible au-delà de sandbox), tools sandbox réellement utilisables (`extra_mcp` résolu dynamiquement, jusque-là `Vec::new()` en dur), options avancées de `ModelProfile` éditables côté web, `vue-advanced-chat` remplacé par Nuxt UI Chat (Tailwind CSS global accepté après correction d'une annonce erronée). Implémenté directement par Claude (pas Qwen/`.tasks/`) à la demande du développeur. Review Phase 3 a trouvé une faille de scoping owner réelle (sandbox d'un autre utilisateur résolvable via le contexte), corrigée avant clôture ; `fmt` non lancé (4ᵉ occurrence du motif) |
 | `.claude/memory/lsp-integration.md` | LSP par toolchain dans la sandbox : process unique partagé entre l'éditeur (CodeMirror `@codemirror/lsp-client` via `/ws/lsp/:toolchain`) et le LLM (tools MCP `lsp_*`, additifs). Livré par `cadence`, mais avec trois escalades explicites (forme de `Toolchain.lsp`, traduction d'URIs relatif↔absolu côté bridge WS, limite du helper `renameSymbol` du package pour le cross-file) résolues en session plutôt que découvertes en review — contraste avec WS-10/editing-context-menus. `fmt` lancé cette fois (5ᵉ feature déléguée, 1ʳᵉ où c'est fait). Review Phase 3 a trouvé un message de rename trompeur, corrigé. Suivi same-day (`fix/lsp-toolchain-images`) : images LSP réelles construites et publiées (`toolchains/rust/`, `toolchains/node/Dockerfile`) après un premier défaut non fonctionnel |
 | `.claude/memory/git-integration.md` | Git complet dans l'IDE (statut/diff/staging/commit/branches/merge/push/clé SSH), demandé en priorité explicite par le développeur. Rouvre volontairement les exclusions de WS-11. Décision structurante du développeur (corrigeant le premier jet de Claude) : clé SSH dans le PVC Owner déjà monté, pas un Secret K8s dédié — zéro nouvelle capacité pour `app`. Deux escalades Cadence résolues avant implémentation (sémantique HTTP du conflit de merge, canal d'auth frontend→sandbox). Review Phase 3 : premier écart de gravité net du projet — traversal de chemin + injection d'argument + fail-open sur un check de sécurité, tous corrigés par Claude directement (accord explicite), pas des coquilles habituelles. Diagnostic discuté avec le développeur : pas une baisse de fiabilité du modèle (DeepSeek v4 flash via Cadence), deux trous de configuration réels (cargo fmt permis mais jamais dans les commandes de validation ; mandat d'escalade de Cadence limité aux ambiguïtés visibles, pas aux contraintes de sécurité implicites) — corrigés dans `.opencode/agents/cadence.md`/`AGENTS.md`/`.claude/config.md` (`fix/cadence-validation-gaps`). Un commit portait un trailer avec le nom/email personnel du développeur, corrigé par réécriture d'historique avant tout push |
+| `.claude/memory/miryad-core-integration.md` | Bascule complète de `app` sur `miryad-core` (crate publique du développeur, auth/RBAC/CRUD générique) — sqlx→SeaORM, `Uuid`→`i32`, six entités sur le CRUD générique, le reste (CRDs K8s, Conversation/Message custom) en handlers maison rebranchés. Blocage Cadence en Phase 2 (3 ambiguïtés non couvertes par le design, résolues développeur+Claude). Review Phase 3 : deux bugs critiques rendaient la feature non fonctionnelle malgré des tests tous verts (chat cassé dès le 2ᵉ message — `id: Set(0)` au lieu de `NotSet` ; CRUD générique cassé en 400 — `#[serde(default)]` manquant sur `id`/`owner_id`), plus un troisième trouvé en creusant le premier, plus grave : un index non-UNIQUE mal chaîné cassait les migrations aussi bien sur SQLite que sur Postgres — jamais testé contre une vraie base avant cette revue. Tous corrigés par Claude directement (le développeur a demandé "corriges toi-même"), avec un harnais de test sqlite-en-mémoire réutilisable. Mergé avec `git-integration` (conflits réels sur 3 fichiers touchés par les deux branches, résolus) |
 
 ---
 
@@ -155,10 +156,18 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   sur la même image par langage. Toujours pas testé sur cluster réel.
 - **Git intégration** (2026-08-24, `.claude/memory/git-integration.md`) : statut/diff/
   staging/commit/branches/merge/push depuis l'IDE, provisioning de clé SSH à la
-  demande dans le PVC Owner. Branche `feat/git-integration` mergée dans `main` (pas
-  encore poussée). `fix/cadence-validation-gaps` mergé avant elle — corrige les deux
+  demande dans le PVC Owner. Branche `feat/git-integration` mergée dans `main` et
+  poussée. `fix/cadence-validation-gaps` mergé avant elle — corrige les deux
   trous de configuration trouvés pendant sa review (fmt, mandat d'escalade sécurité
   de Cadence). Toujours pas testé sur cluster réel.
+- **Bascule sur miryad-core** (2026-08-27, `.claude/memory/miryad-core-integration.md`) :
+  `app` ne réimplémente plus sa propre couche auth/BDD/CRUD — consomme `miryad-core`
+  (SeaORM, RBAC générique, `resource_router`). Branche `feat/miryad-core-integration`
+  mergée dans `main` et poussée avec `git-integration` (conflits réels résolus sur
+  `Cargo.toml`/`sandboxes.rs`/`error.rs`). Deux bugs critiques + un bug de migration
+  plus profond trouvés et corrigés en revue Phase 3 malgré des tests tous verts avant
+  cette revue — cf. le fichier mémoire pour le détail, ça vaut le détour pour la
+  méthode. Toujours pas testé sur cluster réel.
 
 **Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
 attaqué) :

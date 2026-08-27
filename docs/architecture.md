@@ -16,7 +16,7 @@ Sept crates : **trois bibliothèques feuilles** partagées (`vanyline-tools`, `v
 | `vanyline-crds` | lib feuille | Types CRD Owner/Project/Sandbox/Application (spec/status/derives kube), sans runtime opérateur | `Owner`/`Project`/`Sandbox`/`Application` + specs/status, `Toolchain`/`PvcRef`/`ProjectDefaults`/`IngressControllerRef`, `crd_manifests()`, `service_name`/`MCP_PORT` (convention de nommage du Service MCP d'une sandbox, partagée avec `vanyline-lib`) — voir sections "Client K8s CLI" et "Opérateur Kubernetes" plus bas |
 | `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), `k8s` (`VnlK8sClient`, **feature Cargo optionnelle `k8s`**, désactivée par défaut — voir "Client K8s CLI" plus bas), erreurs `VNL-*` |
 | `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux, active la feature `k8s` de `vanyline-lib` (commandes owner/project/sandbox + toolbox) |
-| `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), OIDC, sqlx/PostgreSQL, `PgConfigStore` (adapte le schéma PG en `ConfigStore`), orchestration LLM via `vanyline-lib`, client `VnlK8sClient` (feature `k8s`) pour piloter Owner/Project/Sandbox/Application et relayer les tickets WS de la sandbox — voir section "Backend web" plus bas |
+| `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), auth/RBAC/CRUD générique via `miryad-core` (crate publique), SeaORM/PostgreSQL, `PgConfigStore` (adapte le schéma SeaORM en `ConfigStore`), orchestration LLM via `vanyline-lib`, client `VnlK8sClient` (feature `k8s`) pour piloter Owner/Project/Sandbox/Application et relayer les tickets WS de la sandbox — voir section "Backend web" plus bas |
 | `vanyline-sandbox` | binaire | Pod serveur MCP + éditeur | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) + WebSocket éditeur (`/ws/ticket`, `/ws/fs`, `/ws/terminal`) — voir section "Serveur MCP" plus bas ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
 | `vanyline-controller` | binaire | Opérateur Kubernetes | kube-rs, reconcilers des CRDs Owner/Project/Sandbox/Application v1alpha1 (types importés de `vanyline-crds`) — voir section dédiée plus bas |
 
@@ -93,9 +93,8 @@ pub async fn run_agent_turn(
 - `store: Arc<dyn ConfigStore>` — résolution de config par nom (providers, modèles,
   toolsets, agents, skills). Chaque binaire fournit sa **propre implémentation** :
   `FsConfigStore` (cli, YAML deux couches natif — voir "Configuration CLI" plus bas ;
-  remplace l'ancien `CliConfigStore`/JSON, supprimé) et `PgConfigStore` (app, requête le
-  schéma PostgreSQL existant, synthétise encore `ModelProfile`/`Toolset` en attendant sa
-  propre bascule vers un stockage natif — `app-harness-parity.md`).
+  remplace l'ancien `CliConfigStore`/JSON, supprimé) et `PgConfigStore` (app, requête
+  les entités SeaORM de `miryad-core-integration` — voir "Backend web" plus bas).
 - `sink: Arc<dyn EventSink>` — un seul type d'événement, `ChatEvent`, pour tous les
   transports (REPL stdout, WebSocket, JSON-RPC stdio). `EventSink::emit` est
   appelée pour chaque `ChatEvent` produit pendant le tour (tokens, tool calls/résultats,
@@ -325,41 +324,92 @@ façon sur le point de sortir.
 
 ## Backend web — `vanyline-app`
 
-Backend axum du frontend (MVP `initial-app-frontend` + tables/API name-keyed de
-`app-harness-parity`). Auth OIDC stateless (pas de session serveur) : `openidconnect`
-4.0, cookie `HttpOnly` chiffré (`cookie::Key` 64 octets depuis `COOKIE_SECRET`,
-payload `{id_token}|{email}`, `auth/cookie.rs`) revalidé à chaque requête par
-l'extractor `AuthUser` (`auth/middleware.rs`) — tout endpoint `/api/*` scope ses
-requêtes par utilisateur (`get_or_create_user`), aucune notion d'admin distincte
-(`AdminAuth`/`ADMIN_SECRET` du MVP initial ont été retirés une fois l'API CRUD
-name-keyed en place — l'ancienne distinction admin/utilisateur n'avait plus de sens
-dès que providers/mcp servers sont eux aussi scopés par utilisateur). `AuthUser.id_token`
-(le JWT OIDC brut, jamais exposé au JS — cf. section "WebSocket éditeur" plus bas) sert
-depuis `sandbox-ingress-wiring` au relais de ticket WS vers la sandbox.
+Backend axum du frontend. Depuis `miryad-core-integration` (2026-08-27), la couche
+auth/session/BDD/CRUD générique n'est plus maison — `app` consomme la crate publique
+`miryad-core` (crates.io, moteur générique auth/RBAC/REST/GraphQL/MCP derrière le
+template `miryad`, cf. `$HOME/projets/miryad-core`). Bascule complète, en une fois,
+sans chemin de migration ni cohabitation ancien/nouveau (aucune donnée réelle à
+préserver — pas d'instance vanyline en prod à cette date).
 
-**Stockage** : PostgreSQL/sqlx, migrations `app/migrations/0001_initial.sql` (schéma
-MVP) + `0002_harness_parity.sql` (tables `model_profiles`/`toolsets`/`skills`, `agents`
-v2 name-keyed, `user_id`+`UNIQUE(user_id, name)` ajoutés à `llm_providers`/
-`mcp_servers`). `config_store.rs::PgConfigStore` implémente `vanyline_lib::ConfigStore`
-sur ce schéma — une instance par requête, scopée `user_id`, convertit les lignes en
-types name-keyed de la lib (le nom remplace l'UUID en sortie, comme `FsConfigStore`
-côté cli). `load_skill` lit `skills.body` à la demande, même paresse que le cli.
+**Auth** : `miryad_core::auth::{auth_router, MiryadAuthState, AuthUser}` — session
+cookie OIDC pour le navigateur (dual-auth cookie/token API géré par le crate, `app` ne
+consomme que le flow cookie). `AuthUser { subject, email, id_token }` remplace
+l'ancien extracteur maison ; `AuthUser.id_token` (le JWT OIDC brut, jamais exposé au
+JS) sert toujours au relais de ticket WS vers la sandbox (cf. section "WebSocket
+éditeur" plus bas) et au relais `/git/*`. `app/src/auth/{cookie,middleware,oidc}.rs`
+(implémentation maison précédente) supprimés.
 
-**API REST** (`api/*.rs`, `api::api_router`) : CRUD par nom pour `model-profiles`,
-`toolsets`, `skills`, `agents` ; CRUD par id pour `llm-providers`/`mcp-servers`
-(`{id}/test` = discovery, `{id}/default` pour les providers) ; `conversations` +
-`messages` ; `projects`/`sandboxes` (feature `k8s`, cf. ci-dessous) ; `/me` (email +
-`k8s_owner_name`). Toutes les routes exigent `AuthUser` et scopent par utilisateur.
+**Stockage** : PostgreSQL/SeaORM (`sea-orm`/`sea-orm-migration`, plus sqlx direct) —
+entités `app/src/db/entities/*.rs`, tables préfixées `vanyline_*`, migrations
+`app/src/migration/m20260825_*.rs` (table de suivi dédiée `seaql_migrations_app`, pour
+ne pas collisionner avec celle de miryad-core). **Clés primaires `i32`
+auto-incrémentées** (pas `Uuid`) — imposé par `miryad_core::rest::RestEntity`, qui
+suppose une seule colonne de PK de ce type. Le schéma `User` de miryad-core
+(`miryad_users` : id, subject, email, display_name) est **fixe**, sans mécanisme
+d'extension par l'app consommatrice — le lien vers l'Owner CRD K8s (ancien
+`users.k8s_owner_name`) vit donc dans une table séparée côté `app`,
+`vanyline_owner_links` (FK vers `miryad_users.id`, upsert atomique `ON CONFLICT` dans
+`api/owners.rs::ensure_owner`).
+
+`config_store.rs::PgConfigStore` implémente toujours `vanyline_lib::ConfigStore`, mais
+requête désormais les entités SeaORM plutôt que du sqlx brut — même contrat, même
+résolution par nom (le nom remplace l'id en sortie de `ConfigStore`, comme
+`FsConfigStore` côté cli). `load_skill` lit `skills.body` à la demande, même paresse
+qu'avant.
+
+**RBAC générique** (`miryad_core::resource::{MiryadResource, AccessPolicy}`) : chaque
+entité déclare `read_policy()`/`write_policy()` (`Public` / `OwnerOnly` / `Group` /
+`AdminOnly`) et `owner_column()`. `ModelProfile`/`Toolset`/`Skill`/`AgentRecord` sont
+`OwnerOnly` (propriétaire = utilisateur courant, injecté serveur-side, jamais
+acceptée du client). `LlmProvider`/`McpServer` sont devenus des **ressources globales
+partagées** (`read_policy = Public`, `write_policy = AdminOnly`, `owner_column =
+None`) — rupture avec le MVP initial où chaque utilisateur avait ses propres
+providers/serveurs MCP ; tout utilisateur authentifié voit la liste pour choisir un
+modèle/toolset, seul un admin (groupe OIDC `admin`) les configure. Validation
+métier perdue avec les anciennes contraintes `CHECK` (types énumérés `provider_type`/
+`server_type`/`mode`) restaurée via `MiryadResource::before_create` (hook pur, **sans
+accès BDD** — limite du framework : une validation nécessitant une requête, comme
+l'existence d'un nom référencé, ne peut pas y vivre).
+
+**API REST** — deux familles de routes, préfixes distincts par construction :
+- **CRUD générique** (`miryad_core::rest::resource_router::<Entity, AppState>()`,
+  monté dans `main.rs`) pour `llm-providers`, `mcp-servers`, `model-profiles`,
+  `toolsets`, `skills`, `agents` — `GET/POST /api/v1/{resource}` (paginé,
+  `PagedResult<T>`) et `GET/PUT/DELETE /api/v1/{resource}/{id}`. Aucune route écrite à
+  la main pour ces six entités.
+- **Handlers custom** (`api/*.rs`, `api::api_router` sous `/api`, `api::api_v1_router`
+  sous `/api/v1`) pour tout ce qui dépasse le CRUD générique : `owners`/`projects`/
+  `sandboxes` (CRDs K8s, pas des lignes Postgres — hors du moule `MiryadResource`,
+  qui suppose une entité SeaORM), `conversations`/`messages` (effet de bord à la
+  création, résolution de nom côté serveur, sous-route `/messages`, filtre au-delà
+  d'une égalité simple — cf. plus bas), `/me`, `/local-tools`, et les actions
+  non-CRUD des deux ressources globales (`POST /api/v1/llm-providers/{id}/test`,
+  `PUT /api/v1/llm-providers/{id}/default`, `POST /api/v1/mcp-servers/{id}/test` —
+  montées sous `/api/v1`, au même préfixe que le CRUD généré de ces mêmes ressources,
+  RBAC vérifié via les helpers publics `miryad_core::rbac::can_read`/`can_write`, pas
+  réinventé). Toutes ces routes exigent `AuthUser` et scopent par utilisateur (sauf
+  Owner/Project/Sandbox/Conversation/Message qui vérifient l'appartenance à la main,
+  cf. plus bas).
+
+`ChatContext`/`Conversation`/`Message` restent des entités SeaORM mais **volontairement
+hors `MiryadResource`** : `create_conversation` crée un `ChatContext` avant la
+`Conversation` (effet de bord), résout `agent_name` en id côté serveur,
+`list_conversations` filtre par jointure au-delà d'un `filter_column()` à une seule
+colonne — le moule générique ne les couvre pas. `Message`/`Conversation` portent un
+`owner_id` posé directement à la création (pas dérivé d'une FK) : `before_create` n'a
+de toute façon pas accès BDD pour vérifier qu'un `conversation_id` fourni appartient au
+même propriétaire — limite acceptée sciemment (détail de la décision et des bugs trouvés en
+revue Phase 3 : `.claude/memory/miryad-core-integration.md`).
 
 **Discovery — providers et serveurs MCP** (`frontend-dashboards-nav`) : même patron sur
 les deux entités qui référencent une liste de choix, jamais peuplée à la création,
-seulement après un test explicite. `POST /api/llm-providers/{id}/test` interroge le
-provider et persiste les noms de modèles dans `llm_providers.available_models`.
-`POST /api/mcp-servers/{id}/test` fait de même pour les tools exposés par un serveur
+seulement après un test explicite. `POST /api/v1/llm-providers/{id}/test` interroge le
+provider et persiste les noms de modèles dans `vanyline_llm_providers.available_models`.
+`POST /api/v1/mcp-servers/{id}/test` fait de même pour les tools exposés par un serveur
 MCP : réutilise `connect_domain_mcp_server_inner`/`list_all_tools()` de
 `lib/src/prefixed_mcp.rs` (déjà écrit pour la connexion runtime des toolsets, pas un
-nouveau client), persiste dans `mcp_servers.available_tools` (colonne ajoutée par
-`frontend-dashboards-nav`). Les deux listes alimentent des dropdowns dépendants côté
+nouveau client), persiste dans `vanyline_mcp_servers.available_tools`. Les deux listes
+alimentent des dropdowns dépendants côté
 frontend (cf. section Frontend plus bas) — état vide explicite tant que le test n'a
 jamais été lancé. `GET /api/local-tools` (nouveau, lecture seule, pas de DB) expose le
 registre statique `tools::mcp::{filesystem_tools, search_tools, command_tools}` — les 8
@@ -381,20 +431,22 @@ harness-core, résolue par la tâche `ws-chatevent`). **Persistance todo**
 `vanyline-lib`, inconditionnels sur tout `run_agent_turn`) est semé depuis
 `conversations.todo` au début de `handle_message`, relu et persisté après le tour
 seulement s'il a changé (jamais d'update systématique qui écraserait un état
-antérieur à `NULL`) — même patron que le fix `f4dfbf9` déjà en place côté CLI, migré
-ici (`app/migrations/0003_conversation_todo.sql`).
+antérieur à `NULL`) — même patron que le fix `f4dfbf9` déjà en place côté CLI (colonne
+`conversations.todo`, portée par l'entité SeaORM depuis `miryad-core-integration`).
 
-**Résolution Owner** (`api/owners.rs`, `app-k8s-provisioning`) : `users.k8s_owner_name`
-(colonne nullable) fait le lien entre un utilisateur OIDC et un Owner K8s — aucun
-mécanisme automatique avant cette feature (l'Owner se créait jusque-là uniquement à la
-main via le CLI). `resolve_owner_name` (lecture, ne crée rien — routes GET répondent
-« aucun Owner » si absent) et `ensure_owner` (crée l'Owner si nécessaire et persiste le
-nom résolu, **réservé au seul `POST /api/projects`** — décision développeur : lazy
+**Résolution Owner** (`api/owners.rs`, `app-k8s-provisioning`, table dédiée depuis
+`miryad-core-integration`) : `vanyline_owner_links.k8s_owner_name` (FK vers
+`miryad_users.id`, colonne nullable) fait le lien entre un utilisateur OIDC et un Owner
+K8s — aucun mécanisme automatique avant cette feature (l'Owner se créait jusque-là
+uniquement à la main via le CLI). `resolve_owner_name` (lecture, ne crée rien — routes
+GET répondent « aucun Owner » si absent) et `ensure_owner` (crée l'Owner si nécessaire
+et persiste le nom résolu via un upsert atomique `INSERT ... ON CONFLICT (user_id) DO
+UPDATE`, **réservé au seul `POST /api/projects`** — décision développeur : lazy
 provisioning restreint, pas de création implicite sur une route de lecture).
 `sanitize_owner_name` dérive un nom de ressource K8s valide (RFC1123 : début **et
-fin** alphanumériques) depuis l'email ou l'`oidc_sub` — la troncature à 63 caractères
-retrim explicitement les tirets de fin (un bug corrigé en revue : une coupe pile sur
-un `-` produisait un nom invalide).
+fin** alphanumériques) depuis l'email ou le `subject` OIDC — la troncature à 63
+caractères retrim explicitement les tirets de fin (un bug corrigé en revue : une coupe
+pile sur un `-` produisait un nom invalide).
 
 **Routes `projects`/`sandboxes`** (`api/projects.rs`, `api/sandboxes.rs`,
 `app-k8s-provisioning` + `sandbox-ingress-wiring`) : wrappers fins autour de
@@ -595,8 +647,8 @@ jamais de JWT brut (principe déjà acté plus haut). Le frontend n'appelle donc
 la sandbox directement pour ces endpoints — `app` relaie (`ANY
 /api/sandboxes/{name}/git/{*path}`, `app/src/api/sandboxes.rs::git_proxy`), même
 pattern que le relais de ticket WS (JWT présenté à la sandbox, jamais renvoyé au
-navigateur), même scoping owner (get_or_create_user → resolve_owner_name →
-get_sandbox → get_project → assert owner match, dupliqué dans les deux handlers).
+navigateur), même scoping owner (`resolve_user` → `resolve_owner_name` →
+`get_sandbox` → `get_project` → assert owner match, dupliqué dans les deux handlers).
 
 - **Sous-chemin extrait positionnellement depuis l'URI brute de la requête**
   (`raw_git_tail`), pas via l'extractor `Path` d'axum qui décode le wildcard
@@ -1276,8 +1328,8 @@ en l'état, pas un pack de logos par langage.
 **Chat — contexte de conversation, tools sandbox, Nuxt UI** (`chat-app-fonctionnel`) :
 trois axes livrés ensemble.
 
-- **Contexte de conversation** : nouvelle table `chat_contexts` (`kind`/`data` JSONB,
-  `app/migrations/0006_chat_contexts.sql`), `conversations.context_id NOT NULL`. `kind
+- **Contexte de conversation** : table `vanyline_chat_contexts` (`kind`/`data` JSONB,
+  entité SeaORM depuis `miryad-core-integration`), `conversations.context_id NOT NULL`. `kind
   = "sandbox"` (`data = { "sandbox_name": "..." }`) est le seul type géré aujourd'hui —
   le modèle est volontairement polymorphe pour accueillir un futur contexte "settings"
   (chat d'aide au paramétrage) sans migration de schéma. `POST /api/conversations`
