@@ -16,7 +16,8 @@ fn default_mode() -> String {
     "primary".to_string()
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema, DeriveEntityModel)]
+#[schema(as = Agent)]
 #[sea_orm(table_name = "vanyline_agents")]
 pub struct Model {
     // Cf. commentaire équivalent dans `model_profiles.rs` : `#[serde(default)]` sur

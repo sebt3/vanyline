@@ -2,7 +2,8 @@ use miryad_core::resource::{AccessPolicy, MiryadResource};
 use sea_orm::entity::prelude::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema, DeriveEntityModel)]
+#[schema(as = Skill)]
 #[sea_orm(table_name = "vanyline_skills")]
 pub struct Model {
     // Cf. commentaire équivalent dans `model_profiles.rs` : `#[serde(default)]` sur

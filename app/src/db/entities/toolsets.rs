@@ -6,7 +6,8 @@ fn default_json_array() -> serde_json::Value {
     serde_json::json!([])
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DeriveEntityModel)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, utoipa::ToSchema, DeriveEntityModel)]
+#[schema(as = Toolset)]
 #[sea_orm(table_name = "vanyline_toolsets")]
 pub struct Model {
     // Cf. commentaire équivalent dans `model_profiles.rs` : `#[serde(default)]` sur

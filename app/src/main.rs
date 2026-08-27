@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use axum::{Router, extract::FromRef, routing::get};
 use config::Config;
 use miryad_core::auth::{MiryadAuthState, OidcClient};
+use miryad_core::rest::openapi::{resource_openapi, swagger_ui_router};
 use miryad_core::rest::resource_router;
 use sea_orm_migration::MigratorTrait;
 use tower_http::services::{ServeDir, ServeFile};
@@ -141,6 +142,7 @@ async fn main() {
             AppState,
         >())
         .merge(resource_router::<db::entities::agents::Entity, AppState>())
+        .merge(swagger_ui_router::<AppState>(openapi_spec()))
         .nest("/api/v1", api::api_v1_router())
         .nest("/api", api::api_router())
         .route(
@@ -167,4 +169,66 @@ async fn main() {
 
 async fn health() -> &'static str {
     "ok"
+}
+
+/// Document OpenAPI combiné des 6 ressources `resource_router` — un fragment par entité
+/// (`resource_openapi`), fusionnés (`OpenApi::merge`, dédoublonne le schéma Bearer commun),
+/// `info` renseigné une fois sur le document final (les fragments ne le fixent pas). Sert
+/// `GET /api/swagger-ui` (feature Cargo `swagger-ui` de miryad-core) et `/api/openapi.json`.
+fn openapi_spec() -> utoipa::openapi::OpenApi {
+    let mut spec = resource_openapi::<db::entities::llm_providers::Entity>();
+    spec.merge(resource_openapi::<db::entities::mcp_servers::Entity>());
+    spec.merge(resource_openapi::<db::entities::model_profiles::Entity>());
+    spec.merge(resource_openapi::<db::entities::toolsets::Entity>());
+    spec.merge(resource_openapi::<db::entities::skills::Entity>());
+    spec.merge(resource_openapi::<db::entities::agents::Entity>());
+    spec.info = utoipa::openapi::Info::new("vanyline", env!("CARGO_PKG_VERSION"));
+    spec
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    #[test]
+    fn openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme() {
+        let spec = openapi_spec();
+
+        for resource in [
+            "llm-providers",
+            "mcp-servers",
+            "model-profiles",
+            "toolsets",
+            "skills",
+            "agents",
+        ] {
+            assert!(
+                spec.paths
+                    .get_path_item(&format!("/api/v1/{resource}"))
+                    .is_some(),
+                "missing collection path for {resource}"
+            );
+            assert!(
+                spec.paths
+                    .get_path_item(&format!("/api/v1/{resource}/{{id}}"))
+                    .is_some(),
+                "missing item path for {resource}"
+            );
+        }
+
+        assert_eq!(spec.info.title, "vanyline");
+        assert_eq!(spec.info.version, env!("CARGO_PKG_VERSION"));
+
+        // OpenApi::merge dédoublonne security_schemes/security par nom/égalité — les 6
+        // fragments déclarent le même schéma Bearer, il ne doit apparaître qu'une fois.
+        let components = spec.components.expect("components present");
+        assert_eq!(
+            components.security_schemes.len(),
+            1,
+            "expected a single deduplicated security scheme, got {:?}",
+            components.security_schemes.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(spec.security.expect("global security present").len(), 1);
+    }
 }

@@ -36,7 +36,8 @@ url = "2"
 parking_lot = "0.12"
 bytes = "1"
 percent-encoding = "2"
-miryad-core = { version = "0.1", default-features = false }
+miryad-core = { version = "0.1", default-features = false, features = ["swagger-ui"] }
+utoipa = "5"
 sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "mock"] }
 sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
 
