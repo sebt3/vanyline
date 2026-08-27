@@ -3,7 +3,13 @@
 #   podman build -f controller/Dockerfile -t vanyline-controller:dev .
 
 # ── Stage 1 : chef ──────────────────────────────────────────────────────────
+# ca-certificates + curl : `cargo chef cook` (étape 3) construit les dépendances de tout le
+# workspace (pas juste vanyline-controller, même Cargo.lock partagé) — utoipa-swagger-ui
+# (feature swagger-ui de miryad-core, activée côté app) télécharge les assets Swagger UI via
+# curl à la compilation (son build.rs), absent de l'image rust de base.
 FROM rust:1-slim-trixie AS chef
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
 RUN cargo install cargo-chef --locked
 WORKDIR /app
 
