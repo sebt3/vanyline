@@ -34,3 +34,30 @@ impl MigratorTrait for Migrator {
         Alias::new("seaql_migrations_app").into_iden()
     }
 }
+
+/// Régression Phase 3 (miryad-core-integration) : plusieurs migrations chaînaient un index
+/// non-UNIQUE en `.index(...)` directement sur `Table::create()` — sea-query génère alors un
+/// fragment `(...)` orphelin dans le `CREATE TABLE`, syntaxiquement invalide (confirmé contre
+/// Postgres ET SQLite, pas une limite sqlite-only). Seul un `.unique()` produit une contrainte de
+/// table valide (`UNIQUE (...)`) ; un index simple doit passer par `manager.create_index(...)`,
+/// une instruction séparée. Ce test applique la paire complète de migrations (miryad-core + app)
+/// contre une base réelle (sqlite en mémoire) — le seul moyen de détecter ce type d'erreur SQL,
+/// invisible aux tests unitaires qui ne touchent jamais une vraie connexion.
+#[cfg(test)]
+mod migrations_apply_cleanly {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    #[tokio::test]
+    async fn full_migration_set_applies_against_a_real_schema() {
+        let db = crate::db::test_support::real_db().await;
+        // `real_db()` applique déjà les deux migrateurs ; un échec y aurait paniqué avant
+        // d'atteindre cette ligne. Une requête réelle contre une table créée confirme un schéma
+        // effectivement utilisable, pas seulement "la migration n'a pas paniqué".
+        use sea_orm::EntityTrait;
+        let count = crate::db::entities::skills::Entity::find()
+            .all(&db)
+            .await
+            .expect("querying a freshly migrated table succeeds");
+        assert!(count.is_empty());
+    }
+}

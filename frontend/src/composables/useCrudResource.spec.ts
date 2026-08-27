@@ -166,4 +166,33 @@ describe('useCrudResource', () => {
     expect(client.get).toHaveBeenCalledWith('/api/items');
     expect(resource.items.value).toEqual([]);
   });
+
+  it('fetch() : PagedResult multi-pages → toutes les pages sont récupérées (régression Phase 3)', async () => {
+    const page1 = {
+      items: [{ id: 1, name: 'a' }],
+      page: 1,
+      per_page: 1,
+      total_items: 3,
+      total_pages: 3,
+    };
+    const page2 = { ...page1, items: [{ id: 2, name: 'b' }], page: 2 };
+    const page3 = { ...page1, items: [{ id: 3, name: 'c' }], page: 3 };
+    const getMock = vi.fn((url: string) => {
+      if (url === '/api/items') return Promise.resolve(page1);
+      if (url === '/api/items?page=2') return Promise.resolve(page2);
+      if (url === '/api/items?page=3') return Promise.resolve(page3);
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    const client = mockClient({ get: getMock as unknown as ApiClient['get'] });
+    const resource = useCrudResource<Item>(client, '/api/items');
+
+    await resource.fetch();
+
+    expect(resource.items.value).toEqual([
+      { id: 1, name: 'a' },
+      { id: 2, name: 'b' },
+      { id: 3, name: 'c' },
+    ]);
+    expect(getMock).toHaveBeenCalledTimes(3);
+  });
 });

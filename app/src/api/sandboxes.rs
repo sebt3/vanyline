@@ -9,13 +9,7 @@ use vanyline_crds::{Sandbox, SandboxSpec};
 use miryad_core::auth::AuthUser;
 use miryad_core::users::resolve_user;
 
-use crate::{
-    AppState, api::owners, error::AppError, k8s,
-};
-
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
+use crate::{AppState, api::owners, error::AppError, k8s};
 
 /// Body de `POST /api/sandboxes`. `name` porte le nom du CRD Sandbox ;
 /// `#[serde(flatten)]` passe le reste (`SandboxSpec`) tel quel (passthrough).
@@ -39,7 +33,7 @@ pub async fn list_sandboxes(
 ) -> Result<Json<Vec<Sandbox>>, AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
@@ -67,7 +61,7 @@ pub async fn get_sandbox(
 ) -> Result<Json<Sandbox>, AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
@@ -91,7 +85,7 @@ pub async fn create_sandbox(
     }
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
@@ -112,7 +106,7 @@ pub async fn delete_sandbox(
 ) -> Result<StatusCode, AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
@@ -135,7 +129,7 @@ pub async fn set_sandbox_suspended(
 ) -> Result<Json<Sandbox>, AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
@@ -173,7 +167,7 @@ pub async fn ws_ticket(
     // 1. scoping owner identique à get_sandbox/delete_sandbox (déjà en place)
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),

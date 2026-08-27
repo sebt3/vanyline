@@ -33,8 +33,21 @@ export function useCrudResource<T>(client: ApiClient, basePath: string): CrudRes
 
   async function fetchAll(): Promise<void> {
     try {
-      const data = await client.get<T[] | PagedResult<T>>(basePath);
-      items.value = Array.isArray(data) ? data : data.items;
+      const first = await client.get<T[] | PagedResult<T>>(basePath);
+      if (Array.isArray(first)) {
+        items.value = first;
+        return;
+      }
+      // `PagedResult` : une seule page (défaut serveur 100) ne suffit pas pour une ressource qui
+      // en a plus — sans quoi tout ce qui dépasse la première page devient invisible/ingérable
+      // dans l'écran (trouvé en revue Phase 3, cf. docs/features/miryad-core-integration.md).
+      const all = [...first.items];
+      for (let page = first.page + 1; page <= first.total_pages; page += 1) {
+        const sep = basePath.includes('?') ? '&' : '?';
+        const next = await client.get<T[] | PagedResult<T>>(`${basePath}${sep}page=${page}`);
+        all.push(...(Array.isArray(next) ? next : next.items));
+      }
+      items.value = all;
     } catch (e) {
       error.value = e instanceof ApiError ? e.message : String(e);
     } finally {

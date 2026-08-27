@@ -20,7 +20,12 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(Skill::OwnerId).integer().not_null())
                     .col(ColumnDef::new(Skill::Name).string().not_null())
-                    .col(ColumnDef::new(Skill::Description).string().not_null().default(""))
+                    .col(
+                        ColumnDef::new(Skill::Description)
+                            .string()
+                            .not_null()
+                            .default(""),
+                    )
                     .col(ColumnDef::new(Skill::Body).string().not_null().default(""))
                     .foreign_key(
                         ForeignKey::create()

@@ -3,8 +3,8 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use sea_orm::{ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 
 use miryad_core::auth::AuthUser;
 use miryad_core::users::resolve_user;
@@ -13,13 +13,11 @@ use crate::{
     AppState,
     db::entities::{
         chat_contexts::{
-            ActiveModel as ChatContextActiveModel,
-            Entity as ChatContextEntity,
+            ActiveModel as ChatContextActiveModel, Entity as ChatContextEntity,
             Model as ChatContextModel,
         },
         conversations::{
-            ActiveModel as ConversationActiveModel,
-            Entity as ConversationEntity,
+            ActiveModel as ConversationActiveModel, Entity as ConversationEntity,
             Model as ConversationModel,
         },
         messages::{Entity as MessageEntity, Model as MessageModel},
@@ -46,10 +44,6 @@ pub struct CreateConversation {
 /// `vanyline_messages`.
 type MessageOut = MessageModel;
 
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
-
 #[derive(Debug, Clone, Serialize)]
 pub struct ConversationOut {
     pub id: i32,
@@ -63,10 +57,7 @@ pub struct ConversationOut {
 
 /// Résout `conv.agent_id` en nom (SELECT name FROM vanyline_agents WHERE id = $1),
 /// charge le ChatContext depuis vanyline_chat_contexts (N+1 accepté, comme aujourd'hui).
-async fn to_output(
-    state: &AppState,
-    conv: ConversationModel,
-) -> Result<ConversationOut, AppError> {
+async fn to_output(state: &AppState, conv: ConversationModel) -> Result<ConversationOut, AppError> {
     let db = &state.auth.db;
 
     let agent_name = match conv.agent_id {
@@ -75,7 +66,7 @@ async fn to_output(
             AgentEntity::find_by_id(id)
                 .one(db)
                 .await
-                .map_err(db_err)?
+                .map_err(AppError::from)?
                 .map(|a| a.name)
         }
         None => None,
@@ -84,7 +75,7 @@ async fn to_output(
     let context = ChatContextEntity::find_by_id(conv.context_id)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
 
     Ok(ConversationOut {
@@ -116,7 +107,7 @@ async fn resolve_agent_id(
         .filter(Column::Name.eq(agent_name))
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or_else(|| {
             AppError::UnprocessableReference(vanyline_lib::VnyError::UnknownReference(
                 "agent",
@@ -143,14 +134,14 @@ pub async fn list_conversations(
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     let conversations = ConversationEntity::find()
         .filter(crate::db::entities::conversations::Column::OwnerId.eq(principal_user.id))
         .order_by_desc(crate::db::entities::conversations::Column::UpdatedAt)
         .all(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     let mut out: Vec<ConversationOut> = Vec::with_capacity(conversations.len());
 
@@ -159,10 +150,8 @@ pub async fn list_conversations(
             let ctx = ChatContextEntity::find_by_id(conv.context_id)
                 .one(db)
                 .await
-                .map_err(db_err)?
-                .ok_or_else(|| {
-                    AppError::InternalError("VNL-DB-007: context not found".into())
-                })?;
+                .map_err(AppError::from)?
+                .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
 
             if ctx.kind == "sandbox"
                 && ctx.data.get("sandbox_name").and_then(|v| v.as_str()) == Some(sandbox_name)
@@ -187,7 +176,7 @@ pub async fn create_conversation(
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     let agent_id = match &body.agent_name {
         Some(name) => Some(resolve_agent_id(&state, principal_user.id, name).await?),
@@ -197,7 +186,7 @@ pub async fn create_conversation(
     // Effect de bord : créer le ChatContext avant la Conversation
     let now = chrono::Utc::now();
     let ctx_active = ChatContextActiveModel {
-        id: Set(0),
+        id: NotSet,
         kind: Set(body.context.kind.clone()),
         data: Set(body.context.data.clone()),
         created_at: Set(now),
@@ -205,11 +194,11 @@ pub async fn create_conversation(
     let ctx_result = ChatContextEntity::insert(ctx_active)
         .exec(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let context_id = ctx_result.last_insert_id as i32;
 
     let conv_active = ConversationActiveModel {
-        id: Set(0),
+        id: NotSet,
         owner_id: Set(principal_user.id),
         agent_id: Set(agent_id),
         context_id: Set(context_id),
@@ -221,11 +210,11 @@ pub async fn create_conversation(
     let conv_result = ConversationEntity::insert(conv_active)
         .exec(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let conv = ConversationEntity::find_by_id(conv_result.last_insert_id as i32)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or_else(|| {
             AppError::InternalError("VNL-DB-008: created conversation not found".into())
         })?;
@@ -242,12 +231,12 @@ pub async fn get_conversation(
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     let conv = ConversationEntity::find_by_id(id)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or(AppError::ConversationNotFound)?;
 
     // RBAC : owner check à la main
@@ -267,12 +256,12 @@ pub async fn delete_conversation(
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     let conv = ConversationEntity::find_by_id(id)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or(AppError::ConversationNotFound)?;
 
     if conv.owner_id != principal_user.id {
@@ -284,7 +273,7 @@ pub async fn delete_conversation(
         .filter(crate::db::entities::conversations::Column::OwnerId.eq(principal_user.id))
         .exec(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .rows_affected;
 
     if count == 0 {
@@ -301,12 +290,12 @@ pub async fn get_messages(
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     let conv = ConversationEntity::find_by_id(id)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or(AppError::ConversationNotFound)?;
 
     if conv.owner_id != principal_user.id {
@@ -318,7 +307,7 @@ pub async fn get_messages(
         .order_by_asc(crate::db::entities::messages::Column::CreatedAt)
         .all(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     Ok(Json(messages))
 }
@@ -368,15 +357,15 @@ mod tests {
         };
 
         Router::new()
-            .route("/conversations", get(list_conversations).post(create_conversation))
+            .route(
+                "/conversations",
+                get(list_conversations).post(create_conversation),
+            )
             .route(
                 "/conversations/{id}",
                 get(get_conversation).delete(delete_conversation),
             )
-            .route(
-                "/conversations/{id}/messages",
-                get(get_messages),
-            )
+            .route("/conversations/{id}/messages", get(get_messages))
             .with_state(state)
     }
 
@@ -422,6 +411,79 @@ mod tests {
                 .get("sandbox_name")
                 .and_then(|v| v.as_str()),
             Some("my-sandbox")
+        );
+    }
+}
+
+/// Régression Phase 3 (miryad-core-integration) : `ChatContext`/`Conversation` posaient
+/// `id: Set(0)` au lieu de `NotSet` — la première conversation créée système-wide réussissait,
+/// la seconde percutait la contrainte de clé primaire. Deux créations successives doivent
+/// réussir et obtenir des ids distincts (cf. `docs/features/miryad-core-integration.md`).
+#[cfg(test)]
+mod id_regression {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use axum::extract::State;
+    use miryad_core::auth::AuthUser;
+
+    fn test_user() -> AuthUser {
+        AuthUser {
+            subject: "alice".to_string(),
+            email: Some("alice@example.com".to_string()),
+            id_token: "test-id-token".to_string(),
+        }
+    }
+
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
+            oidc_issuer_url: "https://issuer.example.com".to_string(),
+            oidc_client_id: "client-id".to_string(),
+            oidc_client_secret: "client-secret".to_string(),
+            oidc_redirect_url: "https://app.example.com/callback".to_string(),
+            oidc_scopes: vec![],
+            oidc_ca_cert: None,
+            cookie_secret: "0".repeat(64),
+            database_url: "postgres://localhost/test".to_string(),
+            listen_addr: "0.0.0.0:8080".to_string(),
+            static_dir: "./static".to_string(),
+            k8s_namespace: None,
+            application_name: None,
+            default_home_storage_class: None,
+            default_home_access_mode: None,
+            default_project_storage_class: None,
+            default_project_access_mode: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn two_successive_conversations_get_distinct_ids() {
+        let db = crate::db::test_support::real_db().await;
+        let state = AppState {
+            config: test_config(),
+            cookie_key: cookie::Key::from(&[0u8; 64]),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(db),
+        };
+
+        let body = || CreateConversation {
+            agent_name: None,
+            context: ChatContextInput {
+                kind: "sandbox".to_string(),
+                data: serde_json::json!({"sandbox_name": "my-sandbox"}),
+            },
+        };
+
+        let (_, Json(first)) = create_conversation(State(state.clone()), test_user(), Json(body()))
+            .await
+            .expect("first conversation creates");
+        let (_, Json(second)) = create_conversation(State(state), test_user(), Json(body()))
+            .await
+            .expect("second conversation creates");
+
+        assert_ne!(
+            first.id, second.id,
+            "two successive conversations must not collide on the same auto-increment id"
         );
     }
 }

@@ -120,7 +120,7 @@ async function discoverTools(id: number) {
   discovering.value = { ...discovering.value, [id]: true };
   discoverError.value = { ...discoverError.value, [id]: null };
   try {
-    const result = await client.post<McpTestResult>(`/api/mcp-servers/${id}/test`);
+    const result = await client.post<McpTestResult>(`/api/v1/mcp-servers/${id}/test`);
     const server = fetchedServers.value.find((s) => s.id === id);
     if (server) server.available_tools = result.tools;
   } catch (e) {

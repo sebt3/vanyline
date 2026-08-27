@@ -8,14 +8,11 @@ use miryad_core::users::resolve_user;
 use sea_orm::{EntityTrait, IntoActiveModel};
 
 use crate::{
-    AppState, db::entities::mcp_servers::{Entity as McpServerEntity, Model as McpServerModel},
+    AppState,
+    db::entities::mcp_servers::{Entity as McpServerEntity, Model as McpServerModel},
     error::AppError,
 };
 use vanyline_lib::domain::{McpServer as DomainMcpServer, McpTransport};
-
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
 
 /// Mappe le Model SeaORM sur le type domaine `lib`. `server_type: "sse"` -> erreur
 /// claire (VNL-MCP-004, transport SSE non implémenté — limite pré-existante,
@@ -26,7 +23,7 @@ pub fn build_domain_server(server: &McpServerModel) -> Result<DomainMcpServer, A
         "sse" => {
             return Err(AppError::McpError(
                 "VNL-MCP-004: SSE transport is not implemented".into(),
-            ))
+            ));
         }
         other => {
             return Err(AppError::McpError(format!(
@@ -62,15 +59,15 @@ pub async fn test_server(
     let db = state.auth.db.clone();
     let principal_user = resolve_user(&db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let server = McpServerEntity::find_by_id(id)
         .one(&db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError::McpError("VNL-MCP-002: MCP server not found".to_string()))?;
     if !can_write::<McpServerEntity>(&db, &principal_user, &server)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
     {
         return Err(AppError::Forbidden);
     }
@@ -82,7 +79,10 @@ pub async fn test_server(
     // Persist available_tools = tools
     let mut active = server.clone().into_active_model();
     active.available_tools = sea_orm::ActiveValue::Set(tools.clone().into());
-    McpServerEntity::update(active).exec(&db).await.map_err(db_err)?;
+    McpServerEntity::update(active)
+        .exec(&db)
+        .await
+        .map_err(AppError::from)?;
 
     Ok(Json(McpTestResult { tools }))
 }

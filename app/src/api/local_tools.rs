@@ -6,13 +6,7 @@ use vanyline_tools::mcp::{command_tools, filesystem_tools, search_tools};
 use miryad_core::auth::AuthUser;
 use miryad_core::users::resolve_user;
 
-use crate::{
-    AppState, error::AppError,
-};
-
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
+use crate::{AppState, error::AppError};
 
 #[derive(Serialize)]
 pub struct LocalTool {
@@ -46,7 +40,7 @@ pub async fn list_local_tools(
 ) -> Result<Json<Vec<LocalTool>>, AppError> {
     resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     Ok(Json(flatten_local_tools()))
 }
 

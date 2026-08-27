@@ -19,15 +19,11 @@ use vanyline_lib::session::SessionContext;
 
 use miryad_core::auth::AuthUser;
 use miryad_core::users::resolve_user;
-use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set};
-
-use crate::{
-    AppState, config_store::PgConfigStore, error::AppError,
+use sea_orm::{
+    ActiveValue::NotSet, ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, QueryOrder, Set,
 };
 
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
+use crate::{AppState, config_store::PgConfigStore, error::AppError};
 
 #[derive(Deserialize)]
 struct ClientMessage {
@@ -106,13 +102,13 @@ async fn run_socket(
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let user_id = principal_user.id;
 
     let conv = crate::db::entities::conversations::Entity::find_by_id(conversation_id)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or(AppError::ConversationNotFound)?;
 
     if conv.owner_id != user_id {
@@ -239,7 +235,7 @@ async fn resolve_extra_mcp(
     let context = crate::db::entities::chat_contexts::Entity::find_by_id(context_id)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
 
     if context.kind != "sandbox" {
@@ -344,7 +340,7 @@ async fn handle_message(
     let agent_name: String = crate::db::entities::agents::Entity::find_by_id(agent_id)
         .one(db)
         .await
-        .map_err(db_err)?
+        .map_err(AppError::from)?
         .map(|a| a.name)
         .ok_or(AppError::AgentNotFound)?;
 
@@ -356,7 +352,7 @@ async fn handle_message(
         crate::db::entities::conversations::Entity::find_by_id(conversation_id)
             .one(db)
             .await
-            .map_err(db_err)?
+            .map_err(AppError::from)?
             .and_then(|conv| conv.todo);
 
     let extra_mcp = resolve_extra_mcp(state, tx, context_id, user_id).await?;
@@ -396,14 +392,14 @@ async fn handle_message(
             crate::db::entities::conversations::Entity::find_by_id(conversation_id)
                 .one(db)
                 .await
-                .map_err(db_err)?
+                .map_err(AppError::from)?
                 .ok_or(AppError::ConversationNotFound)?
                 .into_active_model();
         active.todo = Set(Some(todo));
         crate::db::entities::conversations::Entity::update(active)
             .exec(db)
             .await
-            .map_err(db_err)?;
+            .map_err(AppError::from)?;
     }
 
     Ok(())
@@ -446,7 +442,7 @@ async fn load_history(
         .order_by_asc(crate::db::entities::messages::Column::CreatedAt)
         .all(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     let history: Vec<rig_core::message::Message> = messages
         .into_iter()
@@ -479,7 +475,7 @@ async fn persist_message(
     });
     let active: crate::db::entities::messages::ActiveModel =
         crate::db::entities::messages::ActiveModel {
-            id: Set(0),
+            id: NotSet,
             owner_id: Set(user_id),
             conversation_id: Set(conversation_id),
             role: Set(role.to_string()),
@@ -489,21 +485,21 @@ async fn persist_message(
     let res = crate::db::entities::messages::Entity::insert(active)
         .exec(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let id = res.last_insert_id as i32;
 
     let mut conv_active: crate::db::entities::conversations::ActiveModel =
         crate::db::entities::conversations::Entity::find_by_id(conversation_id)
             .one(db)
             .await
-            .map_err(db_err)?
+            .map_err(AppError::from)?
             .ok_or(AppError::ConversationNotFound)?
             .into_active_model();
     conv_active.updated_at = Set(chrono::Utc::now());
     crate::db::entities::conversations::Entity::update(conv_active)
         .exec(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
 
     Ok(id)
 }

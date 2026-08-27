@@ -18,8 +18,17 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(LlmProvider::Name).string().not_null().unique_key())
-                    .col(ColumnDef::new(LlmProvider::ProviderType).string().not_null())
+                    .col(
+                        ColumnDef::new(LlmProvider::Name)
+                            .string()
+                            .not_null()
+                            .unique_key(),
+                    )
+                    .col(
+                        ColumnDef::new(LlmProvider::ProviderType)
+                            .string()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(LlmProvider::Endpoint).string().not_null())
                     .col(ColumnDef::new(LlmProvider::ApiKey).string())
                     .col(

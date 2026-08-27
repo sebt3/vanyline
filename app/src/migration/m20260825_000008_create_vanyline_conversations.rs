@@ -27,13 +27,13 @@ impl MigrationTrait for Migration {
                         ColumnDef::new(Conversation::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
-                            .default(Expr::cust("NOW()")),
+                            .default(Expr::current_timestamp()),
                     )
                     .col(
                         ColumnDef::new(Conversation::UpdatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
-                            .default(Expr::cust("NOW()")),
+                            .default(Expr::current_timestamp()),
                     )
                     .foreign_key(
                         ForeignKey::create()
@@ -53,14 +53,28 @@ impl MigrationTrait for Migration {
                             .to(ChatContext::Table, ChatContext::Id)
                             .on_delete(ForeignKeyAction::Restrict),
                     )
-                    .index(
-                        Index::create()
-                            .col(Conversation::OwnerId),
-                    )
-                    .index(
-                        Index::create()
-                            .col(Conversation::ContextId),
-                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Cf. commentaire équivalent dans la migration chat_contexts : un index non-UNIQUE ne
+        // peut pas être chaîné en `.index(...)` sur `Table::create()` (sea-query génère un
+        // fragment orphelin invalide, Postgres et SQLite compris) — instructions séparées.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_vanyline_conversations_owner_id")
+                    .table(Conversation::Table)
+                    .col(Conversation::OwnerId)
+                    .to_owned(),
+            )
+            .await?;
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_vanyline_conversations_context_id")
+                    .table(Conversation::Table)
+                    .col(Conversation::ContextId)
                     .to_owned(),
             )
             .await

@@ -18,7 +18,12 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(McpServer::Name).string().not_null().unique_key())
+                    .col(
+                        ColumnDef::new(McpServer::Name)
+                            .string()
+                            .not_null()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(McpServer::ServerType).string().not_null())
                     .col(ColumnDef::new(McpServer::Url).string().not_null())
                     .col(

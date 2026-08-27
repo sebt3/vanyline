@@ -5,8 +5,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DeriveEntityModel)]
 #[sea_orm(table_name = "vanyline_skills")]
 pub struct Model {
+    // Cf. commentaire équivalent dans `model_profiles.rs` : `#[serde(default)]` sur
+    // `id`/`owner_id` évite un 400 sur les payloads de création du frontend, qui n'envoie
+    // ni l'un ni l'autre (écrasés de toute façon par `resource_router`).
     #[sea_orm(primary_key)]
+    #[serde(default)]
     pub id: i32,
+    #[serde(default)]
     pub owner_id: i32,
     pub name: String,
     #[serde(default)]

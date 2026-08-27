@@ -27,12 +27,22 @@ pub(crate) mod test_support {
     }
 
     pub(crate) fn test_auth_state() -> MiryadAuthState {
+        test_auth_state_with_db(
+            sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Sqlite).into_connection(),
+        )
+    }
+
+    /// Comme `test_auth_state()`, mais avec une vraie connexion (ex: sqlite en mémoire avec
+    /// migrations appliquées, cf. `db::test_support::real_db`) — `MockDatabase` ne pose aucun
+    /// vrai schéma, seulement des résultats de requête pré-programmés, insuffisant pour les
+    /// tests qui vérifient un aller-retour DB réel (désérialisation + insert).
+    pub(crate) fn test_auth_state_with_db(db: sea_orm::DatabaseConnection) -> MiryadAuthState {
         MiryadAuthState {
             oidc_client: std::sync::Arc::new(MockMiryadOidcClient),
             cookie_key: ::cookie::Key::from(&[0u8; 64]),
             post_login_redirect: "/".to_string(),
             post_logout_redirect: "/".to_string(),
-            db: sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Sqlite).into_connection(),
+            db,
         }
     }
 }

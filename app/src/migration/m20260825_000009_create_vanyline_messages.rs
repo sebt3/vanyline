@@ -19,22 +19,14 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(Message::OwnerId).integer().not_null())
-                    .col(
-                        ColumnDef::new(Message::ConversationId)
-                            .integer()
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Message::ConversationId).integer().not_null())
                     .col(ColumnDef::new(Message::Role).string().not_null())
-                    .col(
-                        ColumnDef::new(Message::Payload)
-                            .custom("JSONB")
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(Message::Payload).custom("JSONB").not_null())
                     .col(
                         ColumnDef::new(Message::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
-                            .default(Expr::cust("NOW()")),
+                            .default(Expr::current_timestamp()),
                     )
                     .foreign_key(
                         ForeignKey::create()
@@ -48,10 +40,23 @@ impl MigrationTrait for Migration {
                             .to(Conversation::Table, Conversation::Id)
                             .on_delete(ForeignKeyAction::Cascade),
                     )
-                    .index(
-                        Index::create()
-                            .col(Message::ConversationId),
-                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Composite (pas juste `conversation_id`) : `get_messages` filtre par `conversation_id`
+        // ET trie par `created_at` — index perdu lors de la bascule miryad-core (trouvé en revue
+        // Phase 3), restauré ici. Instruction séparée, pas chaînée sur `Table::create()` : un
+        // index non-UNIQUE chaîné en `.index(...)` génère un fragment orphelin syntaxiquement
+        // invalide côté sea-query (Postgres et SQLite compris), cf. commentaire équivalent dans
+        // la migration chat_contexts.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_vanyline_messages_conversation_id_created_at")
+                    .table(Message::Table)
+                    .col(Message::ConversationId)
+                    .col(Message::CreatedAt)
                     .to_owned(),
             )
             .await

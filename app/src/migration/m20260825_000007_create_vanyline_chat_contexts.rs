@@ -19,21 +19,28 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(ColumnDef::new(ChatContext::Kind).string().not_null())
-                    .col(
-                        ColumnDef::new(ChatContext::Data)
-                            .custom("JSONB")
-                            .not_null(),
-                    )
+                    .col(ColumnDef::new(ChatContext::Data).custom("JSONB").not_null())
                     .col(
                         ColumnDef::new(ChatContext::CreatedAt)
                             .timestamp_with_time_zone()
                             .not_null()
-                            .default(Expr::cust("NOW()")),
+                            .default(Expr::current_timestamp()),
                     )
-                    .index(
-                        Index::create()
-                            .col(ChatContext::Kind),
-                    )
+                    .to_owned(),
+            )
+            .await?;
+
+        // Un index non-UNIQUE ne peut pas être chaîné en `.index(...)` sur `Table::create()` —
+        // seul un vrai `.unique()` produit une contrainte de table valide (`UNIQUE (...)`) ; sans
+        // lui, sea-query génère un fragment `(...)` orphelin, syntaxiquement invalide (trouvé en
+        // testant les migrations contre sqlite en revue Phase 3, confirmé également invalide
+        // contre Postgres). Un index simple s'exprime via une instruction séparée.
+        manager
+            .create_index(
+                Index::create()
+                    .name("idx_vanyline_chat_contexts_kind")
+                    .table(ChatContext::Table)
+                    .col(ChatContext::Kind)
                     .to_owned(),
             )
             .await

@@ -20,7 +20,11 @@ impl MigrationTrait for Migration {
                     )
                     .col(ColumnDef::new(ModelProfile::OwnerId).integer().not_null())
                     .col(ColumnDef::new(ModelProfile::Name).string().not_null())
-                    .col(ColumnDef::new(ModelProfile::ProviderId).integer().not_null())
+                    .col(
+                        ColumnDef::new(ModelProfile::ProviderId)
+                            .integer()
+                            .not_null(),
+                    )
                     .col(ColumnDef::new(ModelProfile::Model).string().not_null())
                     .col(ColumnDef::new(ModelProfile::Temperature).double())
                     .col(ColumnDef::new(ModelProfile::MaxTokens).big_integer())

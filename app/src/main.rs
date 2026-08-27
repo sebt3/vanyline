@@ -129,12 +129,19 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .merge(miryad_core::auth::auth_router())
-        .merge(resource_router::<db::entities::llm_providers::Entity, AppState>())
+        .merge(resource_router::<
+            db::entities::llm_providers::Entity,
+            AppState,
+        >())
         .merge(resource_router::<db::entities::mcp_servers::Entity, AppState>())
         .merge(resource_router::<db::entities::skills::Entity, AppState>())
         .merge(resource_router::<db::entities::toolsets::Entity, AppState>())
-        .merge(resource_router::<db::entities::model_profiles::Entity, AppState>())
+        .merge(resource_router::<
+            db::entities::model_profiles::Entity,
+            AppState,
+        >())
         .merge(resource_router::<db::entities::agents::Entity, AppState>())
+        .nest("/api/v1", api::api_v1_router())
         .nest("/api", api::api_router())
         .route(
             "/api/ws/chat/{conversation_id}",

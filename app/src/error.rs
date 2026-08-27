@@ -40,6 +40,17 @@ pub enum AppError {
     SandboxBranchEmpty,
 }
 
+/// Remplace le `fn db_err` dupliqué verbatim dans 9 modules (`api/{conversations,llm_providers,
+/// local_tools,mcp_servers,me,owners,projects,sandboxes}.rs`, `ws/chat.rs`) — trouvé en revue
+/// Phase 3 (miryad-core-integration). Même code qu'avant (`VNL-DB-006`, tout `DbErr` mappé en
+/// `InternalError`) : la consolidation ne change aucun comportement observable, juste l'endroit
+/// où il vit. `#[from]` permet `?` directement sur un `Result<_, sea_orm::DbErr>`.
+impl From<sea_orm::DbErr> for AppError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        Self::InternalError(format!("VNL-DB-006: {e}"))
+    }
+}
+
 impl From<vanyline_lib::VnyError> for AppError {
     fn from(e: vanyline_lib::VnyError) -> Self {
         match &e {

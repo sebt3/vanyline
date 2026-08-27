@@ -11,12 +11,9 @@ use vanyline_lib::domain::{
 use vanyline_lib::store::ConfigStore;
 
 use crate::db::entities::{
-    agents::Model as AgentRecord,
-    llm_providers::Model as DbLlmProvider,
-    mcp_servers::Model as DbMcpServer,
-    model_profiles::Model as DbModelProfile,
-    skills::Model as DbSkill,
-    toolsets::Model as DbToolset,
+    agents::Model as AgentRecord, llm_providers::Model as DbLlmProvider,
+    mcp_servers::Model as DbMcpServer, model_profiles::Model as DbModelProfile,
+    skills::Model as DbSkill, toolsets::Model as DbToolset,
 };
 
 // ---------------------------------------------------------------------------

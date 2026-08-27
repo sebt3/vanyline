@@ -9,8 +9,14 @@ fn default_json_object() -> serde_json::Value {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, DeriveEntityModel)]
 #[sea_orm(table_name = "vanyline_model_profiles")]
 pub struct Model {
+    // `id`/`owner_id` sans valeur côté client (`resource_router` désérialise le body en
+    // `Model` tel quel — `create()`/`update()` les écrasent de toute façon avant écriture) :
+    // `#[serde(default)]` évite un 400 "missing field" sur les payloads de création envoyés
+    // par le frontend, qui n'incluent ni l'un ni l'autre.
     #[sea_orm(primary_key)]
+    #[serde(default)]
     pub id: i32,
+    #[serde(default)]
     pub owner_id: i32,
     pub name: String,
     pub provider_id: i32,

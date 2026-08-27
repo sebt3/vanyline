@@ -18,7 +18,12 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(ColumnDef::new(OwnerLink::UserId).integer().not_null().unique_key())
+                    .col(
+                        ColumnDef::new(OwnerLink::UserId)
+                            .integer()
+                            .not_null()
+                            .unique_key(),
+                    )
                     .col(ColumnDef::new(OwnerLink::K8sOwnerName).string())
                     .foreign_key(
                         ForeignKey::create()

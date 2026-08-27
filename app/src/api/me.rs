@@ -4,13 +4,7 @@ use serde::Serialize;
 use miryad_core::auth::AuthUser;
 use miryad_core::users::resolve_user;
 
-use crate::{
-    AppState, api::owners, error::AppError,
-};
-
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
+use crate::{AppState, api::owners, error::AppError};
 
 #[derive(Serialize)]
 pub struct MeResponse {
@@ -25,7 +19,7 @@ pub async fn handler_me(
     let db = &state.auth.db;
     let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let k8s_owner_name = owners::resolve_owner_name(&state, principal_user.id).await?;
     Ok(Json(MeResponse {
         email: principal_user.email.unwrap_or_default(),

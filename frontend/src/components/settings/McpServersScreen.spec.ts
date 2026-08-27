@@ -391,7 +391,7 @@ describe('McpServersScreen', () => {
     expect(wrapper.text()).toContain('Aucun serveur MCP');
   });
 
-  it('"Découvrir" appelle POST /api/mcp-servers/{id}/test et affiche les tools renvoyés', async () => {
+  it('"Découvrir" appelle POST /api/v1/mcp-servers/{id}/test et affiche les tools renvoyés', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
@@ -416,7 +416,7 @@ describe('McpServersScreen', () => {
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (method === 'POST' && u === '/api/mcp-servers/1/test') {
+      if (method === 'POST' && u === '/api/v1/mcp-servers/1/test') {
         return new Response(
           JSON.stringify({ tools: ['read_file', 'write_file', 'list_dir'] }),
           { status: 200, headers: { 'content-type': 'application/json' } },
@@ -436,7 +436,7 @@ describe('McpServersScreen', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      '/api/mcp-servers/1/test',
+      '/api/v1/mcp-servers/1/test',
       expect.objectContaining({ method: 'POST' }),
     );
     expect(wrapper.text()).toContain('3 tools');
@@ -468,7 +468,7 @@ describe('McpServersScreen', () => {
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (method === 'POST' && u === '/api/mcp-servers/2/test') {
+      if (method === 'POST' && u === '/api/v1/mcp-servers/2/test') {
         return new Response(
           JSON.stringify({ error: 'VNL-MCP-004: transport SSE non implémenté' }),
           { status: 400, headers: { 'content-type': 'application/json' } },

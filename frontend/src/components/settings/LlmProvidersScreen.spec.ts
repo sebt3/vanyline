@@ -352,13 +352,13 @@ describe('LlmProvidersScreen', () => {
     expect(putCalls.length).toBe(0);
   });
 
-  it('cliquer "Tester" → POST /api/llm-providers/{id}/test, et les modèles retournés s\'affichent', async () => {
+  it('cliquer "Tester" → POST /api/v1/llm-providers/{id}/test, et les modèles retournés s\'affichent', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'POST' && u.includes('/api/llm-providers/1/test')) {
+      if (method === 'POST' && u.includes('/api/v1/llm-providers/1/test')) {
         return {
           ok: true,
           status: 200,
@@ -412,14 +412,14 @@ describe('LlmProvidersScreen', () => {
     expect(wrapper.text()).toContain('gemma');
   });
 
-  it('cliquer "Défaut" → PUT /api/llm-providers/{id}/default, puis re-fetch', async () => {
+  it('cliquer "Défaut" → PUT /api/v1/llm-providers/{id}/default, puis re-fetch', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'PUT' && u.includes('/api/llm-providers/2/default')) {
+      if (method === 'PUT' && u.includes('/api/v1/llm-providers/2/default')) {
         return {
           ok: true,
           status: 200,

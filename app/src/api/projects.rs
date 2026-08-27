@@ -9,13 +9,7 @@ use vanyline_crds::{EgressRule, Project, ProjectSpec, PvcRef};
 use miryad_core::auth::AuthUser;
 use miryad_core::users::resolve_user;
 
-use crate::{
-    AppState, api::owners, error::AppError, k8s,
-};
-
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
+use crate::{AppState, api::owners, error::AppError, k8s};
 
 /// Body de `POST /api/projects`. Reprend les champs de `ProjectSpec` SAUF `owner`,
 /// qui est dérivé de l'utilisateur authentifié (décision développeur : owner dérivé).
@@ -51,7 +45,7 @@ pub async fn list_projects(
 ) -> Result<Json<Vec<Project>>, AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
@@ -73,7 +67,7 @@ pub async fn get_project(
 ) -> Result<Json<Project>, AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
@@ -93,7 +87,7 @@ pub async fn create_project(
 ) -> Result<(StatusCode, Json<Project>), AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = owners::ensure_owner(&state, principal_user.id, &user).await?;
     let spec = ProjectSpec {
         owner: owner.clone(),
@@ -120,7 +114,7 @@ pub async fn delete_project(
 ) -> Result<StatusCode, AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),

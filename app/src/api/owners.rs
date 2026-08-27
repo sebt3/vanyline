@@ -1,12 +1,8 @@
 use miryad_core::auth::AuthUser;
-use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, Set};
+use sea_orm::{ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, Set};
 use vanyline_crds::{OwnerSpec, ProjectDefaults};
 
 use crate::{AppState, error::AppError};
-
-fn db_err(e: sea_orm::DbErr) -> AppError {
-    AppError::InternalError(format!("VNL-DB-006: {e}"))
-}
 
 /// Détecte d'un raw (email ou `oidc_sub`) une étiquette DNS `RFC1123` :
 /// minuscules/chiffres/tirets, début alphanumérique, ≤ 63 caractères.
@@ -52,7 +48,7 @@ pub async fn resolve_owner_name(
         .filter(Column::UserId.eq(user_id))
         .one(db)
         .await
-        .map_err(db_err)?;
+        .map_err(AppError::from)?;
     Ok(link.and_then(|l| l.k8s_owner_name))
 }
 
@@ -67,7 +63,13 @@ pub async fn ensure_owner(
     if let Some(name) = resolve_owner_name(state, user_id).await? {
         return Ok(name);
     }
-    let local = principal.email.as_deref().unwrap_or("").split('@').next().unwrap_or_default();
+    let local = principal
+        .email
+        .as_deref()
+        .unwrap_or("")
+        .split('@')
+        .next()
+        .unwrap_or_default();
     let raw = if local.trim().is_empty() {
         principal.subject.as_str()
     } else {
@@ -106,24 +108,25 @@ pub async fn ensure_owner(
     use crate::db::entities::owner_links::Column;
     use crate::db::entities::owner_links::Entity as OwnerLinkEntity;
 
+    // Upsert atomique (INSERT ... ON CONFLICT (user_id) DO UPDATE) : élimine la fenêtre de
+    // course du find-then-insert précédent, où deux requêtes concurrentes passant toutes les
+    // deux le `resolve_owner_name` en tête de fonction pouvaient percuter la contrainte unique
+    // sur `user_id` (la seconde échouant en 500 brut au lieu d'être idempotente).
     let db = &state.auth.db;
-    let existing = OwnerLinkEntity::find()
-        .filter(Column::UserId.eq(user_id))
-        .one(db)
+    let active = crate::db::entities::owner_links::ActiveModel {
+        id: NotSet,
+        user_id: Set(user_id),
+        k8s_owner_name: Set(Some(name.clone())),
+    };
+    OwnerLinkEntity::insert(active)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(Column::UserId)
+                .update_column(Column::K8sOwnerName)
+                .to_owned(),
+        )
+        .exec(db)
         .await
-        .map_err(db_err)?;
-    if let Some(existing) = existing {
-        let mut active = existing.into_active_model();
-        active.k8s_owner_name = Set(Some(name.clone()));
-        OwnerLinkEntity::update(active).exec(db).await.map_err(db_err)?;
-    } else {
-        let active = crate::db::entities::owner_links::ActiveModel {
-            id: Set(0),
-            user_id: Set(user_id),
-            k8s_owner_name: Set(Some(name.clone())),
-        };
-        OwnerLinkEntity::insert(active).exec(db).await.map_err(db_err)?;
-    }
+        .map_err(AppError::from)?;
 
     Ok(name)
 }

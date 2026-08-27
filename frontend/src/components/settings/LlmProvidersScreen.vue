@@ -123,7 +123,7 @@ async function saveEdit(id: number) {
 
 async function testProvider(id: number) {
   try {
-    const result = await client.post<TestResult>(`/api/llm-providers/${id}/test`);
+    const result = await client.post<TestResult>(`/api/v1/llm-providers/${id}/test`);
     testResults.value[id] = result.models.join(', ');
   } catch (e) {
     testResults.value[id] = e instanceof ApiError ? e.message : String(e);
@@ -132,7 +132,7 @@ async function testProvider(id: number) {
 
 async function setDefault(id: number) {
   try {
-    await client.put<LlmProvider>(`/api/llm-providers/${id}/default`);
+    await client.put<LlmProvider>(`/api/v1/llm-providers/${id}/default`);
     await resource.fetch();
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e);
