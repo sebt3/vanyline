@@ -1758,10 +1758,29 @@ mod tests {
             .args(["-C", &root.to_string_lossy(), "add", "a.txt"])
             .output()
             .unwrap();
-        Command::new("git")
-            .args(["-C", &root.to_string_lossy(), "commit", "-q", "-m", "init"])
+        // Identité explicite (`-c`, pas de dépendance à une config git globale) : sans elle,
+        // `commit` échoue silencieusement sur un runner CI sans `user.name`/`user.email`
+        // configurés — `.output().unwrap()` ne vérifie que l'exécution de la commande, pas son
+        // code de sortie, donc l'échec passait inaperçu. `a.txt` restait alors indexé (jamais
+        // committé) et le test suivant `is_dirty(root, true)` — cf. commentaire ci-dessous —
+        // trouvait à tort des changements stagés, faisant échouer l'assertion (bug trouvé en
+        // CI, jamais reproduit en local où l'identité globale existe déjà).
+        let commit = Command::new("git")
+            .args([
+                "-C",
+                &root.to_string_lossy(),
+                "-c",
+                "user.name=test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "init",
+            ])
             .output()
             .unwrap();
+        assert!(commit.status.success(), "commit failed: {commit:?}");
         fs::write(root.join("a.txt"), "changed").unwrap();
         assert!(is_dirty(root, false).unwrap());
         assert!(!is_dirty(root, true).unwrap());
