@@ -10,7 +10,7 @@ import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
 
 interface LlmProvider {
-  id: string;
+  id: number;
   name: string;
   provider_type: string;
   endpoint: string;
@@ -38,7 +38,7 @@ interface TestResult {
 }
 
 const client = createApiClient();
-const resource = useCrudResource<LlmProvider>(client, '/api/llm-providers');
+const resource = useCrudResource<LlmProvider>(client, '/api/v1/llm-providers');
 const { items: fetchedProviders, loading, error } = resource;
 
 // Formulaire de création
@@ -49,7 +49,7 @@ const formApiKey = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
-const editingId = ref<string | null>(null);
+const editingId = ref<number | null>(null);
 const editName = ref('');
 const editProviderType = ref('ollama');
 const editEndpoint = ref('');
@@ -57,7 +57,7 @@ const editApiKey = ref('');
 const editError = ref<string | null>(null);
 
 // Résultat du test
-const testResults = ref<Record<string, string>>({});
+const testResults = ref<Record<number, string>>({});
 
 // Modales
 const createModalOpen = ref(false);
@@ -105,7 +105,7 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(id: string) {
+async function saveEdit(id: number) {
   editError.value = null;
   const body: UpdateLlmProvider = {
     name: editName.value,
@@ -121,25 +121,25 @@ async function saveEdit(id: string) {
   }
 }
 
-async function testProvider(id: string) {
+async function testProvider(id: number) {
   try {
-    const result = await client.post<TestResult>(`/api/llm-providers/${id}/test`);
+    const result = await client.post<TestResult>(`/api/v1/llm-providers/${id}/test`);
     testResults.value[id] = result.models.join(', ');
   } catch (e) {
     testResults.value[id] = e instanceof ApiError ? e.message : String(e);
   }
 }
 
-async function setDefault(id: string) {
+async function setDefault(id: number) {
   try {
-    await client.put<LlmProvider>(`/api/llm-providers/${id}/default`);
+    await client.put<LlmProvider>(`/api/v1/llm-providers/${id}/default`);
     await resource.fetch();
   } catch (e) {
     error.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
-async function deleteProvider(id: string) {
+async function deleteProvider(id: number) {
   await resource.remove(id);
 }
 </script>

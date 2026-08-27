@@ -3,15 +3,25 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
 };
+use sea_orm::{ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, QueryOrder, Set};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
 
-use vanyline_lib::VnyError;
+use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
 
 use crate::{
     AppState,
-    auth::middleware::AuthUser,
-    db::models::{ChatContext, Conversation, Message, User},
+    db::entities::{
+        chat_contexts::{
+            ActiveModel as ChatContextActiveModel, Entity as ChatContextEntity,
+            Model as ChatContextModel,
+        },
+        conversations::{
+            ActiveModel as ConversationActiveModel, Entity as ConversationEntity,
+            Model as ConversationModel,
+        },
+        messages::{Entity as MessageEntity, Model as MessageModel},
+    },
     error::AppError,
 };
 
@@ -30,37 +40,43 @@ pub struct CreateConversation {
     pub context: ChatContextInput,
 }
 
+/// Type alias pour la réponse de `get_messages` : le Model SeaORM
+/// `vanyline_messages`.
+type MessageOut = MessageModel;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct ConversationOut {
-    pub id: Uuid,
+    pub id: i32,
     pub agent_name: Option<String>,
-    pub context: ChatContext,
+    pub context: ChatContextModel,
     pub title: Option<String>,
     pub todo: Option<String>,
     pub created_at: chrono::DateTime<chrono::Utc>,
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Résout `conv.agent_id` (peut être `None` — conversation sans agent) en
-/// nom, via une requête séparée (N+1 accepté, cf. Contexte). `None` si
-/// `agent_id` est `None` OU si l'agent référencé a été supprimé depuis
-/// (FK `ON DELETE SET NULL` empêche normalement ce cas, mais la fonction
-/// reste défensive plutôt que de `.unwrap()`).
-async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationOut, AppError> {
+/// Résout `conv.agent_id` en nom (SELECT name FROM vanyline_agents WHERE id = $1),
+/// charge le ChatContext depuis vanyline_chat_contexts (N+1 accepté, comme aujourd'hui).
+async fn to_output(state: &AppState, conv: ConversationModel) -> Result<ConversationOut, AppError> {
+    let db = &state.auth.db;
+
     let agent_name = match conv.agent_id {
         Some(id) => {
-            sqlx::query_scalar::<_, String>("SELECT name FROM agents WHERE id = $1")
-                .bind(id)
-                .fetch_optional(&state.pool)
-                .await?
+            use crate::db::entities::agents::Entity as AgentEntity;
+            AgentEntity::find_by_id(id)
+                .one(db)
+                .await
+                .map_err(AppError::from)?
+                .map(|a| a.name)
         }
         None => None,
     };
 
-    let context = sqlx::query_as::<_, ChatContext>("SELECT * FROM chat_contexts WHERE id = $1")
-        .bind(conv.context_id)
-        .fetch_one(&state.pool)
-        .await?;
+    let context = ChatContextEntity::find_by_id(conv.context_id)
+        .one(db)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
 
     Ok(ConversationOut {
         id: conv.id,
@@ -73,22 +89,33 @@ async fn to_output(state: &AppState, conv: Conversation) -> Result<ConversationO
     })
 }
 
+/// Résout `agent_name` en id depuis `vanyline_agents`
+/// (WHERE owner_id = user_id AND name = agent_name).
+/// Retourne `AppError::UnprocessableReference(UnknownReference("agent", name))`
+/// si l'agent n'est pas trouvé.
 async fn resolve_agent_id(
     state: &AppState,
-    user_id: Uuid,
+    user_id: i32,
     agent_name: &str,
-) -> Result<Uuid, AppError> {
-    sqlx::query_scalar::<_, Uuid>("SELECT id FROM agents WHERE user_id = $1 AND name = $2")
-        .bind(user_id)
-        .bind(agent_name)
-        .fetch_optional(&state.pool)
-        .await?
+) -> Result<i32, AppError> {
+    use crate::db::entities::agents::Column;
+    use crate::db::entities::agents::Entity as AgentEntity;
+
+    let db = &state.auth.db;
+    let agent = AgentEntity::find()
+        .filter(Column::OwnerId.eq(user_id))
+        .filter(Column::Name.eq(agent_name))
+        .one(db)
+        .await
+        .map_err(AppError::from)?
         .ok_or_else(|| {
-            AppError::UnprocessableReference(VnyError::UnknownReference(
+            AppError::UnprocessableReference(vanyline_lib::VnyError::UnknownReference(
                 "agent",
                 agent_name.to_string(),
             ))
-        })
+        })?;
+
+    Ok(agent.id)
 }
 
 /// Filtre optionnel de `list_conversations`. `sandbox_name` est le seul
@@ -104,34 +131,40 @@ pub async fn list_conversations(
     user: AuthUser,
     Query(query): Query<ListConversationsQuery>,
 ) -> Result<Json<Vec<ConversationOut>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let conversations = match &query.sandbox_name {
-        Some(sandbox_name) => {
-            sqlx::query_as::<_, Conversation>(
-                "SELECT c.* FROM conversations c
-                 JOIN chat_contexts ctx ON ctx.id = c.context_id
-                 WHERE c.user_id = $1 AND ctx.kind = 'sandbox' AND ctx.data->>'sandbox_name' = $2
-                 ORDER BY c.updated_at DESC",
-            )
-            .bind(db_user.id)
-            .bind(sandbox_name)
-            .fetch_all(&state.pool)
-            .await?
-        }
-        None => {
-            sqlx::query_as::<_, Conversation>(
-                "SELECT * FROM conversations WHERE user_id = $1 ORDER BY updated_at DESC",
-            )
-            .bind(db_user.id)
-            .fetch_all(&state.pool)
-            .await?
-        }
-    };
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
 
-    let mut out = Vec::with_capacity(conversations.len());
-    for conv in conversations {
-        out.push(to_output(&state, conv).await?);
+    let conversations = ConversationEntity::find()
+        .filter(crate::db::entities::conversations::Column::OwnerId.eq(principal_user.id))
+        .order_by_desc(crate::db::entities::conversations::Column::UpdatedAt)
+        .all(db)
+        .await
+        .map_err(AppError::from)?;
+
+    let mut out: Vec<ConversationOut> = Vec::with_capacity(conversations.len());
+
+    if let Some(ref sandbox_name) = query.sandbox_name {
+        for conv in conversations {
+            let ctx = ChatContextEntity::find_by_id(conv.context_id)
+                .one(db)
+                .await
+                .map_err(AppError::from)?
+                .ok_or_else(|| AppError::InternalError("VNL-DB-007: context not found".into()))?;
+
+            if ctx.kind == "sandbox"
+                && ctx.data.get("sandbox_name").and_then(|v| v.as_str()) == Some(sandbox_name)
+            {
+                out.push(to_output(&state, conv).await?);
+            }
+        }
+    } else {
+        for conv in conversations {
+            out.push(to_output(&state, conv).await?);
+        }
     }
+
     Ok(Json(out))
 }
 
@@ -140,28 +173,51 @@ pub async fn create_conversation(
     user: AuthUser,
     Json(body): Json<CreateConversation>,
 ) -> Result<(StatusCode, Json<ConversationOut>), AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
 
     let agent_id = match &body.agent_name {
-        Some(name) => Some(resolve_agent_id(&state, db_user.id, name).await?),
+        Some(name) => Some(resolve_agent_id(&state, principal_user.id, name).await?),
         None => None,
     };
 
-    let context_id: Uuid =
-        sqlx::query_scalar("INSERT INTO chat_contexts (kind, data) VALUES ($1, $2) RETURNING id")
-            .bind(&body.context.kind)
-            .bind(&body.context.data)
-            .fetch_one(&state.pool)
-            .await?;
+    // Effect de bord : créer le ChatContext avant la Conversation
+    let now = chrono::Utc::now();
+    let ctx_active = ChatContextActiveModel {
+        id: NotSet,
+        kind: Set(body.context.kind.clone()),
+        data: Set(body.context.data.clone()),
+        created_at: Set(now),
+    };
+    let ctx_result = ChatContextEntity::insert(ctx_active)
+        .exec(db)
+        .await
+        .map_err(AppError::from)?;
+    let context_id = ctx_result.last_insert_id as i32;
 
-    let conv = sqlx::query_as::<_, Conversation>(
-        "INSERT INTO conversations (user_id, agent_id, context_id) VALUES ($1, $2, $3) RETURNING *",
-    )
-    .bind(db_user.id)
-    .bind(agent_id)
-    .bind(context_id)
-    .fetch_one(&state.pool)
-    .await?;
+    let conv_active = ConversationActiveModel {
+        id: NotSet,
+        owner_id: Set(principal_user.id),
+        agent_id: Set(agent_id),
+        context_id: Set(context_id),
+        title: Set(None),
+        todo: Set(None),
+        created_at: Set(now),
+        updated_at: Set(now),
+    };
+    let conv_result = ConversationEntity::insert(conv_active)
+        .exec(db)
+        .await
+        .map_err(AppError::from)?;
+    let conv = ConversationEntity::find_by_id(conv_result.last_insert_id as i32)
+        .one(db)
+        .await
+        .map_err(AppError::from)?
+        .ok_or_else(|| {
+            AppError::InternalError("VNL-DB-008: created conversation not found".into())
+        })?;
 
     let out = to_output(&state, conv).await?;
     Ok((StatusCode::CREATED, Json(out)))
@@ -170,16 +226,21 @@ pub async fn create_conversation(
 pub async fn get_conversation(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<i32>,
 ) -> Result<Json<ConversationOut>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+
+    let conv = ConversationEntity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(AppError::from)?
         .ok_or(AppError::ConversationNotFound)?;
 
-    if conv.user_id != db_user.id {
+    // RBAC : owner check à la main
+    if conv.owner_id != principal_user.id {
         return Err(AppError::ConversationAccessDenied);
     }
 
@@ -190,17 +251,32 @@ pub async fn get_conversation(
 pub async fn delete_conversation(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<i32>,
 ) -> Result<StatusCode, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let rows = sqlx::query("DELETE FROM conversations WHERE id = $1 AND user_id = $2")
-        .bind(id)
-        .bind(db_user.id)
-        .execute(&state.pool)
-        .await?
-        .rows_affected();
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
 
-    if rows == 0 {
+    let conv = ConversationEntity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(AppError::from)?
+        .ok_or(AppError::ConversationNotFound)?;
+
+    if conv.owner_id != principal_user.id {
+        return Err(AppError::ConversationAccessDenied);
+    }
+
+    let count = ConversationEntity::delete_many()
+        .filter(crate::db::entities::conversations::Column::Id.eq(id))
+        .filter(crate::db::entities::conversations::Column::OwnerId.eq(principal_user.id))
+        .exec(db)
+        .await
+        .map_err(AppError::from)?
+        .rows_affected;
+
+    if count == 0 {
         return Err(AppError::ConversationNotFound);
     }
     Ok(StatusCode::NO_CONTENT)
@@ -209,52 +285,37 @@ pub async fn delete_conversation(
 pub async fn get_messages(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
-) -> Result<Json<Vec<Message>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let conv = sqlx::query_as::<_, Conversation>("SELECT * FROM conversations WHERE id = $1")
-        .bind(id)
-        .fetch_optional(&state.pool)
-        .await?
+    Path(id): Path<i32>,
+) -> Result<Json<Vec<MessageOut>>, AppError> {
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+
+    let conv = ConversationEntity::find_by_id(id)
+        .one(db)
+        .await
+        .map_err(AppError::from)?
         .ok_or(AppError::ConversationNotFound)?;
 
-    if conv.user_id != db_user.id {
+    if conv.owner_id != principal_user.id {
         return Err(AppError::ConversationAccessDenied);
     }
 
-    let messages = sqlx::query_as::<_, Message>(
-        "SELECT * FROM messages WHERE conversation_id = $1 ORDER BY created_at ASC",
-    )
-    .bind(id)
-    .fetch_all(&state.pool)
-    .await?;
+    let messages = MessageEntity::find()
+        .filter(crate::db::entities::messages::Column::ConversationId.eq(id))
+        .order_by_asc(crate::db::entities::messages::Column::CreatedAt)
+        .all(db)
+        .await
+        .map_err(AppError::from)?;
+
     Ok(Json(messages))
-}
-
-pub async fn get_or_create_user(state: &AppState, auth_user: &AuthUser) -> Result<User, AppError> {
-    if let Some(user) = sqlx::query_as::<_, User>("SELECT * FROM users WHERE email = $1")
-        .bind(&auth_user.email)
-        .fetch_optional(&state.pool)
-        .await?
-    {
-        return Ok(user);
-    }
-
-    let user = sqlx::query_as::<_, User>(
-        "INSERT INTO users (oidc_sub, email) VALUES ($1, $2) ON CONFLICT (oidc_sub) DO UPDATE SET email = EXCLUDED.email RETURNING *",
-    )
-    .bind(&auth_user.email)
-    .bind(&auth_user.email)
-    .fetch_one(&state.pool)
-    .await?;
-    Ok(user)
 }
 
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -289,15 +350,22 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
-            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state(),
         };
 
         Router::new()
-            .route("/conversations", get(list_conversations))
+            .route(
+                "/conversations",
+                get(list_conversations).post(create_conversation),
+            )
+            .route(
+                "/conversations/{id}",
+                get(get_conversation).delete(delete_conversation),
+            )
+            .route("/conversations/{id}/messages", get(get_messages))
             .with_state(state)
     }
 
@@ -343,6 +411,79 @@ mod tests {
                 .get("sandbox_name")
                 .and_then(|v| v.as_str()),
             Some("my-sandbox")
+        );
+    }
+}
+
+/// Régression Phase 3 (miryad-core-integration) : `ChatContext`/`Conversation` posaient
+/// `id: Set(0)` au lieu de `NotSet` — la première conversation créée système-wide réussissait,
+/// la seconde percutait la contrainte de clé primaire. Deux créations successives doivent
+/// réussir et obtenir des ids distincts (cf. `docs/features/miryad-core-integration.md`).
+#[cfg(test)]
+mod id_regression {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use axum::extract::State;
+    use miryad_core::auth::AuthUser;
+
+    fn test_user() -> AuthUser {
+        AuthUser {
+            subject: "alice".to_string(),
+            email: Some("alice@example.com".to_string()),
+            id_token: "test-id-token".to_string(),
+        }
+    }
+
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
+            oidc_issuer_url: "https://issuer.example.com".to_string(),
+            oidc_client_id: "client-id".to_string(),
+            oidc_client_secret: "client-secret".to_string(),
+            oidc_redirect_url: "https://app.example.com/callback".to_string(),
+            oidc_scopes: vec![],
+            oidc_ca_cert: None,
+            cookie_secret: "0".repeat(64),
+            database_url: "postgres://localhost/test".to_string(),
+            listen_addr: "0.0.0.0:8080".to_string(),
+            static_dir: "./static".to_string(),
+            k8s_namespace: None,
+            application_name: None,
+            default_home_storage_class: None,
+            default_home_access_mode: None,
+            default_project_storage_class: None,
+            default_project_access_mode: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn two_successive_conversations_get_distinct_ids() {
+        let db = crate::db::test_support::real_db().await;
+        let state = AppState {
+            config: test_config(),
+            cookie_key: cookie::Key::from(&[0u8; 64]),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(db),
+        };
+
+        let body = || CreateConversation {
+            agent_name: None,
+            context: ChatContextInput {
+                kind: "sandbox".to_string(),
+                data: serde_json::json!({"sandbox_name": "my-sandbox"}),
+            },
+        };
+
+        let (_, Json(first)) = create_conversation(State(state.clone()), test_user(), Json(body()))
+            .await
+            .expect("first conversation creates");
+        let (_, Json(second)) = create_conversation(State(state), test_user(), Json(body()))
+            .await
+            .expect("second conversation creates");
+
+        assert_ne!(
+            first.id, second.id,
+            "two successive conversations must not collide on the same auto-increment id"
         );
     }
 }

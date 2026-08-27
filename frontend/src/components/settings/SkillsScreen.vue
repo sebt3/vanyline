@@ -10,11 +10,13 @@ import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
 
 interface SkillMeta {
+  id: number;
   name: string;
   description: string;
 }
 
 interface SkillDetail {
+  id: number;
   name: string;
   description: string;
   body: string;
@@ -32,7 +34,7 @@ interface UpdateSkill {
 }
 
 const client = createApiClient();
-const resource = useCrudResource<SkillMeta>(client, '/api/skills');
+const resource = useCrudResource<SkillMeta>(client, '/api/v1/skills');
 const { items: fetchedSkills, loading, error } = resource;
 
 // Formulaire de création
@@ -42,7 +44,8 @@ const formBody = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition — séparé car la liste n'expédie pas `body`
-const editingName = ref<string | null>(null);
+const editingId = ref<number | null>(null);
+const editingName = ref<string | null>(null); // titre du dialog (affichage)
 const editDescription = ref('');
 const editBody = ref('');
 const editError = ref<string | null>(null);
@@ -71,12 +74,13 @@ async function createSkill() {
   }
 }
 
-async function editSkill(name: string) {
-  editingName.value = name;
+async function editSkill(skill: SkillMeta) {
+  editingId.value = skill.id;
+  editingName.value = skill.name;
   editError.value = null;
   try {
     // La liste ne contient pas `body` → appel dédié pour charger le détail
-    const detail = await client.get<SkillDetail>(`/api/skills/${name}`);
+    const detail = await client.get<SkillDetail>(`/api/v1/skills/${skill.id}`);
     editDescription.value = detail.description ?? '';
     editBody.value = detail.body ?? '';
   } catch (e) {
@@ -86,6 +90,7 @@ async function editSkill(name: string) {
 }
 
 function cancelEdit() {
+  editingId.value = null;
   editingName.value = null;
   editDescription.value = '';
   editBody.value = '';
@@ -93,21 +98,21 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(name: string) {
+async function saveEdit(id: number) {
   editError.value = null;
   const body: UpdateSkill = {};
   if (editDescription.value) body.description = editDescription.value;
   if (editBody.value) body.body = editBody.value;
   try {
-    await resource.update(name, body);
+    await resource.update(id, body);
     cancelEdit();
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
-async function deleteSkill(name: string) {
-  await resource.remove(name);
+async function deleteSkill(id: number) {
+  await resource.remove(id);
 }
 </script>
 
@@ -126,14 +131,14 @@ async function deleteSkill(name: string) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="s in fetchedSkills" :key="s.name">
+          <tr v-for="s in fetchedSkills" :key="s.id">
             <td>{{ s.name }}</td>
             <td>{{ s.description ?? '—' }}</td>
             <td class="th-actions">
-              <button class="btn btn-edit" @click="editSkill(s.name)">
+              <button class="btn btn-edit" @click="editSkill(s)">
                 Modifier
               </button>
-              <button class="btn btn-delete" @click="deleteSkill(s.name)">
+              <button class="btn btn-delete" @click="deleteSkill(s.id)">
                 Supprimer
               </button>
             </td>
@@ -199,7 +204,7 @@ async function deleteSkill(name: string) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>

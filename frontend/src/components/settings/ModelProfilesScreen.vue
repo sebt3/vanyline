@@ -8,10 +8,12 @@ import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
+import type { PagedResult } from '../../composables/useCrudResource';
 
 interface ModelProfile {
+  id: number;
   name: string;
-  provider: string;
+  provider_id: number;
   model: string;
   temperature?: number | null;
   max_tokens?: number | null;
@@ -20,7 +22,7 @@ interface ModelProfile {
 
 interface CreateModelProfile {
   name: string;
-  provider: string;
+  provider_id: number;
   model: string;
   temperature?: number;
   max_tokens?: number;
@@ -28,7 +30,7 @@ interface CreateModelProfile {
 }
 
 interface UpdateModelProfile {
-  provider?: string;
+  provider_id?: number;
   model?: string;
   temperature?: number;
   max_tokens?: number;
@@ -76,6 +78,7 @@ function rowsFromOptions(options?: Record<string, unknown>): OptionRow[] {
 }
 
 interface LlmProvider {
+  id: number;
   name: string;
   provider_type: string;
   endpoint: string;
@@ -84,7 +87,7 @@ interface LlmProvider {
 }
 
 const client = createApiClient();
-const resource = useCrudResource<ModelProfile>(client, '/api/model-profiles');
+const resource = useCrudResource<ModelProfile>(client, '/api/v1/model-profiles');
 const { items: fetchedProfiles, loading, error } = resource;
 
 const providers = ref<LlmProvider[]>([]);
@@ -92,7 +95,7 @@ const providersError = ref<string | null>(null);
 
 // Formulaire de création
 const formName = ref('');
-const formProvider = ref('');
+const formProviderId = ref<number>(0);
 const formModel = ref('');
 const formTemperature = ref('');
 const formMaxTokens = ref('');
@@ -101,8 +104,9 @@ const formAvailableModels = ref<string[]>([]);
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
-const editingName = ref<string | null>(null);
-const editProvider = ref('');
+const editingId = ref<number | null>(null);
+const editingName = ref<string | null>(null); // titre du dialog
+const editProviderId = ref<number>(0);
 const editModel = ref('');
 const editAvailableModels = ref<string[]>([]);
 const editTemperature = ref('');
@@ -116,7 +120,7 @@ const editModalOpen = ref(false);
 
 async function fetchProviders() {
   try {
-    providers.value = await client.get<LlmProvider[]>('/api/llm-providers');
+    providers.value = (await client.get<PagedResult<LlmProvider>>('/api/v1/llm-providers')).items;
   } catch (e) {
     // Erreur de chargement des providers consignée (visuelle via providersError)
     // mais ne bloque pas l'affichage des profils existants.
@@ -126,8 +130,8 @@ async function fetchProviders() {
 
 /** Lorsque les providers sont chargés (après startEdit), pré-remplir les modèles. */
 watch(() => providers.value, () => {
-  if (editProvider.value) {
-    editAvailableModels.value = modelsForProvider(editProvider.value);
+  if (editProviderId.value) {
+    editAvailableModels.value = modelsForProvider(editProviderId.value);
   }
 }, { immediate: false });
 
@@ -136,18 +140,23 @@ onMounted(async () => {
   await fetchProviders();
 });
 
-/** available_models du provider donné (dépendance du select modèle). */
-function modelsForProvider(name: string): string[] {
-  return providers.value.find((p) => p.name === name)?.available_models ?? [];
+/** available_models du provider donné par id (dépendance du select modèle). */
+function modelsForProvider(providerId: number): string[] {
+  return providers.value.find((p) => p.id === providerId)?.available_models ?? [];
+}
+
+/** provider name for a given id (for table display). */
+function providerNameForId(id: number): string {
+  return providers.value.find((p) => p.id === id)?.name ?? String(id);
 }
 
 function onFormProviderChange() {
-  formAvailableModels.value = modelsForProvider(formProvider.value);
+  formAvailableModels.value = modelsForProvider(formProviderId.value);
   formModel.value = '';
 }
 
 function onEditProviderChange() {
-  editAvailableModels.value = modelsForProvider(editProvider.value);
+  editAvailableModels.value = modelsForProvider(editProviderId.value);
   editModel.value = '';
 }
 
@@ -156,7 +165,7 @@ async function createProfile() {
   const options = optionsFromRows(formOptions.value);
   const body: CreateModelProfile = {
     name: formName.value,
-    provider: formProvider.value,
+    provider_id: formProviderId.value,
     model: formModel.value,
     ...(formTemperature.value ? { temperature: Number(formTemperature.value) } : {}),
     ...(formMaxTokens.value ? { max_tokens: Number(formMaxTokens.value) } : {}),
@@ -165,7 +174,7 @@ async function createProfile() {
   try {
     await resource.create(body);
     formName.value = '';
-    formProvider.value = '';
+    formProviderId.value = 0;
     formModel.value = '';
     formTemperature.value = '';
     formMaxTokens.value = '';
@@ -177,9 +186,10 @@ async function createProfile() {
 }
 
 function startEdit(profile: ModelProfile) {
+  editingId.value = profile.id;
   editingName.value = profile.name;
-  editProvider.value = profile.provider;
-  editAvailableModels.value = modelsForProvider(profile.provider);
+  editProviderId.value = profile.provider_id;
+  editAvailableModels.value = modelsForProvider(profile.provider_id);
   editModel.value = profile.model;
   editTemperature.value = profile.temperature?.toString() ?? '';
   editMaxTokens.value = profile.max_tokens?.toString() ?? '';
@@ -189,8 +199,9 @@ function startEdit(profile: ModelProfile) {
 }
 
 function cancelEdit() {
+  editingId.value = null;
   editingName.value = null;
-  editProvider.value = '';
+  editProviderId.value = 0;
   editAvailableModels.value = [];
   editModel.value = '';
   editTemperature.value = '';
@@ -200,26 +211,26 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(name: string) {
+async function saveEdit(id: number) {
   editError.value = null;
   const options = optionsFromRows(editOptions.value);
   const body: UpdateModelProfile = {
-    ...(editProvider.value ? { provider: editProvider.value } : {}),
+    ...(editProviderId.value ? { provider_id: editProviderId.value } : {}),
     ...(editModel.value ? { model: editModel.value } : {}),
     ...(editTemperature.value ? { temperature: Number(editTemperature.value) } : {}),
     ...(editMaxTokens.value ? { max_tokens: Number(editMaxTokens.value) } : {}),
     ...(options ? { options } : {}),
   };
   try {
-    await resource.update(name, body);
+    await resource.update(id, body);
     cancelEdit();
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
-async function deleteProfile(name: string) {
-  await resource.remove(name);
+async function deleteProfile(id: number) {
+  await resource.remove(id);
 }
 </script>
 
@@ -241,9 +252,9 @@ async function deleteProfile(name: string) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="p in fetchedProfiles" :key="p.name">
+          <tr v-for="p in fetchedProfiles" :key="p.id">
             <td>{{ p.name }}</td>
-            <td class="th-provider">{{ p.provider }}</td>
+            <td class="th-provider">{{ providerNameForId(p.provider_id) }}</td>
             <td class="th-model">{{ p.model }}</td>
             <td class="th-temp">{{ p.temperature ?? '—' }}</td>
             <td class="th-tokens">{{ p.max_tokens ?? '—' }}</td>
@@ -251,7 +262,7 @@ async function deleteProfile(name: string) {
               <button class="btn btn-edit" @click="startEdit(p)">
                 Modifier
               </button>
-              <button class="btn btn-delete" @click="deleteProfile(p.name)">
+              <button class="btn btn-delete" @click="deleteProfile(p.id)">
                 Supprimer
               </button>
             </td>
@@ -276,12 +287,12 @@ async function deleteProfile(name: string) {
         <Field label="Provider">
           <select
             class="field-input"
-            v-model="formProvider"
+            v-model="formProviderId"
             aria-label="Provider"
             @change="onFormProviderChange"
           >
-            <option value="">—</option>
-            <option v-for="p in providers" :key="p.name" :value="p.name">
+            <option :value="0">—</option>
+            <option v-for="p in providers" :key="p.id" :value="p.id">
               {{ p.name }}
             </option>
           </select>
@@ -297,7 +308,7 @@ async function deleteProfile(name: string) {
               {{ m }}
             </option>
           </select>
-          <p v-if="formProvider && formAvailableModels.length === 0" class="empty-state">
+          <p v-if="formProviderId && formAvailableModels.length === 0" class="empty-state">
             Aucun modèle disponible — lancez un test sur ce provider.
           </p>
         </Field>
@@ -371,12 +382,12 @@ async function deleteProfile(name: string) {
         <Field label="Provider">
           <select
             class="field-input"
-            v-model="editProvider"
+            v-model="editProviderId"
             aria-label="Provider"
             @change="onEditProviderChange"
           >
-            <option value="">—</option>
-            <option v-for="p in providers" :key="p.name" :value="p.name">
+            <option :value="0">—</option>
+            <option v-for="p in providers" :key="p.id" :value="p.id">
               {{ p.name }}
             </option>
           </select>
@@ -392,7 +403,7 @@ async function deleteProfile(name: string) {
               {{ m }}
             </option>
           </select>
-          <p v-if="editProvider && editAvailableModels.length === 0" class="empty-state">
+          <p v-if="editProviderId && editAvailableModels.length === 0" class="empty-state">
             Aucun modèle disponible — lancez un test sur ce provider.
           </p>
         </Field>
@@ -455,7 +466,7 @@ async function deleteProfile(name: string) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>

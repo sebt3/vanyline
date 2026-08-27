@@ -50,7 +50,9 @@ describe('useIdeSession', () => {
   });
 
   it('startAgentSession : aucun agent configuré → sessionError, pas de conversation créée', async () => {
-    fetchSpy.mockResolvedValueOnce(jsonResponse([]));
+    fetchSpy.mockResolvedValueOnce(
+      jsonResponse({ items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1 }),
+    );
 
     await startAgentSession('my-sandbox');
 
@@ -62,13 +64,15 @@ describe('useIdeSession', () => {
 
   it('startAgentSession : crée la conversation avec le premier agent', async () => {
     fetchSpy
-      .mockResolvedValueOnce(jsonResponse([{ name: 'default' }, { name: 'other' }]))
-      .mockResolvedValueOnce(jsonResponse({ id: 'conv-42' }));
+      .mockResolvedValueOnce(
+        jsonResponse({ items: [{ name: 'default' }, { name: 'other' }], page: 1, per_page: 100, total_items: 2, total_pages: 1 }),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: 42 }));
 
     await startAgentSession('my-sandbox');
 
     const { activeConversationId, sessionError } = useIdeSession();
-    expect(activeConversationId.value).toBe('conv-42');
+    expect(activeConversationId.value).toBe('42');
     expect(sessionError.value).toBeNull();
 
     const createCall = fetchSpy.mock.calls[1];

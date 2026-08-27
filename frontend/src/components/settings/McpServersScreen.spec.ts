@@ -17,20 +17,26 @@ describe('McpServersScreen', () => {
       status: 200,
       headers: new Map([['content-type', 'application/json']]),
       json: () =>
-        Promise.resolve([
-          {
-            id: 'aaaa1111-bbbb-cccc-dddd-eeee11112222',
-            name: 'git-server',
-            server_type: 'sse',
-            url: 'https://git.example.com/mcp',
-          },
-          {
-            id: 'bbbb2222-cccc-dddd-eeee-ffff33334444',
-            name: 'http-server',
-            server_type: 'http-streamable',
-            url: 'https://http.example.com/mcp',
-          },
-        ]),
+        Promise.resolve({
+          items: [
+            {
+              id: 1,
+              name: 'git-server',
+              server_type: 'sse',
+              url: 'https://git.example.com/mcp',
+            },
+            {
+              id: 2,
+              name: 'http-server',
+              server_type: 'http-streamable',
+              url: 'https://http.example.com/mcp',
+            },
+          ],
+          page: 1,
+          per_page: 100,
+          total_items: 2,
+          total_pages: 1,
+        }),
     } as unknown as Response);
 
     const wrapper = mount(McpServersScreen);
@@ -52,39 +58,51 @@ describe('McpServersScreen', () => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'GET' && u === '/api/mcp-servers') {
+      if (method === 'GET' && u === '/api/v1/mcp-servers') {
         fetchCount++;
         if (fetchCount === 1) {
           return new Response(
-            JSON.stringify([{
-              id: 'ex00001',
-              name: 'existing',
-              server_type: 'sse',
-              url: 'https://existing.example.com/mcp',
-            }]),
+            JSON.stringify({
+              items: [{
+                id: 1,
+                name: 'existing',
+                server_type: 'sse',
+                url: 'https://existing.example.com/mcp',
+              }],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }
         return new Response(
-          JSON.stringify([
-            {
-              id: 'ex00001',
-              name: 'existing',
-              server_type: 'sse',
-              url: 'https://existing.example.com/mcp',
-            },
-            {
-              id: 'new1111-2222-3333-4444-555566667777',
-              name: 'new-server',
-              server_type: 'sse',
-              url: 'https://new.example.com/mcp',
-            },
-          ]),
+          JSON.stringify({
+            items: [
+              {
+                id: 1,
+                name: 'existing',
+                server_type: 'sse',
+                url: 'https://existing.example.com/mcp',
+              },
+              {
+                id: 3,
+                name: 'new-server',
+                server_type: 'sse',
+                url: 'https://new.example.com/mcp',
+              },
+            ],
+            page: 1,
+            per_page: 100,
+            total_items: 2,
+            total_pages: 1,
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
 
-      if (method === 'POST' && u === '/api/mcp-servers') {
+      if (method === 'POST' && u === '/api/v1/mcp-servers') {
         const body = JSON.parse(String((init as RequestInit)?.body));
         expect(body).toEqual({
           name: 'new-server',
@@ -93,7 +111,7 @@ describe('McpServersScreen', () => {
         });
         return new Response(
           JSON.stringify({
-            id: 'new1111-2222-3333-4444-555566667777',
+            id: 3,
             name: 'new-server',
             server_type: 'sse',
             url: 'https://new.example.com/mcp',
@@ -158,12 +176,12 @@ describe('McpServersScreen', () => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'PUT' && u.startsWith('/api/mcp-servers/')) {
+      if (method === 'PUT' && u.startsWith('/api/v1/mcp-servers/')) {
         capturedPutUrl = u;
         capturedPutBody = JSON.parse(String((init as RequestInit)?.body ?? '{}'));
         return new Response(
           JSON.stringify({
-            id: 'edit-me-id',
+            id: 2,
             name: 'updated-name',
             server_type: 'http-streamable',
             url: 'https://updated.example.com/mcp',
@@ -172,26 +190,38 @@ describe('McpServersScreen', () => {
         );
       }
 
-      if (method === 'GET' && u === '/api/mcp-servers') {
+      if (method === 'GET' && u === '/api/v1/mcp-servers') {
         fetchCount++;
         if (fetchCount === 1) {
           return new Response(
-            JSON.stringify([{
-              id: 'edit-me-id',
-              name: 'old-name',
-              server_type: 'sse',
-              url: 'https://old.example.com/mcp',
-            }]),
+            JSON.stringify({
+              items: [{
+                id: 2,
+                name: 'old-name',
+                server_type: 'sse',
+                url: 'https://old.example.com/mcp',
+              }],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }
         return new Response(
-          JSON.stringify([{
-            id: 'edit-me-id',
-            name: 'updated-name',
-            server_type: 'http-streamable',
-            url: 'https://updated.example.com/mcp',
-          }]),
+          JSON.stringify({
+            items: [{
+              id: 2,
+              name: 'updated-name',
+              server_type: 'http-streamable',
+              url: 'https://updated.example.com/mcp',
+            }],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
@@ -239,7 +269,7 @@ describe('McpServersScreen', () => {
     expect(document.querySelector('[role="dialog"]')).toBeFalsy();
 
     // Vérifier les appels PUT
-    expect(capturedPutUrl).toBe('/api/mcp-servers/edit-me-id');
+    expect(capturedPutUrl).toBe('/api/v1/mcp-servers/2');
     expect(capturedPutBody).toEqual({
       name: 'updated-name',
       server_type: 'http-streamable',
@@ -254,14 +284,20 @@ describe('McpServersScreen', () => {
       status: 200,
       headers: new Map([['content-type', 'application/json']]),
       json: () =>
-        Promise.resolve([
-          {
-            id: 'aaa',
-            name: 'ollama-local',
-            server_type: 'sse',
-            url: 'https://ollama.example.com/mcp',
-          },
-        ]),
+        Promise.resolve({
+          items: [
+            {
+              id: 1,
+              name: 'ollama-local',
+              server_type: 'sse',
+              url: 'https://ollama.example.com/mcp',
+            },
+          ],
+          page: 1,
+          per_page: 100,
+          total_items: 1,
+          total_pages: 1,
+        }),
     } as unknown as Response);
 
     const wrapper = mount(McpServersScreen);
@@ -293,29 +329,41 @@ describe('McpServersScreen', () => {
     expect(putCalls.length).toBe(0);
   });
 
-  it('cliquer "Supprimer" → DELETE /{id} puis re-fetch', async () => {
+  it('cliquer "Supprimer" → DELETE /api/v1/mcp-servers/{id} puis re-fetch', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     let fetchCount = 0;
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
-      if (method === 'DELETE' && u.includes('/api/mcp-servers/to-delete-id')) {
+      if (method === 'DELETE' && u.includes('/api/v1/mcp-servers/3')) {
         return new Response(null, { status: 204 });
       }
-      if (method === 'GET' && u === '/api/mcp-servers') {
+      if (method === 'GET' && u === '/api/v1/mcp-servers') {
         fetchCount++;
         if (fetchCount === 1) {
           return new Response(
-            JSON.stringify([{
-              id: 'to-delete-id',
-              name: 'to-delete',
-              server_type: 'sse',
-              url: 'https://todelete.example.com/mcp',
-            }]),
+            JSON.stringify({
+              items: [{
+                id: 3,
+                name: 'to-delete',
+                server_type: 'sse',
+                url: 'https://todelete.example.com/mcp',
+              }],
+              page: 1,
+              per_page: 100,
+              total_items: 1,
+              total_pages: 1,
+            }),
             { status: 200, headers: { 'content-type': 'application/json' } },
           );
         }
-        return new Response(JSON.stringify([]), {
+        return new Response(JSON.stringify({
+          items: [],
+          page: 1,
+          per_page: 100,
+          total_items: 0,
+          total_pages: 1,
+        }), {
           status: 200,
           headers: { 'content-type': 'application/json' },
         });
@@ -333,7 +381,7 @@ describe('McpServersScreen', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     const deleteCalls = fetchSpy.mock.calls.filter(
-      ([url]) => String(url).includes('/api/mcp-servers/to-delete-id'),
+      ([url]) => String(url).includes('/api/v1/mcp-servers/3'),
     );
     expect(deleteCalls.length).toBe(1);
     expect(deleteCalls[0][1]).toMatchObject({
@@ -343,26 +391,32 @@ describe('McpServersScreen', () => {
     expect(wrapper.text()).toContain('Aucun serveur MCP');
   });
 
-  it('"Découvrir" appelle POST /test et affiche les tools renvoyés', async () => {
+  it('"Découvrir" appelle POST /api/v1/mcp-servers/{id}/test et affiche les tools renvoyés', async () => {
     const fetchSpy = vi.spyOn(globalThis, 'fetch');
     fetchSpy.mockImplementation(async (url, init) => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'GET' && u === '/api/mcp-servers') {
+      if (method === 'GET' && u === '/api/v1/mcp-servers') {
         return new Response(
-          JSON.stringify([
-            {
-              id: 'srv-1',
-              name: 'git-server',
-              server_type: 'http-streamable',
-              url: 'https://git.example.com/mcp',
-            },
-          ]),
+          JSON.stringify({
+            items: [
+              {
+                id: 1,
+                name: 'git-server',
+                server_type: 'http-streamable',
+                url: 'https://git.example.com/mcp',
+              },
+            ],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (method === 'POST' && u === '/api/mcp-servers/srv-1/test') {
+      if (method === 'POST' && u === '/api/v1/mcp-servers/1/test') {
         return new Response(
           JSON.stringify({ tools: ['read_file', 'write_file', 'list_dir'] }),
           { status: 200, headers: { 'content-type': 'application/json' } },
@@ -382,7 +436,7 @@ describe('McpServersScreen', () => {
     await new Promise((r) => setTimeout(r, 0));
 
     expect(fetchSpy).toHaveBeenCalledWith(
-      '/api/mcp-servers/srv-1/test',
+      '/api/v1/mcp-servers/1/test',
       expect.objectContaining({ method: 'POST' }),
     );
     expect(wrapper.text()).toContain('3 tools');
@@ -395,20 +449,26 @@ describe('McpServersScreen', () => {
       const method = (init?.method ?? 'GET') as string;
       const u = String(url);
 
-      if (method === 'GET' && u === '/api/mcp-servers') {
+      if (method === 'GET' && u === '/api/v1/mcp-servers') {
         return new Response(
-          JSON.stringify([
-            {
-              id: 'srv-2',
-              name: 'flaky-server',
-              server_type: 'sse',
-              url: 'https://flaky.example.com/mcp',
-            },
-          ]),
+          JSON.stringify({
+            items: [
+              {
+                id: 2,
+                name: 'flaky-server',
+                server_type: 'sse',
+                url: 'https://flaky.example.com/mcp',
+              },
+            ],
+            page: 1,
+            per_page: 100,
+            total_items: 1,
+            total_pages: 1,
+          }),
           { status: 200, headers: { 'content-type': 'application/json' } },
         );
       }
-      if (method === 'POST' && u === '/api/mcp-servers/srv-2/test') {
+      if (method === 'POST' && u === '/api/v1/mcp-servers/2/test') {
         return new Response(
           JSON.stringify({ error: 'VNL-MCP-004: transport SSE non implémenté' }),
           { status: 400, headers: { 'content-type': 'application/json' } },

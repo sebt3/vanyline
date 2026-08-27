@@ -8,18 +8,8 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum AppError {
-    #[error("VNL-AUTH-001: Not authenticated")]
-    NotAuthenticated,
-    #[error("VNL-AUTH-002: Invalid or expired token")]
-    InvalidToken,
-    #[error("VNL-AUTH-003: OIDC error: {0}")]
-    OidcError(String),
     #[error("VNL-AUTH-004: Forbidden")]
     Forbidden,
-    #[error("VNL-CFG-001: Configuration error: {0}")]
-    ConfigError(String),
-    #[error("VNL-DB-001: Database error: {0}")]
-    DatabaseError(#[from] sqlx::Error),
     #[error("VNL-LLM-001: LLM provider error: {0}")]
     LlmError(String),
     #[error("VNL-LLM-002: LLM provider not found")]
@@ -28,12 +18,6 @@ pub enum AppError {
     McpError(String),
     #[error("VNL-AGT-001: Agent not found")]
     AgentNotFound,
-    #[error("VNL-CFG-004: Model profile not found")]
-    ModelProfileNotFound,
-    #[error("VNL-CFG-005: Toolset not found")]
-    ToolsetNotFound,
-    #[error("VNL-CFG-006: Skill not found")]
-    SkillNotFound,
     #[error("{0}")]
     UnprocessableReference(vanyline_lib::VnyError),
     #[error("VNL-CNV-001: Conversation not found")]
@@ -58,6 +42,17 @@ pub enum AppError {
     GitPathInvalid,
 }
 
+/// Remplace le `fn db_err` dupliqué verbatim dans 9 modules (`api/{conversations,llm_providers,
+/// local_tools,mcp_servers,me,owners,projects,sandboxes}.rs`, `ws/chat.rs`) — trouvé en revue
+/// Phase 3 (miryad-core-integration). Même code qu'avant (`VNL-DB-006`, tout `DbErr` mappé en
+/// `InternalError`) : la consolidation ne change aucun comportement observable, juste l'endroit
+/// où il vit. `#[from]` permet `?` directement sur un `Result<_, sea_orm::DbErr>`.
+impl From<sea_orm::DbErr> for AppError {
+    fn from(e: sea_orm::DbErr) -> Self {
+        Self::InternalError(format!("VNL-DB-006: {e}"))
+    }
+}
+
 impl From<vanyline_lib::VnyError> for AppError {
     fn from(e: vanyline_lib::VnyError) -> Self {
         match &e {
@@ -76,19 +71,11 @@ impl From<vanyline_lib::VnyError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            Self::NotAuthenticated => (StatusCode::UNAUTHORIZED, self.to_string()),
-            Self::InvalidToken => (StatusCode::UNAUTHORIZED, self.to_string()),
-            Self::OidcError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            Self::DatabaseError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
             Self::LlmError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
             Self::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::ModelProfileNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::ToolsetNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::SkillNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
@@ -110,18 +97,6 @@ impl IntoResponse for AppError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn model_profile_not_found_maps_to_404() {
-        let resp = AppError::ModelProfileNotFound.into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
-
-    #[test]
-    fn toolset_not_found_maps_to_404() {
-        let resp = AppError::ToolsetNotFound.into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-    }
 
     #[test]
     fn unprocessable_reference_maps_to_422() {

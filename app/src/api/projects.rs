@@ -6,10 +6,10 @@ use axum::{
 use serde::Deserialize;
 use vanyline_crds::{EgressRule, Project, ProjectSpec, PvcRef};
 
-use crate::{
-    AppState, api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
-    error::AppError, k8s,
-};
+use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
+
+use crate::{AppState, api::owners, error::AppError, k8s};
 
 /// Body de `POST /api/projects`. Reprend les champs de `ProjectSpec` SAUF `owner`,
 /// qui est dérivé de l'utilisateur authentifié (décision développeur : owner dérivé).
@@ -43,8 +43,10 @@ pub async fn list_projects(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<Project>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
     };
@@ -63,8 +65,10 @@ pub async fn get_project(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<Json<Project>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -81,8 +85,10 @@ pub async fn create_project(
     user: AuthUser,
     Json(body): Json<CreateProjectBody>,
 ) -> Result<(StatusCode, Json<Project>), AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = owners::ensure_owner(&state, &db_user).await?;
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = owners::ensure_owner(&state, principal_user.id, &user).await?;
     let spec = ProjectSpec {
         owner: owner.clone(),
         repo_url: body.repo_url,
@@ -106,8 +112,10 @@ pub async fn delete_project(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -124,7 +132,6 @@ pub async fn delete_project(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -159,11 +166,10 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
-            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state(),
         };
 
         Router::new()

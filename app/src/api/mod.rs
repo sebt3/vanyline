@@ -1,15 +1,11 @@
-pub mod agents;
 pub mod conversations;
 pub mod llm_providers;
 pub mod local_tools;
 pub mod mcp_servers;
 pub mod me;
-pub mod model_profiles;
 pub mod owners;
 pub mod projects;
 pub mod sandboxes;
-pub mod skills;
-pub mod toolsets;
 
 use axum::{
     Router,
@@ -18,21 +14,13 @@ use axum::{
 
 use crate::AppState;
 
-pub fn api_router() -> Router<AppState> {
+/// Endpoints métier non-CRUD des ressources `resource_router` (`llm-providers`, `mcp-servers`) —
+/// montés à part sous `/api/v1`, au même préfixe que le CRUD généré de ces mêmes ressources
+/// (décision Phase 1 : "conservés en handlers axum custom, à côté de resource_router"). Vivaient
+/// auparavant sous `/api` non versionné, en désaccord avec cette décision (trouvé en revue
+/// Phase 3, cf. `docs/features/miryad-core-integration.md`).
+pub fn api_v1_router() -> Router<AppState> {
     Router::new()
-        .route("/local-tools", get(local_tools::list_local_tools))
-        .route("/me", get(me::handler_me))
-        // LLM providers (admin)
-        .route(
-            "/llm-providers",
-            get(llm_providers::list_providers).post(llm_providers::create_provider),
-        )
-        .route(
-            "/llm-providers/{id}",
-            get(llm_providers::get_provider)
-                .put(llm_providers::update_provider)
-                .delete(llm_providers::delete_provider),
-        )
         .route(
             "/llm-providers/{id}/test",
             post(llm_providers::test_provider),
@@ -41,62 +29,13 @@ pub fn api_router() -> Router<AppState> {
             "/llm-providers/{id}/default",
             put(llm_providers::set_default_provider),
         )
-        // MCP servers (admin)
-        .route(
-            "/mcp-servers",
-            get(mcp_servers::list_servers).post(mcp_servers::create_server),
-        )
-        .route(
-            "/mcp-servers/{id}",
-            get(mcp_servers::get_server)
-                .put(mcp_servers::update_server)
-                .delete(mcp_servers::delete_server),
-        )
         .route("/mcp-servers/{id}/test", post(mcp_servers::test_server))
-        // Model profiles (OIDC, by name)
-        .route(
-            "/model-profiles",
-            get(model_profiles::list_model_profiles).post(model_profiles::create_model_profile),
-        )
-        .route(
-            "/model-profiles/{name}",
-            get(model_profiles::get_model_profile)
-                .put(model_profiles::update_model_profile)
-                .delete(model_profiles::delete_model_profile),
-        )
-        // Toolsets (OIDC, by name)
-        .route(
-            "/toolsets",
-            get(toolsets::list_toolsets).post(toolsets::create_toolset),
-        )
-        .route(
-            "/toolsets/{name}",
-            get(toolsets::get_toolset)
-                .put(toolsets::update_toolset)
-                .delete(toolsets::delete_toolset),
-        )
-        // Skills (OIDC, leaf resource)
-        .route(
-            "/skills",
-            get(skills::list_skills).post(skills::create_skill),
-        )
-        .route(
-            "/skills/{name}",
-            get(skills::get_skill)
-                .put(skills::update_skill)
-                .delete(skills::delete_skill),
-        )
-        // Agents (read: OIDC, write: admin)
-        .route(
-            "/agents",
-            get(agents::list_agents).post(agents::create_agent),
-        )
-        .route(
-            "/agents/{name}",
-            get(agents::get_agent)
-                .put(agents::update_agent)
-                .delete(agents::delete_agent),
-        )
+}
+
+pub fn api_router() -> Router<AppState> {
+    Router::new()
+        .route("/local-tools", get(local_tools::list_local_tools))
+        .route("/me", get(me::handler_me))
         // Conversations (OIDC)
         .route(
             "/conversations",

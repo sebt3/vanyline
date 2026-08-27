@@ -10,7 +10,9 @@ const props = defineProps<{ conversationId: string }>();
 
 /** Ligne persistée (`GET /conversations/{id}/messages`) — `payload` est un
  *  JSON libre côté backend (`vanyline_app::ws::chat::persist_message`),
- *  seul `content` nous intéresse pour reconstruire l'historique en `UIMessage`. */
+ *  seul `content` nous intéresse pour reconstruire l'historique en `UIMessage`.
+ *  Type local : le backend renvoie `id` en i32, on le convertit en `string`
+ *  au chargement (l'id `UIMessage` est une string côté AI SDK). */
 interface MessageRow {
   id: string;
   role: string;
@@ -39,7 +41,7 @@ onMounted(async () => {
   try {
     const rows = await client.get<MessageRow[]>(`/api/conversations/${props.conversationId}/messages`);
     messages.value = rows.map((m) => ({
-      id: m.id,
+      id: String(m.id),
       role: m.role === 'user' ? 'user' : 'assistant',
       parts: [{ type: 'text', text: m.payload.content ?? '' }],
     })) as UIMessage[];

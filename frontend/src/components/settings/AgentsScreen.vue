@@ -9,15 +9,17 @@ import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import CheckboxList from '../common/CheckboxList.vue';
 import Field from '../common/Field.vue';
+import type { PagedResult } from '../../composables/useCrudResource';
 
 type AgentMode = 'primary' | 'subagent' | 'all';
 type SkillSelection = 'auto' | 'none' | string[];
 
 interface Agent {
+  id: number;
   name: string;
   description?: string | null;
   mode: AgentMode;
-  model: string;
+  model_profile_id: number;
   toolsets: string[];
   skills: SkillSelection;
   system_prompt: string;
@@ -27,7 +29,7 @@ interface CreateAgent {
   name: string;
   description?: string;
   mode?: AgentMode;
-  model: string;
+  model_profile_id: number;
   toolsets?: string[];
   skills?: SkillSelection;
   system_prompt?: string;
@@ -36,13 +38,14 @@ interface CreateAgent {
 interface UpdateAgent {
   description?: string;
   mode?: AgentMode;
-  model?: string;
+  model_profile_id?: number;
   toolsets?: string[];
   skills?: SkillSelection;
   system_prompt?: string;
 }
 
 interface ModelProfileOption {
+  id: number;
   name: string;
 }
 
@@ -56,7 +59,7 @@ interface SkillOption {
 }
 
 const client = createApiClient();
-const resource = useCrudResource<Agent>(client, '/api/agents');
+const resource = useCrudResource<Agent>(client, '/api/v1/agents');
 const { items: fetchedAgents, loading, error } = resource;
 
 const modelProfiles = ref<ModelProfileOption[]>([]);
@@ -68,17 +71,18 @@ const optionsError = ref<string | null>(null);
 const formName = ref('');
 const formDescription = ref('');
 const formMode = ref<AgentMode>('primary');
-const formModel = ref('');
+const formModelProfileId = ref<number>(0);
 const formToolsets = ref<string[]>([]);
 const formSkills = ref<'auto' | 'none'>('auto');
 const formSystemPrompt = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
-const editingName = ref<string | null>(null);
+const editingId = ref<number | null>(null);
+const editingName = ref<string | null>(null); // titre du dialog
 const editDescription = ref('');
 const editMode = ref<AgentMode>('primary');
-const editModel = ref('');
+const editModelProfileId = ref<number>(0);
 const editToolsets = ref<string[]>([]);
 const editSkills = ref<'auto' | 'none'>('auto');
 const editSkillList = ref<string[]>([]);
@@ -93,13 +97,13 @@ const editModalOpen = ref(false);
 async function fetchOptions() {
   try {
     const [mp, ts, sk] = await Promise.all([
-      client.get<ModelProfileOption[]>('/api/model-profiles'),
-      client.get<ToolsetOption[]>('/api/toolsets'),
-      client.get<SkillOption[]>('/api/skills'),
+      client.get<PagedResult<ModelProfileOption>>('/api/v1/model-profiles'),
+      client.get<PagedResult<ToolsetOption>>('/api/v1/toolsets'),
+      client.get<PagedResult<SkillOption>>('/api/v1/skills'),
     ]);
-    modelProfiles.value = mp;
-    toolsetOptions.value = ts;
-    skillOptions.value = sk;
+    modelProfiles.value = mp.items;
+    toolsetOptions.value = ts.items;
+    skillOptions.value = sk.items;
   } catch (e) {
     optionsError.value = e instanceof ApiError ? e.message : String(e);
   }
@@ -115,6 +119,11 @@ function skillsToDisplay(s: SkillSelection): string {
   return '—';
 }
 
+/** model profile name for a given id (for table display). */
+function modelProfileNameForId(id: number): string {
+  return modelProfiles.value.find((p) => p.id === id)?.name ?? String(id);
+}
+
 function toOptions(names: string[]): { value: string; label: string }[] {
   return names.map((name) => ({ value: name, label: name }));
 }
@@ -125,7 +134,7 @@ async function createAgent() {
     name: formName.value,
     ...(formDescription.value ? { description: formDescription.value } : {}),
     mode: formMode.value,
-    model: formModel.value,
+    model_profile_id: formModelProfileId.value,
     toolsets: formToolsets.value.length ? formToolsets.value : undefined,
     skills: formSkills.value,
     ...(formSystemPrompt.value ? { system_prompt: formSystemPrompt.value } : {}),
@@ -135,7 +144,7 @@ async function createAgent() {
     formName.value = '';
     formDescription.value = '';
     formMode.value = 'primary';
-    formModel.value = '';
+    formModelProfileId.value = 0;
     formToolsets.value = [];
     formSkills.value = 'auto';
     formSystemPrompt.value = '';
@@ -146,10 +155,11 @@ async function createAgent() {
 }
 
 function startEdit(agent: Agent) {
+  editingId.value = agent.id;
   editingName.value = agent.name;
   editDescription.value = agent.description ?? '';
   editMode.value = agent.mode;
-  editModel.value = agent.model;
+  editModelProfileId.value = agent.model_profile_id;
   editToolsets.value = [...agent.toolsets];
   if (Array.isArray(agent.skills)) {
     editingSkillsIsList.value = true;
@@ -164,10 +174,11 @@ function startEdit(agent: Agent) {
 }
 
 function cancelEdit() {
+  editingId.value = null;
   editingName.value = null;
   editDescription.value = '';
   editMode.value = 'primary';
-  editModel.value = '';
+  editModelProfileId.value = 0;
   editToolsets.value = [];
   editSkillList.value = [];
   editingSkillsIsList.value = false;
@@ -177,25 +188,25 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(name: string) {
+async function saveEdit(id: number) {
   editError.value = null;
   const body: UpdateAgent = {};
   if (editDescription.value) body.description = editDescription.value;
   body.mode = editMode.value;
-  if (editModel.value) body.model = editModel.value;
+  if (editModelProfileId.value) body.model_profile_id = editModelProfileId.value;
   if (editToolsets.value.length > 0) body.toolsets = editToolsets.value;
   body.skills = editingSkillsIsList.value ? editSkillList.value : editSkills.value;
   if (editSystemPrompt.value) body.system_prompt = editSystemPrompt.value;
   try {
-    await resource.update(name, body);
+    await resource.update(id, body);
     cancelEdit();
   } catch (e) {
     editError.value = e instanceof ApiError ? e.message : String(e);
   }
 }
 
-async function deleteAgent(name: string) {
-  await resource.remove(name);
+async function deleteAgent(id: number) {
+  await resource.remove(id);
 }
 </script>
 
@@ -218,11 +229,11 @@ async function deleteAgent(name: string) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="a in fetchedAgents" :key="a.name">
+          <tr v-for="a in fetchedAgents" :key="a.id">
             <td>{{ a.name }}</td>
             <td>{{ a.description ?? '—' }}</td>
             <td>{{ a.mode }}</td>
-            <td>{{ a.model }}</td>
+            <td>{{ modelProfileNameForId(a.model_profile_id) }}</td>
             <td>
               {{ a.toolsets.length ? a.toolsets.join(', ') : '—' }}
             </td>
@@ -231,7 +242,7 @@ async function deleteAgent(name: string) {
               <button class="btn btn-edit" @click="startEdit(a)">
                 Modifier
               </button>
-              <button class="btn btn-delete" @click="deleteAgent(a.name)">
+              <button class="btn btn-delete" @click="deleteAgent(a.id)">
                 Supprimer
               </button>
             </td>
@@ -274,9 +285,9 @@ async function deleteAgent(name: string) {
           </select>
         </Field>
         <Field label="Profil de modèle" top-align>
-          <select class="field-input" v-model="formModel" aria-label="Profil de modèle">
-            <option value="">—</option>
-            <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
+          <select class="field-input" v-model="formModelProfileId" aria-label="Profil de modèle">
+            <option :value="0">—</option>
+            <option v-for="p in modelProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
         </Field>
         <Field label="Toolsets" top-align>
@@ -330,9 +341,9 @@ async function deleteAgent(name: string) {
           </select>
         </Field>
         <Field label="Profil de modèle" top-align>
-          <select class="field-input" v-model="editModel" aria-label="Profil de modèle">
-            <option value="">—</option>
-            <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
+          <select class="field-input" v-model="editModelProfileId" aria-label="Profil de modèle">
+            <option :value="0">—</option>
+            <option v-for="p in modelProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
           </select>
         </Field>
         <Field label="Toolsets" top-align>
@@ -362,7 +373,7 @@ async function deleteAgent(name: string) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>

@@ -1,225 +1,99 @@
 use axum::{
     Json,
     extract::{Path, State},
-    http::StatusCode,
 };
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use miryad_core::auth::AuthUser;
+use miryad_core::rbac::can_write;
+use miryad_core::users::resolve_user;
+use sea_orm::{ColumnTrait, EntityTrait, IntoActiveModel, QueryFilter, sea_query::Expr};
 
 use crate::{
-    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser,
-    db::models::LlmProvider, error::AppError,
+    AppState, db::entities::llm_providers::Column,
+    db::entities::llm_providers::Entity as LlmProviderEntity,
+    db::entities::llm_providers::Model as LlmProviderModel, error::AppError,
 };
 
-#[derive(Deserialize)]
-pub struct CreateLlmProvider {
-    pub name: String,
-    pub provider_type: String,
-    pub endpoint: String,
-    pub api_key: Option<String>,
-    pub is_default: Option<bool>,
-}
-
-#[derive(Deserialize)]
-pub struct UpdateLlmProvider {
-    pub name: Option<String>,
-    pub provider_type: Option<String>,
-    pub endpoint: Option<String>,
-    pub api_key: Option<String>,
-    pub is_default: Option<bool>,
-}
-
-#[derive(Serialize)]
+#[derive(serde::Serialize)]
 pub struct TestResult {
     pub models: Vec<String>,
-}
-
-pub async fn list_providers(
-    State(state): State<AppState>,
-    user: AuthUser,
-) -> Result<Json<Vec<LlmProvider>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let providers = sqlx::query_as::<_, LlmProvider>(
-        "SELECT * FROM llm_providers WHERE user_id = $1 ORDER BY created_at DESC",
-    )
-    .bind(db_user.id)
-    .fetch_all(&state.pool)
-    .await?;
-    Ok(Json(providers))
-}
-
-pub async fn create_provider(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Json(body): Json<CreateLlmProvider>,
-) -> Result<(StatusCode, Json<LlmProvider>), AppError> {
-    validate_provider_type(&body.provider_type)?;
-    let db_user = get_or_create_user(&state, &user).await?;
-
-    if body.is_default == Some(true) {
-        sqlx::query(
-            "UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1",
-        )
-        .bind(db_user.id)
-        .execute(&state.pool)
-        .await?;
-    }
-
-    let provider = sqlx::query_as::<_, LlmProvider>(
-        r"INSERT INTO llm_providers (user_id, name, provider_type, endpoint, api_key, is_default)
-           VALUES ($1, $2, $3, $4, $5, $6)
-           RETURNING *",
-    )
-    .bind(db_user.id)
-    .bind(&body.name)
-    .bind(&body.provider_type)
-    .bind(&body.endpoint)
-    .bind(&body.api_key)
-    .bind(body.is_default.unwrap_or(false))
-    .fetch_one(&state.pool)
-    .await?;
-
-    Ok((StatusCode::CREATED, Json(provider)))
-}
-
-pub async fn get_provider(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<Uuid>,
-) -> Result<Json<LlmProvider>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let provider = sqlx::query_as::<_, LlmProvider>(
-        "SELECT * FROM llm_providers WHERE id = $1 AND user_id = $2",
-    )
-    .bind(id)
-    .bind(db_user.id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::LlmProviderNotFound)?;
-    Ok(Json(provider))
-}
-
-pub async fn update_provider(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<Uuid>,
-    Json(body): Json<UpdateLlmProvider>,
-) -> Result<Json<LlmProvider>, AppError> {
-    if let Some(ref t) = body.provider_type {
-        validate_provider_type(t)?;
-    }
-    let db_user = get_or_create_user(&state, &user).await?;
-
-    if body.is_default == Some(true) {
-        sqlx::query(
-            "UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1 AND id != $2",
-        )
-        .bind(db_user.id)
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
-    }
-
-    let provider = sqlx::query_as::<_, LlmProvider>(
-        r"UPDATE llm_providers SET
-            name = COALESCE($3, name),
-            provider_type = COALESCE($4, provider_type),
-            endpoint = COALESCE($5, endpoint),
-            api_key = COALESCE($6, api_key),
-            is_default = COALESCE($7, is_default),
-            updated_at = NOW()
-           WHERE id = $1 AND user_id = $2
-           RETURNING *",
-    )
-    .bind(id)
-    .bind(db_user.id)
-    .bind(&body.name)
-    .bind(&body.provider_type)
-    .bind(&body.endpoint)
-    .bind(&body.api_key)
-    .bind(body.is_default)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::LlmProviderNotFound)?;
-
-    Ok(Json(provider))
-}
-
-pub async fn delete_provider(
-    State(state): State<AppState>,
-    user: AuthUser,
-    Path(id): Path<Uuid>,
-) -> Result<StatusCode, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let rows = sqlx::query("DELETE FROM llm_providers WHERE id = $1 AND user_id = $2")
-        .bind(id)
-        .bind(db_user.id)
-        .execute(&state.pool)
-        .await?
-        .rows_affected();
-
-    if rows == 0 {
-        return Err(AppError::LlmProviderNotFound);
-    }
-    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn set_default_provider(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
-) -> Result<Json<LlmProvider>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
+    Path(id): Path<i32>,
+) -> Result<Json<LlmProviderModel>, AppError> {
+    let db = state.auth.db.clone();
+    let principal_user = resolve_user(&db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let provider = LlmProviderEntity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(AppError::from)?
+        .ok_or(AppError::LlmProviderNotFound)?;
+    if !can_write::<LlmProviderEntity>(&db, &principal_user, &provider)
+        .await
+        .map_err(AppError::from)?
+    {
+        return Err(AppError::Forbidden);
+    }
+    // Deux `UPDATE` bulk (pas un fetch-all + une boucle par ligne + deux re-fetches
+    // redondants du même provider, cf. revue Phase 3 miryad-core-integration) : is_default =
+    // FALSE partout, puis TRUE sur `id`. Le provider déjà en main (RBAC ci-dessus) est réutilisé
+    // pour la réponse plutôt que refetché.
+    LlmProviderEntity::update_many()
+        .col_expr(Column::IsDefault, Expr::value(false))
+        .exec(&db)
+        .await
+        .map_err(AppError::from)?;
+    LlmProviderEntity::update_many()
+        .col_expr(Column::IsDefault, Expr::value(true))
+        .filter(Column::Id.eq(id))
+        .exec(&db)
+        .await
+        .map_err(AppError::from)?;
 
-    sqlx::query(
-        "UPDATE llm_providers SET is_default = FALSE, updated_at = NOW() WHERE user_id = $1",
-    )
-    .bind(db_user.id)
-    .execute(&state.pool)
-    .await?;
-
-    let provider = sqlx::query_as::<_, LlmProvider>(
-        "UPDATE llm_providers SET is_default = TRUE, updated_at = NOW() WHERE id = $1 AND user_id = $2 RETURNING *",
-    )
-    .bind(id)
-    .bind(db_user.id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::LlmProviderNotFound)?;
-
-    Ok(Json(provider))
+    let mut result = provider;
+    result.is_default = true;
+    Ok(Json(result))
 }
 
 pub async fn test_provider(
     State(state): State<AppState>,
     user: AuthUser,
-    Path(id): Path<Uuid>,
+    Path(id): Path<i32>,
 ) -> Result<Json<TestResult>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let provider = sqlx::query_as::<_, LlmProvider>(
-        "SELECT * FROM llm_providers WHERE id = $1 AND user_id = $2",
-    )
-    .bind(id)
-    .bind(db_user.id)
-    .fetch_optional(&state.pool)
-    .await?
-    .ok_or(AppError::LlmProviderNotFound)?;
-
+    let db = state.auth.db.clone();
+    let principal_user = resolve_user(&db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let provider = LlmProviderEntity::find_by_id(id)
+        .one(&db)
+        .await
+        .map_err(AppError::from)?
+        .ok_or(AppError::LlmProviderNotFound)?;
+    if !can_write::<LlmProviderEntity>(&db, &principal_user, &provider)
+        .await
+        .map_err(AppError::from)?
+    {
+        return Err(AppError::Forbidden);
+    }
     let models = discover_models(&provider).await?;
 
-    let models_json = serde_json::to_value(&models)
-        .map_err(|e| AppError::InternalError(format!("VNL-LLM-002: serialization error: {e}")))?;
-
-    sqlx::query("UPDATE llm_providers SET available_models = $1, updated_at = NOW() WHERE id = $2")
-        .bind(&models_json)
-        .bind(id)
-        .execute(&state.pool)
-        .await?;
+    // Persiste `available_models`, sans re-fetch mort après coup (la réponse ne porte que
+    // `models`, cf. revue Phase 3 miryad-core-integration).
+    let mut active = provider.into_active_model();
+    active.available_models = sea_orm::ActiveValue::Set(models.clone().into());
+    LlmProviderEntity::update(active)
+        .exec(&db)
+        .await
+        .map_err(AppError::from)?;
 
     Ok(Json(TestResult { models }))
 }
 
-async fn discover_models(provider: &LlmProvider) -> Result<Vec<String>, AppError> {
+async fn discover_models(provider: &LlmProviderModel) -> Result<Vec<String>, AppError> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -274,33 +148,16 @@ async fn discover_models(provider: &LlmProvider) -> Result<Vec<String>, AppError
     }
 }
 
-fn validate_provider_type(t: &str) -> Result<(), AppError> {
-    if t != "ollama" && t != "openai-compatible" {
-        return Err(AppError::LlmError(format!(
-            "VNL-LLM-005: provider_type must be 'ollama' or 'openai-compatible', got: {t}"
-        )));
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
-    use axum::{
-        Router,
-        body::Body,
-        http::{Request, StatusCode},
-    };
-    use tower::ServiceExt;
+    use crate::db::entities::llm_providers::ActiveModel;
+    use miryad_core::users::sync_group_memberships;
+    use sea_orm::ActiveValue::{NotSet, Set};
 
-    fn test_key() -> cookie::Key {
-        cookie::Key::from(&[0u8; 64])
-    }
-
-    fn make_app() -> Router {
-        let config = crate::config::Config {
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
             oidc_issuer_url: "https://issuer.example.com".to_string(),
             oidc_client_id: "client-id".to_string(),
             oidc_client_secret: "client-secret".to_string(),
@@ -309,7 +166,6 @@ mod tests {
             oidc_ca_cert: None,
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
-
             listen_addr: "0.0.0.0:8080".to_string(),
             static_dir: "./static".to_string(),
             k8s_namespace: None,
@@ -318,42 +174,81 @@ mod tests {
             default_home_access_mode: None,
             default_project_storage_class: None,
             default_project_access_mode: None,
-        };
+        }
+    }
 
-        let state = AppState {
-            config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
-            cookie_key: test_key(),
-            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
+    async fn test_state() -> AppState {
+        let db = crate::db::test_support::real_db().await;
+        AppState {
+            config: test_config(),
+            cookie_key: cookie::Key::from(&[0u8; 64]),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
-        };
-
-        Router::new()
-            .route("/llm-providers", axum::routing::get(list_providers))
-            .with_state(state)
+            auth: crate::auth::test_support::test_auth_state_with_db(db),
+        }
     }
 
-    #[test]
-    fn validate_provider_type_accepts_known() {
-        assert!(validate_provider_type("ollama").is_ok());
-        assert!(validate_provider_type("openai-compatible").is_ok());
+    fn admin_user() -> AuthUser {
+        AuthUser {
+            subject: "admin-user".to_string(),
+            email: None,
+            id_token: "test-id-token".to_string(),
+        }
     }
 
-    #[test]
-    fn validate_provider_type_rejects_unknown() {
-        let err = validate_provider_type("bogus").unwrap_err();
-        assert!(matches!(err, AppError::LlmError(_)));
-    }
-
+    /// Régression Phase 3 (miryad-core-integration) : `set_default_provider` doit désactiver
+    /// l'ancien défaut et activer le nouveau via deux `UPDATE` bulk, sans dépendre d'une boucle
+    /// par ligne ni de re-fetches redondants.
     #[tokio::test]
-    async fn list_providers_without_cookie_returns_401() {
-        let app = make_app();
-        let req = Request::builder()
-            .uri("/llm-providers")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    async fn set_default_provider_switches_the_flag() {
+        let state = test_state().await;
+        let db = &state.auth.db;
+        let admin = resolve_user(db, "admin-user", None)
+            .await
+            .expect("admin resolves");
+        sync_group_memberships(db, admin.id, &["admin".to_string()])
+            .await
+            .expect("sync admin group");
+
+        let provider_a = LlmProviderEntity::insert(ActiveModel {
+            id: NotSet,
+            name: Set("a".to_string()),
+            provider_type: Set("ollama".to_string()),
+            endpoint: Set("http://localhost:11434".to_string()),
+            api_key: Set(None),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(true),
+        })
+        .exec(db)
+        .await
+        .expect("provider a inserts")
+        .last_insert_id;
+
+        let provider_b = LlmProviderEntity::insert(ActiveModel {
+            id: NotSet,
+            name: Set("b".to_string()),
+            provider_type: Set("ollama".to_string()),
+            endpoint: Set("http://localhost:11434".to_string()),
+            api_key: Set(None),
+            available_models: Set(serde_json::json!([])),
+            is_default: Set(false),
+        })
+        .exec(db)
+        .await
+        .expect("provider b inserts")
+        .last_insert_id;
+
+        let Json(result) =
+            set_default_provider(State(state.clone()), admin_user(), Path(provider_b))
+                .await
+                .expect("set_default_provider succeeds");
+        assert!(result.is_default);
+
+        let a = LlmProviderEntity::find_by_id(provider_a)
+            .one(db)
+            .await
+            .expect("query a")
+            .expect("a exists");
+        assert!(!a.is_default, "previous default must be unset");
     }
 }

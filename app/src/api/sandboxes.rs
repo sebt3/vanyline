@@ -8,10 +8,10 @@ use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 use vanyline_crds::{Sandbox, SandboxSpec};
 
-use crate::{
-    AppState, api::conversations::get_or_create_user, api::owners, auth::middleware::AuthUser,
-    error::AppError, k8s,
-};
+use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
+
+use crate::{AppState, api::owners, error::AppError, k8s};
 
 /// Body de `POST /api/sandboxes`. `name` porte le nom du CRD Sandbox ;
 /// `#[serde(flatten)]` passe le reste (`SandboxSpec`) tel quel (passthrough).
@@ -33,8 +33,10 @@ pub async fn list_sandboxes(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<Sandbox>>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
     };
@@ -59,8 +61,10 @@ pub async fn get_sandbox(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<Json<Sandbox>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -81,8 +85,10 @@ pub async fn create_sandbox(
     if body.spec.branch.trim().is_empty() {
         return Err(AppError::SandboxBranchEmpty);
     }
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -100,8 +106,10 @@ pub async fn delete_sandbox(
     user: AuthUser,
     Path(name): Path<String>,
 ) -> Result<StatusCode, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -121,8 +129,10 @@ pub async fn set_sandbox_suspended(
     Path(name): Path<String>,
     Json(body): Json<SuspendBody>,
 ) -> Result<Json<Sandbox>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -157,8 +167,10 @@ pub async fn ws_ticket(
     Path(name): Path<String>,
 ) -> Result<Json<WsTicketOut>, AppError> {
     // 1. scoping owner identique à get_sandbox/delete_sandbox (déjà en place)
-    let db_user = get_or_create_user(&state, &user).await?;
-    let owner = match owners::resolve_owner_name(&state, db_user.id).await? {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
         Some(o) => o,
         None => return Err(AppError::Forbidden),
     };
@@ -286,8 +298,10 @@ pub async fn git_proxy(
     let raw_path = raw_git_tail(req.uri().path())?;
 
     // 1. scoping owner identique à ws_ticket
-    let _db_user = get_or_create_user(&state, &user).await?;
-    let Some(owner) = owners::resolve_owner_name(&state, _db_user.id).await? else {
+    let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
         return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
@@ -372,7 +386,6 @@ mod tests {
             "branches/x"
         );
     }
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -407,11 +420,10 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
-            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state(),
         };
 
         Router::new()

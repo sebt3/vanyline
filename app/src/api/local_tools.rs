@@ -3,9 +3,10 @@ use serde::Serialize;
 
 use vanyline_tools::mcp::{command_tools, filesystem_tools, search_tools};
 
-use crate::{
-    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser, error::AppError,
-};
+use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
+
+use crate::{AppState, error::AppError};
 
 #[derive(Serialize)]
 pub struct LocalTool {
@@ -37,7 +38,9 @@ pub async fn list_local_tools(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<Vec<LocalTool>>, AppError> {
-    get_or_create_user(&state, &user).await?;
+    resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
     Ok(Json(flatten_local_tools()))
 }
 
@@ -45,7 +48,6 @@ pub async fn list_local_tools(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -80,11 +82,10 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key: test_key(),
-            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state(),
         };
 
         Router::new()

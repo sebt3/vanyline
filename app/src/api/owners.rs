@@ -1,7 +1,8 @@
-use uuid::Uuid;
+use miryad_core::auth::AuthUser;
+use sea_orm::{ActiveValue::NotSet, ColumnTrait, EntityTrait, QueryFilter, Set};
 use vanyline_crds::{OwnerSpec, ProjectDefaults};
 
-use crate::{AppState, db::models::User, error::AppError};
+use crate::{AppState, error::AppError};
 
 /// Détecte d'un raw (email ou `oidc_sub`) une étiquette DNS `RFC1123` :
 /// minuscules/chiffres/tirets, début alphanumérique, ≤ 63 caractères.
@@ -32,34 +33,47 @@ pub fn sanitize_owner_name(raw: &str) -> String {
     label
 }
 
-/// Lit `users.k8s_owner_name` pour `user_id`. `Some(...)` si l'Owner a déjà
-/// été résolu ; `None` sinon (routes de lecture : « aucun Owner »).
+/// Lit `vanyline_owner_links.k8s_owner_name` pour `user_id` (id miryad_users).
+/// `Some(...)` si l'Owner a déjà été résolu ; `None` sinon (routes de lecture :
+/// « aucun Owner »).
 pub async fn resolve_owner_name(
     state: &AppState,
-    user_id: Uuid,
+    user_id: i32,
 ) -> Result<Option<String>, AppError> {
-    Ok(
-        sqlx::query_scalar::<_, Option<String>>("SELECT k8s_owner_name FROM users WHERE id = $1")
-            .bind(user_id)
-            .fetch_optional(&state.pool)
-            .await
-            .map_err(AppError::DatabaseError)?
-            .flatten(),
-    )
+    use crate::db::entities::owner_links::Column;
+    use crate::db::entities::owner_links::Entity as OwnerLinkEntity;
+
+    let db = &state.auth.db;
+    let link = OwnerLinkEntity::find()
+        .filter(Column::UserId.eq(user_id))
+        .one(db)
+        .await
+        .map_err(AppError::from)?;
+    Ok(link.and_then(|l| l.k8s_owner_name))
 }
 
-/// Crée l'Owner si absent et persiste `users.k8s_owner_name` pour `db_user`.
-/// Réservé au `POST /api/projects` (décision développeur : lazy provisioning
-/// restreint). Retourne le nom d'Owner.
-pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, AppError> {
-    if let Some(name) = &db_user.k8s_owner_name {
-        return Ok(name.clone());
+/// Crée l'Owner si absent et persiste `vanyline_owner_links.k8s_owner_name` pour
+/// `user_id`. Réservé au `POST /api/projects` (décision développeur : lazy
+/// provisioning restreint). Retourne le nom d'Owner.
+pub async fn ensure_owner(
+    state: &AppState,
+    user_id: i32,
+    principal: &AuthUser,
+) -> Result<String, AppError> {
+    if let Some(name) = resolve_owner_name(state, user_id).await? {
+        return Ok(name);
     }
-    let local = db_user.email.split('@').next().unwrap_or_default();
+    let local = principal
+        .email
+        .as_deref()
+        .unwrap_or("")
+        .split('@')
+        .next()
+        .unwrap_or_default();
     let raw = if local.trim().is_empty() {
-        &db_user.oidc_sub
+        principal.subject.as_str()
     } else {
-        &db_user.email
+        principal.email.as_deref().unwrap_or("")
     };
     let name = sanitize_owner_name(raw);
 
@@ -90,11 +104,30 @@ pub async fn ensure_owner(state: &AppState, db_user: &User) -> Result<String, Ap
         )
         .await?;
     }
-    sqlx::query("UPDATE users SET k8s_owner_name = $1 WHERE id = $2")
-        .bind(&name)
-        .bind(db_user.id)
-        .execute(&state.pool)
-        .await?;
+
+    use crate::db::entities::owner_links::Column;
+    use crate::db::entities::owner_links::Entity as OwnerLinkEntity;
+
+    // Upsert atomique (INSERT ... ON CONFLICT (user_id) DO UPDATE) : élimine la fenêtre de
+    // course du find-then-insert précédent, où deux requêtes concurrentes passant toutes les
+    // deux le `resolve_owner_name` en tête de fonction pouvaient percuter la contrainte unique
+    // sur `user_id` (la seconde échouant en 500 brut au lieu d'être idempotente).
+    let db = &state.auth.db;
+    let active = crate::db::entities::owner_links::ActiveModel {
+        id: NotSet,
+        user_id: Set(user_id),
+        k8s_owner_name: Set(Some(name.clone())),
+    };
+    OwnerLinkEntity::insert(active)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(Column::UserId)
+                .update_column(Column::K8sOwnerName)
+                .to_owned(),
+        )
+        .exec(db)
+        .await
+        .map_err(AppError::from)?;
+
     Ok(name)
 }
 

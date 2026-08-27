@@ -60,4 +60,61 @@ impl Config {
             default_project_access_mode: env::var("VNL_DEFAULT_PROJECT_ACCESS_MODE").ok(),
         })
     }
+
+    /// Mapping Config → OidcConfig miryad-core. Les redirects post-login/logout sont
+    /// figés sur le comportement SPA actuel de vanyline (`/#/`).
+    pub fn oidc_config(&self) -> miryad_core::auth::OidcConfig {
+        miryad_core::auth::OidcConfig {
+            issuer_url: self.oidc_issuer_url.clone(),
+            client_id: self.oidc_client_id.clone(),
+            client_secret: self.oidc_client_secret.clone(),
+            redirect_url: self.oidc_redirect_url.clone(),
+            scopes: self.oidc_scopes.clone(),
+            ca_cert: self.oidc_ca_cert.clone(),
+            post_login_redirect: "/#/".to_string(),
+            post_logout_redirect: "/#/".to_string(),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+
+    fn full_config() -> Config {
+        Config {
+            oidc_issuer_url: "https://issuer.example.com".to_string(),
+            oidc_client_id: "client-id".to_string(),
+            oidc_client_secret: "client-secret".to_string(),
+            oidc_redirect_url: "https://app.example.com/auth/callback".to_string(),
+            oidc_scopes: vec!["openid".to_string(), "email".to_string()],
+            oidc_ca_cert: Some("pem".to_string()),
+            cookie_secret: "0".repeat(64),
+            database_url: "postgres://localhost/test".to_string(),
+            listen_addr: "0.0.0.0:8080".to_string(),
+            static_dir: "./static".to_string(),
+            k8s_namespace: None,
+            application_name: None,
+            default_home_storage_class: None,
+            default_home_access_mode: None,
+            default_project_storage_class: None,
+            default_project_access_mode: None,
+        }
+    }
+
+    #[test]
+    fn oidc_config_maps_all_fields() {
+        let config = full_config();
+        let oidc = config.oidc_config();
+
+        assert_eq!(oidc.issuer_url, "https://issuer.example.com");
+        assert_eq!(oidc.client_id, "client-id");
+        assert_eq!(oidc.client_secret, "client-secret");
+        assert_eq!(oidc.redirect_url, "https://app.example.com/auth/callback");
+        assert_eq!(oidc.scopes, vec!["openid".to_string(), "email".to_string()]);
+        assert_eq!(oidc.ca_cert.as_deref(), Some("pem"));
+        assert_eq!(oidc.post_login_redirect, "/#/");
+        assert_eq!(oidc.post_logout_redirect, "/#/");
+    }
 }

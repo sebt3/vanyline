@@ -1,9 +1,10 @@
 use axum::{Json, extract::State};
 use serde::Serialize;
 
-use crate::{
-    AppState, api::conversations::get_or_create_user, auth::middleware::AuthUser, error::AppError,
-};
+use miryad_core::auth::AuthUser;
+use miryad_core::users::resolve_user;
+
+use crate::{AppState, api::owners, error::AppError};
 
 #[derive(Serialize)]
 pub struct MeResponse {
@@ -15,10 +16,14 @@ pub async fn handler_me(
     State(state): State<AppState>,
     user: AuthUser,
 ) -> Result<Json<MeResponse>, AppError> {
-    let db_user = get_or_create_user(&state, &user).await?;
+    let db = &state.auth.db;
+    let principal_user = resolve_user(db, &user.subject, user.email.as_deref())
+        .await
+        .map_err(AppError::from)?;
+    let k8s_owner_name = owners::resolve_owner_name(&state, principal_user.id).await?;
     Ok(Json(MeResponse {
-        email: db_user.email,
-        k8s_owner_name: db_user.k8s_owner_name,
+        email: principal_user.email.unwrap_or_default(),
+        k8s_owner_name,
     }))
 }
 
@@ -26,7 +31,6 @@ pub async fn handler_me(
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::auth::MockOidcClient;
     use axum::{
         Router,
         body::Body,
@@ -62,11 +66,10 @@ mod tests {
 
         let state = AppState {
             config,
-            oidc_client: std::sync::Arc::new(MockOidcClient),
             cookie_key,
-            pool: sqlx::PgPool::connect_lazy("postgres://localhost/test_unused").unwrap(),
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state(),
         };
 
         Router::new()

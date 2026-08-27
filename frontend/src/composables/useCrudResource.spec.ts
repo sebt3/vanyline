@@ -4,7 +4,7 @@ import { ApiError } from '../api/client';
 import { useCrudResource } from './useCrudResource';
 
 interface Item {
-  id: string;
+  id: number;
   name: string;
 }
 
@@ -20,7 +20,7 @@ function mockClient(overrides: Partial<ApiClient> = {}): ApiClient {
 
 describe('useCrudResource', () => {
   it('fetch() : peuple items et passe loading à false', async () => {
-    const items: Item[] = [{ id: '1', name: 'a' }];
+    const items: Item[] = [{ id: 1, name: 'a' }];
     const client = mockClient({ get: vi.fn().mockResolvedValue(items) });
     const resource = useCrudResource<Item>(client, '/api/items');
 
@@ -46,7 +46,7 @@ describe('useCrudResource', () => {
   });
 
   it('create() : POST body, refetch, retourne l\'entité créée', async () => {
-    const created: Item = { id: '2', name: 'new' };
+    const created: Item = { id: 2, name: 'new' };
     const client = mockClient({
       post: vi.fn().mockResolvedValue(created),
       get: vi.fn().mockResolvedValue([created]),
@@ -72,7 +72,7 @@ describe('useCrudResource', () => {
   });
 
   it('update() : PUT sur basePath/id, refetch, retourne l\'entité mise à jour', async () => {
-    const updated: Item = { id: '1', name: 'renamed' };
+    const updated: Item = { id: 1, name: 'renamed' };
     const client = mockClient({
       put: vi.fn().mockResolvedValue(updated),
       get: vi.fn().mockResolvedValue([updated]),
@@ -118,5 +118,81 @@ describe('useCrudResource', () => {
 
     await expect(resource.remove('1')).resolves.toBeUndefined();
     expect(resource.error.value).toBe('interdit');
+  });
+
+  it('fetch() : PagedResult → items.value = data.items', async () => {
+    const pageResult: any = {
+      items: [{ id: 1, name: 'a' }],
+      page: 1,
+      per_page: 100,
+      total_items: 1,
+      total_pages: 1,
+    };
+    const client = mockClient({ get: vi.fn().mockResolvedValue(pageResult) });
+    const resource = useCrudResource<Item>(client, '/api/items');
+
+    await resource.fetch();
+
+    expect(resource.items.value).toEqual([{ id: 1, name: 'a' }]);
+    expect(client.get).toHaveBeenCalledWith('/api/items');
+    expect(resource.loading.value).toBe(false);
+    expect(resource.error.value).toBeNull();
+  });
+
+  it('update() : id numérique → client.put(`/api/items/1`, body)', async () => {
+    const updated: Item = { id: 1, name: 'renamed' };
+    const client = mockClient({
+      put: vi.fn().mockResolvedValue(updated),
+      get: vi.fn().mockResolvedValue([updated]),
+    });
+    const resource = useCrudResource<Item>(client, '/api/items');
+
+    await resource.update(1, { name: 'renamed' });
+
+    expect(client.put).toHaveBeenCalledWith('/api/items/1', { name: 'renamed' });
+    expect(resource.items.value).toEqual([updated]);
+  });
+
+  it('remove() : id numérique → client.delete(`/api/items/2`)', async () => {
+    const client = mockClient({
+      delete: vi.fn().mockResolvedValue(undefined),
+      get: vi.fn().mockResolvedValue([]),
+    });
+    const resource = useCrudResource<Item>(client, '/api/items');
+
+    await resource.remove(2);
+
+    expect(client.delete).toHaveBeenCalledWith('/api/items/2');
+    expect(client.get).toHaveBeenCalledWith('/api/items');
+    expect(resource.items.value).toEqual([]);
+  });
+
+  it('fetch() : PagedResult multi-pages → toutes les pages sont récupérées (régression Phase 3)', async () => {
+    const page1 = {
+      items: [{ id: 1, name: 'a' }],
+      page: 1,
+      per_page: 1,
+      total_items: 3,
+      total_pages: 3,
+    };
+    const page2 = { ...page1, items: [{ id: 2, name: 'b' }], page: 2 };
+    const page3 = { ...page1, items: [{ id: 3, name: 'c' }], page: 3 };
+    const getMock = vi.fn((url: string) => {
+      if (url === '/api/items') return Promise.resolve(page1);
+      if (url === '/api/items?page=2') return Promise.resolve(page2);
+      if (url === '/api/items?page=3') return Promise.resolve(page3);
+      return Promise.reject(new Error(`unexpected url: ${url}`));
+    });
+    const client = mockClient({ get: getMock as unknown as ApiClient['get'] });
+    const resource = useCrudResource<Item>(client, '/api/items');
+
+    await resource.fetch();
+
+    expect(resource.items.value).toEqual([
+      { id: 1, name: 'a' },
+      { id: 2, name: 'b' },
+      { id: 3, name: 'c' },
+    ]);
+    expect(getMock).toHaveBeenCalledTimes(3);
   });
 });

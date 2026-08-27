@@ -86,7 +86,7 @@ describe('Chat.vue — session réelle', () => {
     mockFetchRouting({
       'conv-1': [
         {
-          id: 'm1',
+          id: 1,
           role: 'user',
           payload: { content: 'salut' },
           created_at: '2026-01-01T10:00:00Z',
@@ -160,15 +160,15 @@ describe('Chat.vue — session réelle', () => {
     fetchSpy.mockImplementation((url: string) => {
       if (url.startsWith('/api/conversations?')) {
         return jsonResponse([
-          { id: 'conv-a', title: 'Session A', created_at: '2026-01-01T10:00:00Z' },
-          { id: 'conv-b', title: 'Session B', created_at: '2026-01-02T10:00:00Z' },
+          { id: 1, title: 'Session A', created_at: '2026-01-01T10:00:00Z' },
+          { id: 2, title: 'Session B', created_at: '2026-01-02T10:00:00Z' },
         ]);
       }
       return jsonResponse([]);
     });
 
     const { activeConversationId } = useIdeSession();
-    activeConversationId.value = 'conv-a';
+    activeConversationId.value = '1';
 
     const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
     await flush();
@@ -177,9 +177,9 @@ describe('Chat.vue — session réelle', () => {
     const options = wrapper.findAll('option');
     expect(options.map((o) => o.text())).toEqual(['Session A', 'Session B']);
 
-    await wrapper.find('.session-select').setValue('conv-b');
+    await wrapper.find('.session-select').setValue('2');
 
-    expect(activeConversationId.value).toBe('conv-b');
+    expect(activeConversationId.value).toBe('2');
     wrapper.unmount();
   });
 
@@ -200,11 +200,13 @@ describe('Chat.vue — session réelle', () => {
 
   it('"Nouvelle session" démarre une session dans le contexte de la sandbox courante', async () => {
     fetchSpy.mockImplementation((url: string, init?: RequestInit) => {
-      if (url === '/api/agents') return jsonResponse([{ name: 'default' }]);
+      if (url === '/api/v1/agents') {
+        return jsonResponse({ items: [{ name: 'default' }], page: 1, per_page: 100, total_items: 1, total_pages: 1 });
+      }
       if (url === '/api/conversations' && init?.method === 'POST') {
         const body = JSON.parse(init.body as string);
         expect(body.context).toEqual({ kind: 'sandbox', data: { sandbox_name: 'my-sandbox' } });
-        return jsonResponse({ id: 'conv-new' });
+        return jsonResponse({ id: 42 });
       }
       if (url.startsWith('/api/conversations?')) return jsonResponse([]);
       return jsonResponse([]);
@@ -216,7 +218,7 @@ describe('Chat.vue — session réelle', () => {
     await wrapper.find('.session-btn[title="Nouvelle session"]').trigger('click');
     await flush();
 
-    expect(useIdeSession().activeConversationId.value).toBe('conv-new');
+    expect(useIdeSession().activeConversationId.value).toBe('42');
     wrapper.unmount();
   });
 });

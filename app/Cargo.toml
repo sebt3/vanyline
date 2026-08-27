@@ -17,7 +17,6 @@ axum = { version = "0.8.8", features = ["ws", "macros"] }
 openidconnect = "4.0"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
-sqlx = { version = "0.8", features = ["postgres", "uuid", "chrono", "json", "runtime-tokio-rustls", "migrate"] }
 rig-core = { version = "0.38", features = ["rmcp"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
@@ -37,3 +36,13 @@ url = "2"
 parking_lot = "0.12"
 bytes = "1"
 percent-encoding = "2"
+miryad-core = { version = "0.1", default-features = false }
+sea-orm = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls", "macros", "mock"] }
+sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio-rustls"] }
+
+# `sqlx-sqlite` n'est nécessaire qu'aux tests (base sqlite en mémoire avec migrations réelles
+# appliquées, cf. `db::test_support::real_db` — même pattern que les tests internes de
+# miryad-core) : jamais utilisé en production (Postgres/CNPG uniquement, cf. AGENTS.md).
+[dev-dependencies]
+sea-orm = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros", "mock"] }
+sea-orm-migration = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
