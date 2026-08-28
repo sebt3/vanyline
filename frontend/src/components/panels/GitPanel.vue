@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, inject, onMounted, ref } from 'vue';
+import { computed, inject, onMounted, ref, watch } from 'vue';
+import type { Ref } from 'vue';
 import { createGitgraph } from '@gitgraph/js';
 import {
   gitClient,
@@ -12,6 +13,9 @@ import {
 const sandboxName = inject<string>('sandbox-name', '');
 
 const openDiff = inject<(path: string, staged?: boolean) => void>('open-diff', () => {});
+
+const fsVersion = inject<Ref<number> | null>('fs-version', null);
+const notifyFsChange = inject<() => void>('notify-fs-change', () => {});
 
 const status = ref<GitStatus | null>(null);
 const branches = ref<BranchesResult | null>(null);
@@ -88,7 +92,7 @@ async function stageFile(path: string): Promise<void> {
   busy.value = true;
   try {
     await gitClient.stage(sandboxName, [path]);
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -101,7 +105,7 @@ async function unstageFile(path: string): Promise<void> {
   busy.value = true;
   try {
     await gitClient.unstage(sandboxName, [path]);
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -116,7 +120,7 @@ async function markResolved(path: string): Promise<void> {
   busy.value = true;
   try {
     await gitClient.stage(sandboxName, [path]);
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -130,7 +134,7 @@ async function commit(): Promise<void> {
   try {
     await gitClient.commit(sandboxName, commitMessage.value.trim());
     commitMessage.value = '';
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -151,7 +155,7 @@ async function createBranch(): Promise<void> {
     );
     newBranchName.value = '';
     newBranchFrom.value = '';
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -164,7 +168,7 @@ async function checkout(branch: string): Promise<void> {
   busy.value = true;
   try {
     await gitClient.checkout(sandboxName, branch);
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -177,7 +181,7 @@ async function deleteBranch(branch: string): Promise<void> {
   busy.value = true;
   try {
     await gitClient.deleteBranch(sandboxName, branch);
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -190,7 +194,7 @@ async function push(): Promise<void> {
   busy.value = true;
   try {
     await gitClient.push(sandboxName);
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -209,7 +213,7 @@ async function mergeFrom(): Promise<void> {
   try {
     await gitClient.merge(sandboxName, mergeBranch.value.trim());
     mergeBranch.value = '';
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -223,7 +227,7 @@ async function abortMerge(): Promise<void> {
   busy.value = true;
   try {
     await gitClient.mergeAbort(sandboxName);
-    await refresh();
+    await afterFsMutation();
   } catch (e) {
     errorMessage.value = msg(e);
   } finally {
@@ -263,6 +267,15 @@ function renderGraph(): void {
       node.tag(c.refs.join(', '));
     }
   }
+}
+
+if (fsVersion) {
+  watch(fsVersion, () => { void refresh(); });
+}
+
+async function afterFsMutation(): Promise<void> {
+  if (fsVersion) notifyFsChange();
+  else await refresh();
 }
 
 onMounted(() => { void refresh(); });

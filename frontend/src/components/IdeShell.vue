@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onBeforeUnmount, onMounted, provide, shallowRef, watch } from 'vue';
+import { onBeforeUnmount, onMounted, provide, ref, shallowRef, watch } from 'vue';
 import { DockviewVue, type DockviewReadyEvent, type VueComponent, type ContextMenuItem, type GetTabContextMenuItemsParams } from 'dockview-vue';
 import Explorer from './panels/Explorer.vue';
 import Editor from './panels/Editor.vue';
@@ -35,6 +35,11 @@ provide('open-file', openFile);
 provide('close-file', closeFile);
 // Handler fourni au reste de l'IDE : ouvre (ou active) un onglet Diff.
 provide('open-diff', openDiff);
+
+const fsVersion = ref(0);
+function notifyFsChange() { fsVersion.value++; }
+provide('fs-version', fsVersion);
+provide('notify-fs-change', notifyFsChange);
 
 const { activeConversationId, sessionError } = useIdeSession();
 

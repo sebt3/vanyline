@@ -44,6 +44,8 @@ const getLspClient = inject<(toolchain: string, path: string) => Promise<LSPClie
   async () => null,
 );
 
+const notifyFsChange = inject<() => void>('notify-fs-change', () => {});
+
 const denseTheme = EditorView.theme({
   '&': { height: '100%', fontSize: '12.5px' },
   '.cm-content': {
@@ -83,6 +85,7 @@ function save() {
   const content = view.state.doc.toString();
   fsClient.value
     .request<{ ok: boolean }>('write', { path, content })
+    .then(() => notifyFsChange())
     .catch((e: unknown) => {
       showStatus(`Échec de l'enregistrement : ${e instanceof Error ? e.message : String(e)}`);
     });
@@ -131,6 +134,7 @@ const editorEntries: ContextMenuEntry[] = [
       if (view && fsClient.value) {
         void renameSymbolFromView(view, fsClient.value).then((msg) => {
           if (msg) showStatus(msg);
+          if (msg && msg.includes('sur disque')) notifyFsChange();
         });
       }
     },

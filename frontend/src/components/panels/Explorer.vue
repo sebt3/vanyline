@@ -26,6 +26,9 @@ const openFile = inject<(path: string) => void>('open-file', () => {});
 // Fourni par IdeShell : ferme l'onglet Editor d'un chemin s'il est ouvert.
 const closeFile = inject<(path: string) => void>('close-file', () => {});
 
+const fsVersion = inject<Ref<number> | null>('fs-version', null);
+const notifyFsChange = inject<() => void>('notify-fs-change', () => {});
+
 const refreshKey = ref(0);
 const errorMessage = ref<string | null>(null);
 
@@ -167,6 +170,10 @@ function refresh(): void {
   void refreshStatus();
 }
 
+if (fsVersion) {
+  watch(fsVersion, () => refresh());
+}
+
 function setError(message: string): void { errorMessage.value = message; }
 
 /** État git d'un chemin, ou undefined. */
@@ -195,7 +202,7 @@ function createFile(dirPath: string): void {
   const fs = fsClient.value;
   if (!fs) return;
   fs.request<{ ok: boolean }>('write', { path: joinPath(dirPath, name), content: '' })
-    .then(() => { errorMessage.value = null; refresh(); })
+    .then(() => { errorMessage.value = null; fsVersion ? notifyFsChange() : refresh(); })
     .catch((e: unknown) => setError(`Création impossible : ${msg(e)}`));
 }
 
@@ -205,7 +212,7 @@ function createDir(dirPath: string): void {
   const fs = fsClient.value;
   if (!fs) return;
   fs.request<{ ok: boolean }>('mkdir', { path: joinPath(dirPath, name) })
-    .then(() => { errorMessage.value = null; refresh(); })
+    .then(() => { errorMessage.value = null; fsVersion ? notifyFsChange() : refresh(); })
     .catch((e: unknown) => setError(`Création impossible : ${msg(e)}`));
 }
 
@@ -219,14 +226,12 @@ function renameNode(node: FsNode): void {
     .then(() => {
       errorMessage.value = null;
       if (node.leaf) closeFile(node.path);
-      refresh();
+      if (fsVersion) notifyFsChange(); else refresh();
     })
     .catch((e: unknown) => setError(`Renommage impossible : ${msg(e)}`));
 }
 
 function deleteNode(node: FsNode): void {
-  // Irréversible côté sandbox (pas de corbeille) : confirmation systématique
-  // avant d'envoyer l'op.
   if (!window.confirm(`Supprimer « ${node.label} » ? Cette action est irréversible.`)) return;
   const fs = fsClient.value;
   if (!fs) return;
@@ -235,7 +240,7 @@ function deleteNode(node: FsNode): void {
       if (resp.ok) {
         errorMessage.value = null;
         if (node.leaf) closeFile(node.path);
-        refresh();
+        if (fsVersion) notifyFsChange(); else refresh();
       } else {
         setError(`Suppression impossible : ${resp.error ?? 'inconnue'}`);
       }

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from 'vue';
+import { inject, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useChat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
 import { Markdown } from '@comark/vue';
@@ -23,10 +23,33 @@ interface MessageRow {
 const client = createApiClient();
 const transport = new VanylineChatTransport();
 
+const notifyFsChange = inject<() => void>('notify-fs-change', () => {});
+
 const { messages, status, sendMessage, error, stop } = useChat({
   id: props.conversationId,
   transport,
 });
+
+const FS_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'execute_command']);
+const seenToolResults = new Set<string>();
+watch(
+  messages,
+  (msgs) => {
+    for (const m of msgs) {
+      for (const p of m.parts as Array<Record<string, unknown>>) {
+        if (p.type !== 'dynamic-tool') continue;
+        if (p.state !== 'output-available') continue;
+        const toolCallId = p.toolCallId as string | undefined;
+        if (toolCallId && seenToolResults.has(toolCallId)) continue;
+        const toolName = p.toolName as string | undefined;
+        if (!toolName || !FS_MUTATING_TOOLS.has(toolName)) continue;
+        if (toolCallId) seenToolResults.add(toolCallId);
+        notifyFsChange();
+      }
+    }
+  },
+  { deep: true },
+);
 
 // `Chat` (AI SDK) n'a pas de nettoyage automatique à l'unmount — sans ça,
 // fermer la session ou changer de conversation en plein streaming laisse le
