@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { inject, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, inject, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { useChat } from '@ai-sdk/vue';
 import type { UIMessage } from 'ai';
 import { Markdown } from '@comark/vue';
@@ -29,6 +29,33 @@ const { messages, status, sendMessage, error, stop } = useChat({
   id: props.conversationId,
   transport,
 });
+
+const displayMessages = computed(() =>
+  messages.value.map((m) => ({
+    ...m,
+    parts: (m.parts as unknown[]).map((p) => ({ ...(p as Record<string, unknown>) })) as unknown as UIMessage['parts'],
+  })),
+);
+
+const chatMessagesRef = ref<HTMLElement | null>(null);
+
+watch(
+  displayMessages,
+  async () => {
+    if (status.value !== 'streaming') return;
+    await nextTick();
+    const raw = chatMessagesRef.value as unknown as { $el?: HTMLElement } | HTMLElement | null;
+    const el = (raw as { $el?: HTMLElement })?.$el ?? (raw as HTMLElement | null);
+    const target = el ?? (document.querySelector('.chat-messages') as HTMLElement | null);
+    if (!target) return;
+    const scrollParent = target.parentElement?.classList.contains('chat-messages')
+      ? target.parentElement
+      : target;
+    const scrollEl = (scrollParent.scrollHeight ? scrollParent : target) as HTMLElement;
+    scrollEl.scrollTop = scrollEl.scrollHeight;
+  },
+  { deep: true },
+);
 
 const FS_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'execute_command']);
 const seenToolResults = new Set<string>();
@@ -91,7 +118,8 @@ function onSubmit(e: Event) {
          "component with async setup must be nested in a Suspense"). -->
     <Suspense>
       <UChatMessages
-        :messages="messages"
+        ref="chatMessagesRef"
+        :messages="displayMessages"
         :status="status"
         should-auto-scroll
         class="chat-messages"
