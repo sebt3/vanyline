@@ -2,7 +2,8 @@
   "name": "vanyline",
   "private": true,
   "workspaces": [
-    "frontend"
+    "frontend",
+    "packages/*"
   ],
   "scripts": {
     "build": "npm run build --workspace=frontend",
