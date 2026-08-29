@@ -686,7 +686,7 @@ mod tests {
     /// Génère `packages/protocol/src/generated/chat-event.ts` depuis les types
     /// `ChatEvent` et `ToolCallRecord`. Fichier commité ; le job CI (tâche 06)
     /// régénère et vérifie `git diff --exit-code`. `TS_RS_LARGE_INT = "number"`
-    /// est posé dans `.cargo/config.toml` (racine) — lisible par `Config::default()`.
+    /// est posé dans `.cargo/config.toml` (racine) — lisible par `Config::from_env()`.
     #[cfg(feature = "ts-rs")]
     #[test]
     fn export_chat_event_ts() {
