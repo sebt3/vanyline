@@ -153,6 +153,35 @@ cadence l'implémentation d'une feature déjà designée — découpe en tâches
 dispatch à `implement`, valide avant de passer à la suivante ; ne conçoit pas l'architecture
 et ne fait pas la revue finale (réservées à Claude, Phases 1 et 3).
 
+## Réglage `cadence` / `release` — point de fonctionnement DeepSeek-V4-Flash (2026-08-29)
+
+`cadence` (et le nouvel agent `release`) tournent sur `smart/deepseek-v4-flash`
+(= **DeepSeek-V4-Flash-0731**). Le développeur a relevé que la fiche modèle
+prescrit `temperature 1.0` / `top_p 0.95` (+ `reasoningEffort` élevé, `max` pour
+les tâches Code Agent des benchmarks) pour les charges agentiques locales — or
+`cadence.md` était figé à `temperature: 0.2` depuis sa copie initiale
+(2026-08-03). Un `temperature` bas sur un modèle de raisonnement RL-tuné dégrade
+l'exploration et le tool-use (même logique que l'avertissement « pas de temp 0 »
+sur DeepSeek-R1). Corrigé (`sandbox-state-ws`, commit `ad1cf49`) :
+
+- `cadence` : `temperature 1.0`, `top_p 0.95`, `reasoningEffort high`,
+  `textVerbosity low`, `reasoningSummary auto` — ces trois derniers répliquent le
+  variant `high` de `deepseek-v4-flash` dans `~/.opencode/opencode.json`. Les
+  clés extra du frontmatter opencode sont passées telles quelles au provider
+  comme options modèle (doc `opencode.ai/docs/agents`).
+- `release` : `temperature` **laissée à 0.8** (choix assumé du développeur —
+  fiabilité/reproductibilité prioritaires sur un agent de release + ops cluster,
+  au prix d'un peu d'exploration), mêmes `top_p`/`reasoning` que cadence.
+
+Les deux fiches portent un commentaire expliquant le pourquoi, pour éviter un
+retour réflexe à `0.2`.
+
+Nuance vs `git-integration.md` : le diagnostic d'alors (« pas une baisse de
+fiabilité du modèle, deux trous de config ») reste valide — mais cadence tournait
+**aussi** hors specs. Les prochaines features déléguées à cadence tournent
+désormais dans les conditions prévues par DeepSeek ; variable à garder en tête
+pour comparer les reviews Phase 3 avant/après ce réglage.
+
 ## Nouveaux modes d'échec Qwen observés (complètent la liste ci-dessus)
 
 Vus sur `ws09-sandbox-maint-agent.md` et `ws12-sandbox-clients.md` — apostrophes françaises
