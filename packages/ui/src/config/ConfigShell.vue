@@ -161,10 +161,13 @@ onMounted(() => {
     </nav>
     <main class="panels">
       <div class="screen-wrap">
-        <template v-if="resolvedScreen && screens[resolvedScreen]">
-          <component :is="screens[resolvedScreen]" />
-        </template>
-        <slot name="pending" :screen-id="resolvedScreen" />
+        <component
+          v-if="resolvedScreen && screens[resolvedScreen]"
+          :is="screens[resolvedScreen]"
+        />
+        <slot v-else name="pending" :screen-id="resolvedScreen">
+          <div class="pending"><span class="pending-icon">🔜</span>À venir</div>
+        </slot>
       </div>
     </main>
   </div>
@@ -264,5 +267,17 @@ onMounted(() => {
 }
 .screen-wrap {
   max-width: 760px;
+}
+
+.pending {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 100%;
+  color: #6a7185;
+  font-size: 14px;
+}
+.pending-icon {
+  font-size: 22px;
 }
 </style>

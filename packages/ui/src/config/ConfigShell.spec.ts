@@ -26,9 +26,6 @@ const groups: ConfigNavGroup[] = [groupA, groupB];
 
 const stubA: Component = { render: () => h("div", { class: "stub-a" }, "A") };
 const stubB: Component = { render: () => h("div", { class: "stub-b" }, "B") };
-const stubMissing: Component = {
-  render: () => h("div", { class: "stub-miss" }, "MISS"),
-};
 
 const screens: Record<string, Component> = {
   "a-1": stubA,
@@ -133,35 +130,31 @@ describe("ConfigShell", () => {
   });
 
   describe("cas 4 — screenId absent de screens", () => {
-    it("placeholder pending par défaut ; slot personnalisé si fourni", async () => {
-      const defaultScreens: Record<string, Component> = {
-        ...screens,
-        unknown: stubMissing,
-      };
-
-      // Sans slot pending : écran absent → contenu vide dans le panneau
-      const wrapper = mount(ConfigShell, {
-        props: { groups, screens: defaultScreens },
-      });
+    it("placeholder pending par défaut quand l'écran manque ; slot personnalisé si fourni", async () => {
+      // Sans slot pending : écran absent (group-b pas dans screens) → placeholder
+      // par défaut « À venir » rendu dans le panneau
+      const wrapper = host();
       await tick();
 
       wrapper.find('[data-group="group-b"]').trigger("click");
       await tick();
-      // group-b pas dans screens et pas de slot pending → panneau vide
       expect(wrapper.find(".stub-a").exists()).toBe(false);
       expect(wrapper.find(".stub-b").exists()).toBe(false);
-      expect(wrapper.find(".stub-miss").exists()).toBe(false);
+      expect(wrapper.find(".pending").exists()).toBe(true);
+      expect(wrapper.text()).toContain("À venir");
 
-      // Avec slot personnalisé : le contenu du slot est rendu
+      // Avec slot personnalisé : le contenu du slot remplace le défaut
       const wrapper2 = mount(ConfigShell, {
-        props: { groups, screens: defaultScreens },
+        props: { groups, screens },
         slots: {
           pending: h("div", { class: "custom-pending" }, "Mon pending"),
         },
       });
       await tick();
       wrapper2.find('[data-group="group-b"]').trigger("click");
+      await tick();
       expect(wrapper2.find(".custom-pending").exists()).toBe(true);
+      expect(wrapper2.find(".pending").exists()).toBe(false);
 
       wrapper.unmount();
       wrapper2.unmount();
