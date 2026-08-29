@@ -211,13 +211,13 @@ mod tests {
         ] {
             assert!(
                 spec.paths
-                    .get_path_item(&format!("/api/v1/{resource}"))
+                    .get_path_item(format!("/api/v1/{resource}"))
                     .is_some(),
                 "missing collection path for {resource}"
             );
             assert!(
                 spec.paths
-                    .get_path_item(&format!("/api/v1/{resource}/{{id}}"))
+                    .get_path_item(format!("/api/v1/{resource}/{{id}}"))
                     .is_some(),
                 "missing item path for {resource}"
             );
