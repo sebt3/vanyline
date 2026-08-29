@@ -123,9 +123,11 @@ pub fn build_application_role(app: &Application) -> Role {
             PolicyRule {
                 api_groups: Some(vec!["vanyline.solidite.fr".to_string()]),
                 resources: Some(vec!["sandboxes".to_string()]),
+                // `watch` : hub WS `/api/ws/sandbox-state` (kube-runtime watcher).
                 verbs: vec![
                     "get".to_string(),
                     "list".to_string(),
+                    "watch".to_string(),
                     "create".to_string(),
                     "delete".to_string(),
                     "patch".to_string(),
@@ -1109,6 +1111,8 @@ mod tests {
             })
             .expect("should have a rule for sandboxes");
         assert!(sandboxes.verbs.contains(&"patch".to_string()));
+        // Le hub WS sandbox-state ouvre un watch kube-runtime sur les sandboxes.
+        assert!(sandboxes.verbs.contains(&"watch".to_string()));
 
         let applications = rules
             .iter()

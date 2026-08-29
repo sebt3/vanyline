@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onBeforeUnmount, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { DialogClose } from 'reka-ui';
 import { ApiError, createApiClient } from '../../api/client';
 import { useCrudResource } from '../../composables/useCrudResource';
+import { useSandboxState, registerRefresh, unregisterRefresh } from '../../composables/useSandboxState';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
@@ -46,6 +47,7 @@ const client = createApiClient();
 const router = useRouter();
 const resource = useCrudResource<Sandbox>(client, '/api/sandboxes');
 const { items: fetchedSandboxes, loading, error } = resource;
+useSandboxState();
 
 /** Le clone initial du Project doit être terminé avant de pouvoir créer une
  *  sandbox dessus (le worktree n'existe pas encore sinon). `null` tant que
@@ -53,6 +55,18 @@ const { items: fetchedSandboxes, loading, error } = resource;
  *  par défaut, jamais un flash de faux-positif). */
 const project = ref<Project | null>(null);
 const projectReady = computed(() => project.value?.status?.cloned === true);
+
+onMounted(() => {
+  resource.fetch();
+  // Le hub sandbox-state (WS temps réel) refetch le listing sur tout changement
+  // de phase — cf. `useSandboxState`.
+  registerRefresh(resource.fetch);
+  fetchProject();
+});
+
+onBeforeUnmount(() => {
+  unregisterRefresh(resource.fetch);
+});
 
 async function fetchProject() {
   try {
@@ -75,11 +89,6 @@ function openSandbox(sandbox: Sandbox) {
 const formName = ref('');
 const formBranch = ref('');
 const creationError = ref<string | null>(null);
-
-onMounted(() => {
-  resource.fetch();
-  fetchProject();
-});
 
 const modalOpen = ref(false);
 

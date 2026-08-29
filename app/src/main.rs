@@ -31,6 +31,7 @@ pub struct AppState {
     pub busy: Arc<Mutex<HashSet<i32>>>,
     pub k8s: Arc<tokio::sync::Mutex<Option<VnlK8sClient>>>,
     pub auth: MiryadAuthState,
+    pub shared_sandbox_state: ws::sandbox_state::SharedState,
 }
 
 impl FromRef<AppState> for MiryadAuthState {
@@ -125,6 +126,7 @@ async fn main() {
         busy: Arc::new(Mutex::new(HashSet::new())),
         k8s: Arc::new(tokio::sync::Mutex::new(None)),
         auth: auth_state,
+        shared_sandbox_state: ws::sandbox_state::SharedState::new(),
     };
 
     let app = Router::new()
@@ -148,6 +150,10 @@ async fn main() {
         .route(
             "/api/ws/chat/{conversation_id}",
             get(ws::chat::ws_chat_handler),
+        )
+        .route(
+            "/api/ws/sandbox-state",
+            get(ws::sandbox_state::ws_sandbox_state_handler),
         )
         .with_state(state)
         .fallback_service(

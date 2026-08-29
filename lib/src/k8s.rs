@@ -1,6 +1,18 @@
 use vanyline_crds::{Application, Owner, OwnerSpec, Project, ProjectSpec, Sandbox, SandboxSpec};
 
+use futures::{Stream, StreamExt};
+use kube_runtime::watcher::{self, Config as WatcherConfig, Event};
+
 use crate::error::VnyError;
+
+/// Event de watch kube-runtime pour un Sandbox — normalisé pour la diffusion WS.
+#[derive(Clone, Debug)]
+pub enum WatchEvent<T> {
+    Added(T),
+    Modified(T),
+    Deleted(T),
+    Error(String),
+}
 
 /// Client K8s typé pour les CRDs Owner/Project/Sandbox — namespace résolu
 /// par l'appelant (CLI, tâche 3 : `--namespace` > `defaults.namespace` du
@@ -142,6 +154,35 @@ impl VnlK8sClient {
             vanyline_crds::MCP_PORT,
             raw_path
         ))
+    }
+
+    /// Retourne un stream de watch sur les CRD Sandbox du namespace. Le stream
+    /// émet `WatchEvent::Added`/`Modified`/`Deleted` sur chaque objet et
+    /// `WatchEvent::Error` sur toute erreur de connexion kube (l'appelant doit
+    /// relancer la boucle externe en cas d'erreur).
+    ///
+    /// Boxé (`Pin<Box<dyn Stream>>`) plutôt que `impl Stream` : le stream est
+    /// stocké derrière un champ dans le hub WS de `app`, un type nommé y est
+    /// plus commode qu'un `impl Trait` opaque propagé partout.
+    pub fn watch_sandboxes(
+        &self,
+    ) -> std::pin::Pin<Box<dyn Stream<Item = WatchEvent<Sandbox>> + Send>> {
+        let api: kube::Api<Sandbox> = kube::Api::namespaced(self.client.clone(), &self.namespace);
+        // timeout serveur 5 min : un reconnect trop court re-liste toutes les
+        // sandboxes à chaque tour (bookmark perdu) → salve de refetch côté WS.
+        let cfg = WatcherConfig::default().timeout(300);
+        let stream = watcher::watcher(api, cfg).filter_map(|result| async move {
+            match result {
+                Ok(Event::Apply(obj)) => Some(WatchEvent::Modified(obj)),
+                Ok(Event::Delete(obj)) => Some(WatchEvent::Deleted(obj)),
+                Ok(Event::InitApply(obj)) => Some(WatchEvent::Added(obj)),
+                // Init/InitDone : pas d'objet — ignorés (le replay initial se fait
+                // via les InitApply ci-dessus, un par sandbox existante).
+                Ok(Event::Init | Event::InitDone) => None,
+                Err(e) => Some(WatchEvent::Error(e.to_string())),
+            }
+        });
+        Box::pin(stream)
     }
 }
 

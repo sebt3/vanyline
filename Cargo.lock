@@ -6258,6 +6258,7 @@ dependencies = [
  "globset",
  "k8s-openapi",
  "kube",
+ "kube-runtime",
  "parking_lot",
  "percent-encoding 1.0.1",
  "reqwest 0.12.28",
