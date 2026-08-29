@@ -434,6 +434,26 @@ seulement s'il a changé (jamais d'update systématique qui écraserait un état
 antérieur à `NULL`) — même patron que le fix `f4dfbf9` déjà en place côté CLI (colonne
 `conversations.todo`, portée par l'entité SeaORM depuis `miryad-core-integration`).
 
+**WebSocket sandbox-state** (`ws/sandbox_state.rs`, `sandbox-state-ws`) : `GET
+/api/ws/sandbox-state` (same-origin, cookie OIDC — pas de ticket) pousse au
+navigateur les changements de `status.phase` des sandboxes de l'utilisateur, en
+temps réel. Un **seul** watch kube-runtime sur les CRD `Sandbox` du namespace
+(`VnlK8sClient::watch_sandboxes`, timeout serveur 5 min), partagé par toutes les
+connexions via `AppState.shared_sandbox_state` (`SharedState` : `parking_lot`,
+liste de subscribers, cache `project` → `owner`). La tâche `watch_loop` est
+lancée à la première connexion (double-checked locking sur `watch_handle` —
+course entre connexions concurrentes), tourne ensuite pour la vie du process, et
+se met en pause tant qu'aucun subscriber n'est connecté. Chaque événement de
+watch est dispatché aux seuls subscribers dont l'Owner correspond : le namespace
+étant multi-tenant, on résout `Sandbox.spec.project` → `Project.spec.owner`
+(cache avec mémorisation des miss pour ne pas rappeler l'API ni re-logger sur une
+sandbox orpheline). Le payload est minimal (`{ sandbox, phase }`, `phase: null`
+en suppression) ; côté frontend le hub singleton `useSandboxState` s'en sert
+surtout comme **signal** — il débounce un refetch du listing CRUD (300 ms) plutôt
+que de reconstruire l'état depuis le seul `phase`. RBAC : le `Role` de `app`
+généré par le controller porte le verbe `watch` sur `sandboxes` (sans quoi le
+watcher boucle sur des 403).
+
 **Résolution Owner** (`api/owners.rs`, `app-k8s-provisioning`, table dédiée depuis
 `miryad-core-integration`) : `vanyline_owner_links.k8s_owner_name` (FK vers
 `miryad_users.id`, colonne nullable) fait le lien entre un utilisateur OIDC et un Owner
@@ -1051,6 +1071,14 @@ reçu par le container est la chaîne base64 simple attendue par `app/src/main.r
 (`base64::STANDARD.decode(...)`, ≥ 64 octets). Vérifié en lisant l'implémentation
 `serde` de `ByteString`, pas supposé.
 
+**`Role` de `app` — verbes tenus au strict** (`build_application_role`,
+namespaced, jamais `ClusterRole`) : CRUD sur `owners`/`projects`, CRUD + `patch`
+(suspension) + `watch` sur `sandboxes`, `get` seul sur `applications` (`app` ne
+modifie jamais sa propre CR). Le `watch` a été ajouté par `sandbox-state-ws` pour
+le hub WS `/api/ws/sandbox-state` (cf. section `vanyline-app`) — la
+`ClusterRole` du controller détient déjà `watch` cluster-wide sur `sandboxes`,
+donc la délégation namespacée n'est pas une escalade.
+
 ### Ingress par Sandbox (`sandbox-ingress-wiring`)
 
 `Owner.spec.application_ref: Option<String>` (cascade, même esprit que
@@ -1469,11 +1497,14 @@ problème de layout non trivial, différé). Résolution de conflit : pas de UI 
 un fichier `conflicted` s'ouvre dans l'éditeur normal (marqueurs visibles), bouton
 « marquer résolu » activé par `branches.merging`.
 
-**Limites connues (dette assumée)** : pas de reconnexion WS automatique
-(déconnexion réseau/sandbox suspendue → recharger la page), pas de filesystem
+**Limites connues (dette assumée)** : pas de reconnexion WS automatique dans le
+shell IDE (déconnexion réseau/sandbox suspendue → recharger la page ; le hub de
+dashboard `useSandboxState`, lui, se reconnecte avec back-off), pas de filesystem
 watch/push (Explorer et GitPanel ne se
 rafraîchissent pas si le contenu change côté serveur pendant que l'utilisateur
-regarde — GitPanel ne refetch qu'après ses propres actions),
+regarde — GitPanel ne refetch qu'après ses propres actions ; les dashboards
+Projets/Sandboxes, eux, ont un push temps réel des phases via
+`/api/ws/sandbox-state`, cf. section `vanyline-app`),
 pas de code-splitting (bundle ~755 Ko gzippé — CodeMirror + xterm + Element Plus +
 Tailwind CSS/Nuxt UI + dockview-vue, la CSS Tailwind/Nuxt UI ayant sensiblement
 augmenté le poids par rapport à `vue-advanced-chat`, cf. section Chat plus haut).

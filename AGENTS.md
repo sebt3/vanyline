@@ -137,6 +137,7 @@ section "Opérateur Kubernetes — `vanyline-controller`".
 |--------|-------------|-----------|------|
 | frontend | app | HTTP REST | Cookie OIDC (`HttpOnly`, stateless) |
 | frontend | app | WebSocket (chat, priorité basse — pas branché au shell IDE) | Cookie OIDC |
+| frontend | app | WebSocket (`/api/ws/sandbox-state`, push des phases de sandbox) | Cookie OIDC |
 | frontend | sandbox | WebSocket (`/ws/fs`, `/ws/terminal`) | Ticket court-vécu à usage unique |
 | app | sandbox | HTTP (`POST /ws/ticket`, relais de ticket) | JWT OIDC (`id_token` de l'utilisateur) |
 | kydah-code | sandbox | MCP HTTP streaming | Pas encore câblé — pas démarré |
