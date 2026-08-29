@@ -2,7 +2,15 @@
 description: Exécute le workflow de release + redéploiement sur cluster de test décrit dans docs/release-runbook.md — validation, bump de version, tag, suivi CI, redéploiement. Ne conçoit rien, ne merge rien, ne touche pas la prod.
 mode: primary
 model: smart/deepseek-v4-flash
+# temperature délibérément sous le 1.0 de la fiche modèle : on privilégie la
+# fiabilité/reproductibilité sur cet agent (release + ops cluster) au prix d'un
+# peu d'exploration. top_p/reasoningEffort/textVerbosity : variant `high` du
+# provider `smart` (cf. ~/.opencode/opencode.json).
 temperature: 0.8
+top_p: 0.95
+reasoningEffort: high
+textVerbosity: low
+reasoningSummary: auto
 color: warning
 permission:
   doom_loop: ask
