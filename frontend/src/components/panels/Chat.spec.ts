@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ChatBackend } from '@vanyline/ui';
 import Chat from './Chat.vue';
 import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
+import { httpChatBackend } from '../../api/httpChatBackend';
 
 // La sandbox courante est fournie par `IdeShell.vue` via provide/inject
 // (même pattern qu'Explorer.vue) — sans elle Chat.vue ne peut ni filtrer
@@ -89,6 +90,7 @@ describe('Chat.vue — session réelle', () => {
     mockBackend.listConversations.mockReset();
     mockBackend.loadMessages.mockReset();
     mockBackend.createConversation.mockReset();
+    vi.mocked(httpChatBackend).mockClear();
     clearIdeActions();
   });
 
@@ -130,6 +132,9 @@ describe('Chat.vue — session réelle', () => {
     const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
     await flush();
 
+    // Le wrapper injecte sandbox-name et construit httpChatBackend avec elle :
+    // la liste est scopée à la sandbox courante.
+    expect(vi.mocked(httpChatBackend)).toHaveBeenCalledWith('my-sandbox');
     expect(mockBackend.listConversations).toHaveBeenCalled();
     wrapper.unmount();
   });
