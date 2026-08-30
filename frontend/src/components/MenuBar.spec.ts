@@ -117,7 +117,7 @@ describe('MenuBar', () => {
     expect(newTerminal).toHaveBeenCalledTimes(1);
   });
 
-  it('Nouvelle session agent déclenche startAgentSession (POST /api/conversations)', async () => {
+  it('Nouvelle session agent déclenche httpChatBackend.createConversation', async () => {
     const fetchSpy = vi.fn().mockImplementation((url: string) => {
       if (url === '/api/v1/agents') {
         return Promise.resolve(

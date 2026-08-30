@@ -1,26 +1,13 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   clearIdeActions,
-  endAgentSession,
   registerIdeActions,
-  startAgentSession,
   useIdeSession,
 } from './useIdeSession';
-
-const { fetchSpy } = vi.hoisted(() => ({ fetchSpy: vi.fn() }));
-vi.stubGlobal('fetch', fetchSpy);
-
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  });
-}
 
 describe('useIdeSession', () => {
   beforeEach(() => {
     clearIdeActions();
-    fetchSpy.mockReset();
   });
 
   afterEach(() => {
@@ -47,60 +34,5 @@ describe('useIdeSession', () => {
     expect(ideActions.value).toEqual({});
     expect(activeConversationId.value).toBeNull();
     expect(sessionError.value).toBeNull();
-  });
-
-  it('startAgentSession : aucun agent configuré → sessionError, pas de conversation créée', async () => {
-    fetchSpy.mockResolvedValueOnce(
-      jsonResponse({ items: [], page: 1, per_page: 100, total_items: 0, total_pages: 1 }),
-    );
-
-    await startAgentSession('my-sandbox');
-
-    const { activeConversationId, sessionError } = useIdeSession();
-    expect(activeConversationId.value).toBeNull();
-    expect(sessionError.value).toContain('Aucun agent configuré');
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-  });
-
-  it('startAgentSession : crée la conversation avec le premier agent', async () => {
-    fetchSpy
-      .mockResolvedValueOnce(
-        jsonResponse({ items: [{ name: 'default' }, { name: 'other' }], page: 1, per_page: 100, total_items: 2, total_pages: 1 }),
-      )
-      .mockResolvedValueOnce(jsonResponse({ id: 42 }));
-
-    await startAgentSession('my-sandbox');
-
-    const { activeConversationId, sessionError } = useIdeSession();
-    expect(activeConversationId.value).toBe('42');
-    expect(sessionError.value).toBeNull();
-
-    const createCall = fetchSpy.mock.calls[1];
-    expect(createCall[0]).toBe('/api/conversations');
-    expect(JSON.parse(createCall[1].body)).toEqual({
-      agent_name: 'default',
-      context: { kind: 'sandbox', data: { sandbox_name: 'my-sandbox' } },
-    });
-  });
-
-  it('startAgentSession : erreur réseau → sessionError, conversation inchangée', async () => {
-    fetchSpy.mockRejectedValueOnce(new Error('offline'));
-
-    await startAgentSession('my-sandbox');
-
-    const { activeConversationId, sessionError } = useIdeSession();
-    expect(activeConversationId.value).toBeNull();
-    expect(sessionError.value).toBeTruthy();
-  });
-
-  it('endAgentSession referme la session sans toucher aux handlers', () => {
-    registerIdeActions({ saveActiveFile: () => {} });
-    const { activeConversationId, ideActions } = useIdeSession();
-    activeConversationId.value = 'conv-1';
-
-    endAgentSession();
-
-    expect(activeConversationId.value).toBeNull();
-    expect(ideActions.value.saveActiveFile).toBeDefined();
   });
 });
