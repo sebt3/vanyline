@@ -1,63 +1,40 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
-import { ApiError, createApiClient } from '../../api/client';
-import { useCrudResource } from '../../composables/useCrudResource';
+import type { Provider, ProviderType } from '../ports';
+import { useConfigRepo } from './useConfigRepo';
+import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
 
-interface LlmProvider {
-  id: number;
-  name: string;
-  provider_type: string;
-  endpoint: string;
-  api_key?: string | null;
-  available_models?: unknown;
-  is_default: boolean;
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
-interface CreateLlmProvider {
-  name: string;
-  provider_type: string;
-  endpoint: string;
-  api_key?: string;
-}
-
-interface UpdateLlmProvider {
-  name?: string;
-  provider_type?: string;
-  endpoint?: string;
-  api_key?: string;
-}
-
-interface TestResult {
-  models: string[];
-}
-
-const client = createApiClient();
-const resource = useCrudResource<LlmProvider>(client, '/api/v1/llm-providers');
+const repo = useConfigRepo();
+const resource = useCrudResource(repo, 'providers');
 const { items: fetchedProviders, loading, error } = resource;
 
 // Formulaire de création
 const formName = ref('');
-const formProviderType = ref('ollama');
+const formProviderType = ref<ProviderType>('ollama');
 const formEndpoint = ref('');
 const formApiKey = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
-const editingId = ref<number | null>(null);
+const editingName = ref<string | null>(null); // nom d'origine (clé pour l'update)
 const editName = ref('');
-const editProviderType = ref('ollama');
+const editProviderType = ref<ProviderType>('ollama');
 const editEndpoint = ref('');
 const editApiKey = ref('');
 const editError = ref<string | null>(null);
 
-// Résultat du test
-const testResults = ref<Record<number, string>>({});
+// Résultat du test — keyé par nom
+const testResults = ref<Record<string, string>>({});
 
 // Modales
 const createModalOpen = ref(false);
@@ -67,28 +44,27 @@ onMounted(resource.fetch);
 
 async function createProvider() {
   creationError.value = null;
-  const body: CreateLlmProvider = {
-    name: formName.value,
-    provider_type: formProviderType.value,
-    endpoint: formEndpoint.value,
-    ...(formApiKey.value ? { api_key: formApiKey.value } : {}),
-  };
   try {
-    await resource.create(body);
+    await resource.create({
+      name: formName.value,
+      type: formProviderType.value,
+      endpoint: formEndpoint.value,
+      ...(formApiKey.value ? { api_key: formApiKey.value } : {}),
+    });
     formName.value = '';
     formProviderType.value = 'ollama';
     formEndpoint.value = '';
     formApiKey.value = '';
     createModalOpen.value = false;
   } catch (e) {
-    creationError.value = e instanceof ApiError ? e.message : String(e);
+    creationError.value = message(e);
   }
 }
 
-function startEdit(provider: LlmProvider) {
-  editingId.value = provider.id;
+function startEdit(provider: Provider) {
+  editingName.value = provider.name;
   editName.value = provider.name;
-  editProviderType.value = provider.provider_type;
+  editProviderType.value = provider.type;
   editEndpoint.value = provider.endpoint;
   editApiKey.value = provider.api_key ?? '';
   editError.value = null;
@@ -96,7 +72,7 @@ function startEdit(provider: LlmProvider) {
 }
 
 function cancelEdit() {
-  editingId.value = null;
+  editingName.value = null;
   editName.value = '';
   editProviderType.value = 'ollama';
   editEndpoint.value = '';
@@ -105,42 +81,41 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(id: number) {
+async function saveEdit(originalName: string) {
   editError.value = null;
-  const body: UpdateLlmProvider = {
-    name: editName.value,
-    provider_type: editProviderType.value,
-    endpoint: editEndpoint.value,
-    ...(editApiKey.value ? { api_key: editApiKey.value } : {}),
-  };
   try {
-    await resource.update(id, body);
+    await resource.update(originalName, {
+      name: editName.value,
+      type: editProviderType.value,
+      endpoint: editEndpoint.value,
+      ...(editApiKey.value ? { api_key: editApiKey.value } : {}),
+    });
     cancelEdit();
   } catch (e) {
-    editError.value = e instanceof ApiError ? e.message : String(e);
+    editError.value = message(e);
   }
 }
 
-async function testProvider(id: number) {
+async function testProvider(name: string) {
   try {
-    const result = await client.post<TestResult>(`/api/v1/llm-providers/${id}/test`);
-    testResults.value[id] = result.models.join(', ');
+    const result = await repo.testProvider(name);
+    testResults.value[name] = result.models.join(', ');
   } catch (e) {
-    testResults.value[id] = e instanceof ApiError ? e.message : String(e);
+    testResults.value[name] = message(e);
   }
 }
 
-async function setDefault(id: number) {
+async function setDefault(name: string) {
   try {
-    await client.put<LlmProvider>(`/api/v1/llm-providers/${id}/default`);
+    await repo.setDefaultProvider(name);
     await resource.fetch();
   } catch (e) {
-    error.value = e instanceof ApiError ? e.message : String(e);
+    error.value = message(e);
   }
 }
 
-async function deleteProvider(id: number) {
-  await resource.remove(id);
+async function deleteProvider(name: string) {
+  await resource.remove(name);
 }
 </script>
 
@@ -161,24 +136,24 @@ async function deleteProvider(id: number) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="p in fetchedProviders" :key="p.id">
+          <tr v-for="p in fetchedProviders" :key="p.name">
             <td>{{ p.name }}</td>
-            <td class="th-type">{{ p.provider_type }}</td>
+            <td class="th-type">{{ p.type }}</td>
             <td class="th-endpoint">{{ p.endpoint }}</td>
             <td class="th-status">
               <span v-if="p.is_default" class="badge-default">Défaut</span>
             </td>
             <td class="th-actions">
-              <button class="btn btn-test" @click="testProvider(p.id)">
+              <button class="btn btn-test" @click="testProvider(p.name)">
                 Tester
               </button>
-              <button class="btn btn-default" :class="{ 'btn-default-active': p.is_default }" @click="setDefault(p.id)">
+              <button class="btn btn-default" :class="{ 'btn-default-active': p.is_default }" @click="setDefault(p.name)">
                 Défaut
               </button>
               <button class="btn btn-edit" @click="startEdit(p)">
                 Modifier
               </button>
-              <button class="btn btn-delete" @click="deleteProvider(p.id)">
+              <button class="btn btn-delete" @click="deleteProvider(p.name)">
                 Supprimer
               </button>
             </td>
@@ -233,7 +208,7 @@ async function deleteProvider(id: number) {
         </template>
       </DialogShell>
 
-      <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editName}`">
+      <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
         <Field label="Nom">
           <input
             class="field-input"
@@ -273,14 +248,14 @@ async function deleteProvider(id: number) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>
 
-      <div v-for="p in fetchedProviders" :key="'test-' + p.id" class="results">
-        <div v-if="testResults[p.id]" class="test-result">
-          Résultat pour {{ p.name }} : {{ testResults[p.id] }}
+      <div v-for="p in fetchedProviders" :key="'test-' + p.name" class="results">
+        <div v-if="testResults[p.name]" class="test-result">
+          Résultat pour {{ p.name }} : {{ testResults[p.name] }}
         </div>
       </div>
     </div>
