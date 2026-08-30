@@ -1,5 +1,3 @@
-import type { JsonRpcResponse } from './rpc';
-
 /** Transport ndjson minimal — injecté par l'appelant (CLI stdio, socket,
  *  worker...). `write` envoie une ligne complète (SANS `\n`), `onLine` en
  *  reçoit une ligne complète (déjà sans `\n`). */

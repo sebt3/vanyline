@@ -67,12 +67,17 @@ vanyline/
   serde de `lib/src/domain.rs` — `Provider`, `ModelProfile`, `Toolset`, `Agent`,
   `McpServer`, `SkillDetail` (`SkillMeta` + `body`). Ce sont exactement les payloads
   `item` / `patch` du RPC config de F2 (params `item: <entité snake_case>`) : une seule
-  source de vérité côté protocol, `@vanyline/ui` les ré-exporte pour les écrans. **Tous
-  name-keyed** — `ModelProfile.provider: string`, `Agent.model: string` (nom du profil),
-  `Agent.toolsets/skills: string[]`, `Toolset.local_tools: string[]`,
-  `Toolset.mcp[].server: string`. Pas de `ts-rs` ici (le scope ts-rs de F1 reste
-  `ChatEvent` seul) ; conformité vérifiée par des fixtures JSON produites par la lib
-  dans les tests du package, comme le repli `ChatEvent`.
+  source de vérité côté protocol, `@vanyline/ui` les ré-exporte pour les écrans.
+  **Forme = serde de `domain.rs` à la lettre** (décision 2026-08-30) : discriminant
+  `type` (pas `provider_type`/`server_type`), `snake_case` (`api_key`, `max_tokens`,
+  `local_tools`, `system_prompt`), et **name-keyed** — `ModelProfile.provider: string`,
+  `Agent.model: string` (nom du profil), `Agent.toolsets/skills`, `Toolset.local_tools`,
+  `Toolset.mcp[].server`. Plus 3 champs **web-augmentés optionnels** (`available_models`,
+  `is_default` sur `Provider` ; `available_tools` sur `McpServer`). `httpConfigRepo` (F1)
+  porte **toute** la traduction REST↔canonique ; `rpcConfigRepo` (F4) est pass-through.
+  Pas de `ts-rs` ici (le scope ts-rs de F1 reste `ChatEvent` seul) ; conformité par
+  fixtures JSON produites par la lib dans les tests du package, comme le repli
+  `ChatEvent`.
 - `RpcConnection` : client ndjson **transport-injecté** — prend `{ write(line: string):
   void; onLine(cb: (line: string) => void): void }`, ne dépend d'aucune API Node. Gère
   corrélation `id → Promise`, dispatch des notifications par méthode, timeouts.
