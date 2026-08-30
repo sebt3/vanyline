@@ -5,15 +5,15 @@ export function chatEventsToUIStream(
   events: ReadableStream<ChatEvent>,
   options?: { abortSignal?: AbortSignal },
 ): ReadableStream<UIMessageChunk> {
-  let c: ReadableStreamDefaultController<UIMessageChunk>;
+  let reader: ReadableStreamDefaultReader<ChatEvent> | undefined;
   let controllerClosed = false;
 
   return new ReadableStream<UIMessageChunk>({
     start(ctrl) {
-      c = ctrl;
       ctrl.enqueue({ type: 'start' });
 
-      const reader = events.getReader();
+      const r = events.getReader();
+      reader = r;
       let textId: string | null = null;
       let reasoningId: string | null = null;
       let doneEmitted = false;
@@ -112,25 +112,17 @@ export function chatEventsToUIStream(
         if (abortSignal.aborted) {
           enqueue({ type: 'abort' });
           closeController();
-          try {
-            reader.cancel();
-          } catch {
-            // stream may already be closed
-          }
+          void r.cancel().catch(() => {});
           return;
         }
         abortSignal.addEventListener('abort', () => {
           enqueue({ type: 'abort' });
           closeController();
-          try {
-            reader.cancel();
-          } catch {
-            // stream may already be closed
-          }
+          void r.cancel().catch(() => {});
         });
       }
 
-      void reader.read().then(function handleRead(
+      void r.read().then(function handleRead(
         result: ReadableStreamReadResult<ChatEvent>,
       ): Promise<void> | void {
         if (result.done) {
@@ -140,7 +132,7 @@ export function chatEventsToUIStream(
           return;
         }
         handleEvent(result.value);
-        return reader.read().then(handleRead);
+        return r.read().then(handleRead);
       }).catch((err: unknown) => {
         const msg = err instanceof Error ? err.message : String(err);
         ctrl.enqueue({ type: 'error', errorText: msg });
@@ -148,10 +140,12 @@ export function chatEventsToUIStream(
       });
     },
     cancel() {
-      try {
-        c.close();
-      } catch {
-        // readable stream may already be closed
+      if (reader) {
+        try {
+          void reader.cancel().catch(() => {});
+        } catch {
+          // readable stream may already be closed
+        }
       }
     },
   });
