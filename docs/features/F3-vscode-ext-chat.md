@@ -85,8 +85,11 @@ ext/
   (`vanyline`, icône `$(hubot)`), `retainContextWhenHidden: true`.
 - `buildHtml` : CSP + nonce + `<base href>` — repris de kydah-code
   (`src/extension/panels/main.ts`), `localResourceRoots` sur `dist/webview`.
-- La webview monte `ChatWindow` de `@vanyline/ui` et fournit un `ChatTransport`
-  implémenté sur `postMessage` :
+- La webview monte `ChatWindow` de `@vanyline/ui` et fournit **deux** ports par
+  `provide`/`inject` : un `ChatBackend` (clé `vanyline.chatBackend` — `listConversations`/
+  `loadMessages`/`createConversation` relayés en `conversations/list|get|create` RPC via
+  le host) et un `ChatTransport` (clé `vanyline.chatTransport`) implémenté sur
+  `postMessage` :
   - `sendMessages` → `postMessage({ type: 'chat/send', conversationId, message, agent })`
   - le host relaie en `chat/send` RPC ; les notifications `chat/event` (avec `seq`)
     reviennent en `postMessage({ type: 'chat/event', ... })`
