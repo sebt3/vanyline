@@ -1,11 +1,3 @@
-use crate::rpc::protocol::{
-    ChatCancelParams, ChatEventNotificationParams, ChatSendParams, ChatSendResult,
-    ConversationCreateParams, ConversationIdParams, ConversationSummary, InitializeParams,
-    InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, NameParams,
-    OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, SandboxCreateParams, jsonrpc_code,
-    vnl_code,
-};
-
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::io::ErrorKind;
@@ -16,13 +8,21 @@ use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
 use vanyline_lib::session::{SessionContext, run_agent_turn};
 use vanyline_lib::store::ConfigStore;
 
+use crate::config;
+use crate::rpc::protocol::{
+    ChatCancelParams, ChatEventNotificationParams, ChatSendParams, ChatSendResult,
+    ConversationCreateParams, ConversationIdParams, ConversationSummary, InitializeParams,
+    InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, NameParams,
+    OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, SandboxCreateParams, jsonrpc_code,
+    vnl_code,
+};
 use crate::store;
 use vanyline_cfgstore::CfgStoreError;
 
 pub struct ServerState {
     pub initialized: bool,
     pub shutdown_requested: bool,
-    pub store: Option<Arc<crate::fs_store::FsConfigStore>>,
+    pub store: Option<Arc<vanyline_cfgstore::fs_store::FsConfigStore>>,
     /// Sender du canal d'écriture unique de `rpc::mod` — cloné dans toute
     /// tâche spawnée qui a besoin d'écrire (réponse finale OU notification
     /// `chat/event`, tâche 03b).
@@ -61,12 +61,12 @@ impl ServerState {
 /// d'`initialize` — PAS le cwd du process (design : "c'est l'extension qui
 /// la connaît (workspace folder VS Code), pas le cwd"). Fallback sur le
 /// cwd uniquement si `workspace` est `None` (usage CLI direct / tests).
-fn resolve_layers(workspace: Option<&str>) -> crate::config::Layers {
+fn resolve_layers(workspace: Option<&str>) -> vanyline_cfgstore::layers::Layers {
     let root = workspace.map_or_else(
         || std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")),
         std::path::PathBuf::from,
     );
-    crate::config::Layers::discover(&root)
+    config::discover_layers(&root)
 }
 
 /// Convertit une opération de config (`Result<T, CfgStoreError>`) en réponse
@@ -306,7 +306,7 @@ async fn handle_initialize(
 
     // Build the store from workspace
     let layers = resolve_layers(initialize_params.workspace.as_deref());
-    let store = crate::fs_store::FsConfigStore::new(layers);
+    let store = vanyline_cfgstore::fs_store::FsConfigStore::new(layers);
 
     // Resolve default_agent from store — an error here does NOT fail
     // initialize itself; the real error will surface on first config/* call.
@@ -787,7 +787,7 @@ impl Drop for BusyGuard {
 /// `cli/src/chat.rs::read_workspace_context` (qui lit depuis le cwd du
 /// process CLI ; ici la racine vient du client, pas du cwd, cf. design).
 /// `None` si `workspace_dir` est `None` ou si le fichier n'existe pas.
-fn read_workspace_context(store: &crate::fs_store::FsConfigStore) -> Option<String> {
+fn read_workspace_context(store: &vanyline_cfgstore::fs_store::FsConfigStore) -> Option<String> {
     let dir = store.layers().workspace_dir.as_ref()?;
     std::fs::read_to_string(dir.join("AGENTS.md")).ok()
 }

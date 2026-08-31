@@ -475,10 +475,10 @@ mod tests {
 
     #[tokio::test]
     async fn fs_config_store_end_to_end_detects_unknown_model() {
-        use crate::config::Layers;
-        use crate::fs_store::FsConfigStore;
         use std::io::Write;
         use tempfile::tempdir;
+        use vanyline_cfgstore::fs_store::FsConfigStore;
+        use vanyline_cfgstore::layers::Layers;
 
         let tmp = tempdir().unwrap();
         // Write an agent file with an unknown model

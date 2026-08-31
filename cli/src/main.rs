@@ -1,7 +1,6 @@
 mod chat;
 mod config;
 mod config_check;
-mod fs_store;
 mod store;
 
 mod tools;
@@ -18,6 +17,7 @@ mod rpc;
 
 use clap::{Parser, Subcommand};
 use tracing_subscriber::prelude::*;
+use vanyline_cfgstore::layers::{config_entry_source, file_entry_source, skill_entry_source};
 
 #[derive(Parser)]
 #[command(name = "vanyline", version, about = "CLI for vanyline LLM chat")]
@@ -309,7 +309,7 @@ async fn run_agent(cmd: agent::Commands) {
                 println!("No agents configured.");
             } else {
                 for a in &agents {
-                    let source = config::file_entry_source(store.layers(), "agents", "md", &a.name);
+                    let source = file_entry_source(store.layers(), "agents", "md", &a.name);
                     let summary = a.description.as_deref().unwrap_or("-");
                     let marker = if a.name == default_name.as_deref().unwrap_or("") {
                         " (default)"
@@ -339,7 +339,7 @@ async fn run_agent(cmd: agent::Commands) {
             });
 
             println!("Agent: {}", agent.name);
-            let source = config::file_entry_source(store.layers(), "agents", "md", &agent.name);
+            let source = file_entry_source(store.layers(), "agents", "md", &agent.name);
             println!("  Source: {source}");
             if let Some(desc) = &agent.description {
                 println!("  Description: {desc}");
@@ -424,8 +424,7 @@ async fn run_provider(cmd: provider::Commands) {
                 println!("No LLM providers configured.");
             } else {
                 for p in &providers {
-                    let source =
-                        config::config_entry_source(store.layers(), &p.name, |raw| &raw.providers);
+                    let source = config_entry_source(store.layers(), &p.name, |raw| &raw.providers);
                     println!("  {} | {} | {:?}", p.name, source, p.provider_type);
                 }
             }
@@ -433,12 +432,12 @@ async fn run_provider(cmd: provider::Commands) {
     }
 }
 
-pub(crate) fn discover_fs_store() -> fs_store::FsConfigStore {
+pub(crate) fn discover_fs_store() -> vanyline_cfgstore::fs_store::FsConfigStore {
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("Failed to read current directory: {e}");
         std::process::exit(1);
     });
-    fs_store::FsConfigStore::new(config::Layers::discover(&cwd))
+    vanyline_cfgstore::fs_store::FsConfigStore::new(config::discover_layers(&cwd))
 }
 
 async fn run_config(cmd: config_cmd::Commands) {
@@ -474,8 +473,7 @@ async fn run_models(cmd: model_cmd::Commands) {
                 return;
             }
             for m in &models {
-                let source =
-                    config::config_entry_source(store.layers(), &m.name, |raw| &raw.models);
+                let source = config_entry_source(store.layers(), &m.name, |raw| &raw.models);
                 println!("  {} | {} | {} / {}", m.name, source, m.provider, m.model);
             }
         }
@@ -497,7 +495,7 @@ async fn run_toolsets(cmd: toolset_cmd::Commands) {
                 return;
             }
             for t in &toolsets {
-                let source = config::file_entry_source(store.layers(), "toolsets", "yaml", &t.name);
+                let source = file_entry_source(store.layers(), "toolsets", "yaml", &t.name);
                 let summary = t.description.as_deref().unwrap_or("-");
                 println!("  {} | {} | {}", t.name, source, summary);
             }
@@ -520,7 +518,7 @@ async fn run_skills(cmd: skill_cmd::Commands) {
                 return;
             }
             for s in &skills {
-                let source = config::skill_entry_source(store.layers(), &s.name);
+                let source = skill_entry_source(store.layers(), &s.name);
                 println!("  {} | {} | {}", s.name, source, s.description);
             }
         }
@@ -542,7 +540,7 @@ async fn run_mcp(cmd: mcp_cmd::Commands) {
                 return;
             }
             for s in &servers {
-                let source = config::config_entry_source(store.layers(), &s.name, |raw| &raw.mcp);
+                let source = config_entry_source(store.layers(), &s.name, |raw| &raw.mcp);
                 println!("  {} | {} | {:?} {}", s.name, source, s.transport, s.url);
             }
         }

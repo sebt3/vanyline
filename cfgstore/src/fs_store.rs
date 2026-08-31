@@ -1,15 +1,13 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use vanyline_cfgstore::CfgStoreError;
-use vanyline_lib::VnyError;
-use vanyline_lib::domain::{
+use crate::domain::{
     Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
     SkillMeta, SkillSelection, Toolset,
 };
-use vanyline_lib::store::ConfigStore;
-
-use crate::config::Layers;
+use crate::error::CfgStoreError;
+use crate::layers::Layers;
+use crate::store::ConfigStore;
 
 /// Implémente `ConfigStore` sur les deux couches YAML (`Layers`, tâche 1).
 /// Store actif de toutes les commandes CLI depuis la tâche 04b (cutover) —
@@ -30,10 +28,6 @@ impl FsConfigStore {
     pub const fn layers(&self) -> &Layers {
         &self.layers
     }
-}
-
-fn layers_err(e: VnyError) -> CfgStoreError {
-    CfgStoreError::Config(e.to_string())
 }
 
 // --- Formes brutes d'une entrée de map nommée dans config.yaml : mêmes
@@ -192,7 +186,7 @@ fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, CfgStoreError>
 #[async_trait]
 impl ConfigStore for FsConfigStore {
     async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
-        let merged = self.layers.load_merged_config().map_err(layers_err)?;
+        let merged = self.layers.load_merged_config()?;
         let mut result = Vec::new();
         for (name, value) in merged.providers {
             let raw: RawProviderEntry = yaml_serde::from_value(value)
@@ -208,7 +202,7 @@ impl ConfigStore for FsConfigStore {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
-        let merged = self.layers.load_merged_config().map_err(layers_err)?;
+        let merged = self.layers.load_merged_config()?;
         let mut result = Vec::new();
         for (name, value) in merged.models {
             let raw: RawModelEntry = yaml_serde::from_value(value)
@@ -226,7 +220,7 @@ impl ConfigStore for FsConfigStore {
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
-        let merged = self.layers.load_merged_config().map_err(layers_err)?;
+        let merged = self.layers.load_merged_config()?;
         let mut result = Vec::new();
         for (name, value) in merged.mcp {
             let raw: RawMcpEntry = yaml_serde::from_value(value)
@@ -243,10 +237,7 @@ impl ConfigStore for FsConfigStore {
 
     /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
     async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
-        let files = self
-            .layers
-            .resolve_named_files("toolsets", "yaml")
-            .map_err(layers_err)?;
+        let files = self.layers.resolve_named_files("toolsets", "yaml")?;
         files
             .iter()
             .map(|(name, path)| parse_toolset_file(name, path))
@@ -255,10 +246,7 @@ impl ConfigStore for FsConfigStore {
 
     /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
     async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
-        let files = self
-            .layers
-            .resolve_named_files("agents", "md")
-            .map_err(layers_err)?;
+        let files = self.layers.resolve_named_files("agents", "md")?;
         files
             .iter()
             .map(|(name, path)| parse_agent_file(name, path))
@@ -267,7 +255,7 @@ impl ConfigStore for FsConfigStore {
 
     /// Résolu en tâche 02c (skills/<name>/SKILL.md).
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
-        let files = self.layers.resolve_skill_files().map_err(layers_err)?;
+        let files = self.layers.resolve_skill_files()?;
         files
             .iter()
             .map(|(name, path)| {
@@ -285,7 +273,7 @@ impl ConfigStore for FsConfigStore {
 
     /// Résolu en tâche 02c.
     async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError> {
-        let files = self.layers.resolve_skill_files().map_err(layers_err)?;
+        let files = self.layers.resolve_skill_files()?;
         let path = files
             .get(name)
             .ok_or_else(|| CfgStoreError::UnknownReference("skill", name.to_string()))?;
@@ -295,7 +283,7 @@ impl ConfigStore for FsConfigStore {
     }
 
     async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
-        let merged = self.layers.load_merged_config().map_err(layers_err)?;
+        let merged = self.layers.load_merged_config()?;
         match merged.defaults.get("agent") {
             None => Ok(None),
             Some(value) => value.as_str().map(|s| Some(s.to_string())).ok_or_else(|| {
@@ -312,7 +300,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::config::Layers;
+    use crate::layers::Layers;
 
     fn write_config_yaml(dir: &std::path::Path, content: &str) {
         let path = dir.join("config.yaml");
