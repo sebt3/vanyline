@@ -264,18 +264,21 @@ Faites et commitées (`.tasks/F1-vscode-ext-foundations/`) :
 
 Reste (candidate 5 + 6 du design d'origine, redécoupées après les blocages tranchés) :
 
-6. **Plumbing config** : `config-domain.ts` (6 types miroir `domain.rs` + `available*`/
-   `isDefault`, + fixtures de conformité) dans `@vanyline/protocol` ; `ports.ts` →
-   union discriminée par domaine + `setDefaultProvider` ; `httpConfigRepo` rework
-   (traduction FK↔nom **les 2 sens**, `setDefaultProvider`, `available*` mappés) +
-   `httpConfigRepo.spec.ts`. **Aucun écran touché — tout reste vert.**
-7. **`useCrudResource` (ui) + `SettingsView`→`ConfigShell` + extraction Account +
-   Skills + LlmProviders** dans `@vanyline/ui/config/` (+ specs). `SettingsView` monte
-   ConfigShell avec ces 3 écrans depuis le package + les 3 autres encore locaux
-   (fonctionnels, `createApiClient`). `provide('vanyline.configRepo', httpConfigRepo())`.
-8. **Extraction McpServers + ModelProfiles** dans `@vanyline/ui/config/` (+ specs).
-   `SettingsView` bascule ces 2 sur le package.
-9. **Extraction Toolsets + Agents** dans `@vanyline/ui/config/` (+ specs). `SettingsView`
-   n'importe plus que depuis `@vanyline/ui` ; suppression des fichiers écrans locaux.
-10. **CI** : ordre de build workspaces (packages avant frontend) + job de vérification
-    ts-rs (`git diff --exit-code`).
+6. ✅ **Plumbing config** : `config-domain.ts` (6 types miroir `domain.rs` + `available*`/
+   `is_default`, + fixtures de conformité + tests `*_wire_shape` côté Rust) ; `ports.ts`
+   → union par domaine (`ConfigListItemByDomain`/`ConfigItemByDomain`) +
+   `setDefaultProvider` ; `httpConfigRepo` rework (traduction FK↔nom **2 sens**) + spec.
+   Aucun écran touché.
+7. ✅ **`useCrudResource` (ui) + `useConfigRepo`/`CONFIG_REPO_KEY` + `SettingsView`→
+   `ConfigShell` + extraction Skills + LlmProviders** (+ specs sur `ConfigRepo` mocké).
+8. ✅ **Extraction McpServers + ModelProfiles** (+ specs). `sse` conservé (cf. note MCP).
+9. ✅ **Extraction Toolsets + Agents** (+ specs). `SettingsView` n'importe plus que
+   `ConfigShell` + les 6 écrans depuis `@vanyline/ui` ; `AccountScreen` reste local
+   (pas de compte côté CLI). `frontend/src/components/common/` + `useCrudResource`
+   restent pour les dashboards Projects/Sandboxes (hors périmètre F1).
+10. ✅ **CI** : job `frontend` renommé « Frontend + packages », check+test de
+    `@vanyline/protocol` puis `@vanyline/ui` avant le build frontend ; nouveau job
+    `tsrs` (`cargo test -p vanyline-lib --features ts-rs` + `git diff --exit-code`).
+
+**Phase 2 terminée. Reste : Phase 3 (review Claude + migration `docs/architecture.md`
+section « Workspace TypeScript » + suppression de ce fichier + maj mémoire).**

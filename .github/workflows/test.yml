@@ -39,7 +39,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   frontend:
-    name: Frontend
+    name: Frontend + packages
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -48,9 +48,25 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
+      # packages partagés d'abord (frontend en dépend via alias source)
+      - run: npm run check --workspace=@vanyline/protocol
+      - run: npm run test --workspace=@vanyline/protocol
+      - run: npm run check --workspace=@vanyline/ui
+      - run: npm run test --workspace=@vanyline/ui
       - run: npm run build --workspace=frontend
       - run: npm run check --workspace=frontend
       - run: npm run test --workspace=frontend
+
+  tsrs:
+    name: ts-rs types up to date
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # régénère packages/protocol/src/generated/ depuis vanyline-lib
+      - run: cargo test -p vanyline-lib --features ts-rs
+      - run: git diff --exit-code -- packages/protocol/src/generated/
 
   coverage:
     name: Coverage (baseline measurement, no gate)
