@@ -4,15 +4,15 @@ import { provide } from 'vue';
 import {
   ConfigShell,
   LlmProvidersScreen,
+  ModelProfilesScreen,
+  McpServersScreen,
   SkillsScreen,
   CONFIG_REPO_KEY,
   type ConfigNavGroup,
 } from '@vanyline/ui';
 import AccountScreen from './settings/AccountScreen.vue';
-import ModelProfilesScreen from './settings/ModelProfilesScreen.vue';
 import ToolsetsScreen from './settings/ToolsetsScreen.vue';
 import AgentsScreen from './settings/AgentsScreen.vue';
-import McpServersScreen from './settings/McpServersScreen.vue';
 import { httpConfigRepo } from '../api/httpConfigRepo';
 import { activeNav } from './settings/navState';
 
@@ -45,7 +45,7 @@ const groups: ConfigNavGroup[] = [
 ];
 
 // Écrans extraits dans @vanyline/ui (backend-agnostiques via ConfigRepo) +
-// écrans encore locaux (extraction en cours, tâches 08-09).
+// écrans encore locaux (extraction en cours, tâche 09).
 const screens: Record<string, Component> = {
   'llm-providers': LlmProvidersScreen,
   'model-profiles': ModelProfilesScreen,

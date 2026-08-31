@@ -135,6 +135,11 @@ interface ConfigRepo {
   « non supporté » (même précédent que la RBAC ci-dessous).
 - Les états locaux keyés par id dans les écrans (`discovering[id]`, `testResults[id]`,
   `seenToolResults`) passent à une clé `name` — état de composant, hors contrat.
+- **MCP `sse`** (décision 2026-08-31) : l'API `app` acceptait `server_type ∈ {sse,
+  http-streamable}` mais `sse` n'était pas fonctionnel côté sandbox. `McpTransport` du
+  contrat canonique reste `'http-streamable'` seul (aligné sur `domain.rs`) ;
+  `McpServersScreen` ne propose plus que `http-streamable` (les serveurs `sse` stockés
+  s'affichent encore). Petit resserrement fonctionnel du web, assumé.
 - **Champs augmentés au runtime web** : `Provider.availableModels: string[]` +
   `Provider.isDefault: boolean` + `McpServer.availableTools: string[]` ne sont pas dans
   `domain.rs` (persistés côté `app` après un test / `set-default`). `config-domain.ts`

@@ -1,52 +1,33 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
-import { ApiError, createApiClient } from '../../api/client';
-import { useCrudResource } from '../../composables/useCrudResource';
+import type { McpServer, McpTransport } from '../ports';
+import { useConfigRepo } from './useConfigRepo';
+import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
 
-interface McpServer {
-  id: number;
-  name: string;
-  server_type: string;
-  url: string;
-  available_tools?: string[];
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
-interface McpTestResult {
-  tools: string[];
-}
-
-interface CreateMcpServer {
-  name: string;
-  server_type: string;
-  url: string;
-}
-
-interface UpdateMcpServer {
-  name?: string;
-  server_type?: string;
-  url?: string;
-}
-
-const client = createApiClient();
-const resource = useCrudResource<McpServer>(client, '/api/v1/mcp-servers');
+const repo = useConfigRepo();
+const resource = useCrudResource(repo, 'mcp');
 const { items: fetchedServers, loading, error } = resource;
 
 // Formulaire de création
 const formName = ref('');
-const formServerType = ref('sse');
+const formType = ref<McpTransport>('http-streamable');
 const formUrl = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
-const editingId = ref<number | null>(null);
+const editingName = ref<string | null>(null); // nom d'origine (clé pour l'update)
 const editName = ref('');
-const editServerType = ref('sse');
+const editType = ref<McpTransport>('http-streamable');
 const editUrl = ref('');
 const editError = ref<string | null>(null);
 
@@ -58,78 +39,69 @@ onMounted(resource.fetch);
 
 async function createServer() {
   creationError.value = null;
-  const body: CreateMcpServer = {
-    name: formName.value,
-    server_type: formServerType.value,
-    url: formUrl.value,
-  };
   try {
-    await resource.create(body);
+    await resource.create({ name: formName.value, type: formType.value, url: formUrl.value });
     formName.value = '';
-    formServerType.value = 'sse';
+    formType.value = 'http-streamable';
     formUrl.value = '';
     createModalOpen.value = false;
   } catch (e) {
-    creationError.value = e instanceof ApiError ? e.message : String(e);
+    creationError.value = message(e);
   }
 }
 
 function startEdit(server: McpServer) {
-  editingId.value = server.id;
+  editingName.value = server.name;
   editName.value = server.name;
-  editServerType.value = server.server_type;
+  editType.value = server.type;
   editUrl.value = server.url;
   editError.value = null;
   editModalOpen.value = true;
 }
 
 function cancelEdit() {
-  editingId.value = null;
+  editingName.value = null;
   editName.value = '';
-  editServerType.value = 'sse';
+  editType.value = 'http-streamable';
   editUrl.value = '';
   editError.value = null;
   editModalOpen.value = false;
 }
 
-async function saveEdit(id: number) {
+async function saveEdit(originalName: string) {
   editError.value = null;
-  const body: UpdateMcpServer = {
-    name: editName.value,
-    server_type: editServerType.value,
-    url: editUrl.value,
-  };
   try {
-    await resource.update(id, body);
+    await resource.update(originalName, {
+      name: editName.value,
+      type: editType.value,
+      url: editUrl.value,
+    });
     cancelEdit();
   } catch (e) {
-    editError.value = e instanceof ApiError ? e.message : String(e);
+    editError.value = message(e);
   }
 }
 
-async function deleteServer(id: number) {
-  await resource.remove(id);
+async function deleteServer(name: string) {
+  await resource.remove(name);
 }
 
 // Découverte des tools : par serveur, un état de chargement/erreur dédié —
 // tester un serveur ne doit pas bloquer/masquer les autres lignes.
-const discovering = ref<Record<number, boolean>>({});
-const discoverError = ref<Record<number, string | null>>({});
+const discovering = ref<Record<string, boolean>>({});
+const discoverError = ref<Record<string, string | null>>({});
 
-async function discoverTools(id: number) {
-  discovering.value = { ...discovering.value, [id]: true };
-  discoverError.value = { ...discoverError.value, [id]: null };
+async function discoverTools(name: string) {
+  discovering.value = { ...discovering.value, [name]: true };
+  discoverError.value = { ...discoverError.value, [name]: null };
   try {
-    const result = await client.post<McpTestResult>(`/api/v1/mcp-servers/${id}/test`);
-    const server = fetchedServers.value.find((s) => s.id === id);
+    const result = await repo.testMcpServer(name);
+    const server = fetchedServers.value.find((s) => s.name === name);
     if (server) server.available_tools = result.tools;
   } catch (e) {
-    discoverError.value = {
-      ...discoverError.value,
-      [id]: e instanceof ApiError ? e.message : String(e),
-    };
+    discoverError.value = { ...discoverError.value, [name]: message(e) };
   } finally {
-    discovering.value = { ...discovering.value, [id]: false };
+    discovering.value = { ...discovering.value, [name]: false };
   }
 }
 </script>
@@ -151,9 +123,9 @@ async function discoverTools(id: number) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="s in fetchedServers" :key="s.id">
+          <tr v-for="s in fetchedServers" :key="s.name">
             <td>{{ s.name }}</td>
-            <td>{{ s.server_type }}</td>
+            <td>{{ s.type }}</td>
             <td>{{ s.url }}</td>
             <td>
               <span
@@ -164,20 +136,20 @@ async function discoverTools(id: number) {
                 {{ s.available_tools.length }} tool{{ s.available_tools.length > 1 ? 's' : '' }}
               </span>
               <span v-else class="tools-empty">jamais testé</span>
-              <div v-if="discoverError[s.id]" class="discover-error">{{ discoverError[s.id] }}</div>
+              <div v-if="discoverError[s.name]" class="discover-error">{{ discoverError[s.name] }}</div>
             </td>
             <td class="th-actions">
               <button
                 class="btn btn-discover"
-                :disabled="discovering[s.id]"
-                @click="discoverTools(s.id)"
+                :disabled="discovering[s.name]"
+                @click="discoverTools(s.name)"
               >
-                {{ discovering[s.id] ? 'Découverte…' : 'Découvrir' }}
+                {{ discovering[s.name] ? 'Découverte…' : 'Découvrir' }}
               </button>
               <button class="btn btn-edit" @click="startEdit(s)">
                 Modifier
               </button>
-              <button class="btn btn-delete" @click="deleteServer(s.id)">
+              <button class="btn btn-delete" @click="deleteServer(s.name)">
                 Supprimer
               </button>
             </td>
@@ -200,10 +172,9 @@ async function discoverTools(id: number) {
         <Field label="Type" top-align>
           <select
             class="field-input"
-            v-model="formServerType"
+            v-model="formType"
             aria-label="Type de serveur"
           >
-            <option value="sse">sse</option>
             <option value="http-streamable">http-streamable</option>
           </select>
         </Field>
@@ -223,7 +194,7 @@ async function discoverTools(id: number) {
         </template>
       </DialogShell>
 
-      <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editName}`">
+      <DialogShell v-model:open="editModalOpen" :title="`Modifier : ${editingName}`">
         <Field label="Nom" top-align>
           <input
             class="field-input"
@@ -236,10 +207,9 @@ async function discoverTools(id: number) {
         <Field label="Type" top-align>
           <select
             class="field-input"
-            v-model="editServerType"
+            v-model="editType"
             aria-label="Type de serveur"
           >
-            <option value="sse">sse</option>
             <option value="http-streamable">http-streamable</option>
           </select>
         </Field>
@@ -254,7 +224,7 @@ async function discoverTools(id: number) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>
