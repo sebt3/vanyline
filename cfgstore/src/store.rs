@@ -1,9 +1,15 @@
+#![allow(clippy::unwrap_used)]
+
 use std::collections::HashMap;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 
-use crate::domain::{Agent, McpServer, ModelProfile, Provider, SkillMeta, Toolset};
+use crate::domain::{
+    Agent, McpServer, McpTransport, ModelProfile, Provider, ProviderType, SkillMeta, Toolset,
+};
 use crate::error::CfgStoreError;
+use crate::fs_store::validate_name;
 
 /// Permet à `resolve_by_name` de lire le nom d'un item du domaine sans que
 /// chaque appelant ne réécrive `.name.clone()`. Implémenté ici (pas dans
@@ -67,6 +73,7 @@ fn resolve_by_name<T: HasName>(
 /// Couche ciblée par une écriture. La résolution "workspace si dispo sinon
 /// global" est faite par l'appelant (handler RPC) — le trait prend un Layer
 /// explicite. InMemoryConfigStore ignore ce paramètre (jeu unique en mémoire).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
     Global,
     Workspace,
@@ -214,16 +221,16 @@ pub trait ConfigStore: Send + Sync {
 /// du module `pub mod store;`).
 #[derive(Default)]
 pub struct InMemoryConfigStore {
-    pub providers: Vec<Provider>,
-    pub models: Vec<ModelProfile>,
-    pub mcp_servers: Vec<McpServer>,
-    pub toolsets: Vec<Toolset>,
-    pub agents: Vec<Agent>,
-    pub skills: Vec<SkillMeta>,
+    pub providers: Mutex<Vec<Provider>>,
+    pub models: Mutex<Vec<ModelProfile>>,
+    pub mcp_servers: Mutex<Vec<McpServer>>,
+    pub toolsets: Mutex<Vec<Toolset>>,
+    pub agents: Mutex<Vec<Agent>>,
+    pub skills: Mutex<Vec<SkillMeta>>,
     /// Corps des skills, séparé de `skills` (qui ne porte que name+description) —
     /// même distinction lazy-loading que dans `ConfigStore`.
-    pub skill_bodies: HashMap<String, String>,
-    pub default_agent: Option<String>,
+    pub skill_bodies: Mutex<HashMap<String, String>>,
+    pub default_agent: Mutex<Option<String>>,
 }
 
 impl InMemoryConfigStore {
@@ -235,38 +242,372 @@ impl InMemoryConfigStore {
 #[async_trait]
 impl ConfigStore for InMemoryConfigStore {
     async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
-        Ok(self.providers.clone())
+        Ok(self.providers.lock().unwrap().clone())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
-        Ok(self.models.clone())
+        Ok(self.models.lock().unwrap().clone())
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
-        Ok(self.mcp_servers.clone())
+        Ok(self.mcp_servers.lock().unwrap().clone())
     }
 
     async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
-        Ok(self.toolsets.clone())
+        Ok(self.toolsets.lock().unwrap().clone())
     }
 
     async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
-        Ok(self.agents.clone())
+        Ok(self.agents.lock().unwrap().clone())
     }
 
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
-        Ok(self.skills.clone())
+        Ok(self.skills.lock().unwrap().clone())
     }
 
     async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError> {
         self.skill_bodies
+            .lock()
+            .unwrap()
             .get(name)
             .cloned()
             .ok_or_else(|| CfgStoreError::UnknownReference("skill", name.to_string()))
     }
 
     async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
-        Ok(self.default_agent.clone())
+        Ok(self.default_agent.lock().unwrap().clone())
+    }
+
+    // --- Write methods ---
+
+    async fn create_provider(&self, _layer: Layer, item: Provider) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let mut providers = self.providers.lock().unwrap();
+        if providers.iter().any(|p| p.name == item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "provider",
+                name: item.name.clone(),
+                layer: _layer,
+            });
+        }
+        providers.push(item);
+        Ok(())
+    }
+
+    async fn update_provider(
+        &self,
+        _layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let mut providers = self.providers.lock().unwrap();
+        let provider = providers
+            .iter_mut()
+            .find(|p| p.name == name)
+            .ok_or_else(|| CfgStoreError::NotFound {
+                kind: "provider",
+                name: name.to_string(),
+                layer: _layer,
+            })?;
+        let Some(obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in obj {
+            match k.as_str() {
+                "type" => {
+                    let t = v.as_str().ok_or_else(|| {
+                        CfgStoreError::Validation("provider: 'type' must be a string".to_string())
+                    })?;
+                    provider.provider_type = match t {
+                        "ollama" => ProviderType::Ollama,
+                        "openai-compatible" => ProviderType::OpenaiCompatible,
+                        other => {
+                            return Err(CfgStoreError::Validation(format!(
+                                "provider: unknown provider_type '{other}'"
+                            )));
+                        }
+                    };
+                }
+                "endpoint" => {
+                    provider.endpoint = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation(
+                                "provider: 'endpoint' must be a string".to_string(),
+                            )
+                        })?
+                        .to_string();
+                }
+                "api_key" => {
+                    provider.api_key = if v.is_null() {
+                        None
+                    } else {
+                        Some(
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    CfgStoreError::Validation(
+                                        "provider: 'api_key' must be a string".to_string(),
+                                    )
+                                })?
+                                .to_string(),
+                        )
+                    };
+                }
+                _ => {} // clés inconnues ignorées
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_provider(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let mut providers = self.providers.lock().unwrap();
+        let idx = providers
+            .iter()
+            .position(|p| p.name == name)
+            .ok_or_else(|| CfgStoreError::NotFound {
+                kind: "provider",
+                name: name.to_string(),
+                layer: _layer,
+            })?;
+        providers.remove(idx);
+        Ok(())
+    }
+
+    async fn create_model(&self, _layer: Layer, item: ModelProfile) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let mut models = self.models.lock().unwrap();
+        if models.iter().any(|m| m.name == item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "model",
+                name: item.name.clone(),
+                layer: _layer,
+            });
+        }
+        models.push(item);
+        Ok(())
+    }
+
+    async fn update_model(
+        &self,
+        _layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let mut models = self.models.lock().unwrap();
+        let model =
+            models
+                .iter_mut()
+                .find(|m| m.name == name)
+                .ok_or_else(|| CfgStoreError::NotFound {
+                    kind: "model",
+                    name: name.to_string(),
+                    layer: _layer,
+                })?;
+        let Some(obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in obj {
+            match k.as_str() {
+                "provider" => {
+                    model.provider = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation(
+                                "model: 'provider' must be a string".to_string(),
+                            )
+                        })?
+                        .to_string();
+                }
+                "model" => {
+                    model.model = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation("model: 'model' must be a string".to_string())
+                        })?
+                        .to_string();
+                }
+                "temperature" => {
+                    model.temperature = if v.is_null() {
+                        None
+                    } else {
+                        match v.as_f64() {
+                            Some(n) => Some(n),
+                            None => {
+                                return Err(CfgStoreError::Validation(
+                                    "model: 'temperature' must be a number".to_string(),
+                                ));
+                            }
+                        }
+                    };
+                }
+                "max_tokens" => {
+                    model.max_tokens = if v.is_null() {
+                        None
+                    } else {
+                        match v.as_u64() {
+                            Some(n) => Some(n),
+                            None => {
+                                return Err(CfgStoreError::Validation(
+                                    "model: 'max_tokens' must be an integer".to_string(),
+                                ));
+                            }
+                        }
+                    };
+                }
+                "options" => {
+                    if v.is_null() {
+                        model.options.clear();
+                    } else {
+                        match v.as_object() {
+                            Some(o) => {
+                                model.options = o.clone();
+                            }
+                            None => {
+                                return Err(CfgStoreError::Validation(
+                                    "model: 'options' must be an object".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {} // clés inconnues ignorées
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_model(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let mut models = self.models.lock().unwrap();
+        let idx =
+            models
+                .iter()
+                .position(|m| m.name == name)
+                .ok_or_else(|| CfgStoreError::NotFound {
+                    kind: "model",
+                    name: name.to_string(),
+                    layer: _layer,
+                })?;
+        models.remove(idx);
+        Ok(())
+    }
+
+    async fn create_mcp_server(&self, _layer: Layer, item: McpServer) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let mut servers = self.mcp_servers.lock().unwrap();
+        if servers.iter().any(|s| s.name == item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "mcp_server",
+                name: item.name.clone(),
+                layer: _layer,
+            });
+        }
+        servers.push(item);
+        Ok(())
+    }
+
+    async fn update_mcp_server(
+        &self,
+        _layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let mut servers = self.mcp_servers.lock().unwrap();
+        let server =
+            servers
+                .iter_mut()
+                .find(|s| s.name == name)
+                .ok_or_else(|| CfgStoreError::NotFound {
+                    kind: "mcp_server",
+                    name: name.to_string(),
+                    layer: _layer,
+                })?;
+        let Some(obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in obj {
+            match k.as_str() {
+                "type" => {
+                    let t = v.as_str().ok_or_else(|| {
+                        CfgStoreError::Validation("mcp_server: 'type' must be a string".to_string())
+                    })?;
+                    server.transport = match t {
+                        "http-streamable" => McpTransport::HttpStreamable,
+                        "sse" => McpTransport::Sse,
+                        other => {
+                            return Err(CfgStoreError::Validation(format!(
+                                "mcp_server: unknown transport '{other}'"
+                            )));
+                        }
+                    };
+                }
+                "url" => {
+                    server.url = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation(
+                                "mcp_server: 'url' must be a string".to_string(),
+                            )
+                        })?
+                        .to_string();
+                }
+                "headers" => {
+                    if v.is_null() {
+                        server.headers.clear();
+                    } else {
+                        match v.as_object() {
+                            Some(o) => {
+                                server.headers.clear();
+                                for (hk, hv) in o {
+                                    if let Some(hv_str) = hv.as_str() {
+                                        server.headers.insert(hk.clone(), hv_str.to_string());
+                                    }
+                                    // valeurs non-string ignorées
+                                }
+                            }
+                            None => {
+                                return Err(CfgStoreError::Validation(
+                                    "mcp_server: 'headers' must be an object".to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+                _ => {} // clés inconnues ignorées
+            }
+        }
+        Ok(())
+    }
+
+    async fn delete_mcp_server(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let mut servers = self.mcp_servers.lock().unwrap();
+        let idx =
+            servers
+                .iter()
+                .position(|s| s.name == name)
+                .ok_or_else(|| CfgStoreError::NotFound {
+                    kind: "mcp_server",
+                    name: name.to_string(),
+                    layer: _layer,
+                })?;
+        servers.remove(idx);
+        Ok(())
+    }
+
+    async fn set_default_agent(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        *self.default_agent.lock().unwrap() = Some(name.to_string());
+        Ok(())
     }
 }
 
@@ -277,34 +618,34 @@ mod tests {
 
     fn sample_store() -> InMemoryConfigStore {
         InMemoryConfigStore {
-            providers: vec![Provider {
+            providers: Mutex::new(vec![Provider {
                 name: "ollama-local".to_string(),
                 provider_type: crate::domain::ProviderType::Ollama,
                 endpoint: "http://localhost:11434".to_string(),
                 api_key: None,
-            }],
-            models: vec![ModelProfile {
+            }]),
+            models: Mutex::new(vec![ModelProfile {
                 name: "qwen2.5".to_string(),
                 provider: "ollama".to_string(),
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            mcp_servers: vec![McpServer {
+            }]),
+            mcp_servers: Mutex::new(vec![McpServer {
                 name: "fs".to_string(),
                 transport: crate::domain::McpTransport::HttpStreamable,
                 url: "http://mcp-fs:3000".to_string(),
                 headers: Default::default(),
-            }],
-            toolsets: vec![Toolset {
+            }]),
+            toolsets: Mutex::new(vec![Toolset {
                 name: "default".to_string(),
                 description: None,
                 prompt: None,
                 local_tools: vec![],
                 mcp: vec![],
-            }],
-            agents: vec![Agent {
+            }]),
+            agents: Mutex::new(vec![Agent {
                 name: "build".to_string(),
                 description: Some("Build agent".to_string()),
                 mode: crate::domain::AgentMode::Primary,
@@ -312,17 +653,17 @@ mod tests {
                 toolsets: vec!["default".to_string()],
                 skills: crate::domain::SkillSelection::Auto,
                 system_prompt: "You are a build assistant.".to_string(),
-            }],
-            skills: vec![SkillMeta {
+            }]),
+            skills: Mutex::new(vec![SkillMeta {
                 name: "pdf".to_string(),
                 description: "PDF processing skill".to_string(),
-            }],
-            skill_bodies: {
+            }]),
+            skill_bodies: Mutex::new({
                 let mut m = HashMap::new();
                 m.insert("pdf".to_string(), "# PDF skill\n...".to_string());
                 m
-            },
-            default_agent: None,
+            }),
+            default_agent: Mutex::new(None),
         }
     }
 
@@ -349,7 +690,7 @@ mod tests {
     #[tokio::test]
     async fn get_provider_duplicate() {
         let store = InMemoryConfigStore {
-            providers: vec![
+            providers: Mutex::new(vec![
                 Provider {
                     name: "dup".to_string(),
                     provider_type: crate::domain::ProviderType::Ollama,
@@ -362,7 +703,7 @@ mod tests {
                     endpoint: "http://localhost:8080".to_string(),
                     api_key: None,
                 },
-            ],
+            ]),
             ..Default::default()
         };
         let result = store.get_provider("dup").await;
@@ -395,7 +736,7 @@ mod tests {
     #[tokio::test]
     async fn get_agent_duplicate() {
         let store = InMemoryConfigStore {
-            agents: vec![
+            agents: Mutex::new(vec![
                 Agent {
                     name: "dup".to_string(),
                     description: None,
@@ -414,7 +755,7 @@ mod tests {
                     skills: crate::domain::SkillSelection::Auto,
                     system_prompt: "prompt2".to_string(),
                 },
-            ],
+            ]),
             ..Default::default()
         };
         let result = store.get_agent("dup").await;
@@ -463,7 +804,7 @@ mod tests {
     #[tokio::test]
     async fn default_agent_some() {
         let store = InMemoryConfigStore {
-            default_agent: Some("build".to_string()),
+            default_agent: Mutex::new(Some("build".to_string())),
             ..Default::default()
         };
         let result = store.default_agent().await.unwrap();

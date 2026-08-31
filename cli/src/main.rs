@@ -326,10 +326,13 @@ async fn run_agent(cmd: agent::Commands) {
                 eprintln!("agent not found: {name}");
                 std::process::exit(1);
             }
-            config::set_default_agent(store.layers(), &name).unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            store
+                .set_default_agent(vanyline_cfgstore::store::Layer::Global, &name)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             println!("Default agent set to: {name}");
         }
         Show { name } => {

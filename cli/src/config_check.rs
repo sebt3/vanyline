@@ -132,6 +132,7 @@ fn check_duplicate_names<T>(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use std::sync::Mutex;
     use vanyline_cfgstore::CfgStoreError;
     use vanyline_lib::domain::{
         Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider,
@@ -141,27 +142,27 @@ mod tests {
 
     fn make_consistent_store() -> InMemoryConfigStore {
         InMemoryConfigStore {
-            providers: vec![Provider {
+            providers: Mutex::new(vec![Provider {
                 name: "ollama".to_string(),
                 provider_type: ProviderType::Ollama,
                 endpoint: "http://localhost:11434".to_string(),
                 api_key: None,
-            }],
-            models: vec![ModelProfile {
+            }]),
+            models: Mutex::new(vec![ModelProfile {
                 name: "qwen2.5".to_string(),
                 provider: "ollama".to_string(),
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            mcp_servers: vec![McpServer {
+            }]),
+            mcp_servers: Mutex::new(vec![McpServer {
                 name: "fs".to_string(),
                 transport: McpTransport::HttpStreamable,
                 url: "http://mcp-fs:3000".to_string(),
                 headers: Default::default(),
-            }],
-            toolsets: vec![Toolset {
+            }]),
+            toolsets: Mutex::new(vec![Toolset {
                 name: "default".to_string(),
                 description: None,
                 prompt: None,
@@ -170,8 +171,8 @@ mod tests {
                     server: "fs".to_string(),
                     tools: vec!["*".to_string()],
                 }],
-            }],
-            agents: vec![Agent {
+            }]),
+            agents: Mutex::new(vec![Agent {
                 name: "build".to_string(),
                 description: Some("Build agent".to_string()),
                 mode: AgentMode::Primary,
@@ -179,13 +180,13 @@ mod tests {
                 toolsets: vec!["default".to_string()],
                 skills: SkillSelection::Auto,
                 system_prompt: "Build helper.".to_string(),
-            }],
-            skills: vec![SkillMeta {
+            }]),
+            skills: Mutex::new(vec![SkillMeta {
                 name: "pdf".to_string(),
                 description: "PDF processing".to_string(),
-            }],
-            skill_bodies: Default::default(),
-            default_agent: Some("build".to_string()),
+            }]),
+            skill_bodies: Mutex::new(Default::default()),
+            default_agent: Mutex::new(Some("build".to_string())),
         }
     }
 
@@ -201,9 +202,9 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_model_provider_detected() {
-        let mut store = make_consistent_store();
+        let store = make_consistent_store();
         // Break the model -> provider reference
-        store.models[0].provider = "ghost".to_string();
+        store.models.lock().unwrap()[0].provider = "ghost".to_string();
         let problems = check_config(&store).await;
         assert!(!problems.is_empty());
         match &problems[0] {
@@ -218,8 +219,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_toolset_mcp_server_detected() {
-        let mut store = make_consistent_store();
-        store.toolsets[0].mcp[0].server = "ghost".to_string();
+        let store = make_consistent_store();
+        store.toolsets.lock().unwrap()[0].mcp[0].server = "ghost".to_string();
         let problems = check_config(&store).await;
         assert!(!problems.is_empty());
         match &problems[0] {
@@ -234,8 +235,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_agent_model_detected() {
-        let mut store = make_consistent_store();
-        store.agents[0].model = "ghost".to_string();
+        let store = make_consistent_store();
+        store.agents.lock().unwrap()[0].model = "ghost".to_string();
         let problems = check_config(&store).await;
         let model_err = problems
             .into_iter()
@@ -245,8 +246,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_agent_toolset_detected() {
-        let mut store = make_consistent_store();
-        store.agents[0].toolsets = vec!["ghost".to_string()];
+        let store = make_consistent_store();
+        store.agents.lock().unwrap()[0].toolsets = vec!["ghost".to_string()];
         let problems = check_config(&store).await;
         let ts_err = problems
             .into_iter()
@@ -256,8 +257,8 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_agent_named_skill_detected() {
-        let mut store = make_consistent_store();
-        store.agents[0].skills = SkillSelection::Named(vec!["ghost".to_string()]);
+        let store = make_consistent_store();
+        store.agents.lock().unwrap()[0].skills = SkillSelection::Named(vec!["ghost".to_string()]);
         let problems = check_config(&store).await;
         let sk_err = problems
             .into_iter()
@@ -268,7 +269,7 @@ mod tests {
     #[tokio::test]
     async fn agent_skills_auto_and_none_never_flagged() {
         let store = InMemoryConfigStore {
-            agents: vec![
+            agents: Mutex::new(vec![
                 Agent {
                     name: "auto-agent".to_string(),
                     description: None,
@@ -287,26 +288,26 @@ mod tests {
                     skills: SkillSelection::None,
                     system_prompt: "none".to_string(),
                 },
-            ],
-            models: vec![ModelProfile {
+            ]),
+            models: Mutex::new(vec![ModelProfile {
                 name: "qwen2.5".to_string(),
                 provider: "ollama".to_string(),
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            providers: vec![Provider {
+            }]),
+            providers: Mutex::new(vec![Provider {
                 name: "ollama".to_string(),
                 provider_type: ProviderType::Ollama,
                 endpoint: "http://localhost:11434".to_string(),
                 api_key: None,
-            }],
-            mcp_servers: vec![],
-            toolsets: vec![],
-            skills: vec![],
-            skill_bodies: Default::default(),
-            default_agent: None,
+            }]),
+            mcp_servers: Mutex::new(vec![]),
+            toolsets: Mutex::new(vec![]),
+            skills: Mutex::new(vec![]),
+            skill_bodies: Mutex::new(Default::default()),
+            default_agent: Mutex::new(None),
         };
         let problems = check_config(&store).await;
         for p in &problems {
@@ -322,8 +323,8 @@ mod tests {
     #[tokio::test]
     async fn unknown_default_agent_detected() {
         let store = InMemoryConfigStore {
-            agents: Vec::new(),
-            default_agent: Some("ghost".to_string()),
+            agents: Mutex::new(Vec::new()),
+            default_agent: Mutex::new(Some("ghost".to_string())),
             ..Default::default()
         };
         let problems = check_config(&store).await;
@@ -341,8 +342,8 @@ mod tests {
         let store = make_consistent_store();
         let problems_check = check_config(&store).await;
 
-        let mut store2 = store;
-        store2.default_agent = None;
+        let store2 = store;
+        *store2.default_agent.lock().unwrap() = None;
         let problems_none = check_config(&store2).await;
 
         // Without default_agent, there should be fewer or same problems
@@ -364,7 +365,7 @@ mod tests {
     #[tokio::test]
     async fn duplicate_name_detected() {
         let store = InMemoryConfigStore {
-            agents: vec![
+            agents: Mutex::new(vec![
                 Agent {
                     name: "dup".to_string(),
                     description: None,
@@ -383,7 +384,7 @@ mod tests {
                     skills: SkillSelection::Auto,
                     system_prompt: "p2".to_string(),
                 },
-            ],
+            ]),
             ..Default::default()
         };
         let problems = check_config(&store).await;
@@ -429,18 +430,18 @@ mod tests {
     #[tokio::test]
     async fn partial_store_error_does_not_block_other_checks() {
         let inner = InMemoryConfigStore {
-            models: vec![ModelProfile {
+            models: Mutex::new(vec![ModelProfile {
                 name: "ghost-model".to_string(),
                 provider: "ghost".to_string(), // unknown provider
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            providers: vec![],
-            mcp_servers: vec![],
-            toolsets: vec![],
-            agents: vec![Agent {
+            }]),
+            providers: Mutex::new(vec![]),
+            mcp_servers: Mutex::new(vec![]),
+            toolsets: Mutex::new(vec![]),
+            agents: Mutex::new(vec![Agent {
                 name: "build".to_string(),
                 description: None,
                 mode: AgentMode::Primary,
@@ -448,13 +449,13 @@ mod tests {
                 toolsets: vec![],
                 skills: SkillSelection::Named(vec!["ghost".to_string()]), // refs skills
                 system_prompt: "prompt".to_string(),
-            }],
-            skills: vec![SkillMeta {
+            }]),
+            skills: Mutex::new(vec![SkillMeta {
                 name: "pdf".to_string(),
                 description: "PDF".to_string(),
-            }],
-            skill_bodies: Default::default(),
-            default_agent: None,
+            }]),
+            skill_bodies: Mutex::new(Default::default()),
+            default_agent: Mutex::new(None),
         };
         let store = ErrSkillsStore { inner };
         let problems = check_config(&store).await;

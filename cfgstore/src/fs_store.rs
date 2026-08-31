@@ -6,8 +6,28 @@ use crate::domain::{
     SkillMeta, SkillSelection, Toolset,
 };
 use crate::error::CfgStoreError;
-use crate::layers::Layers;
-use crate::store::ConfigStore;
+use crate::layers::{Layers, RawConfigFile, load_config_layer};
+use crate::store::{ConfigStore, Layer};
+
+/// Contrainte anti-traversal : `name` devient une clé de map dans `config.yaml`
+/// (et, tâche 2, un nom de fichier/répertoire). `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
+/// longueur ≤ 64, et rejette explicitement `..` (sous-chaîne), `/`, `\`, un `.`
+/// ou `..` seul, tout chemin absolu (couvert par le premier caractère
+/// alphanumérique + le rejet de `/` et `\`).
+pub fn validate_name(name: &str) -> Result<(), CfgStoreError> {
+    let valid = !name.is_empty()
+        && name.len() <= 64
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && !name.contains("..");
+    if valid {
+        Ok(())
+    } else {
+        Err(CfgStoreError::InvalidName(name.to_string()))
+    }
+}
 
 /// Implémente `ConfigStore` sur les deux couches YAML (`Layers`, tâche 1).
 /// Store actif de toutes les commandes CLI depuis la tâche 04b (cutover) —
@@ -27,6 +47,33 @@ impl FsConfigStore {
     #[allow(dead_code)]
     pub const fn layers(&self) -> &Layers {
         &self.layers
+    }
+
+    // --- Helpers privés pour les méthodes d'écriture ---
+
+    fn layer_dir(&self, layer: Layer) -> Result<std::path::PathBuf, CfgStoreError> {
+        match layer {
+            Layer::Global => Ok(self.layers.global_dir.clone()),
+            Layer::Workspace => {
+                self.layers.workspace_dir.clone().ok_or_else(|| {
+                    CfgStoreError::Config("no workspace layer configured".to_string())
+                })
+            }
+        }
+    }
+
+    async fn write_config_layer(
+        &self,
+        dir: &std::path::Path,
+        raw: RawConfigFile,
+    ) -> Result<(), CfgStoreError> {
+        std::fs::create_dir_all(dir).map_err(CfgStoreError::from)?;
+        let path = dir.join("config.yaml");
+        let content = yaml_serde::to_string(&raw).map_err(|e| {
+            CfgStoreError::WriteError(format!("Failed to serialize {}: {}", path.display(), e))
+        })?;
+        std::fs::write(&path, content).map_err(CfgStoreError::from)?;
+        Ok(())
     }
 }
 
@@ -290,6 +337,298 @@ impl ConfigStore for FsConfigStore {
                 CfgStoreError::Config("defaults.agent must be a string".to_string())
             }),
         }
+    }
+
+    // --- Write methods --- create/update/delete providers/models/mcp_servers
+
+    async fn create_provider(&self, layer: Layer, item: Provider) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        if raw.providers.contains_key(&item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "provider",
+                name: item.name.clone(),
+                layer,
+            });
+        }
+        let mut json_entry = serde_json::to_value(&item)
+            .map_err(|e| CfgStoreError::WriteError(format!("provider '{}': {e}", item.name)))?;
+        json_entry
+            .as_object_mut()
+            .ok_or_else(|| {
+                CfgStoreError::WriteError(format!("provider '{}': not an object", item.name))
+            })?
+            .remove("name");
+        let entry = yaml_serde::to_value(&json_entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("provider '{}': {e}", item.name)))?;
+        raw.providers.insert(item.name.clone(), entry);
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn update_provider(
+        &self,
+        layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        let entry = raw
+            .providers
+            .get(name)
+            .ok_or_else(|| CfgStoreError::NotFound {
+                kind: "provider",
+                name: name.to_string(),
+                layer,
+            })?
+            .clone();
+        let mut json_entry = serde_json::to_value(&entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("provider '{name}': {e}")))?;
+        let obj = json_entry.as_object_mut().ok_or_else(|| {
+            CfgStoreError::Config(format!(
+                "provider '{name}': config.yaml entry is not a mapping"
+            ))
+        })?;
+        let Some(patch_obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in patch_obj {
+            if !matches!(k.as_str(), "type" | "endpoint" | "api_key") {
+                continue;
+            }
+            if v.is_null() {
+                obj.remove(k);
+            } else {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        // Validation du type énuméré après patch
+        if let Some(v) = obj.get("type") {
+            let t = v.as_str().ok_or_else(|| {
+                CfgStoreError::Validation(format!("provider '{name}': 'type' must be a string"))
+            })?;
+            if !matches!(t, "ollama" | "openai-compatible") {
+                return Err(CfgStoreError::Validation(format!(
+                    "provider '{name}': unknown provider_type '{t}'"
+                )));
+            }
+        }
+        let entry = yaml_serde::to_value(&json_entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("provider '{name}': {e}")))?;
+        raw.providers.insert(name.to_string(), entry);
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn delete_provider(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        if raw.providers.remove(name).is_none() {
+            return Err(CfgStoreError::NotFound {
+                kind: "provider",
+                name: name.to_string(),
+                layer,
+            });
+        }
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn create_model(&self, layer: Layer, item: ModelProfile) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        if raw.models.contains_key(&item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "model",
+                name: item.name.clone(),
+                layer,
+            });
+        }
+        let mut json_entry = serde_json::to_value(&item)
+            .map_err(|e| CfgStoreError::WriteError(format!("model '{}': {e}", item.name)))?;
+        json_entry
+            .as_object_mut()
+            .ok_or_else(|| {
+                CfgStoreError::WriteError(format!("model '{}': not an object", item.name))
+            })?
+            .remove("name");
+        let entry = yaml_serde::to_value(&json_entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("model '{}': {e}", item.name)))?;
+        raw.models.insert(item.name.clone(), entry);
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn update_model(
+        &self,
+        layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        let entry = raw
+            .models
+            .get(name)
+            .ok_or_else(|| CfgStoreError::NotFound {
+                kind: "model",
+                name: name.to_string(),
+                layer,
+            })?
+            .clone();
+        let mut json_entry = serde_json::to_value(&entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("model '{name}': {e}")))?;
+        let obj = json_entry.as_object_mut().ok_or_else(|| {
+            CfgStoreError::Config(format!(
+                "model '{name}': config.yaml entry is not a mapping"
+            ))
+        })?;
+        let Some(patch_obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in patch_obj {
+            if !matches!(
+                k.as_str(),
+                "provider" | "model" | "temperature" | "max_tokens" | "options"
+            ) {
+                continue;
+            }
+            if v.is_null() {
+                obj.remove(k);
+            } else {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        let entry = yaml_serde::to_value(&json_entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("model '{name}': {e}")))?;
+        raw.models.insert(name.to_string(), entry);
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn delete_model(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        if raw.models.remove(name).is_none() {
+            return Err(CfgStoreError::NotFound {
+                kind: "model",
+                name: name.to_string(),
+                layer,
+            });
+        }
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn create_mcp_server(&self, layer: Layer, item: McpServer) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        if raw.mcp.contains_key(&item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "mcp_server",
+                name: item.name.clone(),
+                layer,
+            });
+        }
+        let mut json_entry = serde_json::to_value(&item)
+            .map_err(|e| CfgStoreError::WriteError(format!("mcp server '{}': {e}", item.name)))?;
+        json_entry
+            .as_object_mut()
+            .ok_or_else(|| {
+                CfgStoreError::WriteError(format!("mcp server '{}': not an object", item.name))
+            })?
+            .remove("name");
+        let entry = yaml_serde::to_value(&json_entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("mcp server '{}': {e}", item.name)))?;
+        raw.mcp.insert(item.name.clone(), entry);
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn update_mcp_server(
+        &self,
+        layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        let entry = raw
+            .mcp
+            .get(name)
+            .ok_or_else(|| CfgStoreError::NotFound {
+                kind: "mcp_server",
+                name: name.to_string(),
+                layer,
+            })?
+            .clone();
+        let mut json_entry = serde_json::to_value(&entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("mcp server '{name}': {e}")))?;
+        let obj = json_entry.as_object_mut().ok_or_else(|| {
+            CfgStoreError::Config(format!(
+                "mcp server '{name}': config.yaml entry is not a mapping"
+            ))
+        })?;
+        let Some(patch_obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in patch_obj {
+            if !matches!(k.as_str(), "type" | "url" | "headers") {
+                continue;
+            }
+            if v.is_null() {
+                obj.remove(k);
+            } else {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        // Validation de l'enum MCP transport après patch
+        if let Some(v) = obj.get("type") {
+            let t = v.as_str().ok_or_else(|| {
+                CfgStoreError::Validation(format!("mcp server '{name}': 'type' must be a string"))
+            })?;
+            if !matches!(t, "http-streamable" | "sse") {
+                return Err(CfgStoreError::Validation(format!(
+                    "mcp server '{name}': unknown transport '{t}'"
+                )));
+            }
+        }
+        let entry = yaml_serde::to_value(&json_entry)
+            .map_err(|e| CfgStoreError::WriteError(format!("mcp server '{name}': {e}")))?;
+        raw.mcp.insert(name.to_string(), entry);
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn delete_mcp_server(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        if raw.mcp.remove(name).is_none() {
+            return Err(CfgStoreError::NotFound {
+                kind: "mcp_server",
+                name: name.to_string(),
+                layer,
+            });
+        }
+        self.write_config_layer(&dir, raw).await
+    }
+
+    async fn set_default_agent(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        let dir = self.layer_dir(layer)?;
+        let mut raw = load_config_layer(&dir)?;
+        raw.defaults.insert(
+            "agent".to_string(),
+            yaml_serde::Value::String(name.to_string()),
+        );
+        self.write_config_layer(&dir, raw).await
     }
 }
 
@@ -859,5 +1198,521 @@ Tu es un agent d'implémentation.",
             }
             other => panic!("Expected ConfigError, got {other:?}"),
         }
+    }
+
+    // --- validate_name (anti-traversal) ---
+
+    #[test]
+    fn validate_name_accepts_valid() {
+        let valid = ["a", "foo", "a.b", "a-b", "a_b", "a1", "a1b2c3", "a.b-c_d"];
+        for n in valid {
+            let r = validate_name(n);
+            assert!(r.is_ok(), "validate_name({n}) should be Ok");
+        }
+    }
+
+    #[test]
+    fn validate_name_rejects_path_traversal() {
+        // "../evil", "a/b", "..", "/abs", "a\b"
+        let bad = ["../evil", "a/b", "..", "/abs", "a\\b"];
+        for n in bad {
+            let r = validate_name(n);
+            assert!(r.is_err(), "validate_name({n}) should be Err");
+        }
+    }
+
+    #[test]
+    fn validate_name_rejects_empty_and_too_long() {
+        assert!(validate_name("").is_err());
+        assert!(validate_name("a").is_ok());
+        let long = "a".repeat(65);
+        assert!(validate_name(&long).is_err());
+        let err = validate_name(&"a".repeat(65)).unwrap_err();
+        assert!(matches!(err, CfgStoreError::InvalidName(_)));
+    }
+
+    #[test]
+    fn validate_name_rejects_leading_dot() {
+        assert!(validate_name(".hidden").is_err());
+    }
+
+    #[test]
+    fn validate_name_no_fs_side_effect_on_invalid() {
+        let tmp = tempdir().unwrap();
+        // These should all fail and create nothing
+        for n in &["../evil", "a/b", ".."] {
+            validate_name(n).unwrap_err();
+        }
+        // Nothing should have been created
+        let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "validate_name must not create any files/dirs"
+        );
+    }
+
+    // --- create_provider — full cycle ---
+
+    #[tokio::test]
+    async fn create_provider_full_cycle() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        // create
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "strix".to_string(),
+                    provider_type: ProviderType::OpenaiCompatible,
+                    endpoint: "http://localhost:11434".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // list contains it
+        let list = store.list_providers().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "strix");
+
+        // update (partial patch: modify endpoint only, type preserved)
+        store
+            .update_provider(
+                Layer::Global,
+                "strix",
+                serde_json::json!({"endpoint": "http://localhost:12345"}),
+            )
+            .await
+            .unwrap();
+
+        let list = store.list_providers().await.unwrap();
+        assert_eq!(list[0].endpoint, "http://localhost:12345");
+        assert_eq!(list[0].provider_type, ProviderType::OpenaiCompatible);
+
+        // delete
+        store.delete_provider(Layer::Global, "strix").await.unwrap();
+        let list = store.list_providers().await.unwrap();
+        assert_eq!(list.len(), 0);
+    }
+
+    // --- create_provider duplicate → NameConflict ---
+
+    #[tokio::test]
+    async fn create_provider_name_conflict() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "strix".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://x".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "strix".to_string(),
+                    provider_type: ProviderType::OpenaiCompatible,
+                    endpoint: "http://y".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        match err {
+            CfgStoreError::NameConflict {
+                kind,
+                name,
+                layer: _l,
+            } => {
+                assert_eq!(kind, "provider");
+                assert_eq!(name, "strix");
+            }
+            other => panic!("Expected NameConflict, got {other:?}"),
+        }
+    }
+
+    // --- update_provider / delete_provider on non-existent → NotFound ---
+
+    #[tokio::test]
+    async fn update_nonexistent_provider_not_found() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .update_provider(
+                Layer::Global,
+                "nonexistent",
+                serde_json::json!({"type": "ollama"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            &err,
+            CfgStoreError::NotFound {
+                kind: "provider",
+                ..
+            }
+        ));
+
+        let err = store
+            .delete_provider(Layer::Global, "nonexistent")
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            &err,
+            CfgStoreError::NotFound {
+                kind: "provider",
+                ..
+            }
+        ));
+    }
+
+    // --- update_provider with null deletes field ---
+
+    #[tokio::test]
+    async fn update_provider_null_deletes_field() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        // Créer avec api_key
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "p1".to_string(),
+                    provider_type: ProviderType::OpenaiCompatible,
+                    endpoint: "http://x".to_string(),
+                    api_key: Some("key123".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Supprimer api_key
+        store
+            .update_provider(Layer::Global, "p1", serde_json::json!({"api_key": null}))
+            .await
+            .unwrap();
+
+        let list = store.list_providers().await.unwrap();
+        assert_eq!(list[0].name, "p1");
+        assert_eq!(list[0].api_key, None);
+    }
+
+    // --- provider.type unknown enum → Validation ---
+
+    #[tokio::test]
+    async fn update_provider_unknown_type_validation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "p1".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://x".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_provider(
+                Layer::Global,
+                "p1",
+                serde_json::json!({"type": "carrier-pigeon"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // --- mcp.type unknown enum → Validation ---
+
+    #[tokio::test]
+    async fn update_mcp_unknown_type_validation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_mcp_server(
+                Layer::Global,
+                McpServer {
+                    name: "m1".to_string(),
+                    transport: McpTransport::HttpStreamable,
+                    url: "http://x".to_string(),
+                    headers: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_mcp_server(Layer::Global, "m1", serde_json::json!({"type": "unknown"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // --- layer isolation: Workspace vs Global ---
+
+    #[tokio::test]
+    async fn write_isolates_workspace_vs_global() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+
+        // Write provider to workspace
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_provider(
+                Layer::Workspace,
+                Provider {
+                    name: "ws-only".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://ws".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        // Verify: workspace has it, global doesn't
+        let ws_raw = load_config_layer(workspace_dir.path()).unwrap();
+        assert!(ws_raw.providers.contains_key("ws-only"));
+
+        let global_raw = load_config_layer(global_dir.path()).unwrap();
+        assert!(!global_raw.providers.contains_key("ws-only"));
+    }
+
+    // --- layer: Workspace without workspace_dir → Config ---
+
+    #[tokio::test]
+    async fn workspace_layer_without_workspace_dir_errors() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .create_provider(
+                Layer::Workspace,
+                Provider {
+                    name: "test".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://x".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Config(msg) if msg.contains("workspace")));
+    }
+
+    // --- Preserve other maps on write ---
+
+    #[tokio::test]
+    async fn create_preserves_other_maps() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        // Ecrire un initial avec des données dans plusieurs maps
+        write_config_yaml(
+            tmp.path(),
+            "providers:\n  strix:\n    type: openai-compatible\n    endpoint: http://global:11434\nmodels:\n  qwen-code:\n    provider: ollama\n    model: qwen2.5\ndefaults:\n  agent: build\n",
+        );
+
+        // Créer un nouveau provider
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "new-p".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://new".to_string(),
+                    api_key: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let raw = load_config_layer(tmp.path()).unwrap();
+        // L'ancien provider existe toujours
+        assert!(raw.providers.contains_key("strix"));
+        // Le nouveau aussi
+        assert!(raw.providers.contains_key("new-p"));
+        // Les models sont préservés
+        assert!(raw.models.contains_key("qwen-code"));
+        // Les defaults sont préservés
+        assert_eq!(
+            raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("build".into()))
+        );
+    }
+
+    // --- set_default_agent: moved tests from cli/src/config.rs ---
+
+    #[tokio::test]
+    async fn set_default_agent_writes_new_file() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.keep();
+        let layers = Layers {
+            global_dir: path.clone(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .set_default_agent(Layer::Global, "build")
+            .await
+            .unwrap();
+        let raw = load_config_layer(&path).unwrap();
+        assert_eq!(
+            raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("build".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn set_default_agent_preserves_existing_content() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        let config_path = path.join("config.yaml");
+        std::fs::write(
+            &config_path,
+            "providers:\n  strix:\n    type: openai-compatible\n    endpoint: http://localhost\nmodels:\n  qwen-code:\n    provider: ollama\n    model: qwen2.5\n",
+        )
+        .unwrap();
+        let layers = Layers {
+            global_dir: path.clone(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .set_default_agent(Layer::Global, "build")
+            .await
+            .unwrap();
+        let raw = load_config_layer(&path).unwrap();
+        assert!(raw.providers.contains_key("strix"));
+        assert!(raw.models.contains_key("qwen-code"));
+        assert_eq!(
+            raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("build".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn set_default_agent_overwrites_existing_default() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().to_path_buf();
+        let config_path = path.join("config.yaml");
+        std::fs::write(&config_path, "defaults:\n  agent: old\n").unwrap();
+        let layers = Layers {
+            global_dir: path.clone(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store.set_default_agent(Layer::Global, "new").await.unwrap();
+        let raw = load_config_layer(&path).unwrap();
+        let agent = raw.defaults.get("agent").unwrap();
+        assert_eq!(agent.as_str().unwrap(), "new");
+    }
+
+    #[tokio::test]
+    async fn set_default_agent_creates_missing_global_dir() {
+        let tmp = tempdir().unwrap();
+        let non_existent = tmp.path().join("does-not-exist-yet");
+        assert!(!non_existent.exists());
+        let layers = Layers {
+            global_dir: non_existent.to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .set_default_agent(Layer::Global, "build")
+            .await
+            .unwrap();
+        assert!(non_existent.is_dir());
+        let raw = load_config_layer(&non_existent).unwrap();
+        assert_eq!(
+            raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("build".into()))
+        );
+    }
+
+    #[tokio::test]
+    async fn set_default_agent_workspace_layer() {
+        let tmp = tempdir().unwrap();
+        let ws = tmp.path().join("workspace");
+        std::fs::create_dir_all(&ws).unwrap();
+        let path = tmp.path().to_path_buf();
+        let layers = Layers {
+            global_dir: path.clone(),
+            workspace_dir: Some(ws.clone()),
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .set_default_agent(Layer::Workspace, "debug")
+            .await
+            .unwrap();
+        // Vérifier que le workspace a le default
+        let ws_raw = load_config_layer(&ws).unwrap();
+        assert_eq!(
+            ws_raw.defaults.get("agent"),
+            Some(&yaml_serde::Value::String("debug".into()))
+        );
+        // Le global ne doit pas être modifié
+        let global_raw = load_config_layer(&path).unwrap();
+        assert_eq!(global_raw.defaults.get("agent"), None);
     }
 }

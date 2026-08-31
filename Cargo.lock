@@ -6209,7 +6209,6 @@ dependencies = [
  "vanyline-crds",
  "vanyline-lib",
  "vanyline-tools",
- "yaml_serde",
 ]
 
 [[package]]

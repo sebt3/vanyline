@@ -177,11 +177,11 @@ mod tests {
     #[tokio::test]
     async fn call_success_returns_body_and_emits_skill_loaded() {
         let store = Arc::new(InMemoryConfigStore {
-            skill_bodies: {
+            skill_bodies: Mutex::new({
                 let mut m = std::collections::HashMap::new();
                 m.insert("pdf".to_string(), "# PDF skill\ncontent".to_string());
                 m
-            },
+            }),
             ..Default::default()
         });
         let sink = Arc::new(RecordingSink::new());
@@ -212,11 +212,11 @@ mod tests {
     #[tokio::test]
     async fn call_skill_absent_from_selection_returns_error_no_emit() {
         let store = Arc::new(InMemoryConfigStore {
-            skill_bodies: {
+            skill_bodies: Mutex::new({
                 let mut m = std::collections::HashMap::new();
                 m.insert("pdf".to_string(), "# PDF skill\ncontent".to_string());
                 m
-            },
+            }),
             ..Default::default()
         });
         let sink = Arc::new(RecordingSink::new());
@@ -234,11 +234,11 @@ mod tests {
     #[tokio::test]
     async fn call_unknown_skill_returns_error_no_emit() {
         let store = Arc::new(InMemoryConfigStore {
-            skill_bodies: {
+            skill_bodies: Mutex::new({
                 let mut m = std::collections::HashMap::new();
                 m.insert("pdf".to_string(), "# PDF skill\ncontent".to_string());
                 m
-            },
+            }),
             ..Default::default()
         });
         let sink = Arc::new(RecordingSink::new());

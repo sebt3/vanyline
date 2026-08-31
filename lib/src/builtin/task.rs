@@ -350,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn call_depth_exceeded_rejected() {
         let store = Arc::new(InMemoryConfigStore {
-            agents: vec![Agent {
+            agents: Mutex::new(vec![Agent {
                 name: "sub".to_string(),
                 description: None,
                 mode: AgentMode::Subagent,
@@ -358,7 +358,7 @@ mod tests {
                 toolsets: vec![],
                 skills: Default::default(),
                 system_prompt: "prompt".to_string(),
-            }],
+            }]),
             ..Default::default()
         });
         let sink = Arc::new(RecordingSink::new());
@@ -385,7 +385,7 @@ mod tests {
     #[tokio::test]
     async fn call_unknown_agent_rejected() {
         let store = Arc::new(InMemoryConfigStore {
-            agents: vec![Agent {
+            agents: Mutex::new(vec![Agent {
                 name: "other".to_string(),
                 description: None,
                 mode: AgentMode::Subagent,
@@ -393,7 +393,7 @@ mod tests {
                 toolsets: vec![],
                 skills: Default::default(),
                 system_prompt: "prompt".to_string(),
-            }],
+            }]),
             ..Default::default()
         });
         let sink = Arc::new(RecordingSink::new());
@@ -420,7 +420,7 @@ mod tests {
     #[tokio::test]
     async fn call_primary_mode_rejected() {
         let store = Arc::new(InMemoryConfigStore {
-            agents: vec![Agent {
+            agents: Mutex::new(vec![Agent {
                 name: "main".to_string(),
                 description: None,
                 mode: AgentMode::Primary,
@@ -428,7 +428,7 @@ mod tests {
                 toolsets: vec![],
                 skills: Default::default(),
                 system_prompt: "prompt".to_string(),
-            }],
+            }]),
             ..Default::default()
         });
         let sink = Arc::new(RecordingSink::new());
