@@ -14,31 +14,31 @@ pub async fn check_config(store: &dyn ConfigStore) -> Vec<VnyError> {
     let mut problems = Vec::new();
 
     let providers = store.list_providers().await.unwrap_or_else(|e| {
-        problems.push(e);
+        problems.push(e.into());
         Vec::new()
     });
     let models = store.list_models().await.unwrap_or_else(|e| {
-        problems.push(e);
+        problems.push(e.into());
         Vec::new()
     });
     let mcp_servers = store.list_mcp_servers().await.unwrap_or_else(|e| {
-        problems.push(e);
+        problems.push(e.into());
         Vec::new()
     });
     let toolsets = store.list_toolsets().await.unwrap_or_else(|e| {
-        problems.push(e);
+        problems.push(e.into());
         Vec::new()
     });
     let agents = store.list_agents().await.unwrap_or_else(|e| {
-        problems.push(e);
+        problems.push(e.into());
         Vec::new()
     });
     let skills = store.list_skills().await.unwrap_or_else(|e| {
-        problems.push(e);
+        problems.push(e.into());
         Vec::new()
     });
     let default_agent = store.default_agent().await.unwrap_or_else(|e| {
-        problems.push(e);
+        problems.push(e.into());
         None
     });
 
@@ -132,6 +132,7 @@ fn check_duplicate_names<T>(
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use vanyline_cfgstore::CfgStoreError;
     use vanyline_lib::domain::{
         Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider,
         ProviderType, SkillMeta, SkillSelection, Toolset,
@@ -399,28 +400,28 @@ mod tests {
 
     #[async_trait]
     impl ConfigStore for ErrSkillsStore {
-        async fn list_providers(&self) -> Result<Vec<Provider>, VnyError> {
+        async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
             self.inner.list_providers().await
         }
-        async fn list_models(&self) -> Result<Vec<ModelProfile>, VnyError> {
+        async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
             self.inner.list_models().await
         }
-        async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
+        async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
             self.inner.list_mcp_servers().await
         }
-        async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError> {
+        async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
             self.inner.list_toolsets().await
         }
-        async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
+        async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
             self.inner.list_agents().await
         }
-        async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
-            Err(VnyError::ConfigError("boom".to_string()))
+        async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
+            Err(CfgStoreError::Config("boom".to_string()))
         }
-        async fn load_skill(&self, _name: &str) -> Result<String, VnyError> {
+        async fn load_skill(&self, _name: &str) -> Result<String, CfgStoreError> {
             self.inner.load_skill(_name).await
         }
-        async fn default_agent(&self) -> Result<Option<String>, VnyError> {
+        async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
             self.inner.default_agent().await
         }
     }

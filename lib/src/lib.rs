@@ -15,7 +15,7 @@ pub fn encode_git_path(path: &str) -> String {
 }
 
 pub mod builtin;
-pub mod domain;
+pub use vanyline_cfgstore::{domain, store};
 mod error;
 pub mod event;
 #[cfg(feature = "k8s")]
@@ -23,7 +23,6 @@ pub mod k8s;
 pub mod model;
 pub mod prefixed_mcp;
 pub mod session;
-pub mod store;
 mod types;
 
 pub use error::*;

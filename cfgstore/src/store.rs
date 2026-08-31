@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use async_trait::async_trait;
 
 use crate::domain::{Agent, McpServer, ModelProfile, Provider, SkillMeta, Toolset};
-use crate::error::VnyError;
+use crate::error::CfgStoreError;
 
 /// Permet à `resolve_by_name` de lire le nom d'un item du domaine sans que
 /// chaque appelant ne réécrive `.name.clone()`. Implémenté ici (pas dans
@@ -49,14 +49,14 @@ fn resolve_by_name<T: HasName>(
     items: Vec<T>,
     kind: &'static str,
     name: &str,
-) -> Result<T, VnyError> {
+) -> Result<T, CfgStoreError> {
     let mut iter = items.into_iter().filter(|it| it.name() == name);
     let first = iter.next();
     match first {
-        None => Err(VnyError::UnknownReference(kind, name.to_string())),
+        None => Err(CfgStoreError::UnknownReference(kind, name.to_string())),
         Some(item) => {
             if iter.next().is_some() {
-                Err(VnyError::DuplicateName(kind, name.to_string()))
+                Err(CfgStoreError::DuplicateName(kind, name.to_string()))
             } else {
                 Ok(item)
             }
@@ -64,38 +64,145 @@ fn resolve_by_name<T: HasName>(
     }
 }
 
+/// Couche ciblée par une écriture. La résolution "workspace si dispo sinon
+/// global" est faite par l'appelant (handler RPC) — le trait prend un Layer
+/// explicite. InMemoryConfigStore ignore ce paramètre (jeu unique en mémoire).
+pub enum Layer {
+    Global,
+    Workspace,
+}
+
 #[async_trait]
 pub trait ConfigStore: Send + Sync {
-    async fn list_providers(&self) -> Result<Vec<Provider>, VnyError>;
-    async fn list_models(&self) -> Result<Vec<ModelProfile>, VnyError>;
-    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError>;
-    async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError>;
-    async fn list_agents(&self) -> Result<Vec<Agent>, VnyError>;
+    // --- Read methods ---
+    async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError>;
+    async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError>;
+    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError>;
+    async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError>;
+    async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError>;
     /// Index léger : name + description uniquement (lazy-loading de la liste).
-    async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError>;
+    async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError>;
     /// Corps du skill, chargé à la demande uniquement. Erreur
     /// `UnknownReference("skill", name)` si absent.
-    async fn load_skill(&self, name: &str) -> Result<String, VnyError>;
-    async fn default_agent(&self) -> Result<Option<String>, VnyError>;
+    async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError>;
+    async fn default_agent(&self) -> Result<Option<String>, CfgStoreError>;
 
     /// Méthodes défaut — résolution par nom, filtrent `list_x()`.
-    async fn get_provider(&self, name: &str) -> Result<Provider, VnyError> {
+    async fn get_provider(&self, name: &str) -> Result<Provider, CfgStoreError> {
         resolve_by_name(self.list_providers().await?, "provider", name)
     }
-    async fn get_model(&self, name: &str) -> Result<ModelProfile, VnyError> {
+    async fn get_model(&self, name: &str) -> Result<ModelProfile, CfgStoreError> {
         resolve_by_name(self.list_models().await?, "model", name)
     }
-    async fn get_mcp_server(&self, name: &str) -> Result<McpServer, VnyError> {
+    async fn get_mcp_server(&self, name: &str) -> Result<McpServer, CfgStoreError> {
         resolve_by_name(self.list_mcp_servers().await?, "mcp_server", name)
     }
-    async fn get_toolset(&self, name: &str) -> Result<Toolset, VnyError> {
+    async fn get_toolset(&self, name: &str) -> Result<Toolset, CfgStoreError> {
         resolve_by_name(self.list_toolsets().await?, "toolset", name)
     }
-    async fn get_agent(&self, name: &str) -> Result<Agent, VnyError> {
+    async fn get_agent(&self, name: &str) -> Result<Agent, CfgStoreError> {
         resolve_by_name(self.list_agents().await?, "agent", name)
     }
-    async fn get_skill(&self, name: &str) -> Result<SkillMeta, VnyError> {
+    async fn get_skill(&self, name: &str) -> Result<SkillMeta, CfgStoreError> {
         resolve_by_name(self.list_skills().await?, "skill", name)
+    }
+
+    // --- Write method signatures (défaut CfgStoreError::ReadOnly dans cette tâche) ---
+    async fn create_provider(&self, _layer: Layer, _item: Provider) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn update_provider(
+        &self,
+        _layer: Layer,
+        _name: &str,
+        _patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn delete_provider(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn create_model(&self, _layer: Layer, _item: ModelProfile) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn update_model(
+        &self,
+        _layer: Layer,
+        _name: &str,
+        _patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn delete_model(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn create_mcp_server(
+        &self,
+        _layer: Layer,
+        _item: McpServer,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn update_mcp_server(
+        &self,
+        _layer: Layer,
+        _name: &str,
+        _patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn delete_mcp_server(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn create_toolset(&self, _layer: Layer, _item: Toolset) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn update_toolset(
+        &self,
+        _layer: Layer,
+        _name: &str,
+        _patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn delete_toolset(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn create_agent(&self, _layer: Layer, _item: Agent) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn update_agent(
+        &self,
+        _layer: Layer,
+        _name: &str,
+        _patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn delete_agent(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn create_skill(
+        &self,
+        _layer: Layer,
+        _meta: SkillMeta,
+        _body: String,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn update_skill(
+        &self,
+        _layer: Layer,
+        _name: &str,
+        _patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn delete_skill(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
+    }
+    async fn set_default_agent(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
+        Err(CfgStoreError::ReadOnly)
     }
 }
 
@@ -127,38 +234,38 @@ impl InMemoryConfigStore {
 
 #[async_trait]
 impl ConfigStore for InMemoryConfigStore {
-    async fn list_providers(&self) -> Result<Vec<Provider>, VnyError> {
+    async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
         Ok(self.providers.clone())
     }
 
-    async fn list_models(&self) -> Result<Vec<ModelProfile>, VnyError> {
+    async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
         Ok(self.models.clone())
     }
 
-    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
+    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
         Ok(self.mcp_servers.clone())
     }
 
-    async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError> {
+    async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
         Ok(self.toolsets.clone())
     }
 
-    async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
+    async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
         Ok(self.agents.clone())
     }
 
-    async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
+    async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
         Ok(self.skills.clone())
     }
 
-    async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
+    async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError> {
         self.skill_bodies
             .get(name)
             .cloned()
-            .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))
+            .ok_or_else(|| CfgStoreError::UnknownReference("skill", name.to_string()))
     }
 
-    async fn default_agent(&self) -> Result<Option<String>, VnyError> {
+    async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
         Ok(self.default_agent.clone())
     }
 }

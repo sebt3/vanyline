@@ -13,6 +13,7 @@ path = "src/main.rs"
 vanyline-lib = { path = "../lib", features = ["k8s"] }
 vanyline-tools = { path = "../tools" }
 vanyline-crds = { path = "../crds" }
+vanyline-cfgstore = { path = "../cfgstore" }
 kube = { version = "4", default-features = false, features = ["client"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }

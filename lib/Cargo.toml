@@ -12,6 +12,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+vanyline-cfgstore = { path = "../cfgstore" }
 ts-rs = { version = "12", features = ["serde-json-impl"], optional = true }
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }

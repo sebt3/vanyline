@@ -68,6 +68,12 @@ impl From<vanyline_lib::VnyError> for AppError {
     }
 }
 
+impl From<vanyline_cfgstore::CfgStoreError> for AppError {
+    fn from(e: vanyline_cfgstore::CfgStoreError) -> Self {
+        Self::InternalError(e.to_string())
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {

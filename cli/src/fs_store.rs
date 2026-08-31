@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use serde::Deserialize;
 
-use vanyline_lib::VnyError;
+use vanyline_cfgstore::CfgStoreError;
 use vanyline_lib::domain::{
     Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
     SkillMeta, SkillSelection, Toolset,
@@ -30,6 +30,12 @@ impl FsConfigStore {
         &self.layers
     }
 }
+
+fn layers_err(e: VnyError) -> CfgStoreError {
+    CfgStoreError::Config(e.to_string())
+}
+
+use vanyline_lib::VnyError;
 
 // --- Formes brutes d'une entrée de map nommée dans config.yaml : mêmes
 // champs que le type du domaine correspondant, MOINS `name` (porté par la
@@ -74,15 +80,15 @@ use std::path::Path;
 /// Sépare le frontmatter YAML (entre deux lignes `---` exactes) du corps
 /// markdown. La première ligne du fichier DOIT être exactement `---` ; la
 /// fermeture est la prochaine ligne exactement `---`. Le corps est tout ce
-/// qui suit la ligne de fermeture. Erreur `ConfigError` (avec `path` dans le
-/// message) si la première ligne n'est pas `---` ou si aucune fermeture
-/// n'est trouvée. Pas de crate — extraction manuelle (cf. design).
-fn split_frontmatter(path: &Path, content: &str) -> Result<(String, String), VnyError> {
+/// qui suit la ligne de fermeture. Erreur `CfgStoreError::Config` (avec `path`
+/// dans le message) si la première ligne n'est pas `---` ou si aucune
+/// fermeture n'est trouvée. Pas de crate — extraction manuelle (cf. design).
+fn split_frontmatter(path: &Path, content: &str) -> Result<(String, String), CfgStoreError> {
     let mut lines = content.lines();
     match lines.next() {
         Some("---") => {}
         _ => {
-            return Err(VnyError::ConfigError(format!(
+            return Err(CfgStoreError::Config(format!(
                 "{}: must start with '---' frontmatter delimiter",
                 path.display()
             )));
@@ -98,7 +104,7 @@ fn split_frontmatter(path: &Path, content: &str) -> Result<(String, String), Vny
         frontmatter.push(line);
     }
     if !closed {
-        return Err(VnyError::ConfigError(format!(
+        return Err(CfgStoreError::Config(format!(
             "{}: missing closing '---' for frontmatter",
             path.display()
         )));
@@ -124,11 +130,11 @@ const fn default_agent_mode() -> AgentMode {
     AgentMode::Primary
 }
 
-fn parse_agent_file(name: &str, path: &Path) -> Result<Agent, VnyError> {
-    let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+fn parse_agent_file(name: &str, path: &Path) -> Result<Agent, CfgStoreError> {
+    let content = std::fs::read_to_string(path).map_err(CfgStoreError::from)?;
     let (frontmatter, body) = split_frontmatter(path, &content)?;
     let raw: RawAgentFrontmatter = yaml_serde::from_str(&frontmatter)
-        .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
+        .map_err(|e| CfgStoreError::Config(format!("{}: {}", path.display(), e)))?;
     Ok(Agent {
         name: name.to_string(),
         description: raw.description,
@@ -166,10 +172,10 @@ struct RawSkillFrontmatter {
     // le nom du répertoire, porté séparément par `resolve_skill_files`).
 }
 
-fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, VnyError> {
-    let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, CfgStoreError> {
+    let content = std::fs::read_to_string(path).map_err(CfgStoreError::from)?;
     let raw: RawToolsetFile = yaml_serde::from_str(&content)
-        .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
+        .map_err(|e| CfgStoreError::Config(format!("{}: {}", path.display(), e)))?;
     Ok(Toolset {
         name: name.to_string(),
         description: raw.description,
@@ -186,12 +192,12 @@ fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, VnyError> {
 
 #[async_trait]
 impl ConfigStore for FsConfigStore {
-    async fn list_providers(&self) -> Result<Vec<Provider>, VnyError> {
-        let merged = self.layers.load_merged_config()?;
+    async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
+        let merged = self.layers.load_merged_config().map_err(layers_err)?;
         let mut result = Vec::new();
         for (name, value) in merged.providers {
             let raw: RawProviderEntry = yaml_serde::from_value(value)
-                .map_err(|e| VnyError::ConfigError(format!("provider '{name}': {e}")))?;
+                .map_err(|e| CfgStoreError::Config(format!("provider '{name}': {e}")))?;
             result.push(Provider {
                 name,
                 provider_type: raw.provider_type,
@@ -202,12 +208,12 @@ impl ConfigStore for FsConfigStore {
         Ok(result)
     }
 
-    async fn list_models(&self) -> Result<Vec<ModelProfile>, VnyError> {
-        let merged = self.layers.load_merged_config()?;
+    async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
+        let merged = self.layers.load_merged_config().map_err(layers_err)?;
         let mut result = Vec::new();
         for (name, value) in merged.models {
             let raw: RawModelEntry = yaml_serde::from_value(value)
-                .map_err(|e| VnyError::ConfigError(format!("model '{name}': {e}")))?;
+                .map_err(|e| CfgStoreError::Config(format!("model '{name}': {e}")))?;
             result.push(ModelProfile {
                 name,
                 provider: raw.provider,
@@ -220,12 +226,12 @@ impl ConfigStore for FsConfigStore {
         Ok(result)
     }
 
-    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
-        let merged = self.layers.load_merged_config()?;
+    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
+        let merged = self.layers.load_merged_config().map_err(layers_err)?;
         let mut result = Vec::new();
         for (name, value) in merged.mcp {
             let raw: RawMcpEntry = yaml_serde::from_value(value)
-                .map_err(|e| VnyError::ConfigError(format!("mcp server '{name}': {e}")))?;
+                .map_err(|e| CfgStoreError::Config(format!("mcp server '{name}': {e}")))?;
             result.push(McpServer {
                 name,
                 transport: raw.transport,
@@ -237,8 +243,11 @@ impl ConfigStore for FsConfigStore {
     }
 
     /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
-    async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError> {
-        let files = self.layers.resolve_named_files("toolsets", "yaml")?;
+    async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
+        let files = self
+            .layers
+            .resolve_named_files("toolsets", "yaml")
+            .map_err(layers_err)?;
         files
             .iter()
             .map(|(name, path)| parse_toolset_file(name, path))
@@ -246,8 +255,11 @@ impl ConfigStore for FsConfigStore {
     }
 
     /// Implémenté en tâche 02b (agents/*.md, toolsets/*.yaml).
-    async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
-        let files = self.layers.resolve_named_files("agents", "md")?;
+    async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
+        let files = self
+            .layers
+            .resolve_named_files("agents", "md")
+            .map_err(layers_err)?;
         files
             .iter()
             .map(|(name, path)| parse_agent_file(name, path))
@@ -255,15 +267,15 @@ impl ConfigStore for FsConfigStore {
     }
 
     /// Résolu en tâche 02c (skills/<name>/SKILL.md).
-    async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
-        let files = self.layers.resolve_skill_files()?;
+    async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
+        let files = self.layers.resolve_skill_files().map_err(layers_err)?;
         files
             .iter()
             .map(|(name, path)| {
-                let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+                let content = std::fs::read_to_string(path).map_err(CfgStoreError::from)?;
                 let (frontmatter, _body) = split_frontmatter(path, &content)?;
                 let raw: RawSkillFrontmatter = yaml_serde::from_str(&frontmatter)
-                    .map_err(|e| VnyError::ConfigError(format!("{}: {}", path.display(), e)))?;
+                    .map_err(|e| CfgStoreError::Config(format!("{}: {}", path.display(), e)))?;
                 Ok(SkillMeta {
                     name: name.clone(),
                     description: raw.description,
@@ -273,22 +285,22 @@ impl ConfigStore for FsConfigStore {
     }
 
     /// Résolu en tâche 02c.
-    async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
-        let files = self.layers.resolve_skill_files()?;
+    async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError> {
+        let files = self.layers.resolve_skill_files().map_err(layers_err)?;
         let path = files
             .get(name)
-            .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))?;
-        let content = std::fs::read_to_string(path).map_err(VnyError::from)?;
+            .ok_or_else(|| CfgStoreError::UnknownReference("skill", name.to_string()))?;
+        let content = std::fs::read_to_string(path).map_err(CfgStoreError::from)?;
         let (_frontmatter, body) = split_frontmatter(path, &content)?;
         Ok(body.trim().to_string())
     }
 
-    async fn default_agent(&self) -> Result<Option<String>, VnyError> {
-        let merged = self.layers.load_merged_config()?;
+    async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
+        let merged = self.layers.load_merged_config().map_err(layers_err)?;
         match merged.defaults.get("agent") {
             None => Ok(None),
             Some(value) => value.as_str().map(|s| Some(s.to_string())).ok_or_else(|| {
-                VnyError::ConfigError("defaults.agent must be a string".to_string())
+                CfgStoreError::Config("defaults.agent must be a string".to_string())
             }),
         }
     }
@@ -428,7 +440,7 @@ mod tests {
         let store = FsConfigStore::new(layers);
         let result = store.default_agent().await;
         match result {
-            Err(VnyError::ConfigError(msg)) => {
+            Err(CfgStoreError::Config(msg)) => {
                 assert!(msg.contains("must be a string"));
             }
             _ => panic!("Expected ConfigError"),
@@ -481,7 +493,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         match err {
-            VnyError::ConfigError(msg) => {
+            CfgStoreError::Config(msg) => {
                 assert!(msg.contains("strix"));
             }
             _ => panic!("Expected ConfigError, got {err:?}"),
@@ -561,7 +573,7 @@ Tu es un agent d'implémentation.",
         let store = FsConfigStore::new(layers);
         let result = store.list_agents().await;
         match result {
-            Err(VnyError::ConfigError(msg)) => {
+            Err(CfgStoreError::Config(msg)) => {
                 assert!(msg.contains("bad.md"));
                 assert!(msg.contains("must start with '---'"));
             }
@@ -583,7 +595,7 @@ Tu es un agent d'implémentation.",
         let store = FsConfigStore::new(layers);
         let result = store.list_agents().await;
         match result {
-            Err(VnyError::ConfigError(msg)) => {
+            Err(CfgStoreError::Config(msg)) => {
                 assert!(msg.contains("bad.md"));
                 assert!(msg.contains("missing closing '---'"));
             }
@@ -771,7 +783,7 @@ Tu es un agent d'implémentation.",
         let store = FsConfigStore::new(layers);
         let result = store.load_skill("nope").await;
         match result {
-            Err(VnyError::UnknownReference(kind, name)) => {
+            Err(CfgStoreError::UnknownReference(kind, name)) => {
                 assert_eq!(kind, "skill");
                 assert_eq!(name, "nope");
             }
@@ -855,7 +867,7 @@ Tu es un agent d'implémentation.",
         let store = FsConfigStore::new(layers);
         let result = store.list_skills().await;
         match result {
-            Err(VnyError::ConfigError(msg)) => {
+            Err(CfgStoreError::Config(msg)) => {
                 assert!(msg.contains("SKILL.md") || msg.contains("bad"));
             }
             other => panic!("Expected ConfigError, got {other:?}"),

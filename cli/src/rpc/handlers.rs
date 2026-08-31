@@ -17,6 +17,7 @@ use vanyline_lib::session::{SessionContext, run_agent_turn};
 use vanyline_lib::store::ConfigStore;
 
 use crate::store;
+use vanyline_cfgstore::CfgStoreError;
 
 pub struct ServerState {
     pub initialized: bool,
@@ -68,12 +69,12 @@ fn resolve_layers(workspace: Option<&str>) -> crate::config::Layers {
     crate::config::Layers::discover(&root)
 }
 
-/// Convertit une opération de config (`Result<T, VnyError>`) en réponse
+/// Convertit une opération de config (`Result<T, CfgStoreError>`) en réponse
 /// JSON-RPC : `Ok` → succès (sérielisé en Value), `Err` → erreur
 /// `VNL-RPC-006` ("config read error", message = format!("{}", err)).
 fn config_error_response<T: serde::Serialize>(
     id: Value,
-    result: Result<T, vanyline_lib::VnyError>,
+    result: Result<T, CfgStoreError>,
 ) -> JsonRpcResponse {
     match result {
         Ok(v) => {
@@ -255,7 +256,7 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
 /// convertit le résultat en réponse JSON-RPC sérialisée.
 async fn handle_config_list<T: serde::Serialize>(
     id: Value,
-    action: impl std::future::Future<Output = Result<T, vanyline_lib::VnyError>>,
+    action: impl std::future::Future<Output = Result<T, CfgStoreError>>,
 ) -> String {
     let result = action.await;
     serde_json::to_string(&config_error_response(id, result)).expect("serialize config response")
