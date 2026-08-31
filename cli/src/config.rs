@@ -103,10 +103,6 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use vanyline_cfgstore::layers::{
-        config_entry_source, file_entry_source, list_layer_files, list_layer_skill_dirs,
-        load_config_layer, merge_config_layers, merge_layer_files, skill_entry_source,
-    };
 
     // --- discover_workspace_root ---
 
