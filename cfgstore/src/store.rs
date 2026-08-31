@@ -1,5 +1,3 @@
-#![allow(clippy::unwrap_used)]
-
 use std::collections::HashMap;
 use std::sync::Mutex;
 
@@ -242,47 +240,75 @@ impl InMemoryConfigStore {
 #[async_trait]
 impl ConfigStore for InMemoryConfigStore {
     async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
-        Ok(self.providers.lock().unwrap().clone())
+        Ok(self
+            .providers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
-        Ok(self.models.lock().unwrap().clone())
+        Ok(self
+            .models
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
-        Ok(self.mcp_servers.lock().unwrap().clone())
+        Ok(self
+            .mcp_servers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
-        Ok(self.toolsets.lock().unwrap().clone())
+        Ok(self
+            .toolsets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
-        Ok(self.agents.lock().unwrap().clone())
+        Ok(self
+            .agents
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
-        Ok(self.skills.lock().unwrap().clone())
+        Ok(self
+            .skills
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError> {
         self.skill_bodies
             .lock()
-            .unwrap()
+            .unwrap_or_else(|e| e.into_inner())
             .get(name)
             .cloned()
             .ok_or_else(|| CfgStoreError::UnknownReference("skill", name.to_string()))
     }
 
     async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
-        Ok(self.default_agent.lock().unwrap().clone())
+        Ok(self
+            .default_agent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone())
     }
 
     // --- Write methods ---
 
     async fn create_provider(&self, _layer: Layer, item: Provider) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut providers = self.providers.lock().unwrap();
+        let mut providers = self.providers.lock().unwrap_or_else(|e| e.into_inner());
         if providers.iter().any(|p| p.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "provider",
@@ -301,7 +327,7 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut providers = self.providers.lock().unwrap();
+        let mut providers = self.providers.lock().unwrap_or_else(|e| e.into_inner());
         let provider = providers
             .iter_mut()
             .find(|p| p.name == name)
@@ -364,7 +390,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_provider(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut providers = self.providers.lock().unwrap();
+        let mut providers = self.providers.lock().unwrap_or_else(|e| e.into_inner());
         let idx = providers
             .iter()
             .position(|p| p.name == name)
@@ -379,7 +405,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn create_model(&self, _layer: Layer, item: ModelProfile) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut models = self.models.lock().unwrap();
+        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
         if models.iter().any(|m| m.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "model",
@@ -398,7 +424,7 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut models = self.models.lock().unwrap();
+        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
         let model =
             models
                 .iter_mut()
@@ -485,7 +511,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_model(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut models = self.models.lock().unwrap();
+        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
         let idx =
             models
                 .iter()
@@ -501,7 +527,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn create_mcp_server(&self, _layer: Layer, item: McpServer) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut servers = self.mcp_servers.lock().unwrap();
+        let mut servers = self.mcp_servers.lock().unwrap_or_else(|e| e.into_inner());
         if servers.iter().any(|s| s.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "mcp_server",
@@ -520,7 +546,7 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut servers = self.mcp_servers.lock().unwrap();
+        let mut servers = self.mcp_servers.lock().unwrap_or_else(|e| e.into_inner());
         let server =
             servers
                 .iter_mut()
@@ -591,7 +617,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_mcp_server(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut servers = self.mcp_servers.lock().unwrap();
+        let mut servers = self.mcp_servers.lock().unwrap_or_else(|e| e.into_inner());
         let idx =
             servers
                 .iter()
@@ -606,7 +632,7 @@ impl ConfigStore for InMemoryConfigStore {
     }
 
     async fn set_default_agent(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
-        *self.default_agent.lock().unwrap() = Some(name.to_string());
+        *self.default_agent.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
         Ok(())
     }
 }
