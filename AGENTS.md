@@ -3,7 +3,8 @@
 ## Nature du projet
 
 Environnement de développement cloud-native, multi-utilisateur, piloté par l'IA pour Kubernetes.
-Monorepo. Langages : Rust (app, sandbox, controller) + TypeScript/Vue 3 (frontend).
+Monorepo. Langages : Rust (app, sandbox, controller) + TypeScript/Vue 3 (frontend +
+packages partagés `@vanyline/protocol` et `@vanyline/ui`).
 Licence : BSD-3.
 
 ## Architecture
@@ -152,7 +153,9 @@ Convention : jamais `println!`, `dbg!`, `console.log` dans les sources.
 
 | Composant | Langage | Dépendances clés |
 |-----------|---------|-----------------|
-| frontend | TypeScript | Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI |
+| frontend | TypeScript | Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI, `@vanyline/ui`, `@vanyline/protocol` |
+| `packages/protocol` (`@vanyline/protocol`) | TypeScript pur | types Rust↔TS (`ChatEvent` ts-rs, `config-domain.ts` miroir de `lib/src/domain.rs`), enveloppes RPC, `RpcConnection` — zéro dépendance UI |
+| `packages/ui` (`@vanyline/ui`) | TypeScript | Vue 3, `@nuxt/ui`, `reka-ui`, `@ai-sdk/vue` — composants chat + 6 écrans config + `ConfigShell`, agnostiques du backend (ports `ChatTransport`/`ChatBackend`/`ConfigRepo` injectés) |
 | app | Rust | axum, sqlx/PostgreSQL, `openidconnect`, `vanyline-lib` (+ feature `k8s`) |
 | sandbox | Rust | axum, `portable-pty`, `vanyline-tools` |
 | controller | Rust | kube-rs, `vanyline-crds` |
@@ -162,9 +165,14 @@ Convention : jamais `println!`, `dbg!`, `console.log` dans les sources.
 ```
 vanyline/
 ├── Cargo.toml          # workspace Cargo racine
-├── package.json        # workspace npm racine
-├── frontend/           # shell IDE Vue 3
+├── package.json        # workspace npm racine (workspaces: frontend, packages/*)
+├── frontend/           # shell IDE Vue 3 (dépend de @vanyline/ui + @vanyline/protocol)
 │   └── src/
+├── packages/
+│   ├── protocol/       # @vanyline/protocol — types Rust↔TS, RPC, RpcConnection
+│   │   └── src/
+│   └── ui/             # @vanyline/ui — composants chat + config, agnostiques du backend
+│       └── src/
 ├── app/                # backend Rust
 │   ├── Cargo.toml      # sous-workspace
 │   └── src/
@@ -203,13 +211,20 @@ autres : absent ici avant 2026-08-22, ce qui a laissé passer du code non format
 permission déjà accordée à Cadence (`.opencode/agents/cadence.md`) — l'instruction manquait,
 pas la permission.
 
-### Frontend
+### Frontend + packages
 
 ```bash
-npm run build                  # vue-tsc -b && vite build
-npm run test                   # vitest run
-npm run check                  # vue-tsc --noEmit — vérification TypeScript/Vue
+# packages partagés d'abord (le frontend en dépend via alias source)
+npm run check --workspace=@vanyline/protocol && npm run test --workspace=@vanyline/protocol
+npm run check --workspace=@vanyline/ui       && npm run test --workspace=@vanyline/ui
+
+npm run build --workspace=frontend   # vue-tsc -b && vite build
+npm run test  --workspace=frontend   # vitest run
+npm run check --workspace=frontend   # vue-tsc --noEmit — vérification TypeScript/Vue
 ```
+
+Job CI `tsrs` (types ts-rs à jour) : `cargo test -p vanyline-lib --features ts-rs`
+puis `git diff --exit-code -- packages/protocol/src/generated/`.
 
 ## Conventions
 
