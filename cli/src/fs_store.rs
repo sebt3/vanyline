@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use serde::Deserialize;
 
 use vanyline_cfgstore::CfgStoreError;
+use vanyline_lib::VnyError;
 use vanyline_lib::domain::{
     Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
     SkillMeta, SkillSelection, Toolset,
@@ -34,8 +35,6 @@ impl FsConfigStore {
 fn layers_err(e: VnyError) -> CfgStoreError {
     CfgStoreError::Config(e.to_string())
 }
-
-use vanyline_lib::VnyError;
 
 // --- Formes brutes d'une entrée de map nommée dans config.yaml : mêmes
 // champs que le type du domaine correspondant, MOINS `name` (porté par la
