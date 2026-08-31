@@ -219,14 +219,14 @@ fn selected_servers<'a>(
 
 /// Variante de `connect_mcp_server_inner` (existant, inchangé) pour le type
 /// `domain::McpServer` (transport = enum `McpTransport`, plus de match sur une
-/// String magique). `McpTransport` n'a aujourd'hui qu'une variante
-/// (`HttpStreamable`) — un `match` exhaustif à un bras est volontaire : le jour
-/// où une variante `Sse` est ajoutée à l'enum, le compilateur forcera à traiter
-/// ce cas ici plutôt que de l'oublier silencieusement.
+/// String magique). `McpTransport::Sse` est accepté en configuration mais pas
+/// encore connectable ici : `VnyError::SseNotImplemented` remonte alors en
+/// `ToolUnavailable` via `connect_mcp_servers_selected` (pas de crash de tour).
 async fn connect_domain_mcp_server_inner(
     server: &DomainMcpServer,
 ) -> Result<(Vec<Tool>, ServerSink, McpRunningService), VnyError> {
     match server.transport {
+        McpTransport::Sse => Err(VnyError::SseNotImplemented),
         McpTransport::HttpStreamable => {
             let mut headers = std::collections::HashMap::new();
             for (name, value) in &server.headers {

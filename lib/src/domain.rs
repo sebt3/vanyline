@@ -85,6 +85,11 @@ pub struct McpServer {
 #[serde(rename_all = "kebab-case")]
 pub enum McpTransport {
     HttpStreamable,
+    /// Transport SSE — accepté en configuration (le miroir TS
+    /// `@vanyline/protocol/config-domain.ts` l'expose), mais la connexion
+    /// n'est pas encore implémentée dans `prefixed_mcp` : un serveur SSE
+    /// sélectionné par un toolset remonte `VNL-MCP-004` en `ToolUnavailable`.
+    Sse,
 }
 
 /// Groupe cohérent d'outils + fragment de prompt système.
@@ -247,9 +252,15 @@ mod tests {
             serde_json::to_value(McpTransport::HttpStreamable).unwrap(),
             serde_json::json!("http-streamable")
         );
+        assert_eq!(
+            serde_json::to_value(McpTransport::Sse).unwrap(),
+            serde_json::json!("sse")
+        );
 
         let transport: McpTransport = serde_json::from_str("\"http-streamable\"").unwrap();
         assert_eq!(transport, McpTransport::HttpStreamable);
+        let sse: McpTransport = serde_json::from_str("\"sse\"").unwrap();
+        assert_eq!(sse, McpTransport::Sse);
     }
 
     #[test]
@@ -390,5 +401,147 @@ mod tests {
         let e3 = VnyError::UnknownReference("model", "qwen-code".to_string());
         let msg3 = format!("{}", e3);
         assert!(msg3.contains("VNL-CFG-003"));
+    }
+
+    // ---------------------------------------------------------------------------
+    // wire_shape — fige les clés JSON pour la conformité config-domain.ts
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn provider_wire_shape() {
+        let p = Provider {
+            name: "p".into(),
+            provider_type: ProviderType::Ollama,
+            endpoint: "http://x".into(),
+            api_key: None,
+        };
+        let v = serde_json::to_value(&p).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["endpoint", "name", "type"]); // api_key absent (skip_if None)
+    }
+
+    #[test]
+    fn model_profile_wire_shape() {
+        // Full profile so all optional fields are present
+        let mut options = serde_json::Map::new();
+        options.insert("num_ctx".into(), serde_json::json!(65536));
+        let mp = ModelProfile {
+            name: "m".into(),
+            provider: "ollama".into(),
+            model: "qwen".into(),
+            temperature: Some(0.7),
+            max_tokens: Some(4096),
+            options,
+        };
+        let v = serde_json::to_value(&mp).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "max_tokens",
+                "model",
+                "name",
+                "options",
+                "provider",
+                "temperature"
+            ]
+        );
+    }
+
+    #[test]
+    fn mcp_server_wire_shape() {
+        let s = McpServer {
+            name: "s".into(),
+            transport: McpTransport::HttpStreamable,
+            url: "http://x".into(),
+            headers: BTreeMap::new(),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["headers", "name", "type", "url"]);
+    }
+
+    #[test]
+    fn toolset_wire_shape() {
+        // `description`/`prompt` sont `skip_serializing_if = "Option::is_none"` :
+        // instance pleine pour figer la forme maximale.
+        let t = Toolset {
+            name: "t".into(),
+            description: Some("d".into()),
+            prompt: Some("p".into()),
+            local_tools: vec!["bash".into()],
+            mcp: vec![McpSelection {
+                server: "s".into(),
+                tools: vec!["x".into()],
+            }],
+        };
+        let v = serde_json::to_value(&t).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["description", "local_tools", "mcp", "name", "prompt"]
+        );
+
+        // Instance minimale : description/prompt absents du wire.
+        let bare = Toolset {
+            name: "t".into(),
+            description: None,
+            prompt: None,
+            local_tools: Vec::new(),
+            mcp: Vec::new(),
+        };
+        let bv = serde_json::to_value(&bare).unwrap();
+        let mut bare_keys: Vec<_> = bv.as_object().unwrap().keys().map(String::as_str).collect();
+        bare_keys.sort_unstable();
+        assert_eq!(bare_keys, ["local_tools", "mcp", "name"]);
+    }
+
+    #[test]
+    fn agent_wire_shape() {
+        let a = Agent {
+            name: "a".into(),
+            description: None,
+            mode: AgentMode::Primary,
+            model: "m".into(),
+            toolsets: Vec::new(),
+            skills: SkillSelection::Named(vec!["s".into()]),
+            system_prompt: "p".into(),
+        };
+        let v = serde_json::to_value(&a).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            [
+                "mode",
+                "model",
+                "name",
+                "skills",
+                "system_prompt",
+                "toolsets"
+            ]
+        );
+    }
+
+    #[test]
+    fn skill_meta_wire_shape() {
+        let s = SkillMeta {
+            name: "s".into(),
+            description: "d".into(),
+        };
+        let v = serde_json::to_value(&s).unwrap();
+        let obj = v.as_object().unwrap();
+        let mut keys: Vec<_> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["description", "name"]);
     }
 }

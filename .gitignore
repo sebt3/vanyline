@@ -3,6 +3,8 @@ target/
 frontend/dist/
 frontend/auto-imports.d.ts
 frontend/components.d.ts
+packages/ui/auto-imports.d.ts
+packages/ui/components.d.ts
 .tasks/
 coverage.json
 coverage-summary.txt

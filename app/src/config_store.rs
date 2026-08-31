@@ -39,18 +39,21 @@ fn headers_from_json(v: &serde_json::Value) -> BTreeMap<String, String> {
     }
 }
 
-/// `None` si `row.server_type` n'est pas `http-streamable` (àm logger par l'appelant,
-/// PAS ici — cette fonction est pure, pas de `tracing::warn!` dedans).
+/// `None` si `row.server_type` est inconnu (à logger par l'appelant, PAS ici —
+/// fonction pure). `sse` mappe sur `McpTransport::Sse` : accepté, mais la
+/// connexion remonte `VNL-MCP-004` en `ToolUnavailable` (cf. `prefixed_mcp`).
 fn domain_mcp_server(row: &DbMcpServer) -> Option<McpServer> {
-    match row.server_type.as_str() {
-        "http-streamable" => Some(McpServer {
-            name: row.name.clone(),
-            transport: McpTransport::HttpStreamable,
-            url: row.url.clone(),
-            headers: headers_from_json(&row.headers),
-        }),
-        _ => None,
-    }
+    let transport = match row.server_type.as_str() {
+        "http-streamable" => McpTransport::HttpStreamable,
+        "sse" => McpTransport::Sse,
+        _ => return None,
+    };
+    Some(McpServer {
+        name: row.name.clone(),
+        transport,
+        url: row.url.clone(),
+        headers: headers_from_json(&row.headers),
+    })
 }
 
 fn domain_provider(row: &DbLlmProvider) -> Result<Provider, VnyError> {
@@ -419,11 +422,25 @@ mod tests {
 
     // 4. domain_mcp_server_sse_skipped
     #[test]
-    fn domain_mcp_server_sse_skipped() {
+    fn domain_mcp_server_sse_mapped() {
         let row = DbMcpServer {
             id: 1,
             name: "sse-srv".to_string(),
             server_type: "sse".to_string(),
+            url: "http://localhost:9090".to_string(),
+            headers: serde_json::json!({}),
+            available_tools: serde_json::json!([]),
+        };
+        let server = domain_mcp_server(&row).expect("sse mappé, plus ignoré");
+        assert_eq!(server.transport, McpTransport::Sse);
+    }
+
+    #[test]
+    fn domain_mcp_server_unknown_type_skipped() {
+        let row = DbMcpServer {
+            id: 1,
+            name: "bogus".to_string(),
+            server_type: "carrier-pigeon".to_string(),
             url: "http://localhost:9090".to_string(),
             headers: serde_json::json!({}),
             available_tools: serde_json::json!([]),

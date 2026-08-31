@@ -9,7 +9,8 @@ import {
   MenubarSeparator,
 } from 'reka-ui';
 import { useRoute, useRouter } from 'vue-router';
-import { startAgentSession, useIdeSession } from '../composables/useIdeSession';
+import { httpChatBackend } from '../api/httpChatBackend';
+import { useIdeSession } from '../composables/useIdeSession';
 
 interface Item {
   label: string;
@@ -32,7 +33,7 @@ interface Sep {
 
 const router = useRouter();
 const route = useRoute();
-const { ideActions } = useIdeSession();
+const { ideActions, activeConversationId } = useIdeSession();
 
 // Uniquement les entrées réellement câblées (un `action` géré par onSelect) —
 // pas d'items décoratifs qui ne font rien au clic. Menu "Aide" supprimé en
@@ -92,7 +93,15 @@ function onSelect(item: Item) {
     }
     case 'start-agent-session': {
       const sandboxName = route.params.sandboxName;
-      if (typeof sandboxName === 'string') void startAgentSession(sandboxName);
+      if (typeof sandboxName === 'string') {
+        void httpChatBackend(sandboxName).createConversation()
+          .then((id) => {
+            activeConversationId.value = id;
+          })
+          .catch(() => {
+            // l'impl a posé sessionError (affiché par IdeShell.vue)
+          });
+      }
       break;
     }
     case 'open-explorer':

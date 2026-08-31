@@ -1,8 +1,10 @@
 import { createMemoryHistory, createRouter } from 'vue-router';
 import { mount } from '@vue/test-utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { ChatBackend } from '@vanyline/ui';
 import Chat from './Chat.vue';
 import { clearIdeActions, useIdeSession } from '../../composables/useIdeSession';
+import { httpChatBackend } from '../../api/httpChatBackend';
 
 // La sandbox courante est fournie par `IdeShell.vue` via provide/inject
 // (même pattern qu'Explorer.vue) — sans elle Chat.vue ne peut ni filtrer
@@ -45,6 +47,16 @@ vi.mock('../../api/chatWs', () => ({
   }),
 }));
 
+const mockBackend = vi.mocked<ChatBackend>({
+  listConversations: vi.fn(async () => []),
+  loadMessages: vi.fn(async () => []),
+  createConversation: vi.fn(async () => '42'),
+});
+
+vi.mock('../../api/httpChatBackend', () => ({
+  httpChatBackend: vi.fn(() => mockBackend),
+}));
+
 const { fetchSpy } = vi.hoisted(() => ({ fetchSpy: vi.fn() }));
 vi.stubGlobal('fetch', fetchSpy);
 
@@ -75,6 +87,10 @@ describe('Chat.vue — session réelle', () => {
   beforeEach(() => {
     wsInstances.length = 0;
     fetchSpy.mockReset();
+    mockBackend.listConversations.mockReset();
+    mockBackend.loadMessages.mockReset();
+    mockBackend.createConversation.mockReset();
+    vi.mocked(httpChatBackend).mockClear();
     clearIdeActions();
   });
 
@@ -101,10 +117,7 @@ describe('Chat.vue — session réelle', () => {
     await flush();
     await flush();
 
-    expect(fetchSpy).toHaveBeenCalledWith(
-      '/api/conversations/conv-1/messages',
-      expect.any(Object),
-    );
+    expect(mockBackend.loadMessages).toHaveBeenCalledWith('conv-1');
     // Contrairement à l'ancien vue-advanced-chat, le WS n'est plus ouvert
     // par avance à l'activation de la conversation — le transport AI SDK
     // (`VanylineChatTransport`) n'ouvre une connexion qu'au moment d'un
@@ -119,15 +132,16 @@ describe('Chat.vue — session réelle', () => {
     const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
     await flush();
 
-    expect(fetchSpy).toHaveBeenCalledWith(
-      '/api/conversations?sandbox_name=my-sandbox',
-      expect.any(Object),
-    );
+    // Le wrapper injecte sandbox-name et construit httpChatBackend avec elle :
+    // la liste est scopée à la sandbox courante.
+    expect(vi.mocked(httpChatBackend)).toHaveBeenCalledWith('my-sandbox');
+    expect(mockBackend.listConversations).toHaveBeenCalled();
     wrapper.unmount();
   });
 
   it("soumettre le prompt ouvre le WS et envoie {type:'message', content}", async () => {
     mockFetchRouting();
+    mockBackend.listConversations.mockResolvedValueOnce([]);
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-3';
 
@@ -157,15 +171,10 @@ describe('Chat.vue — session réelle', () => {
   });
 
   it('le sélecteur de session liste les conversations et change activeConversationId', async () => {
-    fetchSpy.mockImplementation((url: string) => {
-      if (url.startsWith('/api/conversations?')) {
-        return jsonResponse([
-          { id: 1, title: 'Session A', created_at: '2026-01-01T10:00:00Z' },
-          { id: 2, title: 'Session B', created_at: '2026-01-02T10:00:00Z' },
-        ]);
-      }
-      return jsonResponse([]);
-    });
+    mockBackend.listConversations.mockResolvedValueOnce([
+      { id: '1', title: 'Session A', createdAt: '2026-01-01T10:00:00Z' },
+      { id: '2', title: 'Session B', createdAt: '2026-01-02T10:00:00Z' },
+    ] as import('@vanyline/ui').ChatConversation[]);
 
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = '1';
@@ -183,7 +192,7 @@ describe('Chat.vue — session réelle', () => {
     wrapper.unmount();
   });
 
-  it('"Fermer la session" appelle endAgentSession (activeConversationId → null)', async () => {
+  it('"Fermer la session" désactive activeConversationId', async () => {
     mockFetchRouting();
     const { activeConversationId } = useIdeSession();
     activeConversationId.value = 'conv-x';
@@ -198,19 +207,9 @@ describe('Chat.vue — session réelle', () => {
     wrapper.unmount();
   });
 
-  it('"Nouvelle session" démarre une session dans le contexte de la sandbox courante', async () => {
-    fetchSpy.mockImplementation((url: string, init?: RequestInit) => {
-      if (url === '/api/v1/agents') {
-        return jsonResponse({ items: [{ name: 'default' }], page: 1, per_page: 100, total_items: 1, total_pages: 1 });
-      }
-      if (url === '/api/conversations' && init?.method === 'POST') {
-        const body = JSON.parse(init.body as string);
-        expect(body.context).toEqual({ kind: 'sandbox', data: { sandbox_name: 'my-sandbox' } });
-        return jsonResponse({ id: 42 });
-      }
-      if (url.startsWith('/api/conversations?')) return jsonResponse([]);
-      return jsonResponse([]);
-    });
+  it('"Nouvelle session" appelle httpChatBackend.createConversation', async () => {
+    mockFetchRouting();
+    mockBackend.createConversation.mockClear();
 
     const wrapper = mount(Chat, { global: { plugins: [router()], provide: provideSandboxName } });
     await flush();
@@ -218,6 +217,7 @@ describe('Chat.vue — session réelle', () => {
     await wrapper.find('.session-btn[title="Nouvelle session"]').trigger('click');
     await flush();
 
+    expect(mockBackend.createConversation).toHaveBeenCalledTimes(1);
     expect(useIdeSession().activeConversationId.value).toBe('42');
     wrapper.unmount();
   });

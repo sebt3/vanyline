@@ -1,8 +1,9 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
-import { ApiError, createApiClient } from '../../api/client';
-import { useCrudResource, type PagedResult } from '../../composables/useCrudResource';
+import type { McpSelection, McpServer, Toolset } from '../ports';
+import { useConfigRepo } from './useConfigRepo';
+import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
@@ -10,60 +11,23 @@ import DialogShell from '../common/DialogShell.vue';
 import CheckboxList from '../common/CheckboxList.vue';
 import Field from '../common/Field.vue';
 
-interface McpSelection {
-  server: string;
-  tools?: string[];
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
 /** État local d'une ligne MCP du formulaire : `tools` toujours initialisé
- *  (contrairement à `McpSelection`, le type du contrat réseau). */
+ *  (contrairement à `McpSelection`, où il est optionnel). */
 interface McpRow {
   server: string;
   tools: string[];
 }
 
-interface Toolset {
-  id: number;
-  name: string;
-  description?: string | null;
-  prompt?: string | null;
-  local_tools: string[];
-  mcp: McpSelection[];
-}
-
-interface CreateToolset {
-  name: string;
-  description?: string;
-  prompt?: string;
-  local_tools?: string[];
-  mcp?: McpSelection[];
-}
-
-interface UpdateToolset {
-  description?: string;
-  prompt?: string;
-  local_tools?: string[];
-  mcp?: McpSelection[];
-}
-
-interface LocalTool {
-  name: string;
-  description: string;
-}
-
-interface McpServerOption {
-  name: string;
-  server_type: string;
-  url: string;
-  available_tools: string[];
-}
-
-const client = createApiClient();
-const resource = useCrudResource<Toolset>(client, '/api/v1/toolsets');
+const repo = useConfigRepo();
+const resource = useCrudResource(repo, 'toolsets');
 const { items: fetchedToolsets, loading, error } = resource;
 
-const localTools = ref<LocalTool[]>([]);
-const mcpServers = ref<McpServerOption[]>([]);
+const localTools = ref<string[]>([]);
+const mcpServers = ref<McpServer[]>([]);
 const optionsError = ref<string | null>(null);
 
 const formName = ref('');
@@ -73,8 +37,7 @@ const formLocalTools = ref<string[]>([]);
 const formMcp = ref<McpRow[]>([]);
 const creationError = ref<string | null>(null);
 
-const editingId = ref<number | null>(null);
-const editingName = ref<string | null>(null); // titre du dialog
+const editingName = ref<string | null>(null);
 const editDescription = ref('');
 const editPrompt = ref('');
 const editLocalTools = ref<string[]>([]);
@@ -87,14 +50,11 @@ const editModalOpen = ref(false);
 
 async function fetchOptions() {
   try {
-    const [lt, servers] = await Promise.all([
-      client.get<LocalTool[]>('/api/local-tools'),
-      client.get<PagedResult<McpServerOption>>('/api/v1/mcp-servers'),
-    ]);
+    const [lt, servers] = await Promise.all([repo.listLocalTools(), repo.list('mcp')]);
     localTools.value = lt;
-    mcpServers.value = servers.items;
+    mcpServers.value = servers;
   } catch (e) {
-    optionsError.value = e instanceof ApiError ? e.message : String(e);
+    optionsError.value = message(e);
   }
 }
 
@@ -109,23 +69,18 @@ function toOptions(names: string[]): { value: string; label: string }[] {
 function addMcpRow() {
   formMcp.value.push({ server: '', tools: [] });
 }
-
 function removeMcpRow(index: number) {
   formMcp.value.splice(index, 1);
 }
-
 function onMcpServerChange(index: number) {
   formMcp.value[index].tools = [];
 }
-
 function addEditMcpRow() {
   editMcp.value.push({ server: '', tools: [] });
 }
-
 function removeEditMcpRow(index: number) {
   editMcp.value.splice(index, 1);
 }
-
 function onEditMcpServerChange(index: number) {
   editMcp.value[index].tools = [];
 }
@@ -137,15 +92,14 @@ onMounted(() => {
 
 async function createToolset() {
   creationError.value = null;
-  const body: CreateToolset = {
-    name: formName.value,
-    ...(formDescription.value ? { description: formDescription.value } : {}),
-    ...(formPrompt.value ? { prompt: formPrompt.value } : {}),
-    local_tools: formLocalTools.value,
-    mcp: formMcp.value,
-  };
   try {
-    await resource.create(body);
+    await resource.create({
+      name: formName.value,
+      ...(formDescription.value ? { description: formDescription.value } : {}),
+      ...(formPrompt.value ? { prompt: formPrompt.value } : {}),
+      local_tools: formLocalTools.value,
+      mcp: formMcp.value as McpSelection[],
+    });
     formName.value = '';
     formDescription.value = '';
     formPrompt.value = '';
@@ -153,12 +107,11 @@ async function createToolset() {
     formMcp.value = [];
     createModalOpen.value = false;
   } catch (e) {
-    creationError.value = e instanceof ApiError ? e.message : String(e);
+    creationError.value = message(e);
   }
 }
 
 function startEdit(toolset: Toolset) {
-  editingId.value = toolset.id;
   editingName.value = toolset.name;
   editDescription.value = toolset.description ?? '';
   editPrompt.value = toolset.prompt ?? '';
@@ -169,7 +122,6 @@ function startEdit(toolset: Toolset) {
 }
 
 function cancelEdit() {
-  editingId.value = null;
   editingName.value = null;
   editDescription.value = '';
   editPrompt.value = '';
@@ -179,23 +131,23 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(id: number) {
+async function saveEdit(name: string) {
   editError.value = null;
-  const body: UpdateToolset = {};
-  if (editDescription.value) body.description = editDescription.value;
-  if (editPrompt.value) body.prompt = editPrompt.value;
-  if (editLocalTools.value.length > 0) body.local_tools = editLocalTools.value;
-  if (editMcp.value.length > 0) body.mcp = editMcp.value;
+  const patch: Partial<Toolset> = {};
+  if (editDescription.value) patch.description = editDescription.value;
+  if (editPrompt.value) patch.prompt = editPrompt.value;
+  if (editLocalTools.value.length > 0) patch.local_tools = editLocalTools.value;
+  if (editMcp.value.length > 0) patch.mcp = editMcp.value as McpSelection[];
   try {
-    await resource.update(id, body);
+    await resource.update(name, patch);
     cancelEdit();
   } catch (e) {
-    editError.value = e instanceof ApiError ? e.message : String(e);
+    editError.value = message(e);
   }
 }
 
-async function deleteToolset(id: number) {
-  await resource.remove(id);
+async function deleteToolset(name: string) {
+  await resource.remove(name);
 }
 </script>
 
@@ -216,7 +168,7 @@ async function deleteToolset(id: number) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="t in fetchedToolsets" :key="t.id">
+          <tr v-for="t in fetchedToolsets" :key="t.name">
             <td>{{ t.name }}</td>
             <td>{{ t.description ?? '—' }}</td>
             <td>
@@ -227,7 +179,7 @@ async function deleteToolset(id: number) {
             </td>
             <td>
               <button class="btn btn-edit" @click="startEdit(t)">Modifier</button>
-              <button class="btn btn-delete" @click="deleteToolset(t.id)">Supprimer</button>
+              <button class="btn btn-delete" @click="deleteToolset(t.name)">Supprimer</button>
             </td>
           </tr>
         </tbody>
@@ -266,7 +218,7 @@ async function deleteToolset(id: number) {
           />
         </Field>
         <Field label="Local tools" top-align>
-          <CheckboxList :options="toOptions(localTools.map((t) => t.name))" v-model="formLocalTools" />
+          <CheckboxList :options="toOptions(localTools)" v-model="formLocalTools" />
         </Field>
         <Field label="Serveurs MCP" top-align>
           <div v-for="(sel, i) in formMcp" :key="i" class="mcp-row">
@@ -309,7 +261,7 @@ async function deleteToolset(id: number) {
           />
         </Field>
         <Field label="Local tools" top-align>
-          <CheckboxList :options="toOptions(localTools.map((t) => t.name))" v-model="editLocalTools" />
+          <CheckboxList :options="toOptions(localTools)" v-model="editLocalTools" />
         </Field>
         <Field label="Serveurs MCP" top-align>
           <div v-for="(sel, i) in editMcp" :key="i" class="mcp-row">
@@ -327,7 +279,7 @@ async function deleteToolset(id: number) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>

@@ -1,40 +1,21 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
-import { ApiError, createApiClient } from '../../api/client';
-import { useCrudResource } from '../../composables/useCrudResource';
+import type { SkillDetail, SkillMeta } from '../ports';
+import { useConfigRepo } from './useConfigRepo';
+import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
 
-interface SkillMeta {
-  id: number;
-  name: string;
-  description: string;
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
-interface SkillDetail {
-  id: number;
-  name: string;
-  description: string;
-  body: string;
-}
-
-interface CreateSkill {
-  name: string;
-  description?: string;
-  body?: string;
-}
-
-interface UpdateSkill {
-  description?: string;
-  body?: string;
-}
-
-const client = createApiClient();
-const resource = useCrudResource<SkillMeta>(client, '/api/v1/skills');
+const repo = useConfigRepo();
+const resource = useCrudResource(repo, 'skills');
 const { items: fetchedSkills, loading, error } = resource;
 
 // Formulaire de création
@@ -44,8 +25,7 @@ const formBody = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition — séparé car la liste n'expédie pas `body`
-const editingId = ref<number | null>(null);
-const editingName = ref<string | null>(null); // titre du dialog (affichage)
+const editingName = ref<string | null>(null);
 const editDescription = ref('');
 const editBody = ref('');
 const editError = ref<string | null>(null);
@@ -58,39 +38,36 @@ onMounted(resource.fetch);
 
 async function createSkill() {
   creationError.value = null;
-  const body: CreateSkill = {
-    name: formName.value,
-    ...(formDescription.value ? { description: formDescription.value } : {}),
-    ...(formBody.value ? { body: formBody.value } : {}),
-  };
   try {
-    await resource.create(body);
+    await resource.create({
+      name: formName.value,
+      description: formDescription.value,
+      body: formBody.value,
+    });
     formName.value = '';
     formDescription.value = '';
     formBody.value = '';
     createModalOpen.value = false;
   } catch (e) {
-    creationError.value = e instanceof ApiError ? e.message : String(e);
+    creationError.value = message(e);
   }
 }
 
 async function editSkill(skill: SkillMeta) {
-  editingId.value = skill.id;
   editingName.value = skill.name;
   editError.value = null;
   try {
-    // La liste ne contient pas `body` → appel dédié pour charger le détail
-    const detail = await client.get<SkillDetail>(`/api/v1/skills/${skill.id}`);
+    // La liste ne contient pas `body` → `get` charge le détail complet
+    const detail: SkillDetail = await repo.get('skills', skill.name);
     editDescription.value = detail.description ?? '';
     editBody.value = detail.body ?? '';
   } catch (e) {
-    editError.value = e instanceof ApiError ? e.message : String(e);
+    editError.value = message(e);
   }
   editModalOpen.value = true;
 }
 
 function cancelEdit() {
-  editingId.value = null;
   editingName.value = null;
   editDescription.value = '';
   editBody.value = '';
@@ -98,21 +75,21 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(id: number) {
+async function saveEdit(name: string) {
   editError.value = null;
-  const body: UpdateSkill = {};
-  if (editDescription.value) body.description = editDescription.value;
-  if (editBody.value) body.body = editBody.value;
   try {
-    await resource.update(id, body);
+    await resource.update(name, {
+      description: editDescription.value,
+      body: editBody.value,
+    });
     cancelEdit();
   } catch (e) {
-    editError.value = e instanceof ApiError ? e.message : String(e);
+    editError.value = message(e);
   }
 }
 
-async function deleteSkill(id: number) {
-  await resource.remove(id);
+async function deleteSkill(name: string) {
+  await resource.remove(name);
 }
 </script>
 
@@ -131,14 +108,14 @@ async function deleteSkill(id: number) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="s in fetchedSkills" :key="s.id">
+          <tr v-for="s in fetchedSkills" :key="s.name">
             <td>{{ s.name }}</td>
             <td>{{ s.description ?? '—' }}</td>
             <td class="th-actions">
               <button class="btn btn-edit" @click="editSkill(s)">
                 Modifier
               </button>
-              <button class="btn btn-delete" @click="deleteSkill(s.id)">
+              <button class="btn btn-delete" @click="deleteSkill(s.name)">
                 Supprimer
               </button>
             </td>
@@ -204,7 +181,7 @@ async function deleteSkill(id: number) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>

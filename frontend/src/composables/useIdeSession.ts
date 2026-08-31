@@ -1,6 +1,4 @@
 import { ref, type Ref } from 'vue';
-import { ApiError, createApiClient } from '../api/client';
-import type { PagedResult } from './useCrudResource';
 
 export interface IdeActions {
   saveActiveFile?: () => void;
@@ -9,14 +7,6 @@ export interface IdeActions {
   newTerminal?: () => void;
   findInActiveFile?: () => void;
   replaceInActiveFile?: () => void;
-}
-
-interface AgentOut {
-  name: string;
-}
-
-interface ConversationOut {
-  id: number;
 }
 
 /** Singleton partagé — pont entre le menu global (`MenuBar.vue`, monté une
@@ -48,42 +38,4 @@ export function clearIdeActions(): void {
   ideActions.value = {};
   activeConversationId.value = null;
   sessionError.value = null;
-}
-
-/** Démarre une session agent : résout le premier agent configuré et crée
- *  la conversation associée, dans le contexte de la sandbox `sandboxName`
- *  (`POST /api/conversations` exige un `context` depuis
- *  docs/features/chat-app-fonctionnel.md, axe 1 — c'est lui qui permet au
- *  backend de résoudre les tools MCP de cette sandbox pour le tour). Pas de
- *  sélecteur d'agent pour ce MVP — un seul agent existe dans l'usage
- *  courant ; à revoir si plusieurs agents coexistent en pratique (choix
- *  arbitraire du premier, documenté ici plutôt que caché). */
-export async function startAgentSession(sandboxName: string): Promise<void> {
-  sessionError.value = null;
-  startingSession.value = true;
-  try {
-    const client = createApiClient();
-    const agentsPage = await client.get<PagedResult<AgentOut>>('/api/v1/agents');
-    const agents = agentsPage.items;
-    if (agents.length === 0) {
-      sessionError.value = 'Aucun agent configuré — configure un agent dans Paramètres.';
-      return;
-    }
-    const conv = await client.post<ConversationOut>('/api/conversations', {
-      agent_name: agents[0].name,
-      context: { kind: 'sandbox', data: { sandbox_name: sandboxName } },
-    });
-    activeConversationId.value = String(conv.id);
-  } catch (e) {
-    sessionError.value = e instanceof ApiError ? e.message : String(e);
-  } finally {
-    startingSession.value = false;
-  }
-}
-
-/** Termine la session côté UI (ferme la colonne assistant) sans supprimer
- *  la conversation côté backend — l'historique reste accessible via
- *  `GET /api/conversations`. */
-export function endAgentSession(): void {
-  activeConversationId.value = null;
 }
