@@ -852,6 +852,315 @@ impl ConfigStore for FsConfigStore {
         }
         Ok(())
     }
+
+    async fn update_toolset(
+        &self,
+        layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let files = list_layer_files(&dir.join("toolsets"), "yaml")?;
+        let path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
+            kind: "toolset",
+            name: name.to_string(),
+            layer,
+        })?;
+        let mut toolset = parse_toolset_file(name, path)?;
+        let Some(obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in obj {
+            match k.as_str() {
+                "description" => {
+                    toolset.description = if v.is_null() {
+                        None
+                    } else {
+                        Some(
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    CfgStoreError::Validation(
+                                        "toolset: 'description' must be a string".to_string(),
+                                    )
+                                })?
+                                .to_string(),
+                        )
+                    };
+                }
+                "prompt" => {
+                    toolset.prompt = if v.is_null() {
+                        None
+                    } else {
+                        Some(
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    CfgStoreError::Validation(
+                                        "toolset: 'prompt' must be a string".to_string(),
+                                    )
+                                })?
+                                .to_string(),
+                        )
+                    };
+                }
+                "local_tools" => {
+                    toolset.local_tools = if v.is_null() {
+                        Vec::new()
+                    } else {
+                        let arr = v.as_array().ok_or_else(|| {
+                            CfgStoreError::Validation(
+                                "toolset: 'local_tools' must be an array".to_string(),
+                            )
+                        })?;
+                        arr.iter()
+                            .map(|x| {
+                                x.as_str().map(String::from).ok_or_else(|| {
+                                    CfgStoreError::Validation(
+                                        "toolset: 'local_tools' entries must be strings"
+                                            .to_string(),
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                }
+                "mcp" => {
+                    toolset.mcp = if v.is_null() {
+                        Vec::new()
+                    } else {
+                        let arr = v.as_array().ok_or_else(|| {
+                            CfgStoreError::Validation("toolset: 'mcp' must be an array".to_string())
+                        })?;
+                        let mut out = Vec::new();
+                        for item in arr {
+                            let server =
+                                item.get("server").and_then(|s| s.as_str()).ok_or_else(|| {
+                                    CfgStoreError::Validation(
+                                        "toolset: 'mcp' entry must have a string 'server'"
+                                            .to_string(),
+                                    )
+                                })?;
+                            let tools = match item.get("tools") {
+                                None | Some(serde_json::Value::Null) => Vec::new(),
+                                Some(t) => {
+                                    let arr = t.as_array().ok_or_else(|| {
+                                        CfgStoreError::Validation(
+                                            "toolset: 'mcp' entry 'tools' must be an array"
+                                                .to_string(),
+                                        )
+                                    })?;
+                                    arr.iter()
+                                        .map(|x| {
+                                            x.as_str().map(String::from).ok_or_else(|| {
+                                                CfgStoreError::Validation(
+                                                    "toolset: 'mcp' entry tools must be strings"
+                                                        .to_string(),
+                                                )
+                                            })
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()?
+                                }
+                            };
+                            out.push(McpSelection {
+                                server: server.to_string(),
+                                tools,
+                            });
+                        }
+                        out
+                    };
+                }
+                _ => {} // clés inconnues ignorées
+            }
+        }
+        let content = yaml_serde::to_string(&toolset_to_yaml_json(&toolset)?)
+            .map_err(|e| CfgStoreError::WriteError(format!("toolset '{name}': {e}")))?;
+        std::fs::write(path, content).map_err(CfgStoreError::from)?;
+        Ok(())
+    }
+
+    async fn update_agent(
+        &self,
+        layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let files = list_layer_files(&dir.join("agents"), "md")?;
+        let path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
+            kind: "agent",
+            name: name.to_string(),
+            layer,
+        })?;
+        let mut agent = parse_agent_file(name, path)?;
+        let Some(obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in obj {
+            match k.as_str() {
+                "description" => {
+                    agent.description = if v.is_null() {
+                        None
+                    } else {
+                        Some(
+                            v.as_str()
+                                .ok_or_else(|| {
+                                    CfgStoreError::Validation(
+                                        "agent: 'description' must be a string".to_string(),
+                                    )
+                                })?
+                                .to_string(),
+                        )
+                    };
+                }
+                "mode" => {
+                    let m = v.as_str().ok_or_else(|| {
+                        CfgStoreError::Validation("agent: 'mode' must be a string".to_string())
+                    })?;
+                    agent.mode = match m {
+                        "primary" => AgentMode::Primary,
+                        "subagent" => AgentMode::Subagent,
+                        "all" => AgentMode::All,
+                        other => {
+                            return Err(CfgStoreError::Validation(format!(
+                                "agent: unknown mode '{other}'"
+                            )));
+                        }
+                    };
+                }
+                "model" => {
+                    agent.model = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation("agent: 'model' must be a string".to_string())
+                        })?
+                        .to_string();
+                }
+                "toolsets" => {
+                    agent.toolsets = if v.is_null() {
+                        Vec::new()
+                    } else {
+                        let arr = v.as_array().ok_or_else(|| {
+                            CfgStoreError::Validation(
+                                "agent: 'toolsets' must be an array".to_string(),
+                            )
+                        })?;
+                        arr.iter()
+                            .map(|x| {
+                                x.as_str().map(String::from).ok_or_else(|| {
+                                    CfgStoreError::Validation(
+                                        "agent: 'toolsets' entries must be strings".to_string(),
+                                    )
+                                })
+                            })
+                            .collect::<Result<Vec<_>, _>>()?
+                    };
+                }
+                "skills" => {
+                    agent.skills = if v.is_null() {
+                        SkillSelection::Auto
+                    } else {
+                        match v {
+                            serde_json::Value::String(s) if s == "auto" => SkillSelection::Auto,
+                            serde_json::Value::String(s) if s == "none" => SkillSelection::None,
+                            serde_json::Value::Array(arr) => SkillSelection::Named(
+                                arr.iter()
+                                    .map(|x| {
+                                        x.as_str().map(String::from).ok_or_else(|| {
+                                            CfgStoreError::Validation(
+                                                "agent: 'skills' entries must be strings"
+                                                    .to_string(),
+                                            )
+                                        })
+                                    })
+                                    .collect::<Result<Vec<_>, _>>()?,
+                            ),
+                            _ => {
+                                return Err(CfgStoreError::Validation(
+                                    "agent: 'skills' must be 'auto', 'none' or an array"
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    };
+                }
+                "system_prompt" => {
+                    agent.system_prompt = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation(
+                                "agent: 'system_prompt' must be a string".to_string(),
+                            )
+                        })?
+                        .to_string();
+                }
+                _ => {} // clés inconnues ignorées
+            }
+        }
+        let content = agent_to_md(&agent)?;
+        std::fs::write(path, content).map_err(CfgStoreError::from)?;
+        Ok(())
+    }
+
+    async fn update_skill(
+        &self,
+        layer: Layer,
+        name: &str,
+        patch: serde_json::Value,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let skills = list_layer_skill_dirs(&dir.join("skills"))?;
+        let path = skills.get(name).ok_or_else(|| CfgStoreError::NotFound {
+            kind: "skill",
+            name: name.to_string(),
+            layer,
+        })?;
+        let content = std::fs::read_to_string(path).map_err(CfgStoreError::from)?;
+        let (frontmatter, body) = split_frontmatter(path, &content)?;
+        let raw: RawSkillFrontmatter = yaml_serde::from_str(&frontmatter)
+            .map_err(|e| CfgStoreError::Config(format!("{}: {}", path.display(), e)))?;
+        let mut meta = SkillMeta {
+            name: name.to_string(),
+            description: raw.description,
+        };
+        let mut body = body.trim().to_string();
+        let Some(obj) = patch.as_object() else {
+            return Err(CfgStoreError::Config(
+                "update patch must be a JSON object".to_string(),
+            ));
+        };
+        for (k, v) in obj {
+            match k.as_str() {
+                "description" => {
+                    meta.description = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation(
+                                "skill: 'description' must be a string".to_string(),
+                            )
+                        })?
+                        .to_string();
+                }
+                "body" => {
+                    body = v
+                        .as_str()
+                        .ok_or_else(|| {
+                            CfgStoreError::Validation("skill: 'body' must be a string".to_string())
+                        })?
+                        .to_string();
+                }
+                _ => {} // clés inconnues ignorées
+            }
+        }
+        let content = skill_to_md(&meta, &body)?;
+        std::fs::write(path, content).map_err(CfgStoreError::from)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2740,5 +3049,1041 @@ Tu es un agent d'implémentation.",
 
         let body = store.load_skill("multi").await.unwrap();
         assert_eq!(body, "line1\n\nline3");
+    }
+
+    // --- update_toolset ---
+
+    // 1. update_toolset_full_cycle
+    #[tokio::test]
+    async fn update_toolset_full_cycle() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "grafana".to_string(),
+                    description: Some("Outils Grafana".to_string()),
+                    prompt: Some("Interroger Grafana".to_string()),
+                    local_tools: vec!["grafana_query".to_string()],
+                    mcp: vec![McpSelection {
+                        server: "grafana-kydah".to_string(),
+                        tools: vec!["query_dashboard".to_string()],
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+
+        // Patch partiel: modifier description seulement
+        store
+            .update_toolset(
+                Layer::Global,
+                "grafana",
+                serde_json::json!({"description": "Outils Grafana mis à jour"}),
+            )
+            .await
+            .unwrap();
+
+        let list = store.list_toolsets().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0].description,
+            Some("Outils Grafana mis à jour".to_string())
+        );
+        // Les autres champs sont préservés
+        assert_eq!(list[0].prompt.as_deref(), Some("Interroger Grafana"));
+        assert_eq!(list[0].local_tools, vec!["grafana_query".to_string()]);
+    }
+
+    // 2. update_toolset_null_clears_optional
+    #[tokio::test]
+    async fn update_toolset_null_clears_optional() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "ts".to_string(),
+                    description: Some("descr".to_string()),
+                    prompt: Some("prompt".to_string()),
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // Effacer prompt (champ optionnel)
+        store
+            .update_toolset(Layer::Global, "ts", serde_json::json!({"prompt": null}))
+            .await
+            .unwrap();
+
+        let list = store.list_toolsets().await.unwrap();
+        assert_eq!(list[0].description, Some("descr".to_string()));
+        assert_eq!(list[0].prompt, None);
+    }
+
+    // 3. update_toolset_empty_locals
+    #[tokio::test]
+    async fn update_toolset_empty_locals() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "ts".to_string(),
+                    description: None,
+                    prompt: None,
+                    local_tools: vec!["t1".to_string(), "t2".to_string()],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // vider local_tools
+        store
+            .update_toolset(Layer::Global, "ts", serde_json::json!({"local_tools": []}))
+            .await
+            .unwrap();
+
+        let list = store.list_toolsets().await.unwrap();
+        assert!(list[0].local_tools.is_empty());
+    }
+
+    // 4. update_toolset_unknown_key_ignored
+    #[tokio::test]
+    async fn update_toolset_unknown_key_ignored() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "ts".to_string(),
+                    description: None,
+                    prompt: Some("p".to_string()),
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .update_toolset(
+                Layer::Global,
+                "ts",
+                serde_json::json!({"unknown_field": "x", "name": "should_be_ignored", "prompt": "new p"}),
+            )
+            .await
+            .unwrap();
+
+        let list = store.list_toolsets().await.unwrap();
+        assert_eq!(list[0].prompt, Some("new p".to_string()));
+    }
+
+    // 5. update_toolset_not_found
+    #[tokio::test]
+    async fn update_toolset_not_found() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .update_toolset(
+                Layer::Global,
+                "absent",
+                serde_json::json!({"description": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::NotFound { kind, .. } if *kind == "toolset"));
+    }
+
+    // 6. update_toolset_invalid_name
+    #[tokio::test]
+    async fn update_toolset_invalid_name() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .update_toolset(
+                Layer::Global,
+                "../evil",
+                serde_json::json!({"description": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CfgStoreError::InvalidName(_)));
+    }
+
+    // 7. update_toolset_descriptions_must_be_string
+    #[tokio::test]
+    async fn update_toolset_description_must_be_string() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "ts".to_string(),
+                    description: None,
+                    prompt: None,
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_toolset(Layer::Global, "ts", serde_json::json!({"description": 42}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // 8. update_toolset_mcp_invalid
+    #[tokio::test]
+    async fn update_toolset_mcp_invalid_form() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "ts".to_string(),
+                    description: None,
+                    prompt: None,
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // mcp doit être un array
+        let err = store
+            .update_toolset(
+                Layer::Global,
+                "ts",
+                serde_json::json!({"mcp": "not-an-array"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+
+        // sans "server"
+        let err = store
+            .update_toolset(Layer::Global, "ts", serde_json::json!({"mcp": [{}]}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // 9. update_toolset_rwrite roundtrip
+    #[tokio::test]
+    async fn update_toolset_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "rt".to_string(),
+                    description: Some("init".to_string()),
+                    prompt: Some("init prompt".to_string()),
+                    local_tools: vec!["t1".to_string()],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .update_toolset(
+                Layer::Global,
+                "rt",
+                serde_json::json!({"description": "updated", "local_tools": ["t2", "t3"]}),
+            )
+            .await
+            .unwrap();
+
+        let result = store.get_toolset("rt").await.unwrap();
+        assert_eq!(result.name, "rt");
+        assert_eq!(result.description, Some("updated".to_string()));
+        assert_eq!(result.local_tools, vec!["t2".to_string(), "t3".to_string()]);
+    }
+
+    // 10. update_toolset_layer_isolation
+    #[tokio::test]
+    async fn update_toolset_layer_isolation() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        std::fs::create_dir_all(global_dir.path().join("toolsets")).unwrap();
+        std::fs::create_dir_all(workspace_dir.path().join("toolsets")).unwrap();
+
+        // Write identical files in both layers (update is per-layer, no merge)
+        std::fs::write(
+            global_dir.path().join("toolsets").join("shared.yaml"),
+            "description: global\ntools: {}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            workspace_dir.path().join("toolsets").join("shared.yaml"),
+            "description: global\ntools: {}\n",
+        )
+        .unwrap();
+
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+
+        // Put a marker so we can distinguish
+        store
+            .update_toolset(
+                Layer::Workspace,
+                "shared",
+                serde_json::json!({"description": "workspace"}),
+            )
+            .await
+            .unwrap();
+
+        // Workspace has it updated
+        let ws_files = list_layer_files(&workspace_dir.path().join("toolsets"), "yaml").unwrap();
+        assert!(ws_files.contains_key("shared"));
+        // Check the content by reading the file
+        let ws_content =
+            std::fs::read_to_string(workspace_dir.path().join("toolsets").join("shared.yaml"))
+                .unwrap();
+        assert!(ws_content.contains("workspace"));
+        // The global file is still the original
+        let global_files = list_layer_files(&global_dir.path().join("toolsets"), "yaml").unwrap();
+        assert!(global_files.contains_key("shared"));
+        let global_content =
+            std::fs::read_to_string(global_dir.path().join("toolsets").join("shared.yaml"))
+                .unwrap();
+        assert!(global_content.contains("global"));
+        assert!(!global_content.contains("workspace"));
+    }
+
+    // --- update_agent ---
+
+    // 1. update_agent_full_cycle
+    #[tokio::test]
+    async fn update_agent_full_cycle() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "build".to_string(),
+                    description: Some("build agent".to_string()),
+                    mode: AgentMode::Primary,
+                    model: "qwen-code".to_string(),
+                    toolsets: vec!["fs".to_string()],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "You are a build assistant.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Patch partiel : modifier model et toolsets seulement
+        store
+            .update_agent(
+                Layer::Global,
+                "build",
+                serde_json::json!({
+                    "model": "qwen2.5",
+                    "toolsets": ["fs", "grafana"]
+                }),
+            )
+            .await
+            .unwrap();
+
+        let list = store.list_agents().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].model, "qwen2.5");
+        assert_eq!(
+            list[0].toolsets,
+            vec!["fs".to_string(), "grafana".to_string()]
+        );
+        // Les autres champs préservés
+        assert_eq!(list[0].description.as_deref(), Some("build agent"));
+        assert_eq!(list[0].mode, AgentMode::Primary);
+        assert_eq!(list[0].system_prompt, "You are a build assistant.");
+    }
+
+    // 2. update_agent_null_clears_optional
+    #[tokio::test]
+    async fn update_agent_null_clears_optional() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "a".to_string(),
+                    description: Some("desc".to_string()),
+                    mode: AgentMode::Primary,
+                    model: "m".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Effacer description
+        store
+            .update_agent(Layer::Global, "a", serde_json::json!({"description": null}))
+            .await
+            .unwrap();
+
+        let list = store.list_agents().await.unwrap();
+        assert_eq!(list[0].description, None);
+    }
+
+    // 3. update_agent_tools_null_clears_vec
+    #[tokio::test]
+    async fn update_agent_tools_null_clears_vec() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "a".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "m".to_string(),
+                    toolsets: vec!["t1".to_string()],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .update_agent(Layer::Global, "a", serde_json::json!({"toolsets": null}))
+            .await
+            .unwrap();
+
+        let list = store.list_agents().await.unwrap();
+        assert!(list[0].toolsets.is_empty());
+    }
+
+    // 4. update_agent_mode_invalid → Validation
+    #[tokio::test]
+    async fn update_agent_mode_unknown_validation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "a".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "m".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_agent(Layer::Global, "a", serde_json::json!({"mode": "invalid"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // 5. update_agent_skills_invalid → Validation
+    #[tokio::test]
+    async fn update_agent_skills_invalid_validation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "a".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "m".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Nombre au lieu de string/array/null
+        let err = store
+            .update_agent(Layer::Global, "a", serde_json::json!({"skills": 42}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // 6. update_agent_skills_auto_none_named
+    #[tokio::test]
+    async fn update_agent_skills_variants() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "a".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "m".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // "none"
+        store
+            .update_agent(Layer::Global, "a", serde_json::json!({"skills": "none"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_agents().await.unwrap()[0].skills,
+            SkillSelection::None
+        );
+
+        // Liste de noms
+        store
+            .update_agent(
+                Layer::Global,
+                "a",
+                serde_json::json!({"skills": ["pdf", "csv"]}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_agents().await.unwrap()[0].skills,
+            SkillSelection::Named(vec!["pdf".to_string(), "csv".to_string()])
+        );
+
+        // null → Auto
+        store
+            .update_agent(Layer::Global, "a", serde_json::json!({"skills": null}))
+            .await
+            .unwrap();
+        assert_eq!(
+            store.list_agents().await.unwrap()[0].skills,
+            SkillSelection::Auto
+        );
+    }
+
+    // 7. update_agent_not_found
+    #[tokio::test]
+    async fn update_agent_not_found() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .update_agent(Layer::Global, "absent", serde_json::json!({"model": "x"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::NotFound { kind, .. } if *kind == "agent"));
+    }
+
+    // 8. update_agent_invalid_name
+    #[tokio::test]
+    async fn update_agent_invalid_name() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .update_agent(Layer::Global, "../evil", serde_json::json!({"model": "x"}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CfgStoreError::InvalidName(_)));
+    }
+
+    // 9. update_agent_roundtrip
+    #[tokio::test]
+    async fn update_agent_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "rt".to_string(),
+                    description: Some("init".to_string()),
+                    mode: AgentMode::Primary,
+                    model: "qwen-code".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "You are an init agent.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        store
+            .update_agent(
+                Layer::Global,
+                "rt",
+                serde_json::json!({"model": "qwen2.5", "system_prompt": "You are updated."}),
+            )
+            .await
+            .unwrap();
+
+        let result = store.get_agent("rt").await.unwrap();
+        assert_eq!(result.name, "rt");
+        assert_eq!(result.model, "qwen2.5");
+        assert_eq!(result.system_prompt, "You are updated.");
+        assert!(result.toolsets.is_empty());
+        assert_eq!(result.mode, AgentMode::Primary);
+    }
+
+    // 10. update_agent_layer_isolation
+    #[tokio::test]
+    async fn update_agent_layer_isolation() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+
+        // Create the agent in both layers (update is per-layer, no merge)
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "shared".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "global-model".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "global".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+        store
+            .create_agent(
+                Layer::Workspace,
+                Agent {
+                    name: "shared".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "global-model".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "global".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Update only in workspace
+        store
+            .update_agent(
+                Layer::Workspace,
+                "shared",
+                serde_json::json!({"model": "ws-model"}),
+            )
+            .await
+            .unwrap();
+
+        // Workspace has it updated
+        let ws_files = list_layer_files(&workspace_dir.path().join("agents"), "md").unwrap();
+        assert!(ws_files.contains_key("shared"));
+        let ws_content =
+            std::fs::read_to_string(workspace_dir.path().join("agents").join("shared.md")).unwrap();
+        assert!(ws_content.contains("ws-model"));
+        // The global file is still the original
+        let global_files = list_layer_files(&global_dir.path().join("agents"), "md").unwrap();
+        assert!(global_files.contains_key("shared"));
+        let global_content =
+            std::fs::read_to_string(global_dir.path().join("agents").join("shared.md")).unwrap();
+        assert!(global_content.contains("global-model"));
+        assert!(!global_content.contains("ws-model"));
+    }
+
+    // --- update_skill ---
+
+    // 1. update_skill_full_cycle
+    #[tokio::test]
+    async fn update_skill_full_cycle() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "pdf".to_string(),
+                    description: "PDF processing".to_string(),
+                },
+                "# PDF skill\n\nDétails.".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Patch : description + body
+        store
+            .update_skill(
+                Layer::Global,
+                "pdf",
+                serde_json::json!({
+                    "description": "Updated PDF skill",
+                    "body": "PDF v2\n\nNew details."
+                }),
+            )
+            .await
+            .unwrap();
+
+        let list = store.list_skills().await.unwrap();
+        assert_eq!(list[0].description, "Updated PDF skill");
+        assert_eq!(
+            store.load_skill("pdf").await.unwrap(),
+            "PDF v2\n\nNew details."
+        );
+    }
+
+    // 2. update_skill_not_found
+    #[tokio::test]
+    async fn update_skill_not_found() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .update_skill(
+                Layer::Global,
+                "absent",
+                serde_json::json!({"description": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::NotFound { kind, .. } if *kind == "skill"));
+    }
+
+    // 3. update_skill_invalid_name
+    #[tokio::test]
+    async fn update_skill_invalid_name() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .update_skill(
+                Layer::Global,
+                "../evil",
+                serde_json::json!({"description": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, CfgStoreError::InvalidName(_)));
+    }
+
+    // 4. update_skill_description_must_be_string
+    #[tokio::test]
+    async fn update_skill_description_must_be_string() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "s".to_string(),
+                    description: "d".to_string(),
+                },
+                "body".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_skill(Layer::Global, "s", serde_json::json!({"description": 42}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // 5. update_skill_body_must_be_string
+    #[tokio::test]
+    async fn update_skill_body_must_be_string() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "s".to_string(),
+                    description: "d".to_string(),
+                },
+                "body".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_skill(Layer::Global, "s", serde_json::json!({"body": 42}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // 6. update_skill_partial_patch
+    #[tokio::test]
+    async fn update_skill_partial_patch() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "s".to_string(),
+                    description: "old desc".to_string(),
+                },
+                "old body".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Ne modifier que le body
+        store
+            .update_skill(Layer::Global, "s", serde_json::json!({"body": "new body"}))
+            .await
+            .unwrap();
+
+        let list = store.list_skills().await.unwrap();
+        assert_eq!(list[0].description, "old desc");
+        assert_eq!(store.load_skill("s").await.unwrap(), "new body");
+    }
+
+    // 7. update_skill_roundtrip
+    #[tokio::test]
+    async fn update_skill_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "rt".to_string(),
+                    description: "init".to_string(),
+                },
+                "init body".to_string(),
+            )
+            .await
+            .unwrap();
+
+        store
+            .update_skill(
+                Layer::Global,
+                "rt",
+                serde_json::json!({"description": "updated", "body": "updated body"}),
+            )
+            .await
+            .unwrap();
+
+        let result = store.get_skill("rt").await.unwrap();
+        assert_eq!(result.name, "rt");
+        assert_eq!(result.description, "updated");
+        assert_eq!(store.load_skill("rt").await.unwrap(), "updated body");
+    }
+
+    // 8. update_skill_layer_isolation
+    #[tokio::test]
+    async fn update_skill_layer_isolation() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+
+        // Create the skill in both layers
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "shared".to_string(),
+                    description: "global desc".to_string(),
+                },
+                "global body".to_string(),
+            )
+            .await
+            .unwrap();
+        store
+            .create_skill(
+                Layer::Workspace,
+                SkillMeta {
+                    name: "shared".to_string(),
+                    description: "global desc".to_string(),
+                },
+                "global body".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Update only in workspace
+        store
+            .update_skill(
+                Layer::Workspace,
+                "shared",
+                serde_json::json!({"description": "workspace desc"}),
+            )
+            .await
+            .unwrap();
+
+        // Workspace has it
+        let ws_skills = list_layer_skill_dirs(&workspace_dir.path().join("skills")).unwrap();
+        assert!(ws_skills.contains_key("shared"));
+        // The global still has the original
+        let global_skills = list_layer_skill_dirs(&global_dir.path().join("skills")).unwrap();
+        assert!(global_skills.contains_key("shared"));
+        let global_body = store.load_skill("shared").await.unwrap();
+        // After update only in workspace, global body is unchanged
+        assert!(!global_body.contains("workspace desc"));
     }
 }
