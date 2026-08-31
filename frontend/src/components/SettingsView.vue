@@ -6,13 +6,13 @@ import {
   LlmProvidersScreen,
   ModelProfilesScreen,
   McpServersScreen,
+  ToolsetsScreen,
+  AgentsScreen,
   SkillsScreen,
   CONFIG_REPO_KEY,
   type ConfigNavGroup,
 } from '@vanyline/ui';
 import AccountScreen from './settings/AccountScreen.vue';
-import ToolsetsScreen from './settings/ToolsetsScreen.vue';
-import AgentsScreen from './settings/AgentsScreen.vue';
 import { httpConfigRepo } from '../api/httpConfigRepo';
 import { activeNav } from './settings/navState';
 
@@ -44,8 +44,8 @@ const groups: ConfigNavGroup[] = [
   { id: 'account', label: 'Compte', icon: '●', accent: '#e0a83d' },
 ];
 
-// Écrans extraits dans @vanyline/ui (backend-agnostiques via ConfigRepo) +
-// écrans encore locaux (extraction en cours, tâche 09).
+// Écrans de config extraits dans @vanyline/ui (backend-agnostiques via
+// ConfigRepo) ; `account` reste local (pas de notion de compte côté CLI/F4).
 const screens: Record<string, Component> = {
   'llm-providers': LlmProvidersScreen,
   'model-profiles': ModelProfilesScreen,

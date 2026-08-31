@@ -1,88 +1,44 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue';
 import { DialogClose } from 'reka-ui';
-import { ApiError, createApiClient } from '../../api/client';
-import { useCrudResource } from '../../composables/useCrudResource';
+import type { Agent, AgentMode, ModelProfile, SkillSelection } from '../ports';
+import { useConfigRepo } from './useConfigRepo';
+import { useCrudResource } from '../composables/useCrudResource';
 import LoadingSkeleton from '../common/LoadingSkeleton.vue';
 import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import CheckboxList from '../common/CheckboxList.vue';
 import Field from '../common/Field.vue';
-import type { PagedResult } from '../../composables/useCrudResource';
 
-type AgentMode = 'primary' | 'subagent' | 'all';
-type SkillSelection = 'auto' | 'none' | string[];
-
-interface Agent {
-  id: number;
-  name: string;
-  description?: string | null;
-  mode: AgentMode;
-  model_profile_id: number;
-  toolsets: string[];
-  skills: SkillSelection;
-  system_prompt: string;
+function message(e: unknown): string {
+  return e instanceof Error ? e.message : String(e);
 }
 
-interface CreateAgent {
-  name: string;
-  description?: string;
-  mode?: AgentMode;
-  model_profile_id: number;
-  toolsets?: string[];
-  skills?: SkillSelection;
-  system_prompt?: string;
-}
-
-interface UpdateAgent {
-  description?: string;
-  mode?: AgentMode;
-  model_profile_id?: number;
-  toolsets?: string[];
-  skills?: SkillSelection;
-  system_prompt?: string;
-}
-
-interface ModelProfileOption {
-  id: number;
-  name: string;
-}
-
-interface ToolsetOption {
-  name: string;
-}
-
-interface SkillOption {
-  name: string;
-  description: string;
-}
-
-const client = createApiClient();
-const resource = useCrudResource<Agent>(client, '/api/v1/agents');
+const repo = useConfigRepo();
+const resource = useCrudResource(repo, 'agents');
 const { items: fetchedAgents, loading, error } = resource;
 
-const modelProfiles = ref<ModelProfileOption[]>([]);
-const toolsetOptions = ref<ToolsetOption[]>([]);
-const skillOptions = ref<SkillOption[]>([]);
+const modelProfiles = ref<ModelProfile[]>([]);
+const toolsetOptions = ref<string[]>([]);
+const skillOptions = ref<string[]>([]);
 const optionsError = ref<string | null>(null);
 
 // Formulaire de création
 const formName = ref('');
 const formDescription = ref('');
 const formMode = ref<AgentMode>('primary');
-const formModelProfileId = ref<number>(0);
+const formModel = ref('');
 const formToolsets = ref<string[]>([]);
 const formSkills = ref<'auto' | 'none'>('auto');
 const formSystemPrompt = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
-const editingId = ref<number | null>(null);
-const editingName = ref<string | null>(null); // titre du dialog
+const editingName = ref<string | null>(null);
 const editDescription = ref('');
 const editMode = ref<AgentMode>('primary');
-const editModelProfileId = ref<number>(0);
+const editModel = ref('');
 const editToolsets = ref<string[]>([]);
 const editSkills = ref<'auto' | 'none'>('auto');
 const editSkillList = ref<string[]>([]);
@@ -97,15 +53,15 @@ const editModalOpen = ref(false);
 async function fetchOptions() {
   try {
     const [mp, ts, sk] = await Promise.all([
-      client.get<PagedResult<ModelProfileOption>>('/api/v1/model-profiles'),
-      client.get<PagedResult<ToolsetOption>>('/api/v1/toolsets'),
-      client.get<PagedResult<SkillOption>>('/api/v1/skills'),
+      repo.list('profiles'),
+      repo.list('toolsets'),
+      repo.list('skills'),
     ]);
-    modelProfiles.value = mp.items;
-    toolsetOptions.value = ts.items;
-    skillOptions.value = sk.items;
+    modelProfiles.value = mp;
+    toolsetOptions.value = ts.map((t) => t.name);
+    skillOptions.value = sk.map((s) => s.name);
   } catch (e) {
-    optionsError.value = e instanceof ApiError ? e.message : String(e);
+    optionsError.value = message(e);
   }
 }
 
@@ -119,54 +75,47 @@ function skillsToDisplay(s: SkillSelection): string {
   return '—';
 }
 
-/** model profile name for a given id (for table display). */
-function modelProfileNameForId(id: number): string {
-  return modelProfiles.value.find((p) => p.id === id)?.name ?? String(id);
-}
-
 function toOptions(names: string[]): { value: string; label: string }[] {
   return names.map((name) => ({ value: name, label: name }));
 }
 
 async function createAgent() {
   creationError.value = null;
-  const body: CreateAgent = {
-    name: formName.value,
-    ...(formDescription.value ? { description: formDescription.value } : {}),
-    mode: formMode.value,
-    model_profile_id: formModelProfileId.value,
-    toolsets: formToolsets.value.length ? formToolsets.value : undefined,
-    skills: formSkills.value,
-    ...(formSystemPrompt.value ? { system_prompt: formSystemPrompt.value } : {}),
-  };
   try {
-    await resource.create(body);
+    await resource.create({
+      name: formName.value,
+      ...(formDescription.value ? { description: formDescription.value } : {}),
+      mode: formMode.value,
+      model: formModel.value,
+      toolsets: formToolsets.value,
+      skills: formSkills.value,
+      system_prompt: formSystemPrompt.value,
+    });
     formName.value = '';
     formDescription.value = '';
     formMode.value = 'primary';
-    formModelProfileId.value = 0;
+    formModel.value = '';
     formToolsets.value = [];
     formSkills.value = 'auto';
     formSystemPrompt.value = '';
     createModalOpen.value = false;
   } catch (e) {
-    creationError.value = e instanceof ApiError ? e.message : String(e);
+    creationError.value = message(e);
   }
 }
 
 function startEdit(agent: Agent) {
-  editingId.value = agent.id;
   editingName.value = agent.name;
   editDescription.value = agent.description ?? '';
   editMode.value = agent.mode;
-  editModelProfileId.value = agent.model_profile_id;
+  editModel.value = agent.model;
   editToolsets.value = [...agent.toolsets];
   if (Array.isArray(agent.skills)) {
     editingSkillsIsList.value = true;
     editSkillList.value = [...agent.skills];
   } else {
     editingSkillsIsList.value = false;
-    editSkills.value = agent.skills as 'auto' | 'none';
+    editSkills.value = agent.skills;
   }
   editSystemPrompt.value = agent.system_prompt ?? '';
   editError.value = null;
@@ -174,11 +123,10 @@ function startEdit(agent: Agent) {
 }
 
 function cancelEdit() {
-  editingId.value = null;
   editingName.value = null;
   editDescription.value = '';
   editMode.value = 'primary';
-  editModelProfileId.value = 0;
+  editModel.value = '';
   editToolsets.value = [];
   editSkillList.value = [];
   editingSkillsIsList.value = false;
@@ -188,25 +136,25 @@ function cancelEdit() {
   editModalOpen.value = false;
 }
 
-async function saveEdit(id: number) {
+async function saveEdit(name: string) {
   editError.value = null;
-  const body: UpdateAgent = {};
-  if (editDescription.value) body.description = editDescription.value;
-  body.mode = editMode.value;
-  if (editModelProfileId.value) body.model_profile_id = editModelProfileId.value;
-  if (editToolsets.value.length > 0) body.toolsets = editToolsets.value;
-  body.skills = editingSkillsIsList.value ? editSkillList.value : editSkills.value;
-  if (editSystemPrompt.value) body.system_prompt = editSystemPrompt.value;
+  const patch: Partial<Agent> = {};
+  if (editDescription.value) patch.description = editDescription.value;
+  patch.mode = editMode.value;
+  if (editModel.value) patch.model = editModel.value;
+  if (editToolsets.value.length > 0) patch.toolsets = editToolsets.value;
+  patch.skills = editingSkillsIsList.value ? editSkillList.value : editSkills.value;
+  if (editSystemPrompt.value) patch.system_prompt = editSystemPrompt.value;
   try {
-    await resource.update(id, body);
+    await resource.update(name, patch);
     cancelEdit();
   } catch (e) {
-    editError.value = e instanceof ApiError ? e.message : String(e);
+    editError.value = message(e);
   }
 }
 
-async function deleteAgent(id: number) {
-  await resource.remove(id);
+async function deleteAgent(name: string) {
+  await resource.remove(name);
 }
 </script>
 
@@ -229,11 +177,11 @@ async function deleteAgent(id: number) {
           </tr>
         </thead>
         <tbody>
-          <tr v-for="a in fetchedAgents" :key="a.id">
+          <tr v-for="a in fetchedAgents" :key="a.name">
             <td>{{ a.name }}</td>
             <td>{{ a.description ?? '—' }}</td>
             <td>{{ a.mode }}</td>
-            <td>{{ modelProfileNameForId(a.model_profile_id) }}</td>
+            <td>{{ a.model }}</td>
             <td>
               {{ a.toolsets.length ? a.toolsets.join(', ') : '—' }}
             </td>
@@ -242,7 +190,7 @@ async function deleteAgent(id: number) {
               <button class="btn btn-edit" @click="startEdit(a)">
                 Modifier
               </button>
-              <button class="btn btn-delete" @click="deleteAgent(a.id)">
+              <button class="btn btn-delete" @click="deleteAgent(a.name)">
                 Supprimer
               </button>
             </td>
@@ -285,13 +233,13 @@ async function deleteAgent(id: number) {
           </select>
         </Field>
         <Field label="Profil de modèle" top-align>
-          <select class="field-input" v-model="formModelProfileId" aria-label="Profil de modèle">
-            <option :value="0">—</option>
-            <option v-for="p in modelProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+          <select class="field-input" v-model="formModel" aria-label="Profil de modèle">
+            <option value="">—</option>
+            <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
           </select>
         </Field>
         <Field label="Toolsets" top-align>
-          <CheckboxList :options="toOptions(toolsetOptions.map((t) => t.name))" v-model="formToolsets" />
+          <CheckboxList :options="toOptions(toolsetOptions)" v-model="formToolsets" />
         </Field>
         <Field label="Skills" top-align>
           <select
@@ -341,13 +289,13 @@ async function deleteAgent(id: number) {
           </select>
         </Field>
         <Field label="Profil de modèle" top-align>
-          <select class="field-input" v-model="editModelProfileId" aria-label="Profil de modèle">
-            <option :value="0">—</option>
-            <option v-for="p in modelProfiles" :key="p.id" :value="p.id">{{ p.name }}</option>
+          <select class="field-input" v-model="editModel" aria-label="Profil de modèle">
+            <option value="">—</option>
+            <option v-for="p in modelProfiles" :key="p.name" :value="p.name">{{ p.name }}</option>
           </select>
         </Field>
         <Field label="Toolsets" top-align>
-          <CheckboxList :options="toOptions(toolsetOptions.map((t) => t.name))" v-model="editToolsets" />
+          <CheckboxList :options="toOptions(toolsetOptions)" v-model="editToolsets" />
         </Field>
         <Field v-if="!editingSkillsIsList" label="Skills" top-align>
           <select
@@ -360,7 +308,7 @@ async function deleteAgent(id: number) {
           </select>
         </Field>
         <Field v-else label="Skills" top-align>
-          <CheckboxList :options="toOptions(skillOptions.map((s) => s.name))" v-model="editSkillList" />
+          <CheckboxList :options="toOptions(skillOptions)" v-model="editSkillList" />
         </Field>
         <Field label="System prompt" top-align>
           <textarea
@@ -373,7 +321,7 @@ async function deleteAgent(id: number) {
         </Field>
         <div v-if="editError" class="creation-error">{{ editError }}</div>
         <template #actions>
-          <button class="btn btn-success" @click="saveEdit(editingId!)">Sauvegarder</button>
+          <button class="btn btn-success" @click="saveEdit(editingName!)">Sauvegarder</button>
           <DialogClose class="btn btn-cancel" @click="cancelEdit">Annuler</DialogClose>
         </template>
       </DialogShell>

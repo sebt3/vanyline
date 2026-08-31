@@ -6,6 +6,8 @@ export type { CrudResource } from './composables/useCrudResource';
 export { default as LlmProvidersScreen } from './config/LlmProvidersScreen.vue';
 export { default as ModelProfilesScreen } from './config/ModelProfilesScreen.vue';
 export { default as McpServersScreen } from './config/McpServersScreen.vue';
+export { default as ToolsetsScreen } from './config/ToolsetsScreen.vue';
+export { default as AgentsScreen } from './config/AgentsScreen.vue';
 export { default as SkillsScreen } from './config/SkillsScreen.vue';
 export { default as ChatWindow } from './chat/ChatWindow.vue';
 export { default as ChatSession } from './chat/ChatSession.vue';
