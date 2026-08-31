@@ -135,11 +135,12 @@ interface ConfigRepo {
   « non supporté » (même précédent que la RBAC ci-dessous).
 - Les états locaux keyés par id dans les écrans (`discovering[id]`, `testResults[id]`,
   `seenToolResults`) passent à une clé `name` — état de composant, hors contrat.
-- **MCP `sse`** (décision 2026-08-31) : l'API `app` acceptait `server_type ∈ {sse,
-  http-streamable}` mais `sse` n'était pas fonctionnel côté sandbox. `McpTransport` du
-  contrat canonique reste `'http-streamable'` seul (aligné sur `domain.rs`) ;
-  `McpServersScreen` ne propose plus que `http-streamable` (les serveurs `sse` stockés
-  s'affichent encore). Petit resserrement fonctionnel du web, assumé.
+- **MCP `sse`** : les MCP se connectent au **moteur d'inférence** (qui supporte SSE),
+  pas à la sandbox — `sse` est un transport valide et conservé. `McpTransport` du contrat
+  canonique = `'sse' | 'http-streamable'`. `domain.rs::McpTransport` ne modélise
+  aujourd'hui que `HttpStreamable` : **`config-domain.ts` est volontairement en avance**,
+  `Sse` doit être ajouté à `domain.rs` en F2 (réconciliation RPC). Divergence documentée,
+  même catégorie que « la capacité diffère » de la RBAC.
 - **Champs augmentés au runtime web** : `Provider.availableModels: string[]` +
   `Provider.isDefault: boolean` + `McpServer.availableTools: string[]` ne sont pas dans
   `domain.rs` (persistés côté `app` après un test / `set-default`). `config-domain.ts`

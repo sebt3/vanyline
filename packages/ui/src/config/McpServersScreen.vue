@@ -20,14 +20,14 @@ const { items: fetchedServers, loading, error } = resource;
 
 // Formulaire de création
 const formName = ref('');
-const formType = ref<McpTransport>('http-streamable');
+const formType = ref<McpTransport>('sse');
 const formUrl = ref('');
 const creationError = ref<string | null>(null);
 
 // Formulaire d'édition
 const editingName = ref<string | null>(null); // nom d'origine (clé pour l'update)
 const editName = ref('');
-const editType = ref<McpTransport>('http-streamable');
+const editType = ref<McpTransport>('sse');
 const editUrl = ref('');
 const editError = ref<string | null>(null);
 
@@ -42,7 +42,7 @@ async function createServer() {
   try {
     await resource.create({ name: formName.value, type: formType.value, url: formUrl.value });
     formName.value = '';
-    formType.value = 'http-streamable';
+    formType.value = 'sse';
     formUrl.value = '';
     createModalOpen.value = false;
   } catch (e) {
@@ -62,7 +62,7 @@ function startEdit(server: McpServer) {
 function cancelEdit() {
   editingName.value = null;
   editName.value = '';
-  editType.value = 'http-streamable';
+  editType.value = 'sse';
   editUrl.value = '';
   editError.value = null;
   editModalOpen.value = false;
@@ -175,6 +175,7 @@ async function discoverTools(name: string) {
             v-model="formType"
             aria-label="Type de serveur"
           >
+            <option value="sse">sse</option>
             <option value="http-streamable">http-streamable</option>
           </select>
         </Field>
@@ -210,6 +211,7 @@ async function discoverTools(name: string) {
             v-model="editType"
             aria-label="Type de serveur"
           >
+            <option value="sse">sse</option>
             <option value="http-streamable">http-streamable</option>
           </select>
         </Field>

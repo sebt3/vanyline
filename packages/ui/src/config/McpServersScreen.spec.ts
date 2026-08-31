@@ -49,7 +49,7 @@ describe('McpServersScreen', () => {
     expect(w.text()).toContain('http://mcp:3000');
   });
 
-  it('création : create({ name, type, url }) → modale fermée', async () => {
+  it('création : create({ name, type, url }) avec le type choisi → modale fermée', async () => {
     const repo = mcpRepo();
     const w = mountWith(repo);
     await flushPromises();
@@ -63,6 +63,9 @@ describe('McpServersScreen', () => {
     };
     set('Nom du serveur', 'new-mcp');
     set('URL', 'https://x/mcp');
+    const type = dialog.querySelector('select[aria-label="Type de serveur"]') as HTMLSelectElement;
+    type.value = 'http-streamable';
+    type.dispatchEvent(new Event('change', { bubbles: true }));
     await (dialog.querySelector('.btn-create') as HTMLElement).click();
     await flushPromises();
     expect(repo.create).toHaveBeenCalledWith('mcp', {
@@ -71,6 +74,22 @@ describe('McpServersScreen', () => {
       url: 'https://x/mcp',
     });
     expect((w.vm as unknown as { createModalOpen: boolean }).createModalOpen).toBe(false);
+  });
+
+  it('le transport sse reste proposé et par défaut', async () => {
+    const repo = mcpRepo();
+    const w = mountWith(repo);
+    await flushPromises();
+    await w.find('.btn-create').trigger('click');
+    await flushPromises();
+    const dialog = document.querySelector('[role="dialog"]')!;
+    const opts = [...dialog.querySelectorAll('select[aria-label="Type de serveur"] option')].map((o) => o.getAttribute('value'));
+    expect(opts).toEqual(['sse', 'http-streamable']);
+    (dialog.querySelector('input[aria-label="Nom du serveur"]') as HTMLInputElement).value = 's';
+    dialog.querySelector('input[aria-label="Nom du serveur"]')!.dispatchEvent(new Event('input', { bubbles: true }));
+    await (dialog.querySelector('.btn-create') as HTMLElement).click();
+    await flushPromises();
+    expect(repo.create).toHaveBeenCalledWith('mcp', expect.objectContaining({ type: 'sse' }));
   });
 
   it('modifier : modale pré-remplie, save → update(nomOrigine, patch)', async () => {

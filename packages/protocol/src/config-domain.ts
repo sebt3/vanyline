@@ -25,7 +25,11 @@ export interface ModelProfile {
   options?: Record<string, unknown>;
 }
 
-export type McpTransport = 'http-streamable';
+/** `http-streamable` (le seul modélisé par `lib/src/domain.rs` à ce jour) ou
+ *  `sse`. Les MCP se connectent au moteur d'inférence, qui supporte les deux.
+ *  `domain.rs::McpTransport` doit gagner `Sse` en F2 (réconciliation RPC) —
+ *  divergence intentionnelle et documentée en attendant. */
+export type McpTransport = 'sse' | 'http-streamable';
 
 export interface McpSelection {
   server: string;
