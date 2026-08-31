@@ -6,7 +6,9 @@ use crate::domain::{
     SkillMeta, SkillSelection, Toolset,
 };
 use crate::error::CfgStoreError;
-use crate::layers::{Layers, RawConfigFile, load_config_layer};
+use crate::layers::{
+    Layers, RawConfigFile, list_layer_files, list_layer_skill_dirs, load_config_layer,
+};
 use crate::store::{ConfigStore, Layer};
 
 /// Contrainte anti-traversal : `name` devient une clé de map dans `config.yaml`
@@ -228,6 +230,114 @@ fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, CfgStoreError>
             .map(|(server, tools)| McpSelection { server, tools })
             .collect(),
     })
+}
+
+/// Forme fichier d'un toolset : `description?`, `prompt?`, `tools: { local?,
+/// mcp? }` — `local` et `mcp` inclus seulement si non vides, `tools: {}` si
+/// les deux sont vides. `mcp` est une map serveur -> liste d'outils.
+fn toolset_to_yaml_json(t: &Toolset) -> Result<serde_json::Value, CfgStoreError> {
+    let mut tools = serde_json::Map::new();
+    if !t.local_tools.is_empty() {
+        tools.insert(
+            "local".into(),
+            serde_json::Value::Array(
+                t.local_tools
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !t.mcp.is_empty() {
+        let mut mcp = serde_json::Map::new();
+        for sel in &t.mcp {
+            mcp.insert(
+                sel.server.clone(),
+                serde_json::Value::Array(
+                    sel.tools
+                        .iter()
+                        .cloned()
+                        .map(serde_json::Value::String)
+                        .collect(),
+                ),
+            );
+        }
+        tools.insert("mcp".into(), serde_json::Value::Object(mcp));
+    }
+    let mut obj = serde_json::Map::new();
+    if let Some(d) = &t.description {
+        obj.insert("description".into(), serde_json::Value::String(d.clone()));
+    }
+    if let Some(p) = &t.prompt {
+        obj.insert("prompt".into(), serde_json::Value::String(p.clone()));
+    }
+    obj.insert("tools".into(), serde_json::Value::Object(tools));
+    Ok(serde_json::Value::Object(obj))
+}
+
+/// `---\n<frontmatter yaml>\n---\n<corps>` — frontmatter : `description?`,
+/// `mode` (toujours), `model` (toujours), `toolsets?` (si non vide), `skills`
+/// (toujours). Corps = `system_prompt.trim()` (le read-side trime à la
+/// lecture : round-trip exact).
+fn agent_to_md(a: &Agent) -> Result<String, CfgStoreError> {
+    let mut front = serde_json::Map::new();
+    if let Some(d) = &a.description {
+        front.insert("description".into(), serde_json::Value::String(d.clone()));
+    }
+    front.insert(
+        "mode".into(),
+        serde_json::Value::String(
+            match a.mode {
+                AgentMode::Primary => "primary",
+                AgentMode::Subagent => "subagent",
+                AgentMode::All => "all",
+            }
+            .to_string(),
+        ),
+    );
+    front.insert("model".into(), serde_json::Value::String(a.model.clone()));
+    if !a.toolsets.is_empty() {
+        front.insert(
+            "toolsets".into(),
+            serde_json::Value::Array(
+                a.toolsets
+                    .iter()
+                    .cloned()
+                    .map(serde_json::Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    let skills = match &a.skills {
+        SkillSelection::Auto => serde_json::Value::String("auto".into()),
+        SkillSelection::None => serde_json::Value::String("none".into()),
+        SkillSelection::Named(names) => serde_json::Value::Array(
+            names
+                .iter()
+                .cloned()
+                .map(serde_json::Value::String)
+                .collect(),
+        ),
+    };
+    front.insert("skills".into(), skills);
+    let yaml = yaml_serde::to_string(&serde_json::Value::Object(front))
+        .map_err(|e| CfgStoreError::WriteError(format!("agent '{}': {e}", a.name)))?;
+    Ok(format!("---\n{yaml}---\n{}", a.system_prompt.trim()))
+}
+
+/// `---\n<frontmatter yaml: name + description>\n---\n<corps>` — le corps est
+/// `body.trim()` (le read-side trime à la lecture).
+fn skill_to_md(meta: &SkillMeta, body: &str) -> Result<String, CfgStoreError> {
+    let mut front = serde_json::Map::new();
+    front.insert("name".into(), serde_json::Value::String(meta.name.clone()));
+    front.insert(
+        "description".into(),
+        serde_json::Value::String(meta.description.clone()),
+    );
+    let yaml = yaml_serde::to_string(&serde_json::Value::Object(front))
+        .map_err(|e| CfgStoreError::WriteError(format!("skill '{}': {e}", meta.name)))?;
+    Ok(format!("---\n{yaml}---\n{}", body.trim()))
 }
 
 #[async_trait]
@@ -629,6 +739,118 @@ impl ConfigStore for FsConfigStore {
             yaml_serde::Value::String(name.to_string()),
         );
         self.write_config_layer(&dir, raw).await
+    }
+
+    async fn create_toolset(&self, layer: Layer, item: Toolset) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let dir = self.layer_dir(layer)?;
+        let files = list_layer_files(&dir.join("toolsets"), "yaml")?;
+        if files.contains_key(&item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "toolset",
+                name: item.name.clone(),
+                layer,
+            });
+        }
+        let content = yaml_serde::to_string(&toolset_to_yaml_json(&item)?)
+            .map_err(|e| CfgStoreError::WriteError(format!("toolset '{}': {e}", item.name)))?;
+        std::fs::create_dir_all(dir.join("toolsets")).map_err(CfgStoreError::from)?;
+        std::fs::write(
+            dir.join("toolsets").join(format!("{}.yaml", item.name)),
+            content,
+        )
+        .map_err(CfgStoreError::from)?;
+        Ok(())
+    }
+
+    async fn delete_toolset(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let files = list_layer_files(&dir.join("toolsets"), "yaml")?;
+        let path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
+            kind: "toolset",
+            name: name.to_string(),
+            layer,
+        })?;
+        std::fs::remove_file(path).map_err(CfgStoreError::from)?;
+        Ok(())
+    }
+
+    async fn create_agent(&self, layer: Layer, item: Agent) -> Result<(), CfgStoreError> {
+        validate_name(&item.name)?;
+        let dir = self.layer_dir(layer)?;
+        let files = list_layer_files(&dir.join("agents"), "md")?;
+        if files.contains_key(&item.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "agent",
+                name: item.name.clone(),
+                layer,
+            });
+        }
+        let content = agent_to_md(&item)?;
+        std::fs::create_dir_all(dir.join("agents")).map_err(CfgStoreError::from)?;
+        std::fs::write(
+            dir.join("agents").join(format!("{}.md", item.name)),
+            content,
+        )
+        .map_err(CfgStoreError::from)?;
+        Ok(())
+    }
+
+    async fn delete_agent(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let files = list_layer_files(&dir.join("agents"), "md")?;
+        let path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
+            kind: "agent",
+            name: name.to_string(),
+            layer,
+        })?;
+        std::fs::remove_file(path).map_err(CfgStoreError::from)?;
+        Ok(())
+    }
+
+    async fn create_skill(
+        &self,
+        layer: Layer,
+        meta: SkillMeta,
+        body: String,
+    ) -> Result<(), CfgStoreError> {
+        validate_name(&meta.name)?;
+        let dir = self.layer_dir(layer)?;
+        let skills = list_layer_skill_dirs(&dir.join("skills"))?;
+        if skills.contains_key(&meta.name) {
+            return Err(CfgStoreError::NameConflict {
+                kind: "skill",
+                name: meta.name.clone(),
+                layer,
+            });
+        }
+        let content = skill_to_md(&meta, &body)?;
+        std::fs::create_dir_all(dir.join("skills").join(&meta.name))
+            .map_err(CfgStoreError::from)?;
+        std::fs::write(
+            dir.join("skills").join(&meta.name).join("SKILL.md"),
+            content,
+        )
+        .map_err(CfgStoreError::from)?;
+        Ok(())
+    }
+
+    async fn delete_skill(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
+        validate_name(name)?;
+        let dir = self.layer_dir(layer)?;
+        let skills = list_layer_skill_dirs(&dir.join("skills"))?;
+        let path = skills.get(name).ok_or_else(|| CfgStoreError::NotFound {
+            kind: "skill",
+            name: name.to_string(),
+            layer,
+        })?;
+        std::fs::remove_file(path).map_err(CfgStoreError::from)?;
+        if let Some(parent) = path.parent() {
+            std::fs::remove_dir(parent).map_err(CfgStoreError::from)?;
+        }
+        Ok(())
     }
 }
 
@@ -1714,5 +1936,809 @@ Tu es un agent d'implémentation.",
         // Le global ne doit pas être modifié
         let global_raw = load_config_layer(&path).unwrap();
         assert_eq!(global_raw.defaults.get("agent"), None);
+    }
+
+    // --- create/delete toolset ---
+
+    // 1. create_toolset_full_cycle
+    #[tokio::test]
+    async fn create_toolset_full_cycle() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "grafana".to_string(),
+                    description: Some("Outils Grafana".to_string()),
+                    prompt: Some("Interroger Grafana".to_string()),
+                    local_tools: vec!["grafana_query".to_string()],
+                    mcp: vec![McpSelection {
+                        server: "grafana-kydah".to_string(),
+                        tools: vec!["query_dashboard".to_string(), "query_metrics".to_string()],
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+
+        // list contains it
+        let list = store.list_toolsets().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "grafana");
+        assert_eq!(list[0].description.as_deref(), Some("Outils Grafana"));
+        assert_eq!(list[0].prompt.as_deref(), Some("Interroger Grafana"));
+        assert_eq!(list[0].local_tools, vec!["grafana_query".to_string()]);
+        assert_eq!(list[0].mcp.len(), 1);
+        assert_eq!(list[0].mcp[0].server, "grafana-kydah");
+        assert_eq!(
+            list[0].mcp[0].tools,
+            vec!["query_dashboard".to_string(), "query_metrics".to_string()]
+        );
+
+        // delete
+        store
+            .delete_toolset(Layer::Global, "grafana")
+            .await
+            .unwrap();
+        let list = store.list_toolsets().await.unwrap();
+        assert_eq!(list.len(), 0);
+    }
+
+    // 2. create_toolset_name_conflict
+    #[tokio::test]
+    async fn create_toolset_name_conflict() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "fs".to_string(),
+                    description: None,
+                    prompt: None,
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "fs".to_string(),
+                    description: Some("other".to_string()),
+                    prompt: None,
+                    local_tools: vec!["other".to_string()],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap_err();
+        match err {
+            CfgStoreError::NameConflict {
+                kind,
+                name,
+                layer: _l,
+            } => {
+                assert_eq!(kind, "toolset");
+                assert_eq!(name, "fs");
+            }
+            other => panic!("Expected NameConflict, got {other:?}"),
+        }
+    }
+
+    // 3. delete_toolset_not_found
+    #[tokio::test]
+    async fn delete_toolset_not_found() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .delete_toolset(Layer::Global, "absent")
+            .await
+            .unwrap_err();
+        match err {
+            CfgStoreError::NotFound {
+                kind,
+                name,
+                layer: _l,
+            } => {
+                assert_eq!(kind, "toolset");
+                assert_eq!(name, "absent");
+            }
+            other => panic!("Expected NotFound, got {other:?}"),
+        }
+    }
+
+    // 4. create_toolset_invalid_names
+    #[tokio::test]
+    async fn create_toolset_invalid_names() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        for name in &["../evil", "a/b", "..", "/abs", "a\\b"] {
+            let err = store
+                .create_toolset(
+                    Layer::Global,
+                    Toolset {
+                        name: name.to_string(),
+                        description: None,
+                        prompt: None,
+                        local_tools: vec![],
+                        mcp: vec![],
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, CfgStoreError::InvalidName(_)),
+                "should fail for {name}"
+            );
+        }
+
+        // No files created outside config directory
+        let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "create_toolset must not create files/dirs for invalid names"
+        );
+    }
+
+    // 5. create_toolset_layer_isolation
+    #[tokio::test]
+    async fn create_toolset_layer_isolation() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Workspace,
+                Toolset {
+                    name: "ws-tool".to_string(),
+                    description: None,
+                    prompt: None,
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        // Workspace has it, global doesn't
+        let ws_files = list_layer_files(&workspace_dir.path().join("toolsets"), "yaml").unwrap();
+        assert!(ws_files.contains_key("ws-tool"));
+
+        let global_files = list_layer_files(&global_dir.path().join("toolsets"), "yaml").unwrap();
+        assert!(!global_files.contains_key("ws-tool"));
+    }
+
+    // 6. create_toolset_roundtrip
+    #[tokio::test]
+    async fn create_toolset_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "rt".to_string(),
+                    description: Some("description text".to_string()),
+                    prompt: Some("prompt text".to_string()),
+                    local_tools: vec!["tool1".to_string()],
+                    mcp: vec![McpSelection {
+                        server: "server1".to_string(),
+                        tools: vec!["func1".to_string(), "func2".to_string()],
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+
+        let result = store.get_toolset("rt").await.unwrap();
+        assert_eq!(result.name, "rt");
+        assert_eq!(result.description, Some("description text".to_string()));
+        assert_eq!(result.prompt, Some("prompt text".to_string()));
+        assert_eq!(result.local_tools, vec!["tool1".to_string()]);
+        assert_eq!(result.mcp.len(), 1);
+        assert_eq!(result.mcp[0].server, "server1");
+        assert_eq!(
+            result.mcp[0].tools,
+            vec!["func1".to_string(), "func2".to_string()]
+        );
+    }
+
+    // 7. create_toolset_empty_tools
+    #[tokio::test]
+    async fn create_toolset_empty_tools() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_toolset(
+                Layer::Global,
+                Toolset {
+                    name: "empty".to_string(),
+                    description: None,
+                    prompt: None,
+                    local_tools: vec![],
+                    mcp: vec![],
+                },
+            )
+            .await
+            .unwrap();
+
+        let list = store.list_toolsets().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert!(list[0].local_tools.is_empty());
+        assert!(list[0].mcp.is_empty());
+        assert!(list[0].description.is_none());
+        assert!(list[0].prompt.is_none());
+    }
+
+    // --- create/delete agent ---
+
+    // 1. create_agent_full_cycle
+    #[tokio::test]
+    async fn create_agent_full_cycle() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "build".to_string(),
+                    description: Some("Agent d'implémentation".to_string()),
+                    mode: AgentMode::Primary,
+                    model: "qwen-code".to_string(),
+                    toolsets: vec!["fs".to_string(), "grafana-kydah".to_string()],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "Tu es un agent d'implémentation.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // list contains it
+        let list = store.list_agents().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "build");
+        assert_eq!(
+            list[0].description.as_deref(),
+            Some("Agent d'implémentation")
+        );
+        assert_eq!(list[0].mode, AgentMode::Primary);
+        assert_eq!(list[0].model, "qwen-code");
+        assert_eq!(
+            list[0].toolsets,
+            vec!["fs".to_string(), "grafana-kydah".to_string()]
+        );
+        assert_eq!(list[0].skills, SkillSelection::Auto);
+        assert_eq!(list[0].system_prompt, "Tu es un agent d'implémentation.");
+
+        // delete
+        store.delete_agent(Layer::Global, "build").await.unwrap();
+        let list = store.list_agents().await.unwrap();
+        assert_eq!(list.len(), 0);
+    }
+
+    // 2. create_agent_name_conflict
+    #[tokio::test]
+    async fn create_agent_name_conflict() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "simple".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "x".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "simple".to_string(),
+                    description: Some("other".to_string()),
+                    mode: AgentMode::Subagent,
+                    model: "y".to_string(),
+                    toolsets: vec!["other".to_string()],
+                    skills: SkillSelection::Named(vec!["s".to_string()]),
+                    system_prompt: "other prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap_err();
+        match err {
+            CfgStoreError::NameConflict {
+                kind,
+                name,
+                layer: _l,
+            } => {
+                assert_eq!(kind, "agent");
+                assert_eq!(name, "simple");
+            }
+            other => panic!("Expected NameConflict, got {other:?}"),
+        }
+    }
+
+    // 3. delete_agent_not_found
+    #[tokio::test]
+    async fn delete_agent_not_found() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .delete_agent(Layer::Global, "absent")
+            .await
+            .unwrap_err();
+        match err {
+            CfgStoreError::NotFound {
+                kind,
+                name,
+                layer: _l,
+            } => {
+                assert_eq!(kind, "agent");
+                assert_eq!(name, "absent");
+            }
+            other => panic!("Expected NotFound, got {other:?}"),
+        }
+    }
+
+    // 4. create_agent_invalid_names
+    #[tokio::test]
+    async fn create_agent_invalid_names() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        for name in &["../evil", "a/b", "..", "/abs", "a\\b"] {
+            let err = store
+                .create_agent(
+                    Layer::Global,
+                    Agent {
+                        name: name.to_string(),
+                        description: None,
+                        mode: AgentMode::Primary,
+                        model: "m".to_string(),
+                        toolsets: vec![],
+                        skills: SkillSelection::Auto,
+                        system_prompt: "prompt".to_string(),
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, CfgStoreError::InvalidName(_)),
+                "should fail for {name}"
+            );
+        }
+
+        // No files created outside config directory
+        let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "create_agent must not create files/dirs for invalid names"
+        );
+    }
+
+    // 5. create_agent_layer_isolation
+    #[tokio::test]
+    async fn create_agent_layer_isolation() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Workspace,
+                Agent {
+                    name: "ws-agent".to_string(),
+                    description: None,
+                    mode: AgentMode::Subagent,
+                    model: "ws-model".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::None,
+                    system_prompt: "ws prompt".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // Workspace has it, global doesn't
+        let ws_files = list_layer_files(&workspace_dir.path().join("agents"), "md").unwrap();
+        assert!(ws_files.contains_key("ws-agent"));
+
+        let global_files = list_layer_files(&global_dir.path().join("agents"), "md").unwrap();
+        assert!(!global_files.contains_key("ws-agent"));
+    }
+
+    // 6. create_agent_roundtrip
+    #[tokio::test]
+    async fn create_agent_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "rt".to_string(),
+                    description: Some("roundtrip agent".to_string()),
+                    mode: AgentMode::Subagent,
+                    model: "qwen2.5".to_string(),
+                    toolsets: vec!["fs".to_string()],
+                    skills: SkillSelection::Named(vec!["pdf".to_string()]),
+                    system_prompt: "You are a roundtrip agent.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let result = store.get_agent("rt").await.unwrap();
+        assert_eq!(result.name, "rt");
+        assert_eq!(result.description, Some("roundtrip agent".to_string()));
+        assert_eq!(result.mode, AgentMode::Subagent);
+        assert_eq!(result.model, "qwen2.5");
+        assert_eq!(result.toolsets, vec!["fs".to_string()]);
+        assert_eq!(
+            result.skills,
+            SkillSelection::Named(vec!["pdf".to_string()])
+        );
+        assert_eq!(result.system_prompt, "You are a roundtrip agent.");
+    }
+
+    // 7. create_agent_defaults
+    #[tokio::test]
+    async fn create_agent_defaults() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_agent(
+                Layer::Global,
+                Agent {
+                    name: "minimal".to_string(),
+                    description: None,
+                    mode: AgentMode::Primary,
+                    model: "model-x".to_string(),
+                    toolsets: vec![],
+                    skills: SkillSelection::Auto,
+                    system_prompt: "Minimal agent prompt.".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let result = store.get_agent("minimal").await.unwrap();
+        assert_eq!(result.name, "minimal");
+        assert!(result.description.is_none());
+        assert_eq!(result.mode, AgentMode::Primary);
+        assert_eq!(result.model, "model-x");
+        assert!(result.toolsets.is_empty());
+        assert_eq!(result.skills, SkillSelection::Auto);
+        assert_eq!(result.system_prompt, "Minimal agent prompt.");
+    }
+
+    // --- create/delete skill ---
+
+    // 1. create_skill_full_cycle
+    #[tokio::test]
+    async fn create_skill_full_cycle() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "pdf".to_string(),
+                    description: "PDF processing".to_string(),
+                },
+                "# PDF skill\n\nDétails sur le traitement PDF.".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // list_skills contains it
+        let list = store.list_skills().await.unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].name, "pdf");
+        assert_eq!(list[0].description, "PDF processing");
+
+        // load_skill returns body
+        let body = store.load_skill("pdf").await.unwrap();
+        assert_eq!(body, "# PDF skill\n\nDétails sur le traitement PDF.");
+
+        // delete
+        store.delete_skill(Layer::Global, "pdf").await.unwrap();
+
+        // list_skills no longer contains it
+        let list = store.list_skills().await.unwrap();
+        assert_eq!(list.len(), 0);
+
+        // load_skill returns error
+        assert!(store.load_skill("pdf").await.is_err());
+    }
+
+    // 2. create_skill_name_conflict
+    #[tokio::test]
+    async fn create_skill_name_conflict() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "csv".to_string(),
+                    description: "CSV skill".to_string(),
+                },
+                "csv body".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "csv".to_string(),
+                    description: "other CSV skill".to_string(),
+                },
+                "other body".to_string(),
+            )
+            .await
+            .unwrap_err();
+        match err {
+            CfgStoreError::NameConflict {
+                kind,
+                name,
+                layer: _l,
+            } => {
+                assert_eq!(kind, "skill");
+                assert_eq!(name, "csv");
+            }
+            other => panic!("Expected NameConflict, got {other:?}"),
+        }
+    }
+
+    // 3. delete_skill_not_found
+    #[tokio::test]
+    async fn delete_skill_not_found() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        let err = store
+            .delete_skill(Layer::Global, "absent")
+            .await
+            .unwrap_err();
+        match err {
+            CfgStoreError::NotFound {
+                kind,
+                name,
+                layer: _l,
+            } => {
+                assert_eq!(kind, "skill");
+                assert_eq!(name, "absent");
+            }
+            other => panic!("Expected NotFound, got {other:?}"),
+        }
+    }
+
+    // 4. create_skill_invalid_names
+    #[tokio::test]
+    async fn create_skill_invalid_names() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        for name in &["../evil", "a/b", "..", "/abs", "a\\b"] {
+            let err = store
+                .create_skill(
+                    Layer::Global,
+                    SkillMeta {
+                        name: name.to_string(),
+                        description: "desc".to_string(),
+                    },
+                    "body".to_string(),
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, CfgStoreError::InvalidName(_)),
+                "should fail for {name}"
+            );
+        }
+
+        // No files created outside config directory
+        let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "create_skill must not create files/dirs for invalid names"
+        );
+    }
+
+    // 5. create_skill_layer_isolation
+    #[tokio::test]
+    async fn create_skill_layer_isolation() {
+        let global_dir = tempdir().unwrap();
+        let workspace_dir = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: global_dir.path().to_path_buf(),
+            workspace_dir: Some(workspace_dir.path().to_path_buf()),
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Workspace,
+                SkillMeta {
+                    name: "ws-skill".to_string(),
+                    description: "workspace skill".to_string(),
+                },
+                "ws body".to_string(),
+            )
+            .await
+            .unwrap();
+
+        // Workspace has it, global doesn't
+        let ws_skills = list_layer_skill_dirs(&workspace_dir.path().join("skills")).unwrap();
+        assert!(ws_skills.contains_key("ws-skill"));
+
+        let global_skills = list_layer_skill_dirs(&global_dir.path().join("skills")).unwrap();
+        assert!(!global_skills.contains_key("ws-skill"));
+    }
+
+    // 6. create_skill_roundtrip
+    #[tokio::test]
+    async fn create_skill_roundtrip() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "rt".to_string(),
+                    description: "roundtrip skill".to_string(),
+                },
+                "# My Skill\n\nSome details here.".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let result = store.get_skill("rt").await.unwrap();
+        assert_eq!(result.name, "rt");
+        assert_eq!(result.description, "roundtrip skill");
+
+        let body = store.load_skill("rt").await.unwrap();
+        assert_eq!(body, "# My Skill\n\nSome details here.");
+    }
+
+    // 7. skill_body_preserved
+    #[tokio::test]
+    async fn skill_body_preserved() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_skill(
+                Layer::Global,
+                SkillMeta {
+                    name: "multi".to_string(),
+                    description: "multi-line skill".to_string(),
+                },
+                "line1\n\nline3\n".to_string(),
+            )
+            .await
+            .unwrap();
+
+        let body = store.load_skill("multi").await.unwrap();
+        assert_eq!(body, "line1\n\nline3");
     }
 }
