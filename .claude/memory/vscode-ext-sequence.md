@@ -51,12 +51,20 @@ migration vers `docs/architecture.md` + suppression du design doc).
 
 ## État d'avancement
 
-**2026-08-29** — Phase 1 des 5 features écrite (les 5 design docs). **Aucune
-implémentation démarrée.** Pas encore commité, pas de branche créée. `ws06-vscode-ext-
-bootstrap.md` supprimé (superseded).
+<!-- Une ligne par transition, datée. Clôture Phase 3 / démarrage de feature. -->
 
-<!-- Mettre à jour cette section à chaque clôture Phase 3 / démarrage de feature.
-     Format : une ligne par transition, datée. -->
+- **2026-08-29** — Phase 1 des 5 features écrite (les 5 design docs).
+- **2026-08-31** — **F1 close (Phase 3 faite).** Branche `feat/F1-vscode-ext-foundations`
+  (pas encore poussée/mergée). `@vanyline/protocol` + `@vanyline/ui` extraits :
+  `ChatEvent` (ts-rs) + enveloppes RPC + `RpcConnection` + `config-domain.ts` ;
+  composants chat + les 6 écrans config + `ConfigShell` agnostiques du backend via 3
+  ports injectés (`ChatTransport`, `ChatBackend`, `ConfigRepo`). `frontend/` implémente
+  les ports (`httpConfigRepo` bidirectionnel REST↔canonique, `httpChatBackend`,
+  `VanylineChatTransport`). Design doc migré dans `docs/architecture.md` (§ Workspace
+  TypeScript), `docs/features/F1-vscode-ext-foundations.md` supprimé. Bilan complet
+  (décisions, 2 blocages Phase 2, délégation Qwen ratée sur task 06) :
+  `.claude/memory/F1-vscode-ext-foundations.md`.
+  **Suite : F2** (`F2-vscode-ext-cli-rpc`).
 
 ## Comment reprendre dans une session neuve
 
@@ -79,8 +87,14 @@ bootstrap.md` supprimé (superseded).
 
 ## Rappels techniques transverses
 
-- ts-rs sur `ChatEvent` (`#[serde(tag = "type")]`) : risque connu, repli = types manuels
-  + fixtures de conformité. Décidé en tâche 1 de F1.
+- ts-rs sur `ChatEvent` (`#[serde(tag = "type")]`) : **a marché** (F1 tâche 1), pas de
+  repli. `ts-rs` v12, `TS_RS_LARGE_INT="number"` dans `.cargo/config.toml`. Job CI `tsrs`
+  régénère + `git diff --exit-code`.
+- **`config-domain.ts`** (F1) : miroir **manuel** de `lib/src/domain.rs` (le générer aussi
+  en ts-rs n'a pas été tenté — scope). Forme = serde à la lettre, name-keyed. Toute la
+  traduction wire REST `app` ↔ canonique vit dans `httpConfigRepo` (F1) ; l'impl RPC (F4)
+  sera un pass-through. **F2 doit ajouter `Sse` à `domain.rs::McpTransport`** (le contrat
+  TS l'admet déjà, `domain.rs` non — divergence assumée en F1).
 - Validation anti-traversal des `name` de config (deviennent des noms de fichiers) :
   contrainte explicite dans le design F2 — c'est le trou trouvé sur `git-integration`
   (2026-08-22).

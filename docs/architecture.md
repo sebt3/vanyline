@@ -1726,25 +1726,84 @@ non identifiée, à creuser si ça se reproduit après le passage à 262144.
 ## Workspace TypeScript (npm workspaces)
 
 Le monorepo n'est pas que du Rust : le `package.json` racine fédère les packages
-TypeScript. Cible (les packages marqués *(à venir)* sont créés par les workstreams
-WS-2/WS-6 de `docs/roadmap.md`) :
+TypeScript (`workspaces: ["frontend", "packages/*"]` ; `ext/` ajouté par F3).
 
 | Package | Type | Rôle | Stack |
 |---------|------|------|-------|
 | `frontend/` | app | Shell IDE web : éditeur/explorer/terminal + configuration, cliente de l'app Rust (REST + WS) — voir section "Frontend — shell IDE Vue" plus haut | Vite, Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI, Vitest |
-| `packages/protocol` *(à venir)* | lib feuille | Types partagés `ChatEvent` + protocole JSON-RPC stdio, client ndjson | TypeScript pur, zéro dépendance UI |
-| `ext/` *(à venir)* | app | Extension VS Code : front-end graphique du CLI via JSON-RPC stdio | Host TS + webview Svelte 5/Tailwind |
-| `packages/ui` *(plus tard)* | lib | Composants de chat partagés frontend ↔ webview — extrait quand les deux fronts auront convergé | Svelte 5 |
+| `packages/protocol` (`@vanyline/protocol`) | lib feuille | Types partagés Rust↔TS + client RPC | TypeScript pur, zéro dépendance UI |
+| `packages/ui` (`@vanyline/ui`) | lib | Composants chat + les 6 écrans de configuration + `ConfigShell`, **agnostiques du backend** (ports injectés) | Vue 3, `@nuxt/ui`, `reka-ui`, `@ai-sdk/vue`, `@comark/vue` |
+| `ext/` *(F3)* | app | Extension VS Code : front-end graphique du CLI via JSON-RPC stdio | Host TS + webview Vue |
+
+### `@vanyline/protocol`
+
+- **`ChatEvent`** (`generated/chat-event.ts`) : défini en Rust (`vanyline-lib::event`),
+  **généré par `ts-rs`** (feature `ts-rs` gated, `TS_RS_LARGE_INT="number"` dans
+  `.cargo/config.toml`). Fichier commité ; job CI `tsrs` régénère + `git diff --exit-code`.
+- **Enveloppes RPC** (`rpc.ts`) : miroir de `cli/src/rpc/protocol.rs` (`JsonRpcRequest/
+  Response/Notification`, `InitializeParams/Result`, `ConversationSummary`,
+  `ChatSendParams/Result`, table `VNL-RPC-*`). **`RpcConnection`** (`connection.ts`) :
+  client ndjson **transport-injecté** (`{ write, onLine }`), corrélation `id → Promise`,
+  dispatch des notifications, timeouts — aucune API Node.
+- **`config-domain.ts`** : miroir TS **manuel** des 6 structs serde de
+  `lib/src/domain.rs` (`Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`,
+  `SkillMeta`/`SkillDetail`). Forme = serde à la lettre : discriminant `type` (pas
+  `provider_type`/`server_type`), `snake_case`, **name-keyed** (`ModelProfile.provider`,
+  `Agent.model` = noms, jamais des id). Plus 3 champs web-augmentés optionnels
+  (`Provider.available_models`/`is_default`, `McpServer.available_tools`). Conformité
+  vérifiée des deux côtés (`config-domain.conformance.spec.ts` + `domain.rs` tests
+  `*_wire_shape`). `McpTransport = 'sse' | 'http-streamable'` : `domain.rs` ne modélise
+  que `HttpStreamable`, `Sse` reste à ajouter côté Rust (F2).
+
+### `@vanyline/ui` — découplage par ports injectés
+
+Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`inject` :
+
+| Port | Clé | Fourni par (web) | Rôle |
+|---|---|---|---|
+| `ChatTransport<UIMessage>` (AI SDK) | `vanyline.chatTransport` | `VanylineChatTransport` (`frontend/src/api/chatTransport.ts`) | ouverture WS `app` + délègue le mapping à `chatEventsToUIStream` |
+| `ChatBackend` | `vanyline.chatBackend` | `httpChatBackend` | `listConversations` / `loadMessages` / `createConversation` (la politique de contexte — sandbox, 1ᵉʳ agent — vit dans l'impl, pas dans les composants) |
+| `ConfigRepo` | `CONFIG_REPO_KEY` = `vanyline.configRepo` | `httpConfigRepo` | CRUD **name-keyed** des 6 domaines (`providers`/`profiles`/`mcp`/`toolsets`/`agents`/`skills`) + `setDefaultProvider` / `testProvider` / `testMcpServer` / `listLocalTools` |
+
+- `ChatWindow.vue` : sélecteur de session + boutons new/close + hôte de `ChatSession.vue`
+  (tour de streaming, `useChat` de l'AI SDK). `activeConversationId` en `v-model` —
+  l'embarqueur le possède (web : lié au singleton `useIdeSession` ; VS Code : ref locale).
+  `chatEventsToUIStream(events, { abortSignal })` : `ReadableStream<ChatEvent>` →
+  `ReadableStream<UIMessageChunk>` (switch `ChatEvent` → chunks, gestion des blocs
+  texte/reasoning, `abort`/`finish`). `notify-fs-change` : `inject` optionnel no-op
+  (web-only, refresh de l'explorer).
+- `ConfigShell.vue` : coquille de nav Settings (groupes + sous-items, slot `pending`),
+  `groups: ConfigNavGroup[]` + `screens: Record<string, Component>` fournis par
+  l'embarqueur, émet `nav-change`. `useCrudResource(repo, domain)` : fetch/loading/error
+  + CRUD name-keyed (`create`/`update` propagent, `fetch`/`remove` capturent).
+- **`httpConfigRepo`** porte **toute** la traduction wire REST `app` ↔ forme canonique :
+  `provider_type`/`server_type` ↔ `type`, FK `provider_id`/`model_profile_id` ↔ nom (cache
+  `name↔id` **par instance**, l'id `i32` ne sort jamais du repo), champs web-augmentés,
+  `get('skills')` → `GET /{id}` pour le `body`. L'API REST de `app` est **inchangée**
+  (pas de migration). L'impl RPC de `ConfigRepo` (F4) sera un pass-through — c'est ici que
+  vit l'asymétrie name/id.
+- **RBAC exposée sans masquage** : `create`/`update` sur `providers`/`mcp` renvoient 403
+  pour un non-admin, l'écran affiche l'erreur. Côté CLI (F4) tout est local — l'UI est
+  identique, la capacité diffère.
+- **Restent dans `frontend/`** : `AccountScreen` (pas de compte hors web),
+  `src/components/common/` + `src/composables/useCrudResource.ts` (`(client, basePath)`,
+  consommés par les dashboards Projects/Sandboxes — hors périmètre de l'extraction).
+  `SettingsView.vue` ≈ 20 lignes : monte `ConfigShell` + `provide(CONFIG_REPO_KEY,
+  httpConfigRepo())`.
 
 ### Règles de dépendances TypeScript
 
 1. **`packages/protocol` est une feuille** : aucune dépendance UI, consommable par
    n'importe quel client (extension, frontend, scripts de test).
-2. **Un seul schéma d'événement** : `ChatEvent` est défini en Rust (`vanyline-lib`) ;
-   les types TS de `packages/protocol` en sont le miroir, **générés par `ts-rs`**
-   (feature-gated côté lib, fichier généré commité et vérifié en CI). La dérive
+2. **Un seul schéma par type partagé** : `ChatEvent` (ts-rs) et `config-domain.ts`
+   (miroir manuel + fixtures de conformité) sont définis en Rust d'abord. La dérive
    Rust↔TS est un bug, pas une fatalité.
 3. **Les apps dépendent des libs, jamais l'inverse** — même règle que côté Rust.
+   `frontend/` dépend de `@vanyline/ui` + `@vanyline/protocol` via alias source
+   (`vite.config.ts` + `tsconfig.app.json`), pas de build intermédiaire.
 4. Pas de `console.log` dans les sources (logger projet), pas de code partagé par
    copier-coller entre `frontend/` et `ext/` : ce qui doit être partagé remonte dans
    `packages/`.
+5. **CI** : job « Frontend + packages » — `check` + `test` de `@vanyline/protocol` puis
+   `@vanyline/ui` **avant** le build `frontend`. Job `tsrs` séparé pour la vérification
+   ts-rs.
