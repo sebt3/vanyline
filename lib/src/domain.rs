@@ -85,6 +85,11 @@ pub struct McpServer {
 #[serde(rename_all = "kebab-case")]
 pub enum McpTransport {
     HttpStreamable,
+    /// Transport SSE — accepté en configuration (le miroir TS
+    /// `@vanyline/protocol/config-domain.ts` l'expose), mais la connexion
+    /// n'est pas encore implémentée dans `prefixed_mcp` : un serveur SSE
+    /// sélectionné par un toolset remonte `VNL-MCP-004` en `ToolUnavailable`.
+    Sse,
 }
 
 /// Groupe cohérent d'outils + fragment de prompt système.
@@ -247,9 +252,15 @@ mod tests {
             serde_json::to_value(McpTransport::HttpStreamable).unwrap(),
             serde_json::json!("http-streamable")
         );
+        assert_eq!(
+            serde_json::to_value(McpTransport::Sse).unwrap(),
+            serde_json::json!("sse")
+        );
 
         let transport: McpTransport = serde_json::from_str("\"http-streamable\"").unwrap();
         assert_eq!(transport, McpTransport::HttpStreamable);
+        let sse: McpTransport = serde_json::from_str("\"sse\"").unwrap();
+        assert_eq!(sse, McpTransport::Sse);
     }
 
     #[test]

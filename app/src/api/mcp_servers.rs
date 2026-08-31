@@ -15,16 +15,13 @@ use crate::{
 use vanyline_lib::domain::{McpServer as DomainMcpServer, McpTransport};
 
 /// Mappe le Model SeaORM sur le type domaine `lib`. `server_type: "sse"` -> erreur
-/// claire (VNL-MCP-004, transport SSE non implémenté — limite pré-existante,
-/// pas corrigée dans cette feature). Pure, testable.
+/// claire. `server_type: "sse"` mappe sur `McpTransport::Sse` — accepté, mais la
+/// découverte de tools remonte `VNL-MCP-004` via `prefixed_mcp` (connexion SSE
+/// pas encore implémentée). Pure, testable.
 pub fn build_domain_server(server: &McpServerModel) -> Result<DomainMcpServer, AppError> {
     let transport = match server.server_type.as_str() {
         "http-streamable" => McpTransport::HttpStreamable,
-        "sse" => {
-            return Err(AppError::McpError(
-                "VNL-MCP-004: SSE transport is not implemented".into(),
-            ));
-        }
+        "sse" => McpTransport::Sse,
         other => {
             return Err(AppError::McpError(format!(
                 "VNL-MCP-003: server_type must be 'sse' or 'http-streamable', got: {other}"
@@ -164,7 +161,7 @@ mod tests {
     }
 
     #[test]
-    fn build_domain_server_sse_returns_error() {
+    fn build_domain_server_sse_maps_to_sse_transport() {
         let server = McpServerModel {
             id: 2,
             name: "sse-server".to_string(),
@@ -173,13 +170,8 @@ mod tests {
             headers: serde_json::json!({}),
             available_tools: serde_json::json!([]),
         };
-        let err = build_domain_server(&server).unwrap_err();
-        match err {
-            AppError::McpError(msg) => {
-                assert!(msg.contains("VNL-MCP-004"));
-            }
-            _ => panic!("expected McpError"),
-        }
+        let result = build_domain_server(&server).expect("sse accepté");
+        assert_eq!(result.transport, McpTransport::Sse);
     }
 
     #[test]
