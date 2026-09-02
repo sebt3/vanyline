@@ -11,6 +11,7 @@ use vanyline_lib::store::ConfigStore;
 use crate::config;
 use crate::rpc::protocol::{
     ChatCancelParams, ChatEventNotificationParams, ChatSendParams, ChatSendResult,
+    ConfigCreateParams, ConfigDeleteParams, ConfigLayer, ConfigUpdateParams,
     ConversationCreateParams, ConversationIdParams, ConversationSummary, InitializeParams,
     InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, NameParams,
     OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, SandboxCreateParams, jsonrpc_code,
@@ -87,6 +88,65 @@ fn config_error_response<T: serde::Serialize>(
             vnl_code::CONFIG_ERROR,
         ),
     }
+}
+
+/// Résout le `Layer` de store à partir du `layer?` RPC : Some(Global/Workspace)
+/// -> explicite ; None -> Workspace si `layers.workspace_dir` est Some
+/// (workspace résolu à `initialize`), sinon Global. Aligné sur la sémantique
+/// CLI (design « Cible de couche »).
+fn resolve_layer(
+    layers: &vanyline_cfgstore::layers::Layers,
+    layer: Option<ConfigLayer>,
+) -> vanyline_cfgstore::store::Layer {
+    match layer {
+        Some(ConfigLayer::Global) => vanyline_cfgstore::store::Layer::Global,
+        Some(ConfigLayer::Workspace) => vanyline_cfgstore::store::Layer::Workspace,
+        None => {
+            if layers.workspace_dir.is_some() {
+                vanyline_cfgstore::store::Layer::Workspace
+            } else {
+                vanyline_cfgstore::store::Layer::Global
+            }
+        }
+    }
+}
+
+/// Convertit le résultat d'une méthode d'écriture du store en réponse JSON-RPC.
+/// Mapping design « Codes d'erreur RPC » (table VNL-RPC-011..015) ; les autres
+/// variantes (`Config`, `DuplicateName`, `UnknownReference`, `ReadOnly`)
+/// retombent sur `VNL-RPC-006` comme la lecture (`config_error_response`).
+fn config_write_response(id: Value, result: Result<(), CfgStoreError>) -> String {
+    let response = match result {
+        Ok(()) => JsonRpcResponse::success(id, Value::Null),
+        Err(e) => {
+            let code = match &e {
+                CfgStoreError::WriteError(_) | CfgStoreError::Io(_) => vnl_code::CONFIG_WRITE_ERROR,
+                CfgStoreError::NotFound { .. } => vnl_code::CONFIG_NOT_FOUND,
+                CfgStoreError::NameConflict { .. } => vnl_code::CONFIG_NAME_CONFLICT,
+                CfgStoreError::InvalidName(_) => vnl_code::CONFIG_INVALID_NAME,
+                CfgStoreError::Validation(_) => vnl_code::CONFIG_VALIDATION,
+                _ => vnl_code::CONFIG_ERROR,
+            };
+            JsonRpcResponse::error(id, jsonrpc_code::SERVER_ERROR, format!("{e}"), code)
+        }
+    };
+    serde_json::to_string(&response).expect("serialize config write response")
+}
+
+/// Réponse d'enveloppe malformée pour les méthodes `config/*` d'écriture
+/// (désérialisation de `params` en `ConfigCreateParams`/`ConfigUpdateParams`/
+/// `ConfigDeleteParams` échouée) — même contrat que le pattern en ligne des
+/// handlers existants : code JSON-RPC `PARSE_ERROR`, `VNL-RPC-000`, `id`
+/// conservé. Utilisé uniquement par les bras d'écriture (les bras existants
+/// gardent leur pattern en ligne).
+fn malformed_params_response(id: Value) -> String {
+    serde_json::to_string(&JsonRpcResponse::error(
+        id,
+        jsonrpc_code::PARSE_ERROR,
+        "Malformed request: params could not be deserialized as config write params",
+        vnl_code::MALFORMED_REQUEST,
+    ))
+    .expect("serialize malformed params response")
 }
 
 /// Construits (ou réutilise depuis le cache) le `VnlK8sClient` de cette
@@ -218,6 +278,153 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "config/skills" => {
             let store_clone = store.clone();
             Some(handle_config_list(id, async { store_clone.list_skills().await }).await)
+        }
+        "config/providers" => {
+            let store_clone = store.clone();
+            Some(handle_config_list(id, async { store_clone.list_providers().await }).await)
+        }
+        "config/mcpServers" => {
+            let store_clone = store.clone();
+            Some(handle_config_list(id, async { store_clone.list_mcp_servers().await }).await)
+        }
+        // --- Écriture config.yaml (providers/models/mcpServers — tâche 3a).
+        // toolsets/agents/skills (fichiers) -> tâche 3b. La validation du
+        // `name` (anti-traversal) est faite dans le store, JAMAIS ici.
+        "config/providers/create" => {
+            let params: ConfigCreateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            match serde_json::from_value::<vanyline_cfgstore::domain::Provider>(params.item) {
+                Err(e) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!("Invalid item: {e}"),
+                        vnl_code::CONFIG_VALIDATION,
+                    ))
+                    .expect("serialize create item error response"),
+                ),
+                Ok(item) => Some(config_write_response(
+                    id,
+                    store.create_provider(layer, item).await,
+                )),
+            }
+        }
+        "config/providers/update" => {
+            let params: ConfigUpdateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store
+                    .update_provider(layer, &params.name, params.patch)
+                    .await,
+            ))
+        }
+        "config/providers/delete" => {
+            let params: ConfigDeleteParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.delete_provider(layer, &params.name).await,
+            ))
+        }
+        "config/models/create" => {
+            let params: ConfigCreateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            match serde_json::from_value::<vanyline_cfgstore::domain::ModelProfile>(params.item) {
+                Err(e) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!("Invalid item: {e}"),
+                        vnl_code::CONFIG_VALIDATION,
+                    ))
+                    .expect("serialize create item error response"),
+                ),
+                Ok(item) => Some(config_write_response(
+                    id,
+                    store.create_model(layer, item).await,
+                )),
+            }
+        }
+        "config/models/update" => {
+            let params: ConfigUpdateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.update_model(layer, &params.name, params.patch).await,
+            ))
+        }
+        "config/models/delete" => {
+            let params: ConfigDeleteParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.delete_model(layer, &params.name).await,
+            ))
+        }
+        "config/mcpServers/create" => {
+            let params: ConfigCreateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            match serde_json::from_value::<vanyline_cfgstore::domain::McpServer>(params.item) {
+                Err(e) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!("Invalid item: {e}"),
+                        vnl_code::CONFIG_VALIDATION,
+                    ))
+                    .expect("serialize create item error response"),
+                ),
+                Ok(item) => Some(config_write_response(
+                    id,
+                    store.create_mcp_server(layer, item).await,
+                )),
+            }
+        }
+        "config/mcpServers/update" => {
+            let params: ConfigUpdateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store
+                    .update_mcp_server(layer, &params.name, params.patch)
+                    .await,
+            ))
+        }
+        "config/mcpServers/delete" => {
+            let params: ConfigDeleteParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.delete_mcp_server(layer, &params.name).await,
+            ))
         }
         "conversations/list" => Some(handle_conversations_list(id)),
         "conversations/get" => Some(handle_conversations_get(id, request.params)),
@@ -2667,5 +2874,770 @@ defaults:
 
         assert!(resp.error.is_some());
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    // -- New tests for task 3a (config write: providers/models/mcpServers) --
+
+    /// `providers_create_list_update_delete_roundtrip` — `layer` omis avec un
+    /// workspace résolu (tempdir contenant `.vanyline/`) : défaut = workspace.
+    /// Cycle complet create -> list -> update (patch partiel endpoint, puis
+    /// api_key ajouté puis effacé par `null`) -> delete -> list vide.
+    /// `isolated_config_dir()` : la lecture `config/providers` est FUSIONNÉE —
+    /// sans isolation, un `~/.config/vanyline` réel fuite dans la liste (et le
+    /// `[]` final de fin de test serait impossible).
+    #[tokio::test]
+    async fn providers_create_list_update_delete_roundtrip() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            300,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        // create (layer omis -> workspace) -> result:null sur le fil
+        let create_line = make_request_json(
+            301,
+            "config/providers/create",
+            Some(json!({
+                "item": {"name": "prov-a", "type": "ollama", "endpoint": "http://localhost:11434"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should answer result:null on the wire, got: {result}"
+        );
+
+        // list -> contient prov-a
+        let list_line = make_request_json(302, "config/providers", None);
+        let result = handle_line(&mut state, &list_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/providers should succeed, got: {:?}",
+            resp.error
+        );
+        let providers = resp.result.as_ref().expect("result should be Some");
+        let prov = providers
+            .as_array()
+            .expect("result should be an array")
+            .iter()
+            .find(|p| p["name"] == "prov-a")
+            .expect("prov-a should be listed");
+        assert_eq!(prov["type"], "ollama");
+        assert_eq!(prov["endpoint"], "http://localhost:11434");
+
+        // update patch endpoint -> modifié, type préservé (patch partiel)
+        let update_line = make_request_json(
+            303,
+            "config/providers/update",
+            Some(json!({"name": "prov-a", "patch": {"endpoint": "http://other:11434"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "update should answer result:null, got: {result}"
+        );
+        let result = handle_line(
+            &mut state,
+            &make_request_json(304, "config/providers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let prov = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "prov-a")
+            .expect("prov-a should still be listed");
+        assert_eq!(prov["endpoint"], "http://other:11434");
+        assert_eq!(prov["type"], "ollama", "partial patch preserves type");
+
+        // patch api_key -> présent ; patch {"api_key":null} -> absent du JSON
+        let update_line = make_request_json(
+            305,
+            "config/providers/update",
+            Some(json!({"name": "prov-a", "patch": {"api_key": "k"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(result.contains("\"result\":null"));
+        let result = handle_line(
+            &mut state,
+            &make_request_json(306, "config/providers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let prov = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "prov-a")
+            .unwrap();
+        assert_eq!(prov["api_key"], "k");
+
+        let update_line = make_request_json(
+            307,
+            "config/providers/update",
+            Some(json!({"name": "prov-a", "patch": {"api_key": null}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(result.contains("\"result\":null"));
+        let result = handle_line(
+            &mut state,
+            &make_request_json(308, "config/providers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let prov = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"] == "prov-a")
+            .unwrap();
+        assert!(
+            prov.get("api_key").is_none(),
+            "api_key should be absent from serialized JSON after null patch, got: {prov}"
+        );
+
+        // delete -> success ; list -> []
+        let delete_line = make_request_json(
+            309,
+            "config/providers/delete",
+            Some(json!({"name": "prov-a"})),
+        );
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "delete should answer result:null, got: {result}"
+        );
+        let result = handle_line(
+            &mut state,
+            &make_request_json(310, "config/providers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "list should succeed: {:?}",
+            resp.error
+        );
+        assert_eq!(resp.result.as_ref().unwrap().as_array().unwrap().len(), 0);
+    }
+
+    /// `models_create_list_update_delete_roundtrip` — cycle models ; patch
+    /// `{"model":...}` préserve `provider` ; delete retire `m1` de
+    /// `config/models`.
+    #[tokio::test]
+    async fn models_create_list_update_delete_roundtrip() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            320,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            321,
+            "config/models/create",
+            Some(json!({
+                "item": {"name": "m1", "provider": "prov-a", "model": "llama3", "temperature": 0.2}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should answer result:null, got: {result}"
+        );
+
+        let result = handle_line(&mut state, &make_request_json(322, "config/models", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/models should succeed, got: {:?}",
+            resp.error
+        );
+        let model = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "m1")
+            .expect("m1 should be listed");
+        assert_eq!(model["provider"], "prov-a");
+        assert_eq!(model["model"], "llama3");
+
+        let update_line = make_request_json(
+            323,
+            "config/models/update",
+            Some(json!({"name": "m1", "patch": {"model": "llama3.1"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(result.contains("\"result\":null"));
+        let result = handle_line(&mut state, &make_request_json(324, "config/models", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let model = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["name"] == "m1")
+            .unwrap();
+        assert_eq!(model["model"], "llama3.1");
+        assert_eq!(model["provider"], "prov-a", "patch preserves provider");
+
+        let delete_line =
+            make_request_json(325, "config/models/delete", Some(json!({"name": "m1"})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        assert!(result.contains("\"result\":null"));
+        let result = handle_line(&mut state, &make_request_json(326, "config/models", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "list should succeed: {:?}",
+            resp.error
+        );
+        let models = resp.result.as_ref().unwrap().as_array().unwrap();
+        assert!(
+            !models.iter().any(|m| m["name"] == "m1"),
+            "m1 should be gone after delete, got: {models:?}"
+        );
+    }
+
+    /// `mcp_servers_create_list_update_delete_roundtrip` — méthodes
+    /// `config/mcpServers/*` ; lecture contient puis ne contient plus `s1`.
+    #[tokio::test]
+    async fn mcp_servers_create_list_update_delete_roundtrip() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            340,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            341,
+            "config/mcpServers/create",
+            Some(json!({
+                "item": {
+                    "name": "s1",
+                    "type": "http-streamable",
+                    "url": "http://x/mcp",
+                    "headers": {"a": "b"}
+                }
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should answer result:null, got: {result}"
+        );
+
+        let result = handle_line(
+            &mut state,
+            &make_request_json(342, "config/mcpServers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/mcpServers should succeed, got: {:?}",
+            resp.error
+        );
+        let server = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "s1")
+            .expect("s1 should be listed");
+        assert_eq!(server["type"], "http-streamable");
+        assert_eq!(server["url"], "http://x/mcp");
+        assert_eq!(server["headers"]["a"], "b");
+
+        let update_line = make_request_json(
+            343,
+            "config/mcpServers/update",
+            Some(json!({"name": "s1", "patch": {"url": "http://y/mcp"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(result.contains("\"result\":null"));
+        let result = handle_line(
+            &mut state,
+            &make_request_json(344, "config/mcpServers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let server = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "s1")
+            .unwrap();
+        assert_eq!(server["url"], "http://y/mcp");
+
+        let delete_line =
+            make_request_json(345, "config/mcpServers/delete", Some(json!({"name": "s1"})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        assert!(result.contains("\"result\":null"));
+        let result = handle_line(
+            &mut state,
+            &make_request_json(346, "config/mcpServers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "list should succeed: {:?}",
+            resp.error
+        );
+        let servers = resp.result.as_ref().unwrap().as_array().unwrap();
+        assert!(
+            !servers.iter().any(|s| s["name"] == "s1"),
+            "s1 should be gone after delete, got: {servers:?}"
+        );
+    }
+
+    /// `config_create_conflict_returns_013` — create du même provider deux fois
+    /// dans la même couche -> 2e réponse `VNL-RPC-013`.
+    #[tokio::test]
+    async fn config_create_conflict_returns_013() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            360,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let item =
+            json!({"name": "prov-a", "type": "ollama", "endpoint": "http://localhost:11434"});
+        let first = make_request_json(361, "config/providers/create", Some(json!({"item": item})));
+        let result = handle_line(&mut state, &first).await.unwrap();
+        assert!(result.contains("\"result\":null"), "first create: {result}");
+
+        let second = make_request_json(362, "config/providers/create", Some(json!({"item": item})));
+        let result = handle_line(&mut state, &second).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "second create should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-013");
+    }
+
+    /// `config_update_not_found_returns_012` — update d'un nom absent de la
+    /// couche ciblée (couche workspace vide) -> `VNL-RPC-012`.
+    #[tokio::test]
+    async fn config_update_not_found_returns_012() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            370,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let update_line = make_request_json(
+            371,
+            "config/providers/update",
+            Some(json!({"name": "ghost", "patch": {"endpoint": "http://x"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "update of ghost should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-012");
+    }
+
+    /// `config_delete_not_found_returns_012` — delete d'un nom absent de la
+    /// couche ciblée -> `VNL-RPC-012` (contrairement aux conversations, la
+    /// suppression de config n'est PAS idempotente — design).
+    #[tokio::test]
+    async fn config_delete_not_found_returns_012() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            380,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let delete_line = make_request_json(
+            381,
+            "config/providers/delete",
+            Some(json!({"name": "ghost"})),
+        );
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "delete of ghost should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-012");
+    }
+
+    /// `config_write_invalid_name_returns_014` — create avec `name` de
+    /// traversal -> `VNL-RPC-014`, et AUCUNE écriture : le `config.yaml`
+    /// workspace n'existe pas, `<tmp>` ne contient que `.vanyline/` (vide).
+    /// Idem update/delete avec `name: ".."` -> 014 (`validate_name` s'exécute
+    /// avant la recherche du nom côté store).
+    #[tokio::test]
+    async fn config_write_invalid_name_returns_014() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        let vanyline = tmp.path().join(".vanyline");
+        std::fs::create_dir_all(&vanyline).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            390,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(
+            391,
+            "config/providers/create",
+            Some(json!({
+                "item": {"name": "../evil", "type": "ollama", "endpoint": "http://x"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_some(),
+            "create with traversal name should fail"
+        );
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-014");
+
+        // Assert FS : aucune écriture n'a eu lieu — pas de config.yaml dans la
+        // couche workspace, et `<tmp>` ne contient rien d'autre que `.vanyline/`
+        // (répertoire vide).
+        assert!(
+            !vanyline.join("config.yaml").exists(),
+            "no config.yaml should have been written in the workspace layer"
+        );
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(".vanyline")]);
+        assert!(
+            std::fs::read_dir(&vanyline).unwrap().next().is_none(),
+            ".vanyline should be empty (no write happened)"
+        );
+
+        let update_line = make_request_json(
+            392,
+            "config/providers/update",
+            Some(json!({"name": "..", "patch": {"endpoint": "http://x"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "update with '..' should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-014");
+
+        let delete_line =
+            make_request_json(393, "config/providers/delete", Some(json!({"name": ".."})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "delete with '..' should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-014");
+    }
+
+    /// `config_create_bad_enum_returns_015` — create provider `type` inconnu :
+    /// la désérialisation de `item` échoue côté handler (le store ne voit
+    /// jamais un type déjà typé) -> `VNL-RPC-015`.
+    #[tokio::test]
+    async fn config_create_bad_enum_returns_015() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            400,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(
+            401,
+            "config/providers/create",
+            Some(json!({
+                "item": {"name": "prov-x", "type": "bogus", "endpoint": "http://x"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "create with unknown type should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-015");
+    }
+
+    /// `config_update_bad_enum_returns_015` — provider existant, patch
+    /// `{"type":"bogus"}` -> le store valide l'enum après patch -> `VNL-RPC-015`.
+    #[tokio::test]
+    async fn config_update_bad_enum_returns_015() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            410,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(
+            411,
+            "config/providers/create",
+            Some(json!({
+                "item": {"name": "prov-a", "type": "ollama", "endpoint": "http://localhost:11434"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(result.contains("\"result\":null"), "create: {result}");
+
+        let update_line = make_request_json(
+            412,
+            "config/providers/update",
+            Some(json!({"name": "prov-a", "patch": {"type": "bogus"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "update with unknown type should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-015");
+    }
+
+    /// `config_layer_global_writes_global_only` — workspace résolu +
+    /// `{"layer":"global"}` : écriture UNIQUEMENT dans la couche globale
+    /// (`<XDG_TMP>/vanyline/config.yaml`), la couche workspace n'a pas été
+    /// touchée ; la lecture fusionnée renvoie bien l'entrée globale.
+    #[tokio::test]
+    async fn config_layer_global_writes_global_only() {
+        let (config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            420,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(
+            421,
+            "config/providers/create",
+            Some(json!({
+                "layer": "global",
+                "item": {"name": "prov-g", "type": "ollama", "endpoint": "http://localhost:11434"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "global create should succeed, got: {result}"
+        );
+
+        let global_config = config_tmp.path().join("vanyline").join("config.yaml");
+        assert!(
+            global_config.exists(),
+            "global config.yaml should exist at {}",
+            global_config.display()
+        );
+        let content = std::fs::read_to_string(&global_config).unwrap();
+        assert!(
+            content.contains("prov-g"),
+            "global config.yaml should mention prov-g, got: {content}"
+        );
+        assert!(
+            !tmp.path().join(".vanyline").join("config.yaml").exists(),
+            "workspace layer must NOT have been touched"
+        );
+
+        // Lecture fusionnée -> l'entrée globale est visible
+        let result = handle_line(
+            &mut state,
+            &make_request_json(422, "config/providers", None),
+        )
+        .await
+        .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "list should succeed: {:?}",
+            resp.error
+        );
+        let providers = resp.result.as_ref().unwrap().as_array().unwrap();
+        assert!(
+            providers.iter().any(|p| p["name"] == "prov-g"),
+            "merged read should include the global entry, got: {providers:?}"
+        );
+    }
+
+    /// `config_default_layer_global_without_workspace` — workspace sans
+    /// marqueur (non résolu) + create SANS `layer` : défaut = global -> écrit
+    /// dans `<XDG_TMP>/vanyline/config.yaml`, aucun `.vanyline` créé sous le
+    /// tempdir workspace.
+    #[tokio::test]
+    async fn config_default_layer_global_without_workspace() {
+        let (config_tmp, _config_guard) = isolated_config_dir();
+        // Tempdir SANS .vanyline/ ni .git/ -> workspace_root = None (cf.
+        // initialize_no_workspace_marker_yields_none).
+        let tmp = tempdir().unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            430,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            431,
+            "config/providers/create",
+            Some(json!({
+                "item": {"name": "prov-d", "type": "ollama", "endpoint": "http://localhost:11434"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create (default layer = global, no workspace) should succeed, got: {result}"
+        );
+
+        let global_config = config_tmp.path().join("vanyline").join("config.yaml");
+        assert!(
+            global_config.exists(),
+            "default write should land in the global layer at {}",
+            global_config.display()
+        );
+        let content = std::fs::read_to_string(&global_config).unwrap();
+        assert!(content.contains("prov-d"));
+        assert!(
+            !tmp.path().join(".vanyline").exists(),
+            "no .vanyline should have been created under the workspace tempdir"
+        );
+    }
+
+    /// `config_workspace_layer_without_workspace_returns_006` — même setup
+    /// (workspace non résolu) mais `{"layer":"workspace"}` explicite : le store
+    /// répond `Config("no workspace layer configured")`, repli documenté ->
+    /// `VNL-RPC-006` (cf. `config_write_response`, variantes non typées).
+    #[tokio::test]
+    async fn config_workspace_layer_without_workspace_returns_006() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            440,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            441,
+            "config/providers/create",
+            Some(json!({
+                "layer": "workspace",
+                "item": {"name": "prov-w", "type": "ollama", "endpoint": "http://localhost:11434"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_some(),
+            "explicit workspace layer without a resolved workspace should fail"
+        );
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-006");
     }
 }
