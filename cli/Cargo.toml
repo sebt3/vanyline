@@ -13,6 +13,7 @@ path = "src/main.rs"
 vanyline-lib = { path = "../lib", features = ["k8s"] }
 vanyline-tools = { path = "../tools" }
 vanyline-crds = { path = "../crds" }
+vanyline-cfgstore = { path = "../cfgstore" }
 kube = { version = "4", default-features = false, features = ["client"] }
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
@@ -28,7 +29,7 @@ async-trait = "0.1"
 rig-core = { version = "0.38", features = ["rmcp"] }
 futures = "0.3"
 rmcp = { version = "1.7.0", features = ["transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
-yaml_serde = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 
 [dev-dependencies]
 tempfile = "3"

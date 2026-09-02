@@ -77,6 +77,20 @@ convertis en camelCase. Un client qui s'attend à du camelCase partout va
 se planter sur `config/agents`/`config/models`/`config/toolsets`/
 `conversations/get`. Voir les exemples ci-dessous pour la forme exacte.
 
+Les enveloppes d'**écriture** `config/<domain>/*` sont elles aussi en
+**camelCase** : `layer`, `name`, `patch`, `item`, `body` (params de
+`create`/`update`/`delete`, cf. « Écriture de configuration » plus bas).
+MAIS le **contenu** de `item` et de `patch` est le type de domaine en
+**snake_case natif** (`system_prompt`, `local_tools`, `max_tokens`,
+`api_key`...) — la conversion ne s'applique jamais aux objets de domaine
+portés par l'enveloppe, seulement à l'enveloppe elle-même.
+
+Dernier piège à figer : le domaine RPC s'appelle **`models`** (la map
+`models:` du `config.yaml`, nom historique de la CLI) alors que
+`@vanyline/ui` l'appelle `profiles`. Les deux noms ne désignent qu'une
+seule et même chose — c'est le pont RPC de la feature extension (F4) qui
+traduit l'un en l'autre.
+
 ## Codes d'erreur `VNL-RPC-*`
 
 | Code | Signification |
@@ -87,11 +101,16 @@ se planter sur `config/agents`/`config/models`/`config/toolsets`/
 | `VNL-RPC-003` | `protocolVersion` inconnu dans `initialize` |
 | `VNL-RPC-004` | Méthode inconnue |
 | `VNL-RPC-005` | `conversationId` référence une conversation inexistante |
-| `VNL-RPC-006` | Erreur de lecture de la config (`config/*`) |
+| `VNL-RPC-006` | Erreur de config (`config/*`) non typée : lecture en erreur, nom inconnu sur une action `test`, cible de test injoignable, ou erreur du `store` hors des cas 011–015 |
 | `VNL-RPC-007` | Erreur de stockage des conversations (I/O disque) |
 | `VNL-RPC-008` | Aucun agent résolvable pour `chat/send` (ni param, ni conversation, ni défaut) |
 | `VNL-RPC-009` | Le tour LLM a échoué (`run_agent_turn`) |
 | `VNL-RPC-010` | Erreur K8s (client injoignable ou appel API échoué, `owners/projects/sandboxes`) |
+| `VNL-RPC-011` | `CONFIG_WRITE_ERROR` — échec d'écriture disque ou de sérialisation (`WriteError`/`Io`) |
+| `VNL-RPC-012` | `CONFIG_NOT_FOUND` — `update`/`delete` sur un `name` absent de la **couche ciblée** |
+| `VNL-RPC-013` | `CONFIG_NAME_CONFLICT` — `create` sur un `name` déjà présent dans la **couche ciblée** |
+| `VNL-RPC-014` | `CONFIG_INVALID_NAME` — `name` violant la contrainte anti-traversal |
+| `VNL-RPC-015` | `CONFIG_VALIDATION` — valeur énumérée invalide (`type` de provider/MCP, `mode` d'agent) ou `item` non désérialisable |
 
 ## Méthodes
 
@@ -148,6 +167,36 @@ snake_case natif — voir l'avertissement camelCase/snake_case plus haut.
   ]}
 ```
 
+### `config/providers`
+
+Liste les providers résolus (deux couches fusionnées). Objets `Provider` en
+snake_case natif — `type` est l'enum `"ollama" | "openai-compatible"`, et
+`api_key` est **absent** (pas `null`) quand non configuré.
+
+```json
+→ {"jsonrpc":"2.0","id":8,"method":"config/providers"}
+← {"jsonrpc":"2.0","id":8,"result":[
+    {"name":"ollama-local","type":"ollama","endpoint":"http://localhost:11434"}
+  ]}
+```
+
+### `config/mcpServers`
+
+Liste les serveurs MCP résolus (deux couches fusionnées). Objets `McpServer`
+en snake_case natif — `type` est l'enum `"http-streamable" | "sse"`, et
+`headers` est toujours présent (`{}` si aucun header).
+
+`sse` est **stockable** mais le transport est **non implémenté** : un `test`
+sur un serveur `sse` (comme son usage par un toolset) échoue avec
+`VNL-MCP-004`, replié en `VNL-RPC-006`.
+
+```json
+→ {"jsonrpc":"2.0","id":9,"method":"config/mcpServers"}
+← {"jsonrpc":"2.0","id":9,"result":[
+    {"name":"grafana","type":"http-streamable","url":"http://mcp:3000","headers":{"X-Token":"secret"}}
+  ]}
+```
+
 ### `config/toolsets`
 
 ```json
@@ -169,13 +218,162 @@ Index léger (name + description) — pas le corps du skill.
 ```
 
 Erreur de lecture de config (fichier YAML invalide, etc.) sur n'importe
-laquelle des 4 méthodes ci-dessus :
+laquelle des 6 méthodes ci-dessus :
 ```json
 ← {"jsonrpc":"2.0","id":7,"error":{"code":-32000,"message":"VNL-CFG-001: Configuration error: ...","data":{"code":"VNL-RPC-006"}}}
 ```
 (Le message embarque le code `VNL-CFG-*`/`VNL-LLM-*` interne à
 `vanyline_lib` — utile pour le débogage, le code de premier niveau côté
 client reste `VNL-RPC-006`.)
+
+### Écriture de configuration
+
+18 méthodes — `config/<domain>/create`, `config/<domain>/update`,
+`config/<domain>/delete` avec `domain ∈ {providers, models, mcpServers,
+toolsets, agents, skills}`. L'enveloppe des params est en camelCase
+(`layer`, `name`, `patch`, `item`, `body`), son contenu (`item`, `patch`)
+en **snake_case natif** de domaine. Une enveloppe `params` non
+désérialisable répond `VNL-RPC-000` (comme partout). Tout succès d'écriture
+répond `result: null` — rien à relire dans la réponse : seule la méthode
+`config/<domain>` de lecture correspondante renvoie l'entrée (fusion des
+deux couches, pas la couche ciblée).
+
+**Cible de couche (`layer?`)** — le param `layer` vaut `"global"` ou
+`"workspace"` (minuscules ; toute autre valeur = enveloppe malformée,
+`VNL-RPC-000`) :
+
+- absent — `workspace` si `initialize` a résolu un workspace (marqueur
+  `.vanyline/` ou `.git`), sinon `global` ;
+- `"global"` — force la couche globale **même en workspace résolu** ;
+- `"workspace"` explicite sans workspace résolu — `VNL-RPC-006` ;
+- une écriture ne touche **que** la couche ciblée : le fichier de l'autre
+  couche reste inchangé octet pour octet. La résolution 2-couches à la
+  lecture n'est pas affectée ;
+- conflits et absences (`VNL-RPC-012`, `VNL-RPC-013`) jugés **dans la
+  couche ciblée uniquement** — un nom présent dans l'autre couche ne
+  bloque pas un `create` dans la couche ciblée.
+
+**Les 3 formes**, pour les 6 domaines :
+
+- `config/<domain>/create` — params `{layer?, item}` ; `item` = l'entité
+  snake_case complète (avec son `name`). Succès -> `result: null`.
+- `config/<domain>/update` — params `{layer?, name, patch}` ; `patch` est
+  un objet partiel : clé absente = inchangée, clé présente = **remplacée**,
+  clé à `null` = efface un champ optionnel (ou vide une liste). Les clés
+  inconnues sont ignorées. Succès -> `result: null`.
+- `config/<domain>/delete` — params `{layer?, name}`. Succès ->
+  `result: null`. **Non idempotent** (contrairement à
+  `conversations/delete`) : un `name` absent de la couche ciblée répond
+  `VNL-RPC-012`.
+
+Un `item` non désérialisable dans le type de domaine (`type` hors enum de
+provider/MCP, `mode` d'agent invalide, champ mal typé...) répond
+`VNL-RPC-015`, avant toute atteinte du store.
+
+Un patch dont le résultat rendrait l'entrée **non relisible** est refusé
+en entier par `VNL-RPC-015`, **rien n'est écrit** : `null` sur un champ
+requis (`type`/`endpoint` pour providers, `provider`/`model` pour models,
+`type`/`url` pour MCP, `mode`/`model`/`system_prompt` pour agents,
+`description`/`body` pour skills), **ou** une valeur mal typée sur
+n'importe quel champ (`endpoint: 123`, `temperature: "hot"`,
+`headers: "x"`…). L'entrée relue après un patch rejeté est l'originale
+intacte. `null` sur un champ optionnel (ou une liste) l'efface/vide
+normalement.
+
+**Exception de forme pour skills** — `config/skills/create` prend
+`{layer?, item, body}` : `item` = le `SkillMeta` (`{name, description}`),
+`body` = le corps du `SKILL.md` (hors frontmatter), séparé de l'item.
+`body` est **requis** : absent -> `VNL-RPC-000` (c'est l'enveloppe qui
+échoue, pas l'`item`). `config/skills/update` patche les clés
+`description` et/ou `body`. Le corps n'est jamais exposé en lecture —
+`config/skills` ne renvoie que l'index léger.
+
+Exemple complet (providers, écriture en couche globale puis conflit de nom) :
+
+```json
+→ {"jsonrpc":"2.0","id":10,"method":"config/providers/create","params":{"layer":"global","item":{"name":"ollama-local","type":"ollama","endpoint":"http://localhost:11434"}}}
+← {"jsonrpc":"2.0","id":10,"result":null}
+→ {"jsonrpc":"2.0","id":11,"method":"config/providers/create","params":{"layer":"global","item":{"name":"ollama-local","type":"ollama","endpoint":"http://localhost:11434"}}}
+← {"jsonrpc":"2.0","id":11,"error":{"code":-32000,"message":"VNL-CFG-007: provider 'ollama-local' already exists in Global layer","data":{"code":"VNL-RPC-013"}}}
+```
+
+**Validation des noms (anti-traversal)** — contrat de sécurité. `name`
+devient une clé de map et/ou un nom de fichier et de répertoire : il doit
+matcher `^[a-zA-Z0-9][a-zA-Z0-9._-]*$` et faire au plus 64 caractères.
+`..`, `/`, `\`, chemins absolus sont rejetés par `VNL-RPC-014`, **sans
+aucune écriture** (rien n'est créé sur disque, pas même un répertoire). La
+validation vit dans la couche de store (`vanyline-cfgstore`), pas dans le
+handler RPC : la contrainte est donc identique pour le CLI et pour toute
+surface future (sandbox).
+
+**Effet de bord assumé** — réécrire une entrée réécrit le `config.yaml` de
+la couche concernée via `yaml_serde` : les **données** des autres entrées
+et des autres maps sont préservées, pas le **formatting** — commentaires
+et ordre d'origine perdus. Dette assumée, documentée ici.
+
+**Fichiers annexes** — les `create` des domaines fichiers écrivent
+respectivement `toolsets/<name>.yaml`, `agents/<name>.md` et
+`skills/<name>/SKILL.md` (relatifs au répertoire de la couche) ; les
+`update` réécrivent ce même fichier, les `delete` le suppriment (et le
+répertoire du skill). Rien d'autre ne vit dans le répertoire d'un skill —
+il n'existe aucune surface RPC pour éditer des fichiers annexes.
+
+### Actions
+
+**`config/localTools`** — sans params. Registre **statique** des 8 tools
+intégrés du CLI, en descripteurs MCP `{name, description, inputSchema}`
+passés verbatim (schéma MCP en camelCase — pas des entités de domaine).
+Filesystem (5) : `read_file`, `write_file`, `edit_file`, `delete_file`,
+`list_directory` ; search (2) : `find_files`, `search` ; command (1) :
+`execute_command`. Un toolset peut référencer ces noms dans sa liste
+`local_tools`.
+
+```json
+→ {"jsonrpc":"2.0","id":14,"method":"config/localTools"}
+← {"jsonrpc":"2.0","id":14,"result":[
+    {"name":"read_file","description":"Read a file as numbered lines. …","inputSchema":{"type":"object","properties":{"path":{"type":"string"},"offset":{"type":"integer"},"limit":{"type":"integer"}},"required":["path"]}},
+    {"name":"write_file","description":"…","inputSchema":{"…":"…"}}
+  ]}
+```
+(tronqué à 2 entrées — 8 tools au total)
+
+**`config/providers/test`** — params `{name}` (**requis**, sinon
+`VNL-RPC-000`). Pas de `layer` : l'entrée est résolue par nom dans le store
+**fusionné**, exactement comme la verrait une lecture. Sonde le provider :
+`ollama` -> `GET {endpoint}/api/tags` -> les `models[].name` ;
+`openai-compatible` -> `GET {endpoint}/v1/models` (+ header
+`Authorization: Bearer` si `api_key` présente) -> les `data[].id`.
+Timeout 10 s.
+
+```json
+→ {"jsonrpc":"2.0","id":12,"method":"config/providers/test","params":{"name":"ollama-local"}}
+← {"jsonrpc":"2.0","id":12,"result":{"models":["llama3:latest","qwen2.5"]}}
+```
+
+Nom inconnu, cible injoignable ou réponse non-JSON -> `VNL-RPC-006` (le
+message porte le détail interne `VNL-LLM-003`/`VNL-LLM-004`).
+
+**`config/mcpServers/test`** — params `{name}` (même résolution que
+ci-dessus). Se connecte au serveur MCP et liste les noms de ses outils.
+
+```json
+→ {"jsonrpc":"2.0","id":13,"method":"config/mcpServers/test","params":{"name":"grafana"}}
+← {"jsonrpc":"2.0","id":13,"result":{"tools":["list_alerts","query_metrics"]}}
+```
+
+Échec de connexion — ou transport `sse`, non implémenté (`VNL-MCP-004`) —
+-> `VNL-RPC-006`. Timeout 10 s (une cible qui accepte la connexion sans
+répondre -> `VNL-RPC-006` au bout de 10 s, pas de blocage du serveur).
+
+**Sécurité — note SSRF (assumée, non mitigée)** — les actions `test`
+requêtent les URLs de provider/MCP **stockées dans la config** : la cible
+est donc contrôlée par qui a écrit cette config. Le serveur RPC tourne
+**en local, sous l'utilisateur**, seul maître de sa configuration — la
+surface d'attaque est la sienne, cohérent avec « Sécurité workspace
+assumée ». **Cette hypothèse ne vaut plus dès lors que la même surface de
+config est exposée par un serveur multi-tenant (sandbox)** — à retraiter
+dans la feature sandbox. Le crate de config lui-même ne fait aucune
+requête réseau : seules les actions `test` en font.
 
 ### `conversations/list`
 

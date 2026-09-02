@@ -7,6 +7,7 @@ members = [
     "tools",
     "controller",
     "crds",
+    "cfgstore",
 ]
 resolver = "2"
 [workspace.package]

@@ -736,6 +736,7 @@ mod tests {
 
     use crate::event::ChatEvent;
     use crate::store::InMemoryConfigStore;
+    use std::sync::Mutex;
 
     struct NoopSink;
 
@@ -760,29 +761,29 @@ mod tests {
     #[tokio::test]
     async fn resolve_turn_context_success() {
         let store = InMemoryConfigStore {
-            providers: vec![Provider {
+            providers: Mutex::new(vec![Provider {
                 name: "ollama-local".to_string(),
                 provider_type: ProviderType::Ollama,
                 endpoint: "http://localhost:11434".to_string(),
                 api_key: None,
-            }],
-            models: vec![ModelProfile {
+            }]),
+            models: Mutex::new(vec![ModelProfile {
                 name: "qwen2.5".to_string(),
                 provider: "ollama-local".to_string(),
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            mcp_servers: vec![],
-            toolsets: vec![Toolset {
+            }]),
+            mcp_servers: Mutex::new(vec![]),
+            toolsets: Mutex::new(vec![Toolset {
                 name: "default".to_string(),
                 description: None,
                 prompt: Some("TOOLSET_PROMPT".to_string()),
                 local_tools: vec![],
                 mcp: vec![],
-            }],
-            agents: vec![Agent {
+            }]),
+            agents: Mutex::new(vec![Agent {
                 name: "test-agent".to_string(),
                 description: None,
                 mode: AgentMode::Primary,
@@ -790,11 +791,11 @@ mod tests {
                 toolsets: vec!["default".to_string()],
                 skills: SkillSelection::Auto,
                 system_prompt: "You are helpful.".to_string(),
-            }],
-            skills: vec![SkillMeta {
+            }]),
+            skills: Mutex::new(vec![SkillMeta {
                 name: "pdf".to_string(),
                 description: "PDF processing".to_string(),
-            }],
+            }]),
             ..Default::default()
         };
         let ctx = test_ctx(store);
@@ -821,16 +822,16 @@ mod tests {
     #[tokio::test]
     async fn resolve_turn_context_unknown_model() {
         let store = InMemoryConfigStore {
-            providers: vec![Provider {
+            providers: Mutex::new(vec![Provider {
                 name: "p".to_string(),
                 provider_type: ProviderType::Ollama,
                 endpoint: "http://localhost:11434".to_string(),
                 api_key: None,
-            }],
-            models: vec![],
-            mcp_servers: vec![],
-            toolsets: vec![],
-            agents: vec![Agent {
+            }]),
+            models: Mutex::new(vec![]),
+            mcp_servers: Mutex::new(vec![]),
+            toolsets: Mutex::new(vec![]),
+            agents: Mutex::new(vec![Agent {
                 name: "broken-model".to_string(),
                 description: None,
                 mode: AgentMode::Primary,
@@ -838,8 +839,8 @@ mod tests {
                 toolsets: vec![],
                 skills: SkillSelection::Auto,
                 system_prompt: "prompt".to_string(),
-            }],
-            skills: vec![],
+            }]),
+            skills: Mutex::new(vec![]),
             ..Default::default()
         };
         let ctx = test_ctx(store);
@@ -853,18 +854,18 @@ mod tests {
     #[tokio::test]
     async fn resolve_turn_context_unknown_provider() {
         let store = InMemoryConfigStore {
-            providers: vec![],
-            models: vec![ModelProfile {
+            providers: Mutex::new(vec![]),
+            models: Mutex::new(vec![ModelProfile {
                 name: "m".to_string(),
                 provider: "broken-provider".to_string(),
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            mcp_servers: vec![],
-            toolsets: vec![],
-            agents: vec![Agent {
+            }]),
+            mcp_servers: Mutex::new(vec![]),
+            toolsets: Mutex::new(vec![]),
+            agents: Mutex::new(vec![Agent {
                 name: "broken-model".to_string(),
                 description: None,
                 mode: AgentMode::Primary,
@@ -872,8 +873,8 @@ mod tests {
                 toolsets: vec![],
                 skills: SkillSelection::Auto,
                 system_prompt: "prompt".to_string(),
-            }],
-            skills: vec![],
+            }]),
+            skills: Mutex::new(vec![]),
             ..Default::default()
         };
         let ctx = test_ctx(store);
@@ -887,23 +888,23 @@ mod tests {
     #[tokio::test]
     async fn resolve_turn_context_unknown_toolset() {
         let store = InMemoryConfigStore {
-            providers: vec![Provider {
+            providers: Mutex::new(vec![Provider {
                 name: "ollama-local".to_string(),
                 provider_type: ProviderType::Ollama,
                 endpoint: "http://localhost:11434".to_string(),
                 api_key: None,
-            }],
-            models: vec![ModelProfile {
+            }]),
+            models: Mutex::new(vec![ModelProfile {
                 name: "qwen2.5".to_string(),
                 provider: "ollama-local".to_string(),
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            mcp_servers: vec![],
-            toolsets: vec![],
-            agents: vec![Agent {
+            }]),
+            mcp_servers: Mutex::new(vec![]),
+            toolsets: Mutex::new(vec![]),
+            agents: Mutex::new(vec![Agent {
                 name: "test-agent".to_string(),
                 description: None,
                 mode: AgentMode::Primary,
@@ -911,8 +912,8 @@ mod tests {
                 toolsets: vec!["missing".to_string()],
                 skills: SkillSelection::Auto,
                 system_prompt: "prompt".to_string(),
-            }],
-            skills: vec![],
+            }]),
+            skills: Mutex::new(vec![]),
             ..Default::default()
         };
         let ctx = test_ctx(store);
@@ -926,29 +927,29 @@ mod tests {
     #[tokio::test]
     async fn resolve_turn_context_workspace_context_included() {
         let store = InMemoryConfigStore {
-            providers: vec![Provider {
+            providers: Mutex::new(vec![Provider {
                 name: "ollama-local".to_string(),
                 provider_type: ProviderType::Ollama,
                 endpoint: "http://localhost:11434".to_string(),
                 api_key: None,
-            }],
-            models: vec![ModelProfile {
+            }]),
+            models: Mutex::new(vec![ModelProfile {
                 name: "qwen2.5".to_string(),
                 provider: "ollama-local".to_string(),
                 model: "qwen2.5".to_string(),
                 temperature: None,
                 max_tokens: None,
                 options: serde_json::Map::new(),
-            }],
-            mcp_servers: vec![],
-            toolsets: vec![Toolset {
+            }]),
+            mcp_servers: Mutex::new(vec![]),
+            toolsets: Mutex::new(vec![Toolset {
                 name: "default".to_string(),
                 description: None,
                 prompt: Some("TOOLSET_PROMPT".to_string()),
                 local_tools: vec![],
                 mcp: vec![],
-            }],
-            agents: vec![Agent {
+            }]),
+            agents: Mutex::new(vec![Agent {
                 name: "test-agent".to_string(),
                 description: None,
                 mode: AgentMode::Primary,
@@ -956,11 +957,11 @@ mod tests {
                 toolsets: vec!["default".to_string()],
                 skills: SkillSelection::Auto,
                 system_prompt: "You are helpful.".to_string(),
-            }],
-            skills: vec![SkillMeta {
+            }]),
+            skills: Mutex::new(vec![SkillMeta {
                 name: "pdf".to_string(),
                 description: "PDF processing".to_string(),
-            }],
+            }]),
             ..Default::default()
         };
         let ctx = test_ctx(store);

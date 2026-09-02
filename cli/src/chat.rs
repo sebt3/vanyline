@@ -7,6 +7,8 @@ use vanyline_lib::event::{ChatEvent, ChatTurnResult, EventSink};
 use vanyline_lib::session::run_agent_turn;
 use vanyline_lib::store::ConfigStore;
 
+use vanyline_cfgstore::layers::{config_entry_source, file_entry_source, skill_entry_source};
+
 use crate::{config, store};
 
 struct StdoutSink;
@@ -313,13 +315,15 @@ fn result_to_assistant_message(result: ChatTurnResult) -> vanyline_lib::Message 
 
 /// Calcule les lignes "sources workspace" à afficher au lancement — une
 /// ligne par kind qui a au moins une entrée workspace-sourcée (via
-/// `config::file_entry_source`/`config::skill_entry_source`/
-/// `config::config_entry_source`, déjà utilisés par les commandes `list`,
+/// `file_entry_source`/`skill_entry_source`/
+/// `config_entry_source`, déjà utilisés par les commandes `list`,
 /// tâche 04a). Vide si `layers.workspace_dir` est `None`, ou si aucun kind
 /// n'a d'entrée workspace-sourcée. L'appelant ajoute l'en-tête avec le
 /// chemin — cette fonction ne fait que la liste des lignes de détail, pour
 /// rester testable sans capturer stdout.
-async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec<String> {
+async fn workspace_source_summary(
+    store: &vanyline_cfgstore::fs_store::FsConfigStore,
+) -> Vec<String> {
     let layers = store.layers();
     if layers.workspace_dir.is_none() {
         return Vec::new();
@@ -330,7 +334,7 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     let agents = store.list_agents().await.unwrap_or_default();
     let names: Vec<&str> = agents
         .iter()
-        .filter(|a| config::file_entry_source(layers, "agents", "md", &a.name) == "workspace")
+        .filter(|a| file_entry_source(layers, "agents", "md", &a.name) == "workspace")
         .map(|a| a.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -340,7 +344,7 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     let toolsets = store.list_toolsets().await.unwrap_or_default();
     let names: Vec<&str> = toolsets
         .iter()
-        .filter(|t| config::file_entry_source(layers, "toolsets", "yaml", &t.name) == "workspace")
+        .filter(|t| file_entry_source(layers, "toolsets", "yaml", &t.name) == "workspace")
         .map(|t| t.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -350,7 +354,7 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     let skills = store.list_skills().await.unwrap_or_default();
     let names: Vec<&str> = skills
         .iter()
-        .filter(|s| config::skill_entry_source(layers, &s.name) == "workspace")
+        .filter(|s| skill_entry_source(layers, &s.name) == "workspace")
         .map(|s| s.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -360,7 +364,7 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     let mcp_servers = store.list_mcp_servers().await.unwrap_or_default();
     let names: Vec<&str> = mcp_servers
         .iter()
-        .filter(|s| config::config_entry_source(layers, &s.name, |r| &r.mcp) == "workspace")
+        .filter(|s| config_entry_source(layers, &s.name, |r| &r.mcp) == "workspace")
         .map(|s| s.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -370,7 +374,7 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     let models = store.list_models().await.unwrap_or_default();
     let names: Vec<&str> = models
         .iter()
-        .filter(|m| config::config_entry_source(layers, &m.name, |r| &r.models) == "workspace")
+        .filter(|m| config_entry_source(layers, &m.name, |r| &r.models) == "workspace")
         .map(|m| m.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -380,7 +384,7 @@ async fn workspace_source_summary(store: &crate::fs_store::FsConfigStore) -> Vec
     let providers = store.list_providers().await.unwrap_or_default();
     let names: Vec<&str> = providers
         .iter()
-        .filter(|p| config::config_entry_source(layers, &p.name, |r| &r.providers) == "workspace")
+        .filter(|p| config_entry_source(layers, &p.name, |r| &r.providers) == "workspace")
         .map(|p| p.name.as_str())
         .collect();
     if !names.is_empty() {
@@ -503,8 +507,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::config::Layers;
-    use crate::fs_store::FsConfigStore;
+    use vanyline_cfgstore::fs_store::FsConfigStore;
+    use vanyline_cfgstore::layers::Layers;
 
     fn write_config_yaml(dir: &std::path::Path, content: &str) {
         let path = dir.join("config.yaml");

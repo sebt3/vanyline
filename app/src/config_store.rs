@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 use async_trait::async_trait;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
+use vanyline_cfgstore::CfgStoreError;
 use vanyline_lib::VnyError;
 use vanyline_lib::domain::{
     Agent, AgentMode, McpSelection, McpServer, McpTransport, ModelProfile, Provider, ProviderType,
@@ -166,6 +167,10 @@ fn domain_skill_meta(row: &DbSkill) -> SkillMeta {
     }
 }
 
+fn cfg_err(e: VnyError) -> CfgStoreError {
+    CfgStoreError::Config(e.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // PgConfigStore — méthodes ConfigStore, fines : une requête + un appel aux
 // fonctions pures ci-dessus.
@@ -181,70 +186,74 @@ impl PgConfigStore {
         Self { db, user_id }
     }
 
-    async fn load_providers(&self) -> Result<Vec<DbLlmProvider>, VnyError> {
+    async fn load_providers(&self) -> Result<Vec<DbLlmProvider>, CfgStoreError> {
         crate::db::entities::llm_providers::Entity::find()
             .all(&self.db)
             .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))
+            .map_err(|e| CfgStoreError::Config(e.to_string()))
     }
 
-    async fn load_model_profiles(&self) -> Result<Vec<DbModelProfile>, VnyError> {
+    async fn load_model_profiles(&self) -> Result<Vec<DbModelProfile>, CfgStoreError> {
         use crate::db::entities::model_profiles::Column;
         crate::db::entities::model_profiles::Entity::find()
             .filter(Column::OwnerId.eq(self.user_id))
             .all(&self.db)
             .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))
+            .map_err(|e| CfgStoreError::Config(e.to_string()))
     }
 
-    async fn load_toolsets(&self) -> Result<Vec<DbToolset>, VnyError> {
+    async fn load_toolsets(&self) -> Result<Vec<DbToolset>, CfgStoreError> {
         use crate::db::entities::toolsets::Column;
         crate::db::entities::toolsets::Entity::find()
             .filter(Column::OwnerId.eq(self.user_id))
             .all(&self.db)
             .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))
+            .map_err(|e| CfgStoreError::Config(e.to_string()))
     }
 
-    async fn load_agent_records(&self) -> Result<Vec<AgentRecord>, VnyError> {
+    async fn load_agent_records(&self) -> Result<Vec<AgentRecord>, CfgStoreError> {
         use crate::db::entities::agents::Column;
         crate::db::entities::agents::Entity::find()
             .filter(Column::OwnerId.eq(self.user_id))
             .all(&self.db)
             .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))
+            .map_err(|e| CfgStoreError::Config(e.to_string()))
     }
 
-    async fn load_skills(&self) -> Result<Vec<DbSkill>, VnyError> {
+    async fn load_skills(&self) -> Result<Vec<DbSkill>, CfgStoreError> {
         use crate::db::entities::skills::Column;
         crate::db::entities::skills::Entity::find()
             .filter(Column::OwnerId.eq(self.user_id))
             .all(&self.db)
             .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))
+            .map_err(|e| CfgStoreError::Config(e.to_string()))
     }
 }
 
 #[async_trait]
 impl ConfigStore for PgConfigStore {
-    async fn list_providers(&self) -> Result<Vec<Provider>, VnyError> {
+    async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError> {
         let rows = self.load_providers().await?;
-        rows.iter().map(domain_provider).collect()
+        rows.iter()
+            .map(domain_provider)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(cfg_err)
     }
 
-    async fn list_models(&self) -> Result<Vec<ModelProfile>, VnyError> {
+    async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
         let rows = self.load_model_profiles().await?;
         let providers = self.load_providers().await?;
         rows.iter()
             .map(|r| domain_model_profile(r, &providers))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(cfg_err)
     }
 
-    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, VnyError> {
+    async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
         let rows = crate::db::entities::mcp_servers::Entity::find()
             .all(&self.db)
             .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))?;
+            .map_err(|e| CfgStoreError::Config(e.to_string()))?;
         let mut result = Vec::new();
         for row in &rows {
             if let Some(server) = domain_mcp_server(row) {
@@ -260,37 +269,38 @@ impl ConfigStore for PgConfigStore {
         Ok(result)
     }
 
-    async fn list_toolsets(&self) -> Result<Vec<Toolset>, VnyError> {
+    async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError> {
         let rows = self.load_toolsets().await?;
         Ok(rows.iter().map(domain_toolset).collect())
     }
 
-    async fn list_agents(&self) -> Result<Vec<Agent>, VnyError> {
+    async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError> {
         let rows = self.load_agent_records().await?;
         let profiles = self.load_model_profiles().await?;
         rows.iter()
             .map(|r| domain_agent_record(r, &profiles))
-            .collect()
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(cfg_err)
     }
 
-    async fn list_skills(&self) -> Result<Vec<SkillMeta>, VnyError> {
+    async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
         let rows = self.load_skills().await?;
         Ok(rows.iter().map(domain_skill_meta).collect())
     }
 
-    async fn load_skill(&self, name: &str) -> Result<String, VnyError> {
+    async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError> {
         use crate::db::entities::skills::Column;
         crate::db::entities::skills::Entity::find()
             .filter(Column::OwnerId.eq(self.user_id))
             .filter(Column::Name.eq(name))
             .one(&self.db)
             .await
-            .map_err(|e| VnyError::ConfigError(e.to_string()))?
+            .map_err(|e| CfgStoreError::Config(e.to_string()))?
             .map(|row| row.body)
-            .ok_or_else(|| VnyError::UnknownReference("skill", name.to_string()))
+            .ok_or_else(|| CfgStoreError::UnknownReference("skill", name.to_string()))
     }
 
-    async fn default_agent(&self) -> Result<Option<String>, VnyError> {
+    async fn default_agent(&self) -> Result<Option<String>, CfgStoreError> {
         Ok(None)
     }
 }

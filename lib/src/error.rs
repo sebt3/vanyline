@@ -45,3 +45,18 @@ pub enum VnyError {
     #[error("VNL-K8S-002: Kubernetes API error: {0}")]
     K8sApiError(String),
 }
+
+impl From<vanyline_cfgstore::CfgStoreError> for VnyError {
+    fn from(e: vanyline_cfgstore::CfgStoreError) -> Self {
+        match e {
+            vanyline_cfgstore::CfgStoreError::Config(msg) => VnyError::ConfigError(msg),
+            vanyline_cfgstore::CfgStoreError::DuplicateName(kind, name) => {
+                VnyError::DuplicateName(kind, name)
+            }
+            vanyline_cfgstore::CfgStoreError::UnknownReference(kind, name) => {
+                VnyError::UnknownReference(kind, name)
+            }
+            other => VnyError::ConfigError(other.to_string()),
+        }
+    }
+}

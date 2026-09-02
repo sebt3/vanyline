@@ -6196,6 +6196,7 @@ dependencies = [
  "dirs",
  "futures",
  "kube",
+ "reqwest 0.12.28",
  "rig-core",
  "rmcp",
  "serde",
@@ -6205,10 +6206,10 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "vanyline-cfgstore",
  "vanyline-crds",
  "vanyline-lib",
  "vanyline-tools",
- "yaml_serde",
 ]
 
 [[package]]
@@ -6242,9 +6243,23 @@ dependencies = [
  "url",
  "utoipa",
  "uuid",
+ "vanyline-cfgstore",
  "vanyline-crds",
  "vanyline-lib",
  "vanyline-tools",
+]
+
+[[package]]
+name = "vanyline-cfgstore"
+version = "0.0.11-alpha.5"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "tokio",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -6305,6 +6320,7 @@ dependencies = [
  "tracing",
  "ts-rs",
  "uuid",
+ "vanyline-cfgstore",
  "vanyline-crds",
 ]
 

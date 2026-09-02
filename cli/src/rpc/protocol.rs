@@ -100,6 +100,11 @@ pub mod vnl_code {
     pub const NO_AGENT_RESOLVED: &str = "VNL-RPC-008";
     pub const TURN_EXECUTION_ERROR: &str = "VNL-RPC-009";
     pub const K8S_ERROR: &str = "VNL-RPC-010";
+    pub const CONFIG_WRITE_ERROR: &str = "VNL-RPC-011";
+    pub const CONFIG_NOT_FOUND: &str = "VNL-RPC-012";
+    pub const CONFIG_NAME_CONFLICT: &str = "VNL-RPC-013";
+    pub const CONFIG_INVALID_NAME: &str = "VNL-RPC-014";
+    pub const CONFIG_VALIDATION: &str = "VNL-RPC-015";
 }
 
 #[derive(Debug, Deserialize)]
@@ -236,4 +241,78 @@ pub struct SandboxCreateParams {
     pub name: String,
     #[serde(flatten)]
     pub spec: vanyline_crds::SandboxSpec,
+}
+
+/// Paramètre `layer` optionnel des méthodes `config/*` d'écriture. La valeur
+/// JSON est "global" | "workspace" (minuscules). Toute autre valeur -> erreur
+/// de désérialisation d'enveloppe -> VNL-RPC-000.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfigLayer {
+    Global,
+    Workspace,
+}
+
+/// `config/<domain>/create` — `item` est le type de domaine snake_case tel quel.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigCreateParams {
+    #[serde(default)]
+    pub layer: Option<ConfigLayer>,
+    pub item: serde_json::Value,
+}
+
+/// `config/<domain>/update` — `patch` objet partiel (clé absente = inchangée,
+/// présente = remplacée, null = efface un optionnel), transmis au store sans
+/// inspection côté handler.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigUpdateParams {
+    #[serde(default)]
+    pub layer: Option<ConfigLayer>,
+    pub name: String,
+    pub patch: serde_json::Value,
+}
+
+/// `config/<domain>/delete`
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigDeleteParams {
+    #[serde(default)]
+    pub layer: Option<ConfigLayer>,
+    pub name: String,
+}
+
+/// `config/skills/create` — `item` est le `SkillMeta` {name, description} ;
+/// `body` est le corps du SKILL.md (hors frontmatter), séparé de l'item.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigCreateSkillParams {
+    #[serde(default)]
+    pub layer: Option<ConfigLayer>,
+    pub item: serde_json::Value,
+    pub body: String,
+}
+
+/// Params de `config/providers/test` et `config/mcpServers/test` — l'entrée est
+/// résolue dans le store fusionné par nom (pas de `layer` : on teste ce que la
+/// lecture verrait).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigTestParams {
+    pub name: String,
+}
+
+/// Résultat de `config/providers/test`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTestResult {
+    pub models: Vec<String>,
+}
+
+/// Résultat de `config/mcpServers/test`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTestResult {
+    pub tools: Vec<String>,
 }

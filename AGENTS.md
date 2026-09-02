@@ -199,12 +199,22 @@ redéploiement, pièges connus inclus) : `docs/release-runbook.md`.
 ### Rust (app, sandbox, controller)
 
 ```bash
-cargo check --workspace        # vérification rapide
-cargo test --workspace         # tests
-cargo build --workspace        # build complet
-cargo clippy --workspace       # linter
-cargo fmt --all -- --check     # formatage — obligatoire avant de considérer une tâche terminée
+cargo check --workspace                          # vérification rapide
+cargo test --workspace                            # tests
+cargo build --workspace                           # build complet
+cargo clippy --workspace --all-targets -- -D warnings   # linter — commande CI exacte
+cargo fmt --all -- --check                        # formatage — obligatoire avant de considérer une tâche terminée
 ```
+
+Ces commandes doivent être **identiques à celles de la CI** (`.github/workflows/test.yml`),
+pas une version allégée : une tâche n'est terminée que si elles passent toutes.
+
+`cargo clippy --workspace --all-targets -- -D warnings` : les flags ne sont pas
+optionnels. `--all-targets` couvre le code de test (un `mod tests` sans
+`#![allow(clippy::unwrap_used, clippy::expect_used)]` fait échouer les crates en
+`#![deny(...)]`) ; `-D warnings` transforme tout lint en erreur, comme la CI. Lancer
+`cargo clippy --workspace` seul laisse passer des rouges CI — vu sur F2/`vanyline-cfgstore`
+(2026-09-02) : ~390 `unwrap()` de test non couverts, verts en local, rouges en CI.
 
 `cargo fmt --all -- --check` fait partie des commandes de validation au même titre que les
 autres : absent ici avant 2026-08-22, ce qui a laissé passer du code non formaté malgré la

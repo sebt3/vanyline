@@ -116,21 +116,21 @@ impl EventSink for NoopSink {
 /// l'etape LLM, APRES que le cablage MCP (y compris `extra_mcp`) ait eu lieu.
 fn broken_llm_store() -> InMemoryConfigStore {
     InMemoryConfigStore {
-        providers: vec![Provider {
+        providers: Mutex::new(vec![Provider {
             name: "broken".to_string(),
             provider_type: ProviderType::OpenaiCompatible,
             endpoint: "http://127.0.0.1:1".to_string(),
             api_key: None,
-        }],
-        models: vec![ModelProfile {
+        }]),
+        models: Mutex::new(vec![ModelProfile {
             name: "broken-model".to_string(),
             provider: "broken".to_string(),
             model: "irrelevant".to_string(),
             temperature: None,
             max_tokens: None,
             options: serde_json::Map::new(),
-        }],
-        agents: vec![Agent {
+        }]),
+        agents: Mutex::new(vec![Agent {
             name: "test-agent".to_string(),
             description: None,
             mode: AgentMode::Primary,
@@ -138,7 +138,7 @@ fn broken_llm_store() -> InMemoryConfigStore {
             toolsets: vec![],
             skills: SkillSelection::None,
             system_prompt: "test".to_string(),
-        }],
+        }]),
         ..Default::default()
     }
 }

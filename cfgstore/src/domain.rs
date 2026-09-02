@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
+use serde::{Deserialize, Deserializer, Serialize, Serializer, de::SeqAccess, ser::SerializeSeq};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
@@ -189,7 +189,7 @@ impl<'de> Deserialize<'de> for SkillSelection {
 
             fn visit_seq<A>(self, mut seq: A) -> std::result::Result<SkillSelection, A::Error>
             where
-                A: serde::de::SeqAccess<'de>,
+                A: SeqAccess<'de>,
             {
                 let mut names = Vec::new();
                 while let Some(name) = seq.next_element::<String>()? {
@@ -226,7 +226,6 @@ fn default_agent_mode() -> AgentMode {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use crate::VnyError;
 
     #[test]
     fn provider_type_serde() {
@@ -390,17 +389,6 @@ mod tests {
         // Roundtrip keeps tools as empty array
         let back = serde_json::to_value(&sel).unwrap();
         assert!(back.as_object().unwrap().get("tools").unwrap().is_array());
-    }
-
-    #[test]
-    fn error_codes() {
-        let e2 = VnyError::DuplicateName("agent", "build".to_string());
-        let msg2 = format!("{}", e2);
-        assert!(msg2.contains("VNL-CFG-002"));
-
-        let e3 = VnyError::UnknownReference("model", "qwen-code".to_string());
-        let msg3 = format!("{}", e3);
-        assert!(msg3.contains("VNL-CFG-003"));
     }
 
     // ---------------------------------------------------------------------------

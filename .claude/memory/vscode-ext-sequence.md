@@ -35,8 +35,8 @@ mémoire de clôture (`.claude/memory/<nom>.md`) portent tous le même nom `F<n>
 
 | # | nom | résumé | dépend de |
 |---|---|---|---|
-| F1 | `F1-vscode-ext-foundations` | `packages/protocol` + `packages/ui` extraits du frontend, `ConfigRepo` + impl HTTP, ts-rs. Comportement frontend inchangé. | — |
-| F2 | `F2-vscode-ext-cli-rpc` | RPC write-side : CRUD des 5 domaines + skills dans `vanyline serve --stdio`. **La couche d'écriture est nette-neuve** (les sous-commandes CLI et `ConfigStore` sont lecture seule aujourd'hui). | alignement noms avec F1 |
+| F1 | `F1-vscode-ext-foundations` | **close 2026-08-31.** `packages/protocol` + `packages/ui` extraits du frontend, `ConfigRepo` + impl HTTP, ts-rs. Comportement frontend inchangé. | — |
+| F2 | `F2-vscode-ext-cli-rpc` | **close 2026-09-02, mergée+poussée.** Crate feuille `vanyline-cfgstore` (config extraite de `lib`+`cli`, partageable sandbox) + `ConfigStore` lecture→lecture/écriture + RPC `config/<domain>/{create,update,delete}` + actions test/localTools. | alignement noms avec F1 |
 | F3 | `F3-vscode-ext-chat` | L'extension elle-même : host, provisioning CLI (download+SHA256), sidebar chat, **packaging + release CI**. | F1 |
 | F4 | `F4-vscode-ext-config-ui` | Onglets éditeur pour éditer la config via les écrans `@vanyline/ui` + impl RPC de `ConfigRepo`. | F2, F3 |
 | F5 | `F5-vscode-ext-sandboxes` | `TreeView` native Owners/Projects/Sandboxes via les méthodes RPC K8s existantes. | F3 |
@@ -64,7 +64,19 @@ migration vers `docs/architecture.md` + suppression du design doc).
   TypeScript), `docs/features/F1-vscode-ext-foundations.md` supprimé. Bilan complet
   (décisions, 2 blocages Phase 2, délégation Qwen ratée sur task 06) :
   `.claude/memory/F1-vscode-ext-foundations.md`.
-  **Suite : F2** (`F2-vscode-ext-cli-rpc`).
+- **2026-09-02** — **F2 close (Phase 3 faite), branche `feat/F2-vscode-ext-cli-rpc`
+  mergée dans `main` et poussée.** Nouveau crate feuille **`vanyline-cfgstore`**
+  (`domain` + `store::ConfigStore` déplacés de `lib`, `Layers` + `FsConfigStore`
+  déplacés de `cli` ; `lib` re-exporte `domain` + `store`). `ConfigStore` gagne
+  `create_*`/`update_*`/`delete_*` + `set_default_agent` (défaut `ReadOnly`), cible de
+  couche explicite. RPC : `config/<domain>/{create,update,delete}` pour les 6 domaines,
+  actions `config/{providers,mcpServers}/test` + `config/localTools`, codes
+  `VNL-RPC-011..015`. Design doc migré dans `docs/architecture.md` (§ Vue d'ensemble,
+  Configuration CLI, RPC stdio, Backend web, Workspace TypeScript),
+  `docs/features/F2-vscode-ext-cli-rpc.md` supprimé. Bilan complet (décisions, bascule
+  modèle Cadence en cours de feature, historique squatté, rouge CI clippy, **3 bugs
+  corrigés en review Phase 3**) : `.claude/memory/F2-vscode-ext-cli-rpc.md`.
+  **Suite : F3** (`F3-vscode-ext-chat`).
 
 ## Comment reprendre dans une session neuve
 
@@ -90,14 +102,17 @@ migration vers `docs/architecture.md` + suppression du design doc).
 - ts-rs sur `ChatEvent` (`#[serde(tag = "type")]`) : **a marché** (F1 tâche 1), pas de
   repli. `ts-rs` v12, `TS_RS_LARGE_INT="number"` dans `.cargo/config.toml`. Job CI `tsrs`
   régénère + `git diff --exit-code`.
-- **`config-domain.ts`** (F1) : miroir **manuel** de `lib/src/domain.rs` (le générer aussi
-  en ts-rs n'a pas été tenté — scope). Forme = serde à la lettre, name-keyed. Toute la
-  traduction wire REST `app` ↔ canonique vit dans `httpConfigRepo` (F1) ; l'impl RPC (F4)
-  sera un pass-through. **F2 doit ajouter `Sse` à `domain.rs::McpTransport`** (le contrat
-  TS l'admet déjà, `domain.rs` non — divergence assumée en F1).
+- **`config-domain.ts`** : miroir **manuel** de `domain.rs` (déplacé de `lib/` vers
+  `cfgstore/` en F2 ; `vanyline_lib::domain` le re-exporte). Forme = serde à la lettre,
+  name-keyed. Traduction wire REST `app` ↔ canonique dans `httpConfigRepo` (F1) ; l'impl
+  RPC (F4) = pass-through sur `config/<domain>/{create,update,delete}` (F2). `Sse` est
+  dans `McpTransport` des deux côtés (ajouté avant F2, `d5aaa54`).
 - Validation anti-traversal des `name` de config (deviennent des noms de fichiers) :
-  contrainte explicite dans le design F2 — c'est le trou trouvé sur `git-integration`
-  (2026-08-22).
+  livrée en F2 dans **`vanyline-cfgstore::fs_store::validate_name`**, appliquée avant
+  toute opération disque dans chaque chemin d'écriture (pas dans le handler RPC).
+- **F2 : `cadence` + `implement` sur le même modèle (qwen3.8-flash-next) → validation
+  croisée faible.** La review Claude Phase 3 a trouvé 2 bugs bloquants + 1 rouge CI que
+  Cadence avait validés. Si ce couplage persiste, Phase 3 est le seul vrai filet.
 - Download binaire (F3) : SHA256 obligatoire contre l'asset `.sha256` de la release
   (refus si absent), HTTPS + allowlist d'hôtes après redirects, install atomique.
   Prérequis CI : ajouter `checksum: sha256` au job `upload-cli` du `release.yml`.
