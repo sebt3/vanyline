@@ -11,11 +11,11 @@ use vanyline_lib::store::ConfigStore;
 use crate::config;
 use crate::rpc::protocol::{
     ChatCancelParams, ChatEventNotificationParams, ChatSendParams, ChatSendResult,
-    ConfigCreateParams, ConfigDeleteParams, ConfigLayer, ConfigUpdateParams,
-    ConversationCreateParams, ConversationIdParams, ConversationSummary, InitializeParams,
-    InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, NameParams,
-    OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, SandboxCreateParams, jsonrpc_code,
-    vnl_code,
+    ConfigCreateParams, ConfigCreateSkillParams, ConfigDeleteParams, ConfigLayer,
+    ConfigUpdateParams, ConversationCreateParams, ConversationIdParams, ConversationSummary,
+    InitializeParams, InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
+    NameParams, OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, SandboxCreateParams,
+    jsonrpc_code, vnl_code,
 };
 use crate::store;
 use vanyline_cfgstore::CfgStoreError;
@@ -424,6 +424,146 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
             Some(config_write_response(
                 id,
                 store.delete_mcp_server(layer, &params.name).await,
+            ))
+        }
+        // --- Écriture domaines fichiers (toolsets/agents/skills — tâche 3b).
+        // Même plomberie que 3a : resolve_layer, mapping VNL-RPC-011..015 via
+        // config_write_response. La validation du `name` (anti-traversal) est
+        // faite dans le store, JAMAIS ici. `config/skills/create` est le seul
+        // bras hors patron : item = SkillMeta + body séparé (le corps n'est
+        // jamais exposé en lecture RPC — pas de méthode de load).
+        "config/toolsets/create" => {
+            let params: ConfigCreateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            match serde_json::from_value::<vanyline_cfgstore::domain::Toolset>(params.item) {
+                Err(e) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!("Invalid item: {e}"),
+                        vnl_code::CONFIG_VALIDATION,
+                    ))
+                    .expect("serialize create item error response"),
+                ),
+                Ok(item) => Some(config_write_response(
+                    id,
+                    store.create_toolset(layer, item).await,
+                )),
+            }
+        }
+        "config/toolsets/update" => {
+            let params: ConfigUpdateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store
+                    .update_toolset(layer, &params.name, params.patch)
+                    .await,
+            ))
+        }
+        "config/toolsets/delete" => {
+            let params: ConfigDeleteParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.delete_toolset(layer, &params.name).await,
+            ))
+        }
+        "config/agents/create" => {
+            let params: ConfigCreateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            match serde_json::from_value::<vanyline_cfgstore::domain::Agent>(params.item) {
+                Err(e) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!("Invalid item: {e}"),
+                        vnl_code::CONFIG_VALIDATION,
+                    ))
+                    .expect("serialize create item error response"),
+                ),
+                Ok(item) => Some(config_write_response(
+                    id,
+                    store.create_agent(layer, item).await,
+                )),
+            }
+        }
+        "config/agents/update" => {
+            let params: ConfigUpdateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.update_agent(layer, &params.name, params.patch).await,
+            ))
+        }
+        "config/agents/delete" => {
+            let params: ConfigDeleteParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.delete_agent(layer, &params.name).await,
+            ))
+        }
+        "config/skills/create" => {
+            let params: ConfigCreateSkillParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            match serde_json::from_value::<vanyline_cfgstore::domain::SkillMeta>(params.item) {
+                Err(e) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!("Invalid item: {e}"),
+                        vnl_code::CONFIG_VALIDATION,
+                    ))
+                    .expect("serialize create item error response"),
+                ),
+                Ok(meta) => Some(config_write_response(
+                    id,
+                    store.create_skill(layer, meta, params.body).await,
+                )),
+            }
+        }
+        "config/skills/update" => {
+            let params: ConfigUpdateParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.update_skill(layer, &params.name, params.patch).await,
+            ))
+        }
+        "config/skills/delete" => {
+            let params: ConfigDeleteParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let layer = resolve_layer(store.layers(), params.layer);
+            Some(config_write_response(
+                id,
+                store.delete_skill(layer, &params.name).await,
             ))
         }
         "conversations/list" => Some(handle_conversations_list(id)),
@@ -3639,5 +3779,668 @@ defaults:
             "explicit workspace layer without a resolved workspace should fail"
         );
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-006");
+    }
+
+    // -- New tests for task 3b (config write: toolsets/agents/skills) --
+
+    /// `toolsets_create_list_update_delete_roundtrip` — cycle complet du domaine
+    /// fichier toolsets (couche workspace, `layer` omis). `item` snake_case
+    /// natif du domaine (`local_tools`) ; patch `{"prompt":...}` préserve le
+    /// reste, delete retire l'entrée de `config/toolsets`.
+    #[tokio::test]
+    async fn toolsets_create_list_update_delete_roundtrip() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            500,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            501,
+            "config/toolsets/create",
+            Some(json!({
+                "item": {
+                    "name": "ts1",
+                    "description": "outils",
+                    "prompt": "p0",
+                    "local_tools": ["read_file"],
+                    "mcp": [{"server": "s1", "tools": ["*"]}]
+                }
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should answer result:null on the wire, got: {result}"
+        );
+
+        // list -> contient ts1 avec local_tools
+        let result = handle_line(&mut state, &make_request_json(502, "config/toolsets", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/toolsets should succeed, got: {:?}",
+            resp.error
+        );
+        let toolset = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "ts1")
+            .expect("ts1 should be listed");
+        assert_eq!(toolset["local_tools"], json!(["read_file"]));
+
+        // patch {"prompt":"p1"} -> prompt changé, local_tools préservé
+        let update_line = make_request_json(
+            503,
+            "config/toolsets/update",
+            Some(json!({"name": "ts1", "patch": {"prompt": "p1"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "update should answer result:null, got: {result}"
+        );
+        let result = handle_line(&mut state, &make_request_json(504, "config/toolsets", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let toolset = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|t| t["name"] == "ts1")
+            .expect("ts1 should still be listed");
+        assert_eq!(toolset["prompt"], "p1");
+        assert_eq!(
+            toolset["local_tools"],
+            json!(["read_file"]),
+            "partial patch preserves local_tools"
+        );
+
+        // delete -> ts1 absent de config/toolsets
+        let delete_line =
+            make_request_json(505, "config/toolsets/delete", Some(json!({"name": "ts1"})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "delete should answer result:null, got: {result}"
+        );
+        let result = handle_line(&mut state, &make_request_json(506, "config/toolsets", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "list should succeed: {:?}",
+            resp.error
+        );
+        let toolsets = resp.result.as_ref().unwrap().as_array().unwrap();
+        assert!(
+            !toolsets.iter().any(|t| t["name"] == "ts1"),
+            "ts1 should be gone after delete, got: {toolsets:?}"
+        );
+    }
+
+    /// `agents_create_list_update_delete_roundtrip` — cycle agents ; `item`
+    /// snake_case (`system_prompt`) ; patch `{"description":...}` ajoute la
+    /// description et préserve `model` ; delete retire `ag1`.
+    #[tokio::test]
+    async fn agents_create_list_update_delete_roundtrip() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            510,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            511,
+            "config/agents/create",
+            Some(json!({
+                "item": {
+                    "name": "ag1",
+                    "model": "m1",
+                    "system_prompt": "tu es utile",
+                    "mode": "primary",
+                    "skills": "auto"
+                }
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should answer result:null on the wire, got: {result}"
+        );
+
+        let result = handle_line(&mut state, &make_request_json(512, "config/agents", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/agents should succeed, got: {:?}",
+            resp.error
+        );
+        let agent = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == "ag1")
+            .expect("ag1 should be listed");
+        assert_eq!(agent["mode"], "primary");
+        assert_eq!(
+            agent["system_prompt"], "tu es utile",
+            "system_prompt should round-trip through the .md file"
+        );
+
+        // patch description -> description ajoutée, model préservé
+        let update_line = make_request_json(
+            513,
+            "config/agents/update",
+            Some(json!({"name": "ag1", "patch": {"description": "un agent"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "update should answer result:null, got: {result}"
+        );
+        let result = handle_line(&mut state, &make_request_json(514, "config/agents", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let agent = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["name"] == "ag1")
+            .expect("ag1 should still be listed");
+        assert_eq!(agent["description"], "un agent");
+        assert_eq!(agent["model"], "m1", "partial patch preserves model");
+
+        // delete -> ag1 absent de config/agents
+        let delete_line =
+            make_request_json(515, "config/agents/delete", Some(json!({"name": "ag1"})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "delete should answer result:null, got: {result}"
+        );
+        let result = handle_line(&mut state, &make_request_json(516, "config/agents", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "list should succeed: {:?}",
+            resp.error
+        );
+        let agents = resp.result.as_ref().unwrap().as_array().unwrap();
+        assert!(
+            !agents.iter().any(|a| a["name"] == "ag1"),
+            "ag1 should be gone after delete, got: {agents:?}"
+        );
+    }
+
+    /// `skills_create_update_delete_roundtrip` — `config/skills/create` porte
+    /// `item` (SkillMeta) + `body` séparé ; la lecture `config/skills`
+    /// n'expose que name/description (le corps n'est PAS vérifiable via RPC —
+    /// pas de méthode de load, cf. design).
+    #[tokio::test]
+    async fn skills_create_update_delete_roundtrip() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            520,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            521,
+            "config/skills/create",
+            Some(json!({
+                "item": {"name": "sk1", "description": "skill un"},
+                "body": "faire des choses"
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should answer result:null on the wire, got: {result}"
+        );
+
+        let result = handle_line(&mut state, &make_request_json(522, "config/skills", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/skills should succeed, got: {:?}",
+            resp.error
+        );
+        let skill = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "sk1")
+            .expect("sk1 should be listed");
+        assert_eq!(skill["description"], "skill un");
+
+        // patch description -> description modifiée dans la liste (le corps
+        // n'est pas exposé en lecture RPC — non vérifié ici)
+        let update_line = make_request_json(
+            523,
+            "config/skills/update",
+            Some(json!({"name": "sk1", "patch": {"description": "skill deux"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "update should answer result:null, got: {result}"
+        );
+        let result = handle_line(&mut state, &make_request_json(524, "config/skills", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        let skill = resp
+            .result
+            .as_ref()
+            .unwrap()
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == "sk1")
+            .expect("sk1 should still be listed");
+        assert_eq!(skill["description"], "skill deux");
+
+        // delete -> sk1 absent de config/skills
+        let delete_line =
+            make_request_json(525, "config/skills/delete", Some(json!({"name": "sk1"})));
+        let result = handle_line(&mut state, &delete_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "delete should answer result:null, got: {result}"
+        );
+        let result = handle_line(&mut state, &make_request_json(526, "config/skills", None))
+            .await
+            .unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "list should succeed: {:?}",
+            resp.error
+        );
+        let skills = resp.result.as_ref().unwrap().as_array().unwrap();
+        assert!(
+            !skills.iter().any(|s| s["name"] == "sk1"),
+            "sk1 should be gone after delete, got: {skills:?}"
+        );
+    }
+
+    /// `config_file_domain_conflict_returns_013` — create du même nom deux fois
+    /// dans la même couche pour CHACUN des 3 domaines fichiers -> 2e create ->
+    /// `VNL-RPC-013` (NameConflict côté store, jamais côté handler).
+    #[tokio::test]
+    async fn config_file_domain_conflict_returns_013() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            530,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        // --- toolset ---
+        let item = json!({"name": "ts-c", "description": "d", "prompt": "p"});
+        let first = make_request_json(531, "config/toolsets/create", Some(json!({"item": item})));
+        let result = handle_line(&mut state, &first).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "toolset first create: {result}"
+        );
+        let second = make_request_json(532, "config/toolsets/create", Some(json!({"item": item})));
+        let result = handle_line(&mut state, &second).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "toolset second create should fail");
+        assert_eq!(
+            resp.error.as_ref().unwrap().data.code,
+            "VNL-RPC-013",
+            "toolset conflict should be VNL-RPC-013"
+        );
+
+        // --- agent ---
+        let item = json!({"name": "ag-c", "model": "m", "system_prompt": "p"});
+        let first = make_request_json(533, "config/agents/create", Some(json!({"item": item})));
+        let result = handle_line(&mut state, &first).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "agent first create: {result}"
+        );
+        let second = make_request_json(534, "config/agents/create", Some(json!({"item": item})));
+        let result = handle_line(&mut state, &second).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "agent second create should fail");
+        assert_eq!(
+            resp.error.as_ref().unwrap().data.code,
+            "VNL-RPC-013",
+            "agent conflict should be VNL-RPC-013"
+        );
+
+        // --- skill ---
+        let params = json!({"item": {"name": "sk-c", "description": "d"}, "body": "b"});
+        let first = make_request_json(535, "config/skills/create", Some(params.clone()));
+        let result = handle_line(&mut state, &first).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "skill first create: {result}"
+        );
+        let second = make_request_json(536, "config/skills/create", Some(params));
+        let result = handle_line(&mut state, &second).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "skill second create should fail");
+        assert_eq!(
+            resp.error.as_ref().unwrap().data.code,
+            "VNL-RPC-013",
+            "skill conflict should be VNL-RPC-013"
+        );
+    }
+
+    /// `config_file_domain_not_found_returns_012` — update + delete sur un nom
+    /// absent de la couche ciblée pour les 3 domaines fichiers -> `VNL-RPC-012`
+    /// (6 appels — la suppression de config n'est PAS idempotente, design).
+    #[tokio::test]
+    async fn config_file_domain_not_found_returns_012() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            540,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let cases: [(&str, &str, serde_json::Value); 6] = [
+            (
+                "config/toolsets/update",
+                "toolset update of ghost should fail",
+                json!({"name": "ghost-ts", "patch": {"prompt": "p"}}),
+            ),
+            (
+                "config/toolsets/delete",
+                "toolset delete of ghost should fail",
+                json!({"name": "ghost-ts"}),
+            ),
+            (
+                "config/agents/update",
+                "agent update of ghost should fail",
+                json!({"name": "ghost-ag", "patch": {"description": "d"}}),
+            ),
+            (
+                "config/agents/delete",
+                "agent delete of ghost should fail",
+                json!({"name": "ghost-ag"}),
+            ),
+            (
+                "config/skills/update",
+                "skill update of ghost should fail",
+                json!({"name": "ghost-sk", "patch": {"description": "d"}}),
+            ),
+            (
+                "config/skills/delete",
+                "skill delete of ghost should fail",
+                json!({"name": "ghost-sk"}),
+            ),
+        ];
+        for (seq, (method, message, params)) in cases.iter().enumerate() {
+            let id = 541 + seq as u64;
+            let result = handle_line(
+                &mut state,
+                &make_request_json(id, method, Some(params.clone())),
+            )
+            .await
+            .unwrap();
+            let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+            assert!(resp.error.is_some(), "{message} (method {method})");
+            assert_eq!(
+                resp.error.as_ref().unwrap().data.code,
+                "VNL-RPC-012",
+                "{method} of an absent name should be VNL-RPC-012"
+            );
+        }
+    }
+
+    /// `config_file_domain_invalid_name_returns_014` — create avec un nom de
+    /// traversal dans chacun des 3 domaines fichiers -> `VNL-RPC-014` (le store
+    /// valide le nom AVANT toute écriture). Assert FS : sous `<tmp>` seuls
+    /// `.vanyline/` et son contenu pré-existant existent — aucun
+    /// sous-répertoire toolsets/agents/skills créé, aucun fichier écrit.
+    ///
+    /// NB fixtures : les items agent/skill portent les champs obligatoires du
+    /// domaine (`model`/`system_prompt` pour `Agent`, `description` pour
+    /// `SkillMeta`) — sans eux la désérialisation `item` échouerait AVANT la
+    /// validation du nom côté store et répondrait `VNL-RPC-015` (déjà couverte
+    /// par les tests 7/8), pas `VNL-RPC-014`.
+    #[tokio::test]
+    async fn config_file_domain_invalid_name_returns_014() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        let vanyline = tmp.path().join(".vanyline");
+        std::fs::create_dir_all(&vanyline).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            550,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let cases: [(&str, serde_json::Value); 3] = [
+            (
+                "config/toolsets/create",
+                json!({"item": {"name": "a/b", "prompt": "p"}}),
+            ),
+            (
+                "config/agents/create",
+                json!({"item": {"name": "../evil", "model": "m", "system_prompt": "p"}}),
+            ),
+            (
+                "config/skills/create",
+                json!({"item": {"name": "../../evil", "description": "d"}, "body": "b"}),
+            ),
+        ];
+        for (seq, (method, params)) in cases.iter().enumerate() {
+            let id = 551 + seq as u64;
+            let result = handle_line(
+                &mut state,
+                &make_request_json(id, method, Some(params.clone())),
+            )
+            .await
+            .unwrap();
+            let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+            assert!(
+                resp.error.is_some(),
+                "create with traversal name should fail ({method})"
+            );
+            assert_eq!(
+                resp.error.as_ref().unwrap().data.code,
+                "VNL-RPC-014",
+                "{method} with a traversal name should be VNL-RPC-014"
+            );
+        }
+
+        // Assert FS : aucune écriture n'a eu lieu — `<tmp>` ne contient que
+        // `.vanyline/`, et `.vanyline/` est vide (aucun toolsets/, agents/,
+        // skills/ créé, aucun fichier écrit).
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(entries, vec![std::ffi::OsString::from(".vanyline")]);
+        assert!(
+            std::fs::read_dir(&vanyline).unwrap().next().is_none(),
+            ".vanyline should be empty (no write happened)"
+        );
+    }
+
+    /// `config_agent_create_bad_mode_returns_015` — create agent `"mode":"bogus"` :
+    /// la désérialisation de `item` échoue côté handler (le store ne voit
+    /// jamais un mode déjà typé) -> `VNL-RPC-015`.
+    #[tokio::test]
+    async fn config_agent_create_bad_mode_returns_015() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            560,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(
+            561,
+            "config/agents/create",
+            Some(json!({
+                "item": {"name": "ag-x", "model": "m", "system_prompt": "p", "mode": "bogus"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "create with unknown mode should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-015");
+    }
+
+    /// `config_agent_update_bad_mode_returns_015` — agent existant, patch
+    /// `{"mode":"bogus"}` -> validation de l'enum après patch côté store ->
+    /// `VNL-RPC-015`.
+    #[tokio::test]
+    async fn config_agent_update_bad_mode_returns_015() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            570,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(
+            571,
+            "config/agents/create",
+            Some(json!({
+                "item": {"name": "ag-m", "model": "m1", "system_prompt": "p"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(result.contains("\"result\":null"), "create: {result}");
+
+        let update_line = make_request_json(
+            572,
+            "config/agents/update",
+            Some(json!({"name": "ag-m", "patch": {"mode": "bogus"}})),
+        );
+        let result = handle_line(&mut state, &update_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(resp.error.is_some(), "update with unknown mode should fail");
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-015");
+    }
+
+    /// `config_skill_create_missing_body_returns_000` — `config/skills/create`
+    /// SANS `body` : l'enveloppe `ConfigCreateSkillParams` ne désérialise pas
+    /// (`body` requis, contrairement à `layer`) -> enveloppe malformée ->
+    /// `VNL-RPC-000` (PAS `VNL-RPC-015`, réservé à l'échec de `item`).
+    #[tokio::test]
+    async fn config_skill_create_missing_body_returns_000() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            580,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+
+        let create_line = make_request_json(
+            581,
+            "config/skills/create",
+            Some(json!({"item": {"name": "sk-b", "description": "d"}})),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_some(),
+            "skills/create without body should fail"
+        );
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
     }
 }

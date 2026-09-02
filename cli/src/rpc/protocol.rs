@@ -282,3 +282,14 @@ pub struct ConfigDeleteParams {
     pub layer: Option<ConfigLayer>,
     pub name: String,
 }
+
+/// `config/skills/create` — `item` est le `SkillMeta` {name, description} ;
+/// `body` est le corps du SKILL.md (hors frontmatter), séparé de l'item.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigCreateSkillParams {
+    #[serde(default)]
+    pub layer: Option<ConfigLayer>,
+    pub item: serde_json::Value,
+    pub body: String,
+}
