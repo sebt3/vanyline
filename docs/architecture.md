@@ -6,16 +6,17 @@ interfaces réseau, auth), voir `AGENTS.md`.
 
 ## Vue d'ensemble
 
-Sept crates : **trois bibliothèques feuilles** partagées (`vanyline-tools`, `vanyline-lib`,
-`vanyline-crds`) et **quatre binaires** qui les consomment (`vanyline`, `vanyline-app`,
+Huit crates : **quatre bibliothèques feuilles** partagées (`vanyline-tools`, `vanyline-cfgstore`,
+`vanyline-lib`, `vanyline-crds`) et **quatre binaires** qui les consomment (`vanyline`, `vanyline-app`,
 `vanyline-sandbox`, `vanyline-controller`).
 
 | Crate | Type | Rôle | Contenu clé |
 |-------|------|------|-------------|
 | `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic, SLM-friendly (v2) | `filesystem` (read/write/edit/delete/list), `search` (find_files/search), `command` (`execute` via `sh -c`, timeout, cwd), `error` (`ToolsError`, codes `VNL-TLS-*`), `output` (bornage centralisé), `mcp` (schémas JSON — source unique consommée par `cli` et `sandbox`) |
+| `vanyline-cfgstore` | lib feuille | Couche de configuration : types de domaine + trait `ConfigStore` (lecture **et** écriture) + impl fs deux-couches YAML. Zéro dépendance harness (serde/serde_json/yaml_serde/async-trait/thiserror) — consommable par un serveur léger (sandbox) sans tirer rig/rmcp | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store` (`ConfigStore` — `list_*`/`get_*` + `create_*`/`update_*`/`delete_*` par domaine + `set_default_agent` ; défaut `ReadOnly` sur les écritures ; `InMemoryConfigStore`), `layers` (`Layers`, `RawConfigFile`, fusion des deux couches), `fs_store` (`FsConfigStore` + `validate_name` anti-traversal), `error` (`CfgStoreError`, codes `VNL-CFG-001..010`) |
 | `vanyline-crds` | lib feuille | Types CRD Owner/Project/Sandbox/Application (spec/status/derives kube), sans runtime opérateur | `Owner`/`Project`/`Sandbox`/`Application` + specs/status, `Toolchain`/`PvcRef`/`ProjectDefaults`/`IngressControllerRef`, `crd_manifests()`, `service_name`/`MCP_PORT` (convention de nommage du Service MCP d'une sandbox, partagée avec `vanyline-lib`) — voir sections "Client K8s CLI" et "Opérateur Kubernetes" plus bas |
-| `vanyline-lib` | lib feuille | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store::ConfigStore` (résolution de config par nom), `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), `k8s` (`VnlK8sClient`, **feature Cargo optionnelle `k8s`**, désactivée par défaut — voir "Client K8s CLI" plus bas), erreurs `VNL-*` |
-| `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), enveloppe les `vanyline-tools` en `ToolDyn` locaux, active la feature `k8s` de `vanyline-lib` (commandes owner/project/sandbox + toolbox) |
+| `vanyline-lib` | lib | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | dépend de `vanyline-cfgstore` et **re-exporte** `domain` + `store` (`vanyline_lib::domain::…` / `::store::ConfigStore` restent les chemins canoniques) ; `impl From<CfgStoreError> for VnyError` ; `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), `k8s` (`VnlK8sClient`, **feature Cargo optionnelle `k8s`**, désactivée par défaut — voir "Client K8s CLI" plus bas), erreurs `VNL-*` |
+| `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `vanyline_cfgstore::FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), câblage hôte de la découverte de couches (`cli/src/config.rs::discover_layers` : `dirs`, remontée cwd), enveloppe les `vanyline-tools` en `ToolDyn` locaux, active la feature `k8s` de `vanyline-lib` (commandes owner/project/sandbox + toolbox) |
 | `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), auth/RBAC/CRUD générique via `miryad-core` (crate publique), SeaORM/PostgreSQL, `PgConfigStore` (adapte le schéma SeaORM en `ConfigStore`), orchestration LLM via `vanyline-lib`, client `VnlK8sClient` (feature `k8s`) pour piloter Owner/Project/Sandbox/Application et relayer les tickets WS de la sandbox — voir section "Backend web" plus bas |
 | `vanyline-sandbox` | binaire | Pod serveur MCP + éditeur | expose les 8 `vanyline-tools` via MCP (`tools_impl.rs`/`mcp.rs`, schémas partagés avec `cli`) + WebSocket éditeur (`/ws/ticket`, `/ws/fs`, `/ws/terminal`) — voir section "Serveur MCP" plus bas ; second binaire `vanyline-maint` (maintenance des workspaces par les Jobs du controller — voir section dédiée) |
 | `vanyline-controller` | binaire | Opérateur Kubernetes | kube-rs, reconcilers des CRDs Owner/Project/Sandbox/Application v1alpha1 (types importés de `vanyline-crds`) — voir section dédiée plus bas |
@@ -23,30 +24,38 @@ Sept crates : **trois bibliothèques feuilles** partagées (`vanyline-tools`, `v
 ## Graphe de dépendances
 
 ```
-vanyline-tools  ◄──  vanyline (cli),  vanyline-sandbox
-vanyline-lib    ◄──  vanyline (cli),  vanyline-app
-vanyline-crds   ◄──  vanyline-controller,  vanyline-lib (feature k8s, via vanyline (cli)
-                  et vanyline-app)
+vanyline-tools    ◄──  vanyline (cli),  vanyline-sandbox
+vanyline-cfgstore ◄──  vanyline-lib,  vanyline (cli),  vanyline-app   (sandbox : prévu, cf. F2)
+vanyline-lib      ◄──  vanyline (cli),  vanyline-app
+vanyline-crds     ◄──  vanyline-controller,  vanyline-lib (feature k8s, via vanyline (cli)
+                    et vanyline-app)
 
-vanyline-tools  : aucune dépendance interne, pas de rig/rmcp
-vanyline-lib    : aucune dépendance interne obligatoire (rig-core + rmcp externes) ;
-                  feature optionnelle k8s -> vanyline-crds + kube (default-features = false,
-                  "client" seulement — jamais "runtime", ni le CLI ni l'app ne doivent
-                  embarquer le reconciler). Activée par `cli` (commandes owner/project/
-                  sandbox + toolbox) et par `app` (routes REST /api/projects,
-                  /api/sandboxes — app-k8s-provisioning) ; jamais par défaut.
-vanyline-crds   : aucune dépendance interne, kube en "derive" seul (pas de "client"/"runtime")
+vanyline-tools    : aucune dépendance interne, pas de rig/rmcp
+vanyline-cfgstore : aucune dépendance interne, aucun harness (serde/serde_json/yaml_serde/
+                    async-trait/thiserror uniquement). C'est le crate feuille que la sandbox
+                    pourra consommer pour éditer la config d'un workspace sans tirer rig/rmcp.
+vanyline-lib      : dépend de vanyline-cfgstore (re-export domain + store) ; rig-core + rmcp
+                    externes ; feature optionnelle k8s -> vanyline-crds + kube
+                    (default-features = false, "client" seulement — jamais "runtime", ni le
+                    CLI ni l'app ne doivent embarquer le reconciler). Activée par `cli`
+                    (commandes owner/project/sandbox + toolbox) et par `app` (routes REST
+                    /api/projects, /api/sandboxes — app-k8s-provisioning) ; jamais par défaut.
+vanyline-crds     : aucune dépendance interne, kube en "derive" seul (pas de "client"/"runtime")
 vanyline-controller : dépend uniquement de vanyline-crds (types CRD) parmi les crates du
-                  workspace — aucune autre dépendance interne
+                    workspace — aucune autre dépendance interne
 ```
 
-Aucun cycle. Les trois feuilles sont indépendantes l'une de l'autre (`vanyline-crds` ne
-dépend ni de `vanyline-tools` ni de `vanyline-lib`, et réciproquement).
+Aucun cycle. `vanyline-tools`, `vanyline-cfgstore` et `vanyline-crds` sont des feuilles
+indépendantes l'une de l'autre ; `vanyline-lib` n'est plus une feuille (elle dépend de
+`vanyline-cfgstore`).
 
 ## Règles de dépendances
 
-1. **`vanyline-tools` et `vanyline-lib` sont des feuilles.** Elles ne dépendent d'aucun autre
-   crate du workspace. Toute la logique réutilisable vit là ; les binaires ne font que composer.
+1. **`vanyline-tools`, `vanyline-cfgstore` et `vanyline-crds` sont des feuilles.** Elles ne
+   dépendent d'aucun autre crate du workspace. `vanyline-lib` dépend uniquement de
+   `vanyline-cfgstore` (dont elle re-exporte `domain` + `store`). Toute la logique réutilisable
+   vit dans ces libs ; les binaires ne font que composer. `vanyline-cfgstore` en particulier est
+   tenu sans harness (pas de rig/rmcp/tokio-full) pour rester consommable par la sandbox.
 
 2. **`vanyline-lib` ne dépend PAS de `vanyline-tools`.** La lib orchestre des outils *opaques*
    (`Arc<dyn ToolDyn>` référencés par nom dans `SessionContext.local_tools`) — elle ignore leur
@@ -90,11 +99,14 @@ pub async fn run_agent_turn(
 ```
 
 `SessionContext` porte tout ce qui varie par binaire :
-- `store: Arc<dyn ConfigStore>` — résolution de config par nom (providers, modèles,
-  toolsets, agents, skills). Chaque binaire fournit sa **propre implémentation** :
-  `FsConfigStore` (cli, YAML deux couches natif — voir "Configuration CLI" plus bas ;
+- `store: Arc<dyn ConfigStore>` — `ConfigStore` (trait de `vanyline-cfgstore`, re-exporté
+  par `vanyline_lib::store`) : résolution de config par nom (providers, modèles, toolsets,
+  agents, skills). Chaque binaire fournit sa **propre implémentation** : `FsConfigStore`
+  (`vanyline-cfgstore`, YAML deux couches natif — voir "Configuration CLI" plus bas ;
   remplace l'ancien `CliConfigStore`/JSON, supprimé) et `PgConfigStore` (app, requête
-  les entités SeaORM de `miryad-core-integration` — voir "Backend web" plus bas).
+  les entités SeaORM de `miryad-core-integration` — voir "Backend web" plus bas). Le
+  session engine n'utilise que le versant lecture ; les méthodes d'écriture du trait
+  (`create_*`/`update_*`/`delete_*`) ne servent qu'au RPC — voir "RPC stdio" plus bas.
 - `sink: Arc<dyn EventSink>` — un seul type d'événement, `ChatEvent`, pour tous les
   transports (REPL stdout, WebSocket, JSON-RPC stdio). `EventSink::emit` est
   appelée pour chaque `ChatEvent` produit pendant le tour (tokens, tool calls/résultats,
@@ -213,13 +225,27 @@ reproduit, `cli/src/chat.rs`) : résout la racine workspace depuis le cwd
 (`config::discover_workspace_root`), silencieux hors dépôt git, si `git` échoue ou si le
 diff est vide.
 
-**Modules** : `cli/src/config.rs` porte toute la mécanique de couches
-(découverte, fusion, et la "source" d'une entrée — global vs workspace,
-réutilisée par les commandes `list` et par l'affichage "sources workspace"
-au lancement) ; `cli/src/fs_store.rs::FsConfigStore` implémente
-`ConfigStore` dessus — store actif de toutes les commandes CLI. Dépendance
-`yaml_serde` (fork maintenu de `serde_yaml`, devenu archivé — API
-identique : `from_str`/`to_string`/`Value`/`Error`).
+**Modules** : toute la mécanique de couches (`Layers`, `RawConfigFile`,
+fusion, la "source" d'une entrée — global vs workspace) et `FsConfigStore`
+lui-même vivent dans **`vanyline-cfgstore`** (`layers.rs` / `fs_store.rs`) —
+`FsConfigStore` implémente `ConfigStore` (lecture + écriture) et reste le
+store actif de toutes les commandes CLI et du RPC. `cli/src/config.rs` ne
+garde que le **câblage hôte** : `config_dir`/`data_dir` (`dirs`),
+`discover_workspace_root` (remontée cwd), `discover_layers` (assemble un
+`Layers` à partir de ces morceaux). Dépendance `yaml_serde` (fork maintenu
+de `serde_yaml`, devenu archivé — API identique :
+`from_str`/`to_string`/`Value`/`Error`).
+
+**Écriture** : `create_*`/`update_*`/`delete_*` par domaine + `set_default_agent`,
+cible de couche explicite (`Layer::Global` / `Workspace`). `validate_name`
+(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 64, rejet `..`/`/`/`\`/absolu — contrat
+anti-traversal, `VNL-CFG-005`) est appliquée **avant toute opération disque**
+dans chaque chemin d'écriture. Les `update` de `config.yaml`
+(providers/models/mcp) revalident l'entrée patchée via son type `Raw*Entry`
+(celui que la lecture consomme) avant d'écrire : un patch qui rendrait le
+domaine illisible (`null` sur requis, valeur mal typée) est refusé en entier
+(`VNL-CFG-010`), rien n'est écrit. Écritures non atomiques (`std::fs::write`
+direct) — dette assumée, à revoir quand la sandbox consommera le crate.
 
 **`vanyline config check`** (`cli/src/config_check.rs`) : charge toutes les
 entités et croise leurs références (model→provider, agent→model/toolset/
@@ -259,10 +285,24 @@ d'erreur, exemples de trames pour chaque méthode) : `docs/rpc-protocol.md`
 
 **Modules** : `cli/src/rpc/mod.rs` (boucle stdin/stdout, writer unique via
 canal mpsc), `protocol.rs` (types serde requêtes/réponses/notifications,
-namespace d'erreur `VNL-RPC-000` à `VNL-RPC-010`), `handlers.rs`
-(dispatch, `ServerState`, logique par méthode). Réutilise `FsConfigStore`
-(config, tâche 02a) et `cli/src/store.rs` (conversations, format JSON
-existant, tâche 02b) tels quels — aucun nouveau stockage introduit.
+namespace d'erreur `VNL-RPC-000` à `VNL-RPC-015`), `handlers.rs`
+(dispatch, `ServerState`, logique par méthode). Réutilise
+`vanyline_cfgstore::FsConfigStore` (config) et `cli/src/store.rs`
+(conversations, format JSON existant) tels quels — aucun nouveau stockage
+introduit.
+
+**Config — lecture et écriture** (`config/*`, F2) : `config/<domain>` liste
+les 6 domaines (`providers`, `models`, `mcpServers`, `toolsets`, `agents`,
+`skills`) ; `config/<domain>/{create,update,delete}` les édite via les
+méthodes d'écriture de `ConfigStore`, avec `layer?` optionnel (`"global"` /
+`"workspace"` — défaut : workspace si résolu à `initialize`, sinon global).
+`CfgStoreError` est traduit en `VNL-RPC-011..015` (write error / not found /
+name conflict / invalid name / validation) ; le reste retombe sur
+`VNL-RPC-006`. Actions : `config/providers/test` et `config/mcpServers/test`
+sondent la cible réseau **stockée dans la config** (SSRF assumée — serveur
+local, config de l'utilisateur), chacune **avec un timeout de 10 s** (le
+dispatch RPC est série : un sondage qui pend gèlerait tout le serveur) ;
+`config/localTools` renvoie le registre statique des 8 tools intégrés.
 
 **Méthodes K8s** (`owners/*`, `projects/*`, `sandboxes/*`, miroir des
 commandes CLI `owner`/`project`/`sandbox` — feature `k8s`, `VNL-RPC-010`
@@ -351,11 +391,14 @@ d'extension par l'app consommatrice — le lien vers l'Owner CRD K8s (ancien
 `vanyline_owner_links` (FK vers `miryad_users.id`, upsert atomique `ON CONFLICT` dans
 `api/owners.rs::ensure_owner`).
 
-`config_store.rs::PgConfigStore` implémente toujours `vanyline_lib::ConfigStore`, mais
-requête désormais les entités SeaORM plutôt que du sqlx brut — même contrat, même
-résolution par nom (le nom remplace l'id en sortie de `ConfigStore`, comme
-`FsConfigStore` côté cli). `load_skill` lit `skills.body` à la demande, même paresse
-qu'avant.
+`config_store.rs::PgConfigStore` implémente toujours `vanyline_lib::store::ConfigStore`
+(trait re-exporté de `vanyline-cfgstore` depuis F2 ; renvoie donc `CfgStoreError`,
+`app/src/error.rs` a le `From` vers `AppError`), mais requête désormais les entités
+SeaORM plutôt que du sqlx brut — même contrat, même résolution par nom (le nom remplace
+l'id en sortie de `ConfigStore`, comme `FsConfigStore` côté cli). `load_skill` lit
+`skills.body` à la demande, même paresse qu'avant. Les méthodes d'écriture du trait ne
+sont **pas** implémentées ici (défaut `ReadOnly`) — les writes de l'app passent par les
+handlers REST / `miryad-core`, jamais par `ConfigStore`.
 
 **RBAC générique** (`miryad_core::resource::{MiryadResource, AccessPolicy}`) : chaque
 entité déclare `read_policy()`/`write_policy()` (`Public` / `OwnerOnly` / `Group` /
@@ -1596,10 +1639,13 @@ jamais un script `grep`/`awk` maison qui approxime ce qu'ils mesurent déjà exa
 | `clippy-pedantic` | `clippy::pedantic`/`clippy::nursery`, workspace entier | 585 warnings | Non — annotation seulement |
 | `coverage` | `cargo-llvm-cov`, push sur `main` uniquement | 74,97 % lignes | Non — mesure seule, pas de seuil |
 
-`unwrap_used`/`expect_used` n'a plus de job dédié : les 6 crates non-cli (`lib`, `app`,
-`sandbox`, `tools`, `controller`, `crds`) sont tous en `#![deny(clippy::unwrap_used,
-clippy::expect_used)]` directement en source — le job à cliquet `unwrap-lint` qui a existé
-le temps de corriger les crates un par un a été supprimé une fois `deny` posé partout.
+`unwrap_used`/`expect_used` n'a plus de job dédié : les 7 crates non-cli (`lib`, `app`,
+`sandbox`, `tools`, `controller`, `crds`, `cfgstore`) sont tous en
+`#![deny(clippy::unwrap_used, clippy::expect_used)]` directement en source — le job à
+cliquet `unwrap-lint` qui a existé le temps de corriger les crates un par un a été
+supprimé une fois `deny` posé partout. (Corollaire : tout `mod tests` d'un de ces crates
+doit porter `#![allow(clippy::unwrap_used, clippy::expect_used)]` — oublié sur deux
+modules de `cfgstore` en F2, invisible sans `--all-targets`, cf. piège plus bas.)
 
 ### Quatre pièges vérifiés empiriquement (pas des suppositions)
 
@@ -1746,14 +1792,16 @@ TypeScript (`workspaces: ["frontend", "packages/*"]` ; `ext/` ajouté par F3).
   client ndjson **transport-injecté** (`{ write, onLine }`), corrélation `id → Promise`,
   dispatch des notifications, timeouts — aucune API Node.
 - **`config-domain.ts`** : miroir TS **manuel** des 6 structs serde de
-  `lib/src/domain.rs` (`Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`,
-  `SkillMeta`/`SkillDetail`). Forme = serde à la lettre : discriminant `type` (pas
-  `provider_type`/`server_type`), `snake_case`, **name-keyed** (`ModelProfile.provider`,
-  `Agent.model` = noms, jamais des id). Plus 3 champs web-augmentés optionnels
-  (`Provider.available_models`/`is_default`, `McpServer.available_tools`). Conformité
-  vérifiée des deux côtés (`config-domain.conformance.spec.ts` + `domain.rs` tests
-  `*_wire_shape`). `McpTransport = 'sse' | 'http-streamable'` : `domain.rs` ne modélise
-  que `HttpStreamable`, `Sse` reste à ajouter côté Rust (F2).
+  `cfgstore/src/domain.rs` (déplacé de `lib/` en F2 ; `vanyline_lib::domain` le
+  re-exporte, `domain.rs` tests `*_wire_shape` sont dans `vanyline-cfgstore`).
+  `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`/`SkillDetail`.
+  Forme = serde à la lettre : discriminant `type` (pas `provider_type`/`server_type`),
+  `snake_case`, **name-keyed** (`ModelProfile.provider`, `Agent.model` = noms, jamais
+  des id). Plus 3 champs web-augmentés optionnels (`Provider.available_models`/`is_default`,
+  `McpServer.available_tools`). Conformité vérifiée des deux côtés
+  (`config-domain.conformance.spec.ts` + les tests `*_wire_shape`).
+  `McpTransport = 'sse' | 'http-streamable'` : les deux côtés modélisent les deux
+  variantes (`Sse` ajouté à `domain.rs` avant F2, commit `d5aaa54`).
 
 ### `@vanyline/ui` — découplage par ports injectés
 
