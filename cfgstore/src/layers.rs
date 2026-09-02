@@ -220,6 +220,8 @@ pub fn skill_entry_source(layers: &Layers, name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use tempfile::tempdir;
 
     use super::*;

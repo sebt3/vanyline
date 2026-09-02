@@ -47,7 +47,7 @@ mod tests {
         assert!(format!("{}", e2).contains("VNL-CFG-002"));
         let e3 = CfgStoreError::UnknownReference("model", "qwen-code".to_string());
         assert!(format!("{}", e3).contains("VNL-CFG-003"));
-        let e4 = CfgStoreError::from(std::io::Error::new(std::io::ErrorKind::Other, "io"));
+        let e4 = CfgStoreError::from(std::io::Error::other("io"));
         assert!(format!("{}", e4).contains("VNL-CFG-004"));
         let e5 = CfgStoreError::InvalidName("".to_string());
         assert!(format!("{}", e5).contains("VNL-CFG-005"));

@@ -1165,6 +1165,11 @@ impl ConfigStore for FsConfigStore {
 
 #[cfg(test)]
 mod tests {
+    // La crate a `#![deny(clippy::unwrap_used, clippy::expect_used)]` au niveau
+    // racine ; les tests déplacés (cli/ et lib/) unwrappent leurs Results —
+    // allowed ici comme dans les autres modules de test du workspace.
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
     use std::io::Write;
 
     use tempfile::tempdir;
