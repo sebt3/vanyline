@@ -293,3 +293,26 @@ pub struct ConfigCreateSkillParams {
     pub item: serde_json::Value,
     pub body: String,
 }
+
+/// Params de `config/providers/test` et `config/mcpServers/test` — l'entrée est
+/// résolue dans le store fusionné par nom (pas de `layer` : on teste ce que la
+/// lecture verrait).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigTestParams {
+    pub name: String,
+}
+
+/// Résultat de `config/providers/test`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTestResult {
+    pub models: Vec<String>,
+}
+
+/// Résultat de `config/mcpServers/test`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct McpTestResult {
+    pub tools: Vec<String>,
+}

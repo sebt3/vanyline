@@ -11,11 +11,11 @@ use vanyline_lib::store::ConfigStore;
 use crate::config;
 use crate::rpc::protocol::{
     ChatCancelParams, ChatEventNotificationParams, ChatSendParams, ChatSendResult,
-    ConfigCreateParams, ConfigCreateSkillParams, ConfigDeleteParams, ConfigLayer,
+    ConfigCreateParams, ConfigCreateSkillParams, ConfigDeleteParams, ConfigLayer, ConfigTestParams,
     ConfigUpdateParams, ConversationCreateParams, ConversationIdParams, ConversationSummary,
     InitializeParams, InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-    NameParams, OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, SandboxCreateParams,
-    jsonrpc_code, vnl_code,
+    McpTestResult, NameParams, OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams,
+    ProviderTestResult, SandboxCreateParams, jsonrpc_code, vnl_code,
 };
 use crate::store;
 use vanyline_cfgstore::CfgStoreError;
@@ -298,6 +298,72 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
                 serde_json::to_string(&JsonRpcResponse::success(id, Value::Array(tools)))
                     .expect("serialize localTools response"),
             )
+        }
+        // --- Actions réseau (tâche 5b) : sondage d'un provider local et listing
+        // des tools d'un serveur MCP, sur l'entrée FUSIONNÉE résolue par nom
+        // (pas de `layer` en params — on teste ce que la lecture verrait).
+        "config/providers/test" => {
+            let params: ConfigTestParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let provider = match store.get_provider(&params.name).await {
+                Ok(p) => p,
+                // erreur du store (nom inconnu -> UnknownReference) -> table de mapping
+                // 3a -> VNL-RPC-006 (variante non listée -> repli CONFIG_ERROR)
+                Err(e) => return Some(config_write_response(id, Err(e))),
+            };
+            match discover_provider_models(&provider).await {
+                Ok(models) => Some(
+                    serde_json::to_string(&JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(ProviderTestResult { models })
+                            .expect("serialize provider test result"),
+                    ))
+                    .expect("serialize provider test response"),
+                ),
+                Err(detail) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        detail,
+                        vnl_code::CONFIG_ERROR,
+                    ))
+                    .expect("serialize provider test error response"),
+                ),
+            }
+        }
+        "config/mcpServers/test" => {
+            let params: ConfigTestParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let server = match store.get_mcp_server(&params.name).await {
+                Ok(s) => s,
+                // même mapping que providers/test : UnknownReference -> VNL-RPC-006
+                Err(e) => return Some(config_write_response(id, Err(e))),
+            };
+            match vanyline_lib::prefixed_mcp::list_mcp_server_tools(&server).await {
+                Ok(tools) => Some(
+                    serde_json::to_string(&JsonRpcResponse::success(
+                        id,
+                        serde_json::to_value(McpTestResult { tools })
+                            .expect("serialize mcp test result"),
+                    ))
+                    .expect("serialize mcp test response"),
+                ),
+                // VnyError (SseNotImplemented = VNL-MCP-004, échec de connexion...)
+                // -> VNL-RPC-006, message = détail (décision dev 2026-09-02).
+                Err(e) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!("{e}"),
+                        vnl_code::CONFIG_ERROR,
+                    ))
+                    .expect("serialize mcp test error response"),
+                ),
+            }
         }
         // --- Écriture config.yaml (providers/models/mcpServers — tâche 3a).
         // toolsets/agents/skills (fichiers) -> tâche 3b. La validation du
@@ -619,6 +685,71 @@ async fn handle_config_list<T: serde::Serialize>(
 ) -> String {
     let result = action.await;
     serde_json::to_string(&config_error_response(id, result)).expect("serialize config response")
+}
+
+/// Probe des modèles d'un provider — MÊME logique que
+/// `app/src/api/llm_providers.rs::discover_models` (adaptée au type typé
+/// `ProviderType`, exhaustive donc sans cas « type inconnu ») :
+/// - Ollama : GET {endpoint}/api/tags (sans slash final) -> resp["models"][].name
+/// - OpenaiCompatible : GET {endpoint}/v1/models, header `Authorization: Bearer`
+///   si api_key présente -> resp["data"][].id
+///
+/// Timeout 10 s. Erreurs (build client / requête / parse JSON) : String porteur
+/// du code interne (VNL-LLM-003/004) + détail — le handler répond VNL-RPC-006.
+///
+/// Le serveur sonde la cible réseau stockée dans la config locale de
+/// l'utilisateur — surface assumée par le design (note SSRF, « Sécurité »).
+async fn discover_provider_models(
+    provider: &vanyline_cfgstore::domain::Provider,
+) -> Result<Vec<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| format!("VNL-LLM-003: {e}"))?;
+
+    match provider.provider_type {
+        vanyline_cfgstore::domain::ProviderType::Ollama => {
+            let url = format!("{}/api/tags", provider.endpoint.trim_end_matches('/'));
+            let resp: serde_json::Value = client
+                .get(&url)
+                .send()
+                .await
+                .map_err(|e| format!("VNL-LLM-004: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("VNL-LLM-004: {e}"))?;
+
+            let models = resp["models"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|m| m["name"].as_str().map(std::string::ToString::to_string))
+                .collect();
+            Ok(models)
+        }
+        vanyline_cfgstore::domain::ProviderType::OpenaiCompatible => {
+            let url = format!("{}/v1/models", provider.endpoint.trim_end_matches('/'));
+            let mut req = client.get(&url);
+            if let Some(ref key) = provider.api_key {
+                req = req.header("Authorization", format!("Bearer {key}"));
+            }
+            let resp: serde_json::Value = req
+                .send()
+                .await
+                .map_err(|e| format!("VNL-LLM-004: {e}"))?
+                .json()
+                .await
+                .map_err(|e| format!("VNL-LLM-004: {e}"))?;
+
+            let models = resp["data"]
+                .as_array()
+                .unwrap_or(&vec![])
+                .iter()
+                .filter_map(|m| m["id"].as_str().map(std::string::ToString::to_string))
+                .collect();
+            Ok(models)
+        }
+    }
 }
 
 /// `initialize` : valide `protocol_version == PROTOCOL_VERSION`. Si mismatch,
@@ -4523,5 +4654,338 @@ defaults:
                 tool["name"]
             );
         }
+    }
+
+    // -- New tests for task 5b (actions config/providers/test + config/mcpServers/test) --
+
+    /// Stub HTTP minimal en `std` pour les happy paths providers : listener
+    /// `127.0.0.1:0` (port libre lu AVANT le call), une connexion acceptée dans
+    /// un thread spike, lecture de la requête au moins jusqu'à la fin des
+    /// en-têtes puis réponse HTTP/1.1 canned avec `connection: close` et un
+    /// `content-length` calculé en Rust sur les OCTETS du corps (jamais à la
+    /// main). Le drop du stream à la fin du bloc ferme la connexion — reqwest
+    /// voit la réponse complète puis la fin de flux. Aucun test ne sort sur le
+    /// réseau externe : uniquement des listeners localhost et ports refusés.
+    fn spawn_json_stub(body: &'static str) -> u16 {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let Ok((mut stream, _peer)) = listener.accept() else {
+                return;
+            };
+            // Lire la requête au moins jusqu'aux en-têtes (\r\n\r\n) avant
+            // d'écrire la réponse.
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            loop {
+                match stream.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        request.extend_from_slice(&buf[..n]);
+                        if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            let _ = stream.write_all(response.as_bytes());
+            let _ = stream.flush();
+        });
+        port
+    }
+
+    /// `config_test_malformed_params_returns_000` — les deux méthodes de test
+    /// SANS `name` dans params -> enveloppe malformée -> `VNL-RPC-000`
+    /// (désérialisation `ConfigTestParams` échouée avant tout accès store).
+    #[tokio::test]
+    async fn config_test_malformed_params_returns_000() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            700,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        for (seq, method) in ["config/providers/test", "config/mcpServers/test"]
+            .iter()
+            .enumerate()
+        {
+            let line = make_request_json(701 + seq as u64, method, Some(json!({})));
+            let result = handle_line(&mut state, &line).await.unwrap();
+            let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+            assert!(resp.error.is_some(), "{method} without name should fail");
+            assert_eq!(
+                resp.error.as_ref().unwrap().data.code,
+                "VNL-RPC-000",
+                "{method} without name should be VNL-RPC-000"
+            );
+        }
+    }
+
+    /// `config_test_unknown_names_return_006` — nom inconnu dans le store
+    /// fusionné -> erreur store (`UnknownReference`) -> repli de la table 3a
+    /// -> `VNL-RPC-006` pour les deux méthodes.
+    #[tokio::test]
+    async fn config_test_unknown_names_return_006() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            710,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        for (seq, method) in ["config/providers/test", "config/mcpServers/test"]
+            .iter()
+            .enumerate()
+        {
+            let line = make_request_json(711 + seq as u64, method, Some(json!({"name": "ghost"})));
+            let result = handle_line(&mut state, &line).await.unwrap();
+            let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+            assert!(
+                resp.error.is_some(),
+                "{method} on an unknown name should fail"
+            );
+            assert_eq!(
+                resp.error.as_ref().unwrap().data.code,
+                "VNL-RPC-006",
+                "{method} on an unknown name should be VNL-RPC-006 (repli CONFIG_ERROR)"
+            );
+        }
+    }
+
+    /// `config_providers_test_ollama_happy_path` — provider `ollama` pointant
+    /// vers le stub localhost -> succès, `result.models` = les `name` du corps
+    /// `{"models":[…]}` renvoyé par le stub (GET {endpoint}/api/tags).
+    #[tokio::test]
+    async fn config_providers_test_ollama_happy_path() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let port = spawn_json_stub(r#"{"models":[{"name":"llama3:latest"},{"name":"qwen2.5"}]}"#);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            720,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            721,
+            "config/providers/create",
+            Some(json!({
+                "item": {
+                    "name": "prov-t",
+                    "type": "ollama",
+                    "endpoint": format!("http://127.0.0.1:{port}")
+                }
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should succeed, got: {result}"
+        );
+
+        let test_line = make_request_json(
+            722,
+            "config/providers/test",
+            Some(json!({"name": "prov-t"})),
+        );
+        let result = handle_line(&mut state, &test_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/providers/test should succeed against the stub, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.as_ref().expect("result should be Some");
+        assert_eq!(result["models"], json!(["llama3:latest", "qwen2.5"]));
+    }
+
+    /// `config_providers_test_openai_compatible_happy_path` — provider
+    /// `openai-compatible` + `api_key` -> succès, `result.models` = les `id` du
+    /// corps `{"data":[…]}` renvoyé par le stub (GET {endpoint}/v1/models,
+    /// header Bearer émis dès que api_key présente — le stub ne le vérifie pas,
+    /// c'est la logique partagée avec l'app qui porte ce comportement).
+    #[tokio::test]
+    async fn config_providers_test_openai_compatible_happy_path() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let port = spawn_json_stub(r#"{"data":[{"id":"gpt-x"},{"id":"gpt-y"}]}"#);
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            730,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            731,
+            "config/providers/create",
+            Some(json!({
+                "item": {
+                    "name": "prov-o",
+                    "type": "openai-compatible",
+                    "endpoint": format!("http://127.0.0.1:{port}"),
+                    "api_key": "k"
+                }
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should succeed, got: {result}"
+        );
+
+        let test_line = make_request_json(
+            732,
+            "config/providers/test",
+            Some(json!({"name": "prov-o"})),
+        );
+        let result = handle_line(&mut state, &test_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/providers/test should succeed against the stub, got: {:?}",
+            resp.error
+        );
+        let result = resp.result.as_ref().expect("result should be Some");
+        assert_eq!(result["models"], json!(["gpt-x", "gpt-y"]));
+    }
+
+    /// `config_providers_test_unreachable_returns_006` — provider ollama
+    /// d'endpoint `http://127.0.0.1:1` (rien n'écoute, connexion refusée
+    /// immédiatement) -> `VNL-RPC-006`. Le message porte le détail
+    /// `VNL-LLM-004` repris de l'app — pas d'assert sur le texte exact.
+    #[tokio::test]
+    async fn config_providers_test_unreachable_returns_006() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            740,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            741,
+            "config/providers/create",
+            Some(json!({
+                "item": {"name": "prov-u", "type": "ollama", "endpoint": "http://127.0.0.1:1"}
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should succeed, got: {result}"
+        );
+
+        let test_line = make_request_json(
+            742,
+            "config/providers/test",
+            Some(json!({"name": "prov-u"})),
+        );
+        let result = handle_line(&mut state, &test_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_some(),
+            "unreachable endpoint should fail, got: {:?}",
+            resp.result
+        );
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-006");
+    }
+
+    /// `config_mcp_servers_test_unreachable_returns_006` — serveur MCP
+    /// `http-streamable` d'URL `http://127.0.0.1:1/mcp` (connexion refusée
+    /// propagée par `list_mcp_server_tools`) -> `VNL-RPC-006`.
+    #[tokio::test]
+    async fn config_mcp_servers_test_unreachable_returns_006() {
+        let (_config_tmp, _config_guard) = isolated_config_dir();
+        let tmp = tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".vanyline")).unwrap();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let tmp_path = tmp.path().to_str().unwrap();
+        let init_line = make_request_json(
+            750,
+            "initialize",
+            Some(json!({"protocolVersion": 1, "workspace": tmp_path})),
+        );
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let create_line = make_request_json(
+            751,
+            "config/mcpServers/create",
+            Some(json!({
+                "item": {
+                    "name": "srv-t",
+                    "type": "http-streamable",
+                    "url": "http://127.0.0.1:1/mcp"
+                }
+            })),
+        );
+        let result = handle_line(&mut state, &create_line).await.unwrap();
+        assert!(
+            result.contains("\"result\":null"),
+            "create should succeed, got: {result}"
+        );
+
+        let test_line = make_request_json(
+            752,
+            "config/mcpServers/test",
+            Some(json!({"name": "srv-t"})),
+        );
+        let result = handle_line(&mut state, &test_line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_some(),
+            "unreachable MCP server should fail, got: {:?}",
+            resp.result
+        );
+        assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-006");
     }
 }
