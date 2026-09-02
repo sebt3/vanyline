@@ -506,6 +506,16 @@ impl ConfigStore for FsConfigStore {
                 "update patch must be a JSON object".to_string(),
             ));
         };
+        // null interdit sur une clé requise — l'entrée doit rester relisible
+        // (un patch qui casserait la désérialisation de l'entrée est refusé
+        // en entier, rien n'est écrit).
+        for k in patch_obj.keys() {
+            if matches!(k.as_str(), "type" | "endpoint") && patch_obj[k].is_null() {
+                return Err(CfgStoreError::Validation(format!(
+                    "provider '{name}': required field '{k}' cannot be cleared"
+                )));
+            }
+        }
         for (k, v) in patch_obj {
             if !matches!(k.as_str(), "type" | "endpoint" | "api_key") {
                 continue;
@@ -602,6 +612,16 @@ impl ConfigStore for FsConfigStore {
                 "update patch must be a JSON object".to_string(),
             ));
         };
+        // null interdit sur une clé requise — l'entrée doit rester relisible
+        // (un patch qui casserait la désérialisation de l'entrée est refusé
+        // en entier, rien n'est écrit).
+        for k in patch_obj.keys() {
+            if matches!(k.as_str(), "provider" | "model") && patch_obj[k].is_null() {
+                return Err(CfgStoreError::Validation(format!(
+                    "model '{name}': required field '{k}' cannot be cleared"
+                )));
+            }
+        }
         for (k, v) in patch_obj {
             if !matches!(
                 k.as_str(),
@@ -690,6 +710,16 @@ impl ConfigStore for FsConfigStore {
                 "update patch must be a JSON object".to_string(),
             ));
         };
+        // null interdit sur une clé requise — l'entrée doit rester relisible
+        // (un patch qui casserait la désérialisation de l'entrée est refusé
+        // en entier, rien n'est écrit).
+        for k in patch_obj.keys() {
+            if matches!(k.as_str(), "type" | "url") && patch_obj[k].is_null() {
+                return Err(CfgStoreError::Validation(format!(
+                    "mcp server '{name}': required field '{k}' cannot be cleared"
+                )));
+            }
+        }
         for (k, v) in patch_obj {
             if !matches!(k.as_str(), "type" | "url" | "headers") {
                 continue;
@@ -2029,6 +2059,198 @@ Tu es un agent d'implémentation.",
             .await
             .unwrap_err();
         assert!(matches!(&err, CfgStoreError::Validation(_)));
+    }
+
+    // --- null sur clé requise dans les update map → Validation, rien écrit ---
+    // Le garde s'exécute AVANT l'application du patch : un patch mixte
+    // valide+invalide n'écrit rien sur disque (l'entrée relue est intacte).
+
+    #[tokio::test]
+    async fn update_provider_null_on_required_returns_validation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "p1".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://x".to_string(),
+                    api_key: Some("key123".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        // {"endpoint": null} → Validation (message exact), rien d'écrit
+        let err = store
+            .update_provider(Layer::Global, "p1", serde_json::json!({"endpoint": null}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(msg)
+                if msg == "provider 'p1': required field 'endpoint' cannot be cleared"));
+
+        // L'entrée relue est l'originale intacte — endpoint toujours là,
+        // list_providers/relire ne tombent pas en VNL-CFG-001
+        let p = store.get_provider("p1").await.unwrap();
+        assert_eq!(p.provider_type, ProviderType::Ollama);
+        assert_eq!(p.endpoint, "http://x");
+        assert_eq!(p.api_key, Some("key123".to_string()));
+        assert_eq!(store.list_providers().await.unwrap().len(), 1);
+
+        // {"type": null} → même comportement
+        let err = store
+            .update_provider(Layer::Global, "p1", serde_json::json!({"type": null}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(msg)
+                if msg == "provider 'p1': required field 'type' cannot be cleared"));
+        let p = store.get_provider("p1").await.unwrap();
+        assert_eq!(p.provider_type, ProviderType::Ollama);
+        assert_eq!(p.endpoint, "http://x");
+
+        // Patch mixte valide+invalide : erreur globale, RIEN n'est appliqué
+        // (le garde précède la boucle d'application)
+        let err = store
+            .update_provider(
+                Layer::Global,
+                "p1",
+                serde_json::json!({"endpoint": null, "api_key": "x"}),
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(_)));
+        let p = store.get_provider("p1").await.unwrap();
+        assert_eq!(p.endpoint, "http://x");
+        assert_eq!(p.api_key, Some("key123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn update_model_null_on_required_returns_validation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_model(
+                Layer::Global,
+                ModelProfile {
+                    name: "m1".to_string(),
+                    provider: "ollama".to_string(),
+                    model: "qwen2.5".to_string(),
+                    temperature: None,
+                    max_tokens: None,
+                    options: serde_json::Map::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_model(Layer::Global, "m1", serde_json::json!({"model": null}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(msg)
+                if msg == "model 'm1': required field 'model' cannot be cleared"));
+
+        let err = store
+            .update_model(Layer::Global, "m1", serde_json::json!({"provider": null}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(msg)
+                if msg == "model 'm1': required field 'provider' cannot be cleared"));
+
+        // Entrée relue intacte (pas de VNL-CFG-001 à la relecture)
+        let m = store.get_model("m1").await.unwrap();
+        assert_eq!(m.provider, "ollama");
+        assert_eq!(m.model, "qwen2.5");
+        assert_eq!(store.list_models().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_mcp_server_null_on_required_returns_validation() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_mcp_server(
+                Layer::Global,
+                McpServer {
+                    name: "s1".to_string(),
+                    transport: McpTransport::HttpStreamable,
+                    url: "http://x".to_string(),
+                    headers: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+
+        let err = store
+            .update_mcp_server(Layer::Global, "s1", serde_json::json!({"url": null}))
+            .await
+            .unwrap_err();
+        assert!(matches!(&err, CfgStoreError::Validation(msg)
+                if msg == "mcp server 's1': required field 'url' cannot be cleared"));
+
+        // Entrée relue intacte (pas de VNL-CFG-001 à la relecture)
+        let s = store.get_mcp_server("s1").await.unwrap();
+        assert_eq!(s.transport, McpTransport::HttpStreamable);
+        assert_eq!(s.url, "http://x");
+        assert_eq!(store.list_mcp_servers().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_model_null_on_optional_still_clears() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+
+        store
+            .create_model(
+                Layer::Global,
+                ModelProfile {
+                    name: "m2".to_string(),
+                    provider: "ollama".to_string(),
+                    model: "qwen2.5".to_string(),
+                    temperature: Some(0.7),
+                    max_tokens: Some(4096),
+                    options: serde_json::Map::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        // null sur un optionnel efface toujours (garde non régressif)
+        store
+            .update_model(
+                Layer::Global,
+                "m2",
+                serde_json::json!({"temperature": null}),
+            )
+            .await
+            .unwrap();
+
+        let m = store.get_model("m2").await.unwrap();
+        assert_eq!(m.temperature, None);
+        // Les autres champs sont préservés
+        assert_eq!(m.max_tokens, Some(4096));
+        assert_eq!(m.provider, "ollama");
+        assert_eq!(m.model, "qwen2.5");
     }
 
     // --- layer isolation: Workspace vs Global ---

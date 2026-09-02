@@ -270,11 +270,12 @@ Un `item` non désérialisable dans le type de domaine (`type` hors enum de
 provider/MCP, `mode` d'agent invalide, champ mal typé...) répond
 `VNL-RPC-015`, avant toute atteinte du store.
 
-Un patch à `null` sur un champ **requis** renvoie `VNL-RPC-015` dans les
-domaines fichiers (`agents`, `skills`, dont les champs sont revalidés) ;
-dans les domaines en map du `config.yaml` (`providers`, `models`,
-`mcpServers`), il n'est **pas gardé** actuellement : la clé est retirée et
-l'entrée devient illisible à la relecture (`VNL-RPC-006`).
+Un patch à `null` sur un champ **requis** (`type`/`endpoint` pour
+providers, `provider`/`model` pour models, `type`/`url` pour MCP,
+`mode`/`model`/`system_prompt` pour agents, `description`/`body` pour
+skills) répond `VNL-RPC-015` dans les 6 domaines et n'écrit **rien** — le
+garde s'exécute avant application du patch, l'entrée reste relisible.
+`null` sur un champ optionnel (ou une liste) l'efface/vide.
 
 **Exception de forme pour skills** — `config/skills/create` prend
 `{layer?, item, body}` : `item` = le `SkillMeta` (`{name, description}`),
