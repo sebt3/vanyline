@@ -287,6 +287,18 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
             let store_clone = store.clone();
             Some(handle_config_list(id, async { store_clone.list_mcp_servers().await }).await)
         }
+        "config/localTools" => {
+            // Registre statique des tools intégrés du CLI (design tâche 4 : lecture
+            // seule, pas de params, pas de store). Descripteurs MCP verbatim —
+            // pas de renames côté handler.
+            let mut tools = vanyline_tools::mcp::filesystem_tools();
+            tools.extend(vanyline_tools::mcp::search_tools());
+            tools.extend(vanyline_tools::mcp::command_tools());
+            Some(
+                serde_json::to_string(&JsonRpcResponse::success(id, Value::Array(tools)))
+                    .expect("serialize localTools response"),
+            )
+        }
         // --- Écriture config.yaml (providers/models/mcpServers — tâche 3a).
         // toolsets/agents/skills (fichiers) -> tâche 3b. La validation du
         // `name` (anti-traversal) est faite dans le store, JAMAIS ici.
@@ -4442,5 +4454,74 @@ defaults:
             "skills/create without body should fail"
         );
         assert_eq!(resp.error.as_ref().unwrap().data.code, "VNL-RPC-000");
+    }
+
+    // -- New tests for task 5a (config/localTools) --
+
+    /// `config_local_tools_lists_eight_builtins` — `config/localTools` sans
+    /// params : registre statique des 8 tools intégrés (filesystem + search +
+    /// command de `vanyline_tools::mcp`, descripteurs verbatim). L'ensemble des
+    /// `name` est exactement celui des 8 builtins ; chaque entrée porte un
+    /// `inputSchema` objet de `type == "object"` (schéma MCP — camelCase
+    /// assumé, pas une entité de domaine).
+    #[tokio::test]
+    async fn config_local_tools_lists_eight_builtins() {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let mut state = ServerState::new(tx);
+        let init_line = make_request_json(600, "initialize", Some(json!({"protocolVersion": 1})));
+        handle_line(&mut state, &init_line).await;
+        assert!(state.initialized);
+
+        let line = make_request_json(601, "config/localTools", None);
+        let result = handle_line(&mut state, &line).await.unwrap();
+        let resp: JsonRpcResponse = serde_json::from_str(&result).expect("parse response");
+        assert!(
+            resp.error.is_none(),
+            "config/localTools should succeed, got: {:?}",
+            resp.error
+        );
+
+        let tools = resp.result.as_ref().expect("result should be Some");
+        let arr = tools.as_array().expect("result should be an array");
+        assert_eq!(
+            arr.len(),
+            8,
+            "config/localTools should list exactly 8 builtin tools, got: {arr:?}"
+        );
+
+        let names: HashSet<&str> = arr
+            .iter()
+            .map(|t| t["name"].as_str().expect("tool name should be a string"))
+            .collect();
+        let expected: HashSet<&str> = [
+            "read_file",
+            "write_file",
+            "edit_file",
+            "delete_file",
+            "list_directory",
+            "find_files",
+            "search",
+            "execute_command",
+        ]
+        .into_iter()
+        .collect();
+        assert_eq!(
+            names, expected,
+            "set of tool names should be exactly the 8 builtins"
+        );
+
+        for tool in arr {
+            let schema = &tool["inputSchema"];
+            assert!(
+                schema.is_object(),
+                "tool {} should have an inputSchema object, got: {tool}",
+                tool["name"]
+            );
+            assert_eq!(
+                schema["type"], "object",
+                "inputSchema of tool {} should have type \"object\", got: {schema}",
+                tool["name"]
+            );
+        }
     }
 }

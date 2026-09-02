@@ -748,3 +748,39 @@ fn smoke_layer_targets_isolated() {
 
     c.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Registre statique des tools intégrés (tâche 5a)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn smoke_local_tools_returns_eight() {
+    // Registre statique : le test ne dépend pas de la config — le préambule
+    // standard (home/ws tmpdirs, marqueur `.vanyline/`) est conservé pour
+    // l'isolation (pattern des tâches 4a/4b).
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    let resp = c.call("config/localTools", serde_json::Value::Null);
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "config/localTools should succeed, got: {resp}"
+    );
+    let tools = resp["result"]
+        .as_array()
+        .unwrap_or_else(|| panic!("config/localTools result should be an array, got: {resp}"));
+    assert_eq!(
+        tools.len(),
+        8,
+        "config/localTools should list the 8 builtin tools, got: {tools:?}"
+    );
+    assert!(
+        tools.iter().any(|t| t["name"] == "execute_command"),
+        "localTools should contain execute_command, got: {tools:?}"
+    );
+
+    c.shutdown();
+}
