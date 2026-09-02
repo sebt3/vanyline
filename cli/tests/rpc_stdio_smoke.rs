@@ -501,3 +501,250 @@ mcp:
 
     c.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Codes d'erreur config (VNL-RPC-012..015) + cible de couche (tâche 4b)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn smoke_conflict_returns_013() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // providers (couche workspace par défaut) : create deux fois le même
+    // name dans la même couche -> NameConflict côté store -> 013.
+    let item = json!({ "name": "prov-c", "type": "ollama", "endpoint": "http://x" });
+    let resp = c.call("config/providers/create", json!({ "item": item.clone() }));
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "first providers/create should succeed, got: {resp}"
+    );
+    let resp = c.call("config/providers/create", json!({ "item": item }));
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-013"),
+        "duplicate providers/create should be VNL-RPC-013, got: {resp}"
+    );
+
+    // agents (domaine fichier, représentatif des 3 domaines fichiers)
+    let item = json!({ "name": "ag-c", "model": "m", "system_prompt": "p" });
+    let resp = c.call("config/agents/create", json!({ "item": item.clone() }));
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "first agents/create should succeed, got: {resp}"
+    );
+    let resp = c.call("config/agents/create", json!({ "item": item }));
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-013"),
+        "duplicate agents/create should be VNL-RPC-013, got: {resp}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_not_found_returns_012() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // update/delete sur un name absent de la couche ciblée -> 012 (la
+    // suppression de config n'est PAS idempotente — design).
+    let cases: Vec<(&str, serde_json::Value)> = vec![
+        (
+            "config/providers/update",
+            json!({ "name": "ghost", "patch": { "endpoint": "http://y" } }),
+        ),
+        ("config/providers/delete", json!({ "name": "ghost" })),
+        (
+            "config/agents/update",
+            json!({ "name": "ghost", "patch": { "model": "m2" } }),
+        ),
+        ("config/agents/delete", json!({ "name": "ghost" })),
+    ];
+    for (method, params) in cases {
+        let resp = c.call(method, params);
+        assert_eq!(
+            Client::vnl_code(&resp).as_deref(),
+            Some("VNL-RPC-012"),
+            "{method} on an absent name should be VNL-RPC-012, got: {resp}"
+        );
+    }
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_invalid_names_return_014() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // Items agents VALIDES (model + system_prompt présents) — sinon la
+    // désérialisation `item` échouerait et répondrait 015 AVANT la validation
+    // du nom côté store. Les 4 noms anti-traversal du design, `/abs` reste
+    // une chaîne littérale dans le JSON.
+    for name in ["../evil", "a/b", "..", "/abs"] {
+        let resp = c.call(
+            "config/agents/create",
+            json!({ "item": { "name": name, "model": "m", "system_prompt": "p" } }),
+        );
+        assert_eq!(
+            Client::vnl_code(&resp).as_deref(),
+            Some("VNL-RPC-014"),
+            "agents/create with name {name:?} should be VNL-RPC-014, got: {resp}"
+        );
+    }
+
+    // Assert FS (pattern du test unitaire 3b) : aucune écriture disque — le
+    // workspace ne contient que le marqueur `.vanyline`, lui-même vide (pas
+    // de sous-répertoire `agents/` créé par les tentatives rejetées).
+    let ws_entries: Vec<std::ffi::OsString> = std::fs::read_dir(ws.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(
+        ws_entries,
+        vec![std::ffi::OsString::from(".vanyline")],
+        "invalid names must not create anything in the workspace"
+    );
+    let inner_entries: Vec<std::ffi::OsString> = std::fs::read_dir(ws.path().join(".vanyline"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert!(
+        inner_entries.is_empty(),
+        "no agents/ dir or file should exist under .vanyline, found: {inner_entries:?}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_bad_provider_type_returns_015() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // type hors enum ProviderType -> échec de désérialisation `item` côté
+    // handler -> VNL-RPC-015 (avant même d'atteindre le store).
+    let resp = c.call(
+        "config/providers/create",
+        json!({ "item": { "name": "prov-b", "type": "bogus", "endpoint": "http://x" } }),
+    );
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-015"),
+        "create with an unknown provider type should be VNL-RPC-015, got: {resp}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_layer_targets_isolated() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    // `<home>/vanyline/` n'est PAS pré-créé : le store doit le créer
+    // lui-même sur l'écriture `layer:"global"` (comportement
+    // `set_default_agent_creates_missing_global_dir`).
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    let global_file = home.path().join("vanyline").join("config.yaml");
+
+    // create global -> le store crée <home>/vanyline/config.yaml avec prov-g
+    let resp = c.call(
+        "config/providers/create",
+        json!({
+            "layer": "global",
+            "item": { "name": "prov-g", "type": "ollama", "endpoint": "http://g" }
+        }),
+    );
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "global providers/create should succeed, got: {resp}"
+    );
+    assert!(
+        global_file.is_file(),
+        "layer:global create should create {} itself",
+        global_file.display()
+    );
+    let before = std::fs::read(&global_file).unwrap();
+    assert!(
+        String::from_utf8_lossy(&before).contains("prov-g"),
+        "global config.yaml should contain prov-g, content: {}",
+        String::from_utf8_lossy(&before)
+    );
+
+    // create workspace
+    let resp = c.call(
+        "config/providers/create",
+        json!({
+            "layer": "workspace",
+            "item": { "name": "prov-w", "type": "ollama", "endpoint": "http://w" }
+        }),
+    );
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "workspace providers/create should succeed, got: {resp}"
+    );
+
+    // Le fichier global est identique octet pour octet : l'écriture
+    // workspace n'a pas re-sérialisé/touché le global.
+    let after = std::fs::read(&global_file).unwrap();
+    assert_eq!(
+        before, after,
+        "workspace write must not touch the global config.yaml"
+    );
+
+    let ws_file = ws.path().join(".vanyline").join("config.yaml");
+    let ws_before = std::fs::read(&ws_file).unwrap();
+    let ws_content = String::from_utf8_lossy(&ws_before).into_owned();
+    assert!(
+        ws_content.contains("prov-w"),
+        "workspace config.yaml should contain prov-w, content: {ws_content}"
+    );
+    assert!(
+        !ws_content.contains("prov-g"),
+        "workspace config.yaml must not contain prov-g, content: {ws_content}"
+    );
+
+    // Lecture fusionnée : les deux couches visibles
+    find_entry(&mut c, "config/providers", "prov-g");
+    find_entry(&mut c, "config/providers", "prov-w");
+
+    // delete ciblé global : prov-g disparaît du global, prov-w survit
+    let resp = c.call(
+        "config/providers/delete",
+        json!({ "layer": "global", "name": "prov-g" }),
+    );
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "global providers/delete should succeed, got: {resp}"
+    );
+    let global_after_delete = std::fs::read_to_string(&global_file).unwrap();
+    assert!(
+        !global_after_delete.contains("prov-g"),
+        "global config.yaml should no longer contain prov-g, content: {global_after_delete}"
+    );
+    find_entry(&mut c, "config/providers", "prov-w");
+    assert_eq!(
+        std::fs::read(&ws_file).unwrap(),
+        ws_before,
+        "global delete must not touch the workspace config.yaml"
+    );
+
+    c.shutdown();
+}
