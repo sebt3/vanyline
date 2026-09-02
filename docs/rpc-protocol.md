@@ -270,12 +270,15 @@ Un `item` non désérialisable dans le type de domaine (`type` hors enum de
 provider/MCP, `mode` d'agent invalide, champ mal typé...) répond
 `VNL-RPC-015`, avant toute atteinte du store.
 
-Un patch à `null` sur un champ **requis** (`type`/`endpoint` pour
-providers, `provider`/`model` pour models, `type`/`url` pour MCP,
-`mode`/`model`/`system_prompt` pour agents, `description`/`body` pour
-skills) répond `VNL-RPC-015` dans les 6 domaines et n'écrit **rien** — le
-garde s'exécute avant application du patch, l'entrée reste relisible.
-`null` sur un champ optionnel (ou une liste) l'efface/vide.
+Un patch dont le résultat rendrait l'entrée **non relisible** est refusé
+en entier par `VNL-RPC-015`, **rien n'est écrit** : `null` sur un champ
+requis (`type`/`endpoint` pour providers, `provider`/`model` pour models,
+`type`/`url` pour MCP, `mode`/`model`/`system_prompt` pour agents,
+`description`/`body` pour skills), **ou** une valeur mal typée sur
+n'importe quel champ (`endpoint: 123`, `temperature: "hot"`,
+`headers: "x"`…). L'entrée relue après un patch rejeté est l'originale
+intacte. `null` sur un champ optionnel (ou une liste) l'efface/vide
+normalement.
 
 **Exception de forme pour skills** — `config/skills/create` prend
 `{layer?, item, body}` : `item` = le `SkillMeta` (`{name, description}`),
@@ -359,7 +362,8 @@ ci-dessus). Se connecte au serveur MCP et liste les noms de ses outils.
 ```
 
 Échec de connexion — ou transport `sse`, non implémenté (`VNL-MCP-004`) —
--> `VNL-RPC-006`.
+-> `VNL-RPC-006`. Timeout 10 s (une cible qui accepte la connexion sans
+répondre -> `VNL-RPC-006` au bout de 10 s, pas de blocage du serveur).
 
 **Sécurité — note SSRF (assumée, non mitigée)** — les actions `test`
 requêtent les URLs de provider/MCP **stockées dans la config** : la cible

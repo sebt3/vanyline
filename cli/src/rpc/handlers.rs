@@ -343,8 +343,30 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
                 // même mapping que providers/test : UnknownReference -> VNL-RPC-006
                 Err(e) => return Some(config_write_response(id, Err(e))),
             };
-            match vanyline_lib::prefixed_mcp::list_mcp_server_tools(&server).await {
-                Ok(tools) => Some(
+            // Timeout obligatoire : le dispatch RPC est série (`handle_line`
+            // await en boucle) et le client MCP streamable-http n'a aucun
+            // timeout — une URL qui accepte la connexion sans jamais répondre
+            // (typo d'un host réel) gèlerait tout le serveur. 10 s, aligné sur
+            // `discover_provider_models`.
+            let probe = tokio::time::timeout(
+                std::time::Duration::from_secs(10),
+                vanyline_lib::prefixed_mcp::list_mcp_server_tools(&server),
+            )
+            .await;
+            match probe {
+                Err(_elapsed) => Some(
+                    serde_json::to_string(&JsonRpcResponse::error(
+                        id,
+                        jsonrpc_code::SERVER_ERROR,
+                        format!(
+                            "VNL-MCP-005: Cannot connect to {}: timed out after 10s",
+                            server.name
+                        ),
+                        vnl_code::CONFIG_ERROR,
+                    ))
+                    .expect("serialize mcp test timeout response"),
+                ),
+                Ok(Ok(tools)) => Some(
                     serde_json::to_string(&JsonRpcResponse::success(
                         id,
                         serde_json::to_value(McpTestResult { tools })
@@ -354,7 +376,7 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
                 ),
                 // VnyError (SseNotImplemented = VNL-MCP-004, échec de connexion...)
                 // -> VNL-RPC-006, message = détail (décision dev 2026-09-02).
-                Err(e) => Some(
+                Ok(Err(e)) => Some(
                     serde_json::to_string(&JsonRpcResponse::error(
                         id,
                         jsonrpc_code::SERVER_ERROR,

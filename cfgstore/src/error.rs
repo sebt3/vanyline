@@ -2,7 +2,7 @@ use crate::store::Layer;
 use thiserror::Error;
 
 /// Erreurs de la couche config (lecture + écriture). Identifiants stables
-/// `VNL-CFG-*`. Les variantes write-side (`VNL-CFG-005..010`) arrivent en tâche 1.
+/// `VNL-CFG-*` : `001..004` lecture/IO, `005..010` écriture.
 #[derive(Debug, Error)]
 pub enum CfgStoreError {
     #[error("VNL-CFG-001: Configuration error: {0}")]

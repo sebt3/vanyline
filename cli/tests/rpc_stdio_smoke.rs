@@ -784,3 +784,150 @@ fn smoke_local_tools_returns_eight() {
 
     c.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Actions réseau — config/providers/test & config/mcpServers/test (tâche 5b)
+// Chemins d'erreur uniquement (pas de serveur LLM/MCP réel) : nom inconnu,
+// endpoint injoignable, et — pour MCP — cible qui accepte la connexion sans
+// jamais répondre (valide le timeout : le dispatch RPC est série, un hang
+// gèlerait tout le serveur).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn smoke_provider_test_unknown_name_returns_006() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    let resp = c.call("config/providers/test", json!({ "name": "does-not-exist" }));
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-006"),
+        "provider/test on unknown name should be VNL-RPC-006, got: {resp}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_provider_test_unreachable_endpoint_returns_006() {
+    // Port fermé garanti : on bind puis on relâche immédiatement.
+    let closed_port = {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        l.local_addr().unwrap().port()
+    };
+
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    c.call(
+        "config/providers/create",
+        json!({ "item": {
+            "name": "prov-dead",
+            "type": "ollama",
+            "endpoint": format!("http://127.0.0.1:{closed_port}"),
+        }}),
+    );
+
+    let resp = c.call("config/providers/test", json!({ "name": "prov-dead" }));
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-006"),
+        "provider/test on an unreachable endpoint should be VNL-RPC-006, got: {resp}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_mcp_test_unknown_name_returns_006() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    let resp = c.call(
+        "config/mcpServers/test",
+        json!({ "name": "does-not-exist" }),
+    );
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-006"),
+        "mcpServers/test on unknown name should be VNL-RPC-006, got: {resp}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_mcp_test_black_hole_times_out_without_hanging() {
+    // Listener qui accepte la connexion TCP mais ne renvoie JAMAIS de réponse
+    // HTTP — le client MCP streamable-http n'a aucun timeout propre. Sans le
+    // timeout côté handler, ce test bloquerait indéfiniment (et gèlerait le
+    // serveur RPC en prod). Avec, la réponse arrive à ~10 s.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let handle = std::thread::spawn(move || {
+        // Garde les connexions ouvertes sans répondre, le temps du test.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        listener
+            .set_nonblocking(true)
+            .expect("set_nonblocking on black-hole listener");
+        let mut held = Vec::new();
+        while std::time::Instant::now() < deadline {
+            match listener.accept() {
+                Ok((stream, _)) => held.push(stream), // jamais lu/écrit
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    c.call(
+        "config/mcpServers/create",
+        json!({ "item": {
+            "name": "srv-blackhole",
+            "type": "http-streamable",
+            "url": format!("http://127.0.0.1:{port}/mcp"),
+        }}),
+    );
+
+    let started = std::time::Instant::now();
+    let resp = c.call("config/mcpServers/test", json!({ "name": "srv-blackhole" }));
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-006"),
+        "mcpServers/test on a black hole should error VNL-RPC-006, got: {resp}"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(25),
+        "mcpServers/test must not hang — returned in {elapsed:?}"
+    );
+    assert!(
+        elapsed >= std::time::Duration::from_secs(8),
+        "the ~10s handler timeout should be what ends this call, not a fast \
+         failure — returned in {elapsed:?}"
+    );
+    // Le serveur reste vivant et répond à la requête suivante.
+    let follow = c.call("config/providers", serde_json::Value::Null);
+    assert_eq!(
+        Client::vnl_code(&follow),
+        None,
+        "server should still answer after a timed-out mcp test, got: {follow}"
+    );
+
+    c.shutdown();
+    drop(handle); // le thread se termine seul via sa deadline
+}

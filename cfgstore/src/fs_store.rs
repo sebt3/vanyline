@@ -539,6 +539,12 @@ impl ConfigStore for FsConfigStore {
         }
         let entry = yaml_serde::to_value(&json_entry)
             .map_err(|e| CfgStoreError::WriteError(format!("provider '{name}': {e}")))?;
+        // Backstop : l'entrée patchée doit rester désérialisable telle que la
+        // lecture la consommera. Un patch mal typé (`endpoint: 123`,
+        // `api_key: 42`…) casserait sinon toute relecture du domaine en
+        // VNL-CFG-001. Rejet complet, rien écrit.
+        yaml_serde::from_value::<RawProviderEntry>(entry.clone())
+            .map_err(|e| CfgStoreError::Validation(format!("provider '{name}': {e}")))?;
         raw.providers.insert(name.to_string(), entry);
         self.write_config_layer(&dir, raw).await
     }
@@ -637,6 +643,10 @@ impl ConfigStore for FsConfigStore {
         }
         let entry = yaml_serde::to_value(&json_entry)
             .map_err(|e| CfgStoreError::WriteError(format!("model '{name}': {e}")))?;
+        // Backstop : cf. `update_provider` — un patch mal typé (`temperature:
+        // "hot"`, `options: "x"`…) rendrait le domaine illisible sinon.
+        yaml_serde::from_value::<RawModelEntry>(entry.clone())
+            .map_err(|e| CfgStoreError::Validation(format!("model '{name}': {e}")))?;
         raw.models.insert(name.to_string(), entry);
         self.write_config_layer(&dir, raw).await
     }
@@ -743,6 +753,10 @@ impl ConfigStore for FsConfigStore {
         }
         let entry = yaml_serde::to_value(&json_entry)
             .map_err(|e| CfgStoreError::WriteError(format!("mcp server '{name}': {e}")))?;
+        // Backstop : cf. `update_provider` — un patch mal typé (`url: 123`,
+        // `headers: "x"`, `headers: {"K": 5}`…) rendrait le domaine illisible.
+        yaml_serde::from_value::<RawMcpEntry>(entry.clone())
+            .map_err(|e| CfgStoreError::Validation(format!("mcp server '{name}': {e}")))?;
         raw.mcp.insert(name.to_string(), entry);
         self.write_config_layer(&dir, raw).await
     }
@@ -2251,6 +2265,140 @@ Tu es un agent d'implémentation.",
         assert_eq!(m.max_tokens, Some(4096));
         assert_eq!(m.provider, "ollama");
         assert_eq!(m.model, "qwen2.5");
+    }
+
+    // --- patch MAL TYPÉ (valeur non-null d'un type incompatible) dans les
+    // update map → Validation, RIEN écrit, le domaine reste relisible.
+    // Régression : avant le fix, `{"endpoint": 123}` renvoyait Ok(()),
+    // écrivait la valeur, et toute relecture du domaine tombait en
+    // VNL-CFG-001 (même classe que le null-sur-requis de 74dded9, restée
+    // ouverte pour les types incompatibles).
+
+    #[tokio::test]
+    async fn update_provider_wrong_type_returns_validation_nothing_written() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_provider(
+                Layer::Global,
+                Provider {
+                    name: "p1".to_string(),
+                    provider_type: ProviderType::Ollama,
+                    endpoint: "http://x".to_string(),
+                    api_key: Some("k".to_string()),
+                },
+            )
+            .await
+            .unwrap();
+
+        for patch in [
+            serde_json::json!({"endpoint": 12345}),
+            serde_json::json!({"api_key": 42}),
+        ] {
+            let err = store
+                .update_provider(Layer::Global, "p1", patch.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, CfgStoreError::Validation(_)),
+                "patch {patch} should be Validation, got {err:?}"
+            );
+        }
+
+        // Le domaine reste relisible — pas de VNL-CFG-001, entrée intacte.
+        let p = store.get_provider("p1").await.unwrap();
+        assert_eq!(p.endpoint, "http://x");
+        assert_eq!(p.api_key, Some("k".to_string()));
+        assert_eq!(store.list_providers().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_model_wrong_type_returns_validation_nothing_written() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_model(
+                Layer::Global,
+                ModelProfile {
+                    name: "m1".to_string(),
+                    provider: "ollama".to_string(),
+                    model: "qwen2.5".to_string(),
+                    temperature: None,
+                    max_tokens: None,
+                    options: serde_json::Map::new(),
+                },
+            )
+            .await
+            .unwrap();
+
+        for patch in [
+            serde_json::json!({"temperature": "hot"}),
+            serde_json::json!({"provider": 7}),
+            serde_json::json!({"options": "not-a-map"}),
+        ] {
+            let err = store
+                .update_model(Layer::Global, "m1", patch.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, CfgStoreError::Validation(_)),
+                "patch {patch} should be Validation, got {err:?}"
+            );
+        }
+
+        let m = store.get_model("m1").await.unwrap();
+        assert_eq!(m.provider, "ollama");
+        assert_eq!(m.model, "qwen2.5");
+        assert_eq!(store.list_models().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn update_mcp_server_wrong_type_returns_validation_nothing_written() {
+        let tmp = tempdir().unwrap();
+        let layers = Layers {
+            global_dir: tmp.path().to_path_buf(),
+            workspace_dir: None,
+        };
+        let store = FsConfigStore::new(layers);
+        store
+            .create_mcp_server(
+                Layer::Global,
+                McpServer {
+                    name: "s1".to_string(),
+                    transport: McpTransport::HttpStreamable,
+                    url: "http://x".to_string(),
+                    headers: Default::default(),
+                },
+            )
+            .await
+            .unwrap();
+
+        for patch in [
+            serde_json::json!({"url": 123}),
+            serde_json::json!({"headers": "not-a-map"}),
+            serde_json::json!({"headers": {"X-Token": 5}}),
+        ] {
+            let err = store
+                .update_mcp_server(Layer::Global, "s1", patch.clone())
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(&err, CfgStoreError::Validation(_)),
+                "patch {patch} should be Validation, got {err:?}"
+            );
+        }
+
+        let s = store.get_mcp_server("s1").await.unwrap();
+        assert_eq!(s.url, "http://x");
+        assert_eq!(store.list_mcp_servers().await.unwrap().len(), 1);
     }
 
     // --- layer isolation: Workspace vs Global ---
