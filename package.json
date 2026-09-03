@@ -1,9 +1,10 @@
 {
-  "name": "vanyline",
+  "name": "vanyline-workspace",
   "private": true,
   "workspaces": [
     "frontend",
-    "packages/*"
+    "packages/*",
+    "ext"
   ],
   "scripts": {
     "build": "npm run build --workspace=frontend",

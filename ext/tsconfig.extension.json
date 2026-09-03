@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "ignoreDeprecations": "6.0",
+    "types": ["node", "vscode"],
+    "baseUrl": ".",
+    "paths": {
+      "@vanyline/protocol": ["../packages/protocol/src/index.ts"],
+      "@vanyline/protocol/*": ["../packages/protocol/src/*"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

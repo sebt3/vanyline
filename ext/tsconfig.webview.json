@@ -1,0 +1,23 @@
+{
+  "extends": "@vue/tsconfig/tsconfig.dom.json",
+  "compilerOptions": {
+    "ignoreDeprecations": "6.0",
+    "types": ["vite/client"],
+    "allowArbitraryExtensions": true,
+
+    /* Linting */
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "erasableSyntaxOnly": true,
+    "noFallthroughCasesInSwitch": true,
+
+    "baseUrl": ".",
+    "paths": {
+      "@vanyline/ui": ["../packages/ui/src/index.ts"],
+      "@vanyline/ui/*": ["../packages/ui/src/*"],
+      "@vanyline/protocol": ["../packages/protocol/src/index.ts"],
+      "@vanyline/protocol/*": ["../packages/protocol/src/*"]
+    }
+  },
+  "include": ["webview/src/**/*.ts", "webview/src/**/*.vue"]
+}
