@@ -30,6 +30,9 @@ function refreshAgents(): void {
     .request<{ name: string }[]>('config/agents', {})
     .then((list) => {
       agents.value = list.map((a) => a.name);
+      // Un refetch qui aboutit rétablit le sélecteur : le serveur avait pu être
+      // absent au mount (select désactivé) puis revenir avant ce config/changed.
+      agentsUnavailable.value = false;
     })
     .catch(() => {
       // -021 (serveur non démarré) ou erreur RPC → UI dégradée, jamais bloquante.
