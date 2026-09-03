@@ -1,42 +1,53 @@
 import * as vscode from 'vscode';
 import { spawn as cpSpawn } from 'node:child_process';
 import { registerChatView } from './panels/chat';
-import { startServer, type ServerHandle } from './rpc';
+import { startServer } from './rpc';
+import { createSupervisor, type Supervisor } from './supervisor';
 
-let handle: ServerHandle | undefined;
+let supervisor: Supervisor | undefined;
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   registerChatView(context);
 
   const channel = vscode.window.createOutputChannel('vanyline');
-  context.subscriptions.push(channel);
+  const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
+  statusBar.command = 'vanyline.restartServer';
+  statusBar.show();
+  context.subscriptions.push(channel, statusBar);
 
-  const cfg = vscode.workspace.getConfiguration('vanyline');
-  const bin = cfg.get<string>('serverPath', '').trim() || 'vanyline';
-  channel.appendLine(`binaire vanyline : ${bin}`); // « log clair du binaire utilisé » (design)
+  supervisor = createSupervisor({
+    channel,
+    statusBar: {
+      setText: (t) => {
+        statusBar.text = t;
+      },
+    },
+    start: async () => {
+      // relecture de la config À CHAQUE tentative (serverPath changeable sans reload)
+      const cfg = vscode.workspace.getConfiguration('vanyline');
+      const bin = cfg.get<string>('serverPath', '').trim() || 'vanyline';
+      channel.appendLine(`binaire vanyline : ${bin}`); // « log clair du binaire utilisé » (design)
+      return startServer({
+        spawn: cpSpawn,
+        channel,
+        bin,
+        workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
+        logLevel: cfg.get<string>('defaultLogLevel', 'info'),
+      });
+    },
+    notifyError: (msg) => {
+      channel.appendLine(msg);
+      void vscode.window.showErrorMessage(msg);
+    },
+  });
 
-  try {
-    handle = await startServer({
-      spawn: cpSpawn,
-      channel,
-      bin,
-      workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
-      logLevel: cfg.get<string>('defaultLogLevel', 'info'),
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    channel.appendLine(msg);
-    void vscode.window.showErrorMessage(msg);
-    // activation dégradée : la vue reste enregistrée, pas de throw (design « offline »)
-  }
+  context.subscriptions.push(
+    vscode.commands.registerCommand('vanyline.restartServer', () => supervisor?.restart()),
+  );
+
+  await supervisor.start(); // ne rejette jamais (activation dégradée, design « offline »)
 }
 
 export async function deactivate(): Promise<void> {
-  if (!handle) return;
-  try {
-    await handle.dispose();
-  } catch {
-    /* mort déjà : rien à faire */
-  }
-  handle = undefined;
+  await supervisor?.stop();
 }
