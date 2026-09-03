@@ -61,16 +61,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     notifyError: (msg) => void vscode.window.showErrorMessage(msg),
   });
 
-  // Provider ↔ superviseur, AVANT start() pour ne manquer le premier 'ready' : le handle
-  // change à chaque restart → re-attach à chaque 'ready', detach ailleurs (le pont répond -021).
+  // Provider chat + panel config ↔ superviseur, AVANT start() pour ne manquer le premier
+  // 'ready' : le handle change à chaque restart → re-attach à chaque 'ready', detach
+  // ailleurs (les deux ponts répondent -021 — mêmes sémantiques, même fenêtre de restart).
   supervisor.onStatus((s) => {
     if (s === 'ready') {
       const h = supervisor?.current();
       if (h) {
         provider.attachServer(h);
+        configPanel.attachServer(h);
       }
     } else {
       provider.detachServer();
+      configPanel.detachServer();
     }
   });
 

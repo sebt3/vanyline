@@ -150,15 +150,34 @@ describe('handleBridgeRequest', () => {
     expect(h.responses).toEqual([{ type: 'rpc/resp', reqId: 31, ok: true, result: ['a'] }]);
   });
 
+  it('cas 5 (F4) — écriture config whitelistée passe : request relaie params tels quels', async () => {
+    const h = fakeApi(async () => ({ name: 'outils-uts' }));
+    const params = { item: { name: 'outils-uts', description: 'toolset créé depuis la webview' } };
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 34, method: 'config/toolsets/create', params },
+      h.api,
+      true,
+    );
+    expect(h.request).toHaveBeenCalledWith('config/toolsets/create', params);
+    expect(h.responses).toEqual([
+      { type: 'rpc/resp', reqId: 34, ok: true, result: { name: 'outils-uts' } },
+    ]);
+  });
+
   it('cas 5 — méthode hors whitelist → VNL-EXT-020 sans appel request', async () => {
+    // Assertion de sécurité renforcée (F4) : la méthode testée est 'shutdown' — la
+    // méthode d'arrêt du serveur ne peut PAS être atteinte depuis une webview, même
+    // forcée via {type:'rpc'}. (Avant F4 le cas portait sur 'config/providers/test' ;
+    // cette méthode est désormais relayée, 'shutdown' la remplace comme méthode
+    // interdite — elle ne figurera jamais dans la whitelist.)
     const h = fakeApi();
-    await handleBridgeRequest({ type: 'rpc', reqId: 32, method: 'config/providers/test' }, h.api, true);
+    await handleBridgeRequest({ type: 'rpc', reqId: 32, method: 'shutdown' }, h.api, true);
     expect(h.request).not.toHaveBeenCalled();
     expect(h.responses).toHaveLength(1);
     expect(h.responses[0].type).toBe('rpc/resp');
     expect(h.responses[0].ok).toBe(false);
     expect(h.responses[0].error?.code).toBe('VNL-EXT-020');
-    expect(h.responses[0].error?.message).toContain('config/providers/test');
+    expect(h.responses[0].error?.message).toContain('shutdown');
   });
 
   it("cas 5 — chat/send forcé via {type:'rpc'} → VNL-EXT-020 (messages nommés uniquement)", async () => {
@@ -171,7 +190,8 @@ describe('handleBridgeRequest', () => {
     expect(h.request).not.toHaveBeenCalled();
     expect(h.responses).toHaveLength(1);
     expect(h.responses[0].error?.code).toBe('VNL-EXT-020');
-    // la whitelist est le contrat de sécurité — gélée ici, exacte. `conversations/delete`
+    // la whitelist est le contrat de sécurité — gélée ici, exacte (ordre compris,
+    // 31 entrées : 3 conversations F3 + 28 config F4). `conversations/delete`
     // n'y figure pas : aucune affordance de suppression côté webview en F3 (ré-ajout
     // possible en F4 quand ChatWindow exposera le geste).
     expect(RELAY_WHITELIST).toEqual([
@@ -179,6 +199,33 @@ describe('handleBridgeRequest', () => {
       'conversations/get',
       'conversations/create',
       'config/agents',
+      'config/agents/create',
+      'config/agents/delete',
+      'config/agents/update',
+      'config/localTools',
+      'config/mcpServers',
+      'config/mcpServers/create',
+      'config/mcpServers/delete',
+      'config/mcpServers/test',
+      'config/mcpServers/update',
+      'config/models',
+      'config/models/create',
+      'config/models/delete',
+      'config/models/update',
+      'config/providers',
+      'config/providers/create',
+      'config/providers/delete',
+      'config/providers/test',
+      'config/providers/update',
+      'config/skills',
+      'config/skills/create',
+      'config/skills/delete',
+      'config/skills/get',
+      'config/skills/update',
+      'config/toolsets',
+      'config/toolsets/create',
+      'config/toolsets/delete',
+      'config/toolsets/update',
     ]);
   });
 
