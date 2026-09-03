@@ -51,7 +51,7 @@
           "type": "string",
           "enum": ["trace", "debug", "info", "warn", "error"],
           "default": "info",
-          "description": "Niveau de log passé à la CLI au spawn (VANYLINE_LOG)."
+          "description": "Niveau de log passé à la CLI au spawn (RUST_LOG)."
         }
       }
     }
