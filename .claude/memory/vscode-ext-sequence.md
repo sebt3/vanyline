@@ -38,7 +38,7 @@ mémoire de clôture (`.claude/memory/<nom>.md`) portent tous le même nom `F<n>
 | F1 | `F1-vscode-ext-foundations` | **close 2026-08-31.** `packages/protocol` + `packages/ui` extraits du frontend, `ConfigRepo` + impl HTTP, ts-rs. Comportement frontend inchangé. | — |
 | F2 | `F2-vscode-ext-cli-rpc` | **close 2026-09-02, mergée+poussée.** Crate feuille `vanyline-cfgstore` (config extraite de `lib`+`cli`, partageable sandbox) + `ConfigStore` lecture→lecture/écriture + RPC `config/<domain>/{create,update,delete}` + actions test/localTools. | alignement noms avec F1 |
 | F3 | `F3-vscode-ext-chat` | **close 2026-09-03, mergée+poussée.** L'extension elle-même : host, provisioning CLI (download+SHA256), sidebar chat, **packaging + release CI**. | F1 |
-| F4 | `F4-vscode-ext-config-ui` | Onglets éditeur pour éditer la config via les écrans `@vanyline/ui` + impl RPC de `ConfigRepo`. | F2, F3 |
+| F4 | `F4-vscode-ext-config-ui` | **close 2026-09-03, mergée+poussée.** Onglet éditeur `vanyline.config` montant `ConfigShell` + les 6 écrans `@vanyline/ui`, impl RPC `rpcConfigRepo` sur le pont, `config/skills/get` + champ additif `source` (badge de couche), broadcast `config/changed` cross-webview. | F2, F3 |
 | F5 | `F5-vscode-ext-sandboxes` | `TreeView` native Owners/Projects/Sandboxes via les méthodes RPC K8s existantes. | F3 |
 
 Ordre d'exécution recommandé : **F1 → F2 → F3 → (F4 ‖ F5)**. F4 et F5 sont
@@ -91,7 +91,27 @@ migration vers `docs/architecture.md` + suppression du design doc).
   Design migré dans `docs/architecture.md` § « Extension VS Code — `ext/` (F3) »,
   `docs/features/F3-vscode-ext-chat.md` supprimé. Bilan complet :
   `.claude/memory/F3-vscode-ext-chat.md`.
-  **Suite : F4 ‖ F5** (parallélisables).
+- **2026-09-03** — **F4 close (Phase 3 faite), branche `feat/F4-vscode-ext-config-ui`
+  mergée `--no-ff` dans `main` et poussée.** Onglet éditeur `vanyline.config` (panel
+  unique) : `main.ts` route sur `<meta name="vanyline-view">` (`router.ts`,
+  repli `chat`) → `App.vue` ou `ConfigView.vue` ; `ConfigView` monte `ConfigShell`
+  (4 groupes, pas de `account`) + `rpcConfigRepo` (pass-through pont→RPC, seule
+  traduction `profiles↔models` / `mcp↔mcpServers`). 2 ajouts CLI/RPC tranchés au
+  démarrage : `config/skills/get` (seule lecture du `body`) et champ additif
+  `source` sur les 6 lectures liste + `skills/get` (calc `*_entry_source` de
+  `cfgstore::layers`) → badge `SourceBadge` sur les 6 écrans. `extension.ts`
+  diffuse `config/changed` à toutes les webviews après tout write vu par
+  `bridge.ts` → le sélecteur d'agent du chat refetch sans reload. `RELAY_WHITELIST`
+  passe de 4 à 31 entrées (toute la surface `config/*`, jamais
+  `initialize`/`shutdown`/`chat/*`/`conversations/delete`). **Livré par Cadence
+  sans escalade, 0 bug bloquant en review — 2ᵉ livraison propre consécutive**
+  (Cadence + implement désormais sur `dgx/qwen3.8-flash-next`). Review Phase 3 :
+  findings mineurs, 1 seul corrigé en code (`App.vue` — `agentsUnavailable` ne se
+  rétablissait jamais), le reste noté. Design migré dans `docs/architecture.md`
+  (§ RPC stdio « Ajouts F4 », § Backend web `rpcConfigRepo`, § « Extension VS Code
+  — `ext/` (F3, F4) »), `docs/features/F4-vscode-ext-config-ui.md` supprimé. Bilan
+  complet : `.claude/memory/F4-vscode-ext-config-ui.md`.
+  **Suite : F5** (dernière — `TreeView` sandboxes).
 
 ## Comment reprendre dans une session neuve
 
@@ -135,7 +155,10 @@ migration vers `docs/architecture.md` + suppression du design doc).
   upload` si `cli-version.txt` la pointe). `ext/cli-version.txt` + `ext/package.json`
   `version` = bumps manuels, cf. `docs/release-runbook.md` §2.
 - Le pont host (`ext/src/panels/bridge.ts`) a un `RELAY_WHITELIST` = contrat de sécurité
-  webview→CLI. F3 : `conversations/list|get|create` + `config/agents`. Toute méthode
-  relayée depuis la webview en F4/F5 s'y ajoute explicitement.
+  webview→CLI. F3 : `conversations/list|get|create` + `config/agents`. F4 : + toute la
+  surface `config/*` (31 entrées, ordre gelé par le test). **Whitelist partagée par les
+  deux webviews** — le chat hérite de la surface config write ; acceptée car la CSP nonce
+  interdit toute exécution JS dans la webview (pas de vecteur pour envoyer un message
+  postMessage arbitraire). F5 : toute méthode K8s relayée s'y ajoute explicitement.
 - Nom de domaine : `profiles` (UI) = `models` (CLI `config.yaml`) = `model-profiles`
   (app REST). Un seul point de traduction par impl de `ConfigRepo`.
