@@ -11,32 +11,15 @@ import {
   SkillsScreen,
   CONFIG_REPO_KEY,
   type ConfigNavGroup,
-  type ConfigRepo,
 } from '@vanyline/ui';
+import { getBridgeClient } from './bridge';
+import { createRpcConfigRepo } from './rpcConfigRepo';
 
-// Dépôt de config encore non branché (le relais host `config/*` + rpcConfigRepo
-// arrivent en tâche 06). Écrit méthode par méthode, typé ConfigRepo — jamais de
-// Proxy magique : chaque méthode rejette VNL-EXT-022, ce qui fait s'afficher
-// l'ErrorCard de l'écran (le « hello ConfigShell » voulu par le design).
-function stubConfigRepo(): ConfigRepo {
-  const notWired = (): never => {
-    throw new Error('VNL-EXT-022: dépôt de config non branché (tâche 06)');
-  };
-  const repo: ConfigRepo = {
-    list: async (_domain) => notWired(),
-    get: async (_domain, _name) => notWired(),
-    create: async (_domain, _item) => notWired(),
-    update: async (_domain, _name, _patch) => notWired(),
-    remove: async (_domain, _name) => notWired(),
-    setDefaultProvider: async (_name) => notWired(),
-    testProvider: async (_name) => notWired(),
-    testMcpServer: async (_name) => notWired(),
-    listLocalTools: async () => notWired(),
-  };
-  return repo;
-}
-
-provide(CONFIG_REPO_KEY, stubConfigRepo());
+// getBridgeClient() appelé ICI (setup), jamais à l'import du module :
+// acquireVsCodeApi() n'existe que dans la webview et une seule fois (cf.
+// bridge.ts, pattern App.vue). Le repo traduit le port @vanyline/ui vers le
+// RPC du CLI via le pont ; le relais host `config/*` est la tâche 06b.
+provide(CONFIG_REPO_KEY, createRpcConfigRepo(getBridgeClient()));
 
 // Nav des 4 groupes CLI — les groupes du frontend `SettingsView.vue` SANS
 // `account` (pas de notion de compte côté CLI / F4). Mêmes labels/icons/accents.
