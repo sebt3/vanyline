@@ -10,6 +10,7 @@ import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import CheckboxList from '../common/CheckboxList.vue';
 import Field from '../common/Field.vue';
+import SourceBadge from '../common/SourceBadge.vue';
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -178,7 +179,7 @@ async function deleteAgent(name: string) {
         </thead>
         <tbody>
           <tr v-for="a in fetchedAgents" :key="a.name">
-            <td>{{ a.name }}</td>
+            <td>{{ a.name }} <SourceBadge :source="a.source" /></td>
             <td>{{ a.description ?? '—' }}</td>
             <td>{{ a.mode }}</td>
             <td>{{ a.model }}</td>

@@ -150,15 +150,34 @@ describe('handleBridgeRequest', () => {
     expect(h.responses).toEqual([{ type: 'rpc/resp', reqId: 31, ok: true, result: ['a'] }]);
   });
 
+  it('cas 5 (F4) — écriture config whitelistée passe : request relaie params tels quels', async () => {
+    const h = fakeApi(async () => ({ name: 'outils-uts' }));
+    const params = { item: { name: 'outils-uts', description: 'toolset créé depuis la webview' } };
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 34, method: 'config/toolsets/create', params },
+      h.api,
+      true,
+    );
+    expect(h.request).toHaveBeenCalledWith('config/toolsets/create', params);
+    expect(h.responses).toEqual([
+      { type: 'rpc/resp', reqId: 34, ok: true, result: { name: 'outils-uts' } },
+    ]);
+  });
+
   it('cas 5 — méthode hors whitelist → VNL-EXT-020 sans appel request', async () => {
+    // Assertion de sécurité renforcée (F4) : la méthode testée est 'shutdown' — la
+    // méthode d'arrêt du serveur ne peut PAS être atteinte depuis une webview, même
+    // forcée via {type:'rpc'}. (Avant F4 le cas portait sur 'config/providers/test' ;
+    // cette méthode est désormais relayée, 'shutdown' la remplace comme méthode
+    // interdite — elle ne figurera jamais dans la whitelist.)
     const h = fakeApi();
-    await handleBridgeRequest({ type: 'rpc', reqId: 32, method: 'config/providers/test' }, h.api, true);
+    await handleBridgeRequest({ type: 'rpc', reqId: 32, method: 'shutdown' }, h.api, true);
     expect(h.request).not.toHaveBeenCalled();
     expect(h.responses).toHaveLength(1);
     expect(h.responses[0].type).toBe('rpc/resp');
     expect(h.responses[0].ok).toBe(false);
     expect(h.responses[0].error?.code).toBe('VNL-EXT-020');
-    expect(h.responses[0].error?.message).toContain('config/providers/test');
+    expect(h.responses[0].error?.message).toContain('shutdown');
   });
 
   it("cas 5 — chat/send forcé via {type:'rpc'} → VNL-EXT-020 (messages nommés uniquement)", async () => {
@@ -171,7 +190,8 @@ describe('handleBridgeRequest', () => {
     expect(h.request).not.toHaveBeenCalled();
     expect(h.responses).toHaveLength(1);
     expect(h.responses[0].error?.code).toBe('VNL-EXT-020');
-    // la whitelist est le contrat de sécurité — gélée ici, exacte. `conversations/delete`
+    // la whitelist est le contrat de sécurité — gélée ici, exacte (ordre compris,
+    // 31 entrées : 3 conversations F3 + 28 config F4). `conversations/delete`
     // n'y figure pas : aucune affordance de suppression côté webview en F3 (ré-ajout
     // possible en F4 quand ChatWindow exposera le geste).
     expect(RELAY_WHITELIST).toEqual([
@@ -179,6 +199,33 @@ describe('handleBridgeRequest', () => {
       'conversations/get',
       'conversations/create',
       'config/agents',
+      'config/agents/create',
+      'config/agents/delete',
+      'config/agents/update',
+      'config/localTools',
+      'config/mcpServers',
+      'config/mcpServers/create',
+      'config/mcpServers/delete',
+      'config/mcpServers/test',
+      'config/mcpServers/update',
+      'config/models',
+      'config/models/create',
+      'config/models/delete',
+      'config/models/update',
+      'config/providers',
+      'config/providers/create',
+      'config/providers/delete',
+      'config/providers/test',
+      'config/providers/update',
+      'config/skills',
+      'config/skills/create',
+      'config/skills/delete',
+      'config/skills/get',
+      'config/skills/update',
+      'config/toolsets',
+      'config/toolsets/create',
+      'config/toolsets/delete',
+      'config/toolsets/update',
     ]);
   });
 
@@ -225,5 +272,78 @@ describe('handleBridgeRequest', () => {
     expect(h.responses).toEqual([
       { type: 'chat/send/resp', reqId: 61, ok: false, error: { code: null, message: 'panne brute' } },
     ]);
+  });
+});
+
+/** Harness dédié aux cas config/changed (tâche 07) : même forme que `fakeApi` mais
+ *  portant le spy `onWriteSucceeded`. `fakeApi` reste INTACT et sans le champ
+ *  optionnel — la non-régression de ce champ passe par son absence (tous les cas
+ *  existants ci-dessus continuent de tourner sans lui). */
+function fakeWriteApi(requestImpl?: (method: string, params?: unknown) => Promise<unknown>) {
+  const responses: Resp[] = [];
+  const request = vi.fn(async (method: string, params?: unknown): Promise<unknown> =>
+    requestImpl ? requestImpl(method, params) : {},
+  );
+  const onWriteSucceeded = vi.fn();
+  const api: BridgeApi = {
+    request: request as BridgeApi['request'],
+    respond: (resp) => {
+      responses.push(resp);
+    },
+    log: () => {},
+    onWriteSucceeded,
+  };
+  return { api, request, responses, onWriteSucceeded };
+}
+
+describe('handleBridgeRequest — détection des writes config réussis (tâche 07)', () => {
+  it('write réussi → réponse ok:true ET callback appelé une fois avec le domaine brut', async () => {
+    const h = fakeWriteApi(async () => null);
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 71, method: 'config/toolsets/create', params: { item: { name: 'x' } } },
+      h.api,
+      true,
+    );
+    expect(h.responses).toEqual([{ type: 'rpc/resp', reqId: 71, ok: true, result: null }]);
+    expect(h.onWriteSucceeded).toHaveBeenCalledTimes(1);
+    expect(h.onWriteSucceeded).toHaveBeenCalledWith('toolsets');
+  });
+
+  it('lecture réussie (config/skills/get) → callback NON appelé', async () => {
+    const h = fakeWriteApi(async () => ({ content: 'x' }));
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 72, method: 'config/skills/get', params: { name: 's' } },
+      h.api,
+      true,
+    );
+    expect(h.responses).toHaveLength(1);
+    expect(h.responses[0].ok).toBe(true);
+    expect(h.onWriteSucceeded).not.toHaveBeenCalled();
+  });
+
+  it('write ÉCHOUÉ (rejet RpcError) → réponse ok:false et callback NON appelé', async () => {
+    const h = fakeWriteApi(async () => {
+      throw new RpcError(-32000, 'busy', 'VNL-RPC-002');
+    });
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 73, method: 'config/agents/create', params: {} },
+      h.api,
+      true,
+    );
+    expect(h.responses).toEqual([
+      { type: 'rpc/resp', reqId: 73, ok: false, error: { code: 'VNL-RPC-002', message: 'busy' } },
+    ]);
+    expect(h.onWriteSucceeded).not.toHaveBeenCalled();
+  });
+
+  it('config/mcpServers/update réussi → domaine RPC brut mcpServers (aucune traduction)', async () => {
+    const h = fakeWriteApi(async () => null);
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 74, method: 'config/mcpServers/update', params: {} },
+      h.api,
+      true,
+    );
+    expect(h.onWriteSucceeded).toHaveBeenCalledTimes(1);
+    expect(h.onWriteSucceeded).toHaveBeenCalledWith('mcpServers');
   });
 });

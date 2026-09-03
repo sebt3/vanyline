@@ -10,6 +10,7 @@ import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import CheckboxList from '../common/CheckboxList.vue';
 import Field from '../common/Field.vue';
+import SourceBadge from '../common/SourceBadge.vue';
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -169,7 +170,7 @@ async function deleteToolset(name: string) {
         </thead>
         <tbody>
           <tr v-for="t in fetchedToolsets" :key="t.name">
-            <td>{{ t.name }}</td>
+            <td>{{ t.name }} <SourceBadge :source="t.source" /></td>
             <td>{{ t.description ?? '—' }}</td>
             <td>
               {{ t.local_tools.length ? t.local_tools.join(', ') : '—' }}

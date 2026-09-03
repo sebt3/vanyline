@@ -26,12 +26,46 @@ export interface ChatEventMessage {
 
 /** Relais RPC autorisés depuis la webview (sécurité : limiter la surface en cas de
  *  script injecté dans la webview). 'chat/send' ET 'chat/cancel' sont des messages nommés
- *  — les passer via {type:'rpc'} est REFUSÉ (-020). */
+ *  — les passer via {type:'rpc'} est REFUSÉ (-020).
+ *
+ *  F4 : le bloc config/* est la surface d'édition de la config de la CLI — volontairement
+ *  complète côté config car la webview de config EST l'éditeur, mais rien d'autre :
+ *  initialize, shutdown, chat/send, chat/cancel, conversations/delete restent refusés
+ *  par conception. L'ordre du tableau (méthodes F3 en tête, puis le bloc config trié
+ *  alphabétiquement par méthode complète) est figé par le test gelé de bridge.spec.ts,
+ *  pas par le runtime. */
 export const RELAY_WHITELIST: readonly string[] = [
   'conversations/list',
   'conversations/get',
   'conversations/create',
   'config/agents',
+  'config/agents/create',
+  'config/agents/delete',
+  'config/agents/update',
+  'config/localTools',
+  'config/mcpServers',
+  'config/mcpServers/create',
+  'config/mcpServers/delete',
+  'config/mcpServers/test',
+  'config/mcpServers/update',
+  'config/models',
+  'config/models/create',
+  'config/models/delete',
+  'config/models/update',
+  'config/providers',
+  'config/providers/create',
+  'config/providers/delete',
+  'config/providers/test',
+  'config/providers/update',
+  'config/skills',
+  'config/skills/create',
+  'config/skills/delete',
+  'config/skills/get',
+  'config/skills/update',
+  'config/toolsets',
+  'config/toolsets/create',
+  'config/toolsets/delete',
+  'config/toolsets/update',
 ];
 
 export type BridgeRequest =
@@ -126,6 +160,10 @@ export interface BridgeApi {
     error?: BridgeError;
   }): void;
   log(line: string): void;
+  /** Appelée après un WRITE config réussi (méthode rpc
+   *  `config/<domain>/create|update|delete`) — domain = nom RPC brut extrait
+   *  de la méthode. Jamais appelée sur échec, ni sur les autres méthodes. */
+  onWriteSucceeded?(domain: string): void;
 }
 
 /** Nom court du type d'un message webview, pour la journalisation d'un message rejeté
@@ -192,6 +230,13 @@ export async function handleBridgeRequest(
       result = await api.request(req.method, req.params ?? {});
     }
     api.respond({ type, reqId: req.reqId, ok: true, result });
+    // Write config = config/<domain>/{create,update,delete} ; slice sur le DERNIER
+    // '/' (aucun domaine n'en contient, mais explicite). Le module pur ne connaît
+    // aucune webview : c'est l'appelant (extension.ts) qui diffuse config/changed.
+    if (req.kind === 'rpc' && /^config\/[^/]+\/(create|update|delete)$/.test(req.method)) {
+      const domain = req.method.slice('config/'.length, req.method.lastIndexOf('/'));
+      api.onWriteSucceeded?.(domain);
+    }
   } catch (err) {
     fail(mapRpcError(err));
   }

@@ -38,4 +38,23 @@ describe('buildHtml', () => {
   it("ne contient pas d'unsafe-eval", () => {
     expect(html).not.toContain('unsafe-eval');
   });
+
+  // Vue : balise lue par le bundle webview (router.resolveView). Le défaut 'chat'
+  // garde les tests 3-args ci-dessus inchangés ; 'config' explicite pour le panel.
+  it("meta vanyline-view = chat par défaut (3 args — comportement F3)", () => {
+    expect(html).toContain('<meta name="vanyline-view" content="chat"');
+    expect(buildHtml('https://base.example/dist/webview', 'vscode-webview://csp', 'NONCE123')).toContain(
+      '<meta name="vanyline-view" content="chat"',
+    );
+  });
+
+  it("meta vanyline-view = config en 4ᵉ argument explicite", () => {
+    const configHtml = buildHtml(
+      'https://base.example/dist/webview',
+      'vscode-webview://csp',
+      'NONCE123',
+      'config',
+    );
+    expect(configHtml).toContain('<meta name="vanyline-view" content="config"');
+  });
 });

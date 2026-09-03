@@ -195,6 +195,51 @@ describe('createBridgeClient — messages nommés et abonnements', () => {
   });
 });
 
+describe('createBridgeClient — notification config/changed (tâche 07)', () => {
+  it('cas 7b — onConfigChanged reçoit le domain brut sur {type:config/changed, domain}', () => {
+    const h = harness();
+    const client = createBridgeClient(h.clientDeps);
+
+    const seen: string[] = [];
+    client.onConfigChanged((domain) => {
+      seen.push(domain);
+    });
+
+    h.emit({ type: 'config/changed', domain: 'agents' });
+    expect(seen).toEqual(['agents']);
+  });
+
+  it('cas 7c — domain absent ou non-string → callback non appelé (message avalé)', () => {
+    const h = harness();
+    const client = createBridgeClient(h.clientDeps);
+
+    const cb = vi.fn();
+    client.onConfigChanged(cb);
+
+    h.emit({ type: 'config/changed' });
+    h.emit({ type: 'config/changed', domain: 42 });
+    h.emit({ type: 'config/changed', domain: null });
+    expect(cb).not.toHaveBeenCalled();
+  });
+
+  it('cas 7d — après off() → plus de callback (pattern des abonnements chat/event)', () => {
+    const h = harness();
+    const client = createBridgeClient(h.clientDeps);
+
+    const seen: string[] = [];
+    const off = client.onConfigChanged((domain) => {
+      seen.push(domain);
+    });
+
+    h.emit({ type: 'config/changed', domain: 'models' });
+    expect(seen).toEqual(['models']);
+
+    off();
+    h.emit({ type: 'config/changed', domain: 'toolsets' });
+    expect(seen).toHaveLength(1);
+  });
+});
+
 describe('getBridgeClient — singleton de production', () => {
   it('mémoïsé au premier appel (acquireVsCodeApi appelé une fois), resetBridgeSingleton repart à zéro', () => {
     const acquire = vi.fn(() => ({ postMessage: vi.fn() }));

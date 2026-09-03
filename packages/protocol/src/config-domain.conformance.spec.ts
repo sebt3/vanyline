@@ -28,6 +28,13 @@ const FIXTURES: Array<
     available_models: ['gpt-4', 'gpt-3.5'],
     is_default: true,
   },
+  // Provider with RPC-augmented source (F4)
+  {
+    name: 'prov-src',
+    type: 'ollama',
+    endpoint: 'http://localhost:11434',
+    source: 'workspace',
+  },
   // ModelProfile with options
   {
     name: 'qwen',
@@ -80,6 +87,16 @@ const FIXTURES: Array<
     skills: ['a', 'b'] as SkillSelection,
     system_prompt: 'Review code',
   },
+  // Agent with RPC-augmented source (F4)
+  {
+    name: 'agent-src',
+    mode: 'primary' as AgentMode,
+    model: 'qwen',
+    toolsets: ['dev'],
+    skills: 'none' as SkillSelection,
+    system_prompt: 'Ops agent',
+    source: 'global',
+  },
   // SkillMeta
   {
     name: 'git-status',
@@ -95,7 +112,7 @@ const FIXTURES: Array<
 
 describe('ConfigDomain conformance', () => {
   it('compile-time assignability — 6 domaines', () => {
-    expect(FIXTURES).toHaveLength(10);
+    expect(FIXTURES).toHaveLength(12);
   });
 
   it('roundtrip JSON — clés stables', () => {
@@ -136,5 +153,15 @@ describe('ConfigDomain conformance', () => {
     agent.skills = none;
     agent.skills = named;
     expect([auto, none, named]).toHaveLength(3);
+  });
+
+  it('source — présent sur Provider/Agent, absent ailleurs par défaut', () => {
+    const withSource = FIXTURES.filter(
+      (f): f is Provider | Agent => 'source' in f,
+    );
+    expect(withSource.map((f) => [f.name, f.source])).toEqual([
+      ['prov-src', 'workspace'],
+      ['agent-src', 'global'],
+    ]);
   });
 });

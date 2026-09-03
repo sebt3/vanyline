@@ -9,6 +9,7 @@ import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
+import SourceBadge from '../common/SourceBadge.vue';
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -109,7 +110,7 @@ async function deleteSkill(name: string) {
         </thead>
         <tbody>
           <tr v-for="s in fetchedSkills" :key="s.name">
-            <td>{{ s.name }}</td>
+            <td>{{ s.name }} <SourceBadge :source="s.source" /></td>
             <td>{{ s.description ?? '—' }}</td>
             <td class="th-actions">
               <button class="btn btn-edit" @click="editSkill(s)">

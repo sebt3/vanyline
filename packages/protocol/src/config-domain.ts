@@ -4,6 +4,12 @@
 
 export type ProviderType = 'ollama' | 'openai-compatible';
 
+/** Couche dont une entrée de config est résolue (fusion workspace/global).
+ *  `source` en lecture RPC uniquement (`config/<domain>` liste et
+ *  `config/skills/get`) — jamais sur le wire d'écriture, jamais côté web
+ *  (`app` n'a pas de notion de couche). Sert au badge de couche de l'extension. */
+export type ConfigEntrySource = 'workspace' | 'global';
+
 export interface Provider {
   name: string;
   type: ProviderType;
@@ -13,6 +19,9 @@ export interface Provider {
   available_models?: string[];
   /** Web-augmenté, lecture seule. Concept web-only. RPC → false. */
   is_default?: boolean;
+  /** RPC-augmenté, lecture seule. Couche source de l'entrée (tâche F4).
+   *  Absent côté web et sur le wire d'écriture. */
+  source?: ConfigEntrySource;
 }
 
 export interface ModelProfile {
@@ -23,6 +32,9 @@ export interface ModelProfile {
   temperature?: number;
   max_tokens?: number;
   options?: Record<string, unknown>;
+  /** RPC-augmenté, lecture seule. Couche source de l'entrée (tâche F4).
+   *  Absent côté web et sur le wire d'écriture. */
+  source?: ConfigEntrySource;
 }
 
 /** `http-streamable` (le seul modélisé par `lib/src/domain.rs` à ce jour) ou
@@ -44,6 +56,9 @@ export interface McpServer {
   headers?: Record<string, string>;
   /** Web-augmenté, lecture seule. Peuplé par `app` après une découverte. RPC → []. */
   available_tools?: string[];
+  /** RPC-augmenté, lecture seule. Couche source de l'entrée (tâche F4).
+   *  Absent côté web et sur le wire d'écriture. */
+  source?: ConfigEntrySource;
 }
 
 export interface Toolset {
@@ -52,6 +67,9 @@ export interface Toolset {
   prompt?: string;
   local_tools: string[];
   mcp: McpSelection[];
+  /** RPC-augmenté, lecture seule. Couche source de l'entrée (tâche F4).
+   *  Absent côté web et sur le wire d'écriture. */
+  source?: ConfigEntrySource;
 }
 
 export type AgentMode = 'primary' | 'subagent' | 'all';
@@ -68,11 +86,17 @@ export interface Agent {
   toolsets: string[];
   skills: SkillSelection;
   system_prompt: string;
+  /** RPC-augmenté, lecture seule. Couche source de l'entrée (tâche F4).
+   *  Absent côté web et sur le wire d'écriture. */
+  source?: ConfigEntrySource;
 }
 
 export interface SkillMeta {
   name: string;
   description: string;
+  /** RPC-augmenté, lecture seule. Couche source de l'entrée (tâche F4).
+   *  Absent côté web et sur le wire d'écriture. */
+  source?: ConfigEntrySource;
 }
 
 export interface SkillDetail extends SkillMeta {

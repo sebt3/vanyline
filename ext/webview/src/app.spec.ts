@@ -96,4 +96,40 @@ describe('App (webview 04b — ports réels sur le pont)', () => {
     expect(get?.['params']).toEqual({ id: 'abc' });
     wrapper.unmount();
   });
+
+  it("cas 17 — config/changed du host → deuxième config/agents et select repeuplé (agent 'b' présent)", async () => {
+    const wrapper = mount(App);
+    await flushPromises();
+
+    const req1 = lastRpc('config/agents');
+    expect(req1).toBeDefined();
+    emit({
+      type: 'rpc/resp',
+      reqId: req1?.['reqId'],
+      ok: true,
+      result: [{ name: 'a' }],
+    });
+    await flushPromises();
+    expect(wrapper.find('select[data-testid=agent-select]').findAll('option').map((o) => o.text())).toContain('a');
+
+    // Un write config réussi (n'importe quelle webview) est diffusé par le host →
+    // le sélecteur du chat refetch sans reload de la vue.
+    emit({ type: 'config/changed', domain: 'agents' });
+    await flushPromises();
+
+    const req2 = lastRpc('config/agents');
+    expect(req2).toBeDefined();
+    expect(req2).not.toBe(req1);
+    emit({
+      type: 'rpc/resp',
+      reqId: req2?.['reqId'],
+      ok: true,
+      result: [{ name: 'a' }, { name: 'b' }],
+    });
+    await flushPromises();
+
+    const texts = wrapper.find('select[data-testid=agent-select]').findAll('option').map((o) => o.text());
+    expect(texts).toContain('b');
+    wrapper.unmount();
+  });
 });

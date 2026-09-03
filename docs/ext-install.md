@@ -1,10 +1,12 @@
 # Installation de l'extension VS Code `vanyline` + test e2e
 
 Procédure d'installation et de validation manuelle de l'extension
-`sebt3.vanyline` (chat dans la sidebar secondaire). L'extension n'est pas
-publiée sur une marketplace : le `.vsix` est attaché à chaque release GitHub
-de `sebt3/vanyline` (job `ext` de `.github/workflows/release.yml`) et
-s'installe à la main. Cible : code-server (et VS Code desktop) sur Linux.
+`sebt3.vanyline` : chat dans la sidebar secondaire, et un panneau de
+configuration (onglet éditeur) pour éditer la config de la CLI — F4.
+L'extension n'est pas publiée sur une marketplace : le `.vsix` est attaché à
+chaque release GitHub de `sebt3/vanyline` (job `ext` de
+`.github/workflows/release.yml`) et s'installe à la main. Cible :
+code-server (et VS Code desktop) sur Linux.
 
 Contexte des commandes : répertoire de travail = racine du repo pour
 `npm run install:local` ; sinon là où se trouve le `.vsix` téléchargé.
@@ -73,8 +75,11 @@ workspace quelconque, et dérouler la checklist :
    config CLI apparaissent) ; choisir un agent explicite et envoyer un
    message → l'agent choisi passe sur le message envoyé (visible côté
    OutputChannel / réponse).
-8. **`vanyline.openSettings`** → ouvre les paramètres VS Code filtrés sur
-   les clés `vanyline.*` (serverPath, autoUpdateCli, defaultLogLevel).
+8. **`vanyline.openSettings`** → ouvre l'onglet éditeur « vanyline —
+   Configuration » (panneau de config F4, pas les paramètres VS Code —
+   `serverPath`/`autoUpdateCli`/`defaultLogLevel` restent accessibles via le
+   menu Extensions → Extension Settings). Rouvrir la commande alors que
+   l'onglet est déjà ouvert doit le révéler, pas en créer un second.
 9. **`vanyline.serverPath` pointant un binaire divergent** → le binaire est
    utilisé tel quel, l'OutputChannel loggue explicitement « auto-update
    désactivée » + le chemin utilisé, et **aucun** téléchargement n'a lieu
@@ -87,7 +92,65 @@ Tout point rouge est une régression de F3 : la remonter telle quelle
 (point n° + symptôme + versions extension/binaire), pas la corriger en
 silence pendant le test.
 
-## 4. Pannes connues
+## 4. Test e2e manuel — panneau de configuration (F4)
+
+Pas de job CI pour cette partie non plus — à dérouler sur le code-server réel,
+**après la checklist §3**, dans la même fenêtre. Le workspace doit porter un
+marqueur `.vanyline/` ou `.git` : sinon les écritures tombent en couche
+globale et les badges `workspace` n'apparaîtront pas — ce n'est pas un bug.
+
+1. **Ouverture** : commande `vanyline: Ouvrir les paramètres` → onglet éditeur
+   « vanyline — Configuration », nav gauche à 4 groupes (Modèles, Outils,
+   Agents, Skills) et écran « Fournisseurs LLM » par défaut. Relancer la
+   commande → même onglet révélé (panel unique).
+2. **Créer un provider** : « Créer un fournisseur », nom `e2e-prov`, type
+   `ollama`, endpoint `http://localhost:11434` → l'entrée apparaît dans la
+   liste avec le badge `workspace`.
+3. **Chaînage Modèles** : créer un profil de modèle `e2e-model` rattaché au
+   provider `e2e-prov` (le sélecteur de provider du formulaire liste
+   `e2e-prov`) → la liste « Profils de modèle » le montre, badge `workspace`.
+4. **Créer un agent** (le cœur de la procédure design) : onglet Agents, créer
+   `e2e-agent` (modèle `e2e-model`, un mode, un prompt) → apparaît dans la
+   liste, badge `workspace`.
+5. **Côté CLI** : dans un terminal du workspace,
+
+   ```bash
+   vanyline agents list
+   ```
+
+   doit montrer la ligne `e2e-agent | workspace | …` — la source affichée est
+   la même que le badge (même calcul `file_entry_source`). Vérifier aussi sur
+   place que le fichier `agents/e2e-agent.md` existe bien sous
+   `.vanyline/agents/` et nulle part dans la config globale.
+6. **Chat sans rechargement** : retourner dans la vue Chat (sidebar) → le
+   sélecteur d'agent contient `e2e-agent` SENS AUCUN rechargement de fenêtre
+   ni clic (broadcast `config/changed` après le write de l'étape 4). C'est LE
+   point qui valide la tâche 07 ; rouge = régression à remonter telle quelle.
+7. **Édition sans perte du body d'un skill** : onglet Skills, créer un skill
+   `e2e-skill` avec un body non vide (`# test\nligne`), fermer/réouvrir
+   l'onglet si voulu, puis Modifier → le champ Body doit montrer le corps
+   existant (lecture `config/skills/get`) ; le sauvegarder sans le toucher
+   laisse le fichier `SKILL.md` inchangé
+   (`cat .vanyline/skills/e2e-skill/SKILL.md`). Un body vidé ici EST une perte
+   de données : c'est le cas que `config/skills/get` protège.
+8. **Tester un provider** : sur `e2e-prov`, bouton « Tester » → si Ollama
+   tourne sur 11434, liste de modèles dans l'UI ; sinon carte d'erreur citant
+   `VNL-RPC-006`. Les deux issues sont vertes, l'erreur doit être lisible
+   (timeout 10 s, jamais un spinner infini).
+9. **Persistance** : laisser un formulaire ouvert avec du texte, passer sur un
+   autre onglet éditeur puis revenir → l'état de la webview est conservé
+   (`retainContextWhenHidden`).
+10. **Nettoyage** : supprimer les entrées `e2e-*` depuis le panneau (boutons
+    Supprimer) puis revérifier `vanyline agents list` (disparu) et le chat
+    (disparu du sélecteur, sans reload). Suppression en couche workspace
+    uniquement ; un `name` présent aussi en global laisse la global intacte
+    (`VNL-RPC-012` sinon sur double suppression — attendu).
+
+Tout point rouge de cette section est une régression de F4 : la remonter
+telle quelle (point n° + symptôme + versions extension/binaire), pas la
+corriger en silence pendant le test.
+
+## 5. Pannes connues
 
 - **Mismatch `PROTOCOL_VERSION`** (extension et CLI trop éloignées) :
   l'`initialize` échoue proprement avec `VNL-RPC-003` — message actionnable
@@ -101,3 +164,10 @@ silence pendant le test.
 - **Offline au premier lancement** : pas de binaire, pas de réseau → mode
   dégradé (voir checklist point 3), pas de crash d'activation. Relancer avec
   `vanyline.restartServer` une fois le réseau revenu.
+- **`VNL-EXT-023` dans un écran de config** : l'entrée a disparu entre
+  l'affichage et l'action (`get` après relecture introuvable — message
+  `VNL-EXT-023: <domain>/<name> introuvable` ; ex. supprimée entre-temps en
+  CLI). L'écran affiche l'erreur ; recharger la liste suffit.
+- **`VNL-EXT-024` sur « Défaut »** : définir un provider par défaut est un
+  concept du web (`app`), pas de la config CLI — le bouton est rejeté par
+  conception dans l'extension. Attendu, pas un bug.

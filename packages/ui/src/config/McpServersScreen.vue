@@ -9,6 +9,7 @@ import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
+import SourceBadge from '../common/SourceBadge.vue';
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -124,7 +125,7 @@ async function discoverTools(name: string) {
         </thead>
         <tbody>
           <tr v-for="s in fetchedServers" :key="s.name">
-            <td>{{ s.name }}</td>
+            <td>{{ s.name }} <SourceBadge :source="s.source" /></td>
             <td>{{ s.type }}</td>
             <td>{{ s.url }}</td>
             <td>

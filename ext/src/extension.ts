@@ -4,6 +4,7 @@ import type { ConversationSummary } from '@vanyline/protocol';
 import { ensureCli, productionDeps } from './cli-provisioning';
 import { mapRpcError } from './panels/bridge';
 import { registerChatView } from './panels/chat';
+import { registerConfigPanel } from './panels/config';
 import { startServer } from './rpc';
 import { createSupervisor, type Supervisor } from './supervisor';
 
@@ -21,7 +22,21 @@ function rpcErrorMessage(action: string, err: unknown): string {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const channel = vscode.window.createOutputChannel('vanyline');
-  const provider = registerChatView(context, channel);
+
+  // Broadcast config/changed (tâche 07) : les deux fournisseurs sont enregistrés avant
+  // d'être câblés entre eux (le panel est créé après le provider) — la closure
+  // late-bound est délibérée, pas un ordre à « corriger ». Les callbacks passés aux
+  // deux register* ne référencent que la variable mutable `broadcastConfigChanged`,
+  // réassignée après les deux enregistrements (TS strict interdit d'utiliser une
+  // const non encore définie — d'où le placeholder no-op).
+  let broadcastConfigChanged: (domain: string) => void = () => {};
+  const provider = registerChatView(context, channel, (d) => broadcastConfigChanged(d));
+  const configPanel = registerConfigPanel(context, channel, (d) => broadcastConfigChanged(d));
+  broadcastConfigChanged = (domain: string): void => {
+    const msg = { type: 'config/changed', domain };
+    provider.post(msg);
+    configPanel.post(msg);
+  };
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = 'vanyline.restartServer';
@@ -59,16 +74,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     notifyError: (msg) => void vscode.window.showErrorMessage(msg),
   });
 
-  // Provider ↔ superviseur, AVANT start() pour ne manquer le premier 'ready' : le handle
-  // change à chaque restart → re-attach à chaque 'ready', detach ailleurs (le pont répond -021).
+  // Provider chat + panel config ↔ superviseur, AVANT start() pour ne manquer le premier
+  // 'ready' : le handle change à chaque restart → re-attach à chaque 'ready', detach
+  // ailleurs (les deux ponts répondent -021 — mêmes sémantiques, même fenêtre de restart).
   supervisor.onStatus((s) => {
     if (s === 'ready') {
       const h = supervisor?.current();
       if (h) {
         provider.attachServer(h);
+        configPanel.attachServer(h);
       }
     } else {
       provider.detachServer();
+      configPanel.detachServer();
     }
   });
 
@@ -114,9 +132,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       provider.post({ type: 'session/pick', conversationId: picked?.id ?? null });
     }),
 
-    vscode.commands.registerCommand('vanyline.openSettings', () => {
-      void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:sebt3.vanyline');
-    }),
+    vscode.commands.registerCommand('vanyline.openSettings', () => configPanel.open()),
   );
 
   await supervisor.start(); // ne rejette jamais (activation dégradée, design « offline »)

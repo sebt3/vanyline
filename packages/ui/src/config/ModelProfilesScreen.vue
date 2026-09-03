@@ -9,6 +9,7 @@ import ErrorCard from '../common/ErrorCard.vue';
 import EmptyState from '../common/EmptyState.vue';
 import DialogShell from '../common/DialogShell.vue';
 import Field from '../common/Field.vue';
+import SourceBadge from '../common/SourceBadge.vue';
 
 function message(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -213,7 +214,7 @@ async function deleteProfile(name: string) {
         </thead>
         <tbody>
           <tr v-for="p in fetchedProfiles" :key="p.name">
-            <td>{{ p.name }}</td>
+            <td>{{ p.name }} <SourceBadge :source="p.source" /></td>
             <td class="th-provider">{{ p.provider }}</td>
             <td class="th-model">{{ p.model }}</td>
             <td class="th-temp">{{ p.temperature ?? '—' }}</td>

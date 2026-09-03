@@ -304,6 +304,18 @@ local, config de l'utilisateur), chacune **avec un timeout de 10 s** (le
 dispatch RPC est série : un sondage qui pend gèlerait tout le serveur) ;
 `config/localTools` renvoie le registre statique des 8 tools intégrés.
 
+**Ajouts F4** (le panneau de config de l'extension) : `config/skills/get`
+(`{name}` → `{name, description, body, source}`) — seule méthode exposant le
+`body` d'un skill, indispensable pour éditer un skill existant sans écraser
+son corps ; nom inconnu → `VNL-RPC-006`, `name` absent → `VNL-RPC-000`. Et un
+champ **additif `"source": "workspace" | "global"`** sur chaque entrée des 6
+lectures liste **et** de `config/skills/get` : la couche dont l'entrée est
+résolue (workspace gagne les collisions), calculé par
+`config_entry_source`/`file_entry_source`/`skill_entry_source` de
+`vanyline_cfgstore::layers` — mêmes valeurs que la colonne `source` des
+sous-commandes `vnl … list`. Purement additif : jamais sur le wire
+d'écriture, ignoré par les clients qui ne le connaissent pas (`app` inclus).
+
 **Méthodes K8s** (`owners/*`, `projects/*`, `sandboxes/*`, miroir des
 commandes CLI `owner`/`project`/`sandbox` — feature `k8s`, `VNL-RPC-010`
 en cas d'erreur) : `VnlK8sClient` est construit **paresseusement**, au
@@ -1828,8 +1840,15 @@ Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`
   `provider_type`/`server_type` ↔ `type`, FK `provider_id`/`model_profile_id` ↔ nom (cache
   `name↔id` **par instance**, l'id `i32` ne sort jamais du repo), champs web-augmentés,
   `get('skills')` → `GET /{id}` pour le `body`. L'API REST de `app` est **inchangée**
-  (pas de migration). L'impl RPC de `ConfigRepo` (F4) sera un pass-through — c'est ici que
-  vit l'asymétrie name/id.
+  (pas de migration).
+- **`rpcConfigRepo`** (`ext/webview/`, F4) : l'impl `ConfigRepo` de l'extension, un
+  quasi pass-through sur le pont postMessage → RPC (name-keyed nativement côté CLI —
+  aucune résolution `name↔id`). Seule traduction : le domaine UI `profiles` ↔ RPC
+  `models` et `mcp` ↔ `mcpServers` (un seul point, testé explicitement — un bug ici
+  écrirait silencieusement le mauvais domaine). `get('skills')` → `config/skills/get` ;
+  `get(<autre>)` relit la liste et filtre (le RPC n'a pas de lecture unité par nom) ;
+  après un `create`/`update` (réponse `null`) l'entrée est **relue** côté serveur.
+  `setDefaultProvider` → `VNL-EXT-024` (concept web-only, absent du CLI).
 - **RBAC exposée sans masquage** : `create`/`update` sur `providers`/`mcp` renvoient 403
   pour un non-admin, l'écran affiche l'erreur. Côté CLI (F4) tout est local — l'UI est
   identique, la capacité diffère.
@@ -1839,33 +1858,46 @@ Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`
   `SettingsView.vue` ≈ 20 lignes : monte `ConfigShell` + `provide(CONFIG_REPO_KEY,
   httpConfigRepo())`.
 
-### Extension VS Code — `ext/` (F3)
+### Extension VS Code — `ext/` (F3, F4)
 
-Front-end graphique du CLI : sidebar de chat dans VS Code / code-server, pilotant une
-CLI `vanyline serve --stdio` locale que l'extension **télécharge et met à jour seule**.
-Deux bundles séparés : **host** (esbuild, `dist/extension/index.js`, CommonJS Node) et
-**webview** (Vite + Vue, `dist/webview/`). Linux x86_64 + aarch64 uniquement.
+Front-end graphique du CLI : sidebar de chat **et** panneau de configuration dans
+VS Code / code-server, pilotant une CLI `vanyline serve --stdio` locale que
+l'extension **télécharge et met à jour seule**. Deux bundles séparés : **host**
+(esbuild, `dist/extension/index.js`, CommonJS Node) et **webview** (Vite + Vue,
+`dist/webview/` — **un seul bundle** monté en chat ou en config selon
+`<meta name="vanyline-view">`). Linux x86_64 + aarch64 uniquement.
 
 **Host** (`src/`, zéro dépendance à un backend distant) :
 
 | Module | Rôle |
 |---|---|
-| `extension.ts` | `activate`/`deactivate` : OutputChannel, status bar, enregistrement des commandes et du `ChatViewProvider`, câblage superviseur↔provider. Relit la config à **chaque** (re)start. |
+| `extension.ts` | `activate`/`deactivate` : OutputChannel, status bar, enregistrement des commandes, du `ChatViewProvider` et du panel config, câblage superviseur↔(provider + panel). Relit la config à **chaque** (re)start. Diffuse `config/changed` **à toutes les webviews** après tout write config réussi (vu par `bridge.ts`) — `domain` = nom RPC brut (`models`, `mcpServers`, …), pas le nom UI. |
 | `cli-provisioning.ts` | `ensureCli` : résout le binaire. `vanyline.serverPath` défini → utilisé tel quel, **aucun** fetch/probe, auto-update off. Sinon `~/.local/bin/vanyline --version` == `EXPECTED_CLI_VERSION` (bakée par esbuild `define` depuis `ext/cli-version.txt`) ? sinon download. |
 | `rpc.ts` | `startServer` : `spawn(bin, ['serve','--stdio'], {shell:false, cwd:workspace})`, transport ndjson sur stdin/stdout, `RpcConnection` (`@vanyline/protocol`), `initialize({protocolVersion, workspace})`. stderr CLI → OutputChannel. Codes `VNL-EXT-010` (spawn) / `-011` (initialize / mismatch protocole). |
 | `supervisor.ts` | Machine à états pure du cycle de vie : backoff exponentiel plafonné (`1s×2ⁿ`, max 30s, 5 essais), fenêtre de stabilité 60s → reset compteur, `restart()` manuel repart de zéro même depuis `erreur`, `stop()` sans auto-redémarrage. `generation` invalide les timers/await en vol. |
 | `panels/chat.ts` | `WebviewViewProvider` sur `vanyline.chatView`, `retainContextWhenHidden`. Abonne `chat/event` sur le handle courant, ré-abonne au restart. |
-| `panels/bridge.ts` | Pont webview↔host **pur** (zéro `vscode`) : parse strict des messages webview, **whitelist de relais** (`conversations/list|get|create`, `config/agents` — `chat/send`/`chat/cancel` sont des kinds nommés non contournables via `{type:'rpc'}`), codes `VNL-EXT-020` (relais refusé) / `-021` (serveur non démarré). |
-| `panels/html.ts` | `buildHtml` pur : CSP `default-src 'none'` + nonce (aléa `node:crypto`) + `<base href>`, `localResourceRoots` sur `dist/webview`. |
+| `panels/config.ts` *(F4)* | Panel éditeur `vanyline.config` (`ViewColumn.Active`, `retainContextWhenHidden`) — **panel unique** réutilisé (`reveal()` si déjà ouvert). Attaché au superviseur comme le chat (relais des requêtes uniquement, aucun abonnement notification : `config/changed` naît des writes, pas d'une notification CLI). |
+| `panels/bridge.ts` | Pont webview↔host **pur** (zéro `vscode`) : parse strict des messages webview, **whitelist de relais** (`conversations/list|get|create` + **toute la surface `config/*`** lecture/écriture/actions depuis F4 — mais **jamais** `initialize`/`shutdown`/`chat/send`/`chat/cancel`/`conversations/delete`), codes `VNL-EXT-020` (relais refusé) / `-021` (serveur non démarré). Après un write `config/<domain>/{create,update,delete}` réussi, notifie l'hôte (`onWriteSucceeded`) qui diffuse `config/changed`. Whitelist partagée par les deux webviews (le chat en hérite — surface acceptée : la CSP nonce interdit toute exécution JS dans la webview). |
+| `panels/html.ts` | `buildHtml(baseHref, cspSource, nonce, view)` pur : CSP `default-src 'none'` + nonce (aléa `node:crypto`) + `<base href>` + `<meta name="vanyline-view" content="chat\|config">`, `localResourceRoots` sur `dist/webview`. |
 
-**Webview** (`webview/src/`) : monte `ChatWindow` de `@vanyline/ui`, fournit les ports
-`vanyline.chatBackend` (relayé en `conversations/*` RPC via le pont) et
-`vanyline.chatTransport` (`PostMessageChatTransport` : `chat/send` + notifications
+**Webview** (`webview/src/`) : `main.ts` lit `<meta name="vanyline-view">` (une webview
+VS Code n'a pas de `location.search`) via `resolveView` (`router.ts`, repli sécuritaire
+sur `chat`) et monte soit `App.vue` (chat) soit `ConfigView.vue` (config, F4). **Chat** :
+`ChatWindow` de `@vanyline/ui`, ports `vanyline.chatBackend` (relayé en `conversations/*`
+RPC) et `vanyline.chatTransport` (`PostMessageChatTransport` : `chat/send` + notifications
 `chat/event` reconstruites en `ReadableStream<UIMessageChunk>` par `chatEventsToUIStream`,
-partagé avec le frontend web). `getBridgeClient()` mémoïse `acquireVsCodeApi()` (appelable
-une seule fois) — jamais à l'import, seulement dans le `setup` de `App.vue`.
-Build Vite : `inlineDynamicImports` (CSP sans `strict-dynamic`), CSS forcé en
-`assets/index.css`, alias source vers `packages/{ui,protocol}/src`.
+partagé avec le frontend web) ; le sélecteur d'agent refetch `config/agents` au mount **et
+à chaque `config/changed`** de l'hôte. **Config** (F4) : `ConfigShell` de `@vanyline/ui`
+(4 groupes CLI — pas de `account`), port `CONFIG_REPO_KEY` = `rpcConfigRepo` ; chaque
+écran refetch à son `onMounted` (pas de `<KeepAlive>`) et après ses propres writes
+(`useCrudResource`) — pas d'abonnement `config/changed` côté config. `getBridgeClient()`
+mémoïse `acquireVsCodeApi()` (appelable une seule fois) — jamais à l'import, seulement
+dans le `setup`. Build Vite : `inlineDynamicImports` (CSP sans `strict-dynamic`), CSS
+forcé en `assets/index.css`, alias source vers `packages/{ui,protocol}/src`.
+
+Le badge de couche des écrans (`SourceBadge` de `@vanyline/ui`, F4) n'apparaît que
+lorsqu'une entrée porte `source` — jamais côté frontend web (`app` n'a pas de couches),
+seulement dans le panel de l'extension.
 
 **Sécurité du provisioning** (téléchargement + exécution d'un binaire) :
 1. **SHA256 obligatoire** : `vanyline-<target>.tar.gz.sha256` de la **même** release
@@ -1888,9 +1920,13 @@ Build Vite : `inlineDynamicImports` (CSP sans `strict-dynamic`), CSS forcé en
 (cf. `docs/release-runbook.md` §2). Procédure d'install + checklist e2e :
 `docs/ext-install.md`.
 
-**Dette assumée F3** : `chat/cancel` reste un no-op côté CLI (pas d'annulation réelle
-de tour) ; pas d'UI de config (F4 — la commande « Paramètres » ouvre les settings VS
-Code natifs) ; pas de gestion sandbox (F5).
+**Dette assumée** : `chat/cancel` reste un no-op côté CLI (pas d'annulation réelle
+de tour, F3) ; pas de gestion sandbox (F5). **F4** : pas de sélecteur de couche
+(les writes héritent du défaut F2 — workspace si résolu, sinon global) ; pas de
+synchro avec les `settings.json` VS Code natifs (`serverPath`/`autoUpdateCli`/
+`defaultLogLevel` restent dans Extension Settings, la config CLI vit dans son YAML
+deux-couches) ; le bouton « provider par défaut » des écrans partagés est rejeté
+(`VNL-EXT-024`, concept web-only).
 
 ### Règles de dépendances TypeScript
 
