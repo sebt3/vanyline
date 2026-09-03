@@ -20,7 +20,7 @@ use crate::rpc::protocol::{
 };
 use crate::store;
 use vanyline_cfgstore::CfgStoreError;
-use vanyline_cfgstore::layers::skill_entry_source;
+use vanyline_cfgstore::layers::{config_entry_source, file_entry_source, skill_entry_source};
 
 pub struct ServerState {
     pub initialized: bool,
@@ -266,20 +266,44 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
             Some(serde_json::to_string(&shutdown_response(id)).expect("JSON serialize response"))
         }
         "config/agents" => {
-            let store_clone = store.clone();
-            Some(handle_config_list(id, async { store_clone.list_agents().await }).await)
+            let result = store.list_agents().await;
+            Some(config_list_sourced_response(
+                id,
+                store.layers(),
+                result,
+                |l, n| file_entry_source(l, "agents", "md", n),
+                |a| a.name.as_str(),
+            ))
         }
         "config/models" => {
-            let store_clone = store.clone();
-            Some(handle_config_list(id, async { store_clone.list_models().await }).await)
+            let result = store.list_models().await;
+            Some(config_list_sourced_response(
+                id,
+                store.layers(),
+                result,
+                |l, n| config_entry_source(l, n, |r| &r.models),
+                |m| m.name.as_str(),
+            ))
         }
         "config/toolsets" => {
-            let store_clone = store.clone();
-            Some(handle_config_list(id, async { store_clone.list_toolsets().await }).await)
+            let result = store.list_toolsets().await;
+            Some(config_list_sourced_response(
+                id,
+                store.layers(),
+                result,
+                |l, n| file_entry_source(l, "toolsets", "yaml", n),
+                |t| t.name.as_str(),
+            ))
         }
         "config/skills" => {
-            let store_clone = store.clone();
-            Some(handle_config_list(id, async { store_clone.list_skills().await }).await)
+            let result = store.list_skills().await;
+            Some(config_list_sourced_response(
+                id,
+                store.layers(),
+                result,
+                skill_entry_source,
+                |s| s.name.as_str(),
+            ))
         }
         "config/skills/get" => {
             // Enveloppe camelCase {name} ; params malformés (name absent/mal
@@ -317,12 +341,24 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
             Some(serde_json::to_string(&response).expect("serialize skills/get response"))
         }
         "config/providers" => {
-            let store_clone = store.clone();
-            Some(handle_config_list(id, async { store_clone.list_providers().await }).await)
+            let result = store.list_providers().await;
+            Some(config_list_sourced_response(
+                id,
+                store.layers(),
+                result,
+                |l, n| config_entry_source(l, n, |r| &r.providers),
+                |p| p.name.as_str(),
+            ))
         }
         "config/mcpServers" => {
-            let store_clone = store.clone();
-            Some(handle_config_list(id, async { store_clone.list_mcp_servers().await }).await)
+            let result = store.list_mcp_servers().await;
+            Some(config_list_sourced_response(
+                id,
+                store.layers(),
+                result,
+                |l, n| config_entry_source(l, n, |r| &r.mcp),
+                |s| s.name.as_str(),
+            ))
         }
         "config/localTools" => {
             // Registre statique des tools intégrés du CLI (design tâche 4 : lecture
@@ -735,15 +771,32 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
     }
 }
 
-/// Helper async : reçoit un future produisant la liste typée d'une méthode
-/// `config/*` (`Vec<Agent>`, `Vec<ModelProfile>`, ...), l'exécute et
-/// convertit le résultat en réponse JSON-RPC sérialisée.
-async fn handle_config_list<T: serde::Serialize>(
+/// Réponse d'une lecture `config/<domain>` : tableau dont CHAQUE entrée porte,
+/// en plus de ses clés natives snake_case, une clé additive
+/// `"source": "workspace" | "global"` (couche dont l'entrée est résolue —
+/// workspace gagne en cas de collision, cf. `pick`/`*_entry_source` de
+/// `vanyline_cfgstore::layers`, mêmes valeurs que la colonne source des
+/// sous-commandes `vnl … list`). Erreur du store → VNL-RPC-006, comme
+/// `config_error_response` (inchangé sur ce point).
+fn config_list_sourced_response<T: serde::Serialize>(
     id: Value,
-    action: impl std::future::Future<Output = Result<T, CfgStoreError>>,
+    layers: &vanyline_cfgstore::layers::Layers,
+    result: Result<Vec<T>, CfgStoreError>,
+    entry_source: impl Fn(&vanyline_cfgstore::layers::Layers, &str) -> &'static str,
+    name_of: fn(&T) -> &str,
 ) -> String {
-    let result = action.await;
-    serde_json::to_string(&config_error_response(id, result)).expect("serialize config response")
+    let result = result.map(|items| {
+        items
+            .into_iter()
+            .map(|item| {
+                let mut entry = serde_json::to_value(&item).expect("config entry serializes");
+                entry["source"] = serde_json::json!(entry_source(layers, name_of(&item)));
+                entry
+            })
+            .collect::<Vec<_>>()
+    });
+    serde_json::to_string(&config_error_response(id, result))
+        .expect("serialize config list response")
 }
 
 /// Probe des modèles d'un provider — MÊME logique que

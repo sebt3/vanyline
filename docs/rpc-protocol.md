@@ -148,13 +148,21 @@ Pas de params. Le process sort **après** avoir envoyé cette réponse.
 
 ### `config/agents`
 
+Les 6 lectures liste (`config/agents`, `config/models`, `config/providers`,
+`config/mcpServers`, `config/toolsets`, `config/skills`) ajoutent sur chaque
+entrée de leur tableau une clé additive `"source": "workspace" | "global"` —
+la couche dont l'entrée est résolue (workspace gagne en cas de collision).
+**Additif** : les clés natives snake_case sont inchangées, et les valeurs sont
+les mêmes que celles de `config/skills/get` et que la colonne `source` des
+sous-commandes `vnl … list`. Un client existant peut donc l'ignorer.
+
 Liste les agents résolus (deux couches fusionnées). Objets `Agent` en
 snake_case natif — voir l'avertissement camelCase/snake_case plus haut.
 
 ```json
 → {"jsonrpc":"2.0","id":4,"method":"config/agents"}
 ← {"jsonrpc":"2.0","id":4,"result":[
-    {"name":"build","mode":"primary","model":"qwen-local","toolsets":["shell"],"skills":"auto","system_prompt":"Tu es un assistant de développement."}
+    {"name":"build","mode":"primary","model":"qwen-local","toolsets":["shell"],"skills":"auto","system_prompt":"Tu es un assistant de développement.","source":"global"}
   ]}
 ```
 
@@ -163,7 +171,7 @@ snake_case natif — voir l'avertissement camelCase/snake_case plus haut.
 ```json
 → {"jsonrpc":"2.0","id":5,"method":"config/models"}
 ← {"jsonrpc":"2.0","id":5,"result":[
-    {"name":"qwen-local","provider":"ollama-local","model":"qwen2.5","max_tokens":4096}
+    {"name":"qwen-local","provider":"ollama-local","model":"qwen2.5","max_tokens":4096,"source":"global"}
   ]}
 ```
 
@@ -176,7 +184,7 @@ snake_case natif — `type` est l'enum `"ollama" | "openai-compatible"`, et
 ```json
 → {"jsonrpc":"2.0","id":8,"method":"config/providers"}
 ← {"jsonrpc":"2.0","id":8,"result":[
-    {"name":"ollama-local","type":"ollama","endpoint":"http://localhost:11434"}
+    {"name":"ollama-local","type":"ollama","endpoint":"http://localhost:11434","source":"global"}
   ]}
 ```
 
@@ -193,7 +201,7 @@ sur un serveur `sse` (comme son usage par un toolset) échoue avec
 ```json
 → {"jsonrpc":"2.0","id":9,"method":"config/mcpServers"}
 ← {"jsonrpc":"2.0","id":9,"result":[
-    {"name":"grafana","type":"http-streamable","url":"http://mcp:3000","headers":{"X-Token":"secret"}}
+    {"name":"grafana","type":"http-streamable","url":"http://mcp:3000","headers":{"X-Token":"secret"},"source":"workspace"}
   ]}
 ```
 
@@ -202,7 +210,7 @@ sur un serveur `sse` (comme son usage par un toolset) échoue avec
 ```json
 → {"jsonrpc":"2.0","id":6,"method":"config/toolsets"}
 ← {"jsonrpc":"2.0","id":6,"result":[
-    {"name":"shell","local_tools":["read_file","write_file"],"mcp":[]}
+    {"name":"shell","local_tools":["read_file","write_file"],"mcp":[],"source":"workspace"}
   ]}
 ```
 
@@ -213,7 +221,7 @@ Index léger (name + description) — pas le corps du skill.
 ```json
 → {"jsonrpc":"2.0","id":7,"method":"config/skills"}
 ← {"jsonrpc":"2.0","id":7,"result":[
-    {"name":"pdf","description":"Traitement de fichiers PDF"}
+    {"name":"pdf","description":"Traitement de fichiers PDF","source":"global"}
   ]}
 ```
 

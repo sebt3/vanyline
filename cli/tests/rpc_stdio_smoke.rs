@@ -1032,3 +1032,164 @@ fn smoke_skills_get_missing_name_returns_000() {
 
     c.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Badge de couche — "source" additif sur les 6 lectures config (F4 tâche 02)
+// Deux couches seedées à la main, fichiers au FORMAT DISQUE (pas RPC) : les
+// entrées présentes dans une seule couche portent source:"global", celles
+// présentes dans les deux portent source:"workspace" (workspace gagne).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn smoke_list_entries_carry_layer_source() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+
+    // -- Couche globale : home/vanyline/ (XDG_CONFIG_HOME = home) ------------
+    let global = home.path().join("vanyline");
+    std::fs::create_dir_all(global.join("toolsets")).unwrap();
+    std::fs::create_dir_all(global.join("agents")).unwrap();
+    std::fs::create_dir_all(global.join("skills").join("skill-g")).unwrap();
+    std::fs::create_dir_all(global.join("skills").join("skill-x")).unwrap();
+    std::fs::write(
+        global.join("config.yaml"),
+        "\
+providers:
+  prov-g:
+    type: ollama
+    endpoint: http://g:11434
+  prov-x:
+    type: ollama
+    endpoint: http://g2:11434
+models:
+  model-g:
+    provider: prov-g
+    model: llama
+  model-x:
+    provider: prov-g
+    model: old
+mcp:
+  srv-g:
+    type: http-streamable
+    url: http://g:3000
+  srv-x:
+    type: http-streamable
+    url: http://g3:3000
+",
+    )
+    .unwrap();
+    std::fs::write(
+        global.join("toolsets").join("toolset-g.yaml"),
+        "description: g\ntools: {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.join("toolsets").join("toolset-x.yaml"),
+        "description: gx\ntools: {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.join("agents").join("agent-g.md"),
+        "---\nmodel: model-g\n---\nprompt g\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.join("agents").join("agent-x.md"),
+        "---\nmodel: model-g\n---\nprompt gx\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.join("skills").join("skill-g").join("SKILL.md"),
+        "---\ndescription: g\n---\nbody g\n",
+    )
+    .unwrap();
+    std::fs::write(
+        global.join("skills").join("skill-x").join("SKILL.md"),
+        "---\ndescription: gx\n---\nbody gx\n",
+    )
+    .unwrap();
+
+    // -- Couche workspace : marqueur .vanyline/, donc workspace résolu --------
+    let wsv = ws.path().join(".vanyline");
+    std::fs::create_dir_all(wsv.join("toolsets")).unwrap();
+    std::fs::create_dir_all(wsv.join("agents")).unwrap();
+    std::fs::create_dir_all(wsv.join("skills").join("skill-x")).unwrap();
+    std::fs::write(
+        wsv.join("config.yaml"),
+        "\
+providers:
+  prov-x:
+    type: ollama
+    endpoint: http://w:11434
+models:
+  model-x:
+    provider: prov-g
+    model: new
+mcp:
+  srv-x:
+    type: http-streamable
+    url: http://w:3000
+",
+    )
+    .unwrap();
+    std::fs::write(
+        wsv.join("toolsets").join("toolset-x.yaml"),
+        "description: w\ntools: {}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        wsv.join("agents").join("agent-x.md"),
+        "---\nmodel: model-g\n---\nprompt w\n",
+    )
+    .unwrap();
+    std::fs::write(
+        wsv.join("skills").join("skill-x").join("SKILL.md"),
+        "---\ndescription: w\n---\nbody w\n",
+    )
+    .unwrap();
+
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // Chaque entrée présente dans une seule couche (la globale) -> "global".
+    for (method, name) in [
+        ("config/providers", "prov-g"),
+        ("config/models", "model-g"),
+        ("config/mcpServers", "srv-g"),
+        ("config/toolsets", "toolset-g"),
+        ("config/agents", "agent-g"),
+        ("config/skills", "skill-g"),
+    ] {
+        let entry = find_entry(&mut c, method, name);
+        assert_eq!(
+            entry["source"], "global",
+            "{name} (global-only) should carry source:global via {method}, entry: {entry}"
+        );
+    }
+
+    // Chaque entrée présente dans les deux couches (ou workspace seule) ->
+    // "workspace" (les helpers font gagner workspace).
+    for (method, name) in [
+        ("config/providers", "prov-x"),
+        ("config/models", "model-x"),
+        ("config/mcpServers", "srv-x"),
+        ("config/toolsets", "toolset-x"),
+        ("config/agents", "agent-x"),
+        ("config/skills", "skill-x"),
+    ] {
+        let entry = find_entry(&mut c, method, name);
+        assert_eq!(
+            entry["source"], "workspace",
+            "{name} (workspace-layer) should carry source:workspace via {method}, entry: {entry}"
+        );
+    }
+
+    // Non-régression valeur : l'entrée workspace gagne toujours à la fusion
+    // (la clé additive source ne change rien à la résolution).
+    let prov_x = find_entry(&mut c, "config/providers", "prov-x");
+    assert_eq!(
+        prov_x["endpoint"], "http://w:11434",
+        "workspace provider must win the merge, entry: {prov_x}"
+    );
+
+    c.shutdown();
+}
