@@ -35,10 +35,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         logLevel: cfg.get<string>('defaultLogLevel', 'info'),
       });
     },
-    notifyError: (msg) => {
-      channel.appendLine(msg);
-      void vscode.window.showErrorMessage(msg);
-    },
+    // PAS d'appendLine ici : le superviseur journalise déjà chaque message qu'il affiche
+    // (reportError) — le coller ici écrirait chaque erreur deux fois dans le canal.
+    notifyError: (msg) => void vscode.window.showErrorMessage(msg),
   });
 
   context.subscriptions.push(
