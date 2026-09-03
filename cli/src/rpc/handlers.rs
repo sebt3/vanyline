@@ -11,14 +11,16 @@ use vanyline_lib::store::ConfigStore;
 use crate::config;
 use crate::rpc::protocol::{
     ChatCancelParams, ChatEventNotificationParams, ChatSendParams, ChatSendResult,
-    ConfigCreateParams, ConfigCreateSkillParams, ConfigDeleteParams, ConfigLayer, ConfigTestParams,
-    ConfigUpdateParams, ConversationCreateParams, ConversationIdParams, ConversationSummary,
-    InitializeParams, InitializeResult, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-    McpTestResult, NameParams, OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams,
-    ProviderTestResult, SandboxCreateParams, jsonrpc_code, vnl_code,
+    ConfigCreateParams, ConfigCreateSkillParams, ConfigDeleteParams, ConfigGetSkillParams,
+    ConfigLayer, ConfigTestParams, ConfigUpdateParams, ConversationCreateParams,
+    ConversationIdParams, ConversationSummary, InitializeParams, InitializeResult,
+    JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpTestResult, NameParams,
+    OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, ProviderTestResult,
+    SandboxCreateParams, jsonrpc_code, vnl_code,
 };
 use crate::store;
 use vanyline_cfgstore::CfgStoreError;
+use vanyline_cfgstore::layers::skill_entry_source;
 
 pub struct ServerState {
     pub initialized: bool,
@@ -278,6 +280,41 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "config/skills" => {
             let store_clone = store.clone();
             Some(handle_config_list(id, async { store_clone.list_skills().await }).await)
+        }
+        "config/skills/get" => {
+            // Enveloppe camelCase {name} ; params malformés (name absent/mal
+            // typé) -> VNL-RPC-000, comme les bras d'écriture.
+            let params: ConfigGetSkillParams = match serde_json::from_value(request.params) {
+                Ok(p) => p,
+                Err(_) => return Some(malformed_params_response(id)),
+            };
+            let store_clone = store.clone();
+            let name = params.name.clone();
+            let result = async move {
+                let meta = store_clone.get_skill(&name).await?;
+                let body = store_clone.load_skill(&name).await?;
+                Ok::<_, CfgStoreError>((meta, body))
+            }
+            .await;
+            let response = match result {
+                Ok((meta, body)) => {
+                    // Résultat = SkillMeta (snake_case natif : {name,
+                    // description}) + "body" (String, déjà trimé par le store
+                    // — ne pas re-trimer) + "source". Ce dernier est lu ICI,
+                    // APRÈS résolution réussie (jamais calculé sur un nom
+                    // inexistant : le branch Err ci-dessous court-circuite).
+                    let source = skill_entry_source(store.layers(), &params.name);
+                    let mut entry = serde_json::to_value(&meta).expect("SkillMeta serializes");
+                    entry["body"] = serde_json::json!(body);
+                    entry["source"] = serde_json::json!(source);
+                    JsonRpcResponse::success(id, entry)
+                }
+                // Nom inconnu (UnknownReference) ou erreur de lecture ->
+                // VNL-RPC-006, comme les 6 lectures config (VNL-RPC-012 reste
+                // réservé aux écritures).
+                Err(e) => config_error_response::<()>(id, Err(e)),
+            };
+            Some(serde_json::to_string(&response).expect("serialize skills/get response"))
         }
         "config/providers" => {
             let store_clone = store.clone();

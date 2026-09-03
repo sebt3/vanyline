@@ -931,3 +931,104 @@ fn smoke_mcp_test_black_hole_times_out_without_hanging() {
     c.shutdown();
     drop(handle); // le thread se termine seul via sa deadline
 }
+
+// ---------------------------------------------------------------------------
+// config/skills/get — lecture du body d'un skill (F4 tâche 01)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn smoke_skills_get_returns_body_and_source() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // create sans `layer` -> couche workspace (pattern de smoke_roundtrip_skills)
+    let resp = c.call(
+        "config/skills/create",
+        json!({
+            "item": { "name": "sk-get", "description": "d" },
+            "body": "ligne 1\nligne 2"
+        }),
+    );
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "skills/create should succeed, got: {resp}"
+    );
+
+    // get -> {name, description, body, source}. body exact : écrit sans
+    // whitespace de bord, le trim de load_skill n'est pas visible ; source =
+    // "workspace" (le skill vit sous <ws>/.vanyline/skills/).
+    let resp = c.call("config/skills/get", json!({ "name": "sk-get" }));
+    assert_eq!(
+        Client::vnl_code(&resp),
+        None,
+        "skills/get should succeed, got: {resp}"
+    );
+    let got = &resp["result"];
+    assert_eq!(
+        got["name"], "sk-get",
+        "result should carry the name, got: {resp}"
+    );
+    assert_eq!(
+        got["description"], "d",
+        "result should carry the description, got: {resp}"
+    );
+    assert_eq!(
+        got["body"], "ligne 1\nligne 2",
+        "result should carry the untrimmed-content body verbatim, got: {resp}"
+    );
+    assert_eq!(
+        got["source"], "workspace",
+        "workspace-layer skill should report source:workspace, got: {resp}"
+    );
+
+    // Non-régression : le body reste absent de l'index léger config/skills.
+    let entry = find_entry(&mut c, "config/skills", "sk-get");
+    assert!(
+        entry.get("body").is_none(),
+        "config/skills index must not carry the body key, entry: {entry}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_skills_get_unknown_name_returns_006() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // Config vide : UnknownReference côté store -> VNL-RPC-006 (message
+    // porteur du VNL-CFG-*), comme les 6 lectures config — VNL-RPC-012 reste
+    // réservé aux écritures.
+    let resp = c.call("config/skills/get", json!({ "name": "absent" }));
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-006"),
+        "skills/get on an unknown name should be VNL-RPC-006, got: {resp}"
+    );
+
+    c.shutdown();
+}
+
+#[test]
+fn smoke_skills_get_missing_name_returns_000() {
+    let home = tempdir().unwrap();
+    let ws = tempdir().unwrap();
+    std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
+    let mut c = Client::spawn(home.path(), Some(ws.path()));
+
+    // `name` requis : params {} -> échec de désérialisation de l'enveloppe
+    // -> VNL-RPC-000, comme les bras d'écriture.
+    let resp = c.call("config/skills/get", json!({}));
+    assert_eq!(
+        Client::vnl_code(&resp).as_deref(),
+        Some("VNL-RPC-000"),
+        "skills/get without name should be VNL-RPC-000, got: {resp}"
+    );
+
+    c.shutdown();
+}

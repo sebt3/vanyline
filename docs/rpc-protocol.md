@@ -226,6 +226,29 @@ laquelle des 6 méthodes ci-dessus :
 `vanyline_lib` — utile pour le débogage, le code de premier niveau côté
 client reste `VNL-RPC-006`.)
 
+### `config/skills/get`
+
+Lecture complète d'un skill : le seul endroit où le **body** est exposé
+(`config/skills` ne renvoie que l'index léger name + description). Résolution
+par nom dans le store **fusionné** — pas de param `layer`, comme les actions
+`test` : on lit ce qu'une lecture verrait. Params `{name}` — `name` **requis**
+(absent ou mal typé -> `VNL-RPC-000`, comme les enveloppes d'écriture).
+
+Réponse `{name, description, body, source}` en snake_case natif. `body` est
+le corps du SKILL.md hors frontmatter, **trimé** à la lecture comme à
+l'écriture. `source` est la source de couche, `"workspace"` ou `"global"` —
+la même valeur qu'affiche la CLI (`vnl skills list`). Nom inconnu ->
+`VNL-RPC-006` (comme les lectures config ; le message porte le
+`VNL-CFG-*: skill '…'` du store).
+
+```json
+→ {"jsonrpc":"2.0","id":15,"method":"config/skills/get","params":{"name":"pdf"}}
+← {"jsonrpc":"2.0","id":15,"result":{
+    "name":"pdf","description":"Traitement de fichiers PDF",
+    "body":"# Corps du skill …","source":"global"
+  }}
+```
+
 ### Écriture de configuration
 
 18 méthodes — `config/<domain>/create`, `config/<domain>/update`,

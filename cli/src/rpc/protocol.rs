@@ -294,6 +294,16 @@ pub struct ConfigCreateSkillParams {
     pub body: String,
 }
 
+/// Params de `config/skills/get` — résolution par nom dans le store FUSIONNÉ
+/// (pas de `layer` : la lecture voit la config fusionnée, comme les actions
+/// `test`). Le body n'est exposé nulle part ailleurs (`config/skills` = index
+/// léger uniquement).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConfigGetSkillParams {
+    pub name: String,
+}
+
 /// Params de `config/providers/test` et `config/mcpServers/test` — l'entrée est
 /// résolue dans le store fusionné par nom (pas de `layer` : on teste ce que la
 /// lecture verrait).
