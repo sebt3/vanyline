@@ -2,6 +2,11 @@
   "name": "vanyline",
   "displayName": "vanyline",
   "publisher": "sebt3",
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sebt3/vanyline"
+  },
   "version": "0.1.0",
   "type": "commonjs",
   "engines": {
@@ -61,7 +66,8 @@
     "build:host": "node esbuild.mjs extension",
     "build:webview": "vite build --config webview/vite.config.mts",
     "check": "tsc --noEmit -p tsconfig.extension.json && vue-tsc --noEmit -p tsconfig.webview.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "package": "npx @vscode/vsce package --no-dependencies"
   },
   "dependencies": {
     "@nuxt/ui": "^4.10.0",

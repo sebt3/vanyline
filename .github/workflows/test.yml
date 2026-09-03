@@ -57,6 +57,25 @@ jobs:
       - run: npm run check --workspace=frontend
       - run: npm run test --workspace=frontend
 
+  ext:
+    name: Extension VS Code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      # l'extension dépend des packages partagés (alias source webview + RpcConnection)
+      - run: npm run check --workspace=@vanyline/protocol
+      - run: npm run test --workspace=@vanyline/protocol
+      - run: npm run check --workspace=@vanyline/ui
+      - run: npm run test --workspace=@vanyline/ui
+      - run: npm run check --workspace=vanyline
+      - run: npm run test --workspace=vanyline
+      - run: npm run build --workspace=vanyline
+
   tsrs:
     name: ts-rs types up to date
     runs-on: ubuntu-latest

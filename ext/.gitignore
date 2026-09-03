@@ -5,3 +5,5 @@ auto-imports.d.ts
 components.d.ts
 webview/auto-imports.d.ts
 webview/components.d.ts
+# Artefact de packaging vsce (jamais commité)
+*.vsix

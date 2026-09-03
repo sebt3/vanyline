@@ -1,0 +1,23 @@
+.gitignore
+.vscodeignore
+src/**
+webview/src/**
+webview/index.html
+webview/vite.config.mts
+webview/package.json
+webview/tsconfig*.json
+*.config.mts
+*.mjs
+tsconfig*.json
+cli-version.txt
+# node_modules à toute profondeur (le motif ancré node_modules/** ne couvrait pas
+# webview/node_modules/.nuxt-ui/, artefact généré par le plugin vite @nuxt/ui)
+**/node_modules/**
+# d.ts générés par unplugin-auto-import / unplugin-vue-components (vsce ancre les
+# motifs sans slash à la racine : chemins explicites pour le webview, cf. .gitignore)
+auto-imports.d.ts
+components.d.ts
+webview/auto-imports.d.ts
+webview/components.d.ts
+**/*.spec.ts
+**/*.map
