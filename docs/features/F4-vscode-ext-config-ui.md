@@ -12,7 +12,19 @@ RPC. Le chat reste dans la sidebar (F3), la config s'ouvre comme un document.
 
 ## Ce qu'elle ne fait pas
 
-- Aucune nouvelle capacité RPC (tout vient de F2).
+- Pas de nouvelle capacité RPC **de comportement** — à l'exception de deux ajouts
+  CLI/RPC tranchés au démarrage de F4 (2026-09-03, développeur) :
+  - **`config/skills/get`** : lecture `{name, description, body, source}` d'un skill.
+    Découverte à la lecture du code : `SkillsScreen.vue` (F1, figé) appelle
+    `repo.get('skills', name)` pour charger le `body` avant édition, et F2 n'expose
+    aucune lecture du body → l'édition d'un skill existant l'écraserait avec un body
+    vide. Le store lit déjà le body (`cfgstore fs_store.rs`, `load_skill`) ; l'ajout
+    est un handler RPC + smoke test + rpc-protocol.md.
+  - **Champ `source` en lecture** : les 6 lectures `config/<domain>` (et
+    `config/skills/get`) ajoutent `"source": "workspace" | "global"` par entrée
+    (additif — les clients existants ignorent la clé), résolu par
+    `config_entry_source`/`file_entry_source`/`skill_entry_source` (cfgstore, déjà
+    utilisé par `config check`). Sert au badge de couche (ci-dessous).
 - **Pas de synchronisation avec les settings VS Code natifs** — la config vit dans le
   YAML deux-couches de la CLI, pas dans `settings.json`. Divergence assumée avec
   kydah-code (qui, lui, stocke tout dans `configuration.properties`).
@@ -63,7 +75,9 @@ ext/
 | `ext/webview/src/main.ts` | routeur interne `?view=` |
 | `ext/webview/src/rpcConfigRepo.ts` | **nouveau** — impl `ConfigRepo` sur postMessage |
 | `ext/package.json` | rien de neuf côté `contributes` (commande déjà déclarée en F3) |
-| `@vanyline/ui` | rien — les écrans et `ConfigShell` viennent de F1 tels quels |
+| `cli/src/rpc/handlers.rs` + `cli/tests/rpc_stdio_smoke.rs` + `docs/rpc-protocol.md` | les 2 ajouts RPC tranchés (`config/skills/get`, `source` en lecture) |
+| `@vanyline/protocol` (`config-domain.ts`) | champ optionnel `source?: 'workspace' \| 'global'` sur les 6 types de domaine (même précédent que `available_models`/`is_default` : « augmenté, lecture seule ») |
+| `@vanyline/ui` | écrans : badge « workspace »/« global » par entrée quand `source` présent (les écrans et `ConfigShell` viennent de F1, seule cette addition les touche) |
 
 ## Sécurité (argv / URL / chemin)
 
@@ -88,10 +102,11 @@ ext/
 - **`WebviewPanel` (éditeur) et `WebviewView` (sidebar) ne partagent pas d'état** — deux
   instances Vue. Résolu par `config/changed` host→webviews + refetch. Vérifier qu'aucun
   écran ne garde de cache silencieux qui survivrait à l'événement.
-- **Badge de couche** : afficher « workspace » / « global » par entrée demande que
-  `config/<domain>` en lecture renvoie la source de chaque entrée (comme le fait déjà
-  `cli/src/config.rs` pour l'affichage « sources workspace » du CLI). Petit ajout à
-  cadrer — soit ici, soit remonté dans F2. **À trancher au démarrage de F4.**
+- **Badge de couche** : **tranché 2026-09-03 — inclus en F4.** La source par entrée est
+  rendue par le champ additif `source` des lectures RPC (voir « Ce qu'elle ne fait pas »),
+  miroitée par `source?` optionnel dans `config-domain.ts`, et affichée par les écrans
+  `@vanyline/ui` quand présente (jamais présente côté web/`app` → pas de badge sur le
+  frontend web, inchangé).
 - **Mapping `profiles`/`models`** : un seul point de traduction (`rpcConfigRepo`), testé
   explicitement — un bug ici est silencieux (mauvais domaine écrit).
 - **`ConfigShell` extraite en F1** : si F1 ne l'a finalement pas fait (dette), la
@@ -100,10 +115,17 @@ ext/
   pas dupliquer la chaîne Vite / le poids. Si le tree-shaking ne sépare pas bien
   chat/config, repli sur deux entrypoints Vite.
 
-## Découpage en tâches candidates
+## Découpage en tâches (figé au démarrage de F4, 2026-09-03)
 
-1. (si non fait en F1) extraire `ConfigShell` neutre dans `@vanyline/ui` + décision badge de couche.
-2. `panels/config.ts` : WebviewPanel + CSP + routeur `?view=` webview + « hello ConfigShell ».
-3. `rpcConfigRepo` + pont host `config/*` + mapping `profiles↔models` + tests.
-4. Invalidation `config/changed` cross-webview + refetch du sélecteur d'agent du chat.
-5. Les 6 écrans montés bout-à-bout + actions `test` + test e2e manuel.
+`ConfigShell` ayant été extrait dès F1, la tâche 1 candidate est tombée ; les deux
+décisions (badge, `config/skills/get`) sont tranchées ci-dessus. Ordre réel :
+
+1. CLI : `config/skills/get` (+ smoke tests + rpc-protocol.md).
+2. CLI : champ additif `source` sur les 6 lectures `config/<domain>` (+ smoke + doc).
+3. `@vanyline/protocol` : `source?` optionnel sur les 6 types de `config-domain.ts`.
+4. `@vanyline/ui` : badge « workspace »/« global » par entrée quand `source` présent.
+5. `panels/config.ts` : WebviewPanel + CSP (`buildHtml` + paramètre de vue) + routeur
+   `?view=` webview + « hello ConfigShell » (repo stub) + `openSettings` réel.
+6. `rpcConfigRepo` + pont host `config/*` (whitelist) + mapping `profiles↔models` + tests.
+7. Invalidation `config/changed` cross-webview + refetch du sélecteur d'agent du chat.
+8. Écrans bout-à-bout (vérification) + section e2e manuel dans `docs/ext-install.md`.
