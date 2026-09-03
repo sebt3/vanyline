@@ -20,4 +20,6 @@ components.d.ts
 webview/auto-imports.d.ts
 webview/components.d.ts
 **/*.spec.ts
-**/*.map
+# dist/extension/index.js.map est embarqué (80 Ko) : traces d'erreur host lisibles
+# pour une extension publiée. Le build webview n'émet pas de sourcemap.
+webview/**/*.map

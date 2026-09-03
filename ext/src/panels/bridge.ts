@@ -31,7 +31,6 @@ export const RELAY_WHITELIST: readonly string[] = [
   'conversations/list',
   'conversations/get',
   'conversations/create',
-  'conversations/delete',
   'config/agents',
 ];
 

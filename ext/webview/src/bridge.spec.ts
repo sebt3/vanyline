@@ -342,6 +342,50 @@ describe('PostMessageChatTransport', () => {
       h.posted.some((m) => m.type === 'chat/cancel' && m.conversationId === 'c1'),
     ).toBe(true);
   });
+
+  it('cas 11b — issue terminale → listener « abort » démonté (pas de chat/cancel tardif)', async () => {
+    // Fuite corrigée : sur rejet du chatSend (comme sur done/error), le listener
+    // 'abort' de l'abortSignal doit être retiré — sinon un abort postérieur au tour
+    // relance un chat/cancel parasite dans une webview longue-vie.
+    const ac = new AbortController();
+    const h = transportHarness();
+    const stream = await h.transport.sendMessages({
+      chatId: 'c1',
+      messages: [userMessage('bonjour')],
+      abortSignal: ac.signal,
+    });
+
+    const chunksPromise = collectChunks(stream);
+    h.emit({
+      type: 'chat/send/resp',
+      reqId: h.sentChat()['reqId'],
+      ok: false,
+      error: { code: 'VNL-RPC-002', message: 'busy' },
+    });
+    await chunksPromise;
+
+    ac.abort();
+    await h.flush();
+    expect(h.posted.some((m) => m.type === 'chat/cancel')).toBe(false);
+  });
+
+  it('cas 11c — done normal → listener « abort » démonté', async () => {
+    const ac = new AbortController();
+    const h = transportHarness();
+    const stream = await h.transport.sendMessages({
+      chatId: 'c1',
+      messages: [userMessage('bonjour')],
+      abortSignal: ac.signal,
+    });
+
+    const chunksPromise = collectChunks(stream);
+    h.emit({ type: 'chat/event', conversationId: 'c1', seq: 0, event: { type: 'done' } });
+    await chunksPromise;
+
+    ac.abort();
+    await h.flush();
+    expect(h.posted.some((m) => m.type === 'chat/cancel')).toBe(false);
+  });
 });
 
 describe('createBridgeBackend', () => {

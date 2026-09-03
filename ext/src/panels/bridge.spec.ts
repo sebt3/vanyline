@@ -171,12 +171,13 @@ describe('handleBridgeRequest', () => {
     expect(h.request).not.toHaveBeenCalled();
     expect(h.responses).toHaveLength(1);
     expect(h.responses[0].error?.code).toBe('VNL-EXT-020');
-    // la whitelist est le contrat de sécurité — gélée ici, exacte :
+    // la whitelist est le contrat de sécurité — gélée ici, exacte. `conversations/delete`
+    // n'y figure pas : aucune affordance de suppression côté webview en F3 (ré-ajout
+    // possible en F4 quand ChatWindow exposera le geste).
     expect(RELAY_WHITELIST).toEqual([
       'conversations/list',
       'conversations/get',
       'conversations/create',
-      'conversations/delete',
       'config/agents',
     ]);
   });

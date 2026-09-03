@@ -1,3 +1,5 @@
+import { randomInt } from 'node:crypto';
+
 /** Génère le HTML de la webview. Fonction pure (zéro import `vscode`, testable en node) :
  *  c'est le provider qui calcule `baseHref` et `cspSource` via `webview.asWebviewUri` /
  *  `webview.cspSource`. Repris de kydah-code `src/extension/panels/main.ts`. */
@@ -25,13 +27,15 @@ export function buildHtml(baseHref: string, cspSource: string, nonce: string): s
 </html>`;
 }
 
-/** Nonce CSP : 32 caractères [A-Za-z0-9] (repris de kydah-code generateNonce). */
+/** Nonce CSP : 32 caractères [A-Za-z0-9]. Aléa cryptographique (`node:crypto`) —
+ *  un nonce CSP n'a de valeur que s'il est imprévisible, `Math.random()` ne l'est pas
+ *  (la version kydah-code s'appuyait dessus). `randomInt` est sans biais modulo. */
 export function generateNonce(): string {
-  let text = '';
   const possible =
     'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+  let text = '';
   for (let i = 0; i < 32; i++) {
-    text += possible.charAt(Math.floor(Math.random() * possible.length));
+    text += possible.charAt(randomInt(possible.length));
   }
   return text;
 }

@@ -34,12 +34,25 @@ export class PostMessageChatTransport implements ChatTransport<UIMessage> {
     const bridge = this.bridge;
     const getAgent = this.getAgent;
     const chatId = options.chatId;
+    const abortSignal = options.abortSignal;
 
     // Le texte envoyé = les parts text du DERNIER message user.
     const lastUser = [...options.messages].reverse().find((m) => m.role === 'user');
     const message = lastUser ? textOf(lastUser) : '';
 
     let unsubscribe: (() => void) | undefined;
+    let onAbort: (() => void) | undefined;
+    // Libère TOUTES les ressources du tour : abonnement chat/event + listener 'abort'.
+    // Appelé sur chaque issue terminale (done/error, rejet du chatSend, cancel du flux) —
+    // sans ça chaque tour laisse fuiter un abonnement dans une webview longue-vie.
+    const cleanup = (): void => {
+      unsubscribe?.();
+      unsubscribe = undefined;
+      if (onAbort && abortSignal) {
+        abortSignal.removeEventListener('abort', onAbort);
+      }
+      onAbort = undefined;
+    };
 
     const events = new ReadableStream<ChatEvent>({
       start(controller) {
@@ -48,28 +61,31 @@ export class PostMessageChatTransport implements ChatTransport<UIMessage> {
           if (p.conversationId !== chatId) return;
           controller.enqueue(p.event);
           if (p.event.type === 'done' || p.event.type === 'error') {
-            unsubscribe?.();
+            cleanup();
             controller.close();
           }
         });
 
-        // Échec de validation du tour (ok:false) → stream en erreur. La résolution
-        // = fin de tour : le stream est déjà fermé par l'événement `done` → ignorer.
+        // Échec de validation du tour (ok:false) → stream en erreur + cleanup (aucun
+        // `done` ne viendra fermer le flux). La résolution = fin de tour : le stream est
+        // déjà fermé par l'événement `done` → ignorer.
         bridge
           .chatSend({ conversationId: chatId, message, agent: getAgent() })
           .catch((err: unknown) => {
+            cleanup();
             controller.error(err);
           });
 
-        if (options.abortSignal) {
-          options.abortSignal.addEventListener('abort', () => {
+        if (abortSignal) {
+          onAbort = (): void => {
             void bridge.chatCancel(chatId).catch(() => {});
-          });
+          };
+          abortSignal.addEventListener('abort', onAbort);
         }
       },
       cancel() {
         // Flux consommé annulé : on se désabonne et on demande l'annulation du tour.
-        unsubscribe?.();
+        cleanup();
         void bridge.chatCancel(chatId).catch(() => {});
       },
     });

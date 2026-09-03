@@ -82,6 +82,10 @@ export function parseSha256File(content: string, expectedArchiveName: string): s
 
 /** Contrôle de l'URL FINALE après redirects (design : allowlist github.com,
  *  objects.githubusercontent.com, *.githubusercontent.com — refus sinon).
+ *  NB : `fetch` suit les redirects tout seul, donc la requête a DÉJÀ atteint
+ *  l'hôte final (et son corps est en main) quand on valide. L'allowlist est donc
+ *  un garde-fou intégrité / anti-exfiltration, pas une garantie « on ne parle
+ *  jamais à un hôte non-GitHub » — l'archive reste de toute façon SHA256-gatée.
  *  Accepte uniquement protocole https: ; host = 'github.com' | 'objects.githubusercontent.com'
  *  | se terminant par '.githubusercontent.com' (avec point, ex. foo.githubusercontent.com ;
  *  githubusercontent.com nu REFOUSÉ). Sinon throw ProvisionError VNL-EXT-006
