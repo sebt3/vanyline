@@ -1,14 +1,16 @@
 {
-  "name": "vanyline",
+  "name": "vanyline-workspace",
   "private": true,
   "workspaces": [
     "frontend",
-    "packages/*"
+    "packages/*",
+    "ext"
   ],
   "scripts": {
     "build": "npm run build --workspace=frontend",
     "test": "npm run test --workspace=frontend",
     "dev": "npm run dev --workspace=frontend",
-    "storybook": "npm run storybook --workspace=frontend"
+    "storybook": "npm run storybook --workspace=frontend",
+    "install:local": "npm run build --workspace=vanyline && npm run package --workspace=vanyline && code-server --install-extension ext/vanyline-$(node -p \"require('./ext/package.json').version\").vsix"
   }
 }

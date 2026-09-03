@@ -23,6 +23,7 @@ cargo clippy --workspace          # pas --all-targets -D warnings : plus strict 
                                    # `git stash` + re-run si un doute existe)
 npm run build                     # vue-tsc -b && vite build
 npm run test
+npm run test --workspace=vanyline && npm run build --workspace=vanyline   # extension VS Code
 ```
 
 Zéro régression sur les quatre avant de continuer.
@@ -46,10 +47,30 @@ avant de commiter le bump :
 deploy/controller/generate-crds.sh   # régénère deploy/controller/crds.yaml
 ```
 
+**Extension VS Code (`ext/`) — deux versions manuelles, découplées du workspace Rust.**
+Le job `ext` de `release.yml` package `ext/vanyline-<ext version>.vsix` et l'attache à
+la release ; le provisioning CLI de l'extension télécharge la CLI dont la version est
+bakée dans `ext/cli-version.txt`. Ni l'une ni l'autre ne suit `Cargo.toml` :
+
+- `ext/cli-version.txt` : mettre la version de CETTE release (`X.Y.Z+1`, sans `v`) —
+  sinon l'extension va chercher `~/.local/bin/vanyline` d'une release antérieure et,
+  si ses assets `.sha256` n'existent pas (releases d'avant l'ajout de `checksum: sha256`,
+  soit avant F3), échoue en `VNL-EXT-005`.
+- `ext/package.json` → `version` : bump si l'extension elle-même a changé (sinon le
+  `.vsix` attaché porte une version périmée ; les globs `vanyline-*.vsix` masquent le
+  souci mais la métadonnée reste fausse).
+
+```bash
+# la CLI de cette release doit produire les assets .sha256 (job upload-cli, checksum: sha256)
+printf '%s\n' 'X.Y.Z+1' > ext/cli-version.txt
+# + éditer ext/package.json "version" si ext/ a changé
+```
+
 Commit dédié :
 
 ```bash
-git add Cargo.toml Cargo.lock deploy/controller/controller.yaml [deploy/controller/crds.yaml]
+git add Cargo.toml Cargo.lock deploy/controller/controller.yaml [deploy/controller/crds.yaml] \
+        ext/cli-version.txt [ext/package.json]
 git commit -m "chore: bump version X.Y.Z+1"
 ```
 
@@ -91,8 +112,10 @@ for r in d.get('workflow_runs',[]):
 ```
 
 Puis poller les jobs du run `Release` trouvé (`create-release`,
-`image (app|sandbox|controller)`, `upload-cli (...)`) jusqu'à ce qu'aucun ne
-soit `queued`/`in_progress`. Compter ~3-5 min pour les trois images.
+`image (app|sandbox|controller)`, `upload-cli (...)`, `ext`) jusqu'à ce qu'aucun ne
+soit `queued`/`in_progress`. Compter ~3-5 min pour les trois images. Le job `ext`
+dépend de `create-release` et attache `ext/vanyline-*.vsix` + les `upload-cli`
+attachent les `*.tar.gz.sha256` que le provisioning de l'extension exige.
 
 **Piège vécu — rate limit API GitHub anonyme.** `api.github.com` limite les
 requêtes non authentifiées à 60/heure. Une boucle de poll à 15-20s peut le

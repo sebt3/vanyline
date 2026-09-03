@@ -40,7 +40,30 @@ jobs:
           target: ${{ matrix.target }}
           archive: vanyline-$target
           tar: all
+          checksum: sha256
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  ext:
+    name: Extension VS Code (.vsix)
+    needs: create-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build --workspace=vanyline
+      - name: Package vsix
+        working-directory: ext
+        run: npx @vscode/vsce package --no-dependencies
+      - name: Upload vsix to release
+        run: gh release upload "$GITHUB_REF_NAME" ext/vanyline-*.vsix --clobber
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   image:
     runs-on: ubuntu-latest

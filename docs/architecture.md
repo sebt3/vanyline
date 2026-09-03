@@ -1839,6 +1839,59 @@ Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`
   `SettingsView.vue` ≈ 20 lignes : monte `ConfigShell` + `provide(CONFIG_REPO_KEY,
   httpConfigRepo())`.
 
+### Extension VS Code — `ext/` (F3)
+
+Front-end graphique du CLI : sidebar de chat dans VS Code / code-server, pilotant une
+CLI `vanyline serve --stdio` locale que l'extension **télécharge et met à jour seule**.
+Deux bundles séparés : **host** (esbuild, `dist/extension/index.js`, CommonJS Node) et
+**webview** (Vite + Vue, `dist/webview/`). Linux x86_64 + aarch64 uniquement.
+
+**Host** (`src/`, zéro dépendance à un backend distant) :
+
+| Module | Rôle |
+|---|---|
+| `extension.ts` | `activate`/`deactivate` : OutputChannel, status bar, enregistrement des commandes et du `ChatViewProvider`, câblage superviseur↔provider. Relit la config à **chaque** (re)start. |
+| `cli-provisioning.ts` | `ensureCli` : résout le binaire. `vanyline.serverPath` défini → utilisé tel quel, **aucun** fetch/probe, auto-update off. Sinon `~/.local/bin/vanyline --version` == `EXPECTED_CLI_VERSION` (bakée par esbuild `define` depuis `ext/cli-version.txt`) ? sinon download. |
+| `rpc.ts` | `startServer` : `spawn(bin, ['serve','--stdio'], {shell:false, cwd:workspace})`, transport ndjson sur stdin/stdout, `RpcConnection` (`@vanyline/protocol`), `initialize({protocolVersion, workspace})`. stderr CLI → OutputChannel. Codes `VNL-EXT-010` (spawn) / `-011` (initialize / mismatch protocole). |
+| `supervisor.ts` | Machine à états pure du cycle de vie : backoff exponentiel plafonné (`1s×2ⁿ`, max 30s, 5 essais), fenêtre de stabilité 60s → reset compteur, `restart()` manuel repart de zéro même depuis `erreur`, `stop()` sans auto-redémarrage. `generation` invalide les timers/await en vol. |
+| `panels/chat.ts` | `WebviewViewProvider` sur `vanyline.chatView`, `retainContextWhenHidden`. Abonne `chat/event` sur le handle courant, ré-abonne au restart. |
+| `panels/bridge.ts` | Pont webview↔host **pur** (zéro `vscode`) : parse strict des messages webview, **whitelist de relais** (`conversations/list|get|create`, `config/agents` — `chat/send`/`chat/cancel` sont des kinds nommés non contournables via `{type:'rpc'}`), codes `VNL-EXT-020` (relais refusé) / `-021` (serveur non démarré). |
+| `panels/html.ts` | `buildHtml` pur : CSP `default-src 'none'` + nonce (aléa `node:crypto`) + `<base href>`, `localResourceRoots` sur `dist/webview`. |
+
+**Webview** (`webview/src/`) : monte `ChatWindow` de `@vanyline/ui`, fournit les ports
+`vanyline.chatBackend` (relayé en `conversations/*` RPC via le pont) et
+`vanyline.chatTransport` (`PostMessageChatTransport` : `chat/send` + notifications
+`chat/event` reconstruites en `ReadableStream<UIMessageChunk>` par `chatEventsToUIStream`,
+partagé avec le frontend web). `getBridgeClient()` mémoïse `acquireVsCodeApi()` (appelable
+une seule fois) — jamais à l'import, seulement dans le `setup` de `App.vue`.
+Build Vite : `inlineDynamicImports` (CSP sans `strict-dynamic`), CSS forcé en
+`assets/index.css`, alias source vers `packages/{ui,protocol}/src`.
+
+**Sécurité du provisioning** (téléchargement + exécution d'un binaire) :
+1. **SHA256 obligatoire** : `vanyline-<target>.tar.gz.sha256` de la **même** release
+   (format GNU `sha256sum`, produit par `checksum: sha256` sur `upload-cli`). Absent
+   (404) → `VNL-EXT-005`, **refus**, aucun fallback « on fait confiance ».
+2. **HTTPS strict + allowlist d'hôte** sur l'URL **finale** après redirects
+   (`github.com`, `*.githubusercontent.com`) → `VNL-EXT-006` sinon. NB : `fetch` suit
+   les redirects seul, l'hôte final n'est validé qu'une fois le corps en main —
+   l'allowlist est un garde-fou intégrité/exfil, l'archive reste SHA256-gatée.
+3. **Install atomique** : download → tmpfile → vérif hash → extract tmpdir →
+   `chmod +x` → `copyFile` vers `~/.local/bin` → `rename`. **Jamais d'exécution avant
+   vérif.** Cible `~/.local/bin` uniquement ; `-003` target non supporté, `-004`
+   destination non inscriptible.
+
+**Packaging & CI** : `.vsix` attaché à chaque release GitHub (job `ext` de
+`release.yml`, `vsce package --no-dependencies`), pas de marketplace ;
+`npm run install:local` (racine) pour code-server. Job `ext` dans `test.yml`
+(check + test + build des packages puis de `ext`). `ext/cli-version.txt` et
+`ext/package.json` `version` = **bumps manuels** découplés du workspace Rust
+(cf. `docs/release-runbook.md` §2). Procédure d'install + checklist e2e :
+`docs/ext-install.md`.
+
+**Dette assumée F3** : `chat/cancel` reste un no-op côté CLI (pas d'annulation réelle
+de tour) ; pas d'UI de config (F4 — la commande « Paramètres » ouvre les settings VS
+Code natifs) ; pas de gestion sandbox (F5).
+
 ### Règles de dépendances TypeScript
 
 1. **`packages/protocol` est une feuille** : aucune dépendance UI, consommable par

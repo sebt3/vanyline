@@ -1,0 +1,9 @@
+# Artefacts de build — miroir des entrées correspondantes du .gitignore racine
+# (frontend/dist/, frontend/auto-imports.d.ts, …) que cette tâche ne peut pas modifier.
+dist/
+auto-imports.d.ts
+components.d.ts
+webview/auto-imports.d.ts
+webview/components.d.ts
+# Artefact de packaging vsce (jamais commité)
+*.vsix

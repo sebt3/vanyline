@@ -35,7 +35,13 @@ export function chatEventsToUIStream(
         closeText();
       };
 
-      const enqueue = (chunk: UIMessageChunk) => ctrl.enqueue(chunk);
+      // Garde : un `abort` peut arriver APRÈS la fermeture du controller (le
+      // listener ci-dessous n'est jamais retiré) — enqueue sur un controller clos
+      // lève ERR_INVALID_STATE. No-op une fois clos.
+      const enqueue = (chunk: UIMessageChunk) => {
+        if (controllerClosed) return;
+        ctrl.enqueue(chunk);
+      };
 
       const handleEvent = (event: ChatEvent) => {
         switch (event.type) {

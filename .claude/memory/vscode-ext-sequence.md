@@ -37,7 +37,7 @@ mémoire de clôture (`.claude/memory/<nom>.md`) portent tous le même nom `F<n>
 |---|---|---|---|
 | F1 | `F1-vscode-ext-foundations` | **close 2026-08-31.** `packages/protocol` + `packages/ui` extraits du frontend, `ConfigRepo` + impl HTTP, ts-rs. Comportement frontend inchangé. | — |
 | F2 | `F2-vscode-ext-cli-rpc` | **close 2026-09-02, mergée+poussée.** Crate feuille `vanyline-cfgstore` (config extraite de `lib`+`cli`, partageable sandbox) + `ConfigStore` lecture→lecture/écriture + RPC `config/<domain>/{create,update,delete}` + actions test/localTools. | alignement noms avec F1 |
-| F3 | `F3-vscode-ext-chat` | L'extension elle-même : host, provisioning CLI (download+SHA256), sidebar chat, **packaging + release CI**. | F1 |
+| F3 | `F3-vscode-ext-chat` | **close 2026-09-03, mergée+poussée.** L'extension elle-même : host, provisioning CLI (download+SHA256), sidebar chat, **packaging + release CI**. | F1 |
 | F4 | `F4-vscode-ext-config-ui` | Onglets éditeur pour éditer la config via les écrans `@vanyline/ui` + impl RPC de `ConfigRepo`. | F2, F3 |
 | F5 | `F5-vscode-ext-sandboxes` | `TreeView` native Owners/Projects/Sandboxes via les méthodes RPC K8s existantes. | F3 |
 
@@ -76,7 +76,22 @@ migration vers `docs/architecture.md` + suppression du design doc).
   `docs/features/F2-vscode-ext-cli-rpc.md` supprimé. Bilan complet (décisions, bascule
   modèle Cadence en cours de feature, historique squatté, rouge CI clippy, **3 bugs
   corrigés en review Phase 3**) : `.claude/memory/F2-vscode-ext-cli-rpc.md`.
-  **Suite : F3** (`F3-vscode-ext-chat`).
+- **2026-09-03** — **F3 close (Phase 3 faite), branche `feat/F3-vscode-ext-chat` mergée
+  dans `main` et poussée.** L'extension `vanyline` elle-même : `ext/` ajouté au workspace
+  npm (racine renommée `vanyline-workspace`), host esbuild (extension/provisioning/rpc/
+  superviseur/pont) + webview Vite-Vue montant `ChatWindow` de `@vanyline/ui`,
+  provisioning CLI SHA256-vérifié + install atomique, jobs CI `ext` (`test.yml` +
+  `release.yml` avec `checksum: sha256`), `install:local`, `docs/ext-install.md`. Livré
+  par **Cadence sans escalade, 0 bug bloquant en review** (contraste net avec
+  git-integration/miryad-core). Review Phase 3 : 6 findings mineurs corrigés par Claude
+  (nonce crypto, fuite d'abonnement du transport, whitelist réduite, runbook, sourcemap
+  du vsix) + 1 fix adjacent dans `chatEventsToUIStream` (`@vanyline/ui`, partagé). e2e
+  réel sur code-server : `VNL-EXT-005` (release `v0.0.11-alpha.5` antérieure à
+  `checksum: sha256`) → `.sha256` attachés manuellement à la release, download OK.
+  Design migré dans `docs/architecture.md` § « Extension VS Code — `ext/` (F3) »,
+  `docs/features/F3-vscode-ext-chat.md` supprimé. Bilan complet :
+  `.claude/memory/F3-vscode-ext-chat.md`.
+  **Suite : F4 ‖ F5** (parallélisables).
 
 ## Comment reprendre dans une session neuve
 
@@ -113,8 +128,14 @@ migration vers `docs/architecture.md` + suppression du design doc).
 - **F2 : `cadence` + `implement` sur le même modèle (qwen3.8-flash-next) → validation
   croisée faible.** La review Claude Phase 3 a trouvé 2 bugs bloquants + 1 rouge CI que
   Cadence avait validés. Si ce couplage persiste, Phase 3 est le seul vrai filet.
-- Download binaire (F3) : SHA256 obligatoire contre l'asset `.sha256` de la release
-  (refus si absent), HTTPS + allowlist d'hôtes après redirects, install atomique.
-  Prérequis CI : ajouter `checksum: sha256` au job `upload-cli` du `release.yml`.
+- Download binaire (F3, **livré**) : SHA256 obligatoire contre `vanyline-<target>.tar.gz.sha256`
+  de la release (refus `VNL-EXT-005` si absent), HTTPS + allowlist d'hôtes sur l'URL finale
+  après redirects, install atomique. `checksum: sha256` sur `upload-cli` — **une release
+  d'avant ce changement n'a pas les sidecars** (les attacher à la main via `gh release
+  upload` si `cli-version.txt` la pointe). `ext/cli-version.txt` + `ext/package.json`
+  `version` = bumps manuels, cf. `docs/release-runbook.md` §2.
+- Le pont host (`ext/src/panels/bridge.ts`) a un `RELAY_WHITELIST` = contrat de sécurité
+  webview→CLI. F3 : `conversations/list|get|create` + `config/agents`. Toute méthode
+  relayée depuis la webview en F4/F5 s'y ajoute explicitement.
 - Nom de domaine : `profiles` (UI) = `models` (CLI `config.yaml`) = `model-profiles`
   (app REST). Un seul point de traduction par impl de `ConfigRepo`.

@@ -1,0 +1,92 @@
+{
+  "name": "vanyline",
+  "displayName": "vanyline",
+  "publisher": "sebt3",
+  "license": "BSD-3-Clause",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/sebt3/vanyline"
+  },
+  "version": "0.1.0",
+  "type": "commonjs",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "main": "./dist/extension/index.js",
+  "activationEvents": ["onStartupFinished"],
+  "contributes": {
+    "viewsContainers": {
+      "secondarySidebar": [
+        { "id": "vanyline", "title": "vanyline", "icon": "$(hubot)" }
+      ]
+    },
+    "views": {
+      "vanyline": [
+        { "type": "webview", "id": "vanyline.chatView", "name": "Chat" }
+      ]
+    },
+    "commands": [
+      { "command": "vanyline.openPanel", "title": "vanyline: Ouvrir le chat" },
+      { "command": "vanyline.newSession", "title": "vanyline: Nouvelle session" },
+      { "command": "vanyline.sessionPicker", "title": "vanyline: Choisir une session" },
+      { "command": "vanyline.openSettings", "title": "vanyline: Ouvrir les paramètres" },
+      { "command": "vanyline.restartServer", "title": "vanyline: Redémarrer le serveur" }
+    ],
+    "menus": {
+      "view/title": [
+        { "command": "vanyline.newSession", "when": "view == vanyline.chatView", "group": "navigation_new@1" },
+        { "command": "vanyline.sessionPicker", "when": "view == vanyline.chatView", "group": "navigation@1" },
+        { "command": "vanyline.openSettings", "when": "view == vanyline.chatView", "group": "navigation@2" }
+      ]
+    },
+    "configuration": {
+      "title": "vanyline",
+      "properties": {
+        "vanyline.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Chemin du binaire vanyline utilisé tel quel (auto-update désactivée)."
+        },
+        "vanyline.autoUpdateCli": {
+          "type": "boolean",
+          "default": true,
+          "description": "Télécharger/mettre à jour automatiquement ~/.local/bin/vanyline."
+        },
+        "vanyline.defaultLogLevel": {
+          "type": "string",
+          "enum": ["trace", "debug", "info", "warn", "error"],
+          "default": "info",
+          "description": "Niveau de log passé à la CLI au spawn (RUST_LOG)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "npm run build:webview && npm run build:host",
+    "build:host": "node esbuild.mjs extension",
+    "build:webview": "vite build --config webview/vite.config.mts",
+    "check": "tsc --noEmit -p tsconfig.extension.json && vue-tsc --noEmit -p tsconfig.webview.json",
+    "test": "vitest run",
+    "package": "npx @vscode/vsce package --no-dependencies"
+  },
+  "dependencies": {
+    "@nuxt/ui": "^4.10.0",
+    "@vanyline/protocol": "0.1.0",
+    "@vanyline/ui": "0.1.0",
+    "tailwindcss": "^4.3.3",
+    "vue": "^3.5.40"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "@types/vscode": "^1.90.0",
+    "@vitejs/plugin-vue": "^6.0.8",
+    "@vue/test-utils": "^2.4.11",
+    "@vue/tsconfig": "^0.9.1",
+    "esbuild": "^0.25.0",
+    "jsdom": "^30.0.1",
+    "typescript": "~6.0.2",
+    "vite": "^8.2.0",
+    "vitest": "^4.1.10",
+    "vue-tsc": "^3.3.8"
+  }
+}
