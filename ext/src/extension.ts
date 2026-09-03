@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { spawn as cpSpawn } from 'node:child_process';
+import { ensureCli, productionDeps } from './cli-provisioning';
 import { registerChatView } from './panels/chat';
 import { startServer } from './rpc';
 import { createSupervisor, type Supervisor } from './supervisor';
@@ -23,14 +24,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       },
     },
     start: async () => {
-      // relecture de la config À CHAQUE tentative (serverPath changeable sans reload)
+      // relecture de la config À CHAQUE tentative (serverPath/autoUpdate changeables sans reload)
       const cfg = vscode.workspace.getConfiguration('vanyline');
-      const bin = cfg.get<string>('serverPath', '').trim() || 'vanyline';
-      channel.appendLine(`binaire vanyline : ${bin}`); // « log clair du binaire utilisé » (design)
+      const resolved = await ensureCli(
+        {
+          serverPath: cfg.get<string>('serverPath', ''),
+          autoUpdate: cfg.get<boolean>('autoUpdateCli', true),
+        },
+        productionDeps((line) => channel.appendLine(line)),
+      );
+      channel.appendLine(`binaire vanyline : ${resolved.bin} (${resolved.source})`); // « log clair du binaire utilisé » (design)
       return startServer({
         spawn: cpSpawn,
         channel,
-        bin,
+        bin: resolved.bin,
         workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath,
         logLevel: cfg.get<string>('defaultLogLevel', 'info'),
       });
