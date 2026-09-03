@@ -61,6 +61,7 @@ export interface ConfigRepo {
 
 // Ré-export pour les écrans (tâches 07-09), qui importent depuis '@vanyline/ui'.
 export type {
+  ConfigEntrySource,
   Provider, ProviderType, ModelProfile, McpServer, McpTransport, McpSelection,
   Toolset, Agent, AgentMode, SkillSelection, SkillMeta, SkillDetail,
 } from '@vanyline/protocol';

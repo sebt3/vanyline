@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { flushPromises, mount } from '@vue/test-utils';
-import type { ConfigRepo } from '../ports';
+import type { ConfigEntrySource, ConfigRepo } from '../ports';
 import { CONFIG_REPO_KEY } from './useConfigRepo';
 import SkillsScreen from './SkillsScreen.vue';
 
@@ -8,11 +8,21 @@ beforeEach(() => {
   document.body.querySelectorAll('[role="dialog"]').forEach((d) => d.remove());
 });
 
-/** Fake repo `skills` avec un store en mémoire. */
-function skillsRepo(initial: Array<{ name: string; description: string; body: string }> = []) {
+/** Fake repo `skills` avec un store en mémoire. `source` (couche RPC, F4)
+ *  passe dans `list` uniquement quand l'item en porte un — les items sans
+ *  couche gardent exactement la forme précédente. */
+function skillsRepo(
+  initial: Array<{ name: string; description: string; body: string; source?: ConfigEntrySource }> = [],
+) {
   const store = new Map(initial.map((s) => [s.name, { ...s }]));
   const repo = {
-    list: vi.fn(async () => [...store.values()].map((s) => ({ name: s.name, description: s.description }))),
+    list: vi.fn(async () =>
+      [...store.values()].map((s) => ({
+        name: s.name,
+        description: s.description,
+        ...(s.source ? { source: s.source } : {}),
+      })),
+    ),
     get: vi.fn(async (_d: string, name: string) => {
       const s = store.get(name);
       if (!s) throw new Error(`${name} introuvable`);
@@ -132,5 +142,24 @@ describe('SkillsScreen', () => {
 
     expect(repo.remove).toHaveBeenCalledWith('skills', 'to-delete');
     expect(w.text()).toContain('Aucun skill');
+  });
+
+  it("badge de couche : source 'workspace' → badge sur la ligne sk-src, absent ailleurs", async () => {
+    const w = mountWith(
+      skillsRepo([
+        { name: 'plain-skill', description: 'sans couche', body: '' },
+        { name: 'sk-src', description: 'skill workspace', body: '', source: 'workspace' },
+      ]),
+    );
+    await flushPromises();
+
+    const rows = w.findAll('tbody tr');
+    const rowSourced = rows.find((r) => r.text().includes('sk-src'))!;
+    const badge = rowSourced.find('[data-testid="source-badge"]');
+    expect(badge.exists()).toBe(true);
+    expect(badge.text()).toBe('workspace');
+
+    const rowPlain = rows.find((r) => r.text().includes('plain-skill'))!;
+    expect(rowPlain.find('[data-testid="source-badge"]').exists()).toBe(false);
   });
 });

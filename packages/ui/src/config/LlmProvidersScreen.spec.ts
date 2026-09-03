@@ -53,6 +53,15 @@ const openai: Provider = {
   is_default: false,
   available_models: ['gpt-4'],
 };
+// Couche source peuplée par les lectures RPC uniquement (F4) — badge attendu.
+const sourced: Provider = {
+  name: 'src-1',
+  type: 'ollama',
+  endpoint: 'http://localhost:11435',
+  is_default: false,
+  available_models: [],
+  source: 'global',
+};
 
 describe('LlmProvidersScreen', () => {
   it('affiche noms, types, endpoints et badge défaut', async () => {
@@ -154,5 +163,19 @@ describe('LlmProvidersScreen', () => {
 
     expect(repo.remove).toHaveBeenCalledWith('providers', 'ollama-local');
     expect(w.text()).toContain('Aucun fournisseur LLM');
+  });
+
+  it("badge de couche : source 'global' → badge sur la ligne src-1, absent sans source", async () => {
+    const w = mountWith(providersRepo([ollama, sourced]));
+    await flushPromises();
+
+    const rows = w.findAll('tbody tr');
+    const rowSourced = rows.find((r) => r.text().includes('src-1'))!;
+    const badge = rowSourced.find('[data-testid="source-badge"]');
+    expect(badge.exists()).toBe(true);
+    expect(badge.text()).toBe('global');
+
+    const rowPlain = rows.find((r) => r.text().includes('ollama-local'))!;
+    expect(rowPlain.find('[data-testid="source-badge"]').exists()).toBe(false);
   });
 });
