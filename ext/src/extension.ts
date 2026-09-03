@@ -4,6 +4,7 @@ import type { ConversationSummary } from '@vanyline/protocol';
 import { ensureCli, productionDeps } from './cli-provisioning';
 import { mapRpcError } from './panels/bridge';
 import { registerChatView } from './panels/chat';
+import { registerConfigPanel } from './panels/config';
 import { startServer } from './rpc';
 import { createSupervisor, type Supervisor } from './supervisor';
 
@@ -22,6 +23,7 @@ function rpcErrorMessage(action: string, err: unknown): string {
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const channel = vscode.window.createOutputChannel('vanyline');
   const provider = registerChatView(context, channel);
+  const configPanel = registerConfigPanel(context, channel);
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = 'vanyline.restartServer';
@@ -114,9 +116,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       provider.post({ type: 'session/pick', conversationId: picked?.id ?? null });
     }),
 
-    vscode.commands.registerCommand('vanyline.openSettings', () => {
-      void vscode.commands.executeCommand('workbench.action.openSettings', '@ext:sebt3.vanyline');
-    }),
+    vscode.commands.registerCommand('vanyline.openSettings', () => configPanel.open()),
   );
 
   await supervisor.start(); // ne rejette jamais (activation dégradée, design « offline »)

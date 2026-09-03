@@ -3,7 +3,12 @@ import { randomInt } from 'node:crypto';
 /** Génère le HTML de la webview. Fonction pure (zéro import `vscode`, testable en node) :
  *  c'est le provider qui calcule `baseHref` et `cspSource` via `webview.asWebviewUri` /
  *  `webview.cspSource`. Repris de kydah-code `src/extension/panels/main.ts`. */
-export function buildHtml(baseHref: string, cspSource: string, nonce: string): string {
+export function buildHtml(
+  baseHref: string,
+  cspSource: string,
+  nonce: string,
+  view: 'chat' | 'config' = 'chat',
+): string {
   return `<!DOCTYPE html>
 <html lang="fr">
   <head>
@@ -15,6 +20,7 @@ export function buildHtml(baseHref: string, cspSource: string, nonce: string): s
                img-src ${cspSource} data:;
                font-src ${cspSource};" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="vanyline-view" content="${view}" />
     <base href="${baseHref}/" />
     <title>vanyline</title>
     <style>html,body{height:100%;margin:0;padding:0}#app{height:100%;display:flex;flex-direction:column}</style>
