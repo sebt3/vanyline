@@ -4,23 +4,30 @@ import { handleBridgeRequest, type BridgeApi } from './bridge';
 import type { LogChannel, ServerHandle } from '../rpc';
 
 /** Ouvre (ou révèle) le panel de configuration. Retourne l'instance pour
- *  l'extension (relais webview→CLI branché en tâche 06b ; config/changed = tâche 07). */
+ *  l'extension (relais webview→CLI branché en tâche 06b ; broadcast host→webview
+ *  via `post` depuis la tâche 07). */
 export interface ConfigPanelHandle {
   open(): void;
-  /** Branche le panel sur un handle vivant (aucun abonnement notification
-   *  pour l'instant — config/changed = tâche 07) ; no-op si handle identique. */
+  /** Branche le panel sur un handle vivant (aucun abonnement notification — le
+   *  handle ne sert qu'au relais des requêtes, config/changed naît des writes
+   *  vus par bridge.ts, pas d'une notification CLI) ; no-op si handle identique. */
   attachServer(handle: ServerHandle): void;
   /** Handle parti (restart) : les requêtes webview répondront VNL-EXT-021. */
   detachServer(): void;
+  /** Message host → webview du panel (broadcast config/changed). No-op si
+   *  aucun panel ouvert. */
+  post(msg: Record<string, unknown>): void;
 }
 
 /** Enregistre la logique du panel ; `open()` crée le panel au premier appel,
  *  `reveal()` sur les appels suivants (panel unique — design « panel unique
  *  réutilisé »). `onDidDispose` remet l'état à zéro pour permettre une
- *  réouverture après fermeture. */
+ *  réouverture après fermeture. `onConfigWrite` (optionnel, tâche 07) : callback
+ *  de broadcast config/changed, même contrat que registerChatView. */
 export function registerConfigPanel(
   context: vscode.ExtensionContext,
   channel: LogChannel,
+  onConfigWrite?: (domain: string) => void,
 ): ConfigPanelHandle {
   let panel: vscode.WebviewPanel | undefined;
   // Handle du superviseur : variable de CLOSURE du module registerConfigPanel, PAS du
@@ -35,8 +42,10 @@ export function registerConfigPanel(
       return;
     }
     handle = h;
-    // Aucun abonnement notification à poser ici (config/changed = tâche 07) : contrairement
-    // à chat.ts, rien n'accroche le handle — bridgeApi() le relit à chaque message.
+    // Aucun abonnement notification à poser ici : contrairement à chat.ts, rien
+    // n'accroche le handle — bridgeApi() le relit à chaque message. config/changed
+    // ne vient pas d'une notification CLI mais des writes vus par bridge.ts
+    // (onWriteSucceeded), diffusés par extension.ts via post().
   }
 
   /** Handle parti (fenêtre de restart) : les requêtes webview répondront -021. */
@@ -44,9 +53,16 @@ export function registerConfigPanel(
     handle = undefined;
   }
 
-  /** BridgeApi du module pur (bridge.ts) — mêmes 3 champs que chat.ts : relais vers le
+  /** Message hôte → webview du panel (broadcast config/changed, tâche 07).
+   *  No-op si aucun panel ouvert : `panel?.webview`, pas de crash possible. */
+  function post(msg: Record<string, unknown>): void {
+    void panel?.webview.postMessage(msg);
+  }
+
+  /** BridgeApi du module pur (bridge.ts) — mêmes champs que chat.ts : relais vers le
    *  handle courant (lecture dynamique à l'appel, jamais capturé), réponses vers la
-   *  webview du panel courant, journal vers l'OutputChannel. */
+   *  webview du panel courant, journal vers l'OutputChannel, broadcast config/changed
+   *  via onWriteSucceeded (le champ optionnel du BridgeApi accepte undefined). */
   function bridgeApi(): BridgeApi {
     return {
       request: <T>(method: string, params?: unknown): Promise<T> =>
@@ -55,6 +71,7 @@ export function registerConfigPanel(
         void panel?.webview.postMessage(resp);
       },
       log: (line) => channel.appendLine(line),
+      onWriteSucceeded: onConfigWrite,
     };
   }
 
@@ -106,5 +123,5 @@ export function registerConfigPanel(
     });
   }
 
-  return { open, attachServer, detachServer };
+  return { open, attachServer, detachServer, post };
 }

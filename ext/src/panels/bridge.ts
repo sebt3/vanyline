@@ -160,6 +160,10 @@ export interface BridgeApi {
     error?: BridgeError;
   }): void;
   log(line: string): void;
+  /** Appelée après un WRITE config réussi (méthode rpc
+   *  `config/<domain>/create|update|delete`) — domain = nom RPC brut extrait
+   *  de la méthode. Jamais appelée sur échec, ni sur les autres méthodes. */
+  onWriteSucceeded?(domain: string): void;
 }
 
 /** Nom court du type d'un message webview, pour la journalisation d'un message rejeté
@@ -226,6 +230,13 @@ export async function handleBridgeRequest(
       result = await api.request(req.method, req.params ?? {});
     }
     api.respond({ type, reqId: req.reqId, ok: true, result });
+    // Write config = config/<domain>/{create,update,delete} ; slice sur le DERNIER
+    // '/' (aucun domaine n'en contient, mais explicite). Le module pur ne connaît
+    // aucune webview : c'est l'appelant (extension.ts) qui diffuse config/changed.
+    if (req.kind === 'rpc' && /^config\/[^/]+\/(create|update|delete)$/.test(req.method)) {
+      const domain = req.method.slice('config/'.length, req.method.lastIndexOf('/'));
+      api.onWriteSucceeded?.(domain);
+    }
   } catch (err) {
     fail(mapRpcError(err));
   }

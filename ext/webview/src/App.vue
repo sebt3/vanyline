@@ -22,7 +22,10 @@ provide('vanyline.chatTransport', transport);
 const agents = ref<string[]>([]);
 const agentsUnavailable = ref(false);
 
-onMounted(() => {
+/** Peuple le sélecteur d'agent ; au rejet (-021 serveur non démarré ou erreur RPC)
+ *  → UI dégradée, jamais bloquante. Appelé au mount ET à chaque config/changed du
+ *  host (tâche 07 : un write réussi n'importe où doit repeupler sans reload). */
+function refreshAgents(): void {
   bridge
     .request<{ name: string }[]>('config/agents', {})
     .then((list) => {
@@ -32,6 +35,12 @@ onMounted(() => {
       // -021 (serveur non démarré) ou erreur RPC → UI dégradée, jamais bloquante.
       agentsUnavailable.value = true;
     });
+}
+
+onMounted(() => {
+  refreshAgents();
+  // Invalidations host (tâche 07) : broadcast config/changed après tout write réussi.
+  bridge.onConfigChanged(refreshAgents);
 
   // Commandes host (tâche 04a) : nouvelle session et reprise via QuickPick.
   bridge.onMessage('session/new', (id) => {

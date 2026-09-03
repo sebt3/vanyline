@@ -274,3 +274,76 @@ describe('handleBridgeRequest', () => {
     ]);
   });
 });
+
+/** Harness dédié aux cas config/changed (tâche 07) : même forme que `fakeApi` mais
+ *  portant le spy `onWriteSucceeded`. `fakeApi` reste INTACT et sans le champ
+ *  optionnel — la non-régression de ce champ passe par son absence (tous les cas
+ *  existants ci-dessus continuent de tourner sans lui). */
+function fakeWriteApi(requestImpl?: (method: string, params?: unknown) => Promise<unknown>) {
+  const responses: Resp[] = [];
+  const request = vi.fn(async (method: string, params?: unknown): Promise<unknown> =>
+    requestImpl ? requestImpl(method, params) : {},
+  );
+  const onWriteSucceeded = vi.fn();
+  const api: BridgeApi = {
+    request: request as BridgeApi['request'],
+    respond: (resp) => {
+      responses.push(resp);
+    },
+    log: () => {},
+    onWriteSucceeded,
+  };
+  return { api, request, responses, onWriteSucceeded };
+}
+
+describe('handleBridgeRequest — détection des writes config réussis (tâche 07)', () => {
+  it('write réussi → réponse ok:true ET callback appelé une fois avec le domaine brut', async () => {
+    const h = fakeWriteApi(async () => null);
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 71, method: 'config/toolsets/create', params: { item: { name: 'x' } } },
+      h.api,
+      true,
+    );
+    expect(h.responses).toEqual([{ type: 'rpc/resp', reqId: 71, ok: true, result: null }]);
+    expect(h.onWriteSucceeded).toHaveBeenCalledTimes(1);
+    expect(h.onWriteSucceeded).toHaveBeenCalledWith('toolsets');
+  });
+
+  it('lecture réussie (config/skills/get) → callback NON appelé', async () => {
+    const h = fakeWriteApi(async () => ({ content: 'x' }));
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 72, method: 'config/skills/get', params: { name: 's' } },
+      h.api,
+      true,
+    );
+    expect(h.responses).toHaveLength(1);
+    expect(h.responses[0].ok).toBe(true);
+    expect(h.onWriteSucceeded).not.toHaveBeenCalled();
+  });
+
+  it('write ÉCHOUÉ (rejet RpcError) → réponse ok:false et callback NON appelé', async () => {
+    const h = fakeWriteApi(async () => {
+      throw new RpcError(-32000, 'busy', 'VNL-RPC-002');
+    });
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 73, method: 'config/agents/create', params: {} },
+      h.api,
+      true,
+    );
+    expect(h.responses).toEqual([
+      { type: 'rpc/resp', reqId: 73, ok: false, error: { code: 'VNL-RPC-002', message: 'busy' } },
+    ]);
+    expect(h.onWriteSucceeded).not.toHaveBeenCalled();
+  });
+
+  it('config/mcpServers/update réussi → domaine RPC brut mcpServers (aucune traduction)', async () => {
+    const h = fakeWriteApi(async () => null);
+    await handleBridgeRequest(
+      { type: 'rpc', reqId: 74, method: 'config/mcpServers/update', params: {} },
+      h.api,
+      true,
+    );
+    expect(h.onWriteSucceeded).toHaveBeenCalledTimes(1);
+    expect(h.onWriteSucceeded).toHaveBeenCalledWith('mcpServers');
+  });
+});

@@ -14,6 +14,8 @@ function fakeBridge() {
     chatCancel: vi.fn(),
     onChatEvent: vi.fn(),
     onMessage: vi.fn(),
+    // Membre requis depuis la tâche 07 ; jamais appelé par le repo (commentaire ci-dessus).
+    onConfigChanged: vi.fn(),
   };
   return { bridge, request };
 }

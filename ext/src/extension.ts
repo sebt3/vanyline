@@ -22,8 +22,21 @@ function rpcErrorMessage(action: string, err: unknown): string {
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const channel = vscode.window.createOutputChannel('vanyline');
-  const provider = registerChatView(context, channel);
-  const configPanel = registerConfigPanel(context, channel);
+
+  // Broadcast config/changed (tâche 07) : les deux fournisseurs sont enregistrés avant
+  // d'être câblés entre eux (le panel est créé après le provider) — la closure
+  // late-bound est délibérée, pas un ordre à « corriger ». Les callbacks passés aux
+  // deux register* ne référencent que la variable mutable `broadcastConfigChanged`,
+  // réassignée après les deux enregistrements (TS strict interdit d'utiliser une
+  // const non encore définie — d'où le placeholder no-op).
+  let broadcastConfigChanged: (domain: string) => void = () => {};
+  const provider = registerChatView(context, channel, (d) => broadcastConfigChanged(d));
+  const configPanel = registerConfigPanel(context, channel, (d) => broadcastConfigChanged(d));
+  broadcastConfigChanged = (domain: string): void => {
+    const msg = { type: 'config/changed', domain };
+    provider.post(msg);
+    configPanel.post(msg);
+  };
 
   const statusBar = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Left, 100);
   statusBar.command = 'vanyline.restartServer';

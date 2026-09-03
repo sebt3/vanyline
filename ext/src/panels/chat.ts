@@ -10,6 +10,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly channel: LogChannel,
+    /** Émis par le pont après tout write config réussi (broadcast config/changed,
+     *  tâche 07) — câblé par extension.ts, absent = pas d'invalidation. */
+    private readonly onConfigWrite?: (domain: string) => void,
   ) {}
 
   /**
@@ -72,13 +75,15 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   /** BridgeApi du module pur (bridge.ts) : relais vers le handle courant, réponses
-   *  vers la webview, journal vers l'OutputChannel. */
+   *  vers la webview, journal vers l'OutputChannel. `onWriteSucceeded` transmis tel
+   *  quel (le champ optionnel du BridgeApi accepte undefined). */
   private bridgeApi(): BridgeApi {
     return {
       request: <T>(method: string, params?: unknown): Promise<T> =>
         this.handle!.conn.request<T>(method, params),
       respond: (resp) => this.post(resp),
       log: (line) => this.channel.appendLine(line),
+      onWriteSucceeded: this.onConfigWrite,
     };
   }
 
@@ -91,12 +96,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 }
 
-/** Enregistre le provider (retainContextWhenHidden: true) + la commande vanyline.openPanel. */
+/** Enregistre le provider (retainContextWhenHidden: true) + la commande vanyline.openPanel.
+ *  `onConfigWrite` (optionnel, tâche 07) : callback de broadcast config/changed. */
 export function registerChatView(
   context: vscode.ExtensionContext,
   channel: LogChannel,
+  onConfigWrite?: (domain: string) => void,
 ): ChatViewProvider {
-  const provider = new ChatViewProvider(context, channel);
+  const provider = new ChatViewProvider(context, channel, onConfigWrite);
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('vanyline.chatView', provider, {

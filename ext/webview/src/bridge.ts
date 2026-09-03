@@ -59,6 +59,10 @@ export interface BridgeClient {
     type: 'session/new' | 'session/pick',
     cb: (conversationId: string | null) => void,
   ): () => void;
+  /** Abonnement notifications host `config/changed` (tous domaines ; le
+   *  consommateur filtre s'il veut). Message valide : type exact + `domain`
+   *  string — tout le reste silencieusement ignoré (convention F3). */
+  onConfigChanged(cb: (domain: string) => void): () => void;
 }
 
 interface Pending {
@@ -82,6 +86,7 @@ export function createBridgeClient(deps: BridgeDeps): BridgeClient {
   let nextReqId = 1;
   const pending = new Map<number, Pending>();
   const chatEventSubs = new Set<(p: ChatEventParams) => void>();
+  const configChangedSubs = new Set<(domain: string) => void>();
   const typedSubs = new Map<'session/new' | 'session/pick', Set<(id: string | null) => void>>();
 
   const send = <T>(msg: Record<string, unknown>): Promise<T> => {
@@ -135,6 +140,12 @@ export function createBridgeClient(deps: BridgeDeps): BridgeClient {
         const subs = typedSubs.get(data.type);
         if (!subs) return;
         for (const cb of [...subs]) cb(conversationId);
+        return;
+      }
+      case 'config/changed': {
+        // Validation stricte (convention F3) : `domain` string exigé, sinon message avalé.
+        if (typeof data.domain !== 'string') return;
+        for (const cb of [...configChangedSubs]) cb(data.domain);
         return;
       }
       default:
@@ -203,7 +214,14 @@ export function createBridgeClient(deps: BridgeDeps): BridgeClient {
     };
   };
 
-  return { request, chatSend, chatCancel, onChatEvent, onMessage };
+  const onConfigChanged = (cb: (domain: string) => void): (() => void) => {
+    configChangedSubs.add(cb);
+    return () => {
+      configChangedSubs.delete(cb);
+    };
+  };
+
+  return { request, chatSend, chatCancel, onChatEvent, onMessage, onConfigChanged };
 }
 
 let singleton: BridgeClient | undefined;
