@@ -365,7 +365,9 @@ pub struct LspDiagnosticsArgs {
     pub path: String,
 }
 
-/// Argument parsing for `lsp_hover`/`lsp_definition`/`lsp_references`.
+/// Argument parsing for `lsp_hover` — 0-based, déprécié : `lsp_hover` est
+/// supprimé en tâche 2 de `lsp-agent-interface` (absorbé par `lsp_definition`).
+/// Les autres tools à position sont passés à `LspSymbolTarget` (tâche 01b).
 #[derive(serde::Deserialize, Clone)]
 pub struct LspPositionArgs {
     pub path: String,
@@ -375,20 +377,18 @@ pub struct LspPositionArgs {
     pub character: u64,
 }
 
-/// Argument parsing for `lsp_rename`.
+/// Args de `lsp_rename` : position partagée + nouveau nom.
 #[derive(serde::Deserialize, Clone)]
 pub struct LspRenameArgs {
-    pub path: String,
-    #[serde(default)]
-    pub line: u64,
-    #[serde(default)]
-    pub character: u64,
+    #[serde(flatten)]
+    pub target: LspSymbolTarget,
     pub new_name: String,
 }
 
 /// Forme d'argument partagée par tous les tools qui ciblent une position
 /// (`lsp_definition`, `lsp_references`, `lsp_rename`, `inspect_symbol`).
-/// Remplace `LspPositionArgs` (migration des tools en tâche 01b — pas ici).
+/// A remplace `LspPositionArgs` pour ces tools (migration achevée en tâche
+/// 01b — `lsp_hover` garde `LspPositionArgs` jusqu'à la tâche 2).
 /// Entrées 1-based (alignées `read_file`), conversion interne 0-based LSP.
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct LspSymbolTarget {
@@ -520,6 +520,106 @@ pub fn resolve_position(
     Ok(PositionResolution::Unique { line0, character0 })
 }
 
+/// Snippet de la ligne `line0` (0-based, convention `content.lines()`) du
+/// contenu `content`, borné (`.trim()` des deux côtés). `None` si la ligne
+/// n'existe pas.
+fn line_snippet(content: &str, line0: u64) -> Option<String> {
+    content
+        .lines()
+        .nth(line0 as usize)
+        .map(|l| l.trim().to_string())
+}
+
+/// Note d'ambiguïté R6, suffixe de la ligne « cible: ». Rendue seulement pour
+/// `PositionResolution::Ambiguous` (`second_char1` est la colonne 1-based de
+/// la 2e occurrence.)
+fn ambiguity_note(sym: &str, matches: usize, second_char1: u64) -> String {
+    format!(
+        " (symbole \"{sym}\" trouvé {matches}× sur la ligne, 1re occurrence utilisée \
+         — préciser character: {second_char1} pour la suivante)"
+    )
+}
+
+/// Vrai si la localisation LSP porte au moins une URI exploitable — `uri`
+/// (forme `Location`) ou `targetUri` (forme `LocationLink`). Les entrées sans
+/// aucune des deux sont filtrées avant rendu (pas de ligne vide).
+fn location_has_uri(loc: &serde_json::Value) -> bool {
+    loc.get("uri").and_then(|u| u.as_str()).is_some()
+        || loc.get("targetUri").and_then(|u| u.as_str()).is_some()
+}
+
+/// Rend un résultat de localisation LSP dans le texte rendu aux agents
+/// (helpers des tâches 2, 4, 5, 6 — réutilisé tel quel).
+///
+/// Deux formes acceptées : `Location` (`uri` + `range.start.line`) et
+/// `LocationLink` (`targetUri` + `targetSelectionRange.start.line` —
+/// rust-analyzer en émet sur certains goto-def). Les deux rendent
+/// `<chemin relatif au workspace>:<ligne 1-based>: <snippet de ligne>`.
+///
+/// Sécurité (design R5) : le snippet exige la lecture de la ligne — l'URI est
+/// d'abord `file://`, puis son chemin passe par `confine(sandbox_root, …)`,
+/// **confine AVANT toute lecture, jamais de lecture hors `sandbox_root`**.
+/// URI non-`file://` ou hors workspace → `<uri brut>:<ligne 1-based>` sans
+/// snippet, aucune lecture tentée. Confine OK mais lecture échouée ou ligne
+/// absente → `<chemin relatif>:<ligne 1-based>` sans snippet.
+///
+/// `chemin relatif` = URI `file://…` amputée de son préfixe
+/// `file://{sandbox_root}/` (`sandbox_root` rendu sans slash final) ; à
+/// défaut, le chemin confiné résolu par `confine`. Localisation sans aucune
+/// URI exploitable (ni `uri` ni `targetUri`) → la chaîne vide.
+async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value) -> String {
+    let raw_uri = match loc.get("uri").and_then(|u| u.as_str()) {
+        Some(u) => u,
+        None => match loc.get("targetUri").and_then(|u| u.as_str()) {
+            Some(u) => u,
+            None => return String::new(),
+        },
+    };
+    let line0 = loc
+        .get("range")
+        .or_else(|| loc.get("targetSelectionRange"))
+        .and_then(|r| r.get("start"))
+        .and_then(|s| s.get("line"))
+        .and_then(|l| l.as_u64());
+
+    // R5 : confine AVANT toute lecture — la lecture ci-dessous ne porte que
+    // sur le chemin résolu rendu par `confine`, jamais sur l'URI brute.
+    let confined = match raw_uri.strip_prefix("file://") {
+        Some(raw_path) => confine(sandbox_root, raw_path).await.ok(),
+        None => None,
+    };
+    if let Some(resolved) = confined {
+        let root_prefix = format!("file://{}/", sandbox_root.display());
+        let display_path = match raw_uri.strip_prefix(&root_prefix) {
+            Some(rel) => rel.to_string(),
+            None => resolved.clone(),
+        };
+        let Some(line0) = line0 else {
+            return display_path;
+        };
+        let snippet = filesystem::read_file(ReadFileOptions {
+            path: resolved,
+            offset: 0,
+            limit: 0,
+            raw: true,
+        })
+        .await
+        .ok()
+        .and_then(|content| line_snippet(&content, line0));
+        return match snippet {
+            Some(snippet) => format!("{display_path}:{}: {snippet}", line0 + 1),
+            None => format!("{display_path}:{}", line0 + 1),
+        };
+    }
+
+    // URI non-`file://` ou hors workspace : rendu brut, aucune lecture tentée.
+    tracing::debug!("LSP location outside workspace, rendered raw: {raw_uri}");
+    match line0 {
+        Some(line0) => format!("{raw_uri}:{}", line0 + 1),
+        None => raw_uri.to_string(),
+    }
+}
+
 /// Mapping extension of a file → (toolchain name, LSP languageId).
 /// Known toolchains by convention with controller presets: `"rust"`, `"node"`.
 /// `None` if the extension is not covered (fallback: no LSP).
@@ -577,11 +677,12 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
             "description": "Go to definition of the symbol at a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
-                "required": ["path"],
+                "required": ["path", "line"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
-                    "character": {"type": "integer", "description": "0-based character offset (default 0)."}
+                    "line": {"type": "integer", "description": "1-based line number (as shown by read_file). Required."},
+                    "symbol": {"type": "string", "description": "Identifier name to target on that line (recommended). Resolved to the first delimited-identifier occurrence; if it appears several times the first is used and the answer says so."},
+                    "character": {"type": "integer", "description": "1-based column, precise targeting when symbol is absent or ambiguous. Ignored when symbol is set."}
                 }
             }
         }),
@@ -590,11 +691,12 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
             "description": "Find all references of the symbol at a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
-                "required": ["path"],
+                "required": ["path", "line"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
-                    "character": {"type": "integer", "description": "0-based character offset (default 0)."}
+                    "line": {"type": "integer", "description": "1-based line number (as shown by read_file). Required."},
+                    "symbol": {"type": "string", "description": "Identifier name to target on that line (recommended). Resolved to the first delimited-identifier occurrence; if it appears several times the first is used and the answer says so."},
+                    "character": {"type": "integer", "description": "1-based column, precise targeting when symbol is absent or ambiguous. Ignored when symbol is set."}
                 }
             }
         }),
@@ -603,11 +705,12 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
             "description": "Rename a symbol at a position in a file via the LSP server (applies the resulting WorkspaceEdit to the filesystem). Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
-                "required": ["path", "new_name"],
+                "required": ["path", "line", "new_name"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
-                    "character": {"type": "integer", "description": "0-based character offset (default 0)."},
+                    "line": {"type": "integer", "description": "1-based line number (as shown by read_file). Required."},
+                    "symbol": {"type": "string", "description": "Identifier name to target on that line (recommended). Resolved to the first delimited-identifier occurrence; if it appears several times the first is used and the answer says so."},
+                    "character": {"type": "integer", "description": "1-based column, precise targeting when symbol is absent or ambiguous. Ignored when symbol is set."},
                     "new_name": {"type": "string", "description": "New name for the symbol."}
                 }
             }
@@ -662,8 +765,8 @@ fn severity_label(severity: i64) -> &'static str {
 }
 
 /// Dispatches a `tools/call` for `lsp_diagnostics`/`lsp_hover`/`lsp_definition`/
-/// `lsp_references`. Returns `None` if `name` is not one of these. Consumes
-/// `state.lsp` (shared LSP process) and `state.config.sandbox_root`.
+/// `lsp_references`/`lsp_rename`. Returns `None` if `name` is not one of these.
+/// Consumes `state.lsp` (shared LSP process) and `state.config.sandbox_root`.
 pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Option<Value> {
     let lsp_tools = [
         "lsp_diagnostics",
@@ -689,18 +792,29 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
         };
         LspArgs::Rename(args)
-    } else {
+    } else if name == "lsp_hover" {
+        // Déprécié — `lsp_hover` garde l'argumentaire 0-based actuel, supprimé
+        // avec le tool en tâche 2.
         let args: LspPositionArgs = match serde_json::from_value(arguments.clone()) {
             Ok(a) => a,
             Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
         };
         LspArgs::Position(args)
+    } else {
+        // `lsp_definition` / `lsp_references` : modèle de position partagé,
+        // `line` requis (son absence tombe dans le `invalid arguments` ci-dessus).
+        let args: LspSymbolTarget = match serde_json::from_value(arguments.clone()) {
+            Ok(a) => a,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        LspArgs::Target(args)
     };
 
     let raw_path = match &args {
         LspArgs::Diagnostics(a) => &a.path,
         LspArgs::Position(a) => &a.path,
-        LspArgs::Rename(a) => &a.path,
+        LspArgs::Target(a) => &a.path,
+        LspArgs::Rename(a) => &a.target.path,
     };
 
     // Step 3: confine
@@ -720,6 +834,56 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     {
         Ok(t) => t,
         Err(e) => return Some(err_result(e.to_string())),
+    };
+
+    // Step 4b (modèle de position partagé, tâche 01b) : résolution 1-based →
+    // 0-based pour les tools à target, avec ligne cible pré-construite —
+    // snippet lu dans le `text` déjà lu par le dispatch (pas de re-lecture)
+    // et note d'ambiguïté R6 le cas échéant. `Err` porte déjà
+    // VNL-SBX-LSP-007/VNL-SBX-LSP-010. `lsp_diagnostics` et `lsp_hover`
+    // (déprécié) ne passent pas ici.
+    let symbol_target: Option<&LspSymbolTarget> = match &args {
+        LspArgs::Target(t) => Some(t),
+        LspArgs::Rename(r) => Some(&r.target),
+        LspArgs::Diagnostics(_) | LspArgs::Position(_) => None,
+    };
+    let target_info = match symbol_target {
+        None => None,
+        Some(t) => {
+            let (line0, character0, note) = match resolve_position(&text, t) {
+                Ok(PositionResolution::Unique { line0, character0 }) => {
+                    (line0, character0, String::new())
+                }
+                Ok(PositionResolution::Ambiguous {
+                    line0,
+                    character0,
+                    matches,
+                    second_char1,
+                }) => (
+                    line0,
+                    character0,
+                    ambiguity_note(
+                        t.symbol.as_deref().unwrap_or_default(),
+                        matches,
+                        second_char1,
+                    ),
+                ),
+                Err(e) => return Some(err_result(e.to_string())),
+            };
+            // Chemin relatif au workspace : le préfixe `{sandbox_root}/` retiré
+            // du chemin confiné ; à défaut le chemin confiné lui-même (même
+            // logique que `render_location`).
+            let root_prefix = format!("{}/", state.config.sandbox_root.display());
+            let display_path = match resolved.strip_prefix(&root_prefix) {
+                Some(rel) => rel.to_string(),
+                None => resolved.clone(),
+            };
+            let target_line = match line_snippet(&text, line0) {
+                Some(snippet) => format!("cible: {display_path}:{}: {snippet}{note}", line0 + 1),
+                None => format!("cible: {display_path}:{}{note}", line0 + 1),
+            };
+            Some((line0, character0, target_line))
+        }
     };
 
     // Step 5: toolchain_for_path
@@ -783,7 +947,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         },
         "lsp_hover" => {
             let args: LspPositionArgs = match &args {
-                LspArgs::Diagnostics(_) => unreachable!(),
+                LspArgs::Diagnostics(_) | LspArgs::Target(_) => unreachable!(),
                 LspArgs::Position(a) => a.clone(),
                 LspArgs::Rename(_) => unreachable!(),
             };
@@ -818,10 +982,9 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             }
         }
         "lsp_definition" => {
-            let args: LspPositionArgs = match &args {
-                LspArgs::Diagnostics(_) => unreachable!(),
-                LspArgs::Position(a) => a.clone(),
-                LspArgs::Rename(_) => unreachable!(),
+            let (line0, character0, target_line) = match target_info {
+                Some(t) => t,
+                None => unreachable!("target_info is Some for target-based tools"),
             };
             match (
                 client.initialize().await,
@@ -832,12 +995,14 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                         "textDocument/definition",
                         serde_json::json!({
                             "textDocument": {"uri": file_uri},
-                            "position": {"line": args.line, "character": args.character}
+                            "position": {"line": line0, "character": character0}
                         }),
                     )
                     .await
                 {
                     Ok(result) => {
+                        // Normalisation existante conservée : tableau JSON-RPC,
+                        // ou objet unique accepté.
                         let locations: Vec<Value> = if let Some(arr) = result.as_array() {
                             arr.clone()
                         } else if result.is_object() {
@@ -845,33 +1010,22 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                         } else {
                             vec![]
                         };
+                        // Entrées sans aucune URI exploitable filtrées avant rendu.
+                        let locations: Vec<Value> =
+                            locations.into_iter().filter(location_has_uri).collect();
+                        let mut out = vec![target_line];
                         if locations.is_empty() {
-                            Some(ok_result("no definitions".to_string()))
+                            out.push("no definitions".to_string());
                         } else {
-                            let lines: Vec<String> = locations
-                                .iter()
-                                .map(|loc| {
-                                    let uri = loc.get("uri").and_then(|u| u.as_str()).unwrap_or("");
-                                    let start = loc
-                                        .get("range")
-                                        .and_then(|r| r.get("start"))
-                                        .and_then(|s| s.as_object());
-                                    match start {
-                                        Some(s) => {
-                                            let line =
-                                                s.get("line").and_then(|l| l.as_i64()).unwrap_or(0);
-                                            let character = s
-                                                .get("character")
-                                                .and_then(|c| c.as_i64())
-                                                .unwrap_or(0);
-                                            format!("{uri}:{line}:{character}")
-                                        }
-                                        None => uri.to_string(),
-                                    }
-                                })
-                                .collect();
-                            Some(ok_result(lines.join("\n")))
+                            out.push("défini à:".to_string());
+                            for loc in &locations {
+                                out.push(format!(
+                                    "  {}",
+                                    render_location(&state.config.sandbox_root, loc).await
+                                ));
+                            }
                         }
+                        Some(ok_result(out.join("\n")))
                     }
                     Err(e) => Some(err_result(e.to_string())),
                 },
@@ -883,6 +1037,10 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                 LspArgs::Rename(a) => a.clone(),
                 _ => unreachable!(),
             };
+            let (line0, character0, target_line) = match target_info {
+                Some(t) => t,
+                None => unreachable!("target_info is Some for target-based tools"),
+            };
             match (
                 client.initialize().await,
                 client.ensure_open(&file_uri, language_id, &text).await,
@@ -892,21 +1050,26 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                         "textDocument/rename",
                         serde_json::json!({
                             "textDocument": {"uri": file_uri},
-                            "position": {"line": args.line, "character": args.character},
+                            "position": {"line": line0, "character": character0},
                             "newName": args.new_name
                         }),
                     )
                     .await
                 {
+                    // Résultat actuel inchangé (chemins résolus modifiés ligne à
+                    // ligne, ou `no rename`), ligne cible antéposée. Pas de mode
+                    // `preview` ni de rapport avant→après : tâche 5.
                     Ok(result) => {
                         if result.is_null() {
-                            Some(ok_result("no rename".to_string()))
+                            Some(ok_result(format!("{target_line}\nno rename")))
                         } else {
                             match apply_workspace_edit(&state.config.sandbox_root, &result).await {
                                 Ok(files) if files.is_empty() => {
-                                    Some(ok_result("no rename".to_string()))
+                                    Some(ok_result(format!("{target_line}\nno rename")))
                                 }
-                                Ok(files) => Some(ok_result(files.join("\n"))),
+                                Ok(files) => {
+                                    Some(ok_result(format!("{target_line}\n{}", files.join("\n"))))
+                                }
                                 Err(e) => Some(err_result(e.to_string())),
                             }
                         }
@@ -917,10 +1080,9 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             }
         }
         "lsp_references" => {
-            let args: LspPositionArgs = match &args {
-                LspArgs::Diagnostics(_) => unreachable!(),
-                LspArgs::Position(a) => a.clone(),
-                LspArgs::Rename(_) => unreachable!(),
+            let (line0, character0, target_line) = match target_info {
+                Some(t) => t,
+                None => unreachable!("target_info is Some for target-based tools"),
             };
             match (
                 client.initialize().await,
@@ -931,7 +1093,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                         "textDocument/references",
                         serde_json::json!({
                             "textDocument": {"uri": file_uri},
-                            "position": {"line": args.line, "character": args.character},
+                            "position": {"line": line0, "character": character0},
                             "context": {"includeDeclaration": true}
                         }),
                     )
@@ -943,33 +1105,22 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                         } else {
                             vec![]
                         };
+                        // Entrées sans aucune URI exploitable filtrées avant rendu.
+                        let locations: Vec<Value> =
+                            locations.into_iter().filter(location_has_uri).collect();
+                        let mut out = vec![target_line];
                         if locations.is_empty() {
-                            Some(ok_result("no references".to_string()))
+                            out.push("no references".to_string());
                         } else {
-                            let lines: Vec<String> = locations
-                                .iter()
-                                .map(|loc| {
-                                    let uri = loc.get("uri").and_then(|u| u.as_str()).unwrap_or("");
-                                    let start = loc
-                                        .get("range")
-                                        .and_then(|r| r.get("start"))
-                                        .and_then(|s| s.as_object());
-                                    match start {
-                                        Some(s) => {
-                                            let line =
-                                                s.get("line").and_then(|l| l.as_i64()).unwrap_or(0);
-                                            let character = s
-                                                .get("character")
-                                                .and_then(|c| c.as_i64())
-                                                .unwrap_or(0);
-                                            format!("{uri}:{line}:{character}")
-                                        }
-                                        None => uri.to_string(),
-                                    }
-                                })
-                                .collect();
-                            Some(ok_result(lines.join("\n")))
+                            out.push(format!("références ({}):", locations.len()));
+                            for loc in &locations {
+                                out.push(format!(
+                                    "  {}",
+                                    render_location(&state.config.sandbox_root, loc).await
+                                ));
+                            }
                         }
+                        Some(ok_result(out.join("\n")))
                     }
                     Err(e) => Some(err_result(e.to_string())),
                 },
@@ -1216,7 +1367,11 @@ async fn apply_workspace_edit(sandbox_root: &Path, edit: &Value) -> anyhow::Resu
 /// Internal enum to hold parsed LSP arguments.
 enum LspArgs {
     Diagnostics(LspDiagnosticsArgs),
+    /// Déprécié — supprimé avec lsp_hover en tâche 2 (modèle de position
+    /// remplacé partout ailleurs par `LspArgs::Target`).
     Position(LspPositionArgs),
+    /// Modèle de position partagé des tools à position (tâche 01b).
+    Target(LspSymbolTarget),
     Rename(LspRenameArgs),
 }
 
@@ -1629,7 +1784,7 @@ mod tests {
             dispatch_lsp(
                 &state,
                 "lsp_definition",
-                serde_json::json!({"path": "main.rs", "line": 0, "character": 0}),
+                serde_json::json!({"path": "main.rs", "line": 1}),
             ),
         )
         .await
@@ -1638,8 +1793,20 @@ mod tests {
 
         assert!(!result["isError"].as_bool().unwrap(), "should be OK");
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("file://"), "should contain 'file://'");
-        assert!(text.contains(":0:0"), "should contain ':0:0' (0-based)");
+        // Nouvelle forme 1-based, chemin relatif + snippet (le fake renvoie
+        // désormais 2 locations : l'écho dans le workspace + une externe).
+        assert!(
+            text.contains("main.rs:1:"),
+            "should contain workspace-relative 'main.rs:1:', got: {text}"
+        );
+        assert!(
+            !text.contains(":0:0"),
+            "no more 0-based ':0:0' rendering, got: {text}"
+        );
+        assert!(
+            text.contains("file:///external/lib.rs:42"),
+            "second location (external, 0-based line 41) rendered raw as 1-based 42, got: {text}"
+        );
     }
 
     #[tokio::test]
@@ -1650,7 +1817,7 @@ mod tests {
             dispatch_lsp(
                 &state,
                 "lsp_references",
-                serde_json::json!({"path": "main.rs", "line": 0, "character": 0}),
+                serde_json::json!({"path": "main.rs", "line": 1}),
             ),
         )
         .await
@@ -1659,8 +1826,20 @@ mod tests {
 
         assert!(!result["isError"].as_bool().unwrap(), "should be OK");
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("file://"), "should contain 'file://'");
-        assert!(text.contains(":0:0"), "should contain ':0:0' (0-based)");
+        // Nouvelle forme 1-based (le fake references n'ajoute qu'une location,
+        // l'externe est propre au fake definition).
+        assert!(
+            text.contains("main.rs:1:"),
+            "should contain workspace-relative 'main.rs:1:', got: {text}"
+        );
+        assert!(
+            !text.contains(":0:0"),
+            "no more 0-based ':0:0' rendering, got: {text}"
+        );
+        assert!(
+            text.contains("références (1):"),
+            "should contain the filtered count title, got: {text}"
+        );
     }
 
     #[tokio::test]
@@ -1668,6 +1847,245 @@ mod tests {
         let (state, _tmpdir) = make_lsp_state("none").await;
         let result = dispatch_lsp(&state, "nope", serde_json::json!({})).await;
         assert!(result.is_none(), "should return None for unknown tool");
+    }
+
+    // ── Tâche 01b — wiring LspSymbolTarget + snippets ─────────────────────────
+
+    /// Test 1 — `lsp_definition` avec `symbol` : ligne cible + location écho
+    /// rendue en chemin relatif au workspace avec snippet de ligne.
+    #[tokio::test]
+    async fn lsp_definition_symbol_relative_paths_and_snippet() {
+        let (state, _tmpdir) = make_lsp_state("def_snip").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_definition",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "main"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("cible: main.rs:1: fn main() {}"),
+            "target line should carry relative path + snippet, got: {text}"
+        );
+        assert!(text.contains("défini à:"), "got: {text}");
+        assert!(
+            text.contains("main.rs:1: fn main() {}"),
+            "echo location (0-based line 0) rendered relative + snippet at :1:, got: {text}"
+        );
+    }
+
+    /// Test 2 (garde R5) — une location hors workspace est rendue **brute**,
+    /// sans snippet accolé, jamais lue.
+    #[tokio::test]
+    async fn lsp_definition_external_location_rendered_without_snippet() {
+        let (state, _tmpdir) = make_lsp_state("def_ext").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_definition",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "main"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("file:///external/lib.rs:42"),
+            "external URI rendered raw with 1-based line (41 0-based → 42), got: {text}"
+        );
+        // Pas de snippet sur la location externe (R5 : jamais lue) — vérifié en
+        // comparant la ligne brute à la forme « avec snippet ».
+        assert!(
+            !text.contains("file:///external/lib.rs:42: "),
+            "external location must NOT carry a snippet, got: {text}"
+        );
+    }
+
+    /// Test 3 — `lsp_references` aplati avec snippet + compteur.
+    #[tokio::test]
+    async fn lsp_references_flat_with_snippet() {
+        let (state, _tmpdir) = make_lsp_state("ref_snip").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_references",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "main"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("cible: main.rs:1: fn main() {}"),
+            "target line should carry snippet, got: {text}"
+        );
+        assert!(
+            text.contains("références (1):"),
+            "title count should be 1, got: {text}"
+        );
+        assert!(
+            text.contains("main.rs:1: fn main() {}"),
+            "reference rendered relative + snippet, got: {text}"
+        );
+    }
+
+    /// Test 4 — pas de tableau en réponse (fake nodiag) → ligne cible puis
+    /// `no references`, pas d'erreur.
+    #[tokio::test]
+    async fn lsp_references_empty_keeps_message() {
+        let (state, _tmpdir) = make_lsp_state_nodiag("ref_empty").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_references",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "main"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("cible: main.rs:1: fn main() {}"),
+            "target line should still render, got: {text}"
+        );
+        assert!(
+            text.contains("no references"),
+            "empty result keeps 'no references', got: {text}"
+        );
+    }
+
+    /// Test 5 (R6) — symbole trouvé 2× sur la ligne : 1re occurrence utilisée,
+    /// ambiguïté notée sur la ligne cible avec la colonne de la 2e.
+    #[tokio::test]
+    async fn lsp_definition_ambiguous_symbol_noted() {
+        let (state, tmpdir) = make_lsp_state("def_amb").await;
+        std::fs::write(tmpdir.path().join("two.rs"), "let x = f(x);\n").unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_definition",
+                serde_json::json!({"path": "two.rs", "line": 1, "symbol": "x"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("2× sur la ligne"),
+            "ambiguity R6 should be noted, got: {text}"
+        );
+        assert!(
+            text.contains("character: 11"),
+            "note should cite the 2nd occurrence 1-based column, got: {text}"
+        );
+    }
+
+    /// Test 6 — `symbol` introuvable → VNL-SBX-LSP-010 en erreur tool.
+    #[tokio::test]
+    async fn lsp_definition_symbol_not_found_returns_010() {
+        let (state, _tmpdir) = make_lsp_state("def_010").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_definition",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "nope"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(result["isError"].as_bool().unwrap(), "should be an error");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("VNL-SBX-LSP-010"),
+            "missing symbol should return VNL-SBX-LSP-010, got: {text}"
+        );
+    }
+
+    /// Test 7 — `line` requis : son absence tombe dans `invalid arguments`.
+    #[tokio::test]
+    async fn lsp_definition_line_required_invalid_args() {
+        let (state, _tmpdir) = make_lsp_state("def_noline").await;
+        let result = dispatch_lsp(
+            &state,
+            "lsp_definition",
+            serde_json::json!({"path": "main.rs"}),
+        )
+        .await
+        .expect("dispatch returned None");
+
+        assert!(result["isError"].as_bool().unwrap(), "should be an error");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("invalid arguments"),
+            "missing required 'line' should be invalid arguments, got: {text}"
+        );
+    }
+
+    /// Test 8 — schémas `lsp_tools()` des 3 tools à position alignés sur
+    /// `LspSymbolTarget`.
+    #[test]
+    fn lsp_tools_position_schemas_updated() {
+        let tools = lsp_tools();
+        let cases = [
+            ("lsp_definition", vec!["line"]),
+            ("lsp_references", vec!["line"]),
+            ("lsp_rename", vec!["line", "new_name"]),
+        ];
+        for (name, required_keys) in cases {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("{name} should be in lsp_tools()"));
+            let required = tool["inputSchema"]["required"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{name}: required should be an array"));
+            for key in required_keys {
+                assert!(
+                    required.iter().any(|r| r.as_str() == Some(key)),
+                    "{name}: required should contain '{key}', got: {required:?}"
+                );
+            }
+            let properties = tool["inputSchema"]["properties"]
+                .as_object()
+                .unwrap_or_else(|| panic!("{name}: properties should be an object"));
+            assert!(
+                properties.contains_key("symbol"),
+                "{name}: properties.symbol should be present"
+            );
+            let line_desc = tool["inputSchema"]["properties"]["line"]["description"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{name}: line description should be a string"));
+            assert!(
+                line_desc.contains("1-based"),
+                "{name}: line description should mention 1-based, got: {line_desc}"
+            );
+        }
     }
 
     /// Test with an unconfigured toolchain (empty specs) → VNL-SBX-LSP-006.
@@ -1808,25 +2226,31 @@ mod tests {
 
     #[test]
     fn lsp_rename_args_parse_ok() {
+        // Forme aplatie (LspSymbolTarget + new_name) — tâche 01b.
         let val = serde_json::json!({
             "path": "src/main.rs",
             "line": 5,
-            "character": 10,
             "new_name": "bar"
         });
         let args: LspRenameArgs = serde_json::from_value(val).unwrap();
-        assert_eq!(args.path, "src/main.rs");
-        assert_eq!(args.line, 5);
-        assert_eq!(args.character, 10);
+        assert_eq!(args.target.path, "src/main.rs");
+        assert_eq!(args.target.line, 5);
+        assert_eq!(args.target.symbol, None);
+        assert_eq!(args.target.character, None);
         assert_eq!(args.new_name, "bar");
     }
 
     #[test]
     fn lsp_rename_args_defaults() {
-        let val = serde_json::json!({ "path": "f.rs", "new_name": "x" });
+        // Forme minimale avec `line` : `symbol` et `character` valent None.
+        let val = serde_json::json!({ "path": "f.rs", "line": 1, "new_name": "x" });
         let args: LspRenameArgs = serde_json::from_value(val).unwrap();
-        assert_eq!(args.line, 0);
-        assert_eq!(args.character, 0);
+        assert_eq!(args.target.symbol, None);
+        assert_eq!(args.target.character, None);
+        // `line` est requis (LspSymbolTarget) : sans lui, erreur de parsing.
+        let missing_line = serde_json::json!({ "path": "f.rs", "new_name": "x" });
+        let result: Result<LspRenameArgs, _> = serde_json::from_value(missing_line);
+        assert!(result.is_err(), "missing required 'line' must fail parsing");
     }
 
     // ── position_to_offset unit tests ─────────────────────────────────────────
@@ -1987,7 +2411,12 @@ mod tests {
             dispatch_lsp(
                 &state,
                 "lsp_rename",
-                serde_json::json!({ "path": "main.rs", "line": 0, "character": 0, "new_name": "X" }),
+                serde_json::json!({
+                    "path": "main.rs",
+                    "line": 1,
+                    "symbol": "main",
+                    "new_name": "X"
+                }),
             ),
         )
         .await
@@ -1999,11 +2428,17 @@ mod tests {
             "should be OK (not isError)"
         );
         let text = result["content"][0]["text"].as_str().unwrap();
+        // Ligne cible antéposée au résultat actuel inchangé.
+        assert!(
+            text.contains("cible: main.rs:1: fn main() {}"),
+            "target line should be prepended, got: {text}"
+        );
         assert!(
             text.contains("/main.rs"),
             "result should contain the resolved path"
         );
-        // Check the file on disk was modified
+        // Check the file on disk was modified (le fake édite les caractères
+        // 0..2 quoi qu'il en soit).
         let disk_content = std::fs::read_to_string(_tmpdir.path().join("main.rs")).unwrap();
         assert_eq!(disk_content, "X main() {}");
     }
@@ -2016,7 +2451,12 @@ mod tests {
             dispatch_lsp(
                 &state,
                 "lsp_rename",
-                serde_json::json!({ "path": "main.rs", "line": 0, "character": 0, "new_name": "X" }),
+                serde_json::json!({
+                    "path": "main.rs",
+                    "line": 1,
+                    "symbol": "main",
+                    "new_name": "X"
+                }),
             ),
         )
         .await
@@ -2028,7 +2468,12 @@ mod tests {
             "should be OK (not isError)"
         );
         let text = result["content"][0]["text"].as_str().unwrap();
-        assert_eq!(text, "no rename");
+        // Ligne cible antéposée puis `no rename` (plus d'égalité stricte).
+        assert!(
+            text.contains("cible: main.rs:1: fn main() {}"),
+            "target line should be prepended, got: {text}"
+        );
+        assert!(text.contains("no rename"), "should contain 'no rename'");
         // File should be unchanged
         let disk_content = std::fs::read_to_string(tmpdir.path().join("main.rs")).unwrap();
         assert_eq!(disk_content, "fn main() {}");

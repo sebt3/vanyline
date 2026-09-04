@@ -342,7 +342,10 @@ while True:
             uri = params.get("textDocument", {}).get("uri", "")
             write_frame(json.dumps({
                 "jsonrpc": "2.0", "id": msg_id,
-                "result": [{"uri": uri, "range": {"start": {"line": 0}, "end": {"line": 0}}}]
+                "result": [
+                    {"uri": uri, "range": {"start": {"line": 0}, "end": {"line": 0}}},
+                    {"uri": "file:///external/lib.rs", "range": {"start": {"line": 41}, "end": {"line": 41}}}
+                ]
             }).encode("utf-8"))
         elif method == "textDocument/references":
             uri = params.get("textDocument", {}).get("uri", "")
