@@ -222,7 +222,7 @@ mod tests {
         let resp = handle_tools_list(Some(serde_json::json!(1)));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 14);
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
@@ -237,6 +237,7 @@ mod tests {
         assert!(names.contains(&"lsp_references"));
         assert!(names.contains(&"lsp_rename"));
         assert!(names.contains(&"lsp_document_symbols"));
+        assert!(names.contains(&"lsp_workspace_symbols"));
     }
 
     #[tokio::test]

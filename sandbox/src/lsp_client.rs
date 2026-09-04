@@ -252,7 +252,7 @@ pub mod lsp_test_fakes {
     /// references, rename, documentSymbol, didOpen→publishDiagnostics).
     /// Utilise le framing LSP (Content-Length) en entrée et en sortie.
     pub const FAKE_LSP_PY: &str = r#"
-import sys, json, re
+import sys, json, re, os
 
 def read_frame():
     header = b""
@@ -407,6 +407,55 @@ while True:
                 "jsonrpc": "2.0", "id": msg_id,
                 "result": result
             }).encode("utf-8"))
+        elif method == "workspace/symbol":
+            # workspace/symbol (tâche 03b) — erreur -32601 pour query vide ou
+            # "NOSUPPORT" (sentinelle de test pour la dégradation ; le query
+            # vide n'arrive jamais par le tool, requis par le schéma), sinon
+            # scan os.walk(".") (cwd = sandbox_root, cf. lsp.rs::spawn) des
+            # fichiers .rs/.ts TRIÉS (ordre déterministe), symboles dont
+            # query in name, rendu plat SymbolInformation limité à 20 entrées.
+            # Rend TOUJOURS un tableau (jamais null).
+            query = params.get("query", "")
+            if query == "" or query == "NOSUPPORT":
+                write_frame(json.dumps({
+                    "jsonrpc": "2.0", "id": msg_id,
+                    "error": {"code": -32601, "message": "unknown request"}
+                }).encode("utf-8"))
+            else:
+                files = []
+                for dirpath, _dirnames, filenames in os.walk("."):
+                    for filename in filenames:
+                        if filename.endswith(".rs") or filename.endswith(".ts"):
+                            files.append(os.path.join(dirpath, filename))
+                result = []
+                for path in sorted(files):
+                    if len(result) >= 20:
+                        break
+                    try:
+                        text = open(path).read()
+                    except Exception:
+                        continue
+                    for m in re.finditer(r"(fn|struct) (\w+)", text):
+                        if query not in m.group(2):
+                            continue
+                        line0 = text[:m.start()].count("\n")
+                        result.append({
+                            "name": m.group(2),
+                            "kind": 12 if m.group(1) == "fn" else 23,
+                            "location": {
+                                "uri": "file://" + os.path.abspath(path),
+                                "range": {
+                                    "start": {"line": line0, "character": 0},
+                                    "end": {"line": line0, "character": 1}
+                                }
+                            }
+                        })
+                        if len(result) >= 20:
+                            break
+                write_frame(json.dumps({
+                    "jsonrpc": "2.0", "id": msg_id,
+                    "result": result
+                }).encode("utf-8"))
         else:
             write_frame(json.dumps({
                 "jsonrpc": "2.0", "id": msg_id,

@@ -371,6 +371,16 @@ pub struct LspDocumentSymbolsArgs {
     pub path: String,
 }
 
+/// Args de `lsp_workspace_symbols`. `path` est un INDICE de toolchain
+/// (`toolchain_for_path` uniquement — jamais ouvert, jamais lu, R5 : aucune
+/// opération de fichier sur cette valeur).
+#[derive(serde::Deserialize)]
+pub struct LspWorkspaceSymbolsArgs {
+    pub query: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 /// Args de `lsp_rename` : position partagée + nouveau nom.
 #[derive(serde::Deserialize, Clone)]
 pub struct LspRenameArgs {
@@ -664,12 +674,13 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Schemas for the 5 LSP tools for `tools/list` (same shape as
+/// Schemas for the 6 LSP tools for `tools/list` (same shape as
 /// `vanyline_tools::mcp::filesystem_tools()` : name/description/inputSchema).
 /// Since task 02 of `lsp-agent-interface`, `lsp_hover` no longer exists as a
 /// standalone tool — hover contents are rendered by `lsp_definition`.
 /// Since task 03a, `lsp_document_symbols` (outline d'un fichier) s'ajoute à la
-/// liste — 13 tools MCP au total.
+/// liste ; since task 03b, `lsp_workspace_symbols` (recherche globale de
+/// symboles) — 14 tools MCP au total.
 pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -734,6 +745,18 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
                 "required": ["path"],
                 "properties": {
                     "path": {"type": "string", "description": "Path to the file within the sandbox workspace."}
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "lsp_workspace_symbols",
+            "description": "Search symbols by name across the whole workspace via the LSP server (workspace/symbol). Results come back ranked by relevance: path, line, kind and name. Optional path only selects which toolchain's server answers (extension must be supported: .rs, .ts/.tsx/.js/…); no file is read from it. Supported toolchains: rust, node — others return VNL-SBX-LSP-006.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": {"type": "string", "description": "Symbol name or partial name to search for."},
+                    "path": {"type": "string", "description": "Optional path of a file in the language whose server should answer (toolchain hint only — the file is not read)."}
                 }
             }
         }),
@@ -1087,9 +1110,50 @@ async fn render_document_symbols(sandbox_root: &Path, opened_uri: &str, result: 
         .join("\n")
 }
 
+/// Rendu plat du résultat `workspace/symbol` : une ligne par SymbolInformation,
+/// **ordre du serveur conservé** (les serveurs classent par pertinence — vérif
+/// R2 cluster ; re-trier détruirait le ranking). Format design §4 :
+/// `<uri relatif>:<ligne 1-based>: <kind-label> <nom>` (+ ` · <detail>` si
+/// `detail` chaîne non vide, helper `symbol_name_and_detail` de 03a réutilisé).
+/// URI rendue par `display_path_for_uri` (R5 : rendu de chemin, aucune lecture).
+/// Entrée sans `location` exploitable (ni uri) : filtrée avant rendu (même
+/// logique que `location_has_uri`). Tableau vide/null → `no symbol matching
+/// "<query>"`.
+async fn render_workspace_symbols(sandbox_root: &Path, query: &str, result: &Value) -> String {
+    let symbols: Vec<Value> = result.as_array().cloned().unwrap_or_default();
+    if symbols.is_empty() {
+        return format!("no symbol matching \"{query}\"");
+    }
+
+    let mut lines = Vec::with_capacity(symbols.len());
+    for sym in &symbols {
+        // SymbolInformation plate : `location.uri` + `location.range.start.line`.
+        let Some(loc) = sym.get("location").filter(|l| l.is_object()) else {
+            continue;
+        };
+        let Some(uri) = loc.get("uri").and_then(|u| u.as_str()) else {
+            continue;
+        };
+        let line1 = loc
+            .get("range")
+            .and_then(|r| r.get("start"))
+            .and_then(|s| s.get("line"))
+            .and_then(|l| l.as_i64())
+            .unwrap_or(0)
+            + 1;
+        let display = display_path_for_uri(sandbox_root, uri).await;
+        lines.push(format!(
+            "{display}:{line1}: {}",
+            symbol_name_and_detail(sym)
+        ));
+    }
+    // Ordre du serveur conservé : surtout pas de sort ici (voir doc ci-dessus).
+    lines.join("\n")
+}
+
 /// Dispatches a `tools/call` for `lsp_diagnostics`/`lsp_definition`/
-/// `lsp_references`/`lsp_rename`/`lsp_document_symbols`. Returns `None` if
-/// `name` is not one of these.
+/// `lsp_references`/`lsp_rename`/`lsp_document_symbols`/
+/// `lsp_workspace_symbols`. Returns `None` if `name` is not one of these.
 /// Consumes `state.lsp` (shared LSP process) and `state.config.sandbox_root`.
 pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Option<Value> {
     let lsp_tools = [
@@ -1098,9 +1162,91 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         "lsp_references",
         "lsp_rename",
         "lsp_document_symbols",
+        "lsp_workspace_symbols",
     ];
     if !lsp_tools.contains(&name) {
         return None;
+    }
+
+    // Tâche 03b — `lsp_workspace_symbols` : bloc DÉDIÉ avant le préambule
+    // partagé confine/lecture/toolchain ci-dessous. Ce tool n'a AUCUN fichier
+    // à confiner ni à lire : il sort de la chaîne (confine → lecture raw →
+    // toolchain → …) et se traite par la sienne (sélection toolchain →
+    // get_or_spawn → initialize → request), SANS `ensure_open` — rien n'est
+    // ouvert. Le `path` optionnel n'est qu'un indice de toolchain
+    // (`toolchain_for_path`), jamais un chemin résolu, confiné ou lu (R5).
+    if name == "lsp_workspace_symbols" {
+        let args: LspWorkspaceSymbolsArgs = match serde_json::from_value(arguments) {
+            Ok(a) => a,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+
+        // Sélection de toolchain : indice explicite (`toolchain_for_path` sur
+        // la valeur brute, sans jamais y toucher autrement), sinon première
+        // toolchain LSP configurée dans l'ordre `rust`, `node`.
+        let toolchain = match &args.path {
+            Some(hint) => match toolchain_for_path(hint) {
+                Some((tc, _language_id)) => tc,
+                None => {
+                    // Un indice invalide est une erreur, pas un indice
+                    // silencieusement ignoré.
+                    return Some(err_result(
+                        "VNL-SBX-LSP-006: no LSP configured for that extension".to_string(),
+                    ));
+                }
+            },
+            None => match ["rust", "node"].into_iter().find(|tc| state.lsp.has(tc)) {
+                Some(tc) => tc,
+                None => {
+                    return Some(err_result(
+                        "VNL-SBX-LSP-006: no LSP toolchain configured in this sandbox".to_string(),
+                    ));
+                }
+            },
+        };
+
+        let session = match state.lsp.get_or_spawn(toolchain).await {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return Some(err_result(format!(
+                    "VNL-SBX-LSP-006: no LSP configured for toolchain {toolchain}"
+                )));
+            }
+            Err(e) => return Some(err_result(e.to_string())),
+        };
+
+        let root_uri = format!("file://{}", state.config.sandbox_root.display());
+        let mut client = LspClient::new(session, root_uri);
+        if let Err(e) = client.initialize().await {
+            return Some(err_result(e.to_string()));
+        }
+        return match client
+            .request("workspace/symbol", serde_json::json!({"query": args.query}))
+            .await
+        {
+            Ok(result) => Some(ok_result(
+                render_workspace_symbols(&state.config.sandbox_root, &args.query, &result).await,
+            )),
+            Err(e) => {
+                // Dégradation méthode absente (design §4 : « message clair,
+                // pas un fallback ») : l'erreur de `lsp_client::request`
+                // embarque l'objet error JSON-RPC sérialisé, donc la
+                // sous-chaîne `"code":-32601` est déterministe. Rendu en
+                // SUCCÈS (ok_result, pas err_result) — et jamais un fallback
+                // grep.
+                if e.to_string().contains("\"code\":-32601") {
+                    tracing::debug!("workspace/symbol not supported by {toolchain} LSP: {e}");
+                    Some(ok_result(
+                        "this LSP server does not support workspace/symbol (method not found) \
+                         — use lsp_document_symbols per file"
+                            .to_string(),
+                    ))
+                } else {
+                    // Toute autre erreur → comportement -005 existant.
+                    Some(err_result(e.to_string()))
+                }
+            }
+        };
     }
 
     // Step 2: parse arguments
@@ -3444,6 +3590,190 @@ mod tests {
         assert!(
             text.contains("VNL-SBX-LSP-006"),
             "no LSP for extension should return VNL-SBX-LSP-006, got: {text}"
+        );
+    }
+
+    // ── Tâche 03b — lsp_workspace_symbols ─────────────────────────────────────
+
+    /// Helper : harness `make_lsp_state` (seule toolchain « rust » configurée,
+    /// le fallback `["rust","node"]` sélectionne donc rust) + `src/main.rs`
+    /// avec `struct Config` L1 et `fn helper` L3 (0-based 0 et 2).
+    async fn make_workspace_symbols_state(name: &str) -> (AppState, tempfile::TempDir) {
+        let (state, tmpdir) = make_lsp_state(name).await;
+        std::fs::create_dir_all(tmpdir.path().join("src")).unwrap();
+        std::fs::write(
+            tmpdir.path().join("src/main.rs"),
+            "struct Config {\n}\nfn helper() {}\n",
+        )
+        .unwrap();
+        (state, tmpdir)
+    }
+
+    /// Test 1 — format design §4 : `<chemin>:<ligne 1-based>: <kind> <nom>`,
+    /// pas de `·` sans detail.
+    #[tokio::test]
+    async fn lsp_workspace_symbols_flat_design_format() {
+        let (state, _tmpdir) = make_workspace_symbols_state("wssym_format").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_workspace_symbols",
+                serde_json::json!({"query": "Config"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.contains(&"src/main.rs:1: struct Config"),
+            "flat line 'chemin:ligne 1-based: kind nom', got: {text}"
+        );
+        assert!(!text.contains('·'), "no '·' without detail, got: {text}");
+    }
+
+    /// Test 2 — le `query` filtre par sous-chaîne du nom (le fake applique
+    /// `query in name` ; le serveur réel rend déjà filtré + ranké).
+    #[tokio::test]
+    async fn lsp_workspace_symbols_query_filters_and_keeps_server_order() {
+        let (state, _tmpdir) = make_workspace_symbols_state("wssym_filter").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_workspace_symbols",
+                serde_json::json!({"query": "helper"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("struct Config"),
+            "query 'helper' must not surface the Config symbol, got: {text}"
+        );
+        assert!(
+            text.contains("src/main.rs:3: fn helper"),
+            "should contain the helper line (0-based line 2 rendered 3), got: {text}"
+        );
+    }
+
+    /// Test 3 — un `path` d'extension non supportée est une ERREUR (-006),
+    /// pas un indice silencieusement ignoré. Le fichier n'a même pas à exister
+    /// (il n'est jamais lu).
+    #[tokio::test]
+    async fn lsp_workspace_symbols_bad_hint_is_error() {
+        let (state, _tmpdir) = make_workspace_symbols_state("wssym_badhint").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_workspace_symbols",
+                serde_json::json!({"query": "x", "path": "a.py"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(result["isError"].as_bool().unwrap(), "should be an error");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("VNL-SBX-LSP-006"),
+            "bad toolchain hint should return VNL-SBX-LSP-006, got: {text}"
+        );
+    }
+
+    /// Test 4 — assertion forte du « jamais lu » : un `path` d'indice
+    /// INEXISTANT ne casse rien (jamais chemin résolu, jamais confiné,
+    /// jamais lu — résultat identique à sans path).
+    #[tokio::test]
+    async fn lsp_workspace_symbols_hint_with_known_extension_ok() {
+        let (state, _tmpdir) = make_workspace_symbols_state("wssym_hint").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_workspace_symbols",
+                serde_json::json!({"query": "Config", "path": "inexistant.rs"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "nonexistent .rs hint must not fail (never read), got: {}",
+            result["content"][0]["text"]
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("src/main.rs:1: struct Config"),
+            "same results as without path, got: {text}"
+        );
+    }
+
+    /// Test 5 — aucun symbole rendu → succès au message explicite.
+    #[tokio::test]
+    async fn lsp_workspace_symbols_no_match() {
+        let (state, _tmpdir) = make_workspace_symbols_state("wssym_nomatch").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_workspace_symbols",
+                serde_json::json!({"query": "ZZZ"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "no match is a success, not an error"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("no symbol matching \"ZZZ\""),
+            "empty result renders the explicit no-match message, got: {text}"
+        );
+    }
+
+    /// Test 6 — méthode absente (-32601) : DÉGRADATION en message clair
+    /// (isError FALSE), pas une erreur, jamais un fallback grep.
+    #[tokio::test]
+    async fn lsp_workspace_symbols_method_missing_degrades() {
+        let (state, _tmpdir) = make_workspace_symbols_state("wssym_nosupport").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_workspace_symbols",
+                serde_json::json!({"query": "NOSUPPORT"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "-32601 must degrade to a clear message, not an error, got: {}",
+            result["content"][0]["text"]
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("method not found"),
+            "degradation message should mention 'method not found', got: {text}"
         );
     }
 }
