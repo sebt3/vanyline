@@ -365,6 +365,12 @@ pub struct LspDiagnosticsArgs {
     pub path: String,
 }
 
+/// Args de `lsp_document_symbols`.
+#[derive(serde::Deserialize)]
+pub struct LspDocumentSymbolsArgs {
+    pub path: String,
+}
+
 /// Args de `lsp_rename` : position partagée + nouveau nom.
 #[derive(serde::Deserialize, Clone)]
 pub struct LspRenameArgs {
@@ -536,6 +542,35 @@ fn location_has_uri(loc: &serde_json::Value) -> bool {
         || loc.get("targetUri").and_then(|u| u.as_str()).is_some()
 }
 
+/// Chemin d'affichage d'une URI `file://` : sous `sandbox_root` → chemin relatif
+/// au workspace (préfixe `file://{root}/` retiré, sinon chemin confiné résolu) ;
+/// hors workspace ou non-`file://` → URI brute.
+///
+/// Sécurité (design R5) : `confine` avant tout — cette fonction ne fait
+/// **aucune lecture**, c'est un rendu de chemin. Un appelant qui veut lire
+/// derrière l'URI doit lui-même `confine` (cf. `render_location`). Extraite de
+/// `render_location` (tâche 03a), réutilisée par `lsp_document_symbols`.
+async fn display_path_for_uri(sandbox_root: &std::path::Path, uri: &str) -> String {
+    let confined = match uri.strip_prefix("file://") {
+        Some(raw_path) => confine(sandbox_root, raw_path).await.ok(),
+        None => None,
+    };
+    match confined {
+        Some(resolved) => {
+            let root_prefix = format!("file://{}/", sandbox_root.display());
+            match uri.strip_prefix(&root_prefix) {
+                Some(rel) => rel.to_string(),
+                None => resolved,
+            }
+        }
+        None => {
+            // URI non-`file://` ou hors workspace : rendu brut, aucune lecture tentée.
+            tracing::debug!("LSP location outside workspace, rendered raw: {uri}");
+            uri.to_string()
+        }
+    }
+}
+
 /// Rend un résultat de localisation LSP dans le texte rendu aux agents
 /// (helpers des tâches 2, 4, 5, 6 — réutilisé tel quel).
 ///
@@ -570,18 +605,15 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
         .and_then(|s| s.get("line"))
         .and_then(|l| l.as_u64());
 
-    // R5 : confine AVANT toute lecture — la lecture ci-dessous ne porte que
-    // sur le chemin résolu rendu par `confine`, jamais sur l'URI brute.
-    let confined = match raw_uri.strip_prefix("file://") {
-        Some(raw_path) => confine(sandbox_root, raw_path).await.ok(),
-        None => None,
-    };
-    if let Some(resolved) = confined {
-        let root_prefix = format!("file://{}/", sandbox_root.display());
-        let display_path = match raw_uri.strip_prefix(&root_prefix) {
-            Some(rel) => rel.to_string(),
-            None => resolved.clone(),
-        };
+    // R5 : confine AVANT toute lecture — le chemin d'affichage passe par
+    // `display_path_for_uri` (qui confine en son sein : relatif si confiné,
+    // URI brute sinon) ; la confine ci-dessous ne sert qu'à armer la lecture
+    // du snippet, qui ne porte que sur le chemin confiné résolu, jamais sur
+    // l'URI brute. Sortie identique à l'état pré-extraction (tests 01b).
+    let display_path = display_path_for_uri(sandbox_root, raw_uri).await;
+    if let Some(raw_path) = raw_uri.strip_prefix("file://")
+        && let Some(resolved) = confine(sandbox_root, raw_path).await.ok()
+    {
         let Some(line0) = line0 else {
             return display_path;
         };
@@ -600,8 +632,8 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
         };
     }
 
-    // URI non-`file://` ou hors workspace : rendu brut, aucune lecture tentée.
-    tracing::debug!("LSP location outside workspace, rendered raw: {raw_uri}");
+    // URI non-`file://` ou hors workspace : rendu brut, aucune lecture tentée
+    // (`display_path_for_uri` a rendu l'URI brute et déjà tracé le debug).
     match line0 {
         Some(line0) => format!("{raw_uri}:{}", line0 + 1),
         None => raw_uri.to_string(),
@@ -632,10 +664,12 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Schemas for the 4 LSP tools for `tools/list` (same shape as
+/// Schemas for the 5 LSP tools for `tools/list` (same shape as
 /// `vanyline_tools::mcp::filesystem_tools()` : name/description/inputSchema).
 /// Since task 02 of `lsp-agent-interface`, `lsp_hover` no longer exists as a
 /// standalone tool — hover contents are rendered by `lsp_definition`.
+/// Since task 03a, `lsp_document_symbols` (outline d'un fichier) s'ajoute à la
+/// liste — 13 tools MCP au total.
 pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -689,6 +723,17 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
                     "symbol": {"type": "string", "description": "Identifier name to target on that line (recommended). Resolved to the first delimited-identifier occurrence; if it appears several times the first is used and the answer says so."},
                     "character": {"type": "integer", "description": "1-based column, precise targeting when symbol is absent or ambiguous. Ignored when symbol is set."},
                     "new_name": {"type": "string", "description": "New name for the symbol."}
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "lsp_document_symbols",
+            "description": "Outline a file's symbols (functions, structs, etc.) with kinds, signatures and line numbers via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path"],
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file within the sandbox workspace."}
                 }
             }
         }),
@@ -896,8 +941,155 @@ fn severity_label(severity: i64) -> &'static str {
     }
 }
 
+/// Étiquette d'affichage d'un `SymbolKind` LSP (1..=26). Inconnu (0, >26) →
+/// format "symbol{n}" (d'où le retour `String`, pas `&'static str`).
+fn symbol_kind_label(kind: i64) -> String {
+    match kind {
+        1 => "file",
+        2 => "module",
+        3 => "namespace",
+        4 => "package",
+        5 => "class",
+        6 => "method",
+        7 => "property",
+        8 => "field",
+        9 => "constructor",
+        10 => "enum",
+        11 => "interface",
+        12 => "fn",
+        13 => "var",
+        14 => "constant",
+        15 => "string",
+        16 => "number",
+        17 => "boolean",
+        18 => "array",
+        19 => "object",
+        20 => "key",
+        21 => "null",
+        22 => "enumMember",
+        23 => "struct",
+        24 => "event",
+        25 => "operator",
+        26 => "typeParameter",
+        _ => return format!("symbol{kind}"),
+    }
+    .to_string()
+}
+
+/// Partie commune d'une ligne de symbole (lsp_document_symbols) :
+/// `"{kind-label} {name}"` + `" · {detail}"` si `detail` est une chaîne non
+/// vide (c'est là que les serveurs mettent la signature d'un DocumentSymbol).
+fn symbol_name_and_detail(sym: &Value) -> String {
+    let kind = sym.get("kind").and_then(|k| k.as_i64()).unwrap_or(0);
+    let name = sym.get("name").and_then(|n| n.as_str()).unwrap_or("");
+    let mut label = format!("{} {name}", symbol_kind_label(kind));
+    if let Some(detail) = sym
+        .get("detail")
+        .and_then(|d| d.as_str())
+        .filter(|d| !d.is_empty())
+    {
+        label.push_str(&format!(" · {detail}"));
+    }
+    label
+}
+
+/// Rend une entrée `DocumentSymbol` (forme hiérarchique — possède
+/// `selectionRange`) et ses `children` récursés **après** le parent dans
+/// `lines`, indentée de 2 espaces par niveau. Ligne rendue 1-based depuis
+/// `selectionRange.start.line`.
+fn render_document_symbol_entry(sym: &Value, depth: usize, lines: &mut Vec<String>) {
+    let indent = "  ".repeat(depth);
+    let line1 = sym
+        .get("selectionRange")
+        .and_then(|r| r.get("start"))
+        .and_then(|s| s.get("line"))
+        .and_then(|l| l.as_i64())
+        .unwrap_or(0)
+        + 1;
+    lines.push(format!(
+        "{indent}{} — L{line1}",
+        symbol_name_and_detail(sym)
+    ));
+    if let Some(children) = sym.get("children").and_then(|c| c.as_array()) {
+        for child in children {
+            render_document_symbol_entry(child, depth + 1, lines);
+        }
+    }
+}
+
+/// Rend le résultat de `textDocument/documentSymbol` pour `lsp_document_symbols`.
+///
+/// Résultat normalisé en tableau ; chaque entrée est soit **SymbolInformation**
+/// (forme plate — possède `location` : c'est celle que rendent réellement
+/// rust-analyzer ET typescript-language-server avec `capabilities: {}`, vérif
+/// R2 sur cluster), soit **DocumentSymbol** (hiérarchique — possède
+/// `selectionRange`) :
+/// - ligne = `"{kind-label} {name}"` + (` · {detail}` si `detail` chaîne non
+///   vide) + `" — L{n}"` (1-based : `selectionRange.start.line` du DocumentSymbol
+///   ou `location.range.start.line` du SymbolInformation) ;
+/// - plates triées par `(line, name)` — le serveur peut ne pas être ordonné ;
+/// - plate dont le `location.uri` diffère du fichier ouvert → préfixé du chemin
+///   d'affichage (`display_path_for_uri`, R5 : rendu de chemin, aucune lecture) ;
+/// - DocumentSymbol : arbre indenté (2 espaces par niveau), children après le
+///   parent, ordre du serveur conservé ;
+/// - tableau vide (ou null) → message explicite, distinct d'un échec de requête
+///   (même cohérence « pas encore analysé » qu'un `lsp_diagnostics` vide).
+async fn render_document_symbols(sandbox_root: &Path, opened_uri: &str, result: &Value) -> String {
+    let symbols: Vec<Value> = result.as_array().cloned().unwrap_or_default();
+    if symbols.is_empty() {
+        return "no symbols (file analyzed yet — the outline is empty)".to_string();
+    }
+
+    // Entrées plates : (ligne, nom, rendu) — triées par (ligne, nom) avant
+    // rendu. Entrées hiérarchiques : rendues dans l'ordre du serveur, children
+    // déjà attachés sous leur parent.
+    let mut flats: Vec<(i64, String, String)> = Vec::new();
+    let mut tree_lines: Vec<String> = Vec::new();
+
+    for sym in &symbols {
+        if let Some(loc) = sym.get("location").filter(|l| l.is_object()) {
+            // SymbolInformation (forme plate réellement observée, R2).
+            let line1 = loc
+                .get("range")
+                .and_then(|r| r.get("start"))
+                .and_then(|s| s.get("line"))
+                .and_then(|l| l.as_i64())
+                .unwrap_or(0)
+                + 1;
+            let name = sym
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or("")
+                .to_string();
+            let mut rendered = format!("{} — L{line1}", symbol_name_and_detail(sym));
+            if let Some(uri) = loc.get("uri").and_then(|u| u.as_str())
+                && uri != opened_uri
+            {
+                let display = display_path_for_uri(sandbox_root, uri).await;
+                rendered = format!("{display}: {rendered}");
+            }
+            flats.push((line1, name, rendered));
+        } else if sym.get("selectionRange").is_some() {
+            // DocumentSymbol (forme hiérarchique).
+            render_document_symbol_entry(sym, 0, &mut tree_lines);
+        }
+        // Entrée sans `location` ni `selectionRange` : aucune ligne exploitable,
+        // filtrée avant rendu (même logique que `location_has_uri`).
+    }
+
+    flats.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    flats
+        .iter()
+        .map(|(_, _, rendered)| rendered)
+        .chain(tree_lines.iter())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Dispatches a `tools/call` for `lsp_diagnostics`/`lsp_definition`/
-/// `lsp_references`/`lsp_rename`. Returns `None` if `name` is not one of these.
+/// `lsp_references`/`lsp_rename`/`lsp_document_symbols`. Returns `None` if
+/// `name` is not one of these.
 /// Consumes `state.lsp` (shared LSP process) and `state.config.sandbox_root`.
 pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Option<Value> {
     let lsp_tools = [
@@ -905,6 +1097,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         "lsp_definition",
         "lsp_references",
         "lsp_rename",
+        "lsp_document_symbols",
     ];
     if !lsp_tools.contains(&name) {
         return None;
@@ -923,6 +1116,12 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
         };
         LspArgs::Rename(args)
+    } else if name == "lsp_document_symbols" {
+        let args: LspDocumentSymbolsArgs = match serde_json::from_value(arguments.clone()) {
+            Ok(a) => a,
+            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+        };
+        LspArgs::DocumentSymbols(args)
     } else {
         // `lsp_definition` / `lsp_references` : modèle de position partagé,
         // `line` requis (son absence tombe dans le `invalid arguments` ci-dessus).
@@ -935,6 +1134,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
 
     let raw_path = match &args {
         LspArgs::Diagnostics(a) => &a.path,
+        LspArgs::DocumentSymbols(a) => &a.path,
         LspArgs::Target(a) => &a.path,
         LspArgs::Rename(a) => &a.target.path,
     };
@@ -962,11 +1162,14 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     // 0-based pour les tools à target, avec ligne cible pré-construite —
     // snippet lu dans le `text` déjà lu par le dispatch (pas de re-lecture)
     // et note d'ambiguïté R6 le cas échéant. `Err` porte déjà
-    // VNL-SBX-LSP-007/VNL-SBX-LSP-010. `lsp_diagnostics` ne passe pas ici.
+    // VNL-SBX-LSP-007/VNL-SBX-LSP-010. `lsp_diagnostics` et
+    // `lsp_document_symbols` (tâche 03a — pas de position cible) ne passent
+    // pas ici.
     let symbol_target: Option<&LspSymbolTarget> = match &args {
         LspArgs::Target(t) => Some(t),
         LspArgs::Rename(r) => Some(&r.target),
         LspArgs::Diagnostics(_) => None,
+        LspArgs::DocumentSymbols(_) => None,
     };
     let target_info = match symbol_target {
         None => None,
@@ -1252,6 +1455,35 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                 (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
             }
         }
+        // Tâche 03a — `lsp_document_symbols` : enchaînement identique à
+        // `lsp_diagnostics` (confine → lecture → toolchain → session →
+        // initialize → ensure_open → requête, tout cela au-dessus de ce
+        // `match`), puis rendu des symboles (plates triées / arbre indenté).
+        "lsp_document_symbols" => {
+            match (
+                client.initialize().await,
+                client.ensure_open(&file_uri, language_id, &text).await,
+            ) {
+                (Ok(_), Ok(())) => match client
+                    .request(
+                        "textDocument/documentSymbol",
+                        serde_json::json!({
+                            "textDocument": {"uri": file_uri}
+                        }),
+                    )
+                    .await
+                {
+                    Ok(result) => Some(ok_result(
+                        render_document_symbols(&state.config.sandbox_root, &file_uri, &result)
+                            .await,
+                    )),
+                    // Erreurs requête → err_result (comportement -005 existant
+                    // inchangé).
+                    Err(e) => Some(err_result(e.to_string())),
+                },
+                (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
+            }
+        }
         _ => unreachable!(),
     }
 }
@@ -1495,6 +1727,8 @@ enum LspArgs {
     /// Modèle de position partagé des tools à position (tâche 01b).
     Target(LspSymbolTarget),
     Rename(LspRenameArgs),
+    /// Args de `lsp_document_symbols` (tâche 03a) — simple `path`.
+    DocumentSymbols(LspDocumentSymbolsArgs),
 }
 
 #[cfg(test)]
@@ -3037,5 +3271,179 @@ mod tests {
         assert_eq!(minimal.line, 3);
         assert_eq!(minimal.symbol, None);
         assert_eq!(minimal.character, None);
+    }
+
+    // ── Tâche 03a — lsp_document_symbols ──────────────────────────────────────
+
+    #[test]
+    fn symbol_kind_label_known_and_unknown() {
+        assert_eq!(symbol_kind_label(12), "fn");
+        assert_eq!(symbol_kind_label(23), "struct");
+        assert_eq!(symbol_kind_label(26), "typeParameter");
+        assert_eq!(symbol_kind_label(99), "symbol99");
+        assert_eq!(symbol_kind_label(0), "symbol0");
+    }
+
+    #[tokio::test]
+    async fn display_path_for_uri_relative_outside_and_foreign() {
+        let root = make_root();
+        // tmpdir est canonique sur Linux ; on construit l'URI sur le chemin
+        // canoniqué pour que le préfixe `file://{root}/` matche.
+        let inside = format!(
+            "file://{}/sub/file.txt",
+            std::fs::canonicalize(root.path()).unwrap().display()
+        );
+        assert_eq!(
+            display_path_for_uri(root.path(), &inside).await,
+            "sub/file.txt",
+            "URI sous la racine rendue en chemin relatif au workspace"
+        );
+        assert_eq!(
+            display_path_for_uri(root.path(), "file:///etc/passwd").await,
+            "file:///etc/passwd",
+            "URI hors workspace rendue brute"
+        );
+        assert_eq!(
+            display_path_for_uri(root.path(), "http://x").await,
+            "http://x",
+            "URI non-`file://` rendue brute"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_document_symbols_flat_sorted() {
+        let (state, tmpdir) = make_lsp_state("docsym_flat").await;
+        // Le scan du fake trouve struct Config L1, fn helper L2, fn main L3.
+        std::fs::write(
+            tmpdir.path().join("main.rs"),
+            "struct Config { }\nfn helper() {}\nfn main() {}",
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_document_symbols",
+                serde_json::json!({"path": "main.rs"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // Lignes exactes : pas de préfixe d'URI (même fichier que celui ouvert).
+        assert!(
+            lines.contains(&"struct Config — L1"),
+            "flat entry rendered 'kind-label name — L(n, 1-based)', got: {text}"
+        );
+        assert!(
+            lines.contains(&"fn helper — L2"),
+            "flat entry rendered 'kind-label name — L(n, 1-based)', got: {text}"
+        );
+        assert!(
+            lines.contains(&"fn main — L3"),
+            "flat entry rendered 'kind-label name — L(n, 1-based)', got: {text}"
+        );
+        // Rendu trié par ligne (le fake rend l'ordre du scan ; le serveur réel
+        // peut ne pas être ordonné — le rendu trie).
+        let idx = |needle: &str| lines.iter().position(|l| *l == needle).unwrap();
+        assert!(
+            idx("struct Config — L1") < idx("fn helper — L2")
+                && idx("fn helper — L2") < idx("fn main — L3"),
+            "flat entries must be sorted by line, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_document_symbols_hierarchical_indented() {
+        let (state, tmpdir) = make_lsp_state("docsym_hier").await;
+        // Le marqueur HIER fait rendre au fake la forme DocumentSymbol :
+        // Outer (struct, L1, detail "struct Outer") + child run (method, L3,
+        // detail "() -> ()").
+        std::fs::write(tmpdir.path().join("hier.rs"), "HIER\nfn outer() {}").unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_document_symbols",
+                serde_json::json!({"path": "hier.rs"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.contains(&"struct Outer · struct Outer — L1"),
+            "parent rendered with kind-label, name, detail and 1-based line, got: {text}"
+        );
+        // Le fake rend `"kind":6` (contrat §Fake du fichier de tâche) → la
+        // table `symbol_kind_label` rend "method" (6 = Method dans la spec
+        // LSP, comme dans le contrat). La ligne attendue « fn run » du §Tests
+        // du fichier de tâche est en écart avec le §Contrats ; le contrat
+        // primeiro (voir rapport de tâche).
+        assert!(
+            lines.contains(&"  method run · () -> () — L3"),
+            "child recursed after parent, indented 2 spaces, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_document_symbols_empty_message() {
+        let (state, tmpdir) = make_lsp_state("docsym_empty").await;
+        // Aucun fn/struct → le fake répond `[]` : succès au message explicite,
+        // distinct d'un échec de requête.
+        std::fs::write(tmpdir.path().join("empty.rs"), "// nothing\n").unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_document_symbols",
+                serde_json::json!({"path": "empty.rs"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "empty symbol array is a success, not an error"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("no symbols"),
+            "empty array renders the explicit 'no symbols' message, got: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lsp_document_symbols_no_toolchain_for_extension() {
+        let (state, tmpdir) = make_lsp_state("docsym_noext").await;
+        std::fs::write(tmpdir.path().join("main.py"), "x = 1").unwrap();
+
+        let result = dispatch_lsp(
+            &state,
+            "lsp_document_symbols",
+            serde_json::json!({"path": "main.py"}),
+        )
+        .await
+        .expect("dispatch returned None");
+
+        assert!(result["isError"].as_bool().unwrap(), "should be an error");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("VNL-SBX-LSP-006"),
+            "no LSP for extension should return VNL-SBX-LSP-006, got: {text}"
+        );
     }
 }

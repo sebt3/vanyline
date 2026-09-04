@@ -249,10 +249,10 @@ pub mod lsp_test_fakes {
     use crate::lsp::{LspManager, LspToolchain};
 
     /// Script Python factice : implémente un mini LSP (initialize, hover, definition,
-    /// references, didOpen→publishDiagnostics).
+    /// references, rename, documentSymbol, didOpen→publishDiagnostics).
     /// Utilise le framing LSP (Content-Length) en entrée et en sortie.
     pub const FAKE_LSP_PY: &str = r#"
-import sys, json
+import sys, json, re
 
 def read_frame():
     header = b""
@@ -364,6 +364,48 @@ while True:
                         ]
                     }
                 }
+            }).encode("utf-8"))
+        elif method == "textDocument/documentSymbol":
+            # documentSymbol — le fake couvre les DEUX formes du contrat : si le
+            # fichier contient HIER, forme DocumentSymbol (hiérarchique : range +
+            # selectionRange + detail = signature + children) ; sinon forme plate
+            # SymbolInformation — celle que rust-analyzer ET
+            # typescript-language-server rendent réellement avec capabilities: {}
+            # (vérification R2 sur cluster). Réponse toujours un tableau JSON.
+            uri = params.get("textDocument", {}).get("uri", "")
+            try:
+                text = open(uri.removeprefix("file://")).read()
+            except Exception:
+                text = ""
+            if "HIER" in text:
+                result = [{
+                    "name": "Outer", "kind": 23, "detail": "struct Outer",
+                    "range": {"start": {"line": 0, "character": 0}, "end": {"line": 3, "character": 1}},
+                    "selectionRange": {"start": {"line": 0, "character": 7}, "end": {"line": 0, "character": 12}},
+                    "children": [{
+                        "name": "run", "kind": 6, "detail": "() -> ()",
+                        "range": {"start": {"line": 2, "character": 4}, "end": {"line": 2, "character": 14}},
+                        "selectionRange": {"start": {"line": 2, "character": 7}, "end": {"line": 2, "character": 10}}
+                    }]
+                }]
+            else:
+                result = []
+                for m in re.finditer(r"(fn|struct) (\w+)", text):
+                    line0 = text[:m.start()].count("\n")
+                    result.append({
+                        "name": m.group(2),
+                        "kind": 12 if m.group(1) == "fn" else 23,
+                        "location": {
+                            "uri": uri,
+                            "range": {
+                                "start": {"line": line0, "character": 0},
+                                "end": {"line": line0, "character": 1}
+                            }
+                        }
+                    })
+            write_frame(json.dumps({
+                "jsonrpc": "2.0", "id": msg_id,
+                "result": result
             }).encode("utf-8"))
         else:
             write_frame(json.dumps({
