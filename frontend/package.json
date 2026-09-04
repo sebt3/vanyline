@@ -27,7 +27,7 @@
     "@comark/vue": "^0.6.2",
     "@gitgraph/js": "^1.4.0",
     "@nuxt/ui": "^4.10.0",
-    "@vueuse/core": "^14.3.0",
+    "@vueuse/core": "^14.4.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "ai": "^7.0.66",
