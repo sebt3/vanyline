@@ -177,8 +177,11 @@ premier, à vérifier pour typescript-language-server).
 - `lsp_document_symbols { path }` → `textDocument/documentSymbol`, rendu en arbre
   indenté : `kind` + nom + signature + `L<line>`. Remplace N `read_file` pour
   comprendre la structure d'un fichier.
-- `lsp_workspace_symbols { query }` → `workspace/symbol`, rendu plat :
+- `lsp_workspace_symbols { query, path? }` → `workspace/symbol`, rendu plat :
   `<uri relatif>:<line>: <kind> <nom>`. « Où est `AuthState` ? » en une requête.
+  `path` optionnel — arbitrage développeur 2026-09-04 : sert uniquement de **choix de
+  toolchain** (`toolchain_for_path`, jamais ouvert/lisi) ; sans lui, première toolchain
+  LSP configurée dans l'ordre `rust`, `node`.
 
 > Risque : support `documentSymbol` / `workspace/symbol` par
 > typescript-language-server **et** rust-analyzer **non vérifié à ce jour** (contrairement
