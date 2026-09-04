@@ -1791,7 +1791,7 @@ TypeScript (`workspaces: ["frontend", "packages/*"]` ; `ext/` ajouté par F3).
 | `frontend/` | app | Shell IDE web : éditeur/explorer/terminal + configuration, cliente de l'app Rust (REST + WS) — voir section "Frontend — shell IDE Vue" plus haut | Vite, Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI, Vitest |
 | `packages/protocol` (`@vanyline/protocol`) | lib feuille | Types partagés Rust↔TS + client RPC | TypeScript pur, zéro dépendance UI |
 | `packages/ui` (`@vanyline/ui`) | lib | Composants chat + les 6 écrans de configuration + `ConfigShell`, **agnostiques du backend** (ports injectés) | Vue 3, `@nuxt/ui`, `reka-ui`, `@ai-sdk/vue`, `@comark/vue` |
-| `ext/` *(F3)* | app | Extension VS Code : front-end graphique du CLI via JSON-RPC stdio | Host TS + webview Vue |
+| `ext/` *(F3–F5)* | app | Extension VS Code : front-end graphique du CLI via JSON-RPC stdio (chat, configuration, `TreeView` ressources K8s) | Host TS + webview Vue |
 
 ### `@vanyline/protocol`
 
@@ -1858,9 +1858,10 @@ Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`
   `SettingsView.vue` ≈ 20 lignes : monte `ConfigShell` + `provide(CONFIG_REPO_KEY,
   httpConfigRepo())`.
 
-### Extension VS Code — `ext/` (F3, F4)
+### Extension VS Code — `ext/` (F3, F4, F5)
 
-Front-end graphique du CLI : sidebar de chat **et** panneau de configuration dans
+Front-end graphique du CLI : sidebar de chat, panneau de configuration **et** vue
+arborescente des ressources Kubernetes (Owners › Projects › Sandboxes) dans
 VS Code / code-server, pilotant une CLI `vanyline serve --stdio` locale que
 l'extension **télécharge et met à jour seule**. Deux bundles séparés : **host**
 (esbuild, `dist/extension/index.js`, CommonJS Node) et **webview** (Vite + Vue,
@@ -1877,6 +1878,7 @@ l'extension **télécharge et met à jour seule**. Deux bundles séparés : **ho
 | `supervisor.ts` | Machine à états pure du cycle de vie : backoff exponentiel plafonné (`1s×2ⁿ`, max 30s, 5 essais), fenêtre de stabilité 60s → reset compteur, `restart()` manuel repart de zéro même depuis `erreur`, `stop()` sans auto-redémarrage. `generation` invalide les timers/await en vol. |
 | `panels/chat.ts` | `WebviewViewProvider` sur `vanyline.chatView`, `retainContextWhenHidden`. Abonne `chat/event` sur le handle courant, ré-abonne au restart. |
 | `panels/config.ts` *(F4)* | Panel éditeur `vanyline.config` (`ViewColumn.Active`, `retainContextWhenHidden`) — **panel unique** réutilisé (`reveal()` si déjà ouvert). Attaché au superviseur comme le chat (relais des requêtes uniquement, aucun abonnement notification : `config/changed` naît des writes, pas d'une notification CLI). |
+| `panels/resources.ts` *(F5)* | `TreeView` native `vanyline.resources` (100 % host — **pas de webview, pas de `RELAY_WHITELIST`** : parle au `RpcConnection` du handle en direct via `resources.ts`). Colle vscode uniquement : `createTreeView`, mapping `ResourceNode`→`TreeItem` (icône par phase, `contextValue` = `kind` pour les menus), `EventEmitter` `onDidChangeTreeData` (**seul mécanisme de refresh d'une `TreeView`** — pas de `TreeView.refresh()`), titre = `Resources` / description = namespace résolu (rafraîchi après chaque `getChildren` car le namespace n'est connu qu'après la 1ʳᵉ liste RPC). `registerRun` : 6 commandes `vanyline.{project,sandbox}.*` → `run*` de `resources.ts`, puis refresh + `showInformationMessage` (succès) / `showErrorMessage` (échec, jamais sur annulation). |
 | `panels/bridge.ts` | Pont webview↔host **pur** (zéro `vscode`) : parse strict des messages webview, **whitelist de relais** (`conversations/list|get|create` + **toute la surface `config/*`** lecture/écriture/actions depuis F4 — mais **jamais** `initialize`/`shutdown`/`chat/send`/`chat/cancel`/`conversations/delete`), codes `VNL-EXT-020` (relais refusé) / `-021` (serveur non démarré). Après un write `config/<domain>/{create,update,delete}` réussi, notifie l'hôte (`onWriteSucceeded`) qui diffuse `config/changed`. Whitelist partagée par les deux webviews (le chat en hérite — surface acceptée : la CSP nonce interdit toute exécution JS dans la webview). |
 | `panels/html.ts` | `buildHtml(baseHref, cspSource, nonce, view)` pur : CSP `default-src 'none'` + nonce (aléa `node:crypto`) + `<base href>` + `<meta name="vanyline-view" content="chat\|config">`, `localResourceRoots` sur `dist/webview`. |
 
@@ -1898,6 +1900,24 @@ forcé en `assets/index.css`, alias source vers `packages/{ui,protocol}/src`.
 Le badge de couche des écrans (`SourceBadge` de `@vanyline/ui`, F4) n'apparaît que
 lorsqu'une entrée porte `source` — jamais côté frontend web (`app` n'a pas de couches),
 seulement dans le panel de l'extension.
+
+**Vue ressources K8s** (`src/resources.ts` + `panels/resources.ts`, F5) : logique pure
+(`resources.ts`, testée sans `vscode`) + colle vscode (`panels/resources.ts`). Le modèle
+(`createResourcesModel(rpc, onError?)`) n'a **aucun cache** : racine → `owners/list`,
+enfant d'un Owner → `projects/list` filtré `spec.owner`, enfant d'un Project →
+`sandboxes/list` filtré `spec.project` ; chaque `getChildren` refait l'appel RPC (v1 =
+refresh manuel, pas de watch). Toute erreur RPC devient un **nœud `error`** dans l'arbre
+(le modèle ne rejette jamais) + une ligne `VNL-EXT-025` dans l'OutputChannel ; serveur non
+démarré → nœud `info` `VNL-EXT-021`. Le namespace affiché est celui du `metadata.namespace`
+du premier objet listé (la CLI le résout une fois par session — `defaults.namespace` du
+YAML fusionné, sinon contexte kubeconfig). Commandes (`resources.ts`, pures, `PromptApi`
+injecté = `InputBox`/`QuickPick`/`showWarningMessage` modal) : `project.create` /
+`project.delete` / `sandbox.create` / `sandbox.delete` (**modale de confirmation** —
+destructif) / `sandbox.stop` / `sandbox.start` (pas de modale — transition réversible
+via `sandboxes/{stop,start}` → `spec.suspended`). Validation de **surface** avant appel
+(`validateResourceName` RFC1123, `validateRepoUrl` `https://…`|`git@…`, `validateGitRef`) →
+`VNL-EXT-026` ; la source de vérité reste le controller. Aucune interpolation shell côté
+extension ; la CLI RPC utilise le kubeconfig local de l'utilisateur (pas d'OIDC).
 
 **Sécurité du provisioning** (téléchargement + exécution d'un binaire) :
 1. **SHA256 obligatoire** : `vanyline-<target>.tar.gz.sha256` de la **même** release
@@ -1921,7 +1941,14 @@ seulement dans le panel de l'extension.
 `docs/ext-install.md`.
 
 **Dette assumée** : `chat/cancel` reste un no-op côté CLI (pas d'annulation réelle
-de tour, F3) ; pas de gestion sandbox (F5). **F4** : pas de sélecteur de couche
+de tour, F3). **F5** : pas de watch temps réel des phases (la CLI RPC n'a pas
+d'équivalent à `/api/ws/sandbox-state` — refresh manuel + refresh après action) ;
+namespace figé par session (changer de contexte kubeconfig impose un `Reload Window`) ;
+formulaires de spec en suite d'`InputBox` (les champs riches de `SandboxSpec` —
+toolchains, LSP — ne sont pas exposés : `sandboxes/create` envoie
+`{name, project, branch}`, les toolchains sont auto-dérivées des langages détectés) ;
+pas de création d'Owner (CLI only) ; `panels/resources.ts` (colle vscode) sans test
+unitaire, comme les autres `panels/*`. **F4** : pas de sélecteur de couche
 (les writes héritent du défaut F2 — workspace si résolu, sinon global) ; pas de
 synchro avec les `settings.json` VS Code natifs (`serverPath`/`autoUpdateCli`/
 `defaultLogLevel` restent dans Extension Settings, la config CLI vit dans son YAML

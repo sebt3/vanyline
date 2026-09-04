@@ -5,6 +5,7 @@ import { ensureCli, productionDeps } from './cli-provisioning';
 import { mapRpcError } from './panels/bridge';
 import { registerChatView } from './panels/chat';
 import { registerConfigPanel } from './panels/config';
+import { registerResources } from './panels/resources';
 import { startServer } from './rpc';
 import { createSupervisor, type Supervisor } from './supervisor';
 
@@ -32,6 +33,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   let broadcastConfigChanged: (domain: string) => void = () => {};
   const provider = registerChatView(context, channel, (d) => broadcastConfigChanged(d));
   const configPanel = registerConfigPanel(context, channel, (d) => broadcastConfigChanged(d));
+  const resources = registerResources(context, channel);
   broadcastConfigChanged = (domain: string): void => {
     const msg = { type: 'config/changed', domain };
     provider.post(msg);
@@ -83,10 +85,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (h) {
         provider.attachServer(h);
         configPanel.attachServer(h);
+        resources.attachServer(h.conn);
       }
     } else {
       provider.detachServer();
       configPanel.detachServer();
+      resources.detachServer();
     }
   });
 

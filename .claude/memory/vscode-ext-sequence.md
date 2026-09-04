@@ -39,7 +39,7 @@ mémoire de clôture (`.claude/memory/<nom>.md`) portent tous le même nom `F<n>
 | F2 | `F2-vscode-ext-cli-rpc` | **close 2026-09-02, mergée+poussée.** Crate feuille `vanyline-cfgstore` (config extraite de `lib`+`cli`, partageable sandbox) + `ConfigStore` lecture→lecture/écriture + RPC `config/<domain>/{create,update,delete}` + actions test/localTools. | alignement noms avec F1 |
 | F3 | `F3-vscode-ext-chat` | **close 2026-09-03, mergée+poussée.** L'extension elle-même : host, provisioning CLI (download+SHA256), sidebar chat, **packaging + release CI**. | F1 |
 | F4 | `F4-vscode-ext-config-ui` | **close 2026-09-03, mergée+poussée.** Onglet éditeur `vanyline.config` montant `ConfigShell` + les 6 écrans `@vanyline/ui`, impl RPC `rpcConfigRepo` sur le pont, `config/skills/get` + champ additif `source` (badge de couche), broadcast `config/changed` cross-webview. | F2, F3 |
-| F5 | `F5-vscode-ext-sandboxes` | `TreeView` native Owners/Projects/Sandboxes via les méthodes RPC K8s existantes. | F3 |
+| F5 | `F5-vscode-ext-sandboxes` | **close 2026-09-04.** `TreeView` native Owners/Projects/Sandboxes via les méthodes RPC K8s existantes + 6 commandes create/delete/stop/start. | F3 |
 
 Ordre d'exécution recommandé : **F1 → F2 → F3 → (F4 ‖ F5)**. F4 et F5 sont
 parallélisables une fois F3 fait. F1 et F2 apportent de la valeur au frontend web même
@@ -112,6 +112,26 @@ migration vers `docs/architecture.md` + suppression du design doc).
   — `ext/` (F3, F4) »), `docs/features/F4-vscode-ext-config-ui.md` supprimé. Bilan
   complet : `.claude/memory/F4-vscode-ext-config-ui.md`.
   **Suite : F5** (dernière — `TreeView` sandboxes).
+- **2026-09-04** — **F5 close (Phase 3 faite). Séquence VS Code terminée.** Branche
+  `feat/F5-vscode-ext-sandboxes` (3 tâches Cadence : `ec16452`+fix, `a7e044b`+fix,
+  `d047395`+fix). `TreeView` native `vanyline.resources` (Owners › Projects › Sandboxes,
+  100 % host, parle au `RpcConnection` en direct — **pas de webview, pas de
+  `RELAY_WHITELIST`**), 6 commandes `vanyline.{project,sandbox}.*` (logique pure dans
+  `ext/src/resources.ts`, colle vscode dans `ext/src/panels/resources.ts`), validation de
+  surface `VNL-EXT-026`, procédure e2e `docs/ext-install.md` §5. Risque design n° 1
+  (`sandboxes/stop|start` fonctionnels ?) **levé** : `handlers.rs` → `set_sandbox_suspended`
+  (`lib/src/k8s.rs:90`) merge-patche déjà `spec.suspended`, controller l'honore
+  (`sandbox.rs:1023`) — aucun câblage CLI nécessaire. **Review Phase 3 : 1 bug bloquant**
+  (le refresh de la `TreeView` appelait un `treeView.refresh()` inexistant — API
+  hallucinée **dans le fichier de tâche** task-01, suivie fidèlement par Cadence avec un
+  commentaire justificatif inventé ; l'arbre ne se serait jamais rafraîchi et
+  `attachServer` aurait lancé une exception à chaque `ready`) + 1 mineur (InputBox
+  « branche optionnelle » qui refusait la chaîne vide → champ jamais omissible) — les
+  deux corrigés par Claude. `panels/resources.ts` sans test (comme les autres `panels/*`),
+  les 168 tests portent sur `resources.ts` pur. Design migré dans `docs/architecture.md`
+  (§ « Extension VS Code — `ext/` (F3, F4, F5) », § Workspace TypeScript),
+  `docs/features/F5-vscode-ext-sandboxes.md` supprimé (`docs/features/` désormais vide).
+  Bilan complet : `.claude/memory/F5-vscode-ext-sandboxes.md`.
 
 ## Comment reprendre dans une session neuve
 
