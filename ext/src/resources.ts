@@ -390,10 +390,12 @@ export async function runProjectCreate(
   }
 
   // branche par défaut optionnelle : vide/absent ⇒ champ omis ; valeur initiale 'main'.
+  // Le champ étant facultatif, l'InputBox accepte la chaîne vide (validateGitRef la
+  // rejette — on ne l'applique qu'à une valeur non vide).
   const defaultBranch = await ui.input({
     prompt: 'Branche par défaut (optionnel)',
     value: 'main',
-    validate: validateGitRef,
+    validate: (v) => (v === '' ? undefined : validateGitRef(v)),
   });
   if (defaultBranch === undefined) {
     return { ok: false, cancelled: true, message: '' };

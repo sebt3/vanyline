@@ -38,25 +38,26 @@ export function registerResources(
 
   let treeView: vscode.TreeView<ResourceNode> | undefined;
 
-  /** Rafraîchit la vue — retourne le Thenable pour que l'appelant puisse chaîner
-   *  `updateTitle()` APRES le refresh (le namespace résolu n'est à jour qu'une fois
-   *  les appels RPC du refresh terminés). API publique de l'extension host depuis
-   *  1.67 mais ABSENTE des types `@types/vscode` installés (vérifié 1.136.0,
-   *  index.d.ts:12149-12236) — d'où le cast isolé, seul endroit qui l'utilise. */
-  function refreshView(): Promise<void> {
-    if (treeView === undefined) {
-      return Promise.resolve();
-    }
-    return (treeView as unknown as { refresh(): Promise<void> }).refresh();
+  /** Signal de rafraîchissement de l'arbre. `fire(undefined)` = « toute la racine a
+   *  changé » → vscode rappelle `getChildren()`. C'est le SEUL mécanisme de refresh
+   *  d'une `TreeView` (il n'existe pas de `TreeView.refresh()` — cf.
+   *  `TreeDataProvider.onDidChangeTreeData`, index.d.ts:12241). */
+  const changeEmitter = new vscode.EventEmitter<ResourceNode | undefined>();
+
+  /** Redemande l'arbre à vscode. Le namespace résolu par le modèle n'est à jour
+   *  qu'une fois les appels RPC du refresh terminés — `updateTitle()` est donc aussi
+   *  rappelé par le provider après chaque `getChildren` (cf. plus bas). */
+  function refreshView(): void {
+    changeEmitter.fire(undefined);
   }
 
-  /** Refresh puis titre/description — chemin des commandes et de attach/detach.
-   *  `updateTitle` aussi en onRejected : le modèle convertit toute erreur RPC en
-   *  nœud error (le provider ne rejette jamais), un rejet de refresh() lui-même
-   *  n'est pas attendu — on met quand même le titre à jour plutôt que de laisser
-   *  une promesse non gérée. */
-  function refreshAndView(): Promise<void> {
-    return refreshView().then(updateTitle, updateTitle);
+  /** Refresh + titre/description — chemin des commandes et de attach/detach.
+   *  `updateTitle()` immédiat couvre le detach (description retirée) et le cas où le
+   *  namespace est déjà connu ; le provider le rappelle quand une liste RPC le
+   *  résout pour la première fois. */
+  function refreshAndView(): void {
+    refreshView();
+    updateTitle();
   }
 
   /** `title` + `description` de la vue à jour après tout refresh (attach/detach/
@@ -70,6 +71,8 @@ export function registerResources(
   }
 
   const treeDataProvider: vscode.TreeDataProvider<ResourceNode> = {
+    onDidChangeTreeData: changeEmitter.event,
+
     getTreeItem(node: ResourceNode): vscode.TreeItem {
       const item = new vscode.TreeItem(node.label);
       item.id = node.id;
@@ -87,17 +90,23 @@ export function registerResources(
       // Modèle « non démarré » quand aucun handle n'est vivant : mêmes sémantiques
       // à la racine (nœud info) qu'en enfant (nœud error « serveur non démarré »).
       const current = model ?? createResourcesModel(undefined);
-      return node === undefined ? current.getRoots() : current.getChildren(node);
+      const kids =
+        node === undefined ? current.getRoots() : current.getChildren(node);
+      // Le namespace n'est résolu qu'APRÈS l'appel RPC de la liste : rafraîchir le
+      // titre une fois la promesse tenue (le modèle ne rejette jamais).
+      return kids.then((nodes) => {
+        updateTitle();
+        return nodes;
+      });
     },
   };
 
   treeView = vscode.window.createTreeView('vanyline.resources', { treeDataProvider });
-  context.subscriptions.push(treeView);
+  context.subscriptions.push(treeView, changeEmitter);
 
   context.subscriptions.push(
-    vscode.commands.registerCommand('vanyline.resources.refresh', async (): Promise<void> => {
-      await refreshView();
-      updateTitle();
+    vscode.commands.registerCommand('vanyline.resources.refresh', (): void => {
+      refreshAndView();
     }),
   );
 
@@ -130,7 +139,7 @@ export function registerResources(
         const r = await run(node);
         if (r.cancelled) return;
         if (r.ok) {
-          await refreshAndView();
+          refreshAndView();
           void vscode.window.showInformationMessage(`vanyline: ${r.message}`);
         } else {
           void vscode.window.showErrorMessage(`vanyline: ${r.message}`);
@@ -151,13 +160,13 @@ export function registerResources(
     model = createResourcesModel(conn, (line): void => {
       channel.appendLine(line);
     });
-    void refreshAndView();
+    refreshAndView();
   }
 
   function detachServer(): void {
     model = undefined;
     rpc = undefined;
-    void refreshAndView();
+    refreshAndView();
   }
 
   return { attachServer, detachServer };
