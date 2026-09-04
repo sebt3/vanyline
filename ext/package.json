@@ -22,7 +22,8 @@
     },
     "views": {
       "vanyline": [
-        { "type": "webview", "id": "vanyline.chatView", "name": "Chat" }
+        { "type": "webview", "id": "vanyline.chatView", "name": "Chat" },
+        { "id": "vanyline.resources", "name": "Resources" }
       ]
     },
     "commands": [
@@ -30,13 +31,15 @@
       { "command": "vanyline.newSession", "title": "vanyline: Nouvelle session" },
       { "command": "vanyline.sessionPicker", "title": "vanyline: Choisir une session" },
       { "command": "vanyline.openSettings", "title": "vanyline: Ouvrir les paramètres" },
-      { "command": "vanyline.restartServer", "title": "vanyline: Redémarrer le serveur" }
+      { "command": "vanyline.restartServer", "title": "vanyline: Redémarrer le serveur" },
+      { "command": "vanyline.resources.refresh", "title": "vanyline: Actualiser les ressources", "icon": "$(refresh)" }
     ],
     "menus": {
       "view/title": [
         { "command": "vanyline.newSession", "when": "view == vanyline.chatView", "group": "navigation_new@1" },
         { "command": "vanyline.sessionPicker", "when": "view == vanyline.chatView", "group": "navigation@1" },
-        { "command": "vanyline.openSettings", "when": "view == vanyline.chatView", "group": "navigation@2" }
+        { "command": "vanyline.openSettings", "when": "view == vanyline.chatView", "group": "navigation@2" },
+        { "command": "vanyline.resources.refresh", "when": "view == vanyline.resources", "group": "navigation" }
       ]
     },
     "configuration": {
