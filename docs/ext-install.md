@@ -154,7 +154,7 @@ corriger en silence pendant le test.
 
 Pas de job CI non plus — à dérouler à la main sur un code-server réel, **après la
 checklist §3** (et la procédure §4 si elle est faite) dans la même fenêtre, sur un
-cluster accessible depuis le kubeconfig local. Le namespace est résolu comme à l'accord
+cluster accessible depuis le kubeconfig local. Le namespace est résolu comme d'habitude
 par la CLI (`defaults.namespace` du config.yaml fusionné, sinon contexte kubeconfig —
 cf. `docs/architecture.md`) : le prérequis minimal est donc **au moins un Owner** dans le
 namespace (sinon `vanyline owner create <nom>` en CLI — l'extension ne crée pas d'Owner,
@@ -182,8 +182,8 @@ décision design F5).
    (`kubectl get sandbox e2e-sb -o jsonpath='{.spec.suspended}'` → `true`).
 6. **Start** : menu → « Démarrer la sandbox » → phase re-Provisioning puis Running
    après refresh.
-7. **Delete** : menu sur la sandbox → modale de confirmation annulable (Annuler ne
-   rien faire) ; supprimer la fait disparaître de l'arbre, idem pour `e2e-projet`
+7. **Delete** : menu sur la sandbox → modale de confirmation annulable (Annuler =
+   rien ne se passe) ; la suppression la fait disparaître de l'arbre, idem pour `e2e-projet`
    (menu sur le nœud projet). `delete` n'est pas idempotent : supprimer deux fois le
    même nom (arborescence périmée) renvoie une erreur lisible `VNL-EXT-025:
    …VNL-RPC-010`.
