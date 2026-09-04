@@ -361,7 +361,7 @@ describe('commandes create/delete (tache 02)', () => {
     });
   });
 
-  it('runSandboxCreate : sans hint - projects/list dabord puis pick', async () => {
+  it('runSandboxCreate : sans hint - projects/list d’abord puis pick', async () => {
     const rpc = fakeRpc((m) => {
       if (m === 'projects/list') {
         return [{ metadata: { name: 'repo-a' }, spec: { owner: 'a' } }];
@@ -441,5 +441,50 @@ describe('commandes create/delete (tache 02)', () => {
     expect(r.ok).toBe(false);
     expect(r.message).toContain('boom');
     expect(r.message).toContain('VNL-EXT-025');
+  });
+
+  it('owners/list rejette (runProjectCreate sans hint) ⇒ VNL-EXT-025, sans rejet hors du run', async () => {
+    const rpc = fakeRpc((m) =>
+      m === 'owners/list' ? Promise.reject(new RpcError(-32000, 'k8s down', 'VNL-RPC-010')) : [],
+    );
+    const ui = scriptedPromptApi([]);
+
+    const r = await runProjectCreate(rpc, ui, undefined);
+
+    expect(r.ok).toBe(false);
+    expect(r.cancelled).toBeUndefined();
+    expect(r.message).toContain('VNL-EXT-025');
+    expect(r.message).toContain('owners/list');
+    expect(r.message).toContain('k8s down');
+    // pas de pick, pas de write RPC : l'échec de liste coupe court
+    expect(ui.pick).not.toHaveBeenCalled();
+    expect(methodsOf(rpc)).not.toContain('projects/create');
+  });
+
+  it('projects/list rejette (runProjectDelete sans hint) ⇒ VNL-EXT-025, sans confirm', async () => {
+    const rpc = fakeRpc((m) =>
+      m === 'projects/list' ? Promise.reject(new RpcError(-32000, 'boom', 'VNL-RPC-010')) : [],
+    );
+    const ui = scriptedPromptApi([]);
+
+    const r = await runProjectDelete(rpc, ui, undefined);
+
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('VNL-EXT-025');
+    expect(r.message).toContain('boom');
+    expect(ui.confirm).not.toHaveBeenCalled();
+  });
+
+  it('runSandboxDelete sans hint, sandboxes/list vide ⇒ message NO_SANDBOX (aucune sandbox)', async () => {
+    const rpc = fakeRpc((m) => (m === 'sandboxes/list' ? [] : []));
+    const ui = scriptedPromptApi([]);
+
+    const r = await runSandboxDelete(rpc, ui, undefined);
+
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/VNL-EXT-027/);
+    // message spécifique « aucune sandbox », pas le message « aucun Project »
+    expect(r.message).toMatch(/aucune Sandbox/i);
+    expect(r.message).not.toMatch(/Project/);
   });
 });

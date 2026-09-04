@@ -253,10 +253,13 @@ const surfaceError = (detail: string): string => `VNL-EXT-026: ${detail}`;
 
 /* « aucun Owner disponible » : message VNL-EXT-027 (création d'owner par CLI). */
 const NO_OWNER =
-  'VNL-EXT-027: aucun Owner dans le namespace - créez-le dabord avec la CLI (`vanyline owner create <nom>`)';
-/* « aucun Project / aucune Sandbox disponible » : message VNL-EXT-027. */
+  'VNL-EXT-027: aucun Owner dans le namespace - créez-le d’abord avec la CLI (`vanyline owner create <nom>`)';
+/* « aucun Project disponible » : message VNL-EXT-027. */
 const NO_PROJECT =
-  'VNL-EXT-027: aucun Project disponible - créez-le dabord (vanyline.project.create)';
+  'VNL-EXT-027: aucun Project disponible - créez-le d’abord (vanyline.project.create)';
+/* « aucune Sandbox disponible » (delete sans cible) : message VNL-EXT-027. */
+const NO_SANDBOX =
+  'VNL-EXT-027: aucune Sandbox dans le namespace - rien à supprimer';
 
 /** Portes de dialogue injectées (vscode dans panels/resources.ts, objets faux dans les tests).
  *  `undefined` sur toute porte ⇒ annulation utilisateur. */
@@ -280,6 +283,22 @@ export interface RunResult {
   readonly cancelled?: boolean;
   /** Message user-facing (français) : succès court, ou erreur avec code VNL-XXX. */
   readonly message: string;
+}
+
+/** Résultat d'une liste de sélection : soit la liste, soit le RunResult d'échec.
+ *  Convention partagée avec le modèle de la tâche 01 : un échec RPC ne remonte
+ *  JAMAIS en rejet hors des run* (le handler de commande n'a pas de catch). */
+type ListOutcome<T> = { readonly list: T[] } | { readonly fail: RunResult };
+
+async function listFor<T>(rpc: RpcLike, method: string): Promise<ListOutcome<T>> {
+  try {
+    const objs = await rpc.request<T[]>(method);
+    return { list: Array.isArray(objs) ? objs : [] };
+  } catch (err) {
+    return {
+      fail: { ok: false, message: `VNL-EXT-025: ${method} (${mapRpcError(err).message})` },
+    };
+  }
 }
 
 /** Nom de ressource K8s valide (RFC1123 label, max 63) ; message `VNL-EXT-026` sinon. */
@@ -327,12 +346,17 @@ export async function runProjectCreate(
   if (ownerHint?.kind === 'owner') {
     owner = ownerHint.label;
   } else {
-    const owners = await rpc.request<VnlOwner[]>('owners/list');
-    const list = Array.isArray(owners) ? owners : [];
-    if (list.length === 0) {
+    const outcome = await listFor<VnlOwner>(rpc, 'owners/list');
+    if ('fail' in outcome) {
+      return outcome.fail;
+    }
+    if (outcome.list.length === 0) {
       return { ok: false, message: NO_OWNER };
     }
-    const picked = await ui.pick('Owner', list.map((o) => ({ label: o.metadata.name })));
+    const picked = await ui.pick(
+      'Owner',
+      outcome.list.map((o) => ({ label: o.metadata.name })),
+    );
     if (picked === undefined) {
       return { ok: false, cancelled: true, message: '' };
     }
@@ -405,14 +429,16 @@ export async function runProjectDelete(
   if (targetHint?.kind === 'project') {
     name = targetHint.label;
   } else {
-    const projects = await rpc.request<VnlProject[]>('projects/list');
-    const list = Array.isArray(projects) ? projects : [];
-    if (list.length === 0) {
+    const outcome = await listFor<VnlProject>(rpc, 'projects/list');
+    if ('fail' in outcome) {
+      return outcome.fail;
+    }
+    if (outcome.list.length === 0) {
       return { ok: false, message: NO_PROJECT };
     }
     const picked = await ui.pick(
       'Projet',
-      list.map((p) => ({ label: p.metadata.name, description: p.spec?.owner ?? '' })),
+      outcome.list.map((p) => ({ label: p.metadata.name, description: p.spec?.owner ?? '' })),
     );
     if (picked === undefined) {
       return { ok: false, cancelled: true, message: '' };
@@ -447,14 +473,16 @@ export async function runSandboxCreate(
   if (projectHint?.kind === 'project') {
     project = projectHint.label;
   } else {
-    const projects = await rpc.request<VnlProject[]>('projects/list');
-    const list = Array.isArray(projects) ? projects : [];
-    if (list.length === 0) {
+    const outcome = await listFor<VnlProject>(rpc, 'projects/list');
+    if ('fail' in outcome) {
+      return outcome.fail;
+    }
+    if (outcome.list.length === 0) {
       return { ok: false, message: NO_PROJECT };
     }
     const picked = await ui.pick(
       'Projet',
-      list.map((p) => ({ label: p.metadata.name, description: p.spec?.owner ?? '' })),
+      outcome.list.map((p) => ({ label: p.metadata.name, description: p.spec?.owner ?? '' })),
     );
     if (picked === undefined) {
       return { ok: false, cancelled: true, message: '' };
@@ -510,14 +538,16 @@ export async function runSandboxDelete(
   if (targetHint?.kind === 'sandbox') {
     name = targetHint.label;
   } else {
-    const sandboxes = await rpc.request<VnlSandbox[]>('sandboxes/list');
-    const list = Array.isArray(sandboxes) ? sandboxes : [];
-    if (list.length === 0) {
-      return { ok: false, message: NO_PROJECT };
+    const outcome = await listFor<VnlSandbox>(rpc, 'sandboxes/list');
+    if ('fail' in outcome) {
+      return outcome.fail;
+    }
+    if (outcome.list.length === 0) {
+      return { ok: false, message: NO_SANDBOX };
     }
     const picked = await ui.pick(
       'Sandbox',
-      list.map((s) => ({
+      outcome.list.map((s) => ({
         label: s.metadata.name,
         description: s.status?.phase ?? 'phase inconnue',
       })),
