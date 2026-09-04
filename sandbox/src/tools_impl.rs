@@ -365,18 +365,6 @@ pub struct LspDiagnosticsArgs {
     pub path: String,
 }
 
-/// Argument parsing for `lsp_hover` — 0-based, déprécié : `lsp_hover` est
-/// supprimé en tâche 2 de `lsp-agent-interface` (absorbé par `lsp_definition`).
-/// Les autres tools à position sont passés à `LspSymbolTarget` (tâche 01b).
-#[derive(serde::Deserialize, Clone)]
-pub struct LspPositionArgs {
-    pub path: String,
-    #[serde(default)]
-    pub line: u64,
-    #[serde(default)]
-    pub character: u64,
-}
-
 /// Args de `lsp_rename` : position partagée + nouveau nom.
 #[derive(serde::Deserialize, Clone)]
 pub struct LspRenameArgs {
@@ -387,8 +375,8 @@ pub struct LspRenameArgs {
 
 /// Forme d'argument partagée par tous les tools qui ciblent une position
 /// (`lsp_definition`, `lsp_references`, `lsp_rename`, `inspect_symbol`).
-/// A remplace `LspPositionArgs` pour ces tools (migration achevée en tâche
-/// 01b — `lsp_hover` garde `LspPositionArgs` jusqu'à la tâche 2).
+/// A remplacé partout l'ancien format 0-based — la migration est achevée
+/// depuis la tâche 02 de `lsp-agent-interface`.
 /// Entrées 1-based (alignées `read_file`), conversion interne 0-based LSP.
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct LspSymbolTarget {
@@ -644,8 +632,10 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Schemas for the 5 LSP tools for `tools/list` (same shape as
+/// Schemas for the 4 LSP tools for `tools/list` (same shape as
 /// `vanyline_tools::mcp::filesystem_tools()` : name/description/inputSchema).
+/// Since task 02 of `lsp-agent-interface`, `lsp_hover` no longer exists as a
+/// standalone tool — hover contents are rendered by `lsp_definition`.
 pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -660,21 +650,8 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
             }
         }),
         serde_json::json!({
-            "name": "lsp_hover",
-            "description": "Get hover information (tooltip) for a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
-            "inputSchema": {
-                "type": "object",
-                "required": ["path"],
-                "properties": {
-                    "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
-                    "line": {"type": "integer", "description": "0-based line number (default 0) — NOT the 1-based line numbers shown by read_file; subtract 1 from a line you saw there."},
-                    "character": {"type": "integer", "description": "0-based character offset (default 0)."}
-                }
-            }
-        }),
-        serde_json::json!({
             "name": "lsp_definition",
-            "description": "Go to definition of the symbol at a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Go to definition of the symbol at a position in a file via the LSP server, with the hover signature/doc for the same position when available. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -753,6 +730,161 @@ fn hover_marked_string_to_text(value: &Value) -> String {
         .to_string()
 }
 
+/// Segment du contenu hover extrait par `hover_segments` : section de code
+/// (entrée `{language, value}`, texte nu sans fences) ou prose (texte aplati
+/// pouvant lui-même porter des blocs ```…``` clôturés — séparés par
+/// `split_fenced_code_blocks`).
+enum HoverSegment {
+    Code(String),
+    Prose(String),
+}
+
+/// Découpe `hover.contents` (3 formes LSP) en segments code/prose SANS
+/// réécrire le parsing : la structure `{language, value}` est seulement
+/// reconnue ici, le texte de chaque élément passe par
+/// `hover_marked_string_to_text` (prose) et la forme non-array est aplatie
+/// par `hover_contents_to_text` — mêmes fonctions que le rendu historique.
+/// Un contenu vide (null, `{}`, array vide, chaînes vides) ne produit aucun
+/// segment.
+fn hover_segments(contents: &Value) -> Vec<HoverSegment> {
+    if let Some(arr) = contents.as_array() {
+        return arr
+            .iter()
+            .filter_map(|el| {
+                if el.get("language").and_then(|l| l.as_str()).is_some() {
+                    let code = el.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                    if code.is_empty() {
+                        None
+                    } else {
+                        Some(HoverSegment::Code(code.to_string()))
+                    }
+                } else {
+                    let text = hover_marked_string_to_text(el);
+                    if text.is_empty() {
+                        None
+                    } else {
+                        Some(HoverSegment::Prose(text))
+                    }
+                }
+            })
+            .collect();
+    }
+    // MarkedString `{language, value}` seule : même traitement que dans un array.
+    if contents.get("language").and_then(|l| l.as_str()).is_some() {
+        let code = contents.get("value").and_then(|v| v.as_str()).unwrap_or("");
+        return if code.is_empty() {
+            vec![]
+        } else {
+            vec![HoverSegment::Code(code.to_string())]
+        };
+    }
+    let text = hover_contents_to_text(contents);
+    if text.is_empty() {
+        vec![]
+    } else {
+        vec![HoverSegment::Prose(text)]
+    }
+}
+
+/// Sépare un texte (markdown ou plaintext) en (blocs de code clôturés
+/// ```…```, lignes de prose restantes). Les lignes de fence ne vont jamais
+/// dans la prose (« amputée de ses fences résiduelles ») : une fence jamais
+/// fermée n'est pas une section de code — son contenu retourne en prose, seul
+/// le marqueur est retiré. Un bloc vide n'est pas une section non plus.
+fn split_fenced_code_blocks(text: &str) -> (Vec<String>, Vec<String>) {
+    let mut blocks: Vec<String> = Vec::new();
+    let mut prose: Vec<String> = Vec::new();
+    let mut open_block: Option<Vec<String>> = None;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            if let Some(buf) = open_block.take() {
+                let block = buf.join("\n");
+                if block.trim().is_empty() {
+                    prose.extend(buf);
+                } else {
+                    blocks.push(block);
+                }
+            } else {
+                open_block = Some(Vec::new());
+            }
+            continue;
+        }
+        if let Some(buf) = &mut open_block {
+            buf.push(line.to_string());
+        } else {
+            prose.push(line.to_string());
+        }
+    }
+    if let Some(buf) = open_block {
+        // Fence jamais fermée : pas une section, contenu rendu en prose.
+        prose.extend(buf);
+    }
+    (blocks, prose)
+}
+
+/// Sépare le contenu `hover.contents` (3 formes LSP, gérées par les fonctions
+/// existantes `hover_contents_to_text`/`hover_marked_string_to_text` et la
+/// structure des éléments `{language, value}` vs `{value}`/string brute) en
+/// (signature, doc) :
+/// - signature = 1re section de CODE : bloc clôturé ```…``` dans un texte
+///   (markdown), ou 1re entrée `{language, value}` d'un array MarkedString.
+///   Rendu sans les fences.
+/// - doc = prose restante (sections de code exclues), amputée de ses fences
+///   résiduelles, tronquée à 3 lignes non vides (rejointes par `\n`).
+/// - Aucune section de code nulle part → signature = 1re ligne non vide du
+///   texte aplati, doc = les 3 lignes non vides suivantes.
+/// - hover null / contenu vide → `("", "")`.
+fn hover_signature_and_doc(contents: &Value) -> (String, String) {
+    let mut signature: Option<String> = None;
+    let mut prose_lines: Vec<String> = Vec::new();
+
+    for segment in hover_segments(contents) {
+        match segment {
+            HoverSegment::Code(code) => {
+                if signature.is_none() {
+                    signature = Some(code);
+                }
+                // Sections de code supplémentaires : exclues du doc, pas de
+                // 2e signature.
+            }
+            HoverSegment::Prose(text) => {
+                let (blocks, prose) = split_fenced_code_blocks(&text);
+                if signature.is_none() {
+                    signature = blocks.first().cloned();
+                }
+                // Tous les blocs clôturés sont des sections de code : jamais
+                // dans le doc, y compris après la signature trouvée.
+                prose_lines.extend(prose);
+            }
+        }
+    }
+
+    let doc_candidates: Vec<&str> = prose_lines
+        .iter()
+        .map(String::as_str)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+
+    match signature {
+        Some(signature) => {
+            let doc = doc_candidates
+                .into_iter()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("\n");
+            (signature, doc)
+        }
+        // Aucune section de code nulle part : 1re ligne non vide = signature,
+        // les 3 suivantes = doc.
+        None => {
+            let mut lines = doc_candidates.into_iter();
+            let signature = lines.next().unwrap_or_default().to_string();
+            let doc = lines.take(3).collect::<Vec<_>>().join("\n");
+            (signature, doc)
+        }
+    }
+}
+
 /// Severity helper: maps LSP severity code → display string.
 fn severity_label(severity: i64) -> &'static str {
     match severity {
@@ -764,13 +896,12 @@ fn severity_label(severity: i64) -> &'static str {
     }
 }
 
-/// Dispatches a `tools/call` for `lsp_diagnostics`/`lsp_hover`/`lsp_definition`/
+/// Dispatches a `tools/call` for `lsp_diagnostics`/`lsp_definition`/
 /// `lsp_references`/`lsp_rename`. Returns `None` if `name` is not one of these.
 /// Consumes `state.lsp` (shared LSP process) and `state.config.sandbox_root`.
 pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Option<Value> {
     let lsp_tools = [
         "lsp_diagnostics",
-        "lsp_hover",
         "lsp_definition",
         "lsp_references",
         "lsp_rename",
@@ -792,14 +923,6 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
         };
         LspArgs::Rename(args)
-    } else if name == "lsp_hover" {
-        // Déprécié — `lsp_hover` garde l'argumentaire 0-based actuel, supprimé
-        // avec le tool en tâche 2.
-        let args: LspPositionArgs = match serde_json::from_value(arguments.clone()) {
-            Ok(a) => a,
-            Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
-        };
-        LspArgs::Position(args)
     } else {
         // `lsp_definition` / `lsp_references` : modèle de position partagé,
         // `line` requis (son absence tombe dans le `invalid arguments` ci-dessus).
@@ -812,7 +935,6 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
 
     let raw_path = match &args {
         LspArgs::Diagnostics(a) => &a.path,
-        LspArgs::Position(a) => &a.path,
         LspArgs::Target(a) => &a.path,
         LspArgs::Rename(a) => &a.target.path,
     };
@@ -840,12 +962,11 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     // 0-based pour les tools à target, avec ligne cible pré-construite —
     // snippet lu dans le `text` déjà lu par le dispatch (pas de re-lecture)
     // et note d'ambiguïté R6 le cas échéant. `Err` porte déjà
-    // VNL-SBX-LSP-007/VNL-SBX-LSP-010. `lsp_diagnostics` et `lsp_hover`
-    // (déprécié) ne passent pas ici.
+    // VNL-SBX-LSP-007/VNL-SBX-LSP-010. `lsp_diagnostics` ne passe pas ici.
     let symbol_target: Option<&LspSymbolTarget> = match &args {
         LspArgs::Target(t) => Some(t),
         LspArgs::Rename(r) => Some(&r.target),
-        LspArgs::Diagnostics(_) | LspArgs::Position(_) => None,
+        LspArgs::Diagnostics(_) => None,
     };
     let target_info = match symbol_target {
         None => None,
@@ -945,42 +1066,6 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             }
             Err(e) => Some(err_result(e.to_string())),
         },
-        "lsp_hover" => {
-            let args: LspPositionArgs = match &args {
-                LspArgs::Diagnostics(_) | LspArgs::Target(_) => unreachable!(),
-                LspArgs::Position(a) => a.clone(),
-                LspArgs::Rename(_) => unreachable!(),
-            };
-            match (
-                client.initialize().await,
-                client.ensure_open(&file_uri, language_id, &text).await,
-            ) {
-                (Ok(_), Ok(())) => match client
-                    .request(
-                        "textDocument/hover",
-                        serde_json::json!({
-                            "textDocument": {"uri": file_uri},
-                            "position": {"line": args.line, "character": args.character}
-                        }),
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        let text = result
-                            .get("contents")
-                            .map(hover_contents_to_text)
-                            .unwrap_or_default();
-                        if text.is_empty() {
-                            Some(ok_result("no hover".to_string()))
-                        } else {
-                            Some(ok_result(text))
-                        }
-                    }
-                    Err(e) => Some(err_result(e.to_string())),
-                },
-                (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
-            }
-        }
         "lsp_definition" => {
             let (line0, character0, target_line) = match target_info {
                 Some(t) => t,
@@ -990,45 +1075,85 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                 client.initialize().await,
                 client.ensure_open(&file_uri, language_id, &text).await,
             ) {
-                (Ok(_), Ok(())) => match client
-                    .request(
-                        "textDocument/definition",
-                        serde_json::json!({
-                            "textDocument": {"uri": file_uri},
-                            "position": {"line": line0, "character": character0}
-                        }),
-                    )
-                    .await
-                {
-                    Ok(result) => {
-                        // Normalisation existante conservée : tableau JSON-RPC,
-                        // ou objet unique accepté.
-                        let locations: Vec<Value> = if let Some(arr) = result.as_array() {
-                            arr.clone()
-                        } else if result.is_object() {
-                            vec![result.clone()]
-                        } else {
-                            vec![]
-                        };
-                        // Entrées sans aucune URI exploitable filtrées avant rendu.
-                        let locations: Vec<Value> =
-                            locations.into_iter().filter(location_has_uri).collect();
-                        let mut out = vec![target_line];
-                        if locations.is_empty() {
-                            out.push("no definitions".to_string());
-                        } else {
-                            out.push("défini à:".to_string());
-                            for loc in &locations {
-                                out.push(format!(
-                                    "  {}",
-                                    render_location(&state.config.sandbox_root, loc).await
-                                ));
+                (Ok(_), Ok(())) => {
+                    // Hover d'abord, best effort (tâche 02 `lsp-agent-interface`,
+                    // design §2) : « pas de def trouvée → on rend quand même
+                    // hover si présent » vaut aussi l'inverse — une erreur ou un
+                    // résultat null/vide au hover ne doit JAMAIS faire échouer le
+                    // tool, juste omettre les sections signature/doc.
+                    let hover = client
+                        .request(
+                            "textDocument/hover",
+                            serde_json::json!({
+                                "textDocument": {"uri": file_uri},
+                                "position": {"line": line0, "character": character0}
+                            }),
+                        )
+                        .await;
+                    let (signature, doc) = match hover {
+                        Ok(result) => match result.get("contents") {
+                            Some(contents) if !contents.is_null() => {
+                                hover_signature_and_doc(contents)
                             }
+                            _ => (String::new(), String::new()),
+                        },
+                        Err(e) => {
+                            tracing::warn!(
+                                "textDocument/hover failed (best effort, lsp_definition continues): {e}"
+                            );
+                            (String::new(), String::new())
                         }
-                        Some(ok_result(out.join("\n")))
+                    };
+                    // Definition : l'échec reste une erreur tool (comportement
+                    // actuel, inchangé).
+                    match client
+                        .request(
+                            "textDocument/definition",
+                            serde_json::json!({
+                                "textDocument": {"uri": file_uri},
+                                "position": {"line": line0, "character": character0}
+                            }),
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            // Normalisation existante conservée : tableau JSON-RPC,
+                            // ou objet unique accepté.
+                            let locations: Vec<Value> = if let Some(arr) = result.as_array() {
+                                arr.clone()
+                            } else if result.is_object() {
+                                vec![result.clone()]
+                            } else {
+                                vec![]
+                            };
+                            // Entrées sans aucune URI exploitable filtrées avant rendu.
+                            let locations: Vec<Value> =
+                                locations.into_iter().filter(location_has_uri).collect();
+                            let mut out = vec![target_line];
+                            // Sections dans l'ordre cible / signature / doc /
+                            // défini à — une section vide est omise.
+                            if !signature.is_empty() {
+                                out.push(format!("signature: {signature}"));
+                            }
+                            if !doc.is_empty() {
+                                out.push(format!("doc: {doc}"));
+                            }
+                            if locations.is_empty() {
+                                out.push("no definitions".to_string());
+                            } else {
+                                out.push("défini à:".to_string());
+                                for loc in &locations {
+                                    out.push(format!(
+                                        "  {}",
+                                        render_location(&state.config.sandbox_root, loc).await
+                                    ));
+                                }
+                            }
+                            Some(ok_result(out.join("\n")))
+                        }
+                        Err(e) => Some(err_result(e.to_string())),
                     }
-                    Err(e) => Some(err_result(e.to_string())),
-                },
+                }
                 (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
             }
         }
@@ -1367,9 +1492,6 @@ async fn apply_workspace_edit(sandbox_root: &Path, edit: &Value) -> anyhow::Resu
 /// Internal enum to hold parsed LSP arguments.
 enum LspArgs {
     Diagnostics(LspDiagnosticsArgs),
-    /// Déprécié — supprimé avec lsp_hover en tâche 2 (modèle de position
-    /// remplacé partout ailleurs par `LspArgs::Target`).
-    Position(LspPositionArgs),
     /// Modèle de position partagé des tools à position (tâche 01b).
     Target(LspSymbolTarget),
     Rename(LspRenameArgs),
@@ -1756,24 +1878,78 @@ mod tests {
         assert_eq!(hover_contents_to_text(&serde_json::json!({})), "");
     }
 
-    #[tokio::test]
-    async fn lsp_hover_returns_content() {
-        let (state, _tmpdir) = make_lsp_state("hover").await;
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            dispatch_lsp(
-                &state,
-                "lsp_hover",
-                serde_json::json!({"path": "main.rs", "line": 0, "character": 0}),
-            ),
-        )
-        .await
-        .expect("timeout")
-        .expect("dispatch returned None");
+    // ── Tâche 02 — hover_signature_and_doc (absorption de lsp_hover) ────────
 
-        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("hover:"), "should contain 'hover:'");
+    #[test]
+    fn hover_split_markdown_fenced_signature_and_doc() {
+        let (sig, doc) = hover_signature_and_doc(&serde_json::json!(
+            {"kind": "markdown",
+             "value": "```rust\nfn main()\n```\n\nEntry point.\nRuns it.\nThird.\nFourth."}
+        ));
+        assert_eq!(sig, "fn main()", "first fenced block is the signature");
+        assert_eq!(
+            doc, "Entry point.\nRuns it.\nThird.",
+            "doc truncated to 3 lines"
+        );
+    }
+
+    #[test]
+    fn hover_split_plaintext_no_fences_is_signature() {
+        // La forme du fake `FAKE_LSP_PY` (plaintext non clôturé) — non régression.
+        let (sig, doc) = hover_signature_and_doc(&serde_json::json!(
+            {"kind": "plaintext", "value": "hover:file:///x"}
+        ));
+        assert_eq!(sig, "hover:file:///x");
+        assert_eq!(doc, "");
+    }
+
+    #[test]
+    fn hover_split_array_marked_string_code_then_prose() {
+        let (sig, doc) = hover_signature_and_doc(&serde_json::json!([
+            "Doc one",
+            {"language": "rust", "value": "fn f()"}
+        ]));
+        assert_eq!(
+            sig, "fn f()",
+            "first {{language, value}} entry is the signature"
+        );
+        assert_eq!(doc, "Doc one", "prose outside code sections is the doc");
+    }
+
+    #[test]
+    fn hover_split_second_code_block_not_in_doc() {
+        let (sig, doc) = hover_signature_and_doc(&serde_json::json!({
+            "kind": "markdown",
+            "value": "```rust\nfn a()\n```\n\nbetween.\n\n```sh\nfn b()\n```\n\nafter."
+        }));
+        assert_eq!(sig, "fn a()", "signature is the first fenced block");
+        assert_eq!(doc, "between.\nafter.");
+        assert!(
+            !doc.contains("fn b()"),
+            "second code block must not leak into the doc, got: {doc}"
+        );
+        assert!(!doc.contains("```"), "no residual fences, got: {doc}");
+    }
+
+    #[test]
+    fn hover_split_empty() {
+        assert_eq!(
+            hover_signature_and_doc(&serde_json::Value::Null),
+            (String::new(), String::new())
+        );
+        assert_eq!(
+            hover_signature_and_doc(&serde_json::json!({})),
+            (String::new(), String::new())
+        );
+    }
+
+    #[test]
+    fn hover_split_multiline_no_fences() {
+        let (sig, doc) = hover_signature_and_doc(&serde_json::json!(
+            {"kind": "plaintext", "value": "a\nb\nc\nd"}
+        ));
+        assert_eq!(sig, "a", "first non-empty line is the signature");
+        assert_eq!(doc, "b\nc\nd", "next 3 non-empty lines, 4th truncated");
     }
 
     #[tokio::test]
@@ -2086,6 +2262,94 @@ mod tests {
                 "{name}: line description should mention 1-based, got: {line_desc}"
             );
         }
+    }
+
+    // ── Tâche 02 — lsp_definition absorbe hover ; lsp_hover retiré ───────────
+
+    /// Test 7 — le fake `FAKE_LSP_PY` rend au hover un plaintext non clôturé
+    /// (`hover:{uri}`) → tout en signature. La réponse porte `signature:` en
+    /// plus de la ligne cible et du bloc `défini à:` (régression 01b).
+    #[tokio::test]
+    async fn lsp_definition_includes_hover_signature() {
+        let (state, _tmpdir) = make_lsp_state("def_hover").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_definition",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "main"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("signature: hover:file://"),
+            "hover contents should render as a signature section, got: {text}"
+        );
+        assert!(
+            text.contains("cible: main.rs:1: fn main() {}"),
+            "01b target line must survive, got: {text}"
+        );
+        assert!(
+            text.contains("défini à:"),
+            "01b definitions block must survive, got: {text}"
+        );
+    }
+
+    /// Test 8 — hover best effort : le fake nodiag répond `{"echo": …}` sans
+    /// `contents` → pas de hover, réponse cible + `no definitions`, aucune
+    /// section `signature:`/`doc:`, pas d'erreur tool.
+    #[tokio::test]
+    async fn lsp_definition_no_hover_still_works() {
+        let (state, _tmpdir) = make_lsp_state_nodiag("def_nohover").await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_definition",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "main"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("cible: main.rs:1: fn main() {}"),
+            "target line should render, got: {text}"
+        );
+        assert!(text.contains("no definitions"), "got: {text}");
+        assert!(
+            !text.contains("signature:"),
+            "no signature section without hover, got: {text}"
+        );
+        assert!(
+            !text.contains("doc:"),
+            "no doc section without hover, got: {text}"
+        );
+    }
+
+    /// Test 9 — `lsp_hover` retiré : plus d'entrée dans `lsp_tools()`, plus de
+    /// dispatch du tout (None).
+    #[tokio::test]
+    async fn lsp_hover_tool_removed() {
+        let tools = lsp_tools();
+        assert!(
+            !tools
+                .iter()
+                .any(|t| t["name"].as_str() == Some("lsp_hover")),
+            "lsp_hover must no longer be advertised, got: {tools:?}"
+        );
+        let (state, _tmpdir) = make_empty_lsp_state().await;
+        let result =
+            dispatch_lsp(&state, "lsp_hover", serde_json::json!({"path": "main.rs"})).await;
+        assert!(result.is_none(), "lsp_hover must no longer be dispatched");
     }
 
     /// Test with an unconfigured toolchain (empty specs) → VNL-SBX-LSP-006.
