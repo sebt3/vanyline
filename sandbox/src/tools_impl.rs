@@ -387,6 +387,11 @@ pub struct LspRenameArgs {
     #[serde(flatten)]
     pub target: LspSymbolTarget,
     pub new_name: String,
+    /// Tâche 05 — `true` : calcule le `WorkspaceEdit` et liste les sites
+    /// sans AUCUNE écriture ; `false` (défaut) : applique et rend le rapport
+    /// avant→après (`preview: false` = comportement historique + rapport).
+    #[serde(default)]
+    pub preview: bool,
 }
 
 /// Forme d'argument partagée par tous les tools qui ciblent une position
@@ -724,7 +729,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_rename",
-            "description": "Rename a symbol at a position in a file via the LSP server (applies the resulting WorkspaceEdit to the filesystem). Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Rename a symbol at a position in a file via the LSP server. Default (preview false) applies the resulting WorkspaceEdit to the filesystem and returns a before/after report per edited site. With preview true, the WorkspaceEdit is computed and its sites listed grouped by file — no file is modified. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line", "new_name"],
@@ -733,7 +738,8 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
                     "line": {"type": "integer", "description": "1-based line number (as shown by read_file). Required."},
                     "symbol": {"type": "string", "description": "Identifier name to target on that line (recommended). Resolved to the first delimited-identifier occurrence; if it appears several times the first is used and the answer says so."},
                     "character": {"type": "integer", "description": "1-based column, precise targeting when symbol is absent or ambiguous. Ignored when symbol is set."},
-                    "new_name": {"type": "string", "description": "New name for the symbol."}
+                    "new_name": {"type": "string", "description": "New name for the symbol."},
+                    "preview": {"type": "boolean", "description": "If true, compute and list the edits without applying them (no file is modified). Default false applies the rename and returns a before/after report."}
                 }
             }
         }),
@@ -1779,19 +1785,51 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                     )
                     .await
                 {
-                    // Résultat actuel inchangé (chemins résolus modifiés ligne à
-                    // ligne, ou `no rename`), ligne cible antéposée. Pas de mode
-                    // `preview` ni de rapport avant→après : tâche 5.
+                    // Tâche 05 — `result.is_null()` → `no rename` INCHANGÉ ;
+                    // sinon embranchement `preview` : `true` → rendu du
+                    // `WorkspaceEdit` par `render_rename_preview` (aucune
+                    // écriture possible par construction) ; `false` (défaut) →
+                    // `apply_workspace_edit` puis rapport avant→après via
+                    // `format_applied_files` ; Vec vide après application →
+                    // `no rename` INCHANGÉ. Ligne cible antéposée dans les
+                    // trois cas.
                     Ok(result) => {
                         if result.is_null() {
                             Some(ok_result(format!("{target_line}\nno rename")))
+                        } else if args.preview {
+                            Some(ok_result(format!(
+                                "{target_line}\n{}",
+                                render_rename_preview(&state.config.sandbox_root, &result).await
+                            )))
                         } else {
                             match apply_workspace_edit(&state.config.sandbox_root, &result).await {
                                 Ok(files) if files.is_empty() => {
                                     Some(ok_result(format!("{target_line}\nno rename")))
                                 }
                                 Ok(files) => {
-                                    Some(ok_result(format!("{target_line}\n{}", files.join("\n"))))
+                                    // Les paths sont DÉJÀ résolus et confinés
+                                    // par `apply_workspace_edit` : simple
+                                    // rendu relatif au root (retombe sur
+                                    // l'absolu sinon — possible seulement en
+                                    // cas de bug de `apply_workspace_edit`),
+                                    // pas de re-confinement, pas d'URI ici.
+                                    let rendered: Vec<(String, Vec<AppliedSite>)> = files
+                                        .into_iter()
+                                        .map(|f| {
+                                            let display = match f
+                                                .path
+                                                .strip_prefix(&state.config.sandbox_root)
+                                            {
+                                                Ok(rel) => rel.display().to_string(),
+                                                Err(_) => f.path.display().to_string(),
+                                            };
+                                            (display, f.sites)
+                                        })
+                                        .collect();
+                                    Some(ok_result(format!(
+                                        "{target_line}\nrename appliqué\n{}",
+                                        format_applied_files(&rendered)
+                                    )))
                                 }
                                 Err(e) => Some(err_result(e.to_string())),
                             }
@@ -2201,11 +2239,39 @@ fn apply_text_edits(content: &str, edits: &[Value]) -> anyhow::Result<String> {
     Ok(result)
 }
 
+/// Un site appliqué par `apply_workspace_edit` : ligne 0-based du début de
+/// l'édit + snippets de la ligne AVANT et APRÈS application (calculés sur le
+/// contenu réellement lu avant écriture et sur `new_text` — vides si la ligne
+/// n'existe plus/hors EOF). Limite assumée et commentée : la ligne du snippet
+/// « après » est relue à la MÊME ligne 0-based — exact pour les edits de
+/// rename (aucun changement de nb de lignes), approximatif si un serveur
+/// renvoie des edits multi-lignes qui décalent le texte.
+#[derive(Debug)]
+struct AppliedSite {
+    line0: u64,
+    old_line: String,
+    new_line: String,
+}
+
+/// Fichier touché + ses sites dans l'ordre des éditions.
+#[derive(Debug)]
+struct AppliedFile {
+    path: PathBuf,
+    sites: Vec<AppliedSite>,
+}
+
 /// Applique un `WorkspaceEdit` sur le filesystem sandbox : pour chaque `(uri, edits)`,
 /// convertit l'URI en chemin (`strip_prefix("file://")`), confine sous `sandbox_root`
 /// (échec → `VNL-SBX-LSP-009` avec le message du confine), lit (read_file raw), applique
-/// `apply_text_edits`, écrit (write_file). Rend les chemins absolus résolus modifiés.
-async fn apply_workspace_edit(sandbox_root: &Path, edit: &Value) -> anyhow::Result<Vec<String>> {
+/// `apply_text_edits`, écrit (write_file). Retour (tâche 05) : par fichier, le détail
+/// des sites — snippets calculés AU POINT D'ÉCRITURE, sur le contenu lu et sur
+/// `new_text` déjà en main (jamais un second aller-retour LSP, jamais une relecture
+/// après écriture, design §5). Comportement d'écriture et garde-fous INCHANGÉS
+/// (confinement R5, VNL-SBX-LSP-009 sur URI hors workspace, erreurs apply_text_edits).
+async fn apply_workspace_edit(
+    sandbox_root: &Path,
+    edit: &Value,
+) -> anyhow::Result<Vec<AppliedFile>> {
     let mut modified = Vec::new();
 
     for (uri, edits) in workspace_edit_files(edit) {
@@ -2232,16 +2298,169 @@ async fn apply_workspace_edit(sandbox_root: &Path, edit: &Value) -> anyhow::Resu
 
         let new_text = apply_text_edits(&text, &edits)?;
 
+        // Snippets avant→après AU POINT D'ÉCRITURE : `text` (contenu lu) et
+        // `new_text` sont déjà en main — zéro I/O de plus, zéro requête LSP
+        // de plus. Les ranges ont été validés par `apply_text_edits`
+        // (VNL-SBX-LSP-008) : un `range.start.line` manquant ici est
+        // défensif, jamais attendu.
+        let mut sites = Vec::with_capacity(edits.len());
+        for e in &edits {
+            if let Some(line0) = e
+                .get("range")
+                .and_then(|r| r.get("start"))
+                .and_then(|s| s.get("line"))
+                .and_then(|l| l.as_u64())
+            {
+                sites.push(AppliedSite {
+                    line0,
+                    old_line: line_snippet(&text, line0).unwrap_or_default(),
+                    new_line: line_snippet(&new_text, line0).unwrap_or_default(),
+                });
+            }
+        }
+
         filesystem::write_file(WriteFileOptions {
             path: resolved.clone(),
             content: new_text,
         })
         .await?;
 
-        modified.push(resolved);
+        modified.push(AppliedFile {
+            path: PathBuf::from(resolved),
+            sites,
+        });
     }
 
     Ok(modified)
+}
+
+/// Rapport post-application (pur, testable sans I/O) :
+/// `{total} remplacements dans {m} fichiers\n` + par fichier (chemin relatif
+/// rendu par l'appelant AVANT d'appeler — ce helper ne connaît que des
+/// display paths) : `{display} — {n} remplacements` puis par site
+/// `  L<1-based>: {old} → {new}`. `total` = somme des sites.
+fn format_applied_files(files: &[(String, Vec<AppliedSite>)]) -> String {
+    let total: usize = files.iter().map(|(_, sites)| sites.len()).sum();
+    let mut out = vec![format!(
+        "{total} remplacements dans {} fichiers",
+        files.len()
+    )];
+    for (display, sites) in files {
+        out.push(format!("{} — {} remplacements", display, sites.len()));
+        for site in sites {
+            out.push(format!(
+                "  L{}: {} → {}",
+                site.line0 + 1,
+                site.old_line,
+                site.new_line
+            ));
+        }
+    }
+    out.join("\n")
+}
+
+/// Rendu preview (tâche 05) : `aperçu — {N} sites dans {M} fichiers — AUCUN
+/// fichier modifié` puis, par fichier (ordre de `workspace_edit_files`, sites
+/// dans l'ordre des edits), le display path et par site
+/// `  L<1-based>:<col 1-based>: <snippet ligne actuelle>`. Async car lit les
+/// lignes actuelles (confinées seules) ; aucune écriture possible par
+/// construction — n'appelle jamais rien qui écrive. `tool_error` non :
+/// erreurs de lecture = lignes nues.
+///
+/// R5 : un fichier n'est LU que si son URI est `file://` ET confiné OK ; hors
+/// workspace / non-`file://` → URI brute rendue, ligne `L<1-based>:<col
+/// 1-based>` nue, AUCUNE lecture tentée ; confine OK mais lecture échouée ou
+/// ligne absente → ligne nue aussi (le fichier déjà confiné est seul lu).
+async fn render_rename_preview(sandbox_root: &Path, edit: &Value) -> String {
+    struct PreviewFile {
+        display: String,
+        /// Contenu actuel — `None` = jamais lu (hors workspace/non-`file://`)
+        /// ou lecture échouée → lignes nues sans snippet.
+        content: Option<String>,
+        /// Positions 0-based (`range.start`) de chaque TextEdit. Un edit sans
+        /// `range.start` exploitable ne peut pas être localisé : sauté
+        /// (jamais attendu d'un serveur conforme — en mode apply il lèverait
+        /// VNL-SBX-LSP-008).
+        sites: Vec<(u64, u64)>,
+    }
+
+    let mut files: Vec<PreviewFile> = Vec::new();
+    for (uri, edits) in workspace_edit_files(edit) {
+        let sites: Vec<(u64, u64)> = edits
+            .iter()
+            .filter_map(|e| {
+                let start = e.get("range")?.get("start")?;
+                Some((
+                    start.get("line")?.as_u64()?,
+                    start.get("character")?.as_u64()?,
+                ))
+            })
+            .collect();
+
+        // R5 : confinement avant toute lecture — seul le chemin confiné résolu
+        // est lu, jamais l'URI brute. Display : relatif au root (même logique
+        // que la ligne « cible: »), URI brute sinon.
+        let (display, content) = match uri.strip_prefix("file://") {
+            Some(raw_path) => match confine(sandbox_root, raw_path).await.ok() {
+                Some(resolved) => {
+                    let root_prefix = format!("{}/", sandbox_root.display());
+                    let display = match resolved.strip_prefix(&root_prefix) {
+                        Some(rel) => rel.to_string(),
+                        None => resolved.clone(),
+                    };
+                    let content = match filesystem::read_file(ReadFileOptions {
+                        path: resolved,
+                        offset: 0,
+                        limit: 0,
+                        raw: true,
+                    })
+                    .await
+                    {
+                        Ok(c) => Some(c),
+                        Err(e) => {
+                            // Best effort : le site est rendu nu, jamais une
+                            // erreur tool.
+                            tracing::warn!("lsp_rename preview: cannot read {uri}: {e}");
+                            None
+                        }
+                    };
+                    (display, content)
+                }
+                None => {
+                    tracing::debug!("lsp_rename preview: outside workspace, rendered raw: {uri}");
+                    (uri.clone(), None)
+                }
+            },
+            None => {
+                tracing::debug!("lsp_rename preview: non-file URI, rendered raw: {uri}");
+                (uri.clone(), None)
+            }
+        };
+
+        files.push(PreviewFile {
+            display,
+            content,
+            sites,
+        });
+    }
+
+    let total: usize = files.iter().map(|f| f.sites.len()).sum();
+    let mut out = vec![format!(
+        "aperçu — {total} sites dans {} fichiers — AUCUN fichier modifié",
+        files.len()
+    )];
+    for f in &files {
+        out.push(f.display.clone());
+        for &(line0, character0) in &f.sites {
+            let line1 = line0 + 1;
+            let col1 = character0 + 1;
+            match f.content.as_deref().and_then(|c| line_snippet(c, line0)) {
+                Some(snippet) => out.push(format!("  L{line1}:{col1}: {snippet}")),
+                None => out.push(format!("  L{line1}:{col1}")),
+            }
+        }
+    }
+    out.join("\n")
 }
 
 /// Internal enum to hold parsed LSP arguments.
@@ -3289,6 +3508,15 @@ mod tests {
         let args: LspRenameArgs = serde_json::from_value(val).unwrap();
         assert_eq!(args.target.symbol, None);
         assert_eq!(args.target.character, None);
+        // Tâche 05 — `preview` absent → `false` (le rename applique, preuve
+        // d'intégration par `lsp_rename_apply_reports_before_after`).
+        assert!(!args.preview, "preview must default to false");
+        // Parse explicite `preview: true` → `true`.
+        let with_preview = serde_json::json!({
+            "path": "f.rs", "line": 1, "new_name": "x", "preview": true
+        });
+        let args: LspRenameArgs = serde_json::from_value(with_preview).unwrap();
+        assert!(args.preview, "explicit preview:true must parse to true");
         // `line` est requis (LspSymbolTarget) : sans lui, erreur de parsing.
         let missing_line = serde_json::json!({ "path": "f.rs", "new_name": "x" });
         let result: Result<LspRenameArgs, _> = serde_json::from_value(missing_line);
@@ -3475,9 +3703,17 @@ mod tests {
             text.contains("cible: main.rs:1: fn main() {}"),
             "target line should be prepended, got: {text}"
         );
+        // Tâche 05 — l'absolu résolu (`/main.rs`) a cédé la place au rapport
+        // avant→après avec chemin d'affichage RELATIF au sandbox_root
+        // (écart consigné : `contains("/main.rs")` → assertions du nouveau
+        // rapport ; la vérification du contenu disque reste).
         assert!(
-            text.contains("/main.rs"),
-            "result should contain the resolved path"
+            text.contains("rename appliqué"),
+            "apply mention expected in report, got: {text}"
+        );
+        assert!(
+            text.contains("main.rs — 1 remplacements"),
+            "per-file report line with relative display path expected, got: {text}"
         );
         // Check the file on disk was modified (le fake édite les caractères
         // 0..2 quoi qu'il en soit).
@@ -3541,6 +3777,238 @@ mod tests {
         assert!(
             text.contains("invalid arguments"),
             "should contain 'invalid arguments'"
+        );
+    }
+
+    // ── Tâche 05 — lsp_rename : preview + rapport avant→après ────────────────
+
+    /// Test 2 — `preview: true` liste les sites du `WorkspaceEdit` SANS
+    /// AUCUNE écriture. Le contrat de rendu est en sous-chaînes (le fake rend
+    /// 1 edit → 1 site dans 1 fichier) ; l'assertion importante est la
+    /// relecture disque APRÈS l'appel : le fichier est INCHANGÉ.
+    #[tokio::test]
+    async fn lsp_rename_preview_lists_sites_without_writing() {
+        let (state, tmpdir) = make_lsp_state("rename_preview").await;
+        let original = "fn helper() {}\nfn main() { helper(); }\n";
+        std::fs::write(tmpdir.path().join("main.rs"), original).unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_rename",
+                serde_json::json!({
+                    "path": "main.rs",
+                    "line": 1,
+                    "symbol": "helper",
+                    "new_name": "tool",
+                    "preview": true
+                }),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap_or(false),
+            "should be OK (not isError), got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        // Contrat sous-chaînes : `aperçu` + `1` + `AUCUN fichier modifié`.
+        assert!(
+            text.contains("aperçu"),
+            "preview header expected, got: {text}"
+        );
+        assert!(text.contains('1'), "site count (1) expected, got: {text}");
+        assert!(
+            text.contains("AUCUN fichier modifié"),
+            "no-write mention expected, got: {text}"
+        );
+        // Site : position 1-based (ligne + colonne du range.start) + snippet
+        // de la ligne ACTUELLE (lecture confinée R5).
+        assert!(
+            text.contains("  L1:1: fn helper() {}"),
+            "site line with current-content snippet expected, got: {text}"
+        );
+        // L'assertion LA plus importante de la tâche : preview:true n'écrit
+        // JAMAIS — relecture du fichier après l'appel.
+        let disk_content = std::fs::read_to_string(tmpdir.path().join("main.rs")).unwrap();
+        assert_eq!(
+            disk_content, original,
+            "preview:true must not modify the file"
+        );
+    }
+
+    /// Test 3 — application (défaut, pas de `preview`) : rapport avant→après
+    /// par site + fichier changé sur disque. Prouve au passage que `preview`
+    /// absent vaut `false` (item 4 — `lsp_rename_preview_default_is_false`,
+    /// preuve = ce test qui applique sans le champ).
+    #[tokio::test]
+    async fn lsp_rename_apply_reports_before_after() {
+        let (state, tmpdir) = make_lsp_state("rename_report").await;
+        std::fs::write(
+            tmpdir.path().join("main.rs"),
+            "fn helper() {}\nfn main() { helper(); }\n",
+        )
+        .unwrap();
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_rename",
+                serde_json::json!({
+                    "path": "main.rs",
+                    "line": 1,
+                    "symbol": "helper",
+                    "new_name": "tool"
+                }),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap_or(false),
+            "should be OK (not isError), got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("rename appliqué"),
+            "apply mention expected, got: {text}"
+        );
+        assert!(
+            text.contains("1 remplacement"),
+            "replacement count expected, got: {text}"
+        );
+        // Snippet avant → après calculés au point d'écriture : le fake
+        // remplace les caractères 0..2 (`fn`) par `X`.
+        assert!(
+            text.contains("L1: fn helper() {} → X helper() {}"),
+            "before/after site line expected, got: {text}"
+        );
+        let disk_content = std::fs::read_to_string(tmpdir.path().join("main.rs")).unwrap();
+        assert_eq!(
+            disk_content, "X helper() {}\nfn main() { helper(); }\n",
+            "file must be modified by apply"
+        );
+    }
+
+    /// Test 1 — `format_applied_files` est PUR : display paths déjà résolus
+    /// par l'appelant, aucune I/O. Deux fichiers → total + en-têtes par
+    /// fichier + sites `  L<1-based>: {old} → {new}`, ordre stable.
+    #[test]
+    fn format_applied_files_two_files_totals() {
+        let files = vec![
+            (
+                "main.rs".to_string(),
+                vec![
+                    AppliedSite {
+                        line0: 0,
+                        old_line: "fn helper() {}".to_string(),
+                        new_line: "fn tool() {}".to_string(),
+                    },
+                    AppliedSite {
+                        line0: 1,
+                        old_line: "helper();".to_string(),
+                        new_line: "tool();".to_string(),
+                    },
+                ],
+            ),
+            (
+                "lib.rs".to_string(),
+                vec![AppliedSite {
+                    line0: 3,
+                    old_line: "pub fn helper() {}".to_string(),
+                    new_line: "pub fn tool() {}".to_string(),
+                }],
+            ),
+        ];
+        let out = format_applied_files(&files);
+        assert!(
+            out.contains("3 remplacements dans 2 fichiers"),
+            "total header expected, got: {out}"
+        );
+        assert!(
+            out.contains("main.rs — 2 remplacements"),
+            "main.rs header expected, got: {out}"
+        );
+        assert!(
+            out.contains("  L1: fn helper() {} → fn tool() {}"),
+            "site line expected, got: {out}"
+        );
+        // Ordre stable : en-tête main.rs avant lib.rs (ordre d'entrée).
+        let pos_main = out.find("main.rs — 2 remplacements").unwrap();
+        let pos_lib = out.find("lib.rs — 1 remplacements").unwrap();
+        assert!(
+            pos_main < pos_lib,
+            "input order must be preserved, got: {out}"
+        );
+    }
+
+    /// Test 5 — assertion R5 du preview, `render_rename_preview` APPELÉE
+    /// DIRECTEMENT (le fake rename ne produit qu'un fichier interne, le cas
+    /// external n'a pas de chemin unitaire hors LSP sinon) : un URI
+    /// `file:///external/…` hors workspace est rendu BRUT, ligne nue
+    /// `L11:5` sans snippet, aucune lecture tentée.
+    #[tokio::test]
+    async fn render_rename_preview_external_uri_renders_bare_line() {
+        let root = make_root();
+        let edit = serde_json::json!({
+            "changes": {
+                "file:///external/lib.rs": [
+                    {
+                        "range": {
+                            "start": {"line": 10, "character": 4},
+                            "end": {"line": 10, "character": 8}
+                        },
+                        "newText": "X"
+                    }
+                ]
+            }
+        });
+        let out = render_rename_preview(root.path(), &edit).await;
+        assert!(
+            out.contains("file:///external/lib.rs"),
+            "raw URI expected, got: {out}"
+        );
+        assert!(
+            out.contains("L11:5"),
+            "1-based line:col expected, got: {out}"
+        );
+        // Ligne NUE : rien après le `L11:5` — pas de snippet tenté hors
+        // workspace (R5).
+        assert!(
+            out.lines().any(|l| l.trim() == "L11:5"),
+            "bare L11:5 line (no snippet) expected, got: {out}"
+        );
+    }
+
+    /// Test 7 — schéma MCP : propriété `preview` (boolean) présente sur
+    /// `lsp_rename` dans `lsp_tools()`. Le comptage global des tools (14,
+    /// inchangé) est couvert par `mcp::tests::tools_list_returns_all_tools`.
+    #[test]
+    fn lsp_rename_schema_has_preview_property() {
+        let tools = lsp_tools();
+        let tool = tools
+            .iter()
+            .find(|t| t["name"].as_str() == Some("lsp_rename"))
+            .expect("lsp_rename should be in lsp_tools()");
+        let preview = &tool["inputSchema"]["properties"]["preview"];
+        assert!(
+            !preview.is_null(),
+            "preview property should be present, got: {}",
+            tool["inputSchema"]
+        );
+        assert_eq!(
+            preview["type"].as_str(),
+            Some("boolean"),
+            "preview should be a boolean, got: {preview}"
+        );
+        let desc = preview["description"].as_str().unwrap_or_default();
+        assert!(
+            desc.contains("no file is modified") && desc.contains("Default false"),
+            "preview description should cover both modes, got: {desc}"
         );
     }
 
