@@ -679,13 +679,15 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Schemas for the 6 LSP tools for `tools/list` (same shape as
+/// Schemas for the 7 LSP tools for `tools/list` (same shape as
 /// `vanyline_tools::mcp::filesystem_tools()` : name/description/inputSchema).
 /// Since task 02 of `lsp-agent-interface`, `lsp_hover` no longer exists as a
 /// standalone tool — hover contents are rendered by `lsp_definition`.
 /// Since task 03a, `lsp_document_symbols` (outline d'un fichier) s'ajoute à la
 /// liste ; since task 03b, `lsp_workspace_symbols` (recherche globale de
-/// symboles) — 14 tools MCP au total.
+/// symboles) ; since task 06, `inspect_symbol` (composition def + refs en un
+/// appel, nom sans préfixe `lsp_` — design §tableau tools) — 15 tools MCP au
+/// total.
 pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -763,6 +765,20 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
                 "properties": {
                     "query": {"type": "string", "description": "Symbol name or partial name to search for."},
                     "path": {"type": "string", "description": "Optional path of a file in the language whose server should answer (toolchain hint only — the file is not read)."}
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "inspect_symbol",
+            "description": "One-shot overview of a symbol: signature and doc (hover), definition location(s), and all references grouped by file with their enclosing symbol. Same position model as lsp_definition (path + 1-based line + symbol name or character). Use this instead of chaining lsp_definition + lsp_references for a first read of a symbol. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others return VNL-SBX-LSP-006.",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path", "line"],
+                "properties": {
+                    "path": {"type": "string", "description": "Path to the file within the sandbox workspace."},
+                    "line": {"type": "integer", "description": "1-based line number (as shown by read_file). Required."},
+                    "symbol": {"type": "string", "description": "Identifier name to target on that line (recommended). Resolved to the first delimited-identifier occurrence; if it appears several times the first is used and the answer says so."},
+                    "character": {"type": "integer", "description": "1-based column, precise targeting when symbol is absent or ambiguous. Ignored when symbol is set."}
                 }
             }
         }),
@@ -955,6 +971,42 @@ fn hover_signature_and_doc(contents: &Value) -> (String, String) {
             let signature = lines.next().unwrap_or_default().to_string();
             let doc = lines.take(3).collect::<Vec<_>>().join("\n");
             (signature, doc)
+        }
+    }
+}
+
+/// Sections signature/doc du hover (tâche 02 de `lsp-agent-interface`, extraite
+/// de la branche `lsp_definition` pour la composition `inspect_symbol` — pur
+/// déplacement, comportement identique) : requête hover best-effort (erreur →
+/// `(vide, vide)` + `tracing::warn!`), contenu null/absent → `(vide, vide)`,
+/// sinon `hover_signature_and_doc`. Ne JAMAIS propager l'erreur — une erreur ou
+/// un résultat null/vide au hover ne doit pas faire échouer le tool, juste
+/// omettre les sections signature/doc (design §2).
+async fn hover_sections(
+    client: &mut LspClient,
+    file_uri: &str,
+    line0: u64,
+    character0: u64,
+) -> (String, String) {
+    let hover = client
+        .request(
+            "textDocument/hover",
+            serde_json::json!({
+                "textDocument": {"uri": file_uri},
+                "position": {"line": line0, "character": character0}
+            }),
+        )
+        .await;
+    match hover {
+        Ok(result) => match result.get("contents") {
+            Some(contents) if !contents.is_null() => hover_signature_and_doc(contents),
+            _ => (String::new(), String::new()),
+        },
+        Err(e) => {
+            tracing::warn!(
+                "textDocument/hover failed (best effort, lsp_definition continues): {e}"
+            );
+            (String::new(), String::new())
         }
     }
 }
@@ -1239,6 +1291,142 @@ fn deepest_containing(file_symbols: &[Value], ref_line0: i64) -> Option<&Value> 
     None
 }
 
+/// Contexte des réf (tâche 04 de `lsp-agent-interface`, extraite de la branche
+/// `lsp_references` pour la composition `inspect_symbol` — pur déplacement,
+/// comportement identique) : un `documentSymbol` par fichier distinct confiné
+/// `file://` même toolchain (cap 20, cible réutilisée sans relecture, erreurs
+/// best-effort `tracing::warn!`).
+///
+/// Après la requête references (inchangée), lecture + `didOpen` +
+/// `documentSymbol` par FICHIER DISTINCT jamais par réf, sous les mêmes
+/// garde-fous R5 que le reste : confinés `file://` ONLY, même toolchain que la
+/// session, cap 20 fichiers. Le fichier cible, déjà confiné/lu/ouvert par le
+/// préambule, est réutilisé (`resolved_target`/`text_target`) — jamais relu,
+/// jamais re-didOpen'é (`ensure_open` idempotent par session,
+/// `try_mark_uri_open` déduplique). Toute erreur de collecte est best effort
+/// (réf rendue sans englobant), jamais une erreur tool.
+///
+/// Sorties : symboles et contenus par URI, consumed par
+/// `render_references_grouped`.
+async fn collect_reference_context(
+    client: &mut LspClient,
+    sandbox_root: &Path,
+    locations: &[Value],
+    file_uri: &str,
+    resolved_target: &str,
+    text_target: &str,
+    toolchain: &str,
+) -> (
+    std::collections::BTreeMap<String, Vec<Value>>,
+    std::collections::BTreeMap<String, String>,
+) {
+    // Fichiers distincts touchés par les réf (BTreeSet : ordre déterministe).
+    // Le fichier cible est traité en tête — il compte dans le cap de 20 et son
+    // statut (déjà lu/ouvert par le préambule) ne doit pas dépendre de l'ordre
+    // de tri des URI.
+    let mut uris: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for loc in locations {
+        if let Some(u) = loc.get("uri").and_then(|u| u.as_str()) {
+            uris.insert(u.to_string());
+        } else if let Some(u) = loc.get("targetUri").and_then(|u| u.as_str()) {
+            uris.insert(u.to_string());
+        }
+    }
+    const MAX_REFERENCE_FILES: usize = 20;
+    let mut ordered_uris: Vec<String> = Vec::with_capacity(uris.len());
+    if uris.remove(file_uri) {
+        ordered_uris.push(file_uri.to_string());
+    }
+    ordered_uris.extend(uris);
+
+    let mut symbols_by_uri: std::collections::BTreeMap<String, Vec<Value>> =
+        std::collections::BTreeMap::new();
+    let mut contents_by_uri: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut files_in_pipeline = 0usize;
+    let mut cap_warned = false;
+    for uri in &ordered_uris {
+        // R5 strict : lecture + didOpen + documentSymbol UNIQUEMENT sur URI
+        // `file://` confine OK, même toolchain que la session. Tout le reste
+        // (hors workspace, non-`file://`, toolchain différente — « traitée hors
+        // workspace ») est rendu brut par le helper, sans jamais rien tenter.
+        let Some(raw_path) = uri.strip_prefix("file://") else {
+            continue;
+        };
+        let Ok(resolved_file) = confine(sandbox_root, raw_path).await else {
+            continue;
+        };
+        let Some((file_toolchain, file_language_id)) = toolchain_for_path(&resolved_file) else {
+            continue;
+        };
+        if file_toolchain != toolchain {
+            continue;
+        }
+        if files_in_pipeline >= MAX_REFERENCE_FILES {
+            if !cap_warned {
+                tracing::warn!(
+                    "lsp_references: more than {MAX_REFERENCE_FILES} distinct files — \
+                     remaining references rendered without enclosing"
+                );
+                cap_warned = true;
+            }
+            continue;
+        }
+        files_in_pipeline += 1;
+
+        // Fichier cible : texte du préambule réutilisé — pas de relecture (et
+        // didOpen déjà fait au-dessus).
+        let content = if resolved_file == resolved_target {
+            text_target.to_string()
+        } else {
+            match filesystem::read_file(ReadFileOptions {
+                path: resolved_file,
+                offset: 0,
+                limit: 0,
+                raw: true,
+            })
+            .await
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(
+                        "lsp_references: cannot read {uri} (best effort, rendered without enclosing): {e}"
+                    );
+                    continue;
+                }
+            }
+        };
+        if *uri != file_uri
+            && let Err(e) = client.ensure_open(uri, file_language_id, &content).await
+        {
+            tracing::warn!(
+                "lsp_references: cannot didOpen {uri} (best effort, rendered without enclosing): {e}"
+            );
+            continue;
+        }
+        // UN seul documentSymbol par fichier distinct — erreur → liste vide +
+        // warn, jamais une erreur tool (best effort, design §3).
+        let symbols = match client
+            .request(
+                "textDocument/documentSymbol",
+                serde_json::json!({"textDocument": {"uri": uri}}),
+            )
+            .await
+        {
+            Ok(result) => result.as_array().cloned().unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(
+                    "lsp_references: documentSymbol failed for {uri} (best effort, rendered without enclosing): {e}"
+                );
+                Vec::new()
+            }
+        };
+        contents_by_uri.insert(uri.clone(), content);
+        symbols_by_uri.insert(uri.clone(), symbols);
+    }
+    (symbols_by_uri, contents_by_uri)
+}
+
 /// Rendu du résultat `textDocument/references` pour `lsp_references` (design
 /// §3, tâche 04) : réf groupées par fichier, chaque run consécutif sous un
 /// même englobant précédé de son en-tête, le tout déterministe (tri par
@@ -1408,8 +1596,9 @@ async fn render_references_grouped(
 
 /// Dispatches a `tools/call` for `lsp_diagnostics`/`lsp_definition`/
 /// `lsp_references`/`lsp_rename`/`lsp_document_symbols`/
-/// `lsp_workspace_symbols`. Returns `None` if `name` is not one of these.
-/// Consumes `state.lsp` (shared LSP process) and `state.config.sandbox_root`.
+/// `lsp_workspace_symbols`/`inspect_symbol`. Returns `None` if `name` is not
+/// one of these. Consumes `state.lsp` (shared LSP process) and
+/// `state.config.sandbox_root`.
 pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Option<Value> {
     let lsp_tools = [
         "lsp_diagnostics",
@@ -1418,6 +1607,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         "lsp_rename",
         "lsp_document_symbols",
         "lsp_workspace_symbols",
+        "inspect_symbol",
     ];
     if !lsp_tools.contains(&name) {
         return None;
@@ -1524,8 +1714,9 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         };
         LspArgs::DocumentSymbols(args)
     } else {
-        // `lsp_definition` / `lsp_references` : modèle de position partagé,
-        // `line` requis (son absence tombe dans le `invalid arguments` ci-dessus).
+        // `lsp_definition` / `lsp_references` / `inspect_symbol` : modèle de
+        // position partagé (`LspSymbolTarget`), `line` requis (son absence
+        // tombe dans le `invalid arguments` ci-dessus).
         let args: LspSymbolTarget = match serde_json::from_value(arguments.clone()) {
             Ok(a) => a,
             Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
@@ -1684,30 +1875,10 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                     // design §2) : « pas de def trouvée → on rend quand même
                     // hover si présent » vaut aussi l'inverse — une erreur ou un
                     // résultat null/vide au hover ne doit JAMAIS faire échouer le
-                    // tool, juste omettre les sections signature/doc.
-                    let hover = client
-                        .request(
-                            "textDocument/hover",
-                            serde_json::json!({
-                                "textDocument": {"uri": file_uri},
-                                "position": {"line": line0, "character": character0}
-                            }),
-                        )
-                        .await;
-                    let (signature, doc) = match hover {
-                        Ok(result) => match result.get("contents") {
-                            Some(contents) if !contents.is_null() => {
-                                hover_signature_and_doc(contents)
-                            }
-                            _ => (String::new(), String::new()),
-                        },
-                        Err(e) => {
-                            tracing::warn!(
-                                "textDocument/hover failed (best effort, lsp_definition continues): {e}"
-                            );
-                            (String::new(), String::new())
-                        }
-                    };
+                    // tool, juste omettre les sections signature/doc. Extraite en
+                    // `hover_sections` (tâche 06, composition `inspect_symbol`).
+                    let (signature, doc) =
+                        hover_sections(&mut client, &file_uri, line0, character0).await;
                     // Definition : l'échec reste une erreur tool (comportement
                     // actuel, inchangé).
                     match client
@@ -1841,15 +2012,10 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             }
         }
         // Tâche 04 — `lsp_references` enrichi (design §3) : après la requête
-        // references (inchangée), un `documentSymbol` par FICHIER DISTINCT
-        // jamais par réf, avec lecture + `ensure_open` (idempotent par
-        // session, `try_mark_uri_open` déduplique) sous les mêmes garde-fous
-        // R5 que le reste : confinés `file://` ONLY, même toolchain que la
-        // session, cap 20 fichiers. Le fichier cible, déjà confiné/lu/ouvert
-        // par le préambule, est réutilisé (`resolved`/`text`) — jamais relu,
-        // jamais re-didOpen'é. Toute erreur de collecte est best effort
-        // (`tracing::warn!`, réf rendue sans englobant), jamais une erreur
-        // tool.
+        // references (inchangée), collecte du contexte par fichier distinct
+        // (`collect_reference_context`, extraite en tâche 06 pour la
+        // composition `inspect_symbol` — comportement identique), puis rendu
+        // groupé.
         "lsp_references" => {
             let (line0, character0, target_line) = match target_info {
                 Some(t) => t,
@@ -1885,120 +2051,16 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                             return Some(ok_result(out.join("\n")));
                         }
 
-                        // Fichiers distincts touchés par les réf (BTreeSet :
-                        // ordre déterministe). Le fichier cible est traité en
-                        // tête — il compte dans le cap de 20 et son statut
-                        // (déjà lu/ouvert par le préambule) ne doit pas dépendre
-                        // de l'ordre de tri des URI.
-                        let mut uris: std::collections::BTreeSet<String> =
-                            std::collections::BTreeSet::new();
-                        for loc in &locations {
-                            if let Some(u) = loc.get("uri").and_then(|u| u.as_str()) {
-                                uris.insert(u.to_string());
-                            } else if let Some(u) = loc.get("targetUri").and_then(|u| u.as_str()) {
-                                uris.insert(u.to_string());
-                            }
-                        }
-                        const MAX_REFERENCE_FILES: usize = 20;
-                        let mut ordered_uris: Vec<String> = Vec::with_capacity(uris.len());
-                        if uris.remove(&file_uri) {
-                            ordered_uris.push(file_uri.clone());
-                        }
-                        ordered_uris.extend(uris);
-
-                        let mut symbols_by_uri: std::collections::BTreeMap<String, Vec<Value>> =
-                            std::collections::BTreeMap::new();
-                        let mut contents_by_uri: std::collections::BTreeMap<String, String> =
-                            std::collections::BTreeMap::new();
-                        let mut files_in_pipeline = 0usize;
-                        let mut cap_warned = false;
-                        for uri in &ordered_uris {
-                            // R5 strict : lecture + didOpen + documentSymbol
-                            // UNIQUEMENT sur URI `file://` confine OK, même
-                            // toolchain que la session. Tout le reste (hors
-                            // workspace, non-`file://`, toolchain différente —
-                            // « traitée hors workspace ») est rendu brut par le
-                            // helper, sans jamais rien tenter.
-                            let Some(raw_path) = uri.strip_prefix("file://") else {
-                                continue;
-                            };
-                            let Ok(resolved_file) =
-                                confine(&state.config.sandbox_root, raw_path).await
-                            else {
-                                continue;
-                            };
-                            let Some((file_toolchain, file_language_id)) =
-                                toolchain_for_path(&resolved_file)
-                            else {
-                                continue;
-                            };
-                            if file_toolchain != toolchain {
-                                continue;
-                            }
-                            if files_in_pipeline >= MAX_REFERENCE_FILES {
-                                if !cap_warned {
-                                    tracing::warn!(
-                                        "lsp_references: more than {MAX_REFERENCE_FILES} distinct files — \
-                                         remaining references rendered without enclosing"
-                                    );
-                                    cap_warned = true;
-                                }
-                                continue;
-                            }
-                            files_in_pipeline += 1;
-
-                            // Fichier cible : texte du préambule réutilisé —
-                            // pas de relecture (et didOpen déjà fait au-dessus).
-                            let content = if resolved_file == resolved {
-                                text.clone()
-                            } else {
-                                match filesystem::read_file(ReadFileOptions {
-                                    path: resolved_file,
-                                    offset: 0,
-                                    limit: 0,
-                                    raw: true,
-                                })
-                                .await
-                                {
-                                    Ok(c) => c,
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "lsp_references: cannot read {uri} (best effort, rendered without enclosing): {e}"
-                                        );
-                                        continue;
-                                    }
-                                }
-                            };
-                            if *uri != file_uri
-                                && let Err(e) =
-                                    client.ensure_open(uri, file_language_id, &content).await
-                            {
-                                tracing::warn!(
-                                    "lsp_references: cannot didOpen {uri} (best effort, rendered without enclosing): {e}"
-                                );
-                                continue;
-                            }
-                            // UN seul documentSymbol par fichier distinct —
-                            // erreur → liste vide + warn, jamais une erreur
-                            // tool (best effort, design §3).
-                            let symbols = match client
-                                .request(
-                                    "textDocument/documentSymbol",
-                                    serde_json::json!({"textDocument": {"uri": uri}}),
-                                )
-                                .await
-                            {
-                                Ok(result) => result.as_array().cloned().unwrap_or_default(),
-                                Err(e) => {
-                                    tracing::warn!(
-                                        "lsp_references: documentSymbol failed for {uri} (best effort, rendered without enclosing): {e}"
-                                    );
-                                    Vec::new()
-                                }
-                            };
-                            contents_by_uri.insert(uri.clone(), content);
-                            symbols_by_uri.insert(uri.clone(), symbols);
-                        }
+                        let (symbols_by_uri, contents_by_uri) = collect_reference_context(
+                            &mut client,
+                            &state.config.sandbox_root,
+                            &locations,
+                            &file_uri,
+                            &resolved,
+                            &text,
+                            toolchain,
+                        )
+                        .await;
 
                         out.push(
                             render_references_grouped(
@@ -2013,6 +2075,128 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                     }
                     Err(e) => Some(err_result(e.to_string())),
                 },
+                (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
+            }
+        }
+        // Tâche 06 — `inspect_symbol` (design §6, proposition 7) : composition
+        // pure definition + references en un appel, aucune méthode LSP de plus.
+        // Sémantique d'erreur exactement celle des tools d'origine : hover
+        // best-effort (`hover_sections`, jamais d'erreur), definition en erreur
+        // dure (`err_result`, comme `lsp_definition`), references en erreur
+        // dure (`err_result`, comme `lsp_references`) ; contexte refs collecté
+        // par `collect_reference_context` (la fonction de la tâche 04), rendu
+        // par `render_references_grouped` (en-tête `références (N):` inclus).
+        // Les sections vides sont omises, jamais rendues comme vides (cohérent
+        // 02).
+        "inspect_symbol" => {
+            let (line0, character0, target_line) = match target_info {
+                Some(t) => t,
+                None => unreachable!("target_info is Some for target-based tools"),
+            };
+            match (
+                client.initialize().await,
+                client.ensure_open(&file_uri, language_id, &text).await,
+            ) {
+                (Ok(_), Ok(())) => {
+                    // 1. Hover best-effort d'abord (sections vides = omises).
+                    let (signature, doc) =
+                        hover_sections(&mut client, &file_uri, line0, character0).await;
+                    // 2. Definition : l'échec est une erreur tool (comme
+                    //    `lsp_definition`).
+                    match client
+                        .request(
+                            "textDocument/definition",
+                            serde_json::json!({
+                                "textDocument": {"uri": file_uri},
+                                "position": {"line": line0, "character": character0}
+                            }),
+                        )
+                        .await
+                    {
+                        Ok(result) => {
+                            // Normalisation et filtre identiques à
+                            // `lsp_definition` (tableau ou objet unique).
+                            let locations: Vec<Value> = if let Some(arr) = result.as_array() {
+                                arr.clone()
+                            } else if result.is_object() {
+                                vec![result.clone()]
+                            } else {
+                                vec![]
+                            };
+                            let locations: Vec<Value> =
+                                locations.into_iter().filter(location_has_uri).collect();
+                            let mut out = vec![target_line];
+                            if !signature.is_empty() {
+                                out.push(format!("signature: {signature}"));
+                            }
+                            if !doc.is_empty() {
+                                out.push(format!("doc: {doc}"));
+                            }
+                            if locations.is_empty() {
+                                out.push("no definitions".to_string());
+                            } else {
+                                out.push("défini à:".to_string());
+                                for loc in &locations {
+                                    out.push(format!(
+                                        "  {}",
+                                        render_location(&state.config.sandbox_root, loc).await
+                                    ));
+                                }
+                            }
+                            // 3. References : l'échec est une erreur tool
+                            //    (comme `lsp_references`).
+                            match client
+                                .request(
+                                    "textDocument/references",
+                                    serde_json::json!({
+                                        "textDocument": {"uri": file_uri},
+                                        "position": {"line": line0, "character": character0},
+                                        "context": {"includeDeclaration": true}
+                                    }),
+                                )
+                                .await
+                            {
+                                Ok(result) => {
+                                    let locations: Vec<Value> = if let Some(arr) = result.as_array()
+                                    {
+                                        arr.clone()
+                                    } else {
+                                        vec![]
+                                    };
+                                    let locations: Vec<Value> =
+                                        locations.into_iter().filter(location_has_uri).collect();
+                                    if locations.is_empty() {
+                                        out.push("no references".to_string());
+                                    } else {
+                                        let (symbols_by_uri, contents_by_uri) =
+                                            collect_reference_context(
+                                                &mut client,
+                                                &state.config.sandbox_root,
+                                                &locations,
+                                                &file_uri,
+                                                &resolved,
+                                                &text,
+                                                toolchain,
+                                            )
+                                            .await;
+                                        out.push(
+                                            render_references_grouped(
+                                                &state.config.sandbox_root,
+                                                &locations,
+                                                &symbols_by_uri,
+                                                &contents_by_uri,
+                                            )
+                                            .await,
+                                        );
+                                    }
+                                    Some(ok_result(out.join("\n")))
+                                }
+                                Err(e) => Some(err_result(e.to_string())),
+                            }
+                        }
+                        Err(e) => Some(err_result(e.to_string())),
+                    }
+                }
                 (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
             }
         }
@@ -4856,6 +5040,143 @@ mod tests {
         assert!(
             !text.contains("dans"),
             "no enclosing block without a symbol above, got: {text}"
+        );
+    }
+
+    // ── Tâche 06 — inspect_symbol (definition + références en un appel) ──────
+
+    /// Test 1 — composition complète : cible, défini à (2 locations du fake,
+    /// dont l'externe), références groupées avec englobant — le tout dans
+    /// CET ordre (positions `find` croissantes des trois sections).
+    #[tokio::test]
+    async fn inspect_symbol_composes_all_sections() {
+        let (state, tmpdir) = make_lsp_state("inspect").await;
+        std::fs::write(
+            tmpdir.path().join("main.rs"),
+            "fn helper() {}\nfn main() { helper(); }\n",
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "inspect_symbol",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "helper"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "should be OK, got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("cible: main.rs:1: fn helper() {}"),
+            "target line expected, got: {text}"
+        );
+        assert!(
+            text.contains("défini à:"),
+            "definition section, got: {text}"
+        );
+        assert!(
+            text.contains("  main.rs:1: fn helper() {}"),
+            "echo definition location (indented render_location), got: {text}"
+        );
+        assert!(
+            text.contains("file:///external/lib.rs:42"),
+            "second (external) definition location rendered raw, got: {text}"
+        );
+        assert!(
+            text.contains("références (3):"),
+            "grouped references header with exact count (2 disk + 1 external), got: {text}"
+        );
+        assert!(
+            text.contains("  dans fn helper · fn helper() {} — L1"),
+            "at least one enclosing block inside the references, got: {text}"
+        );
+        // Ordre des sections : cible < défini à < références (find croissants).
+        let i_target = text.find("cible: main.rs:1").expect("target section");
+        let i_def = text.find("défini à:").expect("definition section");
+        let i_refs = text.find("références (3):").expect("references section");
+        assert!(
+            i_target < i_def && i_def < i_refs,
+            "sections must render in order cible → défini à → références, got: {text}"
+        );
+    }
+
+    /// Test 2 — hover du fake = texte brut `hover:{uri}` (forme plate, pas de
+    /// section code) → 1re ligne non vide = signature, doc vide donc omis :
+    /// aligné sur `lsp_definition_includes_hover_signature` (02), la
+    /// composition partage `hover_sections`.
+    #[tokio::test]
+    async fn inspect_symbol_signature_section_when_hover_prose() {
+        let (state, tmpdir) = make_lsp_state("inspect_hover").await;
+        std::fs::write(
+            tmpdir.path().join("main.rs"),
+            "fn helper() {}\nfn main() { helper(); }\n",
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "inspect_symbol",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "helper"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "should be OK, got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("signature: hover:file://"),
+            "flat hover prose renders as signature (same as lsp_definition), got: {text}"
+        );
+        assert!(
+            !text.contains("doc: hover:"),
+            "no doc section when hover carries no prose beyond the signature line, got: {text}"
+        );
+        // La signature est sa position dans la composition : cible < signature
+        // < défini à.
+        let i_target = text.find("cible: main.rs:1").expect("target section");
+        let i_sig = text.find("signature: hover:file://").expect("signature");
+        let i_def = text.find("défini à:").expect("definition section");
+        assert!(
+            i_target < i_sig && i_sig < i_def,
+            "signature sits between target and definitions, got: {text}"
+        );
+    }
+
+    /// Test 3 — garde de toolchain : `.py` → VNL-SBX-LSP-006 (même préambule
+    /// que les tools target-based).
+    #[tokio::test]
+    async fn inspect_symbol_toolchain_guard() {
+        let (state, tmpdir) = make_lsp_state("inspect_py").await;
+        std::fs::write(tmpdir.path().join("main.py"), "x = 1").unwrap();
+
+        let result = dispatch_lsp(
+            &state,
+            "inspect_symbol",
+            serde_json::json!({"path": "main.py", "line": 1, "symbol": "x"}),
+        )
+        .await
+        .expect("dispatch returned None");
+
+        assert!(result["isError"].as_bool().unwrap(), "should be an error");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("VNL-SBX-LSP-006"),
+            "unsupported extension should return VNL-SBX-LSP-006, got: {text}"
         );
     }
 }
