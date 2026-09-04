@@ -1,8 +1,10 @@
 ---
 description: Implémente une tâche à partir d'un fichier de tâche structuré contenant des prototypes de code
 mode: subagent
-model: smart/qwen3.6:35b-a3b
-temperature: 0.3
+model: smart/qwen3.8-flash-next
+temperature: 1.0
+top_p: 0.95
+reasoningEffort: xhigh
 color: success
 permission:
   "*": allow

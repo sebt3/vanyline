@@ -1,14 +1,10 @@
 ---
 description: Cadence l'implémentation d'une feature déjà designée — découpe en tâches just-in-time, dispatche chacune à l'agent implement, valide avant de passer à la suivante. Ne conçoit pas l'architecture et ne fait pas la revue finale avant merge.
 mode: primary
-model: smart/deepseek-v4-flash
-# DeepSeek-V4-Flash-0731 est prévu pour tourner à temperature 1.0 / top_p 0.95
-# (fiche modèle, "local agentic workloads") — un temperature bas dégrade un
-# modèle de raisonnement RL-tuné. reasoningEffort/textVerbosity/reasoningSummary
-# répliquent le variant `high` du provider `smart` (cf. ~/.opencode/opencode.json).
+model: smart/qwen3.8-flash-next
 temperature: 1.0
 top_p: 0.95
-reasoningEffort: high
+reasoningEffort: xhigh
 textVerbosity: low
 reasoningSummary: auto
 color: info
