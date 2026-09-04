@@ -10,6 +10,10 @@ Décisions produit prises en Phase 1 avec le développeur (2026-09-04) :
 - **Positions** : cibler un nom de symbole sur une ligne (proposition 6), coordonnées
   gardées en option.
 - **Découpage** : les 7 propositions du backlog dans la v1 (pas de coupe).
+- **`edit_and_check` ne bloque jamais le LLM** même si un humain a le fichier ouvert
+  dans l'éditeur ; l'éditeur est rafraîchi après l'édition, et **l'autosave de
+  l'éditeur entre dans le périmètre de cette feature** (absorbe l'item `## Auto-save`
+  du backlog) pour rendre ce rafraîchissement sans perte.
 
 ---
 
@@ -19,6 +23,8 @@ Remplace la collection de tools `lsp_*` qui imitent des gestes d'IDE (hover,
 goto-def, rename bruts, positions 0-based à re-résoudre) par une interface orientée
 boucle agent : après une édition, savoir vite ce qui casse et qui est impacté, avec
 la fonction englobante et sa signature plutôt que des coordonnées `fichier:ligne:col`.
+Amène au passage l'autosave de l'éditeur, prérequis d'une édition LLM propre sur un
+fichier ouvert.
 
 ## Ce qu'elle ne fait pas (périmètre explicite)
 
@@ -45,9 +51,11 @@ la fonction englobante et sa signature plutôt que des coordonnées `fichier:lig
   `apply_workspace_edit` existant. `edit_and_check` **ajoute** un message sortant sur
   `/ws/fs` (« fichier changé sur disque » → l'éditeur recharge), pas une nouvelle
   route.
-- **Ne branche pas l'autosave de l'éditeur** — c'est un item séparé du backlog
-  (`## Auto-save`). R1 s'en passe (l'éditeur affiche « recharger ? » s'il y a des
-  modifs locales) et n'y touche que si ce compromis s'avère pénible en usage.
+- **Autosave** : l'éditeur gagne l'autosave (débounce → `/ws/fs`), mais **rien de
+  plus** — pas d'historique de versions, pas de résolution de conflit à trois voies,
+  pas de toggle par fichier au-delà de ce que R1 sous-question 4 tranche. C'est le
+  strict nécessaire pour que le reload de buffer du cas B ne perde aucune frappe.
+  Cette feature absorbe l'item `## Auto-save` du backlog.
 
 ---
 
@@ -70,6 +78,21 @@ Net : 5 tools → 8 tools (retrait de 1, ajout de 4).
 ---
 
 ## Interfaces clés et modules touchés
+
+Modules touchés :
+- `sandbox/src/tools_impl.rs` — dispatch et schémas des tools `lsp_*`, `resolve_position`,
+  `dispatch_edit_and_check` (§1-7).
+- `sandbox/src/lsp.rs` / `lsp_client.rs` — ajout additif `did_change` / `doc_versions` /
+  `invalidate_diagnostics` + tracking des URIs ouvertes par un client navigateur (§7).
+- `sandbox/src/ws/lsp.rs` — le tracking « ouverte par le navigateur » s'accroche au
+  `subscribe`/`unsubscribe` du bridge (§7, R1 sous-q. 1).
+- `sandbox/src/ws/fs.rs` (ou équivalent) — type de frame sortant « fichier changé sur
+  disque » (§8).
+- `frontend/` éditeur CodeMirror — autosave debouncé + reload de buffer sur
+  notification (§8).
+- `docs/architecture.md` — à la clôture (§ « Serveur LSP », § éditeur).
+
+Aucune modification de `vanyline-tools`, du controller, de `app/`, des CRDs.
 
 ### 1. Modèle de position partagé (proposition 6)
 
@@ -242,6 +265,25 @@ Séquence de messages requise (à dérouler concrètement — leçon `lsp-integr
 Rien d'autre du manager ne bouge. `open_uris` reste write-once ; `edit_and_check`
 suppose le fichier déjà ouvert (via `ensure_open`) et n'envoie **jamais** `didClose`.
 
+### 8. Autosave éditeur + reload sur notification (frontend)
+
+Requis par R1 cas B. Modules `frontend/` (éditeur CodeMirror — cf.
+`docs/architecture.md` « Frontend — shell IDE Vue » / « WebSocket éditeur ») :
+
+- **Autosave** : extension CodeMirror qui, sur `updateListener` (doc changé),
+  planifie un `write` debouncé sur `/ws/fs` pour le fichier courant. Supprime l'état
+  « modifications non enregistrées » (que l'éditeur ne matérialise pas aujourd'hui).
+- **Reload sur notification** : à la réception d'un message `/ws/fs` « fichier changé
+  sur disque : `<path>` », si un onglet tient ce fichier, relire le contenu et
+  remplacer le buffer par une transaction CodeMirror (ce qui fait émettre le
+  `didChange` par `@codemirror/lsp-client`). Avec autosave actif, aucune perte.
+- **Flush avant édition LLM (cas B)** : optionnel — `edit_and_check` peut demander au
+  frontend de flusher l'autosave du fichier avant d'écrire (cf. R1 sous-question 3).
+
+Côté sandbox : le message sortant « fichier changé » sur `/ws/fs` (pas une nouvelle
+route — un type de frame supplémentaire sur la connexion existante), émis par
+`edit_and_check` après le `write_file`/`edit_file`.
+
 ---
 
 ## Risques identifiés et questions ouvertes
@@ -250,9 +292,9 @@ suppose le fichier déjà ouvert (via `ensure_open`) et n'envoie **jamais** `did
 
 **Décision développeur (2026-09-04) : on ne bloque jamais le LLM. `edit_and_check`
 s'exécute quel que soit l'état de l'éditeur, et l'éditeur est rafraîchi après
-l'édition. Si le rafraîchissement pose un problème d'édition humaine non enregistrée,
-on branche l'autosave de l'éditeur (item séparé du backlog, « ## Auto-save ») —
-ce qui supprime le conflit.**
+l'édition. L'autosave de l'éditeur fait partie de cette feature (elle absorbe l'item
+`## Auto-save` du backlog) — c'est ce qui rend le rafraîchissement sûr : plus de
+modif humaine non enregistrée à perdre au reload du buffer.**
 
 Le process LSP est **partagé** éditeur + tools (`docs/architecture.md`, « Serveur
 LSP »). Quand l'éditeur navigateur a `foo.rs` ouvert, **le buffer de l'éditeur, pas
@@ -276,6 +318,17 @@ que le round-trip navigateur produise la ré-analyse. Round-trip lent / WS déco
 → timeout → `VNL-SBX-LSP-008` (édition faite sur disque, retry) ; à la reconnexion
 l'éditeur recharge de toute façon.
 
+**Autosave (dans le périmètre de cette feature).** Écriture debouncée du buffer
+CodeMirror vers `/ws/fs` à chaque changement (l'éditeur n'a aujourd'hui **ni**
+autosave **ni** indicateur « non enregistré », cf. `docs/architecture.md`
+« Limites connues »). Effet sur R1 : quand un humain a le fichier ouvert, ses frappes
+sont déjà sur le disque, donc (i) le `read_file` du LLM voit toujours l'état courant
+et (ii) le reload de buffer du cas B ne détruit aucune modif locale. La fenêtre de
+course résiduelle = le délai de debounce (frappe non encore flushée au moment où le
+LLM écrit) — bornée à quelques centaines de ms au lieu d'une session d'édition
+entière. Édition concurrente stricte humain+LLM sur le même fichier reste
+intrinsèquement racy ; l'autosave la rend acceptable, pas nulle.
+
 **Sous-questions à trancher à la task `edit_and_check` (pas avant) :**
 
 1. **Détecter le cas B** : `LspSession` doit savoir si une URI est ouverte par un
@@ -285,17 +338,19 @@ l'éditeur recharge de toute façon.
 2. **Canal de notification « fichier changé sur disque » vers le frontend** : sur
    `/ws/fs` (l'éditeur y est déjà connecté) ou un événement dédié ? Forme du message,
    et l'éditeur ne recharge que s'il tient ce fichier.
-3. **Conflit avec une édition humaine non enregistrée** : sans autosave, recharger le
-   buffer écrase les modifs locales. Deux options : (i) l'éditeur refuse le reload
-   silencieux et affiche « le LLM a modifié ce fichier — recharger ? » ; (ii) on
-   branche l'autosave (backlog) et le problème disparaît. Décision développeur :
-   autosave si (i) s'avère pénible. À la task, commencer par (i) — moins couplé.
-4. **Cas B sans que le round-trip aboutisse** (autre onglet, pas le fichier au
+3. **Autosave : debounce et flush** — valeur du debounce (200-500 ms ?) ; et est-ce
+   que `edit_and_check` en cas B demande un **flush immédiat** au frontend *avant*
+   d'écrire (ferme la fenêtre de course au prix d'un round-trip de plus), ou accepte
+   la fenêtre de debounce ? Recommandation : flush explicite avant écriture en cas B,
+   debounce simple sinon.
+4. **Autosave : périmètre de déclenchement** — tous les fichiers ouverts, ou
+   opt-out possible ? Interaction avec un fichier en lecture seule / hors workspace.
+5. **Cas B sans que le round-trip aboutisse** (autre onglet, pas le fichier au
    premier plan) : le timeout `VNL-SBX-LSP-008` couvre, mais valider que le message
    dit clairement « édition appliquée, ré-analyse en attente de l'éditeur ».
 
 Les tools 1 à 6 ne dépendent pas de R1 — implémentables d'abord. La task
-`edit_and_check` porte ces 4 sous-questions.
+`edit_and_check` (+ autosave) porte ces sous-questions.
 
 ### R2 — `documentSymbol` / `workspace/symbol` non vérifiés sur les deux serveurs
 
@@ -340,6 +395,13 @@ endpoints :
   chemin filesystem à partir d'une entrée non-`path`. Le seul I/O est : lecture du
   fichier confiné, écriture du fichier confiné (`edit_and_check` uniquement), messages
   JSON-RPC vers le process LSP local via stdio (pas de réseau).
+- **Autosave / notification « fichier changé »** : le `path` du message sortant
+  `/ws/fs` et celui du `write` d'autosave passent par le même confinement que les
+  `write`/`read` `/ws/fs` existants — l'autosave n'écrit que le fichier actuellement
+  ouvert dans un onglet (chemin déjà validé à l'ouverture), le message « fichier
+  changé » porte un chemin relatif au workspace produit côté sandbox (jamais un
+  chemin absolu, cohérent avec la convention `/ws/fs`), l'éditeur ne l'utilise que
+  pour un lookup d'onglet, pas pour un accès disque direct.
 
 ### R6 — `resolve_position` : ambiguïté de symbole sur une ligne
 
@@ -372,14 +434,18 @@ Existants réutilisés : `VNL-SBX-LSP-004` (process fermé), `-005` (erreur serv
 4. **`lsp_references` enrichi** (dépend de `documentSymbol` de la task 3).
 5. **`lsp_rename` preview + rapport**.
 6. **`inspect_symbol`** (composition pure de 2 + 4).
-7. **`edit_and_check`** — porte les 4 sous-questions de R1 (détection cas B, canal de
-   notif frontend, conflit édition humaine, message timeout) ; inclut l'ajout
-   `did_change` / `doc_versions` / `invalidate_diagnostics` au manager + le tracking
-   des URIs ouvertes par un client navigateur + le canal de notif « fichier changé »
-   côté `/ws/fs`. La plus grosse — à re-découper si elle dépasse 45 min.
+7. **Autosave éditeur** (frontend) — extension CodeMirror débounce → `write` `/ws/fs`,
+   + réception d'un message « fichier changé sur disque » → reload de buffer. Livrable
+   seul (utile indépendamment), prérequis du cas B de la task 8.
+8. **`edit_and_check`** — côté sandbox : `did_change` / `doc_versions` /
+   `invalidate_diagnostics` au manager, tracking des URIs ouvertes par un client
+   navigateur, émission du message « fichier changé » sur `/ws/fs`, dispatch du tool
+   lui-même (diff de diagnostics, cas A/B). Porte les sous-questions de R1. **La plus
+   grosse — à re-découper** (p. ex. 8a manager + tracking, 8b le tool + le diff).
 
-Chaque task : un commit, tests d'abord (TDD), fakes LSP existants
-(`lsp_test_fakes::FAKE_LSP_PY` / `FAKE_LSP_NODIAG_PY`) étendus au besoin.
+Tasks 1-6 et 7 indépendantes de R1 ; 8 dépend de 7. Chaque task : un commit, tests
+d'abord (TDD), fakes LSP existants (`lsp_test_fakes::FAKE_LSP_PY` /
+`FAKE_LSP_NODIAG_PY`) étendus au besoin.
 
 ---
 
@@ -388,6 +454,10 @@ Chaque task : un commit, tests d'abord (TDD), fakes LSP existants
 - Migrer la description de l'interface `lsp_*` de v2 dans `docs/architecture.md`
   § « Serveur LSP » (remplacer la liste des 5 tools, ajouter le modèle de position,
   `edit_and_check`, l'ajout `didChange` au manager).
+- Documenter l'autosave dans `docs/architecture.md` § « Frontend — shell IDE Vue » /
+  « WebSocket éditeur » et **retirer** la mention « aucun indicateur modifications non
+  enregistrées » des « Limites connues ».
 - Supprimer ce fichier.
-- Retirer la partie 1 de `docs/backlog.md` (fait à l'extraction) — vérifier que la
-  section « Support éditeur — autres langages » ne référence plus une partie disparue.
+- Retirer l'item `## Auto-save` de `docs/backlog.md` (absorbé) et vérifier que la
+  partie 1 en a bien été retirée à l'extraction, que « Support éditeur — autres
+  langages » ne référence plus une partie disparue.

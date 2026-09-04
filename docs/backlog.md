@@ -87,6 +87,12 @@ de design.
 
 ## Auto-save
 
+> Absorbé (2026-09-04) par la feature `docs/features/lsp-agent-interface.md` — l'édition
+> LLM d'un fichier ouvert dans l'éditeur a besoin de l'autosave pour rafraîchir le
+> buffer sans perte. Périmètre là-bas : écriture debouncée du buffer CodeMirror sur
+> `/ws/fs`, rien de plus. Si un besoin autosave plus large émerge (historique, toggle
+> global), rouvrir ici.
+
 ## Amélioration du chat LLM
 
 - Fix du refresh en streaming.
