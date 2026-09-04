@@ -42,7 +42,12 @@ la fonction englobante et sa signature plutôt que des coordonnées `fichier:lig
   backlog) — tous les tools `lsp_*` restent exposés en wildcard comme aujourd'hui.
 - **Pas de nouvel endpoint sur `/ws/fs`** ni de contrat atomique/rollback — `rename`
   et `edit_and_check` restent best-effort séquentiel, même contrat que
-  `apply_workspace_edit` existant.
+  `apply_workspace_edit` existant. `edit_and_check` **ajoute** un message sortant sur
+  `/ws/fs` (« fichier changé sur disque » → l'éditeur recharge), pas une nouvelle
+  route.
+- **Ne branche pas l'autosave de l'éditeur** — c'est un item séparé du backlog
+  (`## Auto-save`). R1 s'en passe (l'éditeur affiche « recharger ? » s'il y a des
+  modifs locales) et n'y touche que si ce compromis s'avère pénible en usage.
 
 ---
 
@@ -209,15 +214,22 @@ Séquence de messages requise (à dérouler concrètement — leçon `lsp-integr
    ne pas bloquer). État `None` (jamais analysé) est légitime : le « avant » est alors
    l'ensemble vide, à signaler dans la réponse (« aucune analyse préalable — le diff
    est calculé contre vide »).
-2. **Appliquer l'édition** sur le disque (`write_file` / `edit_file`).
-3. **Notifier le LSP du changement** : `textDocument/didChange` (full sync) avec le
-   nouveau texte complet + version incrémentée. Nécessite (voir plus bas) un compteur
-   de version par URI dans `LspSession` et un `LspClient::did_change`.
-4. **Invalider le cache** pour cette URI **juste avant/après le `didChange`**, puis
-   `wait_for_diagnostics(uri, borné)` — le prochain `publishDiagnostics` est la
-   ré-analyse post-édition. Timeout → `VNL-SBX-LSP-008` (état mou, pas une erreur :
-   l'édition est faite).
-5. **Diff** : `avant` vs `après` par identité `(line, col, severity, message)`.
+2. **Invalider le cache diagnostics** pour cette URI (`invalidate_diagnostics`) — pour
+   que le `wait_for_diagnostics` de l'étape 5 bloque jusqu'au **prochain** push, pas
+   sur le cached stale d'avant l'édition.
+3. **Appliquer l'édition** sur le disque (`write_file` / `edit_file`).
+4. **Déclencher la ré-analyse** — dépend de qui tient le fichier (cf. R1) :
+   - **Cas A** (aucun éditeur navigateur sur l'URI) : le tool envoie
+     `textDocument/didChange` (full sync, nouveau texte complet, version du compteur
+     par URI de `LspSession`).
+   - **Cas B** (un éditeur navigateur a l'URI ouverte) : le tool **n'envoie pas**
+     `didChange` — il notifie le frontend « fichier changé sur disque » ; l'éditeur
+     recharge son buffer et émet **son** `didChange`.
+5. `wait_for_diagnostics(uri, borné)` — le prochain `publishDiagnostics` est la
+   ré-analyse post-édition (peu importe qui a émis le `didChange`, il atterrit dans le
+   même `diagnostics_cache` partagé). Timeout → `VNL-SBX-LSP-008` (état mou, pas une
+   erreur : l'édition est faite).
+6. **Diff** : `avant` vs `après` par identité `(line, col, severity, message)`.
 
 **Ajout minimal au manager LSP** (`sandbox/src/lsp.rs` / `lsp_client.rs`) :
 - `LspSessionInner` : `doc_versions: Mutex<HashMap<String, i32>>` (version par URI).
@@ -234,41 +246,56 @@ suppose le fichier déjà ouvert (via `ensure_open`) et n'envoie **jamais** `did
 
 ## Risques identifiés et questions ouvertes
 
-### R1 — Coexistence avec l'éditeur navigateur sur le MÊME fichier (bloquant pour `edit_and_check`)
+### R1 — Coexistence avec l'éditeur navigateur sur le MÊME fichier
+
+**Décision développeur (2026-09-04) : on ne bloque jamais le LLM. `edit_and_check`
+s'exécute quel que soit l'état de l'éditeur, et l'éditeur est rafraîchi après
+l'édition. Si le rafraîchissement pose un problème d'édition humaine non enregistrée,
+on branche l'autosave de l'éditeur (item séparé du backlog, « ## Auto-save ») —
+ce qui supprime le conflit.**
 
 Le process LSP est **partagé** éditeur + tools (`docs/architecture.md`, « Serveur
-LSP »). Quand l'éditeur navigateur a `foo.rs` ouvert :
-- l'éditeur a envoyé son propre `didOpen` (version 1) et des `didChange` au fil de la
-  frappe — **le buffer de l'éditeur, pas le disque, est la vérité du LSP pour ce
-  fichier** ;
-- `edit_and_check` écrit sur le **disque**. Le LSP ne voit rien (il suit le doc
-  in-memory de l'éditeur) ;
-- si `edit_and_check` envoie son propre `didChange`, il entre en collision avec la
-  numérotation de version de l'éditeur et les deux se battent pour l'état du doc.
+LSP »). Quand l'éditeur navigateur a `foo.rs` ouvert, **le buffer de l'éditeur, pas
+le disque, est la vérité du LSP pour ce fichier** — l'éditeur a envoyé son propre
+`didOpen` (version 1) et des `didChange` au fil de la frappe. Deux clients LSP
+indépendants (éditeur + `LspClient` du tool) qui envoient chacun des `didChange` avec
+leur propre compteur de version pour la même URI = désync (rust-analyzer voit la
+version reculer ou le contenu diverger, et LSP n'a **aucune** notification
+serveur→client « ce document a été modifié par un autre »).
 
-**Options à trancher (développeur + Claude) avant la task `edit_and_check` :**
+**Mécanisme retenu — l'éditeur reste seul émetteur de `didChange` quand il tient le
+fichier :**
 
-- **(a) Refuser** `edit_and_check` si le fichier est ouvert dans l'éditeur — message
-  clair (« fichier ouvert dans l'éditeur, enregistre/ferme-le, ou lis ses diagnostics
-  dans l'éditeur »). Nécessite de tracer *quel type* de client a ouvert l'URI
-  (`open_uris` ne le dit pas aujourd'hui — il faudrait `opened_by: HashMap<String,
-  ClientKind>` ou un simple `Set` des URIs ouvertes par un client navigateur).
-  *Le plus honnête, le plus simple, pas de désync.*
-- **(b) Le tool prend la main** : un agent qui édite et un humain qui édite le même
-  fichier en même temps est déjà perdu (writes concurrents). `edit_and_check` envoie
-  `didChange` en autorité ; si un humain a le fichier ouvert il aura une vue périmée
-  jusqu'à rechargement. *Simple côté code, désync silencieuse acceptée.*
-- **(c) Autorité de version par URI** dans `LspSession` (le dernier `didChange`
-  gagne, versions monotones partagées) — plus de code, résout proprement mais
-  déborde le périmètre « ne touche pas la session partagée ».
+| Cas | Émetteur de `didChange` | Séquence |
+|---|---|---|
+| **A — aucun éditeur navigateur n'a l'URI ouverte** | le tool | `edit_and_check` écrit le disque → `LspClient::did_change` (compteur de version du tool, cf. §7) → `wait_for_diagnostics` |
+| **B — un éditeur navigateur a l'URI ouverte** | l'éditeur | `edit_and_check` écrit le disque → notifie le frontend « fichier changé sur disque » → l'éditeur recharge le buffer depuis le disque → `@codemirror/lsp-client` émet **son** `didChange` (version de l'éditeur) → `publishDiagnostics` atterrit dans le `diagnostics_cache` partagé → `wait_for_diagnostics` du tool le récupère |
 
-**Recommandation Claude : (a).** C'est le cas rare (l'agent travaille surtout sur des
-fichiers que l'humain n'a pas sous les yeux), le coût est un petit champ de tracking,
-et ça évite une classe entière de bugs de désync difficiles à diagnostiquer.
+Dans le cas B, `edit_and_check` **n'envoie jamais son propre `didChange`** — il attend
+que le round-trip navigateur produise la ré-analyse. Round-trip lent / WS déconnectée
+→ timeout → `VNL-SBX-LSP-008` (édition faite sur disque, retry) ; à la reconnexion
+l'éditeur recharge de toute façon.
 
-Cette question **doit être résolue et écrite ici** avant d'écrire la task
-`edit_and_check` — les autres tools (2 à 7) n'en dépendent pas et peuvent être
-implémentés d'abord.
+**Sous-questions à trancher à la task `edit_and_check` (pas avant) :**
+
+1. **Détecter le cas B** : `LspSession` doit savoir si une URI est ouverte par un
+   client *navigateur*. `open_uris` (write-once, tous clients confondus) ne le dit
+   pas. Piste : `Set<String>` des URIs ouvertes par un `ClientId` dont le
+   `subscribe` vient du bridge `ws/lsp.rs`, nettoyé sur `unsubscribe`.
+2. **Canal de notification « fichier changé sur disque » vers le frontend** : sur
+   `/ws/fs` (l'éditeur y est déjà connecté) ou un événement dédié ? Forme du message,
+   et l'éditeur ne recharge que s'il tient ce fichier.
+3. **Conflit avec une édition humaine non enregistrée** : sans autosave, recharger le
+   buffer écrase les modifs locales. Deux options : (i) l'éditeur refuse le reload
+   silencieux et affiche « le LLM a modifié ce fichier — recharger ? » ; (ii) on
+   branche l'autosave (backlog) et le problème disparaît. Décision développeur :
+   autosave si (i) s'avère pénible. À la task, commencer par (i) — moins couplé.
+4. **Cas B sans que le round-trip aboutisse** (autre onglet, pas le fichier au
+   premier plan) : le timeout `VNL-SBX-LSP-008` couvre, mais valider que le message
+   dit clairement « édition appliquée, ré-analyse en attente de l'éditeur ».
+
+Les tools 1 à 6 ne dépendent pas de R1 — implémentables d'abord. La task
+`edit_and_check` porte ces 4 sous-questions.
 
 ### R2 — `documentSymbol` / `workspace/symbol` non vérifiés sur les deux serveurs
 
@@ -278,7 +305,7 @@ faire précéder d'une vérification cluster ou d'un test contre un serveur rée
 
 ### R3 — Latence de ré-analyse rust-analyzer variable après `didChange`
 
-`edit_and_check` borne l'attente (§7 étape 4). Le bon comportement à la limite est
+`edit_and_check` borne l'attente (§7 étape 5). Le bon comportement à la limite est
 `VNL-SBX-LSP-008` (« relance dans quelques secondes », édition appliquée), **jamais**
 un blocage indéfini ni un « propre » par défaut (même piège que les 3 états de
 `lsp_diagnostics`). Valeur de timeout à caler à l'implémentation ; commencer par
@@ -345,8 +372,11 @@ Existants réutilisés : `VNL-SBX-LSP-004` (process fermé), `-005` (erreur serv
 4. **`lsp_references` enrichi** (dépend de `documentSymbol` de la task 3).
 5. **`lsp_rename` preview + rapport**.
 6. **`inspect_symbol`** (composition pure de 2 + 4).
-7. **`edit_and_check`** — **précédée** de la résolution écrite de R1 ; inclut l'ajout
-   `did_change` / `doc_versions` / `invalidate_diagnostics` au manager.
+7. **`edit_and_check`** — porte les 4 sous-questions de R1 (détection cas B, canal de
+   notif frontend, conflit édition humaine, message timeout) ; inclut l'ajout
+   `did_change` / `doc_versions` / `invalidate_diagnostics` au manager + le tracking
+   des URIs ouvertes par un client navigateur + le canal de notif « fichier changé »
+   côté `/ws/fs`. La plus grosse — à re-découper si elle dépasse 45 min.
 
 Chaque task : un commit, tests d'abord (TDD), fakes LSP existants
 (`lsp_test_fakes::FAKE_LSP_PY` / `FAKE_LSP_NODIAG_PY`) étendus au besoin.
