@@ -9,6 +9,7 @@ import { renameSymbolFromView } from '../../api/lspRename';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { search, openSearchPanel } from '@codemirror/search';
 import { languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
+import { autosaveExtension, registerEditorFlush } from './editorAutosave';
 import { registerIdeActions } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
 import type { Ref } from 'vue';
@@ -62,9 +63,24 @@ const denseTheme = EditorView.theme({
 const hostRef = useTemplateRef<HTMLDivElement>('host');
 let view: EditorView | undefined;
 
+// Autosave par onglet (tâche 07a) : la valeur retournée est une extension
+// valide, utilisable telle quelle dans la config, portant le `flush` de CETTE
+// instance (save(), démontage, defineExpose) — cf. EditorAutosave.
+const autosave = autosaveExtension({
+  path: filePath,
+  getClient: () => fsClient.value,
+  onWriteSuccess: () => notifyFsChange(),
+  onWriteError: (m) => showStatus(`Échec de l'enregistrement automatique : ${m}`),
+});
+let unregisterAutosaveFlush: (() => void) | undefined;
+
 /** Extensions communes à tout fichier — le langage (dépendant du chemin
- *  ouvert) est ajouté séparément par `loadFile`, cf. `editorLanguage.ts`. */
-const baseExtensions = [basicSetup, oneDark, denseTheme, saveKeymap(), search({ top: true })];
+ *  ouvert) est ajouté séparément par `loadFile`, cf. `editorLanguage.ts`.
+ *  La reconfigure LSP spreade cette liste dans une config COMPLÈTE
+ *  (`StateEffect.reconfigure` remplace tout, il ne fusionne pas) : autosave
+ *  n'y est donc jamais déclaré deux fois — et même Spread dupliqué, CM6
+ *  dédupplique les extensions par identité (vérifié en test). */
+const baseExtensions = [basicSetup, oneDark, denseTheme, saveKeymap(), search({ top: true }), autosave];
 
 // Visible le temps d'informer l'utilisateur — un échec de save/read silencieux
 // laisserait croire que l'édition est enregistrée alors qu'elle ne l'est pas.
@@ -82,6 +98,11 @@ function showStatus(message: string) {
 function save() {
   const path = filePath;
   if (!view || !path || !fsClient.value) return;
+  // Flush d'abord : si l'autosave avait une écriture en attente, il part avec
+  // le contenu courant — exactement ce que Ctrl+S doit faire. Émettre un
+  // second write derrière la doublerait (assertion sur le NBRE d'appels en
+  // test). Pas d'attente en cours → save manuel classique.
+  if (autosave.flush()) return;
   const content = view.state.doc.toString();
   fsClient.value
     .request<{ ok: boolean }>('write', { path, content })
@@ -183,7 +204,17 @@ function msg(e: unknown): string {
 }
 
 /** Exposé pour les tests (fallback si keydown jsdom est fragile). */
-defineExpose({ save, copySelection, cutSelection, pasteClipboard, copyFilePath, getView: () => view });
+defineExpose({
+  save,
+  copySelection,
+  cutSelection,
+  pasteClipboard,
+  copyFilePath,
+  flushAutosave: () => {
+    autosave.flush();
+  },
+  getView: () => view,
+});
 
 function saveKeymap() {
   return keymap.of([
@@ -284,11 +315,19 @@ onMounted(() => {
   }
   claimSaveActionIfActive();
   activeChangeDisposable = panelApi.onDidActiveChange(claimSaveActionIfActive);
+  // Ciblé par la tâche 08 (flush avant écriture LLM sur le path de CET
+  // onglet) ; le flush de l'instance sert aussi au démontage ci-dessous.
+  unregisterAutosaveFlush = registerEditorFlush(filePath, autosave.flush);
 });
 
 onBeforeUnmount(() => {
   activeChangeDisposable?.dispose();
   stopFsClientWatch?.();
+  // Dernière frappe à moins de 300 ms du debounce ne doit pas être perdue :
+  // flush tant que la vue et le client sont encore valides (avant destroy).
+  autosave.flush();
+  unregisterAutosaveFlush?.();
+  unregisterAutosaveFlush = undefined;
   view?.destroy();
   view = undefined;
   clearTimeout(statusTimer);

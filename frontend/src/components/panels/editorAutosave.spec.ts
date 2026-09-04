@@ -1,0 +1,295 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { EditorView } from '@codemirror/view';
+import { EditorState, StateEffect } from '@codemirror/state';
+import type { Extension } from '@codemirror/state';
+import {
+  AUTOSAVE_DEBOUNCE_MS,
+  DISK_RELOAD_EVENT,
+  applyDiskReload,
+  autosaveExtension,
+  flushAllEditors,
+  registerEditorFlush,
+} from './editorAutosave';
+import type { AutosaveFsClient, EditorAutosave } from './editorAutosave';
+
+async function flushMicrotasks() {
+  await Promise.resolve();
+  await Promise.resolve();
+}
+
+/** Client /ws/fs factice — le contrat attendu par l'extension est structurel
+ *  (une seule méthode `request`) ; le cast évite de simulator le generic
+ *  `<T>` de `SandboxFsClient.request` dans chaque test. */
+function makeFsClient(
+  impl?: (op: string, params: Record<string, unknown>) => Promise<unknown>,
+): { client: AutosaveFsClient; request: ReturnType<typeof vi.fn> } {
+  const request = vi.fn(
+    impl ?? (async (_op: string, _params: Record<string, unknown>) => ({ ok: true })),
+  );
+  return { client: { request } as unknown as AutosaveFsClient, request };
+}
+
+function makeView(autosave: Extension, doc = ''): EditorView {
+  return new EditorView({
+    state: EditorState.create({ doc, extensions: [autosave] }),
+  });
+}
+
+function typeText(view: EditorView, text: string): void {
+  view.dispatch({
+    changes: { from: view.state.doc.length, insert: text },
+    userEvent: 'input',
+  });
+}
+
+describe('editorAutosave — extension', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('autosave deboune à 300 ms, une écriture groupée par rafale', async () => {
+    expect(AUTOSAVE_DEBOUNCE_MS).toBe(300);
+    const { client, request } = makeFsClient();
+    const onWriteSuccess = vi.fn();
+    const onWriteError = vi.fn();
+    const autosave = autosaveExtension({
+      path: 'src/a.ts',
+      getClient: () => client,
+      onWriteSuccess,
+      onWriteError,
+    });
+    const view = makeView(autosave);
+
+    // Rafale t=0/10/20 : le timer part à la première frappe et n'est PAS
+    // repoussé par les suivantes (pattern useSandboxState — sinon une frappe
+    // continue ne serait jamais écrite).
+    typeText(view, 'a');
+    vi.advanceTimersByTime(10);
+    typeText(view, 'b');
+    vi.advanceTimersByTime(10);
+    typeText(view, 'c');
+
+    vi.advanceTimersByTime(279); // t = 299 : rien n'est encore écrit
+    expect(request).not.toHaveBeenCalled();
+
+    vi.advanceTimersByTime(1); // t = 300 : UNE seule écriture, contenu final
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith('write', { path: 'src/a.ts', content: 'abc' });
+    await flushMicrotasks();
+    expect(onWriteSuccess).toHaveBeenCalledTimes(1);
+    expect(onWriteError).not.toHaveBeenCalled();
+    view.destroy();
+  });
+
+  it('flush immédiat vide l’attente', async () => {
+    const { client, request } = makeFsClient();
+    const onWriteSuccess = vi.fn();
+    const autosave = autosaveExtension({
+      path: 'src/b.ts',
+      getClient: () => client,
+      onWriteSuccess,
+      onWriteError: () => {},
+    });
+    const view = makeView(autosave);
+
+    typeText(view, 'z');
+    expect(autosave.flush()).toBe(true);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith('write', { path: 'src/b.ts', content: 'z' });
+
+    // Rien après expiration du debounce : pas de doublon.
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS + 100);
+    expect(request).toHaveBeenCalledTimes(1);
+
+    // Plus rien en attente → flush() est un no-op.
+    expect(autosave.flush()).toBe(false);
+    expect(request).toHaveBeenCalledTimes(1);
+    await flushMicrotasks();
+    expect(onWriteSuccess).toHaveBeenCalledTimes(1);
+    view.destroy();
+  });
+
+  it('transaction disk-reload n’écrit jamais', async () => {
+    const { client, request } = makeFsClient();
+    const onWriteError = vi.fn();
+    const autosave = autosaveExtension({
+      path: 'src/c.ts',
+      getClient: () => client,
+      onWriteSuccess: () => {},
+      onWriteError,
+    });
+    const view = makeView(autosave, 'sur disque');
+
+    applyDiskReload(view, 'x');
+    expect(view.state.doc.toString()).toBe('x');
+
+    // Au-delà du debounce : le reload a bien modifié le document (docChanged),
+    // mais aucune écriture ne part — écrire du contenu venant du disque serait
+    // la boucle disque→write→disque.
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS + 200);
+    await flushMicrotasks();
+    expect(request).not.toHaveBeenCalled();
+    expect(onWriteError).not.toHaveBeenCalled();
+
+    // Un userEvent manuel portant l'événement est ignoré de la même façon…
+    view.dispatch({
+      changes: { from: view.state.doc.length, insert: 'y' },
+      userEvent: DISK_RELOAD_EVENT,
+    });
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS + 200);
+    expect(request).not.toHaveBeenCalled();
+
+    // … y compris noyé dans une rafale MIXTE : un seul update contenant à la
+    // fois une transaction de reload et une frappe → conservateur, rien.
+    view.dispatch(
+      { changes: { from: view.state.doc.length, insert: 'm' }, userEvent: DISK_RELOAD_EVENT },
+      { changes: { from: view.state.doc.length, insert: 'q' }, userEvent: 'input' },
+    );
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS + 200);
+    expect(request).not.toHaveBeenCalled();
+
+    // Une frappe franche (update sans reload) reprend le contrôle.
+    typeText(view, 'r');
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS);
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith('write', { path: 'src/c.ts', content: 'xymqr' });
+    view.destroy();
+  });
+
+  it('registre de flush', async () => {
+    const { client, request } = makeFsClient();
+    const autosaveA = autosaveExtension({
+      path: 'a.txt',
+      getClient: () => client,
+      onWriteSuccess: () => {},
+      onWriteError: () => {},
+    });
+    const autosaveB = autosaveExtension({
+      path: 'b.txt',
+      getClient: () => client,
+      onWriteSuccess: () => {},
+      onWriteError: () => {},
+    });
+    const viewA = makeView(autosaveA);
+    const viewB = makeView(autosaveB);
+
+    const unregisterA = registerEditorFlush('a.txt', autosaveA.flush);
+    const unregisterB = registerEditorFlush('b.txt', autosaveB.flush);
+
+    typeText(viewA, 'AAA');
+    typeText(viewB, 'BBB');
+    flushAllEditors();
+    expect(request).toHaveBeenCalledTimes(2);
+    expect(request).toHaveBeenCalledWith('write', { path: 'a.txt', content: 'AAA' });
+    expect(request).toHaveBeenCalledWith('write', { path: 'b.txt', content: 'BBB' });
+
+    unregisterA();
+    unregisterB();
+    typeText(viewA, 'CCC');
+    flushAllEditors();
+    await flushMicrotasks();
+    // Plus aucun enregistrement : le nouvel edit en attente n'est pas écrit
+    // par le registre (les timers propres à l'extension restent seuls maîtres).
+    expect(request).toHaveBeenCalledTimes(2);
+    viewA.destroy();
+    viewB.destroy();
+  });
+
+  it('client null abandonne sans erreur', async () => {
+    const onWriteSuccess = vi.fn();
+    const onWriteError = vi.fn();
+    const autosave = autosaveExtension({
+      path: 'src/d.ts',
+      getClient: () => null,
+      onWriteSuccess,
+      onWriteError,
+    });
+    const view = makeView(autosave);
+
+    typeText(view, 'a');
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS);
+    await flushMicrotasks();
+    expect(onWriteError).not.toHaveBeenCalled();
+    expect(onWriteSuccess).not.toHaveBeenCalled();
+
+    // Idem côté flush explicite (Ctrl+S / démontage) : abandon silencieux,
+    // pas de throw — la prochaine frappe réessaiera. (Le timer du dessus a
+    // déjà consommé la rafale : on en réarme une nouvelle.)
+    typeText(view, 'b');
+    expect(autosave.flush()).toBe(true);
+    await flushMicrotasks();
+    expect(onWriteError).not.toHaveBeenCalled();
+    view.destroy();
+  });
+
+  it('échec du write remonte onWriteError', async () => {
+    const { client, request } = makeFsClient(async () => {
+      throw new Error('disque plein');
+    });
+    const onWriteSuccess = vi.fn();
+    const onWriteError = vi.fn();
+    const autosave = autosaveExtension({
+      path: 'src/e.ts',
+      getClient: () => client,
+      onWriteSuccess,
+      onWriteError,
+    });
+    const view = makeView(autosave);
+
+    typeText(view, 'a');
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS);
+    await flushMicrotasks();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(onWriteError).toHaveBeenCalledWith('disque plein');
+    expect(onWriteSuccess).not.toHaveBeenCalled();
+    // Rejet attrapé (pas de rejet non géré : vitest ferait échouer le test).
+    view.destroy();
+  });
+
+  it('reconfigure LSP : la même instance autosave dupliquée dans la config n’est injectée qu’une fois', async () => {
+    // Piège de la reconfigure LSP d'Editor.vue : baseExtensions (déjà dans la
+    // config initiale) est spreadée dans StateEffect.reconfigure — si
+    // l'extension était double-injectée, deux updateListener écriraient par
+    // frappe. La config est reconstruite entière → instance unique ; et CM6
+    // dédupplique par identité (flatten `seen`) — vérifié ici en listing
+    // explicitement l'instance deux fois.
+    const { client, request } = makeFsClient();
+    const autosave: EditorAutosave = autosaveExtension({
+      path: 'src/f.ts',
+      getClient: () => client,
+      onWriteSuccess: () => {},
+      onWriteError: () => {},
+    });
+    const view = makeView(autosave, 'base');
+    const fakePlugin = EditorView.updateListener.of(() => {});
+
+    view.dispatch({
+      effects: StateEffect.reconfigure.of([[autosave], [autosave, fakePlugin]]),
+    });
+    expect(view.state.doc.toString()).toBe('base');
+
+    typeText(view, 'x');
+    vi.advanceTimersByTime(AUTOSAVE_DEBOUNCE_MS);
+    await flushMicrotasks();
+    expect(request).toHaveBeenCalledTimes(1);
+    view.destroy();
+  });
+});
+
+describe('editorAutosave — registre', () => {
+  it('dernier gagne par path et unregister gardé par identité', () => {
+    const first = vi.fn();
+    const second = vi.fn();
+    const unregisterFirst = registerEditorFlush('same.txt', first);
+
+    registerEditorFlush('same.txt', second);
+    unregisterFirst(); // l'instance remplacée ne doit PAS débrancher la nouvelle
+    flushAllEditors();
+    expect(second).toHaveBeenCalledTimes(1);
+    expect(first).not.toHaveBeenCalled();
+  });
+});

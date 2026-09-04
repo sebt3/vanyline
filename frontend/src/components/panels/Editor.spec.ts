@@ -576,3 +576,134 @@ describe('Editor.vue — menu contextuel LSP', () => {
     expect(jumpToDefinition).toHaveBeenCalled();
   });
 });
+
+describe('Editor.vue — autosave (debounce 300 ms)', () => {
+  let client: ReturnType<typeof makeClient>;
+  let mounted: { unmount(): void } | undefined;
+
+  function writeCalls(): number {
+    return client.request.mock.calls.filter((c: unknown[]) => c[0] === 'write').length;
+  }
+
+  beforeEach(() => {
+    client = makeClient();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    // Démonte l'instance montée par le test : le flush de démontage peut
+    // écrire, mais les assertions sont déjà faites — on protège surtout les
+    // tests suivants du registre module (dernier gagne par path).
+    mounted?.unmount();
+    mounted = undefined;
+    vi.useRealTimers();
+    document.body.innerHTML = '';
+  });
+
+  it('la frappe déclenche un autosave write après debounce', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+    mounted = wrapper;
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const { getView } = wrapper.vm as { getView: () => EditorView };
+    getView().dispatch({
+      changes: { from: 0, to: 0, insert: 'X' },
+      userEvent: 'input',
+    });
+
+    vi.advanceTimersByTime(299);
+    expect(writeCalls()).toBe(0);
+
+    vi.advanceTimersByTime(1);
+    await flushMicrotasks();
+    // read (montage) + write (autosave) — une seule écriture, payload
+    // exactement celle du save manuel.
+    expect(client.request).toHaveBeenCalledTimes(2);
+    expect(client.request).toHaveBeenCalledWith('write', {
+      path: 'src/main.py',
+      content: 'Xligne1\nligne2\n',
+    });
+  });
+
+  it('Ctrl+S juste après une édition : un seul write (autosave non doublonné)', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+    mounted = wrapper;
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const { getView, save } = wrapper.vm as { getView: () => EditorView; save: () => void };
+    getView().dispatch({
+      changes: { from: 0, to: 0, insert: 'X' },
+      userEvent: 'input',
+    });
+
+    // Ctrl+S avant expiration du debounce : le flush consomme l'écriture en
+    // attente — save() ne doit PAS émettre un second write derrière.
+    save();
+    await flushMicrotasks();
+    expect(writeCalls()).toBe(1);
+    expect(client.request).toHaveBeenCalledWith('write', {
+      path: 'src/main.py',
+      content: 'Xligne1\nligne2\n',
+    });
+
+    // Et le debounce expiré ne rejoue rien derrière.
+    vi.advanceTimersByTime(300);
+    await flushMicrotasks();
+    expect(writeCalls()).toBe(1);
+  });
+
+  it('démontage avec edits en attente flush', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+    mounted = wrapper;
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    const { getView } = wrapper.vm as { getView: () => EditorView };
+    getView().dispatch({
+      changes: { from: 0, to: 0, insert: 'X' },
+      userEvent: 'input',
+    });
+
+    // Moins de 300 ms avant la fermeture de l'onglet : la dernière frappe ne
+    // doit pas être perdue.
+    wrapper.unmount();
+    mounted = undefined;
+    await flushMicrotasks();
+    expect(client.request).toHaveBeenCalledWith('write', {
+      path: 'src/main.py',
+      content: 'Xligne1\nligne2\n',
+    });
+    expect(writeCalls()).toBe(1);
+  });
+
+  it('le chargement initial n’autosave pas', async () => {
+    const wrapper = mount(Editor, {
+      props: editorProps('src/main.py'),
+      global: { provide: { 'sandbox-fs': ref(client) }, components: { ContextMenu } },
+    });
+    mounted = wrapper;
+
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    // loadFile passe par setState (pas de transaction) → aucun déclenchement.
+    expect(client.request).toHaveBeenCalledWith('read', { path: 'src/main.py', raw: true });
+    vi.advanceTimersByTime(300);
+    await flushMicrotasks();
+    expect(writeCalls()).toBe(0);
+  });
+});
