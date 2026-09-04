@@ -32,7 +32,11 @@
       { "command": "vanyline.sessionPicker", "title": "vanyline: Choisir une session" },
       { "command": "vanyline.openSettings", "title": "vanyline: Ouvrir les paramètres" },
       { "command": "vanyline.restartServer", "title": "vanyline: Redémarrer le serveur" },
-      { "command": "vanyline.resources.refresh", "title": "vanyline: Actualiser les ressources", "icon": "$(refresh)" }
+      { "command": "vanyline.resources.refresh", "title": "vanyline: Actualiser les ressources", "icon": "$(refresh)" },
+      { "command": "vanyline.project.create", "title": "vanyline: Créer un projet" },
+      { "command": "vanyline.project.delete", "title": "vanyline: Supprimer le projet" },
+      { "command": "vanyline.sandbox.create", "title": "vanyline: Créer une sandbox" },
+      { "command": "vanyline.sandbox.delete", "title": "vanyline: Supprimer la sandbox" }
     ],
     "menus": {
       "view/title": [
@@ -40,6 +44,12 @@
         { "command": "vanyline.sessionPicker", "when": "view == vanyline.chatView", "group": "navigation@1" },
         { "command": "vanyline.openSettings", "when": "view == vanyline.chatView", "group": "navigation@2" },
         { "command": "vanyline.resources.refresh", "when": "view == vanyline.resources", "group": "navigation" }
+      ],
+      "view/item/context": [
+        { "command": "vanyline.project.create", "when": "view == vanyline.resources && viewItem == owner", "group": "2_new@1" },
+        { "command": "vanyline.sandbox.create", "when": "view == vanyline.resources && viewItem == project", "group": "2_new@1" },
+        { "command": "vanyline.project.delete", "when": "view == vanyline.resources && viewItem == project", "group": "3_delete@1" },
+        { "command": "vanyline.sandbox.delete", "when": "view == vanyline.resources && viewItem == sandbox", "group": "3_delete@1" }
       ]
     },
     "configuration": {

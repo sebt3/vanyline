@@ -1,5 +1,15 @@
 import * as vscode from 'vscode';
-import { createResourcesModel, type ResourceNode, type RpcLike } from '../resources';
+import {
+  createResourcesModel,
+  runProjectCreate,
+  runProjectDelete,
+  runSandboxCreate,
+  runSandboxDelete,
+  type PromptApi,
+  type ResourceNode,
+  type RunResult,
+  type RpcLike,
+} from '../resources';
 import type { LogChannel } from '../rpc';
 
 export interface ResourcesView {
@@ -19,6 +29,10 @@ export function registerResources(
   // Modèle courant (source de données de l'arbre). Réassigné par attach/detach
   // selon le handle du superviseur — aucune donnée n'est mise en cache.
   let model: ReturnType<typeof createResourcesModel> | undefined;
+
+  /** Connexion RPC courante (source des commandes create/delete). Réassignée par
+   *  attach/detach — `undefined` hors d'un handle vivant ⇒ repli QuickPick, pas d'appel. */
+  let rpc: RpcLike | undefined;
 
   let treeView: vscode.TreeView<ResourceNode> | undefined;
 
@@ -85,7 +99,51 @@ export function registerResources(
     }),
   );
 
+  /** Adaptateur PromptApi : colle les portes de dialogue vscode sur la logique pure. */
+  const ui: PromptApi = {
+    input: (opts) =>
+      Promise.resolve(
+        vscode.window.showInputBox({
+          prompt: opts.prompt,
+          value: opts.value ?? '',
+          validateInput: opts.validate ?? (() => undefined),
+        }),
+      ),
+    pick: (title, items) =>
+      Promise.resolve(vscode.window.showQuickPick(items, { title })),
+    confirm: async (message) =>
+      (await vscode.window.showWarningMessage(message, { modal: true }, 'Supprimer')) ===
+      'Supprimer',
+  };
+
+  /** Enregistre une commande create/delete : reçoit le nœud de l'arbre (menu contextuel)
+   *  en 1ʳᵉ arg ; la palette renvoie `undefined` ⇒ repli QuickPick dans le flux. Une fois
+   *  l'action réussie, refresh + titre de vue puis message user-facing (français). */
+  function registerRun(
+    command: string,
+    run: (node: ResourceNode | undefined) => Promise<RunResult>,
+  ): void {
+    context.subscriptions.push(
+      vscode.commands.registerCommand(command, async (node?: ResourceNode): Promise<void> => {
+        const r = await run(node);
+        if (r.cancelled) return;
+        if (r.ok) {
+          await refreshAndView();
+          void vscode.window.showInformationMessage(`vanyline: ${r.message}`);
+        } else {
+          void vscode.window.showErrorMessage(`vanyline: ${r.message}`);
+        }
+      }),
+    );
+  }
+
+  registerRun('vanyline.project.create', (n) => runProjectCreate(rpc, ui, n));
+  registerRun('vanyline.project.delete', (n) => runProjectDelete(rpc, ui, n));
+  registerRun('vanyline.sandbox.create', (n) => runSandboxCreate(rpc, ui, n));
+  registerRun('vanyline.sandbox.delete', (n) => runSandboxDelete(rpc, ui, n));
+
   function attachServer(conn: RpcLike): void {
+    rpc = conn;
     model = createResourcesModel(conn, (line): void => {
       channel.appendLine(line);
     });
@@ -94,6 +152,7 @@ export function registerResources(
 
   function detachServer(): void {
     model = undefined;
+    rpc = undefined;
     void refreshAndView();
   }
 

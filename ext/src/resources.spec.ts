@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi, type Mock } from 'vitest';
 import { RpcError } from '@vanyline/protocol';
 import {
   createResourcesModel,
@@ -9,20 +9,32 @@ import {
   projectsOf,
   sandboxNode,
   sandboxesOf,
+  validateResourceName,
+  validateRepoUrl,
+  validateGitRef,
+  runProjectCreate,
+  runProjectDelete,
+  runSandboxCreate,
+  runSandboxDelete,
+  type PromptApi,
   type ResourceNode,
   type RpcLike,
 } from './resources';
 
-/** Faux RpcLike : `request(method)` empile `method` dans `calls` et résout (ou rejette)
- *  selon la réponse/raison renvoyée par `get(method)` — le même esprit « faux objet
- *  injecté » que supervisor.spec.ts, sans aucune dépendance à vscode. */
-function fakeRpc(get: (method: string) => unknown): RpcLike & { calls: string[] } {
+/** Faux RpcLike : `request(method, params?)` empile `method` dans `calls` et résout
+ *  (ou rejette) selon la réponse/raison renvoyée par `get(method)` — le même esprit
+ *  « faux objet injecté » que supervisor.spec.ts, sans aucune dépendance à vscode.
+ *  `request.mock.calls` capte aussi les `params` (2ᵉ elt de chaque tuple) — usage dans
+ *  les tests create/delete. */
+function fakeRpc(get: (method: string) => unknown):
+  RpcLike & { calls: string[]; request: Mock<(method: string, params?: unknown) => unknown> } {
   const calls: string[] = [];
-  const request = vi.fn((method: string): unknown => {
+  const request = vi.fn((method: string, params?: unknown): unknown => {
     calls.push(method);
     return get(method);
   });
-  return { request, calls } as unknown as RpcLike & { calls: string[] };
+  return { request, calls } as unknown as
+    RpcLike & { calls: string[]; request: Mock<(method: string, params?: unknown) => unknown> };
 }
 
 /** Réussite owners/list → deux owners (nom + namespace pour le test namespace). */
@@ -193,5 +205,241 @@ describe('helpers purs exportés', () => {
     expect(extractNamespace([{ metadata: { namespace: 'dev' } }, { metadata: { namespace: 'prod' } }])).toBe('dev');
     expect(extractNamespace([{ metadata: {} }])).toBeUndefined();
     expect(extractNamespace([])).toBeUndefined();
+  });
+});
+
+describe('validation de surface (tache 02)', () => {
+  it('validateResourceName : valides', () => {
+    expect(validateResourceName('repo-a')).toBeUndefined();
+    expect(validateResourceName('s1')).toBeUndefined();
+    expect(validateResourceName('a')).toBeUndefined();
+  });
+
+  it('validateResourceName : invalides ⇒ VNL-EXT-026', () => {
+    for (const n of ['', 'Alice', 'mon_projet', '-ab', 'ab-', 'a b', 'a'.repeat(64)]) {
+      expect(validateResourceName(n)).toMatch(/VNL-EXT-026/);
+    }
+  });
+
+  it('validateRepoUrl : valides https + scp', () => {
+    expect(validateRepoUrl('https://github.com/a/b.git')).toBeUndefined();
+    expect(validateRepoUrl('git@github.com:a/b.git')).toBeUndefined();
+  });
+
+  it('validateRepoUrl : invalides ⇒ VNL-EXT-026', () => {
+    for (const u of ['', 'pas une url', 'https://']) {
+      expect(validateRepoUrl(u)).toMatch(/VNL-EXT-026/);
+    }
+  });
+
+  it('validateGitRef : valides', () => {
+    expect(validateGitRef('main')).toBeUndefined();
+    expect(validateGitRef('fix/corrige-1')).toBeUndefined();
+  });
+
+  it('validateGitRef : invalides ⇒ VNL-EXT-026', () => {
+    for (const r of ['', 'ma branche', 'a..b', '-x']) {
+      expect(validateGitRef(r)).toMatch(/VNL-EXT-026/);
+    }
+  });
+});
+
+describe('commandes create/delete (tache 02)', () => {
+  /** Faux PromptApi : `prompts` consommées dans l'ordre (par input ET pick),
+   *  `confirms` par appel confirm. `confirm` renvoie toujours la prochaine valeur. */
+  function scriptedPromptApi(prompts: Array<unknown>, confirms: boolean[] = []): PromptApi {
+    let i = 0;
+    let c = 0;
+    const input = vi.fn(async (): Promise<unknown> => prompts[i++]);
+    const pick = vi.fn(async (): Promise<unknown> => prompts[i++]);
+    const confirm = vi.fn(async (): Promise<boolean> => confirms[c++]);
+    return { input, pick, confirm } as unknown as PromptApi;
+  }
+
+  /** Méthodes appelées sur le faux Rpc (tri des tuples method/params de mock.calls). */
+  function methodsOf(rpc: ReturnType<typeof fakeRpc>): string[] {
+    return rpc.request.mock.calls.map(([m]) => m);
+  }
+
+  /** Params du 1ᵉᵉ appel vers une méthode donné sur le faux Rpc. */
+  function paramsOf(
+    rpc: ReturnType<typeof fakeRpc>,
+    method: string,
+  ): unknown | undefined {
+    return rpc.request.mock.calls.find(([m]) => m === method)?.[1];
+  }
+
+  it('runProjectCreate : ownerHint, un seul RPC projects/create, params exacts', async () => {
+    const rpc = fakeRpc(() => []);
+    const ui = scriptedPromptApi(['repo-a', 'https://ex/a.git', 'dev']);
+    const hint = ownerNode({ metadata: { name: 'alice' } });
+
+    const r = await runProjectCreate(rpc, ui, hint);
+
+    expect(r.ok).toBe(true);
+    expect(paramsOf(rpc, 'projects/create')).toEqual({
+      name: 'repo-a',
+      owner: 'alice',
+      repoUrl: 'https://ex/a.git',
+      defaultBranch: 'dev',
+    });
+    // hint = nœud owner : aucun owners/list
+    expect(methodsOf(rpc)).toEqual(['projects/create']);
+  });
+
+  it('runProjectCreate : sans hint, owner pick, branche empty ⇒ params sans defaultBranch', async () => {
+    const rpc = fakeRpc((m) => (m === 'owners/list' ? [{ metadata: { name: 'bob' } }] : []));
+    const ui = scriptedPromptApi([
+      { label: 'bob' },
+      'repo-x',
+      'https://ex/x.git',
+      '',
+    ]);
+
+    const r = await runProjectCreate(rpc, ui, undefined);
+
+    expect(r.ok).toBe(true);
+    expect(paramsOf(rpc, 'projects/create')).toEqual({
+      name: 'repo-x',
+      owner: 'bob',
+      repoUrl: 'https://ex/x.git',
+    });
+    expect(methodsOf(rpc)).toEqual(['owners/list', 'projects/create']);
+  });
+
+  it('runProjectCreate : annulation au 2e input ⇒ cancelled, aucun write RPC', async () => {
+    const rpc = fakeRpc((m) => (m === 'owners/list' ? [{ metadata: { name: 'bob' } }] : []));
+    // pick(owner), name, url(=undefined ⇒ annulation)
+    const ui = scriptedPromptApi(['x', 'repo-a', undefined]);
+
+    const r = await runProjectCreate(rpc, ui, undefined);
+
+    expect(r).toEqual({ ok: false, cancelled: true, message: '' });
+    expect(methodsOf(rpc)).not.toContain('projects/create');
+  });
+
+  it('runProjectCreate : re-validation du flux (nom invalide BAD) ⇒ VNL-EXT-026, aucun RPC écrit', async () => {
+    const rpc = fakeRpc(() => []);
+    const ui = scriptedPromptApi(['BAD', 'https://ex/a.git']);
+
+    const r = await runProjectCreate(rpc, ui, ownerNode({ metadata: { name: 'alice' } }));
+
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/VNL-EXT-026/);
+    expect(methodsOf(rpc)).not.toContain('projects/create');
+  });
+
+  it('runProjectDelete : confirm=false ⇒ cancelled ; confirm=true (hint project) ⇒ delete', async () => {
+    // confirm=false ⇒ cancelled, aucun delete
+    const rpc1 = fakeRpc(() => []);
+    const ui1 = scriptedPromptApi([], [false]);
+    const r1 = await runProjectDelete(rpc1, ui1, projectNode({ metadata: { name: 'repo-a' } }));
+    expect(r1).toEqual({ ok: false, cancelled: true, message: '' });
+    expect(methodsOf(rpc1)).not.toContain('projects/delete');
+
+    // confirm=true, hint project
+    const rpc2 = fakeRpc(() => []);
+    const ui2 = scriptedPromptApi([], [true]);
+    const r2 = await runProjectDelete(rpc2, ui2, projectNode({ metadata: { name: 'repo-b' } }));
+    expect(r2.ok).toBe(true);
+    expect(r2.message).toBe('Projet repo-b supprimé');
+    expect(paramsOf(rpc2, 'projects/delete')).toEqual({ name: 'repo-b' });
+  });
+
+  it('runSandboxCreate : projectHint, params exacts', async () => {
+    const rpc = fakeRpc(() => []);
+    const ui = scriptedPromptApi(['s1', 'main']);
+    const hint = projectNode({ metadata: { name: 'repo-a' } });
+
+    const r = await runSandboxCreate(rpc, ui, hint);
+
+    expect(r.ok).toBe(true);
+    expect(paramsOf(rpc, 'sandboxes/create')).toEqual({
+      name: 's1',
+      project: 'repo-a',
+      branch: 'main',
+    });
+  });
+
+  it('runSandboxCreate : sans hint - projects/list dabord puis pick', async () => {
+    const rpc = fakeRpc((m) => {
+      if (m === 'projects/list') {
+        return [{ metadata: { name: 'repo-a' }, spec: { owner: 'a' } }];
+      }
+      return [];
+    });
+    const ui = scriptedPromptApi([{ label: 'repo-a' }, 's1', 'main']);
+
+    const r = await runSandboxCreate(rpc, ui, undefined);
+
+    expect(r.ok).toBe(true);
+    expect(methodsOf(rpc)).toEqual(['projects/list', 'sandboxes/create']);
+  });
+
+  it('runSandboxDelete : confirm=false ⇒ cancelled ; confirm=true (hint sandbox) ⇒ delete', async () => {
+    const rpc1 = fakeRpc(() => []);
+    const ui1 = scriptedPromptApi([], [false]);
+    const r1 = await runSandboxDelete(
+      rpc1,
+      ui1,
+      sandboxNode({ metadata: { name: 's1' }, status: { phase: 'Running' } }),
+    );
+    expect(r1).toEqual({ ok: false, cancelled: true, message: '' });
+    expect(methodsOf(rpc1)).not.toContain('sandboxes/delete');
+
+    const rpc2 = fakeRpc(() => []);
+    const ui2 = scriptedPromptApi([], [true]);
+    const r2 = await runSandboxDelete(
+      rpc2,
+      ui2,
+      sandboxNode({ metadata: { name: 's2' }, status: { phase: 'Running' } }),
+    );
+    expect(r2.ok).toBe(true);
+    expect(r2.message).toBe('Sandbox s2 supprimée');
+    expect(paramsOf(rpc2, 'sandboxes/delete')).toEqual({ name: 's2' });
+  });
+
+  it('rpc absent ⇒ 4 run* VNL-EXT-021, sans ui ni RPC', async () => {
+    const ui = scriptedPromptApi(['a', 'b', 'c'], [true]);
+    const results = [
+      await runProjectCreate(undefined, ui),
+      await runProjectDelete(undefined, ui),
+      await runSandboxCreate(undefined, ui),
+      await runSandboxDelete(undefined, ui),
+    ];
+
+    for (const r of results) {
+      expect(r.ok).toBe(false);
+      expect(r.message).toMatch(/VNL-EXT-021/);
+    }
+    expect(ui.input).not.toHaveBeenCalled();
+    expect(ui.pick).not.toHaveBeenCalled();
+    expect(ui.confirm).not.toHaveBeenCalled();
+  });
+
+  it('aucun owner : owners/list empty, runProjectCreate sans hint ⇒ VNL-EXT-027', async () => {
+    const rpc = fakeRpc((m) => (m === 'owners/list' ? [] : []));
+    const ui = scriptedPromptApi([]);
+
+    const r = await runProjectCreate(rpc, ui, undefined);
+
+    expect(r.ok).toBe(false);
+    expect(r.message).toMatch(/VNL-EXT-027/);
+    expect(methodsOf(rpc)).not.toContain('projects/create');
+  });
+
+  it('échec RPC : projects/delete rejette RpcError VNL-RPC-010 ⇒ VNL-EXT-025 + boom, sans rejet', async () => {
+    const rpc = fakeRpc((m) =>
+      m === 'projects/delete'
+        ? Promise.reject(new RpcError(-32000, 'boom', 'VNL-RPC-010'))
+        : [],
+    );
+    const ui = scriptedPromptApi([], [true]);
+
+    const r = await runProjectDelete(rpc, ui, projectNode({ metadata: { name: 'repo-a' } }));
+
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('boom');
+    expect(r.message).toContain('VNL-EXT-025');
   });
 });
