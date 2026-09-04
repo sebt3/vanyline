@@ -348,10 +348,60 @@ while True:
                 ]
             }).encode("utf-8"))
         elif method == "textDocument/references":
+            # references — scanner workspace-wide (tâche 04) reflétant le
+            # comportement réel : résoudre le MOT (identifiant [A-Za-z0-9_]+)
+            # couvrant params.position dans le fichier demandé (aucun mot →
+            # []), puis renvoyer toute occurrence \b<mot>\b des fichiers .rs
+            # de os.walk(".") triés (cwd = sandbox_root, cf. lsp.rs::spawn) +
+            # UNE entrée synthétique fixe hors workspace (groupe R5 à tester :
+            # rendue brute, jamais lue, jamais documentSymbol'ée). Cap 20.
             uri = params.get("textDocument", {}).get("uri", "")
+            pos = params.get("position", {})
+            line0 = pos.get("line", 0)
+            char0 = pos.get("character", 0)
+            word = None
+            try:
+                text = open(uri.removeprefix("file://")).read()
+                lines = text.splitlines()
+                if line0 < len(lines):
+                    for m in re.finditer(r"[A-Za-z0-9_]+", lines[line0]):
+                        if m.start() <= char0 < m.end():
+                            word = m.group(0)
+                            break
+            except Exception:
+                word = None
+            result = []
+            if word is not None:
+                files = []
+                for dirpath, _dirnames, filenames in os.walk("."):
+                    for filename in filenames:
+                        if filename.endswith(".rs"):
+                            files.append(os.path.join(dirpath, filename))
+                for path in sorted(files):
+                    if len(result) >= 20:
+                        break
+                    try:
+                        text = open(path).read()
+                    except Exception:
+                        continue
+                    for m in re.finditer(r"\b" + re.escape(word) + r"\b", text):
+                        line_start = text.rfind("\n", 0, m.start()) + 1
+                        l0 = text.count("\n", 0, m.start())
+                        result.append({
+                            "uri": "file://" + os.path.abspath(path),
+                            "range": {
+                                "start": {"line": l0, "character": m.start() - line_start},
+                                "end": {"line": l0, "character": m.end() - line_start}
+                            }
+                        })
+                        if len(result) >= 20:
+                            break
+                result.append({
+                    "uri": "file:///external/lib.rs",
+                    "range": {"start": {"line": 10, "character": 4}, "end": {"line": 10, "character": 8}}
+                })
             write_frame(json.dumps({
-                "jsonrpc": "2.0", "id": msg_id,
-                "result": [{"uri": uri, "range": {"start": {"line": 0}, "end": {"line": 0}}}]
+                "jsonrpc": "2.0", "id": msg_id, "result": result
             }).encode("utf-8"))
         elif method == "textDocument/rename":
             uri = params.get("textDocument", {}).get("uri", "")

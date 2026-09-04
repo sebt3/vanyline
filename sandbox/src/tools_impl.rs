@@ -710,7 +710,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_references",
-            "description": "Find all references of the symbol at a position in a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Find all references of the symbol at a position in a file via the LSP server. Results are grouped by file: each reference is rendered under its enclosing symbol (name + signature, resolved with one documentSymbol per distinct file — never per reference) with a line snippet; out-of-workspace references render raw (bare line, never read). Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -1151,6 +1151,255 @@ async fn render_workspace_symbols(sandbox_root: &Path, query: &str, result: &Val
     lines.join("\n")
 }
 
+/// Englobant sur forme PLATE (arbitrage développeur R2 2026-09-04, tâche 04) :
+/// parmi les SymbolInformation du même fichier, celui dont
+/// `location.range.start.line` est maximal sous la contrainte `<= ref_line0`
+/// (dernier symbole démarré **à ou avant** la réf, ordre document). Égalité de
+/// ligne de départ : premier rencontré (stabilité). Vide/aucun → `None`.
+///
+/// Fonction pure, aucun I/O. Justification (design §3/R2) : les deux serveurs
+/// réels rendent `documentSymbol` en forme plate avec un `range` ne couvrant
+/// que le NOM du symbole — le containment profond est impossible sur la forme
+/// réelle ; cette heuristique le remplace, signature = snippet de la ligne de
+/// l'englobant (jamais une requête LSP de plus).
+///
+/// (Signature du contrat de tâche : `&'a [Value] -> Option<&'a Value>` — même
+/// type, lifetime élidée : un seul site de lifetime entrant, cf.
+/// `clippy::needless_lifetimes`.)
+fn flat_enclosing(file_symbols: &[Value], ref_line0: i64) -> Option<&Value> {
+    let mut best: Option<(i64, &Value)> = None;
+    for sym in file_symbols {
+        let Some(line0) = sym
+            .get("location")
+            .and_then(|l| l.get("range"))
+            .and_then(|r| r.get("start"))
+            .and_then(|s| s.get("line"))
+            .and_then(|l| l.as_i64())
+        else {
+            continue;
+        };
+        if line0 > ref_line0 {
+            continue;
+        }
+        // `>` strict : à ligne de départ égale, le premier rencontré gagne
+        // (stabilité de l'ordre document).
+        if best.is_none_or(|(best_line, _)| line0 > best_line) {
+            best = Some((line0, sym));
+        }
+    }
+    best.map(|(_, sym)| sym)
+}
+
+/// Englobant sur forme HIERARCHIQUE (tâche 04) : le `DocumentSymbol` le plus
+/// profond dont `range` contient la ligne de la réf
+/// (`start.line <= ref_line0 <= end.line`), enfants explorés en priorité
+/// (plus profond d'abord). Aucun → `None`.
+///
+/// Fonction pure, aucun I/O. Utilisée quand un serveur rend la forme
+/// hiérarchique (`selectionRange`) — avec `detail` pour signature, l'algorithme
+/// exact du design §3 redevient possible.
+///
+/// (Signature du contrat de tâche : `&'a [Value] -> Option<&'a Value>` — même
+/// type, lifetime élidée, cf. `clippy::needless_lifetimes`.)
+fn deepest_containing(file_symbols: &[Value], ref_line0: i64) -> Option<&Value> {
+    for sym in file_symbols {
+        let range = match sym.get("range") {
+            Some(r) if r.is_object() => r,
+            _ => continue,
+        };
+        let start = range
+            .get("start")
+            .and_then(|s| s.get("line"))
+            .and_then(|l| l.as_i64());
+        let end = range
+            .get("end")
+            .and_then(|s| s.get("line"))
+            .and_then(|l| l.as_i64());
+        let (Some(start), Some(end)) = (start, end) else {
+            continue;
+        };
+        if start > ref_line0 || ref_line0 > end {
+            continue;
+        }
+        // Données valides = children ⊆ parent : explorer les enfants quand le
+        // parent contient déjà suffit, et le plus profond rendu premier gagne.
+        if let Some(children) = sym.get("children").and_then(|c| c.as_array())
+            && let Some(deeper) = deepest_containing(children, ref_line0)
+        {
+            return Some(deeper);
+        }
+        return Some(sym);
+    }
+    None
+}
+
+/// Rendu du résultat `textDocument/references` pour `lsp_references` (design
+/// §3, tâche 04) : réf groupées par fichier, chaque run consécutif sous un
+/// même englobant précédé de son en-tête, le tout déterministe (tri par
+/// `(display, ligne)`).
+///
+/// Le fichier de la dispatch a déjà lu/ouvert/interrogé (`documentSymbol` **un
+/// seul** par fichier distinct) — ce rendu ne fait **aucune** lecture ni
+/// requête : `symbols_by_uri`/`contents_by_uri` portent ce qui a été collecté.
+/// Une URI absente de `contents_by_uri` (hors workspace, non-`file://`, toolchain
+/// différente « traitée hors workspace », cap 20 fichiers atteint ou lecture
+/// échouée) rend des lignes `  L<1-based>` nues — jamais de snippet, jamais de
+/// documentSymbol (R5 : c'est le point de sécurité du design).
+///
+/// Format exact (design §3 + arbitrage plate R2) :
+/// - en-tête fichier = `display_path_for_uri` (relatif si confiné, URI brute
+///   sinon), colonne 0 ;
+/// - en-tête de bloc `  dans {label} · {snippet-signature} — L{ligne englobant}`
+///   — `label` = `symbol_name_and_detail`, snippet-signature de la ligne de
+///   l'englobant **uniquement si `detail` absent** (forme plate ; hiérarchique
+///   → signature = `detail`, déjà dans le label) ;
+/// - réf confinée = `    L<1-based>: {snippet}` (snippet via `line_snippet` sur
+///   le contenu déjà lu ; snippet impossible → `    L<1-based>` sans suffixe) ;
+///   réf sans englobant → même forme nue directement sous l'en-tête fichier.
+async fn render_references_grouped(
+    sandbox_root: &Path,
+    locations: &[Value],
+    symbols_by_uri: &std::collections::BTreeMap<String, Vec<Value>>,
+    contents_by_uri: &std::collections::BTreeMap<String, String>,
+) -> String {
+    struct GroupedRef<'a> {
+        uri: &'a str,
+        line0: i64,
+        display: String,
+    }
+
+    // Loc → (uri, ligne 0-based, chemin d'affichage). Les deux formes de
+    // localisation sont acceptées (`uri`/`range` ou `targetUri`/
+    // `targetSelectionRange`, comme `render_location`).
+    let mut refs: Vec<GroupedRef<'_>> = Vec::with_capacity(locations.len());
+    for loc in locations {
+        let Some(uri) = loc
+            .get("uri")
+            .and_then(|u| u.as_str())
+            .or_else(|| loc.get("targetUri").and_then(|u| u.as_str()))
+        else {
+            continue;
+        };
+        let line0 = loc
+            .get("range")
+            .or_else(|| loc.get("targetSelectionRange"))
+            .and_then(|r| r.get("start"))
+            .and_then(|s| s.get("line"))
+            .and_then(|l| l.as_i64())
+            .unwrap_or(0);
+        // R5 : `display_path_for_uri` est un rendu de chemin (confinement en
+        // son sein), jamais une lecture.
+        let display = display_path_for_uri(sandbox_root, uri).await;
+        refs.push(GroupedRef {
+            uri,
+            line0,
+            display,
+        });
+    }
+    // Rendu déterministe : tri stable par (fichier, ligne) — l'ordre du
+    // serveur reste l'arbitre au sein d'un même (display, ligne).
+    refs.sort_by(|a, b| a.display.cmp(&b.display).then(a.line0.cmp(&b.line0)));
+
+    let mut out = vec![format!("références ({}):", refs.len())];
+    let mut current_uri: Option<&str> = None;
+    // Run courant dans le fichier : `None` = aucun run commencé ; `Some(None)`
+    // = réf nue (sans englobant) ; `Some(Some(ptr))` = bloc de l'englobant
+    // `ptr` (la pointer identifie le symbole dans la liste du fichier).
+    let mut current_run: Option<Option<*const Value>> = None;
+    // Symboles du fichier courant, filtrés par forme (clonés — les helpers
+    // prennent des `&[Value]`).
+    let mut flat_syms: Vec<Value> = Vec::new();
+    let mut hier_syms: Vec<Value> = Vec::new();
+
+    for r in &refs {
+        // Groupe = changement d'URI : en-tête fichier, reset du run,
+        // re-filtrage des symboles. Détection de forme PAR ENTRÉE comme dans
+        // `render_document_symbols` (mélanges possibles dans un même
+        // résultat) : `location` → SymbolInformation plate, conservée
+        // seulement si du même fichier ; `selectionRange` → DocumentSymbol.
+        if current_uri != Some(r.uri) {
+            current_uri = Some(r.uri);
+            out.push(r.display.clone());
+            current_run = None;
+            flat_syms.clear();
+            hier_syms.clear();
+            if let Some(syms) = symbols_by_uri.get(r.uri) {
+                for sym in syms {
+                    if let Some(loc) = sym.get("location").filter(|l| l.is_object()) {
+                        if loc.get("uri").and_then(|u| u.as_str()) == Some(r.uri) {
+                            flat_syms.push(sym.clone());
+                        }
+                    } else if sym.get("selectionRange").is_some() {
+                        hier_syms.push(sym.clone());
+                    }
+                }
+            }
+        }
+
+        // Englobant : containment profond exact d'abord sur la forme
+        // hiérarchique (seule forme dont `range` couvre le corps), puis
+        // heuristique « dernier symbole démarrant avant la réf » sur la forme
+        // plate (arbitrage R2 — celle que les deux serveurs réels rendent).
+        let enclosing: Option<(&Value, bool)> = deepest_containing(&hier_syms, r.line0)
+            .map(|sym| (sym, true))
+            .or_else(|| flat_enclosing(&flat_syms, r.line0).map(|sym| (sym, false)));
+
+        // En-tête de bloc au premier run de l'englobant seulement (runs
+        // consécutifs, ordre de ligne conservé).
+        if let Some((sym, hierarchical)) = enclosing {
+            let run_ptr = sym as *const Value;
+            if !matches!(current_run, Some(Some(ptr)) if ptr == run_ptr) {
+                let enc_line0 = if hierarchical {
+                    sym.get("selectionRange")
+                } else {
+                    sym.get("location").and_then(|l| l.get("range"))
+                }
+                .and_then(|rg| rg.get("start"))
+                .and_then(|s| s.get("line"))
+                .and_then(|l| l.as_i64())
+                .unwrap_or(0);
+                let has_detail = sym
+                    .get("detail")
+                    .and_then(|d| d.as_str())
+                    .is_some_and(|d| !d.is_empty());
+                // Snippet-signature de l'englobant : forme plate sans `detail`
+                // uniquement (arbitrage R2), pris sur le contenu déjà lu —
+                // zéro I/O, zéro requête LSP de plus.
+                let signature = if has_detail || hierarchical {
+                    None
+                } else {
+                    contents_by_uri
+                        .get(r.uri)
+                        .and_then(|c| line_snippet(c, enc_line0.max(0) as u64))
+                };
+                let enc_line1 = enc_line0 + 1;
+                let label = symbol_name_and_detail(sym);
+                out.push(match signature {
+                    Some(sig) => format!("  dans {label} · {sig} — L{enc_line1}"),
+                    None => format!("  dans {label} — L{enc_line1}"),
+                });
+            }
+            current_run = Some(Some(run_ptr));
+        } else {
+            current_run = Some(None);
+        }
+
+        // Ligne de réf : snippet sur le contenu déjà lu (`line_snippet` ne
+        // relit jamais — R5). URI jamais lue (absente de `contents_by_uri`) →
+        // `L<1-based>` seul, comme un groupe hors workspace.
+        let line1 = r.line0 + 1;
+        match contents_by_uri.get(r.uri) {
+            Some(content) => match line_snippet(content, r.line0.max(0) as u64) {
+                Some(snippet) => out.push(format!("    L{line1}: {snippet}")),
+                None => out.push(format!("    L{line1}")),
+            },
+            None => out.push(format!("  L{line1}")),
+        }
+    }
+
+    out.join("\n")
+}
+
 /// Dispatches a `tools/call` for `lsp_diagnostics`/`lsp_definition`/
 /// `lsp_references`/`lsp_rename`/`lsp_document_symbols`/
 /// `lsp_workspace_symbols`. Returns `None` if `name` is not one of these.
@@ -1553,6 +1802,16 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                 (Err(e), _) | (_, Err(e)) => Some(err_result(e.to_string())),
             }
         }
+        // Tâche 04 — `lsp_references` enrichi (design §3) : après la requête
+        // references (inchangée), un `documentSymbol` par FICHIER DISTINCT
+        // jamais par réf, avec lecture + `ensure_open` (idempotent par
+        // session, `try_mark_uri_open` déduplique) sous les mêmes garde-fous
+        // R5 que le reste : confinés `file://` ONLY, même toolchain que la
+        // session, cap 20 fichiers. Le fichier cible, déjà confiné/lu/ouvert
+        // par le préambule, est réutilisé (`resolved`/`text`) — jamais relu,
+        // jamais re-didOpen'é. Toute erreur de collecte est best effort
+        // (`tracing::warn!`, réf rendue sans englobant), jamais une erreur
+        // tool.
         "lsp_references" => {
             let (line0, character0, target_line) = match target_info {
                 Some(t) => t,
@@ -1585,15 +1844,133 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                         let mut out = vec![target_line];
                         if locations.is_empty() {
                             out.push("no references".to_string());
-                        } else {
-                            out.push(format!("références ({}):", locations.len()));
-                            for loc in &locations {
-                                out.push(format!(
-                                    "  {}",
-                                    render_location(&state.config.sandbox_root, loc).await
-                                ));
+                            return Some(ok_result(out.join("\n")));
+                        }
+
+                        // Fichiers distincts touchés par les réf (BTreeSet :
+                        // ordre déterministe). Le fichier cible est traité en
+                        // tête — il compte dans le cap de 20 et son statut
+                        // (déjà lu/ouvert par le préambule) ne doit pas dépendre
+                        // de l'ordre de tri des URI.
+                        let mut uris: std::collections::BTreeSet<String> =
+                            std::collections::BTreeSet::new();
+                        for loc in &locations {
+                            if let Some(u) = loc.get("uri").and_then(|u| u.as_str()) {
+                                uris.insert(u.to_string());
+                            } else if let Some(u) = loc.get("targetUri").and_then(|u| u.as_str()) {
+                                uris.insert(u.to_string());
                             }
                         }
+                        const MAX_REFERENCE_FILES: usize = 20;
+                        let mut ordered_uris: Vec<String> = Vec::with_capacity(uris.len());
+                        if uris.remove(&file_uri) {
+                            ordered_uris.push(file_uri.clone());
+                        }
+                        ordered_uris.extend(uris);
+
+                        let mut symbols_by_uri: std::collections::BTreeMap<String, Vec<Value>> =
+                            std::collections::BTreeMap::new();
+                        let mut contents_by_uri: std::collections::BTreeMap<String, String> =
+                            std::collections::BTreeMap::new();
+                        let mut files_in_pipeline = 0usize;
+                        let mut cap_warned = false;
+                        for uri in &ordered_uris {
+                            // R5 strict : lecture + didOpen + documentSymbol
+                            // UNIQUEMENT sur URI `file://` confine OK, même
+                            // toolchain que la session. Tout le reste (hors
+                            // workspace, non-`file://`, toolchain différente —
+                            // « traitée hors workspace ») est rendu brut par le
+                            // helper, sans jamais rien tenter.
+                            let Some(raw_path) = uri.strip_prefix("file://") else {
+                                continue;
+                            };
+                            let Ok(resolved_file) =
+                                confine(&state.config.sandbox_root, raw_path).await
+                            else {
+                                continue;
+                            };
+                            let Some((file_toolchain, file_language_id)) =
+                                toolchain_for_path(&resolved_file)
+                            else {
+                                continue;
+                            };
+                            if file_toolchain != toolchain {
+                                continue;
+                            }
+                            if files_in_pipeline >= MAX_REFERENCE_FILES {
+                                if !cap_warned {
+                                    tracing::warn!(
+                                        "lsp_references: more than {MAX_REFERENCE_FILES} distinct files — \
+                                         remaining references rendered without enclosing"
+                                    );
+                                    cap_warned = true;
+                                }
+                                continue;
+                            }
+                            files_in_pipeline += 1;
+
+                            // Fichier cible : texte du préambule réutilisé —
+                            // pas de relecture (et didOpen déjà fait au-dessus).
+                            let content = if resolved_file == resolved {
+                                text.clone()
+                            } else {
+                                match filesystem::read_file(ReadFileOptions {
+                                    path: resolved_file,
+                                    offset: 0,
+                                    limit: 0,
+                                    raw: true,
+                                })
+                                .await
+                                {
+                                    Ok(c) => c,
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "lsp_references: cannot read {uri} (best effort, rendered without enclosing): {e}"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            };
+                            if *uri != file_uri
+                                && let Err(e) =
+                                    client.ensure_open(uri, file_language_id, &content).await
+                            {
+                                tracing::warn!(
+                                    "lsp_references: cannot didOpen {uri} (best effort, rendered without enclosing): {e}"
+                                );
+                                continue;
+                            }
+                            // UN seul documentSymbol par fichier distinct —
+                            // erreur → liste vide + warn, jamais une erreur
+                            // tool (best effort, design §3).
+                            let symbols = match client
+                                .request(
+                                    "textDocument/documentSymbol",
+                                    serde_json::json!({"textDocument": {"uri": uri}}),
+                                )
+                                .await
+                            {
+                                Ok(result) => result.as_array().cloned().unwrap_or_default(),
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "lsp_references: documentSymbol failed for {uri} (best effort, rendered without enclosing): {e}"
+                                    );
+                                    Vec::new()
+                                }
+                            };
+                            contents_by_uri.insert(uri.clone(), content);
+                            symbols_by_uri.insert(uri.clone(), symbols);
+                        }
+
+                        out.push(
+                            render_references_grouped(
+                                &state.config.sandbox_root,
+                                &locations,
+                                &symbols_by_uri,
+                                &contents_by_uri,
+                            )
+                            .await,
+                        );
                         Some(ok_result(out.join("\n")))
                     }
                     Err(e) => Some(err_result(e.to_string())),
@@ -2382,19 +2759,31 @@ mod tests {
 
         assert!(!result["isError"].as_bool().unwrap(), "should be OK");
         let text = result["content"][0]["text"].as_str().unwrap();
-        // Nouvelle forme 1-based (le fake references n'ajoute qu'une location,
-        // l'externe est propre au fake definition).
+        // Tâche 04 — assertions adaptées au rendu groupé (consigné au rapport) :
+        // le fake references est devenu un scanner workspace-wide — la requête
+        // sans `symbol` (colonne 0) cible le mot « fn » et rend ses occurrences
+        // + l'entrée externe fixe → 2 réf, rendues groupées par fichier (plus
+        // de ligne `render_location` plate `main.rs:1: …`).
         assert!(
-            text.contains("main.rs:1:"),
-            "should contain workspace-relative 'main.rs:1:', got: {text}"
+            text.contains("cible: main.rs:1:"),
+            "target line unchanged, got: {text}"
         );
         assert!(
             !text.contains(":0:0"),
             "no more 0-based ':0:0' rendering, got: {text}"
         );
         assert!(
-            text.contains("références (1):"),
-            "should contain the filtered count title, got: {text}"
+            text.contains("références (2):"),
+            "occurrence of 'fn' on disk + fixed external entry, got: {text}"
+        );
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            lines.contains(&"main.rs"),
+            "workspace-relative group header, got: {text}"
+        );
+        assert!(
+            lines.contains(&"file:///external/lib.rs"),
+            "external group header rendered raw, got: {text}"
         );
     }
 
@@ -2486,17 +2875,26 @@ mod tests {
 
         assert!(!result["isError"].as_bool().unwrap(), "should be OK");
         let text = result["content"][0]["text"].as_str().unwrap();
+        // Tâche 04 — assertions adaptées au rendu groupé (consigné au rapport) :
+        // le compteur passe de 1 à 2 (le fake scanner rend l'occurrence disque
+        // de `main` + l'entrée externe fixe) et la ligne plate
+        // `main.rs:1: fn main() {}` devient le bloc `dans fn main … — L1` suivi
+        // de la réf `    L1: fn main() {}` sous son englobant.
         assert!(
             text.contains("cible: main.rs:1: fn main() {}"),
             "target line should carry snippet, got: {text}"
         );
         assert!(
-            text.contains("références (1):"),
-            "title count should be 1, got: {text}"
+            text.contains("références (2):"),
+            "occurrence of 'main' on disk + fixed external entry, got: {text}"
         );
         assert!(
-            text.contains("main.rs:1: fn main() {}"),
-            "reference rendered relative + snippet, got: {text}"
+            text.contains("  dans fn main · fn main() {} — L1"),
+            "grouped form: block header with snippet-signature, got: {text}"
+        );
+        assert!(
+            text.contains("    L1: fn main() {}"),
+            "reference rendered under its enclosing with snippet, got: {text}"
         );
     }
 
@@ -3774,6 +4172,222 @@ mod tests {
         assert!(
             text.contains("method not found"),
             "degradation message should mention 'method not found', got: {text}"
+        );
+    }
+
+    // ── Tâche 04 — lsp_references enrichi (groupé par fichier + englobant) ────
+
+    /// Test 1 — englobant sur forme PLATE (arbitrage R2 2026-09-04) : dernier
+    /// symbole démarré à ou avant la réf (bornes inclusives), pures fonctions
+    /// sans I/O.
+    #[test]
+    fn flat_enclosing_last_start_before() {
+        let syms = serde_json::json!([
+            {"name": "a", "kind": 12, "location": {"uri": "file:///m.rs",
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}},
+            {"name": "b", "kind": 12, "location": {"uri": "file:///m.rs",
+                "range": {"start": {"line": 2, "character": 0}, "end": {"line": 2, "character": 1}}}},
+            {"name": "c", "kind": 12, "location": {"uri": "file:///m.rs",
+                "range": {"start": {"line": 5, "character": 0}, "end": {"line": 5, "character": 1}}}}
+        ]);
+        let arr = syms.as_array().unwrap();
+        assert_eq!(
+            flat_enclosing(arr, 1).and_then(|s| s["name"].as_str()),
+            Some("a"),
+            "réf ligne 1 (0-based) → symbole démarré L0"
+        );
+        assert_eq!(
+            flat_enclosing(arr, 2).and_then(|s| s["name"].as_str()),
+            Some("b"),
+            "réf sur la ligne même du symbole : '<=' est inclusif"
+        );
+        assert_eq!(
+            flat_enclosing(arr, 7).and_then(|s| s["name"].as_str()),
+            Some("c"),
+            "réf après tout → dernier symbole démarré"
+        );
+        assert!(flat_enclosing(&[], 3).is_none(), "liste vide → None");
+    }
+
+    /// Test 2 — englobant sur forme HIERARCHIQUE : le `DocumentSymbol` le plus
+    /// profond dont `range` contient la ligne, enfants explorés en priorité.
+    #[test]
+    fn deepest_containing_prefers_deepest() {
+        let syms = serde_json::json!([{
+            "name": "outer", "kind": 12,
+            "range": {"start": {"line": 0, "character": 0}, "end": {"line": 10, "character": 0}},
+            "selectionRange": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 5}},
+            "children": [{
+                "name": "inner", "kind": 12,
+                "range": {"start": {"line": 3, "character": 0}, "end": {"line": 6, "character": 0}},
+                "selectionRange": {"start": {"line": 3, "character": 0}, "end": {"line": 3, "character": 5}}
+            }]
+        }]);
+        let arr = syms.as_array().unwrap();
+        assert_eq!(
+            deepest_containing(arr, 4).and_then(|s| s["name"].as_str()),
+            Some("inner"),
+            "réf 4 contenue par outer ET inner → le plus profond"
+        );
+        assert_eq!(
+            deepest_containing(arr, 1).and_then(|s| s["name"].as_str()),
+            Some("outer"),
+            "réf 1 contenue par outer seul"
+        );
+        assert!(
+            deepest_containing(arr, 20).is_none(),
+            "hors de tout range → None"
+        );
+    }
+
+    /// Test 3 — rendu groupé design §3 : un documentSymbol sur le fichier cible,
+    /// blocs d'englobant avec snippet-signature (forme plate R2), groupe
+    /// externe rendu brut sans aucune lecture (R5).
+    #[tokio::test]
+    async fn lsp_references_grouped_with_enclosing() {
+        let (state, tmpdir) = make_lsp_state("ref_group").await;
+        std::fs::write(
+            tmpdir.path().join("main.rs"),
+            "fn helper() {}\nfn main() { helper(); }\n",
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_references",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "helper"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        // Comptage exact : 2 occurrences disques de helper (L1 + L2) + 1 entrée
+        // synthétique externe.
+        assert!(
+            text.contains("références (3):"),
+            "exact count: main.rs twice + file:///external/lib.rs, got: {text}"
+        );
+        // Groupe main.rs : en-tête relatif + deux blocs d'englobant.
+        assert!(lines.contains(&"main.rs"), "file header, got: {text}");
+        let idx = |needle: &str| {
+            lines
+                .iter()
+                .position(|l| *l == needle)
+                .unwrap_or_else(|| panic!("line {needle:?} missing, got: {text}"))
+        };
+        assert_eq!(
+            lines[idx("  dans fn helper · fn helper() {} — L1") + 1],
+            "    L1: fn helper() {}",
+            "ref L1 under its enclosing block, snippet from content already read, got: {text}"
+        );
+        assert_eq!(
+            lines[idx("  dans fn main · fn main() { helper(); } — L2") + 1],
+            "    L2: fn main() { helper(); }",
+            "ref L2 under its enclosing block, got: {text}"
+        );
+        // Groupe externe (R5 — assertion de sécurité) : URI brute en en-tête,
+        // ligne `L11` nue — aucune lecture, aucun snippet, aucun documentSymbol.
+        assert!(
+            lines.contains(&"file:///external/lib.rs"),
+            "external group header rendered raw, got: {text}"
+        );
+        assert_eq!(
+            lines[idx("file:///external/lib.rs") + 1],
+            "  L11",
+            "external ref is a bare 1-based line (0-based 10), got: {text}"
+        );
+        assert!(
+            !text.contains("file:///external/lib.rs:11"),
+            "external entry must never carry a snippet, got: {text}"
+        );
+    }
+
+    /// Test 4 — chemin secondaire complet : `lib.rs` (fichier non-cible) est lu,
+    /// didOpen'és et documentSymbol'és une fois — sa preuve est son bloc
+    /// d'englobant à lui, impossible sans ces trois étapes.
+    #[tokio::test]
+    async fn lsp_references_secondary_file_read_and_grouped() {
+        let (state, tmpdir) = make_lsp_state("ref_secondary").await;
+        std::fs::write(
+            tmpdir.path().join("main.rs"),
+            "fn helper() {}\nfn main() { helper(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmpdir.path().join("lib.rs"),
+            "fn use_helper() { helper(); }\n",
+        )
+        .unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_references",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "helper"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(
+            text.contains("références (4):"),
+            "main.rs twice + lib.rs once + external, got: {text}"
+        );
+        assert!(
+            lines.contains(&"lib.rs"),
+            "secondary file has its own group header (it was read), got: {text}"
+        );
+        assert!(
+            lines.contains(&"  dans fn use_helper · fn use_helper() { helper(); } — L1"),
+            "enclosing block on the secondary file — proof of its documentSymbol, got: {text}"
+        );
+        assert!(
+            lines.contains(&"    L1: fn use_helper() { helper(); }"),
+            "ref on the secondary file with snippet — proof of its read, got: {text}"
+        );
+    }
+
+    /// Test 5 — réf sans symbole englobant au-dessus : ligne nue sous l'en-tête
+    /// fichier, sans ligne `dans`, pas d'erreur.
+    #[tokio::test]
+    async fn lsp_references_word_without_symbol_context() {
+        let (state, tmpdir) = make_lsp_state("ref_noenc").await;
+        std::fs::write(tmpdir.path().join("main.rs"), "zed_qux\n").unwrap();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_references",
+                serde_json::json!({"path": "main.rs", "line": 1, "symbol": "zed_qux"}),
+            ),
+        )
+        .await
+        .expect("timeout")
+        .expect("dispatch returned None");
+
+        assert!(!result["isError"].as_bool().unwrap(), "should be OK");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert!(lines.contains(&"main.rs"), "file header, got: {text}");
+        assert!(
+            lines.contains(&"    L1: zed_qux"),
+            "bare ref line under the file header, no enclosing, got: {text}"
+        );
+        assert!(
+            !text.contains("dans"),
+            "no enclosing block without a symbol above, got: {text}"
         );
     }
 }
