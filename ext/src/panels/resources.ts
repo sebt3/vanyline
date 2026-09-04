@@ -5,6 +5,8 @@ import {
   runProjectDelete,
   runSandboxCreate,
   runSandboxDelete,
+  runSandboxStart,
+  runSandboxStop,
   type PromptApi,
   type ResourceNode,
   type RunResult,
@@ -141,6 +143,8 @@ export function registerResources(
   registerRun('vanyline.project.delete', (n) => runProjectDelete(rpc, ui, n));
   registerRun('vanyline.sandbox.create', (n) => runSandboxCreate(rpc, ui, n));
   registerRun('vanyline.sandbox.delete', (n) => runSandboxDelete(rpc, ui, n));
+  registerRun('vanyline.sandbox.stop', (n) => runSandboxStop(rpc, ui, n));
+  registerRun('vanyline.sandbox.start', (n) => runSandboxStart(rpc, ui, n));
 
   function attachServer(conn: RpcLike): void {
     rpc = conn;

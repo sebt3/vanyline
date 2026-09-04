@@ -570,3 +570,74 @@ export async function runSandboxDelete(
     return { ok: false, message: `VNL-EXT-025: sandboxes/delete (${mapRpcError(err).message})` };
   }
 }
+
+/** Flux `vanyline.sandbox.stop`. Réversible — PAS de modale (transition). */
+export async function runSandboxStop(
+  rpc: RpcLike | undefined,
+  ui: PromptApi,
+  targetHint?: ResourceNode,
+): Promise<RunResult> {
+  return runSandboxTransition(rpc, ui, 'stop', targetHint);
+}
+
+/** Flux `vanyline.sandbox.start`. Réversible — PAS de modale (transition). */
+export async function runSandboxStart(
+  rpc: RpcLike | undefined,
+  ui: PromptApi,
+  targetHint?: ResourceNode,
+): Promise<RunResult> {
+  return runSandboxTransition(rpc, ui, 'start', targetHint);
+}
+
+/** Transition stop/start partagée : `sandboxes/{stop,start}` avec `{ name }`,
+ *  PAS de confirmation (transition réversible — seule la suppression est destructive,
+ *  cf. runSandboxDelete). Cible = hint de nœud sandbox, ou sélection
+ *  (sandboxes/list + pick ⇒ NO_SANDBOX si liste vide ; échec de liste via listFor
+ *  ⇒ VNL-EXT-025). Échec RPC ⇒ VNL-EXT-025, jamais de rejet hors du run. */
+async function runSandboxTransition(
+  rpc: RpcLike | undefined,
+  ui: PromptApi,
+  action: 'stop' | 'start',
+  targetHint?: ResourceNode,
+): Promise<RunResult> {
+  if (rpc === undefined) {
+    return { ok: false, message: SERVER_NOT_STARTED };
+  }
+
+  let name: string;
+  if (targetHint?.kind === 'sandbox') {
+    name = targetHint.label;
+  } else {
+    const outcome = await listFor<VnlSandbox>(rpc, 'sandboxes/list');
+    if ('fail' in outcome) {
+      return outcome.fail;
+    }
+    if (outcome.list.length === 0) {
+      return { ok: false, message: NO_SANDBOX };
+    }
+    const picked = await ui.pick(
+      'Sandbox',
+      outcome.list.map((s) => ({
+        label: s.metadata.name,
+        description: s.status?.phase ?? 'phase inconnue',
+      })),
+    );
+    if (picked === undefined) {
+      return { ok: false, cancelled: true, message: '' };
+    }
+    name = picked.label;
+  }
+
+  try {
+    await rpc.request(`sandboxes/${action}`, { name });
+    return {
+      ok: true,
+      message: `Sandbox ${name} ${action === 'stop' ? 'arrêtée' : 'démarrée'}`,
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      message: `VNL-EXT-025: sandboxes/${action} (${mapRpcError(err).message})`,
+    };
+  }
+}

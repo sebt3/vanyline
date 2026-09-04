@@ -150,7 +150,53 @@ Tout point rouge de cette section est une régression de F4 : la remonter
 telle quelle (point n° + symptôme + versions extension/binaire), pas la
 corriger en silence pendant le test.
 
-## 5. Pannes connues
+## 5. Test e2e manuel — ressources K8s (F5)
+
+Pas de job CI non plus — à dérouler à la main sur un code-server réel, **après la
+checklist §3** (et la procédure §4 si elle est faite) dans la même fenêtre, sur un
+cluster accessible depuis le kubeconfig local. Le namespace est résolu comme à l'accord
+par la CLI (`defaults.namespace` du config.yaml fusionné, sinon contexte kubeconfig —
+cf. `docs/architecture.md`) : le prérequis minimal est donc **au moins un Owner** dans le
+namespace (sinon `vanyline owner create <nom>` en CLI — l'extension ne crée pas d'Owner,
+décision design F5).
+
+1. **Arbre + namespace** : ouvrir la vue Resources (onglet « Resources », dans la
+   sidebar vanyline sous Chat) — son titre est « Resources », sa description est le
+   namespace résolu ; les Owners y sont listés. Un Owner développé montre ses Projects
+   (en description l'URL du dépôt), un Project montre ses Sandboxes (en description la
+   phase).
+2. **Créer un projet** : menu contextuel sur un nœud Owner → « Créer un projet » → nom
+   `e2e-projet`, URL de dépôt réelle → le projet apparaît sous l'Owner au refresh auto ;
+   il est visible en CLI (`vanyline project list` ou `kubectl get projects`).
+3. **Validation de surface** : taper le nom `E2E_Pas_OK` → l'InputBox rouge le refuse
+   à la volée (`VNL-EXT-026`) ; aucun RPC n'est émis avec un tel nom.
+4. **Créer une sandbox** : menu sur le nœud `e2e-projet` → nom `e2e-sb`, branche par
+   défaut → elle apparaît en phase `Provisioning` (icône spin). Ne pas attendre un watch
+   temps réel (décision v1) : cliquer le bouton refresh de la vue jusqu'à `Running`
+   (icône rocket). Le passage Provisioning → Running peut prendre une minute ; si le
+   pull d'image échoue, la phase passe à `Failed` (icône error) : ce n'est pas un bug
+   de l'extension.
+5. **Stop** : menu → « Arrêter la sandbox » (pas de modale — transition réversible) →
+   « Sandbox e2e-sb arrêtée » ; au refresh suivant, la phase passe `Suspended`
+   (icône circle-slash) **une fois le contrôleur passé** ; à vérifier en CLI
+   (`kubectl get sandbox e2e-sb -o jsonpath='{.spec.suspended}'` → `true`).
+6. **Start** : menu → « Démarrer la sandbox » → phase re-Provisioning puis Running
+   après refresh.
+7. **Delete** : menu sur la sandbox → modale de confirmation annulable (Annuler ne
+   rien faire) ; supprimer la fait disparaître de l'arbre, idem pour `e2e-projet`
+   (menu sur le nœud projet). `delete` n'est pas idempotent : supprimer deux fois le
+   même nom (arborescence périmée) renvoie une erreur lisible `VNL-EXT-025:
+   …VNL-RPC-010`.
+8. **Palette sans cible** : `vanyline: Créer un projet` depuis la palette (Ctrl+Maj+P)
+   → un QuickPick Owner précède le formulaire : le repli fonctionne aussi hors menu
+   contextuel.
+9. **Namespace figé** : changer de contexte kubeconfig ne modifie pas la vue tant que la
+   fenêtre n'est pas rechargée (`Developer: Reload Window`) : documenté, attendu.
+
+Tout point rouge de cette section est une régression de F5 : la remonter telle quelle
+(point n° + symptôme + versions), pas la corriger en silence pendant le test.
+
+## 6. Pannes connues
 
 - **Mismatch `PROTOCOL_VERSION`** (extension et CLI trop éloignées) :
   l'`initialize` échoue proprement avec `VNL-RPC-003` — message actionnable

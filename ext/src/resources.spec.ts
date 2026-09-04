@@ -16,6 +16,8 @@ import {
   runProjectDelete,
   runSandboxCreate,
   runSandboxDelete,
+  runSandboxStart,
+  runSandboxStop,
   type PromptApi,
   type ResourceNode,
   type RpcLike,
@@ -486,5 +488,101 @@ describe('commandes create/delete (tache 02)', () => {
     // message spécifique « aucune sandbox », pas le message « aucun Project »
     expect(r.message).toMatch(/aucune Sandbox/i);
     expect(r.message).not.toMatch(/Project/);
+  });
+
+  // ---- tache 03 : stop/start (transitions réversibles, Jamais de modale) ----
+
+  it('runSandboxStop : hint sandbox, un seul RPC sandboxes/stop, params exacts, sans modale', async () => {
+    const rpc = fakeRpc(() => []);
+    const ui = scriptedPromptApi([], [true]);
+    const hint = sandboxNode({ metadata: { name: 's1' }, status: { phase: 'Running' } });
+
+    const r = await runSandboxStop(rpc, ui, hint);
+
+    expect(r.ok).toBe(true);
+    expect(r.message).toBe('Sandbox s1 arrêtée');
+    expect(paramsOf(rpc, 'sandboxes/stop')).toEqual({ name: 's1' });
+    expect(methodsOf(rpc)).toEqual(['sandboxes/stop']);
+    expect(ui.confirm).not.toHaveBeenCalled();
+  });
+
+  it('runSandboxStart : hint sandbox, un seul RPC sandboxes/start, params exacts', async () => {
+    const rpc = fakeRpc(() => []);
+    const ui = scriptedPromptApi([], [true]);
+    const hint = sandboxNode({ metadata: { name: 's1' }, status: { phase: 'Suspended' } });
+
+    const r = await runSandboxStart(rpc, ui, hint);
+
+    expect(r.ok).toBe(true);
+    expect(r.message).toBe('Sandbox s1 démarrée');
+    expect(paramsOf(rpc, 'sandboxes/start')).toEqual({ name: 's1' });
+  });
+
+  it('runSandboxStop : sans hint, sandboxes/list d’abord puis pick s2 ⇒ { name: s2 }', async () => {
+    const rpc = fakeRpc((m) =>
+      m === 'sandboxes/list'
+        ? [{ metadata: { name: 's1' } }, { metadata: { name: 's2' } }]
+        : [],
+    );
+    const ui = scriptedPromptApi([{ label: 's2' }]);
+
+    const r = await runSandboxStop(rpc, ui, undefined);
+
+    expect(r.ok).toBe(true);
+    expect(methodsOf(rpc)).toEqual(['sandboxes/list', 'sandboxes/stop']);
+    expect(paramsOf(rpc, 'sandboxes/stop')).toEqual({ name: 's2' });
+  });
+
+  it('runSandboxStop : sans hint, pick annulé (undefined) ⇒ cancelled, aucun stop/start', async () => {
+    const rpc = fakeRpc((m) => (m === 'sandboxes/list' ? [{ metadata: { name: 's1' } }] : []));
+    const ui = scriptedPromptApi([undefined]);
+
+    const r = await runSandboxStop(rpc, ui, undefined);
+
+    expect(r).toEqual({ ok: false, cancelled: true, message: '' });
+    expect(methodsOf(rpc)).not.toContain('sandboxes/stop');
+    expect(methodsOf(rpc)).not.toContain('sandboxes/start');
+  });
+
+  it('échec RPC : sandboxes/stop rejette RpcError VNL-RPC-010 ⇒ VNL-EXT-025 + boom, sans rejet', async () => {
+    const rpc = fakeRpc((m) =>
+      m === 'sandboxes/stop'
+        ? Promise.reject(new RpcError(-32000, 'boom', 'VNL-RPC-010'))
+        : [],
+    );
+    const ui = scriptedPromptApi([], [true]);
+    const hint = sandboxNode({ metadata: { name: 's1' }, status: { phase: 'Running' } });
+
+    const r = await runSandboxStop(rpc, ui, hint);
+
+    expect(r.ok).toBe(false);
+    expect(r.message).toContain('boom');
+    expect(r.message).toContain('VNL-EXT-025');
+    expect(r.message).toContain('sandboxes/stop');
+  });
+
+  it('rpc absent ⇒ stop/start VNL-EXT-021, sans ui ni RPC', async () => {
+    const ui = scriptedPromptApi([], [true]);
+    const stopped = await runSandboxStop(undefined, ui);
+    const started = await runSandboxStart(undefined, ui);
+    for (const r of [stopped, started]) {
+      expect(r.ok).toBe(false);
+      expect(r.message).toMatch(/VNL-EXT-021/);
+    }
+    expect(ui.input).not.toHaveBeenCalled();
+    expect(ui.pick).not.toHaveBeenCalled();
+    expect(ui.confirm).not.toHaveBeenCalled();
+  });
+
+  it('hint de mauvais kind (owner) ⇒ repli sélection (sandboxes/list), pas le label owner', async () => {
+    const rpc = fakeRpc((m) => (m === 'sandboxes/list' ? [{ metadata: { name: 's1' } }] : []));
+    const ui = scriptedPromptApi([{ label: 's1' }]);
+    const hint = ownerNode({ metadata: { name: 'alice' } });
+
+    const r = await runSandboxStop(rpc, ui, hint);
+
+    expect(r.ok).toBe(true);
+    expect(methodsOf(rpc)).toContain('sandboxes/list');
+    expect(paramsOf(rpc, 'sandboxes/stop')).toEqual({ name: 's1' });
   });
 });
