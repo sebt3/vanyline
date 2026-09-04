@@ -386,6 +386,140 @@ pub struct LspRenameArgs {
     pub new_name: String,
 }
 
+/// Forme d'argument partagée par tous les tools qui ciblent une position
+/// (`lsp_definition`, `lsp_references`, `lsp_rename`, `inspect_symbol`).
+/// Remplace `LspPositionArgs` (migration des tools en tâche 01b — pas ici).
+/// Entrées 1-based (alignées `read_file`), conversion interne 0-based LSP.
+#[derive(serde::Deserialize, Clone, Debug)]
+pub struct LspSymbolTarget {
+    pub path: String,
+    /// Ligne 1-based (comme read_file). Requis (pas de `serde(default)`).
+    pub line: u64,
+    /// Nom de l'identifiant à cibler sur cette ligne. Mode recommandé.
+    /// Le tool résout lui-même la colonne de la 1re occurrence délimitée.
+    #[serde(default)]
+    pub symbol: Option<String>,
+    /// Colonne 1-based, échappatoire pour un ciblage précis quand `symbol`
+    /// est ambigu ou absent. Ignoré si `symbol` est fourni (non vide).
+    #[serde(default)]
+    pub character: Option<u64>,
+}
+
+/// Résultat de `resolve_position` — position LSP 0-based + information
+/// d'ambiguïté du mode symbole à rendre dans la réponse de l'outil (design R6).
+#[derive(Debug, PartialEq, Eq)]
+pub enum PositionResolution {
+    Unique {
+        line0: u64,
+        character0: u64,
+    },
+    /// Mode symbole : `symbol` trouvé `matches` fois (≥ 2) sur la ligne.
+    /// C'est la 1re occurrence qui est retenue (`character0`).
+    /// `second_char1` = colonne **1-based** de la 2e occurrence, à citer dans
+    /// la note d'ambiguïté de la réponse de l'outil.
+    Ambiguous {
+        line0: u64,
+        character0: u64,
+        matches: usize,
+        second_char1: u64,
+    },
+}
+
+/// Vrai pour les caractères qui délimitent un identifiant ASCII :
+/// `c.is_ascii_alphanumeric() || c == '_'` (bordures `[A-Za-z0-9_]`, design §1).
+fn is_ident_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || c == '_'
+}
+
+/// Résout la position LSP 0-based visée par `target` dans `content` (contenu
+/// brut du fichier déjà lu — fonction pure, aucun I/O).
+///
+/// Modes (ordre de priorité, design §1) :
+/// 1. `symbol = Some(s)` avec `s` non vide → occurrence en tant qu'
+///    **identifiant délimité** : sous-chaîne littérale de `s` dans la ligne,
+///    encadrée à gauche et à droite par une bordure valide (absence de
+///    voisin, ou voisin qui n'est PAS un caractère d'identifiant ASCII :
+///    `[A-Za-z0-9_]` — cf. `is_ident_char`). Recherche manuelle sur la
+///    séquence de `char`s de la ligne — JAMAIS de regex compilée depuis
+///    l'entrée (anti-ReDoS, design R5). Colonnes comptées en `char`s
+///    (mêmes approximations UTF-8 ≈ UTF-16 que `position_to_offset`).
+///    - 0 occurrence → `Err` contenant `VNL-SBX-LSP-010`.
+///    - 1 occurrence → `Unique`.
+///    - ≥ 2 occurrences → `Ambiguous` (1re occurrence retenue).
+/// 2. sinon `character = Some(c)` → colonne `c.saturating_sub(1)`.
+/// 3. sinon → colonne 0 (début de ligne, comportement conservé).
+///
+/// Erreurs (messages `anyhow` portant le code, même style que
+/// `position_to_offset`) :
+/// - `line == 0` ou `line > nombre de lignes` → `VNL-SBX-LSP-007: line {line}
+///   out of range ({n} lines)` — réutilise le sens existant « ligne hors
+///   limites » de ce code.
+/// - symbol mode, 0 occurrence → `VNL-SBX-LSP-010: symbol \"{s}\" not found
+///   as identifier on line {line} of {path}` (le `path` vient du target).
+pub fn resolve_position(
+    content: &str,
+    target: &LspSymbolTarget,
+) -> anyhow::Result<PositionResolution> {
+    // Découpage en lignes : même convention que `position_to_offset`
+    // (`content.lines()` gère `\r\n`). Un contenu vide rend 1 ligne vide :
+    // la ligne 1 existe donc (pas d'erreur de limites sur un fichier vide).
+    let lines: Vec<&str> = content.lines().collect();
+    if target.line == 0 || target.line as usize > lines.len() {
+        return Err(anyhow::anyhow!(
+            "VNL-SBX-LSP-007: line {} out of range ({} lines)",
+            target.line,
+            lines.len()
+        ));
+    }
+    let line0 = target.line - 1;
+    let chars: Vec<char> = lines[line0 as usize].chars().collect();
+
+    // Mode symbole : `symbol` non vide. `Some("")` n'active pas ce mode (il
+    // retombe sur les modes 2/3 ci-dessous).
+    if let Some(sym) = target.symbol.as_deref().filter(|s| !s.is_empty()) {
+        let sym_chars: Vec<char> = sym.chars().collect();
+        // Recherche littérale manuelle, position par position — pas de regex
+        // compilée depuis l'entrée utilisateur (anti-ReDoS, design R5).
+        let mut hits: Vec<usize> = Vec::new();
+        let mut start = 0usize;
+        while start + sym_chars.len() <= chars.len() {
+            if chars[start..start + sym_chars.len()] == sym_chars[..] {
+                let left_ok = start == 0 || !is_ident_char(chars[start - 1]);
+                let after = start + sym_chars.len();
+                let right_ok = after == chars.len() || !is_ident_char(chars[after]);
+                if left_ok && right_ok {
+                    hits.push(start);
+                }
+            }
+            start += 1;
+        }
+
+        return match hits.len() {
+            0 => Err(anyhow::anyhow!(
+                "VNL-SBX-LSP-010: symbol \"{}\" not found as identifier on line {} of {}",
+                sym,
+                target.line,
+                target.path
+            )),
+            1 => Ok(PositionResolution::Unique {
+                line0,
+                character0: hits[0] as u64,
+            }),
+            _ => Ok(PositionResolution::Ambiguous {
+                line0,
+                character0: hits[0] as u64,
+                matches: hits.len(),
+                second_char1: hits[1] as u64 + 1,
+            }),
+        };
+    }
+
+    // Mode 2 : colonne 1-based explicite, saturée (character = 0 → colonne 0,
+    // pas d'underflow). Mode 3 : ni symbol ni character → colonne 0.
+    let character0 = target.character.unwrap_or(0).saturating_sub(1);
+    Ok(PositionResolution::Unique { line0, character0 })
+}
+
 /// Mapping extension of a file → (toolchain name, LSP languageId).
 /// Known toolchains by convention with controller presets: `"rust"`, `"node"`.
 /// `None` if the extension is not covered (fallback: no LSP).
@@ -1921,5 +2055,278 @@ mod tests {
             text.contains("invalid arguments"),
             "should contain 'invalid arguments'"
         );
+    }
+
+    // ── resolve_position unit tests ───────────────────────────────────────────
+
+    #[test]
+    fn resolve_position_symbol_unique() {
+        let content = "fn main() { call_main(); }";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("call_main".to_string()),
+            character: None,
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 12
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_word_boundary_not_substring() {
+        // `main` inside `mainframe` is NOT a delimited occurrence (right border
+        // `f` forbidden) — the central anti-substring test.
+        let content = "fn main() { mainframe(); }";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("main".to_string()),
+            character: None,
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 3
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_not_prefix_of_longer_ident() {
+        let content = "foobar foo";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("foo".to_string()),
+            character: None,
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 7
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_at_line_edges() {
+        // Missing borders on both edges = valid borders.
+        let content = "foo";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("foo".to_string()),
+            character: None,
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 0
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_ambiguous_first_and_second_col() {
+        let content = "let x = f(x);";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("x".to_string()),
+            character: None,
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Ambiguous {
+                line0: 0,
+                character0: 4,
+                matches: 2,
+                second_char1: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_not_found_vnl_sbx_lsp_010() {
+        let content = "fn main() {}";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("nope".to_string()),
+            character: None,
+        };
+        let err = resolve_position(content, &target).unwrap_err();
+        assert!(
+            err.to_string().contains("VNL-SBX-LSP-010"),
+            "symbol not found should return VNL-SBX-LSP-010, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_multiline_line0() {
+        let content = "a()\nb()\nc(foo);\n";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 3,
+            symbol: Some("foo".to_string()),
+            character: None,
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 2,
+                character0: 2
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_character_1based_to_0based() {
+        let content = "abcdefgh";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: None,
+            character: Some(4),
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 3
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_character_zero_saturates() {
+        let content = "abcdefgh";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: None,
+            character: Some(0),
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 0
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_symbol_wins_over_character() {
+        let content = "foo bar";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("bar".to_string()),
+            character: Some(1),
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 4
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_empty_symbol_falls_back_to_character() {
+        let content = "abcdefgh";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: Some("".to_string()),
+            character: Some(3),
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 2
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_default_column_zero() {
+        let content = "abcdefgh";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 1,
+            symbol: None,
+            character: None,
+        };
+        assert_eq!(
+            resolve_position(content, &target).unwrap(),
+            PositionResolution::Unique {
+                line0: 0,
+                character0: 0
+            }
+        );
+    }
+
+    #[test]
+    fn resolve_position_line_out_of_range_vnl_sbx_lsp_007() {
+        let content = "une\nseule\n";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 99,
+            symbol: None,
+            character: None,
+        };
+        let err = resolve_position(content, &target).unwrap_err();
+        assert!(
+            err.to_string().contains("VNL-SBX-LSP-007"),
+            "out-of-range line should return VNL-SBX-LSP-007, got: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_position_line_zero_vnl_sbx_lsp_007() {
+        let content = "une\nseule\n";
+        let target = LspSymbolTarget {
+            path: "m.rs".to_string(),
+            line: 0,
+            symbol: None,
+            character: None,
+        };
+        let err = resolve_position(content, &target).unwrap_err();
+        assert!(
+            err.to_string().contains("VNL-SBX-LSP-007"),
+            "line 0 should return VNL-SBX-LSP-007, got: {err}"
+        );
+    }
+
+    // ── LspSymbolTarget deserialization ───────────────────────────────────────
+
+    #[test]
+    fn lsp_symbol_target_deser_line_required() {
+        // `line` is required (no serde default) → missing it must fail.
+        let missing: Result<LspSymbolTarget, _> =
+            serde_json::from_value(serde_json::json!({ "path": "a.rs" }));
+        assert!(
+            missing.is_err(),
+            "line is required — deserialization must fail"
+        );
+        // `symbol`/`character` default to None when absent.
+        let minimal: LspSymbolTarget =
+            serde_json::from_value(serde_json::json!({ "path": "a.rs", "line": 3 })).unwrap();
+        assert_eq!(minimal.path, "a.rs");
+        assert_eq!(minimal.line, 3);
+        assert_eq!(minimal.symbol, None);
+        assert_eq!(minimal.character, None);
     }
 }
