@@ -169,8 +169,15 @@ comparée aux `range` des symboles du fichier pour trouver l'englobant le plus p
 ```
 
 `documentSymbol` rend soit `DocumentSymbol[]` (hiérarchique, avec `range`) soit
-`SymbolInformation[]` (plat, avec `location`) — gérer les deux (rust-analyzer rend le
-premier, à vérifier pour typescript-language-server).
+`SymbolInformation[]` (plat, avec `location`). Vérification R2 cluster (2026-09-04) : les
+DEUX serveurs rendent la forme plate — son `range` ne couvre que le **nom** du symbole,
+l'englobant « le plus profond » par containment est donc impossible sur la forme réelle
+(l'hypothèse initiale « rust-analyzer rend le premier » est réfutée). Arbitrage
+développeur 2026-09-04 : sur forme plate, englobant = dernier symbole du même fichier
+démarrant à ou avant la réf (ordre document), signature = snippet de la ligne de
+l'englobant (fichier déjà lu pour son `didOpen`) ; sur forme hiérarchique, algorithme
+exact prévu ci-dessus (containment profond + `detail`). Toujours **un seul**
+`documentSymbol` par fichier distinct, zéro requête LSP supplémentaire par référence.
 
 ### 4. Carte du code — deux tools (proposition 2)
 
