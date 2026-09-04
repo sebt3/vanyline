@@ -198,7 +198,8 @@ export const PHASE_ICONS: Readonly<Record<string, string>> = {
 export function sandboxNode(s: VnlSandbox): ResourceNode {
   const phase = s.status?.phase;
   const description = typeof phase === 'string' ? phase : 'inconnue';
-  const iconId = typeof phase === 'string' ? PHASE_ICONS[phase] : 'question';
+  // Phase inconnue (hors des 4 du controller), null ou absente ⇒ même icône « question ».
+  const iconId = (typeof phase === 'string' ? PHASE_ICONS[phase] : undefined) ?? 'question';
   return {
     kind: 'sandbox',
     id: `${SANDBOX_PREFIX}${s.metadata.name}`,
@@ -220,6 +221,7 @@ function errorNode(err: unknown): ResourceNode {
     kind: 'error',
     id: `error:${message}`,
     label: message,
+    iconId: 'error',
   };
 }
 
@@ -228,5 +230,6 @@ function serverNotStartedNode(): ResourceNode {
     kind: 'info',
     id: 'info:VNL-EXT-021',
     label: SERVER_NOT_STARTED,
+    iconId: 'info',
   };
 }

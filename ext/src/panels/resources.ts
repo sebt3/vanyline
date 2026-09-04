@@ -22,10 +22,25 @@ export function registerResources(
 
   let treeView: vscode.TreeView<ResourceNode> | undefined;
 
-  /** Rafraîchit la vue (appel public de l'API 1.67+, mais ABSENT des types
-   *  `@types/vscode` installés — on l'appelle quand même : le contrat le veut). */
-  function refreshView(): void {
-    (treeView as unknown as { refresh(): void }).refresh();
+  /** Rafraîchit la vue — retourne le Thenable pour que l'appelant puisse chaîner
+   *  `updateTitle()` APRES le refresh (le namespace résolu n'est à jour qu'une fois
+   *  les appels RPC du refresh terminés). API publique de l'extension host depuis
+   *  1.67 mais ABSENTE des types `@types/vscode` installés (vérifié 1.136.0,
+   *  index.d.ts:12149-12236) — d'où le cast isolé, seul endroit qui l'utilise. */
+  function refreshView(): Promise<void> {
+    if (treeView === undefined) {
+      return Promise.resolve();
+    }
+    return (treeView as unknown as { refresh(): Promise<void> }).refresh();
+  }
+
+  /** Refresh puis titre/description — chemin des commandes et de attach/detach.
+   *  `updateTitle` aussi en onRejected : le modèle convertit toute erreur RPC en
+   *  nœud error (le provider ne rejette jamais), un rejet de refresh() lui-même
+   *  n'est pas attendu — on met quand même le titre à jour plutôt que de laisser
+   *  une promesse non gérée. */
+  function refreshAndView(): Promise<void> {
+    return refreshView().then(updateTitle, updateTitle);
   }
 
   /** `title` + `description` de la vue à jour après tout refresh (attach/detach/
@@ -53,12 +68,10 @@ export function registerResources(
     },
 
     getChildren(node?: ResourceNode): Promise<ResourceNode[]> {
-      if (node === undefined) {
-        // Racine : modèle courant, ou « non démarré » s'il est absent (vue detach).
-        return model?.getRoots() ?? createResourcesModel(undefined).getRoots();
-      }
-      const current = model;
-      return current ? current.getChildren(node) : Promise.resolve<ResourceNode[]>([]);
+      // Modèle « non démarré » quand aucun handle n'est vivant : mêmes sémantiques
+      // à la racine (nœud info) qu'en enfant (nœud error « serveur non démarré »).
+      const current = model ?? createResourcesModel(undefined);
+      return node === undefined ? current.getRoots() : current.getChildren(node);
     },
   };
 
@@ -67,7 +80,7 @@ export function registerResources(
 
   context.subscriptions.push(
     vscode.commands.registerCommand('vanyline.resources.refresh', async (): Promise<void> => {
-      refreshView();
+      await refreshView();
       updateTitle();
     }),
   );
@@ -76,14 +89,12 @@ export function registerResources(
     model = createResourcesModel(conn, (line): void => {
       channel.appendLine(line);
     });
-    refreshView();
-    updateTitle();
+    void refreshAndView();
   }
 
   function detachServer(): void {
     model = undefined;
-    refreshView();
-    updateTitle();
+    void refreshAndView();
   }
 
   return { attachServer, detachServer };

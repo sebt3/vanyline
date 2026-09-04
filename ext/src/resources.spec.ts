@@ -98,9 +98,9 @@ describe('createResourcesModel — racine', () => {
     expect(run(undefined).iconId).toBe('question');
     expect(run(undefined).description).toBe('inconnue');
 
-    // phase lue inconnue ⇒ aucune icône connue, description = string brut
+    // phase lue inconnue (hors des 4 du controller) ⇒ icône « question », description = string brut
     const inconnue = sandboxNode({ metadata: { name: 's' }, status: { phase: 'À propos' } });
-    expect(inconnue.iconId).toBeUndefined();
+    expect(inconnue.iconId).toBe('question');
     expect(inconnue.description).toBe('À propos');
   });
 
@@ -138,6 +138,7 @@ describe('createResourcesModel — racine', () => {
     expect(nodes[0].kind).toBe('info');
     expect(nodes[0].id).toBe('info:VNL-EXT-021');
     expect(nodes[0].label).toContain('VNL-EXT-021');
+    expect(nodes[0].iconId).toBe('info');
   });
 
   it('cas 8 : échec RPC → [nœud error] portant le message, ne rejette pas', async () => {
@@ -148,6 +149,7 @@ describe('createResourcesModel — racine', () => {
     expect(rpcErr).toHaveLength(1);
     expect(rpcErr[0].kind).toBe('error');
     expect(rpcErr[0].label).toContain('boom');
+    expect(rpcErr[0].iconId).toBe('error');
 
     const plainErr = await withError(new Error('simple'));
     expect(plainErr[0].label).toContain('simple');
