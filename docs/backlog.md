@@ -5,12 +5,13 @@ compris le découpage en 1 ou plusieurs features) au moment de les sortir d'ici.
 
 ## Sélection des tools sandbox par toolset (pas géré aujourd'hui)
 
-> **Partie 1 — refonte de l'interface `lsp_*` orientée agent — sortie du backlog le
-> 2026-09-04** : design doc `docs/features/lsp-agent-interface.md`, branche
-> `feat/lsp-agent-interface`. Décisions Phase 1 : périmètre = partie 1 seule ;
-> `lsp_hover` retiré (absorbé par `lsp_definition`) ; positions par nom de symbole sur
-> une ligne ; les 7 propositions dans la v1. La partie 2 ci-dessous **reste au
-> backlog** (bloqueur UX non tranché).
+> **Partie 1 — refonte de l'interface `lsp_*` orientée agent — LIVRÉE ET CLOSE le
+> 2026-09-05** (feature `lsp-agent-interface`, mergée dans `main`). `lsp_hover` retiré
+> (absorbé par `lsp_definition`), modèle de position par nom de symbole, 8 tools
+> (`lsp_document_symbols`/`lsp_workspace_symbols`/`inspect_symbol`/`edit_and_check`
+> ajoutés), autosave éditeur. Détail : `docs/architecture.md` § « Serveur LSP » et
+> § « WebSocket éditeur ». La partie 2 ci-dessous **reste au backlog** (bloqueur UX
+> non tranché).
 
 Né d'un retour de test détaillé sur les tools `lsp_*` (agent DeepSeek, testé à la
 main sur du Rust + TS réel), en creusant le point « je n'ai pas pu configurer les
@@ -67,9 +68,9 @@ de design.
 
 ## Support éditeur — autres langages
 
-- **Vue** (CodeMirror + LSP) — recoupe la note « `.vue` non couvert » du design doc
-  `docs/features/lsp-agent-interface.md` (Volar/vue-language-server) ; candidat naturel
-  pour absorber ce point du backlog une fois attaqué.
+- **Vue** (CodeMirror + LSP) — `.vue` n'est pas couvert par le LSP actuel
+  (`toolchain_for_path` = rust / node seulement, cf. `docs/architecture.md`
+  § « Serveur LSP ») ; Volar/vue-language-server, feature séparée.
 - **Dockerfile** (coloration CodeMirror + toolchain à monter pour fournir linter/LSP —
   lequel reste à choisir, ex. hadolint côté lint, un langserver Dockerfile existe
   aussi côté LSP).
@@ -84,14 +85,6 @@ de design.
 - Frontend graphique de "git log graph".
 
 ## Markdown viewer
-
-## Auto-save
-
-> Absorbé (2026-09-04) par la feature `docs/features/lsp-agent-interface.md` — l'édition
-> LLM d'un fichier ouvert dans l'éditeur a besoin de l'autosave pour rafraîchir le
-> buffer sans perte. Périmètre là-bas : écriture debouncée du buffer CodeMirror sur
-> `/ws/fs`, rien de plus. Si un besoin autosave plus large émerge (historique, toggle
-> global), rouvrir ici.
 
 ## Amélioration du chat LLM
 

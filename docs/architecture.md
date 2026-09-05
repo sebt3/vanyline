@@ -764,10 +764,28 @@ middleware plutôt qu'une vérification inline dans le handler.
 **`/ws/fs`** : protocole JSON requête/réponse dédié (pas le JSON-RPC MCP, taillé pour
 des tool calls LLM) — `{"op":"read|write|edit|delete|list|mkdir|rename|root","path":...}` →
 `{"ok":true|false,...}`, dispatch vers les mêmes fonctions `vanyline_tools::filesystem::*`
-que le chemin MCP, même confinement (`tools_impl::confine_path`). **Aucun champ de
-corrélation** : strictement une requête lue, une réponse écrite, dans cet ordre — un
-client qui partage la connexion entre plusieurs consommateurs (cf. `SandboxFsClient`
-côté frontend) doit sérialiser ses appels, pas un détail d'implémentation optionnel.
+que le chemin MCP, même confinement (`tools_impl::confine_path`). Le client qui partage
+la connexion entre plusieurs consommateurs (cf. `SandboxFsClient` côté frontend) doit
+**sérialiser ses appels** — une requête en vol à la fois, contrainte de protocole. La
+réponse **reprend le champ `id`** de la requête quand elle en portait un (`attach_req_id`,
+ajouté par `lsp-agent-interface`) : additif, un client sans `id` garde le comportement
+strictement séquentiel.
+
+**Frames de push serveur→client sur `/ws/fs`** (`lsp-agent-interface`, `fs_session`
+passe à une boucle `tokio::select!` recv/broadcast) — pas une route nouvelle, un type
+de frame supplémentaire sur la connexion existante, diffusé à toutes les sessions
+`/ws/fs` authentifiées :
+- `{"event":"file-changed","path":<relatif>}` — émis par `edit_and_check` après une
+  écriture disque en **cas B** (un éditeur navigateur tient le fichier) ; l'éditeur
+  qui tient ce path recharge son buffer par transaction CodeMirror, ce qui fait
+  ré-émettre son propre `didChange` LSP.
+- `{"event":"flush-request","id":N,"path":<relatif>}` / réponse `{"op":"flush-ack",
+  "ackFor":N}` — aller-retour borné (`FS_FLUSH_TIMEOUT_SECS`, 2 s) par lequel
+  `edit_and_check` demande à l'éditeur de flusher son autosave **avant** d'écrire en
+  cas B (`FsFlushRequests`, waiter inséré avant le broadcast pour fermer la course
+  ack-avant-waiter). Timeout → repli sur la fenêtre de debounce, mentionné dans le
+  rapport du tool. L'id du flush voyage dans le champ **dédié** `ackFor`, jamais dans
+  `id` (que le client s'attribue pour sa corrélation).
 
 `mkdir`/`rename`/`root` (`editing-context-menus`, CRUD arbre côté frontend) :
 `mkdir` crée aussi les dossiers parents manquants (`create_dir_all`, cohérent avec
@@ -834,11 +852,56 @@ Deux surfaces consomment ce process unique :
   (le framing `Content-Length` ne concerne que le stdio du process LSP, pas la WS).
   Repli dégradé si la toolchain n'a pas de LSP configuré (close code `4004`) ou si le
   spawn échoue (`4005`).
-- **LLM** — tools MCP `lsp_diagnostics`/`lsp_hover`/`lsp_definition`/
-  `lsp_references`/`lsp_rename` (`sandbox/src/tools_impl.rs`, client dédié
+- **LLM** — tools MCP `lsp_*` (`sandbox/src/tools_impl.rs`, client dédié
   `sandbox/src/lsp_client.rs` qui construit ses URIs absolues directement côté
   serveur), **additifs** aux tools filesystem/search/command existants — ne les
-  remplacent pas.
+  remplacent pas. **Interface orientée boucle agent** (`lsp-agent-interface`,
+  2026-09-05), 8 tools (retrait de `lsp_hover`, absorbé par `lsp_definition`) :
+  - `lsp_diagnostics` — trois états distincts (propre / pas encore analysé / pas de
+    LSP), inchangé.
+  - `lsp_definition` — position(s) **+ signature + doc courte** (hover fusionné) +
+    snippet de la ligne cible.
+  - `lsp_references` — groupé par fichier, chaque réf avec son **symbole englobant +
+    signature** (un seul `textDocument/documentSymbol` par fichier distinct, jamais
+    par réf). Forme plate `SymbolInformation` (ce que rendent réellement
+    rust-analyzer et typescript-language-server) : englobant = dernier symbole
+    démarrant à ou avant la réf ; forme hiérarchique : containment le plus profond.
+  - `lsp_rename` — param `preview` (calcule le `WorkspaceEdit` sans appliquer) ;
+    sinon applique + rapport avant→après par fichier.
+  - `lsp_document_symbols` / `lsp_workspace_symbols` — outline d'un fichier /
+    recherche globale (`workspace/symbol` ; `path` optionnel = simple indice de
+    toolchain, jamais lu). Dégradation propre si la méthode manque, pas un fallback
+    ripgrep déguisé.
+  - `inspect_symbol` — composition pure definition + references + signature en un
+    appel, aucune nouvelle surface LSP.
+  - `edit_and_check` — applique une édition (`write_file` / `edit_file` de
+    `vanyline-tools`, inchangés) puis rend le **diff de diagnostics** (apparus /
+    disparus / compte des inchangés). Cas A (aucun éditeur sur l'URI) : le tool
+    envoie `textDocument/didChange` full-sync versionné. Cas B (éditeur navigateur
+    sur l'URI) : le tool ne l'envoie **jamais** — il flushe l'éditeur puis émet
+    `file-changed` sur `/ws/fs`, l'éditeur ré-émet son `didChange` (deux émetteurs
+    actifs sur la même URI = désync interdit). Timeout de ré-analyse → état mou
+    `VNL-SBX-LSP-011` (édition appliquée, retry), jamais une erreur ni un « propre »
+    par défaut.
+
+  **Modèle de position partagé** (`LspSymbolTarget` : `path` + `line` 1-based +
+  `symbol` nom d'identifiant, ou `character` 1-based en échappatoire) — remplace le
+  couple `line`/`character` 0-based LSP à re-résoudre. `resolve_position` (fonction
+  pure) trouve la 1ʳᵉ occurrence délimitée du nom (bordures `[A-Za-z0-9_]`, recherche
+  littérale — jamais de regex compilée depuis l'entrée) ; ambiguïté → 1ʳᵉ occurrence,
+  signalée dans la réponse.
+
+  **Ajout additif au manager LSP** pour `edit_and_check` (`sandbox/src/lsp.rs`, le
+  reste du manager inchangé) : `doc_versions` (version par URI pour les `didChange`
+  des tools, démarre à 2 — le `didOpen` porte la 1), `next_doc_version`,
+  `invalidate_diagnostics` (vide le cache avant ré-analyse pour ne pas relire le
+  stale), et le suivi `editor_uris` (URIs tenues par un client navigateur, alimenté
+  par le bridge `ws/lsp.rs` sur `didOpen`/`didClose`, purgé sur `unsubscribe`) pour
+  la détection cas A/B.
+
+  Codes d'erreur ajoutés : `VNL-SBX-LSP-010` (`resolve_position` : `symbol`
+  introuvable comme identifiant sur la ligne), `VNL-SBX-LSP-011` (`edit_and_check` :
+  édition appliquée sur le disque, ré-analyse pas stabilisée avant le timeout).
 
 **Traduction d'URIs, uniquement côté bridge navigateur** (`ws/lsp.rs::rewrite_uris`) :
 le navigateur ne connaît jamais `VNL_SANDBOX_ROOT` (cohérent avec `/ws/fs`, jamais de
@@ -858,18 +921,25 @@ identifié en amont, matérialisé ici) ignore silencieusement les fichiers non 
 dans un onglet (`workspace.getFile(uri)` → `null` → aucun `updateFile`). Décision :
 `frontend/src/api/lspRename.ts` envoie sa propre requête `textDocument/rename` (API
 publique du client) et applique le `WorkspaceEdit` lui-même — fichiers ouverts par
-transaction CodeMirror (buffer, **pas persisté sur disque**, l'éditeur n'a pas
-d'autosave), fichiers fermés par `read` (raw) + application locale des `TextEdit`
+transaction CodeMirror (buffer ; l'autosave debouncé le persiste ensuite),
+fichiers fermés par `read` (raw) + application locale des `TextEdit`
 (`applyTextEditsToString`, miroir TS de `apply_text_edits` côté sandbox) + `write` de
 `/ws/fs`. Séquentiel, best-effort — un fichier en échec n'interrompt pas les
 suivants, pas de rollback — même contrat que `apply_workspace_edit`
 (`sandbox/src/tools_impl.rs`, déjà utilisé par le tool MCP `lsp_rename`), donc pas de
-nouvel endpoint batch/atomique introduit sur `/ws/fs`. Le message de statut
-distingue explicitement les fichiers écrits sur disque de ceux modifiés seulement
-dans l'éditeur (« non enregistré — ⌘S ») — cet éditeur n'a aucun indicateur visuel
-« modifications non enregistrées » sur les onglets (cf. "Limites connues" plus bas),
-un message qui ne ferait pas la différence laisserait croire le rename entièrement
-persisté.
+nouvel endpoint batch/atomique introduit sur `/ws/fs`.
+
+**Autosave éditeur** (`lsp-agent-interface` — `frontend/src/components/panels/
+editorAutosave.ts`) : une extension CodeMirror par onglet, sur changement du document
+planifie un `write` debouncé (300 ms, `AUTOSAVE_DEBOUNCE_MS`) vers `/ws/fs` — même
+payload que `Ctrl+S`, sérialisée par la queue du `SandboxFsClient`. `Ctrl+S` flushe
+l'autosave au lieu de doubler l'écriture ; le démontage de l'onglet flushe aussi. Un
+`registerEditorSync` par onglet (registre `path → {flush, reload, hasPending}`)
+alimente le handler `file-changed` (reload du buffer par transaction marquée
+`disk-reload` — l'autosave n'écrit jamais une transaction marquée, anti-boucle) et le
+flush avant écriture LLM du cas B. Il n'y a toujours **pas** d'historique de versions
+ni de résolution de conflit à trois voies : édition concurrente stricte humain+LLM
+sur le même fichier reste racy, l'autosave borne la fenêtre au débounce.
 
 **Menu contextuel éditeur** (`ContextMenu.vue`, étend `editing-context-menus`) :
 « Aller à la définition » (`jumpToDefinition` du package) et « Renommer le symbole »
@@ -1569,11 +1639,11 @@ force un remount complet de l'arbre (`el-tree`) après chaque création/
 renommage/suppression (changement de `:key`) — replie les dossiers dépliés à chaque
 opération plutôt que de rafraîchir juste le nœud concerné. Pas d'undo applicatif sur
 delete/rename dans l'arbre (irréversible côté `/ws/fs`, cf. section "Serveur MCP"),
-compensé côté UI par une confirmation avant Supprimer, pas avant Renommer. Aucun
-indicateur « modifications non enregistrées » sur les onglets éditeur, ni de garde à
-la fermeture — préexistant, mais rendu plus sensible par le rename cross-file LSP
-(cf. section "Serveur LSP" plus haut) qui peut laisser un fichier ouvert modifié en
-mémoire sans autre signal que le message de statut ponctuel. LSP : images
+compensé côté UI par une confirmation avant Supprimer, pas avant Renommer. Les
+onglets éditeur n'ont pas d'indicateur « modifications non enregistrées » — mais il
+n'y a plus rien à enregistrer manuellement : l'autosave debouncé (300 ms,
+`lsp-agent-interface`, cf. section "WebSocket éditeur") persiste chaque frappe, et
+`Ctrl+S` / le démontage d'onglet forcent un flush. LSP : images
 rust-analyzer/typescript-language-server désormais construites (`toolchains/rust/`,
 `toolchains/node/Dockerfile`, cf. section "Serveur LSP" plus haut), mais
 fonctionnalité toujours non testée en conditions réelles (aucun cluster K8s dans
