@@ -11,6 +11,7 @@ import { yaml } from '@codemirror/lang-yaml';
 import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile';
 import { toml } from '@codemirror/legacy-modes/mode/toml';
 import { dockerfileName } from './dockerfileName';
+import { handlebarsMode } from './langHandlebars';
 import { rhaiMode } from './langRhai';
 
 /** Support MVP : ts/js/rust (langages produits) + json/markdown/toml/yaml
@@ -35,6 +36,8 @@ const byExtension: Record<string, () => Extension> = {
   py: () => python(),
   vue: () => vue({ base: html() }),
   rhai: () => StreamLanguage.define(rhaiMode),
+  hbs: () => StreamLanguage.define(handlebarsMode),
+  handlebars: () => StreamLanguage.define(handlebarsMode),
 };
 
 /** Mapping chemin → (toolchain, languageId LSP) — identique à `toolchain_for_path`
