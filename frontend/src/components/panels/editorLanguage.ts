@@ -6,7 +6,9 @@ import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { rust } from '@codemirror/lang-rust';
 import { yaml } from '@codemirror/lang-yaml';
+import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile';
 import { toml } from '@codemirror/legacy-modes/mode/toml';
+import { dockerfileName } from './dockerfileName';
 
 /** Support MVP : ts/js/rust (langages produits) + json/markdown/toml/yaml
  *  (config/doc courants dans ces mêmes projets) + python (déjà présent,
@@ -74,9 +76,12 @@ export function dirRootUri(path: string): string {
 }
 
 /** Retourne l'extension CodeMirror pour `path`, déduite de son extension de
- *  fichier. `null`/pas d'extension reconnue → tableau vide (texte brut). */
+ *  fichier, ou de son nom de base pour les noms Dockerfile/Containerfile (pas
+ *  d'extension à proprement parler). `null`/pas d'extension reconnue → tableau
+ *  vide (texte brut). */
 export function languageExtensionForPath(path: string | null): Extension[] {
   if (!path) return [];
+  if (dockerfileName(path)) return [StreamLanguage.define(dockerFile)];
   const ext = path.split('.').pop()?.toLowerCase();
   const factory = ext ? byExtension[ext] : undefined;
   return factory ? [factory()] : [];

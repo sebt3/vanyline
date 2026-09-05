@@ -19,7 +19,20 @@ describe('languageExtensionForPath', () => {
   });
 
   it('chemin sans extension reconnue → tableau vide', () => {
-    expect(languageExtensionForPath('Dockerfile')).toEqual([]);
+    expect(languageExtensionForPath('Makefile')).toEqual([]);
+  });
+
+  it('nom de base Dockerfile → mode dockerfile (tableau de longueur 1)', () => {
+    expect(languageExtensionForPath('Dockerfile')).toHaveLength(1);
+    expect(languageExtensionForPath('deploy/Dockerfile.dev')).toHaveLength(1);
+    expect(languageExtensionForPath('app.dockerfile')).toHaveLength(1);
+  });
+
+  it('Dockerfile reconnu alors que le chemin ne contient aucun point', () => {
+    // `path.split('.').pop()` seul ne suffirait pas : 'Dockerfile' n'a pas
+    // d'extension, c'est un nom de base.
+    expect('Dockerfile').not.toContain('.');
+    expect(languageExtensionForPath('Dockerfile')).not.toEqual([]);
   });
 
   it('null → tableau vide', () => {
