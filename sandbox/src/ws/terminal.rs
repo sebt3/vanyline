@@ -272,11 +272,14 @@ mod tests {
         });
         let auth = AuthState::new(config.clone()).unwrap();
 
+        let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
             config,
             auth: Arc::new(auth),
             tickets: TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+            fs_events,
+            fs_flush,
         }
     }
 
@@ -458,11 +461,14 @@ mod tests {
         });
         let auth = AuthState::new(config.clone()).unwrap();
 
+        let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {
             config,
             auth: Arc::new(auth),
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+            fs_events,
+            fs_flush,
         };
 
         let (master, _child) = spawn_shell(&state.config.sandbox_root, PtySize::default())

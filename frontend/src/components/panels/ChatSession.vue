@@ -57,7 +57,7 @@ watch(
   { deep: true },
 );
 
-const FS_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'execute_command']);
+const FS_MUTATING_TOOLS = new Set(['write_file', 'edit_file', 'delete_file', 'execute_command', 'edit_and_check']);
 const seenToolResults = new Set<string>();
 watch(
   messages,

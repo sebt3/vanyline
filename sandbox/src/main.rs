@@ -3,8 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser as _;
 use vanyline_sandbox::{
-    AppState, LspManager, auth::AuthState, build_app, config::Config, spawn_metrics_server,
-    ws::ticket::TicketStore,
+    AppState, LspManager, auth::AuthState, build_app, config::Config, fs_push_channels,
+    spawn_metrics_server, ws::ticket::TicketStore,
 };
 
 #[tokio::main]
@@ -22,11 +22,14 @@ async fn main() -> Result<()> {
 
     let auth = Arc::new(AuthState::new(config.clone())?);
     let lsp = Arc::new(LspManager::from_env(config.sandbox_root.clone())?);
+    let (fs_events, fs_flush) = fs_push_channels();
     let state = AppState {
         config: config.clone(),
         auth,
         tickets: TicketStore::new(),
         lsp,
+        fs_events,
+        fs_flush,
     };
     let app = build_app(state);
 

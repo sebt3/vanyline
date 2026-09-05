@@ -134,7 +134,11 @@ pub(crate) async fn handle_tools_call(
         tools_impl::dispatch_command(&state.config.sandbox_root, name, arguments.clone()).await
     {
         JsonRpcResponse::ok(id, result)
-    } else if let Some(result) = tools_impl::dispatch_lsp(state, name, arguments).await {
+    } else if let Some(result) = tools_impl::dispatch_lsp(state, name, arguments.clone()).await {
+        JsonRpcResponse::ok(id, result)
+    } else if let Some(result) = tools_impl::dispatch_edit_and_check(state, name, arguments).await {
+        // `edit_and_check` (tâche 08d) : frère de `dispatch_lsp`, même forme
+        // `Option<Value>` — `None` si le nom est étranger à cette famille.
         JsonRpcResponse::ok(id, result)
     } else {
         JsonRpcResponse::err(id, -32602, format!("Unknown tool: {name}"))
@@ -192,11 +196,14 @@ mod tests {
             sandbox_root: std::path::Path::new("/tmp").into(),
         });
         let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
             config,
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+            fs_events,
+            fs_flush,
         }
     }
 
@@ -222,7 +229,7 @@ mod tests {
         let resp = handle_tools_list(Some(serde_json::json!(1)));
         let result = resp.result.unwrap();
         let tools = result["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 13);
+        assert_eq!(tools.len(), 16);
         let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"write_file"));
@@ -233,10 +240,13 @@ mod tests {
         assert!(names.contains(&"search"));
         assert!(names.contains(&"execute_command"));
         assert!(names.contains(&"lsp_diagnostics"));
-        assert!(names.contains(&"lsp_hover"));
         assert!(names.contains(&"lsp_definition"));
         assert!(names.contains(&"lsp_references"));
         assert!(names.contains(&"lsp_rename"));
+        assert!(names.contains(&"lsp_document_symbols"));
+        assert!(names.contains(&"lsp_workspace_symbols"));
+        assert!(names.contains(&"inspect_symbol"));
+        assert!(names.contains(&"edit_and_check"));
     }
 
     #[tokio::test]

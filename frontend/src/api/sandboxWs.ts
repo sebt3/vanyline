@@ -40,27 +40,127 @@ export async function openSandboxWs(
   });
 }
 
-/** Wrapper autour d'une connexion /ws/fs : sérialise les requêtes (pas de
- *  champ de corrélation dans le protocole serveur — une requête en vol à la
- *  fois, contrainte du protocole, pas un choix arbitraire). Partagé entre
- *  Explorer et Editor pour une même sandbox ouverte. */
+/** Frame reçue sur /ws/fs : réponse de requête (id repris de la requête dès
+ *  le serveur ≥ 08b), ou frame de push (`event` sans `id`). Les autres champs
+ *  dépendent de l'op/l'événement. */
+interface FsFrame {
+  [key: string]: unknown;
+  id?: string | number;
+  event?: string;
+}
+
+/** Requête en vol — la queue sérialisée en garantit au plus UNE. La
+ *  résolution livre la frame entière (le générique `T` de `request` est une
+ *  promesse de l'appelant ; le runtime ne valide pas la forme). */
+interface PendingRequest {
+  id: number;
+  resolve: (value: unknown) => void;
+  reject: (reason: Error) => void;
+}
+
+/** Wrapper autour d'une connexion /ws/fs : sérialise les requêtes (file
+ *  d'attente — une requête en vol à la fois, sémantique de la boucle
+ *  serveur, task-08b) et route les frames reçues par un listener PERMANENT
+ *  posé à la construction : réponse résolue par `id` de corrélation, push
+ *  `event` notifié aux abonnés `onEvent`, et fallback legacy pour les
+ *  serveurs sans corrélation. Partagé entre Explorer et Editor pour une même
+ *  sandbox ouverte. */
 export class SandboxFsClient {
   private queue: Promise<unknown> = Promise.resolve();
   private ws: WebSocket;
-  constructor(ws: WebSocket) { this.ws = ws; }
+  private nextId = 1;
+  private pending: PendingRequest | null = null;
+  private handlers: Record<string, Array<(data: FsFrame) => void>> = {};
+
+  constructor(ws: WebSocket) {
+    this.ws = ws;
+    // Listener permanent (remplace le addEventListener one-shot par requête,
+    // qui rendait toute frame non sollicitée empoisonnable : elle résolvait
+    // la requête en vol avec le mauvais payload).
+    this.ws.addEventListener('message', this.onMessage);
+  }
+
+  /** Souscription aux frames de push (`{"event":…}`) : `handler` reçoit la
+   *  frame entière (payload propre au type d'événement — d'où `any` au
+   *  prototype, le runtime ne valide pas) ; plusieurs abonnés par type OK ;
+   *  le retour désabonne. Un handler qui lève est contenu (try/catch) et
+   *  n'empêche pas les autres abonnés — erreur avalée délibérément, sans
+   *  console. */
+  onEvent(type: string, handler: (data: any) => void): () => void {
+    const list = (this.handlers[type] ??= []);
+    list.push(handler);
+    return () => {
+      const arr = this.handlers[type];
+      if (!arr) return;
+      const idx = arr.indexOf(handler);
+      if (idx !== -1) arr.splice(idx, 1);
+    };
+  }
 
   request<T>(op: string, params: Record<string, unknown>): Promise<T> {
+    const id = this.nextId++;
     const run = () =>
       new Promise<T>((resolve, reject) => {
-        const handler = (ev: MessageEvent) => {
-          this.ws.removeEventListener('message', handler);
-          const data = JSON.parse(ev.data);
-          data.ok ? resolve(data) : reject(new Error(data.error));
+        this.pending = {
+          id,
+          resolve: resolve as (value: unknown) => void,
+          reject,
         };
-        this.ws.addEventListener('message', handler);
-        this.ws.send(JSON.stringify({ op, ...params }));
+        this.ws.send(JSON.stringify({ op, id, ...params }));
       });
     this.queue = this.queue.then(run, run);
     return this.queue as Promise<T>;
+  }
+
+  /** Dispatch de toute frame texte : parse tolérant (non-JSON → ignoré),
+   *  routage id / event / legacy — voir les branches inline. */
+  private onMessage = (ev: MessageEvent): void => {
+    let frame: FsFrame;
+    try {
+      frame = JSON.parse(String(ev.data));
+    } catch {
+      return; // non-JSON (binaire, protocole tiers) : ignoré
+    }
+    if (typeof frame !== 'object' || frame === null) return;
+
+    if (frame.id !== undefined) {
+      // Réponse corrélée : seule la requête en vol portant le MÊME id est
+      // résolue ; un id inconnu (requête déjà soldée, ou frame égarée) est
+      // ignoré — la requête en vol attend la sienne.
+      if (this.pending && this.pending.id === frame.id) this.settle(frame);
+      return;
+    }
+    if (typeof frame.event === 'string') {
+      const list = this.handlers[frame.event];
+      if (!list) return; // événement sans abonné : ignoré silencieusement
+      // Copie itérative : un handler qui se désabonne ne doit pas sauter un
+      // confrère dans la même notification.
+      for (const handler of [...list]) {
+        try {
+          handler(frame);
+        } catch {
+          // Abonné malade : on continue les autres (documenté sur onEvent).
+        }
+      }
+      return;
+    }
+    // Fallback legacy — RETIREABLE quand le serveur ≥ 08b est déployé
+    // partout : un serveur sans champ de corrélation rend une réponse sans
+    // id ni event ; la queue (une requête en vol à la fois) suffit à la
+    // router. À supprimer alors, la branche `id` couvrant tout.
+    if (this.pending) this.settle(frame);
+  };
+
+  /** Solde la requête en vol sur une frame de réponse (résolution/rejet
+   *  exactement comme le listener one-shot historique). */
+  private settle(frame: FsFrame): void {
+    const pending = this.pending;
+    if (!pending) return;
+    this.pending = null;
+    if (frame.ok) {
+      pending.resolve(frame);
+    } else {
+      pending.reject(new Error(String(frame.error)));
+    }
   }
 }
