@@ -1,10 +1,12 @@
 import type { Extension } from '@codemirror/state';
 import { StreamLanguage } from '@codemirror/language';
+import { html } from '@codemirror/lang-html';
 import { javascript } from '@codemirror/lang-javascript';
 import { json } from '@codemirror/lang-json';
 import { markdown } from '@codemirror/lang-markdown';
 import { python } from '@codemirror/lang-python';
 import { rust } from '@codemirror/lang-rust';
+import { vue } from '@codemirror/lang-vue';
 import { yaml } from '@codemirror/lang-yaml';
 import { dockerFile } from '@codemirror/legacy-modes/mode/dockerfile';
 import { toml } from '@codemirror/legacy-modes/mode/toml';
@@ -30,6 +32,7 @@ const byExtension: Record<string, () => Extension> = {
   yml: () => yaml(),
   toml: () => StreamLanguage.define(toml),
   py: () => python(),
+  vue: () => vue({ base: html() }),
 };
 
 /** Mapping chemin → (toolchain, languageId LSP) — identique à `toolchain_for_path`

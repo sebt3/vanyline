@@ -14,6 +14,7 @@ describe('languageExtensionForPath', () => {
     ['a.yaml', 'yaml'],
     ['a.yml', 'yml'],
     ['a.py', 'py'],
+    ['a.vue', 'vue'],
   ])('renvoie une extension non vide pour %s', (path) => {
     expect(languageExtensionForPath(path).length).toBeGreaterThan(0);
   });
@@ -39,8 +40,14 @@ describe('languageExtensionForPath', () => {
     expect(languageExtensionForPath(null)).toEqual([]);
   });
 
+  it('.vue avec chemin à points multiples', () => {
+    // L'extension retenue est bien `vue` (dernier segment), pas `bar`.
+    expect(languageExtensionForPath('src/components/Foo.bar.vue')).toHaveLength(1);
+  });
+
   it("l'extension est insensible à la casse", () => {
     expect(languageExtensionForPath('a.TS').length).toBeGreaterThan(0);
+    expect(languageExtensionForPath('App.VUE')).toHaveLength(1);
   });
 });
 
@@ -61,6 +68,10 @@ describe('lspToolchainForPath', () => {
 
   it.each(['a.py', 'Dockerfile', null])('retourne null pour %s', (path) => {
     expect(lspToolchainForPath(path)).toBeNull();
+  });
+
+  it('.vue reste sans LSP (verrou de périmètre : coloration seule)', () => {
+    expect(lspToolchainForPath('App.vue')).toBeNull();
   });
 
   it('l\'extension est insensible à la casse', () => {
