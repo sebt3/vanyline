@@ -15,6 +15,7 @@ describe('languageExtensionForPath', () => {
     ['a.yml', 'yml'],
     ['a.py', 'py'],
     ['a.vue', 'vue'],
+    ['a.rhai', 'rhai'],
   ])('renvoie une extension non vide pour %s', (path) => {
     expect(languageExtensionForPath(path).length).toBeGreaterThan(0);
   });
@@ -66,7 +67,7 @@ describe('lspToolchainForPath', () => {
     expect(lspToolchainForPath(path)).toEqual(expected);
   });
 
-  it.each(['a.py', 'Dockerfile', null])('retourne null pour %s', (path) => {
+  it.each(['a.py', 'a.rhai', 'Dockerfile', null])('retourne null pour %s', (path) => {
     expect(lspToolchainForPath(path)).toBeNull();
   });
 
