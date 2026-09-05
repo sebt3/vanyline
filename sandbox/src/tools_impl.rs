@@ -2920,6 +2920,7 @@ mod tests {
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp,
+            fs_events: crate::fs_events_channel(),
         };
         (state, tmpdir)
     }
@@ -2952,6 +2953,7 @@ mod tests {
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp: Arc::new(LspManager::new(vec![], tmpdir.path().to_path_buf())),
+            fs_events: crate::fs_events_channel(),
         };
         (state, tmpdir)
     }
@@ -3853,6 +3855,7 @@ mod tests {
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp,
+            fs_events: crate::fs_events_channel(),
         };
         (state, tmpdir)
     }

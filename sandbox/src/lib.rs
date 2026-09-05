@@ -35,6 +35,23 @@ pub struct AppState {
     pub auth: Arc<AuthState>,
     pub tickets: TicketStore,
     pub lsp: Arc<LspManager>,
+    /// Canal de push des sessions `/ws/fs` (tâche 08b) : frames JSON toutes
+    /// prêtes (ex: `{"event":"file-changed","path":…}`) diffusées à chaque
+    /// client WS abonné. L'émetteur d'événements est `edit_and_check` (08d) ;
+    /// ici seul le canal existe.
+    pub fs_events: tokio::sync::broadcast::Sender<String>,
+}
+
+/// Capacité du canal `fs_events` (frames de push /ws/fs, tâche 08b).
+pub const FS_EVENTS_CAPACITY: usize = 64;
+
+/// Crée le canal `fs_events` d'un `AppState` : le `Sender` seul, capacité
+/// [`FS_EVENTS_CAPACITY`]. Helper unique pour que la capacité ne se
+/// retrouve pas dupliquée dans les vingt constructeurs d'`AppState`
+/// (main + tests http + intégrations). Les sessions `/ws/fs` s'abonnent
+/// via `subscribe` après leur upgrade WS.
+pub fn fs_events_channel() -> tokio::sync::broadcast::Sender<String> {
+    tokio::sync::broadcast::channel::<String>(FS_EVENTS_CAPACITY).0
 }
 
 /// Build the main MCP application router (MCP + public routes).

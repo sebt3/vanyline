@@ -3,8 +3,8 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser as _;
 use vanyline_sandbox::{
-    AppState, LspManager, auth::AuthState, build_app, config::Config, spawn_metrics_server,
-    ws::ticket::TicketStore,
+    AppState, LspManager, auth::AuthState, build_app, config::Config, fs_events_channel,
+    spawn_metrics_server, ws::ticket::TicketStore,
 };
 
 #[tokio::main]
@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
         auth,
         tickets: TicketStore::new(),
         lsp,
+        fs_events: fs_events_channel(),
     };
     let app = build_app(state);
 

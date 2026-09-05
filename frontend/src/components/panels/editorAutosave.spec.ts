@@ -8,7 +8,8 @@ import {
   applyDiskReload,
   autosaveExtension,
   flushAllEditors,
-  registerEditorFlush,
+  makeFileChangedHandler,
+  registerEditorSync,
 } from './editorAutosave';
 import type { AutosaveFsClient, EditorAutosave } from './editorAutosave';
 
@@ -97,7 +98,11 @@ describe('editorAutosave — extension', () => {
     const view = makeView(autosave);
 
     typeText(view, 'z');
+    // hasPending (08b) : le drapeau interne est exposé — true dès qu'une
+    // écriture autosave est en attente (debounce pas expiré).
+    expect(autosave.hasPending()).toBe(true);
     expect(autosave.flush()).toBe(true);
+    expect(autosave.hasPending()).toBe(false);
     expect(request).toHaveBeenCalledTimes(1);
     expect(request).toHaveBeenCalledWith('write', { path: 'src/b.ts', content: 'z' });
 
@@ -177,8 +182,19 @@ describe('editorAutosave — extension', () => {
     const viewA = makeView(autosaveA);
     const viewB = makeView(autosaveB);
 
-    const unregisterA = registerEditorFlush('a.txt', autosaveA.flush);
-    const unregisterB = registerEditorFlush('b.txt', autosaveB.flush);
+    // Registre évolué 08b : registerEditorSync (flush/reload/hasPending) —
+    // le flush de l'extension est un EditorSyncHooks.flush valide, même sens
+    // qu'avant (le reload/hasPending factices ne sont pas exercés ici).
+    const unregisterA = registerEditorSync('a.txt', {
+      flush: autosaveA.flush,
+      reload: () => {},
+      hasPending: () => false,
+    });
+    const unregisterB = registerEditorSync('b.txt', {
+      flush: autosaveB.flush,
+      reload: () => {},
+      hasPending: () => false,
+    });
 
     typeText(viewA, 'AAA');
     typeText(viewB, 'BBB');
@@ -284,12 +300,97 @@ describe('editorAutosave — registre', () => {
   it('dernier gagne par path et unregister gardé par identité', () => {
     const first = vi.fn();
     const second = vi.fn();
-    const unregisterFirst = registerEditorFlush('same.txt', first);
+    const unregisterFirst = registerEditorSync('same.txt', {
+      flush: first,
+      reload: () => {},
+      hasPending: () => false,
+    });
 
-    registerEditorFlush('same.txt', second);
+    registerEditorSync('same.txt', { flush: second, reload: () => {}, hasPending: () => false });
     unregisterFirst(); // l'instance remplacée ne doit PAS débrancher la nouvelle
     flushAllEditors();
     expect(second).toHaveBeenCalledTimes(1);
     expect(first).not.toHaveBeenCalled();
+  });
+});
+
+describe('editorAutosave — handler file-changed (08b)', () => {
+  it('makeFileChangedHandler recharge via read raw', async () => {
+    const reload = vi.fn();
+    const unregister = registerEditorSync('a.rs', {
+      flush: () => false,
+      reload,
+      hasPending: () => false,
+    });
+    const { client, request } = makeFsClient(async () => ({
+      ok: true,
+      content: 'contenu disque',
+    }));
+    const handler = makeFileChangedHandler(() => client);
+
+    handler({ path: 'a.rs' });
+    await flushMicrotasks();
+
+    // Read OBLIGATOIREMENT raw:true — sans ça le serveur rend un contenu
+    // numéroté ("    1\t…") qui corromprait le buffer (pattern loadFile).
+    expect(request).toHaveBeenCalledWith('read', { path: 'a.rs', raw: true });
+    expect(reload).toHaveBeenCalledWith('contenu disque');
+
+    // Pas d'éditeur enregistré pour ce path → aucun read émis.
+    request.mockClear();
+    reload.mockClear();
+    handler({ path: 'z.rs' });
+    await flushMicrotasks();
+    expect(request).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+
+    // path absent/non-string → rien (frame malformée tolérée).
+    handler({});
+    handler({ path: 42 });
+    await flushMicrotasks();
+    expect(request).not.toHaveBeenCalled();
+
+    unregister();
+  });
+
+  it('hasPending skippe le reload (frappe en cours, last-writer-wins assumé)', async () => {
+    const reload = vi.fn();
+    const unregister = registerEditorSync('b.rs', {
+      flush: () => false,
+      reload,
+      hasPending: () => true,
+    });
+    const { client, request } = makeFsClient(async () => ({ ok: true, content: 'x' }));
+    const handler = makeFileChangedHandler(() => client);
+
+    handler({ path: 'b.rs' });
+    await flushMicrotasks();
+    expect(request).not.toHaveBeenCalled();
+    expect(reload).not.toHaveBeenCalled();
+    unregister();
+  });
+
+  it('read échoué ou client absent : le buffer reste, rien ne plante', async () => {
+    const reload = vi.fn();
+    const unregister = registerEditorSync('c.rs', {
+      flush: () => false,
+      reload,
+      hasPending: () => false,
+    });
+
+    // Échec du read (rejet, comme SandboxFsClient sur ok:false) → pas de reload.
+    const { client } = makeFsClient(async () => {
+      throw new Error('fichier disparu');
+    });
+    makeFileChangedHandler(() => client)({ path: 'c.rs' });
+    await flushMicrotasks();
+    expect(reload).not.toHaveBeenCalled();
+
+    // Client null (WS pas encore connecté) : abandon silencieux.
+    makeFileChangedHandler(() => null)({ path: 'c.rs' });
+    await flushMicrotasks();
+    expect(reload).not.toHaveBeenCalled();
+
+    unregister();
   });
 });

@@ -277,6 +277,7 @@ mod tests {
             auth: Arc::new(auth),
             tickets: TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+            fs_events: crate::fs_events_channel(),
         }
     }
 
@@ -463,6 +464,7 @@ mod tests {
             auth: Arc::new(auth),
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+            fs_events: crate::fs_events_channel(),
         };
 
         let (master, _child) = spawn_shell(&state.config.sandbox_root, PtySize::default())

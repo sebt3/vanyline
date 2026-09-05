@@ -10,6 +10,7 @@ import GitPanel from './panels/GitPanel.vue';
 import DiffView from './panels/DiffView.vue';
 import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
 import { getLspClient, disposeLspClients } from '../api/lsp';
+import { makeFileChangedHandler } from './panels/editorAutosave';
 import { dirRootUri } from './panels/editorLanguage';
 import { debounce, loadLayout, saveLayout } from './ideLayoutPersistence';
 import { clearIdeActions, registerIdeActions, useIdeSession } from '../composables/useIdeSession';
@@ -46,7 +47,13 @@ const { activeConversationId, sessionError } = useIdeSession();
 onMounted(() => {
   openSandboxWs(props.sandboxName, '/ws/fs')
     .then((ws) => {
-      fsClient.value = new SandboxFsClient(ws);
+      const client = new SandboxFsClient(ws);
+      // Canal push /ws/fs (tâche 08b) : un `file-changed` émis par le serveur
+      // (edit_and_check en 08d) recharge le buffer ouvert, si l'onglet n'a
+      // pas de frappe en attente de flush. Désabonnement implicite : la liste
+      // d'abonnés vit dans le client, qui meurt avec le WS.
+      client.onEvent('file-changed', makeFileChangedHandler(() => fsClient.value));
+      fsClient.value = client;
     })
     .catch(() => {
       // Ticket/ingress indisponible (dépendance d'infra) : les panneaux

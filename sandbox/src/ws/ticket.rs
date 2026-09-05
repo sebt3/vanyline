@@ -241,6 +241,7 @@ mod tests {
             auth: Arc::new(auth),
             tickets: TicketStore::new(),
             lsp: Arc::new(crate::lsp::LspManager::default()),
+            fs_events: crate::fs_events_channel(),
         });
 
         let resp = app
@@ -273,6 +274,7 @@ mod tests {
             auth: Arc::new(auth),
             tickets: external_store.clone(),
             lsp: Arc::new(crate::lsp::LspManager::default()),
+            fs_events: crate::fs_events_channel(),
         });
 
         let resp = app

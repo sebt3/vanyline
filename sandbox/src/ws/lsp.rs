@@ -441,6 +441,7 @@ mod tests {
             auth: Arc::new(auth),
             tickets: external_store.clone(),
             lsp: Arc::new(LspManager::default()),
+            fs_events: crate::fs_events_channel(),
         }
     }
 

@@ -9,7 +9,7 @@ import { renameSymbolFromView } from '../../api/lspRename';
 import { oneDark } from '@codemirror/theme-one-dark';
 import { search, openSearchPanel } from '@codemirror/search';
 import { languageExtensionForPath, lspToolchainForPath } from './editorLanguage';
-import { autosaveExtension, registerEditorFlush } from './editorAutosave';
+import { autosaveExtension, applyDiskReload, registerEditorSync } from './editorAutosave';
 import { registerIdeActions } from '../../composables/useIdeSession';
 import type { DockviewPanelApi } from 'dockview-vue';
 import type { Ref } from 'vue';
@@ -72,7 +72,7 @@ const autosave = autosaveExtension({
   onWriteSuccess: () => notifyFsChange(),
   onWriteError: (m) => showStatus(`Échec de l'enregistrement automatique : ${m}`),
 });
-let unregisterAutosaveFlush: (() => void) | undefined;
+let unregisterEditorSync: (() => void) | undefined;
 
 /** Extensions communes à tout fichier — le langage (dépendant du chemin
  *  ouvert) est ajouté séparément par `loadFile`, cf. `editorLanguage.ts`.
@@ -315,9 +315,18 @@ onMounted(() => {
   }
   claimSaveActionIfActive();
   activeChangeDisposable = panelApi.onDidActiveChange(claimSaveActionIfActive);
-  // Ciblé par la tâche 08 (flush avant écriture LLM sur le path de CET
-  // onglet) ; le flush de l'instance sert aussi au démontage ci-dessous.
-  unregisterAutosaveFlush = registerEditorFlush(filePath, autosave.flush);
+  // Hooks de synchronisation de CET onglet (registre 08b) : ciblés par le
+  // flush global avant écriture LLM (08c, `flushAllEditors`) et par le
+  // handler `file-changed` (reload du buffer via lecture raw). `view` est
+  // lu à l'appel : la transaction de reload vise la vue en vie, pas une
+  // référence figée à l'enregistrement.
+  unregisterEditorSync = registerEditorSync(filePath, {
+    flush: autosave.flush,
+    reload: (content) => {
+      if (view) applyDiskReload(view, content);
+    },
+    hasPending: autosave.hasPending,
+  });
 });
 
 onBeforeUnmount(() => {
@@ -326,8 +335,8 @@ onBeforeUnmount(() => {
   // Dernière frappe à moins de 300 ms du debounce ne doit pas être perdue :
   // flush tant que la vue et le client sont encore valides (avant destroy).
   autosave.flush();
-  unregisterAutosaveFlush?.();
-  unregisterAutosaveFlush = undefined;
+  unregisterEditorSync?.();
+  unregisterEditorSync = undefined;
   view?.destroy();
   view = undefined;
   clearTimeout(statusTimer);

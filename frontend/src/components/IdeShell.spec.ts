@@ -50,13 +50,18 @@ const mockWs = { addEventListener: vi.fn(), removeEventListener: vi.fn() };
 
 // vi.hoisted s'exécute avant les vi.mock (au chargement du module), ce qui permet
 // d'injecter les mêmes références vi.fn() dans le factory du mock et ici.
-const { openSandboxWs, SandboxFsClient: _SandboxFsClient } = vi.hoisted(() => {
+// fsOnEvent : espion partagé de `SandboxFsClient.onEvent` (push file-changed,
+// tâche 08b) — toutes les instances du mock appellent le même vi.fn().
+const { openSandboxWs, SandboxFsClient: _SandboxFsClient, fsOnEvent } = vi.hoisted(() => {
   const fn = vi.fn(() => Promise.resolve(mockWs));
+  const onEventSpy = vi.fn();
   return {
     openSandboxWs: fn,
+    fsOnEvent: onEventSpy,
     SandboxFsClient: class SandboxFsClient {
       constructor(ws: WebSocket) { this.ws = ws; }
       ws: WebSocket;
+      onEvent = onEventSpy;
     },
   };
 });
@@ -70,6 +75,7 @@ describe('IdeShell', () => {
   beforeEach(() => {
     openSandboxWs.mockClear();
     openSandboxWs.mockReturnValue(Promise.resolve(mockWs));
+    fsOnEvent.mockClear();
     mockGetPanelFn.mockClear();
     mockAddPanel.mockClear();
     mockPanelCloseSpy.mockClear();
@@ -90,6 +96,14 @@ describe('IdeShell', () => {
   it('crée un client /ws/fs partagé pour la sandbox', () => {
     mount(IdeShell, { props: { sandboxName: 'foo' } });
     expect(openSandboxWs).toHaveBeenCalledWith('foo', '/ws/fs');
+  });
+
+  it('abonne le handler file-changed sur le client /ws/fs créé (08b)', async () => {
+    mount(IdeShell, { props: { sandboxName: 'foo' } });
+    // Laisse la chaîne openSandboxWs().then(...) construire le client.
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(fsOnEvent).toHaveBeenCalledWith('file-changed', expect.any(Function));
   });
 
   it('un échec du ticket laisse fsClient null', async () => {

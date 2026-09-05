@@ -197,6 +197,7 @@ mod tests {
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+            fs_events: crate::fs_events_channel(),
         }
     }
 

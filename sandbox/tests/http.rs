@@ -46,6 +46,7 @@ fn no_auth_state() -> AppState {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     }
 }
 
@@ -72,6 +73,7 @@ fn no_auth_state_with_root(root: &std::path::Path) -> AppState {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     }
 }
 
@@ -98,6 +100,7 @@ fn auth_state() -> AppState {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     }
 }
 
@@ -124,6 +127,7 @@ fn static_token_state() -> AppState {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     }
 }
 
@@ -1309,6 +1313,7 @@ async fn git_status_endpoint_nominal() {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     };
 
     let app = build_app(state);
@@ -1366,6 +1371,7 @@ async fn git_status_endpoint_clean() {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     };
 
     let app = build_app(state);
@@ -1420,6 +1426,7 @@ async fn git_status_endpoint_not_a_repo() {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     };
 
     let app = build_app(state);
@@ -1566,6 +1573,7 @@ async fn git_unpushed_endpoint_with_upstream() {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     };
 
     let app = build_app(state);
@@ -1631,6 +1639,7 @@ async fn git_unpushed_endpoint_without_upstream() {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     };
 
     let app = build_app(state);
@@ -1690,6 +1699,7 @@ async fn git_unpushed_endpoint_no_local_commits() {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     };
 
     let app = build_app(state);
@@ -1749,6 +1759,7 @@ async fn git_unpushed_endpoint_detached_head() {
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(vanyline_sandbox::lsp::LspManager::default()),
+        fs_events: vanyline_sandbox::fs_events_channel(),
     };
 
     let app = build_app(state);

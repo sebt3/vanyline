@@ -27,33 +27,86 @@ pub async fn handle_ws_fs(
     upgrade.on_upgrade(|ws| fs_session(state, ws))
 }
 
-/// Boucle requête/réponse : chaque frame texte JSON entrante reçoit une frame
-/// texte JSON en sortie. Les frames binaires non JSON sont rejetées avec
+/// Boucle requête/réponse + push : chaque frame texte JSON entrante reçoit une
+/// frame texte JSON en sortie (portant l'id de la requête quand elle en
+/// portait — tâche 08b), et le broadcast `fs_events` du state est relayé tel
+/// quel vers le client. Les frames binaires non JSON sont rejetées avec
 /// `{"ok":false,"error":"unexpected binary frame"}`.
 async fn fs_session(state: AppState, mut ws: WebSocket) {
+    // Souscription APRÈS l'upgrade WS (jamais avant) : un client ne reçoit
+    // que les événements postérieurs à sa connexion — le broadcast n'est pas
+    // un historique d'état, il n'y a pas de rattrapage du passé.
+    let mut events = state.fs_events.subscribe();
     loop {
-        match ws.recv().await {
-            Some(Ok(Message::Text(raw))) => {
-                let resp = dispatch_fs_message(&state, &raw).await;
-                if ws
-                    .send(Message::Text(resp.to_string().into()))
-                    .await
-                    .is_err()
-                {
-                    return;
+        // Pas de `biased;` : la priorité recv()/send() doit rester fluide
+        // dans les deux sens (un flux d'événements ne doit pas affamer la
+        // lecture des requêtes, ni l'inverse). La réception d'un événement
+        // ne consomme jamais de frame entrante en attente.
+        tokio::select! {
+            received = ws.recv() => match received {
+                Some(Ok(Message::Text(raw))) => {
+                    let resp = dispatch_fs_message(&state, &raw).await;
+                    let resp = attach_req_id(resp, &raw);
+                    if ws
+                        .send(Message::Text(resp.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
                 }
-            }
-            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
-            Some(Ok(_)) => {
-                let _ = ws
-                    .send(Message::Text(
-                        serde_json::json!({ "ok": false, "error": "unexpected binary frame" })
-                            .to_string()
-                            .into(),
-                    ))
-                    .await;
-            }
+                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(_)) => {
+                    let _ = ws
+                        .send(Message::Text(
+                            serde_json::json!({ "ok": false, "error": "unexpected binary frame" })
+                                .to_string()
+                                .into(),
+                        ))
+                        .await;
+                }
+            },
+            event = events.recv() => match event {
+                Ok(frame) => {
+                    // Échec de send sur un événement : connexion morte —
+                    // même traitement que l'échec sur réponse.
+                    if ws.send(Message::Text(frame.into())).await.is_err() {
+                        return;
+                    }
+                }
+                // Abonné trop lent : des frames ont été perdues, on continue
+                // (mieux vaut un canal en retard qu'un éditeur débranché).
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    tracing::warn!("fs_events subscriber lagged: {n} pushed frames dropped");
+                }
+                // Tous les Senders sont tombés : plus aucun événement possible.
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+            },
         }
+    }
+}
+
+/// Ajoute `"id": <req_id>` à la réponse si la requête en portait un (n'importe
+/// quel JSON valide — number/string passe, absent → réponse inchangée : les
+/// clients legacy gardent le comportement strictement séquentiel).
+///
+/// Appelé APRÈS dispatch, jamais avant : une frame non-JSON tombe dans les
+/// branches d'erreur existantes (`invalid JSON`), l'helper ne fait que copier
+/// l'id et laisse ces réponses telles quelles.
+fn attach_req_id(resp: serde_json::Value, raw_request: &str) -> serde_json::Value {
+    let Ok(req) = serde_json::from_str::<serde_json::Value>(raw_request) else {
+        return resp;
+    };
+    let Some(id) = req.get("id") else {
+        return resp;
+    };
+    match resp {
+        serde_json::Value::Object(mut map) => {
+            map.insert("id".to_string(), id.clone());
+            serde_json::Value::Object(map)
+        }
+        // Les branches de dispatch rendent toujours des objets ; défensif.
+        other => other,
     }
 }
 
@@ -240,6 +293,7 @@ fn make_state(test_name: &str) -> AppState {
         auth: std::sync::Arc::new(auth),
         tickets: crate::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
+        fs_events: crate::fs_events_channel(),
     }
 }
 
@@ -622,5 +676,42 @@ mod tests {
             resp["root"].as_str().is_some(),
             "root op without path should succeed, not return 'missing path'"
         );
+    }
+
+    /// Test 08b-1 (attach_req_id_echoes_id): requête avec `"id":7` → réponse
+    /// contenant `"id":7` ; requête sans id → réponse strictement inchangée ;
+    /// requête non-JSON → inchangée.
+    #[test]
+    fn attach_req_id_echoes_id() {
+        let resp = serde_json::json!({ "ok": true, "content": "x" });
+
+        let out = attach_req_id(resp.clone(), r#"{"op":"read","path":"a","id":7}"#);
+        assert_eq!(out["id"], 7, "response must echo numeric id 7, got: {out}");
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["content"], "x");
+
+        let out = attach_req_id(resp.clone(), r#"{"op":"read","path":"a"}"#);
+        assert_eq!(
+            out, resp,
+            "request without id → response strictly unchanged"
+        );
+
+        let out = attach_req_id(resp.clone(), "not json");
+        assert_eq!(out, resp, "non-JSON request → response strictly unchanged");
+    }
+
+    /// Test 08b-2 (attach_req_id_preserves_error_response): réponse d'erreur
+    /// `{"ok":false,…}` + requête avec id string `"x1"` → id copié, `ok:false`
+    /// (et l'erreur) intacts.
+    #[test]
+    fn attach_req_id_preserves_error_response() {
+        let resp = serde_json::json!({ "ok": false, "error": "unknown op" });
+        let out = attach_req_id(resp, r#"{"op":"bogus","id":"x1"}"#);
+        assert_eq!(
+            out["id"], "x1",
+            "string id must be copied verbatim, got: {out}"
+        );
+        assert_eq!(out["ok"], false, "ok:false must stay intact");
+        assert_eq!(out["error"], "unknown op", "error message must stay intact");
     }
 }
