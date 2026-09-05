@@ -1,6 +1,8 @@
 use serde_json::Value;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use thiserror::Error;
 
 use crate::AppState;
@@ -679,15 +681,16 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Schemas for the 7 LSP tools for `tools/list` (same shape as
+/// Schemas for the 8 LSP-family tools for `tools/list` (same shape as
 /// `vanyline_tools::mcp::filesystem_tools()` : name/description/inputSchema).
 /// Since task 02 of `lsp-agent-interface`, `lsp_hover` no longer exists as a
 /// standalone tool — hover contents are rendered by `lsp_definition`.
 /// Since task 03a, `lsp_document_symbols` (outline d'un fichier) s'ajoute à la
 /// liste ; since task 03b, `lsp_workspace_symbols` (recherche globale de
 /// symboles) ; since task 06, `inspect_symbol` (composition def + refs en un
-/// appel, nom sans préfixe `lsp_` — design §tableau tools) — 15 tools MCP au
-/// total.
+/// appel, nom sans préfixe `lsp_` — design §tableau tools) ; since task 08d,
+/// `edit_and_check` (édition + diff de diagnostics — 16 tools MCP au
+/// total).
 pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -779,6 +782,22 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
                     "line": {"type": "integer", "description": "1-based line number (as shown by read_file). Required."},
                     "symbol": {"type": "string", "description": "Identifier name to target on that line (recommended). Resolved to the first delimited-identifier occurrence; if it appears several times the first is used and the answer says so."},
                     "character": {"type": "integer", "description": "1-based column, precise targeting when symbol is absent or ambiguous. Ignored when symbol is set."}
+                }
+            }
+        }),
+        serde_json::json!({
+            "name": "edit_and_check",
+            "description": "Apply a file edit (mode write = full content, or edit = old_string/new_string like edit_file) and return the DIFF of LSP diagnostics caused by it: diagnostics APPARUS, DISPARUS and a count of INCHANGÉS. If the file is open in a browser editor, the tool flushes the editor's autosave before writing and lets the editor trigger the re-analysis; a slow editor may yield VNL-SBX-LSP-011 (edit applied, analysis pending — not an error).",
+            "inputSchema": {
+                "type": "object",
+                "required": ["path", "mode"],
+                "properties": {
+                    "path": {"type": "string"},
+                    "mode": {"type": "string", "enum": ["write", "edit"]},
+                    "content": {"type": "string", "description": "Required for mode write: full new content."},
+                    "old_string": {"type": "string", "description": "Required for mode edit."},
+                    "new_string": {"type": "string", "description": "Required for mode edit."},
+                    "replace_all": {"type": "boolean"}
                 }
             }
         }),
@@ -2655,6 +2674,429 @@ enum LspArgs {
     Rename(LspRenameArgs),
     /// Args de `lsp_document_symbols` (tâche 03a) — simple `path`.
     DocumentSymbols(LspDocumentSymbolsArgs),
+}
+
+// ── edit_and_check (tâche 08d — design §7) ──────────────────────────────────
+
+/// Args union discriminée par `mode` (design §7) — le discriminant reste un
+/// champ plat (le wire MCP est un objet JSON plat ; pas d'union serde en
+/// tagging externe).
+#[derive(serde::Deserialize)]
+pub struct EditAndCheckArgs {
+    pub path: String,
+    /// "write" | "edit" — toute autre valeur : invalid arguments tool-result.
+    pub mode: String,
+    #[serde(default)]
+    pub content: Option<String>, // mode write (obligatoire alors)
+    #[serde(default)]
+    pub old_string: Option<String>, // mode edit (obligatoires alors)
+    #[serde(default)]
+    pub new_string: Option<String>,
+    #[serde(default)]
+    pub replace_all: bool,
+}
+
+/// Attente de la capture AVANT (design §7 étape 1) : le fichier peut n'avoir
+/// jamais été analysé — on ne bloque pas le tool là-dessus ; un `None` à
+/// l'issue de ces 300 ms est légitime (« aucune analyse préalable », diff
+/// calculé contre vide).
+const BEFORE_CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// Entrée publique : timeouts de production (flush `FS_FLUSH_TIMEOUT_SECS`,
+/// attente ré-analyse `DIAGNOSTICS_TIMEOUT * 2` — R3).
+pub async fn dispatch_edit_and_check(
+    state: &AppState,
+    name: &str,
+    arguments: serde_json::Value,
+) -> Option<serde_json::Value> {
+    if name != "edit_and_check" {
+        return None;
+    }
+    let args: EditAndCheckArgs = match serde_json::from_value(arguments) {
+        Ok(a) => a,
+        Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
+    };
+    Some(
+        run_edit_and_check(
+            state,
+            args,
+            std::time::Duration::from_secs(crate::FS_FLUSH_TIMEOUT_SECS),
+            crate::lsp_client::DIAGNOSTICS_TIMEOUT * 2,
+        )
+        .await,
+    )
+}
+
+/// Coeur testable avec timeouts injectés (les tests passent ~200 ms pour ne
+/// pas dormir 4 s par test — même code que la prod, constantes séparées).
+/// Numérotation des étapes = design §7 de `lsp-agent-interface`.
+async fn run_edit_and_check(
+    state: &AppState,
+    args: EditAndCheckArgs,
+    flush_timeout: std::time::Duration,
+    analysis_wait: std::time::Duration,
+) -> serde_json::Value {
+    // Étape 0 (schéma) — union discriminée validée AVANT toute I/O : un
+    // argument invalide n'écrit jamais rien.
+    let EditAndCheckArgs {
+        path,
+        mode,
+        content,
+        old_string,
+        new_string,
+        replace_all,
+    } = args;
+    let mode = match (mode.as_str(), content, old_string, new_string) {
+        ("write", Some(content), _, _) => EditMode::Write(content),
+        ("edit", _, Some(old), Some(new)) => EditMode::Edit { old, new },
+        ("write", None, _, _) => {
+            return err_result(
+                "invalid arguments for edit_and_check: mode \"write\" requires \"content\""
+                    .to_string(),
+            );
+        }
+        ("edit", _, None, _) | ("edit", _, _, None) => {
+            return err_result(
+                "invalid arguments for edit_and_check: mode \"edit\" requires \"old_string\" and \"new_string\""
+                    .to_string(),
+            );
+        }
+        (other, _, _, _) => {
+            return err_result(format!(
+                "invalid arguments for edit_and_check: mode must be \"write\" or \"edit\", got \"{other}\""
+            ));
+        }
+    };
+
+    // Étape 1 — confine (message VNL-SBX-* existante sur évasion, zéro
+    // écriture à ce stade).
+    let resolved = match confine(&state.config.sandbox_root, &path).await {
+        Ok(r) => r,
+        Err(val) => return val,
+    };
+
+    // Chemin relatif rendu : préfixe `{sandbox_root}/` amputé (même logique
+    // que `render_location`/dispatch_lsp) ; à défaut le confiné lui-même.
+    let root_prefix = format!("{}/", state.config.sandbox_root.display());
+    let display_path = match resolved.strip_prefix(&root_prefix) {
+        Some(rel) => rel.to_string(),
+        None => resolved.clone(),
+    };
+
+    // Toolchain + session (sinon -006, mêmes messages que dispatch_lsp).
+    let (toolchain, language_id) = match toolchain_for_path(&resolved) {
+        Some(pair) => pair,
+        None => {
+            return err_result("VNL-SBX-LSP-006: no LSP for file extension".to_string());
+        }
+    };
+    let session = match state.lsp.get_or_spawn(toolchain).await {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            return err_result(format!(
+                "VNL-SBX-LSP-006: no LSP configured for toolchain {toolchain}"
+            ));
+        }
+        Err(e) => return err_result(e.to_string()),
+    };
+    let file_uri = format!("file://{resolved}");
+
+    // Étape 1 (design) — CAPTURE AVANT : cached, sinon wait borné court. Le
+    // wait de capture ne peut PAS attendre l'ouverture du fichier par le
+    // tool lui-même : la capture précède tout didOpen/didChange du tool.
+    // Un `None` ici est légitime (fichier peut-être jamais analysé — ne pas
+    // bloquer) → diff calculé contre vide, signalé.
+    let mut before = session.cached_diagnostics(&file_uri);
+    if before.is_none() {
+        before = session
+            .wait_for_diagnostics(&file_uri, BEFORE_CAPTURE_WAIT)
+            .await;
+    }
+    let no_prior_analysis = before.is_none();
+    let before_diags = before.unwrap_or_default();
+
+    // Étape 2 — invalider le cache : sans ça, le wait de l'étape 6
+    // retomberait sur le stale d'AVANT l'édition.
+    session.invalidate_diagnostics(&file_uri);
+
+    // Étape 3 (cas B seulement, R1 sq3) — flush de l'éditeur AVANT écriture.
+    // `false` = timeout → repli fenêtre de debounce, mention obligatoire au
+    // rapport (ne bloque pas — arbitrage sq3).
+    let case_b = session.has_editor_client(&file_uri);
+    let flushed = if case_b {
+        state
+            .fs_flush
+            .request_flush(&display_path, flush_timeout)
+            .await
+    } else {
+        true // sans objet en cas A — aucune mention de repli à rendre
+    };
+
+    // Étape 4 — appliquer via les outils filesystem existants (le crate ne
+    // bouge pas). Erreur = err_result, comportement des outils fs existants
+    // (old_string absent/ambigu inclus — l'éditeur LLM relit et réessaie).
+    let header = match mode {
+        EditMode::Write(content) => {
+            let nbytes = content.len();
+            if let Err(e) = filesystem::write_file(WriteFileOptions {
+                path: resolved.clone(),
+                content,
+            })
+            .await
+            {
+                return err_result(e.to_string());
+            }
+            format!("édition appliquée: {display_path} (write, {nbytes} octets)")
+        }
+        EditMode::Edit { old, new } => {
+            let edit_msg = match filesystem::edit_file(EditFileOptions {
+                path: resolved.clone(),
+                old_string: old,
+                new_string: new,
+                replace_all,
+            })
+            .await
+            {
+                Ok(m) => m,
+                Err(e) => return err_result(e.to_string()),
+            };
+            let n = replacement_count_from_edit_message(&edit_msg, replace_all);
+            let noun = if n == 1 {
+                "remplacement"
+            } else {
+                "remplacements"
+            };
+            format!("édition appliquée: {display_path} (edit, {n} {noun})")
+        }
+    };
+
+    // Étape 5 — déclencher la ré-analyse : cas A par le tool (didChange
+    // versionné), cas B par l'éditeur (broadcast, JAMAIS de didChange du
+    // tool — deux émetteurs actifs sur la même URI = désync interdit).
+    if case_b {
+        // Le fichier EST écrit à ce point : l'éditeur recharge son buffer
+        // sur cette frame et émet son propre didChange. Une send ratée =
+        // zéro abonné (fenêtre refermée entre-temps) — normal, non fatal.
+        let frame = serde_json::json!({ "event": "file-changed", "path": display_path });
+        let _ = state.fs_events.send(frame.to_string());
+    } else {
+        // Contenu relu APRÈS écriture (read raw, même confine) — jamais la
+        // valeur des args : le disque a pu recevoir un flush cas B entre
+        // notre lecture initiale et maintenant. Lecture échouée = err_result.
+        let new_text = match filesystem::read_file(ReadFileOptions {
+            path: resolved.clone(),
+            offset: 0,
+            limit: 0,
+            raw: true,
+        })
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => return err_result(e.to_string()),
+        };
+
+        let root_uri = format!("file://{}", state.config.sandbox_root.display());
+        let mut client = LspClient::new(Arc::clone(&session), root_uri);
+        if let Err(e) = client.initialize().await {
+            return err_result(e.to_string());
+        }
+        if let Err(e) = client.ensure_open(&file_uri, language_id, &new_text).await {
+            return err_result(e.to_string());
+        }
+        // did_change envoyé MÊME si ensure_open vient d'ouvrir (uniforme —
+        // un seul chemin de code) : idempotent côté serveur, qui re-analyse
+        // le même contenu et re-publie ; le wait de l'étape 6 attrape cette
+        // publication. Version = compteur par URI de la session (cas A : le
+        // tool est le seul émetteur).
+        if let Err(e) = client
+            .did_change(&file_uri, session.next_doc_version(&file_uri), &new_text)
+            .await
+        {
+            return err_result(e.to_string());
+        }
+    }
+
+    // Étape 6 — attente de la ré-analyse. `None` = timeout → -011 rendu en
+    // ok_result (ÉTAT MOU, jamais err_result : l'édition est appliquée).
+    let after = match session.wait_for_diagnostics(&file_uri, analysis_wait).await {
+        None => {
+            let mut out = vec![header];
+            if case_b && !flushed {
+                out.push(FLUSH_FALLBACK_NOTE.to_string());
+            }
+            out.push(format!(
+                "ré-analyse pas encore stabilisée après {} s — relance edit_and_check ou lsp_diagnostics dans quelques secondes (VNL-SBX-LSP-011).",
+                analysis_wait.as_secs_f64()
+            ));
+            out.push("L'édition EST appliquée sur le disque.".to_string());
+            if case_b {
+                // R1 sq5 : le message dit explicitement qui tient la balle.
+                out.push(
+                    "ré-analyse en attente de l'éditeur (fichier ouvert dans un onglet)."
+                        .to_string(),
+                );
+            }
+            return ok_result(out.join("\n"));
+        }
+        Some(diags) => diags,
+    };
+
+    // Étape 7 — diff par identifiants en COMPTEURS (doublons légaux).
+    let diff = diff_diagnostics(&before_diags, &after);
+    let mut out = vec![header];
+    if case_b && !flushed {
+        out.push(FLUSH_FALLBACK_NOTE.to_string());
+    }
+    if no_prior_analysis {
+        out.push("aucune analyse préalable — le diff est calculé contre vide".to_string());
+    }
+    out.push(format!("diagnostics APPARUS ({}):", diff.appeared.len()));
+    for key in &diff.appeared {
+        out.push(format!("  {}", render_diag_line(&display_path, key)));
+    }
+    out.push(format!("diagnostics DISPARUS ({}):", diff.gone.len()));
+    for key in &diff.gone {
+        out.push(format!("  {}", render_diag_line(&display_path, key)));
+    }
+    out.push(format!(
+        "diagnostics INCHANGÉS ({}) — non listés",
+        diff.unchanged
+    ));
+    ok_result(out.join("\n"))
+}
+
+/// Discriminant de l'union `EditAndCheckArgs` après validation.
+enum EditMode {
+    Write(String),
+    Edit { old: String, new: String },
+}
+
+/// Mention obligatoire quand le flush cas B n'a pas été acquitté (sq3 : le
+/// tool écrit malgré tout, l'éditeur peut encore pousser son buffer
+/// autosavé dans la fenêtre de debounce).
+const FLUSH_FALLBACK_NOTE: &str = "flush non acquitté — fenêtre de debounce de l'éditeur possible";
+
+/// `filesystem::edit_file` ne rend que son message
+/// `"edited {path}: {n} replacement(s)"` — le crate est lu tel quel, jamais
+/// réécrit. Sans `replace_all`, `n` est forcément 1 (0 occurrence →
+/// `EditNoMatch`, >1 → `EditAmbiguous` : deux erreurs jamais revenues ici) ;
+/// avec `replace_all`, le seul compteur d'occurrences que le crate rende
+/// voyage dans ce message : on l'extrait, 1 en repli défensif tracé (format
+/// inattendu — jamais une erreur tool pour un libellé).
+fn replacement_count_from_edit_message(message: &str, replace_all: bool) -> usize {
+    if !replace_all {
+        return 1;
+    }
+    message
+        .rsplit_once(": ")
+        .and_then(|(_, rest)| rest.strip_suffix(" replacement(s)"))
+        .and_then(|n| n.parse::<usize>().ok())
+        .unwrap_or_else(|| {
+            tracing::debug!("edit_file: replacement count not parseable from: {message}");
+            1
+        })
+}
+
+/// Identité d'un diagnostic pour le diff (design §7 étape 6) : ligne et
+/// colonne 1-based + sévérité + message. Extraction alignée sur le rendu de
+/// `lsp_diagnostics` (champs manquants → défauts 0/0/1/"").
+type DiagKey = (i64, i64, i64, String);
+
+fn diag_key(d: &Value) -> DiagKey {
+    let start = d
+        .get("range")
+        .and_then(|r| r.get("start"))
+        .cloned()
+        .unwrap_or(Value::Null);
+    let line = start.get("line").and_then(|l| l.as_i64()).unwrap_or(0) + 1;
+    let col = start.get("character").and_then(|c| c.as_i64()).unwrap_or(0) + 1;
+    let severity = d.get("severity").and_then(|s| s.as_i64()).unwrap_or(1);
+    let message = d
+        .get("message")
+        .and_then(|m| m.as_str())
+        .unwrap_or("")
+        .to_string();
+    (line, col, severity, message)
+}
+
+/// Rendu d'une ligne de diff : même forme que `lsp_diagnostics` (chemin
+/// confiné relatif, severity_label), en indenté sous sa section.
+fn render_diag_line(display_path: &str, key: &DiagKey) -> String {
+    let (line, col, severity, message) = key;
+    format!(
+        "{display_path}:{line}:{col}: {}: {message}",
+        severity_label(*severity)
+    )
+}
+
+/// Diff avant/après en COMPTEURS par identité — `HashMap<DiagKey, usize>`,
+/// JAMAIS un Set : des diagnostics légalement dupliqués (même position,
+/// même message publié deux fois) doivent survivre au diff avec leur
+/// multiplicité. `appeared`/`gone` listent chaque clé avec sa multiplicité
+/// nette dans l'ordre de son flux (`after`/`before`) ; `unchanged` = somme
+/// des min avant/après.
+#[derive(Debug)]
+struct DiagnosticsDiff {
+    appeared: Vec<DiagKey>,
+    gone: Vec<DiagKey>,
+    unchanged: usize,
+}
+
+fn count_diag_keys(diags: &[Value]) -> HashMap<DiagKey, usize> {
+    let mut counts: HashMap<DiagKey, usize> = HashMap::new();
+    for d in diags {
+        *counts.entry(diag_key(d)).or_insert(0) += 1;
+    }
+    counts
+}
+
+fn diff_diagnostics(before: &[Value], after: &[Value]) -> DiagnosticsDiff {
+    let before_counts = count_diag_keys(before);
+    let after_counts = count_diag_keys(after);
+
+    let unchanged: usize = after_counts
+        .iter()
+        .map(|(key, a)| std::cmp::min(*a, before_counts.get(key).copied().unwrap_or(0)))
+        .sum();
+
+    // Apparus : ce qui reste après appariement un-à-un, dans l'ordre de
+    // `after`.
+    let mut appeared = Vec::new();
+    {
+        let mut paired: HashMap<DiagKey, usize> = HashMap::new();
+        for d in after {
+            let key = diag_key(d);
+            let available = before_counts.get(&key).copied().unwrap_or(0);
+            let used = paired.entry(key.clone()).or_insert(0);
+            if *used < available {
+                *used += 1;
+            } else {
+                appeared.push(key);
+            }
+        }
+    }
+
+    // Disparus : symétrique, dans l'ordre de `before`.
+    let mut gone = Vec::new();
+    {
+        let mut paired: HashMap<DiagKey, usize> = HashMap::new();
+        for d in before {
+            let key = diag_key(d);
+            let available = after_counts.get(&key).copied().unwrap_or(0);
+            let used = paired.entry(key.clone()).or_insert(0);
+            if *used < available {
+                *used += 1;
+            } else {
+                gone.push(key);
+            }
+        }
+    }
+
+    DiagnosticsDiff {
+        appeared,
+        gone,
+        unchanged,
+    }
 }
 
 #[cfg(test)]
@@ -5187,5 +5629,644 @@ mod tests {
             text.contains("VNL-SBX-LSP-006"),
             "unsupported extension should return VNL-SBX-LSP-006, got: {text}"
         );
+    }
+
+    // ── Tâche 08d — edit_and_check : édition + diff de diagnostics (§7) ─────
+
+    /// Harness 08d : fake `FAKE_LSP_EDIT_CHECK_PY` + `main.rs` = "x\n"
+    /// jamais ouvert par personne. Deux différences vis-à-vis de
+    /// `make_lsp_state` : la racine est CANONICALISÉE dans le `Config` (le
+    /// rendu du chemin relatif par strip de `{sandbox_root}/` suppose que
+    /// `confine` rende exactement ce préfixe) et le fake reçoit en argv[1]
+    /// le chemin de son fichier-témoin `observer_<name>.log` (chaque
+    /// méthode LSP reçue y est appendue, à la pose des fakes 08a/08c).
+    /// Chaque test appelle ce helper → son propre tmpdir et sa propre
+    /// session : les enchaînements d'appels sont déterministes.
+    async fn make_edit_check_state(
+        name: &str,
+    ) -> (AppState, tempfile::TempDir, std::path::PathBuf) {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let root = tmpdir.path().canonicalize().unwrap();
+        let script_path = root.join(format!("fake_lsp_{name}.py"));
+        std::fs::write(&script_path, lsp_test_fakes::FAKE_LSP_EDIT_CHECK_PY).unwrap();
+        let observer_log = root.join(format!("observer_{name}.log"));
+        std::fs::write(root.join("main.rs"), "x\n").unwrap();
+
+        let config = Arc::new(Config {
+            listen: "0.0.0.0:3000".into(),
+            tls_cert: None,
+            tls_key: None,
+            oidc_issuer: None,
+            oidc_audience: None,
+            auth_groups_admin: "kubernetes-admin".into(),
+            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
+            no_auth: true,
+            static_token: None,
+            public_url: None,
+            oidc_ca_cert: None,
+            metrics_listen: "0.0.0.0:9090".into(),
+            otel_endpoint: None,
+            sandbox_root: root.clone(),
+        });
+        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let lsp = Arc::new(LspManager::new(
+            vec![crate::lsp::LspToolchain {
+                name: "rust".to_string(),
+                bin: "python3".to_string(),
+                args: vec![
+                    script_path.to_string_lossy().to_string(),
+                    observer_log.to_string_lossy().to_string(),
+                ],
+            }],
+            root.clone(),
+        ));
+        let (fs_events, fs_flush) = crate::fs_push_channels();
+        let state = AppState {
+            config,
+            auth,
+            tickets: crate::ws::ticket::TicketStore::new(),
+            lsp,
+            fs_events,
+            fs_flush,
+        };
+        (state, tmpdir, root)
+    }
+
+    fn edit_args(path: &str, old: &str, new: &str) -> EditAndCheckArgs {
+        EditAndCheckArgs {
+            path: path.to_string(),
+            mode: "edit".to_string(),
+            content: None,
+            old_string: Some(old.to_string()),
+            new_string: Some(new.to_string()),
+            replace_all: false,
+        }
+    }
+
+    /// Test 1 — cas A sur un fichier jamais analysé : avant = ∅ (mention
+    /// « aucune analyse préalable »), après = [] publié par le didChange du
+    /// tool (contenu sans BAD) → les trois compteurs à 0, pas de -011.
+    #[tokio::test]
+    async fn edit_and_check_edit_case_a_never_analyzed() {
+        let (state, _tmpdir, root) = make_edit_check_state("ec_a_never").await;
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_edit_and_check(
+                &state,
+                edit_args("main.rs", "x", "y"),
+                Duration::from_millis(150),
+                Duration::from_millis(400),
+            ),
+        )
+        .await
+        .expect("edit_and_check timeout");
+
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "should be OK, got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("édition appliquée: main.rs (edit, 1 remplacement"),
+            "header line with replacement count, got: {text}"
+        );
+        assert!(
+            text.contains("aucune analyse préalable — le diff est calculé contre vide"),
+            "never-analyzed flag (before = None légitime), got: {text}"
+        );
+        assert!(
+            text.contains("diagnostics APPARUS (0):"),
+            "empty APPARUS section, got: {text}"
+        );
+        assert!(
+            text.contains("diagnostics DISPARUS (0):"),
+            "empty DISPARUS section, got: {text}"
+        );
+        assert!(
+            text.contains("diagnostics INCHANGÉS (0) — non listés"),
+            "empty INCHANGÉS count, got: {text}"
+        );
+        assert!(
+            !text.contains("VNL-SBX-LSP-011"),
+            "the [] published by the tool's didChange must be caught, not -011, got: {text}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("main.rs")).unwrap(),
+            "y\n",
+            "l'édition doit être sur le disque"
+        );
+    }
+
+    /// Test 2 — cas A avec analyse préalable : le premier appel
+    /// `lsp_diagnostics` ouvre le fichier (le fake publie « diag v1 » au
+    /// didOpen) → avant = [v1]. Édition sans BAD → après = [] → DISPARUS
+    /// (1) avec la ligne de v1 ; variante dans un nouveau tmpdir vers un
+    /// contenu contenant BAD → après = [v2] → APPARUS (1) avec diag v2.
+    #[tokio::test]
+    async fn edit_and_check_case_a_apparus_et_disparus() {
+        // Variante a : v1 → [] (disparus).
+        let (state, _tmpdir, _root) = make_edit_check_state("ec_a_diff").await;
+        let diag = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state,
+                "lsp_diagnostics",
+                serde_json::json!({"path": "main.rs"}),
+            ),
+        )
+        .await
+        .expect("lsp_diagnostics timeout")
+        .expect("dispatch returned None");
+        assert!(!diag["isError"].as_bool().unwrap(), "got: {diag}");
+        assert!(
+            diag["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("diag v1"),
+            "fake publishes diag v1 at didOpen, got: {diag}"
+        );
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_edit_and_check(
+                &state,
+                edit_args("main.rs", "x", "y"),
+                Duration::from_millis(150),
+                Duration::from_millis(400),
+            ),
+        )
+        .await
+        .expect("edit_and_check timeout");
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "should be OK, got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("diagnostics DISPARUS (1):"),
+            "diag v1 gone, got: {text}"
+        );
+        assert!(
+            text.contains("main.rs:1:1: error: diag v1"),
+            "gone line rendered like lsp_diagnostics (relative path + severity label), got: {text}"
+        );
+        assert!(
+            text.contains("diagnostics APPARUS (0):"),
+            "nothing appeared, got: {text}"
+        );
+        assert!(text.contains("diagnostics INCHANGÉS (0)"), "got: {text}");
+
+        // Variante b : v1 → [v2] (édition portant BAD) — nouveau tmpdir,
+        // nouvelle session.
+        let (state2, _tmpdir2, root2) = make_edit_check_state("ec_a_bad").await;
+        let diag2 = tokio::time::timeout(
+            Duration::from_secs(10),
+            dispatch_lsp(
+                &state2,
+                "lsp_diagnostics",
+                serde_json::json!({"path": "main.rs"}),
+            ),
+        )
+        .await
+        .expect("lsp_diagnostics timeout")
+        .expect("dispatch returned None");
+        assert!(
+            diag2["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("diag v1"),
+            "got: {diag2}"
+        );
+
+        let result2 = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_edit_and_check(
+                &state2,
+                edit_args("main.rs", "x", "BAD"),
+                Duration::from_millis(150),
+                Duration::from_millis(400),
+            ),
+        )
+        .await
+        .expect("edit_and_check timeout");
+        assert!(
+            !result2["isError"].as_bool().unwrap(),
+            "should be OK, got: {result2}"
+        );
+        let text2 = result2["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text2.contains("diagnostics APPARUS (1):"),
+            "diag v2 appeared, got: {text2}"
+        );
+        assert!(
+            text2.contains("diag v2"),
+            "appeared line names diag v2, got: {text2}"
+        );
+        assert!(
+            text2.contains("diagnostics DISPARUS (1):"),
+            "diag v1 gone at the same time, got: {text2}"
+        );
+        assert!(text2.contains("diagnostics INCHANGÉS (0)"), "got: {text2}");
+        assert_eq!(
+            std::fs::read_to_string(root2.join("main.rs")).unwrap(),
+            "BAD\n",
+            "l'édition doit être sur le disque"
+        );
+    }
+
+    /// Test 3 — cas B : le tool n'envoie JAMAIS didChange (observer.log du
+    /// fake), notifie l'éditeur via le broadcast `file-changed`, écrit sur
+    /// le disque, et l'attente sans re-publication aboutit au -011 EN ÉTAT
+    /// MOU (ok_result, jamais err_result).
+    #[tokio::test]
+    async fn edit_and_check_case_b_never_didchanges_and_notifies() {
+        let (state, _tmpdir, root) = make_edit_check_state("ec_case_b").await;
+        let observer_log = root.join("observer_ec_case_b.log");
+
+        let uri = format!("file://{}", root.join("main.rs").display());
+        let session = state.lsp.get_or_spawn("rust").await.unwrap().unwrap();
+        let (editor_client, _rx) = session.subscribe();
+        session.mark_editor_uri_open(&uri, editor_client);
+
+        // Souscription AVANT l'appel : le broadcast n'est pas un historique.
+        let mut events = state.fs_events.subscribe();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_edit_and_check(
+                &state,
+                edit_args("main.rs", "x", "y"),
+                Duration::from_millis(150),
+                Duration::from_millis(400),
+            ),
+        )
+        .await
+        .expect("edit_and_check timeout");
+
+        // L'édition EST appliquée sur le disque.
+        assert_eq!(
+            std::fs::read_to_string(root.join("main.rs")).unwrap(),
+            "y\n",
+            "cas B : l'écriture a bien eu lieu"
+        );
+
+        // Le broadcast a porté la frame file-changed (outre le
+        // flush-request émis avant écriture).
+        let mut saw_file_changed = false;
+        while let Ok(raw) = events.try_recv() {
+            if let Ok(frame) = serde_json::from_str::<serde_json::Value>(&raw)
+                && frame["event"] == "file-changed"
+            {
+                assert_eq!(
+                    frame["path"], "main.rs",
+                    "la frame file-changed porte le chemin relatif, got: {raw}"
+                );
+                saw_file_changed = true;
+            }
+        }
+        assert!(
+            saw_file_changed,
+            "la frame {{event: file-changed, path}} doit avoir été diffusée sur fs_events"
+        );
+
+        // Personne n'acquitte le flush et l'éditeur ne republie rien →
+        // -011 en état mou.
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "-011 est un état mou (ok_result), jamais err_result, got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("VNL-SBX-LSP-011"),
+            "code d'état mou dans le texte, got: {text}"
+        );
+        assert!(
+            text.contains("ré-analyse en attente de l'éditeur"),
+            "message explicite cas B (R1 sq5), got: {text}"
+        );
+        assert!(text.contains("L'édition EST appliquée"), "got: {text}");
+        assert!(
+            text.contains("flush non acquitté"),
+            "flush timeout (150 ms sans ack) → mention de repli, got: {text}"
+        );
+
+        // Le fake n'a JAMAIS reçu de didChange du tool (design R1 cas B).
+        let observed = if observer_log.exists() {
+            std::fs::read_to_string(&observer_log).unwrap()
+        } else {
+            String::new()
+        };
+        assert!(
+            !observed.contains("didChange"),
+            "cas B : le tool n'envoie jamais didChange, observer.log: {observed:?}"
+        );
+    }
+
+    /// Test 4 — cas B : le flush est demandé AVANT l'écriture (sq3). Le
+    /// subscriber lit la frame flush-request, vérifie que le fichier est
+    /// ENCORE l'ancien, puis acquitte ; l'écriture qui suit rend le nouveau
+    /// contenu. Timeout de flush allongé à 2 s pour ce test (mention
+    /// contraire explicite) : c'est l'ACQUIT qu'on attend, pas le timeout —
+    /// 150 ms laisseraient au test une fenêtre trop étroite entre la
+    /// lecture de la frame et l'ack.
+    #[tokio::test]
+    async fn edit_and_check_case_b_flush_requested_before_write() {
+        let (state, _tmpdir, root) = make_edit_check_state("ec_flush_order").await;
+
+        let uri = format!("file://{}", root.join("main.rs").display());
+        let session = state.lsp.get_or_spawn("rust").await.unwrap().unwrap();
+        let (editor_client, _rx) = session.subscribe();
+        session.mark_editor_uri_open(&uri, editor_client);
+
+        // Souscription AVANT le spawn (le broadcast n'est pas un historique).
+        let mut events = state.fs_events.subscribe();
+
+        let spawned = state.clone();
+        let handle = tokio::spawn(async move {
+            run_edit_and_check(
+                &spawned,
+                edit_args("main.rs", "x", "y"),
+                Duration::from_secs(2),
+                Duration::from_millis(400),
+            )
+            .await
+        });
+
+        let raw = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("flush-request frame timeout")
+            .expect("broadcast closed");
+        let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            frame["event"], "flush-request",
+            "première frame = flush-request, got: {raw}"
+        );
+        assert_eq!(frame["path"], "main.rs", "got: {raw}");
+        let id = frame["id"].as_u64().expect("l'id du flush est numérique");
+
+        // Contrat sq3 : flush demandé AVANT écriture — le fichier est encore
+        // l'ancien, le tool attend l'acquit.
+        assert_eq!(
+            std::fs::read_to_string(root.join("main.rs")).unwrap(),
+            "x\n",
+            "le flush est demandé AVANT que le tool écrive"
+        );
+
+        state.fs_flush.handle_ack(id);
+        let result = tokio::time::timeout(Duration::from_secs(10), handle)
+            .await
+            .expect("edit_and_check timeout")
+            .expect("spawned task panicked");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("main.rs")).unwrap(),
+            "y\n",
+            "après l'ack, l'écriture a eu lieu"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            !text.contains("flush non acquitté"),
+            "flush acquitté → pas de mention de repli, got: {text}"
+        );
+        assert!(text.contains("édition appliquée: main.rs"), "got: {text}");
+    }
+
+    /// Test 5 — personne n'acquitte (flush 100 ms) : repli fenêtre de
+    /// debounce mentionné, ET l'édition est appliquée quand même.
+    #[tokio::test]
+    async fn edit_and_check_flush_timeout_mentions_fallback() {
+        let (state, _tmpdir, root) = make_edit_check_state("ec_flush_timeout").await;
+
+        let uri = format!("file://{}", root.join("main.rs").display());
+        let session = state.lsp.get_or_spawn("rust").await.unwrap().unwrap();
+        let (editor_client, _rx) = session.subscribe();
+        session.mark_editor_uri_open(&uri, editor_client);
+        // Frontend abonné… muet (ne quitte jamais).
+        let _events = state.fs_events.subscribe();
+
+        let result = tokio::time::timeout(
+            Duration::from_secs(10),
+            run_edit_and_check(
+                &state,
+                edit_args("main.rs", "x", "y"),
+                Duration::from_millis(100),
+                Duration::from_millis(400),
+            ),
+        )
+        .await
+        .expect("edit_and_check timeout");
+
+        assert_eq!(
+            std::fs::read_to_string(root.join("main.rs")).unwrap(),
+            "y\n",
+            "le timeout de flush ne bloque pas l'écriture (sq3 : repli, pas échec)"
+        );
+        assert!(
+            !result["isError"].as_bool().unwrap(),
+            "should be OK (état mou), got: {result}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("flush non acquitté — fenêtre de debounce de l'éditeur possible"),
+            "mention de repli obligatoire (sq3), got: {text}"
+        );
+        assert!(
+            text.contains("VNL-SBX-LSP-011"),
+            "puis attente sans re-publication → -011, got: {text}"
+        );
+    }
+
+    /// Test 6 — validation de l'union discriminée : mode inconnu, write sans
+    /// content, edit sans old_string → err_result « invalid arguments… »
+    /// (préfixe existant) SANS écrire. Un nom étranger → None (frère de
+    /// dispatch_lsp, même forme).
+    #[tokio::test]
+    async fn edit_and_check_mode_validation() {
+        let (state, _tmpdir, root) = make_edit_check_state("ec_mode").await;
+
+        // Mode inconnu.
+        let mut args = edit_args("main.rs", "x", "y");
+        args.mode = "patch".to_string();
+        let r = run_edit_and_check(
+            &state,
+            args,
+            Duration::from_millis(150),
+            Duration::from_millis(400),
+        )
+        .await;
+        assert!(r["isError"].as_bool().unwrap(), "unknown mode = error");
+        assert!(
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("invalid arguments"),
+            "préfixe existant, got: {r}"
+        );
+
+        // write sans content.
+        let r = run_edit_and_check(
+            &state,
+            EditAndCheckArgs {
+                path: "main.rs".into(),
+                mode: "write".into(),
+                content: None,
+                old_string: None,
+                new_string: None,
+                replace_all: false,
+            },
+            Duration::from_millis(150),
+            Duration::from_millis(400),
+        )
+        .await;
+        assert!(
+            r["isError"].as_bool().unwrap(),
+            "write sans content = error"
+        );
+        assert!(
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("invalid arguments"),
+            "got: {r}"
+        );
+
+        // edit sans old_string.
+        let mut args = edit_args("main.rs", "x", "y");
+        args.old_string = None;
+        let r = run_edit_and_check(
+            &state,
+            args,
+            Duration::from_millis(150),
+            Duration::from_millis(400),
+        )
+        .await;
+        assert!(
+            r["isError"].as_bool().unwrap(),
+            "edit sans old_string = error"
+        );
+        assert!(
+            r["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("invalid arguments"),
+            "got: {r}"
+        );
+
+        // Rien a été écrit (validation avant toute I/O).
+        assert_eq!(
+            std::fs::read_to_string(root.join("main.rs")).unwrap(),
+            "x\n",
+            "aucune écriture sur les chemins invalid arguments"
+        );
+
+        // Nom étranger → None, comme dispatch_lsp.
+        assert!(
+            dispatch_edit_and_check(&state, "autre_chose", serde_json::json!({}))
+                .await
+                .is_none(),
+            "None si le nom est étranger à la famille"
+        );
+    }
+
+    /// Test 7 — extension hors toolchain LSP → VNL-SBX-LSP-006, aucune
+    /// écriture.
+    #[tokio::test]
+    async fn edit_and_check_no_toolchain() {
+        let (state, _tmpdir, root) = make_edit_check_state("ec_notc").await;
+        std::fs::write(root.join("main.py"), "x = 1").unwrap();
+
+        let result = dispatch_edit_and_check(
+            &state,
+            "edit_and_check",
+            serde_json::json!({"path": "main.py", "mode": "write", "content": "y = 2"}),
+        )
+        .await
+        .expect("dispatch returned None");
+
+        assert!(result["isError"].as_bool().unwrap(), "should be an error");
+        assert!(
+            result["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("VNL-SBX-LSP-006"),
+            "got: {result}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("main.py")).unwrap(),
+            "x = 1",
+            "aucune écriture"
+        );
+    }
+
+    /// Test 8 — évasion hors du sandbox : l'erreur confine existante
+    /// (VNL-SBX-001), zéro écriture.
+    #[tokio::test]
+    async fn edit_and_check_escape_path_rejected() {
+        let (state, _tmpdir, _root) = make_edit_check_state("ec_escape").await;
+
+        let result = dispatch_edit_and_check(
+            &state,
+            "edit_and_check",
+            serde_json::json!({"path": "../etc/passwd", "mode": "write", "content": "pwned"}),
+        )
+        .await
+        .expect("dispatch returned None");
+
+        assert!(result["isError"].as_bool().unwrap(), "should be an error");
+        let text = result["content"][0]["text"].as_str().unwrap();
+        assert!(
+            text.contains("VNL-SBX-001") && text.contains("escapes sandbox root"),
+            "l'erreur confine existante, sans rien inventer, got: {text}"
+        );
+    }
+
+    /// Test 9 — le diff compte des MULTIPLICITÉS : deux diagnostics
+    /// identiques avant, un après → DISPARUS 1 et INCHANGÉS 1 (un HashSet
+    /// perdrait le doublon et rendrait 0/1 — le design impose des compteurs).
+    #[test]
+    fn diagnostics_diff_counts_duplicates() {
+        let d = |message: &str| {
+            serde_json::json!({
+                "message": message,
+                "severity": 1,
+                "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+            })
+        };
+        let dup_before = vec![d("dup"), d("dup")];
+        let dup_after = vec![d("dup")];
+
+        let diff = diff_diagnostics(&dup_before, &dup_after);
+        assert!(diff.appeared.is_empty(), "rien n'apparaît, got: {diff:?}");
+        assert_eq!(diff.gone.len(), 1, "2 avant vs 1 après → 1 disparu net");
+        assert_eq!(diff.unchanged, 1, "le survivant est inchangé");
+
+        // Cas miroir : 1 avant, 2 après → 1 apparu net.
+        let mirror = diff_diagnostics(&dup_after, &dup_before);
+        assert_eq!(mirror.appeared.len(), 1, "1 apparu net");
+        assert!(mirror.gone.is_empty(), "got: {mirror:?}");
+        assert_eq!(mirror.unchanged, 1);
+    }
+
+    /// Test 10 — `edit_and_check` rejoint la liste des outils (16ᵗʰ entrée
+    /// MCP, 8ᵉ dans `lsp_tools()`) avec son schéma plat discriminé par mode.
+    #[test]
+    fn lsp_tools_includes_edit_and_check_as_16th_tool() {
+        let tools = lsp_tools();
+        assert_eq!(
+            tools.len(),
+            8,
+            "7 lsp_* + edit_and_check = 16 tools MCP au total (5 fs + 2 search + 1 command)"
+        );
+        let names: Vec<_> = tools.iter().filter_map(|t| t["name"].as_str()).collect();
+        assert!(names.contains(&"edit_and_check"), "names: {names:?}");
+        let eac = tools
+            .iter()
+            .find(|t| t["name"] == "edit_and_check")
+            .expect("edit_and_check in lsp_tools()");
+        assert_eq!(eac["inputSchema"]["required"][0], "path");
+        assert_eq!(eac["inputSchema"]["required"][1], "mode");
+        assert_eq!(eac["inputSchema"]["properties"]["mode"]["enum"][0], "write");
+        assert_eq!(eac["inputSchema"]["properties"]["mode"]["enum"][1], "edit");
     }
 }

@@ -283,7 +283,7 @@ async fn tools_list_advertises_filesystem_tools() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["jsonrpc"], "2.0");
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), 16);
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
@@ -307,7 +307,7 @@ async fn tools_list_advertises_search_tools() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["jsonrpc"], "2.0");
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), 16);
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"read_file"));
     assert!(names.contains(&"write_file"));
@@ -974,7 +974,7 @@ async fn tools_list_advertises_command_tool() {
     let json = body_json(resp.into_body()).await;
     assert_eq!(json["jsonrpc"], "2.0");
     let tools = json["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), 16);
     let names: Vec<_> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"execute_command"));
     assert!(json["error"].is_null());

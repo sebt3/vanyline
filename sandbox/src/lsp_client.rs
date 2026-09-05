@@ -591,6 +591,124 @@ while True:
         pass
 "#;
 
+    /// Script Python factice pour `edit_and_check` (tâche 08d) : `initialize`
+    /// ok ; `didOpen` publie un diagnostic « diag v1 » ; `didChange` publie
+    /// SELON le contenu reçu — contient `BAD` → un « diag v2 », sinon tableau
+    /// vide. De quoi tester le diff de diagnostics (avant/après, apparus/
+    /// disparus). Chaque méthode reçue est appendue dans le fichier-témoin
+    /// passé en argv[1] (`observer.log`, à la pose des autres fakes) — seul
+    /// moyen de rendre observable ce que le tool ENVOIE (cas B : JAMAIS de
+    /// `didChange`, design R1).
+    ///
+    /// La publication `didOpen` est différée d'un court délai dans un thread,
+    /// comme l'analyse réelle d'un vrai serveur (rust-analyzer publie des
+    /// ms–s après `didOpen`, jamais instantanément) : `edit_and_check` en cas
+    /// A envoie `didOpen` puis `didChange` d'un trait, et un `didOpen` publié
+    /// instantanément gagnerait la course du `wait_for_diagnostics` — le test
+    /// 1 (08d) observerait alors l'analyse du `didOpen` au lieu de celle du
+    /// `didChange` (course réellement observée au développement de 08d,
+    /// verte-rouge au gré de l'ordonnanceur). Avec le délai, l'ordre effectif des
+    /// publications reproduit ce que le tool attend dans le monde réel : la
+    /// ré-analyse consécutive au `didChange` est la première publiable.
+    pub const FAKE_LSP_EDIT_CHECK_PY: &str = r#"
+import sys, json, threading, time
+
+OBSERVER_LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+DID_OPEN_ANALYSIS_DELAY = 0.1
+OUT_LOCK = threading.Lock()
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    with OUT_LOCK:
+        sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+        sys.stdout.buffer.write(out)
+        sys.stdout.buffer.flush()
+
+def log_method(name):
+    if OBSERVER_LOG:
+        with open(OBSERVER_LOG, "a") as f:
+            f.write(name + "\n")
+
+def publish(uri, diagnostics):
+    write_frame({
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {"uri": uri, "diagnostics": diagnostics},
+    })
+
+def diag(message):
+    return {
+        "message": message,
+        "severity": 1,
+        "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}},
+    }
+
+def delayed_publish(uri):
+    time.sleep(DID_OPEN_ANALYSIS_DELAY)
+    publish(uri, [diag("diag v1")])
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+        msg_id = msg.get("id")
+        method = msg.get("method", "")
+        params = msg.get("params", {})
+        if method:
+            log_method(method)
+        if msg_id is None:
+            # Notification. didOpen publie v1 (avec le délai d'analyse, cf.
+            # doc du fake) ; didChange publie selon le contenu (BAD → v2,
+            # sinon vide) — c'est le diff lui-même qui est testé.
+            if method == "textDocument/didOpen":
+                uri = params.get("textDocument", {}).get("uri", "")
+                threading.Thread(target=delayed_publish, args=(uri,), daemon=True).start()
+            elif method == "textDocument/didChange":
+                uri = params.get("textDocument", {}).get("uri", "")
+                changes = params.get("contentChanges") or [{}]
+                text = changes[0].get("text", "")
+                if "BAD" in text:
+                    publish(uri, [diag("diag v2")])
+                else:
+                    publish(uri, [])
+            continue
+        if method == "initialize":
+            write_frame({
+                "jsonrpc": "2.0", "id": msg_id,
+                "result": {"capabilities": {}, "serverInfo": {"name": "fake-edit-check", "version": "1"}}
+            })
+        else:
+            write_frame({"jsonrpc": "2.0", "id": msg_id, "result": {"echo": method}})
+    except Exception:
+        pass
+"#;
+
     /// Crée un LspManager avec un script Python factice.
     pub async fn make_manager(name: &str, script: &str) -> (LspManager, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
