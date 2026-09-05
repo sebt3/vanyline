@@ -1756,6 +1756,17 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         Err(val) => return Some(val),
     };
 
+    // Chemin relatif au workspace : le préfixe `{sandbox_root}/` retiré du
+    // chemin confiné ; à défaut le chemin confiné lui-même (même logique que
+    // `render_location` / `edit_and_check`). Toutes les branches de rendu
+    // s'appuient dessus — `lsp_diagnostics` compris, pour ne plus être la
+    // seule à afficher un chemin absolu.
+    let root_prefix = format!("{}/", state.config.sandbox_root.display());
+    let display_path = match resolved.strip_prefix(&root_prefix) {
+        Some(rel) => rel.to_string(),
+        None => resolved.clone(),
+    };
+
     // Step 4: read file
     let text = match filesystem::read_file(ReadFileOptions {
         path: resolved.clone(),
@@ -1804,14 +1815,6 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                     ),
                 ),
                 Err(e) => return Some(err_result(e.to_string())),
-            };
-            // Chemin relatif au workspace : le préfixe `{sandbox_root}/` retiré
-            // du chemin confiné ; à défaut le chemin confiné lui-même (même
-            // logique que `render_location`).
-            let root_prefix = format!("{}/", state.config.sandbox_root.display());
-            let display_path = match resolved.strip_prefix(&root_prefix) {
-                Some(rel) => rel.to_string(),
-                None => resolved.clone(),
             };
             let target_line = match line_snippet(&text, line0) {
                 Some(snippet) => format!("cible: {display_path}:{}: {snippet}{note}", line0 + 1),
@@ -1874,7 +1877,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                     let severity = d["severity"].as_i64().unwrap_or(1);
                     let message = d["message"].as_str().unwrap_or("");
                     let label = severity_label(severity);
-                    lines.push(format!("{resolved}:{line}:{col}: {label}: {message}"));
+                    lines.push(format!("{display_path}:{line}:{col}: {label}: {message}"));
                 }
                 Some(ok_result(lines.join("\n")))
             }
@@ -3426,6 +3429,10 @@ mod tests {
         assert!(
             text.contains(":1:1:"),
             "should contain ':1:1:' for 0-based line/char +1"
+        );
+        assert!(
+            text.starts_with("main.rs:"),
+            "path must be workspace-relative, homogène avec edit_and_check / render_location : {text}"
         );
     }
 

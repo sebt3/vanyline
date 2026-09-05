@@ -601,17 +601,21 @@ impl LspSession {
         }
     }
 
-    /// Version suivante pour `uri` (démarre à 1, +1 par appel). Compteurs des
+    /// Version suivante pour `uri` (démarre à 2, +1 par appel). Compteurs des
     /// tools uniquement (cas A) — la version du `didOpen` navigateur (côté
     /// codemirror) est indépendante et ne passe jamais par ici (cf. doc du champ
     /// `doc_versions` : deux émetteurs actifs sur la même URI = désync interdit).
+    ///
+    /// Démarre à 2 et non à 1 : le `didOpen` émis par `ensure_open` porte la
+    /// version 1, un `didChange` doit être strictement au-dessus pour que la
+    /// séquence vue par le serveur reste monotone (1 → 2 → 3 …).
     pub fn next_doc_version(&self, uri: &str) -> i32 {
         let mut versions = self
             .inner
             .doc_versions
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let next = versions.get(uri).copied().unwrap_or(0) + 1;
+        let next = versions.get(uri).copied().unwrap_or(1) + 1;
         versions.insert(uri.to_string(), next);
         next
     }
@@ -1444,19 +1448,20 @@ while True:
     // ── Tests tâche 08a : versions de doc, invalidation, didChange, suivi éditeur ──
 
     /// Test 15: next_doc_version_increments_per_uri — un compteur par URI, démarre
-    /// à 1, +1 par appel ; les URI n'interagissent pas (les compteurs navigateur
-    /// sont de toute façon indépendants — `next_doc_version` ne sert qu'aux tools).
+    /// à 2 (le `didOpen` a la version 1), +1 par appel ; les URI n'interagissent
+    /// pas (les compteurs navigateur sont de toute façon indépendants —
+    /// `next_doc_version` ne sert qu'aux tools).
     #[tokio::test]
     async fn next_doc_version_increments_per_uri() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
         let root = tmpdir.path().to_path_buf();
         let session = LspSession::spawn(&spec, &root).await.unwrap();
 
-        assert_eq!(session.next_doc_version("file:///a.rs"), 1);
         assert_eq!(session.next_doc_version("file:///a.rs"), 2);
         assert_eq!(session.next_doc_version("file:///a.rs"), 3);
-        // URI indépendante : jamais vue → redémarre à 1.
-        assert_eq!(session.next_doc_version("file:///b.rs"), 1);
+        assert_eq!(session.next_doc_version("file:///a.rs"), 4);
+        // URI indépendante : jamais vue → redémarre à 2.
+        assert_eq!(session.next_doc_version("file:///b.rs"), 2);
 
         drop(tmpdir);
     }
@@ -1539,8 +1544,10 @@ while True:
 
     /// Test 17: did_change_frame_full_sync_shape — la notification `didChange` du
     /// client a exactement la forme full sync (design §7) : un seul
-    /// `contentChanges` = `{"text": …}` sans `range`, `textDocumentVersion` = la
-    /// version passée, et le framing Content-Length posé par la tâche écrivaine
+    /// `contentChanges` = `{"text": …}` sans `range`, la version passée portée
+    /// PAR `textDocument.version` (`VersionedTextDocumentIdentifier` de la spec
+    /// LSP — jamais un champ frère `textDocumentVersion`, qu'un vrai serveur
+    /// ignorerait), et le framing Content-Length posé par la tâche écrivaine
     /// (un seul `\r\n\r\n` dans la trame reconstruite par le fake).
     #[tokio::test]
     async fn did_change_frame_full_sync_shape() {
@@ -1573,9 +1580,15 @@ while True:
             uri
         );
         assert_eq!(
-            echoed["params"]["textDocumentVersion"].as_i64().unwrap(),
+            echoed["params"]["textDocument"]["version"]
+                .as_i64()
+                .unwrap(),
             7,
-            "version must be the one passed in, not a client-local counter"
+            "version must be the one passed in, inside textDocument (VersionedTextDocumentIdentifier)"
+        );
+        assert!(
+            echoed["params"]["textDocumentVersion"].is_null(),
+            "no sibling textDocumentVersion — a real server would ignore it"
         );
         let changes = echoed["params"]["contentChanges"]
             .as_array()

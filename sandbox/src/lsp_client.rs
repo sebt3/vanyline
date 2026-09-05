@@ -142,16 +142,21 @@ impl LspClient {
     }
 
     /// Notification `textDocument/didChange`, full sync :
-    /// `{"textDocument":{"uri":uri},"textDocumentVersion":version,
+    /// `{"textDocument":{"uri":uri,"version":version},
     ///   "contentChanges":[{"text":full_text}]}`
     /// (design §7 — full sync, pas de range ; version fournie par
     /// `LspSession::next_doc_version`, jamais un compteur local du client).
+    ///
+    /// `version` va DANS `textDocument` (`VersionedTextDocumentIdentifier` de
+    /// la spec LSP), pas en champ frère : `rust-analyzer` /
+    /// `typescript-language-server` désérialisent avec un `version` requis et
+    /// droppent silencieusement une notification mal formée (→ aucune
+    /// ré-analyse, `edit_and_check` bloqué en VNL-SBX-LSP-011).
     pub async fn did_change(&self, uri: &str, version: i32, full_text: &str) -> anyhow::Result<()> {
         self.notify(
             "textDocument/didChange",
             serde_json::json!({
-                "textDocument": { "uri": uri },
-                "textDocumentVersion": version,
+                "textDocument": { "uri": uri, "version": version },
                 "contentChanges": [{ "text": full_text }]
             }),
         )
