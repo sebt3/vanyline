@@ -348,11 +348,21 @@ intrinsèquement racy ; l'autosave la rend acceptable, pas nulle.
 2. **Canal de notification « fichier changé sur disque » vers le frontend** : sur
    `/ws/fs` (l'éditeur y est déjà connecté) ou un événement dédié ? Forme du message,
    et l'éditeur ne recharge que s'il tient ce fichier.
+   **Tranché 2026-09-04** : push sur `/ws/fs` existant — `fs_session` passe à une boucle
+   select (lecture socket + canal interne broadcast par path), le client gagne un dispatch
+   permanent (frames réponse aux handlers one-shot, frames événement aux abonnés).
+   Diffusion à toutes les sessions `/ws/fs` authentifiées ; l'éditeur ne recharge que s'il
+   tient le fichier. Note d'implémentation : le loop actuel est strictement
+   requête→réponse (`ws/fs.rs`) et le client consomme par listener one-shot
+   (`sandboxWs.ts`) — les deux sont à retoucher, c'est assumé.
 3. **Autosave : debounce et flush** — valeur du debounce (200-500 ms ?) ; et est-ce
    que `edit_and_check` en cas B demande un **flush immédiat** au frontend *avant*
    d'écrire (ferme la fenêtre de course au prix d'un round-trip de plus), ou accepte
    la fenêtre de debounce ? Recommandation : flush explicite avant écriture en cas B,
    debounce simple sinon.
+   **Tranché 2026-09-04** : debounce **300 ms** (livré tâche 07a) ; en cas B,
+   `edit_and_check` envoie une requête flush au frontend et attend l'ack avant d'écrire ;
+   timeout de flush court → repli sur la fenêtre de debounce, mention dans le rapport.
 4. **Autosave : périmètre de déclenchement** — tous les fichiers ouverts, ou
    opt-out possible ? Interaction avec un fichier en lecture seule / hors workspace.
 5. **Cas B sans que le round-trip aboutisse** (autre onglet, pas le fichier au
