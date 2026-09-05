@@ -147,6 +147,16 @@ struct LspSessionInner {
     /// appel, absents ensuite) : chaque appel MCP renvoyait son propre `didOpen` sur
     /// le même fichier.
     open_uris: Mutex<HashSet<String>>,
+    /// Version de doc par URI pour les didChange émis par les TOOLS (cas A). Les
+    /// compteurs navigateur (@codemirror/lsp-client) sont indépendants et ne
+    /// croisent jamais les nôtres : en cas B le tool n'envoie JAMAIS didChange
+    /// (design R1) — deux émetteurs actifs sur la même URI = désync, interdit.
+    doc_versions: Mutex<HashMap<String, i32>>,
+    /// URIs tenues par au moins un client navigateur, par ClientId (piste R1 sq1).
+    /// Alimenté par le bridge ws/lsp.rs SEULEMENT (subscribe du bridge = client
+    /// navigateur ; les LspClient des tools ne s'enregistrent pas ici). Nettoyé
+    /// sur didClose navigateur et sur unsubscribe (déconnexion = plus de tenant).
+    editor_uris: Mutex<HashMap<String, HashSet<ClientId>>>,
     /// Dernier `publishDiagnostics.diagnostics` connu par URI, alimenté par la tâche
     /// lectrice pour TOUTE notification reçue — indépendamment de qui est abonné à ce
     /// moment (cf. `wait_for_diagnostics`/`cached_diagnostics`). Nécessaire : un
@@ -213,6 +223,8 @@ impl LspSession {
                 initialize_outcome: Mutex::new(None),
                 initialize_notify: Notify::new(),
                 open_uris: Mutex::new(HashSet::new()),
+                doc_versions: Mutex::new(HashMap::new()),
+                editor_uris: Mutex::new(HashMap::new()),
                 diagnostics_cache: Mutex::new(HashMap::new()),
                 diagnostics_notify: Notify::new(),
                 child: Mutex::new(Some(child)),
@@ -376,8 +388,12 @@ impl LspSession {
         (client_id, rx)
     }
 
-    /// Désabonne un client : retire le canal de sortie et les entrées `pending`
-    /// de ce client.
+    /// Désabonne un client : retire le canal de sortie, les entrées `pending`
+    /// de ce client et sa présence dans toutes les sets de `editor_uris`
+    /// (déconnexion = plus de tenant, piste R1 sq1 — sans ça, une URI fermée
+    /// brutalement (WS coupé, pas de `didClose`) resterait tenue pour toujours).
+    /// Les `LspClient` des tools passent aussi par ici (leur `Drop`) mais ne
+    /// sont jamais dans `editor_uris` — le nettoyage est un no-op pour eux.
     pub fn unsubscribe(&self, client: ClientId) {
         if let Ok(mut subs) = self.inner.subs.lock() {
             subs.remove(&client);
@@ -388,6 +404,17 @@ impl LspSession {
             Err(g) => g.into_inner(),
         };
         pending.retain(|_, (c, _)| *c != client);
+        // Retirer le client de toutes les sets d'URI tenues par des éditeurs ;
+        // une URI sans aucun tenant disparaît de la map.
+        let mut editor_uris = self
+            .inner
+            .editor_uris
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for clients in editor_uris.values_mut() {
+            clients.remove(&client);
+        }
+        editor_uris.retain(|_, clients| !clients.is_empty());
     }
 
     /// Envoie un message JSON-RPC client → process.
@@ -573,6 +600,72 @@ impl LspSession {
             }
         }
     }
+
+    /// Version suivante pour `uri` (démarre à 1, +1 par appel). Compteurs des
+    /// tools uniquement (cas A) — la version du `didOpen` navigateur (côté
+    /// codemirror) est indépendante et ne passe jamais par ici (cf. doc du champ
+    /// `doc_versions` : deux émetteurs actifs sur la même URI = désync interdit).
+    pub fn next_doc_version(&self, uri: &str) -> i32 {
+        let mut versions = self
+            .inner
+            .doc_versions
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let next = versions.get(uri).copied().unwrap_or(0) + 1;
+        versions.insert(uri.to_string(), next);
+        next
+    }
+
+    /// Retire l'entrée `uri` du `diagnostics_cache`. Indispensable avant une
+    /// ré-analyse : `wait_for_diagnostics` retourne le cache s'il est présent —
+    /// sans invalidation, edit_and_check verrait le stale d'AVANT l'édition
+    /// (design §7 étape 2). Aucun notify, aucun effet si absent.
+    pub fn invalidate_diagnostics(&self, uri: &str) {
+        self.inner
+            .diagnostics_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(uri);
+    }
+
+    /// Un éditeur navigateur tient-il cette URI (cas B, design R1) ?
+    pub fn has_editor_client(&self, uri: &str) -> bool {
+        let uris = self
+            .inner
+            .editor_uris
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        uris.get(uri).is_some_and(|clients| !clients.is_empty())
+    }
+
+    /// Mark par le bridge `ws/lsp.rs` (`textDocument/didOpen`) : l'éditeur
+    /// `client` tient `uri`. `unsubscribe(client)` DOIT retirer `client` de
+    /// toutes les sets de `editor_uris` (nettoyage déconnexion).
+    pub fn mark_editor_uri_open(&self, uri: &str, client: ClientId) {
+        let mut uris = self
+            .inner
+            .editor_uris
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        uris.entry(uri.to_string()).or_default().insert(client);
+    }
+
+    /// Close par le bridge `ws/lsp.rs` (`textDocument/didClose`) : l'éditeur
+    /// `client` lâche `uri`. L'URI cesse d'être tenue seulement si plus aucun
+    /// client ne la tient (les autres tenants ne sont affectés en rien).
+    pub fn mark_editor_uri_close(&self, uri: &str, client: ClientId) {
+        let mut uris = self
+            .inner
+            .editor_uris
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(clients) = uris.get_mut(uri) {
+            clients.remove(&client);
+            if clients.is_empty() {
+                uris.remove(uri);
+            }
+        }
+    }
 }
 
 impl Drop for LspSessionInner {
@@ -743,6 +836,137 @@ while True:
 
     /// Script Python factice : exit immédiat.
     const FAKE_LSP_EXIT_PY: &str = "import sys; sys.exit(0)\n";
+
+    /// Script Python factice : publie des diagnostics à CHAQUE `didOpen`
+    /// (contrairement à `FAKE_LSP_PY`, une seule fois par URI). Nécessaire au test
+    /// d'invalidation : il faut DEUX publications successives sur la MÊME URI pour
+    /// observer la différence entre le cache invalide et le frais — un fake qui ne
+    /// publie qu'une fois par URI rend l'invalidation indistinguishable d'un cache
+    /// qui n'a jamais rien contenu après le premier push.
+    const FAKE_LSP_REPUBLISH_PY: &str = r#"
+import sys, json
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+pub_count = 0
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+        method = msg.get("method", "")
+        if method == "textDocument/didOpen":
+            uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+            notif = {
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {
+                    "uri": uri,
+                    "diagnostics": [{"message": f"diag #{pub_count}", "severity": 1, "range": {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}}]
+                }
+            }
+            pub_count += 1
+            write_frame(notif)
+        elif "id" in msg:
+            write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": method}})
+    except Exception:
+        pass
+"#;
+
+    /// Script Python factice : garde la DERNIÈRE notification reçue (global
+    /// Python + octets bruts de la trame reconstruite header+payload) et la
+    /// restitue comme `result` d'une requête `x/echo-notif`. Les notifications
+    /// JSON-RPC n'ont pas de réponse, donc pas de corrélation possible : c'est
+    /// le mécanisme imposé par la tâche pour rendre `didChange` observable,
+    /// framing inclus (`_frameTerminators` = comptes de `\r\n\r\n` dans la
+    /// trame reconstruite, posé par `encode_message` de la tâche écrivaine).
+    const FAKE_LSP_ECHO_NOTIF_PY: &str = r#"
+import sys, json
+
+last_notification = None
+last_frame = b""
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None, None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b"", header
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data, header + data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+while True:
+    payload, frame = read_frame()
+    if payload is None:
+        break
+    try:
+        msg = json.loads(payload)
+    except Exception:
+        continue
+    if "id" not in msg:
+        # Notification : conservée (parse + trame brute) pour x/echo-notif.
+        last_notification = msg
+        last_frame = frame or b""
+        continue
+    method = msg.get("method", "")
+    if method == "x/echo-notif":
+        result = dict(last_notification) if last_notification is not None else {"last": None}
+        result["_frame"] = last_frame.decode("utf-8", errors="replace")
+        result["_frameTerminators"] = last_frame.count(b"\r\n\r\n")
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": result})
+    else:
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": method}})
+"#;
 
     /// Crée une toolchain LSP pointant vers un script Python factice.
     async fn make_fake_toolchain(name: &str, script: &str) -> (LspToolchain, tempfile::TempDir) {
@@ -1213,6 +1437,255 @@ while True:
             !Arc::ptr_eq(&s1, &s2),
             "should return a new session (different Arc)"
         );
+
+        drop(tmpdir);
+    }
+
+    // ── Tests tâche 08a : versions de doc, invalidation, didChange, suivi éditeur ──
+
+    /// Test 15: next_doc_version_increments_per_uri — un compteur par URI, démarre
+    /// à 1, +1 par appel ; les URI n'interagissent pas (les compteurs navigateur
+    /// sont de toute façon indépendants — `next_doc_version` ne sert qu'aux tools).
+    #[tokio::test]
+    async fn next_doc_version_increments_per_uri() {
+        let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root).await.unwrap();
+
+        assert_eq!(session.next_doc_version("file:///a.rs"), 1);
+        assert_eq!(session.next_doc_version("file:///a.rs"), 2);
+        assert_eq!(session.next_doc_version("file:///a.rs"), 3);
+        // URI indépendante : jamais vue → redémarre à 1.
+        assert_eq!(session.next_doc_version("file:///b.rs"), 1);
+
+        drop(tmpdir);
+    }
+
+    /// Test 16: invalidate_diagnostics_then_wait_gets_fresh — le test qui prouve
+    /// l'utilité de l'invalidation (design §7 étape 2) : `wait_for_diagnostics`
+    /// retourne le cache s'il est présent ; sans `invalidate_diagnostics` avant
+    /// l'édition, `edit_and_check` reverrait le stale d'AVANT l'édition.
+    #[tokio::test]
+    async fn invalidate_diagnostics_then_wait_gets_fresh() {
+        let (spec, tmpdir) = make_fake_toolchain("republish", FAKE_LSP_REPUBLISH_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root).await.unwrap();
+        let (client, _rx) = session.subscribe();
+        let uri = "file:///workspace/main.rs";
+
+        let open_payload = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "rust",
+                    "version": 1,
+                    "text": "fn main(){}"
+                }
+            }
+        })
+        .to_string()
+        .into_bytes();
+
+        // Premier didOpen → publication "diag #0" mise en cache.
+        session
+            .send(client, open_payload.clone())
+            .await
+            .expect("didOpen #1 ok");
+        let first = session
+            .wait_for_diagnostics(uri, Duration::from_secs(5))
+            .await
+            .expect("first publish should be cached");
+        assert_eq!(first[0]["message"].as_str().unwrap(), "diag #0");
+        assert!(session.cached_diagnostics(uri).is_some());
+
+        // Invalidation → le cache est vide, sans notify ni effet de bord.
+        session.invalidate_diagnostics(uri);
+        assert!(
+            session.cached_diagnostics(uri).is_none(),
+            "invalidate must remove the cache entry"
+        );
+
+        // Le wait ne doit PAS ressusciter le stale : bloqué jusqu'au timeout
+        // court, il rend None tant que rien de nouveau n'est publié.
+        let started = tokio::time::Instant::now();
+        let stale = session
+            .wait_for_diagnostics(uri, Duration::from_millis(250))
+            .await;
+        assert!(
+            stale.is_none(),
+            "wait must not return the invalidated (stale) cache"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(150),
+            "wait should genuinely block on an empty cache, elapsed: {:?}",
+            started.elapsed()
+        );
+
+        // Second publish (même URI) → le wait rend le FRAIS, pas l'ancien.
+        session
+            .send(client, open_payload)
+            .await
+            .expect("didOpen #2 ok");
+        let fresh = session
+            .wait_for_diagnostics(uri, Duration::from_secs(5))
+            .await
+            .expect("second publish should reach wait_for_diagnostics");
+        assert_eq!(fresh[0]["message"].as_str().unwrap(), "diag #1");
+
+        drop(tmpdir);
+    }
+
+    /// Test 17: did_change_frame_full_sync_shape — la notification `didChange` du
+    /// client a exactement la forme full sync (design §7) : un seul
+    /// `contentChanges` = `{"text": …}` sans `range`, `textDocumentVersion` = la
+    /// version passée, et le framing Content-Length posé par la tâche écrivaine
+    /// (un seul `\r\n\r\n` dans la trame reconstruite par le fake).
+    #[tokio::test]
+    async fn did_change_frame_full_sync_shape() {
+        let (spec, tmpdir) = make_fake_toolchain("echonotif", FAKE_LSP_ECHO_NOTIF_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root).await.unwrap();
+
+        let mut client =
+            crate::lsp_client::LspClient::new(session, "file:///workspace".to_string());
+        let uri = "file:///workspace/main.rs";
+        client
+            .did_change(uri, 7, "texte")
+            .await
+            .expect("did_change ok");
+
+        // Notifications non corrélables (pas de réponse JSON-RPC) : le fake garde
+        // la dernière reçue et la restitue sur `x/echo-notif`.
+        let echoed = client
+            .request("x/echo-notif", serde_json::json!({}))
+            .await
+            .expect("x/echo-notif ok");
+
+        assert_eq!(
+            echoed["method"].as_str().unwrap(),
+            "textDocument/didChange",
+            "echoed notification must be the didChange"
+        );
+        assert_eq!(
+            echoed["params"]["textDocument"]["uri"].as_str().unwrap(),
+            uri
+        );
+        assert_eq!(
+            echoed["params"]["textDocumentVersion"].as_i64().unwrap(),
+            7,
+            "version must be the one passed in, not a client-local counter"
+        );
+        let changes = echoed["params"]["contentChanges"]
+            .as_array()
+            .expect("contentChanges must be an array");
+        assert_eq!(changes.len(), 1, "full sync: exactly one entry");
+        // Égalité exacte sur l'objet : `{"text": "texte"}` et RIEN d'autre —
+        // notamment pas de `range` (full sync, jamais de changement partiel).
+        assert_eq!(changes[0], serde_json::json!({"text": "texte"}));
+
+        // Framing posé par `notify` → encode_message de la tâche écrivaine :
+        // la trame reconstruite est `Content-Length: N\r\n\r\n{payload}` →
+        // exactement un terminateur `\r\n\r\n`, et l'en-tête devant.
+        assert_eq!(
+            echoed["_frameTerminators"].as_i64().unwrap(),
+            1,
+            "frame must carry exactly one \\r\\n\\r\\n terminator"
+        );
+        assert!(
+            echoed["_frame"]
+                .as_str()
+                .expect("frame must be utf-8 lossy decodable")
+                .starts_with("Content-Length: "),
+            "frame must start with the Content-Length header"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 18: editor_uri_tracking_open_close_unsubscribe — plusieurs tenants sur
+    /// une même URI ; la déconnexion (unsubscribe) ou la fermeture (mark_close) de
+    /// l'un ne libère pas l'URI tant qu'un autre la tient.
+    #[tokio::test]
+    async fn editor_uri_tracking_open_close_unsubscribe() {
+        let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root).await.unwrap();
+
+        let (c1, _rx1) = session.subscribe();
+        let (c2, _rx2) = session.subscribe();
+        let uri = "file:///workspace/a.rs";
+
+        assert!(
+            !session.has_editor_client(uri),
+            "no editor client before any mark_open"
+        );
+
+        session.mark_editor_uri_open(uri, c1);
+        assert!(session.has_editor_client(uri), "c1 holds the uri");
+        session.mark_editor_uri_open(uri, c2);
+        assert!(session.has_editor_client(uri), "two holders");
+
+        // Déconnexion de c1 : c2 tient toujours l'URI.
+        session.unsubscribe(c1);
+        assert!(
+            session.has_editor_client(uri),
+            "uri still held by c2 after c1 unsubscribes"
+        );
+        session.unsubscribe(c2);
+        assert!(
+            !session.has_editor_client(uri),
+            "no holder left after c2 unsubscribes"
+        );
+
+        // mark_close séparé sur c3 n'affecte pas c4.
+        let (c3, _rx3) = session.subscribe();
+        let (c4, _rx4) = session.subscribe();
+        let uri2 = "file:///workspace/b.rs";
+        session.mark_editor_uri_open(uri2, c3);
+        session.mark_editor_uri_open(uri2, c4);
+        session.mark_editor_uri_close(uri2, c3);
+        assert!(
+            session.has_editor_client(uri2),
+            "c4 unaffected by c3's mark_close"
+        );
+        session.mark_editor_uri_close(uri2, c4);
+        assert!(
+            !session.has_editor_client(uri2),
+            "last holder closed → false"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 19: unsubscribe_cleans_all_editor_uris — un client qui tient 3 URI
+    /// (sans autres tenants) : la déconnexion libère les 3, nulle part d'autre ne
+    /// reste marqué tenu (nettoyage déconnexion, piste R1 sq1).
+    #[tokio::test]
+    async fn unsubscribe_cleans_all_editor_uris() {
+        let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root).await.unwrap();
+
+        let (c1, _rx1) = session.subscribe();
+        let uris = [
+            "file:///workspace/x1.rs",
+            "file:///workspace/x2.rs",
+            "file:///workspace/x3.rs",
+        ];
+        for uri in uris {
+            session.mark_editor_uri_open(uri, c1);
+            assert!(session.has_editor_client(uri), "{uri} held by c1");
+        }
+
+        session.unsubscribe(c1);
+        for uri in uris {
+            assert!(
+                !session.has_editor_client(uri),
+                "{uri} must be released when its only holder unsubscribes"
+            );
+        }
 
         drop(tmpdir);
     }

@@ -141,6 +141,23 @@ impl LspClient {
         .await
     }
 
+    /// Notification `textDocument/didChange`, full sync :
+    /// `{"textDocument":{"uri":uri},"textDocumentVersion":version,
+    ///   "contentChanges":[{"text":full_text}]}`
+    /// (design §7 — full sync, pas de range ; version fournie par
+    /// `LspSession::next_doc_version`, jamais un compteur local du client).
+    pub async fn did_change(&self, uri: &str, version: i32, full_text: &str) -> anyhow::Result<()> {
+        self.notify(
+            "textDocument/didChange",
+            serde_json::json!({
+                "textDocument": { "uri": uri },
+                "textDocumentVersion": version,
+                "contentChanges": [{ "text": full_text }]
+            }),
+        )
+        .await
+    }
+
     /// Envoie `didOpen` seulement si CET appelant est le premier, tous clients de la
     /// session confondus (éditeur navigateur compris), à demander l'ouverture de
     /// `uri` (`session.try_mark_uri_open`) — sinon no-op. Un second `didOpen` sur une

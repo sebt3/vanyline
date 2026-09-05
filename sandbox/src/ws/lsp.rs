@@ -8,6 +8,7 @@
 //! ne concerne que le stdio du process LSP, côté [`crate::lsp`].
 
 use crate::AppState;
+use crate::lsp::encode_message;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use axum::extract::{Path, State, WebSocketUpgrade};
 use axum::response::IntoResponse;
@@ -111,6 +112,48 @@ pub(super) fn rewrite_uris(value: &mut serde_json::Value, root: &str, direction:
         }
         _ => {}
     }
+}
+
+/// Lit une frame LSP `Content-Length: N\r\n\r\n{N octets JSON}` et rend
+/// (méthode, uri si présente dans textDocument). Best effort : toute frame
+/// non conforme → None (le forwarding ne dépend JAMAIS de l'observation).
+///
+/// Appelé par la boucle entrante du bridge sur la trame `encode_message(payload)`
+/// qu'elle s'apprête à passer à `session.send` (la trame telle que le process la
+/// recevrait) — JAMAIS sur la frame WS brute du navigateur (celle-ci est en JSON
+/// par frame texte, sans framing Content-Length : la distinguer serait confondre
+/// les deux plans de transport, cf. entête du fichier).
+fn peek_lsp_method(bytes: &[u8]) -> Option<(String, Option<String>)> {
+    let sep = bytes.windows(4).position(|w| w == b"\r\n\r\n")?;
+    let header = String::from_utf8_lossy(&bytes[..sep]);
+
+    // Chercher Content-Length dans l'en-tête (insensible à la casse, même
+    // sémantique que `FrameReader::next_frame`).
+    let length = header
+        .lines()
+        .filter_map(|line| {
+            let lower = line.trim().to_ascii_lowercase();
+            lower
+                .strip_prefix("content-length:")
+                .and_then(|v| v.trim().parse::<usize>().ok())
+        })
+        .next()?;
+
+    // La trame doit porter le corps complet annoncé ; sinon → None (tronquée,
+    // jamais "mieux que rien"). checked_add : un en-tête annoncé `usize::MAX`
+    // ne doit pas déborder en debug (le parse a réussi, l'addition suivrait).
+    let body_start = sep + 4;
+    let body_end = body_start.checked_add(length)?;
+    let body = bytes.get(body_start..body_end)?;
+    let msg: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let method = msg.get("method").and_then(|m| m.as_str())?.to_string();
+    // uri optionnelle SANS court-circuiter la méthode : un `initialize` (pas de
+    // `textDocument`) rend Some((méthode, None)), pas None.
+    let uri = msg
+        .pointer("/params/textDocument/uri")
+        .and_then(|u| u.as_str())
+        .map(|s| s.to_string());
+    Some((method, uri))
 }
 
 /// Handler de `GET /ws/lsp/:toolchain`. Le middleware
@@ -273,6 +316,35 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                                 let payload = serde_json::to_string(&msg)
                                     .unwrap_or_default()
                                     .into_bytes();
+
+                                // Observation best-effort (piste R1 sq1, tâche 08a) :
+                                // suivre les URI que des éditeurs navigateur tiennent,
+                                // pour la détection cas A/B de `edit_and_check` (design
+                                // R1). La trame observée est `encode_message(payload)`,
+                                // c'est-à-dire exactement les octets que le process LSP
+                                // recevrait (c'est ce que la tâche écrivaine de
+                                // `LspSession::send` applique au payload) — l'URI est
+                                // donc celle réécrite en absolu ci-dessus, la même que
+                                // voient les tools. Jamais bloquante, jamais décideuse :
+                                // corps non-JSON ou sans `method` → `None`, observation
+                                // aveugle ; le forwarding ci-dessous est strictement
+                                // inchangé (mêmes octets, mêmes chemins d'erreur).
+                                if let Some((method, Some(uri))) =
+                                    peek_lsp_method(&encode_message(&payload))
+                                {
+                                    match method.as_str() {
+                                        // didChange du navigateur : rien à marquer,
+                                        // l'URI est déjà tenue (didOpen observé avant).
+                                        "textDocument/didOpen" => {
+                                            session.mark_editor_uri_open(&uri, client_id)
+                                        }
+                                        "textDocument/didClose" => {
+                                            session.mark_editor_uri_close(&uri, client_id)
+                                        }
+                                        _ => {}
+                                    }
+                                }
+
                                 if session.send(client_id, payload).await.is_err() {
                                     let _ = ws
                                         .send(Message::Text(
@@ -642,5 +714,53 @@ mod tests {
 
         rewrite_uris(&mut value, TEST_ROOT, UriDirection::ToRelative);
         assert_eq!(value["uri"], "file:///src/main.rs");
+    }
+
+    // ── peek_lsp_method — observation des trames entrantes (tâche 08a) ──────────
+
+    #[test]
+    fn peek_lsp_method_valid_malformed_and_uri() {
+        // (a) didOpen complet cadré Content-Length → méthode + uri textDocument.
+        let body = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///a.rs","languageId":"rust","version":1,"text":"x"}}}"#;
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        assert_eq!(
+            peek_lsp_method(frame.as_bytes()),
+            Some((
+                "textDocument/didOpen".to_string(),
+                Some("file:///a.rs".to_string())
+            ))
+        );
+
+        // (b) body sans textDocument (initialize) → méthode rendue, uri None.
+        let body =
+            r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"rootUri":"file:///ws"}}"#;
+        let frame = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
+        assert_eq!(
+            peek_lsp_method(frame.as_bytes()),
+            Some(("initialize".to_string(), None))
+        );
+
+        // (c) toute frame non conforme → None : l'observation est AVEUGLE, le
+        // forwarding reste du ressort de l'appelant — l'observation ne peut pas
+        // casser un send.
+        // Header sans Content-Length.
+        assert_eq!(
+            peek_lsp_method(b"Content-Type: application/json\r\n\r\n{\"method\":\"x\"}"),
+            None
+        );
+        // JSON corrompu (longueur d'en-tête cohérente, parse JSON échoue).
+        let corrupted = [
+            b"Content-Length: 7\r\n\r\n".as_slice(),
+            b"{\"oops\"".as_slice(),
+        ]
+        .concat();
+        assert_eq!(peek_lsp_method(&corrupted), None);
+        // Trame tronquée : body annoncé plus long que les octets disponibles.
+        assert_eq!(
+            peek_lsp_method(b"Content-Length: 999\r\n\r\n{\"method\":\"x\"}"),
+            None
+        );
+        // Aucun terminateur \r\n\r\n du tout (pas une trame).
+        assert_eq!(peek_lsp_method(b"plain text, no frame"), None);
     }
 }
