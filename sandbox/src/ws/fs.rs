@@ -136,6 +136,27 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
         };
         return serde_json::json!({ "ok": true, "root": root_path });
     }
+    // "flush-ack" op — no path required either : acquit d'un `flush-request`
+    // poussé via fs_events (tâche 08c). L'id du flush voyage dans le champ
+    // DÉDIÉ `ackFor`, jamais dans `id` : celui-ci est l'id de corrélation que
+    // le SandboxFsClient s'attribue à lui-même avant de spreader les params —
+    // un `id` dans les params l'écraserait, le pending ne se résoudrait
+    // jamais et la queue FIFO du client mourrait (piège asserti en
+    // sandboxWs.spec). La réponse `{ok:true}` nue reçoit l'id du client par
+    // attach_req_id dans la boucle, comme toute autre op.
+    if op == "flush-ack" {
+        let ack_for = match msg["ackFor"].as_u64() {
+            Some(id) => id,
+            None => {
+                return serde_json::json!({
+                    "ok": false,
+                    "error": "flush-ack requires numeric ackFor"
+                });
+            }
+        };
+        state.fs_flush.handle_ack(ack_for);
+        return serde_json::json!({ "ok": true });
+    }
     let path = match msg["path"].as_str() {
         Some(p) => p.to_string(),
         None => return serde_json::json!({ "ok": false, "error": "missing path" }),
@@ -288,12 +309,14 @@ fn make_state(test_name: &str) -> AppState {
     });
     let auth = AuthState::new(config.clone()).unwrap();
 
+    let (fs_events, fs_flush) = crate::fs_push_channels();
     AppState {
         config,
         auth: std::sync::Arc::new(auth),
         tickets: crate::ws::ticket::TicketStore::new(),
         lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
-        fs_events: crate::fs_events_channel(),
+        fs_events,
+        fs_flush,
     }
 }
 
@@ -713,5 +736,168 @@ mod tests {
         );
         assert_eq!(out["ok"], false, "ok:false must stay intact");
         assert_eq!(out["error"], "unknown op", "error message must stay intact");
+    }
+
+    // ── Tests 08c — aller-retour flush avant écriture (R1 sq3, cas B) ────────
+
+    /// Test 08c-1 (request_flush_resolved_by_ack): `request_flush` émet la
+    /// frame `flush-request` sur le broadcast (forme event/id/path assertie),
+    /// l'ack `flush-ack` dispatché la résout `true`, et `attach_req_id` copie
+    /// l'id de corrélation du client (99) dans la réponse `{ok:true}` — le
+    /// pending du client se solde normalement. Map des waiters vide après.
+    #[tokio::test]
+    async fn request_flush_resolved_by_ack() {
+        use std::time::Duration;
+
+        let state = make_state("flush_ack");
+        // Souscription AVANT le spawn : un abonné postérieur pourrait rater la
+        // frame émise dès l'exécution de la tâche (le broadcast n'est pas un
+        // historique). Le waiter du flush est de toute façon inséré avant le
+        // send (anti-course ack-avant-waiter, dans request_flush).
+        let mut events = state.fs_events.subscribe();
+        let spawned = state.clone();
+        let handle = tokio::spawn(async move {
+            spawned
+                .fs_flush
+                .request_flush("a.rs", Duration::from_secs(crate::FS_FLUSH_TIMEOUT_SECS))
+                .await
+        });
+
+        let raw = events.recv().await.unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            frame["event"], "flush-request",
+            "frame doit être un flush-request, got: {raw}"
+        );
+        assert_eq!(frame["path"], "a.rs", "la frame porte le path demandé");
+        let id = frame["id"].as_u64().expect("l'id doit être numérique");
+
+        // "id":99 = l'id de corrélation que le client réel (SandboxFsClient)
+        // donne à CETTE requête ; `ackFor` porte l'id du flush.
+        let req = format!(r#"{{"op":"flush-ack","ackFor":{id},"id":99}}"#);
+        let resp = dispatch_fs_message(&state, &req).await;
+        assert_eq!(
+            resp,
+            serde_json::json!({ "ok": true }),
+            "la réponse nue doit être strictement ok:true, got: {resp}"
+        );
+        let out = attach_req_id(resp, &req);
+        assert_eq!(out["id"], 99, "la boucle doit copier l'id client 99");
+
+        assert!(
+            handle.await.unwrap(),
+            "request_flush doit résoudre true sur l'ack"
+        );
+        assert_eq!(
+            state.fs_flush.waiter_count(),
+            0,
+            "map des waiters vide après l'acquit"
+        );
+    }
+
+    /// Test 08c-2 (request_flush_times_out_without_ack): aucun ack → `false`
+    /// après le timeout borné, waiter retiré de la map (pas de fuite).
+    #[tokio::test]
+    async fn request_flush_times_out_without_ack() {
+        use std::time::Duration;
+
+        let state = make_state("flush_timeout");
+        let _events = state.fs_events.subscribe(); // frontend abonné… muet
+
+        let start = std::time::Instant::now();
+        let acked = state
+            .fs_flush
+            .request_flush("b.rs", Duration::from_millis(50))
+            .await;
+        assert!(!acked, "aucun ack → false (repli debounce côté 08d)");
+        assert!(
+            start.elapsed() >= Duration::from_millis(50),
+            "l'attente doit être bornée par le timeout, pas court-circuitée"
+        );
+        assert_eq!(
+            state.fs_flush.waiter_count(),
+            0,
+            "waiter nettoyé au timeout"
+        );
+    }
+
+    /// Test 08c-3 (handle_ack_unknown_and_double_noop): id inconnu → rien ;
+    /// double ack → le premier gagne, le second est un no-op sans panique.
+    #[tokio::test]
+    async fn handle_ack_unknown_and_double_noop() {
+        use std::time::Duration;
+
+        let state = make_state("flush_noop");
+        state.fs_flush.handle_ack(12345); // id inconnu : rien ne se passe
+
+        let mut events = state.fs_events.subscribe();
+        let spawned = state.clone();
+        let handle = tokio::spawn(async move {
+            spawned
+                .fs_flush
+                .request_flush("c.rs", Duration::from_secs(2))
+                .await
+        });
+        let raw = events.recv().await.unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = frame["id"].as_u64().unwrap();
+
+        state.fs_flush.handle_ack(id); // premier ack : résout
+        state.fs_flush.handle_ack(id); // second : déjà résolu → no-op, pas de panique
+        assert!(handle.await.unwrap(), "le premier ack doit gagner");
+        assert_eq!(state.fs_flush.waiter_count(), 0);
+    }
+
+    /// Test 08c-4 (flush_ack_malformed_rejected): `ackFor` absent ou non
+    /// numérique → `{ok:false}` message exact, aucun waiter résolu. Avec
+    /// `ackFor` présent et un `id` de requête normal, la réponse porte cet id
+    /// (non-régression du piège de corrélation : le client solde son pending).
+    #[tokio::test]
+    async fn flush_ack_malformed_rejected() {
+        use std::time::Duration;
+
+        let state = make_state("flush_malformed");
+        let mut events = state.fs_events.subscribe();
+        let spawned = state.clone();
+        let handle = tokio::spawn(async move {
+            spawned
+                .fs_flush
+                .request_flush("d.rs", Duration::from_secs(2))
+                .await
+        });
+        let raw = events.recv().await.unwrap();
+        let frame: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = frame["id"].as_u64().unwrap();
+
+        let malformed = [
+            r#"{"op":"flush-ack","id":5}"#.to_string(),
+            format!(r#"{{"op":"flush-ack","ackFor":"{id}","id":5}}"#),
+            r#"{"op":"flush-ack","ackFor":-1,"id":5}"#.to_string(),
+            format!(r#"{{"op":"flush-ack","ackFor":{id}.5,"id":5}}"#),
+        ];
+        for req in &malformed {
+            let resp = dispatch_fs_message(&state, req).await;
+            assert_eq!(resp["ok"], false, "ack malformé rejeté: {req}");
+            assert_eq!(
+                resp["error"], "flush-ack requires numeric ackFor",
+                "message d'erreur exact pour {req}"
+            );
+        }
+        assert_eq!(
+            state.fs_flush.waiter_count(),
+            1,
+            "aucun ack malformé ne résout le waiter"
+        );
+
+        // Ack valide : réponse nue ok:true, et l'id de requête normal (42)
+        // copié dans la réponse par la boucle — le client résout son pending
+        // sur cet id, la queue FIFO continue (piège asserti côté sandboxWs.spec).
+        let req = format!(r#"{{"op":"flush-ack","ackFor":{id},"id":42}}"#);
+        let resp = dispatch_fs_message(&state, &req).await;
+        let out = attach_req_id(resp, &req);
+        assert_eq!(out["ok"], true);
+        assert_eq!(out["id"], 42, "un id de requête normal reste copié");
+        assert!(handle.await.unwrap());
+        assert_eq!(state.fs_flush.waiter_count(), 0);
     }
 }

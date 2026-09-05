@@ -436,12 +436,14 @@ mod tests {
 
         // TicketStore externe partagé (pattern de ticket.rs)
         let external_store = TicketStore::new();
+        let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
             config,
             auth: Arc::new(auth),
             tickets: external_store.clone(),
             lsp: Arc::new(LspManager::default()),
-            fs_events: crate::fs_events_channel(),
+            fs_events,
+            fs_flush,
         }
     }
 

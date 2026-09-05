@@ -192,12 +192,14 @@ mod tests {
             sandbox_root: std::path::Path::new("/tmp").into(),
         });
         let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
             config,
             auth,
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
-            fs_events: crate::fs_events_channel(),
+            fs_events,
+            fs_flush,
         }
     }
 

@@ -3,7 +3,7 @@ import { Transaction } from '@codemirror/state';
 import type { Extension } from '@codemirror/state';
 
 /**
- * Autosave éditeur (feature lsp-agent-interface, tâches 07a + 08b).
+ * Autosave éditeur (feature lsp-agent-interface, tâches 07a + 08b + 08c).
  *
  * Une extension CodeMirror par onglet : document modifié → `write` debouncé
  * vers /ws/fs, exactement la payload du save manuel (`Editor.vue`), sérialisée
@@ -16,6 +16,11 @@ import type { Extension } from '@codemirror/state';
  * et `makeFileChangedHandler` — lecture raw puis rechargement du buffer via
  * la transaction `DISK_RELOAD_EVENT`. L'émetteur d'événements sera
  * `edit_and_check` (08d) ; le déclencheur n'est donc pas encore branché.
+ *
+ * La tâche 08c pose l'aller-retour « flush avant écriture » (cas B R1 sq3) :
+ * `flushEditor` (flush d'un onglet par path) et `makeFlushRequestHandler` —
+ * réception du push `flush-request`, flush local, ack via la queue FIFO avec
+ * le champ dédié `ackFor` (jamais `id` en params, jamais `ws.send` brut).
  */
 
 /** Événement utilisateur posé sur TOUTE transaction de rechargement depuis le
@@ -87,6 +92,16 @@ export function flushAllEditors(): void {
   for (const hooks of [...syncRegistry.values()]) hooks.flush();
 }
 
+/** Flush d'UN onglet par path ; false si aucun onglet ou rien d'en attente
+ *  (08c : cible du handler `flush-request` — le path réclamé par le serveur ;
+ *  multi-onglets, chaque session WS appelante acquittera de toute façon, le
+ *  serveur résout au premier ack). */
+export function flushEditor(path: string): boolean {
+  const hooks = syncRegistry.get(path);
+  if (!hooks) return false;
+  return hooks.flush();
+}
+
 /** Recharge le buffer d'une vue depuis un contenu venant du disque :
  *  transaction full-doc, `userEvent: DISK_RELOAD_EVENT`. Ne fait AUCUNE
  *  écriture, AUCUNE lecture. Appelé par le hook `reload` de l'onglet, lui-même
@@ -141,6 +156,47 @@ export function makeFileChangedHandler(
         // (réseau, fichier disparu) laisse le buffer inchangé, sans statut.
         () => {},
       );
+  };
+}
+
+/** Handler de l'événement `{"event":"flush-request","id":N,"path":…}` (08c,
+ *  arbitrage R1 sq3 cas B) : le serveur (edit_and_check en 08d) réclame un
+ *  flush AVANT d'écrire et attend l'ack. `flushEditor(path)` d'abord — chemin
+ *  inconnu ou rien d'en attente = « rien à flush », un SUCCÈS : on ack
+ *  QUAND MÊME (le broadcast touche toutes les sessions, chacune acquitte,
+ *  le serveur résout au premier ack et n'a pas besoin de qui tient le
+ *  fichier).
+ *
+ *  ACK via `client.request('flush-ack', { ackFor: id })` :
+ *  - JAMAIS `ws.send` brut : `flush()` enfile son `write` dans la queue FIFO
+ *    du client ; un send brut partirait devant et l'ack précéderait l'écriture
+ *    — l'inverse exact de la garantie cherchée.
+ *  - JAMAIS `{ id }` en params : `SandboxFsClient.request` pose son propre id
+ *    de corrélation PUIS spread les params — un `id` ici l'écraserait, le
+ *    pending ne serait jamais résolu et la queue FIFO mourrait (piège vérifié
+ *    en lecture de sandboxWs.ts:103-115, asserti en sandboxWs.spec). D'où le
+ *    champ dédié `ackFor`.
+ *
+ *  Fire-and-forget : un ws fermé en vol fait rejeter le request — écho de
+ *  toute façon inutile (le serveur retombe sur son timeout court).
+ *
+ *  Event sans id numérique → ignoré : sans `ackFor` renvoyable, le serveur
+ *  n'aurait rien à résoudre (frame corrompue ; pas de flush non plus, aucune
+ *  requête légitime derrière). */
+export function makeFlushRequestHandler(
+  getClient: () => AutosaveFsClient | null,
+): (event: { id?: unknown; path?: unknown }) => void {
+  return (event: { id?: unknown; path?: unknown }) => {
+    if (typeof event.id !== 'number' || !Number.isInteger(event.id)) return;
+    const id = event.id;
+    const path = typeof event.path === 'string' ? event.path : undefined;
+    // Best effort : false (aucun onglet, rien d'en attente) n'empêche pas
+    // l'acquit — cf. « rien à flush est un succès » ci-dessus.
+    if (path !== undefined) flushEditor(path);
+    const client = getClient();
+    // WS pas connecté : rien à acquitter, le serveur retombera sur timeout.
+    if (!client) return;
+    client.request('flush-ack', { ackFor: id }).catch(() => {});
   };
 }
 

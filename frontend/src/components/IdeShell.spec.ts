@@ -106,6 +106,15 @@ describe('IdeShell', () => {
     expect(fsOnEvent).toHaveBeenCalledWith('file-changed', expect.any(Function));
   });
 
+  it('abonne le handler flush-request sur le client /ws/fs créé (08c)', async () => {
+    mount(IdeShell, { props: { sandboxName: 'foo' } });
+    await new Promise((r) => setTimeout(r, 0));
+
+    // Aller-retour « flush avant écriture » (cas B, R1 sq3) : l'abonnement
+    // vit à côté de celui de file-changed, même client, même registre.
+    expect(fsOnEvent).toHaveBeenCalledWith('flush-request', expect.any(Function));
+  });
+
   it('un échec du ticket laisse fsClient null', async () => {
     openSandboxWs.mockRejectedValueOnce(new Error('ticket failed'));
     const wrapper = mount(IdeShell, { props: { sandboxName: 'bar' } });

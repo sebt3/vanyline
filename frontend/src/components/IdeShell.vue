@@ -10,7 +10,7 @@ import GitPanel from './panels/GitPanel.vue';
 import DiffView from './panels/DiffView.vue';
 import { openSandboxWs, SandboxFsClient } from '../api/sandboxWs';
 import { getLspClient, disposeLspClients } from '../api/lsp';
-import { makeFileChangedHandler } from './panels/editorAutosave';
+import { makeFileChangedHandler, makeFlushRequestHandler } from './panels/editorAutosave';
 import { dirRootUri } from './panels/editorLanguage';
 import { debounce, loadLayout, saveLayout } from './ideLayoutPersistence';
 import { clearIdeActions, registerIdeActions, useIdeSession } from '../composables/useIdeSession';
@@ -53,6 +53,11 @@ onMounted(() => {
       // pas de frappe en attente de flush. Désabonnement implicite : la liste
       // d'abonnés vit dans le client, qui meurt avec le WS.
       client.onEvent('file-changed', makeFileChangedHandler(() => fsClient.value));
+      // Aller-retour « flush avant écriture » (tâche 08c, cas B R1 sq3) : le
+      // serveur (edit_and_check en 08d) réclame le flush d'un path et attend
+      // l'ack avant d'écrire. L'ack part par la queue du client — jamais
+      // devant le write du flush (FIFO), cf. makeFlushRequestHandler.
+      client.onEvent('flush-request', makeFlushRequestHandler(() => fsClient.value));
       fsClient.value = client;
     })
     .catch(() => {

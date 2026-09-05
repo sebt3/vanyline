@@ -288,4 +288,31 @@ describe('SandboxFsClient', () => {
     // Sans id, sans event, sans requête en vol : ignoré.
     ws.emitMessage('{"ok":true,"content":"orpheline"}');
   });
+
+  it('la queue survit à un aller-retour flush-ack (08c)', async () => {
+    // Piège de l'aller-retour « flush avant écriture » : `request` pose son
+    // propre id de corrélation PUIS spread les params — un params `{id}`
+    // l'écraserait, le pending ne serait jamais résolu et la queue FIFO
+    // mourrait. L'ack voyage donc dans `ackFor` ; assertion anti-blocage :
+    // une requête SUIVANTE part bien après la réponse.
+    ws = new FakeWebSocket('wss://example.com/ws/fs');
+    const client = new SandboxFsClient(ws as unknown as WebSocket);
+
+    const p = client.request('flush-ack', { ackFor: 7 });
+    await flushQueue();
+    expect(ws.sent[0]).toBe('{"op":"flush-ack","id":1,"ackFor":7}');
+
+    // Réponse serveur : {ok:true} nu + id de corrélation attaché par la
+    // boucle (attach_req_id, 08b) — le pending se solde normalement.
+    ws.emitMessage('{"ok":true,"id":1}');
+    expect(await p).toEqual({ ok: true, id: 1 });
+
+    // Queue vivante : la requête suivante est envoyée avec son id 2.
+    const p2 = client.request('read', { path: 'a.txt' });
+    await flushQueue();
+    expect(ws.sent.length).toBe(2);
+    expect(ws.sent[1]).toBe('{"op":"read","id":2,"path":"a.txt"}');
+    ws.emitMessage('{"ok":true,"content":"c","id":2}');
+    expect(await p2).toEqual({ ok: true, content: 'c', id: 2 });
+  });
 });

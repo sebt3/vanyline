@@ -236,12 +236,14 @@ mod tests {
     async fn issuance_without_auth_returns_401() {
         let config = make_config("admin", "reader");
         let auth = AuthState::new(config.clone()).unwrap();
+        let (fs_events, fs_flush) = crate::fs_push_channels();
         let app = build_app(AppState {
             config,
             auth: Arc::new(auth),
             tickets: TicketStore::new(),
             lsp: Arc::new(crate::lsp::LspManager::default()),
-            fs_events: crate::fs_events_channel(),
+            fs_events,
+            fs_flush,
         });
 
         let resp = app
@@ -269,12 +271,14 @@ mod tests {
         // uses Arc<Mutex<...>>, the clone shares the same underlying map — we can
         // verify redemptions after the request completes.
         let external_store = TicketStore::new();
+        let (fs_events, fs_flush) = crate::fs_push_channels();
         let app = build_app(AppState {
             config,
             auth: Arc::new(auth),
             tickets: external_store.clone(),
             lsp: Arc::new(crate::lsp::LspManager::default()),
-            fs_events: crate::fs_events_channel(),
+            fs_events,
+            fs_flush,
         });
 
         let resp = app

@@ -11,8 +11,11 @@ pub mod telemetry;
 pub mod tools_impl;
 pub mod ws;
 
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
@@ -22,6 +25,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, post},
 };
+use tokio::sync::{broadcast, oneshot};
 use tower_http::trace::TraceLayer;
 
 use auth::AuthState;
@@ -40,6 +44,12 @@ pub struct AppState {
     /// client WS abonné. L'émetteur d'événements est `edit_and_check` (08d) ;
     /// ici seul le canal existe.
     pub fs_events: tokio::sync::broadcast::Sender<String>,
+    /// Requêtes « flush cet URI » aller-retour (tâche 08c, arbitrage R1 sq3,
+    /// cas B de `edit_and_check`) : broadcast `flush-request` sur le canal
+    /// ci-dessus, puis attente bornée de l'`flush-ack` qui revient par la WS.
+    /// Consommatrice : `edit_and_check` (08d), via
+    /// [`FsFlushRequests::request_flush`].
+    pub fs_flush: Arc<FsFlushRequests>,
 }
 
 /// Capacité du canal `fs_events` (frames de push /ws/fs, tâche 08b).
@@ -52,6 +62,111 @@ pub const FS_EVENTS_CAPACITY: usize = 64;
 /// via `subscribe` après leur upgrade WS.
 pub fn fs_events_channel() -> tokio::sync::broadcast::Sender<String> {
     tokio::sync::broadcast::channel::<String>(FS_EVENTS_CAPACITY).0
+}
+
+/// Timeout de référence de l'aller-retour flush/ack (tâche 08c) : la WS est
+/// locale (ingress sandbox aller-retour en ms, canal 08b), 2 s est déjà une
+/// marge énorme ; le repli sur la fenêtre de debounce en cas de timeout est
+/// sain, inutile d'attendre plus longtemps avant d'écrire.
+pub const FS_FLUSH_TIMEOUT_SECS: u64 = 2;
+
+/// Atelier du duo push `/ws/fs` d'un `AppState` : le canal `fs_events` et le
+/// [`FsFlushRequests`] branché dessus (tâche 08c). Les frames `flush-request`
+/// voyagent sur le MÊME canal que celui que les sessions `/ws/fs` relayent —
+/// d'où ce helper unique plutôt que deux constructions séparées : les deux
+/// champs doivent partager le canal, et le motif reste unique dans les vingt
+/// constructeurs d'`AppState` (même esprit que [`fs_events_channel`]).
+pub fn fs_push_channels() -> (broadcast::Sender<String>, Arc<FsFlushRequests>) {
+    let tx = fs_events_channel();
+    (tx.clone(), Arc::new(FsFlushRequests::new(tx)))
+}
+
+/// Requêtes « flush cet URI » émises vers le(s) frontend(s) (design R1 sq3,
+/// cas B de edit_and_check — tâche 08d consommatrice).
+pub struct FsFlushRequests {
+    next_id: AtomicU64,
+    tx: broadcast::Sender<String>, // clone de fs_events
+    waiters: Mutex<HashMap<u64, oneshot::Sender<()>>>,
+}
+
+impl FsFlushRequests {
+    pub fn new(tx: broadcast::Sender<String>) -> Self {
+        Self {
+            // Ids à partir de 1 : l'id 0 est falsy en JS — un abonné un peu
+            // lâche (`if (event.id)`) le jetterait ; le client symétrique
+            // (`SandboxFsClient.nextId`) démarre aussi à 1.
+            next_id: AtomicU64::new(1),
+            tx,
+            waiters: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Garde d'accès aux waiters : une lock empoisonnée (panic survenu dans
+    /// une section qui ne fait qu'insérer/retirer des entrées) garde une map
+    /// intacte — on récupère l'intérieur plutôt que de propager (le crate
+    /// interdit `unwrap` hors tests).
+    fn waiters(&self) -> std::sync::MutexGuard<'_, HashMap<u64, oneshot::Sender<()>>> {
+        self.waiters
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Broadcast `{"event":"flush-request","id":N,"path":<relatif>}` puis
+    /// attend l'ack, borné à `timeout`. `true` = ack reçu (le frontend a flush
+    /// et acquitté APRÈS son write — ordre FIFO de la queue client). `false` =
+    /// timeout (frontend absent/déconnecté/lent) : l'appelant (08d) retombe
+    /// sur la fenêtre de debounce et le mentionne dans le rapport.
+    /// Le waiter est retiré de la map à l'acquit ET au timeout (pas de fuite).
+    pub async fn request_flush(&self, path: &str, timeout: Duration) -> bool {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let frame = serde_json::json!({
+            "event": "flush-request",
+            "id": id,
+            "path": path,
+        })
+        .to_string();
+
+        let (ack_tx, ack_rx) = oneshot::channel::<()>();
+        // Le waiter est inséré AVANT le broadcast (course classique : un
+        // client rapide peut acquitter avant que ce code atteigne l'await
+        // ci-dessous — si le waiter n'est pas déjà en place, `handle_ack` ne
+        // trouve personne et le flush attendrait un ack déjà consommé). La
+        // lock est rendue immédiatement : jamais tenue à travers l'await.
+        self.waiters().insert(id, ack_tx);
+        // Zéro abonné (aucune session `/ws/fs` ouverte) : la frame ne va
+        // nulle part et aucun ack ne viendra jamais — cas traité par le
+        // chemin timeout ci-dessous, rien de spécial à en faire.
+        let _ = self.tx.send(frame);
+
+        match tokio::time::timeout(timeout, ack_rx).await {
+            // Ack reçu : `handle_ack` a déjà retiré le waiter de la map.
+            Ok(Ok(())) => true,
+            // Timeout, ou sender déposé sans valeur (cas défensif — le
+            // retireur est `handle_ack`) : nettoyage ici, pas de fuite.
+            Ok(Err(_)) | Err(_) => {
+                self.waiters().remove(&id);
+                false
+            }
+        }
+    }
+
+    /// Appelé par la branche `flush-ack` : résout le waiter (premier ack
+    /// gagne ; id inconnu ou déjà résolu → rien).
+    pub fn handle_ack(&self, id: u64) {
+        // Multi-onglets : le broadcast touche toutes les `fs_session`,
+        // chacune acquitte ; le `remove` rend le premier ack gagnant, les
+        // suivants trouvent une map sans l'id → no-op.
+        if let Some(ack_tx) = self.waiters().remove(&id) {
+            // Le récepteur peut être parti (timeout passé) : échec de send
+            // silencieux, le repli est déjà pris par l'appelant.
+            let _ = ack_tx.send(());
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiter_count(&self) -> usize {
+        self.waiters().len()
+    }
 }
 
 /// Build the main MCP application router (MCP + public routes).

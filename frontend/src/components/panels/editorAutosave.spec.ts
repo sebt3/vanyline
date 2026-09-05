@@ -8,7 +8,9 @@ import {
   applyDiskReload,
   autosaveExtension,
   flushAllEditors,
+  flushEditor,
   makeFileChangedHandler,
+  makeFlushRequestHandler,
   registerEditorSync,
 } from './editorAutosave';
 import type { AutosaveFsClient, EditorAutosave } from './editorAutosave';
@@ -391,6 +393,110 @@ describe('editorAutosave — handler file-changed (08b)', () => {
     await flushMicrotasks();
     expect(reload).not.toHaveBeenCalled();
 
+    unregister();
+  });
+});
+
+describe('editorAutosave — handler flush-request (08c)', () => {
+  it('flushEditor : false sans onglet, propage le hook flush sinon', () => {
+    // Aucun onglet sur ce path → false (cas « rien à flush » vu du registre).
+    expect(flushEditor('inconnu.rs')).toBe(false);
+
+    const flush = vi.fn(() => true);
+    const unregister = registerEditorSync('e.rs', {
+      flush,
+      reload: () => {},
+      hasPending: () => true, // hasPending sans rapport : flushEditor délègue
+    });
+    expect(flushEditor('e.rs')).toBe(true);
+    expect(flush).toHaveBeenCalledTimes(1);
+    unregister();
+    expect(flushEditor('e.rs')).toBe(false);
+  });
+
+  it('flush-request fait flush puis ack via la queue', async () => {
+    // Liste d'appels partagée : l'ORDRE flush → request est l'assertion clé —
+    // l'ack doit partir APRÈS le write enfilé par flush() (FIFO de la queue
+    // client ; un ws.send brut passerait devant l'écriture).
+    const calls: string[] = [];
+    const flush = vi.fn(() => {
+      calls.push('flush');
+      return true;
+    });
+    const unregister = registerEditorSync('a.rs', {
+      flush,
+      reload: () => {},
+      hasPending: () => false,
+    });
+    const { client, request } = makeFsClient(async () => {
+      calls.push('request');
+      return { ok: true };
+    });
+    const handler = makeFlushRequestHandler(() => client);
+
+    handler({ id: 7, path: 'a.rs' });
+    await flushMicrotasks();
+
+    expect(flush).toHaveBeenCalledTimes(1);
+    // Ack via request, avec `ackFor` SÉPARÉ de l'id de corrélation : un params
+    // `id` écraserait celui que SandboxFsClient pose lui-même (pending jamais
+    // résolu → queue FIFO bloquée à vie — piège vérifié, asserti en dessous).
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request).toHaveBeenCalledWith('flush-ack', { ackFor: 7 });
+    expect(request.mock.calls[0][1]).not.toHaveProperty('id');
+    expect(calls).toEqual(['flush', 'request']);
+    unregister();
+  });
+
+  it('chemin inconnu acknowledge quand même', async () => {
+    // Aucun onglet sur z.rs : « rien à flush » est un SUCCÈS — le serveur
+    // résout au premier ack et n'a pas besoin de savoir qui tient le fichier
+    // (le broadcast touche toutes les sessions, chacune acquitte).
+    const { client, request } = makeFsClient();
+    const handler = makeFlushRequestHandler(() => client);
+
+    handler({ id: 8, path: 'z.rs' });
+    await flushMicrotasks();
+
+    expect(request).toHaveBeenCalledWith('flush-ack', { ackFor: 8 });
+  });
+
+  it('event sans id numérique ignoré', async () => {
+    const flush = vi.fn(() => true);
+    const unregister = registerEditorSync('a.rs', {
+      flush,
+      reload: () => {},
+      hasPending: () => false,
+    });
+    const { client, request } = makeFsClient();
+    const handler = makeFlushRequestHandler(() => client);
+
+    handler({ path: 'a.rs' }); // id absent
+    handler({ id: '7', path: 'a.rs' }); // id non numérique
+    await flushMicrotasks();
+
+    // Sans id numérique, aucun ackFor renvoyable : le serveur n'aurait rien à
+    // résoudre — frame ignorée, et pas de flush non plus (aucune requête
+    // légitime derrière).
+    expect(flush).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
+    unregister();
+  });
+
+  it('client null ou ack en échec : fire-and-forget, rien ne remonte', async () => {
+    // WS fermé en vol → request rejeté : avalé (de toute façon le serveur
+    // retombe sur son timeout). Aucun rejet non géré ne doit fuite (vitest).
+    const { client } = makeFsClient(async () => {
+      throw new Error('ws fermé');
+    });
+    const unregister = registerEditorSync('f.rs', {
+      flush: () => true,
+      reload: () => {},
+      hasPending: () => false,
+    });
+    makeFlushRequestHandler(() => client)({ id: 9, path: 'f.rs' });
+    makeFlushRequestHandler(() => null)({ id: 9, path: 'f.rs' });
+    await flushMicrotasks();
     unregister();
   });
 });
