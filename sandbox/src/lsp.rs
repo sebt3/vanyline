@@ -223,6 +223,12 @@ struct LspSessionInner {
     /// primaire n'est PAS dans cette liste — il garde ses champs historiques
     /// ci-dessus (`cmd_tx`, `pending`, `next_req`, `child`).
     aux: Vec<Arc<AuxChild>>,
+    /// Barrières de fusion des requêtes (tâche 07), clef sur le session id du
+    /// primaire (espace d'ids historique de `pending`). Vide en mono-process
+    /// (`aux: []`) comme pour toute méthode `MergeRoute::Primary` : le chemin
+    /// historique n'est jamais dévié par une barrière inexistante (invariant
+    /// 8). Purge par `unsubscribe` côté client.
+    merges: Mutex<HashMap<u64, PendingMerge>>,
     _toolchain_name: String,
 }
 
@@ -235,6 +241,11 @@ enum InternalPending {
     /// un `tsserver/request` du primaire : `vue_id` est l'élément [0] de
     /// `params[0]`, restitué TEL QUEL dans la `tsserver/response`.
     TsserverForward { vue_id: Value },
+    /// Réponse d'un aux à une requête CLIENT fan-out (barrière task-07) :
+    /// `session_id` est le session id du primaire (clef de `merges`) — l'id
+    /// interne de l'aux ne sort jamais côté client, sa réponse est consignée
+    /// comme part de la barrière (règle 3).
+    ClientMerge { session_id: u64 },
 }
 
 /// Un enfant auxiliaire du multiplexeur (jamais le primaire). Possède son canal
@@ -398,6 +409,358 @@ fn concat_diag_parts(uri_parts: &HashMap<usize, Vec<Value>>) -> Vec<Value> {
     merged
 }
 
+// ── Tâche 07 : routage des requêtes en composite + fusions JSON pures ──────
+
+/// Index de la part du PRIMAIRE dans une barrière `PendingMerge` (les aux
+/// portent leur `AuxChild::index`, 1..N — 0 est réservé au primaire, comme
+/// pour les parts de diagnostics de la tâche 06).
+const PRIMARY_PART: usize = 0;
+
+/// Politique de routage d'une REQUÊTE client en composite (`aux` non vide).
+/// `aux` vide ⟹ la table n'est JAMAIS consultée, chemin primaire historique
+/// strict (invariant 8). Défaut : `Primary` — méthodes mono-serveur par
+/// design : `textDocument/formatting`, `textDocument/documentSymbol`,
+/// `textDocument/semanticTokens/*` (tâche 09, stratégie de délégation par
+/// plage déjà tranchée), `textDocument/completion` +
+/// `completionItem/resolve` (tâche 08), `textDocument/signatureHelp` (non
+/// listée au design ⟹ défaut assumé, extensible après vérification manuelle).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MergeRoute {
+    Primary,
+    All,
+}
+
+// TODO(task-08) : `textDocument/completion` et `completionItem/resolve`
+// basculeront ici en `All` avec leur fusionneur dédié — `Primary` d'ici là,
+// même en composite (test `merge_completion_stays_primary` : garde posée
+// exprès pour être inversée par la tâche 08).
+fn merge_route_for_method(method: &str) -> MergeRoute {
+    match method {
+        "textDocument/hover"
+        | "textDocument/definition"
+        | "textDocument/typeDefinition"
+        | "textDocument/implementation"
+        | "textDocument/references"
+        | "textDocument/codeAction"
+        | "textDocument/prepareRename"
+        | "textDocument/rename" => MergeRoute::All,
+        _ => MergeRoute::Primary,
+    }
+}
+
+/// Warn sur une part de fusion au JSON inattendu : sa contribution devient
+/// vide — JAMAIS une panique (contrat des fusionneurs, tâche 07).
+fn warn_unexpected_merge_part(method: &str, part_index: usize, part: &Value) {
+    tracing::warn!(
+        method,
+        part_index,
+        "LSP: unexpected JSON in merge part, contributing empty: {part}"
+    );
+}
+
+/// Une réponse `Hover.contents` est-elle un `MarkupContent` (champs `kind` et
+/// `value` tous deux des chaînes) ? Les autres formes (`MarkedString` chaîne,
+/// `{language, value}`, tableau) relèvent du repli de normalisation.
+fn is_markup_content(contents: &Value) -> bool {
+    contents.get("kind").and_then(Value::as_str).is_some()
+        && contents.get("value").and_then(Value::as_str).is_some()
+}
+
+/// `hover` : `null | {contents}` ; tous null/absents ⟹ `null` ; un seul ⟹
+/// celui-là verbatim ; plusieurs ⟹ si chaque `contents` est un
+/// `MarkupContent` : valeur concaténée primary-first séparée par
+/// `"\n\n---\n\n"` dans l'objet du primaire (kind = celui du primaire, champs
+/// secondaires comme `range` conservés) ; SINON repli : normalisation en
+/// TABLEAU de marked strings (chaîne ou objet) concaténé primary-first. Une
+/// part non-objet ou sans `contents` exploitable contribue vide (warn).
+fn merge_hover(parts: &[Option<Value>]) -> Value {
+    let mut present: Vec<(usize, Value)> = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        match part {
+            None | Some(Value::Null) => {}
+            Some(Value::Object(hover)) => present.push((index, Value::Object(hover.clone()))),
+            Some(unexpected) => warn_unexpected_merge_part("textDocument/hover", index, unexpected),
+        }
+    }
+    match present.len() {
+        0 => Value::Null,
+        1 => present.remove(0).1,
+        _ => {
+            if present
+                .iter()
+                .all(|(_, hover)| hover.get("contents").is_some_and(is_markup_content))
+            {
+                let mut merged = present[0].1.clone();
+                let joined = present
+                    .iter()
+                    .map(|(_, hover)| {
+                        hover["contents"]["value"]
+                            .as_str()
+                            .unwrap_or_default()
+                            .to_string()
+                    })
+                    .collect::<Vec<String>>()
+                    .join("\n\n---\n\n");
+                merged["contents"]["value"] = Value::String(joined);
+                merged
+            } else {
+                let mut contents: Vec<Value> = Vec::new();
+                for (index, hover) in &present {
+                    match hover.get("contents") {
+                        Some(Value::String(s)) => contents.push(Value::String(s.clone())),
+                        Some(Value::Array(items)) => contents.extend(items.iter().cloned()),
+                        Some(object @ Value::Object(_)) => contents.push(object.clone()),
+                        _ => warn_unexpected_merge_part("textDocument/hover", *index, hover),
+                    }
+                }
+                let mut merged = present[0].1.clone();
+                merged["contents"] = Value::Array(contents);
+                merged
+            }
+        }
+    }
+}
+
+/// `definition` / `typeDefinition` / `implementation` / `references` : chaque
+/// résultat `null`/absent | objet `Location` seul (wrap en tableau) | tableau
+/// (`Location` ou `LocationLink`, mélangé accepté, opaque) ⟹ concaténation
+/// primary-first ; toutes null ⟹ `null` ; sinon tableau (éventuellement
+/// vide — un serveur qui répond `[]` a répondu). Une part scalaire inattendue
+/// contribue vide (warn).
+fn merge_locations(parts: &[Option<Value>]) -> Value {
+    let mut merged: Vec<Value> = Vec::new();
+    let mut saw_locations = false;
+    for (index, part) in parts.iter().enumerate() {
+        match part {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(items)) => {
+                saw_locations = true;
+                merged.extend(items.iter().cloned());
+            }
+            Some(value @ Value::Object(_)) => {
+                saw_locations = true;
+                merged.push(value.clone());
+            }
+            Some(unexpected) => warn_unexpected_merge_part("locations", index, unexpected),
+        }
+    }
+    if saw_locations {
+        Value::Array(merged)
+    } else {
+        Value::Null
+    }
+}
+
+/// `textDocument/codeAction` : tableaux concaténés primary-first ; `null` ⟹
+/// `[]` (la fusion de codeActions est TOUJOURS un tableau) ; non-tableau
+/// inconnu ⟹ contribution vide + warn (jamais de panique).
+fn merge_code_actions(parts: &[Option<Value>]) -> Value {
+    let mut merged: Vec<Value> = Vec::new();
+    for (index, part) in parts.iter().enumerate() {
+        match part {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(items)) => merged.extend(items.iter().cloned()),
+            Some(unexpected) => {
+                warn_unexpected_merge_part("textDocument/codeAction", index, unexpected)
+            }
+        }
+    }
+    Value::Array(merged)
+}
+
+/// `textDocument/prepareRename` : primaire non-`null` gagne ; sinon premier
+/// non-`null` aux (fallback) ; tous null/absents ⟹ `null`.
+fn merge_prepare_rename(parts: &[Option<Value>]) -> Value {
+    parts
+        .iter()
+        .flatten()
+        .find(|value| !value.is_null())
+        .cloned()
+        .unwrap_or(Value::Null)
+}
+
+/// Variante `WorkspaceEdit` d'un objet : `changes` est la variante
+/// prépondérante (la branche `documentChanges` ne s'applique qu'en son
+/// absence — contrat tâche 07 « les DEUX avec documentChanges (et pas
+/// changes) »).
+fn workspace_edit_variant(edit: &serde_json::Map<String, Value>) -> Option<&'static str> {
+    if edit.contains_key("changes") {
+        Some("changes")
+    } else if edit.contains_key("documentChanges") {
+        Some("documentChanges")
+    } else {
+        None
+    }
+}
+
+/// Pli gauche d'un `WorkspaceEdit` entrant dans le fold primary-first de
+/// `textDocument/rename` : `changes` × `changes` ⟹ merge objet par URI
+/// (concaténation des tableaux d'edits primary-first dans le MÊME tableau,
+/// URIs disjointes ajoutées — une valeur non-tableau côté primaire n'est
+/// jamais écrasée) ; `documentChanges` × `documentChanges` ⟹ concat des
+/// tableaux primary-first ; variantes MIXTES (`changes` d'un côté,
+/// `documentChanges` de l'autre) ⟹ on garde la variante du PRIMAIRE et les
+/// edits de l'aux sont abandonnés avec `tracing::warn!` explicite (documenté
+/// : rare, ne peut pas se mixer proprement, mieux vaut un renommage partiel
+/// qu'un échec) ; entrant sans variante ⟹ rien à prendre. Champs secondaires
+/// (`changeAnnotation`, metadata) : jamais copiés de l'aux — seuls ceux du
+/// primaire survivent, le pli ne touche que les deux variantes d'edits.
+fn fold_workspace_edit(
+    mut held: serde_json::Map<String, Value>,
+    incoming: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    match (
+        workspace_edit_variant(&held),
+        workspace_edit_variant(incoming),
+    ) {
+        (Some("changes"), Some("changes")) => {
+            let held_ok = if let Some(held_changes) =
+                held.get_mut("changes").and_then(Value::as_object_mut)
+            {
+                match incoming.get("changes").and_then(Value::as_object) {
+                    Some(incoming_changes) => {
+                        for (uri, edits) in incoming_changes {
+                            match held_changes.get_mut(uri) {
+                                Some(Value::Array(held_edits)) => match edits.as_array() {
+                                    Some(incoming_edits) => {
+                                        held_edits.extend(incoming_edits.iter().cloned());
+                                    }
+                                    None => warn_unexpected_merge_part(
+                                        "textDocument/rename",
+                                        usize::MAX,
+                                        edits,
+                                    ),
+                                },
+                                Some(existing) => warn_unexpected_merge_part(
+                                    "textDocument/rename",
+                                    usize::MAX,
+                                    existing,
+                                ),
+                                None => {
+                                    held_changes.insert(uri.clone(), edits.clone());
+                                }
+                            }
+                        }
+                        true
+                    }
+                    None => false,
+                }
+            } else {
+                false
+            };
+            if !held_ok {
+                tracing::warn!("LSP: rename changes merge on unexpected JSON, keeping primary's");
+            }
+        }
+        (Some("documentChanges"), Some("documentChanges")) => {
+            let merged = match (
+                held.get_mut("documentChanges")
+                    .and_then(Value::as_array_mut),
+                incoming.get("documentChanges").and_then(Value::as_array),
+            ) {
+                (Some(held_changes), Some(incoming_changes)) => {
+                    held_changes.extend(incoming_changes.iter().cloned());
+                    true
+                }
+                _ => false,
+            };
+            if !merged {
+                tracing::warn!(
+                    "LSP: rename documentChanges merge on unexpected JSON, keeping primary's"
+                );
+            }
+        }
+        (Some(held_variant), Some(incoming_variant)) => {
+            // Variants identiques => deja mergees plus haut ; ici c'est le
+            // cas MIXTE : garde la variante primaire, abandon explicite.
+            tracing::warn!(
+                held_variant,
+                incoming_variant,
+                "LSP: rename WorkspaceEdit mixed variants, keeping primary's and dropping aux's edits"
+            );
+        }
+        (None, Some(variant)) => {
+            // Primaire sans variante (WorkspaceEdit de champs secondaires
+            // seuls) : on adopte celle de l'aux.
+            if let Some(value) = incoming.get(variant) {
+                held.insert(variant.to_string(), value.clone());
+            }
+        }
+        _ => {}
+    }
+    held
+}
+
+/// `textDocument/rename` : `null | WorkspaceEdit` ; un seul ⟹ celui-là ;
+/// plusieurs ⟹ pli `fold_workspace_edit` primary-first. Parts null/absentes
+/// ignorées ; non-objet inattendu ⟹ contribution vide + warn.
+fn merge_rename(parts: &[Option<Value>]) -> Value {
+    let mut acc: Option<serde_json::Map<String, Value>> = None;
+    for (index, part) in parts.iter().enumerate() {
+        let Some(value) = part.as_ref().filter(|value| !value.is_null()) else {
+            continue;
+        };
+        let Some(edit) = value.as_object() else {
+            warn_unexpected_merge_part("textDocument/rename", index, value);
+            continue;
+        };
+        acc = Some(match acc.take() {
+            None => edit.clone(),
+            Some(held) => fold_workspace_edit(held, edit),
+        });
+    }
+    acc.map(Value::Object).unwrap_or(Value::Null)
+}
+
+/// Dispatch de la fusion vers les cinq cas de la table `MergeRoute::All`
+/// (table fermée : toute méthode `All` a son fusionneur). Méthode inconnue
+/// (impossible par la table, défense) ⟹ part du primaire ou `null`, warn —
+/// jamais de panique.
+fn merge_result_for(method: &str, parts: &[Option<Value>]) -> Value {
+    match method {
+        "textDocument/hover" => merge_hover(parts),
+        "textDocument/definition"
+        | "textDocument/typeDefinition"
+        | "textDocument/implementation"
+        | "textDocument/references" => merge_locations(parts),
+        "textDocument/codeAction" => merge_code_actions(parts),
+        "textDocument/prepareRename" => merge_prepare_rename(parts),
+        "textDocument/rename" => merge_rename(parts),
+        unknown => {
+            tracing::warn!(
+                method = unknown,
+                "LSP: no merge function for routed method, keeping primary's part"
+            );
+            parts
+                .first()
+                .and_then(|part| part.clone())
+                .filter(|value| !value.is_null())
+                .unwrap_or(Value::Null)
+        }
+    }
+}
+
+/// Une entrée de barrière (tâche 07) : la requête d'un client fan-out vers le
+/// primaire (part 0) + chaque aux vivant (parts 1..N, index
+/// `AuxChild::index`), UNE réponse client unique à la fin. `expected` =
+/// nombre de parts réellement émises (aux morts/injoignables exclus — cf.
+/// règle 1). La barrière est clef sur le SESSION id du primaire : le primaire
+/// garde son espace d'ids historique (`next_req`/`pending` inchangés), les
+/// aux répondent sous leurs ids internes corrélés par
+/// `InternalPending::ClientMerge`. Une seule réponse sortante par requête
+/// client : `result` fusionné primary-first (ou `error` du primaire transmis
+/// tel quel en échec fast), id d'origine restauré.
+struct PendingMerge {
+    client: ClientId,
+    orig_id: i64,
+    method: String,
+    expected: usize,
+    /// part index (0 = primaire) → réponse ; `None` = l'enfant a rendu une
+    /// erreur/EOF (contribution vide — seul le primaire en ERREUR fait échouer
+    /// la requête entière, règles 4–5 tâche 07).
+    parts: HashMap<usize, Option<Value>>,
+}
+
 /// Session LSP : possède un process, multiplexe les clients.
 pub struct LspSession {
     inner: Arc<LspSessionInner>,
@@ -498,6 +861,7 @@ impl LspSession {
                 next_client: AtomicU64::new(1),
                 next_req: AtomicU64::new(1),
                 aux,
+                merges: Mutex::new(HashMap::new()),
                 _toolchain_name: spec.name.clone(),
             }),
         });
@@ -536,6 +900,15 @@ impl LspSession {
                     // Trame avec `id` → réponse : router au client d'origine
                     if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
                         let session_id = id as u64;
+                        // Tâche 07 : une réponse du primaire sur une session
+                        // id gouvernée par une barrière (`Route::All` en
+                        // composite) est une PART de fusion, jamais une
+                        // réponse client directe. Hors barrière (mono-process
+                        // inclus) ⟹ chemin historique exactement en dessous,
+                        // sans un octet de changement (règle 8, invariant 8).
+                        if reader_session.record_primary_merge_part(session_id, &msg) {
+                            continue;
+                        }
                         let mut pending = match reader_session.inner.pending.lock() {
                             Ok(g) => g,
                             Err(g) => g.into_inner(),
@@ -706,6 +1079,21 @@ impl LspSession {
                                         .unwrap_or(Value::Null);
                                     reader_session.send_tsserver_response(vue_id, body);
                                 }
+                                Some(InternalPending::ClientMerge { session_id }) => {
+                                    // Tâche 07, règle 3 : réponse de l'aux à
+                                    // une requête CLIENT fan-out — consignée
+                                    // dans la barrière (résultat →
+                                    // `Some(result)`, erreur → `None` + warn
+                                    // dégradé, jamais une erreur globale). La
+                                    // réponse brute ne sort JAMAIS vers un
+                                    // client ; barrière disparue ⟹ debug.
+                                    reader_session.record_aux_merge_part(
+                                        reader_aux.role.as_str(),
+                                        reader_aux.index,
+                                        session_id,
+                                        &msg,
+                                    );
+                                }
                                 None => {
                                     tracing::warn!(
                                         toolchain = reader_session.inner._toolchain_name.as_str(),
@@ -739,10 +1127,13 @@ impl LspSession {
                 // `[[vue_id, null]]` (best effort `try_send` : primaire mort ⟹
                 // ignoré, la requête d'origine n'aurait de toute façon jamais
                 // existé) pour que `vue-language-server` ne pende pas ; les
-                // `Initialize` se font clear comme avant (tâche 03) — et warn
-                // unique « degraded » seulement si la session est encore
-                // vivante : si le primaire vient de mourir en tuant cet aux,
-                // la dégradation serait du bruit.
+                // `Initialize` se font clear comme avant (tâche 03) ; les
+                // `ClientMerge` (tâche 07, règle 5) lèvent leur part en `None`
+                // avec tentative de complétion — un serveur mort ne doit pas
+                // bloquer la fusion primaire. Et warn unique « degraded »
+                // seulement si la session est encore vivante : si le primaire
+                // vient de mourir en tuant cet aux, la dégradation serait du
+                // bruit.
                 reader_aux.alive.store(false, Ordering::SeqCst);
                 // Purge des parts de CET enfant + recomputation du cache
                 // (tâche 06). Justification de la purge plutôt que du maintien :
@@ -751,17 +1142,29 @@ impl LspSession {
                 // fantômes — disparaître est le comportement sûr. Pas de notify
                 // sur ce chemin : réduction du cache, pas information nouvelle.
                 reader_session.drop_aux_parts(reader_aux.index);
+                let mut merge_session_ids: Vec<u64> = Vec::new();
                 {
                     let mut pending = reader_aux
                         .pending_internal
                         .lock()
                         .unwrap_or_else(|e| e.into_inner());
                     for entry in pending.values() {
-                        if let InternalPending::TsserverForward { vue_id } = entry {
-                            reader_session.send_tsserver_response(vue_id.clone(), Value::Null);
+                        match entry {
+                            InternalPending::TsserverForward { vue_id } => {
+                                reader_session.send_tsserver_response(vue_id.clone(), Value::Null);
+                            }
+                            InternalPending::ClientMerge { session_id } => {
+                                merge_session_ids.push(*session_id);
+                            }
+                            InternalPending::Initialize => {}
                         }
                     }
                     pending.clear();
+                }
+                // Hors du verrou `pending_internal` : `insert_merge_part`
+                // prend le verrou `merges` (jamais les deux simultanément).
+                for session_id in merge_session_ids {
+                    reader_session.insert_merge_part(reader_aux.index, session_id, None);
                 }
                 if reader_session.inner.alive.load(Ordering::SeqCst) {
                     tracing::warn!(
@@ -809,9 +1212,11 @@ impl LspSession {
     /// indépendamment du broadcast ci-dessous (cf. doc du champ
     /// `diagnostics_cache`) ; nettoyage des canaux fermés au passage.
     ///
-    /// TODO(task-07) : la fusion des REQUÊTES (routage et fusion des réponses
-    /// de plusieurs enfants pour une requête client, remapping d'ids) est hors
-    /// périmètre de cette tâche — NE RIEN fusionner sur ce chemin.
+    /// La fusion des REQUÊTES (routage par méthode, barrière `PendingMerge`
+    /// et ids internes d'aux — tâches 03/05/07) ne passe par CE chemin : elle
+    /// vit dans `merge_route_for_method`/`send` (fan-out),
+    /// `record_*_merge_part`/`complete_merge` (corrélation et réponse
+    /// fusionnée unique). Rien à fusionner ici.
     fn dispatch_notification_frame(&self, msg: &Value, payload: Vec<u8>, child_idx: usize) {
         // Le payload diffusé aux abonnés : part brute par défaut (mono-process
         // — octets d'origine inchangés — et trames non-diagnostic), fondu
@@ -1048,6 +1453,212 @@ impl LspSession {
         let _ = self.inner.cmd_tx.try_send(frame.to_string().into_bytes());
     }
 
+    /// Émet une trame vers un abonné (id restauré par l'appelant) : même
+    /// motif que le routage historique de la lectrice primaire — client absent
+    /// (déconnecté entre-temps) ⟹ ignoré silencieusement, JAMAIS de réponse
+    /// vers un client désabonné (règle 7).
+    fn send_to_client(&self, client: ClientId, msg: &Value) {
+        if let Ok(subs) = self.inner.subs.lock()
+            && let Some(tx) = subs.get(&client)
+        {
+            let _ = tx.send(msg.to_string().into_bytes());
+        }
+    }
+
+    /// Tâche 07, règles 2–4 — réponse du PRIMAIRE portant un session id
+    /// gouverné par une barrière : `rendre true` ⟹ la barrière possédait la
+    /// trame (consignée en part 0 si `result`, barrière RETENUE tant qu'elle
+    /// n'est pas complète, ou échec fast si `error`), le chemin historique
+    /// `pending` NE doit PAS s'exécuter — la réponse brute du primaire ne
+    /// part jamais telle quelle au client en mode fusion. `rendre false` ⟹
+    /// aucune barrière (mono-process inclus) : le chemin historique
+    /// s'exécute exactement comme avant (règle 8).
+    fn record_primary_merge_part(&self, session_id: u64, msg: &Value) -> bool {
+        let mut merges = self.inner.merges.lock().unwrap_or_else(|e| e.into_inner());
+        if !merges.contains_key(&session_id) {
+            return false;
+        }
+        // La barrière possède la requête : hygiène du `pending` (que le
+        // chemin historique aurait nettoyée). Aucune inversion de verrous
+        // possible : nulle part le verrou `merges` n'est pris PENDANT que
+        // `pending` est tenu (`send` les séquence, `unsubscribe` aussi, la
+        // lectrice aux n'a que `pending_internal`).
+        if let Ok(mut pending) = self.inner.pending.lock() {
+            pending.remove(&session_id);
+        }
+        if let Some(error) = msg.get("error") {
+            // Règle 4 : erreur PRIMAIRE ⟹ réponse erreur immédiate au client
+            // (id restauré, structure `error` transmise TELLE QUELLE),
+            // barrière retirée — les parts aux qui arrivent après sont
+            // ignorées silencieusement (entrée absente).
+            if let Some(pending_merge) = merges.remove(&session_id) {
+                tracing::warn!(
+                    toolchain = self.inner._toolchain_name.as_str(),
+                    method = pending_merge.method.as_str(),
+                    "LSP: primary error on merged request, failing fast: {error}"
+                );
+                drop(merges);
+                self.send_to_client(
+                    pending_merge.client,
+                    &serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": pending_merge.orig_id,
+                        "error": error,
+                    }),
+                );
+            }
+            return true;
+        }
+        let part = match msg.get("result") {
+            Some(result) => Some(result.clone()),
+            None => {
+                // Ni `result` ni `error` (trame inattendue) : contribution
+                // vide, warn — la barrière se complétera sans le primaire.
+                tracing::warn!(
+                    toolchain = self.inner._toolchain_name.as_str(),
+                    session_id,
+                    "LSP: primary response with neither result nor error, merge part empty"
+                );
+                None
+            }
+        };
+        let completed = {
+            let Some(pending) = merges.get_mut(&session_id) else {
+                return true; // purgé entre le test et le get_mut (règle 7)
+            };
+            pending.parts.insert(PRIMARY_PART, part);
+            if pending.parts.len() < pending.expected {
+                return true;
+            }
+            merges.remove(&session_id)
+        };
+        drop(merges);
+        if let Some(pending_merge) = completed {
+            self.complete_merge(pending_merge);
+        }
+        true
+    }
+
+    /// Tâche 07, règle 3 — réponse d'un aux à une requête client fan-out :
+    /// résultat → `Some(result)`, erreur JSON-RPC → `None` + warn dégradé
+    /// (la fusion continue sans cette part — jamais une erreur globale), ni
+    /// résultat ni erreur → `None` + warn.
+    fn record_aux_merge_part(&self, role: &str, part_index: usize, session_id: u64, msg: &Value) {
+        let part = if let Some(error) = msg.get("error") {
+            tracing::warn!(
+                toolchain = self.inner._toolchain_name.as_str(),
+                role,
+                "LSP: aux error on merged client request, empty part (degraded merge): {error}"
+            );
+            None
+        } else {
+            match msg.get("result") {
+                Some(result) => Some(result.clone()),
+                None => {
+                    tracing::warn!(
+                        toolchain = self.inner._toolchain_name.as_str(),
+                        role,
+                        session_id,
+                        "LSP: aux response with neither result nor error, merge part empty"
+                    );
+                    None
+                }
+            }
+        };
+        self.insert_merge_part(part_index, session_id, part);
+    }
+
+    /// Consigne la part `part_index` de la barrière `session_id` (règles
+    /// 3/5/6) et tente la complétion. Barrière disparue (déjà complétée,
+    /// tuée par l'erreur primaire, ou purgée par `unsubscribe`) ⟹ debug +
+    /// ignore — c'est le chemin normal des parts tardives.
+    fn insert_merge_part(&self, part_index: usize, session_id: u64, part: Option<Value>) {
+        let completed = {
+            let mut merges = self.inner.merges.lock().unwrap_or_else(|e| e.into_inner());
+            let Some(pending) = merges.get_mut(&session_id) else {
+                tracing::debug!(
+                    session_id,
+                    part_index,
+                    "LSP: merge part for absent barrier (completed, failed fast or unsubscribed), dropping"
+                );
+                return;
+            };
+            pending.parts.insert(part_index, part);
+            if pending.parts.len() < pending.expected {
+                return;
+            }
+            merges.remove(&session_id)
+        };
+        if let Some(pending_merge) = completed {
+            self.complete_merge(pending_merge);
+        }
+    }
+
+    /// Tente la complétion de la barrière `session_id` sans consigner de part
+    /// — pour les chemins où `expected` BAISSE après la dernière réponse
+    /// attendue (exclusion d'un aux injoignable dans `send`).
+    fn try_complete_merge(&self, session_id: u64) {
+        let completed = {
+            let mut merges = self.inner.merges.lock().unwrap_or_else(|e| e.into_inner());
+            match merges.get(&session_id) {
+                Some(pending) if pending.parts.len() >= pending.expected => {
+                    merges.remove(&session_id)
+                }
+                _ => None,
+            }
+        };
+        if let Some(pending_merge) = completed {
+            self.complete_merge(pending_merge);
+        }
+    }
+
+    /// Règle 1 — l'aux `role` ne recevra jamais cette requête (injoignable :
+    /// `try_send` en échec/fermé, ou mort entre le comptage et l'envoi) ⟹ sa
+    /// part est supprimée du compte : `expected -= 1`, jamais d'attente
+    /// perpétuelle. Barrière déjà disparue (erreur primaire fast, purge) ⟹
+    /// rien à décrémenter.
+    fn abandon_merge_expectation(&self, session_id: u64, role: &str) {
+        if let Some(pending_merge) = self
+            .inner
+            .merges
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&session_id)
+        {
+            pending_merge.expected = pending_merge.expected.saturating_sub(1);
+        }
+        tracing::debug!(
+            toolchain = self.inner._toolchain_name.as_str(),
+            role,
+            session_id,
+            "LSP: aux degraded (cannot receive merged request), part dropped"
+        );
+    }
+
+    /// Règle 6 — barrière complète (`parts.len() == expected`) : parties
+    /// index-ordered (0 = primaire d'abord, indépendamment de l'ordre
+    /// d'arrivée), fusion `merge_result_for`, puis LA réponse client unique
+    /// (id d'origine restauré, résultat fusionné primary-first). Les réponses
+    /// brutes d'enfants ne sortent jamais. `send_to_client` filtre les
+    /// désabonnés (règle 7).
+    fn complete_merge(&self, pending_merge: PendingMerge) {
+        let mut indexes: Vec<usize> = pending_merge.parts.keys().copied().collect();
+        indexes.sort_unstable();
+        let parts: Vec<Option<Value>> = indexes
+            .iter()
+            .filter_map(|index| pending_merge.parts.get(index).cloned())
+            .collect();
+        let result = merge_result_for(&pending_merge.method, &parts);
+        self.send_to_client(
+            pending_merge.client,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": pending_merge.orig_id,
+                "result": result,
+            }),
+        );
+    }
+
     /// Abonne un client. Rend `(ClientId, UnboundedReceiver<Vec<u8>>)`.
     /// Le receiver reçoit les réponses (id restauré) et notifications serveur.
     /// `None` quand le process meurt (canal fermé par la tâche lectrice).
@@ -1061,9 +1672,13 @@ impl LspSession {
     }
 
     /// Désabonne un client : retire le canal de sortie, les entrées `pending`
-    /// de ce client et sa présence dans toutes les sets de `editor_uris`
-    /// (déconnexion = plus de tenant, piste R1 sq1 — sans ça, une URI fermée
-    /// brutalement (WS coupé, pas de `didClose`) resterait tenue pour toujours).
+    /// de ce client, ses barrières de fusion `merges` en cours (tâche 07,
+    /// règle 7 — aucune réponse ne sera jamais émise vers un client désabonné,
+    /// et les `ClientMerge` d'aux déjà enregistrés se font avaler à l'arrivée :
+    /// entrée de barrière absente ⟹ debug) et sa présence dans toutes les sets
+    /// de `editor_uris` (déconnexion = plus de tenant, piste R1 sq1 — sans ça,
+    /// une URI fermée brutalement (WS coupé, pas de `didClose`) resterait
+    /// tenue pour toujours).
     /// Les `LspClient` des tools passent aussi par ici (leur `Drop`) mais ne
     /// sont jamais dans `editor_uris` — le nettoyage est un no-op pour eux.
     pub fn unsubscribe(&self, client: ClientId) {
@@ -1076,6 +1691,12 @@ impl LspSession {
             Err(g) => g.into_inner(),
         };
         pending.retain(|_, (c, _)| *c != client);
+        // Retirer les barrières de fusion de ce client (tâche 07, règle 7).
+        self.inner
+            .merges
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, pending_merge| pending_merge.client != client);
         // Retirer le client de toutes les sets d'URI tenues par des éditeurs ;
         // une URI sans aucun tenant disparaît de la map.
         let mut editor_uris = self
@@ -1091,14 +1712,17 @@ impl LspSession {
 
     /// Envoie un message JSON-RPC client → enfant(s).
     ///
-    /// Multiplexeur : requête avec `id` → primaire uniquement, CHEMIN INCHANGÉ
-    /// (routage/fusion par politique : tâche 07), sauf `initialize` dont une
-    /// copie avec `initOptions` injectés part aussi à chaque aux vivant
+    /// Multiplexeur : requête avec `id` → primaire par défaut, CHEMIN
+    /// INCHANGÉ ; en composite (`aux` non vide) les méthodes
+    /// `MergeRoute::All` (`merge_route_for_method`) sont de plus fan-out vers
+    /// chaque aux vivant sous id interne propre avec barrière `PendingMerge`
+    /// (tâche 07 — une seule réponse client fusionnée à la fin). `initialize`
+    /// garde sa copie systématique vers chaque aux vivant
     /// (`fan_out_initialize`, invariable 3). Trame sans `id` (notification,
     /// doc-sync inclus) → primaire puis fan-out telle quelle à chaque aux
     /// vivant (invariant 2) — un aux mort ou bloqué est ignoré, ne bloque ni
-    /// n'erre jamais le chemin client. `aux` vide ⟹ chemin mono-process
-    /// strictement actuel (invariant 8).
+    /// n'erre jamais le chemin client. `aux` vide ⟹ la table de routage n'est
+    /// JAMAIS consultée, chemin mono-process strictement actuel (invariant 8).
     ///
     /// Erreurs :
     /// - JSON invalide → `VNL-SBX-LSP-001`
@@ -1122,6 +1746,7 @@ impl LspSession {
             // Requête : réécrire l'id en session id et mémoriser le mapping
             let session_req_id = self.inner.next_req.fetch_add(1, Ordering::SeqCst);
             let orig_id = msg["id"].as_i64().unwrap_or(0);
+            let method = msg.get("method").and_then(|m| m.as_str());
 
             // Réécrire l'id dans le payload pour le processus
             let mut rewritten = msg.clone();
@@ -1133,18 +1758,112 @@ impl LspSession {
                 pending.insert(session_req_id, (client, orig_id));
             }
 
+            // ── Tâche 07, règle 1 — barrière composite pour les méthodes
+            // `Route::All`. `aux` vide ⟹ la table n'est PAS consultée
+            // (invariant 8). La barrière est insérée AVANT l'envoi au
+            // primaire : le primaire pourrait répondre avant qu'elle existe,
+            // et sa réponse partirait alors par le chemin historique — deux
+            // réponses sortantes. Le primaire garde son ids-space historique
+            // (`next_req`/`pending` ci-dessus, inchangés) ; les aux recevront
+            // des ids internes corrélés par `ClientMerge`.
+            let barrier = !self.inner.aux.is_empty()
+                && method.is_some_and(|m| merge_route_for_method(m) == MergeRoute::All);
+            let fan_targets: Vec<Arc<AuxChild>> = if barrier {
+                let alive: Vec<Arc<AuxChild>> = self
+                    .inner
+                    .aux
+                    .iter()
+                    .filter(|aux| aux.alive.load(Ordering::SeqCst))
+                    .map(Arc::clone)
+                    .collect();
+                self.inner
+                    .merges
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(
+                        session_req_id,
+                        PendingMerge {
+                            client,
+                            orig_id,
+                            method: method.unwrap_or_default().to_string(),
+                            expected: alive.len() + 1,
+                            parts: HashMap::new(),
+                        },
+                    );
+                alive
+            } else {
+                Vec::new()
+            };
+
             // Envoyer au process
-            self.inner
-                .cmd_tx
-                .send(rewritten_payload)
-                .await
-                .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))?;
+            let sent = self.inner.cmd_tx.send(rewritten_payload).await;
+            if sent.is_err() && barrier {
+                // Le primaire est mort avant de recevoir la requête : aucune
+                // part 0 n'arrivera jamais, la barrière est retirée (le
+                // chemin historique ne se purge pas ici — inchangé, il fuitait
+                // déjà son `pending` sur cette erreur avant la tâche 07).
+                self.inner
+                    .merges
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&session_req_id);
+            }
+            sent.map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))?;
+
+            if barrier {
+                // Fan-out vers chaque aux VIVANT compté à l'insertion de la
+                // barrière : même payload, id interne de l'enfant,
+                // `ClientMerge { session_id }` enregistré AVANT l'envoi (pas
+                // de course avec la lectrice aux). `try_send` + re-check
+                // `alive` : un aux injoignable ne compte pas dans `expected`
+                // (règle 1 — jamais d'attente perpétuelle) et ne fait jamais
+                // échouer le chemin client.
+                for aux in &fan_targets {
+                    let unreachable = !aux.alive.load(Ordering::SeqCst);
+                    if unreachable {
+                        self.abandon_merge_expectation(session_req_id, aux.role.as_str());
+                        continue;
+                    }
+                    let internal_id = aux.next_internal_req.fetch_add(1, Ordering::SeqCst);
+                    let mut copy = msg.clone();
+                    copy["id"] = Value::Number(serde_json::Number::from(internal_id));
+                    aux.pending_internal
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .insert(
+                            internal_id,
+                            InternalPending::ClientMerge {
+                                session_id: session_req_id,
+                            },
+                        );
+                    // Re-check `alive` APRÈS `try_send` : un aux mort entre
+                    // le comptage et l'envoi aurait pu purger ses ids internes
+                    // AVANT notre enregistrement — sa part n'arriverait
+                    // jamais et pendrait. Injoignable ⟹ même traitement que
+                    // `try_send` en échec.
+                    let unreachable = aux
+                        .stdin_tx
+                        .try_send(copy.to_string().into_bytes())
+                        .is_err()
+                        || !aux.alive.load(Ordering::SeqCst);
+                    if unreachable {
+                        aux.pending_internal
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .remove(&internal_id);
+                        self.abandon_merge_expectation(session_req_id, aux.role.as_str());
+                    }
+                }
+                // Un aux exclus ici était peut-être la seule part manquante
+                // (primaire + autres aux déjà consignés) : tenter la
+                // complétion, sans quoi la fusion ne partirait jamais.
+                self.try_complete_merge(session_req_id);
+            }
 
             // Invariant 3 : `initialize` part AUSSI en copie (id interne propre,
             // `initOptions` du spec injectés) vers chaque aux vivant. Les autres
-            // requêtes restent primaire uniquement — routage par politique de
-            // fusion et remapping d'ids par enfant : tâche 07, NE RIEN
-            // fusionner ici.
+            // méthodes `MergeRoute::Primary` restent primaire uniquement —
+            // chemin actuel exact (règle 8).
             if msg.get("method").and_then(|m| m.as_str()) == Some("initialize") {
                 self.fan_out_initialize(&msg);
             }
@@ -1182,6 +1901,19 @@ impl LspSession {
     /// `true` tant que le process n'a pas rendu EOF stdout.
     pub fn is_alive(&self) -> bool {
         self.inner.alive.load(Ordering::SeqCst)
+    }
+
+    /// Nombre de barrières de fusion actuellement ouvertes (test tâche 07 :
+    /// garde de l'invariant 8 — zéro en mono-process — et vérification que la
+    /// barrière est bien retirée après complétion, erreur primaire ou
+    /// unsubscribe). Jamais utilisé hors tests.
+    #[cfg(test)]
+    pub(crate) fn pending_merge_count(&self) -> usize {
+        self.inner
+            .merges
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
     }
 
     /// `true` si le process a déjà reçu `initialize`.
@@ -2834,10 +3566,11 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 23: composite_other_request_primary_only — une requête (id) qui
-    /// n'est pas `initialize` reste intégralement sur le primaire : réponse au
-    /// client, l'aux ne la voit jamais (invariant 4 — routage/fusion : tâches
-    /// 04–06, NE RIEN fusionner ici).
+    /// Test 23: composite_other_request_primary_only — une requête (id) dont la
+    /// méthode est hors table `MergeRoute::All` reste intégralement sur le
+    /// primaire : réponse au client, l'aux ne la voit jamais. Sonde
+    /// `textDocument/signatureHelp` (méthode hors table All, défaut `Primary`) —
+    /// le `hover` d'origine est devenu une méthode fan-out par la tâche 07.
     #[tokio::test]
     async fn composite_other_request_primary_only() {
         let (spec, tmpdir) = make_fake_composite(
@@ -2851,8 +3584,8 @@ while True:
             .expect("spawn composite ok");
         let (client, mut rx) = session.subscribe();
 
-        // initialize + didOpen AVANT le hover : prouvent que le canal de l'aux
-        // est vivant (l'absence du hover ensuite est significative, pas
+        // initialize + didOpen AVANT la sonde : prouvent que le canal de l'aux
+        // est vivant (l'absence de la sonde ensuite est significative, pas
         // l'artefact d'un aux qui n'aurait jamais rien reçu).
         session
             .send(
@@ -2890,47 +3623,47 @@ while True:
             poll_recorder(&aux_log_path(&tmpdir, 0), saw_open, Duration::from_secs(5)).await;
         assert!(
             saw_open(&aux_frames),
-            "l'aux doit avoir reçu le didOpen (canal vivant) avant l'assertion hover; trames: {aux_frames:?}"
+            "l'aux doit avoir reçu le didOpen (canal vivant) avant l'assertion signatureHelp; trames: {aux_frames:?}"
         );
 
-        let hover = serde_json::json!({
-            "jsonrpc": "2.0", "id": 2, "method": "textDocument/hover",
+        let signature_help = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "textDocument/signatureHelp",
             "params": {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}}
         });
         session
-            .send(client, hover.to_string().into_bytes())
+            .send(client, signature_help.to_string().into_bytes())
             .await
-            .expect("hover send ok");
+            .expect("signatureHelp send ok");
         let resp = recv_timeout(&mut rx, Duration::from_secs(5))
             .await
-            .expect("le primaire doit répondre du hover");
+            .expect("le primaire doit répondre de signatureHelp");
         assert_eq!(
             serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
             Some(2)
         );
 
-        let saw_hover = |frames: &[Value]| {
-            frames
-                .iter()
-                .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("textDocument/hover"))
+        let saw_signature_help = |frames: &[Value]| {
+            frames.iter().any(|f| {
+                f.get("method").and_then(|m| m.as_str()) == Some("textDocument/signatureHelp")
+            })
         };
         let primary_frames = poll_recorder(
             &primary_log_path(&tmpdir),
-            saw_hover,
+            saw_signature_help,
             Duration::from_secs(5),
         )
         .await;
         assert!(
-            saw_hover(&primary_frames),
-            "le primaire doit recevoir le hover; trames: {primary_frames:?}"
+            saw_signature_help(&primary_frames),
+            "le primaire doit recevoir la sonde signatureHelp; trames: {primary_frames:?}"
         );
 
-        // Fenêtre laissée à l'aux pour le recevoir éventuellement : rien.
+        // Fenêtre laissée à l'aux pour la recevoir éventuellement : rien.
         tokio::time::sleep(Duration::from_millis(300)).await;
         let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
         assert!(
-            !saw_hover(&aux_frames),
-            "l'aux ne doit PAS recevoir de requête non-initialize; trames: {aux_frames:?}"
+            !saw_signature_help(&aux_frames),
+            "l'aux ne doit PAS recevoir de requête hors table All (sonde signatureHelp); trames: {aux_frames:?}"
         );
 
         drop(tmpdir);
@@ -4494,5 +5227,1266 @@ while True:
         assert!(session.is_alive());
 
         drop(tmpdir);
+    }
+
+    // ── Tests tâche 07 (vue-lsp) : routage par méthode + barrière de fusion ─
+
+    /// Script Python factice PRIMAIRE « fusions de requêtes » (tâche 07) :
+    /// journalise les trames reçues dans argv[1] (pattern recorder de la tâche
+    /// 03) et répond des résultats FIXES identifiables par méthode LSP (le
+    /// `hover` echo la ligne de position — distinguo des requêtes
+    /// simultanées). Toute requête hors `textDocument/*` (dont `initialize`)
+    /// répond `{"capabilities":{}}` — les modes ne dégradent QUE les méthodes
+    /// de fusion, jamais la séquence d'initialisation. Modes via `fake_mode` :
+    /// `"null"` (tout `textDocument/*` répond `result: null`) ; `"error"`
+    /// (tout `textDocument/*` répond une erreur JSON-RPC -32001) ; `"slow"`
+    /// (400 ms de sleep avant chaque réponse) ; `"die"` (meurt APRÈS avoir
+    /// reçu un `textDocument/*`, sans répondre — purge d'EOF task-05) ;
+    /// `"single"` (`definition` répondu comme `Location` objet seul, pas en
+    /// tableau) ; `"docchanges"` (`rename` répondu en variante
+    /// `documentChanges` — cas mixte avec le primaire `changes`) ; `"swap"`
+    /// (retient les requêtes, répond en ordre inversé à la 2e — corrélation) ;
+    /// `"hold"` (retient les `textDocument/*` jusqu'à la notification
+    /// `x/release`, puis redevient normal — determinisme des tests de mort de
+    /// barrière).
+    const FAKE_LSP_MERGE_PRIMARY_PY: &str = r#"
+import sys, json, time
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+MODE = "@@MODE@@"
+SIDE = "primary"
+
+R = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+
+def position_line(msg):
+    return msg.get("params", {}).get("position", {}).get("line", 0)
+
+RESULTS = {
+    "textDocument/hover": lambda m: {"contents": {"kind": "markdown", "value": f"H-PRIM:{position_line(m)}"}},
+    "textDocument/definition": lambda m: [{"uri": "file:///a", "range": R}],
+    "textDocument/typeDefinition": lambda m: [{"uri": "file:///a-td", "range": R}],
+    "textDocument/implementation": lambda m: [{"uri": "file:///a-impl", "range": R}],
+    "textDocument/references": lambda m: [{"uri": "file:///a-ref", "range": R}],
+    "textDocument/codeAction": lambda m: [{"title": "ca-prim"}],
+    "textDocument/prepareRename": lambda m: {"range": R, "placeholder": "prim"},
+    "textDocument/rename": lambda m: {"changes": {
+        "file:///a": [{"range": R, "newText": "prim"}],
+        "file:///shared": [{"range": R, "newText": "shared-prim"}]}},
+    "textDocument/completion": lambda m: [{"label": "prim-item"}],
+}
+
+SINGLE = {
+    "textDocument/definition": lambda m: {"uri": "file:///a", "range": R},
+}
+
+DOCCHANGES = {
+    "textDocument/rename": lambda m: {"documentChanges": [
+        {"textDocument": {"uri": "file:///a"}, "edits": [{"range": R, "newText": "dc-prim"}]}]},
+}
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+def log(msg):
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+
+def compute(msg):
+    method = msg.get("method", "")
+    if MODE == "null":
+        return None
+    if MODE == "single" and method in SINGLE:
+        return SINGLE[method](msg)
+    if MODE == "docchanges" and method in DOCCHANGES:
+        return DOCCHANGES[method](msg)
+    return RESULTS[method](msg) if method in RESULTS else {"echo": method}
+
+def answer(msg):
+    return {"jsonrpc": "2.0", "id": msg["id"], "result": compute(msg)}
+
+hold_buffer = []
+released = False
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    log(msg)
+    if "id" not in msg:
+        if msg.get("method") == "x/release" and MODE == "hold":
+            for m in hold_buffer:
+                write_frame(answer(m))
+            hold_buffer = []
+            released = True
+        continue
+    method = msg.get("method", "")
+    if not method.startswith("textDocument/"):
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+        continue
+    if MODE == "die":
+        sys.exit(0)
+    if MODE == "error":
+        write_frame({"jsonrpc": "2.0", "id": msg["id"],
+                     "error": {"code": -32001, "message": f"{SIDE} exploded on {method}"}})
+        continue
+    if MODE == "hold" and not released:
+        hold_buffer.append(msg)
+        continue
+    if MODE == "swap":
+        hold_buffer.append(msg)
+        if len(hold_buffer) < 2:
+            continue
+        for m in reversed(hold_buffer):
+            write_frame(answer(m))
+        hold_buffer = []
+        continue
+    if MODE == "slow":
+        time.sleep(0.4)
+    write_frame(answer(msg))
+"#;
+
+    /// Script Python factice AUX « fusions de requêtes » (tâche 07) : miroir
+    /// exact du primaire avec des résultats distinguables (`H-AUX:<ligne>`,
+    /// URIs `file:///b*`, `ca-aux`, placeholder `aux`, edits `*-aux`) et la
+    /// même famille de modes (`null`/`error`/`slow`/`die`/`single`/
+    /// `docchanges`/`swap`/`hold`). L'aux d'un composite de fusion porte le
+    /// rôle spawnable `tsserver-forward` — la fusion ne dépend pas du rôle.
+    const FAKE_LSP_MERGE_AUX_PY: &str = r#"
+import sys, json, time
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+MODE = "@@MODE@@"
+SIDE = "aux"
+
+R = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
+
+def position_line(msg):
+    return msg.get("params", {}).get("position", {}).get("line", 0)
+
+RESULTS = {
+    "textDocument/hover": lambda m: {"contents": {"kind": "markdown", "value": f"H-AUX:{position_line(m)}"}},
+    "textDocument/definition": lambda m: [{"uri": "file:///b", "range": R}],
+    "textDocument/typeDefinition": lambda m: [{"uri": "file:///b-td", "range": R}],
+    "textDocument/implementation": lambda m: [{"uri": "file:///b-impl", "range": R}],
+    "textDocument/references": lambda m: [{"uri": "file:///b-ref", "range": R}],
+    "textDocument/codeAction": lambda m: [{"title": "ca-aux"}],
+    "textDocument/prepareRename": lambda m: {"range": R, "placeholder": "aux"},
+    "textDocument/rename": lambda m: {"changes": {
+        "file:///b": [{"range": R, "newText": "aux"}],
+        "file:///shared": [{"range": R, "newText": "shared-aux"}]}},
+    "textDocument/completion": lambda m: [{"label": "aux-item"}],
+}
+
+SINGLE = {
+    "textDocument/definition": lambda m: {"uri": "file:///b", "range": R},
+}
+
+DOCCHANGES = {
+    "textDocument/rename": lambda m: {"documentChanges": [
+        {"textDocument": {"uri": "file:///b"}, "edits": [{"range": R, "newText": "dc-aux"}]}]},
+}
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+def log(msg):
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+
+def compute(msg):
+    method = msg.get("method", "")
+    if MODE == "null":
+        return None
+    if MODE == "single" and method in SINGLE:
+        return SINGLE[method](msg)
+    if MODE == "docchanges" and method in DOCCHANGES:
+        return DOCCHANGES[method](msg)
+    return RESULTS[method](msg) if method in RESULTS else {"echo": method}
+
+def answer(msg):
+    return {"jsonrpc": "2.0", "id": msg["id"], "result": compute(msg)}
+
+hold_buffer = []
+released = False
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    log(msg)
+    if "id" not in msg:
+        if msg.get("method") == "x/release" and MODE == "hold":
+            for m in hold_buffer:
+                write_frame(answer(m))
+            hold_buffer = []
+            released = True
+        continue
+    method = msg.get("method", "")
+    if not method.startswith("textDocument/"):
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+        continue
+    if MODE == "die":
+        sys.exit(0)
+    if MODE == "error":
+        write_frame({"jsonrpc": "2.0", "id": msg["id"],
+                     "error": {"code": -32001, "message": f"{SIDE} exploded on {method}"}})
+        continue
+    if MODE == "hold" and not released:
+        hold_buffer.append(msg)
+        continue
+    if MODE == "swap":
+        hold_buffer.append(msg)
+        if len(hold_buffer) < 2:
+            continue
+        for m in reversed(hold_buffer):
+            write_frame(answer(m))
+        hold_buffer = []
+        continue
+    if MODE == "slow":
+        time.sleep(0.4)
+    write_frame(answer(msg))
+"#;
+
+    /// Composite de deux fakes de fusion (primaire + aux `tsserver-forward` —
+    /// seul rôle spawnable, la fusion n'en dépend pas), chacun dans son mode
+    /// (`""` = défaut). Le tmpdir est retenu pour la durée du test.
+    async fn make_merge_composite(
+        primary_mode: &str,
+        aux_mode: &str,
+    ) -> (Arc<LspSession>, tempfile::TempDir) {
+        let primary = fake_mode(FAKE_LSP_MERGE_PRIMARY_PY, primary_mode);
+        let aux = fake_mode(FAKE_LSP_MERGE_AUX_PY, aux_mode);
+        let (spec, tmpdir) = make_fake_composite(
+            primary.as_str(),
+            &[("tsserver-forward", aux.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite de fusion ok");
+        (session, tmpdir)
+    }
+
+    /// Requête `textDocument/*` pour les fakes de fusion (position à la ligne
+    /// `line` — echoée dans les `hover`, distinguo des requêtes simultanées).
+    fn text_request(id: i64, method: &str, uri: &str, line: i64) -> Vec<u8> {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": method,
+            "params": {
+                "textDocument": {"uri": uri},
+                "position": {"line": line, "character": 0}
+            }
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// Parse une trame reçue par un client.
+    fn client_msg(raw: &[u8]) -> Value {
+        serde_json::from_slice(raw).expect("trame client JSON valide")
+    }
+
+    /// Range fixe porté par tous les résultats des fakes de fusion.
+    fn merge_range() -> Value {
+        serde_json::json!({"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}})
+    }
+
+    /// `Location` attendu d'un côté de fusion (`side` = "a"/"b", `suffix` =
+    /// ""/"-td"/"-impl"/"-ref").
+    fn merge_location(side: &str, suffix: &str) -> Value {
+        serde_json::json!({"uri": format!("file:///{side}{suffix}"), "range": merge_range()})
+    }
+
+    /// `hover` primaire seul (partie unique non-null ⟹ restitué verbatim).
+    fn prim_hover(line: i64) -> Value {
+        serde_json::json!({"contents": {"kind": "markdown", "value": format!("H-PRIM:{line}")}})
+    }
+
+    /// `hover` fusionné markup primary-first, séparateur `---`.
+    fn merged_hover(line: i64) -> Value {
+        serde_json::json!({"contents": {"kind": "markdown", "value": format!("H-PRIM:{line}\n\n---\n\nH-AUX:{line}")}})
+    }
+
+    /// `WorkspaceEdit` du primaire (`changes` : URI propre + URI partagée).
+    fn prim_workspace_edit() -> Value {
+        serde_json::json!({"changes": {
+            "file:///a": [{"range": merge_range(), "newText": "prim"}],
+            "file:///shared": [{"range": merge_range(), "newText": "shared-prim"}]
+        }})
+    }
+
+    /// `WorkspaceEdit` attendu de la fusion `changes` : edits de l'URI
+    /// partagée concaténés primary-first dans le MÊME tableau, URI disjointe
+    /// de l'aux (`file:///b`) ajoutée. Les parts brutes des fakes
+    /// (`prim_workspace_edit`, et côté aux `file:///b` + `shared-aux`) ne
+    /// sortent jamais telles quelles côté client.
+    fn merged_workspace_edit() -> Value {
+        serde_json::json!({"changes": {
+            "file:///a": [{"range": merge_range(), "newText": "prim"}],
+            "file:///shared": [
+                {"range": merge_range(), "newText": "shared-prim"},
+                {"range": merge_range(), "newText": "shared-aux"}
+            ],
+            "file:///b": [{"range": merge_range(), "newText": "aux"}]
+        }})
+    }
+
+    /// Prédicat recorder : trame requête de cette méthode. `Copy` (capture
+    /// `&'static str`) — utilisable dans plusieurs closures sans déplacement.
+    fn is_method(method: &'static str) -> impl Fn(&Value) -> bool + Copy {
+        move |f: &Value| f.get("method").and_then(|m| m.as_str()) == Some(method)
+    }
+
+    /// Test 42: merge_hover_concat_markup — un `hover` composite produit UNE
+    /// réponse client (id d'origine restauré), markup concaténé primary-first
+    /// avec séparateur `---` et kind du primaire ; primaire et aux ont chacun
+    /// reçu le hover dans LEUR espace d'ids (session id 3 pour le primaire —
+    /// initialize 1, ping 2, hover 3 ; id interne 2 pour l'aux — seul le
+    /// copie d'initialize 1 l'a précédé ; le ping a désynchronisé les
+    /// compteurs), l'id client 7 n'apparaît sur aucun fil.
+    #[tokio::test]
+    async fn merge_hover_concat_markup() {
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+
+        // ping : avance seul le compteur de session du primaire — les deux
+        // espaces d'ids divergent à partir d'ici.
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":5,"method":"ping","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("ping ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("réponse ping du primaire");
+        assert_eq!(client_msg(&resp)["id"].as_i64(), Some(5));
+
+        session
+            .send(
+                client,
+                text_request(7, "textDocument/hover", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("hover ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse hover unique"),
+        );
+        assert_eq!(
+            resp["id"].as_i64(),
+            Some(7),
+            "id d'origine restauré sur la réponse fusionnée"
+        );
+        assert_eq!(
+            resp["result"],
+            merged_hover(0),
+            "markup fondu primary-first, séparateur ---, kind du primaire"
+        );
+
+        let is_hover = is_method("textDocument/hover");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_hover),
+            Duration::from_secs(5),
+        )
+        .await;
+        let prim = primary_frames
+            .iter()
+            .find(|f| is_hover(f))
+            .expect("le primaire doit recevoir le hover");
+        assert_eq!(
+            prim["id"].as_i64(),
+            Some(3),
+            "fil primaire : session id (espace historique réécrit), jamais l'id client; trames: {primary_frames:?}"
+        );
+
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_hover),
+            Duration::from_secs(5),
+        )
+        .await;
+        let aux = aux_frames
+            .iter()
+            .find(|f| is_hover(f))
+            .expect("l'aux doit recevoir le hover (fan-out Route::All)");
+        assert_eq!(
+            aux["id"].as_i64(),
+            Some(2),
+            "fil aux : id interne (espace propre à l'enfant), jamais l'id client; trames: {aux_frames:?}"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(
+            leaked.is_none(),
+            "une seule réponse client par requête fusionnée: {leaked:?}"
+        );
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "barrière retirée après complétion"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 43: merge_locations_definition_concat — `definition` : `[LocA]` +
+    /// `[LocB]` ⟹ `[LocA, LocB]` primary-first ; `references` avec un seul
+    /// côté non-null ⟹ CE côté, jamais de tableau vide parasite.
+    #[tokio::test]
+    async fn merge_locations_definition_concat() {
+        // Les deux répondent ⟹ concaténation primary-first.
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/definition", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("definition ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse definition"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(2));
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([merge_location("a", ""), merge_location("b", "")]),
+            "locations concaténées primary-first"
+        );
+        drop(tmpdir);
+
+        // Aux null ⟹ le tableau du primaire seul, sans tableau vide parasite.
+        let (session, tmpdir) = make_merge_composite("", "null").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/references", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("references ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse references"),
+        );
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([merge_location("a", "-ref")]),
+            "un seul côté non-null ⟹ ce côté"
+        );
+        drop(tmpdir);
+
+        // Primaire null ⟹ le tableau de l'aux.
+        let (session, tmpdir) = make_merge_composite("null", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/references", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("references ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse references"),
+        );
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([merge_location("b", "-ref")]),
+            "primaire null ⟹ la part non-null de l'aux"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 44: merge_location_single_object_wrapped — le primaire répond un
+    /// `Location` objet SEUL (pas en tableau), l'aux `null` ⟹ `[objet]` côté
+    /// client (wrap en tableau de la forme objet unique).
+    #[tokio::test]
+    async fn merge_location_single_object_wrapped() {
+        let (session, tmpdir) = make_merge_composite("single", "null").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/definition", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("definition ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse definition"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(2));
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([merge_location("a", "")]),
+            "Location objet seul wrapé en tableau"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 45: merge_codeaction_concat_null_is_empty — primaire `[CA1]` +
+    /// aux `null` ⟹ `[CA1]` ; primaire `null` + aux ⟹ la part de l'aux ;
+    /// les deux répondent ⟹ `[CA1, CA2]` (ordre primary-first respecté quand
+    /// les deux répondent — les codeActions des deux fakes portent des titres
+    /// distincts pour rendre l'ordre observable).
+    #[tokio::test]
+    async fn merge_codeaction_concat_null_is_empty() {
+        // Les deux répondent ⟹ concat primary-first.
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/codeAction", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("codeAction ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse codeAction"),
+        );
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([{"title": "ca-prim"}, {"title": "ca-aux"}]),
+            "les deux répondent : ordre primary-first"
+        );
+        drop(tmpdir);
+
+        // Aux null ⟹ le tableau du primaire seul (null n'est jamais `[]` parasite).
+        let (session, tmpdir) = make_merge_composite("", "null").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/codeAction", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("codeAction ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse codeAction"),
+        );
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([{"title": "ca-prim"}]),
+            "aux null ⟹ contribution vide, jamais un élément parasite"
+        );
+        drop(tmpdir);
+
+        // Primaire null ⟹ la part de l'aux (fusion ⟹ tableau, jamais null).
+        let (session, tmpdir) = make_merge_composite("null", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/codeAction", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("codeAction ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse codeAction"),
+        );
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([{"title": "ca-aux"}]),
+            "primaire null ⟹ codeActions de l'aux (null ⟹ tableau, pas null)"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 46: merge_prepare_rename_primary_wins_then_fallback — les deux
+    /// non-null ⟹ résultat du PRIMAIRE verbatim ; primaire null avec aux
+    /// `{range}` ⟹ résultat de l'aux (fallback).
+    #[tokio::test]
+    async fn merge_prepare_rename_primary_wins_then_fallback() {
+        let prim_result = serde_json::json!({"range": merge_range(), "placeholder": "prim"});
+        let aux_result = serde_json::json!({"range": merge_range(), "placeholder": "aux"});
+
+        // Les deux non-null ⟹ le primaire gagne.
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/prepareRename", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("prepareRename ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse prepareRename"),
+        );
+        assert_eq!(
+            resp["result"], prim_result,
+            "les deux non-null ⟹ résultat primaire verbatim"
+        );
+        drop(tmpdir);
+
+        // Primaire null ⟹ premier non-null aux.
+        let (session, tmpdir) = make_merge_composite("null", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/prepareRename", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("prepareRename ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse prepareRename"),
+        );
+        assert_eq!(
+            resp["result"], aux_result,
+            "primaire null ⟹ fallback sur le premier non-null aux"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 46b: merge_rename_changes_concat — `changes` sur URI commune ⟹
+    /// edits concaténés primary-first dans le MÊME tableau, URI disjointe de
+    /// l'aux ajoutée ; variantes mixtes (primaire `changes`, aux
+    /// `documentChanges`) ⟹ variante du PRIMAIRE conservée intégralement,
+    /// edits de l'aux abandonnés (`tracing::warn!` explicite dans
+    /// `fold_workspace_edit` — vérifié par inspection du code, pas
+    /// observable ici).
+    #[tokio::test]
+    async fn merge_rename_changes_concat() {
+        // Les deux en `changes` ⟹ merge objet URI par URI, primary-first.
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/rename", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("rename ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse rename"),
+        );
+        assert_eq!(
+            resp["result"],
+            merged_workspace_edit(),
+            "URI commune : edits concaténés primary-first dans le même tableau ; URI disjointe ajoutée"
+        );
+        drop(tmpdir);
+
+        // Mixte : primaire `changes`, aux `documentChanges` ⟹ variante du
+        // primaire conservée telle quelle.
+        let (session, tmpdir) = make_merge_composite("", "docchanges").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/rename", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("rename ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse rename"),
+        );
+        assert_eq!(
+            resp["result"],
+            prim_workspace_edit(),
+            "variante mixte ⟹ variante primaire conservée, edits aux abandonnés"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 47: merge_aux_error_part_skipped — erreur de l'aux sur hover ⟹
+    /// réponse client = hover du primaire seul (part None), PAS une erreur
+    /// globale.
+    #[tokio::test]
+    async fn merge_aux_error_part_skipped() {
+        let (session, tmpdir) = make_merge_composite("", "error").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/hover", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("hover ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse hover avec part aux vide"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(2));
+        assert!(
+            resp.get("error").is_none(),
+            "l'erreur d'un aux ne devient JAMAIS l'erreur de la requête: {resp}"
+        );
+        assert_eq!(
+            resp["result"],
+            prim_hover(0),
+            "part aux None ⟹ hover primaire seul (une seule contribution non-null)"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "une seule réponse: {leaked:?}");
+        assert_eq!(session.pending_merge_count(), 0);
+
+        drop(tmpdir);
+    }
+
+    /// Test 48: merge_primary_error_fails_fast — erreur du PRIMAIRE ⟹ réponse
+    /// erreur IMMÉDIATE au client (id restauré, structure `error` verbatim),
+    /// barrière tuée ; l'aux (vivant, répond ensuite) ne produit RIEN de
+    /// visible — aucune 2e réponse ; session saine.
+    #[tokio::test]
+    async fn merge_primary_error_fails_fast() {
+        let (session, tmpdir) = make_merge_composite("error", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/hover", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("hover ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse erreur immédiate du primaire"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(2), "id d'origine restauré");
+        assert_eq!(
+            resp["error"],
+            serde_json::json!({"code": -32001, "message": "primary exploded on textDocument/hover"}),
+            "structure error du primaire transmise TELLE QUELLE"
+        );
+        assert!(resp.get("result").is_none());
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "la barrière est tuée par l'erreur primaire"
+        );
+
+        // L'aux (mode normal) répond son hover — part tardive avalée sans
+        // bruit par la barrière disparue : aucune 2e réponse.
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(600)).await;
+        assert!(
+            leaked.is_none(),
+            "les parts aux tardives après erreur primaire sont avalées: {leaked:?}"
+        );
+
+        // Session saine.
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":3,"method":"ping","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("ping ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("le primaire doit rester fonctionnel après son erreur");
+        assert_eq!(client_msg(&resp)["id"].as_i64(), Some(3));
+
+        drop(tmpdir);
+    }
+
+    /// Test 49: merge_aux_eof_mid_merge — l'aux meurt (mode `die`) APRÈS avoir
+    /// reçu le fan-out, avant de répondre ⟹ sa part `ClientMerge` en attente
+    /// est levée en `None` à l'EOF (purge task-05 étendue) ⟹ barrière
+    /// complétée, réponse primaire seule, client servi UNE fois.
+    #[tokio::test]
+    async fn merge_aux_eof_mid_merge() {
+        let (session, tmpdir) = make_merge_composite("", "die").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/hover", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("hover ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("la mort de l'aux en pleine fusion ne doit pas pendre"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(2));
+        assert_eq!(
+            resp["result"],
+            prim_hover(0),
+            "EOF aux ⟹ part None ⟹ hover primaire seul, la fusion continue"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "une seule réponse: {leaked:?}");
+        assert!(
+            session.is_alive(),
+            "la session survit à l'EOF de l'aux en pleine fusion"
+        );
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "barrière complétée et retirée, rien ne pend"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 50: merge_concurrent_no_cross — deux `hover` simultanés (ids
+    /// clients 1, 2 ; lignes de position 0 et 7 echoées dans les résultats),
+    /// l'aux répond EN ORDRE INVERSÉ (mode `swap`) ⟹ chaque client reçoit SA
+    /// fusion correcte (les payloads distincts par position ne se croisent
+    /// jamais).
+    #[tokio::test]
+    async fn merge_concurrent_no_cross() {
+        let (session, tmpdir) = make_merge_composite("", "swap").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+
+        session
+            .send(
+                client,
+                text_request(1, "textDocument/hover", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("hover 1 ok");
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/hover", "file:///w/Other.vue", 7),
+            )
+            .await
+            .expect("hover 2 ok");
+
+        // L'aux répond au 2e hover AVANT le 1er (swap) : l'ordre d'arrivée
+        // des réponses client est imprévisible — corrélation par id, pas par
+        // ordre.
+        let mut results_by_id = HashMap::new();
+        for _ in 0..2 {
+            let raw = recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("les deux fusions doivent parvenir au client");
+            let msg = client_msg(&raw);
+            results_by_id.insert(msg["id"].as_i64().unwrap(), msg["result"].clone());
+        }
+        assert_eq!(
+            results_by_id[&1],
+            merged_hover(0),
+            "la fusion du hover id 1 (ligne 0) ne doit rien croiser avec le hover id 2"
+        );
+        assert_eq!(
+            results_by_id[&2],
+            merged_hover(7),
+            "la fusion du hover id 2 (ligne 7) doit garder ses deux moitiés appariées"
+        );
+        assert_eq!(session.pending_merge_count(), 0);
+
+        drop(tmpdir);
+    }
+
+    /// Test 51: merge_unsubscribe_mid_merge — souscrire → `hover` → `
+    /// unsubscribe` → l'aux libère alors sa réponse retenue (mode `hold`,
+    /// déclenchement par `x/release` : aucune course de timing) ⟹ AUCUNE
+    /// réponse émise vers le client parti, pas de panique, barrière purgée —
+    /// observable : le hover suivant d'un nouveau client se fuse normalement.
+    #[tokio::test]
+    async fn merge_unsubscribe_mid_merge() {
+        let (session, tmpdir) = make_merge_composite("", "hold").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/hover", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("hover ok");
+        // Le primaire a répondu (part 0 consignée) ; l'aux retient la sienne.
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        session.unsubscribe(client);
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "unsubscribe purge les barrières du client"
+        );
+
+        // L'aux libère sa réponse : la barrière est partie ⟹ part avalée en
+        // silence (debug), JAMAIS de réponse vers un client désabonné.
+        let release = serde_json::json!({"jsonrpc": "2.0", "method": "x/release", "params": {}});
+        session
+            .send(client, release.to_string().into_bytes())
+            .await
+            .expect("x/release ok");
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(
+            leaked.is_none(),
+            "aucune réponse vers un client désabonné: {leaked:?}"
+        );
+
+        // Barrière purgée = le mécanisme est vierge : un hover suivant complet.
+        let (client2, mut rx2) = session.subscribe();
+        session
+            .send(
+                client2,
+                text_request(3, "textDocument/hover", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("hover 2 ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx2, Duration::from_secs(5))
+                .await
+                .expect("le hover suivant doit se fuser normalement"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(3));
+        assert_eq!(resp["result"], merged_hover(0));
+        assert_eq!(session.pending_merge_count(), 0);
+
+        drop(tmpdir);
+    }
+
+    /// Test 52: merge_completion_stays_primary — `textDocument/completion` en
+    /// composite : l'aux ne la reçoit PAS (log aux sans completion, alors que
+    /// sa copie d'`initialize` prouve son canal vivant), réponse primaire
+    /// immédiate et verbatim — la tâche 08 la fera basculer en `All`.
+    #[tokio::test]
+    async fn merge_completion_stays_primary() {
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+
+        // La copie d'initialize dans le log aux prouve que son canal est
+        // vivant : l'absence de completion ensuite est significative.
+        let is_initialize = is_method("initialize");
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_initialize),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            aux_frames.iter().any(is_initialize),
+            "l'aux doit avoir reçu sa copie d'initialize (canal vivant); trames: {aux_frames:?}"
+        );
+
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/completion", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("completion ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("le primaire répond de la completion sans attendre"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(2));
+        assert_eq!(
+            resp["result"],
+            serde_json::json!([{"label": "prim-item"}]),
+            "completion primaire seul, verbatim (pas de fusion)"
+        );
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "Route::Primary ⟹ aucune barrière créée"
+        );
+
+        let is_completion = is_method("textDocument/completion");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_completion),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            primary_frames.iter().any(is_completion),
+            "le primaire doit recevoir la completion; trames: {primary_frames:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        assert!(
+            !aux_frames.iter().any(is_completion),
+            "l'aux ne doit PAS recevoir la completion (tâche 08 la fera basculer); trames: {aux_frames:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 53: mono_process_wire_bytes_unchanged — `aux: []`, hover : le fil
+    /// primaire porte la requête avec le SESSION id (réécriture historique
+    /// intacte), réponse unique et id restauré ; AUCUN état de barrière créé
+    /// avant/après (garde additionnelle de l'invariant 8 — les suites
+    /// task-03/05/06 couvrent déjà le chemin mono de bout en bout).
+    #[tokio::test]
+    async fn mono_process_wire_bytes_unchanged() {
+        // Mono-process construit à la main avec le recorder de la tâche 03 :
+        // le wire entrant du primaire est observable, sa réponse est "ok".
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let script_path = tmpdir.path().join("fake_lsp_mono.py");
+        std::fs::write(&script_path, FAKE_LSP_RECORDER_PY).unwrap();
+        let spec = LspToolchain {
+            name: "mono".to_string(),
+            bin: "python3".to_string(),
+            args: vec![
+                script_path.to_string_lossy().to_string(),
+                primary_log_path(&tmpdir).to_string_lossy().to_string(),
+            ],
+            aux: vec![],
+        };
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn mono-process ok");
+        let (client, mut rx) = session.subscribe();
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "aucune barrière ne doit exister en mono-process"
+        );
+
+        // Premiers requêtes : initialize (session id 1) puis hover (session
+        // id 2) avec un id client 42 qui ne doit JAMAIS passer sur le fil.
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(42, "textDocument/hover", "file:///w/main.rs", 0),
+            )
+            .await
+            .expect("hover ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse unique du primaire"),
+        );
+        assert_eq!(
+            resp["id"].as_i64(),
+            Some(42),
+            "id d'origine restauré (chemin historique)"
+        );
+        assert_eq!(resp["result"], serde_json::json!("ok"));
+
+        let is_hover = is_method("textDocument/hover");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_hover),
+            Duration::from_secs(5),
+        )
+        .await;
+        let prim = primary_frames
+            .iter()
+            .find(|f| is_hover(f))
+            .expect("le primaire doit recevoir le hover");
+        assert_eq!(
+            prim["id"].as_i64(),
+            Some(2),
+            "fil primaire : session id historique (initialize=1, hover=2), jamais l'id client 42; trames: {primary_frames:?}"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "le chemin mono ne crée jamais d'état de barrière"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Garde unitaire des fusionneurs (contrat tâche 07) : JAMAIS de panique
+    /// sur JSON inattendu — la contribution d'une part malformée disparaît
+    /// (vide + warn), et les cas explicites (`null` ⟹ `null` pour les
+    /// locations/prepareRename, `null` ⟹ `[]` pour codeAction, tableau de
+    /// marked strings à la sortie du repli de normalisation hover) sont
+    /// exacts.
+    #[test]
+    fn merge_helpers_never_panic_on_unexpected_json() {
+        let junk = vec![
+            Some(serde_json::json!("pas un objet")),
+            Some(serde_json::json!(42)),
+            Some(serde_json::json!([1, 2])),
+            Some(serde_json::json!({"contents": "kaboul"})),
+            Some(serde_json::json!({"changes": "kaboul", "documentChanges": 7})),
+            None,
+            Some(Value::Null),
+        ];
+        for method in [
+            "textDocument/hover",
+            "textDocument/definition",
+            "textDocument/typeDefinition",
+            "textDocument/implementation",
+            "textDocument/references",
+            "textDocument/codeAction",
+            "textDocument/prepareRename",
+            "textDocument/rename",
+            "textDocument/methode_inconnue",
+        ] {
+            let _merged = merge_result_for(method, &junk);
+        }
+
+        assert_eq!(
+            merge_hover(&[None, Some(Value::Null)]),
+            Value::Null,
+            "hover : tous vides ⟹ null"
+        );
+        assert_eq!(
+            merge_hover(&[Some(serde_json::json!({"contents": "x"})), None]),
+            serde_json::json!({"contents": "x"}),
+            "hover : une seule contribution ⟹ celle-là verbatim"
+        );
+        assert_eq!(
+            merge_hover(&[
+                Some(serde_json::json!({"contents": [{"language": "rust", "value": "code"}]})),
+                Some(serde_json::json!({"contents": {"kind": "markdown", "value": "M"}})),
+            ]),
+            serde_json::json!({"contents": [
+                {"language": "rust", "value": "code"},
+                {"kind": "markdown", "value": "M"}
+            ]}),
+            "hover non-markup ×2 ⟹ tableau de marked strings primary-first"
+        );
+        assert_eq!(
+            merge_locations(&[None, Some(Value::Null)]),
+            Value::Null,
+            "locations : toutes null ⟹ null (jamais [])"
+        );
+        assert_eq!(
+            merge_locations(&[Some(Value::Null), Some(serde_json::json!([]))]),
+            serde_json::json!([]),
+            "locations : un tableau vu ⟹ tableau éventuellement vide"
+        );
+        assert_eq!(
+            merge_code_actions(&[None, Some(Value::Null)]),
+            serde_json::json!([]),
+            "codeAction : null ⟹ []"
+        );
+        assert_eq!(
+            merge_prepare_rename(&[Some(Value::Null), Some(serde_json::json!({"range": 1}))]),
+            serde_json::json!({"range": 1}),
+            "prepareRename : premier non-null gagne"
+        );
+        assert_eq!(
+            merge_rename(&[None, Some(Value::Null)]),
+            Value::Null,
+            "rename : toutes null ⟹ null"
+        );
+        assert_eq!(
+            merge_rename(&[
+                Some(Value::Null),
+                Some(serde_json::json!({"changes": {"u": []}}))
+            ]),
+            serde_json::json!({"changes": {"u": []}}),
+            "rename : une seule contribution ⟹ celle-là"
+        );
     }
 }
