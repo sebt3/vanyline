@@ -229,6 +229,19 @@ struct LspSessionInner {
     /// historique n'est jamais dévié par une barrière inexistante (invariant
     /// 8). Purge par `unsubscribe` côté client.
     merges: Mutex<HashMap<u64, PendingMerge>>,
+    /// Tâche 08 — cache de provenance des complétions SERVIS, pour
+    /// `completionItem/resolve` : uri (telle que vue sur le fil de la session
+    /// — mêmes clés que les notifications didChange/didClose) → ( (label,kind)
+    /// → (index_enfant, item_original) ). Écrit à la complétion de chaque
+    /// barrière completion (parts consignées APRÈS dédup — uniquement les
+    /// items servis), purgé sur didChange/didClose de l'URI et à la saturation
+    /// de la map. CACHE BORNÉ HEURISTIQUE (cap `MAX_COMPLETION_PROVENANCE_URIS`,
+    /// éviction QUELCONQUE — ordre HashMap) : un faux fallback resolve no-op
+    /// (item renvoyé tel quel) est l'échec ACCEPTABLE de ce cache, pas une
+    /// erreur — l'important est qu'un resolve ne parte jamais au mauvais
+    /// serveur. Jamais écrit ni consulté en mono-process (`aux` vide, les
+    /// serveurs mono ont leur propre mémoire d'items — invariant 8).
+    completion_provenance: Mutex<HashMap<String, CompletionProvenanceInner>>,
     _toolchain_name: String,
 }
 
@@ -246,6 +259,17 @@ enum InternalPending {
     /// interne de l'aux ne sort jamais côté client, sa réponse est consignée
     /// comme part de la barrière (règle 3).
     ClientMerge { session_id: u64 },
+    /// `completionItem/resolve` ROUTÉ vers cet enfant car c'est lui qui a
+    /// fourni l'item (provenance task-08) : `client`/`orig_id` portent la
+    /// réponse au client (id restauré) avec le RÉSULTAT de l'enfant. `item` =
+    /// payload reçu du client, conservé pour le fallback no-op : erreur de
+    /// l'enfant ou EOF avant réponse ⟹ réponse `{result: item}` (jamais une
+    /// erreur globale, jamais un pend).
+    ClientResolve {
+        client: ClientId,
+        orig_id: i64,
+        item: Value,
+    },
 }
 
 /// Un enfant auxiliaire du multiplexeur (jamais le primaire). Possède son canal
@@ -416,24 +440,38 @@ fn concat_diag_parts(uri_parts: &HashMap<usize, Vec<Value>>) -> Vec<Value> {
 /// pour les parts de diagnostics de la tâche 06).
 const PRIMARY_PART: usize = 0;
 
+/// Cap du cache de provenance completion (tâche 08) : 64 URIs ; au-delà,
+/// éviction QUELCONQUE (ordre `HashMap`) — cf. doc du champ
+/// `completion_provenance` : un faux fallback resolve no-op est l'échec
+/// acceptable de ce cache borné heuristique, pas une erreur.
+const MAX_COMPLETION_PROVENANCE_URIS: usize = 64;
+
+/// Table de provenance d'UNE URI (tâche 08) : `(label, kind)` →
+/// `(index_enfant, item_original)` — alias posé pour la lisibilité (lint
+/// `type_complexity`), type exactement celui du contrat de la tâche.
+type CompletionProvenanceInner = HashMap<(String, Option<i64>), (usize, Value)>;
+
 /// Politique de routage d'une REQUÊTE client en composite (`aux` non vide).
 /// `aux` vide ⟹ la table n'est JAMAIS consultée, chemin primaire historique
 /// strict (invariant 8). Défaut : `Primary` — méthodes mono-serveur par
 /// design : `textDocument/formatting`, `textDocument/documentSymbol`,
 /// `textDocument/semanticTokens/*` (tâche 09, stratégie de délégation par
-/// plage déjà tranchée), `textDocument/completion` +
-/// `completionItem/resolve` (tâche 08), `textDocument/signatureHelp` (non
-/// listée au design ⟹ défaut assumé, extensible après vérification manuelle).
+/// plage déjà tranchée), `textDocument/signatureHelp` (non listée au design ⟹
+/// défaut assumé, extensible après vérification manuelle). Hors table par
+/// nature : `completionItem/resolve` — ni `Primary` ni barrière, troisième
+/// voie dédiée par provenance (`route_completion_resolve`, tâche 08).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeRoute {
     Primary,
     All,
 }
 
-// TODO(task-08) : `textDocument/completion` et `completionItem/resolve`
-// basculeront ici en `All` avec leur fusionneur dédié — `Primary` d'ici là,
-// même en composite (test `merge_completion_stays_primary` : garde posée
-// exprès pour être inversée par la tâche 08).
+// TODO(task-09) : `textDocument/semanticTokens/*` — stratégie de délégation
+// par plage déjà tranchée au design, `Primary` d'ici là. Tâche 08 posée :
+// `textDocument/completion` est en `All` (fusion dédup `(label,kind)`
+// primary-wins, `merge_completions`) ; `completionItem/resolve` N'EST PAS
+// dans cette table (routage par provenance, jamais de barrière ni de
+// primaire aveugle — test `resolve_routes_to_aux`).
 fn merge_route_for_method(method: &str) -> MergeRoute {
     match method {
         "textDocument/hover"
@@ -443,7 +481,8 @@ fn merge_route_for_method(method: &str) -> MergeRoute {
         | "textDocument/references"
         | "textDocument/codeAction"
         | "textDocument/prepareRename"
-        | "textDocument/rename" => MergeRoute::All,
+        | "textDocument/rename"
+        | "textDocument/completion" => MergeRoute::All,
         _ => MergeRoute::Primary,
     }
 }
@@ -712,8 +751,102 @@ fn merge_rename(parts: &[Option<Value>]) -> Value {
     acc.map(Value::Object).unwrap_or(Value::Null)
 }
 
-/// Dispatch de la fusion vers les cinq cas de la table `MergeRoute::All`
-/// (table fermée : toute méthode `All` a son fusionneur). Méthode inconnue
+/// Clé de dédup ET de provenance d'un `CompletionItem` (tâche 08) :
+/// `(label, kind)` — `label` = la chaîne LSP classique ou l'objet
+/// `CompletionItemLabel` LSP 3.17 (`label.label`) ; `kind` = `kind` (i64) ou
+/// `None` si absent — **absent ≠ présent** (décision développeur 2026-09-06).
+/// `None` = item sans label exploitable (opaque) : jamais dédupé (conservé
+/// tel quel), jamais traçable par la provenance — un resolve dessus retombera
+/// en fallback no-op, l'échec acceptable.
+fn completion_item_key(item: &Value) -> Option<(String, Option<i64>)> {
+    let label = match item.get("label")? {
+        Value::String(s) => s.clone(),
+        Value::Object(label_obj) => label_obj.get("label")?.as_str()?.to_string(),
+        _ => return None,
+    };
+    Some((label, item.get("kind").and_then(Value::as_i64)))
+}
+
+/// Cœur de la fusion completion (tâche 08) : normalise chaque part
+/// (`null`/absent ⟹ vide ; tableau ⟹ ses items ; objet avec `items` tableau
+/// ⟹ `CompletionList` : items + `isIncomplete`) et la plie primary-first dans
+/// `retained` — un item dont `(label, kind)` matche un item DÉJÀ RETENU est
+/// abandonné (le retenu est le plus ancien ⟹ le primaire gagne), un item sans
+/// clé est conservé sans être dédupable. Parts indexées par index d'enfant
+/// (0 = primaire) pour que la provenance sache QUI a fourni chaque item
+/// retenu ; les positions du vecteur d'entrée portent déjà l'ordre
+/// primary-first. Part d'une shape inattendue (scalaire, objet sans `items`)
+/// ⟹ contribution vide + warn (contrat des fusionneurs, jamais de panique).
+/// Rend `(isIncomplete en OR des parts, items retenus avec leur index
+/// d'enfant, au moins une part était un CompletionList)`.
+fn merge_completion_parts(parts: &[(usize, Option<Value>)]) -> (bool, Vec<(usize, Value)>, bool) {
+    let mut seen: HashSet<(String, Option<i64>)> = HashSet::new();
+    let mut retained: Vec<(usize, Value)> = Vec::new();
+    let mut is_incomplete = false;
+    let mut any_completion_list = false;
+    for (index, part) in parts {
+        let items: &[Value] = match part {
+            None | Some(Value::Null) => continue,
+            Some(Value::Array(items)) => items.as_slice(),
+            Some(Value::Object(list)) => match list.get("items").and_then(Value::as_array) {
+                Some(items) => {
+                    any_completion_list = true;
+                    if list
+                        .get("isIncomplete")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false)
+                    {
+                        is_incomplete = true;
+                    }
+                    items.as_slice()
+                }
+                None => {
+                    warn_unexpected_merge_part(
+                        "textDocument/completion",
+                        *index,
+                        &Value::Object(list.clone()),
+                    );
+                    continue;
+                }
+            },
+            Some(unexpected) => {
+                warn_unexpected_merge_part("textDocument/completion", *index, unexpected);
+                continue;
+            }
+        };
+        for item in items {
+            let key = completion_item_key(item);
+            if let Some(key) = &key
+                && !seen.insert(key.clone())
+            {
+                continue; // le primaire (ou un enfant plus tôt) a déjà gagné pour cette clé
+            }
+            retained.push((*index, item.clone()));
+        }
+    }
+    (is_incomplete, retained, any_completion_list)
+}
+
+/// `textDocument/completion` (fusion de barrière, tâche 08) : `merge_result_for`
+/// ne connaît que les valeurs des parts — cœur partagé avec l'écriture de la
+/// provenance (qui, elle, a besoin des index d'enfants) : même fonction,
+/// indices de position ici. Shape de sortie : au moins une part `CompletionList`
+/// ⟹ `CompletionList {isIncomplete, items}` ; sinon (toutes tableaux/null) ⟹
+/// le tableau — préserver la compat d'attente des deux mondes clientes
+/// (`@codemirror/lsp-client` lit les deux).
+fn merge_completions(parts: &[Option<Value>]) -> Value {
+    let indexed: Vec<(usize, Option<Value>)> = parts.iter().cloned().enumerate().collect();
+    let (is_incomplete, retained, any_completion_list) = merge_completion_parts(&indexed);
+    let items: Vec<Value> = retained.into_iter().map(|(_, item)| item).collect();
+    if any_completion_list {
+        serde_json::json!({"isIncomplete": is_incomplete, "items": items})
+    } else {
+        Value::Array(items)
+    }
+}
+
+/// Dispatch de la fusion vers les cas de la table `MergeRoute::All` (table
+/// fermée : toute méthode `All` a son fusionneur). Méthode inconnue
 /// (impossible par la table, défense) ⟹ part du primaire ou `null`, warn —
 /// jamais de panique.
 fn merge_result_for(method: &str, parts: &[Option<Value>]) -> Value {
@@ -726,6 +859,7 @@ fn merge_result_for(method: &str, parts: &[Option<Value>]) -> Value {
         "textDocument/codeAction" => merge_code_actions(parts),
         "textDocument/prepareRename" => merge_prepare_rename(parts),
         "textDocument/rename" => merge_rename(parts),
+        "textDocument/completion" => merge_completions(parts),
         unknown => {
             tracing::warn!(
                 method = unknown,
@@ -754,6 +888,11 @@ struct PendingMerge {
     client: ClientId,
     orig_id: i64,
     method: String,
+    /// `params.textDocument.uri` de la requête, si présent (tâche 08) : seul
+    /// consommateur = l'écriture de la provenance à la complétion d'une
+    /// barrière `completion`. Absent ⟹ pas de provenance (un resolve
+    /// correspondant retombera en fallback no-op — acceptable, documenté).
+    params_uri: Option<String>,
     expected: usize,
     /// part index (0 = primaire) → réponse ; `None` = l'enfant a rendu une
     /// erreur/EOF (contribution vide — seul le primaire en ERREUR fait échouer
@@ -862,6 +1001,7 @@ impl LspSession {
                 next_req: AtomicU64::new(1),
                 aux,
                 merges: Mutex::new(HashMap::new()),
+                completion_provenance: Mutex::new(HashMap::new()),
                 _toolchain_name: spec.name.clone(),
             }),
         });
@@ -1094,6 +1234,47 @@ impl LspSession {
                                         &msg,
                                     );
                                 }
+                                Some(InternalPending::ClientResolve {
+                                    client,
+                                    orig_id,
+                                    item,
+                                }) => {
+                                    // Tâche 08 : réponse de l'ENFANT D'ORIGINE
+                                    // à un resolve routé par provenance —
+                                    // résultat relayé au client (id d'origine
+                                    // restauré). Erreur JSON-RPC (ou trame sans
+                                    // résultat) ⟹ fallback item TEL QUEL +
+                                    // warn : l'échec acceptable est le no-op,
+                                    // jamais une erreur globale, jamais un
+                                    // pend.
+                                    if let Some(result) = msg.get("result") {
+                                        reader_session.send_to_client(
+                                            client,
+                                            &serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": orig_id,
+                                                "result": result.clone(),
+                                            }),
+                                        );
+                                    } else {
+                                        let error =
+                                            msg.get("error").cloned().unwrap_or(Value::Null);
+                                        tracing::warn!(
+                                            toolchain =
+                                                reader_session.inner._toolchain_name.as_str(),
+                                            role = reader_aux.role.as_str(),
+                                            "LSP: aux error on routed completionItem/resolve, serving item un-resolved (no-op fallback): {error}"
+                                        );
+                                        reader_session.send_to_client(
+                                            client,
+                                            &serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": orig_id,
+                                                "result": item,
+                                            }),
+                                        );
+                                    }
+                                }
                                 None => {
                                     tracing::warn!(
                                         toolchain = reader_session.inner._toolchain_name.as_str(),
@@ -1143,6 +1324,7 @@ impl LspSession {
                 // sur ce chemin : réduction du cache, pas information nouvelle.
                 reader_session.drop_aux_parts(reader_aux.index);
                 let mut merge_session_ids: Vec<u64> = Vec::new();
+                let mut resolve_fallbacks: Vec<(ClientId, i64, Value)> = Vec::new();
                 {
                     let mut pending = reader_aux
                         .pending_internal
@@ -1156,6 +1338,17 @@ impl LspSession {
                             InternalPending::ClientMerge { session_id } => {
                                 merge_session_ids.push(*session_id);
                             }
+                            InternalPending::ClientResolve {
+                                client,
+                                orig_id,
+                                item,
+                            } => {
+                                // Tâche 08 : ces resolve n'auront JAMAIS de
+                                // réponse de cet enfant mort ⟹ fallback item
+                                // tel quel (no-op), collecté pour l'envoi HORS
+                                // du verrou (`send_to_client` prend `subs`).
+                                resolve_fallbacks.push((*client, *orig_id, item.clone()));
+                            }
                             InternalPending::Initialize => {}
                         }
                     }
@@ -1165,6 +1358,24 @@ impl LspSession {
                 // prend le verrou `merges` (jamais les deux simultanément).
                 for session_id in merge_session_ids {
                     reader_session.insert_merge_part(reader_aux.index, session_id, None);
+                }
+                // Idem tâche 08 : réponse de fallback aux clients dont le
+                // resolve est mort avec l'enfant (warn « degraded » porteur).
+                for (client, orig_id, item) in resolve_fallbacks {
+                    tracing::warn!(
+                        toolchain = reader_session.inner._toolchain_name.as_str(),
+                        role = reader_aux.role.as_str(),
+                        orig_id,
+                        "LSP: aux died mid completionItem/resolve, serving item un-resolved (no-op fallback)"
+                    );
+                    reader_session.send_to_client(
+                        client,
+                        &serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "id": orig_id,
+                            "result": item,
+                        }),
+                    );
                 }
                 if reader_session.inner.alive.load(Ordering::SeqCst) {
                     tracing::warn!(
@@ -1641,6 +1852,10 @@ impl LspSession {
     /// (id d'origine restauré, résultat fusionné primary-first). Les réponses
     /// brutes d'enfants ne sortent jamais. `send_to_client` filtre les
     /// désabonnés (règle 7).
+    ///
+    /// Tâche 08 : une barrière `completion` complétée écrit en plus la
+    /// provenance des items SERVIS (même cœur `merge_completion_parts` que la
+    /// fusion ⟹ consistance résultat/provenance par construction).
     fn complete_merge(&self, pending_merge: PendingMerge) {
         let mut indexes: Vec<usize> = pending_merge.parts.keys().copied().collect();
         indexes.sort_unstable();
@@ -1648,6 +1863,9 @@ impl LspSession {
             .iter()
             .filter_map(|index| pending_merge.parts.get(index).cloned())
             .collect();
+        if pending_merge.method == "textDocument/completion" {
+            self.record_completion_provenance(&pending_merge, &indexes, &parts);
+        }
         let result = merge_result_for(&pending_merge.method, &parts);
         self.send_to_client(
             pending_merge.client,
@@ -1655,6 +1873,200 @@ impl LspSession {
                 "jsonrpc": "2.0",
                 "id": pending_merge.orig_id,
                 "result": result,
+            }),
+        );
+    }
+
+    /// Tâche 08 — écrit la provenance des items SERVIS par une barrière
+    /// completion complétée : `(label,kind) → (index_enfant, item_original)`
+    /// pour l'URI de la requête, APRÈS dédup (les items droppés n'ont jamais
+    /// été vus d'un éditeur — jamais de provenance sur eux), REMPLACEMENT de
+    /// l'entrée existante de l'URI (la dernière complétion fait foi). Cap
+    /// `MAX_COMPLETION_PROVENANCE_URIS` : au-delà, éviction QUELCONQUE (ordre
+    /// `HashMap`) — cache borné heuristique, un faux fallback resolve no-op
+    /// est l'échec acceptable, pas l'erreur (cf. doc du champ). Requête sans
+    /// `params.textDocument.uri` ⟹ rien à tracer (debug) : le resolve
+    /// correspondant retombera en no-op — documenté, acceptable.
+    fn record_completion_provenance(
+        &self,
+        pending_merge: &PendingMerge,
+        indexes: &[usize],
+        parts: &[Option<Value>],
+    ) {
+        let Some(uri) = pending_merge.params_uri.as_deref() else {
+            tracing::debug!(
+                toolchain = self.inner._toolchain_name.as_str(),
+                session_id = pending_merge.orig_id,
+                "LSP: merged completion without params.textDocument.uri, provenance not recorded"
+            );
+            return;
+        };
+        let indexed: Vec<(usize, Option<Value>)> =
+            indexes.iter().copied().zip(parts.iter().cloned()).collect();
+        let (_, retained, _) = merge_completion_parts(&indexed);
+        let mut inner: CompletionProvenanceInner = HashMap::new();
+        for (child_index, item) in retained {
+            if let Some(key) = completion_item_key(&item) {
+                inner.insert(key, (child_index, item));
+            }
+        }
+        let mut provenance = self
+            .inner
+            .completion_provenance
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if !provenance.contains_key(uri) && provenance.len() >= MAX_COMPLETION_PROVENANCE_URIS {
+            let evicted = provenance.keys().next().cloned();
+            if let Some(evicted) = evicted {
+                provenance.remove(&evicted);
+            }
+        }
+        provenance.insert(uri.to_string(), inner);
+    }
+
+    /// Tâche 08 — troisième voie de `completionItem/resolve` en composite :
+    /// **jamais** de barrière, **jamais** le primaire aveugle. Clé
+    /// `(label, kind)` de l'item reçu (`params` du client — même forme qu'un
+    /// `CompletionItem`), cherchée dans TOUTES les URI du cache de
+    /// provenance → ensemble des enfants distincts fournisseurs :
+    ///
+    /// - un seul enfant PRIMAIRE (index 0) ⟹ `false` : le chemin historique
+    ///   de `send` EST le routage primaire requis (session id réécrit,
+    ///   `pending`, réponse du primaire id restauré) — aucune mécanique
+    ///   nouvelle, aucune trame surnuméraire ;
+    /// - un seul enfant AUX ⟹ copie de la requête avec SON id interne +
+    ///   `InternalPending::ClientResolve` (enregistré AVANT envoi, même motif
+    ///   que le fan-out task-07) ; réponse de l'enfant ⟹ réponse au client
+    ///   (id restauré) avec le RÉSULTAT de l'enfant ; injoignable ou mort ⟹
+    ///   warn + fallback item tel quel ;
+    /// - zéro correspondance ou plusieurs enfants distincts (ambigu) ⟹
+    ///   fallback immédiat `{result: item}`, AUCUNE trame sur les fils
+    ///   enfants — le resolve ne devient jamais une erreur globale, le no-op
+    ///   est l'échec acceptable.
+    ///
+    /// Rend `true` ⟹ prise en charge (routée aux ou fallback) ; `false` ⟹
+    /// laisser passer au chemin historique (propriétaire = primaire).
+    fn route_completion_resolve(&self, client: ClientId, msg: &Value) -> bool {
+        let orig_id = msg["id"].as_i64().unwrap_or(0);
+        let null = Value::Null;
+        let params = msg.get("params").unwrap_or(&null);
+        let key = completion_item_key(params);
+
+        let mut owners: HashSet<usize> = HashSet::new();
+        if let Some(key) = key.as_ref() {
+            let provenance = self
+                .inner
+                .completion_provenance
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for uri_entries in provenance.values() {
+                if let Some((child_index, _)) = uri_entries.get(key) {
+                    owners.insert(*child_index);
+                }
+            }
+        }
+        let owner = match owners.len() {
+            0 => None,
+            1 => owners.iter().next().copied(),
+            _ => {
+                // Deux enfants distincts revendiquent la même `(label,kind)` :
+                // on ne devine pas — le faux enrichissement (ou l'erreur du
+                // mauvais serveur) coûte plus cher que le no-op.
+                tracing::warn!(
+                    toolchain = self.inner._toolchain_name.as_str(),
+                    "LSP: completionItem/resolve provenance ambiguous across children, no-op fallback"
+                );
+                None
+            }
+        };
+        let Some(child_index) = owner else {
+            if owners.is_empty() {
+                tracing::debug!(
+                    toolchain = self.inner._toolchain_name.as_str(),
+                    "LSP: completionItem/resolve without provenance, no-op fallback (item served as-is)"
+                );
+            }
+            self.send_resolve_fallback(client, orig_id, params);
+            return true;
+        };
+
+        if child_index == PRIMARY_PART {
+            // Provenance primaire : le chemin historique de `send` est
+            // exactement ce routage (session id + `pending` + réponse id
+            // restauré par la lectrice primaire).
+            return false;
+        }
+
+        let Some(aux) = self.inner.aux.get(child_index - 1) else {
+            // Index fantôme (barrière d'une autre vie — ne peut pas arriver
+            // tant que `aux` est figé au spawn ; défense = fallback).
+            tracing::warn!(
+                toolchain = self.inner._toolchain_name.as_str(),
+                child_index,
+                "LSP: completionItem/resolve provenance points to unknown child, no-op fallback"
+            );
+            self.send_resolve_fallback(client, orig_id, params);
+            return true;
+        };
+        if !aux.alive.load(Ordering::SeqCst) {
+            // Enfant déjà mort à l'aiguillage : AUCUNE trame sur un fil mort.
+            tracing::warn!(
+                toolchain = self.inner._toolchain_name.as_str(),
+                role = aux.role.as_str(),
+                "LSP: completionItem/resolve owner already degraded, no-op fallback"
+            );
+            self.send_resolve_fallback(client, orig_id, params);
+            return true;
+        }
+
+        let internal_id = aux.next_internal_req.fetch_add(1, Ordering::SeqCst);
+        let mut copy = msg.clone();
+        copy["id"] = Value::Number(serde_json::Number::from(internal_id));
+        aux.pending_internal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                internal_id,
+                InternalPending::ClientResolve {
+                    client,
+                    orig_id,
+                    item: params.clone(),
+                },
+            );
+        // Re-check `alive` APRÈS `try_send` (même raison que le fan-out
+        // task-07) : un aux mort juste après l'enregistrement aurait purgé
+        // sans voir notre entrée — sans ce re-check le client pendrait.
+        let unreachable = aux
+            .stdin_tx
+            .try_send(copy.to_string().into_bytes())
+            .is_err()
+            || !aux.alive.load(Ordering::SeqCst);
+        if unreachable {
+            aux.pending_internal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&internal_id);
+            tracing::warn!(
+                toolchain = self.inner._toolchain_name.as_str(),
+                role = aux.role.as_str(),
+                "LSP: completionItem/resolve cannot reach owner, no-op fallback"
+            );
+            self.send_resolve_fallback(client, orig_id, params);
+        }
+        true
+    }
+
+    /// Tâche 08 — fallback no-op d'un `completionItem/resolve` : réponse au
+    /// client avec l'item TEL QUEL (aucun enrichissement), sous l'id d'origine
+    /// — JAMAIS une erreur globale (contrat : un resolve non servi est
+    /// inoffensif, un resolve en erreur perturbe l'éditeur).
+    fn send_resolve_fallback(&self, client: ClientId, orig_id: i64, item: &Value) {
+        self.send_to_client(
+            client,
+            &serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": orig_id,
+                "result": item.clone(),
             }),
         );
     }
@@ -1697,6 +2109,21 @@ impl LspSession {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .retain(|_, pending_merge| pending_merge.client != client);
+        // Retirer les resolve completion en attente de ce client (tâche 08) :
+        // aucune réponse ne partira vers un client désabonné (règle 7) ; la
+        // réponse tardive de l'aux sur cet id interne purgé sera avalée comme
+        // inconnue par la lectrice (warn existant), sans résidu observable.
+        for aux in &self.inner.aux {
+            aux.pending_internal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retain(|_, entry| {
+                    !matches!(
+                        entry,
+                        InternalPending::ClientResolve { client: c, .. } if *c == client
+                    )
+                });
+        }
         // Retirer le client de toutes les sets d'URI tenues par des éditeurs ;
         // une URI sans aucun tenant disparaît de la map.
         let mut editor_uris = self
@@ -1718,7 +2145,10 @@ impl LspSession {
     /// chaque aux vivant sous id interne propre avec barrière `PendingMerge`
     /// (tâche 07 — une seule réponse client fusionnée à la fin). `initialize`
     /// garde sa copie systématique vers chaque aux vivant
-    /// (`fan_out_initialize`, invariable 3). Trame sans `id` (notification,
+    /// (`fan_out_initialize`, invariable 3). `completionItem/resolve` passe
+    /// D'ABORD par sa troisième voie dédiée en composite
+    /// (`route_completion_resolve`, tâche 08 — routage par provenance, jamais
+    /// de barrière ni de primaire aveugle). Trame sans `id` (notification,
     /// doc-sync inclus) → primaire puis fan-out telle quelle à chaque aux
     /// vivant (invariant 2) — un aux mort ou bloqué est ignoré, ne bloque ni
     /// n'erre jamais le chemin client. `aux` vide ⟹ la table de routage n'est
@@ -1743,6 +2173,18 @@ impl LspSession {
         }
 
         if msg.get("id").is_some() {
+            // ── Tâche 08 — `completionItem/resolve` : troisième voie dédiée
+            // en composite (ni barrière, ni primaire aveugle), AVANT toute
+            // écriture d'id. `aux` vide ⟹ la table de provenance n'est PAS
+            // consultée, chemin primaire historique strict (invariant 8 — les
+            // serveurs mono ont leur propre mémoire d'items).
+            if !self.inner.aux.is_empty()
+                && msg.get("method").and_then(|m| m.as_str()) == Some("completionItem/resolve")
+                && self.route_completion_resolve(client, &msg)
+            {
+                return Ok(());
+            }
+
             // Requête : réécrire l'id en session id et mémoriser le mapping
             let session_req_id = self.inner.next_req.fetch_add(1, Ordering::SeqCst);
             let orig_id = msg["id"].as_i64().unwrap_or(0);
@@ -1786,6 +2228,15 @@ impl LspSession {
                             client,
                             orig_id,
                             method: method.unwrap_or_default().to_string(),
+                            // URI de la requête pour la provenance completion
+                            // (tâche 08) — extraite pour toutes les méthodes
+                            // `All`, consommée par completion seule.
+                            params_uri: msg
+                                .get("params")
+                                .and_then(|p| p.get("textDocument"))
+                                .and_then(|td| td.get("uri"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string),
                             expected: alive.len() + 1,
                             parts: HashMap::new(),
                         },
@@ -1883,6 +2334,26 @@ impl LspSession {
                 .send(payload.clone())
                 .await
                 .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))?;
+            // Tâche 08 — un document qui change ou se ferme rend suspects les
+            // items servis de sa dernière complétion : purge immédiate de sa
+            // provenance (un resolve qui retombe alors en no-op est l'échec
+            // acceptable du cache). Mono-process : jamais écrit, jamais purgé
+            // — ci-dessus le `return` du chemin historique (invariant 8).
+            if matches!(
+                msg.get("method").and_then(|m| m.as_str()),
+                Some("textDocument/didChange") | Some("textDocument/didClose")
+            ) && let Some(uri) = msg
+                .get("params")
+                .and_then(|p| p.get("textDocument"))
+                .and_then(|td| td.get("uri"))
+                .and_then(Value::as_str)
+            {
+                self.inner
+                    .completion_provenance
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(uri);
+            }
             // …puis fan-out à chaque enfant aux VIVANT (invariant 2). Enfant mort
             // ignoré silencieusement (déjà dégradé) ; `try_send` par design : un
             // aux bloqué ne doit jamais suspendre le chemin client — une trame
@@ -1911,6 +2382,19 @@ impl LspSession {
     pub(crate) fn pending_merge_count(&self) -> usize {
         self.inner
             .merges
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len()
+    }
+
+    /// Nombre d'URI tenues par le cache de provenance completion (test tâche
+    /// 08 : garde mono-process — jamais écrit ; vérification composite — écrit
+    /// à la complétion, purgé au didChange/didClose). Jamais utilisé hors
+    /// tests.
+    #[cfg(test)]
+    pub(crate) fn completion_provenance_uri_count(&self) -> usize {
+        self.inner
+            .completion_provenance
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .len()
@@ -5235,31 +5719,54 @@ while True:
     /// journalise les trames reçues dans argv[1] (pattern recorder de la tâche
     /// 03) et répond des résultats FIXES identifiables par méthode LSP (le
     /// `hover` echo la ligne de position — distinguo des requêtes
-    /// simultanées). Toute requête hors `textDocument/*` (dont `initialize`)
-    /// répond `{"capabilities":{}}` — les modes ne dégradent QUE les méthodes
-    /// de fusion, jamais la séquence d'initialisation. Modes via `fake_mode` :
-    /// `"null"` (tout `textDocument/*` répond `result: null`) ; `"error"`
-    /// (tout `textDocument/*` répond une erreur JSON-RPC -32001) ; `"slow"`
+    /// simultanées). `completion` répond un `CompletionList` fixture
+    /// `{"isIncomplete":false,"items":[tmpl(14), ref(17,"P")]}` — variante
+    /// SANS `ref` sur une URI en `B.vue` (fabrique l'ambiguïté du test
+    /// `resolve_ambiguous_no_wire`). `completionItem/resolve` renvoie l'item
+    /// reçu ENRICHI `_from:"prim"` (tâche 08) et fait partie de la famille
+    /// « méthodes de fusion » : les modes ci-dessous qui la dégradent
+    /// (`null`/`error`/`slow`/`die`/`hold`/`swap`) s'appliquent aussi à lui.
+    /// Toute requête hors famille (dont `initialize`) répond
+    /// `{"capabilities":{}}` — les modes ne dégradent JAMAIS la séquence
+    /// d'initialisation. Modes via `fake_mode` :
+    /// `"null"` (toute la famille répond `result: null`) ; `"error"`
+    /// (toute la famille répond une erreur JSON-RPC -32001) ; `"slow"`
     /// (400 ms de sleep avant chaque réponse) ; `"die"` (meurt APRÈS avoir
-    /// reçu un `textDocument/*`, sans répondre — purge d'EOF task-05) ;
+    /// reçu une trame de la famille, sans répondre — purge d'EOF task-05) ;
     /// `"single"` (`definition` répondu comme `Location` objet seul, pas en
     /// tableau) ; `"docchanges"` (`rename` répondu en variante
     /// `documentChanges` — cas mixte avec le primaire `changes`) ; `"swap"`
     /// (retient les requêtes, répond en ordre inversé à la 2e — corrélation) ;
     /// `"hold"` (retient les `textDocument/*` jusqu'à la notification
     /// `x/release`, puis redevient normal — determinisme des tests de mort de
-    /// barrière).
+    /// barrière) ; `"completion-array"` (completion répond le même jeu d'items
+    /// en TABLEAU simple, pas en `CompletionList` — shape de sortie) ;
+    /// `"completion-kind"` (completion répond `[{"label":"x","kind":17}]` —
+    /// dédup kind absent ≠ kind présent).
     const FAKE_LSP_MERGE_PRIMARY_PY: &str = r#"
 import sys, json, time
 
 LOG = sys.argv[1] if len(sys.argv) > 1 else ""
 MODE = "@@MODE@@"
 SIDE = "primary"
+FROM = "prim"
 
 R = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
 
 def position_line(msg):
     return msg.get("params", {}).get("position", {}).get("line", 0)
+
+def completion_items(msg):
+    # Items fixture du primaire (tâche 08). URI en B.vue : sans `ref` ⟹
+    # (ref,17) retenu depuis l'AUX sur cette URI, depuis le PRIMAIRE sur les
+    # autres — même clé provenance, deux enfants distincts (ambiguïté).
+    uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+    if "B.vue" in uri:
+        return [{"label": "tmpl", "kind": 14}]
+    return [{"label": "tmpl", "kind": 14}, {"label": "ref", "kind": 17, "detail": "P"}]
+
+def completion(msg):
+    return {"isIncomplete": False, "items": completion_items(msg)}
 
 RESULTS = {
     "textDocument/hover": lambda m: {"contents": {"kind": "markdown", "value": f"H-PRIM:{position_line(m)}"}},
@@ -5272,7 +5779,7 @@ RESULTS = {
     "textDocument/rename": lambda m: {"changes": {
         "file:///a": [{"range": R, "newText": "prim"}],
         "file:///shared": [{"range": R, "newText": "shared-prim"}]}},
-    "textDocument/completion": lambda m: [{"label": "prim-item"}],
+    "textDocument/completion": completion,
 }
 
 SINGLE = {
@@ -5323,6 +5830,15 @@ def compute(msg):
     method = msg.get("method", "")
     if MODE == "null":
         return None
+    if method == "completionItem/resolve":
+        params = msg.get("params")
+        item = dict(params) if isinstance(params, dict) else {}
+        item["_from"] = FROM
+        return item
+    if MODE == "completion-array" and method == "textDocument/completion":
+        return completion_items(msg)
+    if MODE == "completion-kind" and method == "textDocument/completion":
+        return [{"label": "x", "kind": 17}]
     if MODE == "single" and method in SINGLE:
         return SINGLE[method](msg)
     if MODE == "docchanges" and method in DOCCHANGES:
@@ -5352,7 +5868,8 @@ while True:
             released = True
         continue
     method = msg.get("method", "")
-    if not method.startswith("textDocument/"):
+    in_family = method.startswith("textDocument/") or method == "completionItem/resolve"
+    if not in_family:
         write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
         continue
     if MODE == "die":
@@ -5361,7 +5878,7 @@ while True:
         write_frame({"jsonrpc": "2.0", "id": msg["id"],
                      "error": {"code": -32001, "message": f"{SIDE} exploded on {method}"}})
         continue
-    if MODE == "hold" and not released:
+    if MODE == "hold" and not released and method.startswith("textDocument/"):
         hold_buffer.append(msg)
         continue
     if MODE == "swap":
@@ -5383,17 +5900,36 @@ while True:
     /// même famille de modes (`null`/`error`/`slow`/`die`/`single`/
     /// `docchanges`/`swap`/`hold`). L'aux d'un composite de fusion porte le
     /// rôle spawnable `tsserver-forward` — la fusion ne dépend pas du rôle.
+    /// Tâche 08 : `completion` répond le fixture en TABLEAU
+    /// `[script(3), ref(17,"A")]`, `completionItem/resolve` renvoie l'item reçu
+    /// enrichi `_from:"aux"`, et le resolve fait partie de la famille dégradée
+    /// par les modes. Modes supplémentaires (résolution task-08) :
+    /// `"completion-list"` (completion en `CompletionList{isIncomplete:true}`
+    /// — shape + OR d'incomplétude) ; `"completion-nokind"` (completion
+    /// `[{"label":"x"}]` sans kind — dédup kind absent ≠ présent) ;
+    /// `"error-resolve"` (complétion normale, erreur JSON-RPC sur les
+    /// `completionItem/resolve` seulement — fallback item tel quel) ;
+    /// `"hold-resolve"` (complétion normale, retient les resolve jusqu'à
+    /// `x/release` — determinisme des tests de purge) ; `"hold-resolve-die"`
+    /// (retient les resolve puis MEURT sur la notification `fake/kill` — EOF
+    /// avec resolve en attente).
     const FAKE_LSP_MERGE_AUX_PY: &str = r#"
 import sys, json, time
 
 LOG = sys.argv[1] if len(sys.argv) > 1 else ""
 MODE = "@@MODE@@"
 SIDE = "aux"
+FROM = "aux"
 
 R = {"start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 1}}
 
 def position_line(msg):
     return msg.get("params", {}).get("position", {}).get("line", 0)
+
+AUX_ITEMS = [{"label": "script", "kind": 3}, {"label": "ref", "kind": 17, "detail": "A"}]
+
+def completion(msg):
+    return list(AUX_ITEMS)
 
 RESULTS = {
     "textDocument/hover": lambda m: {"contents": {"kind": "markdown", "value": f"H-AUX:{position_line(m)}"}},
@@ -5406,7 +5942,7 @@ RESULTS = {
     "textDocument/rename": lambda m: {"changes": {
         "file:///b": [{"range": R, "newText": "aux"}],
         "file:///shared": [{"range": R, "newText": "shared-aux"}]}},
-    "textDocument/completion": lambda m: [{"label": "aux-item"}],
+    "textDocument/completion": completion,
 }
 
 SINGLE = {
@@ -5457,6 +5993,15 @@ def compute(msg):
     method = msg.get("method", "")
     if MODE == "null":
         return None
+    if method == "completionItem/resolve":
+        params = msg.get("params")
+        item = dict(params) if isinstance(params, dict) else {}
+        item["_from"] = FROM
+        return item
+    if MODE == "completion-list" and method == "textDocument/completion":
+        return {"isIncomplete": True, "items": list(AUX_ITEMS)}
+    if MODE == "completion-nokind" and method == "textDocument/completion":
+        return [{"label": "x"}]
     if MODE == "single" and method in SINGLE:
         return SINGLE[method](msg)
     if MODE == "docchanges" and method in DOCCHANGES:
@@ -5479,23 +6024,29 @@ while True:
         continue
     log(msg)
     if "id" not in msg:
-        if msg.get("method") == "x/release" and MODE == "hold":
+        if msg.get("method") == "x/release" and MODE in ("hold", "hold-resolve"):
             for m in hold_buffer:
                 write_frame(answer(m))
             hold_buffer = []
             released = True
+        if msg.get("method") == "fake/kill" and MODE == "hold-resolve-die":
+            sys.exit(0)
         continue
     method = msg.get("method", "")
-    if not method.startswith("textDocument/"):
+    in_family = method.startswith("textDocument/") or method == "completionItem/resolve"
+    if not in_family:
         write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
         continue
     if MODE == "die":
         sys.exit(0)
-    if MODE == "error":
+    if MODE == "error" or (MODE == "error-resolve" and method == "completionItem/resolve"):
         write_frame({"jsonrpc": "2.0", "id": msg["id"],
                      "error": {"code": -32001, "message": f"{SIDE} exploded on {method}"}})
         continue
-    if MODE == "hold" and not released:
+    if MODE == "hold" and not released and method.startswith("textDocument/"):
+        hold_buffer.append(msg)
+        continue
+    if MODE in ("hold-resolve", "hold-resolve-die") and method == "completionItem/resolve":
         hold_buffer.append(msg)
         continue
     if MODE == "swap":
@@ -6252,30 +6803,165 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 52: merge_completion_stays_primary — `textDocument/completion` en
-    /// composite : l'aux ne la reçoit PAS (log aux sans completion, alors que
-    /// sa copie d'`initialize` prouve son canal vivant), réponse primaire
-    /// immédiate et verbatim — la tâche 08 la fera basculer en `All`.
+    // ── Tests tâche 08 (vue-lsp) : fusion completion + resolve par provenance ─
+
+    /// `CompletionList` du primaire en mode défaut (fixture task-08) — aussi la
+    /// réponse VERBATIM attendue en mono-process (chemin historique, aucune
+    /// fusion possible).
+    fn prim_completion_list() -> Value {
+        serde_json::json!({"isIncomplete": false, "items": [
+            {"label": "tmpl", "kind": 14},
+            {"label": "ref", "kind": 17, "detail": "P"}
+        ]})
+    }
+
+    /// Résultat fusionné attendu des modes défaut (test 1 et préambules) :
+    /// `[tmpl, ref(P), script]` — le `ref(17,"A")` de l'aux est droppé par le
+    /// dédup `(label,kind)` primary-wins ; shape `CompletionList` (le primaire
+    /// en a envoyé un), `isIncomplete` false.
+    fn merged_completion_fixture() -> Value {
+        serde_json::json!({"isIncomplete": false, "items": [
+            {"label": "tmpl", "kind": 14},
+            {"label": "ref", "kind": 17, "detail": "P"},
+            {"label": "script", "kind": 3}
+        ]})
+    }
+
+    /// Item attendu d'un fake en mode resolve : les `params` reçus enrichis
+    /// `_from` (contrat des fakes task-08).
+    fn resolved(item: Value, from: &str) -> Value {
+        let mut enriched = item.as_object().unwrap().clone();
+        enriched.insert("_from".to_string(), Value::String(from.to_string()));
+        Value::Object(enriched)
+    }
+
+    /// Préambule commun task-08 : `initialize` (id client 1) puis
+    /// `textDocument/completion` (id client 2) fusionnée sur `uri` ; rend la
+    /// réponse client unique. Les modes des fakes sont ceux du composite déjà
+    /// spawné par l'appelant.
+    async fn completion_setup(
+        session: &LspSession,
+        client: ClientId,
+        rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+        uri: &str,
+    ) -> Value {
+        composite_initialize(session, client, rx).await;
+        session
+            .send(client, text_request(2, "textDocument/completion", uri, 0))
+            .await
+            .expect("completion ok");
+        let resp = client_msg(
+            &recv_timeout(rx, Duration::from_secs(5))
+                .await
+                .expect("réponse completion fusionnée"),
+        );
+        assert_eq!(
+            resp["id"].as_i64(),
+            Some(2),
+            "id client restauré sur la fusion"
+        );
+        resp
+    }
+
+    /// Requête `completionItem/resolve` : `params` = l'item lui-même (les
+    /// éditeurs renvoient l'item servi tel quel).
+    fn resolve_request(id: i64, item: Value) -> Vec<u8> {
+        serde_json::json!({
+            "jsonrpc": "2.0", "id": id, "method": "completionItem/resolve",
+            "params": item
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// Notification `textDocument/didChange` pleine (seule l'URI importe pour
+    /// la purge de provenance, mais la shape doit être honnête).
+    fn did_change(uri: &str) -> Vec<u8> {
+        serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didChange",
+            "params": {"textDocument": {"uri": uri}, "contentChanges": [{"text": "<template/>"}]}
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    /// Tâche 08 test 1 : merge_completion_replaces_stays_primary_guard —
+    /// (remplace `merge_completion_stays_primary`, garde d'AVANT cette tâche) :
+    /// la completion fan-out est reçue par les DEUX enfants (session id 2 pour
+    /// le primaire — initialize=1, completion=2 ; id interne 2 pour l'aux —
+    /// copie d'initialize=1), réponse client UNIQUE fusionnée
+    /// `[tmpl, ref(P), script]` — le `ref` de l'aux (detail `A`) est droppé par
+    /// le dédup `(label,kind)`, le detail `P` du primaire survit (primary-
+    /// wins) ; shape `CompletionList`, `isIncomplete` false ; provenance
+    /// écrite pour l'URI.
     #[tokio::test]
-    async fn merge_completion_stays_primary() {
+    async fn merge_completion_replaces_stays_primary_guard() {
         let (session, tmpdir) = make_merge_composite("", "").await;
         let (client, mut rx) = session.subscribe();
-        composite_initialize(&session, client, &mut rx).await;
+        let resp = completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+        assert_eq!(
+            resp["result"],
+            merged_completion_fixture(),
+            "items fusionnés primary-first, dédup (label,kind) primary-wins, shape CompletionList, isIncomplete false"
+        );
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "barrière retirée après complétion"
+        );
+        assert_eq!(
+            session.completion_provenance_uri_count(),
+            1,
+            "provenance écrite pour l'URI complétée"
+        );
 
-        // La copie d'initialize dans le log aux prouve que son canal est
-        // vivant : l'absence de completion ensuite est significative.
-        let is_initialize = is_method("initialize");
-        let aux_frames = poll_recorder(
-            &aux_log_path(&tmpdir, 0),
-            |frames| frames.iter().any(is_initialize),
+        let is_completion = is_method("textDocument/completion");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_completion),
             Duration::from_secs(5),
         )
         .await;
-        assert!(
-            aux_frames.iter().any(is_initialize),
-            "l'aux doit avoir reçu sa copie d'initialize (canal vivant); trames: {aux_frames:?}"
+        let prim = primary_frames
+            .iter()
+            .find(|f| is_completion(f))
+            .expect("le primaire reçoit la completion");
+        assert_eq!(
+            prim["id"].as_i64(),
+            Some(2),
+            "fil primaire : session id (initialize=1, completion=2) ; trames: {primary_frames:?}"
+        );
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_completion),
+            Duration::from_secs(5),
+        )
+        .await;
+        let aux = aux_frames.iter().find(|f| is_completion(f)).expect(
+            "l'AUX reçoit la completion (Route::All — l'inverse exact de la garde task-07)",
+        );
+        assert_eq!(
+            aux["id"].as_i64(),
+            Some(2),
+            "fil aux : id interne (copie initialize=1, completion=2) ; trames: {aux_frames:?}"
         );
 
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse client unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 2 : merge_completion_incomplete_or_and_array_shape —
+    /// primaire en TABLEAU simple, aux en `CompletionList{isIncomplete:true}`
+    /// ⟹ sortie `CompletionList` (au moins une part en était un), `isIncomplete`
+    /// = OR des parts = true, items concaténés-dédupés primary-first.
+    #[tokio::test]
+    async fn merge_completion_incomplete_or_and_array_shape() {
+        let (session, tmpdir) = make_merge_composite("completion-array", "completion-list").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
         session
             .send(
                 client,
@@ -6286,36 +6972,592 @@ while True:
         let resp = client_msg(
             &recv_timeout(&mut rx, Duration::from_secs(5))
                 .await
-                .expect("le primaire répond de la completion sans attendre"),
+                .expect("réponse completion"),
         );
         assert_eq!(resp["id"].as_i64(), Some(2));
         assert_eq!(
             resp["result"],
-            serde_json::json!([{"label": "prim-item"}]),
-            "completion primaire seul, verbatim (pas de fusion)"
+            serde_json::json!({"isIncomplete": true, "items": [
+                {"label": "tmpl", "kind": 14},
+                {"label": "ref", "kind": 17, "detail": "P"},
+                {"label": "script", "kind": 3}
+            ]}),
+            "une part CompletionList ⟹ shape CompletionList ; isIncomplete OR(true) ; items dédupés primary-first"
         );
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 3 : merge_completion_kind_absent_distinct — aux
+    /// `{"label":"x"}` sans kind vs primaire `{"label":"x","kind":17}` ⟹ les
+    /// DEUX servis (kind absent ≠ kind présent dans la clé de dédup) ; aucune
+    /// part `CompletionList` ⟹ shape tableau.
+    #[tokio::test]
+    async fn merge_completion_kind_absent_distinct() {
+        let (session, tmpdir) = make_merge_composite("completion-kind", "completion-nokind").await;
+        let (client, mut rx) = session.subscribe();
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(2, "textDocument/completion", "file:///w/App.vue", 0),
+            )
+            .await
+            .expect("completion ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse completion"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(2));
         assert_eq!(
-            session.pending_merge_count(),
-            0,
-            "Route::Primary ⟹ aucune barrière créée"
+            resp["result"],
+            serde_json::json!([{"label": "x", "kind": 17}, {"label": "x"}]),
+            "kind absent ≠ kind présent ⟹ les DEUX servis ; toutes parts tableaux ⟹ shape tableau"
+        );
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 4 : resolve_routes_to_aux — après la fixture : resolve de
+    /// `script(3)` (item servi par l'AUX) ⟹ l'aux reçoit la requête sous son
+    /// id interne 3 (initialize=1, completion=2, resolve=3), le primaire NON,
+    /// réponse client = résultat de l'AUX avec l'id d'origine, réponse unique.
+    #[tokio::test]
+    async fn resolve_routes_to_aux() {
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+
+        let item = serde_json::json!({"label": "script", "kind": 3});
+        session
+            .send(client, resolve_request(3, item.clone()))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("résultat du resolve par l'aux"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(3), "id d'origine restauré");
+        assert_eq!(
+            resp["result"],
+            resolved(item.clone(), "aux"),
+            "résultat de L'AUX (item enriché _from=aux) — jamais une réponse du primaire"
         );
 
-        let is_completion = is_method("textDocument/completion");
-        let primary_frames = poll_recorder(
-            &primary_log_path(&tmpdir),
-            |frames| frames.iter().any(is_completion),
+        let is_resolve = is_method("completionItem/resolve");
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_resolve),
             Duration::from_secs(5),
         )
         .await;
+        let aux = aux_frames
+            .iter()
+            .find(|f| is_resolve(f))
+            .expect("l'AUX reçoit le resolve (provenance : item retenu depuis lui)");
+        assert_eq!(
+            aux["id"].as_i64(),
+            Some(3),
+            "fil aux : id interne (initialize=1, completion=2, resolve=3) ; trames: {aux_frames:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let primary_frames = read_recorder_frames(&primary_log_path(&tmpdir));
         assert!(
-            primary_frames.iter().any(is_completion),
-            "le primaire doit recevoir la completion; trames: {primary_frames:?}"
+            !primary_frames.iter().any(is_resolve),
+            "le primaire ne reçoit PAS le resolve d'un item de l'aux ; trames: {primary_frames:?}"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 5 : resolve_routes_to_primary — resolve de `tmpl(14)`
+    /// (item servi par le PRIMAIRE) ⟹ primaire seul sur le fil (session id 3,
+    /// chemin historique intact), jamais l'aux, réponse = résultat primaire
+    /// enrichi avec l'id d'origine, réponse unique.
+    #[tokio::test]
+    async fn resolve_routes_to_primary() {
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+
+        let item = serde_json::json!({"label": "tmpl", "kind": 14});
+        session
+            .send(client, resolve_request(3, item.clone()))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("résultat du resolve par le primaire"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(3), "id d'origine restauré");
+        assert_eq!(
+            resp["result"],
+            resolved(item.clone(), "prim"),
+            "résultat du PRIMAIRE (item enriché _from=prim)"
+        );
+
+        let is_resolve = is_method("completionItem/resolve");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_resolve),
+            Duration::from_secs(5),
+        )
+        .await;
+        let prim = primary_frames
+            .iter()
+            .find(|f| is_resolve(f))
+            .expect("le primaire reçoit le resolve de SON item");
+        assert_eq!(
+            prim["id"].as_i64(),
+            Some(3),
+            "fil primaire : session id historique (initialize=1, completion=2, resolve=3) ; trames: {primary_frames:?}"
         );
         tokio::time::sleep(Duration::from_millis(300)).await;
         let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
         assert!(
-            !aux_frames.iter().any(is_completion),
-            "l'aux ne doit PAS recevoir la completion (tâche 08 la fera basculer); trames: {aux_frames:?}"
+            !aux_frames.iter().any(is_resolve),
+            "l'aux ne reçoit PAS le resolve d'un item du primaire ; trames: {aux_frames:?}"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 6 : resolve_unknown_item_no_wire — resolve d'un item
+    /// jamais servi (`inconnu(1)`) ⟹ réponse immédiate = item TEL QUEL (pas de
+    /// `_from`, pas une erreur), AUCUNE trame resolve sur les deux fils.
+    #[tokio::test]
+    async fn resolve_unknown_item_no_wire() {
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+
+        let item = serde_json::json!({"label": "inconnu", "kind": 1});
+        session
+            .send(client, resolve_request(3, item.clone()))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("fallback immédiat item tel quel"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(3));
+        assert!(
+            resp.get("error").is_none(),
+            "jamais une erreur globale: {resp}"
+        );
+        assert_eq!(
+            resp["result"], item,
+            "item renvoyé TEL QUEL (resolve no-op, sans enrichissement)"
+        );
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let is_resolve = is_method("completionItem/resolve");
+        let primary_frames = read_recorder_frames(&primary_log_path(&tmpdir));
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        assert!(
+            !primary_frames.iter().any(is_resolve) && !aux_frames.iter().any(is_resolve),
+            "AUCUNE trame resolve sur les deux fils en fallback: prim={primary_frames:?} aux={aux_frames:?}"
+        );
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 7 : resolve_didChange_purges_provenance — completion,
+    /// puis `didChange` de l'URI, puis resolve du `script` ⟹ fallback item tel
+    /// quel (la purge a rendu la provenance introuvable), AUCUN fil.
+    // Nom de test imposé verbatim par la tâche 08 (`didChange` = nom LSP de la
+    // notification) — d'où l'allow ciblé plutôt qu'un renommage.
+    #[allow(non_snake_case)]
+    #[tokio::test]
+    async fn resolve_didChange_purges_provenance() {
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/App.vue";
+        completion_setup(&session, client, &mut rx, uri).await;
+        assert_eq!(
+            session.completion_provenance_uri_count(),
+            1,
+            "état de départ : provenance de l'URI présente"
+        );
+
+        session
+            .send(client, did_change(uri))
+            .await
+            .expect("didChange ok");
+        assert_eq!(
+            session.completion_provenance_uri_count(),
+            0,
+            "didChange purge la provenance de CETTE URI"
+        );
+
+        let item = serde_json::json!({"label": "script", "kind": 3});
+        session
+            .send(client, resolve_request(3, item.clone()))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("fallback item tel quel après purge"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(3));
+        assert!(resp.get("error").is_none());
+        assert_eq!(resp["result"], item, "item TEL QUEL, aucun enrichissement");
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let is_resolve = is_method("completionItem/resolve");
+        let primary_frames = read_recorder_frames(&primary_log_path(&tmpdir));
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        assert!(
+            !primary_frames.iter().any(is_resolve) && !aux_frames.iter().any(is_resolve),
+            "aucun fil après purge: prim={primary_frames:?} aux={aux_frames:?}"
+        );
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 8 : resolve_ambiguous_no_wire — deux completions sur deux
+    /// URI amenant le MÊME `(label,kind)` (`ref`,17) depuis deux enfants
+    /// DISTINCTS (l'aux le sert partout ; le primaire ne le sert que hors
+    /// `B.vue` — fixture.URI-aware du fake) ⟹ resolve ambigü ⟹ fallback item
+    /// tel quel, AUCUN fil.
+    #[tokio::test]
+    async fn resolve_ambiguous_no_wire() {
+        let (session, tmpdir) = make_merge_composite("", "").await;
+        let (client, mut rx) = session.subscribe();
+        completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+
+        // 2e completion sur l'URI B : le primaire n'y renvoie PAS `ref` ⟹
+        // (ref,17) retenu depuis l'aux ICI, depuis le primaire sur App.
+        session
+            .send(
+                client,
+                text_request(3, "textDocument/completion", "file:///w/B.vue", 0),
+            )
+            .await
+            .expect("completion B ok");
+        let resp_b = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse completion B fusionnée"),
+        );
+        assert_eq!(resp_b["id"].as_i64(), Some(3));
+        assert_eq!(
+            session.completion_provenance_uri_count(),
+            2,
+            "les deux URI portent leur provenance"
+        );
+
+        let item = serde_json::json!({"label": "ref", "kind": 17});
+        session
+            .send(client, resolve_request(4, item.clone()))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("fallback immédiat ambigu"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(4));
+        assert!(
+            resp.get("error").is_none(),
+            "jamais une erreur globale: {resp}"
+        );
+        assert_eq!(
+            resp["result"], item,
+            "item TEL QUEL (ambigu ⟹ on ne devine pas)"
+        );
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let is_resolve = is_method("completionItem/resolve");
+        let primary_frames = read_recorder_frames(&primary_log_path(&tmpdir));
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        assert!(
+            !primary_frames.iter().any(is_resolve) && !aux_frames.iter().any(is_resolve),
+            "resolve ambigu ⟹ AUCUNE trame sur les fils: prim={primary_frames:?} aux={aux_frames:?}"
+        );
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 9 : resolve_aux_error_fallback_item — l'aux (mode
+    /// `error-resolve` : completion normale, erreur sur les resolve) reçoit le
+    /// resolve de SON item puis répond une erreur JSON-RPC ⟹ réponse client =
+    /// item TEL QUEL (pas une erreur), session saine, réponse unique.
+    #[tokio::test]
+    async fn resolve_aux_error_fallback_item() {
+        let (session, tmpdir) = make_merge_composite("", "error-resolve").await;
+        let (client, mut rx) = session.subscribe();
+        let merged = completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+        assert_eq!(
+            merged["result"],
+            merged_completion_fixture(),
+            "l'aux répond bien la completion en mode error-resolve (provenance écrite)"
+        );
+
+        let item = serde_json::json!({"label": "script", "kind": 3});
+        session
+            .send(client, resolve_request(3, item.clone()))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("fallback item après erreur de l'aux"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(3));
+        assert!(
+            resp.get("error").is_none(),
+            "l'erreur de l'aux ne devient JAMAIS une erreur globale: {resp}"
+        );
+        assert_eq!(
+            resp["result"], item,
+            "item renvoyé TEL QUEL (warn + no-op), sans enrichissement"
+        );
+        assert!(session.is_alive(), "la session survit à l'erreur de l'aux");
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 10 : resolve_aux_eof_fallback_item — l'aux (mode
+    /// `hold-resolve-die`) retient le resolve de SON item puis MEURT sur
+    /// `fake/kill` avec la requête en attente ⟹ purge EOF = fallback item tel
+    /// quel, session saine, rien ne pend.
+    #[tokio::test]
+    async fn resolve_aux_eof_fallback_item() {
+        let (session, tmpdir) = make_merge_composite("", "hold-resolve-die").await;
+        let (client, mut rx) = session.subscribe();
+        completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+
+        let item = serde_json::json!({"label": "script", "kind": 3});
+        session
+            .send(client, resolve_request(3, item.clone()))
+            .await
+            .expect("resolve ok");
+        let is_resolve = is_method("completionItem/resolve");
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_resolve),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            aux_frames.iter().any(is_resolve),
+            "l'aux a reçu le resolve avant de mourir ; trames: {aux_frames:?}"
+        );
+
+        // L'aux en mode `hold-resolve-die` meurt sur `fake/kill` (fan-out de
+        // la notification — invariant 2) AVOIR répondu.
+        let kill = serde_json::json!({"jsonrpc": "2.0", "method": "fake/kill", "params": {}});
+        session
+            .send(client, kill.to_string().into_bytes())
+            .await
+            .expect("fake/kill ok");
+
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("EOF aux avec resolve en attente ⟹ fallback, jamais un pend"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(3));
+        assert!(
+            resp.get("error").is_none(),
+            "jamais une erreur globale: {resp}"
+        );
+        assert_eq!(resp["result"], item, "item TEL QUEL (fallback EOF)");
+        assert!(session.is_alive(), "la session survit à l'EOF de l'aux");
+        assert_eq!(session.pending_merge_count(), 0, "rien ne pend");
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponse unique: {leaked:?}");
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 11 : resolve_unsubscribe_mid_resolve — resolve (retenu
+    /// par l'aux `hold-resolve`) puis `unsubscribe` ⟹ aucune réponse vers le
+    /// client parti (même quand l'aux libère sa réponse retenue sur l'id
+    /// interne purgé), pas de panique, AUCUN résidu : le resolve suivant d'un
+    /// nouveau client sur un item PRIMAIRE aboutit normalement.
+    #[tokio::test]
+    async fn resolve_unsubscribe_mid_resolve() {
+        let (session, tmpdir) = make_merge_composite("", "hold-resolve").await;
+        let (client, mut rx) = session.subscribe();
+        completion_setup(&session, client, &mut rx, "file:///w/App.vue").await;
+
+        let item = serde_json::json!({"label": "script", "kind": 3});
+        session
+            .send(client, resolve_request(3, item.clone()))
+            .await
+            .expect("resolve ok");
+        let is_resolve = is_method("completionItem/resolve");
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_resolve),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            aux_frames.iter().any(is_resolve),
+            "l'aux a reçu le resolve (il le retient) ; trames: {aux_frames:?}"
+        );
+
+        session.unsubscribe(client);
+
+        // L'aux libère sa réponse retenue : id interne purgé par unsubscribe ⟹
+        // avalée comme inconnue. Aucune réponse vers le client désabonné.
+        let release = serde_json::json!({"jsonrpc": "2.0", "method": "x/release", "params": {}});
+        session
+            .send(client, release.to_string().into_bytes())
+            .await
+            .expect("x/release ok");
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(
+            leaked.is_none(),
+            "aucune réponse vers un client désabonné: {leaked:?}"
+        );
+
+        // Aucun résidu observable : un nouveau client résout un item PRIMAIRE.
+        let (client2, mut rx2) = session.subscribe();
+        let tmpl = serde_json::json!({"label": "tmpl", "kind": 14});
+        session
+            .send(client2, resolve_request(9, tmpl.clone()))
+            .await
+            .expect("resolve 2 ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx2, Duration::from_secs(5))
+                .await
+                .expect("le resolve suivant (item primaire) doit aboutir normalement"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(9));
+        assert_eq!(resp["result"], resolved(tmpl.clone(), "prim"));
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 08 test 12 : mono_completion_resolve_primary_unchanged —
+    /// `aux: []` : completion ET resolve suivent le chemin historique strict
+    /// (session ids 2 et 3 sur le fil — jamais les ids clients 42/43 — réponse
+    /// verbatim/relayée, unique), et `completion_provenance` RESTE VIDE (la
+    /// table n'est jamais consultée ni écrite en mono-process — invariant 8).
+    #[tokio::test]
+    async fn mono_completion_resolve_primary_unchanged() {
+        // Mono-process construit à la main avec le fake primaire de fusion
+        // (mode défaut) + son log recorder : le wire entrant est observable.
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let script_path = tmpdir.path().join("merge_primary_mono.py");
+        std::fs::write(&script_path, FAKE_LSP_MERGE_PRIMARY_PY).unwrap();
+        let spec = LspToolchain {
+            name: "mono".to_string(),
+            bin: "python3".to_string(),
+            args: vec![
+                script_path.to_string_lossy().to_string(),
+                primary_log_path(&tmpdir).to_string_lossy().to_string(),
+            ],
+            aux: vec![],
+        };
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn mono-process ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        session
+            .send(
+                client,
+                text_request(42, "textDocument/completion", "file:///w/main.rs", 0),
+            )
+            .await
+            .expect("completion ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse completion du primaire"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(42));
+        assert_eq!(
+            resp["result"],
+            prim_completion_list(),
+            "completion VERBATIM du primaire (aucune fusion possible, table jamais consultée)"
+        );
+
+        let item = serde_json::json!({"label": "tmpl", "kind": 14});
+        session
+            .send(client, resolve_request(43, item.clone()))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("résultat du resolve par le primaire mono"),
+        );
+        assert_eq!(
+            resp["id"].as_i64(),
+            Some(43),
+            "chemin historique : id restauré"
+        );
+        assert_eq!(
+            resp["result"],
+            resolved(item.clone(), "prim"),
+            "le serveur mono a sa propre mémoire d'items — resolve primaire strict"
+        );
+
+        let is_completion = is_method("textDocument/completion");
+        let is_resolve = is_method("completionItem/resolve");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_resolve),
+            Duration::from_secs(5),
+        )
+        .await;
+        let prim_completion = primary_frames
+            .iter()
+            .find(|f| is_completion(f))
+            .expect("le primaire reçoit la completion");
+        assert_eq!(
+            prim_completion["id"].as_i64(),
+            Some(2),
+            "session id historique (initialize=1, completion=2), jamais l'id client 42"
+        );
+        let prim_resolve = primary_frames
+            .iter()
+            .find(|f| is_resolve(f))
+            .expect("le primaire reçoit le resolve");
+        assert_eq!(
+            prim_resolve["id"].as_i64(),
+            Some(3),
+            "session id historique (…, resolve=3), jamais l'id client 43 ; trames: {primary_frames:?}"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(leaked.is_none(), "réponses uniques: {leaked:?}");
+        assert_eq!(
+            session.completion_provenance_uri_count(),
+            0,
+            "mono-process : provenance JAMAIS écrite"
+        );
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "mono-process : aucune barrière"
         );
 
         drop(tmpdir);
