@@ -3357,6 +3357,7 @@ mod tests {
                 name: "rust".to_string(),
                 bin: "python3".to_string(),
                 args: vec![script_path.to_string_lossy().to_string()],
+                aux: vec![],
             }],
             tmpdir.path().to_path_buf(),
         ));
@@ -4300,6 +4301,7 @@ mod tests {
                 name: "rust".to_string(),
                 bin: "python3".to_string(),
                 args: vec![script_path.to_string_lossy().to_string()],
+                aux: vec![],
             }],
             tmpdir.path().to_path_buf(),
         ));
@@ -5684,6 +5686,7 @@ mod tests {
                     script_path.to_string_lossy().to_string(),
                     observer_log.to_string_lossy().to_string(),
                 ],
+                aux: vec![],
             }],
             root.clone(),
         ));

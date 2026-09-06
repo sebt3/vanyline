@@ -724,6 +724,7 @@ while True:
                 name: name.to_string(),
                 bin: "python3".to_string(),
                 args: vec![script_path.to_string_lossy().to_string()],
+                aux: vec![],
             }],
             tmpdir.path().to_path_buf(),
         );

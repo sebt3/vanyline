@@ -1,6 +1,9 @@
 //! Gestion des process LSP par toolchain : spawn, framing `Content-Length`,
-//! multiplexage multi-clients. Un seul process par toolchain, partagé entre
-//! l'éditeur (route WS /ws/lsp/:toolchain) et les tools MCP `lsp_*`.
+//! multiplexage multi-clients. Un process PRIMAIRE par toolchain, partagé entre
+//! l'éditeur (route WS /ws/lsp/:toolchain) et les tools MCP `lsp_*`, plus des
+//! enfants auxiliaires optionnels (`aux`, multiplexeur — cf.
+//! `docs/features/vue-lsp.md`). `aux` vide ⟹ chemin mono-process strictement
+//! inchangé (cas de toutes les toolchains sans composite aujourd'hui).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -10,8 +13,35 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::process::{Child, Command};
+use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Notify, mpsc};
+
+/// Rôles `aux` réellement spawnés. `docker-lsp` y ajoutera `diagnostics-merge` ;
+/// un rôle inconnu au spawn = `tracing::warn!` + enfant ignoré (jamais une erreur
+/// de session — invariant 1 de la tâche 03).
+const KNOWN_AUX_ROLES: &[&str] = &["tsserver-forward"];
+
+fn is_known_aux_role(role: &str) -> bool {
+    KNOWN_AUX_ROLES.contains(&role)
+}
+
+/// Spécification d'un processus LSP auxiliaire d'une toolchain composite.
+/// Rôles connus : `"tsserver-forward"` (composite Volar — cette tâche le
+/// traite comme tout aux : spawn + notifications + initialize injecté ; la
+/// sémantique de forwarding arrive tâche 05). `aux` n'est jamais déclaré par
+/// l'utilisateur (preset-only, décision 2026-09-06) — seule la tâche
+/// controller en émet.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LspAux {
+    pub role: String,
+    pub bin: String,
+    pub args: Vec<String>,
+    /// Fusionné dans `params.initializationOptions` de l'`initialize` envoyé
+    /// à CET enfant (ses clés gagnent en cas de collision avec celles du
+    /// client). Clé JSON : `initOptions`.
+    #[serde(rename = "initOptions", default)]
+    pub init_options: Value,
+}
 
 /// Spec d'une toolchain LSP : `bin` est un chemin absolu dans le volume toolchain
 /// monté. Lue depuis `VNL_LSP_TOOLCHAINS` (JSON array).
@@ -20,6 +50,10 @@ pub struct LspToolchain {
     pub name: String,
     pub bin: String,
     pub args: Vec<String>,
+    /// Enfant(s) auxiliaire(s) du multiplexeur. Absent/vide => session
+    /// mono-process au comportement strictement actuel.
+    #[serde(default)]
+    pub aux: Vec<LspAux>,
 }
 
 /// Parse le JSON de `VNL_LSP_TOOLCHAINS` en specs. Erreur si le JSON est invalide
@@ -172,7 +206,128 @@ struct LspSessionInner {
     /// pour les deux serveurs.
     diagnostics_cache: Mutex<HashMap<String, Vec<Value>>>,
     diagnostics_notify: Notify,
+    /// Enfants auxiliaires du multiplexeur (`spec.aux` spawnés, rôles connus).
+    /// Vide ⟹ chemin mono-process strictement inchangé (invariant 8) : le
+    /// primaire n'est PAS dans cette liste — il garde ses champs historiques
+    /// ci-dessus (`cmd_tx`, `pending`, `next_req`, `child`).
+    aux: Vec<Arc<AuxChild>>,
     _toolchain_name: String,
+}
+
+/// Un enfant auxiliaire du multiplexeur (jamais le primaire). Possède son canal
+/// de stdin (fan-out des notifications, copie de `initialize` avec ids
+/// internes), son flag de vie (mort d'un aux = session dégradée, pas morte —
+/// `is_alive()` ne reflète que le primaire), son compteur d'ids internes et
+/// l'ensemble de ces ids en attente (leurs réponses sont interceptées par la
+/// session, JAMAIS routées à un client), et sa handle pour kill.
+struct AuxChild {
+    /// `LspAux::role` — tracage et messages de dégradation.
+    role: String,
+    /// `initOptions` du spec, fusionnés (clés gagnantes) dans
+    /// `params.initializationOptions` du `initialize` envoyé à CET enfant.
+    init_options: Value,
+    stdin_tx: mpsc::Sender<Vec<u8>>,
+    alive: AtomicBool,
+    next_internal_req: AtomicU64,
+    pending_internal: Mutex<HashSet<u64>>,
+    child: Mutex<Option<Child>>,
+}
+
+/// Intermède interne à `LspSession::spawn` : process aux spawné (pré-pass) mais
+/// tâches pas encore lancées — elles nécessitent le `Arc<LspSession>` (la
+/// lectrice aux y dispatch notifications et dégradations).
+struct AuxStartup {
+    handle: Arc<AuxChild>,
+    stdin: ChildStdin,
+    stdin_rx: mpsc::Receiver<Vec<u8>>,
+    stdout: ChildStdout,
+    stderr: ChildStderr,
+}
+
+/// Tâche écrivaine partagée par tous les enfants (primaire et aux) : canal →
+/// stdin encodé `Content-Length`.
+fn spawn_stdin_writer(mut stdin: ChildStdin, mut cmd_rx: mpsc::Receiver<Vec<u8>>) {
+    tokio::spawn(async move {
+        while let Some(data) = cmd_rx.recv().await {
+            let encoded = encode_message(&data);
+            if stdin.write_all(&encoded).await.is_err() {
+                break;
+            }
+            if stdin.flush().await.is_err() {
+                break;
+            }
+        }
+        // Canal fermé → le process voit EOF stdin
+    });
+}
+
+/// Spawn du process d'un aux : mêmes conditions que le primaire (`cwd =
+/// sandbox_root`, stdio pipés) + canal de stdin dédié. Les tâches
+/// lectrice/écrivaine/stderr sont lancées séparément par `LspSession::spawn`
+/// une fois la session Arc constituée.
+async fn spawn_aux_startup(aux_spec: &LspAux, sandbox_root: &Path) -> anyhow::Result<AuxStartup> {
+    let mut cmd = Command::new(&aux_spec.bin);
+    cmd.args(&aux_spec.args)
+        .current_dir(sandbox_root)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("aux spawn error: {e}"))?;
+
+    let stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing stdin"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("missing stderr"))?;
+
+    let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(64);
+    let handle = Arc::new(AuxChild {
+        role: aux_spec.role.clone(),
+        init_options: aux_spec.init_options.clone(),
+        stdin_tx,
+        alive: AtomicBool::new(true),
+        next_internal_req: AtomicU64::new(1),
+        pending_internal: Mutex::new(HashSet::new()),
+        child: Mutex::new(Some(child)),
+    });
+    Ok(AuxStartup {
+        handle,
+        stdin,
+        stdin_rx,
+        stdout,
+        stderr,
+    })
+}
+
+/// `initializationOptions` à poser sur la copie d'`initialize` envoyée à un aux.
+/// La copie de la requête client étant déjà verbatim, cette fonction ne calcule
+/// une valeur que quand le spec a des `initOptions` (objet) à injecter : objet
+/// du client fusionné puis clés du spec (spec gagnant ; `plugins` est un
+/// tableau, pas de merge profond à faire ici), et le spec verbatim si le client
+/// n'avait pas d'options. `None` = rien à injecter (la copie garde l'état du
+/// client tel quel).
+fn merged_initialization_options(req: &Value, spec_opts: &Value) -> Option<Value> {
+    let spec_obj = spec_opts.as_object()?;
+    let mut merged = req
+        .get("params")
+        .and_then(|p| p.get("initializationOptions"))
+        .and_then(|opts| opts.as_object())
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in spec_obj {
+        merged.insert(key.clone(), value.clone());
+    }
+    Some(Value::Object(merged))
 }
 
 /// Session LSP : possède un process, multiplexe les clients.
@@ -181,10 +336,19 @@ pub struct LspSession {
 }
 
 impl LspSession {
-    /// Spawn le process LSP (`spec.bin` + `spec.args`) avec `cwd = sandbox_root`,
-    /// stdio pipé (stdin/stdout), stderr pipé et loggé via `tracing`. Lance les
-    /// tâches lectrice (stdout → FrameReader → dispatch) et écrivaine (canal →
-    /// stdin encodé). Erreur si le spawn échoue ou si stdin/stdout/stderr sont absents.
+    /// Spawn le process primaire (`spec.bin` + `spec.args`) avec `cwd =
+    /// sandbox_root`, stdio pipé (stdin/stdout), stderr pipé et loggé via
+    /// `tracing`. Lance les tâches lectrice (stdout → FrameReader → dispatch) et
+    /// écrivaine (canal → stdin encodé). Erreur si le spawn du PRIMAIRE échoue ou
+    /// si stdin/stdout/stderr sont absents.
+    ///
+    /// Toolchain composite (`spec.aux` non vide) : chaque aux de rôle connu est
+    /// spawné aux mêmes conditions et reçoit le fan-out des notifications et une
+    /// copie de `initialize` avec `initOptions` injectés (cf. `AuxChild`). Spawn
+    /// d'aux en échec ou rôle inconnu = session dégradée (`tracing::warn!`),
+    /// jamais une erreur de session (invariant 1). `spec.aux` vide ⟹ chemin
+    /// mono-process strictement actuel (invariant 8 — tout le LSP déployé dépend
+    /// de cette non-régression).
     pub async fn spawn(spec: &LspToolchain, sandbox_root: &Path) -> anyhow::Result<Arc<Self>> {
         let mut cmd = Command::new(&spec.bin);
         cmd.args(&spec.args)
@@ -211,7 +375,38 @@ impl LspSession {
             .ok_or_else(|| anyhow::anyhow!("missing stderr"))?;
         // child handle still valid for kill
 
-        let (cmd_tx, mut cmd_rx) = mpsc::channel(64);
+        let (cmd_tx, cmd_rx) = mpsc::channel(64);
+
+        // ── Enfants auxiliaires du multiplexeur — pré-pass processus seulement
+        // (les tâches démarrent une fois le session Arc constitué, chaque
+        // lectrice aux y dispatchant trames et dégradations). Rôle inconnu :
+        // warn + enfant ignoré ; spawn en échec : warn « aux degraded ». Ni l'un
+        // ni l'autre ne fait échouer le spawn de la session (invariant 1).
+        let mut aux_startups: Vec<AuxStartup> = Vec::new();
+        for aux_spec in &spec.aux {
+            if !is_known_aux_role(&aux_spec.role) {
+                tracing::warn!(
+                    toolchain = spec.name.as_str(),
+                    role = aux_spec.role.as_str(),
+                    "LSP: unknown aux role, aux ignored"
+                );
+                continue;
+            }
+            match spawn_aux_startup(aux_spec, sandbox_root).await {
+                Ok(startup) => aux_startups.push(startup),
+                Err(e) => {
+                    tracing::warn!(
+                        toolchain = spec.name.as_str(),
+                        role = aux_spec.role.as_str(),
+                        "LSP: aux degraded (spawn failed): {e}"
+                    );
+                }
+            }
+        }
+        let aux: Vec<Arc<AuxChild>> = aux_startups
+            .iter()
+            .map(|startup| Arc::clone(&startup.handle))
+            .collect();
 
         let session = Arc::new(LspSession {
             inner: Arc::new(LspSessionInner {
@@ -230,24 +425,13 @@ impl LspSession {
                 child: Mutex::new(Some(child)),
                 next_client: AtomicU64::new(1),
                 next_req: AtomicU64::new(1),
+                aux,
                 _toolchain_name: spec.name.clone(),
             }),
         });
 
         // Écrivaine : canal → stdin encodé
-        tokio::spawn(async move {
-            let mut writer = stdin;
-            while let Some(data) = cmd_rx.recv().await {
-                let encoded = encode_message(&data);
-                if writer.write_all(&encoded).await.is_err() {
-                    break;
-                }
-                if writer.flush().await.is_err() {
-                    break;
-                }
-            }
-            // Canal fermé → le process voit EOF stdin
-        });
+        spawn_stdin_writer(stdin, cmd_rx);
 
         // Lectrice : stdout → FrameReader → dispatch
         let reader_session = Arc::clone(&session);
@@ -302,48 +486,16 @@ impl LspSession {
                             );
                         }
                     } else {
-                        // `publishDiagnostics` : mis en cache pour TOUT abonné, présent
-                        // ou futur — indépendant du broadcast ci-dessous (cf. doc du
-                        // champ `diagnostics_cache`).
-                        if msg.get("method").and_then(|m| m.as_str())
-                            == Some("textDocument/publishDiagnostics")
-                            && let Some(params) = msg.get("params")
-                            && let Some(uri) = params.get("uri").and_then(|u| u.as_str())
-                            && let Some(diags) =
-                                params.get("diagnostics").and_then(|d| d.as_array())
-                        {
-                            if let Ok(mut cache) = reader_session.inner.diagnostics_cache.lock() {
-                                cache.insert(uri.to_string(), diags.clone());
-                            }
-                            reader_session.inner.diagnostics_notify.notify_waiters();
-                        }
-
-                        // Notification (pas d'id) : broadcast à tous les abonnés
-                        let subs_map = match reader_session.inner.subs.lock() {
-                            Ok(g) => g,
-                            Err(g) => g.into_inner(),
-                        };
-
-                        let dead_clients: Vec<_> = subs_map
-                            .iter()
-                            .filter(|(_client_id, tx)| {
-                                let raw_json = payload.clone();
-                                if tx.send(raw_json).is_err() {
-                                    return true; // client mort (canal fermé)
-                                }
-                                false
-                            })
-                            .map(|(id, _)| *id)
-                            .collect();
-
-                        // Nettoyer les clients morts
-                        if !dead_clients.is_empty()
-                            && let Ok(mut subs) = reader_session.inner.subs.lock()
-                        {
-                            for client_id in dead_clients {
-                                subs.remove(&client_id);
-                            }
-                        }
+                        // Notification (pas d'id) : chemin actuel — cache
+                        // `publishDiagnostics` puis broadcast.
+                        // TODO(task-05) : `tsserver/request` (notification que
+                        // vue-language-server envoie à SON client primaire) sera
+                        // traitée ici par un forwarding vers l'aux
+                        // `tsserver-forward` (`executeCommand
+                        // typescript.tsserverRequest` → `tsserver/response` en
+                        // retour). En attendant : broadcast comme toute
+                        // notification — TEMPORAIRE.
+                        reader_session.dispatch_notification_frame(&msg, payload);
                     }
                 }
             }
@@ -352,6 +504,17 @@ impl LspSession {
             reader_session.inner.alive.store(false, Ordering::SeqCst);
             if let Ok(mut subs) = reader_session.inner.subs.lock() {
                 subs.clear();
+            }
+            // Invariant 6 : mort du primaire = mort de la session ⟹ kill
+            // explicite des enfants aux. Flag alive baissé avant kill : leur
+            // EOF stdout ne doit pas sonner « degraded » alors que la session
+            // est déjà morte — ce n'est pas une dégradation, c'est la mort.
+            for aux in &reader_session.inner.aux {
+                aux.alive.store(false, Ordering::SeqCst);
+                if let Some(mut child) = aux.child.lock().unwrap_or_else(|e| e.into_inner()).take()
+                {
+                    drop(child.kill());
+                }
             }
         });
 
@@ -373,7 +536,229 @@ impl LspSession {
             }
         });
 
+        // ── Tâches des aux (session Arc constitué) : écrivaine, lectrice,
+        // stderr.
+        for startup in aux_startups {
+            let AuxStartup {
+                handle: aux,
+                stdin: aux_stdin,
+                stdin_rx: aux_rx,
+                stdout: aux_stdout,
+                stderr: aux_stderr,
+            } = startup;
+
+            spawn_stdin_writer(aux_stdin, aux_rx);
+
+            // Lectrice aux : distingue par ENFANT (cette tâche EST l'enfant).
+            // Les ids internes de l'aux ne sont JAMAIS routés à un client :
+            // réponse à un id interne → interceptée par la session (succès →
+            // rien, erreur → warn « aux degraded »), toute autre trame à `id`
+            // (server→aux request, id sans correspondance) → warn + drop, comme
+            // le pending miss du chemin primaire.
+            let reader_aux = Arc::clone(&aux);
+            let reader_session = Arc::clone(&session);
+            tokio::spawn(async move {
+                let mut stdout = aux_stdout;
+                let mut frame_reader = FrameReader::new();
+                let mut buf = [0u8; 8192];
+
+                loop {
+                    let n = match stdout.read(&mut buf).await {
+                        Ok(0) => break, // EOF → aux mort : dégradation, pas mort de session
+                        Ok(n) => n,
+                        Err(_) => break,
+                    };
+
+                    frame_reader.push(&buf[..n]);
+                    while let Some(payload) = frame_reader.next_frame() {
+                        let msg: Value = match serde_json::from_slice(&payload) {
+                            Ok(msg) => msg,
+                            Err(_) => {
+                                tracing::warn!(
+                                    toolchain = reader_session.inner._toolchain_name.as_str(),
+                                    role = reader_aux.role.as_str(),
+                                    "LSP: non-JSON frame from aux, ignoring"
+                                );
+                                continue;
+                            }
+                        };
+
+                        if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
+                            let swallowed = {
+                                let mut pending = match reader_aux.pending_internal.lock() {
+                                    Ok(g) => g,
+                                    Err(g) => g.into_inner(),
+                                };
+                                pending.remove(&(id as u64))
+                            };
+                            if swallowed {
+                                // Réponse à l'`initialize` interne — jamai
+                                // relayée au client (invariant 3).
+                                if let Some(error) = msg.get("error") {
+                                    tracing::warn!(
+                                        toolchain = reader_session.inner._toolchain_name.as_str(),
+                                        role = reader_aux.role.as_str(),
+                                        "LSP: aux degraded (initialize error): {error}"
+                                    );
+                                }
+                            } else {
+                                tracing::warn!(
+                                    toolchain = reader_session.inner._toolchain_name.as_str(),
+                                    role = reader_aux.role.as_str(),
+                                    session_id = id,
+                                    "LSP: response from aux for unknown internal id, dropping"
+                                );
+                            }
+                        } else {
+                            // Notification d'un enfant (aux inclus) : chemin
+                            // actuel — cache `publishDiagnostics` (last-writer-
+                            // wins, TODO(task-06) porté par
+                            // `dispatch_notification_frame`) puis broadcast.
+                            reader_session.dispatch_notification_frame(&msg, payload);
+                        }
+                    }
+                }
+
+                // EOF stdout d'un AUX : la session SURVIT (`is_alive()` ne
+                // reflète que le primaire). Aux baissé, ids internes en
+                // attente purgés (ils n'auront jamais de réponse), et warn
+                // unique « degraded » seulement si la session est encore vivante
+                // — si le primaire vient de mourir en tuant cet aux, la
+                // dégradation serait du bruit.
+                reader_aux.alive.store(false, Ordering::SeqCst);
+                reader_aux
+                    .pending_internal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clear();
+                if reader_session.inner.alive.load(Ordering::SeqCst) {
+                    tracing::warn!(
+                        toolchain = reader_session.inner._toolchain_name.as_str(),
+                        role = reader_aux.role.as_str(),
+                        "LSP: aux degraded (stdout EOF)"
+                    );
+                }
+            });
+
+            // Stderr de l'aux → tracing::debug! (comme le primaire, role en plus)
+            let stderr_aux = Arc::clone(&aux);
+            let stderr_session = Arc::clone(&session);
+            tokio::spawn(async move {
+                let mut stderr = aux_stderr;
+                let mut buf = [0u8; 8192];
+                while let Ok(n) = stderr.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                    let line = String::from_utf8_lossy(&buf[..n]);
+                    tracing::debug!(
+                        toolchain = stderr_session.inner._toolchain_name.as_str(),
+                        role = stderr_aux.role.as_str(),
+                        "LSP stderr (aux): {}",
+                        line.trim()
+                    );
+                }
+            });
+        }
+
         Ok(session)
+    }
+
+    /// Traite une trame NOTIFICATION (sans `id`) reçue d'un enfant — primaire ou
+    /// aux — chemin partagé par invariant 5 : cache `publishDiagnostics` pour
+    /// TOUT abonné, présent ou futur — indépendant du broadcast ci-dessous (cf.
+    /// doc du champ `diagnostics_cache`) — puis broadcast aux abonnés (nettoyage
+    /// des canaux fermés au passage).
+    ///
+    /// TODO(task-06) : la fusion des `publishDiagnostics` entre enfants (concat
+    /// par URI) se fera AVANT l'écriture du cache — navigateur et MCP doivent
+    /// voir le même résultat fondu (contrainte, pas option). En attendant :
+    /// last-writer-wins (comportement mono-process actuel, `aux: []` ⟹ seule la
+    /// lectrice primaire alimente ce chemin, donc strictement inchangé).
+    fn dispatch_notification_frame(&self, msg: &Value, payload: Vec<u8>) {
+        // `publishDiagnostics` : cache + notify (chemin actuel).
+        if msg.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
+            && let Some(params) = msg.get("params")
+            && let Some(uri) = params.get("uri").and_then(|u| u.as_str())
+            && let Some(diags) = params.get("diagnostics").and_then(|d| d.as_array())
+        {
+            if let Ok(mut cache) = self.inner.diagnostics_cache.lock() {
+                cache.insert(uri.to_string(), diags.clone());
+            }
+            self.inner.diagnostics_notify.notify_waiters();
+        }
+
+        // Notification (pas d'id) : broadcast à tous les abonnés
+        let subs_map = match self.inner.subs.lock() {
+            Ok(g) => g,
+            Err(g) => g.into_inner(),
+        };
+
+        let dead_clients: Vec<_> = subs_map
+            .iter()
+            .filter(|(_client_id, tx)| {
+                let raw_json = payload.clone();
+                if tx.send(raw_json).is_err() {
+                    return true; // client mort (canal fermé)
+                }
+                false
+            })
+            .map(|(id, _)| *id)
+            .collect();
+
+        // Nettoyer les clients morts
+        if !dead_clients.is_empty()
+            && let Ok(mut subs) = self.inner.subs.lock()
+        {
+            for client_id in dead_clients {
+                subs.remove(&client_id);
+            }
+        }
+    }
+
+    /// Invariant 3 : copie de l'`initialize` client vers chaque aux VIVANT, avec
+    /// un id interne propre à l'enfant (compteur par enfant — l'espace d'ids du
+    /// primaire n'est jamais touché) et `params.initializationOptions` fusionné
+    /// (`merged_initialization_options`). La réponse est interceptée par la
+    /// lectrice aux (jamais routée à un client). Ne rend jamais d'erreur : un aux
+    /// qui ne peut rien recevoir se dégrade lui-même (`debug`) — il ne peut ni
+    /// bloquer ni faire échouer la réponse du primaire.
+    fn fan_out_initialize(&self, msg: &Value) {
+        for aux in &self.inner.aux {
+            if !aux.alive.load(Ordering::SeqCst) {
+                continue; // déjà dégradé : ignoré silencieusement
+            }
+            let internal_id = aux.next_internal_req.fetch_add(1, Ordering::SeqCst);
+            let mut copy = msg.clone();
+            copy["id"] = Value::Number(serde_json::Number::from(internal_id));
+            if let Some(merged) = merged_initialization_options(msg, &aux.init_options) {
+                copy["params"]["initializationOptions"] = merged;
+            }
+            // Enregistrement AVANT l'envoi : évite la course avec la lectrice
+            // aux qui verrait une réponse sans correspondance (warn parasite).
+            aux.pending_internal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(internal_id);
+            // `try_send` (pas `send().await`) : même raison que les
+            // notifications — un aux bloqué ou mort ne doit jamais bloquer ni
+            // faire échouer le chemin client.
+            if aux
+                .stdin_tx
+                .try_send(copy.to_string().into_bytes())
+                .is_err()
+            {
+                aux.pending_internal
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .remove(&internal_id);
+                tracing::debug!(
+                    toolchain = self.inner._toolchain_name.as_str(),
+                    role = aux.role.as_str(),
+                    "LSP: aux degraded (cannot receive initialize)"
+                );
+            }
+        }
     }
 
     /// Abonne un client. Rend `(ClientId, UnboundedReceiver<Vec<u8>>)`.
@@ -417,7 +802,16 @@ impl LspSession {
         editor_uris.retain(|_, clients| !clients.is_empty());
     }
 
-    /// Envoie un message JSON-RPC client → process.
+    /// Envoie un message JSON-RPC client → enfant(s).
+    ///
+    /// Multiplexeur : requête avec `id` → primaire uniquement, CHEMIN INCHANGÉ
+    /// (routage/fusion par politique : tâches 04–06), sauf `initialize` dont une
+    /// copie avec `initOptions` injectés part aussi à chaque aux vivant
+    /// (`fan_out_initialize`, invariable 3). Trame sans `id` (notification,
+    /// doc-sync inclus) → primaire puis fan-out telle quelle à chaque aux
+    /// vivant (invariant 2) — un aux mort ou bloqué est ignoré, ne bloque ni
+    /// n'erre jamais le chemin client. `aux` vide ⟹ chemin mono-process
+    /// strictement actuel (invariant 8).
     ///
     /// Erreurs :
     /// - JSON invalide → `VNL-SBX-LSP-001`
@@ -457,14 +851,44 @@ impl LspSession {
                 .cmd_tx
                 .send(rewritten_payload)
                 .await
-                .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))
+                .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))?;
+
+            // Invariant 3 : `initialize` part AUSSI en copie (id interne propre,
+            // `initOptions` du spec injectés) vers chaque aux vivant. Les autres
+            // requêtes restent primaire uniquement — routage par politique de
+            // fusion et remapping d'ids par enfant : tâches 04–06, NE RIEN
+            // fusionner ici.
+            if msg.get("method").and_then(|m| m.as_str()) == Some("initialize") {
+                self.fan_out_initialize(&msg);
+            }
+            Ok(())
         } else {
-            // Notification : transmettre tel quel
+            // Notification : transmettre tel quel au primaire (chemin actuel)…
+            if self.inner.aux.is_empty() {
+                return self
+                    .inner
+                    .cmd_tx
+                    .send(payload)
+                    .await
+                    .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"));
+            }
             self.inner
                 .cmd_tx
-                .send(payload)
+                .send(payload.clone())
                 .await
-                .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))
+                .map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))?;
+            // …puis fan-out à chaque enfant aux VIVANT (invariant 2). Enfant mort
+            // ignoré silencieusement (déjà dégradé) ; `try_send` par design : un
+            // aux bloqué ne doit jamais suspendre le chemin client — une trame
+            // perdue pour un aux saturé fait partie de sa dégradation, jamais de
+            // celle du primaire.
+            for aux in &self.inner.aux {
+                if !aux.alive.load(Ordering::SeqCst) {
+                    continue;
+                }
+                let _ = aux.stdin_tx.try_send(payload.clone());
+            }
+            Ok(())
         }
     }
 
@@ -674,8 +1098,18 @@ impl LspSession {
 
 impl Drop for LspSessionInner {
     fn drop(&mut self) {
+        // Invariant 6 : Drop tue le primaire ET tous les aux. Flag alive baissé
+        // d'abord : la lectrice d'un aux tué ici ne doit pas sonner « degraded »
+        // — c'est la mort du multiplexeur lui-même, pas une dégradation.
+        self.alive.store(false, Ordering::SeqCst);
         if let Some(mut child) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
             drop(child.kill());
+        }
+        for aux in &self.aux {
+            aux.alive.store(false, Ordering::SeqCst);
+            if let Some(mut child) = aux.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                drop(child.kill());
+            }
         }
     }
 }
@@ -972,6 +1406,166 @@ while True:
         write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": method}})
 "#;
 
+    /// Script Python factice enregistreur (multiplexeur, tâche 03) : lit stdin
+    /// trame par trame, journalise chaque objet reçu (JSON un par ligne) dans le
+    /// fichier passé en argv[1], et répond `{"result":"ok"}` aux requêtes
+    /// (`"id"` présent). Le fichier est créé à la PREMIÈRE trame (mode append à
+    /// chaque écriture) : « fichier absent » = « recorder jamais alimenté » —
+    /// seul état observable d'un enfant qu'on n'a volontairement pas spawné.
+    const FAKE_LSP_RECORDER_PY: &str = r#"
+import sys, json
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+    if "id" in msg:
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": "ok"})
+"#;
+
+    /// Chemin du log du recorder primaire posé par `make_fake_composite`.
+    fn primary_log_path(tmpdir: &tempfile::TempDir) -> PathBuf {
+        tmpdir.path().join("primary.log")
+    }
+
+    /// Chemin du log du recorder aux `index` posé par `make_fake_composite`.
+    fn aux_log_path(tmpdir: &tempfile::TempDir, index: usize) -> PathBuf {
+        tmpdir.path().join(format!("aux_{index}.log"))
+    }
+
+    /// Construit un `init_options` (`Value::Null` = rien à injecter) à partir de
+    /// paires `(clé, JSON inline)` ; une valeur non-JSON est stockée en chaîne.
+    fn build_init_options(pairs: &[(&str, &str)]) -> Value {
+        if pairs.is_empty() {
+            return Value::Null;
+        }
+        let mut map = serde_json::Map::new();
+        for (key, raw) in pairs {
+            let value =
+                serde_json::from_str(raw).unwrap_or_else(|_| Value::String((*raw).to_string()));
+            map.insert((*key).to_string(), value);
+        }
+        Value::Object(map)
+    }
+
+    /// Toolchain composite : script primaire + scripts aux (recorders), chacun
+    /// avec son fichier-log dédié dans le tmpdir (nommé déterministement —
+    /// `primary.log`, `aux_{i}.log` — les tests recalculent les chemins via
+    /// `primary_log_path`/`aux_log_path`). Les logs ne sont PAS pré-créés :
+    /// absence = recorder jamais alimenté. Chaque aux reçoit son chemin de log
+    /// en argv[1] ; le primaire aussi (inoffensif pour les fakes non-recorders,
+    /// qui ignorent l'argument de plus). Le tmpdir est retenu pour la durée du
+    /// test (scripts + logs vivent dedans).
+    /// Le tuple `(&role, &script, Vec<(clé, JSON)> )` des specs aux est celui
+    /// imposé par la tâche 03 — d'où l'allow (signature documentée du helper).
+    #[allow(clippy::type_complexity)]
+    async fn make_fake_composite(
+        primary_script: &str,
+        aux_scripts: &[(
+            &str,              /*role*/
+            &str,              /*script*/
+            Vec<(&str, &str)>, /*initOptions*/
+        )],
+    ) -> (LspToolchain, tempfile::TempDir) {
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let primary_script_path = tmpdir.path().join("fake_lsp_primary.py");
+        std::fs::write(&primary_script_path, primary_script).unwrap();
+        let mut aux = Vec::new();
+        for (i, (role, script, init_options)) in aux_scripts.iter().enumerate() {
+            let script_path = tmpdir.path().join(format!("fake_lsp_aux_{i}.py"));
+            std::fs::write(&script_path, script).unwrap();
+            let log_path = tmpdir.path().join(format!("aux_{i}.log"));
+            aux.push(LspAux {
+                role: role.to_string(),
+                bin: "python3".to_string(),
+                args: vec![
+                    script_path.to_string_lossy().to_string(),
+                    log_path.to_string_lossy().to_string(),
+                ],
+                init_options: build_init_options(init_options),
+            });
+        }
+        let toolchain = LspToolchain {
+            name: "composite".to_string(),
+            bin: "python3".to_string(),
+            args: vec![
+                primary_script_path.to_string_lossy().to_string(),
+                primary_log_path(&tmpdir).to_string_lossy().to_string(),
+            ],
+            aux,
+        };
+        (toolchain, tmpdir)
+    }
+
+    /// Lit un log de recorder (JSON un par ligne). Fichier absent = 0 trame.
+    fn read_recorder_frames(path: &Path) -> Vec<Value> {
+        match std::fs::read_to_string(path) {
+            Ok(content) => content
+                .lines()
+                .filter(|line| !line.is_empty())
+                .filter_map(|line| serde_json::from_str(line).ok())
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Relit un log de recorder (poll 10ms, borné par `timeout`) jusqu'à ce que
+    /// `done` soit satisfait des trames vues ; rend les trames lues (au plus
+    /// une dernière relecture après le délai).
+    async fn poll_recorder(
+        path: &Path,
+        done: impl Fn(&[Value]) -> bool,
+        timeout: Duration,
+    ) -> Vec<Value> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let frames = read_recorder_frames(path);
+            if done(&frames) || tokio::time::Instant::now() >= deadline {
+                return frames;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     /// Crée une toolchain LSP pointant vers un script Python factice.
     async fn make_fake_toolchain(name: &str, script: &str) -> (LspToolchain, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
@@ -981,6 +1575,7 @@ while True:
             name: name.to_string(),
             bin: "python3".to_string(),
             args: vec![script_path.to_string_lossy().to_string()],
+            aux: vec![],
         };
         (toolchain, tmpdir)
     }
@@ -1699,6 +2294,543 @@ while True:
                 "{uri} must be released when its only holder unsubscribes"
             );
         }
+
+        drop(tmpdir);
+    }
+
+    // ── Tests tâche 03 (vue-lsp) : ossature multi-process ──────────────────
+
+    /// Test 20: parse_aux_roundtrip_and_default_empty — contrat de format
+    /// `VNL_LSP_TOOLCHAINS` avec `aux` (interop tâche controller ultérieure) :
+    /// valeurs exactes (dont `initOptions` → `init_options`), clé `aux` absente
+    /// ⟹ `vec![]`, sérialisation sans aux ⟹ `"aux":[]` (additif, accepté).
+    #[test]
+    fn parse_aux_roundtrip_and_default_empty() {
+        let json = r#"[
+            {"name":"node","bin":"/toolchains/node-lsp/bin/vue-language-server","args":["--stdio"],
+             "aux":[{"role":"tsserver-forward",
+                     "bin":"/toolchains/node-lsp/bin/typescript-language-server","args":["--stdio"],
+                     "initOptions":{"plugins":[{"name":"@vue/typescript-plugin",
+                                                "location":"/toolchains/node-lsp/lib/node_modules/@vue/language-server"}]}}]}
+        ]"#;
+        let specs = parse_lsp_toolchains(json).expect("JSON avec aux doit parser");
+        assert_eq!(specs[0].aux.len(), 1, "un seul aux");
+        let a = &specs[0].aux[0];
+        assert_eq!(a.role, "tsserver-forward");
+        assert_eq!(a.bin, "/toolchains/node-lsp/bin/typescript-language-server");
+        assert_eq!(a.args, vec!["--stdio".to_string()]);
+        assert_eq!(
+            a.init_options["plugins"],
+            serde_json::json!([
+                {"name": "@vue/typescript-plugin",
+                 "location": "/toolchains/node-lsp/lib/node_modules/@vue/language-server"}
+            ]),
+            "initOptions doit atterrir dans init_options, verbatim"
+        );
+
+        // Clé `aux` absente (cas de tous les pods déployés aujourd'hui) → vec![].
+        let json_no_aux =
+            r#"[{"name":"rust","bin":"/toolchains/rust/bin/rust-analyzer","args":[]}]"#;
+        let plain = parse_lsp_toolchains(json_no_aux).expect("JSON sans aux doit parser");
+        assert!(
+            plain[0].aux.is_empty(),
+            "clé aux absente doit default à vec![]"
+        );
+
+        // Sérialisation d'un LspToolchain sans aux → "aux":[] (additif accepté).
+        let serialized = serde_json::to_value(&plain[0]).unwrap();
+        assert_eq!(serialized["aux"], serde_json::json!([]));
+
+        // Round-trip complet du composite (contrat d'interop controller).
+        let back: LspToolchain =
+            serde_json::from_value(serde_json::to_value(&specs[0]).unwrap()).unwrap();
+        assert_eq!(back.name, specs[0].name);
+        assert_eq!(back.bin, specs[0].bin);
+        assert_eq!(back.args, specs[0].args);
+        assert_eq!(back.aux.len(), 1);
+        assert_eq!(back.aux[0].role, a.role);
+        assert_eq!(back.aux[0].bin, a.bin);
+        assert_eq!(back.aux[0].args, a.args);
+        assert_eq!(back.aux[0].init_options, a.init_options);
+        assert!(
+            serde_json::to_value(&back.aux[0])
+                .unwrap()
+                .get("initOptions")
+                .is_some(),
+            "init_options doit se sérialiser sous la clé JSON initOptions"
+        );
+    }
+
+    /// Test 21: composite_initialize_reaches_both_injected_options_on_aux —
+    /// `initialize` part au primaire (chemin actuel, options du client seules)
+    /// ET à chaque aux vivant en copie avec `initOptions` du spec injectés
+    /// (clés spec gagnantes, options client conservées) ; la réponse de l'aux
+    /// est interceptée par la session : le client ne voit EXACTEMENT que la
+    /// réponse du primaire (invariant 3).
+    #[tokio::test]
+    async fn composite_initialize_reaches_both_injected_options_on_aux() {
+        let plugins_json = r#"[{"name":"@vue/typescript-plugin","location":"/opt/plugins/vue"}]"#;
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_RECORDER_PY,
+            &[(
+                "tsserver-forward",
+                FAKE_LSP_RECORDER_PY,
+                vec![("plugins", plugins_json)],
+            )],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        let init = serde_json::json!({
+            "jsonrpc": "2.0", "id": 1, "method": "initialize",
+            "params": {"processId": null, "initializationOptions": {"existing": true}}
+        });
+        session
+            .send(client, init.to_string().into_bytes())
+            .await
+            .expect("send initialize ok");
+
+        // (c) Le flux client reçoit une réponse id 1 — celle du primaire.
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("la réponse initialize du primaire doit parvenir au client");
+        let resp = serde_json::from_slice::<Value>(&resp).unwrap();
+        assert_eq!(resp["id"].as_i64(), Some(1), "id restauré côté client");
+        assert!(
+            resp.get("result").is_some(),
+            "la réponse routée est un résultat"
+        );
+
+        // (a) Recorder primaire : initialize reçu avec les options du client,
+        // PAS les initOptions de l'aux (injection réservée à l'enfant).
+        let is_init = |f: &Value| f.get("method").and_then(|m| m.as_str()) == Some("initialize");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_init),
+            Duration::from_secs(5),
+        )
+        .await;
+        let prim = primary_frames
+            .iter()
+            .find(|f| is_init(f))
+            .expect("le primaire doit recevoir initialize");
+        assert_eq!(
+            prim["params"]["initializationOptions"]["existing"],
+            serde_json::json!(true)
+        );
+        assert!(
+            prim["params"]["initializationOptions"]
+                .get("plugins")
+                .is_none(),
+            "le primaire ne doit PAS recevoir les initOptions de l'aux: {prim}"
+        );
+
+        // (b) Recorder aux : copie initialize avec plugins = tableau du spec
+        // ET clé client conservée (fusion superficielle, clés spec gagnantes).
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_init),
+            Duration::from_secs(5),
+        )
+        .await;
+        let aux_init = aux_frames
+            .iter()
+            .find(|f| is_init(f))
+            .expect("l'aux doit recevoir une copie de initialize");
+        assert_eq!(
+            aux_init["params"]["initializationOptions"]["plugins"],
+            serde_json::from_str::<Value>(plugins_json).unwrap(),
+            "les initOptions du spec doivent être injectés verbatim"
+        );
+        assert_eq!(
+            aux_init["params"]["initializationOptions"]["existing"],
+            serde_json::json!(true),
+            "les options du client doivent être conservées"
+        );
+
+        // Rien d'autre ne doit jamais suivre : la réponse de l'aux (ids interne)
+        // est avalée par la session, jamais routée au client.
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(
+            leaked.is_none(),
+            "une réponse d'aux a fuité vers le client: {leaked:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 22: composite_didOpen_fanout_to_both — toute notification client
+    /// (doc-sync inclus) part telle quelle à chaque enfant vivant (invariant 2).
+    /// Nom du test imposé tel quel par la tâche 03 (`didOpen` = méthode LSP).
+    #[allow(non_snake_case)]
+    #[tokio::test]
+    async fn composite_didOpen_fanout_to_both() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_RECORDER_PY,
+            &[("tsserver-forward", FAKE_LSP_RECORDER_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        // initialize d'abord (séquence LSP réelle ; la fan-out didOpen est ce
+        // qu'observe ce test).
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("initialize ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("réponse initialize du primaire");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(1)
+        );
+
+        let uri = "file:///workspace/App.vue";
+        let did_open = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {"uri": uri, "languageId": "vue", "version": 1, "text": "<template/>"}
+            }
+        });
+        session
+            .send(client, did_open.to_string().into_bytes())
+            .await
+            .expect("didOpen ok");
+
+        let saw_open = |frames: &[Value]| {
+            frames.iter().any(|f| {
+                f.get("method").and_then(|m| m.as_str()) == Some("textDocument/didOpen")
+                    && f["params"]["textDocument"]["uri"].as_str() == Some(uri)
+            })
+        };
+        let primary_frames =
+            poll_recorder(&primary_log_path(&tmpdir), saw_open, Duration::from_secs(5)).await;
+        let aux_frames =
+            poll_recorder(&aux_log_path(&tmpdir, 0), saw_open, Duration::from_secs(5)).await;
+        assert!(
+            saw_open(&primary_frames),
+            "le primaire doit recevoir le didOpen; trames: {primary_frames:?}"
+        );
+        assert!(
+            saw_open(&aux_frames),
+            "l'aux doit recevoir le même didOpen; trames: {aux_frames:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 23: composite_other_request_primary_only — une requête (id) qui
+    /// n'est pas `initialize` reste intégralement sur le primaire : réponse au
+    /// client, l'aux ne la voit jamais (invariant 4 — routage/fusion : tâches
+    /// 04–06, NE RIEN fusionner ici).
+    #[tokio::test]
+    async fn composite_other_request_primary_only() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_RECORDER_PY,
+            &[("tsserver-forward", FAKE_LSP_RECORDER_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        // initialize + didOpen AVANT le hover : prouvent que le canal de l'aux
+        // est vivant (l'absence du hover ensuite est significative, pas
+        // l'artefact d'un aux qui n'aurait jamais rien reçu).
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("initialize ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("réponse initialize");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(1)
+        );
+
+        let uri = "file:///workspace/App.vue";
+        let did_open = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": uri, "languageId": "vue", "version": 1, "text": ""}}
+        });
+        session
+            .send(client, did_open.to_string().into_bytes())
+            .await
+            .expect("didOpen ok");
+        let saw_open = |frames: &[Value]| {
+            frames
+                .iter()
+                .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("textDocument/didOpen"))
+        };
+        let aux_frames =
+            poll_recorder(&aux_log_path(&tmpdir, 0), saw_open, Duration::from_secs(5)).await;
+        assert!(
+            saw_open(&aux_frames),
+            "l'aux doit avoir reçu le didOpen (canal vivant) avant l'assertion hover; trames: {aux_frames:?}"
+        );
+
+        let hover = serde_json::json!({
+            "jsonrpc": "2.0", "id": 2, "method": "textDocument/hover",
+            "params": {"textDocument": {"uri": uri}, "position": {"line": 0, "character": 0}}
+        });
+        session
+            .send(client, hover.to_string().into_bytes())
+            .await
+            .expect("hover send ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("le primaire doit répondre du hover");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(2)
+        );
+
+        let saw_hover = |frames: &[Value]| {
+            frames
+                .iter()
+                .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("textDocument/hover"))
+        };
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            saw_hover,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            saw_hover(&primary_frames),
+            "le primaire doit recevoir le hover; trames: {primary_frames:?}"
+        );
+
+        // Fenêtre laissée à l'aux pour le recevoir éventuellement : rien.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        assert!(
+            !saw_hover(&aux_frames),
+            "l'aux ne doit PAS recevoir de requête non-initialize; trames: {aux_frames:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 24: primary_death_kills_session — EOF stdout du PRIMAIRE = mort de
+    /// la session (invariant 6), même avec un aux durable à côté ; pattern de
+    /// poll borné de `manager_respawns_dead_session`.
+    #[tokio::test]
+    async fn primary_death_kills_session() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_EXIT_PY,
+            &[("tsserver-forward", FAKE_LSP_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+
+        for _ in 0..500 {
+            if !session.is_alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !session.is_alive(),
+            "la mort du primaire doit emporter la session"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 25: aux_death_session_survives_degraded — EOF stdout d'un AUX =
+    /// dégradation, pas mort (invariant 6) : `is_alive()` (primaire) reste
+    /// `true`, les requêtes primaire répondent, le fan-out ignore l'aux mort
+    /// sans erreur.
+    #[tokio::test]
+    async fn aux_death_session_survives_degraded() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_PY,
+            &[("tsserver-forward", FAKE_LSP_EXIT_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("la mort attendue de l'aux ne doit pas faire échouer le spawn");
+
+        // Laisser l'aux mourir (exit immédiat + EOF stdout constaté).
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            session.is_alive(),
+            "la mort d'un aux ne doit pas tuer la session"
+        );
+
+        let (client, mut rx) = session.subscribe();
+        let req = serde_json::json!({"jsonrpc":"2.0","id":3,"method":"ping","params":{}});
+        session
+            .send(client, req.to_string().into_bytes())
+            .await
+            .expect("requête primaire ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("le primaire doit toujours répondre après perte de l'aux");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(3)
+        );
+
+        // didOpen ultérieur : le fan-out ignore l'aux mort, nulle part d'erreur.
+        let did_open = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {"textDocument": {"uri": "file:///workspace/App.vue", "languageId": "vue", "version": 1, "text": ""}}
+        });
+        session
+            .send(client, did_open.to_string().into_bytes())
+            .await
+            .expect("didOpen ne doit pas erreur avec un aux mort");
+        assert!(session.is_alive());
+
+        drop(tmpdir);
+    }
+
+    /// Test 26: aux_spawn_failure_degrades_not_fails — un aux au binaire absent
+    /// dégrade la session (`warn`) mais ne la fait jamais échouer (invariant 1) :
+    /// `spawn` rend `Ok`, session vivante, primaire fonctionnel, notifications
+    /// fan-out sans erreur.
+    #[tokio::test]
+    async fn aux_spawn_failure_degrades_not_fails() {
+        let (mut spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
+        spec.aux.push(LspAux {
+            role: "tsserver-forward".to_string(),
+            bin: "/nonexistent/vanilla-lsp".to_string(),
+            args: vec![],
+            init_options: Value::Null,
+        });
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("un aux inexistant doit dégrader la session, pas la faire échouer");
+        assert!(session.is_alive());
+
+        let (client, mut rx) = session.subscribe();
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":4,"method":"ping","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("requête primaire ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("le primaire doit répondre malgré l'aux absent");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(4)
+        );
+
+        // Notification : le fan-out vers l'aux jamais né doit rester sans erreur.
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","method":"fake/notify","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("notification ok malgré aux jamais spawné");
+
+        drop(tmpdir);
+    }
+
+    /// Test 27: aux_unknown_role_ignored — rôle inconnu au spawn : `warn` +
+    /// enfant ignoré (JAMAIS spawné — son recorder ne crée même pas son log),
+    /// session vivante et fonctionnelle avec les aux connus (invariant 1).
+    #[tokio::test]
+    async fn aux_unknown_role_ignored() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_RECORDER_PY,
+            &[("wat", FAKE_LSP_RECORDER_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("un rôle aux inconnu ne doit pas faire échouer le spawn");
+        assert!(session.is_alive());
+
+        // Notification de sonde : le primaire (recorder) la reçoit, prouvant que
+        // le fan-out a eu lieu — un aux inconnu qui aurait été spawné à tort
+        // aurait reçu la même trame et créé son log.
+        let (client, mut rx) = session.subscribe();
+        let probe = serde_json::json!({"jsonrpc":"2.0","method":"fake/notify","params":{}});
+        session
+            .send(client, probe.to_string().into_bytes())
+            .await
+            .expect("notification ok");
+        let saw_probe = |frames: &[Value]| {
+            frames
+                .iter()
+                .any(|f| f.get("method").and_then(|m| m.as_str()) == Some("fake/notify"))
+        };
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            saw_probe,
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            saw_probe(&primary_frames),
+            "le primaire doit recevoir la sonde; trames: {primary_frames:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(
+            !aux_log_path(&tmpdir, 0).exists(),
+            "le recorder d'un aux à rôle inconnu n'a jamais dû être spawné"
+        );
+
+        // Session pleinement fonctionnelle avec les aux connus (ici : aucun).
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":5,"method":"ping","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("requête primaire ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("la session doit fonctionner normalement");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(5)
+        );
 
         drop(tmpdir);
     }
