@@ -951,6 +951,21 @@ extension → toolchain/languageId de la sandbox — `.rs` → `rust`/`rust`, `.
 `.mts`/`.cts` → `node`/`typescript`, `.js`/`.jsx`/`.mjs`/`.cjs` → `node`/`javascript`.
 Extension non couverte → `null`, mode dégradé (coloration seule, pas de LSP).
 
+**Coloration syntaxique** (`editorLanguage.ts::byExtension` +
+`languageExtensionForPath`, réutilisé aussi par `DiffView.vue`) : sélection d'une
+extension CodeMirror par extension de fichier — ts/tsx/js/jsx/mjs/cjs, rs, json,
+md/markdown, yaml/yml, toml, py, **vue** (`@codemirror/lang-vue` sur base
+`@codemirror/lang-html`), **rhai** et **hbs/handlebars**. Les noms
+Dockerfile/Containerfile (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
+`Containerfile*`) sont reconnus par nom de base via le helper partagé
+`dockerfileName.ts` (aussi utilisé par `fileIcon.ts`), pas par extension →
+`@codemirror/legacy-modes/mode/dockerfile`. rhai et handlebars sont des modes
+`StreamLanguage` maison (`langRhai.ts`, `langHandlebars.ts`, fonctions pures
+testées) : **coloration « suffisante » seulement**, pas de parseur Lezer, pas
+d'AST — mots-clés/commentaires/chaînes/nombres pour rhai, HTML-lite + surcouche
+moustaches pour handlebars. Aucune de ces extensions n'a de LSP (vue et
+Dockerfile : branchement LSP hors périmètre, features `vue-lsp`/`docker-lsp`).
+
 **Images toolchain = images LSP, décidé après coup (2026-08-20)** : le premier jet de
 cette feature pointait `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` sur les mêmes images
 toolchain génériques (`rust:slim-trixie`/`node:trixie-slim`), qui ne contiennent pas

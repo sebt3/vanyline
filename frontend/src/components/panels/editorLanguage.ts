@@ -14,10 +14,13 @@ import { dockerfileName } from './dockerfileName';
 import { handlebarsMode } from './langHandlebars';
 import { rhaiMode } from './langRhai';
 
-/** Support MVP : ts/js/rust (langages produits) + json/markdown/toml/yaml
- *  (config/doc courants dans ces mêmes projets) + python (déjà présent,
- *  gardé — le support natif viendra plus tard). Extension de fichier →
- *  extension CodeMirror ; chemin sans extension connue → aucun langage
+/** Extension de fichier → extension CodeMirror. Couvre : ts/js/rust (langages
+ *  produits) + json/markdown/toml/yaml (config/doc courants) + python + vue
+ *  (`@codemirror/lang-vue` sur base html) + rhai/hbs/handlebars (modes
+ *  `StreamLanguage` maison, coloration seule — cf. `langRhai.ts`/
+ *  `langHandlebars.ts`). Les noms Dockerfile/Containerfile sont traités hors
+ *  de cette table, par nom de base (`dockerfileName`), dans
+ *  `languageExtensionForPath`. Chemin sans extension connue → aucun langage
  *  (coloration désactivée, pas de plantage). */
 const byExtension: Record<string, () => Extension> = {
   ts: () => javascript({ typescript: true }),
