@@ -14,20 +14,43 @@ describe('languageExtensionForPath', () => {
     ['a.yaml', 'yaml'],
     ['a.yml', 'yml'],
     ['a.py', 'py'],
+    ['a.vue', 'vue'],
+    ['a.rhai', 'rhai'],
+    ['a.hbs', 'hbs'],
+    ['a.handlebars', 'handlebars'],
   ])('renvoie une extension non vide pour %s', (path) => {
     expect(languageExtensionForPath(path).length).toBeGreaterThan(0);
   });
 
   it('chemin sans extension reconnue → tableau vide', () => {
-    expect(languageExtensionForPath('Dockerfile')).toEqual([]);
+    expect(languageExtensionForPath('Makefile')).toEqual([]);
+  });
+
+  it('nom de base Dockerfile → mode dockerfile (tableau de longueur 1)', () => {
+    expect(languageExtensionForPath('Dockerfile')).toHaveLength(1);
+    expect(languageExtensionForPath('deploy/Dockerfile.dev')).toHaveLength(1);
+    expect(languageExtensionForPath('app.dockerfile')).toHaveLength(1);
+  });
+
+  it('Dockerfile reconnu alors que le chemin ne contient aucun point', () => {
+    // `path.split('.').pop()` seul ne suffirait pas : 'Dockerfile' n'a pas
+    // d'extension, c'est un nom de base.
+    expect('Dockerfile').not.toContain('.');
+    expect(languageExtensionForPath('Dockerfile')).not.toEqual([]);
   });
 
   it('null → tableau vide', () => {
     expect(languageExtensionForPath(null)).toEqual([]);
   });
 
+  it('.vue avec chemin à points multiples', () => {
+    // L'extension retenue est bien `vue` (dernier segment), pas `bar`.
+    expect(languageExtensionForPath('src/components/Foo.bar.vue')).toHaveLength(1);
+  });
+
   it("l'extension est insensible à la casse", () => {
     expect(languageExtensionForPath('a.TS').length).toBeGreaterThan(0);
+    expect(languageExtensionForPath('App.VUE')).toHaveLength(1);
   });
 });
 
@@ -46,8 +69,12 @@ describe('lspToolchainForPath', () => {
     expect(lspToolchainForPath(path)).toEqual(expected);
   });
 
-  it.each(['a.py', 'Dockerfile', null])('retourne null pour %s', (path) => {
+  it.each(['a.py', 'a.rhai', 'a.hbs', 'Dockerfile', null])('retourne null pour %s', (path) => {
     expect(lspToolchainForPath(path)).toBeNull();
+  });
+
+  it('.vue reste sans LSP (verrou de périmètre : coloration seule)', () => {
+    expect(lspToolchainForPath('App.vue')).toBeNull();
   });
 
   it('l\'extension est insensible à la casse', () => {
