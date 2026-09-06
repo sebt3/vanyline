@@ -204,7 +204,19 @@ struct LspSessionInner {
     /// typescript-language-server non (`"Unhandled method"`) — donc pas de solution
     /// pull uniforme entre les deux, le cache push est la seule option qui marche
     /// pour les deux serveurs.
+    /// Contenu : le FONDU des parts par enfant (`diag_parts`) — plus jamais le
+    /// dernier `publishDiagnostics` brut reçu. Mono-process (`aux` vide), une
+    /// seule part possible : contenu exactement publié par le primaire,
+    /// comportement historique inchangé.
     diagnostics_cache: Mutex<HashMap<String, Vec<Value>>>,
+    /// Parts de diagnostics par URI et par enfant (0 = primaire, 1..N = index
+    /// de `inner.aux`, porté par `AuxChild::index`). La concat dans l'ordre
+    /// croissant des index produit la valeur fusionnée écrite dans
+    /// `diagnostics_cache` AVANT broadcast — navigateur et MCP voient le même
+    /// résultat (contrainte design n° 5). Publication d'un enfant =
+    /// REMPLACEMENT de sa part (jamais append). Invalidée avec le cache,
+    /// purgée à l'EOF de l'enfant.
+    diag_parts: Mutex<HashMap<String, HashMap<usize, Vec<Value>>>>,
     diagnostics_notify: Notify,
     /// Enfants auxiliaires du multiplexeur (`spec.aux` spawnés, rôles connus).
     /// Vide ⟹ chemin mono-process strictement inchangé (invariant 8) : le
@@ -235,6 +247,13 @@ enum InternalPending {
 struct AuxChild {
     /// `LspAux::role` — tracage et messages de dégradation.
     role: String,
+    /// Index d'enfant dans le multiplexeur : position dans `inner.aux` + 1 (0
+    /// = primaire réservé), posé au pré-pass de `LspSession::spawn`. Porte ses
+    /// parts de diagnostics dans `diag_parts` — la concat primary-first des
+    /// index croissants produit le fondu (tâche 06). Index dans la liste des
+    /// enfants RÉELLEMENT spawnés, pas dans `spec.aux` : rôle inconnu ignoré
+    /// ou spawn en échec ne décale rien pour les enfants retenus.
+    index: usize,
     /// `initOptions` du spec, fusionnés (clés gagnantes) dans
     /// `params.initializationOptions` du `initialize` envoyé à CET enfant.
     init_options: Value,
@@ -276,8 +295,14 @@ fn spawn_stdin_writer(mut stdin: ChildStdin, mut cmd_rx: mpsc::Receiver<Vec<u8>>
 /// Spawn du process d'un aux : mêmes conditions que le primaire (`cwd =
 /// sandbox_root`, stdio pipés) + canal de stdin dédié. Les tâches
 /// lectrice/écrivaine/stderr sont lancées séparément par `LspSession::spawn`
-/// une fois la session Arc constituée.
-async fn spawn_aux_startup(aux_spec: &LspAux, sandbox_root: &Path) -> anyhow::Result<AuxStartup> {
+/// une fois la session Arc constituée. `index` : index d'enfant attribué par
+/// le pré-pass (position dans la liste spawnée + 1, 0 = primaire) — porté par
+/// `AuxChild` pour la fusion des diagnostics (tâche 06).
+async fn spawn_aux_startup(
+    aux_spec: &LspAux,
+    sandbox_root: &Path,
+    index: usize,
+) -> anyhow::Result<AuxStartup> {
     let mut cmd = Command::new(&aux_spec.bin);
     cmd.args(&aux_spec.args)
         .current_dir(sandbox_root)
@@ -305,6 +330,7 @@ async fn spawn_aux_startup(aux_spec: &LspAux, sandbox_root: &Path) -> anyhow::Re
     let (stdin_tx, stdin_rx) = mpsc::channel::<Vec<u8>>(64);
     let handle = Arc::new(AuxChild {
         role: aux_spec.role.clone(),
+        index,
         init_options: aux_spec.init_options.clone(),
         stdin_tx,
         alive: AtomicBool::new(true),
@@ -354,6 +380,22 @@ fn parse_tsserver_request(msg: &Value) -> Option<(Value, &str, Value)> {
     let vue_id = inner.first()?.clone();
     let payload = inner.get(2).cloned().unwrap_or(Value::Null);
     Some((vue_id, command, payload))
+}
+
+/// Concat des parts de diagnostics d'une URI dans l'ordre croissant des index
+/// d'enfant (0 = primaire d'abord, puis aux dans l'ordre de `inner.aux`) —
+/// déterminisme du fondu : indépendant de l'ordre d'arrivée des publications
+/// (primary-first, contrainte design n° 5 de la tâche 06).
+fn concat_diag_parts(uri_parts: &HashMap<usize, Vec<Value>>) -> Vec<Value> {
+    let mut indexes: Vec<usize> = uri_parts.keys().copied().collect();
+    indexes.sort_unstable();
+    let mut merged = Vec::new();
+    for index in indexes {
+        if let Some(part) = uri_parts.get(&index) {
+            merged.extend(part.iter().cloned());
+        }
+    }
+    merged
 }
 
 /// Session LSP : possède un process, multiplexe les clients.
@@ -408,6 +450,9 @@ impl LspSession {
         // lectrice aux y dispatchant trames et dégradations). Rôle inconnu :
         // warn + enfant ignoré ; spawn en échec : warn « aux degraded ». Ni l'un
         // ni l'autre ne fait échouer le spawn de la session (invariant 1).
+        // Index d'enfant porté par chaque enfant retenu : position dans la
+        // liste spawnée + 1 (0 réservé au primaire) — fusion des diagnostics,
+        // tâche 06.
         let mut aux_startups: Vec<AuxStartup> = Vec::new();
         for aux_spec in &spec.aux {
             if !is_known_aux_role(&aux_spec.role) {
@@ -418,7 +463,7 @@ impl LspSession {
                 );
                 continue;
             }
-            match spawn_aux_startup(aux_spec, sandbox_root).await {
+            match spawn_aux_startup(aux_spec, sandbox_root, aux_startups.len() + 1).await {
                 Ok(startup) => aux_startups.push(startup),
                 Err(e) => {
                     tracing::warn!(
@@ -447,6 +492,7 @@ impl LspSession {
                 doc_versions: Mutex::new(HashMap::new()),
                 editor_uris: Mutex::new(HashMap::new()),
                 diagnostics_cache: Mutex::new(HashMap::new()),
+                diag_parts: Mutex::new(HashMap::new()),
                 diagnostics_notify: Notify::new(),
                 child: Mutex::new(Some(child)),
                 next_client: AtomicU64::new(1),
@@ -516,12 +562,14 @@ impl LspSession {
                         // vue-language-server en mode hybride v3 envoie à SON
                         // client primaire pour une exécution tsserver) est
                         // INTERCEPTÉE ici — jamais broadcast aux clients
-                        // (tâche 05) ; toute autre notification : chemin
-                        // actuel — cache `publishDiagnostics` puis broadcast.
+                        // (tâche 05) ; toute autre notification : dispatch
+                        // partagé avec l'index du primaire (0) — fusion
+                        // `publishDiagnostics` par parts AVANT le cache, puis
+                        // broadcast du même fondu (tâche 06).
                         if msg.get("method").and_then(|m| m.as_str()) == Some("tsserver/request") {
                             reader_session.handle_tsserver_request(&msg);
                         } else {
-                            reader_session.dispatch_notification_frame(&msg, payload);
+                            reader_session.dispatch_notification_frame(&msg, payload, 0);
                         }
                     }
                 }
@@ -668,18 +716,25 @@ impl LspSession {
                                 }
                             }
                         } else {
-                            // Notification d'un enfant (aux inclus) : chemin
-                            // actuel — cache `publishDiagnostics` (last-writer-
-                            // wins, TODO(task-06) porté par
-                            // `dispatch_notification_frame`) puis broadcast.
-                            reader_session.dispatch_notification_frame(&msg, payload);
+                            // Notification d'un enfant (aux inclus) : dispatch
+                            // partagé avec SON index d'enfant (`AuxChild::index`)
+                            // — fusion des parts de diagnostics avant le cache
+                            // et broadcast du même fondu (tâche 06 ; l'index
+                            // distingue ses parts de celles du primaire et des
+                            // autres aux).
+                            reader_session.dispatch_notification_frame(
+                                &msg,
+                                payload,
+                                reader_aux.index,
+                            );
                         }
                     }
                 }
 
                 // EOF stdout d'un AUX : la session SURVIT (`is_alive()` ne
-                // reflète que le primaire). Aux baissé, ids internes en
-                // attente purgés (ils n'auront jamais de réponse) — les
+                // reflète que le primaire). Aux baissé, parts de diagnostics
+                // purgées, ids internes en attente purgés (ils n'auront jamais
+                // de réponse) — les
                 // `TsserverForward` reçoivent d'abord une `tsserver/response`
                 // `[[vue_id, null]]` (best effort `try_send` : primaire mort ⟹
                 // ignoré, la requête d'origine n'aurait de toute façon jamais
@@ -689,6 +744,13 @@ impl LspSession {
                 // vivante : si le primaire vient de mourir en tuant cet aux,
                 // la dégradation serait du bruit.
                 reader_aux.alive.store(false, Ordering::SeqCst);
+                // Purge des parts de CET enfant + recomputation du cache
+                // (tâche 06). Justification de la purge plutôt que du maintien :
+                // des diagnostics d'un serveur MORT qui resteraient publiés
+                // feraient passer un `edit_and_check` au vert sur des erreurs
+                // fantômes — disparaître est le comportement sûr. Pas de notify
+                // sur ce chemin : réduction du cache, pas information nouvelle.
+                reader_session.drop_aux_parts(reader_aux.index);
                 {
                     let mut pending = reader_aux
                         .pending_internal
@@ -734,28 +796,56 @@ impl LspSession {
         Ok(session)
     }
 
-    /// Traite une trame NOTIFICATION (sans `id`) reçue d'un enfant — primaire ou
-    /// aux — chemin partagé par invariant 5 : cache `publishDiagnostics` pour
-    /// TOUT abonné, présent ou futur — indépendant du broadcast ci-dessous (cf.
-    /// doc du champ `diagnostics_cache`) — puis broadcast aux abonnés (nettoyage
-    /// des canaux fermés au passage).
+    /// Traite une trame NOTIFICATION (sans `id`) reçue d'un enfant — primaire
+    /// (`child_idx = 0`) ou aux (son `AuxChild::index`) — chemin partagé par
+    /// invariant 5. `publishDiagnostics` : la part de CET enfant REMPLACE la
+    /// sienne dans `diag_parts`, le fondu concat primary-first est écrit dans
+    /// `diagnostics_cache` AVANT tout broadcast — cache et broadcast portent
+    /// le MÊME contenu en composite (navigateur et MCP consomment le même
+    /// résultat, contrainte design n° 5) ; `aux` vide (mono-process, tout ce
+    /// qui est déployé) ⟹ payload d'origine octet-identique (invariant 8).
+    /// Toute autre notification : broadcast de la part brute, chemin actuel
+    /// inchangé. Le cache alimente TOUT abonné, présent ou futur,
+    /// indépendamment du broadcast ci-dessous (cf. doc du champ
+    /// `diagnostics_cache`) ; nettoyage des canaux fermés au passage.
     ///
-    /// TODO(task-06) : la fusion des `publishDiagnostics` entre enfants (concat
-    /// par URI) se fera AVANT l'écriture du cache — navigateur et MCP doivent
-    /// voir le même résultat fondu (contrainte, pas option). En attendant :
-    /// last-writer-wins (comportement mono-process actuel, `aux: []` ⟹ seule la
-    /// lectrice primaire alimente ce chemin, donc strictement inchangé).
-    fn dispatch_notification_frame(&self, msg: &Value, payload: Vec<u8>) {
-        // `publishDiagnostics` : cache + notify (chemin actuel).
+    /// TODO(task-07) : la fusion des REQUÊTES (routage et fusion des réponses
+    /// de plusieurs enfants pour une requête client, remapping d'ids) est hors
+    /// périmètre de cette tâche — NE RIEN fusionner sur ce chemin.
+    fn dispatch_notification_frame(&self, msg: &Value, payload: Vec<u8>, child_idx: usize) {
+        // Le payload diffusé aux abonnés : part brute par défaut (mono-process
+        // — octets d'origine inchangés — et trames non-diagnostic), fondu
+        // synthétisé en composite `publishDiagnostics` (cf. flux tâche 06).
+        let mut broadcast_payload = payload;
         if msg.get("method").and_then(|m| m.as_str()) == Some("textDocument/publishDiagnostics")
             && let Some(params) = msg.get("params")
             && let Some(uri) = params.get("uri").and_then(|u| u.as_str())
             && let Some(diags) = params.get("diagnostics").and_then(|d| d.as_array())
         {
-            if let Ok(mut cache) = self.inner.diagnostics_cache.lock() {
-                cache.insert(uri.to_string(), diags.clone());
-            }
+            let merged = {
+                let mut parts = self
+                    .inner
+                    .diag_parts
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                let uri_parts = parts.entry(uri.to_string()).or_default();
+                uri_parts.insert(child_idx, diags.clone());
+                let merged = concat_diag_parts(uri_parts);
+                if let Ok(mut cache) = self.inner.diagnostics_cache.lock() {
+                    cache.insert(uri.to_string(), merged.clone());
+                }
+                merged
+            };
             self.inner.diagnostics_notify.notify_waiters();
+            if !self.inner.aux.is_empty() {
+                // Composite : les abonnés ne voient JAMAIS une part brute —
+                // clone de la trame reçue avec `params.diagnostics` remplacé
+                // par le fondu (les autres champs de `params` — `uri`,
+                // `version` — conservés de la trame qui a déclenché).
+                let mut synthesized = msg.clone();
+                synthesized["params"]["diagnostics"] = Value::Array(merged);
+                broadcast_payload = synthesized.to_string().into_bytes();
+            }
         }
 
         // Notification (pas d'id) : broadcast à tous les abonnés
@@ -767,7 +857,7 @@ impl LspSession {
         let dead_clients: Vec<_> = subs_map
             .iter()
             .filter(|(_client_id, tx)| {
-                let raw_json = payload.clone();
+                let raw_json = broadcast_payload.clone();
                 if tx.send(raw_json).is_err() {
                     return true; // client mort (canal fermé)
                 }
@@ -784,6 +874,40 @@ impl LspSession {
                 subs.remove(&client_id);
             }
         }
+    }
+
+    /// EOF d'un aux (enfant `child_idx`) : retire ses parts de `diag_parts`
+    /// pour TOUTES les URI puis recompte `diagnostics_cache[uri]` = concat des
+    /// parts restantes ; une URI sans aucune part restante est retirée du
+    /// cache. Pas de `notify_waiters` : réduction du cache, pas nouvelle
+    /// information (justification de la purge : cf. commentaire de l'appelant
+    /// dans la lectrice aux — des diagnostics d'un serveur mort qui resteraient
+    /// publiés feraient passer un `edit_and_check` au vert sur des erreurs
+    /// fantômes). Même ordre de verrous que `dispatch_notification_frame`
+    /// (`diag_parts` puis `diagnostics_cache`) — pas d'inversion, pas
+    /// d'interblocage.
+    fn drop_aux_parts(&self, child_idx: usize) {
+        let mut parts = self
+            .inner
+            .diag_parts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .inner
+            .diagnostics_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (uri, uri_parts) in parts.iter_mut() {
+            if uri_parts.remove(&child_idx).is_none() {
+                continue; // URI sans part de cet enfant : rien à recompter
+            }
+            if uri_parts.is_empty() {
+                cache.remove(uri);
+            } else {
+                cache.insert(uri.clone(), concat_diag_parts(uri_parts));
+            }
+        }
+        parts.retain(|_, uri_parts| !uri_parts.is_empty());
     }
 
     /// Invariant 3 : copie de l'`initialize` client vers chaque aux VIVANT, avec
@@ -968,7 +1092,7 @@ impl LspSession {
     /// Envoie un message JSON-RPC client → enfant(s).
     ///
     /// Multiplexeur : requête avec `id` → primaire uniquement, CHEMIN INCHANGÉ
-    /// (routage/fusion par politique : tâches 04–06), sauf `initialize` dont une
+    /// (routage/fusion par politique : tâche 07), sauf `initialize` dont une
     /// copie avec `initOptions` injectés part aussi à chaque aux vivant
     /// (`fan_out_initialize`, invariable 3). Trame sans `id` (notification,
     /// doc-sync inclus) → primaire puis fan-out telle quelle à chaque aux
@@ -1019,7 +1143,7 @@ impl LspSession {
             // Invariant 3 : `initialize` part AUSSI en copie (id interne propre,
             // `initOptions` du spec injectés) vers chaque aux vivant. Les autres
             // requêtes restent primaire uniquement — routage par politique de
-            // fusion et remapping d'ids par enfant : tâches 04–06, NE RIEN
+            // fusion et remapping d'ids par enfant : tâche 07, NE RIEN
             // fusionner ici.
             if msg.get("method").and_then(|m| m.as_str()) == Some("initialize") {
                 self.fan_out_initialize(&msg);
@@ -1135,8 +1259,12 @@ impl LspSession {
         }
     }
 
-    /// Diagnostics en cache pour `uri`, tel que publiés en dernier par le process —
-    /// `None` si jamais publiés pour cette URI.
+    /// Diagnostics en cache pour `uri` — le FONDU multi-enfants (tâche 06) :
+    /// concat des parts publiées par chaque enfant dans l'ordre croissant de
+    /// leur index — primaire (0) d'abord, puis aux dans l'ordre de `inner.aux`
+    /// — indépendant de l'ordre d'arrivée des publications. Mono-process
+    /// (`aux: []`), contenu exactement publié par le primaire (inchangé).
+    /// `None` si jamais publiés (ou invalidés) pour cette URI.
     pub fn cached_diagnostics(&self, uri: &str) -> Option<Vec<Value>> {
         self.inner
             .diagnostics_cache
@@ -1207,13 +1335,22 @@ impl LspSession {
         next
     }
 
-    /// Retire l'entrée `uri` du `diagnostics_cache`. Indispensable avant une
-    /// ré-analyse : `wait_for_diagnostics` retourne le cache s'il est présent —
-    /// sans invalidation, edit_and_check verrait le stale d'AVANT l'édition
-    /// (design §7 étape 2). Aucun notify, aucun effet si absent.
+    /// Retire l'entrée `uri` du `diagnostics_cache` ET de `diag_parts` (toutes
+    /// parts d'enfant). Indispensable avant une ré-analyse :
+    /// `wait_for_diagnostics` retourne le cache s'il est présent — sans
+    /// invalidation, edit_and_check verrait le stale d'AVANT l'édition
+    /// (design §7 étape 2). La purge des parts est du même coup : sans elle,
+    /// une part aux stale survivrait masquée dans `diag_parts` et resurgirait
+    /// dans le fondu à la première publication suivante. Aucun notify, aucun
+    /// effet si absent.
     pub fn invalidate_diagnostics(&self, uri: &str) {
         self.inner
             .diagnostics_cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(uri);
+        self.inner
+            .diag_parts
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .remove(uri);
@@ -3658,6 +3795,701 @@ while True:
             tsserver_response_params(&primary_frames),
             vec![serde_json::json!([[1, null]])],
             "canal aux plein ⟹ body null immédiat, pas de pend; trames: {primary_frames:?}"
+        );
+        assert!(session.is_alive());
+
+        drop(tmpdir);
+    }
+
+    // ── Tests tâche 06 (vue-lsp) : fusion publishDiagnostics avant cache ─────
+
+    /// Script Python factice PRIMAIRE « publieur de diagnostics » (tâche 06) :
+    /// à chaque `textDocument/didOpen`, publie une `publishDiagnostics` sur
+    /// l'URI ouverte portant un unique diagnostic `{"source":"primary",
+    /// "message":"P{n}"}` (n = compteur de publications — deux `didOpen` ⟹ P1
+    /// puis P2, motif REPUBLISH étendu avec `source` distinctif). Journalise
+    /// dans argv[1] (optionnel) ses trames PUBLIÉES en octets bruts (une par
+    /// ligne) — base de la comparaison octet-à-octet du test mono-process.
+    /// Répond `{"result":{"echo":…}}` à toute requête. Modes via `fake_mode` :
+    /// `"slow"` (dort 400 ms avant chaque publication — laisser une part
+    /// d'abord arriver de l'autre enfant) ; `"manual"` (ne publie PAS sur
+    /// didOpen — retient la dernière URI ouverte et publie sur la notification
+    /// `x/trigger-publish` : au didOpen seul l'aux publie, au trigger les deux
+    /// publient).
+    const FAKE_LSP_PRIMARY_DIAGS_PY: &str = r#"
+import sys, json, time
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+MODE = "@@MODE@@"
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+pub_count = 0
+last_uri = ""
+
+def publish():
+    global pub_count
+    pub_count += 1
+    notif = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": last_uri,
+            "diagnostics": [{"source": "primary", "message": f"P{pub_count}"}]
+        }
+    }
+    out = json.dumps(notif).encode("utf-8")
+    if LOG:
+        with open(LOG, "ab") as f:
+            f.write(out + b"\n")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    method = msg.get("method", "")
+    if method == "textDocument/didOpen":
+        last_uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+        if MODE == "manual":
+            continue
+        if MODE == "slow":
+            time.sleep(0.4)
+        publish()
+    elif method == "x/trigger-publish":
+        if MODE == "manual":
+            last_uri = msg.get("params", {}).get("textDocument", {}).get("uri", "") or last_uri
+            if last_uri:
+                publish()
+    elif "id" in msg:
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": method}})
+"#;
+
+    /// Script Python factice AUX « publieur de diagnostics » (tâche 06) : publie
+    /// sur l'URI du `textDocument/didOpen` un unique diagnostic
+    /// `{"source":"aux","message":"A1"}` ; répond `{"result":{}}` à toute
+    /// requête (copie d'`initialize`). Journalise ses publications en octets
+    /// bruts dans argv[1] (optionnel). Modes via `fake_mode` : `"once"` (ne
+    /// publie qu'AU PREMIER didOpen, reste vivant — les publications suivantes
+    /// sont primaire-only) ; `"slow"` (dort 400 ms avant publication — arrive
+    /// après le primaire) ; `"trigger"` (publie aussi sur `x/trigger-publish`) ;
+    /// `"die"` (publie au premier didOpen puis MEURT À LA TRAME SUIVANTE : le
+    /// test envoie une notification `fake/kill` après avoir observé le fondu —
+    /// la mort est déclenchée par le test, pas une course qui rendrait l'état
+    /// fondu transitoire fugace par construction du fake).
+    const FAKE_LSP_AUX_DIAGS_PY: &str = r#"
+import sys, json, time
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+MODE = "@@MODE@@"
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+did_open_count = 0
+
+def publish(uri):
+    notif = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/publishDiagnostics",
+        "params": {
+            "uri": uri,
+            "diagnostics": [{"source": "aux", "message": "A1"}]
+        }
+    }
+    out = json.dumps(notif).encode("utf-8")
+    if LOG:
+        with open(LOG, "ab") as f:
+            f.write(out + b"\n")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+    if MODE == "die":
+        # meurt à la trame SUIVANTE (le test envoie `fake/kill` après avoir
+        # observé le fondu [P1, A1]) — mort déclenchée par le test, pas une
+        # course qui ferait disparaître l'état fondu avant qu'on l'observe.
+        read_frame()
+        sys.exit(0)
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    method = msg.get("method", "")
+    if method == "textDocument/didOpen":
+        did_open_count += 1
+        if MODE == "once" and did_open_count > 1:
+            continue
+        uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+        if MODE == "slow":
+            time.sleep(0.4)
+        publish(uri)
+    elif method == "x/trigger-publish" and MODE == "trigger":
+        uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+        if uri:
+            publish(uri)
+    elif "id" in msg:
+        out = json.dumps({"jsonrpc": "2.0", "id": msg["id"], "result": {}}).encode("utf-8")
+        sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+        sys.stdout.buffer.write(out)
+        sys.stdout.buffer.flush()
+"#;
+
+    /// Diagnostic attendu côté primaire dans un fondu.
+    fn prim_diag(message: &str) -> Value {
+        serde_json::json!({"source": "primary", "message": message})
+    }
+
+    /// Diagnostic attendu côté aux dans un fondu.
+    fn aux_diag(message: &str) -> Value {
+        serde_json::json!({"source": "aux", "message": message})
+    }
+
+    /// Poll `cached_diagnostics` (10 ms, borné par `timeout`) jusqu'à `done` —
+    /// motif de `poll_recorder` appliqué au cache : les parts arrivent de deux
+    /// process indépendants, seul l'état FONDU final est déterministe.
+    async fn poll_cached(
+        session: &LspSession,
+        uri: &str,
+        done: impl Fn(&Option<Vec<Value>>) -> bool,
+        timeout: Duration,
+    ) -> Option<Vec<Value>> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            let cached = session.cached_diagnostics(uri);
+            if done(&cached) || tokio::time::Instant::now() >= deadline {
+                return cached;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// Prédicat `poll_cached` : le cache est EXACTEMENT `expected` (fondu
+    /// complet — equality stricte, pas de part surnuméraire ni de stale).
+    fn cache_is(expected: Vec<Value>) -> impl Fn(&Option<Vec<Value>>) -> bool {
+        move |cached| cached.as_ref() == Some(&expected)
+    }
+
+    /// Vide le flux client jusqu'à 100 ms d'inactivité : trames
+    /// `publishDiagnostics` reçues (octets bruts + parse), dans l'ordre reçu.
+    async fn drain_publish_frames(
+        rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    ) -> Vec<(Vec<u8>, Value)> {
+        let mut pubs = Vec::new();
+        while let Some(raw) = recv_timeout(rx, Duration::from_millis(100)).await {
+            if let Ok(v) = serde_json::from_slice::<Value>(&raw)
+                && v.get("method").and_then(|m| m.as_str())
+                    == Some("textDocument/publishDiagnostics")
+            {
+                pubs.push((raw, v));
+            }
+        }
+        pubs
+    }
+
+    /// Les frames des fakes (python `json.dumps`) sérialisent avec le
+    /// séparateur `": "` ; le fondu synthétisé par le multiplexeur (serde
+    /// compact) ne le contient jamais : l'absence de ce motif prouve que le
+    /// client n'a reçu AUCUNE part brute d'un seul enfant, uniquement des
+    /// publications fondues (contrat tâche 06, mode composite).
+    fn is_synthesized(raw: &[u8]) -> bool {
+        !raw.windows(3).any(|w| w == b"\": \"")
+    }
+
+    /// Test 35: diag_merge_primary_then_aux_order — didOpen unique, primaire
+    /// publié d'abord (aux `slow`) : `cached_diagnostics` = `[P1, A1]` et le
+    /// flux client porte le MÊME fondu en dernière notification (aucune part
+    /// brute d'un seul enfant sur le réseau — tout est synthétisé).
+    #[tokio::test]
+    async fn diag_merge_primary_then_aux_order() {
+        let aux_script = fake_mode(FAKE_LSP_AUX_DIAGS_PY, "slow");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_PRIMARY_DIAGS_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/App.vue";
+        composite_open(&session, client, uri).await;
+
+        let merged = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            merged,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "fondu primary-first dans le cache (aux arrivé en second)"
+        );
+
+        let pubs = drain_publish_frames(&mut rx).await;
+        assert!(
+            !pubs.is_empty(),
+            "le client doit recevoir les publications fondues"
+        );
+        let (raw_last, last) = pubs.last().unwrap();
+        assert_eq!(last["params"]["uri"].as_str(), Some(uri));
+        assert_eq!(
+            last["params"]["diagnostics"],
+            serde_json::json!([prim_diag("P1"), aux_diag("A1")]),
+            "dernier broadcast = le fondu complet [P1, A1], jamais une part seule; flux: {pubs:?}"
+        );
+        for (raw, _) in &pubs {
+            assert!(
+                is_synthesized(raw),
+                "part brute d'un seul enfant broadcastée (octets du fake) : {}",
+                String::from_utf8_lossy(raw)
+            );
+        }
+        assert!(
+            is_synthesized(raw_last),
+            "la dernière frame doit être synthétisée"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 36: diag_merge_order_independent_of_arrival — l'AUX publie AVANT
+    /// le primaire (primaire `slow`) : le fondu final reste `[P1, A1]` — ordre
+    /// par index d'enfant, pas par ordre d'arrivée (et pas last-writer-wins :
+    /// le flux fini n'est pas `[A1]`).
+    #[tokio::test]
+    async fn diag_merge_order_independent_of_arrival() {
+        let primary_script = fake_mode(FAKE_LSP_PRIMARY_DIAGS_PY, "slow");
+        let (spec, tmpdir) = make_fake_composite(
+            primary_script.as_str(),
+            &[("tsserver-forward", FAKE_LSP_AUX_DIAGS_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/App.vue";
+        composite_open(&session, client, uri).await;
+
+        let merged = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            merged,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "aux publié en premier : le fondu reste primary-first par index d'enfant"
+        );
+
+        let pubs = drain_publish_frames(&mut rx).await;
+        let (_raw, last) = pubs.last().expect("le flux porte les publications fondues");
+        assert_eq!(
+            last["params"]["diagnostics"],
+            serde_json::json!([prim_diag("P1"), aux_diag("A1")]),
+            "flux fini = fondu complet [P1, A1], pas [A1] (aux arrivé en premier) ; flux: {pubs:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 37: diag_replace_per_child_not_append — le primaire republie
+    /// (2e didOpen ⟹ P2) : le fondu devient `[P2, A1]` — P1 nulle part, ni
+    /// dans le cache ni dans le dernier broadcast. La publication d'un enfant
+    /// REMPLACE sa part, ne l'ajoute jamais.
+    #[tokio::test]
+    async fn diag_replace_per_child_not_append() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_PRIMARY_DIAGS_PY,
+            &[("tsserver-forward", FAKE_LSP_AUX_DIAGS_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/App.vue";
+
+        composite_open(&session, client, uri).await;
+        let first = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            first,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "état de départ [P1, A1]"
+        );
+
+        // 2e didOpen : primaire republie P2 (remplacement de SA part), aux
+        // republie A1 (remplacement idempotent de la sienne).
+        composite_open(&session, client, uri).await;
+        let merged = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P2"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            merged,
+            Some(vec![prim_diag("P2"), aux_diag("A1")]),
+            "P1 nulle part dans le cache : la part du primaire est remplacée, pas appendue"
+        );
+
+        let pubs = drain_publish_frames(&mut rx).await;
+        let (_raw, last) = pubs.last().expect("le flux porte les publications fondues");
+        assert_eq!(
+            last["params"]["diagnostics"],
+            serde_json::json!([prim_diag("P2"), aux_diag("A1")]),
+            "dernier broadcast fondu sans P1 non plus ; flux: {pubs:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 38: diag_invalidate_clears_all_parts — après `[P2, A1]`,
+    /// `invalidate_diagnostics` vide le cache ET les parts : la publication
+    /// primaire suivante (aux `once` silencieux) produit le fondu `[P3]`
+    /// EXACTEMENT — sans invalidation des parts, le stale aux survivrait
+    /// masqué et resurgirait en `[P3, A1]`.
+    #[tokio::test]
+    async fn diag_invalidate_clears_all_parts() {
+        let aux_script = fake_mode(FAKE_LSP_AUX_DIAGS_PY, "once");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_PRIMARY_DIAGS_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, _rx) = session.subscribe();
+        let uri = "file:///w/App.vue";
+
+        composite_open(&session, client, uri).await;
+        let first = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            first,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "état de départ [P1, A1]"
+        );
+
+        // 2e didOpen (aux `once` ne republie plus) → [P2, A1] : la part aux
+        // vit toujours, rien ne l'a invalidée.
+        composite_open(&session, client, uri).await;
+        let second = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P2"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            second,
+            Some(vec![prim_diag("P2"), aux_diag("A1")]),
+            "la part aux survit tant que rien ne l'invalidise"
+        );
+
+        session.invalidate_diagnostics(uri);
+        assert!(
+            session.cached_diagnostics(uri).is_none(),
+            "l'invalidation retire l'entrée du cache"
+        );
+
+        // 3e didOpen → primaire seul publie P3 : fondu EXACTEMENT [P3] — la
+        // part aux stale est partie avec l'invalidation.
+        composite_open(&session, client, uri).await;
+        let fresh = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P3")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            fresh,
+            Some(vec![prim_diag("P3")]),
+            "une publication primaire seule après invalidation ne ressuscite aucune part aux"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 39: diag_wait_resolves_on_aux_push — `wait_for_diagnostics` est
+    /// réveillé par la publication de l'AUX seul (primaire `manual` muet au
+    /// didOpen) et rend `[A1]` : le MCP ne dépend jamais du primaire pour être
+    /// réveillé. Invalidation puis trigger (les DEUX enfants republient) : le
+    /// cache repassé en attente rend le fondu complet `[P1, A1]`.
+    #[tokio::test]
+    async fn diag_wait_resolves_on_aux_push() {
+        let primary_script = fake_mode(FAKE_LSP_PRIMARY_DIAGS_PY, "manual");
+        let aux_script = fake_mode(FAKE_LSP_AUX_DIAGS_PY, "trigger");
+        let (spec, tmpdir) = make_fake_composite(
+            primary_script.as_str(),
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/App.vue";
+
+        composite_open(&session, client, uri).await; // primaire manual : muet au didOpen
+
+        // Le MCP est réveillé par l'AUX seul — si le réveil dépendait du
+        // primaire, ce wait ne sortirait jamais avant son timeout.
+        let aux_only = session
+            .wait_for_diagnostics(uri, Duration::from_secs(5))
+            .await;
+        assert_eq!(
+            aux_only,
+            Some(vec![aux_diag("A1")]),
+            "la publication de l'aux seule doit réveiller wait_for_diagnostics"
+        );
+
+        // Invalidation (cache ET parts) puis trigger : le fan-out de la
+        // notification (invariant 2) fait republier les DEUX enfants.
+        session.invalidate_diagnostics(uri);
+        assert!(
+            session.cached_diagnostics(uri).is_none(),
+            "invalidé = plus rien en attente"
+        );
+        let trigger = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "x/trigger-publish",
+            "params": {"textDocument": {"uri": uri}}
+        });
+        session
+            .send(client, trigger.to_string().into_bytes())
+            .await
+            .expect("trigger ok");
+
+        let merged = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            merged,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "les deux enfants ayant republié, le fondu est complet (primary-first)"
+        );
+        let waited = session
+            .wait_for_diagnostics(uri, Duration::from_secs(1))
+            .await;
+        assert_eq!(
+            waited,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "un wait repassé en attente rend le fondu complet"
+        );
+
+        let pubs = drain_publish_frames(&mut rx).await;
+        let (_raw, last) = pubs.last().expect("le flux porte les publications fondues");
+        assert_eq!(
+            last["params"]["diagnostics"],
+            serde_json::json!([prim_diag("P1"), aux_diag("A1")]),
+            "dernière publication fondue du flux = [P1, A1] ; flux: {pubs:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 40: diag_aux_eof_drops_its_parts — aux publie A1, primaire publie
+    /// P1 → `[P1, A1]` ; puis l'aux meurt (mode `die`, tué par une notification
+    /// `fake/kill` que le fake attend après sa publication) : ses parts sont
+    /// retirées et le cache recompté en `[P1]`, URI toujours présente (le cache
+    /// primaire vivant reste publieux) et session vivante. Sans purge, un
+    /// `edit_and_check` passerait au vert sur les erreurs fantômes d'un serveur
+    /// mort.
+    #[tokio::test]
+    async fn diag_aux_eof_drops_its_parts() {
+        let aux_script = fake_mode(FAKE_LSP_AUX_DIAGS_PY, "die");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_PRIMARY_DIAGS_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, _rx) = session.subscribe();
+        let uri = "file:///w/App.vue";
+
+        composite_open(&session, client, uri).await;
+        let both = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            both,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "les deux parts sont publiées avant la mort de l'aux"
+        );
+
+        // L'aux en mode `die` meurt à la trame suivante — le trigger passe par
+        // le fan-out des notifications (invariant 2) ; le primaire l'ignore.
+        let kill = serde_json::json!({"jsonrpc": "2.0", "method": "fake/kill", "params": {}});
+        session
+            .send(client, kill.to_string().into_bytes())
+            .await
+            .expect("fake/kill ok");
+
+        // EOF de l'aux : ses parts partent, le cache recompte [P1] — et lui
+        // seul. Atteignable seulement après l'EOF (la part A1 vue ci-dessus
+        // n'est retirée que par la purge d'EOF).
+        let after = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            after,
+            Some(vec![prim_diag("P1")]),
+            "EOF aux ⟹ ses parts retirées et le cache recompté, URI toujours présente"
+        );
+        assert!(
+            session.is_alive(),
+            "la session survit à la mort de l'aux et son cache primaire reste servi"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 41: diag_mono_process_bytes_unchanged — `aux: []` : le payload
+    /// broadcast reçu par le client est OCTET-IDENTIQUE à la trame publiée
+    /// par le fake primaire (aucune synthèse JSON réordonnée — garde de
+    /// l'invariant 8 sur CE chemin précis) ; le cache vaut le contenu publié.
+    #[tokio::test]
+    async fn diag_mono_process_bytes_unchanged() {
+        // Mono-process construit à la main : le fake journalise ses
+        // publications en octets bruts (argv[1]) pour la comparaison exacte.
+        let tmpdir = tempfile::TempDir::new().unwrap();
+        let script_path = tmpdir.path().join("primary_diags.py");
+        std::fs::write(&script_path, FAKE_LSP_PRIMARY_DIAGS_PY).unwrap();
+        let published_log = tmpdir.path().join("published.log");
+        let spec = LspToolchain {
+            name: "mono".to_string(),
+            bin: "python3".to_string(),
+            args: vec![
+                script_path.to_string_lossy().to_string(),
+                published_log.to_string_lossy().to_string(),
+            ],
+            aux: vec![],
+        };
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn mono-process ok");
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/main.rs";
+        composite_open(&session, client, uri).await;
+
+        let raw = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("le client reçoit la publication");
+        // Le fake écrit son log AVANT stdout : la trame reçue ⟹ le log est
+        // déjà écrit. Ligne = payload brut + `\n` de terminaison.
+        let logged = std::fs::read(&published_log).expect("le fake a journalisé sa publication");
+        let expected = logged
+            .strip_suffix(b"\n" as &[u8])
+            .expect("log terminé par \\n")
+            .to_vec();
+        assert_eq!(
+            raw, expected,
+            "broadcast mono-process = octets EXACTS de la trame publiée par le fake (pas de synthèse)"
+        );
+        assert_eq!(
+            session.cached_diagnostics(uri),
+            Some(vec![prim_diag("P1")]),
+            "cache mono-process = contenu publié, inchangé"
         );
         assert!(session.is_alive());
 
