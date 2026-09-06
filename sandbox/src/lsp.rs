@@ -26,11 +26,11 @@ fn is_known_aux_role(role: &str) -> bool {
 }
 
 /// Spécification d'un processus LSP auxiliaire d'une toolchain composite.
-/// Rôles connus : `"tsserver-forward"` (composite Volar — cette tâche le
-/// traite comme tout aux : spawn + notifications + initialize injecté ; la
-/// sémantique de forwarding arrive tâche 05). `aux` n'est jamais déclaré par
-/// l'utilisateur (preset-only, décision 2026-09-06) — seule la tâche
-/// controller en émet.
+/// Rôles connus : `"tsserver-forward"` (composite Volar — les
+/// `tsserver/request` du primaire y sont exécutés via `executeCommand
+/// typescript.tsserverRequest` et dépilés en `tsserver/response`, tâche 05).
+/// `aux` n'est jamais déclaré par l'utilisateur (preset-only, décision
+/// 2026-09-06) — seule la tâche controller en émet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspAux {
     pub role: String,
@@ -214,12 +214,24 @@ struct LspSessionInner {
     _toolchain_name: String,
 }
 
+/// Contexte d'une requête émise par la session vers un aux (ids internes —
+/// leurs réponses ne sont JAMAIS routées à un client).
+enum InternalPending {
+    /// Copie d'`initialize` (task-03) : succès → rien, erreur → warn dégradé.
+    Initialize,
+    /// `workspace/executeCommand typescript.tsserverRequest` émis en réponse à
+    /// un `tsserver/request` du primaire : `vue_id` est l'élément [0] de
+    /// `params[0]`, restitué TEL QUEL dans la `tsserver/response`.
+    TsserverForward { vue_id: Value },
+}
+
 /// Un enfant auxiliaire du multiplexeur (jamais le primaire). Possède son canal
 /// de stdin (fan-out des notifications, copie de `initialize` avec ids
 /// internes), son flag de vie (mort d'un aux = session dégradée, pas morte —
 /// `is_alive()` ne reflète que le primaire), son compteur d'ids internes et
-/// l'ensemble de ces ids en attente (leurs réponses sont interceptées par la
-/// session, JAMAIS routées à un client), et sa handle pour kill.
+/// la map de ces ids en attente avec leur contexte (`InternalPending` — leurs
+/// réponses sont interceptées par la session, JAMAIS routées à un client), et
+/// sa handle pour kill.
 struct AuxChild {
     /// `LspAux::role` — tracage et messages de dégradation.
     role: String,
@@ -229,7 +241,7 @@ struct AuxChild {
     stdin_tx: mpsc::Sender<Vec<u8>>,
     alive: AtomicBool,
     next_internal_req: AtomicU64,
-    pending_internal: Mutex<HashSet<u64>>,
+    pending_internal: Mutex<HashMap<u64, InternalPending>>,
     child: Mutex<Option<Child>>,
 }
 
@@ -297,7 +309,7 @@ async fn spawn_aux_startup(aux_spec: &LspAux, sandbox_root: &Path) -> anyhow::Re
         stdin_tx,
         alive: AtomicBool::new(true),
         next_internal_req: AtomicU64::new(1),
-        pending_internal: Mutex::new(HashSet::new()),
+        pending_internal: Mutex::new(HashMap::new()),
         child: Mutex::new(Some(child)),
     });
     Ok(AuxStartup {
@@ -328,6 +340,20 @@ fn merged_initialization_options(req: &Value, spec_opts: &Value) -> Option<Value
         merged.insert(key.clone(), value.clone());
     }
     Some(Value::Object(merged))
+}
+
+/// Extrait `(vue_id, command, payload)` d'une notification `tsserver/request`
+/// du primaire : `params` est un tableau dont `params[0]` est le tableau
+/// `[id, commande, payload?]`. `None` = trame malformée (commande absente ou
+/// non-string, params pas `[ […] ]`…) — `vue_id` alors non exploitable, on ne
+/// répond pas. `payload` absent ou `null` ⟹ `Value::Null` (passé tel quel
+/// dans les `arguments` de l'`executeCommand`).
+fn parse_tsserver_request(msg: &Value) -> Option<(Value, &str, Value)> {
+    let inner = msg.get("params")?.get(0)?.as_array()?;
+    let command = inner.get(1)?.as_str()?;
+    let vue_id = inner.first()?.clone();
+    let payload = inner.get(2).cloned().unwrap_or(Value::Null);
+    Some((vue_id, command, payload))
 }
 
 /// Session LSP : possède un process, multiplexe les clients.
@@ -486,16 +512,17 @@ impl LspSession {
                             );
                         }
                     } else {
-                        // Notification (pas d'id) : chemin actuel — cache
-                        // `publishDiagnostics` puis broadcast.
-                        // TODO(task-05) : `tsserver/request` (notification que
-                        // vue-language-server envoie à SON client primaire) sera
-                        // traitée ici par un forwarding vers l'aux
-                        // `tsserver-forward` (`executeCommand
-                        // typescript.tsserverRequest` → `tsserver/response` en
-                        // retour). En attendant : broadcast comme toute
-                        // notification — TEMPORAIRE.
-                        reader_session.dispatch_notification_frame(&msg, payload);
+                        // Notification (pas d'id). `tsserver/request` (que
+                        // vue-language-server en mode hybride v3 envoie à SON
+                        // client primaire pour une exécution tsserver) est
+                        // INTERCEPTÉE ici — jamais broadcast aux clients
+                        // (tâche 05) ; toute autre notification : chemin
+                        // actuel — cache `publishDiagnostics` puis broadcast.
+                        if msg.get("method").and_then(|m| m.as_str()) == Some("tsserver/request") {
+                            reader_session.handle_tsserver_request(&msg);
+                        } else {
+                            reader_session.dispatch_notification_frame(&msg, payload);
+                        }
                     }
                 }
             }
@@ -551,10 +578,12 @@ impl LspSession {
 
             // Lectrice aux : distingue par ENFANT (cette tâche EST l'enfant).
             // Les ids internes de l'aux ne sont JAMAIS routés à un client :
-            // réponse à un id interne → interceptée par la session (succès →
-            // rien, erreur → warn « aux degraded »), toute autre trame à `id`
-            // (server→aux request, id sans correspondance) → warn + drop, comme
-            // le pending miss du chemin primaire.
+            // réponse à un id interne → interceptée par la session et
+            // dispatchée par variante d'`InternalPending` (`Initialize` :
+            // succès → rien, erreur → warn « aux degraded » ; `TsserverForward`
+            // → body dépilé et `tsserver/response` au primaire), toute autre
+            // trame à `id` (server→aux request, id sans correspondance) →
+            // warn + drop, comme le pending miss du chemin primaire.
             let reader_aux = Arc::clone(&aux);
             let reader_session = Arc::clone(&session);
             tokio::spawn(async move {
@@ -584,30 +613,59 @@ impl LspSession {
                         };
 
                         if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
-                            let swallowed = {
+                            let pending_entry = {
                                 let mut pending = match reader_aux.pending_internal.lock() {
                                     Ok(g) => g,
                                     Err(g) => g.into_inner(),
                                 };
                                 pending.remove(&(id as u64))
                             };
-                            if swallowed {
-                                // Réponse à l'`initialize` interne — jamai
-                                // relayée au client (invariant 3).
-                                if let Some(error) = msg.get("error") {
+                            match pending_entry {
+                                Some(InternalPending::Initialize) => {
+                                    // Réponse à l'`initialize` interne — jamais
+                                    // relayée au client (invariant 3) : succès →
+                                    // rien, erreur → warn dégradé.
+                                    if let Some(error) = msg.get("error") {
+                                        tracing::warn!(
+                                            toolchain =
+                                                reader_session.inner._toolchain_name.as_str(),
+                                            role = reader_aux.role.as_str(),
+                                            "LSP: aux degraded (initialize error): {error}"
+                                        );
+                                    }
+                                }
+                                Some(InternalPending::TsserverForward { vue_id }) => {
+                                    // Contrat tâche 05 : le résultat LSP de
+                                    // `typescript.tsserverRequest` est l'OBJET
+                                    // RÉPONSE TSSERVER COMPLET — on en dépile
+                                    // `body`. Tout ce qui n'est pas un body
+                                    // exploitable (résultat absent — erreur
+                                    // JSON-RPC — , `null`/sentinelle
+                                    // NoContent, sans champ `body`, non-objet)
+                                    // ⟹ body `null`.
+                                    if let Some(error) = msg.get("error") {
+                                        tracing::warn!(
+                                            toolchain =
+                                                reader_session.inner._toolchain_name.as_str(),
+                                            role = reader_aux.role.as_str(),
+                                            "LSP: aux degraded (tsserver forward error): {error}"
+                                        );
+                                    }
+                                    let body = msg
+                                        .get("result")
+                                        .and_then(|r| r.get("body"))
+                                        .cloned()
+                                        .unwrap_or(Value::Null);
+                                    reader_session.send_tsserver_response(vue_id, body);
+                                }
+                                None => {
                                     tracing::warn!(
                                         toolchain = reader_session.inner._toolchain_name.as_str(),
                                         role = reader_aux.role.as_str(),
-                                        "LSP: aux degraded (initialize error): {error}"
+                                        session_id = id,
+                                        "LSP: response from aux for unknown internal id, dropping"
                                     );
                                 }
-                            } else {
-                                tracing::warn!(
-                                    toolchain = reader_session.inner._toolchain_name.as_str(),
-                                    role = reader_aux.role.as_str(),
-                                    session_id = id,
-                                    "LSP: response from aux for unknown internal id, dropping"
-                                );
                             }
                         } else {
                             // Notification d'un enfant (aux inclus) : chemin
@@ -621,16 +679,28 @@ impl LspSession {
 
                 // EOF stdout d'un AUX : la session SURVIT (`is_alive()` ne
                 // reflète que le primaire). Aux baissé, ids internes en
-                // attente purgés (ils n'auront jamais de réponse), et warn
-                // unique « degraded » seulement si la session est encore vivante
-                // — si le primaire vient de mourir en tuant cet aux, la
-                // dégradation serait du bruit.
+                // attente purgés (ils n'auront jamais de réponse) — les
+                // `TsserverForward` reçoivent d'abord une `tsserver/response`
+                // `[[vue_id, null]]` (best effort `try_send` : primaire mort ⟹
+                // ignoré, la requête d'origine n'aurait de toute façon jamais
+                // existé) pour que `vue-language-server` ne pende pas ; les
+                // `Initialize` se font clear comme avant (tâche 03) — et warn
+                // unique « degraded » seulement si la session est encore
+                // vivante : si le primaire vient de mourir en tuant cet aux,
+                // la dégradation serait du bruit.
                 reader_aux.alive.store(false, Ordering::SeqCst);
-                reader_aux
-                    .pending_internal
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .clear();
+                {
+                    let mut pending = reader_aux
+                        .pending_internal
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner());
+                    for entry in pending.values() {
+                        if let InternalPending::TsserverForward { vue_id } = entry {
+                            reader_session.send_tsserver_response(vue_id.clone(), Value::Null);
+                        }
+                    }
+                    pending.clear();
+                }
                 if reader_session.inner.alive.load(Ordering::SeqCst) {
                     tracing::warn!(
                         toolchain = reader_session.inner._toolchain_name.as_str(),
@@ -739,7 +809,7 @@ impl LspSession {
             aux.pending_internal
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .insert(internal_id);
+                .insert(internal_id, InternalPending::Initialize);
             // `try_send` (pas `send().await`) : même raison que les
             // notifications — un aux bloqué ou mort ne doit jamais bloquer ni
             // faire échouer le chemin client.
@@ -759,6 +829,99 @@ impl LspSession {
                 );
             }
         }
+    }
+
+    /// Intercepte une notification `tsserver/request` émise par le PRIMAIRE
+    /// (mode hybride Volar v3 : `vue-language-server` ne parle pas à tsserver
+    /// seul et délègue à SON client — ici la session). Exécution contre le
+    /// premier aux `tsserver-forward` VIVANT via `workspace/executeCommand
+    /// typescript.tsserverRequest` (`arguments = [command, payload]`
+    /// exactement — le 3e argument `ExecuteInfo`, optionnel sur TLS 6.0.0,
+    /// n'est PAS envoyé : ses defaults conviennent). La réponse de l'aux
+    /// (objet tsserver complet) est dépilée par la lectrice aux et renvoyée
+    /// en `tsserver/response` — JAMAIS un broadcast aux clients (dialogue
+    /// interne, le navigateur n'en veut pas).
+    ///
+    /// Aucun aux vivant du rôle (absent, mort, ou canal `try_send` plein) ⟹
+    /// réponse `[[vue_id, null]]` IMMÉDIATE : `vue-language-server` ne pend
+    /// jamais faute d'aux. Trame malformée ⟹ `warn` + drop, sans réponse (le
+    /// `vue_id` n'est pas exploitable) — jamais une panique ni une erreur de
+    /// session.
+    ///
+    /// NB (`aux: []`, mono-process) : un primaire inconnu qui émettrait quand
+    /// même `tsserver/request` (personne aujourd'hui hors composite Volar)
+    /// voit sa trame INTERCEPTÉE — plus de broadcast aux clients — puis
+    /// `[[id, null]]` renvoyé : nouveau comportement assumé par la tâche 05.
+    fn handle_tsserver_request(&self, msg: &Value) {
+        let (vue_id, command, payload) = match parse_tsserver_request(msg) {
+            Some(parsed) => parsed,
+            None => {
+                tracing::warn!(
+                    toolchain = self.inner._toolchain_name.as_str(),
+                    "LSP: malformed tsserver/request from primary, dropping"
+                );
+                return;
+            }
+        };
+        let alive_aux = self
+            .inner
+            .aux
+            .iter()
+            .find(|aux| aux.role == "tsserver-forward" && aux.alive.load(Ordering::SeqCst));
+        let Some(aux) = alive_aux else {
+            // Aucun aux vivant du rôle ⟹ body null immédiat (primaire vivant
+            // ou déjà mort — `try_send` err alors, sans conséquence).
+            self.send_tsserver_response(vue_id, Value::Null);
+            return;
+        };
+        let internal_id = aux.next_internal_req.fetch_add(1, Ordering::SeqCst);
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": internal_id,
+            "method": "workspace/executeCommand",
+            "params": {
+                "command": "typescript.tsserverRequest",
+                "arguments": [command, payload],
+            }
+        });
+        // Enregistrement AVANT envoi (même raison que `fan_out_initialize` :
+        // éviter que la lectrice aux voie une réponse sans correspondance).
+        aux.pending_internal
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(
+                internal_id,
+                InternalPending::TsserverForward {
+                    vue_id: vue_id.clone(),
+                },
+            );
+        if aux
+            .stdin_tx
+            .try_send(request.to_string().into_bytes())
+            .is_err()
+        {
+            // Aux marqué vivant mais injoignable (canal plein ou fermé) : il
+            // ne répondra jamais ⟹ dégradation + body null immédiat.
+            aux.pending_internal
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .remove(&internal_id);
+            self.send_tsserver_response(vue_id, Value::Null);
+        }
+    }
+
+    /// `tsserver/response` de la session vers le PRIMAIRE (sa stdin via
+    /// `cmd_tx`) : notification JSON-RPC `params = [[vue_id, body]]`, `vue_id`
+    /// restitué TEL QUEL (numérique ou string — le primaire est seul juge de
+    /// ses ids). Jamais une notification client ; `cmd_tx` fermé ⟹ primaire
+    /// mort, la réponse n'a plus de destinataire : ignorée silencieusement.
+    fn send_tsserver_response(&self, vue_id: Value, body: Value) {
+        let frame = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "tsserver/response",
+            "params": [[vue_id, body]],
+        });
+        let _ = self.inner.cmd_tx.try_send(frame.to_string().into_bytes());
     }
 
     /// Abonne un client. Rend `(ClientId, UnboundedReceiver<Vec<u8>>)`.
@@ -2831,6 +2994,672 @@ while True:
             serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
             Some(5)
         );
+
+        drop(tmpdir);
+    }
+
+    // ── Tests tâche 05 (vue-lsp) : forwarding tsserver/request ──────────────
+
+    /// Script Python factice PRIMAIRE « vue-ish » (tâche 05) : journalise les
+    /// trames reçues dans argv[1] (pattern recorder de la tâche 03) ; à chaque
+    /// `textDocument/didOpen`, émet la notification `tsserver/request` avec
+    /// `params = [[id_vue, "_vue:projectInfo", {"file": <uri}>]]` (`id_vue`
+    /// compte 1, 2, 3… — comme vue-language-server en mode hybride Volar v3) ;
+    /// répond `{"result":{"echo":…}}` à toute requête. Mode spécial via
+    /// `fake_mode` : `"garbage"` ⟹ n'émet plus que `params: "garbage"` puis un
+    /// bon `[[3, "_vue:x", null]]` (test des trames malformées).
+    const FAKE_LSP_VUEISH_PY: &str = r#"
+import sys, json
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+MODE = "@@MODE@@"
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+vue_id = 0
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+    method = msg.get("method", "")
+    if method == "textDocument/didOpen":
+        uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+        if MODE == "garbage":
+            write_frame({"jsonrpc": "2.0", "method": "tsserver/request", "params": "garbage"})
+            write_frame({"jsonrpc": "2.0", "method": "tsserver/request",
+                         "params": [[3, "_vue:x", None]]})
+        else:
+            vue_id += 1
+            write_frame({"jsonrpc": "2.0", "method": "tsserver/request",
+                         "params": [[vue_id, "_vue:projectInfo", {"file": uri}]]})
+    elif "id" in msg:
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": method}})
+"#;
+
+    /// Script Python factice aux « typescript-language-server » (tâche 05) :
+    /// journalise dans argv[1] ; sur `workspace/executeCommand` avec
+    /// `command == "typescript.tsserverRequest"`, répond l'OBJET RÉPONSE
+    /// TSSERVER COMPLET dans `result` (`{type, success, body}`, vérifié sur
+    /// TLS 6.0.0 — c'est le résultat LSP de la commande, PAS le `body` nu ;
+    /// `body` porte `_cmd`/`_file` dérivés des `arguments` pour prouver
+    /// l'appariement) ; sur `initialize`, répond `{"capabilities":{}}`.
+    /// Modes via `fake_mode` : `"error"` (JSON-RPC erreur), `"null"`
+    /// (`result: null` — sentinelle NoContent), `"swap"` (le 2e reçu répond
+    /// avant le 1er — corrélation en désordre), `"die"` (meurt APRÈS avoir
+    /// reçu la requête, sans répondre — purge d'EOF).
+    const FAKE_LSP_TLS_PY: &str = r#"
+import sys, json
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+MODE = "@@MODE@@"
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+def tsserver_reply(msg):
+    args = msg.get("params", {}).get("arguments", [])
+    cmd = args[0] if len(args) > 0 else None
+    payload = args[1] if len(args) > 1 else None
+    file_ = payload.get("file") if isinstance(payload, dict) else None
+    return {"jsonrpc": "2.0", "id": msg["id"],
+            "result": {"type": "response", "success": True,
+                       "body": {"configFileName": "/p/tsconfig.json",
+                                "_cmd": cmd, "_file": file_}}}
+
+pending_swap = []
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+    if "id" not in msg:
+        continue
+    is_fwd = (msg.get("method") == "workspace/executeCommand"
+              and msg.get("params", {}).get("command") == "typescript.tsserverRequest")
+    if not is_fwd:
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+        continue
+    if MODE == "error":
+        write_frame({"jsonrpc": "2.0", "id": msg["id"],
+                     "error": {"code": -32603, "message": "tsserver exploded"}})
+    elif MODE == "null":
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": None})
+    elif MODE == "swap":
+        pending_swap.append(msg)
+        if len(pending_swap) == 2:
+            for m in reversed(pending_swap):
+                write_frame(tsserver_reply(m))
+            pending_swap = []
+    elif MODE == "die":
+        sys.exit(0)
+    else:
+        write_frame(tsserver_reply(msg))
+"#;
+
+    /// Script Python factice aux « saturé » (tâche 05) : reste vivant (stdout
+    /// ouvert) mais ne lit JAMAIS stdin — le pipe puis le canal de la tâche
+    /// écrivaine se remplissent, `try_send` vers l'aux rend `Full` alors même
+    /// que l'aux est `alive`.
+    const FAKE_LSP_SILENT_AUX_PY: &str = r#"
+import time
+while True:
+    time.sleep(3600)
+"#;
+
+    /// Variante de comportement d'un fake (placeholder `@@MODE@@` de son
+    /// script Python). C'est le FAKE qui a des modes — le contrat du
+    /// multiplexeur, lui, est unique.
+    fn fake_mode(script: &str, mode: &str) -> String {
+        script.replace("@@MODE@@", mode)
+    }
+
+    /// Préambule commun des tests de forwarding : `initialize` jusqu'à la
+    /// réponse du primaire (id restauré côté client).
+    async fn composite_initialize(
+        session: &LspSession,
+        client: ClientId,
+        rx: &mut mpsc::UnboundedReceiver<Vec<u8>>,
+    ) {
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("initialize ok");
+        let resp = recv_timeout(rx, Duration::from_secs(5))
+            .await
+            .expect("réponse initialize du primaire");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(1)
+        );
+    }
+
+    /// `didOpen` d'une URI : le fake primaire vue-ish émet un
+    /// `tsserver/request` à chaque ouverture.
+    async fn composite_open(session: &LspSession, client: ClientId, uri: &str) {
+        let did_open = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {"uri": uri, "languageId": "vue", "version": 1, "text": "<template/>"}
+            }
+        });
+        session
+            .send(client, did_open.to_string().into_bytes())
+            .await
+            .expect("didOpen ok");
+    }
+
+    /// Les `params` des trames `tsserver/response` reçues par un fake primaire
+    /// (le multiplexeur émet `params = [[vue_id, body]]`).
+    fn tsserver_response_params(frames: &[Value]) -> Vec<Value> {
+        frames
+            .iter()
+            .filter(|f| f.get("method").and_then(|m| m.as_str()) == Some("tsserver/response"))
+            .map(|f| f["params"].clone())
+            .collect()
+    }
+
+    /// La trame `workspace/executeCommand typescript.tsserverRequest` reçue
+    /// par un fake TLS, s'il y en a une.
+    fn forwarded_execute_command(frames: &[Value]) -> Option<Value> {
+        frames
+            .iter()
+            .find(|f| {
+                f.get("method").and_then(|m| m.as_str()) == Some("workspace/executeCommand")
+                    && f["params"]["command"].as_str() == Some("typescript.tsserverRequest")
+            })
+            .cloned()
+    }
+
+    /// Test 28: forward_project_info_roundtrip — (a) l'aux reçoit l'
+    /// `executeCommand` EXACT (arguments = [command, payload], pas de
+    /// ExecuteInfo), (b) le primaire reçoit `tsserver/response` avec le body
+    /// DÉPILÉ de l'objet tsserver complet et le vue-id restitué, (c) le client
+    /// ne voit AUCUNE trame tsserver/*.
+    #[tokio::test]
+    async fn forward_project_info_roundtrip() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUEISH_PY,
+            &[("tsserver-forward", FAKE_LSP_TLS_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+
+        // (a) l'aux reçoit l'executeCommand exact
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| forwarded_execute_command(frames).is_some(),
+            Duration::from_secs(5),
+        )
+        .await;
+        let exec = forwarded_execute_command(&aux_frames)
+            .expect("l'aux doit recevoir l'executeCommand typescript.tsserverRequest");
+        assert_eq!(
+            exec["params"]["arguments"],
+            serde_json::json!(["_vue:projectInfo", {"file": "file:///w/App.vue"}]),
+            "arguments = [command, payload] exactement, pas de 3e ExecuteInfo; trames: {aux_frames:?}"
+        );
+
+        // (b) le primaire reçoit la tsserver/response [[1, body dépilé]]
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[1, {
+                "configFileName": "/p/tsconfig.json",
+                "_cmd": "_vue:projectInfo",
+                "_file": "file:///w/App.vue"
+            }]])],
+            "params = [[vue_id, body DÉPILÉ]], id 1 restitué; trames: {primary_frames:?}"
+        );
+
+        // (c) le client ne voit aucune trame tsserver/* (ni request ni response)
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(
+            leaked.is_none(),
+            "une trame du dialogue interne tsserver/* a fuité vers le client: {leaked:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 29: forward_aux_error_null_body — erreur JSON-RPC de l'aux ⟹
+    /// primaire reçoit `[[id, null]]`, session vivante et fonctionnelle.
+    #[tokio::test]
+    async fn forward_aux_error_null_body() {
+        let aux_script = fake_mode(FAKE_LSP_TLS_PY, "error");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUEISH_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[1, null]])],
+            "erreur JSON-RPC de l'aux ⟹ body null; trames: {primary_frames:?}"
+        );
+        assert!(
+            session.is_alive(),
+            "une erreur de l'aux ne tue pas la session"
+        );
+
+        // session toujours fonctionnelle côté primaire
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":2,"method":"ping","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("ping ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("le primaire doit répondre après une erreur de l'aux");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(2)
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 30: forward_no_body_result_null — `result: null` (sentinelle
+    /// NoContent de TLS, pas une erreur) ⟹ primaire reçoit `[[id, null]]`.
+    #[tokio::test]
+    async fn forward_no_body_result_null() {
+        let aux_script = fake_mode(FAKE_LSP_TLS_PY, "null");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUEISH_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[1, null]])],
+            "result null (NoContent) ⟹ body null; trames: {primary_frames:?}"
+        );
+        assert!(session.is_alive());
+
+        drop(tmpdir);
+    }
+
+    /// Test 31: forward_aux_dead_null_body_no_hang — l'aux meurt (EOF) APRÈS
+    /// avoir reçu la requête, sans jamais répondre ⟹ la purge des ids
+    /// internes en attente à l'EOF doit répondre `[[id, null]]` au primaire ;
+    /// session vivante, pas de pend.
+    #[tokio::test]
+    async fn forward_aux_dead_null_body_no_hang() {
+        let aux_script = fake_mode(FAKE_LSP_TLS_PY, "die");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUEISH_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[1, null]])],
+            "EOF aux avec requête en attente ⟹ purge body null; trames: {primary_frames:?}"
+        );
+        assert!(
+            session.is_alive(),
+            "la mort de l'aux après la requête ne tue pas la session"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 32: forward_no_alive_aux_null_body_immediate — aux mort avant
+    /// même l'`initialize` : à l'émission `tsserver/request` du primaire, la
+    /// réponse `[[id, null]]` part IMMÉDIATEMENT (poll borné à 2s — pas de
+    /// pend, `vue-language-server` ne doit jamais attendre un aux absent).
+    #[tokio::test]
+    async fn forward_no_alive_aux_null_body_immediate() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUEISH_PY,
+            &[("tsserver-forward", FAKE_LSP_EXIT_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        // Laisser l'aux rendre son EOF (exit immédiat) avant toute émission.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[1, null]])],
+            "aucun aux vivant ⟹ [[id, null]] quasi-immédiat, pas de pend; trames: {primary_frames:?}"
+        );
+        assert!(session.is_alive());
+
+        drop(tmpdir);
+    }
+
+    /// Test 33: forward_concurrent_correlation — deux `tsserver/request`
+    /// (ids 1, 2 via deux didOpen), l'aux répond EN ORDRE INVERSÉ (le 2e reçu
+    /// répond avant le 1er) ⟹ les deux `tsserver/response` portent les bons
+    /// vue_ids et les bons fichiers appariés (pas de croisement).
+    #[tokio::test]
+    async fn forward_concurrent_correlation() {
+        let aux_script = fake_mode(FAKE_LSP_TLS_PY, "swap");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUEISH_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+        composite_open(&session, client, "file:///w/Other.vue").await;
+
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| tsserver_response_params(frames).len() >= 2,
+            Duration::from_secs(5),
+        )
+        .await;
+        let responses = tsserver_response_params(&primary_frames);
+        assert_eq!(
+            responses.len(),
+            2,
+            "deux tsserver/response attendues; trames: {primary_frames:?}"
+        );
+        // L'aux a répondu en ordre inversé (le fake le garantit) : la première
+        // réponse reçue par le primaire est celle du 2e request (id 2). La
+        // corrélation par id interne doit malgré tout apparier id↔fichier.
+        assert_eq!(
+            responses[0],
+            serde_json::json!([[2, {
+                "configFileName": "/p/tsconfig.json",
+                "_cmd": "_vue:projectInfo",
+                "_file": "file:///w/Other.vue"
+            }]]),
+            "la réponse arrivée en premier doit être celle du 2e request (id 2, Other.vue)"
+        );
+        assert_eq!(
+            responses[1],
+            serde_json::json!([[1, {
+                "configFileName": "/p/tsconfig.json",
+                "_cmd": "_vue:projectInfo",
+                "_file": "file:///w/App.vue"
+            }]]),
+            "la seconde réponse doit être celle du 1er request (id 1, App.vue)"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 34: forward_malformed_params_dropped — primaire émet
+    /// `tsserver/request` avec `params: "garbage"` puis un bon
+    /// `[[3, "_vue:x", null]]` : pas de panique, aucune réponse au garbage
+    /// (id non exploitable), le payload `null` passe TEL QUEL dans
+    /// `arguments`, et la réponse `[[3, null]]` (aux mode NoContent) atteint
+    /// le primaire. Session OK.
+    #[tokio::test]
+    async fn forward_malformed_params_dropped() {
+        let primary_script = fake_mode(FAKE_LSP_VUEISH_PY, "garbage");
+        let aux_script = fake_mode(FAKE_LSP_TLS_PY, "null");
+        let (spec, tmpdir) = make_fake_composite(
+            primary_script.as_str(),
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+
+        // Le payload `null` est passé tel quel dans les arguments.
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| forwarded_execute_command(frames).is_some(),
+            Duration::from_secs(5),
+        )
+        .await;
+        let exec = forwarded_execute_command(&aux_frames)
+            .expect("le bon tsserver/request doit être forwardé malgré le garbage précédent");
+        assert_eq!(
+            exec["params"]["arguments"],
+            serde_json::json!(["_vue:x", null]),
+            "payload null passé tel quel dans arguments; trames: {aux_frames:?}"
+        );
+
+        // Exactement UNE tsserver/response (aucune pour le garbage, qui n'a
+        // pas d'id exploitable) : [[3, null]] — aux mode NoContent.
+        poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let primary_frames = read_recorder_frames(&primary_log_path(&tmpdir));
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[3, null]])],
+            "exactement une réponse [[3, null]], jamais une pour le garbage; trames: {primary_frames:?}"
+        );
+
+        // Pas de panique, session vivante et fonctionnelle.
+        assert!(session.is_alive());
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":2,"method":"ping","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("ping ok");
+        let resp = recv_timeout(&mut rx, Duration::from_secs(5))
+            .await
+            .expect("la session doit rester fonctionnelle après une trame malformée");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&resp).unwrap()["id"].as_i64(),
+            Some(2)
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Test 34b: forward_aux_saturated_channel_null_body — aux VIVANT mais
+    /// qui ne lit jamais stdin : pipe puis canal saturés ⟹ `try_send` plein ⟹
+    /// `[[id, null]]` immédiat au primaire (l'aux est dégradé, la requête
+    /// n'aurait jamais de réponse). Couvre la branche « canal plein » du
+    /// fallback null-body.
+    #[tokio::test]
+    async fn forward_aux_saturated_channel_null_body() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUEISH_PY,
+            &[("tsserver-forward", FAKE_LSP_SILENT_AUX_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+
+        // Saturation : l'aux ne lit jamais — la tâche écrivaine se bloque sur
+        // le pipe (64 Ko) et le canal (64 places) se remplit derrière. Marge
+        // largement suffisante : 100 × 16 Ko ≫ pipe + canal.
+        let pad = "x".repeat(16 * 1024);
+        for i in 0..100 {
+            let notif =
+                serde_json::json!({"jsonrpc":"2.0","method":"fake/pad","params":{"i":i,"pad":pad}});
+            session
+                .send(client, notif.to_string().into_bytes())
+                .await
+                .expect("notification de saturation ok");
+        }
+
+        composite_open(&session, client, "file:///w/App.vue").await;
+
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[1, null]])],
+            "canal aux plein ⟹ body null immédiat, pas de pend; trames: {primary_frames:?}"
+        );
+        assert!(session.is_alive());
 
         drop(tmpdir);
     }
