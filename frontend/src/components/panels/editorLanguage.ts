@@ -44,8 +44,9 @@ const byExtension: Record<string, () => Extension> = {
 };
 
 /** Mapping chemin → (toolchain, languageId LSP) — identique à `toolchain_for_path`
- *  de la sandbox (task-04). `null` si l'extension n'est pas couverte (pas de LSP,
- *  mode dégradé). */
+ *  de la sandbox (task-04) : rs (rust), ts/tsx/mts/cts + js/jsx/mjs/cjs + vue
+ *  (node — `.vue` → languageId `vue`, session composite Volar depuis vue-lsp).
+ *  `null` si l'extension n'est pas couverte (pas de LSP, mode dégradé). */
 export function lspToolchainForPath(
   path: string | null,
 ): { toolchain: string; languageId: string } | null {
@@ -65,6 +66,8 @@ export function lspToolchainForPath(
     case 'mjs':
     case 'cjs':
       return { toolchain: 'node', languageId: 'javascript' };
+    case 'vue':
+      return { toolchain: 'node', languageId: 'vue' };
     default:
       return null;
   }

@@ -65,6 +65,7 @@ describe('lspToolchainForPath', () => {
     ['a.jsx', { toolchain: 'node', languageId: 'javascript' }],
     ['a.mjs', { toolchain: 'node', languageId: 'javascript' }],
     ['a.cjs', { toolchain: 'node', languageId: 'javascript' }],
+    ['App.vue', { toolchain: 'node', languageId: 'vue' }],
   ])('%s → %s', (path, expected) => {
     expect(lspToolchainForPath(path)).toEqual(expected);
   });
@@ -73,14 +74,11 @@ describe('lspToolchainForPath', () => {
     expect(lspToolchainForPath(path)).toBeNull();
   });
 
-  it('.vue reste sans LSP (verrou de périmètre : coloration seule)', () => {
-    expect(lspToolchainForPath('App.vue')).toBeNull();
-  });
-
   it('l\'extension est insensible à la casse', () => {
     expect(lspToolchainForPath('A.RS')).toEqual({ toolchain: 'rust', languageId: 'rust' });
     expect(lspToolchainForPath('A.TS')).toEqual({ toolchain: 'node', languageId: 'typescript' });
     expect(lspToolchainForPath('A.JS')).toEqual({ toolchain: 'node', languageId: 'javascript' });
+    expect(lspToolchainForPath('App.VUE')).toEqual({ toolchain: 'node', languageId: 'vue' });
   });
 });
 
