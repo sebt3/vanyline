@@ -145,7 +145,10 @@ pub struct ProjectStatus {
     pub worktrees: Vec<String>,
     #[serde(default)]
     pub conditions: Vec<Condition>,
-    /// Langages détectés ("rust", "js-ts", ordre fixe — cf.
+    /// Langages détectés. Valeurs possibles : "rust", "js-ts", "vue"
+    /// ("dockerfile" réservé à la feature `docker-lsp`, jamais émis tant
+    /// qu'aucun marqueur ne le produit). Ordre fixe
+    /// `["rust", "js-ts", "vue", "dockerfile"]` filtré — cf.
     /// `vanyline_sandbox::maint::detect_languages`. Écrit uniquement par le
     /// Job `detect` (tâche 03) via un patch dédié — jamais par
     /// `compute_status`. `skip_serializing_if` : voir note "Point

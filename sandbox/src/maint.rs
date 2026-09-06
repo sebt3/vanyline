@@ -477,6 +477,11 @@ const RUST_MARKER: &str = "Cargo.toml";
 /// Noms de fichiers marquant la présence de JS/TS — racine uniquement.
 const JS_TS_MARKERS: [&str; 2] = ["package.json", "tsconfig.json"];
 
+/// Extension marquant la présence de Vue — n'importe quel fichier `*.vue`
+/// dans l'arbre HEAD (tout niveau de profondeur). Comparaison sensible à la
+/// casse (comme les autres marqueurs) : `.VUE` n'est pas détecté.
+const VUE_MARKER_EXT: &str = ".vue";
+
 /// Liste les chemins de fichiers de l'arbre HEAD du clone bare
 /// `workspace/repo.git` (`git --git-dir <bare> ls-tree -r --name-only HEAD`).
 /// Chaque chemin est relatif à la racine du dépôt, séparateur `/` (format git,
@@ -532,21 +537,35 @@ fn list_head_tree(workspace: &Path) -> Result<Vec<String>, MaintError> {
         .collect())
 }
 
+/// Ordre de sortie figé, filtré par la détection. `dockerfile` : valeur
+/// réservée — le marqueur correspondant arrive avec la feature `docker-lsp`
+/// (aucun marqueur ici => jamais retenu par le filtre en pratique).
+const LANGUAGE_ORDER: [&str; 4] = ["rust", "js-ts", "vue", "dockerfile"];
+
 /// Détecte les langages utilisés à partir des marqueurs de fichiers de
-/// l'arbre HEAD. Résultat dans l'ordre fixe `["rust", "js-ts"]` (filtré).
+/// l'arbre HEAD. Résultat dans l'ordre fixe
+/// `["rust", "js-ts", "vue", "dockerfile"]` (filtré — `dockerfile` sans
+/// marqueur avant `docker-lsp`).
 pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
     let paths = list_head_tree(workspace)?;
     let has_rust = paths
         .iter()
         .any(|p| p == RUST_MARKER || p.ends_with(&format!("/{RUST_MARKER}")));
     let has_js_ts = paths.iter().any(|p| JS_TS_MARKERS.contains(&p.as_str()));
+    let has_vue = paths.iter().any(|p| p.ends_with(VUE_MARKER_EXT));
 
     let mut languages = Vec::new();
-    if has_rust {
-        languages.push("rust".to_string());
-    }
-    if has_js_ts {
-        languages.push("js-ts".to_string());
+    for lang in LANGUAGE_ORDER {
+        let present = match lang {
+            "rust" => has_rust,
+            "js-ts" => has_js_ts,
+            "vue" => has_vue,
+            // `dockerfile` : pas de marqueur avant `docker-lsp` — toujours faux ici.
+            _ => false,
+        };
+        if present {
+            languages.push(lang.to_string());
+        }
     }
     Ok(languages)
 }

@@ -818,6 +818,153 @@ fn detect_no_markers() {
     assert_eq!(result, r#"{"languages":[]}"#);
 }
 
+/// Repo git initialisé avec un commit contenant `files` (chemins relatifs,
+/// `/` acceptés, répertoires parents créés) + un README de baseline.
+fn make_source_repo_with_files(dir: &Path, files: &[(&str, &str)]) -> PathBuf {
+    let dir = dir.to_path_buf();
+    // `git init` requires the working directory to exist.
+    std::fs::create_dir_all(&dir).expect("create dir");
+
+    // `git init -b main` — branche par défaut déterministe.
+    assert!(
+        Command::new("git")
+            .args(["init", "-b", "main"])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success(),
+        "git init failed"
+    );
+
+    // Baseline README (comme `make_source_repo`).
+    std::fs::write(dir.join("README.md"), "# test\n").expect("write README.md");
+
+    // Write each requested file, creating parent dirs as needed.
+    for (path, content) in files {
+        let full = dir.join(path);
+        if let Some(parent) = full.parent() {
+            std::fs::create_dir_all(parent).expect("create parent dir");
+        }
+        std::fs::write(&full, content).expect("write file");
+    }
+
+    // `git add`
+    assert!(
+        Command::new("git")
+            .args(["add", "."])
+            .current_dir(&dir)
+            .status()
+            .unwrap()
+            .success(),
+        "git add failed"
+    );
+
+    // `git commit`
+    let output = Command::new("git")
+        .args([
+            "-c",
+            "user.email=test@test",
+            "-c",
+            "user.name=test",
+            "commit",
+            "-m",
+            "init",
+        ])
+        .current_dir(&dir)
+        .output()
+        .expect("git commit failed");
+    assert!(
+        output.status.success(),
+        "git commit failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    dir
+}
+
+// ===== detect_vue_nested_only =====
+// Marqueur `vue` : tout *.vue de l'arbre HEAD, profondeur quelconque.
+// Sans package.json => preuve d'indépendance vis-à-vis de `js-ts`.
+#[test]
+fn detect_vue_nested_only() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("src/App.vue", "<template><div>hi</div></template>\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["vue"]}"#);
+}
+
+// ===== detect_vue_with_package_json_order_fixed =====
+// Ordre figé : `js-ts` avant `vue`.
+#[test]
+fn detect_vue_with_package_json_order_fixed() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[
+            ("package.json", r#"{"name":"app"}"#),
+            (
+                "src/components/HelloWorld.vue",
+                "<template><p>hello</p></template>\n",
+            ),
+        ],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["js-ts","vue"]}"#);
+}
+
+// ===== detect_all_rust_js_ts_vue_order_fixed =====
+// Ordre figé complet des trois langages détectables.
+#[test]
+fn detect_all_rust_js_ts_vue_order_fixed() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[
+            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0.1.0\"\n"),
+            ("package.json", r#"{"name":"app"}"#),
+            ("App.vue", "<template><div>x</div></template>\n"),
+        ],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["rust","js-ts","vue"]}"#);
+}
+
+// ===== detect_dockerfile_file_not_detected =====
+// Garde de la décision développeur : `dockerfile` est dans l'ordre figé mais
+// aucun marqueur ne le produit avant la feature `docker-lsp`.
+#[test]
+fn detect_dockerfile_file_not_detected() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[
+            ("Dockerfile", "FROM scratch\n"),
+            ("App.vue", "<template><div>x</div></template>\n"),
+        ],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["vue"]}"#);
+}
+
 // ===== detect_without_bare_fails =====
 #[test]
 fn detect_without_bare_fails() {
