@@ -182,6 +182,29 @@ fiabilité du modèle, deux trous de config ») reste valide — mais cadence to
 désormais dans les conditions prévues par DeepSeek ; variable à garder en tête
 pour comparer les reviews Phase 3 avant/après ce réglage.
 
+## Binôme modèle `cadence` + `implement` — décision figée (2026-09-06)
+
+Le développeur fixe le binôme sur **`qwen3.8-flash-next`** pour `cadence` **et**
+`implement`, jusqu'à trouver mieux. Bilan des essais à date :
+
+- **`deepseek-v4-flash` (cadence) + `qwen3.6` (implement)** — `git-integration`,
+  `miryad-core`. **Rangé, ne ressortira plus.** Escalades manquées, bugs bloquants
+  en review Phase 3 malgré CI verte. NB : deepseek-v4-flash a été le **premier**
+  modèle hébergeable en local à réussir les tâches de planning — mérite historique,
+  mais dépassé pour le rôle.
+- **`ornith1.5` en `implement`** (F5) — pas mieux que `qwen3.6` en pratique côté
+  Claude/review, alors que les benchmarks le donnaient devant. Écarté.
+- **`qwen3.8-flash-next` (cadence + implement)** — F4, F5, `editor-syntax-highlighting`.
+  **Meilleur binôme à date.** F4/F5 : 0 bug bloquant ;
+  `editor-syntax-highlighting` : 0 bloquant. Limite connue : `cadence` et
+  `implement` sur le **même** modèle → validation croisée faible (relevé sur F2,
+  `F2-vscode-ext-cli-rpc.md`) — compensé jusqu'ici par la review Phase 3.
+
+Le réglage `temperature`/`top_p`/`reasoning` de la section ci-dessus a été calibré
+pour **DeepSeek-V4-Flash** — à revoir si le point de fonctionnement de
+`qwen3.8-flash-next` diffère (pas encore fait, features livrées proprement telles
+quelles).
+
 ## Nouveaux modes d'échec Qwen observés (complètent la liste ci-dessus)
 
 Vus sur `ws09-sandbox-maint-agent.md` et `ws12-sandbox-clients.md` — apostrophes françaises
