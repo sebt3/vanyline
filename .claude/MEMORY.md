@@ -196,6 +196,14 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   (`toolchains/rust/`, `toolchains/node/Dockerfile`, même tag que
   app/sandbox/controller) — `TOOLCHAIN_IMAGE_*` et `LSP_IMAGE_*` pointent désormais
   sur la même image par langage. Toujours pas testé sur cluster réel.
+  **Suivi (2026-09-06, `fix/sandbox-rustup-stable-alias` mergé dans `main`)** : même
+  classe de piège (read-only du volume toolchain) — un projet avec
+  `rust-toolchain.toml` `channel = "stable"` cassait cargo + rust-analyzer en
+  sandbox (rustup ne peut pas installer `stable-<host>` absent du volume). Fix :
+  symlink relatif `stable-<host>` → toolchain versionnée dans
+  `toolchains/rust/Dockerfile` + `test-toolchain.sh` (rejoue read-only non-root du
+  pod). Rouge démontré sur cluster 2026-09-04. Ne couvre que `stable` (pas
+  `beta`/`nightly`/pin de version). Image rust à rebuild+republier au prochain tag.
 - **Git intégration** (2026-08-24, `.claude/memory/git-integration.md`) : statut/diff/
   staging/commit/branches/merge/push depuis l'IDE, provisioning de clé SSH à la
   demande dans le PVC Owner. Branche `feat/git-integration` mergée dans `main` et
