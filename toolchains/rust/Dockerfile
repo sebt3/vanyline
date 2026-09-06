@@ -30,3 +30,19 @@ FROM docker.io/library/rust:slim-trixie
 # rust-src the same way you installed rustc", trouvé en usage réel).
 RUN rustup component add rust-analyzer rust-src \
     && ln -srf "$(rustup which rust-analyzer)" /usr/local/bin/rust-analyzer
+
+# Alias `stable-<host>` vers la toolchain versionnée installée par la base.
+# Un projet qui épingle `rust-toolchain.toml` (channel = "stable") fait résoudre
+# à rustup le toolchain nominal `stable-<host>` : absent du dossier toolchains,
+# rustup tente de l'installer — impossible en pod, le volume `volumes[].image`
+# est read-only et le process non-root ("toolchain 'stable-…' is not installed"
+# / "could not create temp file … Read-only file system", vérifié sur cluster
+# 2026-09-04 : cargo metadata échouait, donc rust-analyzer ne chargeait pas le
+# workspace et cargo build/test étaient impossibles dans la sandbox).
+# Rien de codé en dur : le host triple vient de `rustc -Vv`, le nom du dossier
+# versionné de `rustup which rustc`. `ln -sr` RELATIF, comme le lien
+# rust-analyzer ci-dessus : un lien absolu devient mort une fois l'image montée
+# en volume hors de /. Vérification post-build : ./test-toolchain.sh.
+RUN host="$(rustc -Vv | awk -F': ' '/^host:/{print $2}')" \
+    && tc="$(basename "$(dirname "$(dirname "$(rustup which rustc)")")")" \
+    && ln -sr "/usr/local/rustup/toolchains/$tc" "/usr/local/rustup/toolchains/stable-$host"
