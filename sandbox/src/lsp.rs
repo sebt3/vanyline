@@ -455,23 +455,19 @@ type CompletionProvenanceInner = HashMap<(String, Option<i64>), (usize, Value)>;
 /// `aux` vide ⟹ la table n'est JAMAIS consultée, chemin primaire historique
 /// strict (invariant 8). Défaut : `Primary` — méthodes mono-serveur par
 /// design : `textDocument/formatting`, `textDocument/documentSymbol`,
-/// `textDocument/semanticTokens/*` (tâche 09, stratégie de délégation par
-/// plage déjà tranchée), `textDocument/signatureHelp` (non listée au design ⟹
-/// défaut assumé, extensible après vérification manuelle). Hors table par
-/// nature : `completionItem/resolve` — ni `Primary` ni barrière, troisième
-/// voie dédiée par provenance (`route_completion_resolve`, tâche 08).
+/// `textDocument/signatureHelp` (non listée au design ⟹ défaut assumé,
+/// extensible après vérification manuelle). Les méthodes `semanticTokens`
+/// (full/range/delta + refresh) sont `Primary` par cas EXPLICITES de la table
+/// (tâche 09 — jamais de fusion de flux de tokens, cf. commentaire du
+/// `match`). Hors table par nature : `completionItem/resolve` — ni `Primary`
+/// ni barrière, troisième voie dédiée par provenance
+/// (`route_completion_resolve`, tâche 08).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MergeRoute {
     Primary,
     All,
 }
 
-// TODO(task-09) : `textDocument/semanticTokens/*` — stratégie de délégation
-// par plage déjà tranchée au design, `Primary` d'ici là. Tâche 08 posée :
-// `textDocument/completion` est en `All` (fusion dédup `(label,kind)`
-// primary-wins, `merge_completions`) ; `completionItem/resolve` N'EST PAS
-// dans cette table (routage par provenance, jamais de barrière ni de
-// primaire aveugle — test `resolve_routes_to_aux`).
 fn merge_route_for_method(method: &str) -> MergeRoute {
     match method {
         "textDocument/hover"
@@ -483,6 +479,18 @@ fn merge_route_for_method(method: &str) -> MergeRoute {
         | "textDocument/prepareRename"
         | "textDocument/rename"
         | "textDocument/completion" => MergeRoute::All,
+        // semanticTokens/* : JAMAIS en fusion — deux flux de tokens sur un même
+        // document ne sont pas concaténables (offsets absolus + legend). La
+        // stratégie « délégation par plage » (décision 2026-09-06, risque n° 1)
+        // est portée par le PRIMAIRE lui-même : il calcule template/style et
+        // demande script → tsserver via `_vue:encodedSemanticClassifications-full`
+        // en tsserver/request (canal tâche 05). Le multiplexeur ne voit qu'un flux
+        // déjà complet, enrichi par l'aux via forwarding — routage primaire
+        // EXPLICITE, pas un accident du défaut.
+        "textDocument/semanticTokens/full"
+        | "textDocument/semanticTokens/range"
+        | "textDocument/semanticTokens/delta"
+        | "workspace/semanticTokens/refresh" => MergeRoute::Primary,
         _ => MergeRoute::Primary,
     }
 }
@@ -7730,5 +7738,472 @@ while True:
             serde_json::json!({"changes": {"u": []}}),
             "rename : une seule contribution ⟹ celle-là"
         );
+    }
+
+    // ── Tâche 09 : semanticTokens — routage primaire + preuve bout-en-bout ──
+
+    /// Script Python factice PRIMAIRE « vue-language-server tokens » (tâche 09) :
+    /// journalise dans argv[1] ; sur `initialize` répond des capabilities
+    /// standards (dont `semanticTokensProvider` — l'issue `initialize` est celle
+    /// du primaire, tâche 03) ; mémorise l'URI du `didOpen` ; sur
+    /// `textDocument/semanticTokens/full` émet D'ABORD
+    /// `tsserver/request [[9, "_vue:encodedSemanticClassifications-full",
+    /// {"file": uri, "start": 10}]]` (la plage `<script>` déléguée à tsserver en
+    /// mode hybride Volar v3 — canal de forwarding de la tâche 05), attend la
+    /// `tsserver/response` reçue sur son fil, puis répond UN flux de tokens
+    /// UNIQUE : le token dérivé de la classification de l'aux (`body.spans[0]`
+    /// mappé `[0, 0, longueur, classification]` — la preuve que le marqueur a
+    /// traversé le canal) puis SON token template. Dégradation (body `null` ou
+    /// timeout 2 s — le multiplexeur ne pend jamais le primaire, mais le faux
+    /// ne doit jamais pendre non plus) : répond ses seuls tokens template, sans
+    /// marqueur aux. Toute autre requête : réponse echo. Les lectures stdin
+    /// sont crues (`os.read` + `select`) — sans quoi un buffer Python
+    /// cacherait des octets au `select` et le timeout serait un mensonge.
+    const FAKE_LSP_VUE_TOKENS_PY: &str = r#"
+import sys, os, json, time, select
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+
+# token template émis par le primaire lui-même (legend factice : tokenType 1)
+TEMPLATE_TOKEN = [50, 0, 4, 1]
+
+doc_uri = ""
+# None, ou {"req_id": …, "deadline": …} en attente de la tsserver/response
+awaiting = None
+
+def read_frame(deadline=None):
+    # -> (data, timed_out) ; data None = EOF ; timed_out seulement si deadline
+    # posée (select sur le fd 0, lecture non bufferisée).
+    header = b""
+    while True:
+        if deadline is not None and not select.select([0], [], [], max(0.0, deadline - time.monotonic()))[0]:
+            return None, True
+        ch = os.read(0, 1)
+        if not ch:
+            return None, False
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b"", False
+    data = b""
+    while len(data) < length:
+        if deadline is not None and not select.select([0], [], [], max(0.0, deadline - time.monotonic()))[0]:
+            return None, True
+        chunk = os.read(0, length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data, False
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+def answer_tokens(req_id, aux_body):
+    data = []
+    try:
+        spans = aux_body["spans"]
+        if spans:
+            data += [0, 0, spans[0][1], spans[0][2]]
+    except Exception:
+        pass
+    data += TEMPLATE_TOKEN
+    write_frame({"jsonrpc": "2.0", "id": req_id, "result": {"data": data}})
+
+while True:
+    deadline = awaiting["deadline"] if awaiting else None
+    raw, timed_out = read_frame(deadline)
+    if timed_out:
+        # aucune réponse dans les 2 s (jamais en pratique : le multiplexeur
+        # répond `body null` à toute tsserver/request — contrat tâche 05)
+        req_id = awaiting["req_id"]
+        awaiting = None
+        answer_tokens(req_id, None)
+        continue
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+    method = msg.get("method", "")
+    if method == "tsserver/response":
+        if awaiting is not None:
+            try:
+                body = msg["params"][0][1]
+            except Exception:
+                body = None
+            req_id = awaiting["req_id"]
+            awaiting = None
+            answer_tokens(req_id, body)
+        continue
+    if method == "textDocument/didOpen":
+        doc_uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+        continue
+    if method == "textDocument/semanticTokens/full" and "id" in msg:
+        write_frame({"jsonrpc": "2.0", "method": "tsserver/request",
+                     "params": [[9, "_vue:encodedSemanticClassifications-full",
+                                 {"file": doc_uri, "start": 10}]]})
+        awaiting = {"req_id": msg["id"], "deadline": time.monotonic() + 2.0}
+        continue
+    if "id" in msg:
+        if method == "initialize":
+            write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {
+                "semanticTokensProvider": {
+                    "legend": {"tokenTypes": ["template", "aux"], "tokenModifiers": []},
+                    "full": True}}}})
+        else:
+            write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"echo": method}})
+"#;
+
+    /// Script Python factice aux « typescript-language-server classifier »
+    /// (tâche 09) : journalise dans argv[1] ; sur `initialize` répond
+    /// `{"capabilities":{}}` ; sur `workspace/executeCommand` avec
+    /// `arguments[0] == "_vue:encodedSemanticClassifications-full"`, répond
+    /// l'objet tsserver complet `{"type":"response","success":true,
+    /// "body":{"spans":[[10,3,7]]}}` (forme encoded classification tsserver :
+    /// tableau plat de spans `[start, longueur, classification]`) ; toute autre
+    /// commande forwardée : `body: null`. Modes via `fake_mode` : `"error"`
+    /// (JSON-RPC erreur — l'aux en échec de la délégation).
+    const FAKE_LSP_TLS_CLASSIFY_PY: &str = r#"
+import sys, json
+
+LOG = sys.argv[1] if len(sys.argv) > 1 else ""
+MODE = "@@MODE@@"
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+    except Exception:
+        continue
+    if LOG:
+        with open(LOG, "a") as f:
+            f.write(json.dumps(msg) + "\n")
+    if "id" not in msg:
+        continue
+    is_fwd = (msg.get("method") == "workspace/executeCommand"
+              and msg.get("params", {}).get("command") == "typescript.tsserverRequest")
+    if not is_fwd:
+        write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {"capabilities": {}}})
+        continue
+    if MODE == "error":
+        write_frame({"jsonrpc": "2.0", "id": msg["id"],
+                     "error": {"code": -32603, "message": "tsserver exploded"}})
+        continue
+    args = msg.get("params", {}).get("arguments", [])
+    cmd = args[0] if len(args) > 0 else None
+    if cmd == "_vue:encodedSemanticClassifications-full":
+        write_frame({"jsonrpc": "2.0", "id": msg["id"],
+                     "result": {"type": "response", "success": True,
+                                "body": {"spans": [[10, 3, 7]]}}})
+    else:
+        write_frame({"jsonrpc": "2.0", "id": msg["id"],
+                     "result": {"type": "response", "success": True, "body": None}})
+"#;
+
+    /// Trames d'un log dont la méthode mentionne `semanticTokens` (garde de
+    /// silence du fil aux : les méthodes semanticTokens ne sortent jamais du
+    /// primaire).
+    fn semtok_frames(frames: &[Value]) -> Vec<&Value> {
+        frames
+            .iter()
+            .filter(|f| {
+                f.get("method")
+                    .and_then(|m| m.as_str())
+                    .is_some_and(|m| m.contains("semanticTokens"))
+            })
+            .collect()
+    }
+
+    /// Tâche 09 test 1 : `semtok_routes_primary_only_end_to_end` — le client
+    /// envoie `semanticTokens/full` (id 4) : (a) le fil client reçoit UNE seule
+    /// réponse id 4 dont `data` porte ET le token template du primaire ET le
+    /// marqueur dérivé de la classification de l'aux (preuve bout-en-bout de la
+    /// délégation par plage) ; (b) le log aux contient l'`executeCommand`
+    /// `_vue:encodedSemanticClassifications-full` et AUCUNE trame
+    /// `semanticTokens/*` ; (c) le primaire a reçu la `tsserver/response` avec
+    /// le body dépilé.
+    #[tokio::test]
+    async fn semtok_routes_primary_only_end_to_end() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUE_TOKENS_PY,
+            &[("tsserver-forward", FAKE_LSP_TLS_CLASSIFY_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+        session
+            .send(
+                client,
+                text_request(
+                    4,
+                    "textDocument/semanticTokens/full",
+                    "file:///w/App.vue",
+                    0,
+                ),
+            )
+            .await
+            .expect("semanticTokens/full ok");
+
+        // (b) l'aux reçoit l'executeCommand de classification — et côté fil aux
+        // ne JAMAIS circuler de semanticTokens/* (le flux de tokens ne s'est
+        // jamais scindé).
+        let aux_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| forwarded_execute_command(frames).is_some(),
+            Duration::from_secs(5),
+        )
+        .await;
+        let exec = forwarded_execute_command(&aux_frames)
+            .expect("l'aux doit recevoir l'executeCommand de classification");
+        assert_eq!(
+            exec["params"]["arguments"],
+            serde_json::json!([
+                "_vue:encodedSemanticClassifications-full",
+                {"file": "file:///w/App.vue", "start": 10}
+            ]),
+            "arguments = [command, payload {{file, start}}] exactement ; trames: {aux_frames:?}"
+        );
+        assert!(
+            semtok_frames(&aux_frames).is_empty(),
+            "aucune trame semanticTokens/* ne doit atteindre l'aux ; trames: {aux_frames:?}"
+        );
+
+        // (c) le primaire reçoit la tsserver/response [[9, body DÉPILÉ]], le
+        // vue-id restitué tel quel.
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[9, {"spans": [[10, 3, 7]]}]])],
+            "params = [[vue_id 9, body dépilé de l'objet tsserver complet]] ; trames: {primary_frames:?}"
+        );
+
+        // (a) le client reçoit UNE réponse id 4 au flux unique : token dérivé
+        // des classifications aux (span [10,3,7] ⟹ token [0,0,3,7]) + token
+        // template du primaire.
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse unique semanticTokens/full"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(4));
+        assert_eq!(
+            resp["result"],
+            serde_json::json!({"data": [0, 0, 3, 7, 50, 0, 4, 1]}),
+            "marqueur issu des classifications aux + token template, dans UN flux unique"
+        );
+
+        let leaked = recv_timeout(&mut rx, Duration::from_millis(500)).await;
+        assert!(
+            leaked.is_none(),
+            "réponse unique du primaire, aucune trame tsserver/* ni part aux sur le fil client: {leaked:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 09 test 2 : `semtok_forward_failure_degrades_to_template_tokens` —
+    /// aux en mode erreur : le forwarding répond `body null` au primaire
+    /// (contrat tâche 05) et le faux primaire répond ses seuls tokens template
+    /// ⟹ le client reçoit une réponse de tokens VALIDE, sans marqueur aux,
+    /// sans aucune erreur JSON-RPC.
+    #[tokio::test]
+    async fn semtok_forward_failure_degrades_to_template_tokens() {
+        let aux_script = fake_mode(FAKE_LSP_TLS_CLASSIFY_PY, "error");
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUE_TOKENS_PY,
+            &[("tsserver-forward", aux_script.as_str(), vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+        composite_open(&session, client, "file:///w/App.vue").await;
+        session
+            .send(
+                client,
+                text_request(
+                    4,
+                    "textDocument/semanticTokens/full",
+                    "file:///w/App.vue",
+                    0,
+                ),
+            )
+            .await
+            .expect("semanticTokens/full ok");
+
+        // le primaire a bien reçu le body null de la dégradation (canal tâche 05)
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| !tsserver_response_params(frames).is_empty(),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            tsserver_response_params(&primary_frames),
+            vec![serde_json::json!([[9, null]])],
+            "erreur de l'aux ⟹ body null au primaire ; trames: {primary_frames:?}"
+        );
+
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse de tokens valide même aux en échec"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(4));
+        assert!(
+            resp.get("error").is_none(),
+            "aucune erreur JSON-RPC ne doit atteindre le client: {resp}"
+        );
+        assert_eq!(
+            resp["result"],
+            serde_json::json!({"data": [50, 0, 4, 1]}),
+            "seuls les tokens template du primaire, sans marqueur aux"
+        );
+        assert!(
+            session.is_alive(),
+            "l'échec de la délégation ne tue pas la session"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// Tâche 09 test 3 : `semtok_table_explicit_primary` — assert unitaire
+    /// direct de la table sur les 4 méthodes semanticTokens :
+    /// `MergeRoute::Primary` est une décision documentée (cas explicites du
+    /// `match`), pas un accident du défaut ; `hover` reste `All` (garde de
+    /// non-régression de la table).
+    #[test]
+    fn semtok_table_explicit_primary() {
+        for method in [
+            "textDocument/semanticTokens/full",
+            "textDocument/semanticTokens/range",
+            "textDocument/semanticTokens/delta",
+            "workspace/semanticTokens/refresh",
+        ] {
+            assert_eq!(
+                merge_route_for_method(method),
+                MergeRoute::Primary,
+                "{method} : routage PRIMAIRE explicite — jamais de fusion de flux de tokens"
+            );
+        }
+        assert_eq!(
+            merge_route_for_method("textDocument/hover"),
+            MergeRoute::All,
+            "garde : les cas All de la table sont intacts"
+        );
+    }
+
+    /// Tâche 09 test 4 : `semtok_range_and_delta_wire_quiet` —
+    /// `semanticTokens/range` et `semanticTokens/delta` émis par le client : la
+    /// réponse primaire est servie verbatim (id restauré, aucune barrière), et
+    /// le log aux ne porte AUCUNE trame `semanticTokens` — jamais vus par lui.
+    #[tokio::test]
+    async fn semtok_range_and_delta_wire_quiet() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_VUE_TOKENS_PY,
+            &[("tsserver-forward", FAKE_LSP_TLS_CLASSIFY_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        composite_initialize(&session, client, &mut rx).await;
+
+        for (id, method) in [
+            (5, "textDocument/semanticTokens/range"),
+            (6, "textDocument/semanticTokens/delta"),
+        ] {
+            session
+                .send(client, text_request(id, method, "file:///w/App.vue", 0))
+                .await
+                .expect("requête semanticTokens ok");
+            let resp = client_msg(
+                &recv_timeout(&mut rx, Duration::from_secs(5))
+                    .await
+                    .unwrap_or_else(|| panic!("la réponse {method} du primaire doit être servie")),
+            );
+            assert_eq!(resp["id"].as_i64(), Some(id), "id restauré pour {method}");
+            assert_eq!(
+                resp["result"],
+                serde_json::json!({"echo": method}),
+                "réponse primaire servie verbatim (pas de barrière ni de fusion pour {method})"
+            );
+        }
+
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        assert!(
+            semtok_frames(&aux_frames).is_empty(),
+            "l'aux ne voit jamais range/delta ; trames: {aux_frames:?}"
+        );
+        assert_eq!(
+            session.pending_merge_count(),
+            0,
+            "aucune barrière de fusion créée par les méthodes semanticTokens"
+        );
+
+        drop(tmpdir);
     }
 }
