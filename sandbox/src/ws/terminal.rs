@@ -171,7 +171,8 @@ fn parse_text_frame(text: &Utf8Bytes) -> Option<PtySize> {
 
 /// Opens a PTY and spawns `$SHELL` (or `/bin/bash`) in `cwd`.
 ///
-/// Environnement hérité tel quel. Retourne le master (contrôle/lecture/écriture)
+/// Environnement hérité, avec overlay `.venv/` depuis `cwd` (cf. `venv.rs`).
+/// Retourne le master (contrôle/lecture/écriture)
 /// et l'enfant (le shell, leader de session — son `process_id()` == pgid).
 ///
 /// Erreurs : ouverture PTY, spawn du shell → `anyhow::Result`.
@@ -192,6 +193,14 @@ pub fn spawn_shell(
     let mut cmd = CommandBuilder::new(shell);
     cmd.set_controlling_tty(true);
     cmd.cwd(cwd);
+
+    // Overlay `.venv/` (feature python-support) : recalculé à chaque spawn —
+    // terminal ouvert après un `python -m venv .venv` déjà activé. cwd vaut
+    // sandbox_root au seul site d'appel réel (config process, pas une entrée
+    // utilisateur). N'affecte QUE ce shell : le LSP est un process séparé.
+    for (k, v) in crate::venv::venv_overlay(cwd) {
+        cmd.env(k, v);
+    }
 
     let child = pair.slave.spawn_command(cmd)?;
     Ok((pair.master, child))
@@ -529,6 +538,135 @@ mod tests {
             resp.status(),
             StatusCode::UNAUTHORIZED,
             "unknown ticket → 401"
+        );
+    }
+
+    // Test 5: spawn_shell_active_le_venv_du_cwd (feature python-support) —
+    // overlay `.venv/` posé par spawn_shell depuis cwd (= sandbox_root). Le
+    // marqueur distincteur : la frappe contient le NOM du script
+    // (`vnl-term-marker`), jamais sa sortie `term-venv-ok` — celle-ci ne
+    // peut provenir QUE de l'exécution rendue possible par l'overlay.
+    #[test]
+    fn spawn_shell_active_le_venv_du_cwd() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let state = make_state("pty_venv");
+        let root = &state.config.sandbox_root;
+        let venv_bin = root.join(".venv").join("bin");
+        std::fs::create_dir_all(&venv_bin).unwrap();
+        std::fs::write(root.join(".venv").join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+        let script = venv_bin.join("vnl-term-marker");
+        std::fs::write(&script, "#!/bin/sh\necho term-venv-ok\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Le `.venv` est créé AVANT le spawn : l'overlay doit être posé.
+        let (master, _child) =
+            spawn_shell(root, PtySize::default()).expect("spawn_shell should succeed");
+
+        let mut reader = master.try_clone_reader().expect("should have a reader");
+        let mut writer = master.take_writer().expect("should have a writer");
+
+        wait_for_shell_ready(&mut reader, std::time::Duration::from_secs(10));
+
+        // Résolution par `$VIRTUAL_ENV/bin/…` plutôt que par le PATH préfixé :
+        // le nom nu exigerait que le PATH posé au spawn survive aux fichiers
+        // d'init du shell — vrai sur l'image sandbox et les runners CI
+        // (bashrc standard), faux sur la machine de dev dont le ~/.bashrc
+        // source /etc/profile (qui RÉASSIGNE PATH sans $PATH). VIRTUAL_ENV,
+        // elle, n'est touchée par aucun rc et ne peut venir que de l'overlay
+        // : sans lui la frappe devient `/bin/vnl-term-marker` → échec. Le
+        // aspect PATH-en-tête est couvert hermétiquement par `sh -c` ailleurs
+        // (execute_envs_path_tete_de_LISTE + http tools_call_execute_command_
+        // active_le_venv_du_workspace).
+        write!(writer, "\"$VIRTUAL_ENV/bin/vnl-term-marker\"\r\n").unwrap();
+        // Sécurité de terminaison (comme le test historique `echo`+lecture) :
+        // si le marqueur n'apparaît jamais, `exit` provoque EOF/EIO sur le
+        // master et la boucle se termine sur un échec d'assertion — pas un
+        // blocage. Le marqueur, lui, doit arriver AVANT (bash exécute les
+        // lignes dans l'ordre).
+        write!(writer, "exit\r\n").unwrap();
+
+        let start = std::time::Instant::now();
+        let mut output = String::new();
+        while start.elapsed().as_secs() < 10 {
+            let mut buf: [u8; 4096] = [0; 4096];
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+                Ok(n) => {
+                    output.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+                Err(_) => break,
+            }
+            if output.contains("term-venv-ok") {
+                break;
+            }
+        }
+
+        assert!(
+            output.contains("term-venv-ok"),
+            "term-venv-ok not found in output: {}",
+            output.lines().take(40).collect::<Vec<_>>().join("\n")
+        );
+    }
+
+    // Test 6: spawn_shell_sans_venv_pas_de_VIRTUAL_ENV (feature
+    // python-support) — pas de marqueur ⟹ pas d'overlay. Le `[]` lu ne peut
+    // PAS provenir de la frappe : le texte tapé contient `$VIRTUAL_ENV`
+    // (avec le `$`), jamais `[]` accolés.
+    // Nom de test imposé verbatim par la tâche 05 (`VIRTUAL_ENV` = nom de la
+    // variable d'env) — d'où l'allow ciblé plutôt qu'un renommage.
+    #[allow(non_snake_case)]
+    #[test]
+    fn spawn_shell_sans_venv_pas_de_VIRTUAL_ENV() {
+        let state = make_state("pty_novenv");
+        assert!(
+            !state
+                .config
+                .sandbox_root
+                .join(".venv")
+                .join("pyvenv.cfg")
+                .exists(),
+            "préalable : pas de .venv dans ce sandbox_root"
+        );
+
+        let (master, _child) = spawn_shell(&state.config.sandbox_root, PtySize::default())
+            .expect("spawn_shell should succeed");
+
+        let mut reader = master.try_clone_reader().expect("should have a reader");
+        let mut writer = master.take_writer().expect("should have a writer");
+
+        wait_for_shell_ready(&mut reader, std::time::Duration::from_secs(10));
+
+        write!(writer, "echo \"[$VIRTUAL_ENV]\"\r\n").unwrap();
+        // Même sécurité de terminaison que le test jumeau ci-dessus.
+        write!(writer, "exit\r\n").unwrap();
+
+        let start = std::time::Instant::now();
+        let mut output = String::new();
+        while start.elapsed().as_secs() < 10 {
+            let mut buf: [u8; 4096] = [0; 4096];
+            match reader.read(&mut buf) {
+                Ok(0) => {
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                    continue;
+                }
+                Ok(n) => {
+                    output.push_str(&String::from_utf8_lossy(&buf[..n]));
+                }
+                Err(_) => break,
+            }
+            if output.contains("[]") {
+                break;
+            }
+        }
+
+        assert!(
+            output.contains("[]"),
+            "empty VIRTUAL_ENV not found in output: {}",
+            output.lines().take(40).collect::<Vec<_>>().join("\n")
         );
     }
 }

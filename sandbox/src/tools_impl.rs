@@ -343,6 +343,11 @@ pub async fn dispatch_command(sandbox_root: &Path, name: &str, arguments: Value)
         Ok(o) => o,
         Err(e) => return Some(err_result(format!("invalid arguments for {name}: {e}"))),
     };
+    // Overlay `.venv/` (feature python-support) : recalculé à CHAQUE appel —
+    // un `.venv` créé en cours de session est vu dès la commande suivante.
+    // `sandbox_root` vient de la config du process (jamais une entrée
+    // utilisateur) ; cwd continue de passer par `confine()` (inchangé).
+    let envs = crate::venv::venv_overlay(sandbox_root);
     // `cwd` is optional (serde default = "") — confine with empty is `sandbox_root`
     match confine(sandbox_root, &opts.cwd).await {
         Ok(resolved) => {
@@ -350,6 +355,7 @@ pub async fn dispatch_command(sandbox_root: &Path, name: &str, arguments: Value)
                 command: opts.command,
                 timeout_secs: opts.timeout_secs,
                 cwd: resolved,
+                envs,
             })
             .await
             {
