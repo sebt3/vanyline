@@ -482,6 +482,34 @@ const JS_TS_MARKERS: [&str; 2] = ["package.json", "tsconfig.json"];
 /// casse (comme les autres marqueurs) : `.VUE` n'est pas détecté.
 const VUE_MARKER_EXT: &str = ".vue";
 
+/// Vrai si le nom de BASE de `path` (dernier segment après le dernier `/`) est
+/// un nom Docker/Compose-style : `Dockerfile`, `Containerfile`,
+/// `Dockerfile.*`, `Containerfile.*`, `*.dockerfile` — insensible à la casse.
+/// Chemins relatifs POSIX (`git ls-tree`) comme chemins absolus ; chaîne vide
+/// ⟹ false. MIROIR EXACT de `dockerfileName()` du frontend
+/// (`frontend/src/components/panels/dockerfileName.ts`, feature
+/// editor-syntax-highlighting) — les deux évoluent ensemble (risque n° 7 du
+/// design docker-lsp : cohérence détection / mapping sandbox / éditeur).
+pub fn is_dockerfile_path(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    // Dernier segment après le dernier '/' (pas de segment ⟹ whole string),
+    // mis en minuscules, puis les trois règles du helper frontend.
+    let base = match path.rfind('/') {
+        Some(idx) => &path[idx + 1..],
+        None => path,
+    };
+    let base = base.to_lowercase();
+    if base == "dockerfile" || base == "containerfile" {
+        return true;
+    }
+    if base.starts_with("dockerfile.") || base.starts_with("containerfile.") {
+        return true;
+    }
+    base.ends_with(".dockerfile")
+}
+
 /// Liste les chemins de fichiers de l'arbre HEAD du clone bare
 /// `workspace/repo.git` (`git --git-dir <bare> ls-tree -r --name-only HEAD`).
 /// Chaque chemin est relatif à la racine du dépôt, séparateur `/` (format git,
@@ -537,15 +565,14 @@ fn list_head_tree(workspace: &Path) -> Result<Vec<String>, MaintError> {
         .collect())
 }
 
-/// Ordre de sortie figé, filtré par la détection. `dockerfile` : valeur
-/// réservée — le marqueur correspondant arrive avec la feature `docker-lsp`
-/// (aucun marqueur ici => jamais retenu par le filtre en pratique).
+/// Ordre de sortie figé, filtré par la détection. `dockerfile` n'est plus
+/// « réservé » : son marqueur est posé par la feature `docker-lsp`
+/// (cf. `is_dockerfile_path`) — il reste en dernière position.
 const LANGUAGE_ORDER: [&str; 4] = ["rust", "js-ts", "vue", "dockerfile"];
 
 /// Détecte les langages utilisés à partir des marqueurs de fichiers de
 /// l'arbre HEAD. Résultat dans l'ordre fixe
-/// `["rust", "js-ts", "vue", "dockerfile"]` (filtré — `dockerfile` sans
-/// marqueur avant `docker-lsp`).
+/// `["rust", "js-ts", "vue", "dockerfile"]` (filtré).
 pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
     let paths = list_head_tree(workspace)?;
     let has_rust = paths
@@ -553,6 +580,7 @@ pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
         .any(|p| p == RUST_MARKER || p.ends_with(&format!("/{RUST_MARKER}")));
     let has_js_ts = paths.iter().any(|p| JS_TS_MARKERS.contains(&p.as_str()));
     let has_vue = paths.iter().any(|p| p.ends_with(VUE_MARKER_EXT));
+    let has_dockerfile = paths.iter().any(|p| is_dockerfile_path(p));
 
     let mut languages = Vec::new();
     for lang in LANGUAGE_ORDER {
@@ -560,7 +588,7 @@ pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
             "rust" => has_rust,
             "js-ts" => has_js_ts,
             "vue" => has_vue,
-            // `dockerfile` : pas de marqueur avant `docker-lsp` — toujours faux ici.
+            "dockerfile" => has_dockerfile,
             _ => false,
         };
         if present {
@@ -830,5 +858,25 @@ mod tests {
     fn remove_rejects_invalid_sandbox() {
         let result = run_remove(Path::new("/tmp"), "..");
         assert!(matches!(result, Err(MaintError::InvalidSandboxName { .. })));
+    }
+
+    // ===== is_dockerfile_path =====
+
+    // Table de vérité du helper — miroir du helper frontend dockerfileName().
+    #[test]
+    fn is_dockerfile_path_truth_table() {
+        assert!(is_dockerfile_path("Dockerfile"));
+        assert!(is_dockerfile_path("deploy/Dockerfile"));
+        assert!(is_dockerfile_path("Dockerfile.dev"));
+        assert!(is_dockerfile_path("Containerfile"));
+        assert!(is_dockerfile_path("Containerfile.base"));
+        assert!(is_dockerfile_path("build/app.dockerfile"));
+        assert!(is_dockerfile_path("dockerfile"));
+
+        assert!(!is_dockerfile_path(""));
+        assert!(!is_dockerfile_path("docker-compose.yml"));
+        // Piège : la règle suffixe est `.dockerfile` AVEC le point.
+        assert!(!is_dockerfile_path("mydockerfile"));
+        assert!(!is_dockerfile_path("notes.dockerfile.txt"));
     }
 }

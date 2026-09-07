@@ -944,11 +944,12 @@ fn detect_all_rust_js_ts_vue_order_fixed() {
     assert_eq!(result, r#"{"languages":["rust","js-ts","vue"]}"#);
 }
 
-// ===== detect_dockerfile_file_not_detected =====
-// Garde de la décision développeur : `dockerfile` est dans l'ordre figé mais
-// aucun marqueur ne le produit avant la feature `docker-lsp`.
+// ===== detect_dockerfile_file_detected =====
+// Marqueur `dockerfile` posé (feature `docker-lsp`) : preuve d'ordre figé —
+// `dockerfile` émis APRÈS `vue`. (Retournement du test garde vue-lsp
+// `detect_dockerfile_file_not_detected`, caduc depuis le marqueur docker-lsp.)
 #[test]
-fn detect_dockerfile_file_not_detected() {
+fn detect_dockerfile_file_detected() {
     let tmp = TempDir::new().unwrap();
     let src = make_source_repo_with_files(
         &tmp.path().join("src"),
@@ -962,7 +963,168 @@ fn detect_dockerfile_file_not_detected() {
     maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
 
     let result = maint::run_detect(&ws).unwrap();
-    assert_eq!(result, r#"{"languages":["vue"]}"#);
+    assert_eq!(result, r#"{"languages":["vue","dockerfile"]}"#);
+}
+
+// ===== detect_dockerfile_root_only =====
+// `Dockerfile` seul à la racine.
+#[test]
+fn detect_dockerfile_root_only() {
+    let tmp = TempDir::new().unwrap();
+    let src =
+        make_source_repo_with_files(&tmp.path().join("src"), &[("Dockerfile", "FROM scratch\n")]);
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["dockerfile"]}"#);
+}
+
+// ===== detect_dockerfile_nested =====
+// Marqueur à n'importe quelle profondeur de l'arbre HEAD.
+#[test]
+fn detect_dockerfile_nested() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("deploy/prod/Dockerfile", "FROM scratch\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["dockerfile"]}"#);
+}
+
+// ===== detect_dockerfile_variant_dev =====
+// Préfixe `Dockerfile.` (ex. `Dockerfile.dev`).
+#[test]
+fn detect_dockerfile_variant_dev() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("Dockerfile.dev", "FROM scratch\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["dockerfile"]}"#);
+}
+
+// ===== detect_dockerfile_extension_suffix =====
+// Suffixe `.dockerfile` (avec le point).
+#[test]
+fn detect_dockerfile_extension_suffix() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("build/app.dockerfile", "FROM scratch\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["dockerfile"]}"#);
+}
+
+// ===== detect_containerfile_detected =====
+// `Containerfile` — même marqueur, valeur `dockerfile`.
+#[test]
+fn detect_containerfile_detected() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("Containerfile", "FROM scratch\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["dockerfile"]}"#);
+}
+
+// ===== detect_containerfile_variant =====
+// Préfixe `Containerfile.` — miroir du helper frontend (le design omettait
+// ce cas, le helper fait foi).
+#[test]
+fn detect_containerfile_variant() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("Containerfile.base", "FROM scratch\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["dockerfile"]}"#);
+}
+
+// ===== detect_dockerfile_case_insensitive =====
+// Le marqueur `dockerfile` est insensible à la casse (seul marqueur de
+// détection à l'être).
+#[test]
+fn detect_dockerfile_case_insensitive() {
+    let tmp = TempDir::new().unwrap();
+    let src =
+        make_source_repo_with_files(&tmp.path().join("src"), &[("dockerfile", "FROM scratch\n")]);
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["dockerfile"]}"#);
+}
+
+// ===== detect_dockerfile_order_fixed_full =====
+// Ordre figé complet avec dockerfile : `rust`, `js-ts`, puis `dockerfile`
+// (pas de `vue` ici — filtré).
+#[test]
+fn detect_dockerfile_order_fixed_full() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[
+            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0.1.0\"\n"),
+            ("package.json", r#"{"name":"app"}"#),
+            ("Dockerfile", "FROM scratch\n"),
+        ],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["rust","js-ts","dockerfile"]}"#);
+}
+
+// ===== detect_dockerfile_negative_names =====
+// Négatifs de la table de vérité : `mydockerfile` ne doit PAS matcher
+// (règle suffixe `.dockerfile` AVEC le point, règle nom = égalité exacte).
+#[test]
+fn detect_dockerfile_negative_names() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[
+            ("docker-compose.yml", "services: {}\n"),
+            ("mydockerfile", "FROM scratch\n"),
+            ("notes.dockerfile.txt", "FROM scratch\n"),
+        ],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":[]}"#);
 }
 
 // ===== detect_without_bare_fails =====
