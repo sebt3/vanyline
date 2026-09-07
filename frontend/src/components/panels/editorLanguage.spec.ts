@@ -22,8 +22,15 @@ describe('languageExtensionForPath', () => {
     expect(languageExtensionForPath(path).length).toBeGreaterThan(0);
   });
 
+  it('.pyi → coloration python des stubs (tableau de longueur 1)', () => {
+    expect(languageExtensionForPath('stubs/foo.pyi')).toHaveLength(1);
+  });
+
   it('chemin sans extension reconnue → tableau vide', () => {
     expect(languageExtensionForPath('Makefile')).toEqual([]);
+    // `.pyc` (bytecode compilé) reste hors service — miroir des négatifs
+    // `.pyc`/`.pyx` du mapping LSP (task-04).
+    expect(languageExtensionForPath('x.pyc')).toHaveLength(0);
   });
 
   it('nom de base Dockerfile → mode dockerfile (tableau de longueur 1)', () => {
@@ -66,6 +73,9 @@ describe('lspToolchainForPath', () => {
     ['a.mjs', { toolchain: 'node', languageId: 'javascript' }],
     ['a.cjs', { toolchain: 'node', languageId: 'javascript' }],
     ['App.vue', { toolchain: 'node', languageId: 'vue' }],
+    // py/pyi mappés python (miroir sandbox `toolchain_for_path`).
+    ['services/api/main.py', { toolchain: 'python', languageId: 'python' }],
+    ['stubs/foo.pyi', { toolchain: 'python', languageId: 'python' }],
     ['Dockerfile', { toolchain: 'docker', languageId: 'dockerfile' }],
     ['deploy/Dockerfile', { toolchain: 'docker', languageId: 'dockerfile' }],
     ['Dockerfile.dev', { toolchain: 'docker', languageId: 'dockerfile' }],
@@ -78,7 +88,9 @@ describe('lspToolchainForPath', () => {
     expect(lspToolchainForPath(path)).toEqual(expected);
   });
 
-  it.each(['a.py', 'a.rhai', 'a.hbs', null])('retourne null pour %s', (path) => {
+  // `.py` est mappé python depuis task-04 — retiré des négatifs (la règle
+  // docker reste évaluée avant, verrouillée par le test de précédence).
+  it.each(['a.rhai', 'a.hbs', null])('retourne null pour %s', (path) => {
     expect(lspToolchainForPath(path)).toBeNull();
   });
 
@@ -88,6 +100,17 @@ describe('lspToolchainForPath', () => {
     expect(lspToolchainForPath('A.JS')).toEqual({ toolchain: 'node', languageId: 'javascript' });
     expect(lspToolchainForPath('App.VUE')).toEqual({ toolchain: 'node', languageId: 'vue' });
     expect(lspToolchainForPath('DOCKERFILE')).toEqual({ toolchain: 'docker', languageId: 'dockerfile' });
+    expect(lspToolchainForPath('MAIN.PY')).toEqual({ toolchain: 'python', languageId: 'python' });
+  });
+
+  it('précédence du nom de base docker sur .py ; .pyc/.pyx hors service', () => {
+    // Miroir sandbox : `Dockerfile.py` est docker/dockerfile, pas python (le
+    // nom de base passe AVANT le switch d'extension — patron
+    // `toolchain_for_path_python_precedence_dockerfile` côté rust).
+    expect(lspToolchainForPath('Dockerfile.py')).toEqual({ toolchain: 'docker', languageId: 'dockerfile' });
+    // Suffixes voisins, mêmes négatifs que la détection tâche 01.
+    expect(lspToolchainForPath('data.pyc')).toBeNull();
+    expect(lspToolchainForPath('kernel.pyx')).toBeNull();
   });
 });
 

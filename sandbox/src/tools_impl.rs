@@ -666,6 +666,15 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
 /// par tsserver via le canal `tsserver/request` que le primaire relaie à l'aux
 /// (`typescript.tsserverRequest`) — le multiplexeur ne voit qu'un flux déjà
 /// enrichi. Mapping miroir de `lspToolchainForPath` du frontend.
+/// `.py`/`.pyi` → `("python", "python")` : la session python est le composite
+/// primaire `pyright-langserver` + aux `vnl-ruff-lsp` (diagnostics ruff
+/// fusionnés par la session, preset `python` du controller — feature
+/// python-support) ; la languageId `"python"` est celle qu'attendent les deux.
+/// `.pyi` (stubs typés) route comme `.py`, et le mapping est insensible à la
+/// casse comme le reste de la table (contrairement à la DÉTECTION `maint`,
+/// sensible à la casse) — ouvrir un `MAIN.PY` routage pyright. Mapping miroir
+/// de `lspToolchainForPath` du frontend (mêmes commentaires croisés que
+/// `is_dockerfile_path`).
 /// `Dockerfile`/`Containerfile` (+ variantes `Dockerfile.*`,
 /// `Containerfile.*`, `*.dockerfile`) → `("docker", "dockerfile")` : la
 /// session docker est le composite `docker-langserver` + aux hadolint
@@ -694,6 +703,8 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
         Some(("node", "javascript"))
     } else if lower.ends_with(".vue") {
         Some(("node", "vue"))
+    } else if lower.ends_with(".py") || lower.ends_with(".pyi") {
+        Some(("python", "python"))
     } else {
         None
     }
@@ -4034,9 +4045,10 @@ mod tests {
     #[tokio::test]
     async fn lsp_no_toolchain_for_extension() {
         let (state, tmpdir) = make_lsp_state("noext").await;
-        // Write a .py file — no LSP toolchain maps to Python in the config.
-        // But toolchain_for_path(".py") → None, so we need a file with unknown ext
-        // under the sandbox_root that is already confined.
+        // Write a .py file — .py maps to the python toolchain since the
+        // python-support mapping task, but this config has no python spec:
+        // get_or_spawn yields None → VNL-SBX-LSP-006 (same code as the
+        // unknown-extension branch, different message).
         let fake_path = tmpdir.path().join("main.py");
         std::fs::write(&fake_path, "x = 1").unwrap();
 
@@ -4132,7 +4144,6 @@ mod tests {
     #[test]
     fn toolchain_for_path_unknown_extension() {
         assert_eq!(toolchain_for_path("file.xyz"), None);
-        assert_eq!(toolchain_for_path("file.py"), None);
         assert_eq!(toolchain_for_path("file.json"), None);
         assert_eq!(toolchain_for_path("README.md"), None);
     }
@@ -4192,6 +4203,48 @@ mod tests {
             toolchain_for_path("Dockerfile.ts"),
             Some(("docker", "dockerfile"))
         );
+    }
+
+    #[test]
+    fn toolchain_for_path_python_file() {
+        assert_eq!(
+            toolchain_for_path("src/main.py"),
+            Some(("python", "python"))
+        );
+        assert_eq!(
+            toolchain_for_path("stubs/foo.pyi"),
+            Some(("python", "python"))
+        );
+    }
+
+    #[test]
+    fn toolchain_for_path_python_case_insensitive() {
+        assert_eq!(toolchain_for_path("MAIN.PY"), Some(("python", "python")));
+        assert_eq!(
+            toolchain_for_path("Stubs/Foo.Pyi"),
+            Some(("python", "python"))
+        );
+    }
+
+    #[test]
+    fn toolchain_for_path_python_precedence_dockerfile() {
+        // Verrouillage du miroir frontend (patron
+        // `toolchain_for_path_dockerfile_precedence_over_extension`) : la
+        // règle de nom de base docker, évaluée en premier, gagne sur
+        // l'extension — `Dockerfile.py` est docker, pas python.
+        assert_eq!(
+            toolchain_for_path("Dockerfile.py"),
+            Some(("docker", "dockerfile"))
+        );
+    }
+
+    #[test]
+    fn toolchain_for_path_python_negative() {
+        // Suffixes voisins hors service — mêmes négatifs que la détection
+        // `maint` (tâche 01) : bytecode compilé et Cython ne sont pas du
+        // python LSP.
+        assert_eq!(toolchain_for_path("data.pyc"), None);
+        assert_eq!(toolchain_for_path("kernel.pyx"), None);
     }
 
     #[test]
