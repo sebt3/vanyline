@@ -85,6 +85,8 @@ jobs:
             dockerfile: toolchains/node/Dockerfile
           - component: toolchains-docker
             dockerfile: toolchains/docker/Dockerfile
+          - component: toolchains-python
+            dockerfile: toolchains/python/Dockerfile
     steps:
       - uses: actions/checkout@v7
 #      - uses: docker/setup-qemu-action@v4
