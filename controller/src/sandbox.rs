@@ -104,7 +104,8 @@ fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
 /// `/toolchains/node-lsp/usr/local/bin/typescript-language-server`, args
 /// `["--stdio"]`), sinon `None` (aucun LSP — pas de route `/ws/lsp` montée pour
 /// cette toolchain). S'applique uniformément que `spec.toolchains` soit explicite
-/// ou dérivé.
+/// ou dérivé. Pour le `node` DÉRIVÉ en projet vue, la variante composite Volar
+/// (`node_lsp_composite`) remplace ce preset dans `build_sandbox_pod`.
 ///
 /// `ctx.lsp_image_rust`/`ctx.lsp_image_node` valent par défaut la même image que
 /// `ctx.toolchain_image_rust`/`ctx.toolchain_image_node` (`toolchains/rust/`,
@@ -131,6 +132,49 @@ fn resolve_toolchain_lsp(toolchain: &Toolchain, ctx: &SandboxPodContext) -> Opti
         }),
         _ => None,
     }
+}
+
+/// Variante composite Volar du preset `node` (feature vue-lsp) : primaire
+/// `vue-language-server`, enfant auxiliaire `tsserver-forward`
+/// (`typescript-language-server`) auquel le multiplexeur sandbox relaye les
+/// `tsserver/request` et injecte les `initOptions` (cf. `LspAux` dans
+/// `sandbox/src/lsp.rs`). Preset-only (décision 2026-09-06) : `aux` n'existe
+/// que dans ce JSON interne, la CRD `LspSpec` ne l'expose pas — jamais
+/// d'`aux` pour une spec explicite ou un `lsp` custom.
+///
+/// Les deux bins vivent dans la même image (`ctx.lsp_image_node`) montée sur
+/// `/toolchains/node-lsp` : pas de montage supplémentaire vs le preset
+/// mono-process.
+///
+/// Pas de `--tsdk` : le plugin ne sert qu'en mode hybride (primaire Volar), le
+/// flag n'est requis qu'en mode takeover — supprimé. (README
+/// `@vue/language-server` lu dans l'image task-02, config nvim de référence
+/// identique sans ce flag.)
+///
+/// `location` = chemin du paquet `@vue/language-server` DANS LE POD :
+/// `/toolchains/node-lsp` (montage de l'image) + `usr/local/lib/node_modules`
+/// (préfixe `npm -g` sur `node:trixie-slim` — même préfixe que les `bin` ci-dessus
+/// en `usr/local/bin`, vérification empirique task-02). Le chemin niché
+/// `node_modules/@vue/typescript-plugin` à l'intérieur du paquet est requis
+/// par la résolution tsserver `<location>/node_modules/<name>`.
+fn node_lsp_composite(ctx: &SandboxPodContext) -> (LspSpec, Vec<serde_json::Value>) {
+    let aux = vec![serde_json::json!({
+        "role": "tsserver-forward",
+        "bin": "/toolchains/node-lsp/usr/local/bin/typescript-language-server",
+        "args": ["--stdio"],
+        "initOptions": {
+            "plugins": [{
+                "name": "@vue/typescript-plugin",
+                "location": "/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server"
+            }]
+        }
+    })];
+    let spec = LspSpec {
+        image: ctx.lsp_image_node.clone(),
+        bin: "/toolchains/node-lsp/usr/local/bin/vue-language-server".to_string(),
+        args: vec!["--stdio".to_string()],
+    };
+    (spec, aux)
 }
 
 /// Agrège l'environnement de toutes les toolchains d'une Sandbox, dans l'ordre
@@ -184,9 +228,12 @@ pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
 /// Toolchains effectives d'une Sandbox : `spec.toolchains` s'il est non vide
 /// (priorité explicite — jamais fusionnée avec la dérivation), sinon dérivées
 /// de `project.status.languages` : `"rust"` → toolchain `rust` avec
-/// `ctx.toolchain_image_rust` ; `"js-ts"` → toolchain `node` avec
-/// `ctx.toolchain_image_node`. Env vide => preset connu (`toolchain_preset`)
-/// appliqué par `resolve_toolchain_env`. Ordre fixe : rust puis node.
+/// `ctx.toolchain_image_rust` ; `"js-ts"` **ou `"vue"`** → toolchain `node`
+/// avec `ctx.toolchain_image_node` (le marqueur `vue` implique `node`
+/// indépendamment de `js-ts` — un seul `node` même si les deux marqueurs sont
+/// présents, invariant 5 de la feature vue-lsp). Env vide => preset connu
+/// (`toolchain_preset`) appliqué par `resolve_toolchain_env`. Ordre fixe :
+/// rust puis node.
 pub fn effective_toolchains(
     sandbox: &Sandbox,
     project: &Project,
@@ -209,7 +256,7 @@ pub fn effective_toolchains(
             lsp: None,
         });
     }
-    if languages.iter().any(|l| l == "js-ts") {
+    if languages.iter().any(|l| l == "js-ts" || l == "vue") {
         toolchains.push(Toolchain {
             name: "node".to_string(),
             image: ctx.toolchain_image_node.clone(),
@@ -360,10 +407,29 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
     }
     env.extend(aggregate_toolchain_env(&toolchains));
 
+    // Variante composite Volar (preset-only, feature vue-lsp) : uniquement sur
+    // le toolchain `node` DÉRIVÉ (`spec.toolchains` vide) quand `languages`
+    // contient "vue" — invariant 1 : un `spec.toolchains` explicite pose son
+    // propre `toolchain.lsp` et ne reçoit jamais la variante.
+    let volar = sandbox.spec.toolchains.is_empty()
+        && project
+            .status
+            .as_ref()
+            .is_some_and(|s| s.languages.iter().any(|l| l == "vue"));
+
     // Pour chaque toolchain effective, résoudre le LSP et monter le volume dédié
     let mut lsp_entries: Vec<serde_json::Value> = Vec::new();
     for toolchain in &toolchains {
-        if let Some(lsp) = resolve_toolchain_lsp(toolchain, ctx) {
+        // Invariant 2 : un `lsp` custom est utilisé tel quel, jamais d'`aux`
+        // additionnée (le garde `lsp.is_none()` est redondant avec `volar` —
+        // les toolchains dérivées n'ont jamais de `lsp` — mais explicite la
+        // règle).
+        let resolved = if volar && toolchain.name == "node" && toolchain.lsp.is_none() {
+            Some(node_lsp_composite(ctx))
+        } else {
+            resolve_toolchain_lsp(toolchain, ctx).map(|lsp| (lsp, Vec::new()))
+        };
+        if let Some((lsp, aux)) = resolved {
             volumes.push(Volume {
                 name: format!("toolchain-{}-lsp", toolchain.name),
                 image: Some(k8s_openapi::api::core::v1::ImageVolumeSource {
@@ -377,11 +443,27 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
                 mount_path: format!("/toolchains/{}-lsp", toolchain.name),
                 ..Default::default()
             });
-            lsp_entries.push(serde_json::json!({
+            let mut entry = serde_json::json!({
                 "name": toolchain.name,
                 "bin": lsp.bin,
                 "args": lsp.args,
-            }));
+            });
+            // Clé `aux` OMISE quand vide (pas `"aux":[]`) : bytes de
+            // `VNL_LSP_TOOLCHAINS` identiques à avant pour tous les pods hors
+            // composite — garde de non-régression stricte.
+            //
+            // Compatibilité de déploiement :
+            // - nouveau controller + vieille sandbox : l'ancienne structure
+            //   `LspToolchain` ignore les champs inconnus (serde) ⟹ elle
+            //   démarre le primaire `vue-language-server` sans aux (`.vue`
+            //   dégradés, rien d'autre) ;
+            // - nouveau sandbox + vieux controller : pas de clé `aux` ⟹
+            //   `#[serde(default)]` ⟹ `aux: []` ⟹ mono-process (chemin
+            //   task-03).
+            if !aux.is_empty() {
+                entry["aux"] = serde_json::Value::Array(aux);
+            }
+            lsp_entries.push(entry);
         }
     }
     if !lsp_entries.is_empty() {
@@ -1520,6 +1602,43 @@ mod tests {
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn effective_toolchains_derives_node_from_vue_alone() {
+        // Le marqueur `vue` implique `node` indépendamment de `js-ts` (invariant 5).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["vue"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "node");
+        assert_eq!(result[0].image, ctx.toolchain_image_node);
+        assert!(result[0].env.is_empty());
+    }
+
+    #[test]
+    fn effective_toolchains_vue_js_ts_no_duplicate() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(
+            &sandbox,
+            &make_project_with_languages(vec!["js-ts", "vue"]),
+            &ctx,
+        );
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "node");
+
+        let result = effective_toolchains(
+            &sandbox,
+            &make_project_with_languages(vec!["rust", "vue"]),
+            &ctx,
+        );
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].name, "rust");
+        assert_eq!(result[1].name, "node");
     }
 
     #[test]
@@ -3020,6 +3139,8 @@ mod tests {
         assert_eq!(entries[0]["name"], "rust");
         assert_eq!(entries[0]["bin"], "/toolchains/rust-lsp/custom/bin");
         assert_eq!(entries[0]["args"], serde_json::json!(["--x"]));
+        // custom lsp : jamais d'`aux` additionnée (invariant 2, tâche 10 vue-lsp)
+        assert!(!entries[0].get("aux").is_some());
     }
 
     #[test]
@@ -3075,5 +3196,196 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["name"], "rust");
         assert_eq!(entries[1]["name"], "node");
+    }
+
+    /// Parse `VNL_LSP_TOOLCHAINS` du pod construit (mêmes helpers que
+    /// `build_sandbox_pod_lsp_env_order_rust_then_node`).
+    fn lsp_env_entries(pod: &Pod) -> Vec<serde_json::Value> {
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        let lsp_env = env
+            .iter()
+            .find(|e| e.name == "VNL_LSP_TOOLCHAINS")
+            .expect("should have VNL_LSP_TOOLCHAINS");
+        let val = lsp_env
+            .value
+            .as_ref()
+            .expect("VNL_LSP_TOOLCHAINS must have value");
+        serde_json::from_str(val).expect("VNL_LSP_TOOLCHAINS must be valid JSON")
+    }
+
+    #[test]
+    fn build_sandbox_pod_node_vue_composite_entry_exact() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["js-ts", "vue"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "node");
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/node-lsp/usr/local/bin/vue-language-server"
+        );
+        assert_eq!(entries[0]["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(entries[0]["aux"][0]["role"], "tsserver-forward");
+        assert_eq!(
+            entries[0]["aux"][0]["bin"],
+            "/toolchains/node-lsp/usr/local/bin/typescript-language-server"
+        );
+        assert_eq!(entries[0]["aux"][0]["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(
+            entries[0]["aux"][0]["initOptions"]["plugins"][0]["name"],
+            "@vue/typescript-plugin"
+        );
+        assert_eq!(
+            entries[0]["aux"][0]["initOptions"]["plugins"][0]["location"],
+            "/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server"
+        );
+        // Entrée EXACTEMENT le JSON contrat (aucune clé superflue).
+        assert_eq!(
+            entries[0],
+            serde_json::json!({
+                "name": "node",
+                "bin": "/toolchains/node-lsp/usr/local/bin/vue-language-server",
+                "args": ["--stdio"],
+                "aux": [{
+                    "role": "tsserver-forward",
+                    "bin": "/toolchains/node-lsp/usr/local/bin/typescript-language-server",
+                    "args": ["--stdio"],
+                    "initOptions": {
+                        "plugins": [{
+                            "name": "@vue/typescript-plugin",
+                            "location": "/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server"
+                        }]
+                    }
+                }]
+            })
+        );
+
+        // Montage `toolchain-node-lsp` toujours là, image ctx.lsp_image_node
+        // (inchangé — primaire et aux vivent dans la même image).
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
+        let lsp_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-node-lsp")
+            .expect("should have toolchain-node-lsp volume");
+        let src = lsp_vol
+            .image
+            .as_ref()
+            .expect("toolchain-node-lsp should have image source");
+        assert_eq!(src.reference, Some(ctx.lsp_image_node.clone()));
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+        let lsp_mount = mounts
+            .iter()
+            .find(|m| m.name == "toolchain-node-lsp")
+            .expect("should have toolchain-node-lsp mount");
+        assert_eq!(lsp_mount.mount_path, "/toolchains/node-lsp");
+    }
+
+    #[test]
+    fn build_sandbox_pod_node_no_vue_no_aux_key() {
+        // Garde de non-régression stricte : node sans vue = JSON identique à
+        // avant (clé `aux` OMISE, pas `"aux":[]`).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["js-ts"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "node");
+        assert!(!entries[0].get("aux").is_some());
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/node-lsp/usr/local/bin/typescript-language-server"
+        );
+        assert_eq!(entries[0]["args"], serde_json::json!(["--stdio"]));
+    }
+
+    #[test]
+    fn build_sandbox_pod_explicit_toolchains_never_volar() {
+        // spec.toolchains explicite court-circuite la dérivation : même un
+        // `node` nommé explicitement + languages ["vue"] ne reçoit jamais la
+        // variante composite (invariant 1).
+        let sandbox = make_sandbox("sb", vec![make_node_tc(Default::default())], None);
+        let project = make_project_with_languages(vec!["vue"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "node");
+        assert!(!entries[0].get("aux").is_some());
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/node-lsp/usr/local/bin/typescript-language-server"
+        );
+        assert_eq!(entries[0]["args"], serde_json::json!(["--stdio"]));
+    }
+
+    #[test]
+    fn build_sandbox_pod_custom_lsp_no_aux() {
+        // `toolchain.lsp = Some(...)` : utilisé tel quel, jamais d'`aux`
+        // additionnée même en présence de vue (invariant 2).
+        let lsp = LspSpec {
+            image: "custom-lsp:1".to_string(),
+            bin: "/toolchains/node-lsp/custom/bin".to_string(),
+            args: vec!["--y".to_string()],
+        };
+        let node_tc = Toolchain {
+            name: "node".to_string(),
+            image: "node:trixie-slim".to_string(),
+            env: Default::default(),
+            lsp: Some(lsp),
+        };
+        let sandbox = make_sandbox("sb", vec![node_tc], None);
+        let project = make_project_with_languages(vec!["vue"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "node");
+        assert_eq!(entries[0]["bin"], "/toolchains/node-lsp/custom/bin");
+        assert_eq!(entries[0]["args"], serde_json::json!(["--y"]));
+        assert!(!entries[0].get("aux").is_some());
+    }
+
+    #[test]
+    fn build_sandbox_pod_vue_rust_entry_order() {
+        // Ordre de `effective_toolchains` (rust puis node), pas celui de
+        // `languages` (["vue", "rust"]).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["vue", "rust"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "rust");
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
+        );
+        assert!(!entries[0].get("aux").is_some());
+        assert_eq!(entries[1]["name"], "node");
+        assert_eq!(
+            entries[1]["bin"],
+            "/toolchains/node-lsp/usr/local/bin/vue-language-server"
+        );
+        assert_eq!(entries[1]["aux"][0]["role"], "tsserver-forward");
     }
 }

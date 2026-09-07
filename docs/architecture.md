@@ -915,6 +915,57 @@ cas-là est réécrit séparément, le walker générique ne l'attrape pas. Dire
 `ToAbsolute` (navigateur → process) / `ToRelative` (process → navigateur), les deux
 sont l'inverse exacte l'une de l'autre (testé en roundtrip).
 
+**Multiplexeur LSP composite** (`vue-lsp`, `LspSession` interne — API publique
+`subscribe`/`send`/`cached_diagnostics`/`wait_for_diagnostics`/`is_alive`
+**inchangée**, bridge navigateur et client MCP inchangés). Une spec toolchain
+avec `aux` non vide (aujourd'hui seul le preset composite Volar en émet, cf.
+"LSP par toolchain" plus bas) fait de la session un vrai multiplexeur : le
+process **primaire** garde son espace d'ids historique, chaque enfant `aux` de
+rôle connu (`tsserver-forward`) est spawné aux mêmes conditions avec son propre
+canal stdin et ses ids internes (jamais routés vers un client). `aux` vide ⟹
+chemin mono-process **strictement** inchangé (invariant de non-régression : tout
+le LSP déployé en dépend — rust, node-sans-vue).
+
+- **Doc-sync** (`didOpen`/`didChange`/`didClose`/`didSave`) et `initialize`
+  (copie avec `initializationOptions` du spec fusionnés) : fan-out à chaque aux
+  vivant. Un aux mort ou saturé (`try_send`) est ignoré — jamais de blocage ni
+  d'échec du chemin client.
+- **Requêtes** routées par méthode (`merge_route_for_method`) : `hover`,
+  `definition`/`typeDefinition`/`implementation`/`references`, `codeAction`,
+  `prepareRename`/`rename`, `completion` → **barrière** `PendingMerge` (fan-out
+  primaire + aux vivants, une seule réponse client fusionnée primary-first :
+  concat de locations/actions, jointure des `Hover.contents`, pli des
+  `WorkspaceEdit`, dédup completion par `(label, kind)`). Toutes les autres
+  méthodes (dont `formatting`, `documentSymbol`, `signatureHelp`,
+  `semanticTokens/*`) → **primaire seul**. `semanticTokens` est primaire par cas
+  explicite : deux flux de tokens sur un même document ne sont pas concaténables,
+  la délégation de plage (script → TS, template/style → Vue) est portée par
+  Volar lui-même via le canal `tsserver/request` (risque n° 1 du design, tranché
+  2026-09-06).
+- **`completionItem/resolve`** : troisième voie dédiée (ni barrière ni primaire
+  aveugle) — cache de provenance `(label, kind) → enfant fournisseur` alimenté à
+  la complétion de chaque barrière `completion`, purgé au `didChange`/`didClose`
+  de l'URI, borné (64 URIs, éviction quelconque). Provenance primaire ⟹ chemin
+  historique ; provenance aux ⟹ routage vers cet enfant ; ambiguë/absente ⟹
+  fallback no-op (item servi tel quel — l'échec acceptable, jamais une erreur).
+- **`publishDiagnostics`** : la part de chaque enfant **remplace** la sienne
+  dans `diag_parts[uri][child_idx]`, le fondu concat primary-first est écrit
+  dans `diagnostics_cache` **avant** tout broadcast — navigateur et MCP voient
+  le même résultat (contrainte : `edit_and_check`/`lsp_diagnostics` lisent le
+  cache). EOF d'un aux ⟹ ses parts purgées + cache recompté (des diagnostics
+  d'un serveur mort feraient passer un `edit_and_check` au vert à tort).
+- **Forwarding `tsserver/request`** (mode hybride Volar v3 : `vue-language-server`
+  ne parle pas à tsserver et délègue à son client) : intercepté (jamais broadcast),
+  exécuté contre le premier aux `tsserver-forward` vivant via
+  `workspace/executeCommand typescript.tsserverRequest` (`arguments = [command,
+  payload]`), la réponse dépilée (`result.body`) et renvoyée au primaire en
+  `tsserver/response` (`params = [[vue_id, body]]`). Aucun aux vivant ⟹ body
+  `null` immédiat, le primaire ne pend jamais.
+- **Cycle de vie** : mort du **primaire** = mort de la session (kill explicite
+  des aux) ; mort d'un **aux** = session dégradée (`is_alive()` ne reflète que
+  le primaire), warn unique, parts et ids en attente purgés (les barrières
+  concernées se complètent sans cette part).
+
 **Rename cross-file côté UI — flux custom, pas le helper du package.**
 `renameSymbol`/`doRename` de `@codemirror/lsp-client` (v6.1.0, tout jeune — risque
 identifié en amont, matérialisé ici) ignore silencieusement les fichiers non ouverts
@@ -946,10 +997,12 @@ sur le même fichier reste racy, l'autosave borne la fenêtre au débounce.
 (`renameSymbolFromView`), en plus des entrées couper/copier/coller déjà en place.
 
 **Mapping toolchain LSP par chemin** (`frontend/src/components/panels/
-editorLanguage.ts::lspToolchainForPath`) : réplique côté frontend le mapping
-extension → toolchain/languageId de la sandbox — `.rs` → `rust`/`rust`, `.ts`/`.tsx`/
-`.mts`/`.cts` → `node`/`typescript`, `.js`/`.jsx`/`.mjs`/`.cjs` → `node`/`javascript`.
-Extension non couverte → `null`, mode dégradé (coloration seule, pas de LSP).
+editorLanguage.ts::lspToolchainForPath`, miroir de `tools_impl.rs::toolchain_for_path`) :
+`.rs` → `rust`/`rust`, `.ts`/`.tsx`/`.mts`/`.cts` → `node`/`typescript`, `.js`/`.jsx`/
+`.mjs`/`.cjs` → `node`/`javascript`, `.vue` → `node`/`vue` (`vue-lsp` — la session
+`node` est le multiplexeur composite Volar, cf. ci-dessous ; `languageId` `vue` est
+celle qu'attend le primaire `vue-language-server`). Extension non couverte → `null`,
+mode dégradé (coloration seule, pas de LSP).
 
 **Coloration syntaxique** (`editorLanguage.ts::byExtension` +
 `languageExtensionForPath`, réutilisé aussi par `DiffView.vue`) : sélection d'une
@@ -963,8 +1016,10 @@ Dockerfile/Containerfile (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
 `StreamLanguage` maison (`langRhai.ts`, `langHandlebars.ts`, fonctions pures
 testées) : **coloration « suffisante » seulement**, pas de parseur Lezer, pas
 d'AST — mots-clés/commentaires/chaînes/nombres pour rhai, HTML-lite + surcouche
-moustaches pour handlebars. Aucune de ces extensions n'a de LSP (vue et
-Dockerfile : branchement LSP hors périmètre, features `vue-lsp`/`docker-lsp`).
+moustaches pour handlebars. rhai/handlebars/Dockerfile n'ont pas de LSP (Dockerfile :
+feature `docker-lsp`, non démarrée) ; `.vue` **a** un LSP depuis `vue-lsp` (multiplexeur
+composite Volar, cf. "Serveur LSP" plus haut) — la coloration `@codemirror/lang-vue`
+reste la couche lexicale sous les diagnostics/complétion LSP.
 
 **Images toolchain = images LSP, décidé après coup (2026-08-20)** : le premier jet de
 cette feature pointait `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` sur les mêmes images
@@ -977,8 +1032,9 @@ impossible, il faut le baker à la construction de l'image. Résolu par deux nou
 images publiées avec le monorepo (`toolchains/rust/Dockerfile`,
 `toolchains/node/Dockerfile` — mêmes bases que les anciens défauts toolchain, LSP
 ajouté au build : `rustup component add rust-analyzer` + symlink vers
-`/usr/local/bin`, `npm install -g typescript-language-server`), publiées avec le même
-tag que app/sandbox/controller (`.github/workflows/release.yml`). `TOOLCHAIN_IMAGE_*`
+`/usr/local/bin`, `npm install -g typescript-language-server` **+ `@vue/language-server`
+et `@vue/typescript-plugin` 3.3.11 épinglés pour le composite Volar de `vue-lsp`**),
+publiées avec le même tag que app/sandbox/controller (`.github/workflows/release.yml`). `TOOLCHAIN_IMAGE_*`
 et `LSP_IMAGE_*` pointent désormais par défaut sur la **même image** par langage — un
 piste écartée en cours de route : `mcr.microsoft.com/devcontainers/typescript-node`
 semblait tout inclure, vérifié en lisant son Dockerfile réel, elle ne contient pas le
@@ -1119,11 +1175,14 @@ restant de `ws12-sandbox-clients`, qui n'attendait que ce champ.
 ci-dessous pour l'outil) : marqueurs de fichiers sur l'arbre HEAD du clone bare —
 `rust` si un `Cargo.toml` existe (racine ou n'importe quel sous-chemin, membre de
 workspace compris), `js-ts` si `package.json` **ou** `tsconfig.json` existe **à la
-racine uniquement** (un `package.json` imbriqué ne compte pas). **Présence
+racine uniquement** (un `package.json` imbriqué ne compte pas), `vue` si un
+`*.vue` existe n'importe où dans l'arbre HEAD (`vue-lsp`). **Présence
 seulement, jamais de version** (décision 2026-08-15 : ni `rust-toolchain.toml`/
 `rust-version`/edition, ni `.nvmrc`/`engines.node` — si le besoin apparaît, ce sera
-une extension explicite, pas une déduction implicite). Périmètre définitivement
-limité à Rust et JS/TS.
+une extension explicite, pas une déduction implicite). Ordre de sortie figé
+`["rust", "js-ts", "vue", "dockerfile"]`, filtré par les marqueurs présents
+(`dockerfile` réservé à `docker-lsp`, aucun marqueur ne le produit encore). Le
+marqueur `vue` **implique la toolchain `node`** indépendamment de `js-ts`.
 
 **Chaînage dans les Jobs `init`/`fetch`** (`project::git_pod_template`) : le pod du
 Job exécute la commande git (`init` ou `fetch`) comme **initContainer**, puis
@@ -1158,9 +1217,10 @@ fusionné** avec la dérivation automatique (tout ou rien). C'est le mécanisme 
 lequel un utilisateur choisit une image de toolchain custom (version pinnée,
 registry privé) quand le défaut ne convient pas. Sinon, dérivé de
 `project.status.languages` : `rust` → toolchain `rust` (image
-`TOOLCHAIN_IMAGE_RUST`, défaut `docker.io/library/rust:slim-trixie`), `js-ts` →
-toolchain `node` (image `TOOLCHAIN_IMAGE_NODE`, défaut
-`docker.io/library/node:trixie-slim`) — mêmes presets d'env que le mode manuel
+`TOOLCHAIN_IMAGE_RUST`, défaut `docker.io/library/rust:slim-trixie`), `js-ts`
+**ou `vue`** → toolchain `node` (image `TOOLCHAIN_IMAGE_NODE`, défaut
+`docker.io/library/node:trixie-slim`) — un seul `node` même si les deux
+marqueurs sont présents ; mêmes presets d'env que le mode manuel
 (`toolchain_preset`), ordre fixe rust puis node. Les deux images par défaut sont
 des flags CLI du controller (`env` clap), surchargeables sans rebuild, recette
 alignée sur `deploy/sandbox/sandbox-test.yaml`.
@@ -1177,9 +1237,25 @@ pour cette toolchain, éditeur en mode dégradé). S'applique uniformément que
 `spec.toolchains` soit explicite ou dérivé — zero-config pour rust/node dans les deux
 cas. Monté en volume image séparé, `/toolchains/<name>-lsp` (à côté de
 `/toolchains/<name>` du toolchain lui-même) ; découverte côté sandbox via un seul env
-JSON `VNL_LSP_TOOLCHAINS` (`[{name, bin, args}]`, pas d'interpolation shell, argv
+JSON `VNL_LSP_TOOLCHAINS` (`[{name, bin, args, aux?}]`, pas d'interpolation shell, argv
 array au spawn — cf. section "Serveur LSP" plus haut pour le process manager
 consommateur).
+
+**Variante composite Volar** (`vue-lsp`, `node_lsp_composite`) : le `node`
+**dérivé** (`spec.toolchains` vide) d'un projet dont `languages` contient `vue`
+reçoit un preset composite à la place du preset mono-process — primaire
+`vue-language-server --stdio`, plus un enfant `aux` de rôle `tsserver-forward`
+(`typescript-language-server --stdio` avec `initOptions.plugins = [{ name:
+"@vue/typescript-plugin", location:
+"/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server" }]`). Les
+deux bins vivent dans la **même** image (`ctx.lsp_image_node`, `toolchains/node/
+Dockerfile` — Volar 3.3.11 épinglé au patch, `@vue/language-server` installé
+`--install-links` pour que la résolution tsserver `<location>/node_modules/@vue/
+typescript-plugin` trouve le paquet niché). **Preset-only** (décision 2026-09-06)
+: la clé `aux` n'existe que dans ce JSON, la CRD `LspSpec` ne l'expose pas — un
+`spec.toolchains` explicite ou un `toolchain.lsp` custom ne reçoit **jamais**
+d'`aux`. Clé `aux` omise (pas `"aux":[]`) hors composite : bytes de
+`VNL_LSP_TOOLCHAINS` inchangés pour tous les pods non-Vue.
 
 ### CRD Application (`controller-application-crd`)
 

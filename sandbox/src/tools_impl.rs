@@ -659,6 +659,13 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
 
 /// Mapping extension of a file → (toolchain name, LSP languageId).
 /// Known toolchains by convention with controller presets: `"rust"`, `"node"`.
+/// `.vue` → `("node", "vue")` : la session node est le multiplexeur composite
+/// Volar (primaire `vue-language-server`, aux `tsserver-forward`, cf. `lsp.rs`).
+/// La languageId `"vue"` est celle qu'attend le primaire ; l'intelligence des
+/// blocs `<script>` (complétion / diagnostics / hover / definition) est fournie
+/// par tsserver via le canal `tsserver/request` que le primaire relaie à l'aux
+/// (`typescript.tsserverRequest`) — le multiplexeur ne voit qu'un flux déjà
+/// enrichi. Mapping miroir de `lspToolchainForPath` du frontend.
 /// `None` if the extension is not covered (fallback: no LSP).
 pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     let lower = path.to_lowercase();
@@ -676,6 +683,8 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
         || lower.ends_with(".cjs")
     {
         Some(("node", "javascript"))
+    } else if lower.ends_with(".vue") {
+        Some(("node", "vue"))
     } else {
         None
     }
@@ -695,7 +704,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "lsp_diagnostics",
-            "description": "Get diagnostics (errors/warnings) for a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Get diagnostics (errors/warnings) for a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -706,7 +715,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_definition",
-            "description": "Go to definition of the symbol at a position in a file via the LSP server, with the hover signature/doc for the same position when available. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Go to definition of the symbol at a position in a file via the LSP server, with the hover signature/doc for the same position when available. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -720,7 +729,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_references",
-            "description": "Find all references of the symbol at a position in a file via the LSP server. Results are grouped by file: each reference is rendered under its enclosing symbol (name + signature, resolved with one documentSymbol per distinct file — never per reference) with a line snippet; out-of-workspace references render raw (bare line, never read). Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Find all references of the symbol at a position in a file via the LSP server. Results are grouped by file: each reference is rendered under its enclosing symbol (name + signature, resolved with one documentSymbol per distinct file — never per reference) with a line snippet; out-of-workspace references render raw (bare line, never read). Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -734,7 +743,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_rename",
-            "description": "Rename a symbol at a position in a file via the LSP server. Default (preview false) applies the resulting WorkspaceEdit to the filesystem and returns a before/after report per edited site. With preview true, the WorkspaceEdit is computed and its sites listed grouped by file — no file is modified. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Rename a symbol at a position in a file via the LSP server. Default (preview false) applies the resulting WorkspaceEdit to the filesystem and returns a before/after report per edited site. With preview true, the WorkspaceEdit is computed and its sites listed grouped by file — no file is modified. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line", "new_name"],
@@ -750,7 +759,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_document_symbols",
-            "description": "Outline a file's symbols (functions, structs, etc.) with kinds, signatures and line numbers via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others (including .vue) return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Outline a file's symbols (functions, structs, etc.) with kinds, signatures and line numbers via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -773,7 +782,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "inspect_symbol",
-            "description": "One-shot overview of a symbol: signature and doc (hover), definition location(s), and all references grouped by file with their enclosing symbol. Same position model as lsp_definition (path + 1-based line + symbol name or character). Use this instead of chaining lsp_definition + lsp_references for a first read of a symbol. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs (node) — others return VNL-SBX-LSP-006.",
+            "description": "One-shot overview of a symbol: signature and doc (hover), definition location(s), and all references grouped by file with their enclosing symbol. Same position model as lsp_definition (path + 1-based line + symbol name or character). Use this instead of chaining lsp_definition + lsp_references for a first read of a symbol. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -3357,6 +3366,7 @@ mod tests {
                 name: "rust".to_string(),
                 bin: "python3".to_string(),
                 args: vec![script_path.to_string_lossy().to_string()],
+                aux: vec![],
             }],
             tmpdir.path().to_path_buf(),
         ));
@@ -4102,6 +4112,15 @@ mod tests {
     }
 
     #[test]
+    fn toolchain_for_path_vue_file() {
+        assert_eq!(toolchain_for_path("src/App.vue"), Some(("node", "vue")));
+        assert_eq!(
+            toolchain_for_path("components/deep/Hello.vue"),
+            Some(("node", "vue"))
+        );
+    }
+
+    #[test]
     fn toolchain_for_path_unknown_extension() {
         assert_eq!(toolchain_for_path("file.xyz"), None);
         assert_eq!(toolchain_for_path("file.py"), None);
@@ -4120,6 +4139,7 @@ mod tests {
             toolchain_for_path("src/script.JS"),
             Some(("node", "javascript"))
         );
+        assert_eq!(toolchain_for_path("App.VUE"), Some(("node", "vue")));
     }
 
     // ── Rename arg parsing ────────────────────────────────────────────────────
@@ -4300,6 +4320,7 @@ mod tests {
                 name: "rust".to_string(),
                 bin: "python3".to_string(),
                 args: vec![script_path.to_string_lossy().to_string()],
+                aux: vec![],
             }],
             tmpdir.path().to_path_buf(),
         ));
@@ -5684,6 +5705,7 @@ mod tests {
                     script_path.to_string_lossy().to_string(),
                     observer_log.to_string_lossy().to_string(),
                 ],
+                aux: vec![],
             }],
             root.clone(),
         ));
