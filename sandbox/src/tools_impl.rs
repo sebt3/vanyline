@@ -666,8 +666,17 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
 /// par tsserver via le canal `tsserver/request` que le primaire relaie à l'aux
 /// (`typescript.tsserverRequest`) — le multiplexeur ne voit qu'un flux déjà
 /// enrichi. Mapping miroir de `lspToolchainForPath` du frontend.
+/// `Dockerfile`/`Containerfile` (+ variantes `Dockerfile.*`,
+/// `Containerfile.*`, `*.dockerfile`) → `("docker", "dockerfile")` : la
+/// session docker est le composite `docker-langserver` + aux hadolint
+/// (`lsp.rs`, rôle `diagnostics-merge`). Règle de NOM DE BASE (miroir du
+/// frontend `lspToolchainForPath`, risque n° 7) évaluée AVANT les extensions —
+/// helper partagé avec la détection (`maint::is_dockerfile_path`).
 /// `None` if the extension is not covered (fallback: no LSP).
 pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
+    if crate::maint::is_dockerfile_path(path) {
+        return Some(("docker", "dockerfile"));
+    }
     let lower = path.to_lowercase();
     if lower.ends_with(".rs") {
         Some(("rust", "rust"))
@@ -704,7 +713,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
             "name": "lsp_diagnostics",
-            "description": "Get diagnostics (errors/warnings) for a file via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Get diagnostics (errors/warnings) for a file via the LSP server. Supported targets: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node), Dockerfile/Containerfile names (docker) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -715,7 +724,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_definition",
-            "description": "Go to definition of the symbol at a position in a file via the LSP server, with the hover signature/doc for the same position when available. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Go to definition of the symbol at a position in a file via the LSP server, with the hover signature/doc for the same position when available. Supported targets: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node), Dockerfile/Containerfile names (docker) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -729,7 +738,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_references",
-            "description": "Find all references of the symbol at a position in a file via the LSP server. Results are grouped by file: each reference is rendered under its enclosing symbol (name + signature, resolved with one documentSymbol per distinct file — never per reference) with a line snippet; out-of-workspace references render raw (bare line, never read). Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Find all references of the symbol at a position in a file via the LSP server. Results are grouped by file: each reference is rendered under its enclosing symbol (name + signature, resolved with one documentSymbol per distinct file — never per reference) with a line snippet; out-of-workspace references render raw (bare line, never read). Supported targets: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node), Dockerfile/Containerfile names (docker) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -743,7 +752,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_rename",
-            "description": "Rename a symbol at a position in a file via the LSP server. Default (preview false) applies the resulting WorkspaceEdit to the filesystem and returns a before/after report per edited site. With preview true, the WorkspaceEdit is computed and its sites listed grouped by file — no file is modified. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Rename a symbol at a position in a file via the LSP server. Default (preview false) applies the resulting WorkspaceEdit to the filesystem and returns a before/after report per edited site. With preview true, the WorkspaceEdit is computed and its sites listed grouped by file — no file is modified. Supported targets: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node), Dockerfile/Containerfile names (docker) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line", "new_name"],
@@ -759,7 +768,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "lsp_document_symbols",
-            "description": "Outline a file's symbols (functions, structs, etc.) with kinds, signatures and line numbers via the LSP server. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
+            "description": "Outline a file's symbols (functions, structs, etc.) with kinds, signatures and line numbers via the LSP server. Supported targets: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node), Dockerfile/Containerfile names (docker) — others return VNL-SBX-LSP-006, no LSP configured for that extension.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path"],
@@ -782,7 +791,7 @@ pub fn lsp_tools() -> Vec<serde_json::Value> {
         }),
         serde_json::json!({
             "name": "inspect_symbol",
-            "description": "One-shot overview of a symbol: signature and doc (hover), definition location(s), and all references grouped by file with their enclosing symbol. Same position model as lsp_definition (path + 1-based line + symbol name or character). Use this instead of chaining lsp_definition + lsp_references for a first read of a symbol. Supported extensions: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node) — others return VNL-SBX-LSP-006.",
+            "description": "One-shot overview of a symbol: signature and doc (hover), definition location(s), and all references grouped by file with their enclosing symbol. Same position model as lsp_definition (path + 1-based line + symbol name or character). Use this instead of chaining lsp_definition + lsp_references for a first read of a symbol. Supported targets: .rs (rust), .ts/.tsx/.mts/.cts/.js/.jsx/.mjs/.cjs/.vue (node), Dockerfile/Containerfile names (docker) — others return VNL-SBX-LSP-006.",
             "inputSchema": {
                 "type": "object",
                 "required": ["path", "line"],
@@ -4140,6 +4149,65 @@ mod tests {
             Some(("node", "javascript"))
         );
         assert_eq!(toolchain_for_path("App.VUE"), Some(("node", "vue")));
+    }
+
+    #[test]
+    fn toolchain_for_path_dockerfile_files() {
+        assert_eq!(
+            toolchain_for_path("Dockerfile"),
+            Some(("docker", "dockerfile"))
+        );
+        assert_eq!(
+            toolchain_for_path("deploy/prod/Dockerfile"),
+            Some(("docker", "dockerfile"))
+        );
+        assert_eq!(
+            toolchain_for_path("Dockerfile.dev"),
+            Some(("docker", "dockerfile"))
+        );
+        assert_eq!(
+            toolchain_for_path("build/app.dockerfile"),
+            Some(("docker", "dockerfile"))
+        );
+        assert_eq!(
+            toolchain_for_path("Containerfile"),
+            Some(("docker", "dockerfile"))
+        );
+    }
+
+    #[test]
+    fn toolchain_for_path_dockerfile_case_insensitive() {
+        assert_eq!(
+            toolchain_for_path("CONTAINERFILE"),
+            Some(("docker", "dockerfile"))
+        );
+    }
+
+    #[test]
+    fn toolchain_for_path_dockerfile_precedence_over_extension() {
+        // Verrouillage du miroir frontend (`lspToolchainForPath`) : le nom de
+        // base (règle du helper partagé `maint::is_dockerfile_path`) gagne sur
+        // l'extension — `Dockerfile.ts` est docker, pas node.
+        assert_eq!(
+            toolchain_for_path("Dockerfile.ts"),
+            Some(("docker", "dockerfile"))
+        );
+    }
+
+    #[test]
+    fn lsp_tools_descriptions_mention_docker_targets() {
+        // Un seul tool suffit — les descriptions ne sont assertées nulle part
+        // ailleurs sinon (task-05) ; lsp_diagnostics représentatif.
+        let tools = lsp_tools();
+        let diagnostics = tools
+            .iter()
+            .find(|tool| tool["name"] == "lsp_diagnostics")
+            .expect("lsp_diagnostics présent dans lsp_tools()");
+        let description = diagnostics["description"].as_str().unwrap();
+        assert!(
+            description.contains("Dockerfile/Containerfile names (docker)"),
+            "la description de lsp_diagnostics doit lister les cibles docker : {description}"
+        );
     }
 
     // ── Rename arg parsing ────────────────────────────────────────────────────
