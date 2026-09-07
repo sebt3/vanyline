@@ -83,6 +83,8 @@ jobs:
             dockerfile: toolchains/rust/Dockerfile
           - component: toolchains-node
             dockerfile: toolchains/node/Dockerfile
+          - component: toolchains-docker
+            dockerfile: toolchains/docker/Dockerfile
     steps:
       - uses: actions/checkout@v7
 #      - uses: docker/setup-qemu-action@v4
