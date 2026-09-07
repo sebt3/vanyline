@@ -17,6 +17,10 @@ path = "src/bin/maint.rs"
 name = "vnl-hadolint-lsp"
 path = "src/bin/hadolint_lsp.rs"
 
+[[bin]]
+name = "vnl-ruff-lsp"
+path = "src/bin/ruff_lsp.rs"
+
 [dependencies]
 tokio = { version = "1", features = ["full"] }
 rand = "0.8"
