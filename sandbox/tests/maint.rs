@@ -1127,6 +1127,138 @@ fn detect_dockerfile_negative_names() {
     assert_eq!(result, r#"{"languages":[]}"#);
 }
 
+// ===== detect_python_by_py_file =====
+// Marqueur `python` posé par un simple `*.py` (feature python-support).
+#[test]
+fn detect_python_by_py_file() {
+    let tmp = TempDir::new().unwrap();
+    let src =
+        make_source_repo_with_files(&tmp.path().join("src"), &[("src/main.py", "print('hi')\n")]);
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["python"]}"#);
+}
+
+// ===== detect_python_by_pyi_only =====
+// `*.pyi` seul (stubs de typage) marque aussi Python.
+#[test]
+fn detect_python_by_pyi_only() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("stubs/foo.pyi", "def f() -> int: ...\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["python"]}"#);
+}
+
+// ===== detect_python_by_pyproject_no_py =====
+// `pyproject.toml` sans aucun `*.py` (projet packaging-only).
+#[test]
+fn detect_python_by_pyproject_no_py() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("pyproject.toml", "[project]\nname=\"x\"\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["python"]}"#);
+}
+
+// ===== detect_python_by_setup_cfg =====
+// `setup.cfg` seul marque Python (projet packaging-only).
+#[test]
+fn detect_python_by_setup_cfg() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("setup.cfg", "[metadata]\nname = x\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["python"]}"#);
+}
+
+// ===== detect_python_nested_marker =====
+// Manifest `pyproject.toml` niché (pas à la racine) — contraste voulu avec
+// `js-ts` qui est racine-only.
+#[test]
+fn detect_python_nested_marker() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[("services/api/pyproject.toml", "[project]\n")],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":["python"]}"#);
+}
+
+// ===== detect_python_order_fixed_full =====
+// Ordre figé complet avec python : `python` AVANT `dockerfile`.
+#[test]
+fn detect_python_order_fixed_full() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[
+            ("Cargo.toml", "[package]\nname=\"x\"\nversion=\"0.1.0\"\n"),
+            ("package.json", r#"{"name":"app"}"#),
+            ("App.vue", "<template><div>x</div></template>\n"),
+            ("src/main.py", "print('hi')\n"),
+            ("Dockerfile", "FROM scratch\n"),
+        ],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(
+        result,
+        r#"{"languages":["rust","js-ts","vue","python","dockerfile"]}"#
+    );
+}
+
+// ===== detect_python_negative =====
+// Négatifs : ni `.pyc` ni `.pyx` ne matchent — `.pyx` ne finit PAS par
+// `.py` (suffixe, pas préfixe d'extension).
+#[test]
+fn detect_python_negative() {
+    let tmp = TempDir::new().unwrap();
+    let src = make_source_repo_with_files(
+        &tmp.path().join("src"),
+        &[
+            ("notes.md", "x\n"),
+            ("data.pyc", "x\n"),
+            ("kernel.pyx", "x\n"),
+        ],
+    );
+    let ws = tmp.path().join("ws");
+    std::fs::create_dir_all(&ws).unwrap();
+    maint::run_init(&ws, src.to_str().unwrap(), &[]).unwrap();
+
+    let result = maint::run_detect(&ws).unwrap();
+    assert_eq!(result, r#"{"languages":[]}"#);
+}
+
 // ===== detect_without_bare_fails =====
 #[test]
 fn detect_without_bare_fails() {
