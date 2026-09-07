@@ -2,8 +2,9 @@
 //! multiplexage multi-clients. Un process PRIMAIRE par toolchain, partagé entre
 //! l'éditeur (route WS /ws/lsp/:toolchain) et les tools MCP `lsp_*`, plus des
 //! enfants auxiliaires optionnels (`aux`, multiplexeur — cf.
-//! `docs/features/vue-lsp.md`). `aux` vide ⟹ chemin mono-process strictement
-//! inchangé (cas de toutes les toolchains sans composite aujourd'hui).
+//! `docs/features/vue-lsp.md` et `docs/features/docker-lsp.md`). `aux` vide ⟹
+//! chemin mono-process strictement inchangé (cas de toutes les toolchains sans
+//! composite aujourd'hui).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -16,19 +17,40 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Notify, mpsc};
 
-/// Rôles `aux` réellement spawnés. `docker-lsp` y ajoutera `diagnostics-merge` ;
-/// un rôle inconnu au spawn = `tracing::warn!` + enfant ignoré (jamais une erreur
-/// de session — invariant 1 de la tâche 03).
-const KNOWN_AUX_ROLES: &[&str] = &["tsserver-forward"];
+/// Rôles `aux` réellement spawnés. Rôles connus :
+/// - `"tsserver-forward"` (composite Volar — feature vue-lsp) : l'aux répond
+///   aux requêtes fan-out (`MergeRoute::All`) et reçoit les
+///   `tsserver/request` relayés (tâches 05/07/08).
+/// - `"diagnostics-merge"` (composite hadolint — feature docker-lsp) : l'aux
+///   NE répond à AUCUNE requête. Il reçoit `initialize` (fan-out invariant 3)
+///   et les notifications doc-sync (invariant 2), et publie ses
+///   `textDocument/publishDiagnostics` que la session concatène avec celles
+///   du primaire en amont du cache (fusion déjà indépendante du rôle).
+///
+/// Un rôle inconnu au spawn = `tracing::warn!` + enfant ignoré (jamais une
+/// erreur de session — invariant 1 de la tâche 03).
+const KNOWN_AUX_ROLES: &[&str] = &["tsserver-forward", "diagnostics-merge"];
 
 fn is_known_aux_role(role: &str) -> bool {
     KNOWN_AUX_ROLES.contains(&role)
 }
 
+/// Une requête client (`MergeRoute::All` fan-out + barrière, resolve par
+/// provenance) ne part vers un aux que si son rôle répond aux requêtes.
+/// `diagnostics-merge` ⟹ `false` (contrat design docker-lsp : « requêtes du
+/// client → primaire seul ») ; rôle inconnu ⟹ `false` par défaut sûr (il est
+/// de toute façon ignoré au spawn — défense en profondeur).
+fn aux_answers_requests(role: &str) -> bool {
+    matches!(role, "tsserver-forward")
+}
+
 /// Spécification d'un processus LSP auxiliaire d'une toolchain composite.
 /// Rôles connus : `"tsserver-forward"` (composite Volar — les
 /// `tsserver/request` du primaire y sont exécutés via `executeCommand
-/// typescript.tsserverRequest` et dépilés en `tsserver/response`, tâche 05).
+/// typescript.tsserverRequest` et dépilés en `tsserver/response`, tâche 05) ;
+/// `"diagnostics-merge"` (composite hadolint — feature docker-lsp) : l'aux ne
+/// répond à aucune requête, il ne fait que recevoir doc-sync et publier ses
+/// diagnostics fusionnés avec ceux du primaire.
 /// `aux` n'est jamais déclaré par l'utilisateur (preset-only, décision
 /// 2026-09-06) — seule la tâche controller en émet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1932,6 +1954,22 @@ impl LspSession {
         provenance.insert(uri.to_string(), inner);
     }
 
+    /// Le composite possède-t-il au moins un aux dont le rôle répond aux
+    /// requêtes ? PORTE DE NIVEAU RÔLE (la liste `aux` est figée au spawn —
+    /// l'état `alive` n'y change rien) : avec uniquement des
+    /// `diagnostics-merge`, la provenance completion ne peut JAMAIS avoir été
+    /// écrite (aucun fan-out n'a jamais eu lieu pendant toute la vie de la
+    /// session) et la `completionItem/resolve` relève du chemin primaire
+    /// historique — y envoyer `route_completion_resolve` la ferait retomber
+    /// dans le fallback no-op de la tâche 08 alors qu'ici le primaire est la
+    /// seule source des items (contractuel : le resolve revient au primaire,
+    /// cf. design docker-lsp « requêtes du client → primaire seul »). En
+    /// composite avec `tsserver-forward` : `true` — comportement tâche 08
+    /// strict (provenance, fallback no-op sur didChange purge — inchangé).
+    fn has_requesting_aux(&self) -> bool {
+        self.inner.aux.iter().any(|a| aux_answers_requests(&a.role))
+    }
+
     /// Tâche 08 — troisième voie de `completionItem/resolve` en composite :
     /// **jamais** de barrière, **jamais** le primaire aveugle. Clé
     /// `(label, kind)` de l'item reçu (`params` du client — même forme qu'un
@@ -2150,17 +2188,22 @@ impl LspSession {
     /// Multiplexeur : requête avec `id` → primaire par défaut, CHEMIN
     /// INCHANGÉ ; en composite (`aux` non vide) les méthodes
     /// `MergeRoute::All` (`merge_route_for_method`) sont de plus fan-out vers
-    /// chaque aux vivant sous id interne propre avec barrière `PendingMerge`
-    /// (tâche 07 — une seule réponse client fusionnée à la fin). `initialize`
+    /// chaque aux vivant DONT LE RÔLE RÉPOND AUX REQUÊTES
+    /// (`aux_answers_requests` — tâche 02 docker-lsp : un
+    /// `diagnostics-merge` ne reçoit jamais de requête, la barrière
+    /// `PendingMerge` ne compte que des parts qui peuvent arriver ; tâche 07
+    /// — une seule réponse client fusionnée à la fin). `initialize`
     /// garde sa copie systématique vers chaque aux vivant
     /// (`fan_out_initialize`, invariable 3). `completionItem/resolve` passe
     /// D'ABORD par sa troisième voie dédiée en composite
     /// (`route_completion_resolve`, tâche 08 — routage par provenance, jamais
-    /// de barrière ni de primaire aveugle). Trame sans `id` (notification,
-    /// doc-sync inclus) → primaire puis fan-out telle quelle à chaque aux
-    /// vivant (invariant 2) — un aux mort ou bloqué est ignoré, ne bloque ni
-    /// n'erre jamais le chemin client. `aux` vide ⟹ la table de routage n'est
-    /// JAMAIS consultée, chemin mono-process strictement actuel (invariant 8).
+    /// de barrière ni de primaire aveugle ; jamais non plus quand seul un
+    /// `diagnostics-merge` existe : `has_requesting_aux`). Trame sans `id`
+    /// (notification, doc-sync inclus) → primaire puis fan-out telle quelle
+    /// à chaque aux vivant (invariant 2) — un aux mort ou bloqué est ignoré,
+    /// ne bloque ni n'erre jamais le chemin client. `aux` vide ⟹ la table de
+    /// routage n'est JAMAIS consultée, chemin mono-process strictement actuel
+    /// (invariant 8).
     ///
     /// Erreurs :
     /// - JSON invalide → `VNL-SBX-LSP-001`
@@ -2185,8 +2228,10 @@ impl LspSession {
             // en composite (ni barrière, ni primaire aveugle), AVANT toute
             // écriture d'id. `aux` vide ⟹ la table de provenance n'est PAS
             // consultée, chemin primaire historique strict (invariant 8 — les
-            // serveurs mono ont leur propre mémoire d'items).
-            if !self.inner.aux.is_empty()
+            // serveurs mono ont leur propre mémoire d'items). Tâche 02
+            // docker-lsp : même chemin primaire historique quand aucun aux
+            // du rôle ne répond aux requêtes (`has_requesting_aux`).
+            if self.has_requesting_aux()
                 && msg.get("method").and_then(|m| m.as_str()) == Some("completionItem/resolve")
                 && self.route_completion_resolve(client, &msg)
             {
@@ -2210,18 +2255,31 @@ impl LspSession {
 
             // ── Tâche 07, règle 1 — barrière composite pour les méthodes
             // `Route::All`. `aux` vide ⟹ la table n'est PAS consultée
-            // (invariant 8). La barrière est insérée AVANT l'envoi au
+            // (invariant 8). Tâche 02 docker-lsp : seuls les aux dont le rôle
+            // répond aux requêtes entrent en ligne de compte — composite
+            // 100% `diagnostics-merge` ⟹ `barrier` faux pour TOUTES les
+            // méthodes, chemin requête octet-pour-octet le chemin primaire
+            // historique. La barrière est insérée AVANT l'envoi au
             // primaire : le primaire pourrait répondre avant qu'elle existe,
             // et sa réponse partirait alors par le chemin historique — deux
             // réponses sortantes. Le primaire garde son ids-space historique
             // (`next_req`/`pending` ci-dessus, inchangés) ; les aux recevront
             // des ids internes corrélés par `ClientMerge`.
-            let barrier = !self.inner.aux.is_empty()
+            // Répondeurs = aux dont le rôle accepte les requêtes
+            // (tsserver-forward). diagnostics-merge est exclu par
+            // construction (ne répond à rien) : la barrière ne peut jamais
+            // compter une part qui n'arrivera pas.
+            let responder_candidates: Vec<Arc<AuxChild>> = self
+                .inner
+                .aux
+                .iter()
+                .filter(|aux| aux_answers_requests(&aux.role))
+                .map(Arc::clone)
+                .collect();
+            let barrier = !responder_candidates.is_empty()
                 && method.is_some_and(|m| merge_route_for_method(m) == MergeRoute::All);
             let fan_targets: Vec<Arc<AuxChild>> = if barrier {
-                let alive: Vec<Arc<AuxChild>> = self
-                    .inner
-                    .aux
+                let alive: Vec<Arc<AuxChild>> = responder_candidates
                     .iter()
                     .filter(|aux| aux.alive.load(Ordering::SeqCst))
                     .map(Arc::clone)
@@ -8202,6 +8260,431 @@ while True:
             session.pending_merge_count(),
             0,
             "aucune barrière de fusion créée par les méthodes semanticTokens"
+        );
+
+        drop(tmpdir);
+    }
+
+    // ── Tests tâche 02 (docker-lsp) : rôle aux `diagnostics-merge` ─────────
+
+    /// docker-lsp tâche 02 test 1 : `dm_requests_route_to_primary_only` —
+    /// composite recorder/recorder rôle `diagnostics-merge` : `initialize`
+    /// client puis les quatre requêtes `MergeRoute::All` (hover, completion,
+    /// definition, codeAction, ids 1..4). Le client reçoit les 4 réponses
+    /// « ok » du primaire ÉCHO (aucune barrière engagée) ; le log primaire
+    /// porte les 4 méthodes ; l'aux reçoit la copie d'`initialize` (canal
+    /// vivant — invariant 3, preuve positive avant les assertions
+    /// d'absence — et unique trame à `id` de son fil) : il ne reçoit AUCUNE
+    /// requête du client, la barrière ne peut jamais compter une part qui
+    /// n'arrivera jamais.
+    #[tokio::test]
+    async fn dm_requests_route_to_primary_only() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_RECORDER_PY,
+            &[("diagnostics-merge", FAKE_LSP_RECORDER_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("initialize ok");
+        let init_resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse initialize du primaire"),
+        );
+        assert_eq!(init_resp["id"].as_i64(), Some(0));
+        assert_eq!(init_resp["result"], serde_json::json!("ok"));
+
+        let requested: [&str; 4] = [
+            "textDocument/hover",
+            "textDocument/completion",
+            "textDocument/definition",
+            "textDocument/codeAction",
+        ];
+        for (id, method) in [
+            (1i64, requested[0]),
+            (2, requested[1]),
+            (3, requested[2]),
+            (4, requested[3]),
+        ] {
+            session
+                .send(client, text_request(id, method, "file:///w/Dockerfile", 0))
+                .await
+                .expect("requête ok");
+        }
+        for (id, method) in [
+            (1i64, requested[0]),
+            (2, requested[1]),
+            (3, requested[2]),
+            (4, requested[3]),
+        ] {
+            let resp = client_msg(
+                &recv_timeout(&mut rx, Duration::from_secs(5))
+                    .await
+                    .unwrap_or_else(|| {
+                        panic!("la réponse {method} du primaire (id {id}) doit être servie")
+                    }),
+            );
+            assert_eq!(resp["id"].as_i64(), Some(id), "id restauré pour {method}");
+            assert_eq!(
+                resp["result"],
+                serde_json::json!("ok"),
+                "écho du primaire servi verbatim — pas un résultat de fusion \
+                 (aucune barrière possible avec un composite 100% diagnostics-merge) : {resp}"
+            );
+        }
+
+        // poll primaire AVANT d'inspecter le log aux (pas de course) : les
+        // réponses client reçues + le primaire qui a journalisé les 4 prouvent
+        // que tout est arrivé ; une part fan-outée vers l'aux y serait déjà
+        // journalisée aussi (le recorder logge avant de répondre).
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| {
+                requested.iter().all(|m| {
+                    frames
+                        .iter()
+                        .any(|f| f.get("method").and_then(|x| x.as_str()) == Some(*m))
+                })
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        for m in requested {
+            assert!(
+                primary_frames
+                    .iter()
+                    .any(|f| f.get("method").and_then(|x| x.as_str()) == Some(m)),
+                "le primaire doit recevoir {m} ; trames: {primary_frames:?}"
+            );
+        }
+
+        let is_init = is_method("initialize");
+        let alive_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_init),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            alive_frames.iter().any(is_init),
+            "l'aux doit recevoir la copie d'initialize (handshake invariant 3 — \
+             preuve que son canal est vivant avant les assertions d'absence) ; trames: {alive_frames:?}"
+        );
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        for frame in &aux_frames {
+            let method = frame.get("method").and_then(|v| v.as_str()).unwrap_or("");
+            assert!(
+                !requested.contains(&method),
+                "l'aux diagnostics-merge ne doit recevoir AUCUNE requête du client \
+                 ({method} observée) ; trames: {aux_frames:?}"
+            );
+            if frame.get("id").is_some() {
+                assert_eq!(
+                    method, "initialize",
+                    "aucune trame à `id` sur le fil de l'aux en dehors de la copie \
+                     d'initialize ; trames: {aux_frames:?}"
+                );
+            }
+        }
+
+        drop(tmpdir);
+    }
+
+    /// docker-lsp tâche 02 test 2 : `dm_docsync_notifications_reach_aux` —
+    /// même couple recorder/recorder : `didOpen`/`didChange`/`didSave`/
+    /// `didClose` sur `file:///w/Dockerfile` ⟹ les 4 méthodes dans le log
+    /// aux (fan-out invariant 2 valable pour CE rôle — le lint hadolint a
+    /// besoin du contenu des documents).
+    #[tokio::test]
+    async fn dm_docsync_notifications_reach_aux() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_RECORDER_PY,
+            &[("diagnostics-merge", FAKE_LSP_RECORDER_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, _rx) = session.subscribe();
+        let uri = "file:///w/Dockerfile";
+
+        let notifications = [
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "textDocument/didOpen",
+                "params": {"textDocument": {"uri": uri, "languageId": "dockerfile", "version": 1, "text": "FROM alpine"}}
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "textDocument/didChange",
+                "params": {"textDocument": {"uri": uri}, "contentChanges": [{"text": "FROM alpine\nRUN echo hi"}]}
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "textDocument/didSave",
+                "params": {"textDocument": {"uri": uri}}
+            }),
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "textDocument/didClose",
+                "params": {"textDocument": {"uri": uri}}
+            }),
+        ];
+        for notification in &notifications {
+            session
+                .send(client, notification.to_string().into_bytes())
+                .await
+                .expect("notification doc-sync ok");
+        }
+
+        let methods: Vec<&str> = notifications
+            .iter()
+            .map(|f| f["method"].as_str().unwrap())
+            .collect();
+        let saw_all = |frames: &[Value]| {
+            methods.iter().all(|m| {
+                frames
+                    .iter()
+                    .any(|f| f.get("method").and_then(|x| x.as_str()) == Some(*m))
+            })
+        };
+        let aux_frames =
+            poll_recorder(&aux_log_path(&tmpdir, 0), saw_all, Duration::from_secs(5)).await;
+        for m in &methods {
+            assert!(
+                aux_frames
+                    .iter()
+                    .any(|f| f.get("method").and_then(|x| x.as_str()) == Some(*m)),
+                "l'aux diagnostics-merge doit recevoir {m} (fan-out invariant 2) ; trames: {aux_frames:?}"
+            );
+        }
+
+        drop(tmpdir);
+    }
+
+    /// docker-lsp tâche 02 test 3 : `dm_diagnostics_merge_primary_first` —
+    /// primaire publieur + aux `FAKE_LSP_AUX_DIAGS_PY` rôle
+    /// `diagnostics-merge` : `composite_open` ⟹ cache `[P1, A1]` (fondu
+    /// primary-first par index d'enfant, les deux `source` coexistent —
+    /// design risque 1, pas de dédup) et la DERNIÈRE publication diffusée
+    /// côté client est exactement `[P1, A1]` (le navigateur voit le même
+    /// fondu que le cache — fusion indépendante du rôle, éprouvée vue-lsp).
+    #[tokio::test]
+    async fn dm_diagnostics_merge_primary_first() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_PRIMARY_DIAGS_PY,
+            &[("diagnostics-merge", FAKE_LSP_AUX_DIAGS_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/Dockerfile";
+
+        composite_open(&session, client, uri).await;
+        let merged = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1"), aux_diag("A1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            merged,
+            Some(vec![prim_diag("P1"), aux_diag("A1")]),
+            "fondu primary-first dans le cache pour le rôle diagnostics-merge, \
+             les deux sources conservées (P1 primaire, A1 aux)"
+        );
+
+        let pubs = drain_publish_frames(&mut rx).await;
+        let (_raw, last) = pubs
+            .last()
+            .expect("le client reçoit les publications fondues");
+        assert_eq!(last["params"]["uri"].as_str(), Some(uri));
+        assert_eq!(
+            last["params"]["diagnostics"],
+            serde_json::json!([prim_diag("P1"), aux_diag("A1")]),
+            "dernière publication diffusée = exactement [P1, A1] — le navigateur \
+             voit le même fondu que le cache ; flux: {pubs:?}"
+        );
+
+        drop(tmpdir);
+    }
+
+    /// docker-lsp tâche 02 test 4 : `dm_aux_dead_silent_degradation` — aux
+    /// `FAKE_LSP_EXIT_PY` rôle `diagnostics-merge` : mort immédiate ≠ mort de
+    /// la session (`is_alive()` vrai) ; après `composite_open` le cache
+    /// stabilisé en `[P1]` ne bouge plus (la purge des parts de l'aux mort ne
+    /// retire RIEN du primaire) ; une requête `hover` répond normalement —
+    /// jamais de barrière pendante sur un aux mort (et jamais de barrière du
+    /// tout pour ce rôle).
+    #[tokio::test]
+    async fn dm_aux_dead_silent_degradation() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_PRIMARY_DIAGS_PY,
+            &[("diagnostics-merge", FAKE_LSP_EXIT_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("la mort d'un aux diagnostics-merge ne doit pas faire échouer le spawn");
+        assert!(
+            session.is_alive(),
+            "la mort d'un aux diagnostics-merge ne doit pas tuer la session"
+        );
+
+        let (client, mut rx) = session.subscribe();
+        let uri = "file:///w/Dockerfile";
+        composite_open(&session, client, uri).await;
+        let only = poll_cached(
+            &session,
+            uri,
+            cache_is(vec![prim_diag("P1")]),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            only,
+            Some(vec![prim_diag("P1")]),
+            "le cache = la part du primaire seul (l'aux n'a jamais rien publié)"
+        );
+        // Fenêtre de stabilisation (pattern des tests de dégradation vue-lsp) :
+        // la purge d'EOF de l'aux, déclenchée à tout moment dans cette fenêtre,
+        // ne doit rien avoir retiré du primaire.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            session.cached_diagnostics(uri),
+            Some(vec![prim_diag("P1")]),
+            "après la fenêtre, le cache n'a pas bougé : la purge des parts de \
+             l'aux mort n'a rien retiré du primaire"
+        );
+
+        session
+            .send(client, text_request(2, "textDocument/hover", uri, 0))
+            .await
+            .expect("hover ok");
+        // La publication [P1] du didOpen est en cours de diffusion sur le flux
+        // client : on ne retient que la trame à `id` (notification sans id
+        // ignorée, jamais de sommeil fixe).
+        let resp = loop {
+            let raw = recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("le primaire doit répondre du hover malgré l'aux mort");
+            let msg = client_msg(&raw);
+            if msg.get("id").is_some() {
+                break msg;
+            }
+        };
+        assert_eq!(resp["id"].as_i64(), Some(2));
+        assert_eq!(
+            resp["result"],
+            serde_json::json!({"echo": "textDocument/hover"}),
+            "réponse primaire servie verbatim — l'aux (vivant ou mort) ne compte \
+             jamais dans une barrière pour ce rôle"
+        );
+        assert!(session.is_alive());
+
+        drop(tmpdir);
+    }
+
+    /// docker-lsp tâche 02 test 5 : `dm_completion_resolve_routes_to_primary`
+    /// — recorder/recorder rôle `diagnostics-merge` : `initialize` (id 0)
+    /// puis `completionItem/resolve` (id 1) ⟹ le log PRIMAIRE contient le
+    /// resolve (chemin primaire historique — PAS le fallback no-op de la
+    /// tâche 08, qui lui n'émet aucune trame) et le client reçoit la réponse
+    /// « ok » du primaire (le fallback, lui, renverrait l'item tel quel) ;
+    /// l'aux — vivant (copie d'`initialize` au log), jamais demandeur — ne
+    /// reçoit pas le resolve.
+    #[tokio::test]
+    async fn dm_completion_resolve_routes_to_primary() {
+        let (spec, tmpdir) = make_fake_composite(
+            FAKE_LSP_RECORDER_PY,
+            &[("diagnostics-merge", FAKE_LSP_RECORDER_PY, vec![])],
+        )
+        .await;
+        let root = tmpdir.path().to_path_buf();
+        let session = LspSession::spawn(&spec, &root)
+            .await
+            .expect("spawn composite ok");
+        let (client, mut rx) = session.subscribe();
+
+        session
+            .send(
+                client,
+                serde_json::json!({"jsonrpc":"2.0","id":0,"method":"initialize","params":{}})
+                    .to_string()
+                    .into_bytes(),
+            )
+            .await
+            .expect("initialize ok");
+        let init_resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("réponse initialize du primaire"),
+        );
+        assert_eq!(init_resp["id"].as_i64(), Some(0));
+
+        let item = serde_json::json!({"label": "FROM", "kind": 14});
+        session
+            .send(client, resolve_request(1, item))
+            .await
+            .expect("resolve ok");
+        let resp = client_msg(
+            &recv_timeout(&mut rx, Duration::from_secs(5))
+                .await
+                .expect("le primaire doit répondre du resolve (chemin historique)"),
+        );
+        assert_eq!(resp["id"].as_i64(), Some(1), "id client restauré");
+        assert_eq!(
+            resp["result"],
+            serde_json::json!("ok"),
+            "résultat du PRIMAIRE, pas le fallback no-op (qui renverrait l'item \
+             tel quel sans rien émettre sur le fil) : {resp}"
+        );
+
+        let is_resolve = is_method("completionItem/resolve");
+        let primary_frames = poll_recorder(
+            &primary_log_path(&tmpdir),
+            |frames| frames.iter().any(is_resolve),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            primary_frames.iter().any(is_resolve),
+            "le log primaire doit contenir completionItem/resolve (chemin primaire \
+             historique — le fallback no-op de la tâche 08 n'émet aucune trame) ; trames: {primary_frames:?}"
+        );
+
+        let is_init = is_method("initialize");
+        let alive_frames = poll_recorder(
+            &aux_log_path(&tmpdir, 0),
+            |frames| frames.iter().any(is_init),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(
+            alive_frames.iter().any(is_init),
+            "l'aux doit avoir reçu la copie d'initialize (canal vivant — preuve \
+             avant l'assertion d'absence) ; trames: {alive_frames:?}"
+        );
+        let aux_frames = read_recorder_frames(&aux_log_path(&tmpdir, 0));
+        assert!(
+            !aux_frames.iter().any(is_resolve),
+            "l'aux diagnostics-merge ne reçoit jamais le resolve (le primaire est \
+             la seule source des items) ; trames: {aux_frames:?}"
         );
 
         drop(tmpdir);
