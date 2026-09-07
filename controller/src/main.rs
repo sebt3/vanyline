@@ -52,6 +52,19 @@ struct Cli {
     )]
     toolchain_image_node: String,
 
+    /// Image toolchain par défaut pour le langage "dockerfile" — image à
+    /// runtime node (`node:trixie-slim`) + dockerfile-language-server-nodejs +
+    /// hadolint + vnl-hadolint-lsp bakés (`toolchains/docker/Dockerfile`,
+    /// publiée avec le même tag que app/sandbox/controller), utilisée quand
+    /// `Sandbox.spec.toolchains` est vide et que la détection a trouvé
+    /// `dockerfile`. Surchargée par l'env `TOOLCHAIN_IMAGE_DOCKER`.
+    #[arg(
+        long,
+        env = "TOOLCHAIN_IMAGE_DOCKER",
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-docker:v", env!("CARGO_PKG_VERSION"))
+    )]
+    toolchain_image_docker: String,
+
     /// Image LSP par défaut pour "rust". Par défaut la même image que
     /// `TOOLCHAIN_IMAGE_RUST` (rust-analyzer y est déjà baké, cf.
     /// `toolchains/rust/Dockerfile`) — un flag séparé reste utile pour surcharger
@@ -71,6 +84,19 @@ struct Cli {
         default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-node:v", env!("CARGO_PKG_VERSION"))
     )]
     lsp_image_node: String,
+
+    /// Image LSP par défaut pour "dockerfile". Par défaut la même image que
+    /// `TOOLCHAIN_IMAGE_DOCKER` (docker-langserver + hadolint +
+    /// vnl-hadolint-lsp y sont bakés, cf. tâche image docker-lsp) — un flag
+    /// séparé reste utile pour surcharger juste le LSP sans toucher la
+    /// toolchain. Utilisée par `resolve_toolchain_lsp` (et le composite
+    /// hadolint de `build_sandbox_pod`) quand `toolchain.lsp` est absent.
+    #[arg(
+        long,
+        env = "LSP_IMAGE_DOCKER",
+        default_value = concat!("ghcr.io/sebt3/vanyline-toolchains-docker:v", env!("CARGO_PKG_VERSION"))
+    )]
+    lsp_image_docker: String,
 
     /// Tag de l'image app (ghcr.io/sebt3/vanyline-app) utilisée pour le
     /// Deployment `app`, quand `Application.spec.image` est absent.
@@ -152,8 +178,10 @@ async fn main() {
         default_image: sandbox_image.clone(),
         toolchain_image_rust: cli.toolchain_image_rust.clone(),
         toolchain_image_node: cli.toolchain_image_node.clone(),
+        toolchain_image_docker: cli.toolchain_image_docker.clone(),
         lsp_image_rust: cli.lsp_image_rust.clone(),
         lsp_image_node: cli.lsp_image_node.clone(),
+        lsp_image_docker: cli.lsp_image_docker.clone(),
     });
 
     let sandbox_run = sandbox::build_controller(client)

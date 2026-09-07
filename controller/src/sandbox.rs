@@ -49,8 +49,9 @@ pub fn toolchain_root(name: &str) -> String {
     format!("/toolchains/{name}")
 }
 
-/// Preset d'environnement pour une toolchain connue (`"rust"`, `"node"`) —
-/// valeurs recopiées de la recette validée `deploy/sandbox-test.yaml`. Les clés
+/// Preset d'environnement pour une toolchain connue (`"rust"`, `"node"`,
+/// `"docker"`) — valeurs recopiées de la recette validée
+/// `deploy/sandbox-test.yaml`. Les clés
 /// `PATH`/`LD_LIBRARY_PATH` sont concaténées entre toolchains par
 /// `aggregate_toolchain_env` ; les autres clés (ex. `RUSTUP_HOME`) sont posées
 /// telles quelles.
@@ -71,6 +72,18 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
             ),
         ])),
         "node" => Some(BTreeMap::from([
+            ("PATH".to_string(), "{root}/usr/local/bin".to_string()),
+            (
+                "LD_LIBRARY_PATH".to_string(),
+                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/lib/aarch64-linux-gnu:{root}/usr/local/lib".to_string(),
+            ),
+        ])),
+        // Pas d'env spécifique (décision design docker-lsp) : le runtime node
+        // de l'image (bâtie sur `node:trixie-slim`) pour `docker-langserver`
+        // exige le `LD_LIBRARY_PATH` standard des presets d'images à runtime,
+        // cf. AGENTS.md ; `hadolint` est statique, le wrapper
+        // `vnl-hadolint-lsp` est lié sur le base du pod — rien de plus.
+        "docker" => Some(BTreeMap::from([
             ("PATH".to_string(), "{root}/usr/local/bin".to_string()),
             (
                 "LD_LIBRARY_PATH".to_string(),
@@ -102,14 +115,18 @@ fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
 /// `ctx.lsp_image_rust`, bin `/toolchains/rust-lsp/usr/local/bin/rust-analyzer`, args
 /// vide ; "node" → image `ctx.lsp_image_node`, bin
 /// `/toolchains/node-lsp/usr/local/bin/typescript-language-server`, args
+/// `["--stdio"]` ; "docker" → image `ctx.lsp_image_docker`, bin
+/// `/toolchains/docker-lsp/usr/local/bin/docker-langserver`, args
 /// `["--stdio"]`), sinon `None` (aucun LSP — pas de route `/ws/lsp` montée pour
 /// cette toolchain). S'applique uniformément que `spec.toolchains` soit explicite
 /// ou dérivé. Pour le `node` DÉRIVÉ en projet vue, la variante composite Volar
-/// (`node_lsp_composite`) remplace ce preset dans `build_sandbox_pod`.
+/// (`node_lsp_composite`) remplace ce preset dans `build_sandbox_pod` ; pour le
+/// `docker` DÉRIVÉ en projet dockerfile, la variante composite hadolint
+/// (`docker_lsp_composite`) fait de même.
 ///
-/// `ctx.lsp_image_rust`/`ctx.lsp_image_node` valent par défaut la même image que
-/// `ctx.toolchain_image_rust`/`ctx.toolchain_image_node` (`toolchains/rust/`,
-/// `toolchains/node/Dockerfile` — le LSP y est déjà baké) — d'où deux montages
+/// `ctx.lsp_image_rust`/`ctx.lsp_image_node`/`ctx.lsp_image_docker` valent par défaut la même image que
+/// `ctx.toolchain_image_rust`/`ctx.toolchain_image_node`/`ctx.toolchain_image_docker` (`toolchains/rust/`,
+/// `toolchains/node/`, `toolchains/docker/` — le LSP y est déjà baké) — d'où deux montages
 /// (`/toolchains/<name>` et `/toolchains/<name>-lsp`) de la même image par
 /// défaut. Redondant mais inoffensif (contenu en cache côté kubelet, un seul
 /// `ImageVolumeSource` de plus dans le pod spec) ; pas simplifié en un montage
@@ -128,6 +145,11 @@ fn resolve_toolchain_lsp(toolchain: &Toolchain, ctx: &SandboxPodContext) -> Opti
         "node" => Some(LspSpec {
             image: ctx.lsp_image_node.clone(),
             bin: "/toolchains/node-lsp/usr/local/bin/typescript-language-server".to_string(),
+            args: vec!["--stdio".to_string()],
+        }),
+        "docker" => Some(LspSpec {
+            image: ctx.lsp_image_docker.clone(),
+            bin: "/toolchains/docker-lsp/usr/local/bin/docker-langserver".to_string(),
             args: vec!["--stdio".to_string()],
         }),
         _ => None,
@@ -172,6 +194,32 @@ fn node_lsp_composite(ctx: &SandboxPodContext) -> (LspSpec, Vec<serde_json::Valu
     let spec = LspSpec {
         image: ctx.lsp_image_node.clone(),
         bin: "/toolchains/node-lsp/usr/local/bin/vue-language-server".to_string(),
+        args: vec!["--stdio".to_string()],
+    };
+    (spec, aux)
+}
+
+/// Variante composite hadolint du preset `docker` (feature docker-lsp) :
+/// primaire `docker-langserver --stdio`, aux `diagnostics-merge`
+/// `vnl-hadolint-lsp` (ne répond à aucune requête — fan-out doc-sync +
+/// publication de diagnostics fusionnée par la session, cf. lsp.rs tâche 02
+/// de docker-lsp). Preset-only : `aux` n'existe que dans ce JSON interne.
+///
+/// Les deux bins vivent dans la même image (`ctx.lsp_image_docker`) montée sur
+/// `/toolchains/docker-lsp` : pas de montage supplémentaire vs le preset
+/// mono-process (patron du composite node). Pas de clé `initOptions` sur l'aux
+/// (le wrapper ne prend aucun argument ; le parseur sandbox a un `default`
+/// Null). Les valeurs sont des constantes de code — aucun argv construit à
+/// partir des CR (contrainte de validation du design).
+fn docker_lsp_composite(ctx: &SandboxPodContext) -> (LspSpec, Vec<serde_json::Value>) {
+    let aux = vec![serde_json::json!({
+        "role": "diagnostics-merge",
+        "bin": "/toolchains/docker-lsp/usr/local/bin/vnl-hadolint-lsp",
+        "args": []
+    })];
+    let spec = LspSpec {
+        image: ctx.lsp_image_docker.clone(),
+        bin: "/toolchains/docker-lsp/usr/local/bin/docker-langserver".to_string(),
         args: vec!["--stdio".to_string()],
     };
     (spec, aux)
@@ -231,9 +279,10 @@ pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
 /// `ctx.toolchain_image_rust` ; `"js-ts"` **ou `"vue"`** → toolchain `node`
 /// avec `ctx.toolchain_image_node` (le marqueur `vue` implique `node`
 /// indépendamment de `js-ts` — un seul `node` même si les deux marqueurs sont
-/// présents, invariant 5 de la feature vue-lsp). Env vide => preset connu
-/// (`toolchain_preset`) appliqué par `resolve_toolchain_env`. Ordre fixe :
-/// rust puis node.
+/// présents, invariant 5 de la feature vue-lsp) ; `"dockerfile"` → toolchain
+/// `docker` avec `ctx.toolchain_image_docker` (feature docker-lsp). Env vide
+/// => preset connu (`toolchain_preset`) appliqué par `resolve_toolchain_env`.
+/// Ordre fixe : rust puis node puis docker.
 pub fn effective_toolchains(
     sandbox: &Sandbox,
     project: &Project,
@@ -260,6 +309,14 @@ pub fn effective_toolchains(
         toolchains.push(Toolchain {
             name: "node".to_string(),
             image: ctx.toolchain_image_node.clone(),
+            env: Default::default(),
+            lsp: None,
+        });
+    }
+    if languages.iter().any(|l| l == "dockerfile") {
+        toolchains.push(Toolchain {
+            name: "docker".to_string(),
+            image: ctx.toolchain_image_docker.clone(),
             env: Default::default(),
             lsp: None,
         });
@@ -304,11 +361,15 @@ pub struct SandboxPodContext {
     pub toolchain_image_rust: String,
     /// Idem pour "js-ts" (env `TOOLCHAIN_IMAGE_NODE`).
     pub toolchain_image_node: String,
+    /// Idem pour "dockerfile" (env `TOOLCHAIN_IMAGE_DOCKER`).
+    pub toolchain_image_docker: String,
     /// Image LSP par défaut pour "rust" (env `LSP_IMAGE_RUST`). Utilisée par
     /// `resolve_toolchain_lsp` quand `toolchain.lsp` est absent.
     pub lsp_image_rust: String,
     /// Idem pour "js-ts" (env `LSP_IMAGE_NODE`).
     pub lsp_image_node: String,
+    /// Idem pour "dockerfile" (env `LSP_IMAGE_DOCKER`).
+    pub lsp_image_docker: String,
 }
 
 /// Construit le Pod sandbox : home Owner + worktree + caches + toolchains,
@@ -417,15 +478,26 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
             .as_ref()
             .is_some_and(|s| s.languages.iter().any(|l| l == "vue"));
 
+    // Variante composite hadolint (preset-only, feature docker-lsp) : même
+    // patron que volar sur son propre gate — uniquement sur le toolchain
+    // `docker` DÉRIVÉ quand `languages` contient "dockerfile".
+    let hadolint = sandbox.spec.toolchains.is_empty()
+        && project
+            .status
+            .as_ref()
+            .is_some_and(|s| s.languages.iter().any(|l| l == "dockerfile"));
+
     // Pour chaque toolchain effective, résoudre le LSP et monter le volume dédié
     let mut lsp_entries: Vec<serde_json::Value> = Vec::new();
     for toolchain in &toolchains {
         // Invariant 2 : un `lsp` custom est utilisé tel quel, jamais d'`aux`
-        // additionnée (le garde `lsp.is_none()` est redondant avec `volar` —
-        // les toolchains dérivées n'ont jamais de `lsp` — mais explicite la
-        // règle).
+        // additionnée (le garde `lsp.is_none()` est redondant avec `volar`/
+        // `hadolint` — les toolchains dérivées n'ont jamais de `lsp` — mais
+        // explicite la règle).
         let resolved = if volar && toolchain.name == "node" && toolchain.lsp.is_none() {
             Some(node_lsp_composite(ctx))
+        } else if hadolint && toolchain.name == "docker" && toolchain.lsp.is_none() {
+            Some(docker_lsp_composite(ctx))
         } else {
             resolve_toolchain_lsp(toolchain, ctx).map(|lsp| (lsp, Vec::new()))
         };
@@ -561,10 +633,15 @@ pub struct Context {
     pub toolchain_image_rust: String,
     /// Image toolchain par défaut pour "js-ts" (env `TOOLCHAIN_IMAGE_NODE`).
     pub toolchain_image_node: String,
+    /// Image toolchain par défaut pour "dockerfile" (env
+    /// `TOOLCHAIN_IMAGE_DOCKER`).
+    pub toolchain_image_docker: String,
     /// Image LSP par défaut pour "rust" (env `LSP_IMAGE_RUST`).
     pub lsp_image_rust: String,
     /// Image LSP par défaut pour "js-ts" (env `LSP_IMAGE_NODE`).
     pub lsp_image_node: String,
+    /// Image LSP par défaut pour "dockerfile" (env `LSP_IMAGE_DOCKER`).
+    pub lsp_image_docker: String,
 }
 
 pub fn checkout_job_name(sandbox_name: &str) -> String {
@@ -1118,8 +1195,10 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             default_image: ctx.default_image.clone(),
             toolchain_image_rust: ctx.toolchain_image_rust.clone(),
             toolchain_image_node: ctx.toolchain_image_node.clone(),
+            toolchain_image_docker: ctx.toolchain_image_docker.clone(),
             lsp_image_rust: ctx.lsp_image_rust.clone(),
             lsp_image_node: ctx.lsp_image_node.clone(),
+            lsp_image_docker: ctx.lsp_image_docker.clone(),
         };
         if let Some(pod) = pods.get_opt(&pod_name(&sandbox.name_any())).await? {
             match pod.status.and_then(|s| s.phase) {
@@ -1327,8 +1406,10 @@ mod tests {
             default_image: "registry.example/vanyline-sandbox:latest".to_string(),
             toolchain_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
             toolchain_image_node: "docker.io/library/node:trixie-slim".to_string(),
+            toolchain_image_docker: "IMG-DOCKER".to_string(),
             lsp_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
             lsp_image_node: "docker.io/library/node:trixie-slim".to_string(),
+            lsp_image_docker: "IMG-DOCKER-LSP".to_string(),
         }
     }
 
@@ -1363,6 +1444,15 @@ mod tests {
         Toolchain {
             name: "node".to_string(),
             image: "node:trixie-slim".to_string(),
+            env,
+            lsp: None,
+        }
+    }
+
+    fn make_docker_tc(env: std::collections::BTreeMap<String, String>) -> Toolchain {
+        Toolchain {
+            name: "docker".to_string(),
+            image: "toolchains-docker:test".to_string(),
             env,
             lsp: None,
         }
@@ -1490,6 +1580,51 @@ mod tests {
             .expect("must have LD_LIBRARY_PATH");
         let ld_val = ld.value.as_ref().expect("LD_LIBRARY_PATH must have value");
         assert!(ld_val.find("/toolchains/rust") < ld_val.find("/toolchains/node"));
+    }
+
+    #[test]
+    fn toolchain_preset_docker_standard_only() {
+        // Preset docker (feature docker-lsp) : PATH + LD_LIBRARY_PATH standard
+        // des images à runtime (l'image est bâtie sur node:trixie-slim,
+        // docker-langserver s'exécute sur le runtime node du volume) — aucune
+        // env « particulière » type RUSTUP_HOME (décision design).
+        let toolchain = make_docker_tc(Default::default());
+        let env = resolve_toolchain_env(&toolchain);
+        assert_eq!(
+            env.get("PATH").expect("must have PATH"),
+            "/toolchains/docker/usr/local/bin"
+        );
+        assert_eq!(
+            env.get("LD_LIBRARY_PATH")
+                .expect("must have LD_LIBRARY_PATH"),
+            "/toolchains/docker/usr/lib/x86_64-linux-gnu:/toolchains/docker/usr/lib/aarch64-linux-gnu:/toolchains/docker/usr/local/lib"
+        );
+        // Aucune autre clé (pas d'env spécifique).
+        assert_eq!(env.len(), 2);
+
+        // Agrégat rust+node+docker : PATH concaténé dans l'ordre figé de
+        // `effective_toolchains`, docker en dernier avant BASE_PATH.
+        let env = aggregate_toolchain_env(&[
+            make_rust_tc(Default::default()),
+            make_node_tc(Default::default()),
+            toolchain,
+        ]);
+        let path = env
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
+        let path_val = path.value.as_ref().expect("PATH must have value");
+        let node_bin = "/toolchains/node/usr/local/bin";
+        let docker_bin = "/toolchains/docker/usr/local/bin";
+        assert!(path_val.find(node_bin) < path_val.find(docker_bin));
+        assert!(path_val.ends_with(BASE_PATH));
+
+        let ld = env
+            .iter()
+            .find(|e| e.name == "LD_LIBRARY_PATH")
+            .expect("must have LD_LIBRARY_PATH");
+        let ld_val = ld.value.as_ref().expect("LD_LIBRARY_PATH must have value");
+        assert!(ld_val.find("/toolchains/node") < ld_val.find("/toolchains/docker"));
     }
 
     #[test]
@@ -1639,6 +1774,38 @@ mod tests {
         assert_eq!(result.len(), 2);
         assert_eq!(result[0].name, "rust");
         assert_eq!(result[1].name, "node");
+    }
+
+    #[test]
+    fn effective_toolchains_derives_dockerfile() {
+        // Le marqueur `dockerfile` (détection tâche 01) implique le toolchain
+        // `docker` (feature docker-lsp).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["dockerfile"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "docker");
+        assert_eq!(result[0].image, ctx.toolchain_image_docker);
+        assert!(result[0].env.is_empty());
+        assert!(result[0].lsp.is_none());
+    }
+
+    #[test]
+    fn effective_toolchains_derives_docker_alone_after_rust_and_node() {
+        // Ordre figé complet de la dérivation : rust, node, docker (push
+        // séquentiel sur l'axe des `languages`, pas l'ordre des marqueurs).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["rust", "vue", "dockerfile"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        let names: Vec<_> = result.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["rust", "node", "docker"]);
+        assert_eq!(result[0].image, ctx.toolchain_image_rust);
+        assert_eq!(result[1].image, ctx.toolchain_image_node);
+        assert_eq!(result[2].image, ctx.toolchain_image_docker);
     }
 
     #[test]
@@ -3008,6 +3175,38 @@ mod tests {
     }
 
     #[test]
+    fn resolve_toolchain_lsp_preset_docker() {
+        let toolchain = make_docker_tc(Default::default());
+        let ctx = make_ctx();
+        let result = resolve_toolchain_lsp(&toolchain, &ctx);
+        assert!(result.is_some());
+        let resolved = result.unwrap();
+        assert_eq!(resolved.image, ctx.lsp_image_docker);
+        assert_eq!(
+            resolved.bin,
+            "/toolchains/docker-lsp/usr/local/bin/docker-langserver"
+        );
+        assert_eq!(resolved.args, vec!["--stdio".to_string()]);
+
+        // `lsp` custom explicite : verbatim (patron des tests rust/node).
+        let lsp = LspSpec {
+            image: "custom-lsp:1".to_string(),
+            bin: "/toolchains/docker-lsp/custom/bin".to_string(),
+            args: vec!["--z".to_string()],
+        };
+        let toolchain = Toolchain {
+            name: "docker".to_string(),
+            image: "toolchains-docker:test".to_string(),
+            env: Default::default(),
+            lsp: Some(lsp.clone()),
+        };
+        let resolved = resolve_toolchain_lsp(&toolchain, &ctx).expect("custom lsp wins");
+        assert_eq!(resolved.image, lsp.image);
+        assert_eq!(resolved.bin, lsp.bin);
+        assert_eq!(resolved.args, lsp.args);
+    }
+
+    #[test]
     fn resolve_toolchain_lsp_unknown_is_none() {
         let toolchain = Toolchain {
             name: "custom".to_string(),
@@ -3387,5 +3586,169 @@ mod tests {
             "/toolchains/node-lsp/usr/local/bin/vue-language-server"
         );
         assert_eq!(entries[1]["aux"][0]["role"], "tsserver-forward");
+    }
+
+    // ===== composite docker (feature docker-lsp) =====
+
+    #[test]
+    fn build_pod_docker_composite_json() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["dockerfile"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "docker");
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/docker-lsp/usr/local/bin/docker-langserver"
+        );
+        assert_eq!(entries[0]["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(entries[0]["aux"].as_array().expect("aux array").len(), 1);
+        assert_eq!(entries[0]["aux"][0]["role"], "diagnostics-merge");
+        assert_eq!(
+            entries[0]["aux"][0]["bin"],
+            "/toolchains/docker-lsp/usr/local/bin/vnl-hadolint-lsp"
+        );
+        // Le wrapper ne prend aucun argument.
+        assert_eq!(entries[0]["aux"][0]["args"], serde_json::json!([]));
+        // Pas de clé `initOptions` sur CET aux (défaut Null côté parseur
+        // sandbox `LspAux` — contrairement au composite node qui en a une).
+        assert!(!entries[0]["aux"][0].get("initOptions").is_some());
+
+        // Entrée EXACTEMENT le JSON contrat (aucune clé superflue).
+        assert_eq!(
+            entries[0],
+            serde_json::json!({
+                "name": "docker",
+                "bin": "/toolchains/docker-lsp/usr/local/bin/docker-langserver",
+                "args": ["--stdio"],
+                "aux": [{
+                    "role": "diagnostics-merge",
+                    "bin": "/toolchains/docker-lsp/usr/local/bin/vnl-hadolint-lsp",
+                    "args": []
+                }]
+            })
+        );
+
+        // Volumes/mounts : toolchain + LSP dédiés (patron rust/node) — le
+        // primaire ET l'aux vivent dans l'image `ctx.lsp_image_docker` montée
+        // sur `/toolchains/docker-lsp`.
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
+
+        let tc_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-docker")
+            .expect("should have toolchain-docker volume");
+        let src = tc_vol
+            .image
+            .as_ref()
+            .expect("toolchain-docker should have image source");
+        assert_eq!(src.reference, Some(ctx.toolchain_image_docker.clone()));
+
+        let lsp_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-docker-lsp")
+            .expect("should have toolchain-docker-lsp volume");
+        let src = lsp_vol
+            .image
+            .as_ref()
+            .expect("toolchain-docker-lsp should have image source");
+        assert_eq!(src.reference, Some(ctx.lsp_image_docker.clone()));
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+        let tc_mount = mounts
+            .iter()
+            .find(|m| m.name == "toolchain-docker")
+            .expect("should have toolchain-docker mount");
+        assert_eq!(tc_mount.mount_path, "/toolchains/docker");
+        let lsp_mount = mounts
+            .iter()
+            .find(|m| m.name == "toolchain-docker-lsp")
+            .expect("should have toolchain-docker-lsp mount");
+        assert_eq!(lsp_mount.mount_path, "/toolchains/docker-lsp");
+    }
+
+    #[test]
+    fn build_pod_vue_and_dockerfile_both_composites() {
+        // Les gates volar et hadolint coexistent : chaque aux sur SON toolchain
+        // (node ⟹ tsserver-forward, docker ⟹ diagnostics-merge), ordre figé
+        // node puis docker.
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["vue", "dockerfile"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "node");
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/node-lsp/usr/local/bin/vue-language-server"
+        );
+        assert_eq!(entries[0]["aux"].as_array().expect("node aux").len(), 1);
+        assert_eq!(entries[0]["aux"][0]["role"], "tsserver-forward");
+        assert_eq!(entries[1]["name"], "docker");
+        assert_eq!(
+            entries[1]["bin"],
+            "/toolchains/docker-lsp/usr/local/bin/docker-langserver"
+        );
+        assert_eq!(entries[1]["aux"].as_array().expect("docker aux").len(), 1);
+        assert_eq!(entries[1]["aux"][0]["role"], "diagnostics-merge");
+    }
+
+    #[test]
+    fn build_pod_explicit_toolchains_never_composite() {
+        // spec.toolchains explicite court-circuite la dérivation : un `docker`
+        // nommé explicitement + languages ["dockerfile"] ne reçoit jamais le
+        // composite (invariant 1 du patron volar, côté docker) — mono preset.
+        let sandbox = make_sandbox("sb", vec![make_docker_tc(Default::default())], None);
+        let project = make_project_with_languages(vec!["dockerfile"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "docker");
+        assert!(!entries[0].get("aux").is_some());
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/docker-lsp/usr/local/bin/docker-langserver"
+        );
+        assert_eq!(entries[0]["args"], serde_json::json!(["--stdio"]));
+
+        // `lsp` custom explicite : jamais d'`aux` non plus (invariant 2 — le
+        // garde `lsp.is_none()` de la boucle est redondant avec le gate
+        // `hadolint` mais explicite la règle, cf. build_sandbox_pod_custom_lsp_no_aux).
+        let lsp = LspSpec {
+            image: "custom-lsp:1".to_string(),
+            bin: "/toolchains/docker-lsp/custom/bin".to_string(),
+            args: vec!["--z".to_string()],
+        };
+        let docker_tc = Toolchain {
+            name: "docker".to_string(),
+            image: "toolchains-docker:test".to_string(),
+            env: Default::default(),
+            lsp: Some(lsp),
+        };
+        let sandbox = make_sandbox("sb", vec![docker_tc], None);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "docker");
+        assert_eq!(entries[0]["bin"], "/toolchains/docker-lsp/custom/bin");
+        assert_eq!(entries[0]["args"], serde_json::json!(["--z"]));
+        assert!(!entries[0].get("aux").is_some());
     }
 }
