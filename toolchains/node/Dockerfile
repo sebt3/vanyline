@@ -31,7 +31,7 @@ RUN npm install -g typescript-language-server typescript
 # exactement égale) et le sous-répertoire
 # /usr/local/lib/node_modules/@vue/language-server/node_modules/@vue/typescript-plugin
 # n'existe pas — or le preset composite du controller référence le plugin par
-# `location: /toolchains/node-lsp/lib/node_modules/@vue/language-server`
+# `location: /toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server`
 # (montage de la MÊME image en volume `/toolchains/node-lsp`) et la résolution
 # tsserver d'un plugin passe par `<location>/node_modules/<name>` — layout
 # vérifié sur l'image construite (risque n° 3 du design, itérage 2).

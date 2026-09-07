@@ -152,8 +152,9 @@ fn resolve_toolchain_lsp(toolchain: &Toolchain, ctx: &SandboxPodContext) -> Opti
 /// identique sans ce flag.)
 ///
 /// `location` = chemin du paquet `@vue/language-server` DANS LE POD :
-/// `/usr/local/lib/...` de l'image sous le montage `/toolchains/node-lsp`
-/// (vérification empirique task-02). Le chemin niché
+/// `/toolchains/node-lsp` (montage de l'image) + `usr/local/lib/node_modules`
+/// (préfixe `npm -g` sur `node:trixie-slim` — même préfixe que les `bin` ci-dessus
+/// en `usr/local/bin`, vérification empirique task-02). Le chemin niché
 /// `node_modules/@vue/typescript-plugin` à l'intérieur du paquet est requis
 /// par la résolution tsserver `<location>/node_modules/<name>`.
 fn node_lsp_composite(ctx: &SandboxPodContext) -> (LspSpec, Vec<serde_json::Value>) {
@@ -164,7 +165,7 @@ fn node_lsp_composite(ctx: &SandboxPodContext) -> (LspSpec, Vec<serde_json::Valu
         "initOptions": {
             "plugins": [{
                 "name": "@vue/typescript-plugin",
-                "location": "/toolchains/node-lsp/lib/node_modules/@vue/language-server"
+                "location": "/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server"
             }]
         }
     })];
@@ -3240,7 +3241,7 @@ mod tests {
         );
         assert_eq!(
             entries[0]["aux"][0]["initOptions"]["plugins"][0]["location"],
-            "/toolchains/node-lsp/lib/node_modules/@vue/language-server"
+            "/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server"
         );
         // Entrée EXACTEMENT le JSON contrat (aucune clé superflue).
         assert_eq!(
@@ -3256,7 +3257,7 @@ mod tests {
                     "initOptions": {
                         "plugins": [{
                             "name": "@vue/typescript-plugin",
-                            "location": "/toolchains/node-lsp/lib/node_modules/@vue/language-server"
+                            "location": "/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server"
                         }]
                     }
                 }]

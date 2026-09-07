@@ -660,9 +660,12 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
 /// Mapping extension of a file → (toolchain name, LSP languageId).
 /// Known toolchains by convention with controller presets: `"rust"`, `"node"`.
 /// `.vue` → `("node", "vue")` : la session node est le multiplexeur composite
-/// (ts-ls + Volar, cf. `lsp.rs`) — la languageId `"vue"` est celle qu'attend
-/// Volar dans `didOpen`, le ts-ls enfant ignore cette notification sans effet
-/// de bord. Mapping miroir de `lspToolchainForPath` du frontend.
+/// Volar (primaire `vue-language-server`, aux `tsserver-forward`, cf. `lsp.rs`).
+/// La languageId `"vue"` est celle qu'attend le primaire ; l'intelligence des
+/// blocs `<script>` (complétion / diagnostics / hover / definition) est fournie
+/// par tsserver via le canal `tsserver/request` que le primaire relaie à l'aux
+/// (`typescript.tsserverRequest`) — le multiplexeur ne voit qu'un flux déjà
+/// enrichi. Mapping miroir de `lspToolchainForPath` du frontend.
 /// `None` if the extension is not covered (fallback: no LSP).
 pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     let lower = path.to_lowercase();
