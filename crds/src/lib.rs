@@ -119,7 +119,7 @@ pub struct ProjectSpec {
     /// (la clé SSH vit dans le PVC Owner, cf. docs/features/git-integration.md
     /// section 0). Champ conservé pour la migration, pas supprimé.
     pub git_secret: Option<String>,
-    /// Caches partagés. None => ["cargo", "pnpm"].
+    /// Caches partagés. None => ["cargo", "pnpm", "pip"].
     pub caches: Option<Vec<String>>,
     /// Intervalle du `CronJob` de fetch. None => "1h".
     pub fetch_interval: Option<String>,

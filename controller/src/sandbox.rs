@@ -50,7 +50,7 @@ pub fn toolchain_root(name: &str) -> String {
 }
 
 /// Preset d'environnement pour une toolchain connue (`"rust"`, `"node"`,
-/// `"docker"`) — valeurs recopiées de la recette validée
+/// `"docker"`, `"python"`) — valeurs recopiées de la recette validée
 /// `deploy/sandbox-test.yaml`. Les clés
 /// `PATH`/`LD_LIBRARY_PATH` sont concaténées entre toolchains par
 /// `aggregate_toolchain_env` ; les autres clés (ex. `RUSTUP_HOME`) sont posées
@@ -90,6 +90,30 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
                 "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/lib/aarch64-linux-gnu:{root}/usr/local/lib".to_string(),
             ),
         ])),
+        // Python (feature python-support). `PYTHONUSERBASE`/`PIP_USER` : le fallback
+        // « pip install sans venv » va dans le user-site du PVC Owner
+        // (`/home/vanyline/.local` = miroir littéral de `owner::HOME_MOUNT_PATH`
+        // + /.local — pas de substitution `{root}`, qui vise le volume toolchain
+        // read-only ; writable, partagé entre les sandboxes d'un même Owner —
+        // tradeoff documenté design python-support §périmètre). PIP_USER=1 : un
+        // `pip install` nu écrit dans ce user-site sans `--user`. Le segment
+        // `/home/vanyline/.local/bin` est littéral dans la string PATH (le
+        // `aggregate_toolchain_env` concatène les segments PATH entre toolchains).
+        "python" => Some(BTreeMap::from([
+            (
+                "PATH".to_string(),
+                "{root}/usr/local/bin:/home/vanyline/.local/bin".to_string(),
+            ),
+            (
+                "LD_LIBRARY_PATH".to_string(),
+                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/lib/aarch64-linux-gnu:{root}/usr/local/lib".to_string(),
+            ),
+            (
+                "PYTHONUSERBASE".to_string(),
+                "/home/vanyline/.local".to_string(),
+            ),
+            ("PIP_USER".to_string(), "1".to_string()),
+        ])),
         _ => None,
     }
 }
@@ -117,12 +141,16 @@ fn resolve_toolchain_env(toolchain: &Toolchain) -> BTreeMap<String, String> {
 /// `/toolchains/node-lsp/usr/local/bin/typescript-language-server`, args
 /// `["--stdio"]` ; "docker" → image `ctx.lsp_image_docker`, bin
 /// `/toolchains/docker-lsp/usr/local/bin/docker-langserver`, args
+/// `["--stdio"]` ; "python" → image `ctx.lsp_image_python`, bin
+/// `/toolchains/python-lsp/usr/local/bin/pyright-langserver`, args
 /// `["--stdio"]`), sinon `None` (aucun LSP — pas de route `/ws/lsp` montée pour
 /// cette toolchain). S'applique uniformément que `spec.toolchains` soit explicite
 /// ou dérivé. Pour le `node` DÉRIVÉ en projet vue, la variante composite Volar
 /// (`node_lsp_composite`) remplace ce preset dans `build_sandbox_pod` ; pour le
 /// `docker` DÉRIVÉ en projet dockerfile, la variante composite hadolint
-/// (`docker_lsp_composite`) fait de même.
+/// (`docker_lsp_composite`) fait de même ; pour le `python` DÉRIVÉ en projet
+/// python, la variante composite pyright+ruff (`python_lsp_composite`) fait de
+/// même.
 ///
 /// `ctx.lsp_image_rust`/`ctx.lsp_image_node`/`ctx.lsp_image_docker` valent par défaut la même image que
 /// `ctx.toolchain_image_rust`/`ctx.toolchain_image_node`/`ctx.toolchain_image_docker` (`toolchains/rust/`,
@@ -150,6 +178,11 @@ fn resolve_toolchain_lsp(toolchain: &Toolchain, ctx: &SandboxPodContext) -> Opti
         "docker" => Some(LspSpec {
             image: ctx.lsp_image_docker.clone(),
             bin: "/toolchains/docker-lsp/usr/local/bin/docker-langserver".to_string(),
+            args: vec!["--stdio".to_string()],
+        }),
+        "python" => Some(LspSpec {
+            image: ctx.lsp_image_python.clone(),
+            bin: "/toolchains/python-lsp/usr/local/bin/pyright-langserver".to_string(),
             args: vec!["--stdio".to_string()],
         }),
         _ => None,
@@ -225,6 +258,36 @@ fn docker_lsp_composite(ctx: &SandboxPodContext) -> (LspSpec, Vec<serde_json::Va
     (spec, aux)
 }
 
+/// Variante composite pyright du preset `python` (feature python-support) :
+/// primaire `pyright-langserver --stdio`, aux `diagnostics-merge`
+/// `vnl-ruff-lsp` (wrapper tâche 02 — diagnostics ruff fusionnés par la session
+/// sandbox, rôle déjà établi par la tâche docker-lsp). Preset-only : `aux`
+/// n'existe que dans ce JSON interne.
+///
+/// Le primaire auto-découvre `<workspace>/.venv` s'il existe, sinon `python3`
+/// du PATH toolchain + le user-site via `PYTHONUSERBASE` hérité — PAS d'
+/// `initializationOptions` sur le primaire, l'auto-découverte suffit (design
+/// python-support, question ouverte tranchée : non).
+///
+/// Les deux bins vivent dans la même image (`ctx.lsp_image_python`) montée sur
+/// `/toolchains/python-lsp` : pas de montage supplémentaire vs le preset
+/// mono-process (patron des composites node/docker). Pas de clé `initOptions`
+/// sur l'aux. Les valeurs sont des constantes de code — aucun argv construit à
+/// partir des CR (contrainte de validation du design).
+fn python_lsp_composite(ctx: &SandboxPodContext) -> (LspSpec, Vec<serde_json::Value>) {
+    let aux = vec![serde_json::json!({
+        "role": "diagnostics-merge",
+        "bin": "/toolchains/python-lsp/usr/local/bin/vnl-ruff-lsp",
+        "args": []
+    })];
+    let spec = LspSpec {
+        image: ctx.lsp_image_python.clone(),
+        bin: "/toolchains/python-lsp/usr/local/bin/pyright-langserver".to_string(),
+        args: vec!["--stdio".to_string()],
+    };
+    (spec, aux)
+}
+
 /// Agrège l'environnement de toutes les toolchains d'une Sandbox, dans l'ordre
 /// de `spec.toolchains` : les segments `PATH` de chaque toolchain sont
 /// concaténés (`:`) puis suivis de `BASE_PATH` ; les segments
@@ -279,10 +342,12 @@ pub fn aggregate_toolchain_env(toolchains: &[Toolchain]) -> Vec<EnvVar> {
 /// `ctx.toolchain_image_rust` ; `"js-ts"` **ou `"vue"`** → toolchain `node`
 /// avec `ctx.toolchain_image_node` (le marqueur `vue` implique `node`
 /// indépendamment de `js-ts` — un seul `node` même si les deux marqueurs sont
-/// présents, invariant 5 de la feature vue-lsp) ; `"dockerfile"` → toolchain
-/// `docker` avec `ctx.toolchain_image_docker` (feature docker-lsp). Env vide
+/// présents, invariant 5 de la feature vue-lsp) ; `"python"` → toolchain
+/// `python` avec `ctx.toolchain_image_python` (feature python-support) ;
+/// `"dockerfile"` → toolchain `docker` avec `ctx.toolchain_image_docker` (feature
+/// docker-lsp). Env vide
 /// => preset connu (`toolchain_preset`) appliqué par `resolve_toolchain_env`.
-/// Ordre fixe : rust puis node puis docker.
+/// Ordre fixe : rust puis node puis python puis docker.
 pub fn effective_toolchains(
     sandbox: &Sandbox,
     project: &Project,
@@ -313,6 +378,14 @@ pub fn effective_toolchains(
             lsp: None,
         });
     }
+    if languages.iter().any(|l| l == "python") {
+        toolchains.push(Toolchain {
+            name: "python".to_string(),
+            image: ctx.toolchain_image_python.clone(),
+            env: Default::default(),
+            lsp: None,
+        });
+    }
     if languages.iter().any(|l| l == "dockerfile") {
         toolchains.push(Toolchain {
             name: "docker".to_string(),
@@ -325,12 +398,13 @@ pub fn effective_toolchains(
 }
 
 /// Variable d'env pour un cache donné, `None` si le cache n'a pas de convention
-/// connue (seuls `"cargo"` et `"pnpm"` en ont une en v1).
+/// connue (seuls `"cargo"`, `"pnpm"` et `"pip"` en ont une en v1).
 fn cache_env_var(cache: &str) -> Option<(&'static str, String)> {
     let path = format!("/project-cache/{}", crate::project::cache_dir_name(cache));
     match cache {
         "cargo" => Some(("CARGO_HOME", path)),
         "pnpm" => Some(("npm_config_store_dir", path)),
+        "pip" => Some(("PIP_CACHE_DIR", path)),
         _ => None,
     }
 }
@@ -363,6 +437,8 @@ pub struct SandboxPodContext {
     pub toolchain_image_node: String,
     /// Idem pour "dockerfile" (env `TOOLCHAIN_IMAGE_DOCKER`).
     pub toolchain_image_docker: String,
+    /// Idem pour "python" (env `TOOLCHAIN_IMAGE_PYTHON`).
+    pub toolchain_image_python: String,
     /// Image LSP par défaut pour "rust" (env `LSP_IMAGE_RUST`). Utilisée par
     /// `resolve_toolchain_lsp` quand `toolchain.lsp` est absent.
     pub lsp_image_rust: String,
@@ -370,6 +446,8 @@ pub struct SandboxPodContext {
     pub lsp_image_node: String,
     /// Idem pour "dockerfile" (env `LSP_IMAGE_DOCKER`).
     pub lsp_image_docker: String,
+    /// Idem pour "python" (env `LSP_IMAGE_PYTHON`).
+    pub lsp_image_python: String,
 }
 
 /// Construit le Pod sandbox : home Owner + worktree + caches + toolchains,
@@ -487,17 +565,28 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
             .as_ref()
             .is_some_and(|s| s.languages.iter().any(|l| l == "dockerfile"));
 
+    // Variante composite pyright (preset-only, feature python-support) : même
+    // patron que volar/hadolint sur son propre gate — uniquement sur le toolchain
+    // `python` DÉRIVÉ quand `languages` contient "python".
+    let pyright = sandbox.spec.toolchains.is_empty()
+        && project
+            .status
+            .as_ref()
+            .is_some_and(|s| s.languages.iter().any(|l| l == "python"));
+
     // Pour chaque toolchain effective, résoudre le LSP et monter le volume dédié
     let mut lsp_entries: Vec<serde_json::Value> = Vec::new();
     for toolchain in &toolchains {
         // Invariant 2 : un `lsp` custom est utilisé tel quel, jamais d'`aux`
         // additionnée (le garde `lsp.is_none()` est redondant avec `volar`/
-        // `hadolint` — les toolchains dérivées n'ont jamais de `lsp` — mais
-        // explicite la règle).
+        // `hadolint`/`pyright` — les toolchains dérivées n'ont jamais de `lsp` —
+        // mais explicite la règle).
         let resolved = if volar && toolchain.name == "node" && toolchain.lsp.is_none() {
             Some(node_lsp_composite(ctx))
         } else if hadolint && toolchain.name == "docker" && toolchain.lsp.is_none() {
             Some(docker_lsp_composite(ctx))
+        } else if pyright && toolchain.name == "python" && toolchain.lsp.is_none() {
+            Some(python_lsp_composite(ctx))
         } else {
             resolve_toolchain_lsp(toolchain, ctx).map(|lsp| (lsp, Vec::new()))
         };
@@ -636,12 +725,16 @@ pub struct Context {
     /// Image toolchain par défaut pour "dockerfile" (env
     /// `TOOLCHAIN_IMAGE_DOCKER`).
     pub toolchain_image_docker: String,
+    /// Idem pour "python" (env `TOOLCHAIN_IMAGE_PYTHON`).
+    pub toolchain_image_python: String,
     /// Image LSP par défaut pour "rust" (env `LSP_IMAGE_RUST`).
     pub lsp_image_rust: String,
     /// Image LSP par défaut pour "js-ts" (env `LSP_IMAGE_NODE`).
     pub lsp_image_node: String,
     /// Image LSP par défaut pour "dockerfile" (env `LSP_IMAGE_DOCKER`).
     pub lsp_image_docker: String,
+    /// Idem pour "python" (env `LSP_IMAGE_PYTHON`).
+    pub lsp_image_python: String,
 }
 
 pub fn checkout_job_name(sandbox_name: &str) -> String {
@@ -1196,9 +1289,11 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
             toolchain_image_rust: ctx.toolchain_image_rust.clone(),
             toolchain_image_node: ctx.toolchain_image_node.clone(),
             toolchain_image_docker: ctx.toolchain_image_docker.clone(),
+            toolchain_image_python: ctx.toolchain_image_python.clone(),
             lsp_image_rust: ctx.lsp_image_rust.clone(),
             lsp_image_node: ctx.lsp_image_node.clone(),
             lsp_image_docker: ctx.lsp_image_docker.clone(),
+            lsp_image_python: ctx.lsp_image_python.clone(),
         };
         if let Some(pod) = pods.get_opt(&pod_name(&sandbox.name_any())).await? {
             match pod.status.and_then(|s| s.phase) {
@@ -1407,9 +1502,11 @@ mod tests {
             toolchain_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
             toolchain_image_node: "docker.io/library/node:trixie-slim".to_string(),
             toolchain_image_docker: "IMG-DOCKER".to_string(),
+            toolchain_image_python: "IMG-PYTHON".to_string(),
             lsp_image_rust: "docker.io/library/rust:slim-trixie".to_string(),
             lsp_image_node: "docker.io/library/node:trixie-slim".to_string(),
             lsp_image_docker: "IMG-DOCKER-LSP".to_string(),
+            lsp_image_python: "IMG-PYTHON-LSP".to_string(),
         }
     }
 
@@ -3750,5 +3847,338 @@ mod tests {
         assert_eq!(entries[0]["bin"], "/toolchains/docker-lsp/custom/bin");
         assert_eq!(entries[0]["args"], serde_json::json!(["--z"]));
         assert!(!entries[0].get("aux").is_some());
+    }
+
+    // ===== python-support (toolchain python, composite pyright/ruff, cache pip) =====
+
+    #[test]
+    fn toolchain_preset_python_env() {
+        // Preset python (feature python-support) : PATH {root}/usr/local/bin +
+        // /home/vanyline/.local/bin (user-site du PVC Owner — littéral, pas de
+        // {root} qui viserait le volume toolchain read-only), LD_LIBRARY_PATH
+        // standard des images à runtime, PYTHONUSERBASE/PIP_USER pour le
+        // fallback « pip install sans venv ». Exactement 4 clés ; substitutions
+        // {root} faites, literals intacts.
+        let toolchain = Toolchain {
+            name: "python".to_string(),
+            image: "toolchains-python:test".to_string(),
+            env: Default::default(),
+            lsp: None,
+        };
+        let env = resolve_toolchain_env(&toolchain);
+        assert_eq!(
+            env.get("PATH").expect("must have PATH"),
+            "/toolchains/python/usr/local/bin:/home/vanyline/.local/bin"
+        );
+        assert_eq!(
+            env.get("LD_LIBRARY_PATH")
+                .expect("must have LD_LIBRARY_PATH"),
+            "/toolchains/python/usr/lib/x86_64-linux-gnu:/toolchains/python/usr/lib/aarch64-linux-gnu:/toolchains/python/usr/local/lib"
+        );
+        assert_eq!(
+            env.get("PYTHONUSERBASE").expect("must have PYTHONUSERBASE"),
+            "/home/vanyline/.local"
+        );
+        assert_eq!(env.get("PIP_USER").expect("must have PIP_USER"), "1");
+        // Aucune autre clé.
+        assert_eq!(env.len(), 4);
+    }
+
+    #[test]
+    fn effective_toolchains_derives_python() {
+        // Le marqueur `python` (détection tâche 01) implique le toolchain
+        // `python` (feature python-support).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["python"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].name, "python");
+        assert_eq!(result[0].image, ctx.toolchain_image_python);
+        assert!(result[0].env.is_empty());
+        assert!(result[0].lsp.is_none());
+    }
+
+    #[test]
+    fn effective_toolchains_python_full_order() {
+        // Ordre figé complet de la dérivation (rust, node, python, docker) —
+        // push séquentiel sur l'axe des `languages`, pas l'ordre des marqueurs
+        // d'entrée (volontairement non conforme ici).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project =
+            make_project_with_languages(vec!["dockerfile", "python", "vue", "js-ts", "rust"]);
+        let ctx = make_ctx();
+
+        let result = effective_toolchains(&sandbox, &project, &ctx);
+        let names: Vec<_> = result.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["rust", "node", "python", "docker"]);
+    }
+
+    #[test]
+    fn resolve_toolchain_lsp_preset_python() {
+        let toolchain = Toolchain {
+            name: "python".to_string(),
+            image: "toolchains-python:test".to_string(),
+            env: Default::default(),
+            lsp: None,
+        };
+        let ctx = make_ctx();
+        let result = resolve_toolchain_lsp(&toolchain, &ctx);
+        assert!(result.is_some());
+        let resolved = result.unwrap();
+        assert_eq!(resolved.image, ctx.lsp_image_python);
+        assert_eq!(
+            resolved.bin,
+            "/toolchains/python-lsp/usr/local/bin/pyright-langserver"
+        );
+        assert_eq!(resolved.args, vec!["--stdio".to_string()]);
+
+        // `lsp` custom explicite : verbatim (patron des tests rust/node/docker).
+        let lsp = LspSpec {
+            image: "custom-lsp:1".to_string(),
+            bin: "/toolchains/python-lsp/custom/bin".to_string(),
+            args: vec!["--w".to_string()],
+        };
+        let toolchain = Toolchain {
+            name: "python".to_string(),
+            image: "toolchains-python:test".to_string(),
+            env: Default::default(),
+            lsp: Some(lsp.clone()),
+        };
+        let resolved = resolve_toolchain_lsp(&toolchain, &ctx).expect("custom lsp wins");
+        assert_eq!(resolved.image, lsp.image);
+        assert_eq!(resolved.bin, lsp.bin);
+        assert_eq!(resolved.args, lsp.args);
+    }
+
+    #[test]
+    fn build_pod_python_composite_json() {
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["python"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "python");
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/python-lsp/usr/local/bin/pyright-langserver"
+        );
+        assert_eq!(entries[0]["args"], serde_json::json!(["--stdio"]));
+        assert_eq!(entries[0]["aux"].as_array().expect("aux array").len(), 1);
+        assert_eq!(entries[0]["aux"][0]["role"], "diagnostics-merge");
+        assert_eq!(
+            entries[0]["aux"][0]["bin"],
+            "/toolchains/python-lsp/usr/local/bin/vnl-ruff-lsp"
+        );
+        // Le wrapper ne prend aucun argument.
+        assert_eq!(entries[0]["aux"][0]["args"], serde_json::json!([]));
+        // Pas de clé `initOptions` sur CET aux (contrat JSON interne, mêmes
+        // clés role/bin/args que l'aux hadolint — l'auto-découverte .venv /
+        // python3+user-site du primaire suffit).
+        assert!(!entries[0]["aux"][0].get("initOptions").is_some());
+
+        // Entrée EXACTEMENT le JSON contrat (aucune clé superflue).
+        assert_eq!(
+            entries[0],
+            serde_json::json!({
+                "name": "python",
+                "bin": "/toolchains/python-lsp/usr/local/bin/pyright-langserver",
+                "args": ["--stdio"],
+                "aux": [{
+                    "role": "diagnostics-merge",
+                    "bin": "/toolchains/python-lsp/usr/local/bin/vnl-ruff-lsp",
+                    "args": []
+                }]
+            })
+        );
+
+        // Volumes/mounts : toolchain + LSP dédiés (patron rust/node/docker) —
+        // le primaire ET l'aux vivent dans l'image `ctx.lsp_image_python`
+        // montée sur `/toolchains/python-lsp`.
+        let volumes = pod
+            .spec
+            .as_ref()
+            .unwrap()
+            .volumes
+            .as_ref()
+            .expect("should have volumes");
+
+        let tc_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-python")
+            .expect("should have toolchain-python volume");
+        let src = tc_vol
+            .image
+            .as_ref()
+            .expect("toolchain-python should have image source");
+        assert_eq!(src.reference, Some(ctx.toolchain_image_python.clone()));
+
+        let lsp_vol = volumes
+            .iter()
+            .find(|v| v.name == "toolchain-python-lsp")
+            .expect("should have toolchain-python-lsp volume");
+        let src = lsp_vol
+            .image
+            .as_ref()
+            .expect("toolchain-python-lsp should have image source");
+        assert_eq!(src.reference, Some(ctx.lsp_image_python.clone()));
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let mounts = container
+            .volume_mounts
+            .as_ref()
+            .expect("should have volume_mounts");
+        let tc_mount = mounts
+            .iter()
+            .find(|m| m.name == "toolchain-python")
+            .expect("should have toolchain-python mount");
+        assert_eq!(tc_mount.mount_path, "/toolchains/python");
+        let lsp_mount = mounts
+            .iter()
+            .find(|m| m.name == "toolchain-python-lsp")
+            .expect("should have toolchain-python-lsp mount");
+        assert_eq!(lsp_mount.mount_path, "/toolchains/python-lsp");
+    }
+
+    #[test]
+    fn build_sandbox_pod_python_explicit_never_ruff_aux() {
+        // spec.toolchains explicite court-circuite la dérivation : un `python`
+        // nommé explicitement + languages ["python"] ne reçoit jamais le
+        // composite (invariant 1 du patron volar/hadolint, côté python) — mono
+        // preset pyright, pas d'`aux`.
+        let python_tc = Toolchain {
+            name: "python".to_string(),
+            image: "IMG-PYTHON-EXPLICIT".to_string(),
+            env: Default::default(),
+            lsp: None,
+        };
+        let sandbox = make_sandbox("sb", vec![python_tc], None);
+        let project = make_project_with_languages(vec!["python"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "python");
+        assert!(!entries[0].get("aux").is_some());
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/python-lsp/usr/local/bin/pyright-langserver"
+        );
+        assert_eq!(entries[0]["args"], serde_json::json!(["--stdio"]));
+    }
+
+    #[test]
+    fn build_sandbox_pod_python_custom_lsp_no_aux() {
+        // `toolchain.lsp = Some(...)` : utilisé tel quel, jamais d'`aux`
+        // additionnée même en présence de python (invariant 2).
+        let lsp = LspSpec {
+            image: "custom-lsp:1".to_string(),
+            bin: "/toolchains/python-lsp/custom/bin".to_string(),
+            args: vec!["--y".to_string()],
+        };
+        let python_tc = Toolchain {
+            name: "python".to_string(),
+            image: "IMG-PYTHON-EXPLICIT".to_string(),
+            env: Default::default(),
+            lsp: Some(lsp),
+        };
+        let sandbox = make_sandbox("sb", vec![python_tc], None);
+        let project = make_project_with_languages(vec!["python"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0]["name"], "python");
+        assert_eq!(entries[0]["bin"], "/toolchains/python-lsp/custom/bin");
+        assert_eq!(entries[0]["args"], serde_json::json!(["--y"]));
+        assert!(!entries[0].get("aux").is_some());
+    }
+
+    #[test]
+    fn build_sandbox_pod_python_rust_entry_order() {
+        // Ordre de `effective_toolchains` (rust puis python), pas celui de
+        // `languages` (["python", "rust"]).
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["python", "rust"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let entries = lsp_env_entries(&pod);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "rust");
+        assert_eq!(
+            entries[0]["bin"],
+            "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
+        );
+        assert!(!entries[0].get("aux").is_some());
+        assert_eq!(entries[1]["name"], "python");
+        assert_eq!(
+            entries[1]["bin"],
+            "/toolchains/python-lsp/usr/local/bin/pyright-langserver"
+        );
+        assert_eq!(entries[1]["aux"][0]["role"], "diagnostics-merge");
+    }
+
+    #[test]
+    fn build_sandbox_pod_python_path_env_aggregation() {
+        // Fige l'ordre d'`aggregate_toolchain_env` : segment rust, puis segment
+        // python COMPLET (avec son /home/vanyline/.local/bin), puis BASE_PATH ;
+        // PYTHONUSERBASE/PIP_USER posés tels quels dans l'env.
+        let sandbox = make_sandbox("sb", vec![], None);
+        let project = make_project_with_languages(vec!["rust", "python"]);
+        let ctx = make_ctx();
+
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+
+        let path = env
+            .iter()
+            .find(|e| e.name == "PATH")
+            .expect("must have PATH");
+        assert_eq!(
+            path.value.as_deref(),
+            Some(
+                "/toolchains/rust/usr/local/cargo/bin:/toolchains/rust/usr/bin:/toolchains/python/usr/local/bin:/home/vanyline/.local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+            )
+        );
+
+        let userbase = env
+            .iter()
+            .find(|e| e.name == "PYTHONUSERBASE")
+            .expect("must have PYTHONUSERBASE");
+        assert_eq!(userbase.value, Some("/home/vanyline/.local".to_string()));
+        let pip_user = env
+            .iter()
+            .find(|e| e.name == "PIP_USER")
+            .expect("must have PIP_USER");
+        assert_eq!(pip_user.value, Some("1".to_string()));
+    }
+
+    #[test]
+    fn cache_env_var_pip() {
+        assert_eq!(
+            cache_env_var("pip"),
+            Some(("PIP_CACHE_DIR", "/project-cache/pip".to_string()))
+        );
+        assert_eq!(cache_env_var("inconnu"), None);
+        // Inchangés (pas de test dédié préexistant pour `cache_env_var` seul —
+        // asserts repris ici) : cargo/pnpm.
+        assert_eq!(
+            cache_env_var("cargo"),
+            Some(("CARGO_HOME", "/project-cache/cargo".to_string()))
+        );
+        assert_eq!(
+            cache_env_var("pnpm"),
+            Some((
+                "npm_config_store_dir",
+                "/project-cache/pnpm-store".to_string()
+            ))
+        );
     }
 }
