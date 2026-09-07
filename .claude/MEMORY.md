@@ -99,6 +99,7 @@ techniques, leçons de délégation Qwen) vit dans le fichier pointé, pas ici.
 | `.claude/memory/lsp-agent-interface.md` | Interface `lsp_*` v2 orientée boucle agent (suite de `lsp-integration`) : 8 tools (retrait `lsp_hover`, ajout `lsp_document_symbols`/`lsp_workspace_symbols`/`inspect_symbol`/`edit_and_check`), modèle de position par nom de symbole 1-based, `edit_and_check` (diff de diagnostics, cas A/B selon éditeur navigateur), autosave éditeur (debounce 300 ms) + frames de push `/ws/fs` (`file-changed`, `flush-request`/`flush-ack`). Livré par Cadence, 3 escalades résolues en session (contraste WS-10 ; comme `lsp-integration`), `fmt` lancé. Design doc annonçait de faux codes d'erreur (007/008 déjà pris) → réels : `VNL-SBX-LSP-010`/`-011`. Review Phase 3 : **1 bloquant** — `did_change` non conforme (`textDocumentVersion` au lieu de `textDocument.version`), droppé par un vrai serveur → `edit_and_check` cas A cassé, CI verte (fakes echo) ; même motif que `miryad-core`. + 1 mineur (chemin `lsp_diagnostics` absolu, homogénéisé). Corrigés par Claude avant merge. |
 | `.claude/memory/editor-syntax-highlighting.md` | Coloration syntaxique éditeur (Vue `@codemirror/lang-vue`, Dockerfile/Containerfile par nom de base via helper `dockerfileName` partagé, rhai + handlebars en modes `StreamLanguage` maison « coloration seule »). 100 % `frontend/`, aucun LSP. Livré par Cadence (`qwen3.8-flash-next`), review Phase 3 : 0 bug bloquant, 1 doc-drift mineur attendu (migration doc = Phase 3 par design). Suite : `feat/vue-lsp`. |
 | `.claude/memory/vue-lsp.md` | LSP `.vue` réel via **multiplexeur composite** dans `LspSession` (API publique inchangée) : Volar v3 mode hybride, primaire `vue-language-server` + aux `tsserver-forward` (`typescript-language-server`+`@vue/typescript-plugin`). Routage par méthode (barrière fusion primary-first pour hover/def/refs/completion/rename ; primaire seul pour le reste dont `semanticTokens`), forwarding `tsserver/request`→`executeCommand`, fondu `publishDiagnostics` avant cache, provenance `completionItem/resolve`. `aux` vide ⟹ mono-process strictement inchangé. Preset-only (`node` dérivé d'un projet `vue`), marqueur détection `vue`, image node gagne Volar 3.3.11 (`--install-links` obligatoire). Livré par Cadence (DeepSeek-V4-Flash), `fmt` lancé, 4 écarts arbitrés en cadence tous OK. Review Phase 3 : **1 bloquant** — `location` du plugin sans `usr/local/` (chemin faux **dans le fichier de tâche** écrit par Claude, suivi par Cadence, verrouillé par test — même classe que F5) → plugin ne charge pas, intelligence `<script>` morte, CI verte. Corrigé par Claude. `tsdk` primaire + capabilities `initialize` + round-trip réel = passe cluster. |
+| `.claude/memory/docker-lsp.md` | LSP Dockerfile réel : toolchain `docker` auto-dérivée (marqueur `dockerfile` = nom Dockerfile/Containerfile dans l'arbre HEAD, helper `is_dockerfile_path` miroir de `dockerfileName.ts`) avec **composite `diagnostics-merge`** — 2ᵉ consommateur de l'ossature multiplexeur de [[vue-lsp]], rôle le plus simple : primaire `docker-langserver`, aux `vnl-hadolint-lsp` (3ᵉ binaire du crate sandbox) qui ne répond à aucune requête, juste fan-out doc-sync + `publishDiagnostics` fusionnées avant cache. Nouvelle porte `aux_answers_requests` : composite 100 % `diagnostics-merge` ⟹ toutes requêtes (resolve compris) par le chemin primaire historique. Wrapper : `didOpen`+`didSave` immédiats / `didChange` 500 ms, `hadolint -` sur stdin (jamais argv/shell), cwd hérité pour `.hadolint.yaml`. Image `toolchains/docker/` (hadolint v2.15.1 checksum vérifié upstream, ~55 Mo). Livré par Cadence, `fmt` lancé, 0 escalade. **Review Phase 3 : 0 bug bloquant — 1ʳᵉ feature composite sans blocker** (rôle trivial + ossature éprouvée). 7 interprétations cadence validées avant Phase 3 (3 = trous du design). Pas testé cluster (image à rebuild au prochain tag). |
 | `.claude/memory/vscode-ext-sequence.md` | **F1→F5 toutes closes — séquence VS Code terminée.** Extension VS Code `vanyline` : composant utilisable (chat + config + sandboxes) réutilisant le frontend via `packages/protocol` + `packages/ui`. **5 features**, ordre F1→F2→F3→(F4‖F5). Ce fichier porte les décisions structurantes, l'état d'avancement et la procédure de reprise. Remplace `ws06-vscode-ext-bootstrap`. |
 | `.claude/memory/F1-vscode-ext-foundations.md` | **F1 (close 2026-08-31).** `@vanyline/protocol` (ts-rs `ChatEvent` + enveloppes RPC + `RpcConnection` + `config-domain.ts` miroir manuel de `domain.rs`) et `@vanyline/ui` (chat + 6 écrans config + `ConfigShell`, agnostiques du backend via 3 ports injectés `ChatTransport`/`ChatBackend`/`ConfigRepo`) extraits du frontend. `frontend/` implémente les ports (`httpConfigRepo` traduit REST↔canonique : `type`↔`provider_type`, FK id↔nom). 2 blocages Phase 2 tranchés en session. Délégation Qwen sur task 06 : timeout à ~70 %, fini par Claude. Review Phase 3 : propre. |
 | `.claude/memory/F3-vscode-ext-chat.md` | **F3 (close 2026-09-03, mergée+poussée).** L'extension VS Code `vanyline` elle-même : `ext/` dans le workspace npm (racine → `vanyline-workspace`), host esbuild (extension/`cli-provisioning`/`rpc`/`supervisor`/pont whitelisté) + webview Vite-Vue montant `ChatWindow` de `@vanyline/ui`. Provisioning CLI : SHA256 obligatoire (`VNL-EXT-005` si absent), HTTPS + allowlist d'hôte après redirects, install atomique, `~/.local/bin` only. Jobs CI `ext` (`test.yml` + `release.yml` `.vsix` + `checksum: sha256`), `install:local`, `docs/ext-install.md`. **Livré par Cadence sans escalade, 0 bug bloquant en review Phase 3** (contraste net avec git-integration/miryad-core). 6 findings mineurs corrigés (nonce `Math.random`→crypto, fuite d'abonnement du transport, `conversations/delete` retiré de la whitelist, runbook bumps manuels, sourcemap du vsix) + fix adjacent `chatEventsToUIStream`. e2e code-server : `VNL-EXT-005` (release antérieure à `checksum: sha256`) → `.sha256` attachés à la main à `v0.0.11-alpha.5`. |
@@ -265,6 +266,25 @@ vanyline est une couche d'exécution gérée et K8s-native que plusieurs outils 
   réel contre l'image construite : passe cluster (pas de backend en dev, image
   node à rebuild au prochain tag).
 
+- **LSP Dockerfile + hadolint — composite `diagnostics-merge`** (2026-09-07,
+  `.claude/memory/docker-lsp.md`) : 2ᵉ consommateur de l'ossature multiplexeur de
+  vue-lsp, rôle le plus simple (l'aux ne répond à aucune requête). Toolchain
+  `docker` auto-dérivée (marqueur `dockerfile` réel, helper `is_dockerfile_path`
+  miroir de `dockerfileName.ts`) : primaire `docker-langserver`, aux
+  `vnl-hadolint-lsp` (3ᵉ binaire du crate sandbox) — `hadolint -` sur stdin,
+  `didOpen`+`didSave` immédiats / `didChange` 500 ms, cwd hérité pour
+  `.hadolint.yaml`, `publishDiagnostics` fusionnées avant cache (`source`
+  conservée, pas de dédup v1). Nouvelle porte `aux_answers_requests` : composite
+  100 % `diagnostics-merge` ⟹ toutes requêtes (resolve compris) par le chemin
+  primaire historique. Image `toolchains/docker/` (hadolint v2.15.1, checksum
+  vérifié contre l'upstream). Branche `feat/docker-lsp` mergée dans `main`
+  (`--no-ff`) et poussée. Livré par Cadence (DeepSeek-V4-Flash), `fmt` lancé,
+  0 escalade, 7 interprétations validées avant Phase 3 (3 = trous du design).
+  **Review Phase 3 : 0 bug bloquant — 1ʳᵉ feature composite sans blocker.**
+  2 mineurs notés (drift didChange incrémental du wrapper si le primaire
+  négocie le sync incrémental ; CRLF cosmétique). Pas testé cluster, image
+  docker à rebuild au prochain tag.
+
 **Reste ouvert / pas démarré** (pas "hors scope" par nécessité, juste pas encore
 attaqué) :
 - Auth kydah-code → sandbox (NetworkPolicy en place, aucun mécanisme applicatif) et
@@ -276,6 +296,8 @@ attaqué) :
   fonctionne et est consommé par la `TreeView` de l'extension depuis F5 (2026-09-04).
 - Tool `validate` (test/lint/format par toolchain détectée, scope original plus
   large de `ws10-language-support`) — jamais démarré, pas de design doc actif.
+  `hadolint` est désormais sur le `PATH` de la toolchain `docker` (via
+  `docker-lsp`) et disponible pour ce tool le jour où il arrive.
 - Workflow/DAG (capacité "ajoutée" par la réorientation du 2026-08-09) — le panneau
   Workflow du shell IDE reste mock. Le panneau Chat, lui, est sorti du statut mock
   (2026-08-18, cf. `.claude/memory/chat-app-fonctionnel.md`) — le webchat n'est plus
