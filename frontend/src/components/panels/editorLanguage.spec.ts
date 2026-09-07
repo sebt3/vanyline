@@ -66,11 +66,19 @@ describe('lspToolchainForPath', () => {
     ['a.mjs', { toolchain: 'node', languageId: 'javascript' }],
     ['a.cjs', { toolchain: 'node', languageId: 'javascript' }],
     ['App.vue', { toolchain: 'node', languageId: 'vue' }],
+    ['Dockerfile', { toolchain: 'docker', languageId: 'dockerfile' }],
+    ['deploy/Dockerfile', { toolchain: 'docker', languageId: 'dockerfile' }],
+    ['Dockerfile.dev', { toolchain: 'docker', languageId: 'dockerfile' }],
+    ['build/app.dockerfile', { toolchain: 'docker', languageId: 'dockerfile' }],
+    ['Containerfile', { toolchain: 'docker', languageId: 'dockerfile' }],
+    // Nom de base gagnant sur l'extension (miroir sandbox) : `Dockerfile.ts`
+    // est docker/dockerfile, pas node/typescript.
+    ['Dockerfile.ts', { toolchain: 'docker', languageId: 'dockerfile' }],
   ])('%s → %s', (path, expected) => {
     expect(lspToolchainForPath(path)).toEqual(expected);
   });
 
-  it.each(['a.py', 'a.rhai', 'a.hbs', 'Dockerfile', null])('retourne null pour %s', (path) => {
+  it.each(['a.py', 'a.rhai', 'a.hbs', null])('retourne null pour %s', (path) => {
     expect(lspToolchainForPath(path)).toBeNull();
   });
 
@@ -79,6 +87,7 @@ describe('lspToolchainForPath', () => {
     expect(lspToolchainForPath('A.TS')).toEqual({ toolchain: 'node', languageId: 'typescript' });
     expect(lspToolchainForPath('A.JS')).toEqual({ toolchain: 'node', languageId: 'javascript' });
     expect(lspToolchainForPath('App.VUE')).toEqual({ toolchain: 'node', languageId: 'vue' });
+    expect(lspToolchainForPath('DOCKERFILE')).toEqual({ toolchain: 'docker', languageId: 'dockerfile' });
   });
 });
 

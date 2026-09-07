@@ -43,14 +43,18 @@ const byExtension: Record<string, () => Extension> = {
   handlebars: () => StreamLanguage.define(handlebarsMode),
 };
 
-/** Mapping chemin → (toolchain, languageId LSP) — identique à `toolchain_for_path`
- *  de la sandbox (task-04) : rs (rust), ts/tsx/mts/cts + js/jsx/mjs/cjs + vue
- *  (node — `.vue` → languageId `vue`, session composite Volar depuis vue-lsp).
- *  `null` si l'extension n'est pas couverte (pas de LSP, mode dégradé). */
+/** Mapping chemin → (toolchain, languageId LSP) — miroir de
+ *  `toolchain_for_path` de la sandbox : rs (rust), ts/tsx/mts/cts +
+ *  js/jsx/mjs/cjs + vue (node), et Dockerfile/Containerfile (+ variantes)
+ *  → docker/dockerfile évalués par nom de base (helper `dockerfileName`)
+ *  AVANT le switch d'extension. `null` si non couvert (pas de LSP). */
 export function lspToolchainForPath(
   path: string | null,
 ): { toolchain: string; languageId: string } | null {
   if (!path) return null;
+  if (dockerfileName(path)) {
+    return { toolchain: 'docker', languageId: 'dockerfile' };
+  }
   const ext = path.split('.').pop()?.toLowerCase();
   if (!ext) return null;
   switch (ext) {

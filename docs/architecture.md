@@ -918,13 +918,28 @@ sont l'inverse exacte l'une de l'autre (testé en roundtrip).
 **Multiplexeur LSP composite** (`vue-lsp`, `LspSession` interne — API publique
 `subscribe`/`send`/`cached_diagnostics`/`wait_for_diagnostics`/`is_alive`
 **inchangée**, bridge navigateur et client MCP inchangés). Une spec toolchain
-avec `aux` non vide (aujourd'hui seul le preset composite Volar en émet, cf.
-"LSP par toolchain" plus bas) fait de la session un vrai multiplexeur : le
-process **primaire** garde son espace d'ids historique, chaque enfant `aux` de
-rôle connu (`tsserver-forward`) est spawné aux mêmes conditions avec son propre
-canal stdin et ses ids internes (jamais routés vers un client). `aux` vide ⟹
-chemin mono-process **strictement** inchangé (invariant de non-régression : tout
-le LSP déployé en dépend — rust, node-sans-vue).
+avec `aux` non vide (presets composite Volar et hadolint, cf. "LSP par
+toolchain" plus bas) fait de la session un vrai multiplexeur : le process
+**primaire** garde son espace d'ids historique, chaque enfant `aux` de rôle
+connu est spawné aux mêmes conditions avec son propre canal stdin et ses ids
+internes (jamais routés vers un client). `aux` vide ⟹ chemin mono-process
+**strictement** inchangé (invariant de non-régression : tout le LSP déployé en
+dépend — rust, node-sans-vue, docker-sans-composite).
+
+**Deux rôles `aux` connus** (`KNOWN_AUX_ROLES` ; rôle inconnu au spawn ⟹ warn +
+enfant ignoré, jamais une erreur de session) :
+- `tsserver-forward` (`vue-lsp`) — **répond aux requêtes** : entre en barrière
+  de fusion et reçoit les `tsserver/request` relayés.
+- `diagnostics-merge` (`docker-lsp`, `vnl-hadolint-lsp`) — **ne répond à aucune
+  requête**. Il ne reçoit que la copie d'`initialize` (invariant handshake) et
+  le fan-out doc-sync (le lint a besoin du contenu des buffers), et publie ses
+  `textDocument/publishDiagnostics` que la session fond avec celles du primaire.
+  Porte de niveau rôle (`aux_answers_requests`) : un composite dont **tous** les
+  aux sont `diagnostics-merge` route TOUTES les requêtes — `completionItem/
+  resolve` compris — par le chemin primaire historique octet-pour-octet (jamais
+  de barrière `PendingMerge` qui compterait une part qui n'arrivera pas, jamais
+  le fallback no-op du resolve alors que le primaire est la seule source
+  d'items).
 
 - **Doc-sync** (`didOpen`/`didChange`/`didClose`/`didSave`) et `initialize`
   (copie avec `initializationOptions` du spec fusionnés) : fan-out à chaque aux
@@ -953,7 +968,11 @@ le LSP déployé en dépend — rust, node-sans-vue).
   dans `diagnostics_cache` **avant** tout broadcast — navigateur et MCP voient
   le même résultat (contrainte : `edit_and_check`/`lsp_diagnostics` lisent le
   cache). EOF d'un aux ⟹ ses parts purgées + cache recompté (des diagnostics
-  d'un serveur mort feraient passer un `edit_and_check` au vert à tort).
+  d'un serveur mort feraient passer un `edit_and_check` au vert à tort). Chaque
+  diagnostic garde sa `source` (`"dockerfile"` du primaire, `"hadolint"` de
+  l'aux `diagnostics-merge`) : **pas de dédup en v1** — si les deux serveurs
+  signalent la même chose l'utilisateur voit deux entrées (accepté, dédup
+  possible en évolution).
 - **Forwarding `tsserver/request`** (mode hybride Volar v3 : `vue-language-server`
   ne parle pas à tsserver et délègue à son client) : intercepté (jamais broadcast),
   exécuté contre le premier aux `tsserver-forward` vivant via
@@ -965,6 +984,28 @@ le LSP déployé en dépend — rust, node-sans-vue).
   des aux) ; mort d'un **aux** = session dégradée (`is_alive()` ne reflète que
   le primaire), warn unique, parts et ids en attente purgés (les barrières
   concernées se complètent sans cette part).
+
+**Wrapper `vnl-hadolint-lsp`** (`docker-lsp`, `sandbox/src/bin/hadolint_lsp.rs`,
+second binaire du crate sandbox baké dans l'image toolchain `docker`) : serveur
+LSP stdio minimal, rôle `diagnostics-merge`. Réutilise le framing
+`Content-Length` de `lsp.rs`. `initialize` → capacités minimales
+(`textDocumentSync` incrémental) ; toute autre requête → `-32601` (défensif — la
+session ne lui en envoie jamais). Déclencheurs de lint : `didOpen` **et**
+`didSave` immédiats, `didChange` debouncé 500 ms (le `didOpen` immédiat est
+requis pour que le tool MCP `lsp_diagnostics` — didOpen + attente, jamais
+d'édit — voie hadolint). Chaque lint capture `(texte, version, génération)` à
+son démarrage ; un résultat périmé (buffer bougé entre-temps) est **abandonné**
+et un lint du contenu courant re-déclenché — jamais un diagnostic plus vieux
+que le buffer. Invocation : `hadolint --format json --no-color -`, **contenu du
+buffer sur stdin** (jamais l'URI/le chemin en argv, jamais de shell) ; le `cwd`
+est celui hérité de la session (`spawn_aux_startup` → `current_dir(sandbox_root)`)
+— hadolint y trouve le `.hadolint.yaml` du projet, zéro interpolation. Sortie
+JSON convertie en diagnostics LSP : positions hadolint 1-based → ranges 0-based
+(`start = (line-1, col-1)` clampé UTF-16, `end` = fin de ligne — hadolint ne
+donne qu'un point), `level` → severity (error/warning/info/style → 1/2/3/4),
+`code` (`DL3008`…) → `Diagnostic.code`, `source = "hadolint"`. Spawn en échec /
+stdout non-JSON ⟹ contribution vide + message sur stderr : le wrapper ne meurt
+jamais (le primaire sert encore — dégradation silencieuse).
 
 **Rename cross-file côté UI — flux custom, pas le helper du package.**
 `renameSymbol`/`doRename` de `@codemirror/lsp-client` (v6.1.0, tout jeune — risque
@@ -1001,8 +1042,15 @@ editorLanguage.ts::lspToolchainForPath`, miroir de `tools_impl.rs::toolchain_for
 `.rs` → `rust`/`rust`, `.ts`/`.tsx`/`.mts`/`.cts` → `node`/`typescript`, `.js`/`.jsx`/
 `.mjs`/`.cjs` → `node`/`javascript`, `.vue` → `node`/`vue` (`vue-lsp` — la session
 `node` est le multiplexeur composite Volar, cf. ci-dessous ; `languageId` `vue` est
-celle qu'attend le primaire `vue-language-server`). Extension non couverte → `null`,
-mode dégradé (coloration seule, pas de LSP).
+celle qu'attend le primaire `vue-language-server`). **Les noms
+Dockerfile/Containerfile** (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
+`Containerfile`, `Containerfile.*`, insensible à la casse) → `docker`/`dockerfile`
+(`docker-lsp` — la session `docker` est le composite `docker-langserver` + aux
+hadolint) : règle de **nom de base** (helper partagé `dockerfileName.ts` côté
+frontend / `maint::is_dockerfile_path` côté sandbox, le même que la détection et
+la coloration) évaluée **avant** le switch d'extension — `Dockerfile.ts` est
+`docker`, pas `node`. Extension non couverte → `null`, mode dégradé (coloration
+seule, pas de LSP).
 
 **Coloration syntaxique** (`editorLanguage.ts::byExtension` +
 `languageExtensionForPath`, réutilisé aussi par `DiffView.vue`) : sélection d'une
@@ -1010,16 +1058,16 @@ extension CodeMirror par extension de fichier — ts/tsx/js/jsx/mjs/cjs, rs, jso
 md/markdown, yaml/yml, toml, py, **vue** (`@codemirror/lang-vue` sur base
 `@codemirror/lang-html`), **rhai** et **hbs/handlebars**. Les noms
 Dockerfile/Containerfile (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
-`Containerfile*`) sont reconnus par nom de base via le helper partagé
-`dockerfileName.ts` (aussi utilisé par `fileIcon.ts`), pas par extension →
+`Containerfile`, `Containerfile.*`) sont reconnus par nom de base via le helper
+partagé `dockerfileName.ts` (aussi utilisé par `fileIcon.ts`), pas par extension →
 `@codemirror/legacy-modes/mode/dockerfile`. rhai et handlebars sont des modes
 `StreamLanguage` maison (`langRhai.ts`, `langHandlebars.ts`, fonctions pures
 testées) : **coloration « suffisante » seulement**, pas de parseur Lezer, pas
 d'AST — mots-clés/commentaires/chaînes/nombres pour rhai, HTML-lite + surcouche
-moustaches pour handlebars. rhai/handlebars/Dockerfile n'ont pas de LSP (Dockerfile :
-feature `docker-lsp`, non démarrée) ; `.vue` **a** un LSP depuis `vue-lsp` (multiplexeur
-composite Volar, cf. "Serveur LSP" plus haut) — la coloration `@codemirror/lang-vue`
-reste la couche lexicale sous les diagnostics/complétion LSP.
+moustaches pour handlebars. rhai/handlebars n'ont pas de LSP ; `.vue` (`vue-lsp`,
+multiplexeur composite Volar) et **Dockerfile/Containerfile** (`docker-lsp`,
+composite `docker-langserver` + hadolint, cf. "Serveur LSP" plus haut) **en ont
+un** — la coloration reste la couche lexicale sous les diagnostics/complétion LSP.
 
 **Images toolchain = images LSP, décidé après coup (2026-08-20)** : le premier jet de
 cette feature pointait `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` sur les mêmes images
@@ -1028,12 +1076,15 @@ le LSP — code complet mais non fonctionnel sur un cluster réel, confirmé en
 diagnostiquant `rustup component add rust-analyzer` en pod : `Read-only file system`,
 attendu, `volumes[].image` monte toujours en lecture seule (propriété K8s, pas une
 contrainte vanyline) — installer un LSP au runtime dans le pod est structurellement
-impossible, il faut le baker à la construction de l'image. Résolu par deux nouvelles
+impossible, il faut le baker à la construction de l'image. Résolu par des
 images publiées avec le monorepo (`toolchains/rust/Dockerfile`,
-`toolchains/node/Dockerfile` — mêmes bases que les anciens défauts toolchain, LSP
-ajouté au build : `rustup component add rust-analyzer` + symlink vers
-`/usr/local/bin`, `npm install -g typescript-language-server` **+ `@vue/language-server`
-et `@vue/typescript-plugin` 3.3.11 épinglés pour le composite Volar de `vue-lsp`**),
+`toolchains/node/Dockerfile`, `toolchains/docker/Dockerfile` — mêmes bases que
+les défauts toolchain, LSP ajouté au build : `rustup component add rust-analyzer`
++ symlink vers `/usr/local/bin`, `npm install -g typescript-language-server` **+
+`@vue/language-server` et `@vue/typescript-plugin` 3.3.11 épinglés pour le
+composite Volar de `vue-lsp`**, et pour `docker` `npm install -g
+dockerfile-language-server-nodejs` + `hadolint` statique épinglé + `vnl-hadolint-lsp`
+baké pour le composite hadolint de `docker-lsp`),
 publiées avec le même tag que app/sandbox/controller (`.github/workflows/release.yml`). `TOOLCHAIN_IMAGE_*`
 et `LSP_IMAGE_*` pointent désormais par défaut sur la **même image** par langage — un
 piste écartée en cours de route : `mcr.microsoft.com/devcontainers/typescript-node`
@@ -1176,12 +1227,15 @@ ci-dessous pour l'outil) : marqueurs de fichiers sur l'arbre HEAD du clone bare 
 `rust` si un `Cargo.toml` existe (racine ou n'importe quel sous-chemin, membre de
 workspace compris), `js-ts` si `package.json` **ou** `tsconfig.json` existe **à la
 racine uniquement** (un `package.json` imbriqué ne compte pas), `vue` si un
-`*.vue` existe n'importe où dans l'arbre HEAD (`vue-lsp`). **Présence
-seulement, jamais de version** (décision 2026-08-15 : ni `rust-toolchain.toml`/
-`rust-version`/edition, ni `.nvmrc`/`engines.node` — si le besoin apparaît, ce sera
-une extension explicite, pas une déduction implicite). Ordre de sortie figé
-`["rust", "js-ts", "vue", "dockerfile"]`, filtré par les marqueurs présents
-(`dockerfile` réservé à `docker-lsp`, aucun marqueur ne le produit encore). Le
+`*.vue` existe n'importe où dans l'arbre HEAD (`vue-lsp`), `dockerfile` si un
+nom Dockerfile/Containerfile (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
+`Containerfile`, `Containerfile.*`, insensible à la casse — helper partagé
+`maint::is_dockerfile_path`, miroir de `dockerfileName.ts`) existe n'importe où
+dans l'arbre HEAD (`docker-lsp`). **Présence seulement, jamais de version**
+(décision 2026-08-15 : ni `rust-toolchain.toml`/`rust-version`/edition, ni
+`.nvmrc`/`engines.node` — si le besoin apparaît, ce sera une extension
+explicite, pas une déduction implicite). Ordre de sortie figé
+`["rust", "js-ts", "vue", "dockerfile"]`, filtré par les marqueurs présents. Le
 marqueur `vue` **implique la toolchain `node`** indépendamment de `js-ts`.
 
 **Chaînage dans les Jobs `init`/`fetch`** (`project::git_pod_template`) : le pod du
@@ -1220,19 +1274,26 @@ registry privé) quand le défaut ne convient pas. Sinon, dérivé de
 `TOOLCHAIN_IMAGE_RUST`, défaut `docker.io/library/rust:slim-trixie`), `js-ts`
 **ou `vue`** → toolchain `node` (image `TOOLCHAIN_IMAGE_NODE`, défaut
 `docker.io/library/node:trixie-slim`) — un seul `node` même si les deux
-marqueurs sont présents ; mêmes presets d'env que le mode manuel
-(`toolchain_preset`), ordre fixe rust puis node. Les deux images par défaut sont
-des flags CLI du controller (`env` clap), surchargeables sans rebuild, recette
-alignée sur `deploy/sandbox/sandbox-test.yaml`.
+marqueurs sont présents —, `dockerfile` → toolchain `docker` (image
+`TOOLCHAIN_IMAGE_DOCKER`, défaut `ghcr.io/sebt3/vanyline-toolchains-docker:v<version>`,
+`toolchains/docker/Dockerfile` — cf. "LSP par toolchain" ci-dessous) ; mêmes
+presets d'env que le mode manuel (`toolchain_preset` — pour `docker` : `PATH` +
+`LD_LIBRARY_PATH` arch standard des images à runtime, `docker-langserver`
+s'exécute sur le runtime node de son volume, aucune env spécifique), ordre fixe
+rust puis node puis docker. Les images par défaut sont des flags CLI du
+controller (`env` clap), surchargeables sans rebuild, recette alignée sur
+`deploy/sandbox/sandbox-test.yaml`.
 
 **LSP par toolchain** (`lsp-integration`, `Toolchain.lsp: Option<LspSpec>` —
 `{ image, bin, args }`, `crds/src/lib.rs`) : résolution (`resolve_toolchain_lsp`,
 même forme que `resolve_toolchain_env`) — `toolchain.lsp` explicite s'il est
 renseigné (LSP custom possible, y compris hors rust/node) ; sinon preset par
-`toolchain.name` (`image` depuis `ctx.lsp_image_rust`/`ctx.lsp_image_node`, flags CLI
-`LSP_IMAGE_RUST`/`LSP_IMAGE_NODE` — l'image doit rester configurable au déploiement,
+`toolchain.name` (`image` depuis `ctx.lsp_image_rust`/`ctx.lsp_image_node`/
+`ctx.lsp_image_docker`, flags CLI `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE`/
+`LSP_IMAGE_DOCKER` — l'image doit rester configurable au déploiement,
 contrairement à `bin`/`args` qui sont hardcodés : `rust-analyzer` sans args,
-`typescript-language-server --stdio`) ; sinon `None` (pas de route `/ws/lsp` montée
+`typescript-language-server --stdio`, `docker-langserver --stdio`) ; sinon
+`None` (pas de route `/ws/lsp` montée
 pour cette toolchain, éditeur en mode dégradé). S'applique uniformément que
 `spec.toolchains` soit explicite ou dérivé — zero-config pour rust/node dans les deux
 cas. Monté en volume image séparé, `/toolchains/<name>-lsp` (à côté de
@@ -1256,6 +1317,24 @@ typescript-plugin` trouve le paquet niché). **Preset-only** (décision 2026-09-
 `spec.toolchains` explicite ou un `toolchain.lsp` custom ne reçoit **jamais**
 d'`aux`. Clé `aux` omise (pas `"aux":[]`) hors composite : bytes de
 `VNL_LSP_TOOLCHAINS` inchangés pour tous les pods non-Vue.
+
+**Variante composite hadolint** (`docker-lsp`, `docker_lsp_composite`) : même
+patron, sur son propre gate — le `node` dérivé d'un projet `vue` a son composite
+Volar, le `docker` **dérivé** (`spec.toolchains` vide) d'un projet dont
+`languages` contient `dockerfile` a le sien : primaire `docker-langserver
+--stdio`, plus un enfant `aux` de rôle `diagnostics-merge` (`vnl-hadolint-lsp`,
+sans argument, sans `initOptions`). Les deux bins vivent dans la **même** image
+(`ctx.lsp_image_docker`, `toolchains/docker/Dockerfile` — base `node:trixie-slim`
++ `dockerfile-language-server-nodejs` + binaire `hadolint` statique épinglé
+`v2.15.1` checksum SHA256 vérifié au build + `vnl-hadolint-lsp` baké par copie
+multi-stage depuis le build sandbox). `TOOLCHAIN_IMAGE_DOCKER` et
+`LSP_IMAGE_DOCKER` pointent par défaut sur la même image, publiée avec le même
+tag que app/sandbox/controller (`.github/workflows/release.yml`, entrée matrice
+`toolchains-docker`, amd64-only comme les autres). **Preset-only** identique à
+Volar : `spec.toolchains` explicite ou `toolchain.lsp` custom ⟹ jamais d'`aux`,
+juste le preset mono-process `docker-langserver`. Les deux gates coexistent
+(projet `vue` + `dockerfile` ⟹ `node` composite Volar **et** `docker` composite
+hadolint).
 
 ### CRD Application (`controller-application-crd`)
 
@@ -1735,8 +1814,9 @@ onglets éditeur n'ont pas d'indicateur « modifications non enregistrées » �
 n'y a plus rien à enregistrer manuellement : l'autosave debouncé (300 ms,
 `lsp-agent-interface`, cf. section "WebSocket éditeur") persiste chaque frappe, et
 `Ctrl+S` / le démontage d'onglet forcent un flush. LSP : images
-rust-analyzer/typescript-language-server désormais construites (`toolchains/rust/`,
-`toolchains/node/Dockerfile`, cf. section "Serveur LSP" plus haut), mais
+rust-analyzer/typescript-language-server/docker-langserver+hadolint désormais
+construites (`toolchains/rust/`, `toolchains/node/Dockerfile`,
+`toolchains/docker/Dockerfile`, cf. section "Serveur LSP" plus haut), mais
 fonctionnalité toujours non testée en conditions réelles (aucun cluster K8s dans
 l'environnement de dev de ces sessions).
 
