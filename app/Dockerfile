@@ -3,7 +3,7 @@
 #   podman build -f app/Dockerfile -t vanyline-app:dev .
 
 # ── Stage 1 : frontend ──────────────────────────────────────────────────────
-FROM node:22-alpine AS frontend
+FROM node:26-alpine AS frontend
 WORKDIR /build
 COPY package*.json ./
 COPY frontend/package*.json frontend/
