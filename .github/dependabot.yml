@@ -54,9 +54,28 @@ updates:
       interval: "weekly"
     labels:
       - "tools"
+  - package-ecosystem: "cargo"
+    directory: "/cfgstore"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "cfgstore"
   - package-ecosystem: "npm"
     directory: "/"
     schedule:
       interval: "weekly"
     labels:
       - "frontend"
+  # Bases `FROM` des Dockerfiles (app/sandbox/controller + images toolchain).
+  # Ne suit PAS les binaires téléchargés + checksum dans les RUN (hadolint,
+  # ruff) — ceux-là restent bumpés à la main (une ligne + SHA256).
+  - package-ecosystem: "docker"
+    directories:
+      - "/app"
+      - "/sandbox"
+      - "/controller"
+      - "/toolchains/*"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "docker"
