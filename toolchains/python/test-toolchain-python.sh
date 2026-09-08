@@ -23,7 +23,8 @@
 #   4. RUFF_WRAPPER_SMOKE_OK  : vnl-ruff-lsp en bout-en-bouche avec le VRAI
 #                               ruff de l'image (handshake, didOpen,
 #                               publishDiagnostics, code F401 réel, source
-#                               "ruff", severity 2, codeDescription —
+#                               "ruff", severity 1 (ruff pose "error" sur
+#                               F401, relayée), codeDescription —
 #                               conversion de la tâche 02). Le stdin du
 #                               wrapper est maintenu ouvert ~4 s (printf +
 #                               sleep dans le pipe) : le wrapper ne publie
@@ -130,8 +131,9 @@ podman run --rm -w / -i "$image" sh -euc "$pyright_script"
 # pipe ne se ferme qu'après le sleep, le lint (didOpen → ruff →
 # publishDiagnostics) a le temps de publier.
 # `codeDescription":{"href":"…unused-import"}` : l'URL réelle du F401 rendue
-# par ruff 0.16.6, relayée verbatim par la conversion (tâche 02) ; severity 2
-# = décision design §3 (tout en Warning, severity ruff ignorée).
+# par ruff 0.16.6, relayée verbatim par la conversion (tâche 02) ; severity 1
+# (Error) = ruff 0.16.6 pose `"severity":"error"` sur F401, relayée par
+# `ruff_severity` (décision 2026-09-08 — Warning n'est que le repli).
 ruff_smoke_script="$(cat <<'SH'
 init='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
 opened='{"jsonrpc":"2.0","method":"initialized","params":{}}'
@@ -144,7 +146,7 @@ doc='{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{
 grep -q publishDiagnostics /tmp/lsp.out
 grep -q F401 /tmp/lsp.out
 grep -q '"source":"ruff"' /tmp/lsp.out
-grep -q '"severity":2' /tmp/lsp.out
+grep -q '"severity":1' /tmp/lsp.out
 grep -q '"codeDescription":{"href":"https://docs.astral.sh/ruff/rules/unused-import"}' /tmp/lsp.out
 echo RUFF_WRAPPER_SMOKE_OK
 SH

@@ -510,9 +510,10 @@ fn utf16_offset(text: &str, line: i64, character: i64) -> usize {
 /// ligne de start aussi. Garde-fou `filename` : un item portant un `filename`
 /// PRÉSENT et différent de `"-"` est ignoré (on passe toujours `-` en argv —
 /// protection contre un changement de comportement futur ou un
-/// `--stdin-filename` ajouté par un tiers). `severity` ruff IGNOREE (elle vaut
-/// `"error"` y compris sur F401 dans 0.16.6) : 2 (Warning) pour TOUS les items,
-/// inconditionnellement — design §3. `code` verbatim (absente/`null` ⟹ clé
+/// `--stdin-filename` ajouté par un tiers). `severity` ruff RELAYÉE via
+/// `ruff_severity` quand c'est une chaîne connue (ruff 0.16.6 pose `"error"` y
+/// compris sur F401/I001) ; absente/`null`/inconnue ⟹ 2 (Warning) par défaut
+/// (décision 2026-09-08). `code` verbatim (absente/`null` ⟹ clé
 /// OMISE) ; `source`: `ruff` ; `message` verbatim ; `codeDescription.href`
 /// seulement si `url` est une chaîne (`href` doit être une chaîne en LSP,
 /// jamais `null` — le `url: null` de `invalid-syntax` ⟹ clé OMISE). Entrée
@@ -584,9 +585,12 @@ fn convert_ruff_output(ruff_json: &str, doc_text: &str) -> Vec<Value> {
                     "end": {"line": end.0, "character": end.1},
                 }),
             );
-            // Severity 2 (Warning) inconditionnelle — design §3 : ruff check
-            // ne distingue pas les niveaux côté LSP en v1.
-            diagnostic.insert("severity".to_string(), serde_json::json!(2));
+            // Severity : la valeur ruff est EXPOSÉE quand c'est une chaîne
+            // connue, Warning(2) n'est que le repli (décision 2026-09-08).
+            diagnostic.insert(
+                "severity".to_string(),
+                serde_json::json!(ruff_severity(obj)),
+            );
             if let Some(code) = obj.get("code").filter(|code| !code.is_null()) {
                 diagnostic.insert("code".to_string(), code.clone());
             }
@@ -605,6 +609,23 @@ fn convert_ruff_output(ruff_json: &str, doc_text: &str) -> Vec<Value> {
         .collect()
 }
 
+/// Sévérité LSP (`1` Error, `2` Warning, `3` Information, `4` Hint) depuis le
+/// champ `severity` de ruff quand c'est une chaîne connue — `"error"`/`"fatal"`
+/// → 1, `"warning"` → 2, `"info"`/`"information"`/`"notice"` → 3, `"hint"` → 4.
+/// Absente / `null` / valeur inconnue ⟹ `2` (Warning) par défaut. Décision
+/// 2026-09-08 : on relaie la sévérité ruff quand elle existe (ruff 0.16.6 pose
+/// `"error"` y compris sur les lints de style comme `I001`), Warning ne reste
+/// que le repli quand ruff n'en fournit aucune.
+fn ruff_severity(obj: &serde_json::Map<String, Value>) -> i64 {
+    match obj.get("severity").and_then(Value::as_str) {
+        Some("error" | "fatal") => 1,
+        Some("warning") => 2,
+        Some("info" | "information" | "notice") => 3,
+        Some("hint") => 4,
+        _ => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -619,9 +640,9 @@ mod tests {
     /// structurelle exacte (ranges, sévérités, code, source, ordre). Les `\n`
     /// internes des valeurs `fix.edits.content` sont des newlines littéraux
     /// échappés dans la JSON (préservés tels quels par la raw string) : les
-    /// champs `cell`/`fix`/`name`/`noqa_row`/`severity` de l'entrée
-    /// n'apparaissent PAS dans la sortie (seule `severity` ruff est écrasée
-    /// par le 2, jamais relayée).
+    /// champs `cell`/`fix`/`name`/`noqa_row` de l'entrée n'apparaissent PAS
+    /// dans la sortie ; `severity` de l'entrée (`"error"` sur les deux items)
+    /// est relayée en `1` (Error) — cf. `ruff_severity`.
     #[test]
     fn convert_ruff_output_example() {
         let input = r#"[{"cell":null,"code":"I001","end_location":{"column":12,"row":2},"filename":"-","fix":{"applicability":"safe","edits":[{"content":"import json\nimport os\n\n","end_location":{"column":1,"row":4},"location":{"column":1,"row":1}}],"message":"Organize imports"},"location":{"column":1,"row":1},"message":"Import block is un-sorted or un-formatted","name":"unsorted-imports","noqa_row":1,"severity":"error","url":"https://docs.astral.sh/ruff/rules/unsorted-imports"},{"cell":null,"code":"F401","end_location":{"column":10,"row":1},"filename":"-","fix":{"applicability":"safe","edits":[{"content":"","end_location":{"column":1,"row":2},"location":{"column":1,"row":1}}],"message":"Remove unused import: `os`"},"location":{"column":8,"row":1},"message":"`os` imported but unused","name":"unused-import","noqa_row":1,"severity":"error","url":"https://docs.astral.sh/ruff/rules/unused-import"}]"#;
@@ -629,35 +650,38 @@ mod tests {
         let out = convert_ruff_output(input, doc_text);
         let expected = json!([
             {"range":{"start":{"line":0,"character":0},"end":{"line":1,"character":11}},
-             "severity":2,"code":"I001","source":"ruff",
+             "severity":1,"code":"I001","source":"ruff",
              "message":"Import block is un-sorted or un-formatted",
              "codeDescription":{"href":"https://docs.astral.sh/ruff/rules/unsorted-imports"}},
             {"range":{"start":{"line":0,"character":7},"end":{"line":0,"character":9}},
-             "severity":2,"code":"F401","source":"ruff",
+             "severity":1,"code":"F401","source":"ruff",
              "message":"`os` imported but unused",
              "codeDescription":{"href":"https://docs.astral.sh/ruff/rules/unused-import"}}
         ]);
         assert_eq!(Value::Array(out), expected);
     }
 
-    /// Test 2 : convert_ruff_output_severity_always_warning — la clé
-    /// `severity` de ruff est IGNOREE (`"error"`, `"warning"` ou absente à
-    /// l'entrée) : la sortie vaut 2 (Warning) pour TOUS les items,
-    /// inconditionnellement (design §3).
+    /// Test 2 : convert_ruff_output_severity_relayed — la sévérité ruff est
+    /// RELAYÉE quand c'est une chaîne connue (`"error"` → 1, `"warning"` → 2,
+    /// `"info"` → 3, `"hint"` → 4) ; absente ou valeur inconnue ⟹ 2 (Warning)
+    /// par défaut (décision 2026-09-08).
     #[test]
-    fn convert_ruff_output_severity_always_warning() {
+    fn convert_ruff_output_severity_relayed() {
         let input = r#"[
             {"cell":null,"code":"A","end_location":{"column":1,"row":1},"filename":"-","fix":null,"location":{"column":1,"row":1},"message":"a","name":"x","noqa_row":1,"severity":"error","url":null},
             {"cell":null,"code":"B","end_location":{"column":1,"row":2},"filename":"-","fix":null,"location":{"column":1,"row":2},"message":"b","name":"x","noqa_row":2,"severity":"warning","url":null},
-            {"cell":null,"code":"C","end_location":{"column":1,"row":3},"filename":"-","fix":null,"location":{"column":1,"row":3},"message":"c","name":"x","noqa_row":3,"url":null}
+            {"cell":null,"code":"C","end_location":{"column":1,"row":3},"filename":"-","fix":null,"location":{"column":1,"row":3},"message":"c","name":"x","noqa_row":3,"url":null},
+            {"cell":null,"code":"D","end_location":{"column":1,"row":4},"filename":"-","fix":null,"location":{"column":1,"row":4},"message":"d","name":"x","noqa_row":4,"severity":"info","url":null},
+            {"cell":null,"code":"E","end_location":{"column":1,"row":5},"filename":"-","fix":null,"location":{"column":1,"row":5},"message":"e","name":"x","noqa_row":5,"severity":"hint","url":null},
+            {"cell":null,"code":"F","end_location":{"column":1,"row":6},"filename":"-","fix":null,"location":{"column":1,"row":6},"message":"f","name":"x","noqa_row":6,"severity":"bogus","url":null}
         ]"#;
-        let out = convert_ruff_output(input, "a\nb\nc");
-        assert_eq!(out.len(), 3);
+        let out = convert_ruff_output(input, "a\nb\nc\nd\ne\nf");
+        assert_eq!(out.len(), 6);
         let severities: Vec<i64> = out
             .iter()
             .map(|d| d["severity"].as_i64().unwrap())
             .collect();
-        assert_eq!(severities, vec![2, 2, 2]);
+        assert_eq!(severities, vec![1, 2, 2, 3, 4, 2]);
     }
 
     /// Test 3 : convert_ruff_output_url_null_omits_code_description — TRACE-B
@@ -672,7 +696,8 @@ mod tests {
         // Item 1 : « def broken(: » = 12 unités UTF-16.
         assert_eq!(out[0]["code"], json!("invalid-syntax"));
         assert!(out[0].get("codeDescription").is_none());
-        assert_eq!(out[0]["severity"], json!(2));
+        // `invalid-syntax` porte `severity: "error"` ⟹ relayé en 1 (Error).
+        assert_eq!(out[0]["severity"], json!(1));
         assert_eq!(out[0]["range"]["start"], json!({"line":0,"character":11}));
         assert_eq!(out[0]["range"]["end"], json!({"line":0,"character":12}));
         // Item 2 : dernière ligne vide (doc fini par \n), start = end.
