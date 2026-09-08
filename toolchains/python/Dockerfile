@@ -96,7 +96,7 @@ RUN cargo build --release --locked -p vanyline-sandbox --bin vnl-ruff-lsp
 #
 # Pas de USER : les toolchains node/rust/docker n'en mettent pas — le pod pose
 # l'UID, et le contenu du volume est read-only de toute façon.
-FROM docker.io/library/python:3.13-slim-trixie
+FROM docker.io/library/python:3.14-slim-trixie
 RUN apt-get update && apt-get install -y --no-install-recommends libatomic1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=pyright /usr/local/lib/node_modules/pyright /usr/local/lib/node_modules/pyright
