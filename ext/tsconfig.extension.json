@@ -9,7 +9,6 @@
     "noEmit": true,
     "ignoreDeprecations": "6.0",
     "types": ["node", "vscode"],
-    "baseUrl": ".",
     "paths": {
       "@vanyline/protocol": ["../packages/protocol/src/index.ts"],
       "@vanyline/protocol/*": ["../packages/protocol/src/*"]
