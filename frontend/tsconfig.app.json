@@ -12,7 +12,6 @@
     "erasableSyntaxOnly": true,
     "noFallthroughCasesInSwitch": true,
 
-    "baseUrl": ".",
     "paths": {
       "@vanyline/ui": ["../packages/ui/src/index.ts"],
       "@vanyline/ui/*": ["../packages/ui/src/*"],

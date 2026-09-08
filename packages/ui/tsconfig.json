@@ -1,7 +1,6 @@
 {
   "extends": "@vue/tsconfig/tsconfig.dom.json",
   "compilerOptions": {
-    "baseUrl": ".",
     "paths": {
       "@vanyline/protocol": ["../protocol/src/index.ts"],
       "@vanyline/protocol/*": ["../protocol/src/*"]
