@@ -930,8 +930,9 @@ dépend — rust, node-sans-vue, docker-sans-composite).
 enfant ignoré, jamais une erreur de session) :
 - `tsserver-forward` (`vue-lsp`) — **répond aux requêtes** : entre en barrière
   de fusion et reçoit les `tsserver/request` relayés.
-- `diagnostics-merge` (`docker-lsp`, `vnl-hadolint-lsp`) — **ne répond à aucune
-  requête**. Il ne reçoit que la copie d'`initialize` (invariant handshake) et
+- `diagnostics-merge` (`docker-lsp`, `vnl-hadolint-lsp` ; `python-support`,
+  `vnl-ruff-lsp`) — **ne répond à aucune requête**. Il ne reçoit que la copie
+  d'`initialize` (invariant handshake) et
   le fan-out doc-sync (le lint a besoin du contenu des buffers), et publie ses
   `textDocument/publishDiagnostics` que la session fond avec celles du primaire.
   Porte de niveau rôle (`aux_answers_requests`) : un composite dont **tous** les
@@ -970,7 +971,8 @@ enfant ignoré, jamais une erreur de session) :
   cache). EOF d'un aux ⟹ ses parts purgées + cache recompté (des diagnostics
   d'un serveur mort feraient passer un `edit_and_check` au vert à tort). Chaque
   diagnostic garde sa `source` (`"dockerfile"` du primaire, `"hadolint"` de
-  l'aux `diagnostics-merge`) : **pas de dédup en v1** — si les deux serveurs
+  l'aux `diagnostics-merge` ; de même `"Pyright"` / `"ruff"` pour le composite
+  python) : **pas de dédup en v1** — si les deux serveurs
   signalent la même chose l'utilisateur voit deux entrées (accepté, dédup
   possible en évolution).
 - **Forwarding `tsserver/request`** (mode hybride Volar v3 : `vue-language-server`
@@ -1007,6 +1009,29 @@ donne qu'un point), `level` → severity (error/warning/info/style → 1/2/3/4),
 stdout non-JSON ⟹ contribution vide + message sur stderr : le wrapper ne meurt
 jamais (le primaire sert encore — dégradation silencieuse).
 
+**Wrapper `vnl-ruff-lsp`** (`python-support`, `sandbox/src/bin/ruff_lsp.rs`,
+troisième binaire du crate sandbox baké dans l'image toolchain `python`) :
+clone quasi verbatim de `vnl-hadolint-lsp` — même framing, même rôle
+`diagnostics-merge`, mêmes déclencheurs (`didOpen`/`didSave` immédiats,
+`didChange` debouncé 500 ms), même capture `(texte, version, génération)` +
+abandon de résultat périmé, même contrat de dégradation. Invocation :
+`ruff check --output-format json --force-exclude -`, **buffer sur stdin**, `cwd`
+hérité de la session — ruff y trouve `pyproject.toml` / `ruff.toml` /
+`.ruff.toml`, zéro interpolation. Conversion JSON → diagnostics LSP : positions
+ruff 1-based → ranges 0-based (`start = (row-1, column-1)` clampé UTF-16, `end`
+depuis `end_location` avec repli fin-de-ligne à-la-hadolint), `code`
+(`F401`, `E501`…) → `Diagnostic.code`, `url` → `codeDescription.href` (omis si
+`null`), `source = "ruff"`. `severity` : `ruff_severity()` relaie la valeur ruff
+quand c'est une chaîne connue (`error`/`fatal` → 1, `warning` → 2,
+`info`/`information`/`notice` → 3, `hint` → 4), défaut `2` (Warning) si absente
+ou inconnue (décision 2026-09-08 ; ruff 0.16.6 pose `"error"` y compris sur
+F401/I001 ⟹ ces lints remontent en Error). Codes de fonctionnement
+`VNL-SBX-LSP-012` (spawn/E-S) / `-013` (stdout non-JSON) sur stderr. Limite
+documentée : colonnes ruff en scalaires Unicode, LSP en UTF-16 ⟹ décalage
+possible de +1 par caractère hors-BMP avant la violation sur la même ligne
+(conversion triviale `-1`, pas de remap — classe « CRLF cosmétique » de
+`docker-lsp`).
+
 **Rename cross-file côté UI — flux custom, pas le helper du package.**
 `renameSymbol`/`doRename` de `@codemirror/lsp-client` (v6.1.0, tout jeune — risque
 identifié en amont, matérialisé ici) ignore silencieusement les fichiers non ouverts
@@ -1042,7 +1067,9 @@ editorLanguage.ts::lspToolchainForPath`, miroir de `tools_impl.rs::toolchain_for
 `.rs` → `rust`/`rust`, `.ts`/`.tsx`/`.mts`/`.cts` → `node`/`typescript`, `.js`/`.jsx`/
 `.mjs`/`.cjs` → `node`/`javascript`, `.vue` → `node`/`vue` (`vue-lsp` — la session
 `node` est le multiplexeur composite Volar, cf. ci-dessous ; `languageId` `vue` est
-celle qu'attend le primaire `vue-language-server`). **Les noms
+celle qu'attend le primaire `vue-language-server`), `.py`/`.pyi` → `python`/`python`
+(`python-support` — la session `python` est le composite primaire
+`pyright-langserver` + aux `vnl-ruff-lsp` ; `.pyi` route comme `.py`). **Les noms
 Dockerfile/Containerfile** (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
 `Containerfile`, `Containerfile.*`, insensible à la casse) → `docker`/`dockerfile`
 (`docker-lsp` — la session `docker` est le composite `docker-langserver` + aux
@@ -1055,7 +1082,8 @@ seule, pas de LSP).
 **Coloration syntaxique** (`editorLanguage.ts::byExtension` +
 `languageExtensionForPath`, réutilisé aussi par `DiffView.vue`) : sélection d'une
 extension CodeMirror par extension de fichier — ts/tsx/js/jsx/mjs/cjs, rs, json,
-md/markdown, yaml/yml, toml, py, **vue** (`@codemirror/lang-vue` sur base
+md/markdown, yaml/yml, toml, py/pyi (`@codemirror/lang-python` ; `.pyi` alias de
+`.py` — `python-support`), **vue** (`@codemirror/lang-vue` sur base
 `@codemirror/lang-html`), **rhai** et **hbs/handlebars**. Les noms
 Dockerfile/Containerfile (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
 `Containerfile`, `Containerfile.*`) sont reconnus par nom de base via le helper
@@ -1078,13 +1106,18 @@ attendu, `volumes[].image` monte toujours en lecture seule (propriété K8s, pas
 contrainte vanyline) — installer un LSP au runtime dans le pod est structurellement
 impossible, il faut le baker à la construction de l'image. Résolu par des
 images publiées avec le monorepo (`toolchains/rust/Dockerfile`,
-`toolchains/node/Dockerfile`, `toolchains/docker/Dockerfile` — mêmes bases que
+`toolchains/node/Dockerfile`, `toolchains/docker/Dockerfile`,
+`toolchains/python/Dockerfile` — mêmes bases que
 les défauts toolchain, LSP ajouté au build : `rustup component add rust-analyzer`
 + symlink vers `/usr/local/bin`, `npm install -g typescript-language-server` **+
 `@vue/language-server` et `@vue/typescript-plugin` 3.3.11 épinglés pour le
-composite Volar de `vue-lsp`**, et pour `docker` `npm install -g
+composite Volar de `vue-lsp`**, pour `docker` `npm install -g
 dockerfile-language-server-nodejs` + `hadolint` statique épinglé + `vnl-hadolint-lsp`
-baké pour le composite hadolint de `docker-lsp`),
+baké pour le composite hadolint de `docker-lsp`, et pour `python` (base
+`python:3.13-slim-trixie` + `libatomic1`) `npm install -g pyright` avec `node`
+copié multi-stage + `pyright-langserver` en **symlink relatif** + `ruff` binaire
+épinglé `0.16.6` checksum vérifié + `vnl-ruff-lsp` baké pour le composite pyright
+de `python-support`),
 publiées avec le même tag que app/sandbox/controller (`.github/workflows/release.yml`). `TOOLCHAIN_IMAGE_*`
 et `LSP_IMAGE_*` pointent désormais par défaut sur la **même image** par langage — un
 piste écartée en cours de route : `mcr.microsoft.com/devcontainers/typescript-node`
@@ -1152,9 +1185,10 @@ en argv — jamais de `sh -c`, aucun champ de CRD ne s'interpole dans une comman
 (cf. section "Maintenance des workspaces" ci-dessous pour l'outil lui-même).
 
 **Presets toolchain** (`sandbox.rs::toolchain_preset`) : la recette d'env validée (PATH,
-`LD_LIBRARY_PATH` deux arches, `RUSTUP_HOME`…) vit ici, pas répétée dans chaque CR —
-`Toolchain.env` vide déclenche le preset si `Toolchain.name` matche (`rust`, `node`),
-sinon aucune variable ; `Toolchain.env` explicite remplace le preset entièrement. La
+`LD_LIBRARY_PATH` deux arches, `RUSTUP_HOME`, `PYTHONUSERBASE`/`PIP_USER`…) vit ici, pas
+répétée dans chaque CR — `Toolchain.env` vide déclenche le preset si `Toolchain.name`
+matche (`rust`, `node`, `docker`, `python`), sinon aucune variable ; `Toolchain.env`
+explicite remplace le preset entièrement. La
 liste de `Toolchain` elle-même peut être explicite (`spec.toolchains`) ou dérivée
 automatiquement de la détection de langages — cf. sous-section "Détection de langages
 et toolchains automatiques (WS-10)" ci-dessous.
@@ -1227,16 +1261,20 @@ ci-dessous pour l'outil) : marqueurs de fichiers sur l'arbre HEAD du clone bare 
 `rust` si un `Cargo.toml` existe (racine ou n'importe quel sous-chemin, membre de
 workspace compris), `js-ts` si `package.json` **ou** `tsconfig.json` existe **à la
 racine uniquement** (un `package.json` imbriqué ne compte pas), `vue` si un
-`*.vue` existe n'importe où dans l'arbre HEAD (`vue-lsp`), `dockerfile` si un
-nom Dockerfile/Containerfile (`Dockerfile`, `Dockerfile.*`, `*.dockerfile`,
-`Containerfile`, `Containerfile.*`, insensible à la casse — helper partagé
-`maint::is_dockerfile_path`, miroir de `dockerfileName.ts`) existe n'importe où
-dans l'arbre HEAD (`docker-lsp`). **Présence seulement, jamais de version**
-(décision 2026-08-15 : ni `rust-toolchain.toml`/`rust-version`/edition, ni
-`.nvmrc`/`engines.node` — si le besoin apparaît, ce sera une extension
-explicite, pas une déduction implicite). Ordre de sortie figé
-`["rust", "js-ts", "vue", "dockerfile"]`, filtré par les marqueurs présents. Le
-marqueur `vue` **implique la toolchain `node`** indépendamment de `js-ts`.
+`*.vue` existe n'importe où dans l'arbre HEAD (`vue-lsp`), `python` si un
+`*.py`/`*.pyi` **ou** un `pyproject.toml`/`setup.cfg` existe n'importe où dans
+l'arbre HEAD (`python-support` — `setup.py` est couvert par `.py` ; pas de
+helper partagé, l'extension et les manifests ne concernent que la détection),
+`dockerfile` si un nom Dockerfile/Containerfile (`Dockerfile`, `Dockerfile.*`,
+`*.dockerfile`, `Containerfile`, `Containerfile.*`, insensible à la casse —
+helper partagé `maint::is_dockerfile_path`, miroir de `dockerfileName.ts`)
+existe n'importe où dans l'arbre HEAD (`docker-lsp`). **Présence seulement,
+jamais de version** (décision 2026-08-15 : ni `rust-toolchain.toml`/
+`rust-version`/edition, ni `.nvmrc`/`engines.node`, ni version Python — si le
+besoin apparaît, ce sera une extension explicite, pas une déduction implicite).
+Ordre de sortie figé `["rust", "js-ts", "vue", "python", "dockerfile"]`, filtré
+par les marqueurs présents. Le marqueur `vue` **implique la toolchain `node`**
+indépendamment de `js-ts`.
 
 **Chaînage dans les Jobs `init`/`fetch`** (`project::git_pod_template`) : le pod du
 Job exécute la commande git (`init` ou `fetch`) comme **initContainer**, puis
@@ -1274,25 +1312,37 @@ registry privé) quand le défaut ne convient pas. Sinon, dérivé de
 `TOOLCHAIN_IMAGE_RUST`, défaut `docker.io/library/rust:slim-trixie`), `js-ts`
 **ou `vue`** → toolchain `node` (image `TOOLCHAIN_IMAGE_NODE`, défaut
 `docker.io/library/node:trixie-slim`) — un seul `node` même si les deux
-marqueurs sont présents —, `dockerfile` → toolchain `docker` (image
-`TOOLCHAIN_IMAGE_DOCKER`, défaut `ghcr.io/sebt3/vanyline-toolchains-docker:v<version>`,
+marqueurs sont présents —, `python` → toolchain `python` (image
+`TOOLCHAIN_IMAGE_PYTHON`, défaut `ghcr.io/sebt3/vanyline-toolchains-python:v<version>`,
+`toolchains/python/Dockerfile` — `python-support`), `dockerfile` → toolchain
+`docker` (image `TOOLCHAIN_IMAGE_DOCKER`, défaut
+`ghcr.io/sebt3/vanyline-toolchains-docker:v<version>`,
 `toolchains/docker/Dockerfile` — cf. "LSP par toolchain" ci-dessous) ; mêmes
 presets d'env que le mode manuel (`toolchain_preset` — pour `docker` : `PATH` +
 `LD_LIBRARY_PATH` arch standard des images à runtime, `docker-langserver`
-s'exécute sur le runtime node de son volume, aucune env spécifique), ordre fixe
-rust puis node puis docker. Les images par défaut sont des flags CLI du
+s'exécute sur le runtime node de son volume, aucune env spécifique ; pour
+`python` : `PATH` (`{root}/usr/local/bin` + `/home/vanyline/.local/bin`) +
+`LD_LIBRARY_PATH` standard + `PYTHONUSERBASE=/home/vanyline/.local` + `PIP_USER=1`
+— le fallback « pip install sans venv » écrit dans le user-site du PVC Owner,
+writable, partagé entre les sandboxes d'un Owner ; le `.venv/` de workspace est
+la vraie isolation, cf. « Activation `.venv/` » plus bas), ordre fixe rust puis
+node puis python puis docker. Les images par défaut sont des flags CLI du
 controller (`env` clap), surchargeables sans rebuild, recette alignée sur
-`deploy/sandbox/sandbox-test.yaml`.
+`deploy/sandbox/sandbox-test.yaml`. `effective_caches` par défaut →
+`["cargo", "pnpm", "pip"]` (`python-support` — `pip` →
+`PIP_CACHE_DIR=/project-cache/pip`, provisionné pour tout Project comme les
+deux autres).
 
 **LSP par toolchain** (`lsp-integration`, `Toolchain.lsp: Option<LspSpec>` —
 `{ image, bin, args }`, `crds/src/lib.rs`) : résolution (`resolve_toolchain_lsp`,
 même forme que `resolve_toolchain_env`) — `toolchain.lsp` explicite s'il est
 renseigné (LSP custom possible, y compris hors rust/node) ; sinon preset par
 `toolchain.name` (`image` depuis `ctx.lsp_image_rust`/`ctx.lsp_image_node`/
-`ctx.lsp_image_docker`, flags CLI `LSP_IMAGE_RUST`/`LSP_IMAGE_NODE`/
-`LSP_IMAGE_DOCKER` — l'image doit rester configurable au déploiement,
-contrairement à `bin`/`args` qui sont hardcodés : `rust-analyzer` sans args,
-`typescript-language-server --stdio`, `docker-langserver --stdio`) ; sinon
+`ctx.lsp_image_docker`/`ctx.lsp_image_python`, flags CLI `LSP_IMAGE_RUST`/
+`LSP_IMAGE_NODE`/`LSP_IMAGE_DOCKER`/`LSP_IMAGE_PYTHON` — l'image doit rester
+configurable au déploiement, contrairement à `bin`/`args` qui sont hardcodés :
+`rust-analyzer` sans args, `typescript-language-server --stdio`,
+`docker-langserver --stdio`, `pyright-langserver --stdio`) ; sinon
 `None` (pas de route `/ws/lsp` montée
 pour cette toolchain, éditeur en mode dégradé). S'applique uniformément que
 `spec.toolchains` soit explicite ou dérivé — zero-config pour rust/node dans les deux
@@ -1335,6 +1385,48 @@ Volar : `spec.toolchains` explicite ou `toolchain.lsp` custom ⟹ jamais d'`aux`
 juste le preset mono-process `docker-langserver`. Les deux gates coexistent
 (projet `vue` + `dockerfile` ⟹ `node` composite Volar **et** `docker` composite
 hadolint).
+
+**Variante composite pyright** (`python-support`, `python_lsp_composite`) : même
+patron, sur son propre gate — le `python` **dérivé** (`spec.toolchains` vide)
+d'un projet dont `languages` contient `python` a un composite primaire
+`pyright-langserver --stdio` + un enfant `aux` de rôle `diagnostics-merge`
+(`vnl-ruff-lsp`, sans argument, sans `initOptions` — un seul aux
+`diagnostics-merge` ⟹ toutes les requêtes, resolve compris, par le chemin
+primaire). **Aucune `initializationOptions` sur le primaire** : Pyright
+auto-découvre `<workspace>/.venv` s'il existe, sinon `python3` du PATH toolchain
++ le user-site `PYTHONUSERBASE` hérité (question ouverte tranchée : pas de
+`pythonPath` injecté). Les trois bins (`pyright-langserver`, `ruff`,
+`vnl-ruff-lsp`) + un `node` vivent dans la **même** image (`ctx.lsp_image_python`,
+`toolchains/python/Dockerfile` — base `python:3.13-slim-trixie` + `libatomic1`
+que le `node` copié lie ; `pyright-langserver` en **symlink relatif**
+`../lib/node_modules/pyright/langserver.index.js` et non en `COPY` — le shim npm
+résout son propre répertoire, copié en fichier régulier il meurt
+`MODULE_NOT_FOUND` sous le montage volume ; `ruff` binaire épinglé `0.16.6`
+checksum SHA256 du tarball vérifié au build ; `vnl-ruff-lsp` baké par copie
+multi-stage depuis le build sandbox). `TOOLCHAIN_IMAGE_PYTHON` et
+`LSP_IMAGE_PYTHON` pointent par défaut sur la même image, publiée avec le même
+tag (`.github/workflows/release.yml`, entrée matrice `toolchains-python`,
+amd64-only). **Preset-only** : `spec.toolchains` explicite ou `toolchain.lsp`
+custom ⟹ jamais d'`aux`, juste le preset mono-process `pyright-langserver`.
+
+**Activation `.venv/`** (`python-support`, `sandbox/src/venv.rs`) : un
+virtualenv de workspace est activé pour les process **shell** — terminal PTY
+(`/ws/terminal`) **et** `execute_command` — jamais pour le LSP. `venv_overlay(
+sandbox_root)` teste `<sandbox_root>/.venv/pyvenv.cfg` en tant que **fichier** ;
+présent ⟹ overlay `VIRTUAL_ENV=<sandbox_root>/.venv` + `PATH` préfixé de
+`<sandbox_root>/.venv/bin`, sinon vide. **Recalculé à chaque spawn/invocation**,
+jamais mis en cache — un `.venv` créé en cours de session est vu par la
+commande / le terminal suivant. Seul `<sandbox_root>/.venv` est reconnu (pas de
+walk-up ; venv niché = activation manuelle). Côté `execute_command` : nouveau
+champ `ExecuteCommandOptions.envs` en `#[serde(skip)]` — **jamais désérialisé
+depuis les arguments du tool**, un LLM ne peut pas injecter d'env ; seul
+`dispatch_command` (code sandbox) l'écrit, avec la sortie de `venv_overlay`.
+Limites : (1) un fichier d'init de shell qui réassigne `PATH` sans `$PATH`
+détruirait le préfixe côté PTY (`VIRTUAL_ENV` survit, le bashrc Debian slim du
+pod ne le fait pas) ; (2) Pyright n'auto-découvre `.venv` qu'à la racine que lui
+donne le `rootUri` du client — un `.py` profondément niché ouvert dans
+l'éditeur navigateur avec un `.venv` à la racine du workspace peut ne pas être
+analysé venv-aware (cohérent avec le contrat « racine seulement »).
 
 ### CRD Application (`controller-application-crd`)
 
