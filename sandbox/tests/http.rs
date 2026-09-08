@@ -1133,6 +1133,123 @@ async fn tools_call_execute_command_missing_argument() {
     );
 }
 
+// ── tools/call (command) — activation .venv (feature python-support) ─────────
+
+#[tokio::test]
+async fn tools_call_execute_command_active_le_venv_du_workspace() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let tmpdir = tempfile::tempdir().unwrap();
+    let venv = tmpdir.path().join(".venv");
+    std::fs::create_dir_all(venv.join("bin")).unwrap();
+    std::fs::write(venv.join("pyvenv.cfg"), "home = /usr/bin\n").unwrap();
+    let script = venv.join("bin").join("vnl-venv-marker");
+    std::fs::write(&script, "#!/bin/sh\necho vnl-venv-ok\n").unwrap();
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    // VIRTUAL_ENV posée (assertion sur `/.venv]` : le chemin du venv est
+    // tmpdir/.venv) ET la commande résolue depuis .venv/bin (PATH en tête).
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": { "command": "echo \"[$VIRTUAL_ENV]\" && vnl-venv-marker" }
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("/.venv]"),
+        "expected VIRTUAL_ENV '…/.venv]' in: {text}"
+    );
+    assert!(
+        text.contains("vnl-venv-ok"),
+        "expected .venv/bin on PATH (vnl-venv-ok) in: {text}"
+    );
+}
+
+#[tokio::test]
+async fn tools_call_execute_command_sans_venv() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    // Pas de `.venv/pyvenv.cfg` ⟹ aucun overlay : VIRTUAL_ENV unset ⟹ `[]`.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": { "command": "echo \"[$VIRTUAL_ENV]\"" }
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("[]"), "expected empty VIRTUAL_ENV in: {text}");
+}
+
+#[tokio::test]
+async fn tools_call_execute_command_envs_non_injectables() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let app = build_app(no_auth_state_with_root(tmpdir.path()));
+
+    // Sécurité (le point clé du `#[serde(skip)]` sur `envs`) : un champ
+    // "envs" dans les arguments du tool est IGNOREE à la désérialisation —
+    // ici la forme aurait même été désérialisable (tableau de paires),
+    // seule la skip l'empêche. Tmpdir SANS venv : aucun env additionnel
+    // n'est posé par le sandbox lui-même, donc `$X` doit rester vide.
+    let req = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {
+                    "name": "execute_command",
+                    "arguments": { "command": "echo \"[$X]\"", "envs": [["X", "INJECTEE"]] }
+                }
+            })
+            .to_string(),
+        ))
+        .unwrap();
+    let resp = app.oneshot(req).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json = body_json(resp.into_body()).await;
+    assert_eq!(json["result"]["isError"], false);
+    let text = json["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("[]"),
+        "expected empty $X (envs ignored) in: {text}"
+    );
+    assert!(
+        !text.contains("INJECTEE"),
+        "envs must NEVER be injectable from tool arguments, got: {text}"
+    );
+}
+
 // ── OAuth metadata ────────────────────────────────────────────────────────────
 
 #[tokio::test]

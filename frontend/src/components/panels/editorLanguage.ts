@@ -15,8 +15,9 @@ import { handlebarsMode } from './langHandlebars';
 import { rhaiMode } from './langRhai';
 
 /** Extension de fichier → extension CodeMirror. Couvre : ts/js/rust (langages
- *  produits) + json/markdown/toml/yaml (config/doc courants) + python + vue
- *  (`@codemirror/lang-vue` sur base html) + rhai/hbs/handlebars (modes
+ *  produits) + json/markdown/toml/yaml (config/doc courants) + python
+ *  (`.pyi` alias de `.py` : les stubs typés se colorient comme du python)
+ *  + vue (`@codemirror/lang-vue` sur base html) + rhai/hbs/handlebars (modes
  *  `StreamLanguage` maison, coloration seule — cf. `langRhai.ts`/
  *  `langHandlebars.ts`). Les noms Dockerfile/Containerfile sont traités hors
  *  de cette table, par nom de base (`dockerfileName`), dans
@@ -37,6 +38,7 @@ const byExtension: Record<string, () => Extension> = {
   yml: () => yaml(),
   toml: () => StreamLanguage.define(toml),
   py: () => python(),
+  pyi: () => python(),
   vue: () => vue({ base: html() }),
   rhai: () => StreamLanguage.define(rhaiMode),
   hbs: () => StreamLanguage.define(handlebarsMode),
@@ -45,9 +47,10 @@ const byExtension: Record<string, () => Extension> = {
 
 /** Mapping chemin → (toolchain, languageId LSP) — miroir de
  *  `toolchain_for_path` de la sandbox : rs (rust), ts/tsx/mts/cts +
- *  js/jsx/mjs/cjs + vue (node), et Dockerfile/Containerfile (+ variantes)
- *  → docker/dockerfile évalués par nom de base (helper `dockerfileName`)
- *  AVANT le switch d'extension. `null` si non couvert (pas de LSP). */
+ *  js/jsx/mjs/cjs + vue (node) + py/pyi (python), et Dockerfile/Containerfile
+ *  (+ variantes) → docker/dockerfile évalués par nom de base (helper
+ *  `dockerfileName`) AVANT le switch d'extension. `null` si non couvert (pas
+ *  de LSP). */
 export function lspToolchainForPath(
   path: string | null,
 ): { toolchain: string; languageId: string } | null {
@@ -72,6 +75,9 @@ export function lspToolchainForPath(
       return { toolchain: 'node', languageId: 'javascript' };
     case 'vue':
       return { toolchain: 'node', languageId: 'vue' };
+    case 'py':
+    case 'pyi':
+      return { toolchain: 'python', languageId: 'python' };
     default:
       return null;
   }

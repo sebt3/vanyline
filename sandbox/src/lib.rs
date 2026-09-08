@@ -9,6 +9,7 @@ pub mod maint;
 pub mod mcp;
 pub mod telemetry;
 pub mod tools_impl;
+pub mod venv;
 pub mod ws;
 
 use std::collections::HashMap;

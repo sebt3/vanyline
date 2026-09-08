@@ -276,6 +276,8 @@ impl ToolDyn for ExecuteCommandTool {
                 command: args.command,
                 timeout_secs: args.timeout_secs.unwrap_or(30),
                 cwd: args.cwd,
+                // L'activation .venv est propre au sandbox ; le harness cli reste vierge.
+                envs: Vec::new(),
             })
             .await
             .map_err(|e| ToolError::ToolCallError(Box::new(e)))

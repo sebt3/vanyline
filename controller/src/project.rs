@@ -76,7 +76,8 @@ pub fn worktree_path(sandbox_name: &str) -> String {
 /// Nom du répertoire de cache pour un identifiant de `ProjectSpec.caches` donné.
 /// La plupart des identifiants sont utilisés tels quels comme nom de répertoire ;
 /// `"pnpm"` est le seul actuellement mappé (répertoire `pnpm-store`, convention de
-/// la toolchain pnpm — cf. design § Layout des volumes).
+/// la toolchain pnpm — cf. design § Layout des volumes). `"pip"` non plus n'est
+/// pas mappé (répertoire `pip`, feature python-support — fallback `other`).
 #[allow(dead_code)]
 pub fn cache_dir_name(cache: &str) -> String {
     match cache {
@@ -92,14 +93,14 @@ pub fn cache_path(cache: &str) -> String {
 }
 
 /// Liste effective des caches à provisionner : `spec.caches` si fourni, sinon
-/// `["cargo", "pnpm"]`.
+/// `["cargo", "pnpm", "pip"]`.
 #[allow(dead_code)]
 pub fn effective_caches(project: &Project) -> Vec<String> {
     project
         .spec
         .caches
         .clone()
-        .unwrap_or_else(|| vec!["cargo".to_string(), "pnpm".to_string()])
+        .unwrap_or_else(|| vec!["cargo".to_string(), "pnpm".to_string(), "pip".to_string()])
 }
 
 /// `ownerReference` vers ce Project, pour la GC en cascade du PVC créé.
@@ -883,6 +884,8 @@ mod tests {
         assert_eq!(cache_dir_name("cargo"), "cargo");
         assert_eq!(cache_dir_name("pnpm"), "pnpm-store");
         assert_eq!(cache_dir_name("custom"), "custom");
+        // `pip` passe par le fallback `other` (feature python-support).
+        assert_eq!(cache_dir_name("pip"), "pip");
     }
 
     // 4. cache_path_uses_mapping
@@ -898,7 +901,7 @@ mod tests {
         let project = make_project(None, None);
         assert_eq!(
             effective_caches(&project),
-            vec!["cargo".to_string(), "pnpm".to_string()]
+            vec!["cargo".to_string(), "pnpm".to_string(), "pip".to_string()]
         );
     }
 
@@ -1153,6 +1156,8 @@ mod tests {
                 "cargo".to_string(),
                 "--cache".to_string(),
                 "pnpm".to_string(),
+                "--cache".to_string(),
+                "pip".to_string(),
             ]
         );
         assert_eq!(init_cmd.image, Some(ctx.sandbox_image.clone()));

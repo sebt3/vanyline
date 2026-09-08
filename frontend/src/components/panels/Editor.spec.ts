@@ -442,7 +442,7 @@ describe('Editor.vue — plugin LSP', () => {
     const provider = vi.fn(() => Promise.resolve(fakeClient));
 
     mount(Editor, {
-      props: editorProps('a.py'),
+      props: editorProps('data.pyc'),
       global: {
         provide: {
           'sandbox-fs': ref(makeClient()),
@@ -457,7 +457,9 @@ describe('Editor.vue — plugin LSP', () => {
     await flush();
     await flush();
 
-    // Le provider n'a pas été appelé : pas de toolchain LSP pour .py
+    // Le provider n'a pas été appelé : pas de toolchain LSP pour .pyc
+    // (`.py` est mappé python depuis python-support — le sentinel « jamais
+    // mappé » est passé sur un négatif de la feature).
     expect(provider).not.toHaveBeenCalled();
   });
 });

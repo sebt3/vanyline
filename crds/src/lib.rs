@@ -119,7 +119,7 @@ pub struct ProjectSpec {
     /// (la clé SSH vit dans le PVC Owner, cf. docs/features/git-integration.md
     /// section 0). Champ conservé pour la migration, pas supprimé.
     pub git_secret: Option<String>,
-    /// Caches partagés. None => ["cargo", "pnpm"].
+    /// Caches partagés. None => ["cargo", "pnpm", "pip"].
     pub caches: Option<Vec<String>>,
     /// Intervalle du `CronJob` de fetch. None => "1h".
     pub fetch_interval: Option<String>,
@@ -146,9 +146,9 @@ pub struct ProjectStatus {
     #[serde(default)]
     pub conditions: Vec<Condition>,
     /// Langages détectés. Valeurs possibles : "rust", "js-ts", "vue",
-    /// "dockerfile" (marqueur `dockerfile` : noms Dockerfile/Containerfile/
-    /// variants dans l'arbre HEAD). Ordre fixe
-    /// `["rust", "js-ts", "vue", "dockerfile"]` filtré — cf.
+    /// "python", "dockerfile" (marqueur `dockerfile` : noms
+    /// Dockerfile/Containerfile/variants dans l'arbre HEAD). Ordre fixe
+    /// `["rust", "js-ts", "vue", "python", "dockerfile"]` filtré — cf.
     /// `vanyline_sandbox::maint::detect_languages`. Écrit uniquement par le
     /// Job `detect` (tâche 03) via un patch dédié — jamais par
     /// `compute_status`. `skip_serializing_if` : voir note "Point

@@ -482,6 +482,16 @@ const JS_TS_MARKERS: [&str; 2] = ["package.json", "tsconfig.json"];
 /// casse (comme les autres marqueurs) : `.VUE` n'est pas détecté.
 const VUE_MARKER_EXT: &str = ".vue";
 
+/// Extensions marquant la présence de Python — n'importe quel niveau de
+/// profondeur dans l'arbre HEAD. `setup.py` est couvert par `.py`.
+/// Comparaison sensible à la casse comme les autres marqueurs.
+const PYTHON_MARKER_EXTS: [&str; 2] = [".py", ".pyi"];
+
+/// Noms de fichiers (basename, n'importe quel niveau) marquant la présence de
+/// Python même sans aucun `*.py` (projet packaging-only). `setup.py` n'y est
+/// pas : `.py` le couvre déjà.
+const PYTHON_FILE_MARKERS: [&str; 2] = ["pyproject.toml", "setup.cfg"];
+
 /// Vrai si le nom de BASE de `path` (dernier segment après le dernier `/`) est
 /// un nom Docker/Compose-style : `Dockerfile`, `Containerfile`,
 /// `Dockerfile.*`, `Containerfile.*`, `*.dockerfile` — insensible à la casse.
@@ -567,12 +577,13 @@ fn list_head_tree(workspace: &Path) -> Result<Vec<String>, MaintError> {
 
 /// Ordre de sortie figé, filtré par la détection. `dockerfile` n'est plus
 /// « réservé » : son marqueur est posé par la feature `docker-lsp`
-/// (cf. `is_dockerfile_path`) — il reste en dernière position.
-const LANGUAGE_ORDER: [&str; 4] = ["rust", "js-ts", "vue", "dockerfile"];
+/// (cf. `is_dockerfile_path`) — il reste en dernière position, juste après
+/// `python` (marqueur posé par la feature `python-support`).
+const LANGUAGE_ORDER: [&str; 5] = ["rust", "js-ts", "vue", "python", "dockerfile"];
 
 /// Détecte les langages utilisés à partir des marqueurs de fichiers de
 /// l'arbre HEAD. Résultat dans l'ordre fixe
-/// `["rust", "js-ts", "vue", "dockerfile"]` (filtré).
+/// `["rust", "js-ts", "vue", "python", "dockerfile"]` (filtré).
 pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
     let paths = list_head_tree(workspace)?;
     let has_rust = paths
@@ -580,6 +591,12 @@ pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
         .any(|p| p == RUST_MARKER || p.ends_with(&format!("/{RUST_MARKER}")));
     let has_js_ts = paths.iter().any(|p| JS_TS_MARKERS.contains(&p.as_str()));
     let has_vue = paths.iter().any(|p| p.ends_with(VUE_MARKER_EXT));
+    let has_python = paths.iter().any(|p| {
+        PYTHON_MARKER_EXTS.iter().any(|ext| p.ends_with(ext)) || {
+            let base = p.rsplit('/').next().unwrap_or(p.as_str());
+            PYTHON_FILE_MARKERS.contains(&base)
+        }
+    });
     let has_dockerfile = paths.iter().any(|p| is_dockerfile_path(p));
 
     let mut languages = Vec::new();
@@ -588,6 +605,7 @@ pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
             "rust" => has_rust,
             "js-ts" => has_js_ts,
             "vue" => has_vue,
+            "python" => has_python,
             "dockerfile" => has_dockerfile,
             _ => false,
         };

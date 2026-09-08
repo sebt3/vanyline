@@ -20,6 +20,14 @@ pub struct ExecuteCommandOptions {
     /// Répertoire de travail. Vide = hérite du cwd du processus courant.
     #[serde(default)]
     pub cwd: String,
+    /// Paires d'env additionnelles appliquées au process APRES le reste de la
+    /// config, avant `spawn()` (feature python-support : activation `.venv/`
+    /// posée par l'appelant sandbox). `#[serde(skip)]` : jamais désérialisé
+    /// depuis les arguments du tool `execute_command` — un LLM ne peut pas
+    /// injecter d'env. Posé uniquement par du code sandbox (`dispatch_command`).
+    /// Vide = comportement historique strict (cli, tests, tous les autres).
+    #[serde(skip)]
+    pub envs: Vec<(String, String)>,
 }
 
 /// Retourne un `String` formaté (exit code, duration, stdout, stderr).
@@ -76,6 +84,10 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
 
         if let Some(ref dir) = base_dir {
             cmd.current_dir(dir);
+        }
+
+        for (k, v) in &opts.envs {
+            cmd.env(k, v);
         }
 
         let child = cmd.spawn().map_err(|e| ToolsError::Io {
@@ -157,6 +169,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: r#"echo "hello world""#.to_string(),
             timeout_secs: 5,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -171,6 +184,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: "echo hi | tr a-z A-Z".to_string(),
             timeout_secs: 5,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -185,6 +199,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: "false".to_string(),
             timeout_secs: 5,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -200,6 +215,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: "sleep 5".to_string(),
             timeout_secs: 1,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -214,6 +230,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: "echo ok".to_string(),
             timeout_secs: 0,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -228,6 +245,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: String::new(),
             timeout_secs: 5,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -250,6 +268,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: "echo test".to_string(),
             timeout_secs: 5,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -269,6 +288,7 @@ mod tests {
             command: "pwd".to_string(),
             timeout_secs: 5,
             cwd: dir.path().to_string_lossy().to_string(),
+            envs: Vec::new(),
         })
         .await;
 
@@ -290,6 +310,7 @@ mod tests {
             command: "echo ok".to_string(),
             timeout_secs: 5,
             cwd: "/nonexistent/path/xyz".to_string(),
+            envs: Vec::new(),
         })
         .await;
 
@@ -311,6 +332,7 @@ mod tests {
             command: "echo ok".to_string(),
             timeout_secs: 5,
             cwd: file.to_string_lossy().to_string(),
+            envs: Vec::new(),
         })
         .await;
 
@@ -327,6 +349,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: "for i in $(seq 1 5000); do echo \"line $i with padding to make it long xxxxxxxxxxxxxxxxxxxx\"; done".to_string(),
             timeout_secs: 10,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -341,6 +364,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: "for i in $(seq 1 5000); do echo \"error $i with padding to make it long xxxxxxxxxxxxxxxxxxxx\" 1>&2; done".to_string(),
             timeout_secs: 10,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -361,6 +385,7 @@ mod tests {
         let result = execute(ExecuteCommandOptions {
             command: format!("(sleep 2 && touch {marker_str}) & sleep 100"),
             timeout_secs: 1,
+            envs: Vec::new(),
             ..Default::default()
         })
         .await;
@@ -375,5 +400,94 @@ mod tests {
             !marker.exists(),
             "background grandchild survived the timeout — process group was not killed"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    /// feature python-support : `envs` (overlay `.venv/` posé par l'appelant)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn execute_envs_appliquees() {
+        let result = execute(ExecuteCommandOptions {
+            command: r#"echo "${VNL_TEST_ENV:-absent}""#.to_string(),
+            timeout_secs: 5,
+            envs: vec![("VNL_TEST_ENV".into(), "overlay-ok".into())],
+            ..Default::default()
+        })
+        .await;
+
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(res.contains("overlay-ok"), "expected overlay value: {res}");
+        assert!(!res.contains("absent"), "env var not applied: {res}");
+    }
+
+    // Nom de test imposé verbatim par la tâche 05 (`LISTE` = tête de PATH,
+    // accentuation uppercase assumée dans l'énoncé) — d'où l'allow ciblé
+    // plutôt qu'un renommage (même précédent que `sandbox/src/lsp.rs`).
+    #[allow(non_snake_case)]
+    #[tokio::test]
+    async fn execute_envs_path_tete_de_LISTE() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("vnl-env-marker");
+        std::fs::write(&script, "#!/bin/sh\necho marker-ok\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // La commande n'existe que dans le tmpdir préfixant PATH : elle ne
+        // peut être résolue QUE grâce à l'overlay.
+        let result = execute(ExecuteCommandOptions {
+            command: "vnl-env-marker".to_string(),
+            timeout_secs: 5,
+            envs: vec![(
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", dir.path().to_string_lossy()),
+            )],
+            ..Default::default()
+        })
+        .await;
+
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(res.contains("marker-ok"), "expected PATH head: {res}");
+        assert!(res.contains("exit code: 0"), "expected success: {res}");
+
+        // Volet négatif déterministe : sans l'overlay, même commande ⟹ exit
+        // code ≠ 0 (résolution impossible, sh renvoie 127 ; pas d'assertion
+        // sur le message « not found » qui varie selon le shell).
+        let result_without = execute(ExecuteCommandOptions {
+            command: "vnl-env-marker".to_string(),
+            timeout_secs: 5,
+            ..Default::default()
+        })
+        .await;
+        assert!(result_without.is_ok());
+        let res_without = result_without.unwrap();
+        assert!(
+            !res_without.contains("exit code: 0"),
+            "command should fail without the PATH overlay: {res_without}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_envs_vide_identique() {
+        // `envs: Vec::new()` = comportement historique strict : aucune env
+        // additionnelle (le `-absent` par défaut du shell doit gagner).
+        let result = execute(ExecuteCommandOptions {
+            command: r#"echo "${VNL_TEST_ENV:-absent}""#.to_string(),
+            timeout_secs: 5,
+            envs: Vec::new(),
+            ..Default::default()
+        })
+        .await;
+
+        assert!(result.is_ok());
+        let res = result.unwrap();
+        assert!(
+            res.contains("absent"),
+            "expected historical behavior: {res}"
+        );
+        assert!(!res.contains("overlay-ok"), "no env injected: {res}");
     }
 }
