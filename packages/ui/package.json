@@ -16,7 +16,7 @@
   "dependencies": {
     "@ai-sdk/vue": "^4.0.93",
     "@comark/vue": "^0.6.2",
-    "@nuxt/ui": "^4.10.0",
+    "@nuxt/ui": "^4.11.1",
     "@vanyline/protocol": "0.1.0",
     "ai": "^7.0.93",
     "reka-ui": "^2.10.3",

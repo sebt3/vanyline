@@ -87,7 +87,7 @@
     "package": "npx @vscode/vsce package --no-dependencies"
   },
   "dependencies": {
-    "@nuxt/ui": "^4.10.0",
+    "@nuxt/ui": "^4.11.1",
     "@vanyline/protocol": "0.1.0",
     "@vanyline/ui": "0.1.0",
     "tailwindcss": "^4.3.3",
