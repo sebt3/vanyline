@@ -1,0 +1,444 @@
+Spec: Layers
+
+Platform: Rust/vanyline-cfgstore/std::fs/yaml_serde
+
+Purpose:
+  Superposition (overlay) de la configuration sur DEUX couches de répertoires — une couche
+  `global` toujours présente (côté CLI : `~/.config/vanyline`, assemblée par
+  `discover_layers` de /cli/src/config.rs) et une couche `workspace` optionnelle (ex:
+  `<racine>/.vanyline`) — et calcul de la provenance (« source layer ») de chaque entrée,
+  affichée par l'UI config et les commandes `list` du CLI. Le fichier contractualise trois
+  choses indissociables : l'ordre de précédence exact (`workspace` > `global`, deux couches
+  seulement), la sémantique de fusion à trois granularités selon le mode de découverte
+  (`config.yaml` fusionné map par map avec remplacement TOTAL d'entrée, fichiers nommés
+  fusionnés par `stem`, skills fusionnés par nom de répertoire), et les fonctions de
+  provenance `*_entry_source`, infaillibles, qui répondent `"workspace"` ou `"global"`.
+  Les valeurs d'entrées restent opaques ici (@yaml_serde::Value) : l'interprétation typée
+  (providers/models/mcp/agents/toolsets/skills → types de ./domain.rs) vit dans ./fs_store.rs,
+  seul consommateur des méthodes de @Layers côté store ; les fonctions de provenance sont
+  consommées directement par le CLI (`cli/src/main.rs`, `cli/src/chat.rs`,
+  `cli/src/rpc/handlers.rs`).
+
+Owns:
+  ./layers.rs
+
+Can read:
+  ./lib.rs
+  ./error.rs
+  ./store.rs
+  ./domain.rs
+  ./fs_store.rs
+  /cli/src/config.rs
+  /cli/src/rpc/handlers.rs
+  ../Cargo.toml
+
+Depends on:
+  @std::fs (@std::fs::read_to_string, @std::fs::read_dir), @std::path (@std::path::Path,
+    @std::path::PathBuf, @std::path::Path::join/is_file/is_dir/extension/file_stem/file_name)
+    et @std::io::ErrorKind::NotFound — toutes les lectures sont directes, sans cache : chaque
+    appel relit le disque.
+  @serde (derives @Serialize/@Deserialize, attribut `#[serde(default)]`) et @yaml_serde
+    (v0.10, ../Cargo.toml) — @yaml_serde::Value comme valeur opaque d'entrée de config et
+    @yaml_serde::from_str comme parseur de `config.yaml`.
+  @crate::error::CfgStoreError — seules variantes levées ici : @CfgStoreError::Config
+    (`VNL-CFG-001`, YAML invalide, message portant le chemin complet) et @CfgStoreError::Io
+    (`VNL-CFG-004`, via @From<@std::io::Error>). Les variantes d'écriture (`NotFound`,
+    `NameConflict`, `ReadOnly`, …) portent le @crate::store::Layer et sont hors du périmètre
+    de ce fichier.
+  @std::collections::BTreeMap — toute map retournée est triée par clé : l'ordre d'affichage
+    des listes (UI config, CLI `list`) est déterministe.
+  ./lib.rs déclare `pub mod layers;` : toute la surface du fichier est publique hors du crate
+    (le CLI construit des @Layers et appelle les fonctions de provenance sans passer par le
+    store).
+
+Exposes:
+  @Layers — `pub struct` (derives `Debug`, `Clone`), deux champs publics : @Layers::global_dir
+    (@std::path::PathBuf, la couche toujours présente) et @Layers::workspace_dir
+    (`@Option<@std::path::PathBuf>`, `None` = pas de couche workspace). Simple porteur de
+    chemins sans état ni cache, construit par l'appelant. Méthodes :
+      @Layers::load_merged_config(&self) -> `Result<@RawConfigFile, @CfgStoreError>` — charge
+        `config.yaml` de la couche globale et (si `Some`) de la couche workspace via
+        @load_config_layer, puis les fusionne via @merge_config_layers.
+      @Layers::resolve_named_files(&self, subdir: &str, ext: &str) ->
+        `Result<@BTreeMap<@String, @std::path::PathBuf>, @CfgStoreError>` — fichiers
+        `<couche>/<subdir>/*.<ext>` des deux couches découverts via @list_layer_files et
+        fusionnés via @merge_layer_files, indexés par `stem`. Consommé pour
+        `agents`/`"md"` et `toolsets`/`"yaml"` (./fs_store.rs).
+      @Layers::resolve_skill_files(&self) -> même type que ci-dessus — skills découverts par
+        répertoires `<couche>/skills/<nom>/SKILL.md` via @list_layer_skill_dirs, indexés par
+        nom de répertoire, valeur = chemin du `SKILL.md` (et non du répertoire).
+  @RawConfigFile — `pub struct` (derives `Debug`, `Clone`, `Default`, @Serialize,
+    @Deserialize), quatre champs `#[serde(default)]`, chacun
+    `@BTreeMap<@String, @yaml_serde::Value>` : @RawConfigFile::providers,
+    @RawConfigFile::models, @RawConfigFile::mcp, @RawConfigFile::defaults. Clé = nom de
+    l'entrée ; valeur = document YAML opaque — ce fichier ne l'interprète JAMAIS (ni schéma,
+    ni validation, ni deep-merge ; le mapping typé `RawXEntry` vit dans ./fs_store.rs).
+    `defaults` porte les valeurs globales plates (`agent`, `namespace`, `toolbox`, …) lues
+    par `default_agent` (./fs_store.rs) et `configured_namespace`/`configured_toolbox`
+    (/cli/src/config.rs).
+  @load_config_layer(dir: &@std::path::Path) -> `Result<@RawConfigFile, @CfgStoreError>` —
+    lit et parse `<dir>/config.yaml` : fichier absent (@NotFound, répertoire parent compris)
+    → @RawConfigFile::default ; YAML invalide → @CfgStoreError::Config avec le chemin complet
+    dans le message ; toute autre erreur IO (permission refusée, `config.yaml` étant un
+    répertoire, contenu non UTF-8) → @CfgStoreError::Io.
+  @merge_config_layers(global: @RawConfigFile, workspace: `Option<@RawConfigFile>`) ->
+    @RawConfigFile — fusion clé par clé DANS chacune des quatre maps nommées : les entrées
+    workspace sont `extend`-ues sur celles de global ; une clé présente dans les deux couches
+    est INTÉGRALEMENT remplacée par la valeur workspace (aucune fusion intra-entrée, tableaux
+    inclus — cf. contrat dans `Must`). `workspace: None` → global rendu inchangé (identité).
+  @list_layer_files(dir: &@std::path::Path, ext: &str) ->
+    `Result<@BTreeMap<@String, @std::path::PathBuf>, @CfgStoreError>` — énumération NON
+    récursive de `dir` : ne retient que les fichiers (`@Path::is_file`, liens symboliques
+    suivis) dont l'extension égale exactement `ext` (sans point, comparaison sensible à la
+    casse) et dont le `stem` est UTF-8 valide, indexés par `stem`. Les sous-répertoires sont
+    ignorés, même nommés `*.md`. `dir` absent (@NotFound) → map vide, PAS une erreur.
+  @merge_layer_files(global: @BTreeMap<@String, @std::path::PathBuf>, workspace:
+    `Option<@BTreeMap<@String, @std::path::PathBuf>>`) -> @BTreeMap<@String,
+    @std::path::PathBuf> — à `stem` égal le chemin workspace REMPLACE le chemin global ;
+    `None` → global inchangé. Un fichier global d'un stem surchargé devient invisible
+    (ombrage, pas d'accumulation ni de concaténation de contenus).
+  @list_layer_skill_dirs(dir: &@std::path::Path) -> même type que ci-dessus — énumération NON
+    récursive : ne retient que les sous-répertoires directs (`@Path::is_dir`, liens
+    symboliques suivis) contenant un fichier `SKILL.md`, indexés par nom de répertoire,
+    valeur = chemin vers ce `SKILL.md`. Un sous-répertoire sans `SKILL.md` est ignoré
+    silencieusement ; un fichier `SKILL.md` isolé directement sous `dir` ne constitue pas un
+    skill. `dir` absent → map vide (même régime qu'@list_layer_files).
+  @config_entry_source(layers: &@Layers, name: &str, pick: `fn(&@RawConfigFile) ->
+    &@BTreeMap<@String, @yaml_serde::Value>`) -> `&'static str` — répond `"workspace"` si
+    `name` est clé de la map choisie par `pick` dans le `config.yaml` de la couche workspace,
+    `"global"` sinon ; `layers.workspace_dir` `None`, `config.yaml` absent, illisible OU
+    YAML-invalide → `"global"` sans erreur (la remontée d'erreur appartient à
+    `list_x()`/`config check`). La réponse n'affirme PAS que l'entrée existe dans la couche
+    globale — cf. `Handles`.
+  @file_entry_source(layers: &@Layers, subdir: &str, ext: &str, name: &str) -> `&'static str`
+    — même contrat, sur la présence de `name` parmi @list_layer_files(`<workspace>/<subdir>`,
+    `ext`) ; permissivité à l'erreur identique.
+  @skill_entry_source(layers: &@Layers, name: &str) -> `&'static str` — équivalent pour
+    `<workspace>/skills/<name>/SKILL.md` via @list_layer_skill_dirs (découverte par
+    répertoire, pas par extension).
+  Consommation extérieure (contexte de contrat, hors `Owns`) : les méthodes de @Layers
+    alimentent @crate::fs_store::FsConfigStore (./fs_store.rs) ; les trois fonctions de
+    provenance alimentent la colonne source des `vnl … list`, le champ additif `"source"` des
+    réponses RPC `config/*` (`config_list_sourced_response`, /cli/src/rpc/handlers.rs) et les
+    filtres « workspace uniquement » de l'export de config (`cli/src/chat.rs`).
+
+Accepts:
+  @Layers — n'importe quels chemins, même inexistants : aucune validation ni ouverture à la
+    construction ; l'absence d'une couche tombe sous le régime @NotFound (→ default / map
+    vide). `workspace_dir: Some(dir)` avec `dir` inexistant se comporte comme une couche
+    vide.
+  `ext` — une extension SANS point (`"md"`, `"yaml"`) : aucune normalisation, `".md"` passé
+    tel quel ne matche aucun fichier ; comparaison exacte sensible à la casse (`A.MD` ignoré
+    pour `ext = "md"`).
+  `subdir` — un segment de chemin relatif joiné tel quel par @std::path::Path::join ; non
+    validé dans ce fichier (appelants actuels : littéraux `"agents"`, `"toolsets"`,
+    `"skills"` — question `[?]` dans `Tasks`).
+  `name` (fonctions de provenance) — n'importe quelle chaîne, sans passer par
+    `validate_name` (/fs_store.rs) : c'est une lookup `contains_key`, la validation des noms
+    appartient aux chemins d'écriture.
+  `pick` — toute fonction retournant l'une des quatre maps de @RawConfigFile ; aucune
+    vérification de cohérence entre la map choisie et le `name` transmis.
+  @load_config_layer — contenu UTF-8 uniquement (@std::fs::read_to_string) : un
+    `config.yaml` non UTF-8 produit une erreur IO (@CfgStoreError::Io), pas une erreur de
+    parsing.
+  Fichiers multi-extensions — `build.tar.md` est retenu pour `ext = "md"` et indexé sous le
+    `stem` `build.tar` (le `stem` peut contenir des points).
+
+Returns:
+  Toute map — @BTreeMap triée par clé : ordre d'affichage déterministe, stable entre appels à
+    contenu de disque constant.
+  @Layers::load_merged_config / @merge_config_layers — un @RawConfigFile possédé (les deux
+    couches entrent par valeur et sont consommées) ; après fusion `Some`, chaque clé provient
+    soit de global non surchargé, soit de workspace surchargé — jamais d'un mélange
+    intra-entrée.
+  @list_layer_files / @list_layer_skill_dirs / @Layers::resolve_named_files /
+    @Layers::resolve_skill_files — map possiblement vide (répertoire absent ou ne contenant
+    rien d'éligible), jamais `Err` pour une simple absence.
+  Fonctions de provenance — exactement l'un des deux littéraux `"workspace"` ou `"global"`
+    (`&'static str`), infaillibles.
+  @merge_layer_files — la map fusionnée, infaillible, sans effet de bord.
+
+Raises:
+  @CfgStoreError::Config (`VNL-CFG-001`) — @load_config_layer sur YAML invalide : le message
+    interne est `Failed to parse <chemin>: <détail yaml_serde>` ; @Layers::load_merged_config
+    le remonte tel quel pour l'une ou l'autre couche, sans merge partiel : une couche
+    invalide fait échouer toute la lecture fusionnée.
+  @CfgStoreError::Io (`VNL-CFG-004`) — toute @std::io::Error autre que @NotFound : lecture
+    d'un `config.yaml` qui est un répertoire ou illisible, @std::fs::read_dir sur un chemin
+    qui n'est pas un répertoire, erreur sur une entrée d'@std::fs::ReadDir ; propagée sans
+    transformation par @Layers::load_merged_config, @Layers::resolve_named_files et
+    @Layers::resolve_skill_files.
+  Jamais de panic, `unwrap`, `expect` ou log dans le code de production du fichier (harnais
+    /tooling.sdd) ; `mod tests` seul s'exempte (`#![allow(clippy::unwrap_used,
+    clippy::expect_used)]`).
+
+Handles:
+  Couche partiellement peuplée — régime @NotFound : `config.yaml` absent → default,
+    sous-répertoire `agents/`, `toolsets/` ou `skills/` absent → map vide. L'absence d'une
+    partie d'une couche n'est jamais une erreur ; seule une erreur d'IO « active » remonte.
+  Segments non UTF-8 — `stem` (@std::ffi::OsStr::to_str → `None`), extension ou nom de
+    répertoire de skill non UTF-8 → l'entrée est IGNORÉE silencieusement (ni erreur, ni clé) ;
+    une erreur IO est propagée, un nom indécodable est un fichier invisible.
+  Liens symboliques — @Path::is_file/@Path::is_dir les suit : un lien vers un fichier `.ext`
+    ou un répertoire de skill est retenu comme un vrai, un lien cassé est ignoré (aucun test
+    actuel — verrouillage à trancher, voir `Tasks`).
+  Erreurs sous le tapis des provenances — les trois fonctions `*_entry_source` avalent TOUT
+    (IO et parsing) derrière `"global"`. Cohérent avec les appelants : si le `config.yaml`
+    workspace est invalide, `list_x()` (via @Layers::load_merged_config) échoue avant tout
+    affichage, et `config/skills/get` ne calcule la provenance qu'après résolution réussie —
+    la provenance n'est jamais consultée sur une entrée fantôme d'un workspace invalide.
+  Provenance « par défaut » — `"global"` signifie « pas dans workspace », pas « vérifié dans
+    global » : une entrée absente des DEUX couches reçoit `"global"`. Les appelants ne
+    consultent la provenance que sur des noms déjà retournés par `list_x()`, cas où les deux
+    lectures coïncident (question `[?]` dans `Tasks`).
+  Ordre d'itération d'@std::fs::read_dir — arbitraire et sans effet observable : chaque clé
+    (`stem` ou nom de répertoire) est unique par répertoire et la map de sortie est triée.
+  Collision de `stem` dans un MÊME répertoire — impossible par construction (même
+    extension + même `stem` = même nom de fichier) ; la sémantique `insert`-overwrite de
+    @list_layer_files n'est donc jamais observée qu'au travers du merge inter-couches.
+
+Must:
+  Contracter la précédence à DEUX couches, `workspace` strictement au-dessus de `global` :
+    pas de troisième couche, pas de score, pas de fusion d'une même entrée entre couches.
+  Fusionner `config.yaml` map par map (`providers`, `models`, `mcp`, `defaults`) au niveau de
+    la CLÉ D'ENTRÉE : une entrée workspace qui en surcharge une globale la remplace
+    INTÉGRALEMENT — les champs internes absents côté workspace ne sont pas complétés depuis
+    global, les tableaux sont remplacés et jamais concaténés. Contrat verrouillé par le test
+    `merge_config_layers_cle_commune_remplace_entree_integralement`.
+  Appliquer la même loi d'ombrage aux fichiers et aux skills : même `stem` ou même nom de
+    répertoire → l'entrée workspace éclipse l'entrée globale, et la map fusionnée ne contient
+    qu'une seule occurrence de la clé.
+  Tolérer @NotFound partout (`config.yaml` absent → @RawConfigFile::default, sous-répertoire
+    absent → map vide) et propager toute AUTRE erreur IO ou de parsing, partout hors des
+    fonctions de provenance.
+  Garder @RawConfigFile permissif côté serde : les quatre maps en `#[serde(default)]`, un
+    `config.yaml` ne déclarant qu'une partie des sections se charge sans erreur (et les
+    sections absentes deviennent des maps vides, pas des `None`).
+  Retourner `"workspace"` et `"global"` comme littéraux `&'static str` exacts : ce sont les
+    valeurs comparées en dur (`== "workspace"`) par le CLI et diffusées telles quelles dans
+    le champ `source` des réponses RPC (`config_list_sourced_response`).
+  Limiter les fonctions de provenance à la seule couche workspace : `global_dir` n'est JAMAIS
+    lu par elles (le `Layers { global_dir: "/nonexistent", .. }` des tests repose sur ce fait).
+  Conserver des @BTreeMap partout (ordre déterministe observable par l'UI config et les
+    listes CLI).
+  Relire le disque à chaque appel (aucun état dans @Layers) : deux appels consécutifs
+    reflètent une modification intervenue entre les appels.
+
+Must not:
+  Interpréter la valeur d'une entrée (@yaml_serde::Value) dans ce fichier : ni validation de
+    schéma, ni conversion de type, ni normalisation — le typage est l'affaire de
+    ./fs_store.rs (tâche store).
+  Deep-merger une entrée, fusionner/concaténer des tableaux, ou compléter les champs
+    manquants d'une entrée workspace depuis l'entrée globale homonyme.
+  Introduire une sémantique de suppression : `extend` traite une valeur `null` comme une
+    valeur normale, qui SURCHARGE l'entrée globale — aucune valeur spéciale (`null`,
+    `$delete`) ne retire une entrée globale (la question d'un mécanisme de retrait est
+    ouverte en `Tasks`, jamais un contrat).
+  Faire des listings récursifs : @list_layer_files et @list_layer_skill_dirs ne regardent
+    que le niveau direct de leur répertoire (les skills sont par nature `<dir>/<nom>/`, géré
+    par @list_layer_skill_dirs, jamais par un `walkdir`).
+  Normaliser la casse des extensions ou des noms : `A.MD` reste ignoré pour `ext = "md"`.
+  Remonter une erreur, paniquer ou logger depuis @config_entry_source, @file_entry_source ou
+    @skill_entry_source, ni y vérifier la présence d'une entrée dans la couche globale.
+  Écrire quoi que ce soit : aucune fonction du fichier ne crée de répertoire ni de fichier
+    (le write-back `config.yaml` est l'affaire de ./fs_store.rs, qui réutilise @RawConfigFile
+    comme format canonique).
+
+Tasks:
+  [ ] Compléter les tests, un par Scenario, taggés par son titre. Les tests existants de
+    `mod tests` couvrent déjà : absent→default, YAML valide, YAML invalide avec chemin,
+    identité `None`, union disjointe, remplacement total, `defaults` clé par clé, sélection
+    d'extension, ignor des sous-répertoires, répertoires absents, ombrage par stem, unions
+    multi-couches, découverte skills, provenances cas favorable et `workspace_dir: None`.
+    Scénarios sans équivalent actuel à écrire :
+    `load_config_layer_io_non_not_found_rend_cfg_004`,
+    `load_merged_config_fusionne_global_et_workspace`,
+    `load_merged_config_propage_erreur_du_workspace_invalide`,
+    `list_layer_files_extension_exacte_sensible_a_la_casse`,
+    `resolve_named_files_meme_stem_le_workspace_gagne_sans_doublon`,
+    `resolve_skill_files_nom_commun_le_workspace_gagne`,
+    `config_entry_source_repond_global_sur_yaml_workspace_invalide`,
+    `file_entry_source_extension_differentee_repond_global`,
+    `skill_entry_source_sans_workspace_repond_global`,
+    `provenance_absente_des_deux_couches_repond_global`.
+  [ ] Décider du sort des liens symboliques (fichier `.ext` éligible, répertoire de skill,
+    lien cassé) décrits dans `Handles` : test de verrouillage (comportement actuel assumé)
+    ou comportement à changer.
+  [?] @yaml_serde 0.10 sur `config.yaml` VIDE (0 octet) : @yaml_serde::from_str("") échoue-t-il
+    (→ `VNL-CFG-001`, fichier posé mais invalide) ou réussit-il en valeur par défaut ?
+    Comportement jamais testé. Trancher si « fichier vide = couche vide » doit devenir un
+    contrat ou rester une erreur de parsing.
+  [?] Clés top-level inconnues d'un `config.yaml` (hors `providers`/`models`/`mcp`/`defaults`)
+    et commentaires : ignorés à la lecture par serde (pas de `deny_unknown_fields`), puis DÉTRUITS
+    par le write-back de ./fs_store.rs (`write_config_layer` re-sérialise @RawConfigFile en
+    structure canonique). Normalisation voulue (le format canonique EST la struct) ou perte
+    de données à protéger (champ `#[serde(flatten)]` collecteur, avertissement `config check`) ?
+  [?] Provenance « global par défaut » : `"global"` ne vérifie PAS la présence dans la couche
+    globale — une entrée absente des deux couches répond `"global"`. Choix assumé
+    (« provenance = réponse à "défini dans le workspace ?" ») ou bug latent dès qu'un appelant
+    hors du chemin actuel (RPC/CLI) afficherait une provenance sur un nom non listé ?
+  [?] Pas de mécanisme de retrait : une entrée globale ne peut pas être annulée par le
+    workspace (le `null` YAML surcharge au lieu d'effacer, cf. `Must not`). Volonté explicite
+    (« l'ombrage par entrée de même nom suffit ») ou trou fonctionnel à combler ?
+  [?] `#[allow(dead_code)]` sur @Layers, @RawConfigFile, @load_config_layer,
+    @merge_config_layers, @list_layer_files, @merge_layer_files, @list_layer_skill_dirs :
+    tous ces items sont en réalité consommés (./fs_store.rs et le CLI). Attributs périmés à
+    purger avec la dette du harnais (/tooling.sdd) ou intentionnels (API réservée) ?
+  [?] `subdir` et `ext` de @Layers::resolve_named_files ne sont pas validés : un `subdir`
+    absolu ou contenant `..` échappe à la couche de répertoires via @std::path::Path::join
+    (les appelants actuels passent des littéraux). Contrat interne « réservé aux littéraux du
+    crate » ou durcissement (`validate_name`-like sur `subdir`) ?
+  [?] Relecture disque à chaque appel : les listes RPC `config/*` appellent une fonction de
+    provenance PAR entrée (N re-lectures du `config.yaml` workspace ou re-listings par
+    réponse, en plus des listings déjà faits par `list_x()`). Performance acceptée à cette
+    échelle (config locale, listes petites) ou cache/lot à contractualiser ?
+  [!] Deux représentations de la même notion : les littéraux `&'static str`
+    `"workspace"`/`"global"` de la lecture/provenance (ce fichier, wire `source`) vs l'enum
+    typé @crate::store::Layer (`Global`/`Workspace`, cible des écritures, ./store.rs).
+    Garder les deux (littéraux = protocole public) ou faire dériver les chaînes de l'enum ?
+    À trancher avec Sébastien.
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les tests existants de `mod tests` sont soit taggés sous les titres de Scenario
+    équivalents, soit référencés par eux — pas de doublons silencieux.
+  La batterie AGENTS.md (check/test/build/clippy --all-targets -D warnings/fmt) est verte
+    pour le crate et ses consommateurs CLI.
+  Sébastien a tranché tous les `[?]` et `[!]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: load_config_layer_absent_rend_default
+  Given un répertoire temporaire vide, sans `config.yaml`
+  When @load_config_layer est appelé sur ce répertoire
+  Then le résultat est `Ok` d'un @RawConfigFile dont les quatre maps (`providers`, `models`,
+    `mcp`, `defaults`) sont vides — l'absence du fichier n'est pas une erreur
+
+Scenario: load_config_layer_valide_peuple_quatre_maps
+  Given un `config.yaml` déclarant une entrée dans chacune des quatre sections (provider
+    `strix`, model `qwen-code`, serveur mcp `server1`, default `agent`)
+  When @load_config_layer est appelé
+  Then `Ok` et les quatre maps contiennent la clé attendue, valeurs opaques non interprétées
+
+Scenario: load_config_layer_invalide_erreur_cfg_001_avec_chemin
+  Given un `config.yaml` dont le contenu n'est pas du YAML valide (ex: `{invalid: [yaml`)
+  When @load_config_layer est appelé
+  Then le résultat est `Err(@CfgStoreError::Config)` et le @Display du message contient le
+    chemin complet du fichier (marqueur `VNL-CFG-001` porté par la variante)
+
+Scenario: load_config_layer_io_non_not_found_rend_cfg_004
+  Given un répertoire contenant un SOUS-RÉPERTOIRE nommé `config.yaml`
+  When @load_config_layer est appelé
+  Then le résultat est `Err(@CfgStoreError::Io)` (marqueur `VNL-CFG-004`) et non un default —
+    seule l'absence (@NotFound) est tolérée
+
+Scenario: load_merged_config_fusionne_global_et_workspace
+  Given une couche globale dont le `config.yaml` déclare le provider `strix` et le default
+    `agent: build`, et une couche workspace dont le `config.yaml` déclare le model
+    `qwen-code` et le default `agent: debug`
+  When @Layers::load_merged_config est appelé sur ces deux couches
+  Then le fichier fusionné contient `strix` (fourni par global), `qwen-code` (fourni par
+    workspace) et `defaults.agent == "debug"` (surcharge workspace)
+
+Scenario: load_merged_config_propage_erreur_du_workspace_invalide
+  Given une couche globale au `config.yaml` valide et une couche workspace au `config.yaml`
+    YAML-invalide
+  When @Layers::load_merged_config est appelé
+  Then le résultat est `Err(@CfgStoreError::Config)` portant le chemin du `config.yaml`
+    workspace — aucun merge partiel n'est retourné
+
+Scenario: merge_config_layers_none_rend_global_inchange
+  Given un @RawConfigFile global peuplé (au moins un provider)
+  When @merge_config_layers est appelé avec `workspace: None`
+  Then les quatre maps du résultat sont identiques à celles de l'entrée globale
+
+Scenario: merge_config_layers_cle_commune_remplace_entree_integralement
+  Given un model global `qwen-code` à deux champs (`temperature: 0.1`, `max_tokens: 512`) et
+    un model workspace `qwen-code` à un seul champ (`temperature: 0.5`)
+  When @merge_config_layers est appelé avec la couche workspace
+  Then la valeur fusionnée de `qwen-code` est EXACTEMENT l'entrée workspace : elle contient
+    `temperature: 0.5` et ne contient PAS `max_tokens` — preuve de l'absence de deep-merge
+    intra-entrée
+
+Scenario: merge_config_layers_defaults_surcharge_cle_par_cle
+  Given des defaults globaux `agent: build` et `autre: x`, et des defaults workspace
+    `agent: debug` seulement
+  When @merge_config_layers est appelé avec la couche workspace
+  Then `defaults.agent == "debug"` (surchargé) et `defaults.autre == "x"` (conservé) — la
+    surcharge opère clé par clé dans `defaults`, pas section par section
+
+Scenario: list_layer_files_extension_exacte_sensible_a_la_casse
+  Given un répertoire contenant `a.md`, `b.md`, `c.txt` et `A.MD`
+  When @list_layer_files est appelé avec `ext = "md"`
+  Then seules les clés `a` et `b` sont présentes : `c.txt` est exclu par l'extension et
+    `A.MD` par la casse — aucune normalisation
+
+Scenario: list_layer_files_ignore_sous_repertoires
+  Given un répertoire contenant le fichier `a.md` ET un sous-répertoire nommé `sub.md`
+  When @list_layer_files est appelé avec `ext = "md"`
+  Then seule la clé `a` est présente — la détection exige `@Path::is_file` et l'énumération
+    est non récursive
+
+Scenario: list_layer_files_repertoire_absent_rend_map_vide
+  Given un chemin de répertoire inexistant
+  When @list_layer_files est appelé avec `ext = "md"`
+  Then le résultat est `Ok` d'une map vide (@NotFound toléré, pas d'erreur)
+
+Scenario: merge_layer_files_stem_commun_le_workspace_remplace
+  Given la map globale `build -> cheminG` et la map workspace `build -> cheminW` plus
+    `debug -> cheminD`
+  When @merge_layer_files est appelé avec la couche workspace
+  Then le résultat a 2 entrées, `build` vaut `cheminW` (remplacement, `cheminG` invisible) et
+    `debug` vaut `cheminD` (union)
+
+Scenario: resolve_named_files_meme_stem_le_workspace_gagne_sans_doublon
+  Given une couche globale avec `agents/build.md` et une couche workspace avec
+    `agents/build.md` et `agents/debug.md`
+  When @Layers::resolve_named_files est appelé avec `("agents", "md")`
+  Then la map contient exactement 2 clés (`build`, `debug`), et `build` pointe sur le fichier
+    workspace — l'entrée globale homonyme est éclipsée, jamais listée deux fois
+
+Scenario: list_layer_skill_dirs_indexe_seulement_les_repertoires_avec_skill_md
+  Given un répertoire contenant le sous-répertoire `pdf/` avec un fichier `pdf/SKILL.md`, le
+    sous-répertoire `empty-dir/` sans `SKILL.md`, et un fichier isolé `not-a-skill.md`
+  When @list_layer_skill_dirs est appelé
+  Then seule la clé `pdf` est présente et sa valeur est le chemin `pdf/SKILL.md` (le fichier,
+    pas le répertoire) ; le sous-répertoire sans `SKILL.md` et le fichier isolé sont ignorés
+    silencieusement
+
+Scenario: list_layer_skill_dirs_repertoire_absent_rend_map_vide
+  Given un chemin de répertoire inexistant
+  When @list_layer_skill_dirs est appelé
+  Then le résultat est `Ok` d'une map vide (même tolérance @NotFound qu'@list_layer_files)
+
+Scenario: resolve_skill_files_nom_commun_le_workspace_gagne
+  Given une couche globale avec `skills/pdf/SKILL.md` et une couche workspace avec
+    `skills/pdf/SKILL.md` et `skills/csv/SKILL.md`
+  When @Layers::resolve_skill_files est appelé
+  Then la map contient 2 clés ; `pdf` pointe sur le `SKILL.md` workspace (ombrage de
+    l'entrée globale homonyme) et `csv` est présent (union)
+
+Scenario: config_entry_source_repond_global_sur_yaml_workspace_invalide
+  Given une couche workspace dont le `config.yaml` est YAML-invalide et une requête de
+    provenance sur n'importe quel nom, map `models` choisie par `pick`
+  When @config_entry_source est appelé
+  Then la réponse est `"global"` sans erreur — les fonctions de provenance avalent
+    l'erreur de parsing (le lieu de remontée est `list_x()`/`config check`)
+
+Scenario: file_entry_source_extension_differentee_repond_global
+  Given une couche workspace contenant `toolsets/grafana.yml` et une requête
+    `@file_entry_source(layers, "toolsets", "yaml", "grafana")` (extension demandée `yaml`)
+  When l'appel s'exécute
+  Then la réponse est `"global"` : la correspondance d'extension est exacte, `grafana.yml`
+    ne compte pas comme une entrée workspace pour `ext = "yaml"`
+
+Scenario: skill_entry_source_sans_workspace_repond_global
+  Given un @Layers dont `workspace_dir` est `None`
+  When @skill_entry_source est appelé pour n'importe quel nom
+  Then la réponse est `"global"` sans aucune lecture disque côté workspace — cas des
+    invocations hors dépôt git (aucune racine découverte)
+
+Scenario: provenance_absente_des_deux_couches_repond_global
+  Given une couche workspace au `config.yaml` valide ne contenant aucune clé `ghost` dans la
+    map `models`, et une couche globale où `ghost` est tout aussi absente
+  When @config_entry_source est appelé sur `ghost` (map `models`)
+  Then la réponse est `"global"` : `"global"` signifie « pas défini dans le workspace »,
+    sans vérification d'existence dans la couche globale (contrat `[?]` de `Tasks`)

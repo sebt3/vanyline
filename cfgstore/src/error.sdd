@@ -1,0 +1,334 @@
+Spec: Error
+
+Platform: Rust/vanyline-cfgstore/thiserror
+
+Purpose:
+  Enum d'erreurs unique de `vanyline-cfgstore` (@CfgStoreError) : le type d'erreur de toute
+  la couche config du crate — le trait @ConfigStore et son double en mémoire
+  @InMemoryConfigStore (./store.rs), le store sur fichiers @FsConfigStore (./fs_store.rs) et
+  la lecture des couches YAML (@Layers, ./layers.rs). C'est la contractualisation, pour le
+  domaine `CFG` côté store, de la convention « messages d'erreur avec identifiant unique »
+  de l'AGENTS.md : chaque variante porte un marqueur stable `VNL-CFG-<NNN>` en tête de son
+  @Display, même famille `VNL-*` que ../../lib/src/error.rs (@VnyError) et
+  ../../tools/src/error.rs (@ToolsError). Le commentaire d'en-tête du fichier range les
+  marqueurs : `001..004` lecture/IO, `005..010` écriture — classification descriptive, voir
+  `Tasks`. Le module est déclaré `pub mod error;` dans
+  ./lib.rs ET re-exporté à la racine (`pub use error::CfgStoreError;`) : le chemin public
+  retenu par les consommateurs est @vanyline_cfgstore::CfgStoreError. Le @Display de cet
+  enum est la seule forme visible hors crate : c'est lui qui voyage tel quel dans les
+  réponses JSON-RPC du cli (`error.message` de `config_write_response`,
+  ../../cli/src/rpc/handlers.rs), dans les corps d'erreurs HTTP de l'app
+  (@From<@CfgStoreError> pour `AppError` → HTTP 500, ../../app/src/error.rs), et dans des
+  assertions de tests TS de l'extension (../../ext/webview/src/rpcConfigRepo.spec.ts verrouille
+  une chaîne `VNL-CFG-007` complète). Un seul fichier, un seul contrat : pas de regroupement.
+
+Owns:
+  ./error.rs
+
+Can read:
+  ./lib.rs
+  ./store.rs
+  ./fs_store.rs
+  ./layers.rs
+  ../Cargo.toml
+  ../../lib/src/error.rs
+  ../../cli/src/rpc/handlers.rs
+  ../../app/src/error.rs
+
+Depends on:
+  @thiserror (v2, ../Cargo.toml) — derive @thiserror::Error : implémente
+    @std::error::Error, génère le @std::fmt::Display depuis les attributs `#[error(...)]`
+    et le @From<std::io::Error> du champ `#[from]` de @CfgStoreError::Io. Un seul @Display
+    par variante, aucune autre derive (pas de `Clone`, `PartialEq`, `Serialize`, ni ts-rs) :
+    type purement interne Rust, diffusé hors crate uniquement sous forme de chaîne via
+    @Display, jamais sérialisé.
+  @crate::store::Layer — type du champ `layer` de @CfgStoreError::NotFound et
+    @CfgStoreError::NameConflict (`use crate::store::Layer`, enum `pub enum Layer { Global,
+    Workspace }` de ./store.rs, derives `Debug, Clone, Copy, PartialEq, Eq`, SANS @Display) :
+    le rendu `VNL-CFG-006/007` dépend donc du @Debug dérivé de ./store.rs (`Global` /
+    `Workspace`), pas d'un format défini ici.
+  @std::io::Error — payload du champ `#[from]` de @CfgStoreError::Io (chaînée par
+    @std::error::Error::source et interpolée inline via `{0}` dans le gabarit).
+
+Exposes:
+  @CfgStoreError — `pub enum` avec derives `Debug` et @thiserror::Error exactement. 10
+    variantes au total, sans aucun gating de feature. Le @Display de chaque variante
+    commence par son marqueur `VNL-CFG-*` suivi de `": "` — les rendus ci-dessous sont
+    exacts, caractère par caractère, `{0}`/`{1}` désignant les champs dans l'ordre de
+    déclaration et `{kind}`/`{name}`/`{layer:?}` les champs nommés (`:?` = format Debug) :
+      @CfgStoreError::Config(String) — `"VNL-CFG-001: Configuration error: {0}"`
+      @CfgStoreError::DuplicateName(&'static str, String) —
+        `"VNL-CFG-002: Duplicate name '{1}' for {0}"` (champ 0 = sorte, champ 1 = nom —
+        rendu dans l'ordre INVERSE des champs)
+      @CfgStoreError::UnknownReference(&'static str, String) —
+        `"VNL-CFG-003: Unknown {0} reference: '{1}'"` (champ 0 = sorte, champ 1 = nom,
+        ordre naturel)
+      @CfgStoreError::Io(@std::io::Error) — `"VNL-CFG-004: I/O error: {0}"` ; champ
+        `#[from]` → @From<@std::io::Error> généré (utilisable par l'opérateur `?` et
+        `.map_err(CfgStoreError::from)`) et @std::error::Error::source() rend l'erreur io
+        d'origine
+      @CfgStoreError::InvalidName(String) — `"VNL-CFG-005: Invalid name: {0}"`
+      @CfgStoreError::NotFound { kind, name, layer } —
+        `"VNL-CFG-006: {kind} '{name}' not found in {layer:?} layer"` ; `kind: &'static str`,
+        `name: String`, `layer: @crate::store::Layer` rendu en Debug (`Global`/`Workspace`,
+        sans quotes)
+      @CfgStoreError::NameConflict { kind, name, layer } —
+        `"VNL-CFG-007: {kind} '{name}' already exists in {layer:?} layer"` ; mêmes champs
+        et même rendu Debug de `layer` que 006
+      @CfgStoreError::WriteError(String) — `"VNL-CFG-008: Write error: {0}"`
+      @CfgStoreError::ReadOnly — `"VNL-CFG-009: Config store is read-only"`
+      @CfgStoreError::Validation(String) — `"VNL-CFG-010: Invalid value: {0}"`
+  @From<@std::io::Error> pour @CfgStoreError — généré par le `#[from]` de la variante
+    @CfgStoreError::Io : toute fonction retournant `Result<_, @CfgStoreError>` peut propager
+    une @std::io::Error par `?` (ainsi utilisés en masse dans ./layers.rs et ./fs_store.rs).
+    Aucune autre conversion @From n'existe dans ce fichier, générée ou manuelle.
+  @std::error::Error — implémenté par la derive : `source()` ne rend `Some` que pour
+    @CfgStoreError::Io (seul champ `#[from]`), `None` pour les 9 autres variantes.
+  @std::fmt::Debug — dérivé, utilisé par les tests consommateurs (`match … { other =>
+    panic!("Expected ConfigError, got {other:?}") }` dans ./layers.rs, `matches!` dans
+    ./store.rs).
+  Re-export — ./lib.rs : `pub mod error;` ET `pub use error::CfgStoreError;` — les deux
+    chemins (@vanyline_cfgstore::error::CfgStoreError et @vanyline_cfgstore::CfgStoreError)
+    résolvent le même type ; c'est le second qu'utilisent `lib`, `app` et `cli`.
+  Module de test `tests::error_codes` — test existant du fichier : vérifie par `contains`
+    que les 10 variantes rendent leur marqueur (via `format!("{}", e)`) et qu'une
+    @CfgStoreError::InvalidName se matche par `matches!`. Faible (aucun verrouillage du
+    rendu complet), dette tracée en `Tasks`.
+
+Accepts:
+  Variantes à payload — n'importe quel `String` dans `Config`/`InvalidName`/`WriteError`/
+    `Validation` et n'importe quel `&'static str`/`String` dans `kind`/`name` : aucune
+    validation, aucune troncature, aucun contrôle de grammaire ; chemins et texte rendus
+    tels quels, espaces, guillemets et UTF-8 inclus. Un payload portant lui-même un marqueur
+    `VNL-*` d'un autre crate est accepté et rendu tel quel (double marqueur, voir `Handles`).
+  @CfgStoreError::Io — n'importe quelle @std::io::Error, OS brute (`raw_os_error`) ou
+    synthétique (`io::Error::other`, `io::Error::new(kind, msg)`) ; le @Display n'interpole
+    que le niveau 0 via `{0}`, pas la chaîne complète de causes.
+  @CfgStoreError::NotFound / @CfgStoreError::NameConflict — n'importe quelle valeur de
+    @crate::store::Layer et n'importe quelle chaîne `kind` : le type n'énumère pas les
+    sortes connues (`"provider"`, `"model"`, `"mcp_server"`, `"toolset"`, `"agent"`,
+    `"skill"` sont des littéraux répandus chez les appelants, sans constants partagées).
+  @CfgStoreError::InvalidName — y compris le nom vide : `validate_name` (./fs_store.rs)
+    le rejette ainsi, et le rendu garde la ponctuation du gabarit (`VNL-CFG-005: Invalid
+    name: ` avec espace final, payload vide).
+
+Returns:
+  Ce fichier ne retourne rien hors conversion : aucune fonction hors code généré par les
+    derives et le @From<std::io::Error>.
+  @Display de chaque variante — exactement le gabarit de `Exposes` avec payloads injectés ;
+    c'est la surface observable principale, et la forme exacte diffusée au fil par le RPC du
+    cli (`format!("{e}")` dans `error.message` JSON-RPC) et par l'app (corps HTTP 500).
+  @std::error::Error::source() — `Some` de l'@std::io::Error d'origine pour
+    @CfgStoreError::Io uniquement, `None` sinon.
+  @Debug dérivé — rendu structurel Rust par défaut, jamais contractualisé au-delà de son
+    existence.
+
+Raises:
+  Aucune — le fichier ne retourne jamais d'erreur et ne panique jamais : aucune fonction
+    manuelle, les derives thiserror ne génèrent aucune panic. Les valeurs de @CfgStoreError
+    ne sont que construites et transportées par ./store.rs, ./fs_store.rs, ./layers.rs, et
+    hors crate par `app` (PgConfigStore) — jamais par ./domain.rs, qui ne manipule que des
+    @serde::de::Error.
+
+Handles:
+  Sites de construction du crate (aucun n'est dans ce fichier) —
+    ./store.rs :: @resolve_by_name rend @CfgStoreError::UnknownReference (0 sorte + nom) à 0
+    match et @CfgStoreError::DuplicateName à >1 match dans les `list_x()` ; @load_skill sur
+    un nom absent rend `UnknownReference("skill", nom)` ; les 19 méthodes d'écriture du trait
+    @ConfigStore ont un défaut `Err(CfgStoreError::ReadOnly)` — c'est ce défaut qui fait
+    compiler sans stub un store non-inscriptible (le `PgConfigStore` de l'app s'appuie
+    dessus) ; @InMemoryConfigStore rend `NameConflict` en create sur nom existant,
+    `NotFound` en update/delete sur nom absent, `Config("update patch must be a JSON
+    object")` sur patch non objet, `Validation` sur type de patch invalide, et
+    `InvalidName` via @validate_name.
+    ./fs_store.rs :: @validate_name (anti-traversal, `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, ≤ 64,
+    rejet `..`) rend `InvalidName` avant toute opération disque ; @FsConfigStore::layer_dir
+    sur `Layer::Workspace` sans `workspace_dir` configuré rend
+    `Config("no workspace layer configured")` ; les sérialisations yaml/JSON en échec
+    rendent `WriteError` ; les écritures/suppressions @std::fs en échec rendent `Io` par
+    `?` ; le revalidation-backstop des patch `config.yaml` (entrée patchée doit rester
+    désérialisable via son `Raw*Entry`) rend `Validation` ; @split_frontmatter et les
+    `parse_*_file` rendent `Config` avec le chemin dans le message.
+    ./layers.rs :: YAML invalide → `Config("Failed to parse {chemin}: {err}")` ; erreur io
+    autre que NotFound → `Io` par conversion.
+  Io de type NotFound jamais rendu ici — ./layers.rs translate « fichier/dossier absent »
+    en couche vide (`load_config_layer` → `RawConfigFile::default()`, `list_layer_files` /
+    `list_layer_skill_dirs` → map vide) : `VNL-CFG-004` n'atteint le fil que pour une vraie
+    panne io (permission, disque), pas pour l'absence.
+  Rendu de `layer` en Debug, pas en Display — @crate::store::Layer n'a pas de @Display ;
+    `{layer:?}` rend `Global`/`Workspace` (majuscule initiale, sans quotes), d'où
+    `… not found in Workspace layer`. Cette forme est verrouillée hors du crate : un test TS
+    de l'extension assert la chaîne complète `VNL-CFG-007: provider 'p' already exists in
+    Workspace layer` et docs/rpc-protocol.md en montre l'exemple `Global`.
+  @CfgStoreError::NotFound vs @CfgStoreError::UnknownReference — deux variantes « absent »
+    aux sémantiques distinctes : `UnknownReference` (003) pour la résolution par nom sur les
+    données fusionnées en lecture (`get_x`, `load_skill`), `NotFound` (006) pour une écriture
+    qui cible une couche nommée (le champ `layer` porte la couche demandée). @InMemoryConfigStore,
+    qui ne distingue pas les couches en stockage, embarque quand même l'argument `layer`
+    reçu dans ses `NotFound`/`NameConflict` rendus.
+  Conversions et mappages hors du fichier — aucune conversion @From<CfgStoreError> n'est
+    écrite ici. ../../lib/src/error.rs implémente @From<@CfgStoreError> pour @VnyError :
+    `Config`/`DuplicateName`/`UnknownReference` mappées avec @Display byte-identique, toute
+    autre variante dégradée en `VnyError::ConfigError(affichage source)` avec DOUBLE
+    marqueur (ex: `ReadOnly` → `VNL-CFG-001: Configuration error: VNL-CFG-009: Config store
+    is read-only`). ../../app/src/error.rs implémente @From<@CfgStoreError> pour `AppError`
+    en `InternalError(e.to_string())` → HTTP 500 avec le @Display complet en message.
+    ../../cli/src/rpc/handlers.rs (`config_write_response`) mappe par variante vers les
+    codes RPC : `WriteError`|`Io` → `CONFIG_WRITE_ERROR`, `NotFound` → `CONFIG_NOT_FOUND`,
+    `NameConflict` → `CONFIG_NAME_CONFLICT`, `InvalidName` → `CONFIG_INVALID_NAME`,
+    `Validation` → `CONFIG_VALIDATION`, toutes autres (`Config`, `DuplicateName`,
+    `UnknownReference`, `ReadOnly`) → `CONFIG_ERROR` (VNL-RPC-006) — le @Display complet
+    étant à chaque fois le `error.message` de l'enveloppe JSON-RPC.
+  Payload portant déjà un marqueur — `app/src/config_store.rs` embrique des @VnyError
+    stringifiés dans @CfgStoreError::Config (`CfgStoreError::Config(e.to_string())`) : le
+    rendu porte deux marqueurs (`VNL-CFG-001: Configuration error: VNL-LLM-001: …`), le type
+    ne déduplique rien — état verrouillé par scenario (même philosophie que le fallback de
+    ../../lib/src/error.rs).
+
+Must:
+  Préfixer le @Display de chaque variante par son marqueur `VNL-CFG-<NNN>` exact, suivi de
+    `": "` — convention AGENTS.md « message d'erreur avec identifiant unique » ; les
+    marqueurs `VNL-CFG-001` à `VNL-CFG-010` et les 10 gabarits de `Exposes` sont stables et
+    verrouillés par test sur le rendu complet (pas le seul `contains` actuel).
+  Garder les marqueurs uniques dans l'enum : deux variantes ne peuvent pas partager le même
+    code, et le compte de chaque littéral `VNL-CFG-0NN` hors module de test est un.
+  Conserver les gabarits 001/002/003 byte-identiques à leurs jumeaux @VnyError::ConfigError/
+    @VnyError::DuplicateName/@VnyError::UnknownReference de ../../lib/src/error.rs : la
+    conversion lib promet un rendu préservé pour ces trois variantes ; l'ordre des champs de
+    @CfgStoreError::DuplicateName (rendu `{1}` avant `{0}`) est verrouillé.
+  Conserver le `#[from]` de @CfgStoreError::Io : ./layers.rs et ./fs_store.rs propagent des
+    @std::io::Error par `?` et `.map_err(CfgStoreError::from)` à travers tout le crate ; sa
+    suppression casserait chaque call-site.
+  N'avoir comme derives que `Debug` et @thiserror::Error : ni serde, ni ts-rs, ni
+    `Clone`/`PartialEq` — la diffusion hors crate se fait par @Display stringifié, jamais
+    par sérialisation de l'enum.
+  Rendre `layer` dans 006/007 par le @Debug de @crate::store::Layer dans le gabarit `… in
+    {layer} layer` (suffixe ` layer` littéral inclus) : des tests hors crate comparent la
+    chaîne complète.
+  Documenter toute nouvelle variante dans `Exposes` avec marqueur, gabarit exact et
+    intention de construction (lecture vs écriture).
+
+Must not:
+  Renommer, renuméroter ou réaffecter un marqueur `VNL-CFG-0NN` publié, ni retoucher un
+    gabarit (ordre des champs, quotes autour du nom, suffixe ` layer`, casse) sans décision
+    de spec actée par Sébastien — les marqueurs sont lus dans les tests du crate, le test de
+    conversion de lib, les réponses RPC du cli, les corps HTTP 500 de l'app, un test TS de
+    l'extension et docs/rpc-protocol.md.
+  Introduire une variante sans marqueur, sans ligne dans `Exposes`, ou dont le @Display ne
+    commence pas par son marqueur suivi de `": "`.
+  Faire de @CfgStoreError un type de transport (serde/ts-rs) ou lui ajouter
+    `Clone`/`PartialEq` : le fil ne voit que sa stringification.
+  Valider, normaliser, tronquer ou dédupliquer un payload dans le type lui-même (message,
+    nom, sorte, couche, marqueur embarqué) : toute validation appartient aux modules
+    constructeurs (@validate_name en tête).
+  Paniquer ou logger dans ce fichier (les derives ne le permettent pas, aucune fonction
+    manuelle ne doit les introduire).
+  Ajouter un @From manuel d'une erreur d'un autre crate vers @CfgStoreError : les
+    conversions de sortie (vers @VnyError, `AppError`) vivent chez les consommateurs, les
+    conversions d'entrée hors @std::io::Error doivent rester explicites chez l'appelant
+    (`map_err(CfgStoreError::Config)`).
+
+Tasks:
+  [ ] Ajouter les tests du module : `error_codes` ne fait que des `contains` ; ajouter un
+    test par Scenario, taggé par son titre, verrouillant les rendus complets (méthode de
+    ../../lib/src/error.sdd et ../../tools/src/error.sdd).
+  [?] Collision de namespace avec l'app : ../../app/src/config.rs et
+    ../../app/src/main.rs émettent EN DUR `VNL-CFG-001`…`VNL-CFG-008` pour leurs erreurs de
+    variables d'environnement (`OIDC_ISSUER_URL is required`, `COOKIE_SECRET must be at
+    least 64 bytes`, `invalid LISTEN_ADDR`…) — mêmes marqueurs, sémantiques totalement
+    différentes, sans rapport avec @CfgStoreError. Règle « un espace de noms `VNL-CFG-*`
+    par crate » à confirmer, ou à faire renommer les marqueurs de l'app (une ligne dans
+    vanyline.sdd ?). Documenté, non tranché.
+  [?] Le frontend synthétise `VNL-CFG-404 ${domain}/${name} introuvable`
+    (frontend/src/api/httpConfigRepo.ts) : format non conforme (3 chiffres attendus) et
+    préfixe partagé avec ce crate. Le frontend doit-il un namespace propre, ou ce marqueur
+    est-il assumé comme un faux-code d'affichage ?
+  [?] Double titularité de `VNL-CFG-001` : porté à la fois par @CfgStoreError::Config (ici)
+    et @VnyError::ConfigError (../../lib/src/error.sdd) — alignement voulu par la conversion
+    byte-identique ou collision à terme. Déjà posé côté lib, à trancher ici et là-bas en
+    cohérence.
+  [?] Le commentaire d'en-tête du fichier (« `001..004` lecture/IO, `005..010` écriture »)
+    est descriptif, pas strict : `Config` (001) et `Io` (004) sont aussi construits sur des
+    chemins d'écriture (layer_dir, `std::fs::write`, patch non-objet), et `ReadOnly` (009)
+    est le défaut du trait, sans toucher le disque. La classification est-elle une
+    intention normative (à faire respecter) ou une note historique (à reformuler) ?
+  [?] `kind` de 002/003/006/007 : `&'static str` non énumérée, six littéraux (`"provider"`,
+    `"model"`, `"mcp_server"`, `"toolset"`, `"agent"`, `"skill"`) répandus entre ./store.rs,
+    ./fs_store.rs et app/src/config_store.rs sans constantes. Introduire des constantes de
+    sorte dans ce fichier (single source) ou laisser les littéraux chez les appelants ?
+  [?] @CfgStoreError ne dérive ni `Clone` ni `PartialEq` — les consommateurs testent par
+    `matches!` et sous-chaînes : absence voulue (alignement @VnyError/@ToolsError) ou manque
+    à combler ?
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les 10 rendus exacts (caractère par caractère, ordre des champs de 002 inclus) sont
+    verrouillés par test et complètent ou remplacent `error_codes`.
+  Le test de conversion de lib (`conversion_cfgstore_preserve_rendu_sur_trois_variantes` de
+    ../../lib/src/error.sdd) et le test TS de l'extension verrouillant `VNL-CFG-007`
+    restent verts sans modification.
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: display_exhaustif_des_dix_marqueurs_vnl_cfg
+  Given une instance de chaque variante de @CfgStoreError avec des payloads fixés
+    (`Config("boom")`, `DuplicateName("agent", "build")`,
+    `UnknownReference("model", "qwen-code")`, `Io(io::Error::other("io"))`,
+    `InvalidName("")`, `NotFound { kind: "provider", name: "x", layer: Layer::Global }`,
+    `NameConflict { kind: "model", name: "x", layer: Layer::Workspace }`,
+    `WriteError("boom")`, `ReadOnly`, `Validation("type")`)
+  When chacune est rendue par @Display
+  Then chaque rendu est exactement le gabarit de `Exposes` avec payloads injectés,
+    commençant par `VNL-CFG-001` … `VNL-CFG-010` suivi de `": "`
+
+Scenario: rendu_inverse_des_champs_de_duplicate_name
+  Given @CfgStoreError::DuplicateName("agent", "dup") et
+    @CfgStoreError::UnknownReference("model", "qwen")
+  When elles sont rendues par @Display
+  Then la première rend le nom AVANT la sorte : `VNL-CFG-002: Duplicate name 'dup' for
+    agent`, tandis que la seconde rend l'ordre naturel : `VNL-CFG-003: Unknown model
+    reference: 'qwen'`
+
+Scenario: rendu_debug_de_layer_dans_not_found_et_name_conflict
+  Given @CfgStoreError::NotFound { kind: "provider", name: "p", layer: Layer::Workspace }
+    et @CfgStoreError::NameConflict { kind: "provider", name: "p",
+    layer: Layer::Workspace }
+  When chacune est rendue par @Display
+  Then les rendus sont exactement `VNL-CFG-006: provider 'p' not found in Workspace layer`
+    et `VNL-CFG-007: provider 'p' already exists in Workspace layer` — couche rendue en
+    Debug (`Workspace`, sans quotes), forme assertée hors crate par le test de
+    l'extension rpcConfigRepo.spec.ts
+
+Scenario: conversion_depuis_std_io_error_generee_par_operateur_question
+  Given une fonction retournant `Result<(), CfgStoreError>` qui exécute une opération
+    @std::fs en échec (écriture dans un chemin invalide) via l'opérateur `?`
+  When l'erreur remonte
+  Then le résultat est un @CfgStoreError::Io dont l'@Display est
+    `VNL-CFG-004: I/O error: {@Display de l'erreur io d'origine}` et dont
+    @std::error::Error::source() rend `Some` de cette erreur io
+
+Scenario: source_std_error_absente_sauf_variante_io
+  Given un @CfgStoreError::ReadOnly et un @CfgStoreError::Io(io::Error::other("x")) vus
+    comme @std::error::Error
+  When @std::error::Error::source() est appelé sur chacun
+  Then le premier rend `None` et le second `Some` de l'@std::io::Error d'origine
+
+Scenario: marqueurs_vnl_cfg_uniques_dans_le_fichier
+  Given le contenu de ./error.rs lu par `include_str!` dans un test du crate
+  When chaque marqueur `VNL-CFG-001` … `VNL-CFG-010` y est dénombré hors du module de tests
+  Then chacun apparaît exactement une fois (dans son gabarit `#[error(...)]`) et deux
+    variantes quelconques n'ont jamais le même marqueur
+
+Scenario: payload_rendu_tel_quel_y_compris_nom_vide
+  Given @CfgStoreError::Config("/dosier avec espace «çà» 'quote'") et
+    @CfgStoreError::InvalidName("") (nom vide rejeté par @validate_name)
+  When ils sont rendus par @Display
+  Then le texte UTF-8 avec espaces et quotes ressort byte-identique dans le rendu, et le
+    nom vide laisse la ponctuation du gabarit telle quelle : `VNL-CFG-005: Invalid name: `
+    avec l'espace final, sans ponctuation ajoutée ni retirée
+
+Scenario: payload_portant_deja_un_marqueur_produit_un_double_marqueur
+  Given un @CfgStoreError::Config construit comme le fait app/src/config_store.rs avec une
+    @VnyError stringifiée : `Config("VNL-LLM-001: LLM provider error: x")`
+  When il est rendu par @Display
+  Then le rendu est exactement `VNL-CFG-001: Configuration error: VNL-LLM-001: LLM provider
+    error: x` — deux marqueurs coexistent, le type ne déduplique ni ne réécrit rien

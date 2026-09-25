@@ -1,0 +1,241 @@
+Spec: Lib
+
+Platform: Rust/vanyline-cfgstore
+
+Purpose:
+  Racine du crate `vanyline-cfgstore` (stockage de configuration du monorepo). Le fichier
+  (9 lignes) ne porte AUCUNE logique : aucun type, fonction ou constante propre, aucun
+  module `#[cfg(test)]`, aucun commentaire de doc crate. Il porte trois comportements de
+  câblage observables : (1) l'arbre des cinq modules publics (`domain`, `error`,
+  `fs_store`, `layers`, `store`), tous déclarés `pub` et sans condition de feature —
+  ../Cargo.toml ne définit d'ailleurs aucune feature ; (2) le re-export racine unique
+  `pub use error::CfgStoreError`, chemin canonique effectivement employé par `cli`, `app`
+  et `lib` (implémentations @From de @VnyError et @AppError) ; (3) l'attribut
+  `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]`, exigé par
+  /tooling.sdd pour chaque racine de crate et qui est ici PORTANT : aucun module enfant
+  ne porte d'exemption locale et leur code de test fait un usage massif de `unwrap` —
+  le retirer ajouterait une cargaison d'erreurs `unwrap_used`/`expect_used` imputables au
+  seul code de test (contrairement à `vanyline-lib` où lib/src/lib.sdd le soupçonne
+  redondant). Le crate est consommé de
+  deux façons : directement par `cli` et `app` (chemins `vanyline_cfgstore::…`), et par
+  relais de `vanyline-lib` qui ré-exporte `domain` et `store` comme chemins canoniques
+  (cf. /lib/src/lib.sdd). Le contenu des modules est à contracter par des specs sœurs
+  encore à produire (cf. `Tasks`) ; cette spec ne couvre que la surface racine.
+
+Owns:
+  ./lib.rs
+
+Can read:
+  ./domain.rs
+  ./error.rs
+  ./fs_store.rs
+  ./layers.rs
+  ./store.rs
+  ../Cargo.toml
+  /tooling.sdd
+  /vanyline.sdd
+  /lib/src/lib.rs
+
+Structure:
+  ./lib.rs — code réel : un seul attribut de crate (exemption clippy `cfg(test)`), cinq
+    déclarations `pub mod` (sans attribut de gating), un unique re-export d'item. Zéro
+    logique, zéro test, zéro doc `//!`.
+  vanyline_cfgstore:: — surface racine vue de l'extérieur : cinq modules publics, un nom
+    ré-exporté.
+    ├── domain (pub mod) — ./domain.rs : types du domaine de configuration (@Provider,
+    │   @ProviderType, @ModelProfile, @McpServer, @McpTransport, @Toolset,
+    │   @McpSelection, @SkillMeta, @AgentMode, @SkillSelection, @Agent) — spec à produire
+    ├── error (pub mod) — ./error.rs : @CfgStoreError (@thiserror), identifiants stables
+    │   `VNL-CFG-001`..`VNL-CFG-010` — spec à produire
+    ├── fs_store (pub mod) — ./fs_store.rs : @validate_name, @FsConfigStore
+    │   (implémentation fichier de @store::ConfigStore) — spec à produire
+    ├── layers (pub mod) — ./layers.rs : @Layers, @RawConfigFile, chargement/fusion de
+    │   couches, helpers de source (@config_entry_source, @file_entry_source,
+    │   @skill_entry_source) — spec à produire
+    └── store (pub mod) — ./store.rs : @Layer, trait asynchrone @ConfigStore
+        (@async_trait, `Send + Sync`), @InMemoryConfigStore — spec à produire
+  Le nom @CfgStoreError est adressable par DEUX chemins équivalents (même item) :
+    `vanyline_cfgstore::CfgStoreError` (re-export racine, seul chemin employé dans le
+    workspace) et `vanyline_cfgstore::error::CfgStoreError` (chemin long, jamais utilisé).
+
+Must:
+  Déclarer l'arbre de modules exactement ainsi et SANS condition de feature ni de profil :
+    `pub mod domain`, `pub mod error`, `pub mod fs_store`, `pub mod layers`,
+    `pub mod store` — les cinq modules sont publics (aucun module privé, contrairement au
+    `error`/`types` de `vanyline-lib`).
+  Maintenir `pub use error::CfgStoreError` comme chemin racine canonique : il est écrit
+    littéralement `use vanyline_cfgstore::CfgStoreError` dans `cli/src/rpc/handlers.rs`
+    et `app/src/config_store.rs`, et nommé `vanyline_cfgstore::CfgStoreError` dans les
+    implémentations @From de `lib/src/error.rs` (@VnyError, cf. /lib/src/error.sdd) et de
+    `app/src/error.rs`. Le retirer ou le renommer casse quatre sites consommateurs.
+  Exposer @CfgStoreError par un re-export d'item nommé, sans glob : la racine ne ré-exporte
+    à ce jour qu'un seul nom.
+  Conserver `domain` et `store` publiés sous ces noms pour que le relais
+    `pub use vanyline_cfgstore::{domain, store}` de /lib/src/lib.rs continue de résoudre
+    les chemins canoniques `vanyline_lib::domain::…` et `vanyline_lib::store::…`.
+  Restreindre l'exemption `#![cfg_attr(test, allow(clippy::unwrap_used,
+    clippy::expect_used))]` au seul profil `cfg(test)` : en build de production le harnais
+    de /tooling.sdd garde ces lints en deny. Cette ligne est celle que /tooling.sdd se
+    réserve le droit de modifier dans ./lib.rs (« ligne d'exemption `cfg(test)` seulement »).
+  Compter sur cette seule exemption crate-wide pour les tests des modules enfants : aucun
+    des cinq fichiers enfants ne porte de `#![allow(clippy::unwrap_used, …)]` local et les
+    modules `#[cfg(test)]` de ./store.rs, ./fs_store.rs, ./layers.rs font un usage intensif
+    de `unwrap`/`expect`.
+  Déléguer sans redondance le contrat du contenu de chaque module à sa spec sœur (aucune
+    n'existe encore — cf. `Tasks`).
+
+Must not:
+  Porter un autre comportement que le câblage : pas de fonction, type, constante, macro,
+    module `#[cfg(test)]` ou doc crate dans ./lib.rs — le fichier ne définit aucun item
+    lui-même, @CfgStoreError est défini dans ./error.rs.
+  Ré-exporter les modules en glob à la racine (`pub use store::*`, `pub use layers::*`,
+    etc.) : la surface racine est exactement les cinq modules plus le nom
+    @CfgStoreError ; @Layers, @FsConfigStore, @Layer, @validate_name ne sont adressables
+    que sous leur chemin de module — c'est ce qu'écrivent les consommateurs `cli`.
+  Gating d'un module ou du re-export sur une feature cargo : ../Cargo.toml ne déclare
+    aucune feature ; aucune forme `#[cfg(feature = …)]` n'existe dans le crate.
+  Faire produire un effet à l'exemption clippy hors `cfg(test)` : en code de production
+    `unwrap_used`/`expect_used` restent deny (/tooling.sdd).
+  Rendre le module `error` privé : il est `pub` et le chemin long
+    `vanyline_cfgstore::error::CfgStoreError` reste résolvable (même sans utilisateur
+    aujourd'hui — la décision de le supprimer est à trancher, cf. `Tasks`).
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` en code de production
+    (harnais de /tooling.sdd).
+
+Depends on:
+  ./error.rs — définit @CfgStoreError, seul item ré-exporté par la racine.
+  ./domain.rs, ./store.rs, ./layers.rs, ./fs_store.rs — modules déclarés, contenu à gérer
+    par leurs specs ; @error.rs dépend de @store::Layer pour ses variantes @NotFound et
+    @NameConflict (couplage interne au crate, pas à la racine).
+  ../Cargo.toml — `[lints] workspace = true` (héritage du harnais que l'attribut
+    d'exemption est le seul à relativiser) ; absence de toute table `[features]` ;
+    dépendances (@serde, @serde_json, @async-trait, @thiserror, @yaml_serde) consommées
+    par les modules enfants, pas par ./lib.rs.
+  /tooling.sdd — impose l'attribut `cfg_attr(test, …)` à chaque racine de crate et se
+    réserve la modification de cette seule ligne dans ./lib.rs.
+  /lib/src/lib.rs — consommateur-par-relais : ré-exporte `domain` et `store` ; la
+    visibilité `pub` de ces deux modules est un contrat pour lui.
+
+Exposes:
+  vanyline_cfgstore::domain — `pub mod` (types du domaine config).
+  vanyline_cfgstore::error — `pub mod` (@CfgStoreError).
+  vanyline_cfgstore::fs_store — `pub mod` (@validate_name, @FsConfigStore).
+  vanyline_cfgstore::layers — `pub mod` (@Layers et helpers de couches/source).
+  vanyline_cfgstore::store — `pub mod` (@Layer, @ConfigStore, @InMemoryConfigStore).
+  vanyline_cfgstore::CfgStoreError — re-export nommé du même item que
+    `vanyline_cfgstore::error::CfgStoreError` (double chemin, un seul item).
+  Rien d'autre à la racine : pas de glob, pas de doc crate, aucun item défini ici.
+
+Accepts:
+  Rien : ./lib.rs ne définit aucune fonction ; le câblage ne prend aucune entrée.
+
+Returns:
+  Rien : aucune fonction dans le fichier.
+
+Raises:
+  Aucune : ./lib.rs n'exécute aucun code — compilé, il ne lève ni ne panique rien.
+  Jamais de panic en code de production (harnais de /tooling.sdd).
+
+Handles:
+  Absence totale de features cargo : `cargo check -p vanyline-cfgstore
+    --no-default-features` compile exactement la même surface (aucune feature par défaut
+    à désactiver).
+  Deux styles de consommation coexistent : chemins directs `vanyline_cfgstore::layers::…`,
+    `::fs_store::…`, `::store::…`, `::domain::…` (employés par `cli` et `app`) et relais
+    via `vanyline_lib::domain` / `vanyline_lib::store` (seuls modules relayés — `layers`
+    et `fs_store` ne le sont pas, `cli` passe donc par `vanyline-cfgstore`).
+  Profil test : les `unwrap`/`expect` des modules `#[cfg(test)]` des cinq enfants
+    compilent et passent sans exemption locale, grâce au seul attribut racine ; en profil
+    production le même code (hors `cfg(test)`) n'est pas couvert.
+  Chemin long @CfgStoreError : `vanyline_cfgstore::error::CfgStoreError` résout le même
+    item que le re-export racine — les deux chemins sont interchangeables en typage.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-25.
+  [ ] Produire les specs sœurs des cinq modules — ./error.sdd, ./domain.sdd,
+    ./layers.sdd, ./store.sdd, ./fs_store.sdd — aucune n'existe ; leur contenu
+    (identifiants `VNL-CFG-*`, sémantique des couches, contrats @ConfigStore) est
+    aujourd'hui sans contrat écrit.
+  [?] Double chemin de @CfgStoreError : le module `error` est `pub` (chemin long
+    résolvable) mais aucun consommateur du workspace n'écrit
+    `vanyline_cfgstore::error::CfgStoreError`. Contracter le module public (et son chemin
+    long) comme aujourd'hui, ou l'aligner sur `vanyline-lib` (module privé, racine seule
+    porte — rien ne casserait au vu des recherches actuelles) ?
+  [?] Re-export unique sans glob : la racine n'expose que @CfgStoreError. Voulu (surface
+    racine minimale) ou omission ? Si un second nom (ex: @Layer) devait être ré-exporté,
+    ce serait une évolution d'API, pas un oubli à corriger silencieusement.
+  [?] Le Scenario `exemption_cfg_test_couvre_les_tests_sans_allow_local` n'est exécutable
+    en assembleur de commande (`clippy --all-targets` sans erreur imputable aux tests)
+    qu'après purge de la dette du crate : snapshot /tooling.sdd 2026-09-21,
+    `vanyline-cfgstore` 100 erreurs / 99 warnings (dont une grande partie de la famille
+    stricte). Exécutable dès maintenant en vérifiant seulement l'absence d'erreur
+    `unwrap_used`/`expect_used` sur le code de TEST, ou à gated derrière la purge ?
+    Trancher la traduction exacte.
+  [?] Le Scenario `exemption_inopérante_hors_profil_test` est un cas compile/clippy-fail :
+    sans harnais compile-fail (trybuild absent des dev-dependencies, même lacune que
+    /lib/src/lib.sdd `Tasks`), il n'est traduisible qu'en revue du texte d'attribut ou en
+    mutation temporaire. Accepter la traduction par revue, ou ajouter un harnais ?
+  [?] Doc crate `//!` absente de ./lib.rs : le lint `missing_docs` (warn, futur deny —
+    /tooling.sdd) est déjà saturé de dette dans ce crate (228 warnings `missing_docs` sur
+    les feuilles). Ajouter la doc de lib.rs maintenant ou attendre la campagne de purge ?
+  [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
+    (implementer, par ex. `cfgstore/tests/surface.rs`) — les Scenarios
+    `crate_sans_feature_*`, `exemption_cfg_test_*` et `exemption_inopérante_*` sont des
+    tests de compilation / commandes cargo, pas des tests comportementaux — puis faire
+    passer la synthèse du validator au vert.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe.
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur `vanyline-cfgstore` (sous réserve de la purge de dette — cf. `Tasks`).
+
+Scenario: surface_racine_cfgstore_error_canonique
+  Given le crate `vanyline-cfgstore` compilé comme dépendance d'un crate consommateur
+  When un test écrit `use vanyline_cfgstore::CfgStoreError;` puis construit
+    `CfgStoreError::Config("boom".to_string())` et vérifie que `format!("{}", …)` contient
+    `VNL-CFG-001`
+  Then la compilation réussit et l'assertion passe — le re-export racine est bien le
+    chemin employé par `cli`, `app` et `lib`
+
+Scenario: surface_error_double_chemin_meme_item
+  Given le crate `vanyline-cfgstore` compilé comme dépendance d'un crate consommateur
+  When un test assigne la closure identité à une variable de type
+    `fn(vanyline_cfgstore::CfgStoreError) -> vanyline_cfgstore::error::CfgStoreError`
+  Then la compilation réussit — les deux chemins désignent un seul et même item (le
+    re-export n'est pas un type distinct)
+
+Scenario: surface_modules_publics_adressables
+  Given le crate `vanyline-cfgstore` compilé comme dépendance d'un crate consommateur
+  When un test nomme @vanyline_cfgstore::domain::Agent,
+    @vanyline_cfgstore::error::CfgStoreError,
+    @vanyline_cfgstore::fs_store::FsConfigStore,
+    @vanyline_cfgstore::layers::Layers, @vanyline_cfgstore::store::Layer et
+    @vanyline_cfgstore::store::ConfigStore
+  Then la compilation réussit — les cinq modules sont publics et rien de nécessaire chez
+    les consommateurs (`cli` en tête) ne passe par un chemin privé
+
+Scenario: crate_sans_feature_compile_avec_no_default_features
+  Given la batterie de validation du workspace (commande cargo, cf. `Tasks`)
+  When `cargo check -p vanyline-cfgstore --no-default-features` s'exécute
+  Then le check réussit — ../Cargo.toml ne déclare aucune feature et aucun module ni
+    re-export n'est gated (`--no-default-features` compile la surface complète)
+
+Scenario: exemption_cfg_test_couvre_les_tests_sans_allow_local
+  Given le harnais de /tooling.sdd (unwrap_used/expect_used en deny via
+    `[workspace.lints]`) et l'absence de tout `#![allow]` local dans les cinq modules
+    enfants, dont les modules `#[cfg(test)]` usent massivement de `unwrap`
+  When `cargo clippy -p vanyline-cfgstore --all-targets` s'exécute (exécutabilité
+    conditionnée à la purge de dette — cf. `Tasks`)
+  Then aucune erreur `clippy::unwrap_used` ou `clippy::expect_used` n'est imputable au
+    code de test — la seule exemption qui les couvre est l'attribut crate-wide de ./lib.rs
+
+Scenario: exemption_inopérante_hors_profil_test
+  Given le harnais de /tooling.sdd et l'attribut `#![cfg_attr(test,
+    allow(clippy::unwrap_used, clippy::expect_used))]` de ./lib.rs
+  When un appel `.unwrap()` est introduit dans du code NON-test d'un module du crate
+    (hors `#[cfg(test)]`)
+  Then `cargo clippy -p vanyline-cfgstore --all-targets -- -D warnings` échoue avec une
+    erreur `clippy::unwrap_used` — l'exemption ne déborde pas du profil `cfg(test)`
+    (traduction compile-fail à arbitrer, cf. `Tasks`)

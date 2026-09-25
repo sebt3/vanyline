@@ -1,0 +1,518 @@
+Spec: Domain
+
+Platform: Rust/vanyline-cfgstore/serde/serde_json
+
+Purpose:
+  Types du domaine de la configuration vanyline : onze types serde (@Provider,
+  @ProviderType, @ModelProfile, @McpServer, @McpTransport, @Toolset, @McpSelection,
+  @SkillMeta, @AgentMode, @SkillSelection, @Agent) portés par les stores du crate
+  (./store.rs, ./fs_store.rs) et par tous les consommateurs — le crate
+  `vanyline-lib` qui les réexporte sous `vanyline_lib::domain`
+  (../../lib/src/lib.rs), `app` qui les construit depuis PostgreSQL
+  (../../app/src/config_store.rs), le RPC du cli qui désérialise `params.item`
+  en ces types sur `config/*/create` (../../cli/src/rpc/handlers.rs). La forme
+  serde de ces types est le wire JSON d'écriture de la config ET la représentation
+  des enums dans les couches YAML (les entrées `Raw*` de ./fs_store.rs partagent
+  @ProviderType, @McpTransport et les conventions de clés). Le fichier est le
+  pendant Rust du miroir TS manuel `@vanyline/protocol/config-domain`
+  (../../packages/protocol/src/config-domain.ts) : PAS de génération ts-rs ici
+  (aucune dépendance ts-rs dans le crate, rien de généré dans
+  ../../packages/protocol/src/generated/), la garde du miroir est double —
+  les tests `*_wire_shape` de ce fichier côté Rust,
+  ../../packages/protocol/src/config-domain.conformance.spec.ts côté TS.
+  Spec en groupe d'un seul fichier : le contrat est purement « représentation
+  serde », aucune logique hors (de)serialization — pas de constructeur, pas de
+  validation de domaine (les noms, références croisées `provider`/`model`/`server`
+  et plages sont arbitrés par les consommateurs), aucun I/O, aucun log, aucun
+  type d'erreur propre.
+
+Owns:
+  ./domain.rs
+
+Can read:
+  ./store.rs
+  ./fs_store.rs
+  ../../packages/protocol/src/config-domain.ts
+  ../../packages/protocol/src/config-domain.conformance.spec.ts
+  ../../lib/src/error.rs
+  ../../cli/src/rpc/handlers.rs
+
+Depends on:
+  @serde — derives @Serialize / @Deserialize, et impls custom (non derives) pour
+    @SkillSelection : @Serializer avec @serde::ser::SerializeSeq, @Deserializer
+    avec @serde::de::SeqAccess et @serde::de::Visitor ; traits @Serializer /
+    @serde::ser::SerializeMap pour @serialize_options / @deserialize_options.
+  @serde_json — @serde_json::Map et @serde_json::Value pour
+    @ModelProfile::options ; @serde_json::Map::is_empty comme
+    `skip_serializing_if`.
+  @std::collections::BTreeMap — stockage de @McpServer::headers (clés triées,
+    dédupliquées).
+  Aucun module de `vanyline-cfgstore` ni du workspace : module feuille — les
+    autres modules (./store.rs, ./fs_store.rs) dépendent de lui, jamais l'inverse.
+
+Exposes:
+  @Provider — `pub struct`, derives `Debug Clone` (PAS de `PartialEq`). Wire :
+    `name`, `type` (renomme le champ `provider_type`), `endpoint` requis ;
+    `api_key` (`Option<String>`) avec `default` + `skip_serializing_if` : absent
+    du wire quand `None`, présent verbatim sinon (y compris chaîne vide).
+  @ProviderType — `pub enum`, derives `Debug Clone Copy PartialEq Eq`,
+    `rename_all = "kebab-case"` : @ProviderType::Ollama ↔ `"ollama"`,
+    @ProviderType::OpenaiCompatible ↔ `"openai-compatible"` — seules valeurs
+    acceptées dans les deux sens.
+  @ModelProfile — `pub struct`, derives `Debug Clone PartialEq` (pas d'`Eq` :
+    `f64`). Wire : `name`, `provider`, `model` requis (le rename explicite
+    `"model"` sur le champ `model` est un no-op) ; `temperature`
+    (`Option<f64>`) et `max_tokens`
+    (`Option<u64>`) omis du wire quand `None` ; `options`
+    (`@serde_json::Map<String, @serde_json::Value>`) : objet JSON imbriqué sous
+    la clé `options` (NON aplati) via @serialize_options, omis quand vide,
+    @deserialize_options exige un objet quand la clé est présente.
+  @McpServer — `pub struct`, derives `Debug Clone`. Wire : `name`, `type`
+    (renomme le champ `transport`), `url` requis ; `headers`
+    (`@BTreeMap<String, String>`) avec `#[serde(default)]` seulement : toujours
+    sérialisé, `{}` inclus.
+  @McpTransport — `pub enum`, derives `Debug Clone Copy PartialEq Eq`,
+    `rename_all = "kebab-case"` : @McpTransport::HttpStreamable ↔
+    `"http-streamable"`, @McpTransport::Sse ↔ `"sse"`. @McpTransport::Sse est
+    accepté en configuration et sur le wire, mais la connexion n'est pas
+    implémentée : `vanyline-lib` (../../lib/src/prefixed_mcp.rs) y oppose
+    @VnyError::SseNotImplemented, marqueur `"VNL-MCP-004"` — hors du périmètre
+    de ce fichier, documenté ici car c'est le contrat du variant.
+  @Toolset — `pub struct`, derives `Debug Clone`. Wire : `name` requis ;
+    `description` / `prompt` (`Option<String>`) omis quand `None` ;
+    `local_tools` (`Vec<String>`) et `mcp` (`Vec<@McpSelection>`) avec
+    `#[serde(default)]` : toujours sérialisés, `[]` inclus.
+  @McpSelection — `pub struct`, derives `Debug Clone`. Wire : `server` requis ;
+    `tools` (`Vec<String>`, `#[serde(default)]`) toujours sérialisé même vide.
+    Liste vide = convention documentaire « tous les outils du serveur » :
+    l'interprétation vit chez les consommateurs, pas ici.
+  @SkillMeta — `pub struct`, derives `Debug Clone`. Wire : exactement `name` et
+    `description`, tous deux requis. Ne porte JAMAIS le corps du skill : le corps
+    circule comme `String` séparé (`ConfigStore::load_skill` côté Rust ; type
+    distinct `SkillDetail extends SkillMeta { body }` côté miroir TS).
+  @AgentMode — `pub enum`, derives `Debug Clone Copy PartialEq Eq`,
+    `rename_all = "lowercase"` : @AgentMode::Primary ↔ `"primary"`,
+    @AgentMode::Subagent ↔ `"subagent"`, @AgentMode::All ↔ `"all"`.
+  @SkillSelection — `pub enum`, derives `Debug Clone PartialEq Eq Default`,
+    serde entièrement custom (impls @Serialize / @Deserialize écrits à la main) :
+    @SkillSelection::Auto (valeur @Default) ↔ `"auto"`, @SkillSelection::None ↔
+    `"none"`, @SkillSelection::Named(Vec) ↔ tableau de noms (tableau vide
+    inclus, distinct des deux autres).
+  @Agent — `pub struct`, derives `Debug Clone`. Wire : `name`, `model`,
+    `system_prompt` requis ; `mode` avec `default = default_agent_mode` =
+    @AgentMode::Primary ; `toolsets` (`Vec<String>`, `#[serde(default)]`) ;
+    `skills` (`#[serde(default)]` + @Default de @SkillSelection = Auto) ;
+    `description` omise quand `None`. `mode`, `toolsets`, `skills` sont toujours
+    sérialisés.
+  # Private (contract internal, pas des surfaces publiques) : @serialize_options
+  # (map imbriqué sous `options`), @deserialize_options (objet requis sinon
+  # erreur `expected object for 'options', got {valeur}`), @default_agent_mode.
+
+Accepts:
+  Toutes les structures — tout objet JSON avec des clés inconnues en plus :
+    aucune `deny_unknown_fields`, l'excédent est accepté sans erreur puis
+    perdu au roundtrip. C'est ce qui laisse passer en écriture les champs
+    augmentés lecture-seule du miroir TS (`source`, `available_models`,
+    `is_default`, `available_tools`).
+  @Provider — `name` / `type` / `endpoint` requis sans validation (vide, non-URL
+    accepté) ; `"api_key": null` accepté (→ `None`) ; aucune contrainte de
+    format ou de longueur sur la clé.
+  @ModelProfile — `name` / `provider` / `model` libres, sans vérification que
+    `provider` référence un @Provider existant ; `temperature` sans borne
+    (négatif, `0`, `42` passent, seul le type JSON nombre compte) ;
+    `max_tokens` doit être un entier au sens `u64` (flottant ou négatif →
+    erreur serde) ; `options` tout objet JSON, clés et valeurs passe-through
+    sans filtrage (provider-spécifique : `num_ctx`, `top_k`…), collisions de
+    clés avec les champs dédiées acceptées.
+  @McpServer — `headers` : objet à valeurs-string uniquement — une valeur
+    non-string dans l'entrée YAML/RPC brute est erreur serde ; le filtrage
+    tolérant (valeurs non-string ignorées) n'existe que dans les patches de
+    ./store.rs.
+  @SkillSelection — exactement : `"auto"`, `"none"` (sensibles à la casse, en
+    ASCII), ou tableau dont TOUS les éléments sont des strings ; doublons
+    acceptés, ordre conservé, aucune vérification que les skills existent.
+  @Agent — `system_prompt` requis mais la chaîne vide est acceptée ;
+    `"description": null` accepté (→ `None`).
+
+Returns:
+  Sérialisation JSON (et couches YAML pour les enums partagés) — jeu de clés
+    exact (figé par les tests `*_wire_shape`, clés triées) :
+  @Provider — complet : `api_key`, `endpoint`, `name`, `type` ; sans clé :
+    `endpoint`, `name`, `type` (clé `api_key` absente, jamais `null`).
+  @ModelProfile — complet : `max_tokens`, `model`, `name`, `options`,
+    `provider`, `temperature` ; minimal : `model`, `name`, `provider`.
+  @McpServer — toujours `headers`, `name`, `type`, `url`.
+  @Toolset — complet : `description`, `local_tools`, `mcp`, `name`, `prompt` ;
+    minimal : `local_tools`, `mcp`, `name`.
+  @McpSelection — toujours `server`, `tools` (`tools: []` quand vide).
+  @SkillMeta — toujours `description`, `name`.
+  @Agent — avec description : `description`, `mode`, `model`, `name`, `skills`,
+    `system_prompt`, `toolsets` ; sans : les six mêmes sans `description`.
+  @SkillSelection — `"auto"`, `"none"` ou le tableau des noms (ordre et
+    doublons tels quels).
+  Enums — les chaînes exactes listées en `Exposes` ; @McpServer::headers —
+    clés triées (dédupliquées) par le @BTreeMap.
+  Désérialisation — jamais de mutation ni d'auto-correction : les défauts
+    documentés en `Exposes` s'appliquent sur champ absent uniquement ; un champ
+    présent est pris verbatim (aucune normalisation de casse, de trims, etc.).
+
+Raises:
+  Aucune erreur propre au fichier : pas de fonction exécutable hors impls serde,
+    pas de panic, pas d'I/O (harnais /tooling.sdd : `unwrap`/`expect` uniquement
+    sous `cfg(test)`, exemption de la racine de crate ./lib.rs). Les échecs sont
+    des @serde::de::Error renvoyés en `Err` aux appelants, avec ces messages
+    caractéristiques :
+  Champ requis absent — erreur serde `missing field "<clé>"`.
+  Variant d'enum inconnu (`"type": "claude"`, `"mode": "expert"`, transport
+    fantaisiste) — erreur serde `unknown variant …`.
+  @ModelProfile::options non-objet quand la clé est présente (null, nombre,
+    chaîne, tableau) — message exact `expected object for 'options', got
+    {valeur affichée}`.
+  @SkillSelection — chaîne autre que `"auto"`/`"none"` : message
+    `expected "auto" or "none", got "{chaîne}"` ; tout autre type JSON (nombre,
+    booléen, objet, null) : message d'@expecting `a string ("auto" or "none")
+    or an array of skill names` ; tableau à élément non-string : erreur serde du
+    sous-élément.
+  @McpServer::headers à valeur non-string — erreur serde `invalid type` du
+    sous-élément.
+  # Côté consommateur seulement : le cli enveloppe ces erreurs en
+  # `"Invalid item: {e}"` avec le code `CONFIG_VALIDATION`
+  # (../../cli/src/rpc/handlers.rs) — hors périmètre de ce fichier.
+
+Handles:
+  `null` explicite contre omission : `api_key`, `temperature`, `max_tokens`,
+    `description` (champs `Option`) acceptent `"champ": null` (→ `None`, réomis
+    à la resérialisation) ; `options`, `mode`, `toolsets`, `skills` REJETENT
+    `null` — `serde(default)` ne couvre que l'absence, le null atteint le
+    désérialiseur qui échoue. Deux vocabularies coexistent avec les patches
+    d'./store.rs où null signifie « effacer/vider/auto » : arbitrage en `Tasks`.
+  @SkillSelection::Named avec liste vide : se sérialise `[]` et se relit
+    @SkillSelection::Named([]) — trois états distincts sur le wire : absence
+    (= `Auto`), `"none"`, `[]`.
+  @McpServer::headers : le @BTreeMap trie et déduplique les clés avant la
+    sérialisation ; deux en-têtes homonymes en entrée brute est une erreur serde
+    (map JSON), pas une fusion.
+  Types `Copy` : @ProviderType, @McpTransport, @AgentMode se copient sans
+    allocation ; @ModelProfile est le seul type de domaine à dériver `PartialEq`
+    — les autres (@Provider, @McpServer, @Toolset, @McpSelection, @SkillMeta,
+    @Agent) se comparent par `.name` côté consommateurs (@HasName de ./store.rs).
+  YAML : ./fs_store.rs construit ses entrées `Raw*` avec @ProviderType,
+    @McpTransport et @SkillSelection — les représentations kebab-case / lowercase
+    / custom de ce fichier sont donc aussi le format des fichiers `config.yaml`
+    des couches, pas seulement le wire JSON.
+  @McpTransport::Sse sélectionné par un toolset : la configuration est valide
+    ici ; c'est `vanyline-lib` (../../lib/src/prefixed_mcp.rs) qui produit
+    `"VNL-MCP-004"` à l'usage.
+
+Must:
+  Sérialiser @ProviderType et @McpTransport en kebab-case (`"openai-compatible"`,
+    `"http-streamable"`, `"sse"`), @AgentMode en lowercase (`"primary"`,
+    `"subagent"`, `"all"`) — aucune autre valeur acceptée en lecture.
+  Omettre du wire tout `Option` à `None` et l'@serde_json::Map vide d'`options`
+    — invariant d'OMISSION, jamais `"champ": null` en sortie (cohérent avec les
+    champs `?` du miroir TS).
+  Toujours émettre en revanche `headers`, `local_tools`, `mcp`, `tools`,
+    `toolsets`, `skills`, `mode` — même vides ou à leur défaut : ce sont des
+    clés requises côté miroir TS (`McpSelection.tools: string[]`, etc.).
+  Maintenir @SkillSelection par impls custom : `"auto"` / `"none"` / tableau,
+    @Default = @SkillSelection::Auto, et refus explicite de toute autre forme.
+  Sérialiser @ModelProfile::options comme objet imbriqué sous la clé `options`
+    (jamais aplati dans l'objet du profil) et n'accepter en lecture qu'un objet.
+  Garder toutes les clés de wire en snake_case (`system_prompt`, `local_tools`,
+    `max_tokens`…) : le miroir TS nomme ses champs à l'identique, aucun
+    camelCase sur ce wire.
+  Traiter les paires de garde du miroir comme indivisibles : toute modification
+    de forme met à jour en même temps les tests `*_wire_shape` de ./domain.rs et
+    ../../packages/protocol/src/config-domain.conformance.spec.ts (miroir manuel
+    sans génération ts-rs).
+  Accepter silencieusement les clés inconnues en entrée (comportement actuel
+    dont dépendent les objets augmentés renvoyés en lecture par les RPC).
+
+Must not:
+  Introduire `deny_unknown_fields` sans arbitrage préalable (lignes `[?]` des
+    `Tasks`) : il casserait le renvoi des objets lus (`source`,
+    `available_models`, `is_default`, `available_tools`) vers `create`.
+  Porter du comportement de domaine : constructeur, validateur de `name`,
+    résolution de référence `provider`/`model`/`server`, normalisation — les
+    impls sur ces types vivent chez les consommateurs (stratégie additive,
+    @HasName de ./store.rs en est le précédent).
+  Ajouter une derive ts-rs, un `#[cfg]` de feature, une I/O, un log, un
+    `println!`/`dbg!`/`unwrap`/`expect`/`panic!` hors `cfg(test)` (harnais
+    /tooling.sdd).
+  Sérialiser `null` explicite pour un champ optionnel absent, ni aplatisser
+    `options` dans l'objet @ModelProfile.
+  Renommer une clé de wire ou une valeur d'enum sans la PR coordonnée miroir TS
+    + tests `*_wire_shape` + conformance.
+
+Tasks:
+  [ ] Convertir chaque Scenario sans test existant en un test dédié taggé par
+    son titre (flux TTD). Couverts aujourd'hui par `mod tests` de ./domain.rs :
+    @provider_type_serde, @mcp_transport_serde, @agent_mode_serde,
+    @skill_selection_serde, @agent_defaults, @model_profile_roundtrip,
+    @toolset_defaults, @mcp_selection_empty_tools, @provider_wire_shape,
+    @model_profile_wire_shape, @mcp_server_wire_shape, @toolset_wire_shape,
+    @agent_wire_shape, @skill_meta_wire_shape. NON couverts (dix-huit Scenario
+    nouveaux à tester : `provider_cle_api_wire`, rejets d'enum inconnu,
+    `options` null/scalar, bornes de types numériques, collisions d'options,
+    clés inconnues, tableaux vides et types inacceptables de @SkillSelection,
+    null sur champs non-optionnels d'@Agent, champs requis manquants).
+  [ ] Faire trancher toutes les lignes `[?]` par Sébastien, puis relire la spec.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] Vocabulaire du `null` incohérent entre les deux voies d'entrée : en item
+    complet, `"options": null` est REJETÉ, `"mode"`/`"toolsets"`/`"skills"`
+    null sont REJETÉS ; dans les patches d'./store.rs, null efface les options,
+    vide les listes et remet `skills` à `Auto`. Faut-il aligner (null partout =
+    effacer, ou null partout = erreur) ?
+  [?] @SkillSelection::Named([]) — l'entrée `[]` sur le wire n'a pas de sens
+    documenté distinct de `"none"` : « aucun skill » ? Doit-on normaliser `[]`
+    en @SkillSelection::None à la lecture, ou l'interdire ?
+  [?] `#[serde(rename = "model")]` sur @ModelProfile::model est un no-op (le
+    champ s'appelle déjà `model`) : résidu historique à retirer ou intention
+    à garder ?
+  [?] @Provider, @McpServer, @Toolset, @McpSelection, @SkillMeta, @Agent ne
+    dérivent pas `PartialEq` (contrairement à @ModelProfile et aux enums) :
+    choix délibéré de la stratégie additive ou dette qui interdit de comparer
+    deux providers dans les consommateurs ?
+  [?] `api_key` sérialisé sans aucun filtrage quand présent (y compris chaîne
+    vide), donc la clé d'API circule en clair sur le wire RPC et dans
+    `config.yaml`. La question du masque/retrait en chemin lecture est-elle
+    tranchée, et où vit-elle (jamais dans ce fichier) ?
+  [?] La logique de @SkillSelection est REIMPLÉMENTÉE hors de son impl custom :
+    mapping @SkillSelection → @serde_json::Value recopié dans ./fs_store.rs
+    (lignes 313–315) et sémantique `skills` des patches recopiée dans ./store.rs
+    (lignes 890–916) — trois sources des mêmes règles, risque de dérive.
+    Factoriser sur @SkillSelection (méthode `to_json`), ou l'interdit la
+    stratégie additive ?
+  [?] Miroir TS obsolète sur deux points (à corriger côté TS, pas ici) :
+    l'en-tête de ../../packages/protocol/src/config-domain.ts dit « Miroir TS
+    manuel de lib/src/domain.rs » (le fichier a été déplacé dans `cfgstore`,
+    `lib` ne fait que réexporter) et la documentation de @McpTransport dit que
+    seul `http-streamable` est modélisé « à ce jour » alors que
+    @McpTransport::Sse existe ici depuis lors. Confirmer que Sse côté miroir
+    reste bien « accepté, connexion non implémentée (`VNL-MCP-004`) ».
+  [?] Le miroir TS est maintenu À LA MAIN (aucun ts-rs dans
+    `vanyline-cfgstore`, rien de généré pour config-domain) : arbitrage
+    définitif — miroir manuel + double garde de tests admissible durablement,
+    ou migration ts-rs (comme @ChatEvent) à planifier ?
+  [?] Dette `missing_docs` (harnais /tooling.sdd, warn) : @Provider,
+    @ProviderType, @McpServer, @McpTransport, @McpSelection, @SkillMeta,
+    @AgentMode, @Agent n'ont pas de commentaire de doc (seuls @ModelProfile,
+    @SkillSelection, @Toolset et le variant @McpTransport::Sse en portent).
+    Purge à programmer avec le passage de ce crate ?
+  [?] Aucune validation de `temperature` (plage usuelle [0,2] chez beaucoup de
+    providers) ni de `max_tokens == 0` ici ni nulle part identifié :
+    pass-through assumé jusqu'au provider, ou garde-fou à placer (ce fichier,
+    les stores, ou `app`) ?
+
+Done when:
+  Chaque Scenario a son test taggé par son titre et passe, y compris les dix-huit
+    Scenario nouveaux listés en `Tasks`.
+  Les représentations wire sont figées des deux côtés : tests `*_wire_shape`
+    de ./domain.rs et
+    ../../packages/protocol/src/config-domain.conformance.spec.ts passent sur la
+    même forme.
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée
+    dans la spec et le code.
+  La batterie du workspace est verte pour `vanyline-cfgstore` (check, test,
+    build, clippy `--all-targets -D warnings`, fmt).
+
+Scenario: provider_type_serde
+  Given la valeur Rust @ProviderType::OpenaiCompatible
+  When elle est sérialisée en JSON
+  Then le littéral produit vaut exactement `"openai-compatible"`
+  And la désérialisation de `"ollama"` redonne @ProviderType::Ollama
+
+Scenario: mcp_transport_serde
+  Given @McpTransport::HttpStreamable et @McpTransport::Sse
+  When elles sont sérialisées en JSON
+  Then les littéraux produits sont exactement `"http-streamable"` et `"sse"`
+  And la désérialisation de chacun de ces littéraux redonne le variant
+
+Scenario: agent_mode_serde
+  Given les trois variants @AgentMode::Primary, @AgentMode::Subagent, @AgentMode::All
+  When ils sont sérialisés en JSON
+  Then les littéraux produits sont exactement `"primary"`, `"subagent"`, `"all"`
+    et se relisent en les variants correspondants
+
+Scenario: skill_selection_serde
+  Given les entrées JSON `"auto"`, `"none"` et `["a","b"]`
+  When chacune est désérialisée en @SkillSelection puis resérialisée
+  Then on retrouve @SkillSelection::Auto, @SkillSelection::None et
+    @SkillSelection::Named(["a","b"]) avec le wire d'origine à l'identique
+  And la chaîne `"autre"` est rejetée en erreur
+
+Scenario: agent_defaults
+  Given l'objet JSON `{"name":"a","model":"m","system_prompt":"p"}`
+  When il est désérialisé en @Agent
+  Then `mode` vaut @AgentMode::Primary, `toolsets` la liste vide, `skills`
+    @SkillSelection::Auto et `description` `None`
+
+Scenario: model_profile_roundtrip
+  Given un @ModelProfile complet avec `temperature`, `max_tokens` et
+    `options: {"num_ctx": 65536}`
+  When il est sérialisé puis resérialisé depuis le JSON obtenu
+  Then l'instance relue est égale (`PartialEq`) à l'originale, `options`
+    imbriqué sous la clé `options`
+  And un profil minimal (`name`/`provider`/`model`) se câble SANS les clés
+    `temperature`, `max_tokens` ni `options`
+
+Scenario: toolset_defaults
+  Given l'objet JSON `{"name":"t"}`
+  When il est désérialisé en @Toolset
+  Then `description` et `prompt` valent `None`, `local_tools` et `mcp` des
+    listes vides
+
+Scenario: mcp_selection_empty_tools
+  Given l'objet JSON `{"server":"s"}`
+  When il est désérialisé en @McpSelection puis resérialisé
+  Then `tools` est une liste vide ET la clé `tools` apparaît côté wire sous
+    forme de tableau vide
+
+Scenario: provider_wire_shape
+  Given un @Provider avec `api_key: None`
+  When il est sérialisé en JSON
+  Then l'objet porte exactement les clés `endpoint`, `name`, `type` — pas de
+    clé `api_key`
+
+Scenario: model_profile_wire_shape
+  Given un @ModelProfile complet (`temperature`, `max_tokens`, `options` non vide)
+  When il est sérialisé en JSON
+  Then l'objet porte exactement les clés `max_tokens`, `model`, `name`,
+    `options`, `provider`, `temperature`
+
+Scenario: mcp_server_wire_shape
+  Given un @McpServer avec `headers` vide
+  When il est sérialisé en JSON
+  Then l'objet porte exactement les clés `headers`, `name`, `type`, `url` — la
+    clé `headers` est présente même à `{}`
+
+Scenario: toolset_wire_shape
+  Given un @Toolset complet (description, prompt, un outil local, une sélection
+    MCP) et un @Toolset minimal
+  When les deux sont sérialisés en JSON
+  Then le complet porte exactement `description`, `local_tools`, `mcp`, `name`,
+    `prompt` et le minimal exactement `local_tools`, `mcp`, `name`
+
+Scenario: agent_wire_shape
+  Given un @Agent avec `description: None`, `skills: Named(["s"])` et des
+    `toolsets` vides
+  When il est sérialisé en JSON
+  Then l'objet porte exactement `mode`, `model`, `name`, `skills`,
+    `system_prompt`, `toolsets` — sans clé `description`
+
+Scenario: skill_meta_wire_shape
+  Given un @SkillMeta `name` + `description`
+  When il est sérialisé en JSON
+  Then l'objet porte exactement les deux clés `description` et `name`, sans clé
+    de corps
+
+Scenario: provider_cle_api_wire
+  Given un @Provider avec `api_key: Some("sk-test")` puis un autre avec
+    `api_key: Some("")`, et l'objet JSON d'entrée avec `"api_key": null`
+  When ils sont sérialisés, et que l'objet à null est désérialisé puis
+    resérialisé
+  Then la clé apparaît verbatim (`"sk-test"` et `""`) dans les deux premiers
+    cas, et dans le troisième `api_key` vaut `None` et disparaît du wire
+
+Scenario: provider_type_inconnu_rejete
+  Given l'objet JSON `{"name":"p","type":"claude","endpoint":"http://x"}`
+  When il est désérialisé en @Provider
+  Then la désérialisation échoue (message `unknown variant`) et aucune valeur
+    n'est produite
+
+Scenario: mcp_transport_inconnu_rejete
+  Given l'objet JSON `{"name":"s","type":"websocket","url":"http://x"}`
+  When il est désérialisé en @McpServer
+  Then la désérialisation échoue (message `unknown variant`)
+
+Scenario: agent_mode_inconnu_rejete
+  Given l'objet JSON `{"name":"a","model":"m","system_prompt":"p","mode":"expert"}`
+  When il est désérialisé en @Agent
+  Then la désérialisation échoue (message `unknown variant`)
+
+Scenario: model_profile_options_non_objet_rejete
+  Given deux entrées @ModelProfile dont `options` vaut respectivement `null` et
+    `42`
+  When elles sont désérialisées
+  Then chacune échoue avec le message commençant par
+    `expected object for 'options', got` (le `default` ne couvre pas null)
+
+Scenario: model_profile_max_tokens_flottant_rejete
+  Given une entrée @ModelProfile dont `max_tokens` vaut `4096.5`, puis une dont
+    il vaut `-1`
+  When elles sont désérialisées
+  Then chacune échoue en erreur de type serde (champ de type `u64`)
+
+Scenario: model_profile_temperature_sans_bornes_acceptee
+  Given une entrée @ModelProfile dont `temperature` vaut `-1`, puis une dont il
+    vaut `42`
+  When elles sont désérialisées
+  Then les deux passent (`Some(-1.0)` et `Some(42.0)`), resérialisées à
+    l'identique — aucune plage de validation n'existe ici
+
+Scenario: model_profile_options_collision_non_filtree
+  Given une entrée @ModelProfile avec `temperature: 0.7` ET
+    `options: {"temperature": 0.1}`
+  When elle est désérialisée
+  Then les deux valeurs coexistent (`profile.temperature == 0.7` et
+    `options["temperature"] == 0.1`) sans filtrage ni fusion
+
+Scenario: model_profile_cle_inconnue_ignoree_puis_perdue
+  Given une entrée @ModelProfile contenant une clé inconnue `"source": "workspace"`
+  When elle est désérialisée puis resérialisée
+  Then la désérialisation réussit et la clé inconnue n'apparaît plus côté wire
+    (aucune erreur `deny_unknown_fields`)
+
+Scenario: skill_selection_tableau_vide_distinct_de_none
+  Given l'entrée JSON `[]` pour le champ `skills` d'un @Agent
+  When elle est désérialisée
+  Then `skills` vaut @SkillSelection::Named([]), distinct de
+    @SkillSelection::None et de @SkillSelection::Auto, et se resérialise `[]`
+
+Scenario: skill_selection_type_inacceptable_rejete
+  Given les entrées JSON `42`, `true`, `{}` et `null` comme valeur de
+    @SkillSelection
+  When chacune est désérialisée
+  Then chacune échoue avec le message d'attente `a string ("auto" or "none") or
+    an array of skill names`
+
+Scenario: skill_selection_doublons_et_ordre_conserves
+  Given l'entrée JSON `["b","a","b"]` pour @SkillSelection
+  When elle est désérialisée puis resérialisée
+  Then le résultat est @SkillSelection::Named(["b","a","b"]) — ordre et doublons
+    verbatim — et le wire resérialisé est identique à l'entrée d'origine
+
+Scenario: agent_defauts_presentes_sur_le_wire
+  Given un @Agent construit avec `mode: Primary`, `skills: Auto`, `toolsets` vide
+  When il est sérialisé en JSON
+  Then les clés `mode` (`"primary"`), `skills` (`"auto"`) et `toolsets` (`[]`)
+    sont toutes présentes — les défauts ne s'oublient pas à l'écriture
+
+Scenario: agent_null_sur_champ_non_optionnel_rejete
+  Given trois entrées @Agent dont l'une a `"mode": null`, l'autre
+    `"toolsets": null`, la troisième `"skills": null`
+  When chacune est désérialisée
+  Then les trois échouent — `serde(default)` ne couvre que l'absence du champ
+
+Scenario: agent_description_null_acceptee
+  Given l'entrée @Agent valide contenant `"description": null`
+  When elle est désérialisée puis resérialisée
+  Then `description` vaut `None` et la clé disparaît du wire
+
+Scenario: agent_prompt_vide_accepte
+  Given l'entrée @Agent `{"name":"a","model":"m","system_prompt":""}`
+  When elle est désérialisée
+  Then la désérialisation réussit avec `system_prompt` chaîne vide — requis
+    veut dire présent, pas non vide
+
+Scenario: agent_champ_obligatoire_manquant_rejete
+  Given deux entrées @Agent, l'une sans clé `model`, l'autre sans clé
+    `system_prompt`
+  When chacune est désérialisée
+  Then chacune échoue en erreur serde `missing field`
+
+Scenario: skill_meta_description_manquante_rejete
+  Given l'objet JSON `{"name":"s"}` comme @SkillMeta
+  When il est désérialisé
+  Then la désérialisation échoue en `missing field "description"` — le
+    `description` d'un skill n'est pas optionnel

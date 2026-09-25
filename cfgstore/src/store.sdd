@@ -1,0 +1,675 @@
+Spec: Store
+
+Platform: Rust/vanyline-cfgstore/async-trait/serde_json/std::sync::Mutex
+
+Purpose:
+  Façade abstraite du stockage de configuration de `vanyline-cfgstore` : le trait asynchrone
+  @ConfigStore (lecture + écriture par domaine, défauts @CfgStoreError::ReadOnly sur les
+  écritures), l'enum @Layer (couche ciblée par une écriture), l'helper privé
+  @resolve_by_name (résolution par nom à trois issues via le trait interne @HasName) et
+  @InMemoryConfigStore (fixture en mémoire, JAMAIS gardée derrière `#[cfg(test)]`, réutilisée
+  par les tests de tout le workspace). Groupe d'un seul contrat : @Layer est le payload des
+  variantes @CfgStoreError::NotFound/@CfgStoreError::NameConflict de ./error.rs, et le trait,
+  la fixture et @resolve_by_name ne décrivent qu'une seule sémantique (lecture unifiée,
+  écriture typée par patch JSON) — l'implémentation fichiers YAML ./fs_store.rs est un
+  contractant distinct de ce contrat, avec sa propre spec ./fs_store.sdd.
+  Le trait est consommé par : @FsConfigStore (./fs_store.rs, implémente tout), @PgConfigStore
+  (/app/src/config_store.rs, n'implémente que les lectures — ses écritures retombent donc
+  sur le défaut @CfgStoreError::ReadOnly), et les handlers RPC du CLI
+  (/cli/src/rpc/handlers.rs) qui résolvent le @Layer avant d'appeler. La fixture et le trait
+  sont ré-exportés au niveau crate par /lib/src/lib.rs
+  (`pub use vanyline_cfgstore::{domain, store};`) : le chemin public consommé en test est
+  `vanyline_lib::store::InMemoryConfigStore`.
+
+Owns:
+  ./store.rs
+
+Can read:
+  ./domain.rs
+  ./error.rs
+  ./fs_store.rs
+  ./Cargo.toml
+  ../Cargo.toml
+  /lib/src/lib.rs
+  /cli/src/rpc/handlers.rs
+  /app/src/config_store.rs
+
+Depends on:
+  @crate::domain — @Provider, @ModelProfile, @McpServer, @Toolset, @Agent, @SkillMeta et
+    leurs sous-types (@ProviderType, @McpTransport, @AgentMode, @SkillSelection,
+    @McpSelection) : types portés et mutés par les patchs, définis dans ./domain.rs.
+  @crate::error::CfgStoreError — type d'erreur exclusif du trait (marqueurs `VNL-CFG-001..010`,
+    ./error.rs). Dépendance mutuelle : ./error.rs importe @crate::store::Layer pour ses deux
+    variantes à couche.
+  @crate::fs_store::validate_name — unique validation de nom appliquée par toute écriture de
+    la fixture ; la règle exacte (`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`, longueur ≤ 64, rejet de
+    `..`) est le contrat de ./fs_store.sdd, ce fichier n'en consomme que le verdict
+    (@CfgStoreError::InvalidName, marqueur `VNL-CFG-005`).
+  @async_trait::async_trait — méthode d'objet du trait (compatibilité `dyn`), déclarations et
+    implémentations en `#[async_trait]`.
+  @serde_json — @serde_json::Value des patchs d'@update_* et du typage appliqué par champ.
+  @std::sync::Mutex et @std::collections::HashMap — état interne de @InMemoryConfigStore
+    (le trait prend `&self`, verrouillage pour les écritures).
+
+Exposes:
+  @Layer — `pub enum` à deux variantes @Layer::Global et @Layer::Workspace, derives
+    `Debug, Clone, Copy, PartialEq, Eq` exactement (ni serde, ni ts-rs). Son @Debug
+    (`"Global"` / `"Workspace"`) est injecté dans le @Display de @CfgStoreError::NotFound
+    (`VNL-CFG-006`) et @CfgStoreError::NameConflict (`VNL-CFG-007`). La résolution
+    « workspace si disponible sinon global » est du ressort de l'appelant (ex.
+    `resolve_layer` de /cli/src/rpc/handlers.rs) : le trait ne prend jamais qu'un @Layer
+    explicite.
+  @ConfigStore — `#[async_trait] pub trait ConfigStore: Send + Sync`, trois familles :
+    Lectures obligatoires (aucune implémentation par défaut) :
+      @list_providers, @list_models, @list_mcp_servers, @list_toolsets, @list_agents —
+        `async fn(&self) -> Result<Vec<T>, CfgStoreError>`.
+      @list_skills — `async fn(&self) -> Result<Vec<SkillMeta>, CfgStoreError>` : index
+        léger nom + description uniquement, jamais le corps (lazy-loading).
+      @load_skill — `async fn(&self, name: &str) -> Result<String, CfgStoreError>` : corps
+        du skill chargé à la demande ; absent -> @CfgStoreError::UnknownReference(`"skill"`,
+        nom).
+      @default_agent — `async fn(&self) -> Result<Option<String>, CfgStoreError>`.
+    Lectures par défaut (méthodes du trait, non surchargées par la fixture) :
+      @get_provider, @get_model, @get_mcp_server, @get_toolset, @get_agent, @get_skill —
+        `async fn(&self, name: &str) -> Result<T, CfgStoreError>`, chacune =
+        @resolve_by_name(@list_x().await?, littéral de sorte, name), avec les littéraux
+        `&'static str` de sorte : `"provider"`, `"model"`, `"mcp_server"`, `"toolset"`,
+        `"agent"`, `"skill"`.
+    Écritures (19 méthodes = create + update + delete pour six domaines plus
+      @set_default_agent, défaut commun @Err(@CfgStoreError::ReadOnly) — un implémenteur qui
+      ne les surcharge pas est explicitement en lecture seule, cas réel de @PgConfigStore) :
+      create — `async fn(&self, layer: Layer, item: T) -> Result<(), CfgStoreError>` pour
+        chaque domaine ; @create_skill prend `(layer, meta: SkillMeta, body: String)`.
+      update — `async fn(&self, layer: Layer, name: &str, patch: serde_json::Value) ->
+        Result<(), CfgStoreError>` : patch partiel, appliqué clé par clé (voir `Accepts`).
+      delete — `async fn(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError>`.
+      @set_default_agent — `async fn(&self, layer: Layer, name: &str) ->
+        Result<(), CfgStoreError>`. Côté CLI, seules @FsConfigStore et
+        @InMemoryConfigStore l'implémentent ; @set_default_agent n'est exposé par aucun
+        handler RPC à ce jour (appel direct depuis /cli/src/main.rs).
+  @InMemoryConfigStore — `pub struct` (derive @Default seulement) à huit champs `pub` :
+    @providers, @models, @mcp_servers, @toolsets, @agents, @skills (`Mutex<Vec<T>>`),
+    @skill_bodies (`Mutex<HashMap<String, String>>`, corps séparé de l'index des meta) et
+    @default_agent (`Mutex<Option<String>>`). Construction : @InMemoryConfigStore::new()
+    (identique à @Default::default(), tout vide) ou initialisation structurelle directe des
+    champs `pub` (pattern des fixtures de test du workspace). Implémente @ConfigStore en
+    totalité : les six défauts @get_* hérités et les dix-neuf écritures — aucune remontée de
+    @CfgStoreError::ReadOnly possible depuis cette implémentation.
+  Interne au fichier (non exposé) : trait privé @HasName (implémenté pour les six types à
+    champ `name` ; le commentaire d'origine justifie sa présence ici plutôt que dans
+    ./domain.rs par la stratégie additive) et @resolve_by_name — filtre la liste sur le nom,
+    zéro match -> @CfgStoreError::UnknownReference(sorte, nom), exactement un -> @Ok(élément),
+    deux ou plus -> @CfgStoreError::DuplicateName(sorte, nom).
+
+Accepts:
+  @InMemoryConfigStore::create_* (six domaines) — l'item complet du domaine ; le nom est
+    validé par @validate_name AVANT toute autre opération ; aucun contrôle d'intégrité
+    référentielle : un @ModelProfile dont @provider désigne un fournisseur inexistant, ou un
+    @Agent dont @model/@toolsets/@skills référencent des noms inconnus, est accepté tel quel
+    (la résolution est le contrat de /lib/src/session.sdd, pas du store).
+  @InMemoryConfigStore::update_* — un @serde_json::Value qui doit être un objet JSON (sinon
+    @CfgStoreError::Config, `VNL-CFG-001`, message exact `"update patch must be a JSON
+    object"`) ; les clés inconnues sont ignorées en silence — `name` en fait partie : aucun
+    renommage n'est possible par patch. Sémantique par clé reconnue, identique dans les six
+    domaines sauf mention :
+      champ optionnel (@Provider::api_key, @Toolset::description/@prompt,
+        @Agent::description) — `null` -> mis à @None ; chaîne attendue sinon.
+      champ requis en texte (@Provider::endpoint, @ModelProfile::provider/@model,
+        @McpServer::url, @Agent::model/@system_prompt) — chaîne uniquement ; `null` ou
+        non-chaîne -> @CfgStoreError::Validation (`VNL-CFG-010`).
+      énumérateur par chaîne — clé `"type"` du provider : `"ollama"` -> @ProviderType::Ollama,
+        `"openai-compatible"` -> @ProviderType::OpenaiCompatible ; clé `"type"` du serveur
+        MCP : `"http-streamable"` -> @McpTransport::HttpStreamable, `"sse"` ->
+        @McpTransport::Sse ; clé `"mode"` de l'agent : `"primary"`, `"subagent"`, `"all"` ->
+        @AgentMode correspondant. Toute autre valeur (le message cite la valeur reçue) ou
+        non-chaîne (dont `null`) -> Validation.
+      liste de chaînes (@Toolset::local_tools, @Agent::toolsets) — tableau de chaînes ;
+        `null` -> liste vidée ; non-tableau ou élément non-chaîne -> Validation.
+      @ModelProfile::temperature — nombre via @serde_json::Value::as_f64, ou `null` ->
+        @None ; sinon Validation.
+      @ModelProfile::max_tokens — entier via @serde_json::Value::as_u64 (les flottants non
+        entiers échouent), ou `null` -> @None ; sinon Validation.
+      @ModelProfile::options — objet -> REMPLACE intégralement la map, quelle que soit la
+        valeur interne (passthrough sans contrôle de type) ; `null` -> map vidée ; non-objet
+        -> Validation.
+      @McpServer::headers — objet -> remplace la map mais ne retient QUE les entrées à valeur
+        chaîne (les valeurs non-chaîne sont ignorées en silence, sans erreur) ; `null` ->
+        map vidée ; non-objet -> Validation.
+      @Toolset::mcp — tableau d'objets ; chaque entrée exige une clé `"server"` chaîne (sinon
+        Validation citant `"server"`) ; clé `"tools"` absente ou `null` -> liste vide, sinon
+        tableau de chaînes (non-tableau ou élément non-chaîne -> Validation) ; clés
+        surnuméraires d'une entrée ignorées ; `null` sur `"mcp"` -> liste vidée.
+      @Agent::skills — `null` ou chaîne `"auto"` -> @SkillSelection::Auto ; chaîne `"none"`
+        -> @SkillSelection::None ; tableau de chaînes -> @SkillSelection::Named ; tout autre
+        (objet, nombre, autre chaîne) -> Validation citant `"auto"`, `"none"` et le tableau.
+      @SkillMeta::description (skill) — chaîne uniquement, `null` REJETÉ (contrairement aux
+        descriptions des autres domaines, le champ n'est pas optionnel dans le domaine).
+      clé `"body"` (skill) — chaîne uniquement ; écrit le corps dans @skill_bodies (récréé
+        même si l'entrée manquait).
+  @InMemoryConfigStore::update_skill — particularité d'ordre : la vérification « patch est un
+    objet » a lieu AVANT la recherche de l'item (les cinq autres @update_* cherchent d'abord
+    et répondent donc @NotFound avant de rejeter la forme) ; voir `Handles`.
+  @InMemoryConfigStore::set_default_agent — n'importe quelle chaîne : PAS de @validate_name,
+    PAS de vérification que l'agent nommé existe, @Layer ignoré, toujours @Ok — comportement
+    figé par le code actuel, arbitré en `Tasks`.
+  @get_* (défauts du trait) — n'importe quelle chaîne comme nom, y compris vide ou invalide
+    : aucune validation en lecture, seules les trois issues de @resolve_by_name existent.
+
+Returns:
+  Lectures @InMemoryConfigStore — clones profonds des collections internes (@Vec cloné, map
+    @HashMap clonée pour @skill_bodies, @Option clonée pour @default_agent) : le store et le
+    résultat sont indépendants après retour ; @default_agent répond @Ok(@None) tant
+    qu'aucune écriture n'a eu lieu.
+  @get_* — @Ok(élément) sur match unique ; le clone est celui porté par la liste au moment de
+    l'appel (pas de vue cohérente garantie entre deux @list_x successifs).
+  Écritures @InMemoryConfigStore — @Ok(()) quand l'opération s'applique intégralement ;
+    @create_skill pousse la meta en fin de @skills et insère le corps dans @skill_bodies
+    (l'ordre d'@list_x est l'ordre d'insertion, les fixtures en dépendent) ; @update_* est
+    strictement partiel : les clés absentes du patch conservent leur valeur.
+  @resolve_by_name n'examine jamais plus de deux candidats : le test de duplication
+    s'arrête au deuxième match.
+
+Raises:
+  @CfgStoreError::InvalidName (`VNL-CFG-005`) — de toute écriture (@create_*, @update_*,
+    @delete_*) dont le nom (celui de l'item ou le paramètre `name`) échoue @validate_name ;
+    premier contrôle exécuté, avant verrou, conflit ou recherche — sauf @set_default_agent
+    qui ne valide pas.
+  @CfgStoreError::NameConflict (`VNL-CFG-007`) — @create_* avec un nom déjà présent dans la
+    collection de la fixture (le champ `layer` de l'erreur est le @Layer reçu en paramètre,
+    même si la fixture n'a qu'un jeu unique).
+  @CfgStoreError::NotFound (`VNL-CFG-006`) — @update_*/@delete_* sur un nom absent (après
+    validation du nom ; pour @update_skill, seulement après la vérification de forme du
+    patch).
+  @CfgStoreError::Config (`VNL-CFG-001`) — patch d'@update_* non-objet (message exact
+    `"update patch must be a JSON object"`).
+  @CfgStoreError::Validation (`VNL-CFG-010`) — clé reconnue du patch avec valeur de mauvais
+    type, énumérateur inconnu (message citant la valeur), entrée @Toolset::mcp sans
+    `"server"` chaîne, @Agent::skills dans une forme hors des trois acceptées.
+  @CfgStoreError::UnknownReference (`VNL-CFG-003`) — @load_skill ou un @get_* sur nom absent
+    (sorte = littéral de la méthode).
+  @CfgStoreError::DuplicateName (`VNL-CFG-002`) — @get_* quand la liste contient au moins
+    deux items du même nom (injectable via les champs `pub` de la fixture, jamais via les
+    écritures qui refusent le conflit).
+  @CfgStoreError::ReadOnly (`VNL-CFG-009`) — uniquement par les défauts du trait quand
+    l'implémentation ne surcharge pas l'écriture (jamais depuis @InMemoryConfigStore).
+  Jamais : @CfgStoreError::Io ni @CfgStoreError::WriteError (marqueurs `VNL-CFG-004` /
+    `VNL-CFG-008`, propres à ./fs_store.rs) ; aucune panic sur le chemin public, aucun
+    @unwrap hors `cfg(test)` grâce à la récupération d'empoisonnement (voir `Handles`).
+
+Handles:
+  Mutex empoisonnés — chaque prise de verrou de la fixture est
+    `lock().unwrap_or_else(|e| e.into_inner())` (pattern projet, commit `16cabba`) : une
+    panic survenue sous verrou dans un test n'empoisonne pas le store pour les appels
+    suivants ; aucune méthode ne propage jamais d'erreur d'empoisonnement.
+  @update_skill et l'ordre de vérification — la forme du patch (objet) est vérifiée avant
+    l'existence de l'item : `update_skill("absent", 42)` rend `VNL-CFG-001` là où
+    @update_provider/@update_toolset/@update_agent rendent `VNL-CFG-006` sur les mêmes
+    entrées. Les deux ordres coexistent dans le fichier ; l'écart est arbitrable, pas un
+    contrat voulu documenté (voir `Tasks`).
+  @update_* partiellement appliqués en cas de rejet — les clés sont parcourues dans l'ordre
+    du map @serde_json (ordre lexicographique, le crate ne demande pas la feature
+    `preserve_order`) et chaque clé valide est appliquée immédiatement : un patch
+    `{"model": "qwen3", "mode": "inconnu"}` sur un agent a muté `model` ET retourné
+    Validation. Aucun rollback — comportement figé par scenario, arbitrage en `Tasks`.
+  @create_skill en trois prises de verrou séquentielles — vérification de conflit sous le
+    verrou @skills (relâché ensuite), puis @push de la meta sous un second verrou @skills,
+    puis @insert du corps sous verrou @skill_bodies : une observation concurrente peut voir
+    une meta sans corps entre les deux écritures (fenêtre de cohérence, non atomique —
+    arbitrage en `Tasks`). @update_skill et @delete_skill font l'inverse : ils gardent le
+    verrou @skills acquis et nidifient le verrou @skill_bodies dessus. L'ordre
+    d'emboîtement est constant skills -> skill_bodies dans tout le fichier (aucun chemin
+    inverse), donc pas d'interblocage possible en l'état.
+  @InMemoryConfigStore et la couche — le paramètre @Layer est ignoré par la fixture (jeu de
+    données unique) : @create_* en @Layer::Workspace entre en conflit avec un item créé en
+    @Layer::Global, et les erreurs @NotFound/@NameConflict rapportent dans leur message
+    `VNL-CFG-006/007` le @Layer reçu en paramètre, même si l'entrée en conflit appartient au
+    jeu global de la fixture. Documenté par le commentaire de @Layer ; assumé car la fixture
+    n'est pas le store de production.
+  @PgConfigStore (/app/src/config_store.rs) comme implémenteur partiel — ne surcharge
+    aucune écriture : tout @create_*/@update_*/@delete_*/@set_default_agent le concernant
+    répond @CfgStoreError::ReadOnly ; @default_agent y est un @Ok(@None) constant.
+  @McpTransport::Sse accepté en configuration par @update_mcp_server — la connexion
+    elle-même n'est pas implémentée (/lib/src/prefixed_mcp.rs remonte `VNL-MCP-004` en
+    @ToolUnavailable, cf. ./domain.rs) : le store valide le mot, pas l'usage.
+  Dépendance circulaire de module — ./error.rs importe @crate::store::Layer et ./store.rs
+    importe @crate::error::CfgStoreError : légitime entre modules d'un même crate, à
+    connaître avant tout découpage du fichier.
+
+Must:
+  Valider le nom par @validate_name en PREMIER contrôle de toute écriture (@create_*,
+    @update_*, @delete_*), avant verrou, conflit ou recherche, et propager
+    @CfgStoreError::InvalidName sans aucune mutation.
+  Refuser tout nom en double à la création (@CfgStoreError::NameConflict) et exiger
+    l'existence exacte pour @update_*/@delete_* (@CfgStoreError::NotFound) sur la collection
+    du domaine.
+  Exiger un objet JSON pour tout patch d'@update_* (@CfgStoreError::Config sinon) et ignorer
+    silencieusement toute clé non listée dans `Accepts`, `name` compris — le nom d'un item
+    n'est jamais modifiable par patch.
+  Appliquer la sémantique `null` de `Accepts` clé par clé : `null` efface un optionnel ou une
+    liste, `null` REJETTE un champ requis en texte et @SkillMeta::description, et `null` sur
+    @Agent::skills signifie @SkillSelection::Auto (la valeur par défaut, pas « inchangé »).
+  N'appliquer tout patch d'@update_* que de façon strictement partielle : les clés absentes
+    conservent leur valeur.
+  Implémenter @resolve_by_name en trois issues exhaustives : zéro -> UnknownReference, un ->
+    Ok, deux ou plus -> DuplicateName, avec le littéral de sorte propre à chaque @get_*.
+  Rendre @list_skills sans corps (deux champs de @SkillMeta) et le corps uniquement via
+    @load_skill ; un corps absent de @skill_bodies alors que la meta est présente répond
+    UnknownReference(`"skill"`) — les deux collections ne sont pas garanties synchrones sous
+    injection directe de fixture.
+  Récupérer tout verrou empoisonné par `unwrap_or_else(|e| e.into_inner())` à chaque prise de
+    verrou, sans exception, et ne jamais paniquer sur le chemin public.
+  Ignorer le @Layer dans toute la fixture (une seule collection par domaine) tout en le
+    propagant intact dans les payloads d'erreurs NotFound/NameConflict.
+  Garder @InMemoryConfigStore hors de `#[cfg(test)]` : fixture d'intégration consommée par
+    les tests de `cli`, `lib` et `app` via `vanyline_lib::store::InMemoryConfigStore`.
+  Faire porter par les dix-neuf écritures du trait le défaut @Err(@CfgStoreError::ReadOnly) —
+    un implémenteur partiel (pattern @PgConfigStore) doit rester compilable et explicitement
+    en lecture seule.
+  Dériver @Layer exactement `Debug, Clone, Copy, PartialEq, Eq` et rien d'autre — le type
+    entre dans le @Display d'erreurs par son @Debug, jamais dans le wire (ni serde, ni ts-rs).
+
+Must not:
+  Contrôler l'intégrité référentielle à l'écriture (provider d'un modèle, model/toolsets/
+    skills d'un agent, server d'une sélection MCP) : ces références sont stockées telles
+    quelles, la résolution et ses erreurs sont le contrat de la session, pas du store.
+  Vérifier la validité du nom ou l'existence de l'agent dans @set_default_agent (état actuel ;
+    toute évolution passe par l'arbitrage `Tasks`).
+  Accepter un renommage, une suppression de clé ou un merge profond via patch : seule la clé
+    `"options"` remplace une collection entière, `"headers"` filtre et remplace, le reste est
+    un remplacement scalaire ou une reconstruction de liste.
+  Exposer @HasName ou @resolve_by_name hors du fichier (`pub`) — la résolution par nom est le
+    comportement privé des défauts @get_* du trait.
+  Faire de @Layer ou @ConfigStore des types sérialisables ou ts-rs, ni les publier au wire.
+  Laisser @create_skill une meta sans corps après un retour @Ok : la fenêtre concurrente
+    transitoire est documentée dans `Handles`, l'état final doit rester cohérent.
+  Modifier ./fs_store.rs, ./error.rs ou ./domain.rs depuis ce fichier : ./store.rs ne
+    consomme @validate_name et @CfgStoreError qu'en lecture de leur contrat propre.
+
+Tasks:
+  [ ] Compléter les tests manquants dans ./store.rs (un test par Scenario de cette spec,
+    taggé par son titre) : les comportements non couverts à ce jour sont
+    `update_patch_non_objet_renv_vnl_cfg_001`, `update_cle_name_du_patch_est_ignoree`,
+    `update_patch_partiellement_applique_apres_rejet`, `update_champ_requis_null_rejete`,
+    `update_provider_type_et_api_key`, `update_model_options_null_vide_non_objet_rejete`,
+    `update_mcp_server_headers_non_string_ignores`,
+    `update_skill_forme_patch_verifiee_avant_existence`,
+    `set_default_agent_sans_validation_ni_couche`,
+    `ecritures_defaut_du_trait_renv_lecture_seule`, `mutex_empoisonne_recupere`,
+    `inmemory_ignore_la_couche`, `ecritures_acceptent_references_inconnues`,
+    `create_provider_model_mcp_conflit_et_nom_invalide`,
+    `delete_provider_model_mcp_suppriment` — les Scenarios homonymes des tests existants
+    sont déjà couverts (la quarantaine de tests présents dans `mod tests`).
+  [?] Non-atomicité des patchs d'@update_* en cas de rejet (clés valides appliquées avant la
+    clé en erreur, sans rollback) : figée telle quelle par le scenario
+    `update_patch_partiellement_applique_apres_rejet`. Voulu (écritures de la fixture
+    mono-thread en pratique) ou faut-il un deux-temps « valider tout puis appliquer », comme
+    le fait déjà ./fs_store.rs via revalidation `Raw*Entry` (mémoire review Phase 3) ? La
+    divergence fixture/@FsConfigStore est un écart de contrat entre deux implémentations du
+    même trait — arbitrage Sébastien requis.
+  [?] Ordre divergent de @update_skill (forme du patch vérifiée avant l'existence) contre les
+    cinq autres @update_* (existence avant forme) : bug d'ordre ou intention ? Sur l'entrée
+    `(nom_absent, patch_non_objet)` l'une rend `VNL-CFG-001`, les autres `VNL-CFG-006` —
+    quelle cohérence contracter pour tous les domaines ?
+  [?] @set_default_agent sans @validate_name, sans contrôle d'existence de l'agent, @Layer
+    ignoré en fixture, écriture en aveugle en fs (`defaults.agent` acceptant n'importe
+    quelle chaîne) : contrat voulu (« nom d'agent = simple réglage ») ou trou de validation à
+    combler côté trait ? Les deux implémentations sont alignées sur l'absence de contrôle,
+    mais rien ne le déclare ailleurs que dans le code.
+  [?] Deux sémantiques JSON hétérogènes dans le même fichier : @ModelProfile::options accepte
+    n'importe quelle valeur imbriquée (passthrough) alors que @McpServer::headers filtre les
+    valeurs non-chaîne en silence, sans erreur. Filtrage silencieux ou rejet explicite des
+    valeurs non-chaîne dans `"headers"` — et le passthrough de `"options"` est-il un contrat
+    ou une paresse assumée ?
+  [?] Absence de contrôle d'intégrité référentielle à l'écriture (agent vers model/toolsets/
+    skills inconnus, model vers provider inconnu, sélection MCP vers server inconnu) :
+    contracté « résolution à la session » ici. Confirmer que c'est la frontière voulue, ou
+    exiger une validation croisée dans le trait (avec quelle règle sur les suppressions ?).
+  [?] Fenêtre de non-atomicité de @create_skill (meta poussée avant le corps, trois prises de
+    verrou) et discipline de verrou implicite (emboîtement skills -> skill_bodies dans
+    @update_skill/@delete_skill, séquentiel dans @create_skill) : faut-il un unique verrou
+    composite dans la fixture pour rendre les écritures de skill atomiques ?
+  [?] `null` sur @Agent::skills -> @SkillSelection::Auto (retour à la valeur par défaut) :
+    sémantique distincte de « ne pas toucher » et piégeable côté UI (un client qui envoie
+    `null` « pour ne rien changer » désactive toutes les skills) ; verrouillée ou à rapprocher
+    de l'absence de modification ?
+  [?] Commentaires datés du fichier (« dans cette tâche », « tâche 2 », « tâches futures ») et
+    chemin `vanyline_lib::store::InMemoryConfigStore` cité dans le commentaire de la fixture
+    alors que le module d'origine est ici et que /lib/src/lib.rs ne fait qu'une ré-export :
+    vocabulaire de l'ancienne méthode à réécrire selon ce contrat, ou à laisser ?
+  [?] @InMemoryConfigStore ne dérive que @Default (pas @Debug) alors que ses huit champs sont
+    `pub` : absence voulue (les fixtures se composent, ne s'affichent pas) ou manque pratique
+    pour le débogage des tests consommateurs ?
+
+Done when:
+  Chaque Scenario de cette spec a son test dédié taggé par son titre et passe
+    (`cargo test -p vanyline-cfgstore`, puis batterie workspace au vert).
+  Les implémenteurs du trait (@FsConfigStore ici, @PgConfigStore par héritage des défauts)
+    sont relus contre ce même contrat et les écarts (non-atomicité, ordre de vérification)
+    sont tranchés ou explicitement tolérés.
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: get_provider_found
+  Given un @InMemoryConfigStore contenant un unique provider `"ollama-local"`
+  When @get_provider(`"ollama-local"`) est attendu
+  Then le résultat est @Ok et le clone remonté porte `name == "ollama-local"`, sans mutation
+    du store
+
+Scenario: get_provider_unknown
+  Given un @InMemoryConfigStore vide
+  When @get_provider(`"nope"`) est attendu
+  Then l'erreur @CfgStoreError::UnknownReference(`"provider"`, `"nope"`) est remontée et son
+    @Display contient `"VNL-CFG-003"` et `"nope"`
+
+Scenario: get_provider_duplicate
+  Given un @InMemoryConfigStore où deux providers nommés `"dup"` ont été injectés via le
+    champ `pub` @providers
+  When @get_provider(`"dup"`) est attendu
+  Then l'erreur @CfgStoreError::DuplicateName(`"provider"`, `"dup"`) est remontée, @Display
+    contenant `"VNL-CFG-002"` — le seuil de duplication est le deuxième match, sans scan
+    complet
+
+Scenario: get_x_helpers_cover_all_kinds
+  Given un @InMemoryConfigStore peuplé d'un item par domaine (provider, model, mcp_server,
+    toolset, agent, skill)
+  When les six méthodes par défaut @get_* sont attendues sur le nom correspondant
+  Then chacune rend @Ok, attestant le littéral de sorte correct de chaque défaut (`"provider"`,
+    `"model"`, `"mcp_server"`, `"toolset"`, `"agent"`, `"skill"`)
+
+Scenario: list_skills_is_lightweight
+  Given un @InMemoryConfigStore contenant le skill `"pdf"` (meta et corps)
+  When @list_skills puis @load_skill(`"pdf"`) sont attendus
+  Then @list_skills rend exactement les champs @SkillMeta (nom et description) sans le corps,
+    et @load_skill rend le corps exact injecté
+
+Scenario: load_skill_unknown
+  Given un @InMemoryConfigStore ne contenant aucun corps de skill
+  When @load_skill(`"absent"`) est attendu
+  Then @CfgStoreError::UnknownReference(`"skill"`, `"absent"`) est remontée, @Display
+    contenant `"VNL-CFG-003"`
+
+Scenario: default_agent_none
+  Given un @InMemoryConfigStore vide
+  When @default_agent() est attendu
+  Then @Ok(@None) est rendu
+
+Scenario: default_agent_some
+  Given un @InMemoryConfigStore dont le champ @default_agent est initialisé à
+    @Some(`"build".to_string()`)
+  When @default_agent() est attendu
+  Then @Ok(@Some(`"build"`)) est rendu, clone indépendant de l'état interne
+
+Scenario: create_toolset_global
+  Given un @InMemoryConfigStore vide
+  When @create_toolset(@Layer::Global, toolset complet `"ts-cli"`) est attendu
+  Then @Ok est rendu, @list_toolsets contient ce toolset avec tous ses champs (description,
+    prompt, @local_tools) et @get_toolset(`"ts-cli"`) rend les mêmes champs
+
+Scenario: create_toolset_name_conflict
+  Given un @InMemoryConfigStore contenant déjà le toolset `"default"`
+  When @create_toolset(@Layer::Global, toolset nommé `"default"`) est attendu
+  Then @CfgStoreError::NameConflict de sorte `"toolset"` est rendue, @Display contenant
+    `"VNL-CFG-007"`, et @list_toolsets est inchangé
+
+Scenario: create_toolset_invalid_name
+  Given un @InMemoryConfigStore vide
+  When @create_toolset(@Layer::Global, toolset nommé `""`) est attendu
+  Then @CfgStoreError::InvalidName est rendue (`"VNL-CFG-005"`), sans aucune insertion
+
+Scenario: update_toolset_partial_patch
+  Given un @InMemoryConfigStore contenant le toolset `"default"` (description @None, prompt
+    @None, @local_tools vide)
+  When @update_toolset(@Layer::Global, `"default"`, `{"description": "Updated description"}`)
+    est attendu
+  Then @Ok est rendu, la description est modifiée, le prompt et @local_tools sont intacts —
+    le patch est strictement partiel
+
+Scenario: update_toolset_null_clears_optional
+  Given un @InMemoryConfigStore contenant le toolset `"ts"` avec description @Some et prompt
+    @Some
+  When @update_toolset avec `{"description": null}` est attendu
+  Then la description devient @None et le prompt conserve sa valeur
+
+Scenario: update_toolset_null_clears_list
+  Given un @InMemoryConfigStore contenant le toolset `"default"`
+  When @update_toolset avec `{"local_tools": null}` est attendu
+  Then @local_tools est vide
+
+Scenario: update_toolset_mcp
+  Given un @InMemoryConfigStore contenant le toolset `"ts"` avec @mcp vide
+  When @update_toolset avec @mcp `[{"server": "fs", "tools": ["read", "write"]}, {"server":
+    "git"}]` est attendu
+  Then la première sélection porte le serveur `"fs"` et les tools `["read", "write"]`, la
+    seconde le serveur `"git"` et une liste de tools vide (clé `"tools"` absente)
+
+Scenario: update_toolset_mcp_invalid_form
+  Given un @InMemoryConfigStore contenant le toolset `"default"`
+  When @update_toolset avec `{"mcp": "not-an-array"}` est attendu
+  Then @CfgStoreError::Validation est rendue (`"VNL-CFG-010"`) et @mcp est inchangée — idem
+    pour une entrée sans `"server"` chaîne
+
+Scenario: delete_toolset_by_name
+  Given un @InMemoryConfigStore contenant l'unique toolset `"default"`
+  When @delete_toolset(@Layer::Global, `"default"`) est attendu
+  Then @Ok est rendu et @list_toolsets est vide
+
+Scenario: update_toolset_not_found
+  Given un @InMemoryConfigStore vide
+  When @update_toolset(@Layer::Global, `"nope"`, `{}`) est attendu
+  Then @CfgStoreError::NotFound de sorte `"toolset"` est rendue (`"VNL-CFG-006"`, le @Display
+    cite le @Layer reçu)
+
+Scenario: delete_toolset_not_found
+  Given un @InMemoryConfigStore vide
+  When @delete_toolset(@Layer::Global, `"nope"`) est attendu
+  Then @CfgStoreError::NotFound est rendue et les collections sont inchangées
+
+Scenario: create_agent_global
+  Given un @InMemoryConfigStore vide
+  When @create_agent(@Layer::Global, agent `"dev"` en @AgentMode::Subagent, avec toolsets et
+    @SkillSelection::Named) est attendu
+  Then @Ok est rendu et @list_agents/@get_agent(`"dev"`) remontent tous les champs, dont
+    @system_prompt et @SkillSelection::Named
+
+Scenario: update_agent_partial_patch
+  Given un @InMemoryConfigStore contenant l'agent `"build"` (@AgentMode::Primary,
+    @SkillSelection::Auto, model `"qwen2.5"`)
+  When @update_agent(@Layer::Global, `"build"`, `{"model": "qwen3.5"}`) est attendu
+  Then le model devient `"qwen3.5"`, @mode reste @AgentMode::Primary et @skills reste
+    @SkillSelection::Auto
+
+Scenario: update_agent_null_clears_optionals_and_list
+  Given un @InMemoryConfigStore contenant l'agent `"build"` (description @Some, toolsets non
+    vides)
+  When @update_agent avec `{"description": null, "toolsets": null}` est attendu
+  Then la description est @None et @toolsets est vide
+
+Scenario: update_agent_mode
+  Given un @InMemoryConfigStore contenant l'agent `"build"`
+  When @update_agent avec `{"mode": "all"}` est attendu
+  Then @mode vaut @AgentMode::All — idem pour `"primary"` et `"subagent"`
+
+Scenario: update_agent_skills_variants
+  Given un @InMemoryConfigStore contenant l'agent `"build"`
+  When quatre patchs successifs sont attendus : `{"skills": null}`, `{"skills": "auto"}`,
+    `{"skills": "none"}`, `{"skills": ["pdf", "render"]}`
+  Then @skills vaut dans l'ordre @SkillSelection::Auto, @SkillSelection::Auto,
+    @SkillSelection::None, puis @SkillSelection::Named
+
+Scenario: update_agent_invalid_mode
+  Given un @InMemoryConfigStore contenant l'agent `"build"`
+  When @update_agent avec `{"mode": "unknown"}` est attendu
+  Then @CfgStoreError::Validation est rendue, son @Display citant la valeur fautive, et @mode
+    est inchangé
+
+Scenario: create_agent_name_conflict
+  Given un @InMemoryConfigStore contenant déjà l'agent `"build"`
+  When @create_agent(@Layer::Global, agent nommé `"build"`) est attendu
+  Then @CfgStoreError::NameConflict de sorte `"agent"` est rendue et @list_agents est inchangé
+
+Scenario: update_agent_not_found
+  Given un @InMemoryConfigStore vide
+  When @update_agent(@Layer::Global, `"nope"`, `{}`) est attendu
+  Then @CfgStoreError::NotFound est rendue (`"VNL-CFG-006"`, sorte `"agent"`)
+
+Scenario: delete_agent_by_name
+  Given un @InMemoryConfigStore contenant l'unique agent `"build"`
+  When @delete_agent(@Layer::Global, `"build"`) est attendu
+  Then @Ok est rendu et @list_agents est vide
+
+Scenario: delete_agent_not_found
+  Given un @InMemoryConfigStore vide
+  When @delete_agent(@Layer::Global, `"nope"`) est attendu
+  Then @CfgStoreError::NotFound est rendue
+
+Scenario: create_agent_invalid_name
+  Given un @InMemoryConfigStore vide
+  When @create_agent(@Layer::Global, agent nommé `"..invalid"`) est attendu
+  Then @CfgStoreError::InvalidName est rendue (`"VNL-CFG-005"`), sans aucune insertion
+
+Scenario: create_skill
+  Given un @InMemoryConfigStore vide
+  When @create_skill(@Layer::Global, @SkillMeta `"render"`, un corps non vide) est attendu
+  Then @Ok est rendu, @list_skills ne contient que la meta (nom et description) et
+    @load_skill(`"render"`) rend le corps exact
+
+Scenario: update_skill_description_and_body
+  Given un @InMemoryConfigStore contenant le skill `"pdf"` (meta et corps)
+  When un patch `{"description": "Updated PDF skill"}` puis un patch
+    `{"body": "NEW BODY CONTENT"}` sont attendus
+  Then @get_skill(`"pdf"`) rend la description mise à jour et @load_skill(`"pdf"`) rend
+    exactement `"NEW BODY CONTENT"`
+
+Scenario: delete_skill_removes_from_both
+  Given un @InMemoryConfigStore contenant le skill `"pdf"` présent dans @skills et
+    @skill_bodies
+  When @delete_skill(@Layer::Global, `"pdf"`) est attendu
+  Then @list_skills est vide ET @load_skill(`"pdf"`) rend @CfgStoreError::UnknownReference —
+    la meta et le corps disparaissent ensemble
+
+Scenario: create_skill_name_conflict
+  Given un @InMemoryConfigStore contenant déjà le skill `"pdf"`
+  When @create_skill(@Layer::Global, meta nommée `"pdf"`, un corps) est attendu
+  Then @CfgStoreError::NameConflict de sorte `"skill"` est rendue, et ni @skills ni
+    @skill_bodies n'est modifié
+
+Scenario: update_skill_not_found
+  Given un @InMemoryConfigStore vide
+  When @update_skill(@Layer::Global, `"nope"`, `{}`) est attendu
+  Then @CfgStoreError::NotFound est rendue (sorte `"skill"`)
+
+Scenario: delete_skill_not_found
+  Given un @InMemoryConfigStore vide
+  When @delete_skill(@Layer::Global, `"nope"`) est attendu
+  Then @CfgStoreError::NotFound est rendue
+
+Scenario: create_skill_invalid_name
+  Given un @InMemoryConfigStore vide
+  When @create_skill(@Layer::Global, meta nommée `""`, un corps) est attendu
+  Then @CfgStoreError::InvalidName est rendue, ni @skills ni @skill_bodies n'est touché
+
+Scenario: update_patch_non_objet_renv_vnl_cfg_001
+  Given un @InMemoryConfigStore contenant l'agent `"build"`
+  When @update_agent(@Layer::Global, `"build"`, un @serde_json::Value::Number) est attendu
+  Then @CfgStoreError::Config est rendue avec le message exact `"update patch must be a JSON
+    object"` (`"VNL-CFG-001"`) et l'agent est inchangé
+
+Scenario: update_cle_name_du_patch_est_ignoree
+  Given un @InMemoryConfigStore contenant le toolset `"default"`
+  When @update_toolset(@Layer::Global, `"default"`, `{"name": "rebaptise", "description":
+    "ok"}`) est attendu
+  Then @Ok est rendu, la description est modifiée et le nom reste `"default"` : la clé
+    `"name"` est ignorée en silence, aucun renommage n'est possible par patch
+
+Scenario: update_patch_partiellement_applique_apres_rejet
+  Given un @InMemoryConfigStore contenant l'agent `"build"` de model `"qwen2.5"`
+  When @update_agent avec `{"model": "qwen3", "mode": "inconnu"}` est attendu — l'itération
+    lexicographique applique `"model"` avant `"mode"`
+  Then @CfgStoreError::Validation est rendue ET le model vaut durablement `"qwen3"` : aucun
+    rollback n'a lieu (comportement figé, arbitré en `Tasks`)
+
+Scenario: update_champ_requis_null_rejete
+  Given un @InMemoryConfigStore contenant un provider, un model, un mcp_server et un agent
+  When @update_provider avec `{"endpoint": null}`, @update_model avec `{"model": null}`,
+    @update_mcp_server avec `{"url": null}` puis @update_agent avec
+    `{"system_prompt": null}` sont attendus
+  Then chacun rend @CfgStoreError::Validation et aucun champ n'est modifié — un champ requis
+    en texte n'accepte jamais `null`
+
+Scenario: update_provider_type_et_api_key
+  Given un @InMemoryConfigStore contenant le provider `"ollama-local"` avec un api_key posée
+  When les patchs `{"api_key": null}`, puis `{"type": "openai-compatible"}`, puis
+    `{"type": "carrier-pigeon"}` sont attendus
+  Then @api_key devient @None, puis @provider_type vaut @ProviderType::OpenaiCompatible,
+    puis le troisième patch rend @CfgStoreError::Validation citant la valeur inconnue
+
+Scenario: update_model_options_null_vide_non_objet_rejete
+  Given un @InMemoryConfigStore contenant le model `"qwen2.5"` avec @options non vide
+  When les patchs `{"options": null}`, puis `{"options": {"num_ctx": 65536}}`, puis
+    `{"options": 42}` sont attendus
+  Then @options est vidée, puis remplacée exactement par l'objet injecté (toute valeur
+    interne acceptée, passthrough), puis le troisième rend @CfgStoreError::Validation
+
+Scenario: update_mcp_server_headers_non_string_ignores
+  Given un @InMemoryConfigStore contenant le mcp_server `"fs"`
+  When @update_mcp_server avec `{"headers": {"X-Foo": "bar", "X-Num": 42}}` est attendu
+  Then @Ok est rendu et @headers ne contient que `"X-Foo" -> "bar"` : la valeur non-chaîne
+    est écartée en silence sans erreur — alors que `{"headers": "non-objet"}` rend
+    @CfgStoreError::Validation et `{"headers": null}` vide la map
+
+Scenario: update_skill_forme_patch_verifiee_avant_existence
+  Given un @InMemoryConfigStore vide
+  When @update_skill(@Layer::Global, `"absent"`, un patch non-objet) est attendu, puis
+    @update_agent(@Layer::Global, `"absent"`, le même patch non-objet)
+  Then le premier rend @CfgStoreError::Config (`"VNL-CFG-001"`, forme vérifiée avant
+    l'existence) alors que le second rend @CfgStoreError::NotFound (`"VNL-CFG-006"`) —
+    divergence figée, arbitrée en `Tasks`
+
+Scenario: set_default_agent_sans_validation_ni_couche
+  Given un @InMemoryConfigStore vide, sans aucun agent
+  When @set_default_agent(@Layer::Workspace, `"..invalide"`) puis @default_agent() sont
+    attendus
+  Then @Ok est rendu et @default_agent() vaut @Some(`"..invalide"`) : pas de @validate_name,
+    pas de contrôle d'existence, @Layer ignoré (comportement figé, arbitré en `Tasks`)
+
+Scenario: ecritures_defaut_du_trait_renv_lecture_seule
+  Given une implémentation minimale de @ConfigStore n'implémentant que les lectures
+    obligatoires (pattern de @PgConfigStore)
+  When n'importe laquelle des dix-neuf écritures est attendue (@create_provider et
+    @set_default_agent compris)
+  Then chacune rend @Err(@CfgStoreError::ReadOnly) (`"VNL-CFG-009"`) sans effet d'état
+
+Scenario: mutex_empoisonne_recupere
+  Given un @InMemoryConfigStore dont le verrou @providers a été empoisonné par une panic
+    déclenchée dans un thread sous ce verrou
+  When @list_providers et @create_provider sont attendus ensuite
+  Then aucun ne panique et aucun ne rend d'erreur d'empoisonnement :
+    @unwrap_or_else(|e| e.into_inner()) récupère la donnée interne
+
+Scenario: inmemory_ignore_la_couche
+  Given un @InMemoryConfigStore contenant le provider `"dup"` créé en @Layer::Global
+  When @create_provider(@Layer::Workspace, provider nommé `"dup"`) est attendu
+  Then @CfgStoreError::NameConflict est rendue et son @Display cite la couche `"Workspace"`
+    reçue en paramètre alors que la fixture n'a qu'une collection : @Layer n'y est qu'une
+    décoration du message
+
+Scenario: ecritures_acceptent_references_inconnues
+  Given un @InMemoryConfigStore vide (aucun provider, model, toolset ni skill)
+  When @create_model avec @provider `"fantome"` puis @create_agent avec @model `"fantome"`,
+    @toolsets `["inconnu"]` et @SkillSelection::Named sont attendus
+  Then les deux rendent @Ok : aucun contrôle d'intégrité référentielle n'est effectué à
+    l'écriture
+
+Scenario: create_provider_model_mcp_conflit_et_nom_invalide
+  Given un @InMemoryConfigStore contenant un provider, un model et un mcp_server nommés `"x"`
+  When @create_provider, @create_model et @create_mcp_server sont attendus avec le nom `"x"`,
+    puis chacun avec le nom `"a/b"`
+  Then la première série rend @CfgStoreError::NameConflict pour les sortes `"provider"`,
+    `"model"`, `"mcp_server"`, et la seconde @CfgStoreError::InvalidName — le motif de
+    @create_* est identique sur les six domaines
+
+Scenario: delete_provider_model_mcp_suppriment
+  Given un @InMemoryConfigStore contenant un provider, un model et un mcp_server
+  When @delete_provider, @delete_model et @delete_mcp_server sont attendus sur les noms
+    correspondants, puis l'un d'eux une seconde fois
+  Then les trois premières suppressions rendent @Ok avec @list_x vidée, et la répétition rend
+    @CfgStoreError::NotFound avec le @Layer reçu en paramètre dans le message

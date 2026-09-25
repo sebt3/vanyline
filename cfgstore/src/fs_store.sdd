@@ -1,0 +1,873 @@
+Spec: FsConfigStore
+
+Platform: Rust/vanyline-cfgstore/yaml_serde/async-trait
+
+Purpose:
+  Implémentation filesystem du trait @ConfigStore de ./store.rs (@FsConfigStore) :
+  stockage des providers/modèles/MCP/agents/toolsets/skills sur deux couches YAML
+  (@Layers de ./layers.rs — `global` et `workspace` optionnel), plus le garde
+  anti-traversal de noms @validate_name utilisé aussi par @InMemoryConfigStore
+  (./store.rs). Store actif de toutes les commandes CLI depuis le cutover 04b
+  (construit par `/cli/src/main.rs::discover_fs_store`, consommé par
+  `/cli/src/rpc/handlers.rs`, `/cli/src/config_check.rs` et `/cli/src/chat.rs`).
+  Un seul fichier pour un seul
+  contrat : le store, ses formes brutes de désérialisation (Raw*Entry / Raw*File /
+  Raw*Frontmatter) et ses fabricants de sérialisation (frontmatter Markdown, YAML
+  toolset, rewrites de `config.yaml`) ne sont observables qu'ensemble — les séparer
+  fragmenterait le contrat de layout sur disque.
+
+  Layout sur disque, par couche (`<dir>` = @Layers::global_dir, ou @Layers::workspace_dir
+  quand la couche est @Layer::Workspace) :
+
+    <dir>/config.yaml              # maps providers / models / mcp / defaults
+    <dir>/agents/<nom>.md          # agent : frontmatter YAML + corps = system_prompt
+    <dir>/toolsets/<nom>.yaml      # toolset : description/prompt/tools{local,mcp}
+    <dir>/skills/<nom>/SKILL.md    # skill : frontmatter YAML (name+description) + corps
+
+  Clé -> chemin : le `name` du domaine n'est JAMAIS porté par la valeur pour les
+  types de `config.yaml` (c'est la clé de map qui le porte) ; c'est le stem du
+  fichier (toolsets `*.yaml`, agents `*.md`) ou le nom du répertoire (skills) pour
+  les types fichiers ; le `name:` du
+  frontmatter d'un `SKILL.md` est ignoré à la lecture (format compat écosystème,
+  réécrit à l'écriture) — le répertoire est canonique.
+
+  Fusion des couches : lecture toujours sur la VUE FUSIONNÉE (@Layers::load_merged_config,
+  @Layers::resolve_named_files, @Layers::resolve_skill_files) — une entrée ou un
+  fichier présent dans les deux couches est remplacé intégralement par la version
+  workspace (pas de deep-merge) ; les écritures et suppressions ciblent une couche
+  explicite @Layer et ne voient que les fichiers de cette couche (pas de fusion
+  pour les conflits/NotFound côté écriture).
+
+  Aucun cache : chaque appel relit le disque ; les méthodes `async` font de l'IO de
+  blocage @std::fs direct (pas de `spawn_blocking`) — la nature asynchrone est un
+  choix du trait, pas un engagement de non-blocage.
+
+Owns:
+  ./fs_store.rs
+
+Can read:
+  ./layers.rs
+  ./store.rs
+  ./domain.rs
+  ./error.rs
+  ./lib.rs
+  ../Cargo.toml
+  /tooling.sdd
+
+Depends on:
+  @crate::layers — @Layers (champs publics @global_dir, @workspace_dir),
+    @RawConfigFile (4 maps @providers/@models/@mcp/@defaults de @yaml_serde::Value
+    bruts, @BTreeMap donc clés triées), @load_config_layer (fichier absent -> valeur
+    par défaut vide, YAML invalide -> @CfgStoreError::Config avec le chemin),
+    @list_layer_files (fichiers `*.ext` non récursifs indexés par stem, répertoire
+    absent -> map vide sans erreur), @list_layer_skill_dirs (sous-répertoires contenant
+    `SKILL.md`, indexés par nom de répertoire, valeur = chemin du `SKILL.md`).
+  @crate::store — @ConfigStore (trait implémenté, ~24 méthodes, dont les défauts
+    @get_provider/@get_model/@get_mcp_server/@get_toolset/@get_agent/@get_skill hérités
+    tels quels, résolution par nom via @resolve_by_name) et @Layer (@Global | @Workspace).
+  @crate::domain — @Provider, @ModelProfile, @McpServer, @Toolset, @McpSelection,
+    @Agent, @AgentMode, @SkillMeta, @SkillSelection, @ProviderType, @McpTransport :
+    leurs derives serde (noms de clés wire `type`, kebab-case des enums,
+    `skip_serializing_if` des optionnels) façonnent les fichiers écrits.
+  @crate::error::CfgStoreError — marqueurs `VNL-CFG-001..010` (./error.rs).
+  @yaml_serde (0.10) — (dés) sérialisation YAML de `config.yaml`, toolsets et
+    frontmatter (via des @serde_json::Value intermédiaires).
+  @serde_json — patch des méthodes `update_*`, valeurs `options` des modèles,
+    fabrication JSON intermédiaire avant conversion YAML.
+  @async_trait — le trait @ConfigStore est asynchrone ; @tokio n'est qu'une
+    dépendance de test (tests `#[tokio::test]` + `tempfile`).
+  @std::fs — toutes les lectures/écritures, appels bloquants.
+
+Exposes:
+  @validate_name(name: &str) -> @Result<(), @CfgStoreError> — `pub fn`, seul item
+    public hors store. Contrat anti-traversal : nom accepté ssi non vide, longueur
+    ≤ 64 (octets — l'alphabet autorisé est ASCII, donc équivalent caractères),
+    premier caractère alphanumérique ASCII, caractères restants alphanumériques
+    ASCII ou `.`/`_`/`-`, et ne contenant PAS la sous-chaîne `..`. Rejette donc :
+    vide, > 64, `.seul`, `..`, `../evil`, `a/b`, `a\b`, `/abs`, tout caractère
+    unicode ou ponctuation autre que `.-_` (ex: `a b`, `a:b`). Erreur
+    @CfgStoreError::InvalidName(nom) (`VNL-CFG-005`). Aucune IO : la fonction ne
+    touche jamais le disque.
+  @FsConfigStore — `pub struct` @Clone (champ privé @layers : @Layers), marque
+    `#[allow(dead_code)]` sur la structure, @new et @layers. @FsConfigStore::new(layers)
+    — @const, infaillible, aucune vérification des chemins à la construction
+    (répertoires inexistants acceptés, ils seront créés à la première écriture).
+    @FsConfigStore::layers() -> &@Layers — @const, accès en lecture seule aux couches.
+  Implémentation de @ConfigStore (toutes méthodes `async`, IO bloquante interne) :
+    Reads (vue fusionnée des couches, listes triées par nom — l'itération suit l'ordre
+    des @BTreeMap) :
+      @list_providers — fusionne les `config.yaml`, désérialise chaque entrée par
+        @RawProviderEntry (clés `type` et `endpoint` requises, `api_key` optionnelle).
+      @list_models — @RawModelEntry (clés `provider` et `model` requises,
+        `temperature`/`max_tokens`/`options` optionnels ; `options` = map JSON
+        passe-plat quelconque).
+      @list_mcp_servers — @RawMcpEntry (clés `type` et `url` requises, `headers`
+        map de strings, défaut vide).
+      @list_toolsets — parse `<dir>/toolsets/*.yaml` de chaque couche par
+        @parse_toolset_file (clé `name` du fichier ignorée, le stem commande ;
+        `description?`, `prompt?`, `tools: { local?, mcp: {serveur: [outils]} }`).
+      @list_agents — parse `<dir>/agents/*.md` par @parse_agent_file (frontmatter
+        strict, voir plus bas).
+      @list_skills — parse uniquement le frontmatter des `<dir>/skills/<nom>/SKILL.md`
+        (index léger : @SkillMeta { name = nom du répertoire, description } ; la clé
+        `name` du frontmatter est ignorée ; le corps n'est pas lu).
+      @load_skill(name) — vue fusionnée, renvoie le corps du `SKILL.md` TRIMÉ (absent ->
+        @CfgStoreError::UnknownReference("skill", name), `VNL-CFG-003`).
+      @default_agent — `defaults.agent` de la config fusionnée : absent -> @None ;
+        chaîne -> @Some ; toute autre valeur (nombre, map…) -> @Config
+        (`VNL-CFG-001`, message `defaults.agent must be a string`).
+      @get_provider/@get_model/@get_mcp_server/@get_toolset/@get_agent/@get_skill —
+        défauts hérités du trait (@resolve_by_name sur les `list_*`).
+    Writes sur `config.yaml` (@Layer, création/conflit/suppression vus par COUCHE —
+    jamais par la fusion) — toutes en lecture-modification-réécriture du
+    `config.yaml` de la couche via @load_config_layer + @write_config_layer :
+      @create_provider/@create_model/@create_mcp_server(layer, item) — @validate_name
+        d'abord ; la clé de map ne porte QUE les champs de l'entrée SANS `name`
+        (retiré du JSON intermédiaire) ; `api_key`/optionnels `None` absents de
+        l'entrée (sauf @McpServer::headers, map toujours sérialisée même vide) ;
+        clé déjà présente dans la MÊME couche -> @NameConflict (`VNL-CFG-007`) ;
+        présence homologue dans l'autre couche NON conflictuelle (sémantique
+        d'ombrage workspace voulue).
+      @update_provider/@update_model/@update_mcp_server(layer, name, patch) —
+        @validate_name ; entrée absente de la couche -> @NotFound (`VNL-CFG-006`) ;
+        patch non-objet JSON -> @Config (`update patch must be a JSON object`) ;
+        entrée existante non-map -> @Config (`… config.yaml entry is not a mapping`).
+        Sémantique du patch (appliqué à la copie brute de l'entrée, donc champs
+        inconnus DE L'ENTRÉE préservés) :
+          - seules les clés de la whitelist de chaque sorte sont appliquées
+            (`type`|`endpoint`|`api_key` ; `provider`|`model`|`temperature`|
+            `max_tokens`|`options` ; `type`|`url`|`headers`) ; clés inconnues
+            silencieusement ignorées ;
+          - `null` sur une clé requise -> @Validation AVANT toute application,
+            message exact `{sorte} '{nom}': required field '{clé}' cannot be
+            cleared` (`provider`/`model`/`mcp server`) — un patch mixte
+            valide+invalide n'écrit RIEN ;
+          - `null` sur une clé optionnelle -> suppression de la clé de l'entrée ;
+          - après application, validation d'enum si la clé est présente :
+            `type` de provider ∈ {`ollama`, `openai-compatible`} (sinon
+            @Validation `provider '{nom}': unknown provider_type '{v}'`), `type`
+            MCP ∈ {`http-streamable`, `sse`} (sinon @Validation `mcp server
+            '{nom}': unknown transport '{v}'`) ;
+          - backstop : l'entrée patchée doit se relire par le @RawXEntry
+            correspondant — un patch mal typé (`endpoint: 123`, `temperature:
+            "hot"`, `headers: {"K": 5}`…) -> @Validation (`{sorte} '{nom}': …`),
+            RIEN écrit (le domaine reste relisible, aucun `VNL-CFG-001` différé).
+      @delete_provider/@delete_model/@delete_mcp_server(layer, name) — @validate_name ;
+        clé absente de la couche -> @NotFound.
+      @set_default_agent(layer, name) — écrit `defaults.agent = name` dans le
+        `config.yaml` de la couche. PAS de @validate_name sur `name`, PAS de
+        vérification d'existence de l'agent (cf. Tasks `[?]`). Les autres clés de
+        `defaults` et les autres maps sont préservées.
+    Writes fichiers (couche explicite, conflits/NotFound vus dans la seule couche) :
+      @create_toolset(layer, item) — @validate_name ; nom déjà pris dans
+        `<couche>/toolsets/` -> @NameConflict("toolset") ; écrit
+        `<couche>/toolsets/<nom>.yaml` (création de l'arborescence si absente) via
+        @toolset_to_yaml_json : forme exacte `description?` puis `prompt?` (clés
+        absentes si @None) puis `tools:` TOUJOURS présent, avec `local:` et `mcp:`
+        omis si vides, `tools: {}` si les deux le sont ; `mcp:` = map
+        nom-de-serveur -> liste d'outils.
+      @update_toolset(layer, name, patch) — @validate_name ; fichier absent de la
+        couche -> @NotFound ; parse l'existant, applique le patch (clé par clé,
+        inconnues ignorées, cf. @Returns), RÉÉCRIT le fichier entier à la forme
+        canonique (@toolset_to_yaml_json) — le fichier est normalisé à chaque
+        écriture ; patch non-objet -> @Config.
+      @delete_toolset(layer, name) — @validate_name ; absent -> @NotFound ;
+        @std::fs::remove_file.
+      @create_agent(layer, item) / @update_agent(layer, name, patch) —
+        `<couche>/agents/<nom>.md` ; forme écrite par @agent_to_md :
+        `---\n<frontmatter yaml>\n---\n<system_prompt.trim()>` avec frontmatter :
+        `description` si @Some, `mode` (toujours, `primary`/`subagent`/`all`),
+        `model` (toujours), `toolsets` si non vide, `skills` (toujours : `"auto"`,
+        `"none"` ou liste de noms). @update_agent ne peut pas renommer (clé `name`
+        ignorée).
+      @delete_agent(layer, name) — remove_file, @NotFound("agent") sinon.
+      @create_skill(layer, meta, body) / @update_skill(layer, name, patch) —
+        `<couche>/skills/<nom>/SKILL.md` ; forme écrite par @skill_to_md :
+        `---\n<frontmatter: name + description>\n---\n<body.trim()>` ; conflit sur
+        les répertoires avec `SKILL.md` de la couche (@NameConflict("skill")) ;
+        @update_skill accepte `description` (string obligatoire, `null` ->
+        @Validation — jamais effaçable) et `body` (string obligatoire), inconnues
+        ignorées, réécriture normalisée trimmée.
+      @delete_skill(layer, name) — @NotFound("skill") si absent ; supprime le
+        `SKILL.md` puis le répertoire parent (le `remove_dir` NON récursif échoue
+        en `VNL-CFG-004` si le répertoire contient d'autres fichiers — cf. Handles).
+  Formats lus (privés mais contractuels car le round-trip les fige) :
+    @split_frontmatter — la PREMIÈRE ligne du fichier doit être exactement `---` et
+      la fermeture la prochaine ligne exactement `---` (comparaison byte à byte :
+      un CRLF ou un préfixe d'espaces casse) ; sinon @Config (`VNL-CFG-001`) avec
+      le chemin et `must start with '---' frontmatter delimiter` ou
+      `missing closing '---' for frontmatter`. Corps = tout ce qui suit, trimé par
+      les appelants.
+    @RawAgentFrontmatter — `model` requis ; `description`, `toolsets`, `skills`
+      optionnels (défauts : absent / vide / `auto`) ; `mode` défaut `primary` ;
+      clés inconnues (ex: `temperature`) ignorées sans erreur.
+    @RawSkillFrontmatter — `description` REQUISE (absente -> @Config citant le
+      chemin du `SKILL.md`).
+    @RawToolsetFile — tout optionnel, défauts vides ; `tools` absent -> `tools: {}`.
+    @RawProviderEntry/@RawModelEntry/@RawMcpEntry — cf. @list_providers/@list_models/
+      @list_mcp_servers ; clés inconnues d'une entrée ignorées à la lecture.
+
+Accepts:
+  @Layer::Global — toujours écrivable (le répertoire cible est créé au besoin par
+    `create_dir_all`). @Layer::Workspace — exige @Layers::workspace_dir = @Some,
+    sinon @Config (`VNL-CFG-001`, message `no workspace layer configured`) sur TOUTE
+    méthode d'écriture (y compris @set_default_agent et les méthodes fichiers).
+  Nom d'objet (`name`, clé `name` des @Agent/@Toolset/@SkillMeta, paramètre `name`
+    des update/delete) — validé par @validate_name EN PREMIER sur les 18 méthodes
+    d'écriture et suppression ; @load_skill et les @get_* ne valident pas (simple
+    lookup de map, jamais de concaténation de chemin).
+  Patch d'update — @serde_json::Value objet pour les 8 méthodes `update_*`
+    (@set_default_agent n'en prend aucun). Les patchs sont des mises à jour
+    partielles : seule la whitelist de chaque sorte est appliquée, et `null` efface
+    ou réinitialise selon la cible :
+      update de map (`provider`/`model`/`mcp server`) — `null` sur clé requise ->
+        @Validation (rien écrit) ; `null` sur clé optionnelle -> clé retirée de
+        l'entrée ;
+      @update_toolset/@update_agent — `null` sur `description`/`prompt` -> @None, sur
+        `local_tools`/`mcp`/`toolsets` -> liste vide, `skills: null` -> @Auto ;
+        `mode`/`model`/`system_prompt` jamais nullables (@Validation « must be a
+        string ») ;
+      @update_skill — `description` et `body` sont des strings obligatoires (`null` ->
+        @Validation).
+    Clés hors whitelist (y compris `name`) silencieusement ignorées : pas de
+    renommage par update.
+  Fichiers et YAML écrits par d'autres (édition manuelle, autre outil) : toute entrée
+    ou tout fichier conforme aux formats de `Exposes` est accepté ; champs
+    d'entrée/frontmatter inconnus ignorés à la lecture.
+  @FsConfigStore::new — n'importe quel @Layers, chemins valides ou non, existants
+    ou non : aucune IO à la construction.
+
+Returns:
+  Listes de lecture (`list_providers`, `list_models`, `list_mcp_servers`) : entrées
+    de la config fusionnée, triées par nom (ordre @BTreeMap) ; `api_key: None` quand la
+    clé est absente de l'entrée.
+  `list_toolsets`/`list_agents` : union des stems des deux couches (workspace gagne à
+    stem égal), chaque fichier relu à l'appel, nom = stem ; @Agent.system_prompt =
+    corps trimé ; défauts agents : `mode` = @AgentMode::Primary, `skills` =
+    @SkillSelection::Auto, `toolsets` vide, `description` @None.
+  `list_skills` : @SkillMeta { name = nom de répertoire (workspace gagne),
+    description } ; jamais le corps.
+  @load_skill : corps trimé (leading/trailing whitespace retiré — `line1\n\nline3\n`
+    écrit puis relu rend `line1\n\nline3`).
+  @default_agent : @Some(chaîne) | @None | @Err.
+  Writes : @Ok(()) si tout le cycle lecture-validation-écriture a réussi ; aucune
+    valeur de retour partielle (tout patch rejeté = rien écrit, `config.yaml` et
+    fichiers inchangés).
+  @validate_name : @Ok(()) | @Err(@InvalidName) — jamais de panique, jamais d'IO.
+  @write_config_layer (interne) : réécrit le `config.yaml` complet avec les 4 maps
+    (`providers`, `models`, `mcp`, `defaults`) dans l'ordre de déclaration, entrées
+    triées, maps vides rendues en style flow `{}` ; le style byte-à-byte (ordre de
+    rendu des clés d'entrée, scalaires multi-lignes) n'est PAS figé par test — seul
+    le round-trip fonctionnel est contracté.
+
+Raises:
+  @CfgStoreError::InvalidName — `VNL-CFG-005`, par @validate_name et donc en tête de
+    toute écriture/suppression sur un nom non conforme.
+  @CfgStoreError::Config — `VNL-CFG-001` : `config.yaml` invalide (message portant le
+    chemin), entrée de map mal typée à la lecture (message portant `provider
+    '{nom}'`/`model '{nom}'`/`mcp server '{nom}'`), frontmatter sans délimiteur
+    (message portant le chemin du fichier), `SKILL.md` sans `description`, patch
+    non-objet (`update patch must be a JSON object`), entrée existante non-map,
+    `defaults.agent` non-string, `Layer::Workspace` sans `workspace_dir`.
+  @CfgStoreError::UnknownReference — `VNL-CFG-003` : @load_skill d'un skill absent
+    (les @get_* du trait le produisent aussi via `list_*` vides).
+  @CfgStoreError::Io — `VNL-CFG-004` : toute erreur @std::io hors NotFound (droits,
+    disque plein, `remove_dir` non vide après @delete_skill…). Une IO `NotFound` sur
+    la LECTURE de `config.yaml`/répertoires n'est JAMAIS une erreur (voir Handles) ;
+    sur l'ÉCRITURE (write, remove_file, create_dir_all) elle l'est.
+  @CfgStoreError::NotFound — `VNL-CFG-006` : update/delete (toutes sortes, maps et
+    fichiers) d'un nom absent de la COUCHE ciblée.
+  @CfgStoreError::NameConflict — `VNL-CFG-007` : create (toutes sortes) sur un nom
+    déjà présent dans la COUCHE ciblée.
+  @CfgStoreError::WriteError — `VNL-CFG-008` : échec de sérialisation YAML à l'écriture
+    (`Failed to serialize {chemin}: …`, `agent '{nom}': …`, `skill '{nom}': …`,
+    `toolset '{nom}': …`) — en pratique quasi inatteignable, les valeurs étant
+    fabriquées depuis le domaine.
+  @CfgStoreError::Validation — `VNL-CFG-010` : null sur clé requise des update map
+    (message exact en `Exposes`), enum inconnu (provider_type, transport, mode
+    agent), valeur de patch mal typée (string attendu, array attendu, entrée `mcp`
+    sans `server`…), backstop de relisibilité des update map.
+  @CfgStoreError::DuplicateName / @CfgStoreError::ReadOnly — `VNL-CFG-002` /
+    `VNL-CFG-009` : JAMAIS émis par @FsConfigStore (les maps @BTreeMap rendent le
+    doublon impossible ; le store n'est jamais en lecture seule) — réservés aux
+    autres implémentations de @ConfigStore.
+
+Handles:
+  Fichiers/répertoires absents en lecture — `config.yaml` absent = couche vide par
+    défaut ; `<dir>/agents`, `<dir>/toolsets`, `<dir>/skills` absents = aucune
+    entrée, sans erreur (le comportement est celui de @load_config_layer et
+    @list_layer_files/@list_layer_skill_dirs de ./layers.rs). Un store entièrement
+    neuf (aucun fichier) rend toutes les listes @Ok(vide) et @default_agent @None.
+  Entrée ou fichier invalide en lecture — l'ERREUR ABORTE la liste entière (`collect`
+    de @Result) : une seule entrée provider mal typée ou un seul `agents/mauvais.md`
+    sans délimiteur fait échouer @list_providers/@list_agents en entier ; le message
+    porte le nom de l'entrée ou le chemin du fichier fautif.
+  Fichier toolset/agent dont le stem ne passe pas @validate_name (ex: `..foo.yaml`,
+    créé à la main) — visible en lecture (le stem sert de nom), puis inatteignable en
+    écriture/suppression (@InvalidName) : asymétrie lecture/écriture
+    assumée par le code, jamais érigée en contrat ici (cf. Tasks `[?]`).
+  `SKILL.md` avec une clé `name:` divergente du répertoire — ignorée, le nom canonique
+    reste le répertoire (test dédié) ; à la réécriture, @skill_to_md réécrit le `name`
+    canonique.
+  Répertoire de skills sans `SKILL.md` — ignoré silencieusement par @list_skills et
+    invisible aux conflits @create_skill : un `create_skill` dans un répertoire
+    préexistant (sans `SKILL.md`) réussit et y dépose son fichier sans conflit signalé.
+  `delete_skill` sur un répertoire contenant d'autres fichiers que `SKILL.md` — l'état
+    actuel : `remove_file` réussit, `remove_dir` échoue, l'appel retourne
+    `VNL-CFG-004` ALORS que le `SKILL.md` est déjà supprimé (skill devenu invisible
+    mais répertoire restant) — comportement suspect, remonté en Tasks `[?]`, non
+    contracté par Scenario.
+  @Toolset.mcp avec deux @McpSelection du même serveur — la fabrication YAML passe par
+    une map : la dernière occurrence écrase la précédente, la première est perdue sans
+    erreur à l'écriture (perte silencieuse, remontée en Tasks `[?]`).
+  Concurrence et atomicité — aucun verrou ni écriture atomique : les writes de map
+    sont read-modify-write du `config.yaml` entier avec @std::fs::write direct (pas de
+    temp+rename, pas de fsync) ; deux écritures concurrentes peuvent perdre l'une des
+    mises à jour, un crash en plein write peut laisser un `config.yaml` tronqué (que
+    toute lecture rend alors inutilisable en `VNL-CFG-001`). Remonté en Tasks `[?]`.
+  Réécriture destructive du `config.yaml` — @write_config_layer reconstruit le fichier
+    depuis @RawConfigFile : commentaires YAML, ancres, et clés top-level hors des 4
+    maps connues sont silencieusement supprimés à chaque écriture de map (les clés
+    inconnues À L'INTÉRIEUR d'une entrée, elles, survivent — l'entrée est copiée
+    brute). Remonté en Tasks `[?]`.
+  Fichiers agents/skills en CRLF ou à délimiteurs imparfaits — @split_frontmatter
+    compare des lignes exactement `---` : un `---\r\n` est rejeté en `VNL-CFG-001`.
+    Non testé, remonté en Tasks `[?]`.
+  Suppression de la dernière entrée d'une map — le `config.yaml` est réécrit avec la
+    map vide (`{}`), le fichier `config.yaml` lui-même n'est jamais supprimé.
+  Écriture sur répertoire inexistant — `create_dir_all` précède chaque écriture
+    (`config.yaml` de couche, `toolsets/`, `agents/`, `skills/<nom>/`) : le CLI peut
+    écrire dans une couche jamais initialisée.
+  IO bloquante dans des méthodes `async` — appelées depuis un runtime tokio, elles
+    bloquent la tâche (pas de `spawn_blocking`) ; acceptable car usage CLI/harnais,
+    jamais chemin chaud serveur.
+  @Agent.system_prompt ou corps de skill vide — round-trip stable : écriture sans
+    ligne de corps, relecture en chaîne vide (le trim côté lecture compense
+    l'absence).
+
+Must:
+  Appeler @validate_name EN PREMIER acte des 18 méthodes create/update/delete
+    (les 3 sortes de map, toolset, agent, skill) — aucune concaténation de chemin ni
+    insertion de clé ne doit précéder ce garde : c'est la seule barrière
+    anti-traversal hors base (`../evil`, `a/b`, `..`, `/abs`, `a\b`) de tous les
+    fichiers d'une couche et de toutes les clés de `config.yaml`.
+  Valider les patchs AVANT toute écriture et de façon tout-ou-rien : garde null-sur-requis
+    exécuté sur les clés du patch avant la boucle d'application, validation d'enum et
+    backstop de relisibilité (`yaml_serde::from_value::<RawXEntry>`) exécutés avant
+    @write_config_layer / @std::fs::write — un patch rejeté ne doit jamais avoir écrit
+    le moindre octet (le domaine doit rester relisible, sans `VNL-CFG-001` différé).
+  Conserver les messages d'erreur exacts contractualisés en `Exposes`/`Raises`
+    (`required field '{k}' cannot be cleared`, `unknown provider_type '{t}'`,
+    `unknown transport '{t}'`, `update patch must be a JSON object`,
+    `no workspace layer configured`, `defaults.agent must be a string`,
+    `must start with '---' frontmatter delimiter`,
+    `missing closing '---' for frontmatter`) — porteurs des marqueurs `VNL-CFG-*`
+    de ./error.rs.
+  Écrire les entrées de `config.yaml` SANS le champ `name` (la clé de map le porte)
+    et relire exactement ce qui est écrit (round-trip domaine -> disque -> domaine
+    vérifié par les Scenarios de création/update pour les 6 sortes).
+  Écrire `toolsets/*.yaml` à la forme canonique de @toolset_to_yaml_json (`tools:`
+    toujours présent, `local`/`mcp` omis si vides, `tools: {}` sinon) et relire de
+    même — y compris à chaque @update_toolset qui normalise le fichier existant.
+  Écrire agents et skills avec le frontmatter à délimiteurs `---` conformes à ce que
+    @split_frontmatter relit (le write-side et le read-side sont les deux moitiés du
+    même contrat de round-trip, corps trimé des deux côtés).
+  Traiter les écritures par COUCHE : conflit et NotFound évalués dans la seule couche
+    ciblée (un homologue dans l'autre couche n'est ni un conflit ni un Found) ; les
+    lectures par FUSION (workspace masque global, entrée ou fichier entiers).
+  Retourner @None (et non une erreur) quand `defaults.agent` est absent, et des
+    listes vides quand rien n'existe — un store neuf n'est pas une exception.
+  Recharger le disque à CHAQUE appel (aucun cache inter-appels) : deux stores
+    @FsConfigStore clones sur les mêmes @Layers voient immédiatement les écritures
+    de l'autre.
+  Trimer les corps lus (@Agent.system_prompt, corps de skill via @load_skill) pour
+    que `agent_to_md`/`skill_to_md` (qui triment à l'écriture) donnent un round-trip
+    exact.
+
+Must not:
+  Assembler un chemin à partir d'un nom NON passé par @validate_name, ni laisser
+    remonter une erreur d'IO sur un fichier simplement absent en LECTURE (l'absence
+    est un état vide, pas une panne).
+  Accepter en écriture un nom unicode, vide, > 64, à premier caractère non
+    alphanumérique, contenant `..` en n'importe quelle position, ou `/`/`\` — et
+    présenter ce rejet autrement que par `VNL-CFG-005`.
+  Écrire quoi que ce soit sur patch invalide (le tout-ou-rien de `Must` inclut les
+    patchs mixtes : une clé invalide du patch contamine le patch entier).
+  Appliquer un deep-merge entre couches, ni à la lecture, ni à l'écriture : le
+    remplacement est par entrée/fichier entière.
+  Renommer un objet via un update (`name` n'est dans aucune whitelist de patch) ni
+    modifier une entrée d'une autre couche qu'une écriture d'un update.
+  Émettre `VNL-CFG-002` (@DuplicateName) ou `VNL-CFG-009` (@ReadOnly) depuis ce
+    fichier.
+  Paniquer, `unwrap`/`expect` hors `cfg(test)`, logger, ou `println` : le module est
+    sous le harnais strict (/tooling.sdd) ; les seules sorties d'erreur sont les
+    @CfgStoreError typées.
+  Introduire un cache, un verrou ou une écriture temp+rename sans décision de spec
+    (les Scenarios actuels contractent le comportement non-atomique existant ; les
+    `[?]` de Tasks ouvrent le débat, ils ne le tranchent pas).
+  Présenter les comportements signalés `[?]` (perte d'entrées toolset dupliquées,
+    `delete_skill` à répertoire non vide, non-validation de @set_default_agent,
+    destruction des clés top-level inconnues) comme le contrat voulu tant que
+    Sébastien n'a pas tranché.
+
+Tasks:
+  [ ] Dériver les Scenarios sans test équivalent aujourd'hui (les autres Scenario ont
+    déjà un test dans `mod tests` du fichier, aux titres proches — rapprocher les noms
+    de test des titres de Scenario à l'occasion) :
+    patch non-objet sur les update map, entrée de `config.yaml` non-map, champ
+    `name`/clé inconnue ignorée sur @update_provider, préservation des champs
+    inconnus d'une entrée patchée, @create_provider en workspace quand global possède
+    déjà la clé, écriture d'une couche jamais initialisée pour les fichiers
+    (`toolsets/` créé par @create_toolset), round-trip `@Toolset` avec mcp multi-
+    serveurs via @update_toolset.
+  [?] @set_default_agent ne passe PAS par @validate_name (contrairement aux 18
+    autres écritures) et ne vérifie pas que l'agent référencé existe (la vérification
+    d'existence vit côté `/cli/src/rpc/handlers.rs`). Le nom atterrit comme valeur
+    de `defaults.agent` (jamais de chemin — risque de traversal nul) : cohérence à
+    faire (valider le nom) ou choix assumé ? À trancher.
+  [?] Atomicité et concurrence du `config.yaml` : pas de temp+rename, pas de fsync,
+    pas de verrou, read-modify-write complet. Crash en plein write = fichier tronqué
+    et config globalement illisible (toute lecture en `VNL-CFG-001`) ; écritures
+    concurrentes = perte dernière-écriture-gagnante sans détection. Contracter (le
+    statut quo documenté + Scenarios qui le figent) ou corriger (temp+rename +
+    fsync, ou verrou) ? Décision structurante, non prise ici.
+  [?] @write_config_layer détruit silencieusement commentaires, ancres et clés
+    top-level hors `providers`/`models`/`mcp`/`defaults` à chaque écriture de map.
+    Pertes d'éditions manuelles sans avertissement. Choix assumé (le `config.yaml` est
+    « notre fichier ») ou faut-il refuser la clé inconnue / préserver les zones non
+    modélisées ? À trancher (les champs
+    inconnus À L'INTÉRIEUR d'une entrée, eux, survivent — l'asymétrie est-elle
+    voulue ?).
+  [?] @delete_skill sur `skills/<nom>/` contenant d'autres fichiers : `SKILL.md`
+    supprimé PUIS erreur `VNL-CFG-004` sur `remove_dir` non vide — état semi-supprimé
+    retourne une erreur alors que l'effet souhaité (le skill disparaît) est déjà fait.
+    Voulu (interdire les skills multi-fichiers) ou faut-il `remove_dir_all`/tolérer ?
+  [?] @Toolset.mcp est un @Vec/@McpSelection dans le domaine mais une map serveur ->
+    outils sur disque : deux sélections du même serveur s'écrasent silencieusement à
+    l'écriture (perte de la première). Normaliser (fusion des listes d'outils) ou
+    refuser les doublons en validation ?
+  [?] @split_frontmatter rejette un fichier en CRLF (`---\r` n'est pas `---`) :
+    comportement à figer par test (le frontmatter est produit par nous, donc ASCII
+    LF garanti en round-trip) ou à assouplir pour les fichiers édités sous Windows ?
+  [?] `api_key` des providers stocké EN CLAIR dans `config.yaml` (aucune référence
+    vers un secret externe, aucun masquage). Choix d'architecture assumé (fichier de
+    config local au
+    workspace) ou dette de sécurité à tracer ?
+  [?] Marques `#[allow(dead_code)]` sur @FsConfigStore/@new/@layers/@RawProviderEntry/
+    @RawMcpEntry/@RawModelEntry et helpers de ./layers.rs : le type est en fait
+    construit par le CLI — dettes historiques du cutover 04b à purger (harnais,
+    cf. /tooling.sdd) ou usages résiduels réels ?
+  [?] Asymétrie lecture/écriture sur les noms non conformes : un stem refusé par
+    @validate_name reste listable (avec un nom impossible à cibler en update/delete).
+    Accepté (fichiers d'édition manuelle seulement) ou faut-il filtrer/alerter à la
+    lecture ?
+  [?] Style byte-à-byte du YAML écrit (ordre des clés d'une entrée, rendu `{}` des
+    maps vides, scalaires multi-lignes en block scalar ou chaîne échappée) : seul le
+    round-trip fonctionnel est testé. Figer par golden-tests (stabilité des diffs
+    git des configs) ou laisser le format ouvert ?
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe (la majorité existe
+    déjà dans `mod tests` — les reprendre tels quels, écrire les manquants listés en
+    `Tasks`).
+  Les comportements `[?]` non couverts volontairement par un Scenario (delete_skill
+    répertoire non vide, clés top-level détruites, sélections mcp dupliquées, CRLF,
+    @set_default_agent non validé) ont une décision de Sébastien tracée, et la spec
+    relue fait foi du contrat.
+  La batterie workspace (check/test/clippy `--all-targets` `-D warnings`/fmt) est
+    verte avec ce fichier sous harnais strict, sans `#[allow]` ajouté.
+
+Scenario: validate_name_accepte_noms_valides
+  Given les noms `a`, `foo`, `a.b`, `a-b`, `a_b`, `a1`, `a1b2c3`, `a.b-c_d` et un nom
+    de exactement 64 caractères
+  When chacun est passé à @validate_name
+  Then chacun retourne @Ok(())
+
+Scenario: validate_name_rejette_traversal_chemin
+  Given les noms `../evil`, `a/b`, `..`, `/abs`, `a\b`
+  When chacun est passé à @validate_name
+  Then chacun retourne @CfgStoreError::InvalidName portant le nom tenté
+    (marqueur `VNL-CFG-005`)
+
+Scenario: validate_name_rejette_vide_trop_long_et_point_initial
+  Given les noms `` (vide), un `a` répété 65 fois, et `.hidden`
+  When chacun est passé à @validate_name
+  Then chacun retourne @InvalidName, alors qu'un `a` seul passe
+
+Scenario: validate_name_ne_touche_jamais_le_disque
+  Given un répertoire temporaire vide
+  When @validate_name est appelé sur `../evil`, `a/b` et `..`
+  Then les trois appels échouent et le répertoire reste strictement vide
+
+Scenario: list_providers_fusionne_deux_couches_par_entree
+  Given un `config.yaml` global définissant le provider `strix` (endpoint global) et
+    un `config.yaml` workspace redéfinissant `strix` (endpoint workspace)
+  When @list_providers s'exécute sur le store biculture
+  Then une seule entrée `strix` est retournée, avec l'endpoint workspace, triée par nom
+
+Scenario: lecture_sur_store_tout_absent_retourne_vide
+  Given un @FsConfigStore dont aucune couche n'a de fichier (répertoires temporaires
+    vides)
+  When @list_providers, @list_models, @list_mcp_servers, @list_toolsets,
+    @list_agents, @list_skills et @default_agent s'exécutent
+  Then les six listes retournent @Ok(vide) sans erreur et @default_agent @Ok(None)
+
+Scenario: list_providers_entree_mal_typee_aborte_avec_le_nom
+  Given un `config.yaml` dont l'entrée `strix` omet la clé requise `endpoint`
+  When @list_providers s'exécute
+  Then l'appel retourne @CfgStoreError::Config (`VNL-CFG-001`) dont le message porte
+    `strix`, et aucune liste partielle n'est rendue
+
+Scenario: config_yaml_syntaxiquement_invalide_erreure_avec_chemin
+  Given un `config.yaml` global au contenu YAML cassé (`{invalid: [yaml`)
+  When @list_providers s'exécute
+  Then l'appel retourne @CfgStoreError::Config dont le message porte le chemin
+    complet du `config.yaml`
+
+Scenario: list_models_conserve_options_en_passe_plat
+  Given une entrée modèle `qwen-code` avec `provider`, `model` et `options:`
+    `num_ctx: 65536`
+  When @list_models s'exécute
+  Then l'entrée rendue porte `options["num_ctx"] = 65536` sans autre transformation
+
+Scenario: list_mcp_servers_parse_transport_et_headers
+  Given une entrée `grafana-kydah` de `type: http-streamable`, `url: http://mcp:3000`
+    et `headers:` `X-Token: secret`
+  When @list_mcp_servers s'exécute
+  Then l'entrée rendue porte @McpTransport::HttpStreamable, l'url et le header
+    `X-Token=secret`
+
+Scenario: default_agent_absent_string_ou_mal_type
+  Given trois stores : `config.yaml` sans `defaults.agent`, avec `defaults: {agent:
+    build}`, avec `defaults: {agent: 123}`
+  When @default_agent s'exécute sur chacun
+  Then ils retournent respectivement @Ok(None), @Ok(Some("build")), et
+    @CfgStoreError::Config contenant `must be a string`
+
+Scenario: list_agents_parse_frontmatter_complet_et_defauts
+  Given `agents/build.md` avec frontmatter complet (description, mode, model,
+    toolsets, skills `auto`) et corps texte, et `agents/simple.md` avec seul `model: x`
+  When @list_agents s'exécute
+  Then `build` rend tous ses champs (nom = stem, system_prompt = corps trimé) et
+    `simple` rend @AgentMode::Primary, description @None, toolsets vide,
+    @SkillSelection::Auto
+
+Scenario: list_agents_sans_delimiteur_ouverture_erreure
+  Given `agents/bad.md` commençant par `model: x` sans ligne `---` initiale
+  When @list_agents s'exécute
+  Then l'appel retourne @CfgStoreError::Config contenant `bad.md` et
+    `must start with '---'`
+
+Scenario: list_agents_sans_delimiteur_fermeture_erreure
+  Given `agents/bad.md` commençant par `---` sans seconde ligne `---`
+  When @list_agents s'exécute
+  Then l'appel retourne @CfgStoreError::Config contenant `bad.md` et
+    `missing closing '---'`
+
+Scenario: list_agents_ignore_les_champs_frontmatter_inconnus
+  Given `agents/build.md` dont le frontmatter contient une clé `temperature: 0.9`
+    absente du domaine @Agent
+  When @list_agents s'exécute
+  Then l'agent est retourné sans erreur et la clé inconnue est absente de @Agent
+
+Scenario: list_toolsets_forme_fichier_complette_et_vide
+  Given `toolsets/grafana.yaml` avec description, prompt, `tools.local` et
+    `tools.mcp.grafana-kydah` (liste d'outils), et `toolsets/empty.yaml` de contenu
+    `tools: {}`
+  When @list_toolsets s'exécute
+  Then `grafana` rend son outil local et sa sélection MCP (serveur `grafana-kydah`,
+    deux outils dans l'ordre), et `empty` rend description/prompt @None et listes
+    vides
+
+Scenario: list_skills_nom_de_repertoire_canonique
+  Given `skills/pdf/SKILL.md` dont le frontmatter porte `name: something-else` et
+    `description: PDF processing`
+  When @list_skills s'exécute
+  Then l'entrée retournée est nommée `pdf` (le nom du répertoire) avec la description
+    du frontmatter
+
+Scenario: list_skills_description_manquante_erreure
+  Given `skills/bad/SKILL.md` au frontmatter sans clé `description`
+  When @list_skills s'exécute
+  Then l'appel retourne @CfgStoreError::Config (`VNL-CFG-001`) dont le message cite le
+    fichier fautif
+
+Scenario: list_skills_ignore_les_repertoires_sans_skill_md
+  Given `skills/pdf/SKILL.md` valide et un répertoire voisin `skills/random/` sans
+    `SKILL.md`
+  When @list_skills s'exécute
+  Then seule l'entrée `pdf` est retournée
+
+Scenario: load_skill_retourne_le_corps_trim_ou_inconnu
+  Given `skills/pdf/SKILL.md` de corps `# PDF skill\n\nDétails...`
+  When @load_skill("pdf") puis @load_skill("nope") s'exécutent
+  Then le premier retourne le corps trimé exact et le second
+    @CfgStoreError::UnknownReference("skill", "nope") (`VNL-CFG-003`)
+
+Scenario: les_fichiers_workspace_masquent_les_globaux
+  Given `agents/build.md` dans les deux couches avec des `model:` distincts, et de
+    même pour `skills/pdf/SKILL.md` (descriptions et corps distincts)
+  When @list_agents, @list_skills et @load_skill("pdf") s'exécutent
+  Then partout la version workspace gagne intégralement (un seul `build`, un seul
+    `pdf`, corps workspace)
+
+Scenario: create_update_delete_provider_cycle_complet
+  Given un store global neuf
+  When @create_provider insère `strix` (openai-compatible), @list_providers le voit,
+    @update_provider patch seul `endpoint`, @list_providers relit, puis
+    @delete_provider l'efface
+  Then chaque étape réussit, l'update conserve le `type` d'origine, et la liste est
+    vide après suppression
+
+Scenario: create_provider_conflit_en_meme_couche
+  Given un store global contenant déjà le provider `strix`
+  When @create_provider insère un second `strix` en @Layer::Global
+  Then l'appel retourne @CfgStoreError::NameConflict { kind: "provider", name:
+    "strix" } (`VNL-CFG-007`) et rien de nouveau n'est écrit
+
+Scenario: create_provider_en_workspace_masque_sans_conflit
+  Given un provider `strix` existant en couche globale et une couche workspace sans
+    clé `strix`
+  When @create_provider insère `strix` en @Layer::Workspace
+  Then l'appel réussit (le conflit n'est évalué que dans la couche ciblée) et la vue
+    fusionnée rend la version workspace
+
+Scenario: update_provider_null_sur_requis_rejette_sans_rien_ecrire
+  Given un provider `p1` Ollama créé avec `api_key: key123`
+  When @update_provider reçoit `{"endpoint": null}`, puis `{"type": null}`, puis le
+    patch mixte `{"endpoint": null, "api_key": "x"}`
+  Then les trois retournent @CfgStoreError::Validation aux messages exacts
+    `provider 'p1': required field 'endpoint' cannot be cleared` (et `type` /
+    mixte), et `p1` reste intégralement intact à la relecture
+
+Scenario: update_provider_mauvais_type_rejette_sans_rien_ecrire
+  Given un provider `p1` existant avec `endpoint: http://x`, `api_key: k`
+  When @update_provider reçoit `{"endpoint": 12345}` puis `{"api_key": 42}`
+  Then les deux retournent @CfgStoreError::Validation (backstop de relisibilité), et
+    la relecture du domaine rend l'entrée inchangée sans `VNL-CFG-001`
+
+Scenario: update_provider_api_key_null_efface_et_inconnue_ignoree
+  Given un provider `p1` avec `api_key: key123` et une clé inconnue `custom: yes`
+    déjà présente dans son entrée sur disque
+  When @update_provider reçoit `{"api_key": null, "inconnu": "z"}`
+  Then l'appel réussit, `api_key` est @None à la relecture, et la clé `custom` de
+    l'entrée a survécu à la réécriture
+
+Scenario: update_provider_patch_non_objet_rejette
+  Given un provider `p1` existant
+  When @update_provider reçoit la valeur JSON `42` (non-objet)
+  Then l'appel retourne @CfgStoreError::Config contenant
+    `update patch must be a JSON object` et rien n'est écrit
+
+Scenario: update_et_delete_provider_absents_not_found
+  Given un store global sans provider `nonexistent`
+  When @update_provider et @delete_provider ciblent `nonexistent`
+  Then chacun retourne @CfgStoreError::NotFound { kind: "provider" }
+    (`VNL-CFG-006`)
+
+Scenario: update_provider_type_enum_inconnu_rejette
+  Given un provider `p1` existant
+  When @update_provider reçoit `{"type": "carrier-pigeon"}`
+  Then l'appel retourne @CfgStoreError::Validation (`VNL-CFG-010`) et le type
+    d'origine est préservé
+
+Scenario: update_model_null_sur_requis_et_optionnel
+  Given un modèle `m1` créé avec provider, model, `temperature: 0.7` et
+    `max_tokens: 4096`
+  When @update_model reçoit `{"model": null}` puis `{"provider": null}` puis
+    `{"temperature": null}`
+  Then les deux premiers retournent @Validation aux messages `model 'm1': required
+    field '…' cannot be cleared`, le troisième réussit et n'efface que
+    `temperature` (max_tokens, provider, model préservés)
+
+Scenario: update_model_mal_type_rejette_sans_rien_ecrire
+  Given un modèle `m1` existant
+  When @update_model reçoit `{"temperature": "hot"}`, `{"provider": 7}`, puis
+    `{"options": "not-a-map"}`
+  Then les trois retournent @Validation et l'entrée relue est intacte
+
+Scenario: update_mcp_server_null_requis_transport_et_type_rejetes
+  Given un MCP `s1` existant (`http-streamable`, `http://x`)
+  When @update_mcp_server reçoit `{"url": null}`, puis `{"type": "unknown"}`, puis
+    `{"headers": {"X-Token": 5}}`
+  Then les trois retournent @Validation (dont le message exact `mcp server 's1':
+    required field 'url' cannot be cleared`), et `s1` reste relisible intact
+
+Scenario: ecritures_isolees_par_couche
+  Given un store biculture
+  When @create_provider en @Layer::Workspace insère `ws-only`
+  Then le `config.yaml` workspace contient `ws-only` et le global ne le contient pas
+
+Scenario: write_workspace_sans_workspace_dir_erreure
+  Given un store dont @Layers::workspace_dir est @None
+  When toute méthode d'écriture (par ex. @create_provider, @create_toolset,
+    @set_default_agent) est appelée avec @Layer::Workspace
+  Then chacune retourne @CfgStoreError::Config contenant `workspace`
+    (`no workspace layer configured`) sans avoir touché le disque
+
+Scenario: creation_de_map_preserve_les_autres_maps
+  Given un `config.yaml` global avec provider `strix`, modèle `qwen-code` et
+    `defaults.agent: build`
+  When @create_provider insère `new-p`
+  Then le `config.yaml` relu contient les trois maps d'origine PLUS `new-p`,
+    inchangées champ pour champ
+
+Scenario: set_default_agent_cree_repertoire_et_ecrit
+  Given une couche globale dont le répertoire n'existe pas encore
+  When @set_default_agent(@Global, "build") s'exécute
+  Then le répertoire est créé, le `config.yaml` contient `defaults.agent: build`, et
+    @default_agent le relit
+
+Scenario: set_default_agent_ecrase_preserve_et_isole
+  Given un `config.yaml` global avec providers, models et `defaults.agent: old`
+  When @set_default_agent(@Global, "new") puis @set_default_agent(@Workspace, "debug")
+    s'exécutent (couche workspace présente)
+  Then `defaults.agent` global vaut `new` avec providers/models préservés, le
+    workspace porte `debug`, et le global n'est pas affecté par l'écriture workspace
+
+Scenario: create_toolset_forme_canonique_et_roundtrip
+  Given un store global neuf
+  When @create_toolset insère `grafana` (description, prompt, 1 tool local, 1
+    sélection MCP à 2 outils) puis un toolset `empty` entièrement vide
+  Then le round-trip par @list_toolsets/@get_toolset restitue `grafana` champ pour
+    champ, et `empty` se relit avec `tools: {}` (aucune clé locale, description et
+    prompt @None)
+
+Scenario: create_toolset_conflit_et_noms_invalides_sans_ecriture
+  Given un store global neuf
+  When @create_toolset insère deux fois `fs`, puis tente les noms `../evil`, `a/b`,
+    `..`, `/abs`, `a\b`
+  Then le second insert rend @NameConflict("toolset"), les cinq noms rendent
+    @InvalidName, et les cinq rejets ne créent aucun fichier ni répertoire de plus
+    que le `toolsets/fs.yaml` déjà écrit
+
+Scenario: delete_toolset_absent_not_found
+  Given un store global sans toolset `absent`
+  When @delete_toolset(@Global, "absent") s'exécute
+  Then l'appel retourne @NotFound { kind: "toolset" } et @delete_toolset sur un nom
+    `../evil` retourne @InvalidName avant toute recherche
+
+Scenario: create_agent_frontmatter_roundtrip_et_defauts
+  Given un store global neuf
+  When @create_agent insère `rt` complet (subagent, model, toolsets, skills nommés,
+    prompt) puis `minimal` sans description ni toolsets et skills `auto`
+  Then le round-trip par @get_agent restitue `rt` champ pour champ (corps = prompt
+    trimé entre délimiteurs `---`) et `minimal` rend ses défauts @Primary/@Auto
+
+Scenario: create_agent_conflit_et_noms_invalides_sans_ecriture
+  Given un store global contenant déjà l'agent `simple`
+  When @create_agent réinsère `simple`, puis tente les cinq noms de traversal
+  Then `simple` rend @NameConflict("agent"), les noms rendent @InvalidName, et aucun
+    nouveau fichier n'apparaît dans `<couche>/agents/` outre le `simple.md` du Given
+
+Scenario: delete_agent_absent_not_found
+  Given un store global sans agent `absent`
+  When @delete_agent(@Global, "absent") s'exécute
+  Then l'appel retourne @NotFound { kind: "agent" }
+
+Scenario: create_skill_roundtrip_et_nom_de_repertoire
+  Given un store global neuf
+  When @create_skill(@Global, meta `pdf`, corps `# PDF skill\n\nDétails…`) s'exécute
+  Then le fichier écrit est exactement `skills/pdf/SKILL.md` (frontmatter avec le nom
+    canonique), @list_skills rend `pdf`, @load_skill rend le corps, et @delete_skill
+    fait disparaître les deux
+
+Scenario: create_skill_conflit_et_noms_invalides_sans_ecriture
+  Given un store global contenant déjà le skill `csv`
+  When @create_skill réinsère `csv`, puis tente les cinq noms de traversal
+  Then `csv` rend @NameConflict("skill"), les noms rendent @InvalidName, et aucun
+    autre répertoire `skills/<nom>/` n'est créé dans la couche
+
+Scenario: delete_skill_absent_not_found
+  Given un store global sans skill `absent`
+  When @delete_skill(@Global, "absent") s'exécute
+  Then l'appel retourne @NotFound { kind: "skill" }
+
+Scenario: skill_body_trim_en_roundtrip
+  Given un corps `line1\n\nline3\n` passé à @create_skill
+  When @load_skill relit le skill
+  Then le corps rendu est `line1\n\nline3` sans le newline de fin
+
+Scenario: update_toolset_patch_partiel_et_normalisation
+  Given un toolset `grafana` créé complet (description, prompt, tool local, mcp)
+  When @update_toolset patche seule la description, puis le test relit
+  Then la description est remplacée et prompt/local/mcp sont préservés à l'identique
+    (le fichier réécrit est relisible par @list_toolsets)
+
+Scenario: update_toolset_null_et_vide_effacent
+  Given un toolset `ts` avec description, prompt et deux tools locaux
+  When @update_toolset reçoit `{"prompt": null}` puis `{"local_tools": []}`
+  Then après le premier, prompt est @None et description intacte ; après le second,
+    `local_tools` est vide à la relecture
+
+Scenario: update_toolset_cle_inconnue_ignoree_sans_rename
+  Given un toolset `ts` existant
+  When @update_toolset reçoit `{"unknown_field": "x", "name": "rebaptise",
+    "prompt": "new p"}`
+  Then l'appel réussit, `prompt` vaut `new p`, et l'objet reste nommé `ts` (le `name`
+    du patch est ignoré)
+
+Scenario: update_toolset_formes_invalides_rejetees
+  Given un toolset `ts` existant
+  When @update_toolset reçoit `{"description": 42}`, `{"mcp": "not-an-array"}`, puis
+    `{"mcp": [{}]}`
+  Then les trois retournent @CfgStoreError::Validation et le fichier est resté
+    inchangé
+
+Scenario: update_toolset_absent_et_nom_invalide
+  Given un store global sans toolset `absent`
+  When @update_toolset cible `absent` puis `../evil`
+  Then le premier retourne @NotFound { kind: "toolset" } et le second @InvalidName
+
+Scenario: update_agent_patch_partiel_preserve_le_reste
+  Given un agent `build` créé complet
+  When @update_agent patche `model` et `toolsets` seulement
+  Then les deux champs sont remplacés, description/mode/system_prompt intacts à la
+    relecture (fichier réécrit, round-trip OK)
+
+Scenario: update_agent_skills_toutes_variantes
+  Given un agent `a` avec skills `auto`
+  When @update_agent reçoit `{"skills": "none"}`, puis `{"skills": ["pdf","csv"]}`,
+    puis `{"skills": null}`, puis `{"skills": 42}`
+  Then les trois premiers réussissent et rendent @SkillSelection::None,
+    @Named(["pdf","csv"]), @Auto ; le quatrième retourne @Validation
+    (`must be 'auto', 'none' or an array`)
+
+Scenario: update_agent_mode_et_champs_obligatoires_valides
+  Given un agent `a` existant
+  When @update_agent reçoit `{"mode": "invalid"}`, puis `{"mode": null}`, puis
+    `{"model": null}`
+  Then les trois retournent @Validation (mode inconnu `agent: unknown mode …`,
+    `must be a string`) et l'agent est relisible inchangé
+
+Scenario: update_agent_absent_et_nom_invalide
+  Given un store global sans agent `absent`
+  When @update_agent cible `absent` puis `../evil`
+  Then le premier retourne @NotFound { kind: "agent" } et le second @InvalidName
+
+Scenario: update_skill_description_et_body_string_obligatoires
+  Given un skill `s` créé avec description `d` et body `body`
+  When @update_skill patche `description: 42`, puis `body: 42`, puis patche seul
+    `body: "new body"`
+  Then les deux premiers retournent @Validation (`skill: '…' must be a string`), et
+    le troisième remplace le body en préservant la description à la relecture
+
+Scenario: update_skill_absent_et_nom_invalide
+  Given un store global sans skill `absent`
+  When @update_skill cible `absent` puis `../evil`
+  Then le premier retourne @NotFound { kind: "skill" } et le second @InvalidName
+
+Scenario: update_fichier_ne_touche_pas_l_autre_couche
+  Given le toolset `shared` présent avec le même contenu dans les deux couches (et
+    idem pour l'agent `shared`)
+  When @update_toolset(@Workspace, "shared") puis @update_agent(@Workspace, "shared")
+    patchent description/model avec des marqueurs workspace
+  Then les fichiers workspace portent les marqueurs, les fichiers global gardent leur
+    contenu d'origine sans marqueur
+
+Scenario: clone_voit_les_ecritures_du_precedent
+  Given un @FsConfigStore global neuf et son @Clone pris immédiatement après
+  When le premier store appelle @create_provider(`strix`) puis le clone
+    @list_providers
+  Then le clone voit `strix` — aucun cache inter-appels, chaque lecture relit le
+    disque
