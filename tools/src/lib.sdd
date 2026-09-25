@@ -1,0 +1,167 @@
+Spec: Lib
+
+Platform: Rust/vanyline-tools
+
+Purpose:
+  Racine du crate `vanyline-tools` : outils de filesystem, de recherche et de commande
+  partagés entre `sandbox` (server MCP + WS éditeur), `app` (API `local_tools`) et `cli`
+  (harnais RPC). ./lib.rs ne porte aucun comportement : sa teneur se limite à un attribut
+  de crate — l'exemption `cfg(test)` de la famille `unwrap`/`expect` (convention de racine
+  posée par /tooling.sdd) — et à six déclarations `pub mod` qui constituent l'intégralité
+  de la surface publique du crate. Aucun re-export, aucun glob, aucun type, constante ou
+  fonction défini ici : `command`, `error`, `filesystem`, `mcp`, `output` et `search` sont
+  les seuls chemins publics. Contrat minimal de racine (nommer les enfants) ; le contenu
+  de chaque module est contracté par ses specs sœurs — toutes absentes à la date de
+  rédaction (`Tasks`).
+
+Owns:
+  ./lib.rs
+
+Can read:
+  ./command.rs
+  ./error.rs
+  ./filesystem.rs
+  ./mcp.rs
+  ./output.rs
+  ./search.rs
+  ../Cargo.toml
+  /tooling.sdd
+  /vanyline.sdd
+
+Structure:
+  ./lib.rs — attribut de crate et câblage seuls :
+    `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` puis six
+    `pub mod`. Aucun `pub use`, aucun item défini à la racine, aucun `#[cfg(...)]`.
+  vanyline_tools:: — surface vue de l'extérieur : six modules publics et rien d'autre.
+    ├── command (pub mod) — ./command.rs : @execute, @ExecuteCommandOptions, @BoxedFuture
+    ├── error (pub mod) — ./error.rs : @ToolsError (identifiés `VNL-TLS-NNN`)
+    ├── filesystem (pub mod) — ./filesystem.rs : @read_file, @write_file, @edit_file,
+      @delete_file, @mkdir, @rename_file, @list_directory et leurs structures d'options
+    ├── mcp (pub mod) — ./mcp.rs : descripteurs de tools JSON @filesystem_tools,
+      @search_tools, @command_tools
+    ├── output (pub mod) — ./output.rs : bornes centralisées (`READ_MAX_LINES`,
+      `READ_MAX_BYTES`, `LIST_MAX_ENTRIES`, `SEARCH_MAX_MATCHES`, `COMMAND_MAX_BYTES`)
+      et @bound_lines
+    └── search (pub mod) — ./search.rs : @find_files, @search et leurs options
+
+Exposes:
+  vanyline_tools::command, vanyline_tools::error, vanyline_tools::filesystem,
+    vanyline_tools::mcp, vanyline_tools::output, vanyline_tools::search — six `pub mod`,
+    aucun gating (../Cargo.toml ne déclare ni `[features]` ni `[[bin]]`, et il n'y a pas
+    de crate d'intégration sous ../tests/).
+  Rien de plus : aucun item n'est adressable directement sous `vanyline_tools::`
+    (aucun re-export racine) ; toute la surface publique vit dans les modules enfants.
+
+Accepts:
+  Rien — ./lib.rs ne définit aucune fonction ni point d'entrée paramétré.
+
+Returns:
+  Rien — cf. `Accepts`, le fichier ne définit aucune fonction.
+
+Raises:
+  Rien à l'exécution : le fichier ne contient aucun code exécutable.
+  Jamais de panic en code de production (harnais de /tooling.sdd).
+
+Handles:
+  Profil test (`cfg(test)`) : l'exemption crate-wide autorise la famille
+    `unwrap`/`expect` dans les modules de test du crate ; en build de production les
+    lints restent `deny` via le workspace.
+  Absence de la moindre feature cargo : le crate compile toujours intégralement,
+    les six modules sont toujours présents (aucun cas `#[cfg(feature = ...)]`).
+
+Must:
+  Déclarer exactement six modules, tous `pub`, sans gating de feature ni de profil :
+    `pub mod command`, `pub mod error`, `pub mod filesystem`, `pub mod mcp`,
+    `pub mod output`, `pub mod search`.
+  Restreindre au seul profil `cfg(test)` l'exemption
+    `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` : la racine de
+    crate ne porte que cette exemption (convention de /tooling.sdd) et le harnais garde
+    ces lints en `deny` en build de production.
+  Ne publier aucun item à plat à la racine : les six modules sont les seules exports ;
+    les consommateurs observés (`sandbox/src/tools_impl.rs`, `sandbox/src/ws/fs.rs`,
+    `sandbox/src/mcp.rs`, `app/src/api/local_tools.rs`, `cli/src/tools.rs`,
+    `cli/src/rpc/handlers.rs`) adressent exclusivement par chemins
+    `vanyline_tools::<module>::…`.
+  Déléguer sans redondance le contrat du contenu de chaque module à sa spec sœur.
+
+Must not:
+  Porter un comportement au-delà du câblage et de l'exemption `cfg(test)` : aucune
+    fonction, constante, type ou re-export défini dans ./lib.rs.
+  Ajouter un re-export ou un glob racine (`pub use …`) sans décision explicite :
+    l'absence de surface plate est le contrat observable actuel (cf. `Tasks`).
+  Rendre un des six modules privé : leur surface publique entière est le contrat des
+    consommateurs.
+  Gater un module sur une feature cargo : le crate n'a aucune feature (../Cargo.toml).
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` en code de production
+    (harnais de /tooling.sdd).
+
+Depends on:
+  ./command.rs, ./error.rs, ./filesystem.rs, ./mcp.rs, ./output.rs, ./search.rs —
+    modules déclarés, contenu géré par leurs propres specs (specs sœurs à produire,
+    cf. l'ordre de migration de /vanyline.sdd).
+  /tooling.sdd — harnais clippy/fmt et convention d'exemption des racines de crate.
+  (Les dépendances externes du crate — `tokio`, `tracing`, `serde`, `serde_json`,
+    `thiserror`, `futures`, `regex`, `globset`, `ignore`, `libc` — sont consommées par
+    les modules enfants, pas par la racine, qui n'en référence aucune.)
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] Attribut crate `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` :
+    il ne couvre aujourd'hui aucun code qui ne soit déjà couvert ailleurs — les quatre
+    modules dont les tests utilisent `unwrap` (./command.rs, ./filesystem.rs,
+    ./search.rs, ./mcp.rs) portent leur propre `#![allow(...)]` dans leur `mod tests`,
+    et ./error.rs comme ./output.rs n'en emploient aucun. La garder comme convention de
+    racine (filet pour les futurs `unwrap` non autrement exemptés) ou l'ôter au profit
+    d'exemptions uniquement par module ?
+  [?] Omission dans /tooling.sdd : sa liste `Can modify` énumère la ligne d'exemption
+    `cfg(test)` de chaque racine de crate (lib, app, cli, sandbox + binaires, controller,
+    crds, cfgstore) mais pas ./lib.rs, qui en porte pourtant une. Compléter tooling.sdd
+    (la ligne est bien la convention voulue partout) ou considérer que l'exemption
+    racine n'était pas prévue pour `vanyline-tools` ? Lié à l'entrée ci-dessus.
+  [?] Absence de surface plate à la racine : `vanyline_tools::ToolsError` ou
+    `vanyline_tools::read_file` sont des erreurs de compilation à ce jour. Confirmation
+    de garder l'adressage mono-chemin, ou ré-exporter au moins @ToolsError (le type le
+    plus transversal, présent dans toute signature d'outil) ?
+  [?] Les observables de ce fichier sont des propriétés de compilation (visibilité,
+    absence de re-export) : un test négatif (`surface_racine_sans_nom_plat`) exige
+    trybuild (absent des dev-dependencies de ../Cargo.toml) ou une vérification par
+    revue. Lequel choisir ?
+  [!] @BoxedFuture défini trois fois à l'identique (./command.rs, ./filesystem.rs,
+    ./search.rs) : hors du périmètre de cette racine — à trancher dans les specs sœurs
+    des trois modules (mutualiser, et si oui où).
+  [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
+    (implementer) — les Scenarios `surface_*` sont des tests de compilation,
+    `harnais_*` une commande cargo, pas des tests comportementaux — puis faire passer la
+    synthèse du validator au vert.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe.
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur `vanyline-tools`.
+
+Scenario: surface_racine_six_modules_publics
+  Given le crate `vanyline-tools` compilé sans feature (le crate n'en a aucune)
+  When un test référence @vanyline_tools::command::execute, @vanyline_tools::error::ToolsError,
+    @vanyline_tools::filesystem::read_file, @vanyline_tools::mcp::filesystem_tools,
+    @vanyline_tools::output::READ_MAX_LINES et @vanyline_tools::search::find_files —
+    des chemins de même forme que ceux employés par `sandbox`, `app` et `cli`
+  Then la compilation réussit — les six modules sont adressables tels quels sous
+    `vanyline_tools::` (test de surface)
+
+Scenario: surface_racine_sans_nom_plat
+  Given un fichier de test qui référence `vanyline_tools::ToolsError` ou
+    `vanyline_tools::read_file` (noms plats court-circuitant les modules)
+  When `cargo check -p vanyline-tools` s'exécute
+  Then le check échoue en import non résolu — la racine ne définit aucun re-export
+    (observable de compilation, cf. la question trybuild des `Tasks`)
+
+Scenario: harnais_test_exempte_production_deny
+  Given la commande de validation `cargo clippy -p vanyline-tools --all-targets
+    -- -D warnings`, qui compile aussi bien les profils production que `cfg(test)`
+  When le harnais s'exécute sur l'état actuel du crate
+  Then aucun lint `unwrap_used`/`expect_used` n'est signalé — les `mod tests` sont
+    exemptés (attribut racine et exemptions par module) — pendant qu'un `.unwrap()`
+    ajouté hors `mod tests` serait rejeté (rejet déjà contracté par le Scenario
+    `unwrap ajouté dans du code touché` de /tooling.sdd)

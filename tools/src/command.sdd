@@ -1,0 +1,484 @@
+Spec: command
+
+Platform: Rust/vanyline-tools/tokio
+
+Purpose:
+  Tool d'exécution de commandes shell pour agents LLM (`execute_command`) : @execute
+  lance `sh -c <command>`, capture stdout/stderr bornés, les rend dans une chaîne
+  formatée fixe (code de sortie, durée, sections `stdout:`/`stderr:`) et remonte les
+  échecs (argument vide, cwd invalide, I/O, timeout) en @ToolsError. Porte aussi la
+  forme désérialisée des arguments du tool (@ExecuteCommandOptions), dont le champ
+  `envs` réservé à l'hôte (`#[serde(skip)]`, feature python-support : overlay
+  `.venv/` posé par le sandbox) — jamais injectable par le LLM. Le schéma JSON MCP
+  (`./mcp.rs`), le `confine()` du sandbox et le default de timeout côté cli sont
+  hors de ce fichier (cf. `Depends on`). Contrat d'un seul fichier, pas de
+  regroupement.
+
+Owns:
+  ./command.rs
+
+Can read:
+  ../../sandbox/src/tools_impl.rs
+  ../../cli/src/tools.rs
+  ../../tooling.sdd
+
+Exposes:
+  @BoxedFuture — alias de type public `Pin<Box<dyn Future<Output = T> + Send +
+    'static>>`.
+  @ExecuteCommandOptions — struct publique des arguments du tool, derives @Debug,
+    @Serialize, @Deserialize, @Default. Forme JSON : voir `Accepts`. @Default::default()
+    = commande vide + timeout 0 + cwd vide + `envs` vide (donc rejetée par @execute
+    comme commande vide).
+    `command: String` — commande passée à `sh -c` ; seul champ requis à la
+      désérialisation (pas de `#[serde(default)]`).
+    `timeout_secs: u64` — `#[serde(default)]` (absence = 0). `0` = AUCUN timeout
+      (attente illimitée) ; toute autre valeur = plafond en secondes appliqué à
+      l'attente entière (sortie + EOF des pipes).
+    `cwd: String` — `#[serde(default)]` (absence = vide). Vide = le fils hérite du
+      cwd du processus portant ce code ; sinon répertoire de travail résolu ici même
+      avant spawn.
+    `envs: Vec<(String, String)>` — `#[serde(skip)]` : jamais désérialisé (vaut
+      toujours @Default::default(), vide, quel que soit le JSON reçu) et jamais
+      sérialisé. Paires additionnelles appliquées à l'environnement du fils juste
+      avant `spawn()`, APRÈS héritage. Posé uniquement par du code hôte (sandbox
+      `dispatch_command` avec la sortie de @venv::venv_overlay) ; vide = comportement
+      historique strict (cli, tests).
+  @execute — fonction publique `#[must_use]`, PAS `async fn` : retourne un
+    @BoxedFuture de `Result<String, @ToolsError>` (signature pour l'object safety
+    des appelants). Le corps est décrit en `Handles`, le succès en `Returns`, les
+    échecs en `Raises`.
+
+Accepts:
+  Arguments JSON du tool (désérialisés par les appelants en @ExecuteCommandOptions) :
+    `{"command": <string>[, "timeout_secs": <integer>][, "cwd": <string>]}` —
+    `command` requis (absente ou mal typée → @serde_json::Error côté appelant, jamais
+    une @ToolsError) ; `timeout_secs` et `cwd` optionnels (`#[serde(default)]` : 0 et
+    vide) ; les champs JSON inconnus sont ignorés silencieusement (défaut serde, pas
+    de `deny_unknown_fields`) — notamment une clé `"envs"` envoyée par le LLM est
+    ignorée sans erreur, le champ n'étant pas désérialisable (cf. `Tasks`).
+  @execute elle-même accepte toute @ExecuteCommandOptions. Aucune restriction de
+    caractères ni de longueur sur `command` : exécutée via `sh -c`, les
+    métacaractères shell (quotes, pipes, `&&`, substitutions) et l'injection de
+    commande sont possibles PAR DESIGN — le tool est un shell, pas un exec argv.
+  `cwd` : un chemin de système de fichiers, statué par @tokio::fs::metadata (symlinks
+    suivis) puis passé à `current_dir`.
+  Les paires de `envs` sont libres (aucune validation de clé/valeur, aucun
+    développement de variable, aucune restriction à un sous-ensemble).
+
+Returns:
+  @execute succès — `Ok(String)` exactement en quatre parties, format figé :
+    `"exit code: {n}\nduration: {d}s\nstdout:\n{stdout}\nstderr:\n{stderr}"` où :
+    `{n}` — code de sortie du shell ; un processus mort sur signal (`status.code()`
+      = `None`) est rendu `-1` (convention à formaliser, cf. `Tasks`) ;
+    `{d}` — temps mesuré en `as_secs_f64` à 2 décimales (`{:.2}`), horloge démarrant
+      juste avant le spawn et s'arrêtant à la fin de l'attente — N'INCLUT PAS la
+      résolution du cwd ;
+    `{stdout}` / `{stderr}` — flux capturés, octets invalides remplacés par U+FFFD
+      (@String::from_utf8_lossy), puis bornés CHACUN PAR @output::bound_head_tail
+      avec @output::COMMAND_MAX_BYTES (8 KiB) : si dépassé, tête + queue sur
+      frontières de lignes séparées par `[... {n} bytes truncated ...]`.
+    Un flux vide se rend en section vide (deux sections vides = `stdout:\n` suivi
+      immédiatement de `\nstderr:`).
+  Un code de sortie non nul est un SUCCÈS (`Ok`) — le code vit dans la chaîne
+    retournée, jamais dans une @ToolsError.
+
+Raises:
+  @execute — en @ToolsError, dans cet ordre d'évaluation :
+    1. @ToolsError::InvalidArgument (VNL-TLS-005), `name` = `"command"`, `reason` =
+      `"must not be empty"` — commande vide, vérifiée AVANT toute résolution de cwd ;
+    2. @ToolsError::FileNotFound (VNL-TLS-001) — cwd non vide dont @tokio::fs::metadata
+      échoue en `NotFound` ; `path` = `cwd`, `hint` =
+      @filesystem::file_not_found_hint(`cwd`) (contenu trié du parent existant, ou
+      mention de l'absence du parent) ;
+    3. @ToolsError::Io (VNL-TLS-009) — cwd non vide dont metadata échoue pour toute
+      autre raison (notamment `PermissionDenied` → VNL-TLS-009, jamais VNL-TLS-004,
+      cf. `Tasks`) ; `path` = `cwd` ;
+    4. @ToolsError::NotADirectory (VNL-TLS-003), path = `cwd` — metadata OK mais pas
+      un répertoire ;
+    5. @ToolsError::Io (VNL-TLS-009) — échec de `spawn()` du `sh` ou erreur de
+      `wait_with_output()` hors chemin timeout ; `path` = la chaîne
+      `"command: {command}"` (via `format!`) — un identifiant de commande, PAS un
+      chemin de fichier ;
+    6. @ToolsError::CommandTimeout (VNL-TLS-008), valeur = `timeout_secs` configuré —
+      attente dépassée ; la sortie partielle capturée est PERDUE, non retournée (en
+      décalage avec le message « partial output kept », cf. `Tasks`).
+  Les variantes @ToolsError::NotAFile, ::PermissionDenied, ::EditNoMatch et
+    ::EditAmbiguous ne sortent jamais de ce fichier.
+
+Handles:
+  Exécution — le fils est toujours `sh -c <command>` (@tokio::process::Command) :
+    stdout et stderr en @Stdio::piped ; stdin JAMAIS configuré (hérité du processus
+    portant — une commande interactive peut donc bloquer jusqu'au timeout, cf.
+    `Tasks`) ; @kill_on_drop(true) ; @process_group(0) — groupe de processus dédié,
+    pgid == pid du fils ; `current_dir` posé seulement si `cwd` non vide ; paires de
+    `envs` appliquées dans l'ordre du Vec via `cmd.env` juste avant spawn.
+  Environnement du fils — TOUJOURS additif : l'environnement hérité du processus
+    portant n'est jamais vidé (`env_clear` absent) ni retiré ; une même clé répétée
+    dans `envs` est gagnée par la dernière paire ; l'usage hôte (sandbox) préfixe
+    `PATH` et pose `VIRTUAL_ENV` pour l'activation `.venv/`.
+  Horloge — @Instant::now pris juste après la résolution du cwd et avant le spawn ;
+    la durée rapportée inclut spawn + attente ; le timeout tokio est armé sur
+    l'attente (`wait_with_output`), pas sur le spawn.
+  Attente — `wait_with_output` court jusqu'à la sortie du fils ET l'EOF des deux
+    pipes : un descendant en arrière-plan qui hérite stdout/stderr prolonge
+    l'attente au-delà de la mort du `sh` (avec timeout = imputable au timeout ;
+    sans timeout = attente potentiellement illimitée).
+  Pas de timeout (`timeout_secs == 0`) — `wait_with_output().await` nu, sans
+    @tokio::time::timeout (comportement historique cli/tests).
+  Timeout (`timeout_secs > 0`) — @tokio::time::timeout enveloppe l'attente entière ;
+    à l'expiration, le futur interne est abandonné (kill_on_drop tue le `sh` direct),
+    puis `libc::kill(-pid, SIGKILL)` cible le GROUPE de processus (pgid == pid du
+    leader) : tue `sh` et tous ses descendants — y compris les `&` en arrière-plan —
+    pas seulement `sh` (régression R8 qui ne doit jamais revenir). kill(2) est
+    best-effort : valeur de retour ignorée, ESRCH (déjà mort) et toute autre erreur
+    non remontés ; @CommandTimeout est la seule erreur propagée. Le kill est gardé
+    par l'@Option de `child.id()` (`None` impossible juste après spawn, cf. `Tasks`).
+  Annulation par l'appelant — si le futur rendu par @execute est abandonné (drop)
+    par son appelant, kill_on_drop tue le `sh` direct mais AUCUN kill de groupe
+    n'existe sur ce chemin : les descendants en arrière-plan survivent (cf. `Tasks`).
+  Unsafe — l'appel kill(2) est le seul bloc `unsafe` du fichier, exempté par
+    `#[allow(unsafe_code)]` + commentaire SAFETY d'une ligne : l'un des trois sites
+    `libc` légitimes pour lesquels `tooling.sdd` maintient `unsafe_code = deny` (et
+    non `forbid`).
+  Encodage — les deux flux sont décodés en `from_utf8_lossy` (U+FFFD sur octets
+    invalides) : une sortie binaire n'est jamais une erreur, elle est rendue
+    « abîmée mais lisible ».
+
+Depends on:
+  ./error.rs — @ToolsError et ses identifiants VNL-TLS-001/-003/-005/-008/-009.
+  ./output.rs — @output::bound_head_tail et @output::COMMAND_MAX_BYTES (8 KiB).
+  ./filesystem.rs — @filesystem::file_not_found_hint (`pub(crate)`, hint partagé
+    avec les tools fichier).
+  ./mcp.rs — schéma JSON `execute_command` déclaré hors de ce fichier (propriétés
+    `command`/`timeout_secs`/`cwd`, seul `command` requis ; texte « default 30 »
+    contredit par le défaut serde 0 — cf. `Tasks`).
+  @tokio::process (@Command, @Stdio, kill_on_drop, process_group), @tokio::fs::metadata,
+    @tokio::time::timeout, @libc::kill / @libc::SIGKILL, @serde (derive),
+    @std::time::Instant.
+  ../../sandbox/src/tools_impl.rs — appelant principal (`dispatch_command`) :
+    désérialise les args MCP `tools/call` en @ExecuteCommandOptions, passe TOUJOURS
+    `cwd` par `confine()` (cwd effectif par défaut = `sandbox_root`, jamais vide
+    côté @execute dans le sandbox), pose `envs` depuis @venv::venv_overlay
+    (recalculé à chaque appel, un `.venv` apparu en session est vu dès la commande
+    suivante).
+  ../../cli/src/tools.rs — harnais cli : force `timeout_secs` à 30 quand absent
+    (décision hors de ce fichier), `envs` toujours vide (l'activation `.venv` est
+    propre au sandbox).
+
+Must:
+  Rejeter une `command` vide par @ToolsError::InvalidArgument AVANT tout autre
+    contrôle (y avant la résolution du cwd).
+  Lancer le `sh -c` dans un groupe de processus dédié (`process_group(0)`) avec
+    `kill_on_drop(true)`.
+  Au timeout, tuer le GROUPE entier (`kill(-pgid, SIGKILL)`, best-effort) avant de
+    retourner @CommandTimeout(`timeout_secs`) — tuer le seul `sh` est la régression
+    R8 contractée interdite.
+  Rendre `Ok` sur tout code de sortie, y compris non nul : le code vit dans la
+    chaîne `"exit code: {n}"`.
+  Borner stdout et stderr chacun à @output::COMMAND_MAX_BYTES via @bound_head_tail
+    (frontières de lignes, marqueur `[... {n} bytes truncated ...]`).
+  Garder `envs` jamais désérialisable ni sérialisable (`#[serde(skip)]`) — un LLM ne
+    peut injecter AUCUNE variable d'environnement ; la non-injectabilité est vérifiée
+    en test.
+  Appliquer `envs` en additif, dans l'ordre du Vec, juste avant spawn — dernière
+    paire gagnante sur clé dupliquée.
+  Rendre la sortie en UTF-8 lossy sans jamais errer sur des octets invalides.
+  Rester compatible harnais (../../tooling.sdd) : aucun `unwrap`/`expect`/`panic!`/
+    `println!` en production ; le seul `unsafe` est le bloc kill(2) avec
+    `#[allow(unsafe_code)]` ciblé et commentaire SAFETY d'une ligne ; le module de
+    test porte l'exemption locale unwrap/expect (et l'allow `non_snake_case`
+    justifié du test `execute_envs_path_tete_de_LISTE`).
+
+Must not:
+  Traiter un code de sortie non nul comme une @ToolsError.
+  Désérialiser `envs` depuis le JSON des arguments du tool — ni même signaler sa
+    présence : la clé `"envs"` envoyée par un LLM est silencieusement ignorée.
+  Remonter une erreur de kill(2) (ESRCH ou autre) autrement que comme
+    @CommandTimeout.
+  Vider l'environnement hérité du fils ni retirer une variable via `envs` (overlay
+    additif uniquement).
+  Utiliser @ToolsError::PermissionDenied pour une erreur de permission sur le cwd
+    (tombe en @ToolsError::Io — cf. `Tasks`).
+  Introduire un nouveau site `unsafe` dans ce fichier — l'exemption kill(2) est
+    l'exception nominative du harnais.
+  Retourner la sortie partielle capturée avant un timeout (le comportement actuel
+    la jette — cf. `Tasks`).
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat (reverse
+    du 2026-09-25), en priorité sur les points `[?]` ci-dessous.
+  [?] Le message de @ToolsError::CommandTimeout dit « (partial output kept) » alors
+    que le chemin timeout ABANDONNE le futur de `wait_with_output` et jette la
+    sortie déjà capturée. Corriger le message ou conserver et restituer la sortie
+    partielle (le message promet ce que le code ne fait pas) ?
+  [?] Le schéma MCP (`./mcp.rs`) annonce `timeout_secs` « default 30 » mais le défaut
+    serde est 0 = illimité, et `dispatch_command` ne force rien : un LLM qui omet
+    `timeout_secs` dans le sandbox lance une exécution SANS AUCUNE limite (seul le
+    cli force 30, hors de ce fichier). Imposer 30 côté sandbox, défaut 30 ici, ou
+    corriger le texte du schéma ?
+  [?] Annulation par l'appelant (futur rendu par @execute dropé) : kill_on_drop tue
+    le `sh` direct mais il n'y a pas de kill de groupe sur ce chemin — les
+    descendants `&` en arrière-plan survivent à l'annulation. Corriger (kill de
+    groupe au Drop) ou considérer que l'annulation n'arrive jamais (MCP
+    n'interrompt pas) ?
+  [?] Erreur de permission sur `cwd` (metadata en EACCES) : remonte @ToolsError::Io
+    (VNL-TLS-009), jamais @PermissionDenied (VNL-TLS-004, variante jamais utilisée
+    par ce fichier). Volonté (« le lint n'est pas le lieu du refus ») ou erreur
+    d'aiguillage à corriger ?
+  [?] Clé `"envs"` dans le JSON d'arguments du LLM : ignorée silencieusement (pas de
+    `deny_unknown_fields`). Silence assumé ou erreur explicite pour signaler au
+    LLM que le paramètre n'existe pas ?
+  [?] Code de sortie `-1` pour une mort sur signal (`status.code()` = `None`) :
+    convention à formaliser comme contrat (le LLM peut la confondre avec les 126/127
+    de `sh`) ?
+  [?] stdin hérité du processus serveur : une commande interactive peut bloquer
+    jusqu'au timeout — et indéfiniment si `timeout_secs` omis (lié à la question du
+    défaut 30). Contrat voulu ou `Stdio::null()` ?
+  [?] `child.id()` = `None` (fils déjà réapré) garde le kill de groupe : branche
+    inatteignable juste après spawn. Défense-en-profondeur assumée ou code mort à
+    retirer ?
+  [ ] Le chemin « spawn échoué » (@Io avec `path` = `command: {command}`) n'a aucun
+    test et reste difficile à déclencher (`sh` est pratiquement toujours présent).
+    Test avec PATH factice ou simple contrat ?
+  [ ] Dériver un test par Scenario encore sans test (chacun taggé du titre de son
+    Scenario) : `commande_vide_prioritaire_sur_cwd`, `exit_code_signal_vaut_minus_un`,
+    `stream_vides_sections_vides`, `stderr_capture_dans_section_stderr`,
+    `attente_sortie_jusqu_a_fermeture_pipes`, `timeout_jette_sortie_partielle`,
+    `cwd_vide_herite_du_processus_courant`, `cwd_symlink_vers_repertoire_accepte`,
+    `cwd_parent_inaccessible_erreur_io`, `utf8_invalide_remapensee_en_fffd`,
+    `envs_meme_cle_derniere_paire_gagne`, `envs_jamais_deserialisees`,
+    `envs_absentes_de_la_serialisation`, `timeout_secs_et_cwd_defauts_deser`,
+    `processus_lance_dans_groupe_dedie`, `future_annulee_tue_le_fils_direct`
+    (risque de flakiness — détection par `pgrep`, marge large).
+  [ ] Renforcer les tests existants sur les Scenarios partiellement couverts :
+    `test_stdout_truncated`/`test_stderr_truncated` n'assertent que la présence de
+    « bytes truncated », pas la borne 8 KiB ni la forme tête+queue ;
+    `test_cwd_not_found` n'asserte pas le `hint` ; `test_duration_present`
+    n'asserte pas la forme complète à quatre sections.
+  [ ] Cartographie des tests existants → Scenarios : `test_empty_command` →
+    `commande_vide_invalid_argument` ; `test_quotes_respected` + `test_pipe_works` →
+    `shell_semantique_quotes_et_pipe` ; `test_nonzero_exit_code` →
+    `exit_code_non_zero_reste_ok` ; `test_duration_present` →
+    `sortie_formatee_quatre_sections` (partiel) ; `test_unlimited_timeout` →
+    `timeout_zero_completion_normale` ; `test_timeout_efficient` →
+    `timeout_depasse_command_timeout` ;
+    `test_timeout_kills_process_group_not_just_direct_child` →
+    `timeout_tue_groupe_et_descendants` ; `test_cwd` → `cwd_applique_au_process` ;
+    `test_cwd_not_found` → `cwd_inexistant_file_not_found_avec_hint` (partiel) ;
+    `test_cwd_not_a_directory` → `cwd_fichier_regulier_not_a_directory` ;
+    `test_stdout_truncated` → `stdout_borne_tete_et_queue_8kib` (partiel) ;
+    `test_stderr_truncated` → `stderr_borne_tete_et_queue_8kib` (partiel) ;
+    `execute_envs_appliquees` → `envs_appliquees_au_process` ;
+    `execute_envs_path_tete_de_LISTE` → `envs_surcharge_path_tete_de_liste` ;
+    `execute_envs_vide_identique` → `envs_vides_comportement_historique`.
+
+Done when:
+  Chaque Scenario dispose d'un test taggé par son titre et passe.
+  Les questions `[?]` sont tranchées par Sébastien.
+  La batterie complète est verte sur `vanyline-tools` (../../tooling.sdd).
+
+Scenario: commande_vide_invalid_argument
+  Given un @ExecuteCommandOptions avec `command` vide et `timeout_secs` 5
+  When @execute est attendu
+  Then le résultat est @ToolsError::InvalidArgument avec `name` = `"command"` et
+    `reason` contenant `"must not be empty"` (VNL-TLS-005)
+
+Scenario: commande_vide_prioritaire_sur_cwd
+  Given un @ExecuteCommandOptions avec `command` vide ET `cwd` =
+    `"/nonexistent/path/xyz"`
+  When @execute est attendu
+  Then l'erreur est @ToolsError::InvalidArgument (commande vide), PAS
+    @ToolsError::FileNotFound — le contrôle de la commande passe avant celui du cwd
+
+Scenario: shell_semantique_quotes_et_pipe
+  Given `timeout_secs` 5 et `envs` vide
+  When @execute lance `r#"echo "hello world""#` puis séparément
+    `"echo hi | tr a-z A-Z"`
+  Then le premier rendu `Ok` contient `"hello world"` (quotes respectées) et le
+    second contient `"HI"` (pipeline shell fonctionnel)
+
+Scenario: exit_code_non_zero_reste_ok
+  Given `command` = `"false"` et `timeout_secs` 5
+  When @execute est attendu
+  Then le résultat est `Ok` (aucune erreur) et la chaîne contient `"exit code: 1"`
+
+Scenario: exit_code_signal_vaut_minus_un
+  Given `command` = `"kill -9 $$"` (le `sh` se tue lui-même par signal) et
+    `timeout_secs` 5
+  When @execute est attendu
+  Then le résultat est `Ok` contenant `"exit code: -1"` — pas de code de sortie
+    disponible (mort sur signal) rendu par la convention `-1`
+
+Scenario: sortie_formatee_quatre_sections
+  Given `command` = `"echo test"` et `timeout_secs` 5
+  When @execute est attendu
+  Then la chaîne `Ok` contient dans l'ordre la ligne `"exit code: 0"`, une ligne
+    `"duration: "` suivie d'un nombre à 2 décimales puis `"s"`, la section
+    `"stdout:"` incluant la ligne `"test"`, puis la section `"stderr:"`
+
+Scenario: stream_vides_sections_vides
+  Given `command` = `"true"` (aucune sortie) et `timeout_secs` 5
+  When @execute est attendu
+  Then la chaîne `Ok` contient `"stdout:\n\nstderr:"` — les deux flux vides se
+    rendent en sections vides consécutives
+
+Scenario: stderr_capture_dans_section_stderr
+  Given `command` = `"echo out; echo err 1>&2"` et `timeout_secs` 5
+  When @execute est attendu
+  Then la partie avant le séparateur `"\nstderr:\n"` contient `"out"` et ne
+    contient pas `"err"`, et la partie après contient `"err"`
+
+Scenario: timeout_zero_completion_normale
+  Given `command` = `"echo ok"` et `timeout_secs` 0 (aucune limite)
+  When @execute est attendu
+  Then le résultat est `Ok` contenant `"ok"` — l'absence de timeout n'altère pas la
+    complétion normale (comportement historique)
+
+Scenario: timeout_depasse_command_timeout
+  Given `command` = `"sleep 5"` et `timeout_secs` 1
+  When @execute est attendu et le temps écoulé est mesuré
+  Then le résultat est @ToolsError::CommandTimeout(1) et le temps écoulé est nettement
+    inférieur à `sleep 5` (< 3 s) — le kill borné suit le timeout
+
+Scenario: timeout_tue_groupe_et_descendants
+  Given un fichier marqueur absent, `command` = `"(sleep 2 && touch <marqueur>) &
+    sleep 100"` (arrière-plan `&` + avant-plan bloquant) et `timeout_secs` 1
+  When @execute est attendu, puis on attend 3 s
+  Then le résultat est @ToolsError::CommandTimeout(1) et le marqueur n'existe PAS —
+    l'arrière-plan `&` a été tué par le SIGKILL du groupe (régression R8)
+
+Scenario: timeout_jette_sortie_partielle
+  Given `command` = `"echo visible; sleep 5"` et `timeout_secs` 1
+  When @execute est attendu
+  Then le résultat est `Err(@ToolsError::CommandTimeout(1))` et la chaîne d'erreur ne
+    contient PAS `"visible"` — la sortie émise avant l'expiration est perdue (cf.
+    `Tasks` sur le message « partial output kept »)
+
+Scenario: attente_sortie_jusqu_a_fermeture_pipes
+  Given `command` = `"sleep 2 & echo vite"` (l'arrière-plan hérite du pipe stdout) et
+    `timeout_secs` 10
+  When @execute est attendu et le temps écoulé est mesuré
+  Then le résultat est `Ok` contenant `"vite"` et le temps écoulé est d'environ 2 s
+    ou plus — l'attente court jusqu'à l'EOF des pipes, pas jusqu'à la sortie du `sh`
+
+Scenario: cwd_applique_au_process
+  Given un répertoire temporaire existant passé en `cwd` et `command` = `"pwd"`
+  When @execute est attendu
+  Then la première ligne de la section stdout, canonifiée, égale le chemin canonique
+    du répertoire temporaire
+
+Scenario: cwd_vide_herite_du_processus_courant
+  Given `cwd` vide et `command` = `"pwd"`
+  When @execute est attendu
+  Then la première ligne de la section stdout, canonifiée, égale le cwd canonique du
+    processus de test — le fils hérite du cwd portant
+
+Scenario: cwd_inexistant_file_not_found_avec_hint
+  Given un répertoire temporaire contenant `a.txt` et `b.txt`, et `cwd` =
+    un chemin inexistant dans ce répertoire (`<tmp>/manquant`)
+  When @execute est attendu
+  Then le résultat est @ToolsError::FileNotFound (VNL-TLS-001) avec `path` contenant
+    `"manquant"` et un `hint` listant le contenu du parent (`"a.txt"` et `"b.txt"`)
+
+Scenario: cwd_fichier_regulier_not_a_directory
+  Given un fichier régulier existant passé en `cwd`
+  When @execute est attendu
+  Then le résultat est @ToolsError::NotADirectory (VNL-TLS-003) dont le path contient
+    le nom du fichier
+
+Scenario: cwd_symlink_vers_repertoire_accepte
+  Given un lien symbolique vers un répertoire existant passé en `cwd` et
+    `command` = `"pwd"`
+  When @execute est attendu
+  Then le résultat est `Ok` et le pwd canoniqué égale le répertoire cible — metadata
+    suit les liens symboliques
+
+Scenario: cwd_parent_inaccessible_erreur_io
+  Given un répertoire en mode `000` (inaccessible au processus de test, test lancé
+    non-root comme en CI) et `cwd` = un chemin sous ce répertoire
+  When @execute est attendu
+  Then le résultat est @ToolsError::Io (VNL-TLS-009), PAS @PermissionDenied —
+    cf. `Tasks`
+
+Scenario: stdout_borne_tete_et_queue_8kib
+  Given `command` générant nettement plus de 8 KiB sur stdout (boucle `seq 1 5000`
+    de lignes à rallonge) et `timeout_secs` 10
+  When @execute est attendu
+  Then la chaîne `Ok` contient le marqueur `"bytes truncated"` dans la section
+    stdout, la toute première ligne émise (tête) et la toute dernière (queue), et la
+    section stdout bornée reste de l'ordre de @output::COMMAND_MAX_BYTES
+
+Scenario: stderr_borne_tete_et_queue_8kib
+  Given `command` générant nettement plus de 8 KiB sur stderr (`1>&2`, boucle
+    `seq 1 5000`) et `timeout_secs` 10
+  When @execute est attendu
+  Then la chaîne `Ok` contient `"bytes truncated"` APRÈS le séparateur
+    `"\nstderr:\n"`, avec tête et queue du flux stderr
+
+Scenario: utf8_invalide_remapensee_en_fffd
+  Given `command` = `"printf '\377'"` (octet `0xFF`, UTF-8 invalide) et
+    `timeout_secs` 5
+  When @execute est attendu
+  Then le résultat est `Ok` (jamais une erreur d'encodage) et la section stdout
+    contient le caractère de remplacement `U+FFFD`
+
+Scenario: envs_appliquees_au_process
+  Given `envs` = `vec![("VNL_TEST_ENV", "overlay-ok")]` et `command` =
+    `r#"echo "${VNL_TEST_ENV:-absent}""#`
+  When @execute est attendu
+  Then la chaîne `Ok` contient `"overlay-ok"` et ne contient pas `"absent"` — la
+    paire posée par l'hôte est visible du fils
+
+Scenario: envs_surcharge_path_tete_de_liste
+  Given un script exécutable `vnl-env-marker` dans un répertoire temporaire, `envs` =
+    `PATH` préfixé de ce répertoire, et `command` = `"vnl-env-marker"`
+  When @execute est attendu avec l'overlay, puis sans overlay (`envs` vide)
+  Then avec overlay la chaîne `Ok` contient `"marker-ok"` et `"exit code: 0"` (la
+    commande n'existe que via la tête de `PATH`) ; sans overlay le même appel rend un
+    code de sortie non nul (résolution impossible — 127 selon le shell)
+
+Scenario: envs_vides_comportement_historique
+  Given `envs` vide et `command` = `r#"echo "${VNL_TEST_ENV:-absent}""#`
+  When @execute est attendu
+  Then la chaîne `Ok` contient `"absent"` et pas `"overlay-ok"` — aucune variable
+    additionnelle n'est injectée
+
+Scenario: envs_meme_cle_derniere_paire_gagne
+  Given `envs` = `vec![("VNL_DUP", "premiere"), ("VNL_DUP", "seconde")]` et
+    `command` = `"echo $VNL_DUP"`
+  When @execute est attendu
+  Then la chaîne `Ok` contient `"seconde"` — les paires sont appliquées dans l'ordre
+    et la dernière pour une clé dupliquée gagne
+
+Scenario: envs_jamais_deserialisees
+  Given le JSON `{"command":"x","envs":[["FOO","bar"]]}` (clé `envs` forgée par un
+    LLM)
+  When il est désérialisé en @ExecuteCommandOptions
+  Then la désérialisation réussit et le champ `envs` lu est VIDE — le JSON des
+    arguments du tool ne peut jamais porter d'environnement
+
+Scenario: envs_absentes_de_la_serialisation
+  Given une @ExecuteCommandOptions avec `envs` non vide
+  When elle est sérialisée en JSON
+  Then l'object obtenu porte exactement les clés `command`, `timeout_secs`, `cwd` —
+    `envs` n'apparaît jamais dans la forme sérialisée
+
+Scenario: timeout_secs_et_cwd_defauts_deser
+  Given le JSON `{"command":"x"}` sans `timeout_secs` ni `cwd`
+  When il est désérialisé en @ExecuteCommandOptions
+  Then `timeout_secs` vaut 0 et `cwd` est vide — les absences valent les défauts
+    historiques (aucun timeout, cwd hérité)
+
+Scenario: processus_lance_dans_groupe_dedie
+  Given `command` = `"ps -o pgid= -p $$"` (pgid du `sh` lui-même) et `timeout_secs` 5
+  When @execute est attendu
+  Then le pgid rapporté diffère du pgid du processus de test — le fils est leader de
+    son propre groupe (`process_group(0)`)
+
+Scenario: future_annulee_tue_le_fils_direct
+  Given le futur rendu par @execute sur `command` = `"sleep 987654"`
+    (`timeout_secs` 0, marqueur unique) est starté une fois puis abandonné (drop —
+    annulation à la source par l'appelant)
+  When on attend un court instant puis on cherche le processus (par nom)
+  Then le `sh`/fils direct n'est plus là (kill_on_drop) — les descendants en
+    arrière-plan survivent faute de kill de groupe sur ce chemin (cf. `Tasks`)

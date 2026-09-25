@@ -1,0 +1,575 @@
+Spec: Lib
+
+Platform: Rust/vanyline-crds
+
+Purpose:
+  Racine unique du crate `vanyline-crds`, feuille sans runtime du monorepo : les définitions
+  des quatre CRDs namespacées du controller (`vanyline.solidite.fr/v1alpha1` — Owner,
+  Project, Sandbox, Application) sous forme de structs Rust + leurs schémas OpenAPI, et les
+  constantes / conventions de nommage partagées entre controller, `vanyline-lib` (feature
+  `k8s`), `cli`, `app` et `sandbox`. Le crate ne contient AUCUNE logique de reconcile : son
+  comportement observable est intégralement de la (dé)sérialisation — chaque struct `Spec`/
+  `Status` est un contrat de sérialisation K8s (schéma structural de la CRD, clés camelCase,
+  requis/optionnels, défauts serde) lu par l'apiserver, écrit par le CLI/`app`/les tests du
+  controller, et repatché en `Patch::Merge` par les reconcilers (`controller/src/project.rs`
+  ligne 736 par ex.). Le crate porte aussi la génération des manifests CRD
+  (@crd_manifests, consommé par `controller --crds` et `deploy/controller/generate-crds.sh`)
+  et la convention du Service MCP (@service_name + @MCP_PORT). Le comportement « à la
+  sérialisation près » inclut les deux `skip_serializing_if` de @ProjectStatus qui protègent
+  les valeurs écrites par le Job `detect` contre les merge-patchs de routine du reconciler
+  Project. Les valeurs par défaut MÉTIER (`"1Gi"`, caches `["cargo", "pnpm", "pip"]`,
+  fetch `"1h"`, modes d'accès, presets LSP) ne vivent pas ici : ce crate ne porte que le
+  champ `Option` dont l'absence les déclenche, appliquées par le controller — la spec ne
+  fait que nommer ce lien, sans le contracter.
+
+Owns:
+  ./lib.rs
+
+Can read:
+  ../Cargo.toml
+  /tooling.sdd
+  /vanyline.sdd
+  /docs/architecture.md
+  /controller/src/project.rs
+  /controller/src/owner.rs
+  /controller/src/main.rs
+  /lib/src/k8s.rs
+
+Structure:
+  ./lib.rs — quatre blocs @CustomResource (Owner, Project, Sandbox, Application), types
+    partagés entre specs (@EgressRule, @EgressPort), types d'appui par spec
+    (@ProjectDefaults, @IngressControllerRef, @PvcRef, @Toolchain, @LspSpec,
+    @ApplicationStorageDefaults), quatre structs de status, deux items d'interface publique
+    hors types (@crd_manifests, @MCP_PORT + @service_name), et le module `#[cfg(test)]`.
+    Ordre physique : Owner (avec ses types annexes) → Project → Sandbox → Application →
+    @crd_manifests → @MCP_PORT / @service_name → tests.
+    Consommation externe : `controller` (reconcilers + `--crds`), `vanyline-lib` feature
+    `k8s` (@service_name, @MCP_PORT dans @VnlK8sClient::sandbox_mcp_url — spec sœur
+    `k8s.sdd` de `vanyline-lib`), `cli` (construction des specs + enveloppes RPC), `app`
+    (routes REST + relais), `sandbox` (type @Project seulement, dans son utilitaire de
+    maintenance `maint.rs` — aucun usage de @service_name/@MCP_PORT/@crd_manifests trouvé).
+
+Must:
+  Exempter uniquement le profil test via `#![cfg_attr(test, allow(clippy::unwrap_used,
+    clippy::expect_used))]` : en production le harnais de /tooling.sdd garde ces lints en
+    deny (cette ligne est la dette tranchée de /tooling.sdd pour ./lib.rs).
+  Dériver @OwnerSpec avec @CustomResource exactement sous : `group = "vanyline.solidite.fr"`,
+    `version = "v1alpha1"`, `kind = "Owner"`, namespaced, `status = "OwnerStatus"` ; deux
+    printcolumns — `SA` (string, `.status.serviceAccount`) et `PVC` (string,
+    `.status.pvcName`).
+  Dériver @ProjectSpec avec les mêmes groupe/version, `kind = "Project"`, namespaced,
+    `status = "ProjectStatus"` ; trois printcolumns — `Owner` (string, `.spec.owner`),
+    `Repo` (string, `.spec.repoUrl`), `Cloned` (boolean, `.status.cloned`).
+  Dériver @SandboxSpec avec les mêmes groupe/version, `kind = "Sandbox"`, namespaced,
+    `status = "SandboxStatus"` ; trois printcolumns — `Project` (string, `.spec.project`),
+    `Branch` (string, `.spec.branch`), `Phase` (string, `.status.phase`).
+  Dériver @ApplicationSpec avec les mêmes groupe/version, `kind = "Application"`, namespaced,
+    `status = "ApplicationStatus"` ; deux printcolumns — `Host` (string, `.spec.host`),
+    `Ready` (string, `.status.phase`).
+  Exposer par le derive @CustomResourceExt les méthodes @Owner::crd, @Project::crd,
+    @Sandbox::crd, @Application::crd produisant les @CustomResourceDefinition K8s dont
+    `metadata.name` vaut `owners.vanyline.solidite.fr`, `projects.vanyline.solidite.fr`,
+    `sandboxes.vanyline.solidite.fr`, `applications.vanyline.solidite.fr` respectivement,
+    `spec.scope` = `Namespaced`, `spec.versions[0].name` = `v1alpha1`, et la version déclare
+    le sous-ressource `status` (attribut `status = "..."`).
+  Appliquer `#[serde(rename_all = "camelCase")]` à TOUTES les structs sérialisables du
+    fichier : les quatre Spec, les quatre Status, et les huit types d'appui (@ProjectDefaults,
+    @IngressControllerRef, @EgressRule, @EgressPort, @PvcRef, @Toolchain, @LspSpec,
+    @ApplicationStorageDefaults). Les clés JSON sont donc camelCase (`repoUrl`,
+    `applicationRef`, `podSelector`, `oidcSecretRef`, `detectedAt`, …), jamais snake_case.
+  Appliquer @JsonSchema (schemars 1) à toutes ces structs, consommé par kube pour générer le
+    schéma structural de chaque CRD ; les champs `Option` et ceux marqués `default` ne sont
+    pas requis au sens du schéma, les autres le sont.
+  Rendre @OwnerSpec entièrement optionnelle : `existingPvc`, `homeSize`, `homeStorageClass`,
+    `homeAccessMode`, `projectDefaults`, `applicationRef` sont `Option` (absent ⇒ `None` par
+    serde) et `egress` porte `#[serde(default)]` (absent ⇒ vec vide) — un `spec: {}` est
+    valide et produit l'@OwnerSpec par défaut. Les défauts métier downstream
+    (`homeSize` ⇒ `"1Gi"`, `homeAccessMode` ⇒ `ReadWriteMany` — `controller/src/owner.rs`)
+    sont appliqués au reconcile, jamais ici.
+  Définir @ProjectDefaults avec trois champs `Option<String>` (`storageSize`,
+    `storageClass`, `storageAccessMode`) servant de repli pour @ProjectSpec ; le repli final
+    `ReadWriteOnce` est interprété par le controller, pas par ce type.
+  Définir @IngressControllerRef avec `namespace` requis et `podLabels: BTreeMap<String,
+    String>` requis (une map vide sérialisée `{}` est valide) ; aucun `#[serde(default)]`.
+  Définir @EgressRule avec `description` requis (chaîne non vide NON vérifiée ici),
+    `cidr` / `podSelector` / `namespaceSelector` optionnels et `ports` à
+    `#[serde(default)]` (absent ⇒ vec vide). L'exclusivité `cidr` XOR `podSelector` et la
+    combinabilité `namespaceSelector` avec `podSelector` NE SONT PAS validées par ce type ni
+    par le schéma CRD — doc comment explicite : portée par la construction de la
+    `NetworkPolicy` (netpol-builder, controller).
+  Définir @EgressPort avec `port: i32` requis et `protocol: Option<String>` (`"TCP"` |
+    `"UDP"`) ; `None` ⇒ TCP est une interprétation du netpol-builder, pas une valeur posée
+    ici (aucune validation de chaîne).
+  Définir @OwnerStatus avec @Default : `pvcName` / `serviceAccount` optionnels, `conditions`
+    à `#[serde(default)]` (absent ⇒ vec vide).
+  Rendre @ProjectSpec : `owner` et `repoUrl` REQUIS (absents ⇒ erreur de désérialisation, et
+    requis dans le schéma CRD) ; `defaultBranch`, `existingPvc`, `storageSize`,
+    `storageClass`, `storageAccessMode`, `gitSecret`, `caches`, `fetchInterval` optionnels
+    (absents ⇒ `None`) ; `egress` à `#[serde(default)]`. Les replis (`caches` ⇒
+    `["cargo", "pnpm", "pip"]` via `controller/src/project.rs::effective_caches`,
+    `fetchInterval` ⇒ `"1h"`, access mode ⇒ repli Owner puis `ReadWriteOnce`) vivent côté
+    controller. Le champ `gitSecret` est DÉPRÉCIÉ : conservé pour la migration, plus consommé
+    par le controller depuis git-integration (la clé SSH vit dans le PVC Owner) — il continue
+    de se sérialiser/désérialiser (`gitSecret`) comme avant.
+  Définir @PvcRef avec `name` requis et `subPath` optionnel.
+  Définir @ProjectStatus avec @Default et le couple d'attributs suivant, qui EST le contrat
+    anti-écrasement du merge-patch : `cloned: bool` avec `#[serde(default)]` (absent ⇒
+    `false`, sérialisé même à `false`), `pvcName` / `lastFetch` optionnels, `worktrees` et
+    `conditions` à `#[serde(default)]`, `languages` à `#[serde(default,
+    skip_serializing_if = "Vec::is_empty")]` et `detectedAt` à
+    `#[serde(skip_serializing_if = "Option::is_none")]`. Conséquence contractuelle : le JSON
+    d'un @ProjectStatus sans langues détectées ne contient NI la clé `languages` NI la clé
+    `detectedAt`, donc le `Patch::Merge` de routine du reconciler Project
+    (`compute_status` returning `languages: Vec::new(), detected_at: None`,
+    `controller/src/project.rs`) ne peut pas effacer les valeurs écrites par le Job `detect`.
+    Les valeurs possibles de `languages` sont `["rust", "js-ts", "vue", "python",
+    "dockerfile"]` en ordre fixe filtré (producteur : `vanyline_sandbox::maint::detect_languages`),
+    mais ce type transporte des `String` sans les valider.
+  Rendre @SandboxSpec : `project` et `branch` REQUIS ; `toolchains` et `egress` à
+    `#[serde(default)]` (absents ⇒ vec vides) ; `image` et `resources`
+    (`Option<k8s_openapi::api::core::v1::ResourceRequirements>`, type natif transmis tel
+    quel) optionnels ; `suspended: bool` à `#[serde(default)]` (absent ⇒ `false`). La
+    sémantique de `suspended` (Pod supprimé / phase `"Suspended"` vs recréé) et le repli
+    `image` (défaut du controller piloté par env) sont du ressort du controller.
+  Définir @Toolchain avec `name` et `image` requis, `env: BTreeMap<String, String>` à
+    `#[serde(default)]` (absent ⇒ map vide ; le template `{root}` dans les valeurs est
+    résolu par le controller), `lsp: Option<LspSpec>` absent ⇒ `None` — la résolution des
+    presets par nom (`rust`/`node`) et le repli dégradé (pas de route `/ws/lsp` pour un nom
+    inconnu) vivent dans `controller/src/sandbox.rs::resolve_toolchain_lsp`.
+  Définir @LspSpec avec `image` et `bin` requis (`bin` : chemin absolu dans le pod, non
+    validé ici) et `args` à `#[serde(default)]` (absent ⇒ vec vide).
+  Définir @SandboxStatus avec @Default : `phase` (`Option<String>` — valeurs documentées
+    `Provisioning` | `Running` | `Failed`, pas un enum, pas de validation) et `service`
+    optionnels, `conditions` à `#[serde(default)]`.
+  Rendre @ApplicationSpec : `oidcSecretRef`, `databaseSecretRef`, `host`, `ingressClassName`
+    et `tlsIssuerName` REQUIS ; `image`, `replicas`, `cookieSecretRef`, `tlsIssuerKind`,
+    `ingressController`, `storageDefaults` optionnels ; `ingressAnnotations` à
+    `#[serde(default)]` (absent ⇒ map vide). Le dérivé `redirectUrl` depuis `host`, le secret
+    cookie auto-généré (`<name>-cookie`) et le repli d'image sont du ressort du reconciler
+    `controller/src/application.rs`.
+  Définir @ApplicationStorageDefaults avec @Default et quatre champs `Option<String>`
+    (`homeStorageClass`, `homeAccessMode`, `projectStorageClass`, `projectAccessMode`) ;
+    propagés en env au Deployment `app`, jamais lus par le reconciler Application lui-même.
+  Définir @ApplicationStatus avec @Default : `phase` optionnel (mêmes valeurs documentées
+    que @SandboxStatus) et `conditions` à `#[serde(default)]`.
+  Réutiliser @Condition, @LabelSelector et @Time depuis
+    `k8s_openapi::apimachinery::pkg::apis::meta::v1` et @ResourceRequirements depuis
+    `k8s_openapi::api::core::v1` — pas de types maison pour ces formes standard K8s ; le
+    feature `schemars` de k8s-openapi (../Cargo.toml) est ce qui les rend intégrables au
+    schéma.
+  Implémenter @crd_manifests comme la concaténation avec `---\n` des quatre YAML
+    `serde_yaml::to_string(&X::crd())`, dans l'ordre exact Owner, Project, Sandbox,
+    Application ; marquée @must_use ; l'unique `unwrap()` du fichier y est circonskrit par
+    `#[allow(clippy::unwrap_used)]` + justification d'une ligne (schéma connu à la
+    compilation, sans entrée externe). Consommateur : `controller --crds` (stdout,
+    `controller/src/main.rs`) → source de `deploy/controller/crds.yaml` via
+    `deploy/controller/generate-crds.sh`.
+  Définir @MCP_PORT comme `pub const MCP_PORT: i32 = 3000` : port MCP exposé par
+    `vanyline-sandbox` ; la valeur est un contrat TRIPLY implicite — ce const, le défaut de
+    `MCP_LISTEN` côté binaire (`0.0.0.0:3000`, `sandbox/src/config.rs`) et les usages
+    controller (port du Service/sonde/Ingress/netpol, `controller/src/sandbox.rs`) — aucun
+    lien code ne vérifie l'alignement avec le binaire sandbox, seul ce const relie
+    controller et `vanyline-lib` (@VnlK8sClient::sandbox_mcp_url).
+  Implémenter @service_name comme `format!("sandbox-{sandbox_name}")`, @must_use, sans
+    validation ni assainissement de l'entrée : le nom de Service K8s résultant doit être
+    rendu valide par l'appelant (noms de ressource RFC 1123). Point d'entrée unique de la
+    convention `sandbox-<name>` partagée par le controller (création du Service, backend
+    d'Ingress, `status.service`) et `vanyline-lib` (URL MCP).
+
+Must not:
+  Porter de shortnames, categories, singularisation personnalisée, doc externe ou webhook
+    d'admission dans les attributs `#[kube(...)]` : seuls groupe, version, kind, namespaced,
+    status et printcolumns sont posés (aucun `shortname` — `kubectl` n'accepte que les
+    formes longues ; cf. `Tasks`).
+  Valider dans ce type ou dans le schéma CRD : l'exclusivité `cidr`/`podSelector` des
+    @EgressRule, les valeurs de `protocol`, `tlsIssuerKind`, `homeAccessMode` /
+    `storageAccessMode` / `project_access_mode`, les phases `Option<String>`, le format des
+    tailles (`homeSize`, `storageSize` : chaînes libres, c'est l'apiserver qui rejette une
+    `quantity` invalide à l'usage), le caractère non vide de `description`, ou le contenu de
+    `languages`.
+  Appliquer un défaut métier dans ce crate : `#[serde(default)]` ne produit que les zéros
+    serde (`None`, vec/map vides, `false`, `0` jamais) — `"1Gi"`, `ReadWriteMany`,
+    `["cargo", "pnpm", "pip"]`, `"1h"`, TCP-pour-`None` et les presets LSP appartiennent au
+    controller et au netpol-builder.
+  Marquer d'un `skip_serializing_if` un champ `Option` autre que @ProjectStatus::detectedAt :
+    les `None` des autres Status se sérialisent en `null` explicites (cf. Scenario
+    `project_status_autres_champs_optionnels_en_null` et son `[?]` associé — en JSON merge
+    patch, un `null` EFFACE la clé côté apiserver).
+  Consommer ou retirer @ProjectSpec::gitSecret : le champ est conservé tel quel pour la
+    compatibilité de migration ; le crate ne fait que le transporter.
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` hors du `#[allow]` motivé de
+    @crd_manifests et des exemptions `cfg(test)` (harnais de /tooling.sdd).
+  Dépendre d'un runtime K8s : ../Cargo.toml épingle `kube` en `default-features = false,
+    features = ["derive"]` — pas de client, pas de kube-runtime, aucune fonction asynchrone
+    dans ce crate (crate feuille, cf. /docs/architecture.md « feuilles »).
+
+Depends on:
+  `kube` 4 (derive seul) — macro @CustomResource (types racine @Owner/@Project/@Sandbox/@Application,
+    méthode @crd), @CustomResourceExt.
+  `k8s-openapi` 0.28 (features `latest`, `schemars`) — @Condition, @LabelSelector, @Time,
+    @ResourceRequirements et le type @CustomResourceDefinition des manifests.
+  `schemars` 1 — derive @JsonSchema des structs (génère le schéma structural des CRDs).
+  `serde` 1 (derive), `serde_json` 1 (tests et conventions camelCase), `serde_yaml` 0.9
+    (@crd_manifests et tests).
+  /tooling.sdd — harnais clippy/fmt ; l'exemption `cfg(test)` de la ligne 1 est tracée là.
+  Consommateurs (hors dépendances, pour le contexte du contrat) : `vanyline-controller`,
+    `vanyline-lib` (feature `k8s`), `cli`, `app`, `deploy/controller/crds.yaml`.
+
+Exposes:
+  Types racine de CRD générés par @CustomResource : @Owner, @Project, @Sandbox, @Application
+    (champs `spec`/`status`, `crd()` via @CustomResourceExt).
+  @OwnerSpec, @ProjectDefaults, @IngressControllerRef, @EgressRule, @EgressPort, @OwnerStatus.
+  @ProjectSpec, @PvcRef, @ProjectStatus.
+  @SandboxSpec, @LspSpec, @Toolchain, @SandboxStatus.
+  @ApplicationSpec, @ApplicationStorageDefaults, @ApplicationStatus.
+  @crd_manifests — `pub fn () -> String`, @must_use.
+  @MCP_PORT — `pub const i32` = `3000`.
+  @service_name — `pub fn (&str) -> String`, @must_use.
+  Rien d'autre : le module `tests` est privé ; tout item non-`pub` est absent du fichier.
+
+Accepts:
+  @service_name : `sandbox_name: &str` — toute chaîne, non vide ou vide, caractères
+    invalides pour un nom K8s compris (aucune vérification ; la validité RFC 1123 relève de
+    l'appelant).
+  @crd_manifests : aucune entrée.
+  Contrat de désérialisation (subi par les Spec/Status) : tout document JSON/YAML d'une CR,
+    produit par le CLI (`cli/src/{owner,project,sandbox}_cmd.rs`), `app`, les tests du
+    controller ou `kubectl`.
+
+Returns:
+  @crd_manifests : @String — quatre documents YAML séparés par `---\n` dans l'ordre Owner,
+    Project, Sandbox, Application ; chaque document est un @CustomResourceDefinition valide
+    contenant `kind: CustomResourceDefinition` et le groupe `vanyline.solidite.fr`.
+  @service_name : le @String `sandbox-<sandbox_name>` concaténé sans séparateur ajouté.
+  @MCP_PORT : l'entier `3000`.
+  Sérialisation serde : clés camelCase ; `Option::None` ⇒ `"clé": null` SAUF
+    @ProjectStatus::detectedAt (clé omise) ; vec/map `#[serde(default)]` vides ⇒ `[]` / `{}`
+    SAUF @ProjectStatus::languages (clé omise) ; `cloned`/`suspended` sérialisés même à
+    `false`.
+  Désérialisation : clé absente ⇒ `None` (champs `Option`, implicite serde), vec/map vides
+    (`#[serde(default)]`), `false` (bool à défaut) ; type du champ ou clé requis absent ⇒
+    erreur serde remontée à l'appelant.
+
+Raises:
+  @crd_manifests : pas de @Result ; panique par `unwrap()` en théorie si `serde_yaml`
+    échouait sur un schéma connu à la compilation — jugée impossible en pratique par la
+    justification de l'`#[allow]` (seul point de panique du code de production du crate).
+  @service_name, @MCP_PORT : aucune erreur possible (fonctions totales).
+  Désérialisation d'un document invalide (clé requise absente — `owner`/`repoUrl` de
+    @ProjectSpec, `project`/`branch` de @SandboxSpec, les cinq requis d'@ApplicationSpec,
+    `name` de @PvcRef, `description` de @EgressRule, `name`/`image` de @Toolchain,
+    `image`/`bin` de @LspSpec, `namespace`/`podLabels` de @IngressControllerRef, `port`
+    d'@EgressPort — ou type de champ non conforme) : erreur serde remontée à l'appelant,
+    jamais interceptée, paniquée ni loggée ici.
+
+Handles:
+  CRD sans document `spec` requis au niveau de la ressource : @OwnerSpec se satisfait de
+    `{}` ; @ProjectSpec, @SandboxSpec et @ApplicationSpec exigent leurs clés requises.
+  @ProjectStatus partiel (le JSON du Job `detect` ne porte que `languages`/`detectedAt`) :
+    se désérialise avec les autres champs à leur défaut (`cloned` `false`, vec vides) grâce
+    aux `#[serde(default)]`.
+  @ProjectStatus par défaut sérialisé : `pvcName: null`, `lastFetch: null`, `cloned: false`,
+    `worktrees: []`, `conditions: []`, clés `languages`/`detectedAt` ABSENTES.
+  Status vu depuis un objet existant sans `status` : le champ `status` de la racine générée
+    est un @Option que le controller lit par `.as_ref()` (ex:
+    `controller/src/sandbox.rs` — `project.status.as_ref().is_some_and(...)`) ; les tests du
+    controller exercent ce chemin sans cluster.
+  Entrée vide de @service_name : retourne exactement `"sandbox-"` (aucun contrôle).
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] Absence de `shortname` dans les quatre blocs `#[kube(...)]` (`owners`, `projects`,
+    `sandboxes`, `applications` en forme longue uniquement) : voulu (stabilité des manifests
+    déployés) ou oubli — ajouter `own`/`prj`/`sbox`/`app` ? L'ajout change le manifeste donc
+    `deploy/controller/crds.yaml`.
+  [?] `skip_serializing_if` posé UNIQUEMENT sur @ProjectStatus::languages/detectedAt : les
+    autres `Option` des Status se sérialisent en `null` explicites, et un `Patch::Merge`
+    (controller) traite `null` comme une suppression — le patch de routine de `compute_status`
+    contient donc `"lastFetch": null` et écrase `last_fetch` si un jour il est alimenté ;
+    `status.phase`/`status.service` de la Sandbox vivent le même patron. Faut-il étendre
+    `skip_serializing_if` à ces champs (auquel cas rien ne les effacerait plus jamais, ni en
+    cas de suppression légitime), ou le `null` est-il un contrat assumé (« ces champs ne sont
+    pas suivis en v1 », cf. commentaire de `compute_status`) ?
+  [?] @ProjectStatus::cloned est sérialisé même à `false` (pas de `skip_serializing_if`) :
+    le merge-patch écrase donc toujours `cloned` — indispensable que `compute_status` soit la
+    seule source de ce champ ; confirmer que c'est le contrat (la printcolumn `Cloned` s'en
+    nourrit).
+  [?] Exclusivité `cidr` XOR `podSelector` de @EgressRule : portée par le seul commentaire
+    doc et par le netpol-builder ; un `EgressRule` avec les deux posés (ou aucun) passe le
+    schéma CRD et n'est rattrapé qu'à la construction de la `NetworkPolicy`. Accepté
+    explicitement, ou à verrouiller (schéma `oneOf` ou webhook d'admission, alors absent du
+    crate) ?
+  [?] Chaînes libres là où des enums existeraient (`protocol`, `tlsIssuerKind`, modes
+    d'accès `homeAccessMode`/`storageAccessMode`/`project_access_mode`, phases
+    `Option<String>`) : choix migratoire assumé (validations reportées à l'apiserver/au
+    controller) ou dette à convertir en enums serde ?
+  [?] @ProjectSpec::gitSecret déprécié : conservé « pour la migration » sans échéance
+    écrite. Date/version cible de suppression, ou suppression maintenant (le schéma CRD
+    retirerait la clé — un `gitSecret` resté dans une CR posée en `kubectl apply` complet
+    serait alors rejeté ou coupé selon `x-kubernetes-preserve-unknown-fields`) ?
+  [?] Contradiction documentaire sur `ApplicationSpec.image` : le doc comment ici dit
+    « défaut du controller (constante, cf. controller/src/application.rs) » alors que
+    `controller/src/main.rs` expose `--app-image-tag`/`--app-image-repo` (vars d'env
+    `APP_IMAGE_TAG`/`APP_IMAGE_REPO`) — le repli est donc paramétrable, pas une constante.
+    Corriger le commentaire de ./lib.rs (côté spec : le contrat est juste « `None` ⇒ défaut
+    du controller », sans plus).
+  [?] @MCP_PORT = 3000 : triple accord const / `MCP_LISTEN` du binaire / usages controller
+    non vérifié par un test dans le crate (le binaire sandbox ne référence pas ce const).
+    Ajouter un test de cohérence (lecture de la doc `sandbox/src/config.rs` impossible en
+    test — a minima un test d'arrêteur documentant la valeur, scenario `mcp_port_vaut_3000`)
+    ou assumer la convention documentaire ?
+  [?] Le commentaire du test `controller/src/sandbox.rs` (ligne ~2216, hors du périmètre de
+    cette spec mais découvert en remontant `effective_caches`) annonce un défaut
+    `["cargo", "pnpm"]` alors que `effective_caches` et le doc comment de @ProjectSpec::caches
+    disent `["cargo", "pnpm", "pip"]` — commentaire périmé côté controller, à corriger dans
+    sa spec/sa tâche.
+  [ ] Couverture existante (./lib.rs module `tests`, 18 tests) : `crd_names`,
+    `crd_manifests_yaml`, `spec_camel_case`, `sandbox_defaults`, `owner_schema_fields`,
+    `egress_camel_case`, `egress_defaults_to_empty`, `suspended_defaults_to_false`,
+    `sandbox_schema_fields_suspended`, `application_schema_fields`, `application_defaults`,
+    `application_camel_case`, `owner_application_ref_camel_case`,
+    `ingress_controller_ref_camel_case`, `project_status_languages_default_empty`,
+    `project_status_languages_skipped_when_empty`, `project_status_languages_present_when_set`,
+    `lsp_spec_absent_defaults_to_none` — ils verrouillent les Scenarios homonymes ou listés
+    ci-dessous.
+  [ ] Convertir en tests taggés par leur titre les Scenarios sans test existant :
+    `crd_manifests_ordre_documents`, `crd_scope_namespaced_version_v1alpha1`,
+    `crd_printcolumns_et_absence_shortnames`, `owner_spec_deserialise_depuis_objet_vide`,
+    `project_spec_champs_requis`, `sandbox_spec_champs_requis`, `application_spec_champs_requis`,
+    `project_status_autres_champs_optionnels_en_null`, `lsp_spec_complet_roundtrip`,
+    `egress_rule_minimale_defauts`, `pvc_ref_name_requis_subpath_optionnel`,
+    `service_name_prefixe_sandbox`, `mcp_port_vaut_3000`,
+    `status_structures_defaut_deserialisables` — puis faire passer la synthèse du validator
+    au vert.
+  [ ] Étendre deux tests existants pour couvrir l'intégralité du Scenario homonyme :
+    `sandbox_defaults` ne vérifie pas `resources: None` ; `application_defaults` ne vérifie
+    pas `storage_defaults: None` (le test `application_camel_case` les exerce en sérialisation
+    seulement).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe.
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur `vanyline-crds`, et `controller --crds` produit un diff nul contre
+    `deploy/controller/crds.yaml` quand un changement de schéma l'a justifié (régénéré via
+    `deploy/controller/generate-crds.sh`).
+
+Scenario: crd_manifests_quatre_documents_yaml_valides
+  Given @crd_manifests du crate `vanyline-crds`
+  When le manifeste combiné est produit puis découpé sur `---` (segments non vides filtrés)
+  Then il y a exactement 4 segments, chacun parseable comme YAML valide, l'ensemble contient
+    4 occurrences de `kind: CustomResourceDefinition` et la chaîne
+    `vanyline.solidite.fr` (test existant `crd_manifests_yaml`)
+
+Scenario: crd_manifests_ordre_documents
+  Given le résultat de @crd_manifests
+  When on localise dans l'ordre les lignes de nom de ressource `names:` / `kind:` des quatre
+    CRDs (par recherche séquentielle `kind: Owner`, puis `kind: Project`, puis `kind:
+    Sandbox`, puis `kind: Application`)
+  Then les quatre offsets sont strictement croissants dans cet ordre — l'ordre Owner, Project,
+    Sandbox, Application est figé (le manifeste `deploy/controller/crds.yaml` en dépend)
+
+Scenario: crd_noms_pluriels_groupe_vanyline
+  Given @Owner::crd, @Project::crd, @Sandbox::crd et @Application::crd
+  When on lit leur `metadata.name`
+  Then les valeurs sont exactement `owners.vanyline.solidite.fr`,
+    `projects.vanyline.solidite.fr`, `sandboxes.vanyline.solidite.fr` et
+    `applications.vanyline.solidite.fr` (test existant `crd_names`)
+
+Scenario: crd_scope_namespaced_version_v1alpha1
+  Given les quatre @CustomResourceDefinition produites par `crd()`
+  When on lit `spec.scope`, `spec.group` et `spec.versions[0].name` de chacune
+  Then `scope` vaut `Namespaced`, `group` vaut `vanyline.solidite.fr` et la version unique
+    s'appelle `v1alpha1` sur les quatre (attributs `namespaced` + groupe/version du derive)
+
+Scenario: crd_printcolumns_et_absence_shortnames
+  Given les quatre @CustomResourceDefinition produites par `crd()`
+  When on lit `spec.versions[0].additional_printer_columns` et `spec.names.short_names`
+  Then @Owner déclare les colonnes `SA` et `PVC` (type `string`), @Project `Owner`, `Repo`
+    (string) et `Cloned` (boolean), @Sandbox `Project`, `Branch`, `Phase` (string), @Application
+    `Host`, `Ready` (string) — avec les `jsonPath` correspondants (`.status.cloned` etc.) —
+    et `short_names` est absent/vide sur les quatre
+
+Scenario: project_spec_camel_case
+  Given un @ProjectSpec minimal (`owner`, `repoUrl` posés, reste `None`, `egress` vide)
+  When il est sérialisé en JSON
+  Then le JSON contient `"repoUrl"` et ne contient aucun `repo_url` en snake_case (test
+    existant `spec_camel_case`)
+
+Scenario: owner_application_ref_camel_case
+  Given un @OwnerSpec avec `application_ref` = `Some("my-app")`
+  When il est sérialisé en JSON
+  Then le JSON contient `"applicationRef"` et pas `application_ref` (test existant
+    `owner_application_ref_camel_case`)
+
+Scenario: application_spec_camel_case
+  Given un @ApplicationSpec complet (les trois secretRefs, `host`, `ingressClassName`,
+    `tlsIssuerName`, `tlsIssuerKind`, `ingressAnnotations`, un @IngressControllerRef avec
+    deux labels, @ApplicationStorageDefaults avec deux champs posés)
+  When il est sérialisé en JSON
+  Then le JSON contient `"oidcSecretRef"`, `"databaseSecretRef"`, `"cookieSecretRef"`,
+    `"ingressClassName"`, `"tlsIssuerName"`, `"tlsIssuerKind"`, `"ingressAnnotations"`,
+    `"ingressController"`, `"podLabels"`, `"storageDefaults"`, `"homeStorageClass"`,
+    `"homeAccessMode"` et ne contient aucune de leurs formes snake_case (test existant
+    `application_camel_case`)
+
+Scenario: egress_camel_case
+  Given un @SandboxSpec dont une @EgressRule porte `pod_selector` ET `namespace_selector`
+    (mêmes @LabelSelector) et un @EgressPort `53/UDP`
+  When il est sérialisé en JSON
+  Then le JSON contient `"podSelector"` et `"namespaceSelector"`, jamais `pod_selector` ni
+    `namespace_selector` (test existant `egress_camel_case`)
+
+Scenario: ingress_controller_ref_camel_case
+  Given un @IngressControllerRef (`namespace` + un `pod_labels`)
+  When il est sérialisé en JSON
+  Then le JSON contient `"namespace"` et `"podLabels"`, pas `pod_labels` (test existant
+    `ingress_controller_ref_camel_case`)
+
+Scenario: sandbox_defaults
+  Given le JSON `{"project":"p","branch":"main"}` désérialisé en @SandboxSpec
+  When on inspecte la struct
+  Then `toolchains` est vide et `image` est `None` — et `resources` est `None` (extension du
+    test existant `sandbox_defaults`, cf. `Tasks`)
+
+Scenario: egress_defaults_to_empty
+  Given le JSON `{"project":"p","branch":"main"}` désérialisé en @SandboxSpec
+  When on inspecte `egress`
+  Then la liste est vide — l'absence de la clé ne fait pas échouer la désérialisation (test
+    existant `egress_defaults_to_empty`)
+
+Scenario: suspended_defaults_to_false
+  Given le JSON `{"project":"p","branch":"main"}` désérialisé en @SandboxSpec
+  When on inspecte `suspended`
+  Then la valeur est `false` (test existant `suspended_defaults_to_false`)
+
+Scenario: owner_spec_deserialise_depuis_objet_vide
+  Given un @OwnerSpec visé par `serde_json`
+  When le document `{}` est désérialisé
+  Then la désérialisation réussit, tous les champs `Option` sont `None` et `egress` est vide —
+    un Owner sans aucun champ de spec est un document valide
+
+Scenario: project_spec_champs_requis
+  Given @ProjectSpec visé par `serde_json`
+  When les documents `{"repoUrl":"https://x/repo"}` (sans `owner`) puis `{"owner":"o"}`
+    (sans `repoUrl`) sont désérialisés
+  Then chacun échoue en erreur serde (clé requise manquante) — `owner` et `repoUrl` sont les
+    seuls champs requis de la spec
+
+Scenario: sandbox_spec_champs_requis
+  Given @SandboxSpec visé par `serde_json`
+  When les documents `{"branch":"main"}` (sans `project`) puis `{"project":"p"}` (sans
+    `branch`) sont désérialisés
+  Then chacun échoue en erreur serde — `project` et `branch` sont requis, aucun défaut ne
+    peut les remplacer
+
+Scenario: application_defaults
+  Given @ApplicationSpec visé par `serde_json` et le document minimal
+    `{"host":"app.example.com","ingressClassName":"nginx","oidcSecretRef":"oidc",
+    "databaseSecretRef":"db","tlsIssuerName":"self-sign"}`
+  When il est désérialisé
+  Then `image`, `replicas`, `cookieSecretRef`, `ingressController` et `tlsIssuerKind` sont
+    `None`, `ingressAnnotations` est vide — et `storageDefaults` est `None` (extension du
+    test existant `application_defaults`, cf. `Tasks`)
+
+Scenario: application_spec_champs_requis
+  Given @ApplicationSpec visé par `serde_json`
+  When le document minimal d'@ApplicationSpec amputé d'une de ses cinq clés requises
+    (`host`, `ingressClassName`, `oidcSecretRef`, `databaseSecretRef` ou `tlsIssuerName`) est
+    désérialisé
+  Then la désérialisation échoue en erreur serde pour chacune des cinq amputations
+
+Scenario: owner_schema_fields
+  Given @Owner::crd et son schéma OpenAPI `spec`
+  When on liste les propriétés de `spec`
+  Then `existingPvc`, `projectDefaults`, `egress` et `applicationRef` en font partie (test
+    existant `owner_schema_fields`)
+
+Scenario: sandbox_schema_fields_suspended
+  Given @Sandbox::crd et son schéma OpenAPI `spec`
+  When on liste les propriétés de `spec`
+  Then `suspended` en fait partie — le champ est exposable en `kubectl apply` (test existant
+    `sandbox_schema_fields_suspended`)
+
+Scenario: application_schema_fields
+  Given @Application::crd et son schéma OpenAPI `spec`
+  When on liste les propriétés de `spec`
+  Then `host`, `ingressClassName`, `oidcSecretRef`, `databaseSecretRef`, `cookieSecretRef`,
+    `ingressAnnotations`, `tlsIssuerName`, `tlsIssuerKind` et `ingressController` en font
+    partie (test existant `application_schema_fields`)
+
+Scenario: project_status_languages_default_empty
+  Given un @ProjectStatus visé par `serde_json`
+  When le document `{}` est désérialisé
+  Then `languages` est vide et `detectedAt` est `None` — le status du Job `detect` fusionne
+    avec des champs absents à leur défaut (test existant `project_status_languages_default_empty`)
+
+Scenario: project_status_languages_skipped_when_empty
+  Given @ProjectStatus::default()
+  When il est sérialisé en JSON
+  Then les clés `languages` et `detectedAt` sont ABSENTES du document — condition indispensable
+    pour que le merge-patch de routine du reconciler Project n'écrase pas le travail du Job
+    `detect` (test existant `project_status_languages_skipped_when_empty`)
+
+Scenario: project_status_languages_present_when_set
+  Given un @ProjectStatus avec `languages = ["rust", "js-ts"]` et `detectedAt` posés
+  When il est sérialisé, puis la même struct vidée de ces deux champs est re-sérialisée
+  Then le premier JSON contient `"languages"` (avec `"rust"` et `"js-ts"`) et `detectedAt`,
+    le second ne contient plus ni l'un ni l'autre — clé émise uniquement quand non vide (test
+    existant `project_status_languages_present_when_set`)
+
+Scenario: project_status_autres_champs_optionnels_en_null
+  Given @ProjectStatus::default()
+  When il est sérialisé en JSON
+  Then le document contient `"pvcName":null`, `"lastFetch":null`, `"cloned":false`,
+    `"worktrees":[]` et `"conditions":[]` — contrairement à `languages`/`detectedAt`, ces
+    champs N'ont pas de `skip_serializing_if` ; en JSON merge patch, leurs `null` sont des
+    suppressions explicites (verrou anti-régression, cf. `[?]` des `Tasks`)
+
+Scenario: lsp_spec_absent_defaults_to_none
+  Given un @Toolchain visé par `serde_json` et le document `{"name":"rust","image":"x"}`
+  When il est désérialisé
+  Then `lsp` est `None` et `env` est une map vide — sans LSP ni env explicites, le controller
+    applique ses presets par nom (test existant `lsp_spec_absent_defaults_to_none`)
+
+Scenario: lsp_spec_complet_roundtrip
+  Given un @Toolchain avec `name`/`image`, un `env` explicite (`{"PATH":"{root}/bin"}`) et un
+    `lsp` @LspSpec `{"image":"img","bin":"/u/b","args":[]}`
+  When il est sérialisé en JSON puis redésérialisé
+  Then `env`, `lsp.image`, `lsp.bin` et `lsp.args` survivent au roundtrip à l'identique,
+    avec `lsp.args` sérialisé `[]` — le template `{root}` est transporté verbatim (le crate
+    ne l'interprète pas)
+
+Scenario: egress_rule_minimale_defauts
+  Given une @EgressRule visée par `serde_json` et le document `{"description":"allow dns"}`
+  When il est désérialisé
+  Then `cidr`, `podSelector` et `namespaceSelector` sont `None` et `ports` est vide — aucune
+    validation d'exclusivité ni de contenu n'est exercée à la désérialisation
+
+Scenario: pvc_ref_name_requis_subpath_optionnel
+  Given @PvcRef visé par `serde_json`
+  When `{"name":"home"}` puis `{}` sont désérialisés
+  Then le premier réussit avec `sub_path` = `None`, le second échoue (clé `name` requise) —
+    et une @ProjectSpec avec `existingPvc = {"name":"hc","subPath":"repo"}` fait transiter les
+    deux clés camelCase au roundtrip
+
+Scenario: service_name_prefixe_sandbox
+  Given @service_name
+  When elle reçoit `"web"`, puis `"db-2"`, puis la chaîne vide
+  Then les retours sont exactement `"sandbox-web"`, `"sandbox-db-2"` et `"sandbox-"` — aucune
+    validation du nom d'entrée n'est exercée (la validité RFC 1123 relève de l'appelant)
+
+Scenario: mcp_port_vaut_3000
+  Given @MCP_PORT
+  When on lit la constante
+  Then elle vaut exactement `3000` (i32) — la valeur fige le contrat avec `MCP_LISTEN` par
+    défaut du binaire sandbox et avec les ports du Service/de la sonde/de l'Ingress posés par
+    le controller
+
+Scenario: status_structures_defaut_deserialisables
+  Given @OwnerStatus, @SandboxStatus et @ApplicationStatus visés par `serde_json`
+  When le document `{}` est désérialisé dans chacun
+  Then chacun réussit : `conditions` vide partout, `pvcName`/`serviceAccount` (Owner) et
+    `phase`/`service` (Sandbox, Application) `None` — les Status tolèrent un sous-document
+    posé par un patch partiel

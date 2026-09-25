@@ -1,0 +1,471 @@
+Spec: Search tools (find_files + search)
+
+Platform: Rust/vanyline-tools — fonctions asynchrones sur futures boxed, consommées par le dispatch MCP du sandbox et les tools rig du CLI
+
+Purpose:
+  Contrat des deux tools de recherche en lecture seule du crate `vanyline-tools` :
+  @find_files (localisation de fichiers par motif glob @globset, rendu = un chemin relatif
+  par ligne) et @search (recherche de contenu par regex @regex, rendu = lignes au format
+  type grep). Les deux partagent la même géométrie : chemin racine optionnel (vide = `"."`),
+  arpentage du crate `ignore` avec .gitignore actif et exclusion sans condition de
+  `.git`/`target`/`node_modules`, seuils de rendu centralisés dans ./output.rs
+  (@output::LIST_MAX_ENTRIES = 200 entrées, @output::SEARCH_MAX_MATCHES = 50
+  correspondances) avec marqueur de troncation actionnable, et erreurs @ToolsError
+  identifiées `VNL-TLS-*` (./error.rs). Le fichier n'expose qu'une surface de rendu texte —
+  le confinement du chemin (racine du sandbox) et le câblage MCP/JSON-RPC vivent chez les
+  appelants : ../../sandbox/src/tools_impl.rs (@dispatch_search) et
+  ../../cli/src/tools.rs (@FindFilesTool, @SearchTool).
+  Contrat groupe : @find_files et @search ne forment qu'un seul contrat (mêmes conventions
+  de chemin, d'arpentage, de limites et de rendu, fonctions côte à côte dans le même
+  fichier), d'où une spec unique pour ./search.rs.
+
+Owns:
+  ./search.rs
+
+Exposes:
+  @BoxedFuture — alias de type public `Pin<Box<dyn Future<Output = T> + Send + 'static>>`,
+    support des deux signatures ci-dessous.
+  @FindFilesOptions — struct publique, @Serialize + @Deserialize + @Default. Champs :
+    `pattern: String` (motif glob ; PAS de `#[serde(default)]` : le champ est requis à la
+    désérialisation serde, son absence est rejetée par l'appelant qui désérialise) ;
+    `path: String` (`#[serde(default)]`, vide = répertoire courant `"."`).
+  @find_files — fonction publique `#[must_use]`, signature
+    @(FindFilesOptions) -> @BoxedFuture<`Result<String, `@ToolsError`>`> ; corps décrit en
+    `Handles`/`Returns`/`Raises`. Rien n'est exécuté avant l'`await` : la fonction construit
+    seulement le future, la résolution du chemin et la compilation du motif se font dans le
+    future.
+  @SearchOptions — struct publique, @Serialize + @Deserialize + @Default. Champs :
+    `pattern: String` (regex, requis côté serde) ; `path: String` (`#[serde(default)]`,
+    vide = `"."`) ; `glob: String` (`#[serde(default)]`, vide = pas de filtre, tous les
+    fichiers arpentés).
+  @search — fonction publique `#[must_use]`, signature
+    @(SearchOptions) -> @BoxedFuture<`Result<String, `@ToolsError`>`>.
+
+Accepts:
+  @find_files — @FindFilesOptions dont `pattern` est un motif glob @globset (sémantique
+    globset : `*` ne traverse pas `/`, `**` traverse les composantes, `**/*.rs` matche aussi
+    bien un fichier à la racine qu'à n'importe quelle profondeur) et `path` un chemin de
+    répertoire (absolu ou relatif au répertoire courant du processus appelant — le crate ne
+    canonicalise jamais).
+  @search — @SearchOptions dont `pattern` est une regex @regex par défaut (sensible à la
+    casse, évaluée sur chaque ligne individuellement, sans mode multi-ligne ni insensibilité
+    à la casse exposés), `path` comme ci-dessus, et `glob` éventuellement un second motif
+    glob @globset filtrant les fichiers arpentés.
+  Les deux fonctions ne lisent QUE le système de fichiers sous `path` : aucun réseau, aucune
+    variable d'environnement, aucun état interne, aucun effet d'écriture.
+  Rappel d'interaction (hors contrat de ce fichier) : côté MCP, ./mcp.rs @search_tools
+    déclare `pattern` requis et `path`/`glob` optionnels ; côté sandbox, `path` est réécrit
+    par @confine avant l'appel (vide → racine du sandbox), si bien que le `"."` par défaut
+    de ce fichier ne s'applique jamais tel quel dans le sandbox.
+
+Returns:
+  @find_files succès, au moins un fichier trouvé — les chemins RELATIFS à `path` (une entrée
+    par fichier, perte UTF-8 tolérée via @Path::to_string_lossy), triés par @Vec::sort
+    (ordre lexicographique octet par octet de la chaîne rendue), joints par `"\n"`, sans
+    ligne de titre ni newline final.
+  @find_files succès, aucun fichier trouvé — exactement
+    `no files matching '{pattern}' under {effective_path}`
+    (`{pattern}` et `{path}` insérés bruts, sans échappement).
+  @find_files, limite atteinte — les entrées collectées (200 au plus, cf. `Handles`) sont
+    jointes, puis la marque est ACCOLÉE en dernière ligne :
+    `\n[truncated at 200 matches — narrow the pattern or path]`
+    (nombre = @output::LIST_MAX_ENTRIES, tiret long `—`, mot « matches » employé ici pour des
+    fichiers, cf. `Tasks`).
+  @search succès, au moins une correspondance — une ligne par ligne de fichier matchante, au
+    format exact `{rel}:{N}: {ligne}` où `{rel}` est le chemin relatif à `path` (lossy UTF-8),
+    `{N}` le numéro de ligne 1-based, et UN ESPACE entre le second `:` et le contenu de la
+    ligne (cf. `Tasks`) ; lignes jointes par `"\n"`, dans l'ordre de l'arpentage (aucun tri,
+    cf. `Must not`).
+  @search succès, aucune correspondance — exactement
+    `no matches for '{pattern}' under {effective_path}`
+  @search, limite atteinte — les 50 premières correspondances puis la marque :
+    `\n[truncated at 50 matches — narrow the pattern, path, or glob]`
+    (nombre = @output::SEARCH_MAX_MATCHES).
+  Les deux fonctions retournent `Ok` (jamais `Err`) sur un arbre vide, un motif sans résultat
+    ou des fichiers illisibles : le vide est un résultat, pas une erreur.
+
+Raises:
+  Toujours des @ToolsError identifiés, dans cet ordre de précédence (le premier qui frappe
+  gagne) :
+  1. @ToolsError::FileNotFound (VNL-TLS-001) — @tokio::fs::metadata sur `effective_path`
+    échoue en `ErrorKind::NotFound` ; le champ `hint` vient de
+    @filesystem::file_not_found_hint (liste triée des entrées du parent, ou
+    « parent directory does not exist either »).
+  2. @ToolsError::Io (VNL-TLS-009) — tout autre échec de @metadata (ex. PermissionDenied sur
+    un composant du chemin : c'est bien VNL-TLS-009 qui sort, VNL-TLS-004 n'est JAMAIS émis
+    par ce fichier).
+  3. @ToolsError::NotADirectory (VNL-TLS-003) — le chemin existe mais n'est pas un
+    répertoire (un fichier, ou un lien symbolique pointant vers un fichier — @metadata suit
+    les liens ; un lien vers un répertoire est en revanche accepté comme racine).
+  4. @ToolsError::InvalidArgument (VNL-TLS-005), `name: "pattern"` — motif globset invalide
+    (@find_files) ou regex invalide (@search), `reason` = le message d'erreur d'origine via
+    `to_string`.
+  5. @ToolsError::InvalidArgument (VNL-TLS-005), `name: "glob"` — uniquement @search, quand
+    le filtre `glob` non vide est un motif globset invalide.
+  Après erreur : aucun effet de bord possible (aucune écriture dans ce fichier, et rien n'a
+  encore été collecté).
+
+Handles:
+  Ordre des vérifications — chemin (métadonnées + « est un répertoire ») AVANT compilation
+    du motif : `path` invalide et motif invalide simultanés produisent l'erreur de CHEMIN,
+    jamais InvalidArgument ; pour @search, la regex est compilée avant le filtre glob : regex
+    et glob invalides simultanés produisent `name: "pattern"`.
+  Arpentage — @ignore::WalkBuilder sur `effective_path`, réglé explicitement par :
+    `git_ignore(true)` (les `.gitignore` sont respectés), `git_global(false)` (le gitignore
+    global de l'utilisateur ne l'est PAS), et un @filter_entry qui élimine à TOUTE profondeur
+    toute entrée (fichier OU répertoire, le sous-arbre est alors élagué) dont le nom exact
+    est `.git`, `target` ou `node_modules` — les noms non UTF-8 passent (@Option::is_none_or).
+    Le reste vient des défauts du crate `ignore`, jamais surchargés ici : `.ignore` respectés,
+    `.git/info/exclude` respectés, `parents(true)` (les fichiers d'exclusion des répertoires
+    ancêtres du point de départ s'appliquent), `require_git(true)` (les règles git ne
+    s'appliquent QUE si l'arpentage démarre dans un dépôt git — hors dépôt, un `.gitignore`
+    est un fichier ordinaire), fichiers cachés NON ignorés, profondeur non bornée, liens
+    symboliques NON suivis (sauf la racine, résolue par @metadata), aucun tri d'arpentage
+    (ordre du système de fichiers).
+  Fichiers retenus — uniquement les fichiers réguliers : @DirEntry::file_type absent ou non
+    `is_file()` élimine silencieusement répertoires, liens symboliques (même pointant vers un
+    fichier régulier) et FIFO.
+  Chemins relatifs — chaque entrée est @strip_prefix d'`effective_path` : @find_files saute
+    silencieusement l'entrée si le strip échoue, @search retombe sur le chemin complet de
+    l'entrée (`unwrap_or(entry.path())`) — asymétrie défensive, branche théoriquement
+    inatteignable puisque l'arpentage part de cette racine (cf. `Tasks`).
+  Filtre glob de @search — le filtre éventuel s'évalue AUSSI sur le chemin relatif (donc
+    `*.rs` ne retient que les `.rs` à la racine de `path`, jamais les imbriqués — mêmes
+    sémantiques globset que @find_files) ; une entrée dont le strip échoue est sautée quand
+    le filtre est actif.
+  Lecture des fichiers — @tokio::fs::read_to_string, FICHIER ENTIER en mémoire, sans limite
+    de taille ; TOUT échec de lecture (binaire non UTF-8, droits insuffisants, erreur
+    d'entrée/sortie, fichier disparu en cours d'arpentage) fait sauter le fichier
+    SILENCIEUSEMENT, sans marqueur dans la sortie.
+  Correspondances — @regex::is_match ligne par ligne sur @str::lines (fins `\n` et `\r\n`
+    retirées, le contenu rendu est la ligne nue) ; le numéro de ligne rendu est 1-based ; une
+    ligne matchante produit exactement UNE entrée (`is_match`, jamais les captures ni toutes
+    les occurrences d'une même ligne).
+  Troncation @find_files — drapeau @std::cell::Cell ; le test `results.len() >= 200` a lieu
+    APRÈS chaque push : la 200e entrée pushée arme la marque ET coupe, y compris si aucune
+    autre correspondance ne suivait (cf. `Tasks`) ; le TRI intervient APRÈS la collecte : le
+    sous-ensemble de 200 conservé dépend de l'ordre d'arpentage (non déterministe), pas de
+    l'ordre lexicographique.
+  Troncation @search — le test `results.len() >= 50` a lieu au HAUT de chaque itération de
+    ligne, AVANT l'évaluation de la regex : la marque s'arme sur la ligne QUI SUIT la 50e
+    correspondance, fût-elle une ligne sans correspondance (fausse troncation, cf. `Tasks`) ;
+    la marque ne s'arme que si le parcours fournit encore au moins une ligne à itérer — si la
+    50e correspondance est la dernière ligne utile (plus aucune ligne de fichier lisible non
+    vide derrière), le drapeau reste désarmé et la marque est absente.
+  Bornes de temps — les deux fonctions bornent leur collecte par ces SEULS seuils de
+    comptage : aucun timeout, aucune taille maximale de fichier, aucune profondeur maximale ;
+    un arbre immense est arpenté jusqu'au bout si la limite de correspondances n'est jamais
+    atteinte (cf. `Tasks`).
+  Erreurs d'arpentage — une entrée du walker en `Err` (droits sur un sous-répertoire, fichier
+    disparu) est sautée silencieusement, la marche continue.
+
+Depends on:
+  ./error.rs — @ToolsError et les codes VNL-TLS-001/-003/-005/-009 (message d'erreur unique
+    `VNL-*` exigé par ../../AGENTS.md ; pas encore de spec `./error.sdd`).
+  ./output.rs — @LIST_MAX_ENTRIES (200) et @SEARCH_MAX_MATCHES (50) : jamais de nombre
+    magique dans un outil, les seuils sont centralisés là-bas (aucun des autres auxiliaires
+    de ./output.rs — @bound_lines, @bound_head_tail, @number_lines — n'est utilisé ici).
+  ./filesystem.rs — @file_not_found_hint (`pub(crate)`), construit le `hint` de VNL-TLS-001.
+  @ignore::WalkBuilder — arpentage sensible aux ignore files (défauts du crate, cf.
+    `Handles`).
+  @globset::{Glob, GlobMatcher} — motif de @find_files et filtre `glob` de @search.
+  @regex::Regex — motif de @search.
+  @tokio::fs — @metadata et @read_to_string asynchrones.
+  @serde / @serde_json — derives des structs d'options (pas de génération ts-rs sur ce crate :
+    aucun miroir dans ../../packages/protocol).
+  ../../sandbox/src/tools_impl.rs — @dispatch_search : désérialise les options, confine
+    `path` à la racine du sandbox, mappe @ToolsError en `tools/call` `isError` (texte brut de
+    `to_string`, code VNL inclus). Consommateurs de test : ../../sandbox/tests/http.rs.
+  ../../cli/src/tools.rs — @FindFilesTool / @SearchTool (rig @ToolDyn) : mêmes options,
+    erreurs boîtées en @ToolError::ToolCallError.
+  ./mcp.rs — @search_tools : schémas JSON MCP `find_files` / `search` (contrat de ./mcp.rs,
+    cité pour la cohérence des noms de champs).
+
+Must:
+  Résoudre `path` vide en `"."` et le tester par @tokio::fs::metadata AVANT toute compilation
+    de motif, avec la précédence d'erreurs de `Raises`.
+  Rendre des chemins relatifs au `effective_path` reçu, jamais des chemins absolus (hors
+    repli défensif de @search), joints par `"\n"` sans newline final.
+  Respecter les `.gitignore` quand l'arpentage part d'un dépôt git, et élaguer
+    `.git`/`target`/`node_modules` à toute profondeur, y compris hors dépôt git.
+  Traiter toute erreur de lecture d'un fichier et toute erreur d'entrée du walker comme un
+    saut silencieux : la recherche doit se terminer sur un arbre partiellement lisible.
+  Borner la sortie à @LIST_MAX_ENTRIES / @SEARCH_MAX_MATCHES avec exactement les marqueurs de
+    `Returns` (nombre interpolé depuis ./output.rs).
+  Rester dans le harnais (cf. ../../tooling.sdd) : aucun
+    `unwrap`/`expect`/`panic!`/`println!` hors `cfg(test)` ; le module de test porte
+    l'exemption locale `#![allow(clippy::unwrap_used, clippy::expect_used)]`.
+
+Must not:
+  Écrire, modifier ou supprimer quoi que ce soit sur le disque : lecture seule stricte.
+  Suivre les liens symboliques pendant l'arpentage (ni les suivre pour tester leur type : un
+    lien vers un fichier régulier n'est PAS un fichier régulier pour le filtre).
+  Trier les résultats de @search : l'ordre de sortie est l'ordre d'arpentage (la question
+    d'ajouter un tri est ouverte en `Tasks`).
+  Faire surface une erreur par fichier (VNL-TLS-004 n'est jamais émis ici) ni signaler dans
+    la sortie quels fichiers ont été ignorés (binaires ou illisibles).
+  Appliquer un filtre glob traversant `/` : il s'évalue sur le chemin relatif complet avec la
+    sémantique globset par défaut (`*` ne traverse pas `/`).
+  Dépasser les seuils de ./output.rs, en dur un autre nombre dans ce fichier, ou tronquer
+    sans marqueur.
+  Accepter un motif invalide sans erreur : regex ou glob malformé est VNL-TLS-005 avec le
+    `name` du champ fautif (`"pattern"` ou `"glob"`).
+  Émettre un événement, un log ou tout effet de bord hors lecture du système de fichiers.
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat, en priorité sur
+    les points `[?]` ci-dessous (reverse du 2026-09-25).
+  [?] Fausse troncation de @search : le test de limite se fait au haut de la ligne SUIVANTE
+    la 50e correspondance — un fichier qui contient EXACTEMENT 50 correspondances puis une
+    seule ligne sans correspondance affiche « truncated at 50 matches » alors que rien n'a pu
+    être perdu. Corriger (tester avant push comme @find_files, ou mesurer les restes réels)
+    ou assumer un marqueur approximatif ?
+  [?] Off-by-one de @find_files : la 200e entrée pushée arme la marque et coupe, même si
+    l'arbre ne contenait exactement que 200 fichiers matchants — sortie complète annoncée
+    tronquée. Même question de tranchant que le point précédent.
+  [?] @find_files trie APRÈS la collecte : en cas de troncation, l'ensemble des 200 entrées
+    conservées dépend de l'ordre d'arpentage (ordre readdir, non déterministe), pas du tri
+    affiché. Trier avant de tronquer (échantillon stable, coût d'un tri complet) ou accepter ?
+  [?] @search ne trie PAS ses résultats (ordre d'arpentage) là où @find_files trie — asymétrie
+    voulue (le format grep garde l'ordre de parcours) ou tri à ajouter ?
+  [?] Exclusion par nom exact `target`/`node_modules` à TOUTE profondeur et sur les FICHIERS
+    aussi : un répertoire ou un fichier légitimement nommé `target` (ex. `src/target/`) est
+    élagué. Choix assumé (pragmatisme Rust/Node) ou restriction aux seuls répertoires / à la
+    racine ?
+  [?] @search avale TOUTE erreur de lecture comme un « binaire » : un fichier illisible pour
+    cause de droits (ou supprimé en cours de route) est absent de la sortie sans aucun signal.
+    Le LLM ne peut pas distinguer « pas de correspondance » de « fichier jamais lu ».
+    Silencieux assumé ou compte rendu en fin de sortie (« N files skipped ») ?
+  [?] Défauts du crate `ignore` jamais discutés dans le code : `.ignore` et
+    `.git/info/exclude` sont actifs (défauts `true` non surchargés), le gitignore global de
+    l'utilisateur est coupé (`git_global(false)` explicite), et `require_git(true)` (défaut)
+    rend les règles git inopérantes hors dépôt git — un même projet peut donc rendre des
+    résultats différents selon la présence de `.git/`. Cet assortiment est-il le contrat
+    voulu ?
+  [?] Aucune limite de taille de fichier ni timeout : @search charge chaque fichier UTF-8
+    entier en mémoire et arpente sans `max_depth` ; un dépôt contenant un artefact de
+    plusieurs Go non ignoré est lu en entier. ./output.rs centralise des bornes ailleurs —
+    faut-il un plafond de taille par fichier et un plafond de temps à contractualiser ?
+  [?] Le format de ligne de @search contient un ESPACE après le second `:`
+    (`fichier:12: contenu`) là où grep émet `fichier:12:contenu`. Choix de lisibilité assumé
+    ou coquille à corriger ?
+  [?] Asymétrie défensive sur @strip_prefix : @find_files saute l'entrée, @search retombe sur
+    le chemin complet. Les deux branches sont inatteignables depuis un walker construit sur
+    la même racine. Unifier le sort de ces branches (le harnais interdit `unreachable!` — donc
+    quoi ?) ou laisser les deux replis distincts ?
+  [?] Le marqueur de @find_files dit « matches » pour des fichiers (« truncated at 200
+    matches — narrow the pattern or path ») : wording only, à renommer en « files » ?
+  [?] Le test existant `search_truncates` écrit 200 lignes matchantes (bien au-delà de 50) :
+    la limite exacte (50 et 51 correspondances) et les deux cas approximatifs `[?]` ci-dessus
+    ne sont testés nulle part. À figer une fois la politique de marque tranchée.
+  [ ] Dériver un test par Scenario encore sans test (chacun taggé du titre de son Scenario) :
+    `find_files_path_vide_signifie_repertoire_courant`,
+    `find_files_patron_ancre_sur_chemin_relatif`,
+    `find_files_aucun_resultat_message_exact`,
+    `find_files_gitignore_respecte_dans_depot_git`,
+    `find_files_hors_depot_git_le_gitignore_ne_filtre_rien`,
+    `find_files_chemin_non_repertoire`,
+    `find_files_chemin_invalide_prioritaire_sur_patron_invalide`,
+    `find_files_tronque_a_200_entrees`, `find_files_symlink_non_retenu`,
+    `search_format_de_ligne_exact`, `search_numerotation_une_based`,
+    `search_aucune_correspondance_message_exact`,
+    `search_chemin_non_repertoire`,
+    `search_chemin_invalide_prioritaire_sur_regex_invalide`,
+    `search_regex_invalide_prioritaire_sur_glob_invalide`,
+    `search_sensible_a_la_casse`, `search_ne_traverse_pas_les_fin_de_ligne`,
+    `search_fichier_illisible_ignore_silencieusement`. Le Scenario
+    `find_files_path_vide_signifie_repertoire_courant` exige un test sérialisé
+    (@std::env::set_current_dir agit sur tout le processus). Les tests existants couvrent déjà :
+    nominal trié des deux côtés, exclusions `.git`/`target` (mais pas `node_modules`), motif
+    sans résultat des deux côtés, glob/regex/glob-filtre invalides, chemin inexistant
+    (find_files seulement), binaire sauté, troncation > 50 de search, filtre glob de search.
+  [ ] Compléter les tests existants : `find_files_ignores_git_target` ne teste pas
+    `node_modules` ; `find_files_not_found` n'asserte ni le contenu du `hint` ni le code
+    VNL-TLS-001 ; aucun test n'asserte les messages exacts (littéraux complets de `Returns`)
+    ni le marqueur de @find_files.
+
+Done when:
+  Chaque Scenario dispose d'un test taggé par son titre et passe.
+  Les questions `[?]` sont tranchées par Sébastien et la spec mise à jour en conséquence.
+  La batterie complète est verte sur `vanyline-tools`, tests consommateurs (sandbox, CLI)
+  inchangés.
+
+Scenario: find_files_chemins_relatifs_tries
+  Given un répertoire temporaire contenant `src/lib.rs`, `src/main.rs` et `README.md`
+  When on appelle @find_files avec `pattern: "**/*.rs"` et `path` = le répertoire temporaire
+  Then le résultat est `Ok` de exactement deux lignes triées, `src/lib.rs` puis
+    `src/main.rs` (chemins relatifs à `path`, joints par `"\n"`, sans titre ni newline final)
+
+Scenario: find_files_path_vide_signifie_repertoire_courant
+  Given le répertoire courant du processus positionné sur un répertoire temporaire contenant
+    `seulement.rs` (test sérialisé, le cwd étant global au processus)
+  When on appelle @find_files avec `pattern: "*.rs"` et `path: ""`
+  Then le résultat est `Ok` contenant la ligne `seulement.rs` (chemin relatif au `"."` implicite)
+
+Scenario: find_files_patron_ancre_sur_chemin_relatif
+  Given un répertoire temporaire contenant `racine.rs` à la racine et `nested/imbre.rs`
+  When on appelle @find_files avec `pattern: "*.rs"` et `path` = le répertoire temporaire
+  Then le résultat contient `racine.rs` mais PAS `nested/imbre.rs` (`*` ne traverse pas `/`)
+  And un second appel avec `pattern: "**/*.rs"` retourne les deux fichiers
+
+Scenario: find_files_aucun_resultat_message_exact
+  Given un répertoire temporaire ne contenant que `README.md`
+  When on appelle @find_files avec `pattern: "**/*.rs"` et `path` = le répertoire temporaire
+  Then le résultat est `Ok` de la chaîne EXACTE
+    `no files matching '**/*.rs' under {path}` (chemin inséré tel que transmis)
+
+Scenario: find_files_exclut_git_target_node_modules
+  Given un répertoire temporaire contenant `main.rs`, `.git/config`, `target/out.o` et
+    `node_modules/pkg/index.js`
+  When on appelle @find_files avec `pattern: "**/*"` et `path` = le répertoire temporaire
+  Then le résultat ne contient que `main.rs` (les trois répertoires sont élagués à la racine,
+    et il en irait de même à n'importe quelle profondeur)
+
+Scenario: find_files_gitignore_respecte_dans_depot_git
+  Given un répertoire temporaire initialisé en dépôt git (contenant un `.git/`) avec un
+    `.gitignore` contenant la ligne `ignoree.txt`, et les fichiers `ignoree.txt` et
+    `gardee.txt`
+  When on appelle @find_files avec `pattern: "*.txt"` et `path` = le répertoire temporaire
+  Then le résultat contient `gardee.txt` mais pas `ignoree.txt`
+
+Scenario: find_files_hors_depot_git_le_gitignore_ne_filtre_rien
+  Given un répertoire temporaire SANS `.git/` contenant un `.gitignore` avec la ligne
+    `ignoree.txt`, et les fichiers `ignoree.txt` et `gardee.txt`
+  When on appelle @find_files avec `pattern: "*.txt"` et `path` = le répertoire temporaire
+  Then le résultat contient `ignoree.txt` ET `gardee.txt` (require_git par défaut : hors
+    dépôt git, les règles .gitignore ne s'appliquent pas)
+
+Scenario: find_files_patron_glob_invalide
+  Given un répertoire temporaire valide
+  When on appelle @find_files avec `pattern: "["` et `path` = le répertoire temporaire
+  Then le résultat est `Err(@ToolsError::InvalidArgument)` avec `name == "pattern"` et un
+    `reason` non vide (message globset brut)
+
+Scenario: find_files_chemin_inexistant_avec_hinte
+  Given un chemin `/nonexistent/path/xyz` qui n'existe pas
+  When on appelle @find_files avec `pattern: "**/*.rs"` et ce `path`
+  Then le résultat est `Err(@ToolsError::FileNotFound)` (VNL-TLS-001), le champ `path` du
+    variant est le chemin transmis et le `hint` vaut « parent directory does not exist
+    either » (parent absent aussi)
+
+Scenario: find_files_chemin_non_repertoire
+  Given un fichier régulier `versus.txt` dans un répertoire temporaire
+  When on appelle @find_files avec `pattern: "**/*"` et `path` = le chemin du FICHIER
+  Then le résultat est `Err(@ToolsError::NotADirectory)` (VNL-TLS-003) mentionnant le chemin,
+    sans qu'aucun arpentage n'ait eu lieu
+
+Scenario: find_files_chemin_invalide_prioritaire_sur_patron_invalide
+  Given un `path` inexistant ET un `pattern: "["` tous deux invalides
+  When on appelle @find_files avec ces deux arguments
+  Then le résultat est `Err(@ToolsError::FileNotFound)` — la vérification du chemin passe
+    avant la compilation du motif
+
+Scenario: find_files_tronque_a_200_entrees
+  Given un répertoire temporaire contenant 250 fichiers `fichier-001.txt` … `fichier-250.txt`
+    à plat
+  When on appelle @find_files avec `pattern: "*.txt"` et `path` = le répertoire temporaire
+  Then le résultat compte 200 lignes de chemins triées suivies de la ligne finale EXACTE
+    `[truncated at 200 matches — narrow the pattern or path]`
+
+Scenario: find_files_symlink_non_retenu
+  Given un répertoire temporaire contenant `reel.rs` et un lien symbolique `lien.rs` pointant
+    vers `reel.rs`
+  When on appelle @find_files avec `pattern: "*.rs"` et `path` = le répertoire temporaire
+  Then le résultat contient `reel.rs` et ne mentionne pas `lien.rs` (le lien n'est pas un
+    fichier régulier pour le filtre de type)
+
+Scenario: search_format_de_ligne_exact
+  Given un répertoire temporaire contenant `test.rs` avec le contenu `fn foo() {}\nfn bar()
+    {}\n`
+  When on appelle @search avec `pattern: "fn \\w+"`, ce `path`, et `glob: ""`
+  Then le résultat est exactement `test.rs:1: fn foo() {}` suivi d'un newline puis
+    `test.rs:2: fn bar() {}` (chemin relatif, numéros 1-based, UN espace après le second `:`)
+
+Scenario: search_numerotation_une_based
+  Given un fichier `notes.txt` de trois lignes dont la seule contenant `aiguille` est la 3e
+  When on appelle @search avec `pattern: "aiguille"` sur le répertoire parent
+  Then le résultat est une unique ligne commençant exactement par `notes.txt:3: ` (jamais
+    `:0:` ni `:2:`)
+
+Scenario: search_aucune_correspondance_message_exact
+  Given un répertoire temporaire contenant `test.txt` avec `hello world`
+  When on appelle @search avec `pattern: "fn \\w+"` et ce `path`
+  Then le résultat est `Ok` de la chaîne EXACTE `no matches for 'fn \\w+' under {path}`
+    (motif inséré tel que transmis, non ré-échappé)
+
+Scenario: search_filtre_glob_sur_chemin_relatif
+  Given un répertoire temporaire contenant `test.rs` et `test.md` au même contenu matchant
+    `fn foo`, plus `sous/neste.rs` matchant aussi
+  When on appelle @search avec `pattern: "fn \\w+"`, `glob: "*.rs"` et ce `path`
+  Then seule la ligne de `test.rs` est remontée : `test.md` exclu par le filtre, et
+    `sous/neste.rs` aussi (`*` ne traverse pas `/` sur le chemin relatif)
+
+Scenario: search_regex_invalide_nomme_pattern
+  Given un répertoire temporaire valide
+  When on appelle @search avec `pattern: "("` et ce `path`
+  Then le résultat est `Err(@ToolsError::InvalidArgument)` avec `name == "pattern"` et un
+    `reason` non vide (message @regex::Error brut)
+
+Scenario: search_glob_invalide_nomme_glob
+  Given un répertoire temporaire valide contenant `test.txt`
+  When on appelle @search avec `pattern: "foo"`, `glob: "["` et ce `path`
+  Then le résultat est `Err(@ToolsError::InvalidArgument)` avec `name == "glob"` et un
+    `reason` non vide
+
+Scenario: search_regex_invalide_prioritaire_sur_glob_invalide
+  Given un répertoire temporaire valide et les deux motifs invalides `pattern: "("` et
+    `glob: "["`
+  When on appelle @search avec ces deux arguments
+  Then le résultat est `Err(@ToolsError::InvalidArgument)` avec `name == "pattern"` (la regex
+    est compilée avant le filtre glob)
+
+Scenario: search_chemin_invalide_prioritaire_sur_regex_invalide
+  Given un `path` inexistant et `pattern: "("`
+  When on appelle @search avec ces deux arguments
+  Then le résultat est `Err(@ToolsError::FileNotFound)` : la vérification du chemin passe
+    avant toute compilation de regex
+
+Scenario: search_binaire_non_utf8_ignore_silencieusement
+  Given un répertoire temporaire contenant `binaire.bin` (octets `FF FE 00 01`, non UTF-8) et
+    `texte.txt` (`hello world`, sans correspondance)
+  When on appelle @search avec `pattern: "fn \\w+"` et ce `path`
+  Then le résultat est `Ok` du message « no matches for … » et ne mentionne jamais
+    `binaire.bin` (aucun signal de fichier ignoré dans la sortie)
+
+Scenario: search_fichier_illisible_ignore_silencieusement
+  Given un répertoire temporaire contenant `interdit.txt` privé de permissions de lecture
+    (mode 000, test exécuté hors root) et `lisibles.txt` contenant `aiguille`
+  When on appelle @search avec `pattern: "aiguille"` et ce `path`
+  Then seule la ligne de `lisibles.txt` est remontée, l'appel est `Ok`, et aucune erreur
+    VNL-TLS-004 n'est émise (cf. `[?]` de `Tasks` sur ce silence)
+
+Scenario: search_sensible_a_la_casse
+  Given un fichier contenant uniquement la ligne `AIGUILLE`
+  When on appelle @search avec `pattern: "aiguille"` (minuscules) sur le répertoire
+  Then le résultat est `Ok` du message « no matches for … » (regex par défaut sensible à la
+    casse, aucune option insensible exposée)
+
+Scenario: search_ne_traverse_pas_les_fin_de_ligne
+  Given un fichier dont la ligne 1 se termine par `debut` et la ligne 2 commence par `fin`
+  When on appelle @search avec `pattern: "debut\\s+fin"` sur le répertoire
+  Then le résultat est le message « no matches for … » (la regex s'évalue ligne par ligne,
+    `\s` ne peut franchir la frontière de ligne)
+
+Scenario: search_tronque_a_50_correspondances
+  Given un fichier `big.txt` dont 200 lignes matchent `fn foo`
+  When on appelle @search avec `pattern: "fn foo"` et `path` = le répertoire parent
+  Then le résultat compte 50 lignes de correspondances suivies de la ligne finale EXACTE
+    `[truncated at 50 matches — narrow the pattern, path, or glob]`
+
+Scenario: search_chemin_non_repertoire
+  Given un fichier régulier `versus.txt` dans un répertoire temporaire
+  When on appelle @search avec `pattern: "x"` et `path` = le chemin du FICHIER
+  Then le résultat est `Err(@ToolsError::NotADirectory)` (VNL-TLS-003), aucun arpentage
+    n'ayant eu lieu
+
+Scenario: search_exclut_git_target_node_modules
+  Given un répertoire temporaire où `aiguille` apparaît dans un fichier racine, dans
+    `.git/config`, `target/out.txt` et `node_modules/x/index.js`
+  When on appelle @search avec `pattern: "aiguille"` et ce `path`
+  Then seules les lignes du fichier racine sont remontées, aucune depuis les trois
+    répertoires exclus

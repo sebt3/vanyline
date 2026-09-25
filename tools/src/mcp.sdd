@@ -1,0 +1,259 @@
+Spec: Mcp
+
+Purpose:
+  Registre statique des 8 tools intégrés de `vanyline-tools` au format de description MCP
+  (`tools/list`) : trois fonctions pures produisant des descripteurs JSON Schema
+  (`name` / `description` / `inputSchema`), source unique partagée par les quatre
+  consommateurs — serveur MCP de la sandbox (`handle_tools_list`, qui concatène 8 tools
+  ici + 8 `lsp_tools` locaux = 16), CLI (définitions d'outils du harnais rig via
+  @tool_definition et réponse RPC `config/localTools` verbatim), `app`
+  (`GET /api/local-tools`, aplati en paires name/description). Le module ne porte ni
+  exécution ni validation : les comportements annoncés dans les descriptions sont
+  implémentés par les modules frères (./filesystem.rs, ./search.rs, ./command.rs) et
+  résolus par les consommateurs. Un seul contrat pour un seul fichier : « ce que le
+  LLM voit des tools », indépendant de qui les exécute.
+
+Owns:
+  ./mcp.rs
+
+References:
+  ./filesystem.rs — implémentation de read_file/write_file/edit_file/delete_file/list_directory (valeurs de repli `limit == 0` → 200 lignes, `depth == 0` → 1 niveau)
+  ./search.rs — implémentation de find_files/search
+  ./command.rs — implémentation d'execute_command (@ExecuteCommandOptions, `timeout_secs == 0` = pas de timeout)
+  ./output.rs — @READ_MAX_LINES = 200 (valeur annoncée dans la description de read_file)
+  ./error.rs — @ToolsError (@ToolsError::EditNoMatch `VNL-TLS-006`, @ToolsError::EditAmbiguous `VNL-TLS-007`, contractualisés dans la description de edit_file)
+  ../../sandbox/src/mcp.rs — @handle_tools_list (concatène filesystem → search → command → lsp_tools)
+  ../../sandbox/src/tools_impl.rs — désérialisation runtime des arguments et confinement (`cwd` vide → `sandbox_root`)
+  ../../cli/src/tools.rs — @tool_definition (lookup par nom, panique si absent — contrat du CLI, pas d'ici) et @local_tools_map (mêmes 8 noms)
+  ../../cli/src/rpc/handlers.rs — gestionnaire `config/localTools` (descripteurs verbatim, même ordre de concaténation)
+  ../../app/src/api/local_tools.rs — @flatten_local_tools (noms + descriptions seulement)
+  ../../sandbox/tests/http.rs — couverture indirecte `tools/list` (16 tools dont les 8 d'ici)
+
+Must:
+  @filesystem_tools rend exactement 5 descripteurs dans cet ordre : `read_file`,
+    `write_file`, `edit_file`, `delete_file`, `list_directory`.
+  @search_tools rend exactement 2 descripteurs dans cet ordre : `find_files`, `search`.
+  @command_tools rend exactement 1 descripteur : `execute_command`.
+  Les trois fonctions rendent ensemble 8 noms distincts, sans doublon, et ces 8 noms sont
+    exactement les identifiants reconnus par le dispatch `tools/call` des consommateurs
+    (sandbox @dispatch_filesystem / @dispatch_search / @dispatch_command, @local_tools_map
+    du CLI).
+  Chaque descripteur possède exactement trois clés : `name` (chaîne), `description`
+    (chaîne non vide), `inputSchema` (objet).
+  Chaque `inputSchema` possède exactement trois clés : `type` = `"object"`, `properties`
+    (une entrée par paramètre nommé ci-dessous), `required` (tableau non vide de noms de
+    paramètres requis, dans l'ordre cité).
+  Tableaux `required` exacts : read_file `[path]` · write_file `[path, content]` ·
+    edit_file `[path, old_string, new_string]` · delete_file `[path]` ·
+    list_directory `[path]` · find_files `[pattern]` · search `[pattern]` ·
+    execute_command `[command]`.
+  Types JSON Schema des paramètres : `path`, `content`, `old_string`, `new_string`,
+    `pattern`, `glob`, `command`, `cwd` en `"string"` ; `offset`, `limit`, `depth`,
+    `timeout_secs` en `"integer"` ; `replace_all` en `"boolean"`.
+  Les paramètres optionnels (`offset`, `limit`, `replace_all`, `depth`, le `path` de
+    find_files/search, `glob`, `timeout_secs`, `cwd`) ne figurent jamais dans `required`.
+  Chaque `description` contient un exemple au format littéral `Example: {…}` (JSON en
+    prose) — 8 sur 8.
+  Les valeurs par défaut sont annoncées en prose dans les descriptions et dans les
+    descriptions seulement : read_file `offset` « default 0 » et `limit` « default 200 »
+    (valeur de @output::READ_MAX_LINES) ; list_directory `depth` « default 1 » ;
+    execute_command `timeout_secs` « default 30, 0 = no timeout » ; `path` de
+    find_files/search et `cwd` d'execute_command « default: current directory ».
+  La description de edit_file énonce son contrat d'échec — échec si `old_string` absent,
+    échec sur plusieurs occurrences sauf `replace_all` — correspondant à
+    @ToolsError::EditNoMatch (`VNL-TLS-006`) et @ToolsError::EditAmbiguous
+    (`VNL-TLS-007`).
+  La description de write_file annonce la création automatique des répertoires parents ;
+    celle de delete_file borne l'opération aux fichiers et répertoires vides ; celle de
+    list_directory annonce une sortie en arbre compact borné par `depth`.
+  Les trois fonctions sont `#[must_use]`, sans argument, sans I/O : le registre est le
+    même quel que soit le contexte du processus (cwd, variables d'environnement, état du
+    système de fichiers).
+
+Must not:
+  Publier un tool `create_directory` : la création de répertoire est un effet de bord de
+    write_file (test existant de cette absence).
+  Embarquer des mots-clés d'annotation JSON Schema (`default`, `minimum`, `examples`)
+    dans les `inputSchema` : les valeurs par défaut n'existent qu'en prose (choix à
+    trancher, cf. `Tasks`).
+  Résoudre un quelconque contexte d'exécution : « current directory » est laissé au
+    consommateur (confinement `sandbox_root` dans la sandbox, cwd du processus dans le
+    CLI) — ce module ignore où il est compilé et appelé.
+  Exécuter, valider ou transformer des arguments d'outils : la désérialisation et
+    l'application des défauts runtime appartiennent aux consommateurs et aux modules
+    frères.
+  Garantir l'ordre des clés dans les objets JSON (rendu `serde_json::Map` non
+    contractuel) : seuls les ordres de tableaux (`required`, liste des descripteurs) sont
+    observables.
+
+Depends on:
+  `serde_json` — macro @json!, @serde_json::Value (seule dépendance du module)
+
+Exposes:
+  @filesystem_tools — 5 descripteurs filesystem, `#[must_use]`.
+  @search_tools — 2 descripteurs de recherche, `#[must_use]`.
+  @command_tools — 1 descripteur d'exécution de commande, `#[must_use]`.
+
+Accepts:
+  Les trois fonctions : aucun argument.
+
+Returns:
+  `Vec<serde_json::Value>` possédé, reconstruit intégralement à chaque appel (littéraux
+    @json!) : deux appels rendent des valeurs égales mais indépendantes — muter le
+    premier `Vec` ou l'un de ses éléments ne contamine pas l'appel suivant.
+  Forme de chaque élément : `{"name": …, "description": …, "inputSchema": {"type":
+    "object", "properties": {…}, "required": […]}}`.
+
+Raises:
+  Aucune — assemblage de données statiques, aucun chemin d'erreur, aucun
+    `unwrap`/`expect`/panic sur le chemin de production (harnais `../../tooling.sdd`).
+
+Handles:
+  Arguments d'un `tools/call` : non traités ici — le module ne produit que les
+    descripteurs ; la désérialisation et les replis sont côté consommateur (sandbox
+    @ExecuteCommandOptions avec `#[serde(default)]`, structs `*Args` du CLI) et côté
+    module frère (sentinelles `limit == 0` → 200 lignes, `depth == 0` → 1 niveau dans
+    ./filesystem.rs).
+  Paramètre optionnel absent : géré par le consommateur (`serde default` / `Option`) ; ce
+    module se borne à ne pas le déclarer `required`.
+  `timeout_secs == 0` : annoncé « no timeout » en description, effectif dans ./command.rs
+    (pas de @ToolsError::CommandTimeout). En revanche l'absence du paramètre prend 30
+    dans le CLI (`unwrap_or(30)`) et 0 — donc pas de timeout — dans la sandbox
+    (`#[serde(default)]`) : divergence documentée en `Tasks` `[?]`.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
+    accidentel ne devient contrat qu'après cette relecture
+    (`.specdd/bootstrap.project.md`).
+  [ ] Convertir en tests taggés par leur titre les Scenarios sans couverture directe
+    actuelle. Couverture existante dans `mod tests` de ./mcp.rs : `filesystem_tools_surface`,
+    `search_tools_surface`, `command_tools_surface`, `edit_file_required_fields`,
+    `read_file_required_fields`, `no_create_directory_schema`. Couverture indirecte :
+    `tools_list_advertises_filesystem_tools` / `tools_list_advertises_search_tools`
+    (../../sandbox/tests/http.rs, 16 tools), tests de @flatten_local_tools
+    (../../app/src/api/local_tools.rs, 8 tools aplatis).
+  [?] Valeur par défaut de `timeout_secs` : le schéma annonce `default 30`, le CLI
+    applique 30, mais la sandbox mappe une absence en @ExecuteCommandOptions::timeout_secs
+    = 0 (défaut serde), soit **pas de timeout** — un `execute_command` sans timeout côté
+    sandbox peut tourner indéfiniment. Aligner la sandbox sur 30, aligner le schéma sur
+    « absent = pas de timeout », ou imposer le défaut dans le schéma ?
+  [?] `limit == 0` et `depth == 0` passés explicitement valent « défaut » (sentinelles de
+    ./filesystem.rs : 0 → 200 lignes, 0 → 1 niveau) sans être annoncés dans les
+    descriptions — un LLM lisant `limit: 0` comme « 0 ligne » se trompe. Annoncer la
+    sentinelle en description, ou distinguer absent et 0 explicite ?
+  [?] Pas de fonction agrégeant les 8 tools : les quatre consommateurs répètent chacun le
+    chaînage filesystem → search → command (ordre et complétude à maintenir à la main,
+    risque de dérive). Ajouter un @all_tools ici ou garder la granularité par catégorie ?
+  [?] Défaut « current directory » (path de find_files/search, cwd d'execute_command) :
+    rendu effectif `sandbox_root` dans la sandbox (via @confine) et cwd du processus dans
+    le CLI — contrat accepté côté consommateur, ou schéma à préciser par exposition ?
+  [?] Aucun `minimum: 0` sur les paramètres `integer` : une valeur négative envoyée par le
+    LLM échoue en désérialisation `u64` (côté CLI : @ToolError::ToolCallError) — comportement
+    accepté ou annotation à ajouter ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre.
+  Les décisions `[?]` sont tranchées par Sébastien et reflétées dans la spec, en
+    particulier la valeur par défaut de `timeout_secs`.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur `vanyline-tools`.
+
+Scenario: filesystem_tools_cinq_descripteurs_dans_ordre_fixe
+  Given aucune entrée (fonction pure sans argument)
+  When @filesystem_tools est appelée
+  Then elle rend exactement 5 éléments
+  And leurs `name` dans l'ordre sont `read_file`, `write_file`, `edit_file`,
+    `delete_file`, `list_directory`
+
+Scenario: search_tools_deux_descripteurs_dans_ordre_fixe
+  Given aucune entrée
+  When @search_tools est appelée
+  Then elle rend exactement 2 éléments
+  And leurs `name` dans l'ordre sont `find_files`, `search`
+
+Scenario: command_tools_unique_execute_command
+  Given aucune entrée
+  When @command_tools est appelée
+  Then elle rend exactement 1 élément
+  And son `name` est `execute_command`
+
+Scenario: huit_noms_de_tools_uniques
+  Given les trois fonctions appelées et concaténées dans l'ordre filesystem, search, command
+  When les 8 `name` sont collectés
+  Then aucun nom n'apparaît deux fois
+  And l'ensemble est exactement {read_file, write_file, edit_file, delete_file,
+    list_directory, find_files, search, execute_command}
+
+Scenario: descripteur_de_trois_cles_seulement
+  Given chacun des 8 descripteurs produits par les trois fonctions
+  When ses clés JSON sont listées
+  Then il a exactement les clés `name`, `description`, `inputSchema`
+  And `description` est une chaîne non vide
+  And `inputSchema` a exactement les clés `type`, `properties`, `required`
+  And `type` vaut `"object"` et `required` est un tableau non vide
+
+Scenario: required_de_read_file_est_path
+  Given le descripteur `read_file`
+  When son `inputSchema` est inspecté
+  Then `required` est exactement `["path"]`
+  And `properties` contient `offset` et `limit` de type `"integer"`
+  And ni `offset` ni `limit` ne figure dans `required`
+
+Scenario: required_de_write_file_est_path_et_content
+  Given le descripteur `write_file`
+  When son `inputSchema` est inspecté
+  Then `required` est exactement `["path", "content"]`
+  And `path` et `content` sont tous deux de type `"string"`
+
+Scenario: required_de_edit_file_sans_replace_all
+  Given le descripteur `edit_file`
+  When son `inputSchema` est inspecté
+  Then `required` est exactement `["path", "old_string", "new_string"]`
+  And `properties` contient `replace_all` de type `"boolean"`
+  And `replace_all` ne figure pas dans `required`
+
+Scenario: required_de_execute_command_est_command
+  Given le descripteur `execute_command`
+  When son `inputSchema` est inspecté
+  Then `required` est exactement `["command"]`
+  And `timeout_secs` est de type `"integer"` et `cwd` de type `"string"`
+  And ni `timeout_secs` ni `cwd` ne figure dans `required`
+
+Scenario: required_des_outils_restants
+  Given les descripteurs `delete_file`, `list_directory`, `find_files`, `search`
+  When leurs tableaux `required` sont lus
+  Then delete_file a exactement `["path"]`
+  And list_directory a exactement `["path"]` avec `depth` optionnel de type `"integer"`
+  And find_files a exactement `["pattern"]` avec `path` optionnel de type `"string"`
+  And search a exactement `["pattern"]` avec `path` et `glob` optionnels de type `"string"`
+
+Scenario: chaque_description_porte_un_exemple_json
+  Given les 8 descripteurs agrégés des trois fonctions
+  When chaque `description` est cherchée
+  Then chacune contient le littéral `Example: {`
+
+Scenario: defauts_annonces_en_prose_sans_cle_schema
+  Given les 8 descripteurs agrégés des trois fonctions
+  When leurs descriptions et `inputSchema` sont inspectés
+  Then la description de read_file contient `default 0` et `default 200`
+  And la description de list_directory contient `default 1`
+  And la description d'execute_command contient `default 30` et `0 = no timeout`
+  And les descriptions de find_files et search contiennent `default: current directory`
+  But aucun `inputSchema` ne contient de clé `default`
+
+Scenario: description_de_edit_file_annonce_les_deux_echecs
+  Given le descripteur `edit_file`
+  When sa `description` est lue
+  Then elle énonce l'échec quand `old_string` est absent
+  And elle énonce l'échec sur plusieurs occurrences sauf `replace_all` posé
+
+Scenario: deux_appels_rendent_des_valeurs_independantes
+  Given un premier appel à @filesystem_tools dont le `Vec` retourné est muté (par exemple
+    un élément ajouté)
+  When @filesystem_tools est appelée une seconde fois
+  Then le second appel rend encore exactement 5 descripteurs intacts
+
+Scenario: absence_de_create_directory
+  Given les 8 descripteurs agrégés des trois fonctions
+  When leurs `name` sont listés
+  Then aucun ne vaut `create_directory`

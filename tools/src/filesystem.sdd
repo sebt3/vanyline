@@ -1,0 +1,651 @@
+Spec: Filesystem
+
+Platform: Rust/vanyline-tools/tokio/serde/thiserror
+
+Purpose:
+  Les sept tools de filesystem exposés au LLM (MCP) et à l'éditeur web (WS) :
+  @read_file, @write_file, @edit_file, @list_directory, @delete_file, @mkdir,
+  @rename_file, plus l'helper @file_not_found_hint, partagé `pub(crate)` avec
+  ./command.rs et ./search.rs. Le fichier contractualise les formats de sortie taillés
+  pour les LLM
+  (numérotation `cat -n`, bornage en lignes et octets avec marqueur d'action de reprise,
+  arbre compact borné) et l'écriture atomique R15 (@atomic_write : temporaire dans le
+  même répertoire puis `rename`, permissions préservées — ni fichier tronqué après un
+  crash, ni mode silencieusement réinitialisé à l'umask). Point de frontière important :
+  ce fichier ne confinne AUCUN chemin — la garde anti-évasion hors racine sandbox
+  (@confine_path, marqueurs `VNL-SBX-*`) est la responsabilité exclusive des appelants
+  (`sandbox` : dispatch MCP et WS `/ws/fs`) ; toute la surface d'ici accepte des chemins
+  arbitraires. Voir `[?]` dans `Tasks`. Spécifié seul (pas de regroupement) : c'est le
+  plus gros fichier du crate (~1677 lignes) et un seul contrat « outils fichier ».
+
+Owns:
+  ./filesystem.rs
+
+Can read:
+  ./lib.rs
+  ./error.rs
+  ./output.rs
+  ./mcp.rs
+  ./command.rs
+  ./search.rs
+  ../Cargo.toml
+  ../../sandbox/src/tools_impl.rs
+  ../../sandbox/src/ws/fs.rs
+  ../../vanyline.sdd
+  ../../tooling.sdd
+
+Depends on:
+  @crate::error::ToolsError (./error.rs) — unique type d'erreur retourné ; les marqueurs
+    utiles ici sont `VNL-TLS-001` (@FileNotFound), `VNL-TLS-002` (@NotAFile),
+    `VNL-TLS-003` (@NotADirectory), `VNL-TLS-004` (@PermissionDenied), `VNL-TLS-005`
+    (@InvalidArgument), `VNL-TLS-006` (@EditNoMatch), `VNL-TLS-007` (@EditAmbiguous),
+    `VNL-TLS-009` (@Io). `VNL-TLS-008` appartient à ./command.rs, jamais émis ici.
+  @crate::output (./output.rs) — constantes @READ_MAX_LINES (200), @READ_MAX_BYTES
+    (16 384), @LIST_MAX_ENTRIES (200) et fonctions @number_lines, @bound_lines ; jamais
+    de nombre magique dans ce fichier.
+  tokio (features `full`, ../Cargo.toml) — @tokio::fs pour les sept tools,
+    @tokio::task::spawn_blocking pour @list_directory (walk synchrone hors executor).
+  std — @std::fs (listing synchrone de @list_directory, @file_not_found_hint),
+    @std::process::id (nom du fichier temporaire de @atomic_write), @std::cell::Cell
+    (drapeau de limitation dans la récursion de @list_directory),
+    @std::path::Path (parent/file_name/join).
+  serde (derive) — les sept structs d'options sont `Serialize + Deserialize` : ce sont
+    les types de l'enveloppe JSON-RPC `tools/call` côté sandbox (@serde_json::from_value
+    dans `sandbox/src/tools_impl.rs`).
+  Consommateurs externes (lecture de contrat, hors périmètre d'édition) :
+    ../../sandbox/src/tools_impl.rs — @dispatch_filesystem expose 5 tools MCP
+    (read/write/edit/delete/list) après @confine ; ../../sandbox/src/ws/fs.rs — ops WS
+    `read`/`write`/`edit`/`delete`/`mkdir`/`rename`/`list` après @confine_path ;
+    ./command.rs et ./search.rs réutilisent @file_not_found_hint (visibilité
+    `pub(crate)`).
+  Harnais clippy (../../tooling.sdd) — production sans `unwrap`/`expect`/`panic!`/
+    `println!` ; le module ne logge pas (le logging est la charge des appelants).
+
+Exposes:
+  @BoxedFuture<T> — alias public `Pin<Box<dyn Future<Output = T> + Send + 'static>>`.
+    Paresseux : aucun effet de bord avant le premier @poll ; le `#[must_use]` des
+    fonctions ci-dessous impose l'await. (Alias triplé à l'identique dans ./command.rs et
+    ./search.rs — cf. `Tasks`.)
+  @ReadFileOptions — `Debug + Serialize + Deserialize + Default` ; champs `path`
+    (requis), `offset` (`#[serde(default)]`, 0-based), `limit` (`#[serde(default)]`,
+    `0` = sentinelle → @output::READ_MAX_LINES), `raw` (`#[serde(default)]`). Seule des
+    sept structs à dériver `Default`.
+  @WriteFileOptions — `path`, `content` (tous deux requis, aucun défaut).
+  @EditFileOptions — `path`, `old_string`, `new_string` (requis), `replace_all`
+    (`#[serde(default)]`).
+  @DeleteFileOptions — `path` (requis).
+  @MkdirOptions — `path` (requis).
+  @RenameFileOptions — `path` (source) et `to` (destination), tous deux requis.
+  @ListDirectoryOptions — `path` (requis), `depth` (`#[serde(default)]`, `0` = sentinelle
+    → 1 niveau).
+  @file_not_found_hint(path: &str) -> String — `pub(crate)`, synchrone, listing réel du
+    répertoire parent au moment de l'appel. Quatre formes exhaustives :
+      `""` — parent @None, parent vide (`"foo.txt"`) ou `"."` (`"./foo"`)
+      `", parent directory contains: [a, b]"` — parent listable, noms triés par
+        @Ord::cmp croissant sur `file_name().to_string_lossy()`, séparateur `", "`
+      `", parent directory contains: []"` — parent listable mais vide
+      `", parent directory does not exist either"` — @read_dir du parent en échec,
+        QUELLE QUE SOIT la cause (cf. `[?]`)
+  @read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, @ToolsError>> —
+    `#[must_use]`. Ordonnance contractuelle : metadata → contrôle répertoire →
+    @read_to_string → (court-circuit `raw`) → fichier vide → hors plage offset →
+    limitation. En mode numéroté : lignes de `content.lines().skip(offset)`, jointes
+    `"\n"`, numérotées par @output::number_lines à partir de `offset + 1` (format
+    `{:>5}\t`), puis @output::bound_lines(…, offset, effective_limit, @READ_MAX_BYTES).
+    En mode `raw` : contenu intégral tel quel, sans numérotation, sans troncature, sans
+    interprétation de `offset` ni `limit` ; les contrôles not-found / répertoire /
+    permission s'appliquent quand même.
+  @write_file(opts: WriteFileOptions) -> BoxedFuture<Result<(), @ToolsError>> —
+    `#[must_use]`. create_dir_all du parent → refus si cible est un répertoire →
+    @atomic_write.
+  @edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, @ToolsError>> —
+    `#[must_use]`. Refus `old_string` vide AVANT tout accès fichier → lecture (mêmes
+    erreurs que @read_file) → décompte d'occurrences @str::matches (non chevauchées) →
+    sans correspondance : @EditNoMatch avec indice Levenshtein → ambiguïté refusée sauf
+    `replace_all` → remplacement (@str::replace ou @str::replacen(1)) → @atomic_write.
+  @list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String,
+    @ToolsError>> — `#[must_use]`, exécuté dans @spawn_blocking. Arbre compact :
+    entrées triées par `file_name` (@Ord::cmp sur @OsString, ordre binaire, non
+    localisé), une par ligne, indentation de deux espaces par niveau, suffixe `"/"` pour
+    les répertoires (@Path::is_dir suit les symlinks). Descente dans un sous-répertoire
+    seulement si `depth_remaining > 1`. Limite globale @output::LIST_MAX_ENTRIES
+    (200 entrées, tous niveaux confondus).
+  @delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), @ToolsError>> —
+    `#[must_use]`. Jamais récursif : fichier → @tokio::fs::remove_file ; répertoire →
+    @tokio::fs::remove_dir (refusé non vide).
+  @mkdir(opts: MkdirOptions) -> BoxedFuture<Result<(), @ToolsError>> — `#[must_use]`,
+    @tokio::fs::create_dir_all : idempotent sur répertoire existant (Ok).
+  @rename_file(opts: RenameFileOptions) -> BoxedFuture<Result<(), @ToolsError>> —
+    `#[must_use]`. metadata de la source → validation du parent de `to` →
+    @tokio::fs::rename.
+  Privés au module (testables sous `mod tests`, non surface publique) : @atomic_write,
+    @levenshtein_distance (distances sur @as_bytes — un caractère multi-octets compte
+    par octets), @closest_line_hint (`". Closest line in file: '{ligne}'"` après
+    @trim de part et d'autre, égalité de distance → première ligne rencontrée, fichier
+    sans ligne → `""`).
+
+Accepts:
+  Tous les `path`/`to` : n'importe quelle chaîne — absolue, relative au cwd du process,
+    avec `..`, symlink, vide. Aucune normalisation, aucune racine, aucune validation
+    syntaxique dans ce fichier (le confinement est la charge de l'appelant, cf.
+    `Handles`). La chaîne vide est acceptée et produit @ToolsError::FileNotFound (metadata
+    en NotFound sur `""`) avec hint `""` (parent @None).
+  @ReadFileOptions::offset / limit et @ListDirectoryOptions::depth : `usize` ; `0` est
+    une sentinelle de défaut (limit → 200 lignes, depth → 1 niveau), jamais une valeur
+    littérale.
+  @WriteFileOptions::content : @String — UTF-8 par construction ; aucun contenu binaire
+    n'est écrivable via cette API, aucune taille maximale de contenu.
+  Désérialisation serde : champs inconnus acceptés en silence (aucun
+    `deny_unknown_fields`) ; champ requis manquant ou entier négatif/hors `usize` →
+    erreur serde remontée par l'appelant (`invalid arguments for …` côté
+    `tools_impl.rs`), jamais convertie en @ToolsError.
+  @edit_file : `old_string`/`new_string` arbitraires, y compris multi-lignes, vides pour
+    `new_string` (suppression de texte), contenant `old_string` ; occurrences comptées
+    non chevauchantes (`"aa"` dans `"aaaa"` = 2).
+
+Returns:
+  @read_file mode numéroté — les lignes numérotées jointes par `"\n"`, sans newline
+    final ; si tronqué (limite de lignes ou de 16 384 octets atteinte, la première des
+    deux), une ligne finale exacte
+    `[truncated — {remaining} more lines, call again with offset={offset + retournées}]`
+    (tiret cadratin). Fichier vide et `offset == 0` → `""`.
+  @read_file mode `raw` — contenu byte-identique au fichier (newline final conservé).
+  @write_file, @delete_file, @mkdir, @rename_file — `Ok(())` ; c'est l'appelant qui forge
+    le message succès (`wrote {resolved}`, `deleted {resolved}`, etc.).
+  @edit_file — `edited {path}: {n} replacement(s)`, `n` = 1 sans `replace_all`, nombre
+    d'occurrences avec.
+  @list_directory — lignes d'arbre jointes `"\n"` ; répertoire sans entrée remontée →
+    `{path} is empty` (avec le `path` reçu en entrée) ; plafonnement atteint → suffixe
+    exact `\n[truncated at 200 entries — narrow the path or reduce depth]`.
+  @atomic_write — `Ok(())` après `rename` du temporaire `".{file_name}.vny-tmp-{pid}"`
+    écrit dans le même répertoire que la cible ; permissions de la cible existante copiées
+    sur le temporaire avant rename ; cible inexistante → mode par défaut (umask).
+  @levenshtein_distance — `usize`, distance d'édition octet par octet (insertion,
+    suppression, substitution, coût 1) ; chaînes vides → longueur de l'autre.
+
+Raises:
+  Chaque tool retourne une @ToolsError unique en échec, marqueur en tête du @Display :
+    @read_file — @FileNotFound `VNL-TLS-001` (+hint), @Io `VNL-TLS-009` (metadata non
+      NotFound, lecture non PermissionDenied — dont UTF-8 invalide : @read_to_string
+      échoue en `InvalidData`), @NotAFile `VNL-TLS-002` (cible est un répertoire),
+      @PermissionDenied `VNL-TLS-004` (lecture), @InvalidArgument `VNL-TLS-005` name
+      `"offset"` : raison `"file is empty"` (fichier vide, offset > 0) ou
+      `"file has {total} lines, offset {offset} is out of range"` (`offset >= total`).
+    @write_file — @PermissionDenied `VNL-TLS-004` ou @Io `VNL-TLS-009` (le `path` de
+      l'erreur est alors le PARENT quand `create_dir_all` échoue, la cible sinon),
+      @NotAFile `VNL-TLS-002` (cible existante est un répertoire).
+    @edit_file — @InvalidArgument `VNL-TLS-005` name `"old_string"` raison `"must not be
+      empty"` (avant tout I/O), puis les mêmes que @read_file pour la lecture, plus
+      @EditNoMatch `VNL-TLS-006` (+hint Levenshtein), @EditAmbiguous `VNL-TLS-007`
+      (avec `count`), @PermissionDenied/@Io sur l'écriture.
+    @list_directory — @FileNotFound `VNL-TLS-001` (+hint), @Io `VNL-TLS-009` (metadata
+      non NotFound, ou @JoinError du @spawn_blocking converti en @std::io::Error),
+      @NotADirectory `VNL-TLS-003`.
+    @delete_file — @FileNotFound `VNL-TLS-001` (+hint), @InvalidArgument `VNL-TLS-005`
+      name `"path"` raison `"directory is not empty"`, @PermissionDenied `VNL-TLS-004`
+      (fichier seulement — cf. `[?]` pour les répertoires), @Io `VNL-TLS-009`.
+    @mkdir — @NotADirectory `VNL-TLS-003` (mappé depuis @ErrorKind::AlreadyExists :
+      le chemin existe et n'est pas un répertoire), @PermissionDenied `VNL-TLS-004`,
+      @Io `VNL-TLS-009`.
+    @rename_file — @FileNotFound `VNL-TLS-001` (+hint, source), @InvalidArgument
+      `VNL-TLS-005` name `"to"` raison `"parent of '{to}' is a file, not a directory"`
+      ou `"parent of '{to}' does not exist or is not a directory"`,
+      @PermissionDenied `VNL-TLS-004` (le `path` rendu est la SOURCE, même quand le refus
+      concerne `to` — cf. `[?]`), @Io `VNL-TLS-009`.
+
+Handles:
+  Frontière de sécurité : le confinement sous la racine sandbox n'est PAS ici. Les
+    appelants résolvent chaque chemin (@confine en MCP, @confine_path en WS, marqueurs
+    `VNL-SBX-001..003`) avant d'appeler ces fonctions ; un consommateur direct du crate
+    atteint n'importe quel chemin du pod. Contractualisé en `Must`, arbitrage `[?]`.
+  Deux surfaces d'exposition distinctes : 5 tools via MCP (`filesystem_tools()` de
+    ./mcp.rs + @dispatch_filesystem) ; les ops WS `/ws/fs` ajoutent `mkdir` et `rename`
+    (jamais exposés en MCP) et l'éditeur utilise `raw` (flag absent du schéma MCP de
+    ./mcp.rs — cf. `[?]`). @edit_file et @read_file sont aussi réutilisés en interne par
+    `tools_impl.rs` (extraits LSP, rapports de renommage).
+  @list_directory s'exécute sur un thread bloquant : si la closure panique, le
+    @JoinError est converti en @ToolsError::Io `VNL-TLS-009` sur le `path` d'origine —
+    aucune panic ne franchit la future.
+  Erreurs @read_dir non remontées dans l'arbre @list_directory : un sous-répertoire
+    illisible apparaît avec son suffixe `"/"` mais sans enfants ; une entrée en erreur
+    (@DirEntry) est écartée silencieusement (@flatten).
+  @list_directory suit les symlinks-dossiers (@Path::is_dir) : ils portent `"/"` et sont
+    traversés ; une boucle de symlinks reste bornée par `depth` et la limite de 200
+    entrées (duplication bornée, jamais de boucle infinie).
+  @atomic_write laisse un résidu `".{nom}.vny-tmp-{pid}"` dans le répertoire cible si le
+    process est tué entre @write et `rename` (le `rename` est le point de bascule) ; en
+    échec géré le temporaire est supprimé (échec de suppression ignoré).
+  Normalisation des fins de ligne en mode numéroté : @str::lines sépare sur `\n` et
+    retire le `\r` qui précède — un fichier CRLF est donc normalisé en LF dans la sortie
+    numérotée (reconstruite par `join("\n")`), alors que le mode `raw` est
+    byte-identique et conserve les `\r`.
+  L'indice @file_not_found_hint est un instantané non atomique : le contenu listé est
+    celui du répertoire au moment de l'appel d'erreur, périmé dès que la réponse part.
+  @write_file ignore l'erreur de metadata de l'étape « cible est un répertoire » (`if
+    let Ok`) : toute erreur autre que « existe et est un répertoire » tombe dans
+    @atomic_write, qui la rendra en @Io.
+  @rename_file : si metadata du parent de `to` échoue avec une cause autre que NotFound
+    ou PermissionDenied (ex: boucle de symlink), le contrôle laisse passer et c'est
+    `rename` qui tranche en @Io ; si `to` existe déjà, `rename` écrase la cible sans
+    garde (sémantique POSIX, cf. `[?]`).
+  @mkdir s'appuie sur la sémantique de @tokio::fs::create_dir_all : répertoire déjà
+    présent → Ok sans erreur ; `AlreadyExists` n'arrive que si le chemin final existe
+    comme non-répertoire → rendu @NotADirectory `VNL-TLS-003` (le suffixe du message
+    « it is a file — use read_file » est porté par ./error.rs).
+  Fichier non UTF-8 : @read_to_string échoue (InvalidData) AVANT le court-circuit `raw`
+    — même une lecture `raw` d'un fichier binaire rend @Io `VNL-TLS-009` « stream did
+    not contain valid UTF-8 » ; aucune détection binaire/texte n'existe (cf. `[?]`).
+
+Must:
+  Retourner systématiquement @BoxedFuture avec effet de bord différé au premier @poll,
+    et porter `#[must_use]`.
+  Router toute erreur vers une variante @ToolsError avec son marqueur `VNL-TLS-*` :
+    aucune panic, aucun `unwrap`/`expect`, aucun log (le harnais et AGENTS.md s'y
+    ajoutent).
+  Traiter `0` comme sentinelle de défaut pour @ReadFileOptions::limit (→ 200 lignes via
+    @output::READ_MAX_LINES) et @ListDirectoryOptions::depth (→ 1 niveau), et comme
+    offset légitime pour @ReadFileOptions::offset.
+  Numéroter en mode numéroté au format exact `{:>5}\t{ligne}` démarrant à `offset + 1`,
+    et borner avec @output::bound_lines sur `effective_limit` et @READ_MAX_BYTES, le
+    marqueur de troncature devant rester actionnable (`offset=` de la reprise).
+  Appliquer les contrôles not-found / @NotAFile / @PermissionDenied AUSSI en mode `raw`
+    (le court-circuit `raw` n'intervient qu'après la lecture réussie).
+  Passer toute écriture de fichier (@write_file, @edit_file) par @atomic_write :
+    temporaire dans le répertoire de la cible, copie des permissions de la cible
+    existante avant `rename`, suppression du temporaire sur chaque échec intermédiaire.
+  Rejeter @edit_file sur `old_string` vide avant le moindre accès au système de
+    fichiers, et sur `count > 1` sans `replace_all` (@EditAmbiguous avec le compte réel).
+  Refuser @delete_file récursif : un répertoire non vide est une @InvalidArgument,
+    jamais une suppression en cascade.
+  Trier et borner @list_directory exactement comme en `Returns` : ordre binaire sur
+    `file_name`, indentation deux espaces par niveau, `"/"` aux répertoires, 200 entrées
+    maximum tous niveaux confondus, marqueur de plafonnement en suffixe.
+  Exécuter le walk de @list_directory dans @tokio::task::spawn_blocking (jamais sur
+    l'executor asynchrone) et convertir le @JoinError en @Io.
+  Garder @file_not_found_hint en `pub(crate)` avec ses quatre formes de `Exposes` :
+    ./command.rs et ./search.rs construisent leurs @FileNotFound avec lui.
+  Vérifier la source (@FileNotFound + hint) et le parent de `to` avant `rename` dans
+    @rename_file, dans cet ordre.
+
+Must not:
+  Normaliser, restreindre, concaténer ou valider un chemin dans ce fichier : aucun
+    `canonicalize`, aucune racine, aucun refus de `..` — la garde est hors du crate (cf.
+    `Handles`, `[?]` de frontière).
+  Modifier une ligne de fichier, créer/écraser un fichier ou supprimer quoi que ce soit
+    quand une erreur est retournée (les seules écritures sont @atomic_write après tous
+    les contrôles ; le résidu temporaire de crash est le seul écart documenté).
+  Supprimer un fichier en dehors du chemin explicite d'@delete_file — @atomic_write
+    ne `rename` que son propre temporaire `".{nom}.vny-tmp-{pid}"`.
+  Retourner un contenu non UTF-8 : toutes les sorties sont des @String ; un fichier
+    binaire est une erreur, jamais un contenu dégradé ou échappé.
+  Exposer un log, un `println!` ou un tracing depuis ce module (la responsabilité de
+    log est aux appelants sandbox).
+  Réaffecter ou renommer un marqueur `VNL-TLS-*` lu ici sans décision de spec actée
+    (les marqueurs vivent dans ./error.rs).
+  Faire dépendre ce module de la crate `sandbox` (sens de dépendance inverse interdit :
+    c'est `sandbox` qui compose @confine + ces tools).
+
+Tasks:
+  [ ] Ajouter les tests manquants : chaque `Scenario` sans homologue dans `mod tests` de
+    ./filesystem.rs doit avoir son test taggé par son titre — notamment
+    `read_file_budget_octets_tronque_avant_budget_lignes`,
+    `read_file_non_utf8_remonte_vnl_tls_009`,
+    `read_file_fichier_vide_offset_non_zero_refuse`,
+    `edit_file_occurrences_non_chevauchees`,
+    `edit_file_old_string_vide_refuse_sans_acces_fichier`,
+    `list_directory_sous_repertoire_ilisible_sans_enfants`,
+    `file_not_found_hint_liste_triee_ou_liste_vide`,
+    `file_not_found_hint_vide_quand_parent_implicit`,
+    `rename_parent_destination_est_un_fichier_refuse`,
+    `write_file_parent_interdit_rejete_en_vnl_tls_004`.
+  [ ] Scénarios dépendants des permissions
+    (`write_file_parent_interdit_rejete_en_vnl_tls_004`,
+    `list_directory_sous_repertoire_ilisible_sans_enfants`) : à sauter explicitement
+    quand les tests tournent en root (CI conteneur), sinon faux négatifs.
+  [?] Frontière de sécurité : aucune garde anti-traversal dans ce crate — @confine_path
+    (`VNL-SBX-*`) est uniquement côté `sandbox`. Un bug d'oubli de @confine dans un
+    nouveau dispatch exposerait tout le système de fichiers du pod. Verrouiller la
+    responsabilité par spec ( appelant confine, jamais le tool ) ou ajouter une racine
+    optionnelle ici ? Arbitrage de sécurité à trancher avec Sébastien.
+  [?] `raw` + `offset` non nul : @read_file en mode `raw` ignore silencieusement
+    `offset` et retourne tout le fichier. Comportement accidentel (le champ reste
+    accepté) ou contrat « raw = tout le fichier, offset réservé au mode numéroté » ?
+  [?] Fichiers binaires : @read_to_string échoue AVANT le court-circuit `raw`, donc
+    même l'éditeur ne peut ouvrir un fichier non UTF-8 (`VNL-TLS-009`). Contrat voulu
+    ou manque (repli binaire/base64, ou refus explicite avec marqueur dédié) ?
+  [?] @atomic_write nomme le temporaire `.nom.vny-tmp-{pid}` : deux écritures
+    CONCURRENTES du même fichier dans le même process (deux @edit_file parallèles sur la
+    même cible, fréquents sous tokio) partagent le même nom de temporaire → course
+    d'écriture/`rename` perdue. Ajouter un compteur/sel par appel ? Idem pour deux
+    process sandbox sur le même PVC.
+  [?] @atomic_write sur une cible symlink : les permissions lues (@metadata) suivent le
+    lien, mais `rename` remplace LE LIEN par un fichier régulier — le lien est détruit,
+    la cible réelle conservée orpheline. Sur un workspace avec symlinks (toolchains,
+    caches), comportement voulu ou faut-il @File::persist en suivant le lien ?
+  [?] @rename_file sur destination existante : `rename` POSIX écrase la cible sans
+    avertissement (perte de données silencieuse pour un LLM). Contrat (« rename = mv
+    unix ») ou garde (refuser si `to` existe) ?
+  [?] @rename_file en @PermissionDenied rend le chemin de la SOURCE même quand le refus
+    vient du côté `to` ; message trompeur à corriger ou contrat figé ?
+  [?] @rename_file : erreur metadata du parent de `to` autre que NotFound/EACCES (ex:
+    ELOOP) → on laisse `rename` trancher. Voulu ou faut-il propager l'erreur mère ?
+  [?] @delete_file sur répertoire en @PermissionDenied : `remove_dir` tombe dans @Io
+    `VNL-TLS-009`, alors que la branche fichier rend `VNL-TLS-004` — incohérence de
+    routage à corriger ou à verrouiller ?
+  [?] @list_directory : `read_dir` du répertoire racine en échec (EACCES sur un
+    répertoire existant et metadata OK) produit `{path} is empty` — une erreur de
+    permission maquillée en répertoire vide. Erreur dédiée ou contrat assumé ?
+  [?] @file_not_found_hint : (a) un chemin de premier niveau (`"/foo"`) fait lister la
+    RACINE `/` entière dans le message d'erreur (bruit, coût, fuite de noms) ; (b) un
+    parent existant mais illisible rend « does not exist either », faux. Les deux sont-ils
+    acceptés ou à borner (longueur max, distinction EACCES) ?
+  [?] @edit_file est un read-modify-write non atomique : entre la lecture et
+    @atomic_write, une modification externe (git, terminal dans la sandbox) est écrasée
+    sans détection (pas de comparaison d'inode/mtime). Accepté (mono-écriture supposée)
+    ou garde à ajouter ?
+  [?] @BoxedFuture est déclarée à l'identique dans ./filesystem.rs, ./command.rs et
+    ./search.rs : consolidation en ./lib.rs (requerrait leur spec) ou duplication
+    assumée ?
+  [?] Le schéma MCP `read_file` (./mcp.rs, propriété ./mcp.sdd à venir) ne déclare pas
+    `raw` : réservé à l'éditeur WS par intention, ou oubli d'exposition MCP ?
+  [?] Ligne unique dépassant @READ_MAX_BYTES : @output::bound_lines ne sait couper qu'aux
+    `\n`, une ligne numérotée de plus de 16 KiB sort entière SANS marqueur (budget
+    explosé, observable via @read_file sur gros fichier minifié). Lacune à arbitrer dans
+    ./output.sdd ; signalé ici car visible par ce contrat.
+
+Done when:
+  Chaque `Scenario` a son test dédié taggé par son titre et passe (ceux déjà présents
+    dans `mod tests` alignés sur les titres).
+  Les formats exacts (numérotation, marqueurs de troncature, messages d'erreur avec
+    marqueurs `VNL-TLS-*`, arbre d'arborescence) sont verrouillés par assertions.
+  Sébastien a tranché tous les `[?]` de `Tasks`, la spec relue fait foi du contrat.
+  Batterie complète verte (check, test, build, clippy `--all-targets -D warnings`, fmt).
+
+Scenario: read_file_numerote_aux_defauts
+  Given un fichier de 5 lignes `line1..line5`
+  When @read_file avec `offset=0`, `limit=0`, `raw=false`
+  Then le résultat contient exactement 5 lignes numérotées commençant chacune par
+    `{:>5}\t` de `1` à `5`, sans aucune mention `truncated`
+
+Scenario: read_file_offset_decale_numerotation
+  Given un fichier de 10 lignes
+  When @read_file avec `offset=5`
+  Then 5 lignes sont retournées et la première commence par `    6\t` (numérotation
+    repartie de `offset + 1`)
+
+Scenario: read_file_limite_declenche_marqueur_de_troncation
+  Given un fichier de 300 lignes
+  When @read_file avec `limit=50`
+  Then 50 lignes numérotées sont retournées suivies d'une ligne finale exacte
+    `[truncated — 250 more lines, call again with offset=50]`
+
+Scenario: read_file_budget_octets_tronque_avant_budget_lignes
+  Given un fichier de 200 lignes de 200 caractères (numérotées, plus de 16 384 octets)
+  When @read_file avec `limit=200`
+  Then le marqueur `[truncated` est présent et le corps retourné (hors marqueur) tient
+    dans @output::READ_MAX_BYTES, avec moins de 200 lignes de contenu
+
+Scenario: read_file_introuvable_avec_liste_du_parent
+  Given un répertoire contenant au moins un fichier et un chemin `nonexistent.txt`
+    inexistant dans ce répertoire
+  When @read_file sur ce chemin
+  Then @ToolsError::FileNotFound `VNL-TLS-001` est retournée et son `hint` contient
+    `parent directory contains:` suivi des noms du parent
+
+Scenario: read_file_introuvable_parent_absent_aussi
+  Given le chemin `/nonexistent_parent/does_not_exist/foo.txt`
+  When @read_file sur ce chemin
+  Then @FileNotFound est retournée avec un `hint` contenant
+    `does not exist either`
+
+Scenario: read_file_sur_repertoire_rejete_en_vnl_tls_002
+  Given un répertoire existant
+  When @read_file sur ce chemin de répertoire
+  Then @ToolsError::NotAFile `VNL-TLS-002` est retournée avec le chemin
+
+Scenario: read_file_offset_hors_plage_refuse
+  Given un fichier de 3 lignes
+  When @read_file avec `offset=10`
+  Then @ToolsError::InvalidArgument `VNL-TLS-005` de name `"offset"` est retournée, la
+    raison contenant `3 lines` et l'offset demandé
+
+Scenario: read_file_fichier_vide_offset_zero_rend_vide
+  Given un fichier de 0 octet
+  When @read_file avec `offset=0`
+  Then `Ok("")` est retourné sans erreur
+
+Scenario: read_file_fichier_vide_offset_non_zero_refuse
+  Given un fichier de 0 octet
+  When @read_file avec `offset=1`
+  Then @InvalidArgument de name `"offset"` et raison exactement `file is empty` est
+    retournée
+
+Scenario: read_file_non_utf8_remonte_vnl_tls_009
+  Given un fichier contenant des octets invalids en UTF-8 (ex: `0xFF 0xFE`)
+  When @read_file (mode numéroté) sur ce fichier
+  Then @ToolsError::Io `VNL-TLS-009` est retournée (comportement actuel : aucune
+    détection binaire, cf. `[?]`)
+
+Scenario: read_file_raw_renvoie_contenu_brut_sans_numerotation
+  Given un fichier dont le contenu commence par des chiffres (`42 apples\nhello world\n`)
+  When @read_file avec `raw=true`
+  Then le résultat est byte-identique au contenu du fichier, sans préfixe `    1\t` et
+    sans mention `truncated`
+
+Scenario: read_file_raw_ignore_limite_et_troncation
+  Given un fichier de 300 lignes (plus que @READ_MAX_LINES)
+  When @read_file avec `raw=true`, `limit=0`
+  Then les 300 lignes complètes sont retournées, sans marqueur de troncature
+
+Scenario: write_file_cree_repertoires_parents
+  Given un chemin `a/b/c.txt` dont aucun parent n'existe sous un répertoire temporaire
+  When @write_file de contenu `hello parents`
+  Then le fichier existe avec exactement ce contenu et les répertoires `a/b` ont été
+    créés
+
+Scenario: write_file_preserve_permissions_de_la_cible
+  Given un fichier existant en mode `0o640`
+  When @write_file le remplace
+  Then le contenu est remplacé et le mode du fichier est toujours `0o640`
+    (permissions copiées par @atomic_write)
+
+Scenario: write_file_ne_laisse_aucun_temporaire
+  Given un répertoire vide
+  When @write_file d'un fichier `target.txt` réussit
+  Then le répertoire ne contient exactement que `target.txt` (aucun résidu
+    `.target.txt.vny-tmp-*`)
+
+Scenario: write_file_sur_repertoire_rejete_en_vnl_tls_002
+  Given un chemin désignant un répertoire existant
+  When @write_file sur ce chemin
+  Then @ToolsError::NotAFile `VNL-TLS-002` est retournée, aucun fichier temporaire
+    créé dans le répertoire
+
+Scenario: write_file_parent_interdit_rejete_en_vnl_tls_004
+  Given (test exécuté sans être root) un répertoire `ro` en mode `0o500` et un chemin
+    `ro/sous/f.txt` dont le parent `ro/sous` n'existe pas encore
+  When @write_file sur ce chemin
+  Then @create_dir_all du parent échoue et @ToolsError::PermissionDenied `VNL-TLS-004`
+    est retournée avec le PARENT (`ro/sous`) comme `path` d'erreur, conformément à
+    l'étape 1 de `Raises`
+
+Scenario: edit_file_replacement_unique_et_message
+  Given un fichier `hello world\nfoo bar\n`
+  When @edit_file de `world` par `universe` sans `replace_all`
+  Then le message retourné contient `1 replacement(s)` et le fichier contient
+    `hello universe`
+
+Scenario: edit_file_ambigu_sans_replace_all_refuse
+  Given un fichier contenant `apple` trois fois
+  When @edit_file de `apple` par `orange` avec `replace_all=false`
+  Then @ToolsError::EditAmbiguous `VNL-TLS-007` est retournée avec `count=3` et le
+    fichier est intact
+
+Scenario: edit_file_replace_all_remplace_toutes_occurrences
+  Given un fichier `apple\napple\napple\n`
+  When @edit_file de `apple` par `orange` avec `replace_all=true`
+  Then le message contient `3 replacement(s)` et le fichier est exactement
+    `orange\norange\norange\n`
+
+Scenario: edit_file_sans_correspondance_avec_ligne_la_plus_proche
+  Given un fichier `hello world\nfoo bar\n`
+  When @edit_file avec `old_string="xyzzy"`
+  Then @ToolsError::EditNoMatch `VNL-TLS-006` est retournée avec un `hint` contenant
+    `Closest line in file:`
+
+Scenario: edit_file_sans_correspondance_sur_fichier_vide_hint_vide
+  Given un fichier de 0 octet
+  When @edit_file avec `old_string="xyzzy"`
+  Then @EditNoMatch est retournée avec un `hint` exactement vide (aucune ligne à
+    comparer)
+
+Scenario: edit_file_old_string_vide_refuse_sans_acces_fichier
+  Given un chemin de fichier INEXISTANT et `old_string=""`
+  When @edit_file
+  Then @InvalidArgument de name `"old_string"` et raison contenant `must not be empty`
+    est retournée — la validation précède l'erreur FileNotFound
+
+Scenario: edit_file_conserve_permissions_et_remplace
+  Given un fichier `hello world\n` en mode `0o640`
+  When @edit_file de `hello` par `goodbye`
+  Then l'édition réussit, le mode reste `0o640` (passage par @atomic_write)
+
+Scenario: edit_file_occurrences_non_chevauchees
+  Given un fichier de contenu exact `aaaa`
+  When @edit_file avec `old_string="aa"` et `replace_all=false`
+  Then @EditAmbiguous est retournée avec `count=2` (dénombrage @str::matches, jamais
+    3 — les occurrences ne se chevauchent pas)
+
+Scenario: edit_file_introuvable_avec_hint_parent
+  Given un chemin inexistant dans un répertoire listable
+  When @edit_file avec un `old_string` non vide
+  Then @FileNotFound `VNL-TLS-001` est retournée avec son `hint` de listing du parent
+
+Scenario: levenshtein_en_octets_et_egalite_premiere_ligne
+  Given (test interne au module) les appels directs de @levenshtein_distance sur des
+    chaînes accentuées, et @closest_line_hint sur un contenu où deux lignes ex æquo
+    (ex: `foo\nfoo`) sont à distance égale de l'aiguille `foo`
+  When les fonctions sont appelées
+  Then la distance compte les OCTETS (un accent `é` = 2 octets modifiés) et le hint
+    cite la première des lignes ex æquo, rendu exactement
+    `. Closest line in file: 'foo'`
+
+Scenario: list_directory_arbre_tri_avec_suffixe_repertoire
+  Given un répertoire contenant `alpha.txt` (fichier) et `beta` (répertoire)
+  When @list_directory avec `depth=0`
+  Then deux lignes exactes : `alpha.txt` puis `beta/` (ordre binaire, suffixe `/` aux
+    répertoires)
+
+Scenario: list_directory_depth_deux_indente_deux_espaces
+  Given un répertoire contenant `a/b.txt`
+  When @list_directory avec `depth=2`
+  Then exactement deux lignes : `a/` puis `  b.txt` (indentation de deux espaces par
+    niveau)
+
+Scenario: list_directory_defaut_ne_descend_pas
+  Given le même `a/b.txt`
+  When @list_directory avec `depth=0` (sentinelle → 1)
+  Then seule la ligne `a/` est présente, `b.txt` absent du résultat
+
+Scenario: list_directory_repertoire_vide_message_est_vide
+  Given un répertoire sans aucune entrée
+  When @list_directory
+  Then le résultat est exactement `{path} is empty` avec le `path` d'entrée
+
+Scenario: list_directory_introuvable_refuse
+  Given le chemin `/nonexistent/path/xyz`
+  When @list_directory
+  Then @FileNotFound `VNL-TLS-001` est retournée sur ce chemin
+
+Scenario: list_directory_sur_fichier_refuse_en_vnl_tls_003
+  Given un fichier `test.txt`
+  When @list_directory sur ce chemin
+  Then @ToolsError::NotADirectory `VNL-TLS-003` est retournée avec le chemin
+
+Scenario: list_directory_plafonne_a_200_entrees
+  Given un répertoire de 201 fichiers
+  When @list_directory avec `depth=0`
+  Then 200 entrées sont listées suivies du suffixe exact
+    `[truncated at 200 entries — narrow the path or reduce depth]`
+
+Scenario: list_directory_sous_repertoire_ilisible_sans_enfants
+  Given (test exécuté non root) un sous-répertoire en mode `0o000` dans le répertoire
+    listé
+  When @list_directory avec `depth=2`
+  Then le sous-répertoire apparaît avec `/` mais aucun de ses enfants, sans erreur
+    remontée (échec @read_dir interne avalé, contrat `Handles`)
+
+Scenario: delete_file_supprime_un_fichier
+  Given un fichier existant
+  When @delete_file dessus
+  Then `Ok(())` et @metadata échoue ensuite sur ce chemin
+
+Scenario: delete_file_supprime_un_repertoire_vide
+  Given un sous-répertoire vide
+  When @delete_file dessus
+  Then `Ok(())` et le répertoire a disparu
+
+Scenario: delete_file_repertoire_non_vide_refuse_sans_recursion
+  Given un répertoire contenant un fichier
+  When @delete_file sur ce répertoire
+  Then @InvalidArgument de name `"path"` et raison contenant `not empty` est retournée,
+    le contenu est intact
+
+Scenario: delete_file_introuvable_avec_hint
+  Given le chemin `/nonexistent/fake/path/file.txt`
+  When @delete_file
+  Then @FileNotFound `VNL-TLS-001` est retournée avec le chemin complet
+
+Scenario: mkdir_imbrique_et_idempotent
+  Given un chemin `a/b/c` inexistant, puis le même chemin déjà créé
+  When @mkdir deux fois de suite
+  Then `Ok(())` les deux fois et un répertoire `a/b/c` existe (créateur idempotent sur
+    répertoire existant)
+
+Scenario: mkdir_sur_fichier_existant_refuse_en_vnl_tls_003
+  Given un fichier `f.txt` existant
+  When @mkdir sur exactement ce chemin
+  Then @ToolsError::NotADirectory `VNL-TLS-003` est retournée (mappage
+    `AlreadyExists`), le fichier est intact
+
+Scenario: rename_deplace_un_fichier_avec_son_contenu
+  Given `old.txt` (contenu `hello rename`) et `new.txt` absent dans le même répertoire
+  When @rename_file de `old.txt` vers `new.txt`
+  Then `Ok(())`, `old.txt` a disparu et `new.txt` porte le contenu exact
+
+Scenario: rename_deplace_un_repertoire_et_sous_arbre
+  Given un répertoire `old` contenant `inner.txt` et `new` absent
+  When @rename_file de `old` vers `new`
+  Then `Ok(())` et `new/inner.txt` existe
+
+Scenario: rename_source_introuvable_refuse
+  Given une source inexistante et une destination dans un parent valide
+  When @rename_file
+  Then @FileNotFound `VNL-TLS-001` est retournée sur le chemin source (avec hint)
+
+Scenario: rename_parent_destination_inexistant_refuse
+  Given `src.txt` existant et une destination `nope/dest.txt` dont le parent `nope`
+    n'existe pas
+  When @rename_file
+  Then @InvalidArgument de name `"to"` et raison contenant `does not exist` est
+    retournée, la source est intacte
+
+Scenario: rename_parent_destination_est_un_fichier_refuse
+  Given `src.txt` existant, un fichier `obstacle.txt` et la destination
+    `obstacle.txt/x.txt`
+  When @rename_file
+  Then @InvalidArgument de name `"to"` et raison contenant `is a file, not a directory`
+    est retournée, la source est intacte
+
+Scenario: file_not_found_hint_liste_triee_ou_liste_vide
+  Given (test interne) un parent `b` contenant `b.txt` et `a.rs` dans cet ordre de
+    création, et un parent `c` vide
+  When @file_not_found_hint est appelée sur `b/introuvable.txt` puis `c/introuvable.txt`
+  Then le premier rend `, parent directory contains: [a.rs, b.txt]` (tri croissant
+    quel que soit l'ordre disque) et le second
+    `, parent directory contains: []`
+
+Scenario: file_not_found_hint_vide_quand_parent_implicit
+  Given (test interne) les chemins `f.txt` (parent vide) et `./f.txt` (parent `.`)
+  When @file_not_found_hint est appelée sur chacun
+  Then chacune rend une chaîne exactement vide (aucun listing tenté)

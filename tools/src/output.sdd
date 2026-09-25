@@ -1,0 +1,274 @@
+Spec: Output
+
+Purpose:
+  Boîte à outils de rendu des sorties des tools MCP (`vanyline-tools`) vers le LLM :
+  bornes par défaut centralisées (une seule source, jamais de nombre magique dans un
+  outil) et trois transformations pures de texte — numérotation façon `cat -n`,
+  bornage par lignes avec marqueur actionnable « call again with offset= », bornage
+  tête+queue pour les sorties de commande. Le fichier ne connaît ni l'I/O ni les
+  erreurs du crate : il reçoit du texte déjà produit par l'appelant et rend un
+  `String`. Limite du contrat : les marqueurs de troncation des listings
+  (`list_directory`, `find_files`) et des recherches (`search`) sont assemblés par les
+  appelants à partir des constantes de ce fichier — leurs formats appartiennent aux
+  specs de ces appelants, pas à celle-ci ; seuls les marqueurs de @bound_lines et de
+  @bound_head_tail sont produits ici.
+
+Owns:
+  ./output.rs
+
+References:
+  ./filesystem.rs — @read_file (@number_lines puis @bound_lines sur le texte déjà
+    découpé à l'offset, @READ_MAX_LINES comme limite par défaut, @READ_MAX_BYTES),
+    @list_directory (@LIST_MAX_ENTRIES)
+  ./command.rs — @execute (@bound_head_tail sur stdout et stderr avec @COMMAND_MAX_BYTES)
+  ./search.rs — @find_files (@LIST_MAX_ENTRIES), @search (@SEARCH_MAX_MATCHES)
+  ../lib.rs — exposition `pub mod output`
+
+Must:
+  Les cinq constantes publiques sont les seules valeurs centrales des bornes par défaut
+    et valent exactement : @READ_MAX_LINES `200`, @READ_MAX_BYTES `16384`
+    (`16 * 1024`), @LIST_MAX_ENTRIES `200`, @SEARCH_MAX_MATCHES `50`,
+    @COMMAND_MAX_BYTES `8192` (`8 * 1024`). Un outil du crate qui a besoin d'une de ces
+    bornes référence la constante — jamais un nombre magique en dur.
+  @bound_lines découpe exclusivement aux frontières de lignes : la limite en lignes
+    d'abord (`min(total, max_lines)`), puis, si le contenu joint dépasse `max_bytes`,
+    retrait de lignes complètes par la fin jusqu'à repasser sous `max_bytes`.
+  Quand @bound_lines a tronqué (lignes retournées < lignes totales), la sortie gagne en
+    dernière ligne, préfixée par `\n`, le marqueur exactement
+    `[truncated — {remaining} more lines, call again with offset={next_offset}]`
+    (tiret long `—`, U+2014) où `remaining` = lignes totales − lignes retournées et
+    `next_offset` = `offset` + lignes retournées.
+  L'argument `offset` de @bound_lines ne provoque aucun saut de lignes en interne : le
+    texte est supposé déjà découpé par l'appelant (cf. @read_file qui applique
+    `skip(offset)` avant l'appel) ; `offset` sert uniquement à calculer
+    `next_offset` du marqueur.
+  La limite en octets de @bound_lines porte sur le contenu conservé, pas sur la sortie
+    finale : le marqueur de troncation s'ajoute au-delà de `max_bytes`.
+  @bound_head_tail rend le texte mot pour mot (octets pour octets, saut de ligne final
+    inclus) dès que `text.len() <= max_bytes` — y compris pour le texte vide.
+  Quand @bound_head_tail tronque, la sortie est exactement
+    `{header}\n{marker}\n{footer}` avec
+    `marker` = `[... {n} bytes truncated ...]` où `n` = longueur totale du texte −
+    `max_bytes`, un budget de contenu `max_bytes − len(marker) − 2` (plafonné à `0`),
+    partagé moitiés égales entre la tête (premières lignes tenant dans la moitié) et la
+    queue (dernières lignes tenant dans l'autre moitié), queue jamais chevauchante ni
+    empiétante sur la tête ; si l'assemblage dépasse encore `max_bytes`, la queue se
+    réduit ligne par ligne depuis sa gauche.
+  @number_lines rend chaque ligne sous la forme exactement `{num:>5}\t{line}` : numéro
+    aligné à droite sur `5` caractères minimum (un numéro plus long que `5` chiffres
+    n'est jamais tronqué), séparateur tabulation `\t`, numérotation 1-based démarrant à
+    `start_line`, lignes jointes par `\n` sans saut de ligne final.
+  Les trois fonctions sont pures et totales : aucune I/O, aucun effet de bord, aucune
+    panique possible, et rendent toujours un `String` UTF-8 valide.
+  Les trois fonctions sont annotées `#[must_use]`.
+
+Must not:
+  Casser une ligne en cours — toute troncature (en lignes comme en octets) retire ou
+    garde des lignes entières, jamais des octets ou caractères au milieu d'une ligne.
+  Dépendre d'autre chose que `std` : ce module ne dépend d'aucun autre module du
+    crate, ne lève aucune @ToolsError et n'appelle jamais `unwrap`/`expect`/`panic!`.
+  Décorer le contenu conservé : pas d'échappement, pas de filtrage, pas de réécriture
+    des lignes retenues (seuls la sélection de lignes, la numérotation et les marqueurs
+    sont autorisés).
+  Introduire dans un outil du crate (`./filesystem.rs`, `./command.rs`, `./search.rs`)
+    une borne par défaut codée en dur qui court-circuiterait les constantes de ce
+    module.
+
+Depends on:
+  `std` uniquement — `str::lines` pour le découpage ; aucun module du crate, aucune
+    dépendance externe (feuille du graphe interne de `vanyline-tools`).
+
+Exposes:
+  @READ_MAX_LINES, @READ_MAX_BYTES, @LIST_MAX_ENTRIES, @SEARCH_MAX_MATCHES,
+    @COMMAND_MAX_BYTES — constantes `usize` des bornes par défaut (valeurs en `Must`).
+  @bound_lines — bornage par lignes avec marqueur actionnable.
+  @bound_head_tail — bornage tête+queue en octets pour sorties de commande.
+  @number_lines — numérotation façon `cat -n`.
+  @find_split et @find_count_from_end sont des aides privées (comptage de lignes
+    tenant dans un budget octet, hors API publique).
+
+Accepts:
+  @bound_lines : `text` (déjà découpé à l'offset par l'appelant), `offset` (`usize`,
+    0-based, indicateur pour le marqueur uniquement), `max_lines`, `max_bytes`.
+  @bound_head_tail : `text` brut (stdout/stderr d'une commande par exemple),
+    `max_bytes`.
+  @number_lines : `text`, `start_line` (`usize`, 1-based ; @read_file passe
+    `offset + 1`).
+
+Returns:
+  @bound_lines : contenu conservé (lignes jointes par `\n`) éventuellement suivi de la
+    ligne de marqueur ; chaîne vide si le texte d'entrée est vide. Le marqueur compte
+    comme une ligne de plus dans la sortie (200 lignes + marqueur = 201 lignes).
+  @bound_head_tail : texte inchangé si dans le budget, sinon
+    `{header}\n{marker}\n{footer}` (header et/ou footer potentiellement vides aux
+    budgets extrêmes).
+  @number_lines : lignes numérotées jointes par `\n`, sans ligne finale vide.
+  Aucune des trois ne modifie le texte d'entrée (elles rendent un `String` neuf).
+
+Raises:
+  Aucune — fonctions totales et sans erreur ; tout cas limite se dégrade en valeur de
+    retour (cf. `Handles`), jamais en panique ni en `Result::Err`.
+
+Handles:
+  Texte vide : les trois fonctions rendent la chaîne vide (@bound_head_tail rend le
+    texte vide tel quel par son test `text.is_empty() || text.len() <= max_bytes`).
+  Découpe via `str::lines` : un `\n` final n'est pas compté comme ligne et disparaît de
+    la reconstruction ; des fins de ligne `\r\n` voient leur `\r` retiré — la sortie
+    reconstructrice est normalisée en LF (tranché en `Tasks` `[?]`).
+  @bound_lines avec `max_lines` `0`, ou byte-limit chassant toutes les lignes : contenu
+    vide, toutes les lignes comptées comme restantes, sortie = marqueur seul précédé
+    d'un `\n` initial.
+  Ligne unique plus longue que `max_bytes` : @bound_lines ne peut rien retirer (aucune
+    frontière de ligne) et retourne la ligne entière sans marqueur — byte-limit non
+    borné dans ce cas ; @bound_head_tail de même peut rendre une sortie au-dessus de
+    `max_bytes` (budget saturé à `0` → sortie `\n{marker}\n`, ou dernière ligne du
+    footer trop longue que la boucle de réduction ne retire pas).
+  @bound_head_tail quand la dernière ligne dépasse à elle seule la moitié du budget :
+    footer vide, sortie finissant par `{marker}\n` (nouvelle ligne de séparation avant
+    un footer absent).
+  Budget octet minuscule (< `len(marker) + 2`) dans @bound_head_tail : `budget` est
+    saturé à `0`, tête et queue vides, pas de division par zéro ni de panique.
+  Numérotation au-delà de 5 chiffres dans @number_lines : `{:>5}` est une largeur
+    minimale, le numéro s'étend sans troncature.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
+    accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
+  [ ] Convertir en tests taggés par leur titre les Scenarios sans couverture actuelle :
+    `bornes_defaut_valeurs_centrales`, `bound_lines_marqueur_hors_budget_octets`,
+    `bound_lines_saut_final_supprime`, `bound_head_tail_compte_marqueur_egal_ecart_octets`,
+    `bound_head_tail_coupure_jamais_en_milieu_de_ligne`,
+    `number_lines_numero_sans_largeur_maximale`, `normalisation_crlf_en_lf`
+    (sous réserve du `[?]` correspondant). Couverture existante (`mod tests` de
+    ./output.rs) : `bound_lines_untouched`, `bound_lines_truncates` (marqueur vérifié
+    par `contains` seulement — le Scenario exige la chaîne exacte),
+    `bound_lines_respects_offset`, `bound_lines_byte_limit` (borné par une marge
+    tolérée, pas par le contenu réel), `head_tail_untouched`, `head_tail_truncates`,
+    `head_tail_utf8`, `number_lines_format`, `empty_inputs`.
+  [?] Byte-limit décoratif sur ligne unique trop longue : @bound_lines retourne la
+    ligne entière et @bound_head_tail peut rendre une sortie > `max_bytes` (footer
+    bloqué à la dernière ligne par `start >= lines.len() - 1`). Accepté (le LLM digère
+    une ligne longue) ou coupure dure sur frontière de caractère UTF-8 à implémenter ?
+  [?] @bound_head_tail : le `n` affiché dans `[... {n} bytes truncated ...]` vaut
+    `total − max_bytes` (écart nominal), pas les octets réellement retirés (supérieur,
+    à cause des frontières de lignes). Afficher le compte exact ou reformuler ?
+  [?] Reconstructions en LF : @bound_lines et @number_lines transforment `\r\n` en
+    `\n` et suppriment le saut de ligne final (via `str::lines` + `join("\n")`) — le
+    mode éditeur de @read_file normalise donc les fins de ligne, seul le mode `raw` les
+    préserve. Contrat assumé ou préservation byte-exact à viser ?
+  [?] Sorties dégénérées : @bound_lines rendu intégralement tronqué commence par un
+    `\n` (marqueur seul) ; @bound_head_tail à footer vide se termine par un `\n`.
+    Formes voulues ou à nettoyer ?
+  [?] Le commentaire de doc de @number_lines dit « Utilisé par `read_file` (tâche
+    suivante) » alors que @read_file l'utilise déjà — dette de commentaire à corriger à
+    la prochaine main sur le fichier ?
+  [?] Dans @read_file, le marqueur de @bound_lines est ajouté après @number_lines : il
+    n'est pas numéroté et décale le décompte (201 lignes rendues pour `limit` 200).
+    Voulu tel quel ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre.
+  Les décisions `[?]` sont tranchées par Sébastien et reflétées dans la spec.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur `vanyline-tools`.
+
+Scenario: bornes_defaut_valeurs_centrales
+  Given les constantes publiques de ./output.rs
+  When leurs valeurs sont lues
+  Then @READ_MAX_LINES vaut `200`
+  And @READ_MAX_BYTES vaut `16384`
+  And @LIST_MAX_ENTRIES vaut `200`
+  And @SEARCH_MAX_MATCHES vaut `50`
+  And @COMMAND_MAX_BYTES vaut `8192`
+
+Scenario: fonctions_texte_vide_rendent_chaine_vide
+  Given le texte vide
+  When @bound_lines est appelée avec `offset` `0`, `max_lines` `10`, `max_bytes` `1024`,
+    puis @bound_head_tail avec `max_bytes` `1024`, puis @number_lines avec `start_line` `10`
+  Then chacune des trois rend la chaîne vide
+
+Scenario: bound_lines_sous_limites_rend_texte_inchange
+  Given un texte de 10 lignes jointes par `\n` sans saut final
+  When @bound_lines est appelée avec `offset` `0`, `max_lines` `200`, `max_bytes` `16384`
+  Then la sortie est exactement le texte d'entrée
+  And aucune ligne ne contient `truncated`
+
+Scenario: bound_lines_troncature_lignes_marqueur_exact
+  Given un texte de 300 lignes distinctes jointes par `\n`
+  When @bound_lines est appelée avec `offset` `0`, `max_lines` `200`, `max_bytes` `16384`
+  Then la sortie compte `201` lignes
+  And les 200 premières sont les 200 premières lignes de l'entrée
+  And la dernière ligne est exactement `[truncated — 100 more lines, call again with offset=200]`
+
+Scenario: bound_lines_next_offset_ajoute_offset_appelant
+  Given un texte de 300 lignes jointes par `\n` déjà considéré découpé à un offset de `200`
+  When @bound_lines est appelée avec `offset` `200`, `max_lines` `200`, `max_bytes` `16384`
+  Then la dernière ligne est exactement `[truncated — 100 more lines, call again with offset=400]`
+
+Scenario: bound_lines_limite_octets_retrait_lignes_par_la_fin
+  Given un texte de 200 lignes de 200 caractères `x` chacune, jointes par `\n`
+  When @bound_lines est appelée avec `offset` `0`, `max_lines` `200`, `max_bytes` `512`
+  Then la sortie commence par la première ligne de l'entrée
+  And le contenu avant la dernière ligne compte au plus `512` octets
+  And la dernière ligne commence par `[truncated — `
+  And chaque ligne conservée est identique à une ligne entière de l'entrée
+
+Scenario: bound_lines_marqueur_hors_budget_octets
+  Given un texte de 10 lignes de 100 octets chacune, jointes par `\n`
+  When @bound_lines est appelée avec `offset` `0`, `max_lines` `10`, `max_bytes` `500`
+  Then le contenu avant la ligne de marqueur compte au plus `500` octets
+  And la longueur totale de la sortie dépasse `500` octets à cause du seul marqueur
+
+Scenario: bound_lines_saut_final_supprime
+  Given le texte `a\nb\n` (saut de ligne final inclus)
+  When @bound_lines est appelée avec `offset` `0`, `max_lines` `10`, `max_bytes` `1024`
+  Then la sortie est exactement `a\nb`
+  And aucun marqueur de troncation n'apparaît
+
+Scenario: bound_head_tail_texte_sous_budget_rendu_tel_quel
+  Given un texte non vide de longueur inférieure ou égale à `1024` et se terminant par `\n`
+  When @bound_head_tail est appelée avec `max_bytes` `1024`
+  Then la sortie est identique octet pour octet à l'entrée, saut final inclus
+
+Scenario: bound_head_tail_troncature_tete_et_queue
+  Given 100 lignes de la forme `line {i}: ` suivi de 190 caractères `x`, jointes par `\n`
+  When @bound_head_tail est appelée avec @COMMAND_MAX_BYTES
+  Then la sortie commence par `line 0:`
+  And la sortie se termine par la dernière ligne de l'entrée (contenant `line 99:`)
+  And une ligne de la sortie a la forme `[... {n} bytes truncated ...]`
+  And la sortie tient dans `8192` octets pour cette entrée
+  And la sortie est une chaîne UTF-8 valide
+
+Scenario: bound_head_tail_compte_marqueur_egal_ecart_octets
+  Given un texte de 100 lignes de 200 octets environ (longueur totale connue `L`)
+  When @bound_head_tail est appelée avec `max_bytes` `8192`
+  Then le nombre affiché dans le marqueur `[... {n} bytes truncated ...]` vaut exactement
+    `L − 8192`, quel que soit le nombre d'octets réellement retirés
+
+Scenario: bound_head_tail_coupure_jamais_en_milieu_de_ligne
+  Given 50 lignes distinctes de 20 octets chacune, jointes par `\n`
+  When @bound_head_tail est appelée avec `max_bytes` `64`
+  Then toute ligne de la sortie qui n'est pas le marqueur est identique à une ligne
+    entière de l'entrée, dans l'ordre d'origine
+
+Scenario: bound_head_tail_utf8_toujours_valide
+  Given 40 lignes contenant accents et emoji, jointes par `\n`
+  When @bound_head_tail est appelée avec `max_bytes` `512`
+  Then l'appel ne panique pas
+  And la sortie est une chaîne UTF-8 valide
+
+Scenario: number_lines_format_alignement_droite_tab
+  Given le texte `alpha\nbeta\ngamma`
+  When @number_lines est appelée avec `start_line` `42`
+  Then la sortie est exactement `···42\talpha\n···43\tbeta\n···44\tgamma` où `·` désigne
+    l'espace (numéro sur 5 caractères aligné à droite, séparateur tabulation littéral `\t`)
+
+Scenario: number_lines_numero_sans_largeur_maximale
+  Given le texte `x` sur une seule ligne
+  When @number_lines est appelée avec `start_line` `123456`
+  Then la sortie est exactement `123456\tx`
+
+Scenario: normalisation_crlf_en_lf
+  Given le texte `a\r\nb\r\n` (fins de ligne CRLF et saut final)
+  When @bound_lines est appelée avec `offset` `0`, `max_lines` `10`, `max_bytes` `1024`
+  Then la sortie est exactement `a\nb`

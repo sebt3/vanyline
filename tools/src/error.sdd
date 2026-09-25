@@ -1,0 +1,291 @@
+Spec: Error
+
+Platform: Rust/vanyline-tools/thiserror
+
+Purpose:
+  Enum d'erreurs unique de `vanyline-tools` (@ToolsError) : le type d'erreur de tous les
+  tools du crate (@filesystem::read_file/@write_file/@edit_file/@list_directory/@delete_file/
+  @mkdir/@rename_file, @command::execute, @search::find_files/@search). C'est la
+  contractualisation, pour le domaine `TLS` (tools), de la convention « messages d'erreur
+  avec identifiant unique » de l'AGENTS.md : chaque variante porte un marqueur stable
+  `VNL-TLS-<NNN>` en tête de son @Display, même famille `VNL-*` que ../../lib/src/error.rs
+  (`VNL-LLM-*`, `VNL-MCP-*`…), ../../cfgstore/src/error.rs (`VNL-CFG-*`) et
+  ../../controller/src/error.rs (`VNL-CTL-*`). Le module est déclaré `pub mod error;` dans
+  ./lib.rs sans re-export à la racine : le chemin public est
+  @vanyline_tools::error::ToolsError. Le @Display de cet enum est la seule forme visible au
+  fil : le sandbox le stringifie tel quel dans ses réponses MCP (@err_result via
+  `e.to_string()`) et WS (`{"ok":false,"error":…}` de ../../sandbox/src/ws/fs.rs), et des
+  tests d'intégration sandbox testent des sous-chaînes de ces marqueurs
+  (`VNL-TLS-001`, `VNL-TLS-005` dans ../../sandbox/tests/http.rs).
+
+Owns:
+  ./error.rs
+
+Can read:
+  ./lib.rs
+  ../Cargo.toml
+  ./filesystem.rs
+  ./command.rs
+  ./search.rs
+
+Depends on:
+  @thiserror (v2, ../Cargo.toml) — derive @thiserror::Error : implémente
+    @std::error::Error, génère le @std::fmt::Display depuis les attributs `#[error(...)]`.
+    Le crate n'utilise AUCUN attribut `#[from]` (seul `#[source]` sur @ToolsError::Io) :
+    thiserror ne génère ici aucune conversion @From — contrairement à @VnyError dans
+    ../../lib/src/error.rs. Un seul @Display par variante, aucune autre derive (pas de
+    `Clone`, `PartialEq`, `Serialize`, ni ts-rs) : type purement interne Rust, diffusé au
+    wire uniquement sous forme de chaîne via @Display, jamais sérialisé.
+  @std::io::Error — payload du champ `source` de @ToolsError::Io (avec `#[source]`, donc
+    chaînée par @std::error::Error::source) et interpolation inline via `{source}` dans le
+    gabarit.
+  ./filesystem.rs — fournisseur des deux builders de `hint` : @filesystem::file_not_found_hint
+    (pub(crate)) pour @ToolsError::FileNotFound, @filesystem::closest_line_hint (privé de
+    filesystem.rs) pour @ToolsError::EditNoMatch. La grammaire des hints appartient à ce
+    fichier (voir `Handles`), le type d'erreur n'impose rien sur son champ `String`.
+
+Exposes:
+  @ToolsError — `pub enum` avec derives `Debug` et @thiserror::Error exactement. 9 variantes
+    au total, sans aucun gating de feature. Le @Display de chaque variante commence par son
+    marqueur `VNL-TLS-*` suivi de `": "` — les rendus ci-dessous sont exacts, caractère par
+    caractère, `{0}`/`{path}`/`{hint}`/… désignant les champs ; le tiret long `—` (U+2014)
+    des gabarits 002/003/007 est littéral :
+      @ToolsError::FileNotFound { path, hint } —
+        `"VNL-TLS-001: file not found: {path}{hint}"` ; `hint` concaténé SANS séparateur
+        après le chemin (le hint porte son propre séparateur leading, voir `Handles`)
+      @ToolsError::NotAFile(String) —
+        `"VNL-TLS-002: not a file: {0} (it is a directory — use list_directory)"`
+      @ToolsError::NotADirectory(String) —
+        `"VNL-TLS-003: not a directory: {0} (it is a file — use read_file)"`
+      @ToolsError::PermissionDenied(String) —
+        `"VNL-TLS-004: permission denied: {0}"`
+      @ToolsError::InvalidArgument { name, reason } —
+        `"VNL-TLS-005: invalid argument {name}: {reason}"`
+      @ToolsError::EditNoMatch { path, hint } —
+        `"VNL-TLS-006: string not found in {path}: no occurrence of the provided old_string{hint}"`
+        ; hint concaténé sans séparateur, comme pour 001
+      @ToolsError::EditAmbiguous { path, count } —
+        `"VNL-TLS-007: {count} occurrences of old_string in {path} — pass replace_all=true or provide a more specific old_string"`
+        (`count: usize`, rendu en base 10 ; note : `{count}` passe AVANT `{path}` dans le
+        rendu alors que l'ordre de déclaration est path puis count)
+      @ToolsError::CommandTimeout(u64) —
+        `"VNL-TLS-008: command timed out after {0}s (partial output kept)"` ; la valeur est
+        la durée de timeout en secondes (posée par ./command.rs depuis `timeout_secs`)
+      @ToolsError::Io { path, source } —
+        `"VNL-TLS-009: I/O error on {path}: {source}"` ; `source: @std::io::Error` avec
+        `#[source]` → @std::error::Error::source() rend la cause d'origine, ET son @Display
+        est aussi interpolé inline dans le message (double exposition, état verrouillé)
+  @std::error::Error — implémenté par la derive : `source()` ne rend `Some` que pour
+    @ToolsError::Io (seul champ `#[source]`), `None` pour les 8 autres variantes.
+  @std::fmt::Debug — dérivé, utilisé par les tests des modules consommateurs
+    (`format!("{other:?}")`).
+  Module de test `tests::error_codes_present` — test existant du fichier : vérifie par
+    `contains` que chaque variante rend son marqueur. Faible (pas de verrouillage du rendu
+    complet), dette tracée en `Tasks`.
+
+Accepts:
+  Variantes à payload — n'importe quel `String` dans `path`/`hint`/`name`/`reason` et les
+    nouveaux champs : aucune validation, aucune troncature, aucun contrôle de grammaire
+    (un `hint` collé sans séparateur est rendu tel quel). Les chemins sont rendus tels
+    quels, y compris espaces, guillemets et UTF-8.
+  @ToolsError::Io — n'importe quelle @std::io::Error, OS brute (`raw_os_error`) ou synthétique
+    (`io::Error::new(kind, msg)`), dont les erreurs à chaîne de source (seul le @Display de
+    niveau 0 est interpolé par `{source}`, pas la chaîne complète).
+  @ToolsError::EditAmbiguous — n'importe quel `usize` dans `count` : le type ne vérifie pas
+    que `count >= 2` (c'est ./filesystem.rs qui ne le construit qu'à partir de 2
+    occurrences).
+  @ToolsError::CommandTimeout — n'importe quel `u64`, y compris 0 (les points de construction
+    ./command.rs ne l'émettent jamais pour 0, qui signifie « pas de timeout » — voir
+    `Handles`).
+
+Returns:
+  Ce fichier ne retourne rien hors conversion : aucune fonction hors code généré par les
+    derives.
+  @Display de chaque variante — exactement le gabarit de `Exposes` avec payloads injectés ;
+    c'est la surface observable principale, et la forme exacte diffusée au fil MCP/WS par le
+    sandbox (`e.to_string()`).
+  @std::error::Error::source() — `Some` de l'@std::io::Error d'origine pour
+    @ToolsError::Io uniquement, `None` sinon.
+  @Debug dérivé — rendu structurel Rust par défaut, jamais contractualisé au-delà de son
+    existence.
+
+Raises:
+  Aucune — le fichier ne retourne jamais d'erreur et ne panique jamais : aucune fonction
+    manuelle, les derives thiserror ne génèrent aucune panic. Les valeurs de @ToolsError ne
+    sont que construites et transportées par ./filesystem.rs, ./command.rs, ./search.rs.
+
+Handles:
+  Aucune conversion @From, générée ou manuelle — `#[source]` (et non `#[from]`) sur
+    @ToolsError::Io signifie que l'opérateur `?` et `.into()` sur une @std::io::Error ne
+    convertissent PAS vers @ToolsError. Chaque point de construction map explicitement, en
+    discriminant l'@std::io::ErrorKind : `NotFound` → @ToolsError::FileNotFound,
+    `PermissionDenied` → @ToolsError::PermissionDenied, `DirectoryNotEmpty` →
+    @ToolsError::InvalidArgument (cas `delete_file` d'un dossier non vide), toute autre
+    erreur → @ToolsError::Io. Cet état (pas d'auto-conversion) est verrouillé par scenario.
+  Grammaire des hints — la responsabilité en est à ./filesystem.rs, pas à ce type :
+    @filesystem::file_not_found_hint produit `""` (pas de parent, parent vide ou `"."`),
+    `", parent directory contains: [a, b]"` (entrées triées, jointes par `", "`),
+    `", parent directory contains: []"` (dossier vide listable) ou
+    `", parent directory does not exist either"` (parent non listable) ; @filesystem::closest_line_hint
+    produit `. Closest line in file: '<meilleure ligne tronquée>'` par distance de
+    Levenshtein, ou `""` si le fichier n'a aucune ligne. Chaque hint porte donc son propre
+    séparateur leading (`, ` ou `. `), le gabarit 001/006 ne fait que concaténer.
+  @ToolsError::Io.path utilisé comme cible générique, pas toujours un chemin — ./command.rs
+    y met `format!("command: {command}")` pour les échecs de spawn/attente du process ; le
+    champ est un « objet de l'opération » plus qu'un chemin (sujet `[?]` en `Tasks`).
+  @ToolsError::CommandTimeout jamais construit avec 0 — dans ./command.rs, `timeout_secs ==
+    0` désactive le timeout (attente sans borne) ; la variante n'est émise qu'après dépassement
+    effectif, avec kill best-effort du groupe de processus (`libc::kill(-pid, SIGKILL)`).
+    Le message « partial output kept » est en contradiction avec l'appelant qui jette la
+    sortie partielle (sujet `[?]` en `Tasks`).
+  Domaine `VNL-TLS-*` confiné au crate — à ce jour, aucun littéral `VNL-TLS-` n'existe dans
+    le code de production d'un autre crate (seuls les tests du sandbox en testent des
+    sous-chaînes, et un commentaire/panic de test dans ./filesystem.rs cite `VNL-TLS-003`).
+    D'autres crates portent leur propre marqueur « I/O » (`VNL-IO-001` dans lib,
+    `VNL-CFG-004` dans cfgstore) sans collision avec `VNL-TLS-009` — convention documentée,
+    non tranchée (`Tasks`).
+  Marqueurs attendus par les clients — `VNL-TLS-001` et `VNL-TLS-005` sont assertés
+    en sous-chaîne dans les réponses HTTP/WS par ../../sandbox/tests/http.rs : une
+    renumérotation ou une reforme de ces deux gabarits casserait des tests d'intégration
+    hors du crate.
+
+Must:
+  Préfixer le @Display de chaque variante par son marqueur `VNL-TLS-<NNN>` exact, suivi de
+    `": "` — convention AGENTS.md « message d'erreur avec identifiant unique » ; les
+    marqueurs `VNL-TLS-001` à `VNL-TLS-009` et les 9 gabarits de `Exposes` sont stables et
+    verrouillés par test sur le rendu complet (pas le seul `contains` actuel).
+  Garder les marqueurs uniques dans l'enum : deux variantes ne peuvent pas partager le même
+    code ; et aucun autre code `VNL-TLS-*` ne peut naître ailleurs dans le workspace sans
+    passage par cette enum.
+  Conserver le chaînage `#[source]` de @ToolsError::Io : @std::error::Error::source() doit
+    rendre la cause d'origine et le gabarit doit rester double-exposition (inline + chaînée).
+  Laisser le type sans aucune conversion @From (générée ou manuelle) tant que les appelants
+    discriminent les @std::io::ErrorKind eux-mêmes — l'ajout d'un `#[from]` ferait basculer
+    toutes les erreurs io brutes vers `VNL-TLS-009` sans mapping `NotFound`/`PermissionDenied`.
+  Rendre chaque message actionnable pour son lecteur (humain ou LLM) : les gabarits 002/003
+    nomment l'outil correct à la place, 007 nomme la parade (`replace_all=true`), 001/006
+    portent un hint contextuel — c'est l'intention documentée en commentaires du fichier.
+  N'avoir comme derives que `Debug` et @thiserror::Error : ni serde, ni ts-rs, ni
+    `PartialEq` — la diffusion au fil se fait par @Display stringifié, jamais par
+    sérialisation de l'enum.
+
+Must not:
+  Renommer, renuméroter ou réaffecter un marqueur `VNL-TLS-*` publié, ni retoucher un
+    gabarit (séparateurs, tirets `—`, casse) sans décision de spec actée par Sébastien —
+    les marqueurs sont lus dans les logs, les tests du crate et les tests d'intégration du
+    sandbox.
+  Introduire une variante sans marqueur, sans ligne dans `Exposes`, ou dont le @Display ne
+    commence pas par son marqueur suivi de `": "`.
+  Faire de @ToolsError un type de transport (serde/ts-rs) ou lui ajouter `Clone`/`PartialEq`
+    : le fil ne voit que sa stringification.
+  Valider, normaliser ou tronquer un payload dans le type lui-même (chemin, hint, count) :
+    toute validation appartient aux modules constructeurs.
+  Paniquer ou logger dans ce fichier (les derives ne le permettent pas, aucune fonction
+    manuelle ne doit les introduire).
+
+Tasks:
+  [ ] Renforcer les tests du module : `error_codes_present` ne fait que des `contains` ;
+    ajouter un test par Scenario, taggé par son titre, verrouillant les rendus complets
+    (méthode de `lib/src/error.sdd`).
+  [?] @ToolsError::CommandTimeout affiche `(partial output kept)` mais ./command.rs, sur
+    timeout, tue le groupe de processus et retourne l'erreur SANS aucune sortie : la sortie
+    partielle est perdue. Message mensonger à corriger, ou sortie à réellement conserver ?
+    Documenté, non tranché.
+  [?] @ToolsError::Io.path reçoit `command: {command}` depuis ./command.rs — le champ
+    `path` est un « objet de l'opération » générique, pas un chemin. Contrat assumé (le
+    rendu `I/O error on command: …` reste lisible) ou champ à renommer/target à séparer ?
+  [?] La grammaire des hints (`, ` / `. ` leading, formats exacts) vit dans ./filesystem.rs
+    et ./filesystem.rs seul, mais les gabarits 001/006 en dépendent pour être lisibles.
+    Faut-il typer un `Hint` dédié avec constructeur validant le séparateur leading, ou la
+    convention inter-fichiers suffit-elle (à reporter dans filesystem.sdd) ?
+  [?] Trois marqueurs « I/O » coexistent dans le workspace (`VNL-TLS-009` ici,
+    `VNL-IO-001` dans ../../lib/src/error.rs, `VNL-CFG-004` dans ../../cfgstore/src/error.rs)
+    — indice que la convention est « un espace de noms par crate », pas « un espace par
+    sujet ». À confirmer comme règle globale (une ligne dans vanyline.sdd ?) avant
+    d'attribuer de nouveaux codes.
+  [?] @ToolsError::EditAmbiguous accepte tout `usize` y compris 0 ou 1 (jamais émis hors
+    2.. par ./filesystem.rs) : garde-fou dans le type ou confiance aux appelants ?
+  [?] @ToolsError ne dérive ni `Clone` ni `PartialEq` — les consommateurs testent par
+    `matches!` et sous-chaînes : absence voulue (alignement @VnyError) ou manque à combler ?
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les 9 rendus exacts (caractère par caractère, tirets `—` inclus) sont verrouillés par
+    test et remplacent ou complètent `error_codes_present`.
+  Les tests d'intégration du sandbox (`VNL-TLS-001`, `VNL-TLS-005`) restent verts sans
+    modification.
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: display_exhaustif_des_neuf_marqueurs_vnl_tls
+  Given une instance de chaque variante de @ToolsError avec des payloads fixés (`path`
+    `"/foo"`, `hint` `""`, `name` `"offset"`, `reason` `"file is empty"`, `count` `3`,
+    timeout `30`, io synthétique `io::Error::new(NotFound, "nope")`)
+  When chacune est rendue par @Display
+  Then chaque rendu est exactement le gabarit de `Exposes` avec payloads injectés,
+    commençant par `VNL-TLS-001` … `VNL-TLS-009` suivi de `": "`, tirets `—` inclus pour
+    002/003/007
+
+Scenario: file_not_found_concatene_le_hint_sans_separateur
+  Given @ToolsError::FileNotFound { path: "/foo/bar", hint } avec trois hints successifs :
+    `", parent directory contains: [a, b]"`, `", parent directory does not exist either"`
+    et `""`
+  When chacun est rendu par @Display
+  Then le hint est collé immédiatement après le chemin, donnant notamment exactement
+    `VNL-TLS-001: file not found: /foo/bar, parent directory contains: [a, b]` et, hint
+    vide, `VNL-TLS-001: file not found: /foo/bar` sans ponctuation résiduelle
+
+Scenario: edit_no_match_avec_et_sans_hint_proche
+  Given @ToolsError::EditNoMatch { path: "/foo", hint } avec le hint
+    `". Closest line in file: 'xyz'"` puis avec le hint `""` (fichier sans ligne)
+  When chacun est rendu par @Display
+  Then le premier rend exactement `VNL-TLS-006: string not found in /foo: no occurrence
+    of the provided old_string. Closest line in file: 'xyz'` et le second s'arrête à
+    `old_string` sans ponctuation résiduelle
+
+Scenario: edit_ambiguous_rend_le_nombre_et_la_parade
+  Given @ToolsError::EditAmbiguous { path: "/foo", count: 3 }
+  When elle est rendue par @Display
+  Then le rendu est exactement `VNL-TLS-007: 3 occurrences of old_string in /foo — pass
+    replace_all=true or provide a more specific old_string`, avec le nombre devant le
+    chemin malgré l'ordre de déclaration inverse
+
+Scenario: command_timeout_affiche_la_duree_en_secondes
+  Given @ToolsError::CommandTimeout(30)
+  When elle est rendue par @Display
+  Then le rendu est exactement `VNL-TLS-008: command timed out after 30s (partial output
+    kept)`
+
+Scenario: source_std_error_absente_sauf_variante_io
+  Given une @ToolsError::PermissionDenied("/foo") et une @ToolsError::Io { path: "/foo",
+    source: une io::Error } vues comme @std::error::Error
+  When @std::error::Error::source() est appelé sur chacune
+  Then la première rend `None` et la seconde `Some` de l'@std::io::Error d'origine
+
+Scenario: io_inliste_le_display_de_la_cause
+  Given @ToolsError::Io { path: "/foo", source: io::Error::new(NotFound, "nope") }
+  When elle est rendue par @Display
+  Then le rendu est exactement `VNL-TLS-009: I/O error on /foo: nope`, la cause
+    apparaissant inline ET restant chaînée via @source()
+
+Scenario: pas_de_conversion_automatique_depuis_std_io_error
+  Given l'expression `ToolsError::from(io_err)` (ou `?` sur une @std::io::Error dans une
+    fonction retournant `Result<(), ToolsError>`)
+  When cette expression est soumise à compilation (test compile-fail de type trybuild, ou
+    à défaut un contrôle par `include_str!` vérifiant l'absence de `#[from]` et de
+    `impl From` dans ./error.rs)
+  Then la compilation échoue (E0277, aucun @From<@std::io::Error> n'existe pour
+    @ToolsError) et @ToolsError::Io ne peut être construit que littéralement
+
+Scenario: marqueurs_tls_uniques_et_non_dupliques
+  Given le contenu de ./error.rs lu par `include_str!` dans un test du crate
+  When chaque marqueur `VNL-TLS-001` … `VNL-TLS-009` y est dénombré hors du module de tests
+  Then chacun apparaît exactement une fois (dans son gabarit `#[error(...)]`) et deux
+    variantes quelconques n'ont jamais le même marqueur
+
+Scenario: payload_rendu_tel_quel_sans_validation
+  Given @ToolsError::NotAFile("/dosier avec espace «çà» 'quote'") et une
+    @ToolsError::EditAmbiguous { path: "/foo", count: 0 } (valeur jamais émise par
+    ./filesystem.rs)
+  When elles sont rendues par @Display
+  Then le chemin UTF-8 avec espaces et quotes ressort byte-identique dans le rendu et
+    `count` 0 est accepté et rendu tel quel, le type ne validant ni chemin ni nombre
