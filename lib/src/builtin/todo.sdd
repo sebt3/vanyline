@@ -1,0 +1,305 @@
+Spec: Todo builtin
+
+Platform: Rust/vanyline-lib/rig-core ToolDyn
+
+Purpose:
+  Contrat des deux tools builtin `todowrite` et `todoread`, paire lecture/écriture d'un
+  même état todo partagé : @TodoWriteTool remplace TOUTE la liste de tâches par celle
+  fournie (comportement « snapshot », pas d'update partiel ni d'append) et @TodoReadTool
+  renvoie l'état courant. L'état est @SessionContext::todo_state — un @Arc de
+  @std::sync::Mutex de `Option<String>` (la String est la sérialisation JSON du tableau de
+  tâches, `None` = jamais écrit) — partagé par clone de l'@Arc entre l'hôte (le CLI le sème
+  depuis `Conversation.todo` et le relit après le tour pour persister, cf. `cli/src/chat.rs` ;
+  l'app en fait de même, cf. `app/src/ws/chat.rs`), les deux outils, et les tours imbriqués
+  de subagents (@TaskTool copie le MÊME @Arc, cf. ./task.sdd). Les deux tools ne touchent
+  jamais rien d'autre que cet état : aucun I/O, aucune persistance directe, aucun événement.
+
+Owns:
+  ./todo.rs
+
+Exposes:
+  @TodoWriteTool — struct publique, non-singleton : construite une fois par tour dans
+    @run_agent_turn_at_depth (hors de ce fichier) avec @SessionContext::todo_state cloné.
+    Champ (privé) : `state: TodoState`.
+  @TodoWriteTool::new — constructeur public, sans validation : le handle est stocké tel
+    quel (le contenu du mutex n'est jamais inspecté à la construction).
+  @TodoReadTool — idem @TodoWriteTool, côté lecture. Champ (privé) : `state: TodoState`.
+  @TodoReadTool::new — constructeur public, sans validation.
+  @ToolDyn pour @TodoWriteTool :
+    @TodoWriteTool::name — valeur fixe `"todowrite"`.
+    @TodoWriteTool::definition — @ToolDefinition de nom `"todowrite"`, description fixe
+      `"Remplace toute la liste de taches par la liste fournie. "` (avec l'espace final,
+      cf. `Tasks`), schéma `parameters` figé (@TodoWriteTool::parameter_schema, voir
+      `Accepts`) ; ignore son argument de prompt.
+    @TodoWriteTool::call — corps décrit en `Handles` et `Raises`.
+  @ToolDyn pour @TodoReadTool :
+    @TodoReadTool::name — valeur fixe `"todoread"`.
+    @TodoReadTool::definition — @ToolDefinition de nom `"todoread"`, description fixe
+      `"Renvoie la liste de taches courante (todowrite)."`, schéma `parameters` figé
+      `{"type":"object","properties":{},"required":[]}`
+      (@TodoReadTool::parameter_schema) ; ignore son argument de prompt.
+    @TodoReadTool::call — corps décrit en `Handles` et `Raises`.
+  Items privés (contractualisés car observables via les appels) :
+    @TodoState — alias de type `Arc<Mutex<Option<String>>>`, le même handle que
+      @SessionContext::todo_state.
+    @TodoWriteArgs — forme désérialisée des arguments d'écriture : un unique champ
+      `todos: Vec<serde_json::Value>` — les éléments sont du JSON QUELCONQUE, aucune
+      validation de leur forme n'est effectuée (le schéma est purement déclaratif pour le
+      LLM, cf. `Tasks`).
+    @TodoWriteTool::parameter_schema — schéma JSON figé : object, propriété `todos` de type
+      `array`, items de type object avec propriétés `content` et `status` (toutes deux
+      `"type":"string"`) et `required: ["content"]` sur l'item, `required: ["todos"]` à la
+      racine ; `"additionalProperties"` n'est déclaré nulle part.
+    @TodoReadTool::parameter_schema — schéma JSON figé
+      `{"type":"object","properties":{},"required":[]}`.
+
+Accepts:
+  @TodoWriteTool::call — une chaîne JSON désérialisable en @TodoWriteArgs : un object avec
+    le champ requis `todos` sous forme de tableau JSON ; les éléments du tableau sont
+    acceptés sous TOUTE forme JSON (objects conformes au schéma, objects avec clés
+    supplémentaires, scalaires, `null`) et sont stockés tels quels après re-sérialisation.
+    Les champs JSON supplémentaires à la racine (autre que `todos`) sont ignorés
+    silencieusement (défaut serde). Tout autre JSON — mal formé, non-object, `todos` absent,
+    ou `todos` non-tableau — est une erreur.
+  @TodoReadTool::call — une chaîne JSON de N'IMPORTE QUELLE forme valide (`{}`, `null`,
+    `42`, un tableau…) : le contenu est parsé puis ignoré ; seule la validité JSON compte,
+    une entrée non-JSON est rejetée. Les paramètres déclarés comme vides ne sont donc PAS
+    appliqués strictement (cf. `Tasks`).
+  Aucun des deux outils ne lit quoi que ce soit d'autre que sa chaîne d'arguments et le
+    contenu de son mutex partagé.
+
+Returns:
+  @TodoWriteTool::call succès — `Ok("todo list updated ({n} items)")` avec `n` = le nombre
+    d'éléments du tableau reçu (message en anglais, y compris `n = 0`).
+  @TodoReadTool::call succès — `Ok` de la chaîne JSON EXACTEMENT telle que stockée (aucune
+    re-sérialisation à la lecture), ou `Ok("no todo list yet")` si l'état partagé est `None`.
+  @TodoWriteTool::definition / @TodoReadTool::definition — les @ToolDefinition figées
+    décrites en `Exposes`.
+
+Raises:
+  @TodoWriteTool::call — en @ToolError::ToolCallError (boîtée), dans cet ordre :
+    1. args non désérialisables en @TodoWriteArgs — le @serde_json::Error d'origine
+      (message brut, sans identifiant `VNL-*`) ; l'état partagé est laissé intact ;
+    2. échec de la re-sérialisation du tableau — le @serde_json::Error d'origine (branche
+      théoriquement inatteignable depuis des args parsés, cf. `Tasks`) ; l'état partagé est
+      laissé intact.
+  @TodoReadTool::call — args non désérialisables en @serde_json::Value : le
+    @serde_json::Error d'origine, boîtée ; l'état partagé est laissé inchangé.
+  Aucune erreur de mutex (poison) : voir `Handles`.
+
+Handles:
+  @TodoWriteTool::call — ordre strict : désérialisation des args -> re-sérialisation du
+    tableau `todos` en chaîne -> verrouillage -> REMPLACEMENT TOTAL — tout état antérieur
+    (`Some` d'une autre liste ou `None`) est écrasé, il n'y a ni fusion, ni append, ni
+    effacement vers `None` : écrire `{"todos": []}` produit `Some("[]")`, jamais `None`.
+  Ré-sérialisation — l'état stocké est la re-sérialisation @serde_json du tableau parsé,
+    pas un copier-coller des octets reçus : espacement normalisé et, sans la feature
+    `preserve_order`, clés d'object triées par ordre alphabétique. Un @TodoReadTool::call
+    renvoie cette chaîne normalisée, pas l'appel d'origine.
+  @TodoReadTool::call — ordre : parse des args (rejet si non-JSON) -> verrouillage ->
+    lecture ; jamais d'écriture, jamais de mutation de l'état.
+  Poison du mutex — les deux outils verrouillent avec récupération `into_inner` : un mutex
+    poisonné (un thread détenteur a panic entre le lock et l'update) est récupéré et la
+    valeur laissée en l'état est lue ou écrasée malgré tout ; le tool ne retourne JAMAIS
+    d'erreur pour cause de poison.
+  État partagé — les deux outils construites sur des clones du MÊME @Arc voient et
+    modifient le même état : écriture du parent visible du subagent et réciproquement (le
+    tour imbriqué de ./task.sdd copie `todo_state` à l'identique). Câblage producteur (hors
+    de ce fichier, cf. ../session.sdd) : les deux tools sont ajoutées à la toolbox de
+    CHAQUE tour, y compris imbriqué, sans condition de profondeur ni de config ; un échec
+    d'ajout au handle est loggé `tracing::warn` et le tour continue sans l'outil.
+  Persistance (hors contrat, rappel d'interaction) — l'hôte sème l'@Arc à une valeur
+    issue de la conversation persistée et le relit après le tour ; ce fichier ne fait que
+    lire/écrire l'@Arc.
+
+Depends on:
+  ../session.rs — @SessionContext::todo_state et le câblage des deux tools dans
+    @run_agent_turn_at_depth (contrat : ../session.sdd).
+  ./task.rs — le tour imbriqué copie `todo_state` (même @Arc, contrat : ./task.sdd).
+  @rig_core::tool::ToolDyn, @rig_core::completion::ToolDefinition, @rig_core::tool::ToolError.
+  @serde_json — désérialisation des args, re-sérialisation de l'état (sans la feature
+    `preserve_order` : ordre des clés trié).
+  @std::sync::{Arc, Mutex} — état partagé (mutex standard, jamais tokio : le lock est tenu
+    brièvement sans attente sous le garde).
+
+Must:
+  Exposer exactement les noms `"todowrite"` et `"todoread"`, avec les définitions figées de
+    `Exposes` (descriptions et schémas textuels inclus).
+  Remplacer la totalité de l'état à chaque @TodoWriteTool::call réussi, quel que soit
+    l'état antérieur.
+  Écrire dans le handle partagé reçu au constructeur — jamais dans une copie locale du
+    contenu — pour que l'hôte et les tours imbriqués voient la mutation.
+  Rejeter tout argument non désérialisable AVANT toute écriture (l'état ne doit jamais
+    porter de mutation partielle sur erreur).
+  Retourner `"no todo list yet"` (chaîne exacte) quand l'état partagé est `None`.
+  Récupérer un mutex poisonné via `into_inner` plutôt que de paniquer ou d'errer.
+  Rester compatible harnais (/tooling.sdd) : aucun `unwrap`/`expect`/`panic!`/`println!`
+    hors `cfg(test)` ; le module de test porte l'exemption locale.
+
+Must not:
+  Fusionner, ajouter par élément, ou trier les tâches à l'écriture : seul le remplacement
+    total existe.
+  Redonner à l'état la valeur `None` depuis un tool call — `None` n'est posé que par l'hôte
+    à la construction ; @TodoWriteTool::call produit toujours un `Some`.
+  Valider la forme des éléments de `todos` au-delà du fait qu'ils sont du JSON : aucun
+    contrôle de `content`/`status` n'est effectué côté exécution (le schéma n'est qu'une
+    déclaration au LLM).
+  Retransformer, re-sérialiser ou interpréter la chaîne stockée à la lecture :
+    @TodoReadTool::call la renvoie byte-for-byte.
+  Émettre un événement, un log, ou toucher quoi que ce soit d'autre que le mutex partagé.
+  Modifier l'état partagé quand un appel échoue (args invalides des deux côtés).
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat, en priorité sur
+    les points `[?]` ci-dessous (reverse du 2026-09-25).
+  [?] La description de @TodoWriteTool::definition se termine par un espace final (« … par
+    la liste fournie. ») — coquille ou choix assumé ? (contracté tel quel aujourd'hui.)
+  [?] @TodoWriteArgs stocke des `Vec<serde_json::Value>` sans aucune validation :
+    `{"todos":[42,null,"x"]}` est accepté, stocké, puis restitué tel quel au LLM par
+    `todoread`. Le schéma (`content` requis, items objects) n'est donc jamais appliqué à
+    l'exécution. Durcir (désérialisation en un type strict, rejet sinon) ou laisser le LLM
+    seul juge ?
+  [?] La branche d'erreur « échec de re-sérialisation » de @TodoWriteTool::call est
+    théoriquement inatteignable. Défense-en-profondeur assumée ou branche morte à retirer ?
+  [?] Ré-sérialisation sans `preserve_order` : l'état stocké trie les clés par ordre
+    alphabétique et normalise l'espacement. Normalisation voulue (elle stabilise la
+    persistance) ou perte à corriger ?
+  [?] @TodoReadTool::call accepte n'importe quel JSON valide comme args (`null`, `42`,
+    tableau) alors que son schéma déclare `properties: {}` : tolérance voulue ou à serrer
+    (exiger un object) ?
+  [?] Récupération sur poison (`into_inner`) : après un panic d'un autre tenant du mutex,
+    l'outil peut lire/écrire un état laissée incohérente. Politique assumée (« le tool ne
+    doit jamais tomber à cause d'un tiers ») ?
+  [?] Asymétrie `None` vs `Some("[]")` : écrire une liste vide persiste `Some("[]")`, et un
+    hôte qui sème `Some("[]")` depuis une conversation antérieure fait lire `"[]"` à
+    `todoread` là où un hôte neuf fait lire `"no todo list yet"` — le CLI enregistre donc
+    `"[]"` dans `Conversation.todo` plutôt que de réinitialiser à `None`. Contrat voulu ou
+    sémantique d'effacement à poser ?
+  [?] Les messages d'erreur sont les @serde_json::Error bruts, sans identifiant `VNL-*`
+    (même question ouverte que ./task.sdd pour @SubagentError) — exemption des messages
+    destinés au LLM à statuer globalement.
+  [ ] Dériver un test par Scenario encore sans test (chaque test taggé par le titre de son
+    Scenario) : `todowrite_liste_vide_ecrit_some_vide`, `todowrite_todos_non_tableau_rejete`,
+    `todowrite_elements_hors_schema_acceptes`, `todoread_accepte_nimporte_quel_json_valide`,
+    `reserialisation_normalisee`, `etat_partage_entre_clones_de_arc`,
+    `mutex_poisonne_reste_utilisable`, `todowrite_ne_revient_jamais_a_none`. Les tests
+    existants couvrent déjà : names, définitions (schéma partiellement), remplacement,
+    lecture, état vide, args invalides des deux côtés.
+  [ ] Renforcer les tests existants `todowrite_definition_schema` et
+    `todoread_definition_schema` : les chaînes de description exactes (espace final inclus
+    pour `todowrite`) ne sont assertées nulle part.
+
+Done when:
+  Chaque Scenario dispose d'un test taggé par son titre et passe.
+  Les questions `[?]` sont tranchées par Sébastien.
+  La batterie complète est verte sur `vanyline-lib`.
+
+Scenario: name_vaut_todowrite
+  Given un @TodoWriteTool construit sur un état partagé neuf (`None`)
+  When on appelle @TodoWriteTool::name
+  Then la valeur retournée est exactement `"todowrite"`
+
+Scenario: name_vaut_todoread
+  Given un @TodoReadTool construit sur un état partagé neuf (`None`)
+  When on appelle @TodoReadTool::name
+  Then la valeur retournée est exactement `"todoread"`
+
+Scenario: todowrite_definition_figee
+  Given un @TodoWriteTool construit sur un état partagé neuf
+  When on appelle @TodoWriteTool::definition avec un prompt quelconque
+  Then le nom vaut `"todowrite"`, la description vaut exactement
+    `"Remplace toute la liste de taches par la liste fournie. "` (espace final inclus), et
+    `parameters` vaut le schéma figé de `Accepts` (racine `required: ["todos"]`, `todos` de
+    type `array`, items `required: ["content"]`)
+
+Scenario: todoread_definition_figee
+  Given un @TodoReadTool construit sur un état partagé neuf
+  When on appelle @TodoReadTool::definition avec un prompt quelconque
+  Then le nom vaut `"todoread"`, la description vaut exactement
+    `"Renvoie la liste de taches courante (todowrite)."`, et `parameters` vaut
+    `{"type":"object","properties":{},"required":[]}`
+
+Scenario: todowrite_remplace_tout_le_state
+  Given un état partagé déjà semé de `Some("[{\"content\":\"ancienne\"}]")` et un
+    @TodoWriteTool branché sur cet état
+  When on appelle @TodoWriteTool::call avec
+    `{"todos":[{"content":"a","status":"pending"},{"content":"b"}]}`
+  Then le résultat est `Ok` contenant `"2 items"` et l'état partagé relu est une liste JSON
+    de 2 éléments dont aucun n'est l'"ancienne" tâche
+
+Scenario: todowrite_liste_vide_ecrit_some_vide
+  Given un état partagé neuf (`None`) et un @TodoWriteTool branché dessus
+  When on appelle @TodoWriteTool::call avec `{"todos": []}`
+  Then le résultat est `Ok("todo list updated (0 items)")` et l'état partagé relu vaut
+    `Some("[]")` (et non `None`)
+
+Scenario: todowrite_ne_revient_jamais_a_none
+  Given un état partagé semé de `Some("[{\"content\":\"x\"}]")` et un @TodoWriteTool branché dessus
+  When on appelle @TodoWriteTool::call avec `{"todos": []}`
+  Then l'état partagé relu vaut `Some("[]")` — jamais `None` — et @TodoReadTool branché sur
+    le même état répond `"[]"`, pas `"no todo list yet"`
+
+Scenario: todowrite_json_invalide_rejete_sans_effet
+  Given un état partagé neuf (`None`) et un @TodoWriteTool branché dessus
+  When on appelle @TodoWriteTool::call avec `"not json"`
+  Then le résultat est `Err(@ToolError::ToolCallError)` et l'état partagé relu est toujours `None`
+
+Scenario: todowrite_todos_non_tableau_rejete
+  Given un état partagé semé de `Some("[{\"content\":\"x\"}]")` et un @TodoWriteTool branché dessus
+  When on appelle @TodoWriteTool::call avec `{"todos":"pas-un-tableau"}`
+  Then le résultat est `Err` et l'état partagé relu est inchangé (le `Some` d'origine)
+
+Scenario: todowrite_elements_hors_schema_acceptes
+  Given un état partagé neuf et un @TodoWriteTool branché dessus
+  When on appelle @TodoWriteTool::call avec `{"todos":[42,null,{"status":"done"}]}`
+    (éléments non-conformes au schéma : scalaires, item sans `content`)
+  Then le résultat est `Ok` contenant `"3 items"` et l'état partagé relu porte ces trois
+    éléments tels que reçus (aucune validation de forme appliquée)
+
+Scenario: todoread_retourne_le_state_brut
+  Given un état partagé semé de la chaîne exacte `"[{\"content\":\"a\"},{\"content\":\"b\"}]"`
+    et un @TodoReadTool branché dessus
+  When on appelle @TodoReadTool::call avec `"{}"`
+  Then le résultat est `Ok` de cette chaîne EXACTE, octet pour octet
+
+Scenario: todoread_sans_state_retourne_message
+  Given un état partagé neuf (`None`) et un @TodoReadTool branché dessus
+  When on appelle @TodoReadTool::call avec `"{}"`
+  Then le résultat est `Ok("no todo list yet")` (chaîne exacte)
+
+Scenario: todoread_args_non_json_rejete_sans_effet
+  Given un état partagé semé de `Some("[{\"content\":\"a\"}]")` et un @TodoReadTool branché dessus
+  When on appelle @TodoReadTool::call avec `"not json"`
+  Then le résultat est `Err(@ToolError::ToolCallError)` et l'état partagé relu est inchangé
+
+Scenario: todoread_accepte_nimporte_quel_json_valide
+  Given un état partagé semé de `Some("[{\"content\":\"a\"}]")` et un @TodoReadTool branché dessus
+  When on appelle @TodoReadTool::call avec `"42"` (JSON valide, non-object, alors que le
+    schéma déclare des propriétés vides)
+  Then le résultat est `Ok` de la chaîne stockée (l'argument est ignoré pourvu qu'il soit
+    du JSON valide)
+
+Scenario: etat_partage_entre_clones_de_arc
+  Given un @Arc d'état partagé et deux tools construites séparément — une @TodoWriteTool et
+    une @TodoReadTool — chacune sur un CLONE de cet @Arc
+  When @TodoWriteTool::call écrit `{"todos":[{"content":"visible"}]}` puis que
+    @TodoReadTool::call est appelé avec `"{}"`
+  Then @TodoReadTool::call retourne `Ok` de la liste relue contenant `"visible"` — la
+    mutation d'un tenant est visible de l'autre sans reconstruction
+
+Scenario: reserialisation_normalisee
+  Given un état partagé neuf et un @TodoWriteTool branché dessus
+  When on appelle @TodoWriteTool::call avec des args dont les éléments portent des clés
+    hors ordre alphabétique et de l'espacement superflu
+    (`{ "todos" : [ { "status": "in_progress", "content":  "x" } ] }`)
+  Then la chaîne stockée relue depuis l'état est la re-sérialisation normalisée (clés
+    triées : `"content"` avant `"status"`, sans espacement superflu) — pas un
+    copier-coller des octets d'entrée
+
+Scenario: mutex_poisonne_reste_utilisable
+  Given un état partagé dont un thread a locké le @Mutex puis a paniqué en le tenant
+    (mutex poisonné, valeur `Some("[{\"content\":\"tenu\"}]")`)
+  When on appelle @TodoReadTool::call avec `"{}"` sur le même état
+  Then le résultat est `Ok` de la valeur laissée en place (récupération via `into_inner`,
+    pas d'erreur de poison) et un @TodoWriteTool::call ultérieur sur ce même état verrouillé
+    réussit et remplace la valeur

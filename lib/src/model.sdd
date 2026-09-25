@@ -1,0 +1,279 @@
+Spec: Model
+
+Platform: Rust/vanyline-lib/rig-core/serde_json
+
+Purpose:
+  Couche de construction des modèles de complétion rig-core à partir de la config (`domain::Provider`
+  + `domain::ModelProfile`, ré-exports de `vanyline-cfgstore`) : deux constructeurs —
+  @build_ollama_model et @build_openai_compat_model — qui traduisent les champs du
+  provider en options du client rig (base_url, clé d'API) et retournent un
+  @CompletionModel opaque, plus une dérivation pure @agent_params (@AgentParams) qui mappe
+  le profil vers les options de l'@rig_core::agent::AgentBuilder (`temperature`,
+  `max_tokens`, `additional_params`). Aucune I/O réseau dans ce fichier : la construction
+  est purement locale, les pannes de transport appartiennent au stream (@crate::event).
+  Consommateur exclusif en pratique : ./session.rs (dispatch sur @ProviderType dans
+  @run_agent_turn_at_depth, application des paramètres dans @build_agent — cf.
+  ./session.sdd). Les commentaires source citent `crate::llm` (ancien module supprimé de
+  ./lib.rs) — référence documentaire obsolète, voir `Tasks`.
+
+Owns:
+  ./model.rs
+
+Can read:
+  ./error.rs
+  ./session.rs
+  /cfgstore/src/domain.rs
+  ../Cargo.toml
+
+Depends on:
+  @rig_core — @rig_core::providers::{ollama, openai}, @rig_core::client::Nothing,
+    @rig_core::client::CompletionClient::completion_model, @rig_core::completion::CompletionModel,
+    @rig_core::agent::AgentBuilder (destination consommateur des @AgentParams).
+    Sémantiques figées sur rig-core 0.38.1 : chez ollama, une clé vide (`""`) est
+    normalisée en absence (aucun en-tête `Authorization`) ; `Nothing` = aucun en-tête
+    d'auth ; chez openai, @rig_core::client::BearerAuth construit toujours l'en-tête
+    `Authorization: Bearer {clé}` (clé vide => en-tête présent à jeton vide) et la
+    conversion de la clé en en-tête HTTP est la SEULE source d'erreur de `build()`
+    (base_url n'est pas validé au build) ; @openai::Client::completions_api bascule du
+    Responses API (défaut rig 0.38) vers le Chat Completions traditionnel
+    (`{base_url}/chat/completions`).
+  @crate::domain — @Provider (`endpoint`, `api_key: Option<String>`), @ModelProfile
+    (`model`, `temperature`, `max_tokens`, `options`) via `vanyline_cfgstore::domain`.
+  @crate::error::VnyError — variante @VnyError::ModelBuildError (marqueur `"VNL-LLM-006"`)
+    uniquement.
+  @serde_json — enveloppe @serde_json::Value::Object dans @agent_params.
+
+Exposes:
+  @build_ollama_model — `pub fn(&@Provider, &@ModelProfile) -> Result<impl
+    @CompletionModel + 'static, @VnyError>`. Construit un @ollama::Client via son builder :
+    `base_url` = `provider.endpoint` tel quel (aucun trim, aucun suffixe) ; clé :
+    `api_key = Some(k)` → clé d'API `k` (`k == ""` normalisé côté rig en absence d'auth),
+    `api_key = None` → aucun en-tête d'auth (`Nothing`) ; puis retourne le modèle de
+    complétion du nom `profile.model`. Type concret opaque — les appelants ne l'utilisent
+    que via les generics de ./session.rs.
+  @build_openai_compat_model — `pub fn(&@Provider, &@ModelProfile) -> Result<impl
+    @CompletionModel + 'static, @VnyError>`. Construit un @openai::Client : clé d'API =
+    `provider.api_key` ou la chaîne vide si `None` ; `base_url` = `provider.endpoint` dont
+    TOUS les `/` de queue sont retirés (`trim_end_matches('/')`) puis `"/v1"` concaténé ;
+    `.build()`, puis `.completions_api()` (Chat Completions traditionnel, pas le Responses
+    API par défaut de rig 0.38) ; retourne le modèle de complétion du nom `profile.model`.
+    Les requêtes partent donc sur `{endpoint}/v1/chat/completions`.
+  @AgentParams — `pub struct`, derives `Debug Clone PartialEq` ; trois champs publics
+    optionnels : `temperature: Option<f64>`, `max_tokens: Option<u64>`,
+    `additional_params: Option<@serde_json::Value>`. Pas de derive serde ni ts-rs : type
+    purement interne Rust.
+  @agent_params — `pub fn(&@ModelProfile) -> @AgentParams`, pure : pas d'I/O, pas de
+    réseau, pas de log. Mapping en `Returns`.
+
+Accepts:
+  Les deux constructeurs — toute paire `(&Provider, &ModelProfile)` sans validation
+    préalable : `endpoint` peut être vide, mal formé ou invalide en syntaxe d'URL ;
+    `api_key` peut être `None`, vide ou contenir n'importe quels octets ; `model` peut être
+    une chaîne vide. Aucun des deux ne lit `provider.provider_type` — le dispatch (quel
+    constructeur pour quel type) est la responsabilité exclusive de l'appelant
+    (./session.rs) ; appeler @build_ollama_model avec un provider de type
+    @ProviderType::OpenaiCompatible construit quand même un client ollama.
+  @agent_params — tout @ModelProfile ; ne lit que `temperature`, `max_tokens`, `options`.
+
+Returns:
+  @build_ollama_model / @build_openai_compat_model, succès — `Ok` d'un modèle de
+    complétion rig portant le nom brut `profile.model` (JAMAIS `profile.name`, identité du
+    profil côté vanyline) sur le client ainsi configuré ; l'objet ne déclenche aucun appel
+    réseau à la construction.
+  @agent_params — @AgentParams avec : `temperature` = `profile.temperature`
+    (pass-through sans bornes ni validation), `max_tokens` = `profile.max_tokens`
+    (pass-through), `additional_params` = `None` si `profile.options` est vide, sinon
+    `Some(@serde_json::Value::Object(profile.options cloné))` — la forme attendue par
+    @AgentBuilder::additional_params ; les clés et valeurs sont copiées verbatim, sans
+    filtrage ni renommage.
+
+Raises:
+  @VnyError::ModelBuildError — unique erreur possible des deux constructeurs, produite
+    quand `build()` de rig échoue ; le message interne est exactement l'affichage de
+    l'erreur rig, affiché au final sous le marqueur `"VNL-LLM-006: Cannot build model:
+    {…}"` (cf. ./error.sdd). Sur rig-core 0.38.1 la seule cause atteignable est la
+    conversion de la clé d'API en en-tête HTTP : une clé contenant des caractères
+    interdits en en-tête (contrôle, non-ASCII) fait échouer le build — ollama uniquement
+    si la clé est non vide, openai-compatible dans TOUS les cas (`BearerAuth` produit
+    toujours l'en-tête, donc aussi sur chaîne vide, qui elle est une valeur valide).
+  URL jamais validée au build : un `endpoint` vide ou invalide rend la construction `Ok` ;
+    la panne est différée à la première requête de complétion (hors du champ de ce fichier).
+  @agent_params — ne lève jamais, ne panique jamais (harnais de /tooling.sdd).
+
+Handles:
+  @Provider::api_key `None` côté ollama — aucun en-tête `Authorization` sur les requêtes.
+  @Provider::api_key `Some("")` côté ollama — normalisé côté rig en absence d'auth
+    (identique à `None`, pas d'en-tête) — asymétrie assumée avec openai-compatible.
+  @Provider::api_key `None` ou `Some("")` côté openai-compatible — en-tête
+    `Authorization: Bearer ` (préfixe + jeton vide) bel et bien envoyé ; construction `Ok`.
+  @Provider::endpoint avec un ou plusieurs `/` de queue côté openai-compatible — tous
+    retirés avant le suffixe `/v1` (`"http://h//"` → `"http://h/v1"`).
+  @Provider::endpoint se terminant déjà par `/v1` côté openai-compatible — suffixe ajouté
+    quand même : base `…/v1/v1` (comportement actuel, aucun contrôle, arbitrage en `Tasks`).
+  @Provider::endpoint non paré de ses `/` de queue côté ollama — chemins en double slash
+    sur le fil, asymétrie avec openai-compatible documentée en `Tasks`.
+  @Provider::endpoint vide — ollama : le défaut rig (`http://localhost:11434`) est écrasé
+    par la valeur vide, construction `Ok` quand même ; openai-compatible : base `"/v1"`.
+    Dans les deux cas l'échec est différé à la requête.
+  Collision de clés entre `profile.options` et les champs dédiés (ex: `"temperature"`
+    présent dans `options` ET `profile.temperature` `Some`) — @agent_params ne filtre rien :
+    les deux sont transmis à l'@AgentBuilder ; l'arbitrage sur le fil appartient à rig
+    (arbitrage en `Tasks`).
+  Providers de types croisés (mauvais constructeur pour un type donné) — aucune
+    vérification de `provider_type`, construction réussie avec la sémantique du
+    constructeur appelé.
+
+Must:
+  Prendre `base_url` ollama exactement depuis `provider.endpoint`, sans transformation (ni
+    trim, ni schéma imposé, ni suffixe).
+  Construire `base_url` openai-compatible comme `format!("{}/v1",
+    endpoint.trim_end_matches('/'))` — le suffixe `/v1` est la convention qui fait viser
+    `{endpoint}/v1/chat/completions` aux serveurs compatibles.
+  Utiliser @openai::Client::completions_api — le Chat Completions traditionnel, jamais le
+    Responses API par défaut de rig 0.38 — choix requis par les backends visés.
+  Nommer le modèle auprès du provider avec `profile.model` (nom brut côté provider),
+    jamais `profile.name`.
+  Envelopper toute erreur de `build()` de rig dans @VnyError::ModelBuildError avec
+    l'affichage d'origine en message interne (marqueur observable `"VNL-LLM-006"`).
+  Dériver @agent_params sans aucune I/O, en pass-through strict de `temperature` et
+    `max_tokens`, et en enveloppant `options` non vide en @serde_json::Value::Object cloné
+    tel quel.
+  Rendre les deux constructeurs opaques (`impl CompletionModel + 'static`) : les types
+    concrets ollama et openai diffèrent et ne doivent pas fuiter hors du fichier.
+
+Must not:
+  Ouvrir de connexion réseau, lire un fichier ou un log, logger, ni somnoler dans les
+    constructeurs ou @agent_params — `build()` de rig est local et ne vérifie pas le provider.
+  Lire des variables d'environnement pour la clé ou l'URL (les `from_env` de rig ne sont
+    jamais utilisés) : toute la config vient de @Provider.
+  Valider `endpoint`, la plage de `temperature`, la valeur de `max_tokens`, le contenu des
+    clés de `options`, ni `provider.provider_type`.
+  Paniquer, `unwrap`/`expect` hors `cfg(test)` (harnais de /tooling.sdd).
+  Modifier `provider` ou `profile` (les deux sont empruntés et lus seulement).
+  Exposer @AgentParams en serde/ts-rs : aucun type de ce fichier ne rejoint le protocole
+    `@vanyline/protocol`.
+
+Tasks:
+  [ ] Convertir chaque Scenario sans test existant en un test dédié taggé par son titre
+    (flux TTD). Couverts aujourd'hui : @build_ollama_model sans clé
+    (`build_ollama_model_succeeds`), avec clé (`build_ollama_model_with_api_key_succeeds`),
+    @build_openai_compat_model sans clé (`build_openai_compat_model_succeeds`),
+    @agent_params (`agent_params_passthrough`, `agent_params_with_options`,
+    `agent_params_minimal_profile`). NON couverts : clés vides, clés à caractères
+    invalides, chemins d'URL effectifs sur le fil (`/v1/chat/completions`, absence/présence
+    d'`Authorization`), absence d'I/O au build sur port fermé. Les tests sur le fil
+    supposent un serveur HTTP local (`axum` est déjà en dev-deps du crate).
+  [ ] Faire trancher toutes les lignes `[?]` par Sébastien, puis relire la spec.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] Commentaires source obsolètes : `crate::llm::build_ollama_model` et
+    `crate::llm::build_openai_compat_model` ne correspondent plus à aucun module de
+    ./lib.rs — le module `llm` a disparu. Nettoyer les commentaires ?
+  [?] Asymétrie des clés vides : ollama `Some("")` = aucune auth, openai-compatible
+    `None`/`Some("")` = en-tête `Authorization: Bearer ` réellement envoyé — certains
+    backends rejettent ce préfixe vide. Faut-il aligner openai-compatible sur une
+    sémantique « absence » ?
+  [?] Endpoint openai-compatible déjà suffixé `/v1` : la base devient
+    `…/v1/v1/chat/completions`, sans détection ni erreur — comportement voulu (l'opérateur
+    doit saisir l'origine sans `/v1`) ou garde-fou à ajouter ?
+  [?] Aucun `endpoint` validé au build : vide ou invalide, la construction réussit et la
+    panne éclate à la première requête, sans marqueur `"VNL-LLM-006"` — la validation
+    d'URL doit-elle vivre ici (@VnyError::ModelBuildError) ou amont (app/config) ?
+  [?] Endpoint ollama non paré de ses `/` de queue (alors qu'openai les retire) : double
+    slash sur le fil. Toléré ou trim à aligner aussi côté ollama ?
+  [?] Clé d'API à caractères non valides en en-tête HTTP : le build échoue avec
+    l'affichage brut de rig dans `"VNL-LLM-006: …"`. Ce message (sans nom de provider ni
+    profil) est-il assez diagnostiquable ?
+  [?] Clés de `profile.options` en collision avec les champs dédiés : aucun filtrage ici,
+    l'arbitrage dépend du corps de requête assemblé par rig. Faut-il filtrer/interdire ces
+    clés dans @agent_params ?
+  [?] @agent_params ne valide pas `temperature` (hors [0,2] chez beaucoup de providers) ni
+    `max_tokens == 0` — pass-through assumé ou validation à contractualiser ?
+
+Done when:
+  Chaque Scenario a son test taggé par son titre et passe.
+  Les chemins d'erreur (`"VNL-LLM-006"`) et les URL effectives sont verrouillés par des
+    tests sur serveur HTTP local.
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie du crate `vanyline-lib` est verte.
+
+Scenario: build_ollama_model_sans_cle_reussit
+  Given un provider ollama d'endpoint `"http://localhost:11434"` et `api_key: None`
+  And un profil de modèle `"qwen2.5"`
+  When @build_ollama_model s'exécute
+  Then l'appel retourne `Ok` sans aucun appel réseau
+
+Scenario: build_ollama_model_avec_cle_reussit
+  Given un provider ollama avec `api_key: Some("secret")`
+  When @build_ollama_model s'exécute
+  Then l'appel retourne `Ok`
+
+Scenario: build_ollama_model_cle_vide_vaut_absence_de_auth
+  Given un serveur HTTP local mock qui enregistre les en-têtes d'une requête de complétion
+    ollama (`/api/chat`) et répond une réponse valide
+  And un provider ollama d'endpoint l'url de ce mock et `api_key: Some("")`
+  When une complétion est demandée au modèle construit par @build_ollama_model
+  Then la requête enregistrée ne porte AUCUN en-tête `Authorization`
+
+Scenario: build_ollama_model_cle_invalide_en_en_tete_rejetee
+  Given un provider ollama dont `api_key` contient un caractère de contrôle (ex: `"cla\nir"`)
+  When @build_ollama_model s'exécute
+  Then l'appel retourne `Err` et l'affichage de l'erreur contient `"VNL-LLM-006"`
+
+Scenario: build_openai_compat_model_sans_cle_reussit
+  Given un provider openai-compatible d'endpoint `"http://localhost:8080"` et
+    `api_key: None`
+  When @build_openai_compat_model s'exécute
+  Then l'appel retourne `Ok` sans aucun appel réseau
+
+Scenario: build_openai_compat_model_sans_cle_envoie_bearer_vide
+  Given un serveur HTTP local mock qui enregistre les en-têtes et chemins d'une requête de
+    complétion et répond une réponse Chat Completions valide
+  And un provider openai-compatible d'endpoint l'url de ce mock et `api_key: None`
+  When une complétion est demandée au modèle construit par @build_openai_compat_model
+  Then la requête enregistrée porte l'en-tête `Authorization` de valeur exactement `"Bearer "`
+
+Scenario: build_openai_compat_model_cle_invalide_en_en_tete_rejetee
+  Given un provider openai-compatible dont `api_key` contient un caractère non-ASCII (ex: `"clé"`)
+  When @build_openai_compat_model s'exécute
+  Then l'appel retourne `Err` et l'affichage de l'erreur contient `"VNL-LLM-006"`
+
+Scenario: build_openai_compat_model_base_url_suffixee_v1
+  Given un serveur HTTP local mock enregistrant le chemin demandé et répondant une réponse
+    Chat Completions valide
+  And un provider openai-compatible d'endpoint l'url du mock sans suffixe
+  When une complétion est demandée au modèle construit par @build_openai_compat_model
+  Then le chemin enregistré vaut exactement `"/v1/chat/completions"`
+
+Scenario: build_openai_compat_model_slashes_de_queue_rognes
+  Given un serveur HTTP local mock comme ci-dessus
+  And un provider openai-compatible d'endpoint l'url du mock suivie de `"///"`
+  When une complétion est demandée au modèle construit par @build_openai_compat_model
+  Then le chemin enregistré vaut exactement `"/v1/chat/completions"` sans double slash
+
+Scenario: constructeurs_ne_roulent_aucun_reseau_au_build
+  Given un provider ollama ET un provider openai-compatible dont l'endpoint pointe sur un
+    port fermé (`"http://127.0.0.1:1"`)
+  When @build_ollama_model et @build_openai_compat_model s'exécutent
+  Then les deux appels retournent `Ok` (l'échec de connexion n'intervient qu'à la requête,
+    hors de ce fichier)
+
+Scenario: agent_params_passthrough
+  Given un profil de `temperature: Some(0.7)`, `max_tokens: Some(4096)`, `options` vide
+  When @agent_params s'exécute
+  Then les paramètres valent `temperature: Some(0.7)`, `max_tokens: Some(4096)`,
+    `additional_params: None`
+
+Scenario: agent_params_avec_options
+  Given un profil dont `options` vaut `{"num_ctx": 65536, "top_k": 20}`
+  When @agent_params s'exécute
+  Then `additional_params` vaut `Some` de l'objet JSON `{"num_ctx": 65536, "top_k": 20}` tel quel
+
+Scenario: agent_params_profil_minimal
+  Given un profil de `temperature: None`, `max_tokens: None`, `options` vide
+  When @agent_params s'exécute
+  Then les trois champs d'@AgentParams valent `None`
+
+Scenario: agent_params_options_imbriquees_verbatim
+  Given un profil dont `options` porte une valeur imbriquée (ex: `{"nested": {"flag": true}}`)
+  When @agent_params s'exécute
+  Then `additional_params` porte l'objet imbriqué à l'identique, sans filtrage de clé

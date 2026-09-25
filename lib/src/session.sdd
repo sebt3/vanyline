@@ -1,0 +1,422 @@
+Spec: Session
+
+Purpose:
+  Moteur de tour de session de `vanyline-lib` : assemble le system prompt d'un agent
+  (prompt + prompts de toolsets + index des skills + contexte workspace), résout la chaîne
+  de config agent -> modèle -> provider -> toolsets sans aucune I/O réseau, peuple un
+  @ToolServerHandle frais à chaque tour (local tools de l'hôte, servers MCP sélectionnés et
+  préfixés, builtins `skill`, `task`, `todowrite`, `todoread`) puis lance le stream
+  rig-core vers l'@EventSink. Un tour = un handle neuf et des connexions MCP neuves :
+  aucun état partagé entre tours, hors l'@Arc de @SessionContext::todo_state.
+
+Owns:
+  ./session.rs
+  ../tests/toolbox_extra_mcp.rs
+
+References:
+  ../tests/mcp_connection_lifecycle.rs
+  /tooling.sdd
+  @prefixed_mcp::connect_mcp_servers_selected
+  @prefixed_mcp::select_local_tools
+  @crate::event::stream_agent_events
+  @crate::builtin::task::TaskTool
+
+Must:
+  Assembler le system prompt dans l'ordre fixe : prompt de l'agent, prompts des toolsets
+    concaténés, index des skills, contexte workspace.
+  Séparer les sections non vides par `"\n\n"` ; une section vide ne produit aucune section
+    vide ni séparateur superflu, en tête comme en queue.
+  Retrimer avant concaténation le prompt de l'agent, chaque prompt de toolset et le
+    contexte workspace (une valeur vide ou uniquement des blancs est traitée comme absente).
+  Ordonner les prompts de toolsets selon @Agent::toolsets (jamais l'ordre du catalogue) et
+    les skills selon l'ordre du catalogue @SkillMeta (jamais l'ordre de @SkillSelection::Named),
+    avec pour format d'index une ligne `"- {name} : {description}"` par skill, sans ligne
+    d'en-tête.
+  Partager @resolve_skill_index entre l'index texte du prompt et l'index structuré passé au
+    builtin `skill` : la même règle de sélection ne doit jamais diverger sur les deux chemins.
+  Limiter @resolve_turn_context aux seuls appels @ConfigStore — aucune connexion réseau —
+    afin que la résolution complète soit testable sur @InMemoryConfigStore.
+  Utiliser @ResolvedTurn::resolved_toolsets comme source unique et identique pour
+    l'assemblage du prompt et le peuplement des tools d'un même tour.
+  Interpréter @SessionContext::model_override comme un remplacement du modèle de l'agent à
+    la seule résolution : la config n'est pas modifiée et une référence inconnue échoue comme
+    pour le modèle de l'agent.
+  Créer à chaque tour un handle et des connexions MCP neufs ; ne jamais conserver d'état de
+    tools ou de connexions entre deux tours (hors @Arc partagé du todo state).
+  Connecter @SessionContext::extra_mcp avant la boucle des toolsets : en collision de nom
+    de serveur avec une sélection de toolset, l'extra_mcp gagne et la sélection du toolset
+    est ignorée sans erreur.
+  Dédupliquer les local tools par nom sur l'ensemble des toolsets du tour et les sélections
+    MCP par nom de serveur, extra_mcp et toolsets confondus.
+  Partager @SessionContext::local_tools par clonage d'@Arc adapté en @ArcToolDyn, sans
+    jamais les consommer : un même contexte doit pouvoir alimenter plusieurs tours imbriqués.
+  Garder chaque @McpRunningService en vie jusqu'à la fin du stream et annuler proprement
+    chacun d'eux à la fin du tour, succès ou erreur de stream.
+  Exposer le builtin `skill` uniquement quand l'index de skills résolu est non vide, le
+    builtin `task` uniquement quand @run_agent_turn_at_depth::current_depth est strictement
+    inférieur à @SessionContext::subagent_depth_max et qu'au moins un subagent invocable
+    existe, et toujours les builtins `todowrite` et `todoread` branchés sur le même
+    @SessionContext::todo_state.
+  Exclure @AgentMode::Primary de @available_subagents et conserver l'ordre de
+    @ConfigStore::list_agents.
+  Appliquer dans @build_agent le preambule du prompt assemblé, @DEFAULT_MAX_TURNS (`100`)
+    comme `default_max_turns`, et les paramètres optionnels (`temperature`, `max_tokens`,
+    `additional_params`) uniquement quand ils valent `Some`.
+  Dispatcher le stream sur @ProviderType : @build_ollama_model pour @ProviderType::Ollama,
+    @build_openai_compat_model pour @ProviderType::OpenaiCompatible.
+  Partager le même @std::sync::Mutex du todo state entre toutes les copies d'un
+    @SessionContext cloné (hôte, builtins, tours imbriqués).
+  Traiter @run_agent_turn comme le seul point d'entrée public des hôtes, à profondeur `0`.
+
+Must not:
+  Valider des références ou remonter une erreur depuis @assemble_system_prompt : la
+    validation « toolset inconnu » est la responsabilité exclusive de @resolve_turn_context.
+  Faire échouer le tour à cause d'un server MCP injoignable, d'un local tool absent de
+    @SessionContext::local_tools ou d'un @ToolServerHandle::add_tool qui échoue : ces trois
+    cas sont non terminaux (événement ou log, le tour continue).
+  Écrire quoi que ce soit dans le @ConfigStore : le tour est en lecture seule sur la config.
+  Rendre @run_agent_turn_at_depth publique hors de la crate : seul @TaskTool imbrique un
+    tour, les hôtes passent par @run_agent_turn.
+  Consommer @SessionContext::model_override en écrivant le modèle de l'agent dans la config.
+
+Depends on:
+  ./prefixed_mcp.rs
+  ./event.rs
+  ./model.rs
+  ./error.rs
+  ./builtin/skill.rs
+  ./builtin/task.rs
+  ./builtin/todo.rs
+  /cfgstore/src/store.rs
+  /cfgstore/src/domain.rs
+  @rig_core::tool::ToolDyn
+  @rig_core::agent::AgentBuilder
+
+Exposes:
+  @assemble_system_prompt — `pub`, assemblage pur du system prompt.
+  @SessionContext — `pub`, `Clone` ; contexte partagé du tour.
+  @SessionContext::store — `pub` : @Arc de @ConfigStore.
+  @SessionContext::sink — `pub` : @Arc de @EventSink destinataire des @ChatEvent du tour.
+  @SessionContext::local_tools — `pub` : map `String` -> @Arc de @ToolDyn fournie par l'hôte.
+  @SessionContext::subagent_depth_max — `pub` : garde de profondeur des tours imbriqués.
+  @SessionContext::extra_mcp — `pub` : paires (@McpServer, @McpSelection) forcées pour ce
+    tour, hors config, sans que le serveur doive exister dans le store.
+  @SessionContext::model_override — `pub` : override du modèle pour ce tour, `None`
+    en cas général.
+  @SessionContext::todo_state — `pub` : @Arc de @std::sync::Mutex de `Option<String>`,
+    partagé par tous les clones.
+  @run_agent_turn — `pub` : entrée des hôtes, profondeur `0`.
+  @run_agent_turn_at_depth — `pub(crate)` : implémentation paramétrée par la profondeur,
+    réservée à @TaskTool.
+  @resolve_turn_context — @ResolvedTurn (@profile, @provider, @resolved_toolsets,
+    @system_prompt, @skill_index), @dedupe_local_tool_names, @dedupe_mcp_selections,
+    @resolve_skill_index, @available_subagents, @ArcToolDyn, @build_agent,
+    @run_turn_with_model, @DEFAULT_MAX_TURNS — items internes de crate dont le
+    comportement est contractuel : ils portent l'essentiel du contrat de la surface publique.
+
+Accepts:
+  @assemble_system_prompt : une référence @Agent, un catalogue `&[Toolset]`, un catalogue
+    `&[SkillMeta]`, un contexte `Option<&str>` — aucune des entrées n'est modifiée.
+  @run_agent_turn : un nom d'agent résolvable par le store, un historique
+    `Vec<rig_core::message::Message>` transmis tel quel au stream, le message utilisateur,
+    un contexte workspace optionnel.
+  @run_agent_turn_at_depth : en plus, la profondeur courante `u8` (`0` au niveau top).
+
+Returns:
+  @assemble_system_prompt : @String des sections non vides jointes par `"\n\n"` — `""`
+    quand toutes les entrées sont vides.
+  @resolve_turn_context : un @ResolvedTurn profil + provider + toolsets résolus + prompt +
+    index de skills.
+  @dedupe_local_tool_names et @dedupe_mcp_selections : la liste filtrée des éléments
+    inédits, l'ensemble passé en paramètre étant enrichi des noms retenus.
+  @run_agent_turn et @run_agent_turn_at_depth : un @ChatTurnResult (`response_text`,
+    `tool_calls`) ou une erreur.
+
+Raises:
+  @VnyError::UnknownReference (marqueur `"VNL-CFG-003"`) pour agent, modèle (y compris
+    l'override), provider ou toolset inconnu, ainsi que pour toute erreur du store sur
+    @ConfigStore::list_skills et @ConfigStore::list_agents.
+  @VnyError::DuplicateName (marqueur `"VNL-CFG-002"`) quand une référence de config est ambiguë.
+  @VnyError::ModelBuildError quand la construction du modèle du provider échoue.
+  Erreurs de transport/stream de @stream_agent_events propagées sans enveloppement.
+  Erreur terminale si @prefixed_mcp::connect_mcp_servers_selected retourne `Err` —
+    condition aujourd'hui inatteignable (les pannes par serveur transitent par le vec de
+    failures), ligne défensive d'avenir.
+  Jamais de panic dans le code de production (harnais de `/tooling.sdd`).
+
+Handles:
+  Nom de toolset référencé par l'agent mais absent du catalogue : ignoré silencieusement
+    par @assemble_system_prompt (le chemin réel, @resolve_turn_context, le rend fatal).
+  Toolset sans prompt ou au prompt entièrement blanc : aucune contribution au prompt.
+  Index de skills vide (sélection `None`, catalogue vide, ou `Named` ne filtrant rien) :
+    aucune section d'index et pas de builtin `skill`.
+  Contexte workspace `None`, vide ou blanc : aucune section.
+  Local tool demandé par un toolset mais absent de @SessionContext::local_tools :
+    `tracing::warn`, le tour continue.
+  @ToolServerHandle::add_tool en échec (local, MCP, builtin) : `tracing::warn`, le tour continue.
+  Serveur MCP référencé par une sélection mais absent de la config : `tracing::warn`,
+    sélection abandonnée, aucun événement émis (asymétrie avec la panne de connexion,
+    arbitrage en `Tasks`).
+  Serveur MCP sélectionné mais injoignable : @ChatEvent::ToolUnavailable émis sur le sink,
+    tour non terminal.
+  Nom de serveur dupliqué entre @SessionContext::extra_mcp et les toolsets, ou en double
+    dans extra_mcp : la première connexion gagne (extra_mcp d'abord, ordre d'apparition),
+    les sélections suivantes sont dédupliquées sans message.
+  Profondeur atteinte ou aucun agent invocable en mode `Subagent`/`All` : pas de builtin `task`.
+  Fin de stream, succès comme erreur : chaque @McpRunningService est annulé, un échec
+    d'annulation est un simple `tracing::warn`.
+  Erreur précoce après ouverture de connexions MCP (@ConfigStore::list_agents en échec ou
+    construction de modèle en échec) : les connexions sont rendues sans annulation
+    explicite (drop), arbitrage en `Tasks`.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] Serveur MCP référencé mais absent de la config : seul un `tracing::warn` est émis,
+    aucun @ChatEvent::ToolUnavailable — asymétrie avec le serveur injoignable qui, lui,
+    émet l'événement. Faut-il remonter les références « fantômes » au client ?
+  [?] Sur erreur précoce après connexions MCP ouvertes (@ConfigStore::list_agents ou
+    construction de modèle en échec), les @McpRunningService sont droppés sans @cancel
+    propre : l'annulation gracieuse est-elle un contrat réservé à la fin de stream, ou
+    faut-il un cleanup sur tout chemin d'erreur ?
+  [?] @dedupe_local_tool_names et @dedupe_mcp_selections marquent nom/serveur comme
+    ajoutés/connectés avant que l'opération réussisse : si @add_tool ou la connexion
+    échoue, un second toolset référençant le même tool ou serveur ne peut pas réessayer.
+    Contrat assumé ou bug à corriger ?
+  [?] Dédup MCP par nom de serveur uniquement : une seconde @McpSelection avec un filtre
+    de tools différent sur un serveur déjà connecté est ignorée en silence (commentaire
+    « simplification assumée au design »). Confirmer le contrat.
+  [?] Le trim des prompts de toolset et du prompt de l'agent (vide après trim => pas de
+    section) est documenté pour l'agent et implicite pour les toolsets : contrat
+    pleinement assumé ?
+  [?] Nom de skill présent dans @SkillSelection::Named mais absent du catalogue :
+    filtré en silence, sans erreur ni événement. Une validation amont (app/config) est-elle
+    prévue, ou ce silence est-il le contrat final ?
+  [?] Nom de toolset dupliqué dans @Agent::toolsets : résolu et prompté deux fois (le
+    prompt apparaît en double dans le system prompt). Validation amont ou tolérance ?
+  [ ] Convertir chaque `Scenario` sans test existant en un test taggé par son titre
+    (implementer), puis faire passer la synthèse du validator au vert.
+
+Done when:
+  Chaque `Scenario` est couvert par au moins un test taggé par son titre et passe.
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur le crate `vanyline-lib`.
+
+Scenario: assemble_prompt_agent_seul
+  Given un agent dont le system_prompt vaut `"You are helpful."`, sans toolset et en @SkillSelection::None
+  And des catalogues de toolsets et de skills vides et un contexte workspace `None`
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut exactement `"You are helpful."` sans saut de ligne final
+
+Scenario: assemble_prompt_ordre_toolsets_agent
+  Given un catalogue de toolsets `a` et `b` de prompts `"PROMPT_A"` et `"PROMPT_B"`
+  And un agent dont @Agent::toolsets liste `["b", "a"]`
+  When @assemble_system_prompt s'exécute
+  Then `"PROMPT_B"` apparaît avant `"PROMPT_A"` dans le résultat
+
+Scenario: assemble_prompt_toolset_sans_prompt
+  Given un agent référençant deux toolsets dont le prompt est `None`
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut le prompt de l'agent seul
+
+Scenario: assemble_prompt_toolset_blanc
+  Given un agent référençant un toolset dont le prompt est `"   "`
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut le prompt de l'agent seul
+
+Scenario: assemble_prompt_toolset_inconnu_ignore
+  Given un agent référençant le toolset `"nonexistent"`, absent du catalogue
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut le prompt de l'agent seul et aucune erreur n'est produite
+
+Scenario: assemble_prompt_jonction_blanc_unique
+  Given un prompt d'agent `"You are helpful."` et les toolsets `["b", "a"]` de prompts `"PROMPT_B"` et `"PROMPT_A"`
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut exactement `"You are helpful.\n\nPROMPT_B\n\nPROMPT_A"`
+
+Scenario: assemble_prompt_sans_section_skills
+  Given un agent en @SkillSelection::None et un catalogue contenant deux skills
+  When @assemble_system_prompt s'exécute
+  Then aucune description de skill n'apparaît dans le résultat
+
+Scenario: assemble_prompt_skills_auto_ordre_catalogue
+  Given un agent en @SkillSelection::Auto et un catalogue de skills `pdf` puis `web`
+  When @assemble_system_prompt s'exécute
+  Then la ligne `"- pdf : PDF processing"` apparaît avant la ligne `"- web : Web search"`
+
+Scenario: assemble_prompt_skills_nommes_filtre
+  Given un agent en @SkillSelection::Named(["web"]) et un catalogue de skills `pdf` et `web`
+  When @assemble_system_prompt s'exécute
+  Then seule la ligne d'index `web` apparaît
+
+Scenario: assemble_prompt_skills_nommes_ordre_catalogue
+  Given un catalogue de skills `pdf` puis `web` et un agent en @SkillSelection::Named(["web", "pdf"])
+  When @assemble_system_prompt s'exécute
+  Then la ligne d'index `pdf` apparaît avant la ligne d'index `web`
+
+Scenario: assemble_prompt_skills_nommes_inconnus_sans_section
+  Given un agent en @SkillSelection::Named(["absent"])
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut le prompt de l'agent seul
+
+Scenario: assemble_prompt_skills_auto_catalogue_vide
+  Given un agent en @SkillSelection::Auto et un catalogue de skills vide
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut le prompt de l'agent seul, sans bloc vide
+
+Scenario: assemble_prompt_contexte_workspace_en_queue
+  Given un agent et un contexte workspace `"# AGENTS.md\ncontent"`
+  When @assemble_system_prompt s'exécute
+  Then le résultat se termine par `"# AGENTS.md\ncontent"`
+
+Scenario: assemble_prompt_contexte_workspace_retrim
+  Given un contexte workspace `"  # ctx  \n"`
+  When @assemble_system_prompt s'exécute
+  Then la dernière section du résultat vaut `"# ctx"`
+
+Scenario: assemble_prompt_contexte_workspace_blanc
+  Given un prompt d'agent `"You are helpful."` et un contexte workspace `"   "`
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut `"You are helpful."`
+
+Scenario: assemble_prompt_quatre_sections_ordre_fixe
+  Given un prompt d'agent `"You are helpful."`, un toolset `shell` promptant `"## Shell tool"`, un skill `web` en @SkillSelection::Auto et un contexte workspace `"# AGENTS.md\ncontent"`
+  When @assemble_system_prompt s'exécute
+  Then le prompt de l'agent, le prompt du toolset, la ligne de skill et le contexte apparaissent dans cet ordre
+
+Scenario: assemble_prompt_prompt_agent_vide_sans_separateur_tete
+  Given un agent dont `system_prompt` vaut `""` et un toolset promptant `"PROMPT_A"`
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut `"PROMPT_A"` et ne commence pas par un saut de ligne
+
+Scenario: assemble_prompt_blanc_seul_assemble_vide
+  Given un agent dont `system_prompt` vaut `"   "`, sans toolset, sans skill, sans contexte
+  When @assemble_system_prompt s'exécute
+  Then le résultat vaut `""`
+
+Scenario: dedupe_local_tools_saute_deja_ajoutes
+  Given l'ensemble des noms déjà ajoutés contenant déjà `"read_file"`
+  When @dedupe_local_tool_names reçoit `["read_file", "write_file"]`
+  Then seul `"write_file"` est retourné
+  And l'ensemble contient les deux noms ensuite
+
+Scenario: dedupe_local_tools_garde_tout_ensemble_vide
+  Given un ensemble de noms déjà ajoutés vide
+  When @dedupe_local_tool_names reçoit `["a", "b"]`
+  Then les deux noms sont retournés et l'ensemble compte deux entrées
+
+Scenario: dedupe_mcp_saute_serveur_deja_connecte
+  Given l'ensemble des serveurs connectés contenant déjà `"server-a"`
+  When @dedupe_mcp_selections reçoit des sélections pour `server-a` et `server-b`
+  Then seule la sélection `server-b` est retournée
+  And l'ensemble contient les deux noms de serveur ensuite
+
+Scenario: dedupe_mcp_garde_tout_ensemble_vide
+  Given un ensemble de serveurs connectés vide
+  When @dedupe_mcp_selections reçoit des sélections pour `server-a` et `server-b`
+  Then les deux sélections sont retournées
+
+Scenario: subagents_disponibles_excluent_primary
+  Given une liste d'agents ordonnée `primary`, `sub`, `all` selon @AgentMode
+  When @available_subagents s'exécute
+  Then le résultat contient `sub` et `all` dans cet ordre
+
+Scenario: resolve_tour_succes_sans_reseau
+  Given un store avec l'agent `test-agent` -> le modèle `qwen2.5` -> le provider `ollama-local` et le toolset `default` promptant `"TOOLSET_PROMPT"`
+  When @resolve_turn_context s'exécute pour `test-agent`
+  Then le prompt résolu contient `"You are helpful."` et `"TOOLSET_PROMPT"`
+  And un toolset est résolu avec le profil et le provider attendus
+
+Scenario: resolve_tour_agent_inconnu_rejete
+  Given un store vide
+  When @resolve_turn_context s'exécute pour `"nope"`
+  Then le message d'erreur contient `"VNL-CFG-003"`
+
+Scenario: resolve_tour_modele_inconnu_rejete
+  Given un agent référençant le modèle `"nonexistent-model"`, absent du store
+  When @resolve_turn_context s'exécute pour cet agent
+  Then le message d'erreur contient `"VNL-CFG-003"`
+
+Scenario: resolve_tour_provider_inconnu_rejete
+  Given un modèle référençant le provider `"broken-provider"`, absent du store
+  When @resolve_turn_context s'exécute pour l'agent lié à ce modèle
+  Then le message d'erreur contient `"VNL-CFG-003"`
+
+Scenario: resolve_tour_toolset_inconnu_rejete
+  Given un agent référençant le toolset `"missing"`, absent du store
+  When @resolve_turn_context s'exécute pour cet agent
+  Then le message d'erreur contient `"VNL-CFG-003"`
+
+Scenario: resolve_tour_contexte_workspace_ajoute
+  Given une chaîne agent valide et un contexte workspace `"# AGENTS.md"`
+  When @resolve_turn_context s'exécute
+  Then le prompt résolu se termine par `"# AGENTS.md"`
+
+Scenario: override_modele_selectionne_autre_profil
+  Given un agent dont le modèle est `m-a` et un store contenant `m-a` et `m-b` (providers différents)
+  And un contexte dont @SessionContext::model_override vaut `Some("m-b")`
+  When @resolve_turn_context s'exécute pour cet agent
+  Then le profil résolu est `m-b` et son provider est celui de `m-b`
+
+Scenario: override_modele_inconnu_rejete
+  Given un agent au modèle valide et un @SessionContext::model_override `Some("ghost")`
+  When @resolve_turn_context s'exécute
+  Then le message d'erreur contient `"VNL-CFG-003"`
+
+Scenario: index_skills_resolu_suite_selection_auto
+  Given une chaîne agent valide en @SkillSelection::Auto et deux skills dans le store
+  When @resolve_turn_context s'exécute pour cet agent
+  Then l'index de skills résolu égale la liste du store, même ordre
+
+Scenario: build_agent_defaut_max_turns
+  Given un modèle OpenAI-compatible construit depuis un provider et un profil
+  When @build_agent s'exécute avec un handle neuf
+  Then le `default_max_turns` de l'agent vaut `Some(100)`
+
+Scenario: arc_tool_dyn_transmet_identite_et_appel
+  Given un faux @ToolDyn empaqueté dans un @Arc puis dans un @ArcToolDyn
+  When on lit le nom du wrapper et on l'appelle
+  Then le nom et le résultat de l'appel égalent ceux du tool interne
+
+Scenario: serveur_mcp_extra_contacte_pendant_tour
+  Given un vrai serveur MCP local de echo et un agent sans aucun toolset
+  And un @SessionContext::extra_mcp pointant sur ce serveur avec par ailleurs une chaîne LLM cassée
+  When @run_agent_turn s'exécute et échoue plus tard à l'étape LLM
+  Then le serveur de echo a reçu au moins une requête HTTP
+
+Scenario: serveur_mcp_injoignable_emet_tool_unavailable
+  Given un agent dont le toolset sélectionne un serveur MCP d'url `"http://127.0.0.1:1"`
+  And un sink enregistreur avec une chaîne valide par ailleurs et un port LLM fermé
+  When @run_agent_turn s'exécute
+  Then l'enregistrement contient un @ChatEvent::ToolUnavailable pour ce nom de serveur
+
+Scenario: serveur_mcp_absent_du_store_sans_tool_unavailable
+  Given un agent dont le toolset sélectionne le serveur `"ghost"`, absent de la config du store
+  And un sink enregistreur avec une chaîne valide par ailleurs
+  When @run_agent_turn s'exécute
+  Then l'enregistrement ne contient aucun @ChatEvent::ToolUnavailable
+
+Scenario: extra_mcp_gagne_en_collision_de_nom
+  Given @SessionContext::extra_mcp déclarant le serveur `"shared"` sur une url locale de echo vivante
+  And un toolset sélectionnant `"shared"`, dont l'entrée de store pointe sur une url fermée
+  When @run_agent_turn s'exécute et échoue à l'étape LLM
+  Then le serveur de echo a été contacté
+  And aucun @ChatEvent::ToolUnavailable n'a été enregistré pour `"shared"`
+
+Scenario: contexte_clone_partage_todo_state
+  Given un @SessionContext et un clone de ce @SessionContext
+  When le todo_state de l'un est fixé à `Some("[]")`
+  Then le todo_state de l'autre se lit `Some("[]")`
+
+Scenario: agent_inconnu_tour_sans_evenement
+  Given un store vide et un sink enregistreur
+  When @run_agent_turn s'exécute pour l'agent `"nope"`
+  Then le message d'erreur contient `"VNL-CFG-003"`
+  And l'enregistrement est vide
+
+Scenario: listing_agents_en_erreur_avorte_tour_avant_stream
+  Given une chaîne agent -> modèle -> provider valide avec @SessionContext::subagent_depth_max `1`
+  And un store dont @ConfigStore::list_agents échoue avec le marqueur `"boom-list"`
+  When @run_agent_turn s'exécute
+  Then le message d'erreur contient `"boom-list"`

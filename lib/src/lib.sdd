@@ -1,0 +1,273 @@
+Spec: Lib
+
+Platform: Rust/vanyline-lib
+
+Purpose:
+  Racine du crate `vanyline-lib` : cœur partagé LLM / MCP / chat du monorepo. Le fichier
+  porte deux choses. (1) Son seul comportement propre : @encode_git_path et son jeu
+  d'encodage @GIT_ENCODE_SET — helper d'encodage percent de chemins git préservant `/`,
+  hérité de l'époque où le proxy git de la sandbox ré-encodait les chemins, plus appelé en
+  production depuis que ./k8s.rs transcrit `raw_path` verbatim (cf. ./k8s.sdd), et dont la
+  survie est à trancher (`Tasks`). (2) Le câblage du crate : arbre des modules et leur
+  visibilité, les re-exports racine canoniques (`vanyline_lib::domain` / `::store`
+  ré-exportés de `vanyline-cfgstore`, globs de ./error.rs, ./types.rs, ./prefixed_mcp.rs,
+  @ToolServerHandle de `rig-core`), le gating du module `k8s` par la feature cargo
+  éponyme, et l'exemption clippy du profil test. Tout le contenu des modules est
+  contracté par les specs sœurs (./builtin/, ./event.sdd, ./session.sdd, ./k8s.sdd,
+  ./prefixed_mcp.sdd, ./error.sdd, ./model.sdd, ./types.sdd) ; cette spec ne couvre que la
+  surface racine et le comportement défini ici.
+
+Owns:
+  ./lib.rs
+
+Can read:
+  ./error.rs
+  ./types.rs
+  ./prefixed_mcp.rs
+  ./k8s.rs
+  ./session.rs
+  ./event.rs
+  ./model.rs
+  ./builtin/mod.rs
+  ../Cargo.toml
+  /tooling.sdd
+  /vanyline.sdd
+  /docs/architecture.md
+  /cfgstore/src/lib.rs
+
+Structure:
+  ./lib.rs — code réel : @GIT_ENCODE_SET (macro), @encode_git_path, attributs de crate,
+    câblage des modules et globs de re-export.
+  vanyline_lib:: — surface racine vue de l'extérieur : modules publics, re-exports,
+    @encode_git_path.
+    ├── builtin (pub mod) — ./builtin/mod.rs : skill, task, todo
+    ├── domain (re-export pub de vanyline_cfgstore::domain) — canonique
+    ├── store (re-export pub de vanyline_cfgstore::store) — canonique
+    ├── error (mod privé) — surface re-exportée en glob à la racine uniquement
+    ├── event (pub mod) — ./event.rs, pas de glob
+    ├── k8s (pub mod, gated `#[cfg(feature = "k8s")]`)
+    ├── model (pub mod) — ./model.rs, pas de glob
+    ├── prefixed_mcp (pub mod ET glob re-exporté à la racine — double chemin)
+    ├── session (pub mod) — ./session.rs, pas de glob
+    └── types (mod privé) — surface re-exportée en glob à la racine uniquement
+
+Must:
+  Définir @GIT_ENCODE_SET par @percent_encoding::define_encode_set! comme l'union de
+    @percent_encoding::SIMPLE_ENCODE_SET et de `{' ', '%'}`. Sous `percent-encoding` 1.x
+    (version épinglée par ../Cargo.toml), SIMPLE_ENCODE_SET encode tout octet `< 0x20` ou
+    `> 0x7E` — contrôles ASCII, DEL et tous les octets non-ASCII d'une séquence UTF-8 — et
+    aucun caractère ASCII imprimable. Le jeu effectif de @GIT_ENCODE_SET est donc :
+    contrôles + DEL + octets non-ASCII + espace + `%`, et rien d'autre.
+  Implémenter @encode_git_path comme `utf8_percent_encode(path, GIT_ENCODE_SET).to_string()` :
+    encodage appliqué à la chaîne entière, sans découpage, sans décodage préalable, sans
+    validation de segments ; les octets encodés le sont en hexadécimal majuscule (`%20`,
+    `%C3%A9`).
+  Compiler @GIT_ENCODE_SET et @encode_git_path sans condition de feature ni de profil.
+  Déclarer l'arbre de modules exactement ainsi : `pub mod builtin`, `pub mod event`,
+    `pub mod model`, `pub mod prefixed_mcp`, `pub mod session` ; `#[cfg(feature = "k8s")]
+    pub mod k8s` — le module n'existe pas sans la feature (../Cargo.toml : la feature
+    active `kube`, `kube-runtime`, `vanyline-crds`, `k8s-openapi`) ; `mod error` et
+    `mod types` privés, rendus accessibles uniquement par leur glob à la racine.
+  Maintenir `pub use vanyline_cfgstore::{domain, store}` comme chemin canonique
+    `vanyline_lib::domain::…` et `vanyline_lib::store::…` : ce re-export est consommé
+    aussi bien par les binaires du workspace (`cli`, `app`, tests d'intégration) qu'EN
+    INTERNE au crate — ./prefixed_mcp.rs et les modules jumeaux écrivent `crate::domain`.
+    Le retirer ou le renommer casse des chemins `crate::` internes, pas seulement l'API
+    publique.
+  Exposer la surface racine par globs : `pub use error::*` (@VnyError, dont l'impl
+    @From<@vanyline_cfgstore::CfgStoreError> attache), `pub use prefixed_mcp::*`,
+    `pub use types::*` — @VnyError, @ToolCall, @Message, @Conversation et la surface
+    publique de ./prefixed_mcp.rs sont adressables directement sous `vanyline_lib::`.
+  Maintenir ./prefixed_mcp accessible sous DEUX chemins équivalents : `prefixed_mcp` est
+    un `pub mod` ET son contenu est glob-re-exporté à la racine.
+  Re-exporter @ToolServerHandle de `rig_core::tool::server` à la racine.
+  Restreindre l'exemption `#![cfg_attr(test, allow(clippy::unwrap_used,
+    clippy::expect_used))]` au seul profil `cfg(test)` : en build de production le harnais
+    de /tooling.sdd garde ces lints en deny.
+  Déléguer sans redondance le contrat du contenu de chaque module aux specs sœurs.
+
+Must not:
+  Porter un autre comportement que @encode_git_path : le reste du fichier est du câblage
+    (déclarations de modules, re-exports, attributs) sans logique.
+  Encoder `/` dans @encode_git_path : le non-encodage du séparateur est précisément ce
+    qui distingue le helper d'un encodage par segment et ce que ses Scenarios verrouillent.
+  Employer @encode_git_path comme assainisseur d'URL : les ASCII imprimables porteurs de
+    sens en URL (`#`, `?`, `&`, `=`, `+`, `@`, `[`, `]`, `\`, `"`, `<`, `>`) passent tels
+    quels — le helper ne produit pas un segment d'URL sûr (contrat de non-réemploi posé
+    aussi par ./k8s.sdd).
+  Rendre `vanyline_lib::error::…` ou `vanyline_lib::types::…` accessibles : les modules
+    `error` et `types` restent privés ; la racine est leur seul chemin public.
+  Gating @encode_git_path, @GIT_ENCODE_SET, `domain`, `store`, `error`, `types`, `event`,
+    `model`, `session`, `builtin` ou `prefixed_mcp` sur une feature : seule `k8s` est gated.
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` en code de production
+    (harnais de /tooling.sdd).
+
+Depends on:
+  `percent-encoding` (version 1.x, épinglée ../Cargo.toml) — @SIMPLE_ENCODE_SET, la macro
+    @define_encode_set! (qui engendre @GIT_ENCODE_SET) et @utf8_percent_encode.
+  `vanyline-cfgstore` — modules @domain et @store ré-exportés tels quels ; @CfgStoreError
+    converti par ./error.rs.
+  `rig-core` — @ToolServerHandle (`tool::server`).
+  ./error.rs — @VnyError et sa conversion depuis `CfgStoreError` (./error.sdd).
+  ./types.rs — @ToolCall, @Message, @Conversation (./types.sdd).
+  ./prefixed_mcp.rs — (@./prefixed_mcp.sdd).
+  ./k8s.rs — sous feature `k8s` uniquement (./k8s.sdd).
+  ./builtin/mod.rs, ./event.rs, ./model.rs, ./session.rs — modules déclarés, contenu
+    géré par leurs specs.
+  /tooling.sdd — harnais clippy/fmt.
+
+Exposes:
+  @GIT_ENCODE_SET — `pub` (struct unitaire engendrée par la macro) ; implémente
+    @percent_encoding::EncodeSet.
+  @encode_git_path — `pub fn (&str) -> String`.
+  vanyline_lib::builtin — `pub mod` (skill, task, todo) ; vanyline_lib::event,
+    vanyline_lib::model, vanyline_lib::prefixed_mcp, vanyline_lib::session — `pub mod`.
+  vanyline_lib::k8s — `pub mod`, présent uniquement feature `k8s` activée.
+  vanyline_lib::domain, vanyline_lib::store — modules ré-exportés, chemins canoniques.
+  À la racine par glob : @VnyError ; @ToolCall, @Message, @Conversation ;
+    @McpRunningService, @new_tool_handle, @PrefixedMcpTool, @list_mcp_server_tools,
+    @McpConnectFailure, @connect_mcp_servers_selected, @select_local_tools.
+  vanyline_lib::ToolServerHandle — type ré-exporté de `rig_core`.
+  Privé hors racine : `error`, `types` (et tout item non-`pub` de chaque module).
+
+Accepts:
+  @encode_git_path : `path: &str` — toute chaîne UTF-8, sans limite de longueur, sans
+    validation de contenu ; la chaîne vide est une entrée valide.
+
+Returns:
+  @encode_git_path : @String possédé. Espace → `%20`, `%` → `%25`, chaque octet de
+    contrôle ou DEL → `%XX` majuscule, chaque octet d'une séquence UTF-8 non-ASCII → son
+    `%XX` (ex: `é` → `%C3%A9`) ; tous les autres ASCII imprimables passés tels quels, `/`
+    y compris. Aucun décodage ni normalisation : l'entrée n'est jamais interprétée comme
+    déjà-encodée.
+
+Raises:
+  Aucune : @encode_git_path est une fonction totale (`String` de retour, pas de @Result)
+    et ne panique pas.
+  Jamais de panic en code de production (harnais de /tooling.sdd).
+
+Handles:
+  Chemin git sans caractère à encoder (`branches/feature-x`, `status`) : retour byte-for-byte
+    identique — les `/`, `-`, `_`, `.`, `~` et tous les ASCII imprimables traversent.
+  Entrée vide : @String vide.
+  Entrée déjà percent-encodée (`a%20b`) : le `%` est ré-encodé (`a%2520b`) — l'opération
+    n'est pas idempotente, c'est le comportement qui a motivé l'abandon de l'appel dans
+    @VnlK8sClient::sandbox_git_url (./k8s.sdd, section `Must not`).
+  Caractères de contrôle embarqués (tab, LF, CR) : encodés `%09`, `%0A`, `%0D`.
+  Non-ASCII (`café`) : encodé octet par octet de l'UTF-8 (`caf%C3%A9`).
+  Absence de la feature `k8s` : le crate compile sans ./k8s.rs et sans aucune dépendance
+    kube ; la racine reste complète hors `vanyline_lib::k8s`.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] Destin de @encode_git_path : plus aucun appelant de production dans le workspace
+    depuis que @VnlK8sClient::sandbox_git_url transcrit `raw_path` verbatim ; la seule
+    référence restante est le module de test de ./k8s.rs. Le garder (pour quel
+    consommateur futur ?), le déplacer, ou le supprimer avec ses deux tests ?
+  [?] Commentaire doc de @encode_git_path : « segment par segment, en PRÉSERVANT les
+    séparateurs `/` et les caractères sûrs `-`, `_`, `.`, `~` » est doublement trompeur —
+    il n'y a aucun découpage segment par segment (la chaîne entière est encodée d'un bloc)
+    et les « caractères sûrs » ne sont préservés qu'accidentellement. Contractualiser la
+    réalité avec commentaire corrigé, ou une implémentation réellement par segments ?
+  [?] Les deux tests existants de @encode_git_path vivent dans le module `#[cfg(test)]`
+    de ./k8s.rs, gated `feature = "k8s"` alors que la fonction ne l'est pas — ils ne
+    s'exécutent pas dans un build sans la feature. ./k8s.sdd pose la question du
+    déplacement ; les Scenarios ci-dessous sont écrits comme si la responsabilité des
+    tests revenait à cette spec (déplacement vers ./lib.rs ou ./tests/). Confirmer.
+  [?] `pub use prefixed_mcp::*` en plus de `pub mod prefixed_mcp` : double exposition de
+    la surface (racine et chemin de module) — voulue pour la stabilité des imports
+    existants, ou faut-il ne garder qu'un chemin ?
+  [?] Re-export @ToolServerHandle à la racine : aucun consommateur
+    `vanyline_lib::ToolServerHandle` trouvé dans le workspace. Maintenu pour stabiliser
+    l'API vis-à-vis de `rig-core`, ou supprimable ?
+  [?] `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` : redondant
+    avec les `#![allow(...)]` déjà posés dans chaque module `#[cfg(test)]` et sans effet
+    sur les tests d'intégration de ../tests (crates séparées). Garder l'attribut
+    crate-wide ou l'ôter au profit des exemptions par module ?
+  [?] Visibilité privée de `error`/`types` (chemin `vanyline_lib::error::…`
+    compile-fail) : observables de compile-time non traduisables en test unitaire sans
+    trybuild (absent des dev-dependencies). S'en remettre à la revue, ou ajouter un
+    harnais compile-fail ?
+  [?] Montée de version de `percent-encoding` 1.x → 2.x : la sémantique de
+    @SIMPLE_ENCODE_SET change complètement ; @GIT_ENCODE_SET deviendrait silencieusement
+    différent sans modification de code. Le Scenario anti-régression
+    (`encode_git_path_ascii_imprimables_dangereux_passent`) est-il suffisant comme garde-fou ?
+  [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
+    (implementer) — les Scenarios `surface_*` et `module_k8s_*` sont des tests de
+    compilation / commandes cargo, pas des tests comportementaux — puis faire passer la
+    synthèse du validator au vert.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe.
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur `vanyline-lib`, features `k8s` et `ts-rs` activées et désactivées.
+
+Scenario: encode_git_path_preserve_separateurs_et_ascii_surs
+  Given @encode_git_path accessible sous `vanyline_lib::encode_git_path` sans feature
+  When il reçoit `"branches/feature-x"` puis `"refs/heads/feature_x.1~2"` puis `"status"`
+  Then les trois résultats valent exactement les chaînes d'entrée, octet pour octet
+
+Scenario: encode_git_path_encode_espace_et_percent
+  Given @encode_git_path accessible sous `vanyline_lib::encode_git_path`
+  When il reçoit `"branches/feature x"` puis `"a%20b"`
+  Then les résultats valent exactement `"branches/feature%20x"` et `"a%2520b"` — le second
+    prouve la non-idempotence (le `%` d'une entrée déjà encodée est ré-encodé)
+
+Scenario: encode_git_path_encode_controles
+  Given @encode_git_path accessible sous `vanyline_lib::encode_git_path`
+  When il reçoit `"a\tb\nc\rd"`
+  Then le résultat vaut exactement `"a%09b%0Ac%0Dd"`
+
+Scenario: encode_git_path_encode_non_ascii_octet_par_octet
+  Given @encode_git_path accessible sous `vanyline_lib::encode_git_path`
+  When il reçoit `"café/é"`
+  Then le résultat vaut exactement `"caf%C3%A9/%C3%A9"`
+
+Scenario: encode_git_path_ascii_imprimables_dangereux_passent
+  Given @encode_git_path accessible sous `vanyline_lib::encode_git_path`
+  When il reçoit une chaîne d'ASCII imprimables porteurs de sens en URL (`#`, `?`, `&`,
+    `=`, `+`, `@`, `[`, `]`, `\`, `<`, `>`, `{`, `}`, `^`, `|`, `;`)
+  Then le résultat vaut exactement la chaîne d'entrée — le helper n'est pas un assainisseur
+    d'URL (anti-régression d'une montée `percent-encoding` 1.x → 2.x, cf. `Tasks`)
+
+Scenario: encode_git_path_entree_vide
+  Given @encode_git_path accessible sous `vanyline_lib::encode_git_path`
+  When il reçoit `""`
+  Then le résultat vaut exactement `""`
+
+Scenario: surface_racine_domain_store_canoniques
+  Given le crate `vanyline-lib` compilé sans feature
+  When un test référence `vanyline_lib::domain::…` (ex: @Agent) et
+    `vanyline_lib::store::InMemoryConfigStore` exactement comme le font `cli` et `app`
+  Then la compilation réussit — le re-export `vanyline_cfgstore` à la racine est le chemin
+    canonique (et la base des chemins internes `crate::domain`)
+
+Scenario: surface_racine_glob_error_types_prefixed_mcp
+  Given le crate `vanyline-lib` compilé sans feature
+  When un test nomme @vanyline_lib::ToolServerHandle, @vanyline_lib::new_tool_handle,
+    @vanyline_lib::VnyError, @vanyline_lib::ToolCall, @vanyline_lib::Message,
+    @vanyline_lib::Conversation, @vanyline_lib::McpConnectFailure,
+    @vanyline_lib::select_local_tools et `vanyline_lib::event::ChatEvent`
+  Then la compilation réussit — les globs de ./error.rs, ./types.rs, ./prefixed_mcp.rs et
+    le re-export `rig_core` exposent bien ces noms à la racine (test de surface)
+
+Scenario: surface_racine_prefixed_mcp_double_chemin
+  Given le crate `vanyline-lib` compilé sans feature
+  When un test assigne la même fonction `vanyline_lib::connect_mcp_servers_selected` et
+    `vanyline_lib::prefixed_mcp::connect_mcp_servers_selected` à un même pointeur de fonction typé
+  Then la compilation réussit et les deux pointeurs sont égaux à l'exécution (même item)
+
+Scenario: module_k8s_absent_sans_feature
+  Given la batterie de validation du workspace (commande cargo, cf. `Tasks`)
+  When `cargo check -p vanyline-lib` s'exécute sans feature et qu'un fichier de test
+    référence `vanyline_lib::k8s::VnlK8sClient`
+  Then le check de base réussit sans compiler `kube`, `kube-runtime`, `vanyline-crds` ni
+    `k8s-openapi`, et la référence à `vanyline_lib::k8s` échoue en compilation
+
+Scenario: module_k8s_present_avec_feature
+  Given la batterie de validation du workspace (commande cargo, cf. `Tasks`)
+  When `cargo check -p vanyline-lib --features k8s` s'exécute
+  Then le check réussit et `vanyline_lib::k8s::VnlK8sClient` est résoluble (le gating
+    `#[cfg(feature = "k8s")]` est la seule barrière)

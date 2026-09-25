@@ -1,0 +1,359 @@
+Spec: K8s
+
+Platform: Rust/vanyline-lib/kube/kube-runtime/vanyline-crds
+
+Purpose:
+  Client K8s typé de `vanyline-lib` pour les CRDs Owner/Project/Sandbox/Application —
+  sous feature cargo `k8s` désactivée par défaut. Une découverte de config
+  (@VnlK8sClient::discover, in-cluster ou kubeconfig), un CRUD namespaced minimal sur les
+  trois CRD pilotables par l'utilisateur, des lectures ciblées sur Application (pas de
+  CRUD : l'Application est posée par le cluster-admin/controller), des constructeurs d'URL
+  internes de sandbox (MCP, relais de ticket WS, proxy git) qui vérifient l'existence de
+  la sandbox avant de former l'URL, un patch merge ciblé sur `spec.suspended`, et un
+  stream de watch normalisé (@WatchEvent) des @Sandbox du namespace, consommé par le hub
+  WS de l'`app`. Le fichier est une fine couche sur `kube`/`kube-runtime` : aucune logique
+  ne réside ici hors du mappage des erreurs et des événements.
+
+Owns:
+  ./k8s.rs
+
+Can read:
+  ./lib.rs
+  ./error.rs
+  ../Cargo.toml
+  /crds/src/lib.rs
+  /docs/architecture.md
+
+Must:
+  Compiler le module entier uniquement sous la feature cargo `k8s` (gating
+    `#[cfg(feature = "k8s")] pub mod k8s;` dans ./lib.rs) ; la feature active `kube`,
+    `kube-runtime`, `vanyline-crds`, `k8s-openapi` (../Cargo.toml). Les variantes
+    @VnyError::K8sConfigError et @VnyError::K8sApiError consommées ici sont gated de la
+    même feature (./error.rs).
+  Résoudre le namespace à la construction et l'appliquer à TOUTES les opérations via
+    @kube::Api::namespaced — le client ne consulte jamais @kube::Config::default_namespace
+    après @VnlK8sClient::discover ; @VnlK8sClient est @Clone (clone du @kube::Client +
+    @String du namespace).
+  Découvrir la config dans @VnlK8sClient::discover par @kube::Config::infer (in-cluster
+    d'abord, puis `KUBECONFIG`/`~/.kube/config` — gérés par kube), construire le client par
+    @kube::Client::try_from, et retenir `namespace_override` quand il vaut `Some`, sinon
+    `config.default_namespace` (namespace du contexte kubeconfig courant).
+  Exposer le CRUD symétrique Owner/Project/Sandbox : @VnlK8sClient::list_X (liste du
+    namespace, @ListParams::default), @VnlK8sClient::get_X (une ressource, erreur si
+    absente), @VnlK8sClient::create_X (construction par `X::new(name, spec)` — le `name`
+    va dans metadata, `spec` passe tel quel — puis @kube::Api::create avec
+    @PostParams::default), @VnlK8sClient::delete_X (@kube::Api::delete avec
+    @DeleteParams::default, réponse de l'API jetée, retour unitaire).
+  Exposer @VnlK8sClient::get_application comme seule opération sur @Application : lecture
+    d'une Application nommée, sans list/create/delete Application.
+  Patchér @VnlK8sClient::set_sandbox_suspended par merge patch JSON
+    `{"spec": {"suspended": <bool>}}` (@kube::api::Patch::Merge, @PatchParams::default,
+    sans force ni field manager explicite) ; ne pas vérifier l'existence de la sandbox au
+    préalable ; retourner l'objet patché (contrairement aux delete_X) pour que l'appelant
+    voie le nouveau statut immédiatement.
+  Former les trois URL internes de sandbox sur le même patron
+    `http://{service_name(name)}.{namespace}.svc:{MCP_PORT}/{chemin}` avec
+    @vanyline_crds::service_name (`sandbox-{name}`) et @vanyline_crds::MCP_PORT (`3000`)
+    pour les trois chemins : `mcp` (@VnlK8sClient::sandbox_mcp_url), `ws/ticket`
+    (@VnlK8sClient::sandbox_ws_ticket_url), `git/{raw_path}` (@VnlK8sClient::sandbox_git_url) ;
+    dans les trois cas, appeler d'abord @VnlK8sClient::get_sandbox et propager son erreur
+    avant toute construction d'URL.
+  Transcrire le `raw_path` de @VnlK8sClient::sandbox_git_url verbatim : aucun encodage,
+    aucun décodage, aucune validation de segments (`.`/`..`) — la validation et le
+    percent-encodage amont sont la responsabilité exclusive de l'appelant
+    (`app::api::sandboxes::raw_git_tail`).
+  Émettre @VnlK8sClient::watch_sandboxes comme stream boxé `Pin<Box<dyn Stream<Item = @WatchEvent<@Sandbox>> + Send>>`
+    (type nommé préféré à un `impl Stream` opaque, stocké derrière un champ du hub WS de
+    l'`app`), avec @kube_runtime::watcher::Config portant un timeout de `300` secondes
+    (un reconnect trop court re-liste toutes les sandboxes et provoque une salve de
+    refetch côté WS).
+  Mapper les événements du watcher exactement ainsi : `InitApply` -> @WatchEvent::Added,
+    `Apply` -> @WatchEvent::Modified, `Delete` -> @WatchEvent::Deleted, `Init` et
+    `InitDone` -> aucun item (le replay initial des objets existants passe par les
+    `InitApply`), erreur du watcher -> @WatchEvent::Error (message de l'erreur).
+  Dériver @WatchEvent de @Clone et @Debug uniquement (ni @PartialEq, ni sérialisation) et
+    ne jamais laisser filtrer le type @kube_runtime::watcher::Event hors du module.
+
+Must not:
+  Ré-encoder le `raw_path` dans @VnlK8sClient::sandbox_git_url : décoder puis ré-encoder
+    perd la distinction entre un `%2F` légitime dans un segment (nom de branche contenant
+    `/`) et un vrai séparateur de chemin. Le @encode_git_path de ./lib.rs n'est plus
+    appelé depuis ce module.
+  Propager `namespace_override` dans le client kube lui-même : l'override ne vit que dans
+    le champ `namespace` du @VnlK8sClient.
+  Offrir d'opération cluster-scopée ou de CRUD sur @Application autre que
+    @VnlK8sClient::get_application.
+  Unit-tester un appel API K8s avec un mock d'API server : convention du projet (aucun
+    mock kube, cf. mémoire `ws12-sandbox-clients`) ; les seuls tests offline du fichier
+    sont ceux du module de test existant (cf. `Tasks`).
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` en code de production
+    (harnais de `/tooling.sdd`).
+
+Depends on:
+  /crds/src/lib.rs — @Owner/@OwnerSpec, @Project/@ProjectSpec, @Sandbox/@SandboxSpec,
+    @Application, leurs constructeurs `new`, plus @service_name et @MCP_PORT ; option du
+    crate sous feature `k8s`.
+  `kube` — @kube::Config::infer, @kube::Client, @kube::Api (namespaced, list/get/create/
+    delete/patch), @Patch/@PatchParams/@ListParams/@PostParams/@DeleteParams, @kube::Resource.
+  `kube-runtime` — @kube_runtime::watcher et ses @Event.
+  `k8s-openapi` — @NamespaceResourceScope (bound des helpers génériques).
+  `futures` — @Stream, @StreamExt::filter_map.
+  `serde` + `serde_json` — bounds de (de)sérialisation des helpers, construction du merge patch.
+  ./error.rs — @VnyError::K8sConfigError (`"VNL-K8S-001"`) et @VnyError::K8sApiError
+    (`"VNL-K8S-002"`), toutes deux gated `#[cfg(feature = "k8s")]`.
+  ./lib.rs — gating du module par la feature `k8s` ; @encode_git_path (plus appelé ici,
+    testé dans le module de test du fichier).
+
+Exposes:
+  @WatchEvent — énumération publique, @Clone + @Debug, variantes @WatchEvent::Added,
+    @WatchEvent::Modified, @WatchEvent::Deleted, @WatchEvent::Error(`String`) ; forme
+    normalisée pour la diffusion WS des événements du watcher.
+  @VnlK8sClient — `pub`, @Clone ; champs `client` et `namespace` privés.
+  @VnlK8sClient::discover — `pub` : construit le client (namespace résolu, override optionnel).
+  @VnlK8sClient::list_owners / @VnlK8sClient::get_owner / @VnlK8sClient::create_owner /
+    @VnlK8sClient::delete_owner — `pub` CRUD Owner.
+  @VnlK8sClient::get_application — `pub` : lecture seule d'une @Application.
+  @VnlK8sClient::list_projects / @VnlK8sClient::get_project / @VnlK8sClient::create_project /
+    @VnlK8sClient::delete_project — `pub` CRUD Project.
+  @VnlK8sClient::list_sandboxes / @VnlK8sClient::get_sandbox / @VnlK8sClient::create_sandbox /
+    @VnlK8sClient::delete_sandbox — `pub` CRUD Sandbox.
+  @VnlK8sClient::set_sandbox_suspended — `pub` : merge patch de `spec.suspended`,
+    retourne le @Sandbox patché.
+  @VnlK8sClient::sandbox_mcp_url — `pub` : URL MCP HTTP-streamable interne (`…/mcp`).
+  @VnlK8sClient::sandbox_ws_ticket_url — `pub` : URL interne `POST /ws/ticket` (`…/ws/ticket`).
+  @VnlK8sClient::sandbox_git_url — `pub` : URL interne du proxy git (`…/git/{raw_path}`,
+    `raw_path` pré-encodé et validé par l'appelant).
+  @VnlK8sClient::watch_sandboxes — `pub` : stream boxé `Send` de @WatchEvent de @Sandbox.
+  @list / @get / @create / @delete — fonctions privées du module, génériques sur les
+    ressources namespaced ; leur comportement est contractuel : tout le CRUD public n'est
+    que leur application aux trois CRD.
+
+Accepts:
+  @VnlK8sClient::discover : `Option<String>` de namespace override (`None` = contexte kubeconfig).
+  get/delete par CRD : un `name: &str` (nom de la ressource dans le namespace).
+  create par CRD : un `name: &str` et la Spec correspondante (@OwnerSpec, @ProjectSpec, @SandboxSpec).
+  @VnlK8sClient::set_sandbox_suspended : un `name: &str` et un booléen `suspended`.
+  @VnlK8sClient::sandbox_mcp_url / @VnlK8sClient::sandbox_ws_ticket_url : un `name: &str` de sandbox.
+  @VnlK8sClient::sandbox_git_url : un `name: &str` de sandbox et un `raw_path: &str` déjà
+    percent-encodé, sans segment `.`/`..`, validation à la charge de l'appelant.
+  @VnlK8sClient::watch_sandboxes : aucun paramètre — le namespace et le client viennent du @VnlK8sClient.
+
+Returns:
+  @VnlK8sClient::discover : un @VnlK8sClient dont le namespace vaut l'override ou le
+    `default_namespace` du contexte.
+  list_X : @Vec du CRD, vide si le namespace n'en contient aucun.
+  get_X / create_X : l'objet lu ou créé (création : réponse de l'API, pas l'objet envoyé).
+  delete_X : unité.
+  @VnlK8sClient::set_sandbox_suspended : le @Sandbox retourné par l'API après patch.
+  @VnlK8sClient::sandbox_mcp_url : `http://sandbox-{name}.{namespace}.svc:3000/mcp`.
+  @VnlK8sClient::sandbox_ws_ticket_url : `http://sandbox-{name}.{namespace}.svc:3000/ws/ticket`.
+  @VnlK8sClient::sandbox_git_url : `http://sandbox-{name}.{namespace}.svc:3000/git/{raw_path}`
+    — `raw_path` recopié tel quel, y compris vide (URL finissant par `/git/`).
+  @VnlK8sClient::watch_sandboxes : stream infini d'@WatchEvent de @Sandbox, jamais terminé par le module.
+
+Raises:
+  @VnyError::K8sConfigError (marqueur `"VNL-K8S-001"`) dans @VnlK8sClient::discover si
+    @kube::Config::infer ou @kube::Client::try_from échoue (ni cluster in-cluster, ni
+    kubeconfig joignable) — y compris quand un namespace override est fourni.
+  @VnyError::K8sApiError (marqueur `"VNL-K8S-002"`) sur tout appel API en échec :
+    list/get/create/delete des trois CRD, @VnlK8sClient::get_application, patch de
+    @VnlK8sClient::set_sandbox_suspended, et le @VnlK8sClient::get_sandbox de garde des
+    trois constructeurs d'URL (ressource absente = NotFound aplati dans ce marqueur).
+  Message d'erreur = l'affichage de l'erreur kube : aucun typage de la cause (NotFound,
+    conflit de patch, transport) — aplatissement contractuel, cf. `Tasks`.
+  @VnlK8sClient::watch_sandboxes ne lève jamais : les erreurs du flux deviennent des items
+    @WatchEvent::Error.
+  Jamais de panic dans le code de production (harnais de `/tooling.sdd`).
+
+Handles:
+  Absence de config K8s : @VnlK8sClient::discover échoue sur `"VNL-K8S-001"` — aucun mode
+    dégradé, même avec un namespace override.
+  Ressource absente en lecture/patch : erreur `"VNL-K8S-002"` dont le message porte
+    l'affichage de l'erreur kube (NotFound non typée) ; pour les URL, la vérification
+    anticipée @VnlK8sClient::get_sandbox produit cette erreur claire plutôt qu'un échec de
+    connexion confus sur l'URL formée à l'aveugle.
+  @VnlK8sClient::set_sandbox_suspended deux fois avec la même valeur : merge patch
+    idempotent, l'API répond l'objet, aucune erreur ; pas de vérification d'existence
+    préalable (asymétrie assumée avec les constructeurs d'URL — la transition stop/start
+    vient d'un objet que l'appelant vient de lister).
+  `raw_path` vide dans @VnlK8sClient::sandbox_git_url : URL terminée par `/git/` (pas de
+    normalisation, pas de rejet) ; `raw_path` contenant `%2F` : recopié verbatim, jamais
+    transformé en `%252F`.
+  Événements `Init`/`InitDone` du watcher (replay initial sans objet) : aucun item émis ;
+    le replay initial des sandboxes existantes arrive en `InitApply` donc en
+    @WatchEvent::Added, un item par objet.
+  Erreur de connexion kube en cours de watch : item @WatchEvent::Error avec le message de
+    l'erreur ; le stream n'est pas terminé par le module (`kube-runtime` se reconnecte en
+    interne, avec re-list si le bookmark est perdu) — la stratégie de reprise côté
+    appelant est en arbitrage aux `Tasks`.
+  Namespace sans aucune ressource : list_X retourne le vecteur vide — pas d'erreur.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] Le module de test de ./k8s.rs teste @encode_git_path, fonction définie dans ./lib.rs
+    et indépendante de la feature `k8s` ; comme le module est gated `#[cfg(feature =
+    "k8s")]`, ces tests ne s'exécutent que si la feature est activée dans le graphe de
+    build. Faut-il déplacer ces deux tests vers ./lib.rs (et la spec de ./lib.rs), et le
+    gating actuel est-il un accident ou voulu ?
+  [?] @VnlK8sClient::sandbox_git_url accepte `raw_path` vide (URL `/git/` avec slash
+    final) sans validation : contrat de transcription verbatim assumé tel quel, ou
+    rejet/normalisation attendue côté lib plutôt que côté `app::api::sandboxes::raw_git_tail` ?
+  [?] Erreurs kube aplatis en `String` derrière `"VNL-K8S-002"` : un appelant ne peut pas
+    distinguer NotFound d'une erreur de transport de façon programmatique (seuls les
+    constructeurs d'URL compensent par un pré-contrôle @VnlK8sClient::get_sandbox ;
+    @VnlK8sClient::set_sandbox_suspended et les CRUD ne compensent pas). Introduire une
+    variante typée (ex: NotFound) ou la chaîne suffit-elle ?
+  [?] Doc de @VnlK8sClient::watch_sandboxes : « l'appelant doit relancer la boucle
+    externe en cas d'erreur » — or le watcher se reconnecte en interne et ne termine
+    jamais le flux ; qui de la lib ou de l'appelant porte la reprise, et un item
+    @WatchEvent::Error doit-il déclencher une re-création du stream ?
+  [?] @VnlK8sClient::get_application sans list ni CRUD : asymétrie assumée (Application
+    créée par le controller/cluster-admin, lue par l'`app` pour son hôte) ? Le confirmer
+    comme contrat, ou prévoir la liste pour l'extension VS Code plus tard.
+  [?] Merge patch sans field manager ni force : compatible avec la gestion de champs du
+    controller (server-side apply) ? Risque de conflit si le controller gère
+    `spec.suspended` en SSA, à confirmer ou à couvrir par un Scenario d'intégration.
+  [?] @WatchEvent ne dérive ni @PartialEq ni sérialisation : la diffusion WS reconstruit
+    des messages ailleurs — confirmé, ou faut-il un derive de test/sérialisation côté lib ?
+  [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
+    (implementer) — les Scenarios marqués « test d'intégration cluster » tournent contre
+    un api server réel (cluster de test ou envtest), jamais contre un mock (convention
+    projet) — puis faire passer la synthèse du validator au vert.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe (les
+    Scenarios cluster au niveau indiqué).
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur `vanyline-lib`, feature `k8s` activée et désactivée.
+
+Scenario: encode_git_path_preserve_separateurs
+  Given le module de test existant de ./k8s.rs (feature `k8s` activée)
+  When @encode_git_path reçoit `"branches/feature-x"` puis `"status"`
+  Then les résultats valent exactement `"branches/feature-x"` et `"status"`
+
+Scenario: encode_git_path_encode_speciaux
+  Given le module de test existant de ./k8s.rs (feature `k8s` activée)
+  When @encode_git_path reçoit `"branches/feature x"` puis `"a%20b"`
+  Then les résultats valent exactement `"branches/feature%20x"` et `"a%2520b"`
+
+Scenario: discover_override_namespace_prime
+  Given un cluster joignable et un contexte kubeconfig de namespace par défaut `"A"`
+    (test d'intégration cluster)
+  When @VnlK8sClient::discover est appelé avec `Some("B")`
+  Then @VnlK8sClient::create_owner fait atterrir l'Owner dans le namespace `"B"`
+  And @VnlK8sClient::list_owners du même client ne voit aucune ressource du namespace `"A"`
+
+Scenario: discover_sans_override_suivant_contexte
+  Given un contexte kubeconfig dont le namespace courant est `"ctx-ns"` (test d'intégration cluster)
+  When @VnlK8sClient::discover est appelé avec `None`
+  Then @VnlK8sClient::create_owner fait atterrir l'Owner dans `"ctx-ns"`
+
+Scenario: discover_sans_config_vnl_k8s_001
+  Given aucun cluster in-cluster et aucun kubeconfig joignable (test d'intégration
+    environnement : `KUBECONFIG` vers un fichier inexistant, `HOME` sans `.kube/config`)
+  When @VnlK8sClient::discover est appelé avec `None`
+  Then le message d'erreur contient `"VNL-K8S-001"`
+
+Scenario: owner_cycle_complet
+  Given un client sur un namespace d'essai vide et un @OwnerSpec valide (test d'intégration cluster)
+  When @VnlK8sClient::create_owner `"o1"`, puis @VnlK8sClient::get_owner `"o1"`, puis
+    @VnlK8sClient::list_owners, puis @VnlK8sClient::delete_owner `"o1"`, puis
+    @VnlK8sClient::get_owner `"o1"`
+  Then la création et la lecture retournent un Owner de nom `"o1"` et de spec passée
+  And la liste compte exactement un Owner
+  And la suppression retourne l'unité sans erreur
+  And la seconde lecture échoue avec un message contenant `"VNL-K8S-002"`
+
+Scenario: project_cycle_complet
+  Given un client sur un namespace d'essai vide et un @ProjectSpec valide (test d'intégration cluster)
+  When @VnlK8sClient::create_project `"p1"`, @VnlK8sClient::get_project `"p1"`,
+    @VnlK8sClient::list_projects, @VnlK8sClient::delete_project `"p1"`
+  Then les lectures retournent le projet créé et la liste le contient
+  And après suppression @VnlK8sClient::get_project `"p1"` échoue avec un message contenant `"VNL-K8S-002"`
+
+Scenario: sandbox_cycle_complet
+  Given un client sur un namespace d'essai vide et un @SandboxSpec valide (test d'intégration cluster)
+  When @VnlK8sClient::create_sandbox `"s1"`, @VnlK8sClient::get_sandbox `"s1"`,
+    @VnlK8sClient::list_sandboxes, @VnlK8sClient::delete_sandbox `"s1"`
+  Then les lectures retournent la sandbox créée et la liste la contient
+  And après suppression @VnlK8sClient::get_sandbox `"s1"` échoue avec un message contenant `"VNL-K8S-002"`
+
+Scenario: list_isolee_par_namespace
+  Given une sandbox créée dans le namespace `"ns-a"` et un client sur `"ns-b"` (test
+    d'intégration cluster, deux namespaces distincts)
+  When @VnlK8sClient::list_sandboxes du client de `"ns-b"` s'exécute
+  Then la liste est vide et ne contient aucune ressource de `"ns-a"`
+
+Scenario: set_sandbox_suspended_retourne_objet_pache
+  Given une sandbox `"s1"` créée avec `spec.suspended` à `false` (test d'intégration cluster)
+  When @VnlK8sClient::set_sandbox_suspended `"s1"` à `true` s'exécute
+  Then l'objet retourné porte `spec.suspended` à `true`
+  And @VnlK8sClient::get_sandbox `"s1"` relue confirme `true`
+  And le second appel à `false` retourne un objet à `false`
+
+Scenario: set_sandbox_suspended_preserve_reste_spec
+  Given une sandbox `"s1"` dont la spec porte branche, projet et toolchains (test d'intégration cluster)
+  When @VnlK8sClient::set_sandbox_suspended `"s1"` à `true` s'exécute
+  Then l'objet retourné conserve inchangés la branche, le projet et les toolchains
+  And seuls `spec.suspended` et le resourceVersion ont bougé
+
+Scenario: set_sandbox_suspended_inexistante_vnl_k8s_002
+  Given un client sur un namespace d'essai sans sandbox nommée `"ghost"` (test d'intégration cluster)
+  When @VnlK8sClient::set_sandbox_suspended `"ghost"` à `true` s'exécute
+  Then le message d'erreur contient `"VNL-K8S-002"`
+  And aucune sandbox n'est créée
+
+Scenario: sandbox_mcp_url_patron_service_interne
+  Given une sandbox `"alpha"` existante dans le namespace `"ns-1"` (test d'intégration cluster)
+  When @VnlK8sClient::sandbox_mcp_url `"alpha"` s'exécute
+  Then le résultat vaut exactement `"http://sandbox-alpha.ns-1.svc:3000/mcp"`
+
+Scenario: sandbox_mcp_url_absente_erreur_avant_url
+  Given un namespace d'essai sans sandbox nommée `"ghost"` (test d'intégration cluster)
+  When @VnlK8sClient::sandbox_mcp_url `"ghost"` s'exécute
+  Then le message d'erreur contient `"VNL-K8S-002"`
+
+Scenario: sandbox_ws_ticket_url_patron_service_interne
+  Given une sandbox `"alpha"` existante dans le namespace `"ns-1"` (test d'intégration cluster)
+  When @VnlK8sClient::sandbox_ws_ticket_url `"alpha"` s'exécute
+  Then le résultat vaut exactement `"http://sandbox-alpha.ns-1.svc:3000/ws/ticket"`
+
+Scenario: sandbox_git_url_transcrit_raw_path_verbatim
+  Given une sandbox `"alpha"` existante dans le namespace `"ns-1"` (test d'intégration cluster)
+  When @VnlK8sClient::sandbox_git_url reçoit le `raw_path` `"refs/heads/feature%2Fx?name=a%20b"`
+  Then le résultat vaut exactement
+    `"http://sandbox-alpha.ns-1.svc:3000/git/refs/heads/feature%2Fx?name=a%20b"`
+  And le `%2F` n'a pas été transformé en `%252F`
+
+Scenario: sandbox_git_url_chemin_vide_termine_par_slash
+  Given une sandbox `"alpha"` existante dans le namespace `"ns-1"` (test d'intégration
+    cluster — comportement à confirmer, cf. `Tasks`)
+  When @VnlK8sClient::sandbox_git_url reçoit un `raw_path` vide
+  Then le résultat vaut exactement `"http://sandbox-alpha.ns-1.svc:3000/git/"`
+
+Scenario: watch_replay_initial_en_added
+  Given deux sandboxes existantes dans le namespace et un stream @VnlK8sClient::watch_sandboxes
+    lancé ensuite (test d'intégration cluster)
+  When les premiers items porteurs d'objet arrivent
+  Then chacun est un @WatchEvent::Added, un par sandbox existante
+  And aucun item ne correspond aux événements d'initialisation sans objet
+
+Scenario: watch_modification_en_modified
+  Given un stream @VnlK8sClient::watch_sandboxes démarré après le replay initial (test d'intégration cluster)
+  When `spec.suspended` d'une sandbox du namespace est patché via @VnlK8sClient::set_sandbox_suspended
+  Then un @WatchEvent::Modified portant la sandbox patchée arrive sur le stream
+
+Scenario: watch_suppression_en_deleted
+  Given un stream @VnlK8sClient::watch_sandboxes démarré après le replay initial (test d'intégration cluster)
+  When @VnlK8sClient::delete_sandbox supprime une sandbox suivie
+  Then un @WatchEvent::Deleted portant cet objet arrive sur le stream
+
+Scenario: watch_erreur_en_item_sans_terminer_stream
+  Given un stream @VnlK8sClient::watch_sandboxes actif et une coupure de la connexion api
+    server (test d'intégration cluster — assertion fine dépendante de l'arbitrage des
+    `Tasks`)
+  When la coupure produit une erreur interne du watcher
+  Then un @WatchEvent::Error portant le message de l'erreur est émis sur le stream
+  And le stream n'est pas terminé par la perte de connexion

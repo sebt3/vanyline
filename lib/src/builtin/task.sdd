@@ -1,0 +1,273 @@
+Spec: Task builtin
+
+Platform: Rust/vanyline-lib/rig-core ToolDyn
+
+Purpose:
+  Contrat du tool builtin `task` : outil exposé au LLM qui délègue une tâche à un agent
+  configuré comme subagent (mode `Subagent` ou `All`, jamais `Primary`). Le tool lance un
+  tour d'agent imbriqué (@run_agent_turn_at_depth à `current_depth + 1`), encapsule chaque
+  événement du tour imbriqué en @ChatEvent::SubagentEvent vers le sink parent, encadre
+  l'exécution par `SubagentStart`/`SubagentEnd`, et retourne au LLM appelant la seule
+  réponse textuelle finale du subagent. Spécifie aussi le wrapper privé
+  @SubagentEventSink : un seul contrat, il n'existe que pour le tour imbriqué de
+  @TaskTool::call.
+
+Owns:
+  ./task.rs
+
+Exposes:
+  @TaskTool — struct publique, non-singleton : construite une fois par tour dans
+    @run_agent_turn_at_depth avec la profondeur courante et l'index des subagents déjà
+    résolus. Champs (privés) : `ctx: SessionContext`, `current_depth: u8`,
+    `available_agents: Vec<Agent>`.
+  @TaskTool::new — constructeur public, sans validation : les champs sont stockés tels
+    quels (la garde de profondeur est évaluée à chaque @TaskTool::call, pas à la construction).
+  @ToolDyn pour @TaskTool — les trois méthodes du trait rig-core :
+    @TaskTool::name — valeur fixe `"task"`.
+    @TaskTool::definition — @ToolDefinition de nom `"task"`, description construite depuis
+      `available_agents` (voir `Accepts` et `Scenario`) et schéma `parameters` figé (voir
+      @TaskTool::parameter_schema) ; ignore son argument de prompt.
+    @TaskTool::call — corps décrit en `Handles` et `Raises`.
+  Items privés (non exposés hors module, contractualisés car observables via @TaskTool::call) :
+    @SubagentError — erreur interne, @Display rendu brut, sans préfixe ni code `VNL-*` ajouté.
+    @SubagentEventSink — wrapper d'@EventSink qui encapsule TOUT événement reçu en
+      @ChatEvent::SubagentEvent (avec l'id du subagent) avant de le transmettre au sink
+      parent. `SubagentStart`/`SubagentEnd` ne passent JAMAIS par ce wrapper (émis
+      directement sur le sink parent par @TaskTool::call — événements À PROPOS du
+      subagent, pas DU subagent).
+    @TaskArgs — forme désérialisée des arguments (`agent`, `prompt`).
+    @TaskTool::parameter_schema — le schéma JSON figé :
+      `{"type":"object","properties":{"agent":{"type":"string"},"prompt":{"type":"string"}},"required":["agent","prompt"]}`
+
+Accepts:
+  @ToolTool::definition — la description embarquée au LLM vaut, si `available_agents` est
+    non vide, l'en-tête `"Délègue une tâche à un subagent nommé. Subagents disponibles :"`
+    suivi, pour chaque agent dans l'ordre du Vec, d'une ligne `"- {name} : {desc}"`
+    terminée par un saut de ligne, `desc` = la description de l'agent ou la chaîne
+    littérale `"(pas de description)"` si absente ; si `available_agents` est vide,
+    exactement `"Délègue une tâche à un subagent. Aucun subagent disponible."` (aucune ligne `- `).
+  @TaskTool::call — une chaîne JSON strictement désérialisable en @TaskArgs : deux champs
+    requis `agent` (nom de l'agent cible) et `prompt` (la tâche à déléguer) ; tout autre
+    JSON (mal formé, non-object, champ manquant ou de mauvais type) est une erreur. Les
+    champs JSON supplémentaires sont ignorés silencieusement (défaut serde, cf. `Tasks`).
+
+Returns:
+  @TaskTool::call succès — `Ok` du texte final accumulé du tour imbriqué
+    (`response_text`) : les tool calls et l'usage du subagent ne remontent pas dans la
+    valeur de retour, ils sont visibles par le client uniquement via les
+    @ChatEvent::SubagentEvent enveloppés.
+  @TaskTool::definition — @ToolDefinition de nom `"task"` (voir `Exposes`).
+  @SubagentEventSink::emit — unitaire, transparent : propage au sink interne l'événement encapsulé.
+
+Raises:
+  @TaskTool::call — toutes en @ToolError::ToolCallError (boîtée), dans cet ordre d'évaluation :
+    1. args non désérialisables — le @serde_json::Error d'origine (message non reformaté) ;
+    2. profondeur atteinte (`current_depth >= ctx.subagent_depth_max`) — @SubagentError
+      `"subagent depth limit ({subagent_depth_max}) reached, cannot delegate further"` ;
+    3. @ConfigStore::get_agent en erreur — l'erreur de store d'origine propagée boîtée
+      telle quelle : agent inconnu = `VNL-CFG-003`, agents homonymes en double = `VNL-CFG-002` ;
+    4. agent résolu de mode @AgentMode::Primary — @SubagentError `"agent '{agent}' is a
+      primary agent and cannot be invoked as a subagent"` ;
+    5. échec du tour imbriqué — le @VnyError propagé boîté (après émission de
+      `SubagentEnd` avec résultat d'erreur).
+  Aucune de ces erreurs n'émet d'événement si elle survient AVANT `SubagentStart`
+    (gardes 1-4 : sink parent intact) ; la 5 survient APRÈS `SubagentStart`.
+
+Handles:
+  Ordre strict dans @TaskTool::call : désérialisation -> garde de profondeur ->
+    résolution store -> refus @AgentMode::Primary -> génération d'identifiant ->
+    `SubagentStart` -> tour imbriqué -> `SubagentEnd` (succès ou erreur) -> valeur de retour.
+  Identifiant de subagent — @uuid::Uuid::new_v4 en chaîne, unique par appel, partagé par
+    le triple `SubagentStart` / @ChatEvent::SubagentEvent enveloppés / `SubagentEnd` d'un même appel.
+  @ChatEvent::SubagentStart — champs `id`, `agent` (nom demandé), `task` (le prompt), émis sur le sink PARENT.
+  Contexte imbriqué construit par copie de @SessionContext : `store`, `local_tools`,
+    `subagent_depth_max`, `extra_mcp`, `model_override` et `todo_state` (le MÊME
+    @Arc — l'état todo est partagé, visible et mutable par le subagent comme par le
+    parent) ; seul `sink` change : @SubagentEventSink branché sur le sink parent.
+  Tour imbriqué — @run_agent_turn_at_depth avec historique TOUJOURS vide (subagent sans
+    mémoire du parent) et `workspace_context` `None` (le subagent ne reçoit pas le
+    contexte workspace du parent), profondeur `current_depth + 1`.
+  @ChatEvent::SubagentEnd — `result` = texte final du tour au succès ;
+    `result = "Error: {e}"` (`e` = le @VnyError du tour imbriqué, @Display avec son code
+    `VNL-*` inclus) à l'échec — puis l'erreur est propagée (`SubagentEnd` n'avale pas l'échec).
+  Événements internes du tour imbriqué (@ChatEvent::Token, @ReasoningDelta, @ToolCall,
+    @ToolResult, @Usage, @Done, voire @Error en cas d'erreur LLM du subagent) traversent
+    le wrapper : le client parent ne voit que des @SubagentEvent, jamais un @Done brut du
+    subagent sur son propre flux.
+
+Depends on:
+  ./session.rs — @SessionContext et @run_agent_turn_at_depth (`pub(crate)`).
+  ./event.rs — @ChatEvent (variantes `SubagentStart`/`SubagentEvent`/`SubagentEnd`) et @EventSink.
+  /cfgstore/src/domain.rs — @Agent, @AgentMode (`Primary`/`Subagent`/`All`, champ `description`).
+  /cfgstore/src/store.rs — @ConfigStore::get_agent : 0 match = `VNL-CFG-003`, plus d'un match = `VNL-CFG-002`.
+  @rig_core::tool::ToolDyn — signature du tool côté harnais.
+  @uuid::Uuid::new_v4 ; @serde_json ; @async_trait.
+
+Must:
+  N'être exposé au LLM que là où une délégation est possible : le câblage producteur
+    (@run_agent_turn_at_depth dans `session.rs`, hors de ce fichier) n'ajoute @TaskTool
+    que si `current_depth < ctx.subagent_depth_max` ET que la liste des agents invocables
+    (@available_subagents, exclusion @AgentMode::Primary) est non vide ; l'échec d'ajout
+    au handle est loggé `tracing::warn` et le tour continue sans l'outil.
+  Garder la description embarquée cohérente avec l'index passé au constructeur : une ligne
+    `"- {name} : {description}"` par agent invocable, dans l'ordre du Vec, avec
+    `"(pas de description)"` pour un agent sans description.
+  Vérifier la profondeur avec la valeur du CONSTRUCTEUR (`current_depth`) contre
+    `ctx.subagent_depth_max`, avant toute lecture du store et avant tout événement.
+  Résoudre l'agent cible via @ConfigStore::get_agent à chaque @TaskTool::call (le store
+    est la source de vérité au moment de l'appel), pas via le Vec `available_agents` figé
+    à la construction.
+  Refuser tout agent @AgentMode::Primary même présent dans la config, même absent de
+    `available_agents` (double garde : l'index ne liste pas les `Primary`, la vérification
+    en @TaskTool::call les refuse malgré tout).
+  Émettre exactement un `SubagentStart` puis exactement un `SubagentEnd` (même `id`) par
+    appel arrivé jusqu'au tour imbriqué, quelle que soit l'issue de celui-ci.
+  Envelopper TOUT événement du tour imbriqué en @ChatEvent::SubagentEvent avant
+    transmission au sink parent.
+  Partager l'état todo (`todo_state`) entre parent et subagent via le même @Arc.
+  Rester compatible harnais (`/tooling.sdd`) : aucun `unwrap`/`expect`/`panic!`/`println!`
+    hors `cfg(test)` ; le module de test porte l'exemption locale.
+
+Must not:
+  Émettre `SubagentStart`/`SubagentEnd`/`SubagentEvent` sur un appel rejeté par les gardes
+    1-4 (args invalides, profondeur atteinte, agent inconnu ou dupliqué, mode `Primary`) —
+    le sink parent doit rester intact.
+  Accepter de déléguer à un agent @AgentMode::Primary, ni contourner
+    `subagent_depth_max` (le tour imbriqué reçoit `current_depth + 1`, jamais la
+    profondeur du parent).
+  Transmettre au sink parent un événement brut du subagent non enveloppé (sauf
+    `SubagentStart`/`SubagentEnd`, émis directement et jamais via le wrapper).
+  Modifier `subagent_depth_max`, `store`, `local_tools`, `extra_mcp` ou `model_override`
+    dans le contexte imbriqué (copie à l'identique, seul `sink` change).
+  Reformater les erreurs du store (`VNL-CFG-*`) ou du tour imbriqué (@VnyError) — elles
+    remontent boîtées telles quelles dans @ToolError::ToolCallError.
+  Réutiliser un `subagent_id` d'un appel à l'autre (uuid v4 frais par appel) ni mélanger
+    sous un même `id` les événements de deux délégations.
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat, en priorité
+    sur les points `[?]` ci-dessous (reverse du 2026-09-25).
+  [?] Les deux messages de @SubagentError (« subagent depth limit … » et « agent '…' is
+    a primary agent … ») ne portent AUCUN identifiant `VNL-*`, contrairement à la règle
+    AGENTS.md « messages d'erreur avec identifiant unique » et au reste du crate
+    (`VNL-CFG-*`, `VNL-LLM-*`). Faut-il introduire des codes ou ces messages destinés au
+    LLM en sont-ils exempts ?
+  [?] Le schéma `parameters` ne déclare pas `"additionalProperties": false` et @TaskArgs
+    ignore les champs inconnus (défaut serde) : un appel avec un champ `"model"`
+    supplémentaire le voit silencieusement ignoré. Comportement voulu ou à durcir (rejet
+    des champs inconnus) ?
+  [?] @TaskTool::call résout l'agent dans le store au moment de l'appel, sans vérifier
+    qu'il figure dans `available_agents` (l'index montré au LLM). Un agent `Subagent`
+    ajouté à la config APRÈS la construction de l'outil reste invocable alors qu'absent de
+    la description ; un agent passé de `Subagent` à `Primary` entre-temps est refusé malgré
+    sa présence dans l'index. Fraîcheur du store privilégiée délibérément, ou dérive à corriger ?
+  [?] Le contexte imbriqué copie `model_override` : l'override de modèle de l'hôte (ex.
+    flag CLI `-m`) s'applique donc AUSSI au subagent, remplaçant son propre modèle résolu.
+    Effet de bord voulu ou fuite à corriger (le subagent devrait-il garder son modèle de config) ?
+  [?] Le tour imbriqué passe `workspace_context` `None` et un historique vide : le
+    subagent ne voit jamais le contexte workspace (AGENTS.md, etc.) ni la conversation du
+    parent. Contrat délibéré (« subagent sans mémoire ni contexte ») ou limitation à câbler ?
+  [?] En cas d'erreur LLM dans le tour imbriqué, le client parent voit @ChatEvent::Error
+    enveloppé PUIS `SubagentEnd` de résultat `"Error: …"` — deux signaux redondants pour
+    une même panne (et pas de `Done` dans ce cas, cf. `event.sdd`). Cette doublure est-elle
+    le contrat attendu côté frontend/@vanyline/protocol ?
+  [?] La branche `available_agents` vide de @TaskTool::definition est-elle jamais
+    atteinte en production ? Le câblage de `session.rs` n'ajoute l'outil que si la liste
+    est non vide — le placeholder « Aucun subagent disponible » ne sert qu'aux
+    constructions directes (tests). À confirmer comme défense-en-profondeur.
+  [?] La garde de profondeur de @TaskTool::call est-elle seulement atteignable en
+    production ? `session.rs` ne construit @TaskTool que si `current_depth <
+    subagent_depth_max`. Défense-en-profondeur assumée ?
+  [?] La description de l'outil est en français, les messages d'erreur de @SubagentError
+    en anglais — homogénéiser la langue des chaînes exposées au LLM ?
+  [ ] Dériver un test par Scenario encore sans test (chaque test taggé par le titre de
+    son Scenario) : `definition_agent_without_description`, `call_invalid_json_rejected`,
+    `call_depth_guard_before_resolution`, `call_duplicate_agent_rejected`,
+    `call_success_emits_start_wrapped_end`, `call_nested_turn_failure_emits_error_end`.
+    Les deux derniers exigent un fournisseur de test (mock HTTP ou bouchon de modèle) — à
+    ce jour AUCUN test du chemin de succès ni de l'échec imbriqué n'existe.
+  [ ] Ajouter les assertions de MESSAGE exact aujourd'hui absentes : les trois rejets
+    testés n'assertent que `is_err()` + sink vide — le message de profondeur, la présence
+    de `"VNL-CFG-003"` et celle de `"primary agent"` ne sont vérifiées nulle part.
+
+Done when:
+  Chaque Scenario dispose d'un test taggé par son titre et passe.
+  Les questions `[?]` sont tranchées par Sébastien.
+  La batterie complète (`cargo check/test/build`, `clippy --workspace --all-targets --
+    -D warnings`, `fmt --all --check`) est verte sur `vanyline-lib`.
+
+Scenario: name_vaut_task
+  Given un @TaskTool construit avec un @SessionContext minimal et `available_agents` vide
+  When on appelle @TaskTool::name
+  Then la valeur retournée est exactement `"task"`
+
+Scenario: definition_embarque_index_subagents
+  Given un @TaskTool dont `available_agents` contient l'agent `sub` (mode `Subagent`, description `"A subagent"`) et l'agent `all` (mode `All`, description `"An all agent"`)
+  When on appelle @TaskTool::definition
+  Then la description contient `"- sub : A subagent"` puis `"- all : An all agent"` (dans
+    cet ordre), le nom vaut `"task"` et `parameters.required` vaut `["agent", "prompt"]`
+
+Scenario: definition_index_vide_placeholder
+  Given un @TaskTool construit avec `available_agents` vide
+  When on appelle @TaskTool::definition
+  Then la description contient `"Aucun subagent disponible"` et aucune ligne `"- "`
+
+Scenario: definition_agent_sans_description
+  Given un @TaskTool dont `available_agents` contient un unique agent `bare` sans description
+  When on appelle @TaskTool::definition
+  Then la description contient la ligne `"- bare : (pas de description)"`
+
+Scenario: subagent_event_sink_enveloppe_les_evenements
+  Given un @SubagentEventSink branché sur un sink enregistreur avec un id `"sub-1"`
+  When on émet @ChatEvent::Token de contenu `"hi"` sur le wrapper
+  Then le sink enregistreur reçoit exactement un @ChatEvent::SubagentEvent d'id `"sub-1"`
+    portant le @Token `"hi"`
+
+Scenario: call_json_invalide_rejete
+  Given un @TaskTool valide (profondeur 0, `subagent_depth_max` 1)
+  When on appelle @TaskTool::call avec `"pas du json"`
+  Then le résultat est `Err(@ToolError::ToolCallError)` et le sink parent n'a reçu aucun événement
+
+Scenario: call_garde_profondeur_avant_resolution
+  Given un @TaskTool à `current_depth = 1` avec `subagent_depth_max = 1` et un store où l'agent demandé n'existe même pas
+  When on appelle @TaskTool::call avec `{"agent":"ghost","prompt":"x"}`
+  Then le message d'erreur est `"subagent depth limit (1) reached, cannot delegate
+    further"` (la profondeur est jugée AVANT la résolution de l'agent) et aucun événement n'est émis
+
+Scenario: call_profondeur_atteinte_rejete
+  Given un @TaskTool à `current_depth = 1` avec `subagent_depth_max = 1` et l'agent `sub` valide dans le store
+  When on appelle @TaskTool::call avec `{"agent":"sub","prompt":"do x"}`
+  Then le résultat est `Err` et le sink parent n'a reçu aucun événement
+
+Scenario: call_agent_inconnu_rejete
+  Given un @TaskTool à profondeur 0 dont le store ne contient que l'agent `other`
+  When on appelle @TaskTool::call avec `{"agent":"nope","prompt":"x"}`
+  Then le résultat est `Err`, son message contient `"VNL-CFG-003"`, et aucun événement n'est émis
+
+Scenario: call_agent_dupliqué_rejete
+  Given un @TaskTool à profondeur 0 dont le store contient DEUX agents homonymes `dup`
+  When on appelle @TaskTool::call avec `{"agent":"dup","prompt":"x"}`
+  Then le résultat est `Err`, son message contient `"VNL-CFG-002"`, et aucun événement n'est émis
+
+Scenario: call_mode_primary_rejete
+  Given un @TaskTool à profondeur 0 dont le store contient l'agent `main` de mode @AgentMode::Primary
+  When on appelle @TaskTool::call avec `{"agent":"main","prompt":"x"}`
+  Then le résultat est `Err`, son message contient `"primary agent"`, et aucun événement n'est émis
+
+Scenario: call_succes_emet_start_enveloppes_end
+  Given un tour complet exécutable (store résolvant agent, modèle et fournisseur vers un
+    fournisseur de test joignable), l'agent `sub` de mode `Subagent`,
+    `subagent_depth_max = 1` à profondeur 0, et le subagent répondant `"R"`
+  When on appelle @TaskTool::call avec `{"agent":"sub","prompt":"t"}` et que le tour imbriqué réussit
+  Then le sink parent reçoit dans lordre un @ChatEvent::SubagentStart (`agent: "sub"`,
+    `task: "t"`), puis les événements du tour imbriqué chacun enveloppés en @SubagentEvent
+    avec le MÊME id (dont le @Done interne), puis un @SubagentEnd de résultat `"R"`, et
+    @TaskTool::call retourne `Ok("R")`
+
+Scenario: call_tour_imbrique_en_erreur_emet_end_erreur
+  Given la même configuration que le Scenario précédent mais dont le tour imbriqué échoue
+    (erreur de résolution ou fournisseur injoignable)
+  When on appelle @TaskTool::call avec `{"agent":"sub","prompt":"t"}`
+  Then @SubagentStart a été émis, @SubagentEnd d'id égal est émis aussi avec un résultat
+    `"Error: {e}"` portant l'affichage du @VnyError, et @TaskTool::call retourne `Err`
+    (l'échec n'est pas avalé par @SubagentEnd)

@@ -1,0 +1,248 @@
+Spec: Error
+
+Platform: Rust/vanyline-lib/thiserror/cfgstore
+
+Purpose:
+  Enum d'erreurs unique de `vanyline-lib` (@VnyError) et sa conversion depuis la couche
+  config (@vanyline_cfgstore::CfgStoreError). C'est le fichier qui contractualise la
+  convention « messages d'erreur avec identifiant unique » de l'AGENTS.md : chaque variante
+  porte un marqueur stable `VNL-<DOMAINE>-<NNN>` en tête de son @Display, format commun à
+  tout le monorepo (mêmes familles `VNL-*` dans `cfgstore/src/error.rs`,
+  `tools/src/error.rs`, erreurs d'`app` rendues dans ses propres types). Le module est
+  privé dans ./lib.rs (`mod error;`) et exposé au niveau crate par `pub use error::*;` :
+  le chemin public est @vanyline_lib::VnyError. Deux variantes (@K8sConfigError,
+  @K8sApiError) sont gated par la feature cargo `k8s`, en miroir exact du gating du module
+  ./k8s.rs.
+
+Owns:
+  ./error.rs
+
+Can read:
+  ./lib.rs
+  ../Cargo.toml
+  /cfgstore/src/error.rs
+
+Depends on:
+  @thiserror (v2) — derive @thiserror::Error : implémente @std::error::Error, génère le
+    @std::fmt::Display depuis les attributs `#[error(...)]` et les @From des champs
+    `#[from]`. Un seul @Display par variante, aucune autre derive (pas de `Clone`,
+    `PartialEq`, `Serialize`, ni ts-rs) : type purement interne Rust, jamais un type de
+    transport — les codes diffusés au wire passent par @crate::event::ChatEvent::Error
+    (`code`/`message`), pas par ce type.
+  @vanyline_cfgstore::CfgStoreError — source de la conversion manuelle @From du fichier ;
+    ses marqueurs `VNL-CFG-001..010` sont définis dans /cfgstore/src/error.rs.
+  @std::io::Error et @serde_json::Error — payload des variantes @VnyError::IoError et
+    @VnyError::JsonError (champs `#[from]`).
+  Feature cargo `k8s` (../Cargo.toml) — gating des deux variantes
+    @VnyError::K8sConfigError/@VnyError::K8sApiError, désactivée par défaut.
+
+Exposes:
+  @VnyError — `pub enum` avec derives `Debug` et @thiserror::Error exactement. 20 variantes
+    au total, dont 18 sans la feature `k8s` (les 2 dernières sont
+    `#[cfg(feature = "k8s")]`). Le @Display de chaque variante commence par son marqueur
+    `VNL-*` suivi de `": "` — les rendus ci-dessous sont exacts, `{0}`/`{1}` désignant les
+    champs dans l'ordre de déclaration :
+      @VnyError::ConfigError(String) — `"VNL-CFG-001: Configuration error: {0}"`
+      @VnyError::LlmError(String) — `"VNL-LLM-001: LLM provider error: {0}"`
+      @VnyError::LlmProviderNotFound — `"VNL-LLM-002: LLM provider not found"`
+      @VnyError::UnknownProviderType(String) — `"VNL-LLM-005: Unknown provider type: {0}"`
+      @VnyError::ModelBuildError(String) — `"VNL-LLM-006: Cannot build model: {0}"`
+      @VnyError::NoProviderConfigured — `"VNL-LLM-007: No LLM provider configured"`
+      @VnyError::NoModelConfigured — `"VNL-LLM-008: No model configured"`
+      @VnyError::McpError(String) — `"VNL-MCP-001: MCP server error: {0}"`
+      @VnyError::UnknownServerType(String) — `"VNL-MCP-003: Unknown server type: {0}"`
+      @VnyError::SseNotImplemented — `"VNL-MCP-004: SSE transport not yet implemented"`
+      @VnyError::McpConnectError(String, String) —
+        `"VNL-MCP-005: Cannot connect to {0}: {1}"` (champ 0 = nom du serveur,
+        champ 1 = message de la cause)
+      @VnyError::McpToolsError(String, String) —
+        `"VNL-MCP-006: Cannot list tools from {0}: {1}"` (mêmes rôles que ci-dessus)
+      @VnyError::AgentNotFound — `"VNL-AGT-001: Agent not found"`
+      @VnyError::IoError(@std::io::Error) — `"VNL-IO-001: I/O error: {0}"` ; champ
+        `#[from]` → @From<@std::io::Error> généré, @std::error::Error::source() rend
+        l'erreur d'origine
+      @VnyError::JsonError(@serde_json::Error) — `"VNL-JSON-001: JSON error: {0}"` ; idem
+        `#[from]`, @From<@serde_json::Error> généré et @source() rendu
+      @VnyError::InternalError(String) — `"VNL-INT-001: Internal error: {0}"`
+      @VnyError::DuplicateName(&'static str, String) —
+        `"VNL-CFG-002: Duplicate name '{1}' for {0}"` (champ 0 = sorte, champ 1 = nom —
+        rendu dans l'ordre inverse des champs)
+      @VnyError::UnknownReference(&'static str, String) —
+        `"VNL-CFG-003: Unknown {0} reference: '{1}'"` (champ 0 = sorte, champ 1 = nom)
+      @VnyError::K8sConfigError(String) —
+        `"VNL-K8S-001: Cannot reach Kubernetes cluster: {0}"` ; `#[cfg(feature = "k8s")]`
+      @VnyError::K8sApiError(String) — `"VNL-K8S-002: Kubernetes API error: {0}"` ;
+        `#[cfg(feature = "k8s")]`
+  @From<@vanyline_cfgstore::CfgStoreError> pour @VnyError — implémentation manuelle,
+    totale (toutes les variantes de la source aboutissent), non panicante :
+      @CfgStoreError::Config(msg) → @VnyError::ConfigError(msg) — marqueur `VNL-CFG-001`
+        identique des deux côtés, rendu byte-identique conservé
+      @CfgStoreError::DuplicateName(kind, name) → @VnyError::DuplicateName(kind, name) —
+        @Display byte-identique à la source (mêmes gabarits)
+      @CfgStoreError::UnknownReference(kind, name) → @VnyError::UnknownReference(kind,
+        name) — @Display byte-identique à la source
+      toute autre variante (`Io`, `InvalidName`, `NotFound`, `NameConflict`, `WriteError`,
+        `ReadOnly`, `Validation`, et futures variantes non énumérées) →
+        @VnyError::ConfigError(affichage de la source) — le @Display de la source est
+        embarqué comme message : le rendu porte DEUX marqueurs (voir `Handles`)
+  Constructeurs générés par thiserror — @From<@std::io::Error> → @VnyError::IoError et
+    @From<@serde_json::Error> → @VnyError::JsonError, utilisables par l'opérateur `?` dans
+    toute fonction du crate retournant `Result<_, @VnyError>`.
+
+Accepts:
+  @From<@vanyline_cfgstore::CfgStoreError> — n'importe quelle valeur de @CfgStoreError, y
+    compris des variantes qui n'existeront que dans des versions futures du crate
+    (l'attrape-tout `other` compile sans dépendre de l'ensemble des variantes).
+  Variantes à payload — n'importe quel `String` dans les champs message/sorte/nom : aucune
+    validation, aucune troncature, les caractères du payload sont rendus tels quels.
+  @VnyError::IoError / @VnyError::JsonError — n'importe quelle @std::io::Error ou
+    @serde_json::Error, dont les erreurs avec chaîne de @source (le @Display n'affiche que
+    le niveau 0 via `{0}`, pas la chaîne complète).
+
+Returns:
+  Ce fichier ne retourne rien hors conversion : aucune fonction hors @From, qui retourne
+    toujours une valeur de @VnyError (infaillible).
+  @Display de chaque variante — exactement le gabarit de `Exposes` avec payloads injectés ;
+    c'est la seule surface observable du fichier avec le @Debug dérivé.
+  @std::error::Error::source() — `Some` pour @VnyError::IoError et @VnyError::JsonError
+    uniquement (champs `#[from]`) ; `None` pour toutes les autres variantes.
+
+Raises:
+  Aucune — le fichier ne retourne jamais d'erreur et ne panique jamais : la conversion
+    @From est un match total sans branche d'échec ; les derives thiserror ne génèrent
+    aucune panic. Les erreurs de ce type ne sont que transportées par les autres modules.
+
+Handles:
+  @CfgStoreError méconnues à la compilation (ajout amont sans release côté lib) —
+    attrape-tout `other` : pas de rupture de compilation du crate lib lors d'un upgrade de
+    `vanyline-cfgstore` ajoutant une variante ; l'erreur est dégradée en `VNL-CFG-001` avec
+    son marqueur d'origine noyé dans le message (ex: @CfgStoreError::ReadOnly →
+    `VNL-CFG-001: Configuration error: VNL-CFG-009: Config store is read-only`).
+  Feature `k8s` désactivée — @VnyError compile avec 18 variantes, les deux marqueurs
+    `VNL-K8S-*` n'existent pas dans le binaire ; tout code consommateur touchant ces
+    variantes doit être gated de la même feature.
+  Ordre des champs inversé de @VnyError::DuplicateName — le gabarit rend `{1}` (le nom)
+    avant `{0}` (la sorte) : `VNL-CFG-002: Duplicate name 'dup' for agent` ;
+    @VnyError::UnknownReference rend l'ordre naturel. Cette asymétrie de gabarit est
+    l'état verrouillé.
+  Variantes jamais construites dans le workspace à ce jour (dette tracée en `Tasks`) :
+    @VnyError::NoProviderConfigured, @VnyError::NoModelConfigured, @VnyError::McpError,
+    @VnyError::UnknownServerType, @VnyError::AgentNotFound, @VnyError::InternalError
+    n'ont aucun point de construction identifié ; @VnyError::IoError/@VnyError::JsonError
+    ne sont construits explicitement nulle part et ne sont atteignables que par `?`/@From.
+
+Must:
+  Préfixer le @Display de chaque variante par son marqueur `VNL-<DOMAINE>-<NNN>` exact,
+    suivi de `": "` — c'est la contractualisation AGENTS.md du « message d'erreur avec
+    identifiant unique » ; les marqueurs de `Exposes` sont stables et verrouillés par test
+    sur le rendu complet (pas un simple `contains`).
+  Garder les marqueurs uniques dans l'enum : deux variantes ne peuvent pas partager le
+    même code `VNL-*`.
+  Garder les gabarits de @VnyError::DuplicateName et @VnyError::UnknownReference
+    byte-identiques à ceux de /cfgstore/src/error.rs : la conversion @From est déclarée
+    préservant le rendu pour ces deux variantes (documenté dans les specs sœurs qui citent
+    `"VNL-CFG-002"`/`"VNL-CFG-003"` comme marqueurs observés).
+  Gater @VnyError::K8sConfigError et @VnyError::K8sApiError par `#[cfg(feature = "k8s")]`
+    exactement comme le module ./k8s.rs l'est dans ./lib.rs.
+  Conserver les @From générés par `#[from]` sur @VnyError::IoError et
+    @VnyError::JsonError : les fonctions `Result<_, @VnyError>` du crate s'appuient sur `?`.
+  Couvrir toutes les variantes de @CfgStoreError par la conversion manuelle, avec
+    attrape-tout non exhaustif — jamais de `match` strict qui casserait la compilation à
+    chaque variante cfgstore ajoutée.
+  N'avoir comme derives que `Debug` et @thiserror::Error : ni serde, ni ts-rs, ni
+    `PartialEq` — la diffusion des codes au wire passe par @crate::event::ChatEvent::Error.
+
+Must not:
+  Renommer, renuméroter ou réaffecter un marqueur `VNL-*` publié sans décision de spec
+    actée par Sébastien — les marqueurs sont lus dans les logs, les tests et en dur ailleurs.
+  Introduire une variante sans marqueur, sans ligne dans `Exposes`, ou dont le @Display ne
+    commence pas par son marqueur.
+  Faire de @VnyError un type de transport (serde/ts-rs) : les clients consomment
+    `code`/`message` via @crate::event::ChatEvent::Error, jamais cet enum.
+  Paniquer, logger, ou perdre de l'information non stringifiée dans la conversion
+    @From<@vanyline_cfgstore::CfgStoreError> (le fallback stringifie, il ne jette pas).
+  Chaîner la cause de @CfgStoreError via un champ `source` sur @VnyError::ConfigError —
+    l'état contractuel est la stringification dans le message (arbitrée en `Tasks`).
+
+Tasks:
+  [ ] Ajouter les tests unitaires du module (aucun test n'existe dans ./error.rs ni dans
+    le crate pour lui) : un test par Scenario, taggé par son titre.
+  [?] Le marqueur `"VNL-LLM-001"` est dupliqué en dur dans ./event.rs
+    (@stream_agent_events l'émet comme `code` de @crate::event::ChatEvent::Error) et vit
+    ici dans le @Display de @VnyError::LlmError : ./event.sdd pose déjà la question du
+    couplage. Trancher : contracter le couplage (variante ↔ code figés de part et d'autre),
+    ou l'ignorer. Documenté ici, non tranché.
+  [?] Double marqueur du fallback de conversion : une @CfgStoreError::ReadOnly rendue par
+    @From affiche `VNL-CFG-001: Configuration error: VNL-CFG-009: Config store is
+    read-only` — deux identifiants dans un même message, le premier faux. Contrat voulu
+    (dégradation assumée) ou faut-il mapper une variante @VnyError par classe cfgstore ?
+  [?] @CfgStoreError::Io (marqueur `VNL-CFG-004`) tombe dans le fallback
+    @VnyError::ConfigError alors que @VnyError::IoError existe — le routage vers
+    @VnyError::IoError est-il un oubli ou un choix ?
+  [?] Trous de numérotation : `VNL-LLM-003` et `VNL-LLM-004` sans variante, `VNL-MCP-002`
+    sans variante alors que le marqueur est émis en dur dans `app/src/api/mcp_servers.rs`,
+    hors de cet enum. Codes retirés volontairement, réservés, ou fuite de la namespace
+    `VNL-MCP-*` côté `app` ? À trancher avant d'attribuer ces codes à de futures variantes.
+  [?] Le marqueur `"VNL-CFG-001"` est porté par DEUX enums distincts (ce @VnyError::ConfigError
+    et le @CfgStoreError::Config amont) — alignement voulu par la conversion (même rendu)
+    ou collision à terme ?
+  [?] Variantes sans constructeur identifié dans le workspace : @VnyError::NoProviderConfigured,
+    @VnyError::NoModelConfigured, @VnyError::McpError, @VnyError::UnknownServerType,
+    @VnyError::AgentNotFound, @VnyError::InternalError — code mort en attente de
+    branchement, ou dette à purger ?
+  [?] @VnyError ne dérive ni `Clone` ni `PartialEq` — les tests et consommateurs comparent
+    par `matches!`/`format!` : absence voulue ou manque pratique à combler ?
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les 20 rendus exacts sont verrouillés par test, feature `k8s` activée et désactivée.
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: display_exhaustif_des_marqueurs_vnl
+  Given une instance de chaque variante de @VnyError avec des payloads fixés (par ex.
+    `"boom"`, sorte `"agent"` nom `"dup"`, serveur `"s1"` cause `"refusé"`)
+  When chacune est rendue par @Display
+  Then chaque rendu est exactement le gabarit de `Exposes` avec payloads injectés,
+    commençant par son marqueur `VNL-*` suivi de `": "`
+
+Scenario: conversion_cfgstore_preserve_rendu_sur_trois_variantes
+  Given @CfgStoreError::Config("boom"), @CfgStoreError::DuplicateName("agent", "dup") et
+    @CfgStoreError::UnknownReference("model", "qwen")
+  When chacun est converti en @VnyError par @From
+  Then on obtient @VnyError::ConfigError("boom"), @VnyError::DuplicateName("agent", "dup")
+    et @VnyError::UnknownReference("model", "qwen"), et le @Display de chacun est
+    byte-identique à celui du @CfgStoreError source
+
+Scenario: conversion_cfgstore_inconnue_degenere_en_config_error_double_marqueur
+  Given @CfgStoreError::ReadOnly (variante hors des trois mappées)
+  When elle est convertie en @VnyError par @From
+  Then le résultat est une @VnyError::ConfigError et son @Display est exactement
+    `VNL-CFG-001: Configuration error: VNL-CFG-009: Config store is read-only`
+
+Scenario: conversions_from_io_et_json_generables_par_operateur_question
+  Given une fonction retournant `Result<(), @VnyError>` exécutant une opération
+    @serde_json et une opération @std::io en échec via l'opérateur `?`
+  When les deux erreurs remontent
+  Then la première est @VnyError::JsonError chaînant l'erreur serde d'origine, la seconde
+    @VnyError::IoError chaînant l'erreur io d'origine, avec @Display préfixés
+    `"VNL-JSON-001"` et `"VNL-IO-001"`
+
+Scenario: source_std_error_absente_sauf_io_et_json
+  Given une @VnyError::LlmError("x") et une @VnyError::IoError(erreur io) vues comme
+    @std::error::Error
+  When @std::error::Error::source() est appelé sur chacune
+  Then la première rend `None` et la seconde `Some` de l'erreur io d'origine
+
+Scenario: variantes_k8s_reservees_a_la_feature
+  Given le crate compilé sans la feature cargo `k8s`
+  When `cargo check -p vanyline-lib` s'exécute (puis `--features k8s`)
+  Then sans la feature @VnyError compile avec ses 18 variantes et aucune référence
+    possible à @VnyError::K8sConfigError/@VnyError::K8sApiError ; avec la feature les
+    variantes `VNL-K8S-001`/`VNL-K8S-002` existent et s'affichent selon `Exposes`
+
+Scenario: rendu_inverse_des_champs_de_duplicate_name
+  Given @VnyError::DuplicateName("agent", "dup")
+  When elle est rendue par @Display
+  Then le nom apparaît avant la sorte : `VNL-CFG-002: Duplicate name 'dup' for agent`,
+    tandis que @VnyError::UnknownReference("model", "qwen") rend l'ordre naturel
+    `VNL-CFG-003: Unknown model reference: 'qwen'`

@@ -1,0 +1,301 @@
+Spec: Prefixed mcp
+
+Purpose:
+  Passerelle MCP du harnais LLM de `vanyline-lib`. Le module expose une fabrique de
+  handles de tools frais, enveloppe chaque outil déclaré par un serveur MCP dans un outil
+  au nom préfixé `{serveur}/{outil}` — le nom préfixé est ce que voit le LLM, le nom
+  d'origine est ce qui part sur le fil —, résout les sélections de toolsets (motifs glob
+  sur les noms d'origine, références de serveurs, outils locaux) sans jamais contacter un
+  serveur non sélectionné, et rapporte les échecs de connexion par serveur plutôt que
+  d'abattre le tour de chat.
+
+Owns:
+  ./prefixed_mcp.rs
+  ../tests/mcp_connection_lifecycle.rs
+
+References:
+  ../tests/toolbox_extra_mcp.rs
+
+Must:
+  Le nom présenté au LLM par @PrefixedMcpTool::name est `{prefix}/{nom-origine}`
+    (préfixe = `server.name` chez @connect_mcp_servers_selected) ; le nom engagé dans
+    @rmcp::model::CallToolRequestParams vers le serveur est le nom d'origine non préfixé.
+  Les métadonnées de l'outil déclaré — `description`, `inputSchema`, `title`,
+    `outputSchema`, `annotations`, `execution`, `icons`, `meta` — sont recopiées à
+    l'identique sur l'outil préfixé ; une `description` absente est rendue par la chaîne vide.
+  Les motifs glob du filtre portent sur les noms d'origine, avant préfixage. Une liste
+    de motifs vide expose tous les outils ; un motif mal formé n'expose rien (fail-safe :
+    un outil non exposé plutôt qu'une erreur qui bloquerait toute la connexion).
+  @select_local_tools conserve l'ordre de `requested` et ne déduplique pas.
+  @list_mcp_server_tools rend les noms d'origine du serveur, sans préfixe ni filtre glob,
+    dans l'ordre fourni par le serveur.
+  @connect_mcp_servers_selected n'abat jamais le tour sur un échec par serveur : log
+    `warn` + entrée @McpConnectFailure (`server`, `reason`) où `reason` porte
+    l'identifiant @VnyError (`VNL-MCP-*` : `VNL-MCP-004` pour `sse`, `VNL-MCP-005`
+    connexion, `VNL-MCP-006` listing).
+  Les @McpRunningService des serveurs connectés sont rendus à l'appelant, qui doit les
+    garder en vie jusqu'à la fin du tour et les annuler ensuite — un drop prématuré tue
+    les appels d'outils du tour en cours.
+  Les en-têtes HTTP au nom et à la valeur valides atteignent la requête vers le serveur ;
+    un nom ou une valeur invalide est écarté avec un log `warn` et la connexion continue
+    avec les en-têtes restants.
+  @tool_matches, @selected_servers et @select_local_tools sont pures : aucune I/O, aucune
+    connexion réseau — c'est ce qui rend vérifiable sans réseau que les serveurs non
+    sélectionnés ne sont jamais contactés.
+
+Must not:
+  Boucler sur la liste complète des serveurs pour établir des connexions : la seule
+    source de connexions de @connect_mcp_servers_selected est le résultat de
+    @selected_servers (invariant « les serveurs non sélectionnés ne sont jamais contactés »).
+  Interrompre le tour, une connexion ou les autres sélections pour un serveur en échec,
+    un en-tête invalide ou un motif mal formé.
+  Préfixer ou filtrer les noms rendus par @list_mcp_server_tools (destination :
+    découverte d'outils pour l'écran de configuration, pas pour le LLM).
+  Ajouter de la I/O ou un effet de bord dans @tool_matches, @selected_servers ou
+    @select_local_tools.
+
+Depends on:
+  /cfgstore/src/domain.rs — @McpServer, @McpSelection, @McpTransport (re-exportés par `crate::domain`)
+  ./error.rs — @VnyError (@VnyError::SseNotImplemented, @VnyError::McpConnectError, @VnyError::McpToolsError)
+  `rig-core` — @ToolDyn, @ToolServerHandle, @ToolDefinition, @ToolError
+  `rmcp` — client @rmcp::serve_client, @ServerSink, @RunningService, @rmcp::model::Tool
+  `globset` — @Glob
+  `tracing` — logs `warn` des chemins non bloquants
+
+Exposes:
+  @McpRunningService — alias `RunningService<RoleClient, ()>` (client sans handler,
+    vanyline ne reçoit pas de requêtes serveur→client).
+  @new_tool_handle — fabrique de handles de tools vierges, indépendants les uns des autres.
+  @PrefixedMcpTool — outil préfixé, avec @PrefixedMcpTool::new et l'impl @ToolDyn
+    (@PrefixedMcpTool::name, @PrefixedMcpTool::definition, @PrefixedMcpTool::call).
+  @McpConnectFailure — paire (`server`, `reason`) d'un serveur sélectionné en échec.
+  @connect_mcp_servers_selected — connexion filtrée des sélections + ajout au handle.
+  @list_mcp_server_tools — découverte des noms d'outils d'un serveur.
+  @select_local_tools — partage trouvés/absents des outils locaux demandés.
+  Toutes ces entrées sont réexportées à la racine du crate par `pub use` (cf. ./lib.rs).
+
+Accepts:
+  @new_tool_handle : aucun argument.
+  @PrefixedMcpTool::new : outils déclarés par le serveur, @ServerSink partagé, préfixe nu
+    (le séparateur `/` est ajouté par la fonction).
+  @connect_mcp_servers_selected : tranches de @McpSelection et de @McpServer, handle
+    @ToolServerHandle à enrichir en place.
+  @list_mcp_server_tools : une configuration @McpServer.
+  @select_local_tools : noms demandés + table `HashMap<String, V>` d'outils disponibles
+    (générique sur `V`, testable sans instancier de @ToolDyn).
+
+Returns:
+  @new_tool_handle : un @ToolServerHandle vierge, indépendant de tout autre handle.
+  @connect_mcp_servers_selected : tuple (connexions dans l'ordre des sélections réussies,
+    @McpConnectFailure des sélections en échec).
+  @PrefixedMcpTool::call : la chaîne des contenus concaténés sans séparateur.
+  @select_local_tools : (trouvés empruntés, absents clonés), deux listes vides pour une
+    demande vide.
+  La forme d'affichage d'une erreur d'appel de tool est `MCP tool call error: {message}`
+    (@McpToolCallError, type privé mais message observable par le client du handle).
+
+Raises:
+  @list_mcp_server_tools : @VnyError::SseNotImplemented (`VNL-MCP-004`),
+    @VnyError::McpConnectError (`VNL-MCP-005`), @VnyError::McpToolsError (`VNL-MCP-006`).
+  @PrefixedMcpTool::call : @ToolError::ToolCallError enrobant @McpToolCallError sur erreur
+    de transport, réponse `isError`, ou contenu non rendable (audio, variante inconnue).
+  @connect_mcp_servers_selected : aucune erreur — le `Result` de la signature n'a
+    aujourd'hui qu'un seul habitant, `Ok` (tranché en `Tasks` `[?]`).
+
+Handles:
+  Transport @McpTransport::HttpStreamable — connexion @rmcp::serve_client puis
+    `list_all_tools`, avec application des en-têtes custom.
+  Transport @McpTransport::Sse — accepté en configuration, jamais connectable ici :
+    @VnyError::SseNotImplemented systématique, remonté en failure par
+    @connect_mcp_servers_selected sans abattre le tour.
+  Réponse d'appel : `isError` `Some(true)` = échec ; `Some(false)` et `None` = succès.
+  Contenu de réponse : texte recopié tel quel ; image en data URI
+    `data:{mime};base64,{données}` ; ressource texte ou blob sous la forme
+    `data:{mime};{uri}:{contenu}` avec le préfixe `data:{mime};` omis quand le serveur ne
+    fournit pas de mime ; audio = erreur dure ; toute autre variante = erreur dure
+    incluant le rendu `Debug` du contenu.
+  Arguments d'appel : objet JSON valide → transmis comme arguments de l'appel ; `null` ou
+    JSON malformé → appel sans arguments, silencieusement (tranché en `Tasks` `[?]`).
+  Filtre qui ne matche aucun outil : le serveur est quand même connecté (service rendu à
+    l'appelant, aucun outil ajouté au handle).
+  @ToolServerHandle::add_tool en échec (ex. collision de nom avec un outil déjà
+    enregistré) : simple log `warn`, l'outil est perdu sans entrée dans les failures.
+  Liste de sélections vide, serveur référencé absent de la table, motifs vides ou mal
+    formés : résultats vides ou fail-safe, sans erreur.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
+    accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
+  [ ] Convertir en tests taggés par leur titre les Scenarios sans couverture actuelle :
+    `prefixed_tool_nom_prefixe_definition_origine`, `is_error_textes_joints`,
+    contenus, `serveur_sse_echec_vnl_mcp_004`, `serveur_injoignable`, `en_tete_invalide`,
+    `filtre_glob_sur_noms_origine`, `serveur_non_selectionne_jamais_contacte`,
+    `filtre_sans_correspondance`, `list_mcp_server_tools` (les deux).
+    Couverture existante : @tool_matches / @selected_servers / @select_local_tools (10
+    tests de `mod tests` dans ./prefixed_mcp.rs), « deux appels séquentiels »
+    (`test_mcp_tool_survives_multiple_calls_in_same_connection`), en-têtes valides
+    (`test_mcp_custom_headers_reach_server`, qui ne couvre pas la branche invalide).
+  [?] Des arguments JSON malformés dégradés silencieusement en appel sans arguments
+    (repli `unwrap_or_default`) — contrat assumé ou erreur à remonter ?
+  [?] `isError` `true` avec contenu VIDE rend un message d'erreur vide, le repli `MCP
+    tool error (no message)` n'arrivant que sur contenu non-texte. De plus un contenu
+    mixte texte+image perd les textes au profit du repli. À trancher.
+  [?] Garder le `Result` de @connect_mcp_servers_selected dont la branche `Err` n'est
+    jamais produite, ou alléger la signature.
+  [?] @selected_servers ne déduplique pas deux sélections du même serveur (double
+    connexion, puis second lot d'ajouts perdu en collision de noms) — la déduplication
+    est aujourd'hui la responsabilité de l'appelant (`session.rs`) ; est-ce la bonne frontière ?
+  [?] Sûreté du préfixage : l'unicité des `name` de serveurs n'est vérifiée qu'en lecture
+    (@CfgStoreError::DuplicateName côté cfgstore) et aucun assainissement de caractère
+    n'est fait (un `name` contenant `/`, ou préfixe d'un autre nom) : garantie à ajouter
+    ici, en amont (cfgstore), ou contrat documentaire ?
+  [?] Un `add_tool` en échec (collision avec un outil local déjà enregistré sous un nom
+    en forme de nom préfixé) est perdu silencieusement (warn seul) : remonter
+    l'information à l'appelant ou au client ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre.
+  Les décisions `[?]` sont tranchées par Sébastien et reflétées dans la spec.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur `vanyline-lib`.
+
+Scenario: tool_matches_liste_vide_expose_tous
+  Given une liste de motifs vide
+  When le nom `anything` est testé par @tool_matches
+  Then il matche
+
+Scenario: tool_matches_motifs_combines_en_ou
+  Given la liste de motifs `["read_file", "write_*"]`
+  When les noms `read_file`, `write_doc` et `delete_file` sont testés par @tool_matches
+  Then `read_file` matche sur le motif exact
+  And `write_doc` matche sur le joker
+  But `delete_file` ne matche pas
+
+Scenario: tool_matches_motif_malforme_fail_safe
+  Given une liste de motifs ne contenant que `[`
+  When le nom `x` est testé par @tool_matches
+  Then il ne matche pas, sans erreur levée
+
+Scenario: selected_servers_une_paire_par_selection
+  Given les serveurs `a`, `b`, `c` et une sélection unique référençant `b`
+  When @selected_servers résout les sélections
+  Then le résultat est exactement la paire (sélection `b`, serveur `b`)
+  And les serveurs `a` et `c` n'y figurent pas
+
+Scenario: selected_servers_reference_sans_serveur_omit
+  Given le seul serveur `a` et une sélection référençant `z`
+  When @selected_servers résout les sélections
+  Then le résultat est vide, sans erreur
+
+Scenario: select_local_tools_trouves_absents_dans_ordre
+  Given les outils disponibles `read_file` et `write_file`
+  When la demande `["read_file", "delete_file"]` est résolue par @select_local_tools
+  Then les trouvés contiennent exactement `read_file`
+  And les absents contiennent exactement `delete_file`
+  And une demande vide rend deux listes vides
+
+Scenario: prefixed_tool_nom_prefixe_definition_origine
+  Given un outil déclaré `echo`, de description `Echo`, de schéma d'entrée avec une propriété `text` et de titre `Echo tool`
+  And le préfixe `srv`
+  When @PrefixedMcpTool::new construit l'outil préfixé
+  Then @PrefixedMcpTool::name rend `srv/echo`
+  And @PrefixedMcpTool::definition porte le nom `srv/echo`, la description `Echo` et des
+    `parameters` égaux au schéma d'entrée recopié
+  And `title`, `outputSchema`, `annotations`, `execution`, `icons` et `meta` sont recopiés à l'identique
+
+Scenario: deux_appels_sequentiels_nom_origine_sur_le_fil
+  Given un serveur MCP local réel exposant l'outil `echo` (recette ../tests/mcp_connection_lifecycle.rs)
+    et un handle peuplé par @connect_mcp_servers_selected avec une sélection « tous outils », services rendus gardés en vie
+  When l'outil `test-mcp/echo` est appelé deux fois de suite avec `{"text":"salut"}` puis `{"text":"au revoir"}`
+  Then le premier appel rend `salut`
+  And le second appel rend `au revoir`, sans hang ni erreur
+  And le succès des deux appels prouve le portage du nom préfixé vers le nom d'origine sur le fil
+
+Scenario: is_error_textes_joints_tool_call_error
+  Given un outil serveur rendant `isError` `true` avec les contenus texte `e1` et `e2`
+  When l'outil est appelé via le handle
+  Then l'appel échoue en @ToolError::ToolCallError
+  And le message porte `e1` puis `e2` joints par un saut de ligne
+  And l'affichage commence par `MCP tool call error: `
+
+Scenario: is_error_sans_texte_message_repli
+  Given un outil serveur rendant `isError` `true` avec pour seul contenu une image
+  When l'outil est appelé via le handle
+  Then le message d'erreur est exactement `MCP tool error (no message)`
+
+Scenario: contenus_image_ressource_rendus_inline
+  Given un outil serveur réussissant avec une image `image/png` de données `QUJD` suivie
+    d'une ressource texte `file:///r` de mime `text/plain` contenant `bonjour`
+  When l'outil est appelé via le handle
+  Then la chaîne rendue concatène sans séparateur `data:image/png;base64,QUJD` puis
+    `data:text/plain;file:///r:bonjour`
+
+Scenario: contenu_audio_echec_dur
+  Given un outil serveur rendant un contenu audio
+  When l'outil est appelé via le handle
+  Then l'appel échoue et le message contient `audio content (not supported)`
+
+Scenario: serveur_sse_echec_vnl_mcp_004
+  Given une sélection référençant un serveur configuré en @McpTransport::Sse
+  When @connect_mcp_servers_selected est appelée
+  Then le résultat est `Ok` et la liste de connexions est vide
+  And les failures comptent une entrée dont `server` est le nom du serveur et dont
+    `reason` commence par `VNL-MCP-004`
+  And aucun outil n'a été ajouté au handle
+
+Scenario: serveur_injoignable_impacte_sa_seule_selection
+  Given une sélection vers `http://127.0.0.1:1` puis une sélection vers un serveur echo
+    local, dans cet ordre
+  When @connect_mcp_servers_selected est appelée
+  Then les failures comptent une entrée dont `reason` commence par `VNL-MCP-005` et nomme
+    le serveur injoignable
+  And la liste de connexions compte exactement un élément
+  And l'outil echo est appelable via le handle sous son nom préfixé
+
+Scenario: en_tetes_valides_atteignent_la_requete
+  Given un serveur MCP local capturant ses en-têtes et un @McpServer configuré avec
+    l'en-tête `x-test-auth` de valeur `hello-from-client`
+  When @connect_mcp_servers_selected connecte ce serveur
+  Then la requête reçue porte `x-test-auth: hello-from-client`
+  And aucune failure n'est rapportée
+
+Scenario: en_tete_invalide_ecarte_sans_avorter
+  Given un serveur MCP local et un @McpServer configuré avec un en-tête valide et un
+    en-tête dont la valeur contient un caractère de contrôle illégal
+  When @connect_mcp_servers_selected connecte ce serveur
+  Then la connexion réussit et l'en-tête valide atteint la requête
+  And l'en-tête invalide n'est pas envoyé et la connexion n'échoue pas
+
+Scenario: filtre_glob_sur_noms_origine
+  Given un serveur exposant les outils `read_a` et `write_b` et une sélection de motifs `["read_*"]`, préfixe `srv`
+  When @connect_mcp_servers_selected est appelée
+  Then le handle expose `srv/read_a`
+  But le handle n'expose ni `write_b` ni `srv/write_b`
+
+Scenario: serveur_non_selectionne_jamais_contacte
+  Given deux serveurs MCP locaux réels à drapeau de contact et une sélection ne référençant que le premier
+  When @connect_mcp_servers_selected est appelée
+  Then le drapeau du premier serveur est passé à vrai
+  And le drapeau du second serveur reste faux
+
+Scenario: filtre_sans_correspondance_connecte_sans_tool
+  Given un serveur exposant `echo` et une sélection de motifs `["zzz*"]`
+  When @connect_mcp_servers_selected est appelée
+  Then le handle n'expose aucun outil préfixé
+  And la liste de connexions compte exactement un élément
+
+Scenario: list_mcp_server_tools_noms_origine_sans_filtre
+  Given un serveur MCP local exposant l'outil `echo`
+  When @list_mcp_server_tools est appelée sur sa configuration
+  Then le résultat est exactement `["echo"]`
+
+Scenario: list_mcp_server_tools_sse_leve_vnl_mcp_004
+  Given un serveur configuré en @McpTransport::Sse
+  When @list_mcp_server_tools est appelée sur sa configuration
+  Then l'erreur est @VnyError::SseNotImplemented et son affichage commence par `VNL-MCP-004`
+
+Example: rendu des contenus d'un appel réussi
+  texte `bonjour` → `bonjour`
+  image mime `image/png` données `QUJD` → `data:image/png;base64,QUJD`
+  ressource texte mime `application/json` uri `file:///x` → `data:application/json;file:///x:{contenu}`
+  ressource texte sans mime uri `file:///x` → `file:///x:{contenu}`

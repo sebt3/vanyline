@@ -1,0 +1,228 @@
+Spec: Skill builtin
+
+Platform: Rust/vanyline-lib/rig-core ToolDyn
+
+Purpose:
+  Contrat du tool builtin `skill` : outil exposé au LLM qui charge le corps complet d'un
+  SKILL.md par son nom via @ConfigStore::load_skill, après l'avoir validé contre l'index
+  des skills disponibles pour CET agent, et qui signale chaque chargement réussi par
+  @ChatEvent::SkillLoaded vers le sink de la session. Non-singleton : construit une fois
+  par tour dans @run_agent_turn (sa description embarque l'index @SkillMeta résolu en
+  amont par @resolve_skill_index / @resolve_turn_context dans `session.rs`).
+
+Owns:
+  ./skill.rs
+
+Can read:
+  ./session.rs
+  ../event.sdd
+  ./task.sdd
+
+Exposes:
+  @SkillTool — struct publique, non-singleton : construite une fois par tour avec
+    l'index des skills résolus pour l'agent. Champs (privés) : `store` (@Arc de
+    @ConfigStore), `sink` (@Arc de @EventSink), `available` (`Vec<SkillMeta>`).
+  @SkillTool::new — constructeur public, sans validation : les trois arguments sont
+    stockés tels quels (aucun tri, aucune déduplication, aucune consultation du store à
+    la construction).
+  @ToolDyn pour @SkillTool — les trois méthodes du trait rig-core :
+    @SkillTool::name — valeur fixe `"skill"`.
+    @SkillTool::definition — @ToolDefinition de nom `"skill"`, description construite
+      depuis `available` (voir `Accepts`) et schéma `parameters` figé (voir
+      @parameter_schema) ; ignore son argument de prompt.
+    @SkillTool::call — corps décrit en `Handles` et `Raises`.
+  Items privés (non exposés hors module, contractualisés car observables) :
+    @SkillArgs — forme désérialisée des arguments (unique champ requis `name: String`) ;
+      tout champ JSON supplémentaire est ignoré silencieusement (défaut serde, cf. `Tasks`).
+    @parameter_schema — le schéma JSON figé :
+      `{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}`
+
+Accepts:
+  @SkillTool::definition — la description embarquée au LLM vaut, si `available` est non
+    vide, l'en-tête `"Charge le corps complet d'un skill par son nom. Skills
+    disponibles :"` suivi d'un saut de ligne, puis pour chaque @SkillMeta dans l'ordre du
+    Vec d'une ligne `"- {name} : {description}"` terminée par un saut de ligne ; si
+    `available` est vide, exactement `"Charge le corps complet d'un skill par son nom.
+    Aucun skill disponible."` (aucune ligne `"- "`).
+  @SkillTool::call — une chaîne JSON strictement désérialisable en @SkillArgs : un champ
+    requis `name` (le nom du skill à charger) ; tout autre JSON (mal formé, non-object,
+    champ `name` manquant ou de mauvais type) est une erreur. Le nom est comparé par
+    égalité exacte de chaîne (sensible à la casse, ni trim ni normalisation).
+
+Returns:
+  @SkillTool::call succès — `Ok` de la valeur brute de @ConfigStore::load_skill (le corps
+    du SKILL.md tel que le store le rend — pour le store fs, corps après retrait du
+    frontmatter et trim, mais ce rendu est le contrat du store, pas de ce fichier).
+  @SkillTool::definition — @ToolDefinition de nom `"skill"` (voir `Exposes`).
+
+Raises:
+  @SkillTool::call — toutes en @ToolError::ToolCallError (boîtée), dans cet ordre
+    d'évaluation :
+    1. args non désérialisables — le @serde_json::Error d'origine (message non reformaté) ;
+    2. `name` absent de `available` (égalité exacte sur @SkillMeta::name) —
+      @VnyError::UnknownReference, affichage `"VNL-CFG-003: Unknown skill reference:
+      '{name}'"` ;
+    3. @ConfigStore::load_skill en erreur — la @CfgStoreError d'origine propagée boîtée
+      telle quelle, SANS conversion en @VnyError : skill connu de l'index mais absent du
+      store = `VNL-CFG-003` côté store, I/O de lecture = `VNL-CFG-004`, etc.
+  Aucune de ces erreurs n'émet d'événement : @ChatEvent::SkillLoaded n'est émis qu'APRÈS
+    le succès de @ConfigStore::load_skill, il n'existe aucun chemin d'erreur post-émission.
+
+Handles:
+  Ordre strict dans @SkillTool::call : désérialisation -> garde d'appartenance à
+    `available` -> @ConfigStore::load_skill -> émission de @ChatEvent::SkillLoaded ->
+    `Ok(corps)`.
+  Garde d'appartenance jugée contre le Vec `available` figé à la construction, JAMAIS
+    contre @ConfigStore::list_skills au moment de l'appel : un skill présent dans le
+    store mais absent de l'index est rejeté en garde 2, corps existant ou non.
+  @ChatEvent::SkillLoaded — un seul événement par appel arrivé au succès, champ `name` =
+    le nom demandé ; émis sur le sink passé au constructeur (le sink de la session),
+    attendu avant le retour. Aucune déduplication : N appels réussis sur le même skill =
+    N événements @ChatEvent::SkillLoaded.
+  Le corps retourné n'est jamais transformé par ce fichier (pas de trim, pas de préfixe,
+    pas d'enveloppe) : transparence totale entre @ConfigStore::load_skill et la valeur de
+    retour du tool.
+
+Depends on:
+  /cfgstore/src/domain.rs (re-exporté `crate::domain`) — @SkillMeta (`name`, `description`).
+  /cfgstore/src/store.rs (re-exporté `crate::store`) — @ConfigStore::load_skill ;
+    @InMemoryConfigStore sert aux tests.
+  /cfgstore/src/error.rs — @CfgStoreError, boîtée telle quelle dans @ToolError::ToolCallError sur le chemin 3.
+  ../error.rs — @VnyError::UnknownReference, chemin 2 de @SkillTool::call.
+  ../event.rs — @ChatEvent::SkillLoaded et @EventSink.
+  @rig_core::tool::ToolDyn — signature du tool côté harnais.
+  @serde_json ; @std::sync::Arc.
+
+Must:
+  N'être exposé au LLM que lorsqu'un index de skills existe : le câblage producteur
+    (@run_agent_turn dans ./session.rs, hors de ce fichier) ne construit @SkillTool et ne
+    l'ajoute au handle que si l'index de skills résolu est non vide ; l'échec d'ajout au
+    handle est loggé `tracing::warn` et le tour continue sans l'outil.
+  Garder la description embarquée cohérente avec l'index passé au constructeur : une ligne
+    `"- {name} : {description}"` par skill, dans l'ordre du Vec, en-tête français inclus.
+  Rejeter tout `name` absent de `available` AVANT toute lecture du store (le corps d'un
+    skill hors sélection ne doit jamais être chargé ni retourné).
+  Émettre @ChatEvent::SkillLoaded si et seulement si l'appel réussit (après
+    @ConfigStore::load_skill, avant le `Ok`) : le client ne voit un skill « chargé » que
+    si son corps a effectivement été retourné au LLM.
+  Remonter les erreurs du store boîtées telles quelles (messages `VNL-CFG-*` intacts).
+  Rester compatible harnais (`/tooling.sdd`) : aucun `unwrap`/`expect`/`panic!`/
+    `println!` hors `cfg(test)` ; le module de test porte l'exemption locale.
+
+Must not:
+  Émettre @ChatEvent::SkillLoaded sur un appel rejeté (args invalides, skill hors index,
+    store en erreur) — le sink doit rester intact.
+  Retourner `Ok` pour un skill absent de `available`, même si @ConfigStore::load_skill le
+    servirait (la garde d'index prime sur la disponibilité du store).
+  Consulter le store pour la garde d'appartenance — seule la liste figée à la
+    construction fait autorité pour le garde 2.
+  Reformater ou préfixer les erreurs (@serde_json::Error, @VnyError, @CfgStoreError) —
+    elles remontent boîtées telles quelles dans @ToolError::ToolCallError.
+  Transformer le corps retourné (trim, troncature, enveloppe JSON) — transparence store oblige.
+  Faire de @SkillTool un singleton ou réutiliser un index d'un tour à l'autre (l'index
+    dépend de la @SkillSelection résolue pour le tour courant).
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat, en priorité sur
+    les points `[?]` ci-dessous (reverse du 2026-09-25).
+  [?] Asymétrie de type d'erreur entre les deux rejets « skill inconnu » : la garde
+    d'index boîte une @VnyError::UnknownReference, alors que @ConfigStore::load_skill en
+    erreur boîte une @CfgStoreError sans conversion. Les deux rendus portent
+    `VNL-CFG-003: Unknown skill reference: '{name}'` pour le même échec logique. Faut-il
+    unifier (conversion systématique en @VnyError) ou l'asymétrie est-elle assumée ?
+  [?] L'index `available` est figé à la construction alors que le store est lu au moment
+    de l'appel : un skill ajouté au store APRÈS construction reste rejeté par la garde 2,
+    un skill retiré du store entre-temps passe la garde puis échoue en garde 3. Fraîcheur
+    du store sous garde d'index figée : contrat délibéré (cohérent avec la description
+    montrée au LLM) ou dérive à corriger ?
+  [?] Le schéma `parameters` ne déclare pas `"additionalProperties": false` et @SkillArgs
+    ignore les champs inconnus (défaut serde). Voulu ou à durcir (rejet des champs inconnus) ?
+  [?] Une description vide dans @SkillMeta produit la ligne `"- pdf : "` (rendu brut), là
+    où `task.sdd` injecte littéralement `"(pas de description)"`. Aligner (placeholder) ou
+    contracter le rendu brut ?
+  [?] La branche `available` vide de @SkillTool::definition (« Aucun skill disponible »)
+    est-elle jamais atteinte en production ? Le câblage de ./session.rs n'ajoute l'outil
+    que si l'index est non vide — le placeholder ne sert qu'aux constructions directes
+    (tests). À confirmer comme défense-en-profondeur.
+  [?] Des @SkillMeta dupliqués dans `available` (même `name`) produiraient des lignes
+    dupliquées dans la description et un succès unique côté garde. L'absence de doublons
+    est-elle garantie en amont (@resolve_skill_index / catalogue du store) au point de ne
+    rien protéger ici ?
+  [?] @ChatEvent::SkillLoaded est émis à CHAQUE appel réussi, sans déduplication : deux
+    chargements du même skill dans un même tour = deux événements. Signal « occurrence de
+    chargement » voulu par le frontend, ou bruit à dédupliquer ?
+  [ ] Dériver un test par Scenario encore sans test (chaque test taggé par le titre de
+    son Scenario) : `call_store_en_erreur_rejete_sans_emit`,
+    `call_champ_name_manquant_rejete`, `definition_skill_sans_description`,
+    `call_repetition_emet_skill_loaded_a_chaque_appel`.
+  [ ] Ajouter les assertions de MESSAGE aujourd'hui absentes : les trois rejets testés
+    n'assertent que `is_err()` + sink vide — la présence de `"VNL-CFG-003"` (garde
+    d'index) et le message du @serde_json::Error (args invalides) ne sont vérifiés nulle part.
+
+Done when:
+  Chaque Scenario dispose d'un test taggé par son titre et passe.
+  Les questions `[?]` sont tranchées par Sébastien.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur `vanyline-lib`.
+
+Scenario: name_vaut_skill
+  Given un @SkillTool construit avec un store vide, un sink enregistreur et `available` vide
+  When on appelle @SkillTool::name
+  Then la valeur retournée est exactement `"skill"`
+
+Scenario: definition_embarque_index_skills
+  Given un @SkillTool dont `available` contient @SkillMeta `pdf` (description `"PDF
+    processing"`) puis `web` (description `"Web search"`)
+  When on appelle @SkillTool::definition
+  Then la description contient `"- pdf : PDF processing"` puis `"- web : Web search"`
+    (dans cet ordre), le nom vaut `"skill"`, et `parameters` décrit `name` de type
+    `"string"` avec `required` = `["name"]`
+
+Scenario: definition_index_vide_placeholder
+  Given un @SkillTool construit avec `available` vide
+  When on appelle @SkillTool::definition
+  Then la description contient `"Aucun skill disponible"` et aucune ligne `"- "`
+
+Scenario: definition_skill_sans_description
+  Given un @SkillTool dont `available` contient l'unique @SkillMeta `pdf` de description chaîne vide
+  When on appelle @SkillTool::definition
+  Then la description contient la ligne `"- pdf : "` suivie d'un saut de ligne (rendu
+    brut, sans placeholder injecté)
+
+Scenario: call_succes_retourne_corps_et_emet_skill_loaded
+  Given un @SkillTool dont `available` contient `pdf` et dont le store sert pour `pdf` le
+    corps `"# PDF skill\ncontent"`
+  When on appelle @SkillTool::call avec `{"name":"pdf"}`
+  Then le résultat est `Ok` du corps stocké à l'identique (aucune transformation) et le
+    sink a reçu exactement un @ChatEvent::SkillLoaded de `name` `"pdf"`
+
+Scenario: call_skill_absent_de_l_index_rejete_sans_emit
+  Given un @SkillTool dont `available` est VIDE alors que le store contient bien le corps du skill `pdf`
+  When on appelle @SkillTool::call avec `{"name":"pdf"}`
+  Then le résultat est `Err(@ToolError::ToolCallError)` dont le message contient
+    `"VNL-CFG-003"`, et le sink n'a reçu aucun événement (le corps du store n'est jamais lu)
+
+Scenario: call_json_invalide_rejete_sans_emit
+  Given un @SkillTool quelconque (store et sink vides, `available` vide)
+  When on appelle @SkillTool::call avec `"not json"`
+  Then le résultat est `Err(@ToolError::ToolCallError)` et le sink n'a reçu aucun événement
+
+Scenario: call_champ_name_manquant_rejete
+  Given un @SkillTool quelconque (store et sink vides, `available` vide)
+  When on appelle @SkillTool::call avec un JSON valide `{"n":"pdf"}` (`name` absent)
+  Then le résultat est `Err(@ToolError::ToolCallError)` (erreur serde « missing field »)
+    et le sink n'a reçu aucun événement
+
+Scenario: call_store_en_erreur_rejete_sans_emit
+  Given un @SkillTool dont `available` contient `pdf` mais dont le store ne contient
+    AUCUN corps pour `pdf` (@ConfigStore::load_skill rend `VNL-CFG-003`)
+  When on appelle @SkillTool::call avec `{"name":"pdf"}`
+  Then le résultat est `Err(@ToolError::ToolCallError)` dont le message contient
+    `"VNL-CFG-003"`, et le sink n'a reçu aucun événement (@ChatEvent::SkillLoaded n'est
+    jamais émis sans corps effectivement chargé)
+
+Scenario: call_repetition_emet_skill_loaded_a_chaque_appel
+  Given un @SkillTool dont `available` contient `pdf` et dont le store sert son corps
+  When on appelle deux fois de suite @SkillTool::call avec `{"name":"pdf"}`
+  Then les deux appels retournent `Ok` avec le même corps et le sink a reçu exactement
+    DEUX @ChatEvent::SkillLoaded `"pdf"` dans l'ordre (aucune déduplication)

@@ -1,0 +1,341 @@
+Spec: Event
+
+Platform: Rust/vanyline-lib/rig-core/serde/ts-rs
+
+Purpose:
+  Modèle unique d'événements de session (@ChatEvent) partagé par les consommateurs du
+  harnais — stdout REPL du CLI, WebSocket de l'`app`, notifications JSON-RPC — et pipeline
+  de stream d'un tour d'agent : traduction des items de stream `rig-core` en événements
+  (@StreamAccumulator), diffusion générique par sink (@EventSink), et stream complet d'un
+  tour (@stream_agent_events). Le fichier est aussi la source de
+  `packages/protocol/src/generated/chat-event.ts` (ts-rs, feature `ts-rs`).
+
+Owns:
+  ./event.rs
+
+Can modify:
+  /packages/protocol/src/generated/chat-event.ts
+
+Can read:
+  ./error.rs
+  ./types.rs
+  ./session.rs
+  ./builtin/task.rs
+  ../Cargo.toml
+  /.cargo/config.toml
+  /docs/architecture.md
+
+Depends on:
+  @rig_core — @MultiTurnStreamItem, @StreamedAssistantContent, @StreamedUserContent,
+    @ReasoningContent, @ToolResultContent, @Agent::stream_chat, @CompletionModel,
+    @GetTokenUsage. Les types de stream sont `#[non_exhaustive]` côté rig : le fichier
+    s'appuie sur des bras génériques pour les variantes futures (voir `Handles`).
+  @crate::error::VnyError — variante @LlmError uniquement, sur erreur de stream.
+  @serde et @serde_json — sérialisation de @ChatEvent et @ToolCallRecord, champs
+    @serde_json::Value (`args`, `arguments`).
+  @async_trait — méthode @EventSink::emit.
+  @futures::StreamExt — consommation du stream dans @stream_agent_events.
+  @ts_rs — optionnel, feature `ts-rs` seule : derive @TS sur @ChatEvent et
+    @ToolCallRecord ; le mapping `u64` -> `number` vient de
+    `TS_RS_LARGE_INT = "number"` (`.cargo/config.toml`, lu par @ts_rs::Config::from_env).
+
+Exposes:
+  @ChatEvent — enum `#[serde(tag = "type", rename_all = "snake_case")]`, derives
+    `Debug Clone PartialEq Serialize Deserialize`, plus @ts_rs::TS sous feature `ts-rs`.
+    Exactement 12 variantes, tag et champs snake_case :
+      @Token — tag `token`, champ `content`. Delta de texte de réponse finale.
+      @ReasoningDelta — tag `reasoning_delta`, champ `content`. Delta de
+        raisonnement (thinking), canal séparé de `token` pour un rendu distinct ;
+        accumulé côté client comme un `token`.
+      @ToolCall — tag `tool_call`, champs `id`, `name`,
+        `args: @serde_json::Value` (type ts-rs `any` sous feature `ts-rs`).
+      @ToolResult — tag `tool_result`, champs `id`, `name`, `result`,
+        `is_error: bool`. Via le chemin stream de CE fichier, `is_error` est
+        toujours `false` (rig-core 0.38 convertit les erreurs de tool call en texte
+        avant @StreamedUserContent::ToolResult — limite connue, arbitrage en `Tasks`).
+      @SkillLoaded — tag `skill_loaded`, champ `name`. Produit hors de ce fichier.
+      @SubagentStart — tag `subagent_start`, champs `id`, `agent`, `task`. Produit
+        hors de ce fichier (`builtin/task.rs`).
+      @SubagentEvent — tag `subagent_event`, champs `id`,
+        `event: Box<ChatEvent>` — tout événement imbriqué, y compris `error`
+        et `done`, nesting récursif autorisé ; ts-rs le mappe sur le type @ChatEvent
+        lui-même. Produit hors de ce fichier (`builtin/task.rs`).
+      @SubagentEnd — tag `subagent_end`, champs `id`, `result`. Produit hors de ce
+        fichier (`builtin/task.rs`).
+      @Usage — tag `usage`, champs `input_tokens: u64`,
+        `output_tokens: u64`. Sous `ts-rs`, les `u64` deviennent `number`.
+      @Done — tag `done`, sans champ ; se sérialise exactement `{"type":"done"}`.
+      @Error — tag `error`, champs `code`, `message`. Terminale pour les
+        consommateurs : @stream_agent_events garantit n'émettre AUCUN `done` après elle.
+      @ToolUnavailable — tag `tool_unavailable`, champs `server`,
+        `reason`. NON terminale : le tour continue sans les tools du serveur MCP
+        concerné. Produit hors de ce fichier (`session.rs`, `app`).
+  @EventSink — trait @async_trait exigeant `Send + Sync` ; une méthode
+    @EventSink::emit (événement par valeur, aucune valeur de retour) : un sink est
+    infaillible à cette interface, la politique de perte est propre à chaque implémentation.
+  @ToolCallRecord — `pub struct` aux champs `id`, `name`,
+    `arguments: @serde_json::Value`, `result: Option<String>` ; derives
+    `Debug Clone PartialEq Serialize Deserialize`, plus @TS sous feature `ts-rs` ;
+    `arguments` est typé `any` en TS ; `result` absent (`None`) se mappe `null`.
+    Volontairement distinct de @crate::types::ToolCall (qui n'a pas de `id`).
+  @ChatTurnResult — `pub struct` aux champs `response_text: String`,
+    `tool_calls: Vec<ToolCallRecord>`. Pas de derive serde ni ts-rs : type
+    purement interne Rust.
+  @StreamAccumulator — `pub struct` avec `Default` ; champs publics :
+    @StreamAccumulator::response_text (texte assistant concaténé, deltas `Text`
+    uniquement) et @StreamAccumulator::tool_calls (tool calls collectés, dans l'ordre
+    d'arrivée). Champ privé `pending_names` : corrélation `internal_call_id` -> nom du
+    tool, consommée à chaque résultat (une entrée par résultat).
+      @StreamAccumulator::new — accumulateur vide, identique à `Default::default()`.
+      @StreamAccumulator::apply — fonction PURE (aucune I/O, aucun réseau, aucun appel
+        de sink) : traduction d'UN item de stream en 0 à N événements (1 maximum ici) ;
+        `is_final = true` ordonne à l'appelant de cesser de consommer le stream.
+        Mapping détaillé en `Handles` et `Scenario`.
+  @stream_agent_events — `pub async fn` : streame un tour via @Agent::stream_chat,
+    dispatche les événements produits par @StreamAccumulator::apply sur le sink dans
+    l'ordre, et conclut selon le mode de terminaison (`Returns`).
+
+Accepts:
+  @ChatEvent en désérialisation — tout objet JSON avec un champ `"type"` égal à l'un
+    des 12 tags et des champs snake_case conformes ; nesting `subagent_event` de
+    profondeur quelconque.
+  @StreamAccumulator::apply — n'importe quel @MultiTurnStreamItem<R> quel que soit `R` :
+    le type de réponse n'intervient dans aucun événement.
+  @stream_agent_events — `user_msg` emprunté pour la durée de l'appel, `history`
+    passé par valeur à rig ; un appel = un tour (accumulateur local à l'appel).
+  Implémentations de @EventSink — tout type `Send + Sync`.
+
+Returns:
+  @StreamAccumulator::apply — tuple `(events, is_final)` ; `events` dans l'ordre
+    d'émission ; `is_final` vaut `true` UNIQUEMENT sur @MultiTurnStreamItem::FinalResponse.
+  @stream_agent_events, succès — `Ok(@ChatTurnResult)` : `response_text` = deltas
+    `Text` concaténés, `tool_calls` = tous les appels collectés dans l'ordre, `result`
+    laissé `None` pour un appel jamais résolu. @ChatEvent::Done est émis dans TOUS les
+    cas de succès, quelle que soit la terminaison (rupture sur `FinalResponse` ou
+    épuisement du stream sans `FinalResponse`).
+  @stream_agent_events, erreur — `Err(@VnyError::LlmError(msg))` avec le @Display de
+    l'erreur rig ; juste avant, un unique @ChatEvent::Error est émis avec
+    `code = "VNL-LLM-001"` et `message` identique. Alors `Done` n'est JAMAIS émis ;
+    les événements émis avant l'erreur restent diffusés (préfixe observable).
+
+Raises:
+  Désérialisation de @ChatEvent / @ToolCallRecord — erreurs serde_json (tag `"type"`
+    inconnu, champ manquant ou de mauvais type) propagées à l'appelant ; ce fichier
+    n'en lève aucune lui-même.
+  @StreamAccumulator::apply — ne lève jamais, ne panique jamais : toute entrée non
+    mappée rend 0 événement ; la corrélation de résultat ne produit jamais d'erreur
+    pour un `internal_call_id` inconnu.
+  @stream_agent_events — une seule erreur possible : @VnyError::LlmError. Les erreurs
+    de sink ou de sérialisation ne sont pas propagées (sink infaillible).
+
+Handles:
+  Item rig `ToolCallDelta` (arguments partiels en cours de stream) — ignoré : 0
+    événement, non terminal (commentaire source).
+  Toute variante @MultiTurnStreamItem hors contrat de mapping (dont les futures
+    variantes de rig-core) — bras générique : 0 événement, non terminal, sans erreur
+    de compilation (voir `[?]` en `Tasks`).
+  @ToolResult dont l'`internal_call_id` n'a jamais été annoncé par un @ToolCall — un
+    @ChatEvent::ToolResult est QUAND MÊME émis, `name` vide, `tool_calls` non écrit ;
+    un second résultat pour un même id voit aussi `name` vide (l'entrée `pending_names`
+    a été consommée au premier).
+  Bloc @Reasoning complet sans texte extractible (contenus uniquement
+    `Encrypted`/`Redacted`, ou bloc vide) — 0 événement ; sinon les
+    contenus `Text`/`Summary` sont concaténés SANS séparateur en un seul
+    @ReasoningDelta.
+  @CompletionCall avec `usage: None` — 0 événement ; avec usage, seuls
+    `input_tokens`/`output_tokens` sont conservés (compteurs rig `total`,
+    `cached_input`, `reasoning` etc. jetés — voir `[?]` en `Tasks`).
+  Épuisement du stream (`None`) sans @ChatEvent::Done ni @FinalResponse — traité comme
+    une fin de tour : rupture, `Done` émis, `Ok(@ChatTurnResult)` retourné.
+  Delta @Text de contenu vide `""` — émet quand même @Token avec `content` vide
+    (asymétrie avec le bloc @Reasoning vide qui n'émet rien — voir `[?]`).
+  @ToolResult dont tout le contenu est @Image — événement émis avec `result = ""`
+    (les images sont ignorées, le texte concaténé est vide).
+
+Must:
+  Sérialiser @ChatEvent en enum à tag interne : champ `"type"` = nom de variante en
+    `snake_case`, champs en `snake_case` — format de transport du stdout REPL (une
+    ligne JSON par événement), du WebSocket de l'`app` et des notifications JSON-RPC.
+  Utiliser l'`internal_call_id` de rig comme `id` commun des événements `tool_call` et
+    `tool_result` corrélés — jamais l'id fournisseur : la doc rig le déclare non fiable
+    pour la corrélation. L'invariant (même id dans les deux événements) est verrouillé
+    par le test existant `apply_tool_call_then_result_correlates`.
+  Garder @StreamAccumulator::apply pure : aucune I/O, aucun réseau, aucun appel de
+    sink — c'est la surface testée unitairement ; le sink n'est appelé que par
+    @stream_agent_events.
+  Émettre les événements dans l'ordre strict du stream : toutes les sorties d'un
+    @StreamAccumulator::apply sont diffusées sur le sink avant la consommation de
+    l'item suivant.
+  Tenir les invariants de @ChatEvent::Done dans @stream_agent_events : exactement une
+    émission sur tout chemin de succès (toutes terminaisons confondues), AUCUNE sur le
+    chemin d'erreur, et l'appel retourne alors `Err` après émission de @ChatEvent::Error
+    de code `"VNL-LLM-001"`.
+  Accumuler dans @StreamAccumulator::response_text les seuls deltas assistant `Text` —
+    le contenu de raisonnement reste sur le canal `reasoning_delta` et ne rejoint
+    jamais `response_text`.
+  Consigner un @ToolCallRecord avec `result: None` dès l'item @ToolCall, puis renseigner
+    son `result` avec le texte (contenus `Text` concaténés, `Image` ignorés) du
+    @ToolResult de même `internal_call_id` : premier record correspondant gagné ; sans
+    record correspondant, `tool_calls` reste intact.
+  Maintenir le miroir ts-rs : derives @TS sous feature `ts-rs` uniquement, champs
+    @serde_json::Value déclarés `any`, `/packages/protocol/src/generated/chat-event.ts`
+    régénéré par le seul `cargo test -p vanyline-lib --features ts-rs`, vérifié en CI
+    (job `tsrs`, `git diff --exit-code -- packages/protocol/src/generated/`).
+  Garder @ChatEvent nichable : @ChatEvent::SubagentEvent porte un `Box<ChatEvent>`
+    quelconque, sérialisé et désérialisé récursivement (roundtrip verrouillé par le test
+    `subagent_event_nesting`).
+  Réserver l'émission des variantes @ChatEvent::SkillLoaded, @SubagentStart,
+    @SubagentEvent, @SubagentEnd et @ToolUnavailable aux autres modules (`session.rs`,
+    `builtin/task.rs`, `app`) : ce fichier ne produit que @Token, @ReasoningDelta,
+    @ToolCall, @ToolResult, @Usage, @Error et @Done.
+
+Must not:
+  Émettre @ChatEvent::Done — ni aucun autre événement — après @ChatEvent::Error dans
+    @stream_agent_events (l'erreur est terminale côté flux).
+  Dériver de, ou modifier, @crate::types::ToolCall : @ToolCallRecord est le compagnon
+    volontairement distinct (stratégie additive).
+  Éditer à la main `chat-event.ts`, ni introduire une variante au tag hors
+    `snake_case` — `rename_all` est l'unique source de nommage des tags.
+  Ajouter une I/O, un log ou un appel réseau dans @StreamAccumulator::apply.
+  Passer `is_error` à `true` dans les événements @ToolResult issus du chemin stream de
+    @StreamAccumulator::apply : l'état documenté du code est le faux constant (limite
+    rig-core 0.38, voir `[?]` en `Tasks`) — le changer est une décision de spec, pas
+    d'implémentation.
+  Ajouter une variante de @ChatEvent sans son tag serde, son mapping ts-rs, sa
+    couverture dans le test des tags et sa ligne dans `Exposes`.
+
+Tasks:
+  [ ] Convertir chaque `Scenario` sans test existant en un test dédié taggé par son
+    titre (flux TTD). Couverts aujourd'hui : tags et roundtrip (`chat_event_tags`,
+    `subagent_event_nesting`), les chemins de `apply` nommés (`apply_*`), typage
+    @EventSink (`mock_sink_emit`), export ts-rs (`export_chat_event_ts`). NON couverts :
+    @stream_agent_events intégralement (0 test — les scénarios Done/erreur/épuisement
+    demandent un mock de modèle rig), bloc @Reasoning non extractible, catch-all d'items,
+    @FinalResponse.
+  [ ] Maintenir le job CI `tsrs` vert : `cargo test -p vanyline-lib --features ts-rs`
+    puis `git diff --exit-code -- packages/protocol/src/generated/`.
+  [?] `is_error` constant `false` sur @ToolResult du chemin @StreamAccumulator::apply :
+    le commentaire source et `docs/architecture.md` l'attribuent à rig-core qui convertit
+    les erreurs de tool call en texte avant @StreamedUserContent::ToolResult. Faut-il
+    contracter « toujours false » (état actuel) ou le tracer comme dette en attente de
+    correction amont ?
+  [?] Un delta @Text vide émet @Token `{ "content": "" }` alors qu'un bloc @Reasoning
+    vide n'émet rien — l'asymétrie est-elle voulue (ou @Token doit-il filtrer les vides) ?
+  [?] Le bras générique de @StreamAccumulator::apply avale les futures variantes de
+    @MultiTurnStreamItem sans erreur de compilation : une montée de rig-core pourrait
+    jeter du contenu en silence. Veut-on un garde-fou (match exhaustif sans bras
+    générique, compilation cassée à l'upgrade comme sentinelle) ?
+  [?] @ChatEvent::Usage ne retient que `input_tokens`/`output_tokens` : les compteurs
+    rig `total_tokens`, `cached_input_tokens`, `reasoning_tokens` etc. sont jetés —
+    contrat voulu, ou lacune pour le comptage des coûts (app, CLI) ?
+  [?] Le code `"VNL-LLM-001"` est dupliqué en dur dans @stream_agent_events et dans le
+    @Display de @VnyError::LlmError (`error.rs`) — contracter ce couplage
+    code↔variante d'erreur ici, ou l'ignorer (chaque fichier ayant sa spec) ?
+  [?] @ToolResult non corrélé : `name` vide rendu au client — le rendu aval (frontend,
+    kydah) de ce nom vide est-il un contrat validé, ou faut-il un nom sentinelle ?
+  [?] Concaténation des contenus @Reasoning SANS séparateur (Text/Summary mélangés) —
+    le rendu collé est-il accidentel ? Si un format d'assemblage est voulu, le
+    contractualiser ici.
+  [?] @ChatEvent::SubagentEvent accepte n'importe quel événement imbriqué, y compris
+    `error` et `done`, et un nesting de profondeur quelconque (via `builtin/task.rs`) —
+    contrat « tout événement, toute profondeur » ou ensemble restreint à définir ?
+  [?] `export_chat_event_ts` écrit dans l'arborescence source pendant `cargo test`
+    (effet de bord de test sur `packages/protocol/`) — processus acté par `vanyline.sdd`
+    et le job `tsrs`, mais à confirmer comme voulu.
+
+Done when:
+  Chaque `Scenario` a son test taggé par son titre et passe.
+  @stream_agent_events est testé (succès, erreur sans `Done`, épuisement).
+  Le job CI `tsrs` est vert.
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: tags_serialises_de_chaque_variante
+  Given une instance de chacune des 12 variantes de @ChatEvent
+  When chacune est sérialisée en JSON
+  Then l'objet porte le tag `"type"` en snake_case attendu et ses champs snake_case
+
+Scenario: roundtrip_recursif_subagent_event_imbrique
+  Given un événement `subagent_event` d'id `"sub-1"` imbriquant un `token` de contenu `"x"`
+  When il est sérialisé en JSON puis redésérialisé en @ChatEvent
+  Then le résultat est `PartialEq`-égal à l'original
+
+Scenario: generation_ts_rs_a_jour
+  Given une arborescence à HEAD, feature `ts-rs` activée
+  When `cargo test -p vanyline-lib --features ts-rs` s'exécute
+  Then `git diff --exit-code -- packages/protocol/src/generated/` ne signale aucun écart
+    (`u64` en `number`, `args`/`arguments` en `any`, tag `"type"`, récursion `subagent_event`)
+
+Scenario: deltas_text_accumulent_et_emettent_tokens
+  Given un @StreamAccumulator frais
+  When deux items `Text` d'affilée, `"Hel"` puis `"lo"`, sont passés à @StreamAccumulator::apply
+  Then chacun rend UN événement `token` avec son contenu et `is_final` faux, et
+    `response_text` vaut `"Hello"` à la fin
+
+Scenario: reasoning_delta_canal_separesans_response_text
+  Given un @StreamAccumulator frais
+  When un item rig `ReasoningDelta` de raisonnement `"je réfl"` est passé à @StreamAccumulator::apply
+  Then un seul événement `reasoning_delta` de contenu `"je réfl"` est rendu et
+    `response_text` reste vide
+
+Scenario: bloc_reasoning_complet_extrait_en_un_delta
+  Given un item `Reasoning` porteur du texte extractible `"j'analyse la question"`
+  When il est passé à @StreamAccumulator::apply
+  Then un seul événement `reasoning_delta` porte ce texte en entier et `is_final` est faux
+
+Scenario: bloc_reasoning_non_extractible_nemet_rien
+  Given un bloc `Reasoning` dont les seuls contenus sont `Encrypted` et `Redacted`
+  When il est passé à @StreamAccumulator::apply
+  Then @StreamAccumulator::apply rend 0 événement, `is_final` faux, et rien n'est accumulé
+
+Scenario: tool_call_et_result_corrélés_par_internal_call_id
+  Given un item `ToolCall` d'`internal_call_id` `"call-1"` (nom `"search"`, args `{"q":"x"}`, id fournisseur `"prov-1"`)
+  When un item `ToolResult` d'`internal_call_id` `"call-1"` et d'id fournisseur différent est passé à @StreamAccumulator::apply
+  Then les événements `tool_call` et `tool_result` partagent l'id `"call-1"`, le record
+    `tool_calls[0].result` devient `Some("42")`, et l'événement porte `is_error: false`
+    et le nom retrouvé `"search"`
+
+Scenario: tool_result_non_corrélé_nom_vide_sans_record
+  Given un @StreamAccumulator frais
+  When un item `ToolResult` d'`internal_call_id` `"never-seen"` jamais annoncé est passé à @StreamAccumulator::apply
+  Then un événement `tool_result` est quand même rendu avec `name` vide et
+    `is_error: false`, et `tool_calls` reste vide
+
+Scenario: completion_call_avec_usage_emet_usage
+  Given un @StreamAccumulator frais
+  When un `CompletionCall` portant `usage` (10 tokens d'entrée, 5 de sortie) est passé à @StreamAccumulator::apply
+  Then un seul événement `usage` est rendu avec `input_tokens: 10` et `output_tokens: 5`
+
+Scenario: completion_call_sans_usage_nemet_rien
+  Given un @StreamAccumulator frais
+  When un `CompletionCall` avec `usage: None` est passé à @StreamAccumulator::apply
+  Then @StreamAccumulator::apply rend 0 événement et `is_final` faux
+
+Scenario: final_response_terminale_sans_emission
+  Given un @StreamAccumulator ayant déjà accumulé du texte
+  When l'item @MultiTurnStreamItem::FinalResponse est passé à @StreamAccumulator::apply
+  Then @StreamAccumulator::apply rend 0 événement et `is_final` vrai
+
+Scenario: items_hors_mapping_ignorés_silencieusement
+  Given un @StreamAccumulator frais
+  When un item hors contrat de mapping (par exemple `ToolCallDelta`) est passé à @StreamAccumulator::apply
+  Then @StreamAccumulator::apply rend 0 événement et `is_final` faux
+
+Scenario: tour_reussi_diffuse_en_ordre_et_finit_par_done
+  Given un @EventSink mock qui enregistre les événements et un agent mock dont le stream
+    émet `Text`, `ToolCall`, `ToolResult`, puis `FinalResponse`
+  When @stream_agent_events est appelé avec ce sink et cet agent
+  Then le sink reçoit les événements dans cet ordre suivi d'un et un seul `done`, et
+    l'appel retourne `Ok` avec le `response_text` et le @ToolCallRecord résolu dans @ChatTurnResult
+
+Scenario: erreur_de_stream_emet_error_sans_done
+  Given un @EventSink mock et un agent mock dont le stream émet un `Text` puis une erreur
+  When @stream_agent_events est appelé
+  Then le sink reçoit `token` puis `error` de code `"VNL-LLM-001"` et de message égal à
+    l'affichage de l'erreur rig, JAMAIS de `done`, et l'appel retourne
+    `Err(@VnyError::LlmError)`
+
+Scenario: stream_epuise_sans_final_response_finit_par_done
+  Given un agent mock dont le stream émet un `Text` puis se termine sans `FinalResponse`
+  When @stream_agent_events est appelé
+  Then le sink reçoit `token` puis un `done`, et l'appel retourne `Ok(@ChatTurnResult)`
+    avec le texte accumulé

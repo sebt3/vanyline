@@ -1,0 +1,256 @@
+Spec: Types
+
+Platform: Rust/vanyline-lib/serde/uuid
+
+Purpose:
+  Types de persistance des conversations — forme longue, stable sur disque et en base —
+  partagés entre le CLI (`cli/src/store.rs` : fichiers `conversations/{id}.json`,
+  `cli/src/chat.rs`, `cli/src/rpc/`) et l'`app` (`app/src/ws/chat.rs` : colonne `payload`
+  des tables conversations/messages). Ce sont les types de stockage, distincts des types
+  de transport du stream (@crate::event::ChatEvent, @crate::event::ToolCallRecord) : la
+  corrélation `id` d'un tool call n'a de sens que pendant le tour et est abandonnée à la
+  persistance (@ToolCall n'a volontairement PAS de champ `id`, cf. ./event.sdd). Ces types
+  ne sortent pas en TypeScript : aucun derive ts-rs, les miroirs TS sont
+  `ConversationSummary` (CLI, camelCase) et `ToolCallRecord` (protocole).
+  Le module est privé (`mod types;` dans ./lib.rs) mais ses trois items sont réexportés à
+  la racine du crate (`pub use types::*`) — chemin public : @vanyline_lib::ToolCall,
+  @vanyline_lib::Message, @vanyline_lib::Conversation.
+
+Owns:
+  ./types.rs
+
+Can read:
+  ./lib.rs
+  ./event.rs
+  ../Cargo.toml
+
+Depends on:
+  @serde (features derive, ../Cargo.toml) — derives @Serialize/@Deserialize et attributs
+    de champ sur les trois types.
+  @serde_json — champ @ToolCall::arguments de type @serde_json::Value.
+  @uuid (features `v4` + `serde`, ../Cargo.toml) — champ @Conversation::id de type
+    @uuid::Uuid ; la représentation serde du crate (chaîne UUID canonique) est donc un
+    contrat de ce fichier par transitivité.
+  Aucune dépendance interne au crate : le fichier ne référence ni @crate::error, ni
+    @crate::event, ni @crate::session.
+
+Exposes:
+  @ToolCall — `pub struct`, derives `Debug Clone Serialize Deserialize` (PAS de
+    @PartialEq). Exactement 3 champs publics, sans attribut serde (clés `snake_case` par
+    défaut) :
+      @ToolCall::name — @String, nom du tool.
+      @ToolCall::arguments — @serde_json::Value, arguments du call (tout JSON accepté).
+      @ToolCall::result — @Option<String>, résultat du call ; `None` se sérialise en
+        `"result": null` (pas de `skip_serializing_if` — asymétrie assumée avec
+        @Message::tool_calls, voir `[?]` en `Tasks`).
+    Volontairement sans `id` : distinct de @crate::event::ToolCallRecord (stratégie
+    additive verrouillée par ./event.sdd, section `Must not`).
+  @Message — `pub struct`, derives `Debug Clone Serialize` seulement ; @Deserialize est
+    implémenté MANUELLEMENT (via un struct privé @MessageInner interne à la fonction,
+    champs homonymes sans attribut) — comportement strictement équivalent à un derive
+    (voir `[?]` en `Tasks`). Champs publics :
+      @Message::role — @String ; le vocabulaire d'usage est `"user"` / `"assistant"`
+        (imposé par les consommateurs, jamais par le type — voir `Handles`).
+      @Message::content — @String.
+      @Message::tool_calls — @Option<Vec<@ToolCall>> avec
+        `#[serde(skip_serializing_if = "Option::is_none")]` : absent du JSON produit quand
+        `None` ; à la désérialisation, clé absente OU `null` rendent `None`.
+  @Conversation — `pub struct`, derives `Debug Clone Serialize Deserialize`. Champs publics :
+      @Conversation::id — @uuid::Uuid ; sérialisé en chaîne canonique avec tirets,
+        minuscules (représentation par défaut du crate `uuid`) — c'est la forme des noms de
+        fichiers CLI (`conversations/{id}.json`) et des résolutions par préfixe d'UUID.
+      @Conversation::agent — @Option<String>, sans attribut : sérialisé `"agent": null`
+        quand `None` ; clé absente ou `null` rendent `None`.
+      @Conversation::title — @Option<String>, mêmes règles qu'@Conversation::agent.
+      @Conversation::messages — @Vec<@Message>, sans attribut : clé TOUJOURS requise à la
+        désérialisation ; un vecteur vide est légal.
+      @Conversation::todo — @Option<String> avec
+        `#[serde(default, skip_serializing_if = "Option::is_none")]` : état todo
+        (todowrite/todoread) sérialisé en JSON DANS une chaîne (double encodage assumé,
+        commentaire source) ; persisté pour le resume `-c/--continue` du CLI ; clé absente
+        ou `null` rendent `None`, clé absente étant la rétrocompatibilité des fichiers
+        écrits avant ce champ.
+  Aucune fonction, aucune méthode, aucun test dans le fichier : ce sont des données pures ;
+    tout le comportement observable est le comportement serde décrit ci-dessus.
+
+Accepts:
+  (Désérialisation) tout objet JSON conforme aux formes ci-dessus, avec à chaque niveau
+    ignorancement des champs inconnus (aucun `deny_unknown_fields` — tolérance proactive
+    aux formats futurs).
+  @ToolCall::arguments — n'importe quelle valeur JSON (`null`, scalaire, objet, tableau).
+  @Conversation::id — toute chaîne UUID acceptée par le désérialiseur du crate `uuid`.
+  @Message::role — n'importe quelle chaîne, y compris hors du vocabulaire
+    `"user"`/`"assistant"` : le type ne restreint rien.
+
+Returns:
+  (Sérialisation) formes JSON exactes :
+    @ToolCall — toujours `{"name":…,"arguments":…,"result":…}`, la clé `result` présente
+      même à `null`.
+    @Message — `{"role":…,"content":…}` quand @Message::tool_calls est `None` ; avec
+      `"tool_calls":[…]` sinon (tableau vide inclus si `Some(vec![])`).
+    @Conversation — `{"id":"<uuid-hyphené>","agent":…,"title":…,"messages":[…]}`, la clé
+      `"todo"` n'apparaissant QUE non-`None`.
+  Dérives @Debug/@Clone — aucune garantie de format ; @Clone est un clonage profond
+    (messages, tool calls, todo inclus), utilisé par les consommateurs pour snapshoter.
+
+Raises:
+  Jamais de panic ni d'erreur levée par le fichier lui-même. Les seules erreurs possibles
+    sont celles de serde_json propagées à l'appelant : clé `role`, `content`, `id`, `name`,
+    `arguments` ou `messages` absente, ou valeur de mauvais type (dont `id` non-UUID). Les
+    consommateurs exploitent ces erreurs en mode tolérant (comportement des consommateurs,
+    hors contrat ici).
+
+Handles:
+  Clé @Message::tool_calls absente ou `null` — rend `None` (comportement @Option d'office,
+    y compris dans l'impl manuel : @MessageInner est sans attribut).
+  Clé @Conversation::todo absente — rend `None` : rétrocompatibilité explicite des
+    fichiers de conversation antérieurs au champ todo (`#[serde(default)]`).
+  Clé @ToolCall::result absente ou `null` — rend `None`.
+  Champs inconnus à tous les niveaux — ignorés silencieusement (avant et arrière
+    compatibilité des formats persistés).
+  Rôles hors `"user"`/`"assistant"` — acceptés et persistés par le type ; leur sort
+    appartient aux consommateurs : la reconstruction d'historique LLM (`cli/src/chat.rs`,
+    `cli/src/rpc/handlers.rs`, `app/src/ws/chat.rs`) ne retient que ces deux rôles, sur le
+    seul @Message::content, et jette silencieusement les autres.
+  @Some(@Vec::new()) pour @Message::tool_calls — JSON `"tool_calls": []`, distinct de la
+    forme omise de `None` ; les constructeurs CLI normalisent le vide en `None`, pas
+    forcément l'`app` (voir `[?]` en `Tasks`).
+
+Must:
+  Exposer exactement @ToolCall, @Message, @Conversation à la racine du crate via
+    `pub use types::*` de ./lib.rs — le chemin `vanyline_lib::types::…` reste privé hors
+    du crate.
+  Garder @ToolCall sans champ `id` : l'abandon de la corrélation call/result à la
+    persistance est le contrat (commentaires de `cli/src/chat.rs`,
+    `cli/src/rpc/handlers.rs`, et `Must not` de ./event.sdd).
+  Rester le seul format de persistance des conversations : fichier JSON pretty CLI
+    (`cli/src/store.rs::save_conversation`, `{id}` = @Conversation::id canonique) et
+    payload des messages de l'`app`.
+  Préserver la rétrocompatibilité de lecture : clé @Conversation::todo absente doit
+    continuer de rendre `None` ; la roundtrip CLI (sauvegarde puis relecture) doit rester
+    fiable.
+  Conserver la forme UUID canonique (tirets, minuscules) de @Conversation::id en sortie —
+    les noms de fichiers CLI et la résolution par préfixe en dépendent.
+  Garder @Conversation::messages requis à la désérialisation et les champs optionnels
+    (@Conversation::agent, @Conversation::title, @ToolCall::result, @Message::tool_calls)
+    tolérants à la clé absente.
+
+Must not:
+  Introduire un champ `id` sur @ToolCall, ni dériver @ToolCall de
+    @crate::event::ToolCallRecord (réciproque du `Must not` de ./event.sdd : les deux
+    types restent volontairement distincts).
+  Ajouter un derive @ts_rs::TS ou un export vers `@vanyline/protocol` : ces types ne
+    franchissent pas la frontière TS.
+  Ajouter `#[serde(deny_unknown_fields)]` sur un des trois types — les formats persistés
+    existants et futurs doivent rester lisibles.
+  Restreindre @Message::role par un enum sans décision de spec (le type large est l'état
+    actuel, voir `[?]` en `Tasks`).
+  Renommer un champ serde public (aucun `rename` n'existe) sans migration des formats
+    persistés — les clés `snake_case` sont l'interface disque/base.
+
+Tasks:
+  [ ] Aucun test n'existe pour ce fichier (pas de module `cfg(test)`, 51 lignes pures) :
+    convertir chaque Scenario en un test dédié taggé par son titre (flux TTD), dans
+    ./types.rs ou un test d'intégration du crate.
+  [?] L'implémentation manuelle de @Deserialize pour @Message est strictement équivalente
+    à un derive : @MessageInner reprend les mêmes champs, sans aucun attribut. Vestige ou
+    crochet voulu pour une future validation ? À trancher : supprimer au profit du derive,
+    ou documenter l'intention.
+  [?] Asymétrie des représentations JSON des `None` : @ToolCall::result et
+    @Conversation::agent/@title se sérialisent `"…": null`, alors que @Message::tool_calls
+    et @Conversation::todo sont omis. Choix de format à confirmer (ou harmoniser, avec
+    migration des payloads existants).
+  [?] @Message::tool_calls vide : le CLI normalise `[]` en `None` avant persistance,
+    l'`app` peut écrire `"tool_calls": []`. Les deux formes sont-elles contractuellement
+    équivalentes, ou faut-il imposer une forme normale à l'écriture ?
+  [?] @Message::role est un @String libre : le vocabulaire `"user"`/`"assistant"` n'est
+    porté que par les consommateurs, qui jettent silencieusement tout autre rôle à la
+    reconstruction d'historique. Faut-il contracter l'enum côté lib (et que faire des
+    rôles inconnus déjà persistés) ?
+  [?] Absence de @PartialEq sur les trois types : voulue (données de persistance sans
+    comparaison), ou dette qui gênera les tests de roundtrip à écrire ?
+  [?] Double encodage de @Conversation::todo (liste JSON sérialisée DANS une @String) :
+    voulu comme opaque côté @Conversation (lecture/écriture uniquement par les tools
+    todo), ou à retaper en @serde_json::Value ?
+
+Done when:
+  Chaque Scenario a son test taggé par son titre et passe.
+  Les `[?]` de `Tasks` sont tranchés par Sébastien ; la spec relue fait foi du contrat de
+    format de persistance.
+
+Scenario: tool_call_se_serialize_avec_result_null_et_sans_id
+  Given un @ToolCall de nom `"read_file"`, d'arguments `{"path":"a"}`, `result: None`
+  When il est sérialisé en JSON
+  Then l'objet a exactement les clés `"name"`, `"arguments"`, `"result"`, avec
+    `"result": null` et AUCUNE clé `"id"`
+
+Scenario: tool_call_roundtrip_json
+  Given un @ToolCall de nom `"search"`, d'arguments `{"q":"x"}`, `result: Some("42")`
+  When il est sérialisé puis redésérialisé en @ToolCall
+  Then les trois champs sont identiques aux valeurs d'origine
+
+Scenario: message_omit_tool_calls_quand_none
+  Given un @Message de rôle `"user"`, de contenu `"bonjour"`, `tool_calls: None`
+  When il est sérialisé en JSON
+  Then l'objet est exactement `{"role":"user","content":"bonjour"}`, sans clé `"tool_calls"`
+
+Scenario: message_accepte_tool_calls_absent_ou_null
+  Given les deux JSON `{"role":"user","content":"x"}` et
+    `{"role":"user","content":"x","tool_calls":null}`
+  When chacun est désérialisé en @Message
+  Then chacun rend @Message::tool_calls à `None`, sans erreur
+
+Scenario: message_ignore_champs_inconnus
+  Given le JSON `{"role":"user","content":"x","tool_calls":null,"future":"champ"}`
+  When il est désérialisé en @Message
+  Then la désérialisation réussit et le champ inconnu est ignoré
+
+Scenario: message_roundtrip_avec_tool_calls_resolus
+  Given un @Message de rôle `"assistant"` portant un @ToolCall résolu (`result: Some("ok")`)
+  When il est sérialisé puis redésérialisé en @Message
+  Then @Message::tool_calls est `Some` d'un vecteur d'un élément aux champs identiques
+
+Scenario: message_accepte_role_hors_vocabulaire
+  Given le JSON `{"role":"system-e","content":"y"}`
+  When il est désérialisé en @Message
+  Then la désérialisation réussit avec @Message::role égal à `"system-e"` (le type ne
+    restreint pas le vocabulaire des rôles — l'état actuel est libéral)
+
+Scenario: conversation_roundtrip_json_complet
+  Given une @Conversation d'id UUID v4, `agent: Some("general")`, `title: None`, un
+    @Message user, `todo: Some("[{\"content\":\"t1\"}]")`
+  When elle est sérialisée en JSON puis redésérialisée en @Conversation
+  Then @Conversation::id, @Conversation::agent, @Conversation::title, le @Vec des messages
+    et @Conversation::todo sont identiques aux valeurs d'origine
+
+Scenario: conversation_todo_absent_vaut_none_par_defaut
+  Given un JSON de conversation écrit avant le champ todo — sans clé `"todo"` — par
+    ailleurs valide
+  When il est désérialisé en @Conversation
+  Then @Conversation::todo vaut `None` et la lecture n'échoue pas (rétrocompatibilité des
+    fichiers `conversations/*.json` existants)
+
+Scenario: conversation_omit_todo_et_accepte_todo_null
+  Given une @Conversation avec `todo: None` sérialisée en JSON
+  When le JSON est examiné puis redésérialisé
+  Then la clé `"todo"` est absente de la sortie, et la relecture rend `None` ; le même
+    objet avec `"todo": null` injectée rend aussi `None`
+
+Scenario: conversation_id_en_uuid_canonique_hyphen
+  Given une @Conversation d'id `aaaaaaaa-0000-0000-0000-000000000001`
+  When elle est sérialisée en JSON
+  Then @Conversation::id vaut exactement la chaîne
+    `"aaaaaaaa-0000-0000-0000-000000000001"` (tirets, minuscules — forme des noms de fichiers CLI)
+
+Scenario: conversation_refuse_un_json_sans_messages
+  Given le JSON `{"id":"aaaaaaaa-0000-0000-0000-000000000001","agent":null,"title":null}`
+    sans clé `"messages"`
+  When il est désérialisé en @Conversation
+  Then la désérialisation échoue sur un champ manquant (@Vec n'est pas @Option : pas de
+    default implicite)
+
+Scenario: conversation_messages_vide_autorisee
+  Given une @Conversation avec un @Vec vide comme messages et tout le reste renseigné
+  When elle est sérialisée puis redésérialisée
+  Then @Conversation::messages est un vecteur vide et @Conversation::agent/@title null se
+    relisent `None`
