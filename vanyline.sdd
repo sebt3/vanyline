@@ -1,0 +1,69 @@
+Spec: vanyline
+
+Platform: Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, cfgstore, edition 2024) + TypeScript/Vue 3 (workspace npm : frontend, packages/*, ext)
+
+Purpose:
+  Environnement de développement cloud-native, multi-utilisateur, piloté par l'IA pour
+  Kubernetes : shell IDE web (Vue 3), backend d'auth/config/LLM (`app`), servers dans les
+  pods de travail (`sandbox` : WS éditeur + MCP), opérateur Kubernetes (`controller` :
+  CRDs Owner/Project/Sandbox/Application) et packages partagés (`@vanyline/protocol`,
+  `@vanyline/ui`, extension VS Code). Détail architectural : `docs/architecture.md` et la
+  mémoire projet `.claude/MEMORY.md`.
+
+Owns:
+  ./Cargo.toml
+  ./package.json
+  ./rust-toolchain.toml
+
+Can read:
+  ./AGENTS.md
+  ./.specdd/bootstrap.project.md
+  ./.claude/MEMORY.md
+
+References:
+  ./tooling.sdd
+  ./.github/workflows/workflows.sdd
+
+Must:
+  Exiger qu'aucune ligne de code source ne soit écrite sans spec `.sdd` cible approuvée
+  par Sébastien et sans tests dérivés de ses `Scenario` écrits et exécutés d'abord
+  (flux spec → test → implémentation, `.specdd/bootstrap.project.md`).
+  Exiger une spec `.sdd` par fichier `*.rs` des crates du workspace (regroupement 2–3
+  fichiers admis si un seul contrat, motivation dans `Purpose` de la spec), décrivant tout
+  le comportement observable du fichier.
+  Exiger la batterie complète de vérification (AGENTS.md, et `test.yml` pour la CI) avant
+  qu'une `Tasks` passe à `[x]`.
+  Garder `packages/protocol/src/generated/` généré par `vanyline-lib` (feature `ts-rs`) :
+  jamais de modification manuelle des types générés.
+  Maintenir le harnais `[workspace.lints]` du workspace cargo UNIQUE comme source de
+  vérité des lints (`./tooling.sdd`) ; ne jamais introduire de sous-workspace cargo
+  séparé qui échapperait au harnais.
+
+Must not:
+  Interpoler un champ de CRD dans une commande shell du controller : toute maintenance des
+  workspaces passe par `vanyline-maint` en argv (règle architectural — cf. AGENTS.md,
+  section controller).
+  Exposer le JWT OIDC brut au navigateur : le frontend ne voit que des tickets WS court-vécus
+  à usage unique minés par l'app.
+  Écrire dans `deploy/`, `toolchains/` ou `docs/` sans que la spec concernée (ou une
+  demande explicite de Sébastien) l'autorise.
+
+Tasks:
+  [x] Migration de la méthode vers SpecDD + TTD : `.specdd/` (bootstrap 1.5), AGENTS.md,
+    agents `spec-dd`/`spec-reverse`/`implementer`/`validator`, suppression de la méthode
+    llm-template (agents `cadence`/`implement`/`diagnose`, `.claude/config.md`, tâches
+    `.tasks/`).
+  [x] Harnais `[workspace.lints]` posé (deny immédiat, dette tracée dans ./tooling.sdd).
+  [ ] Reverse-engineering des specs par fichier, crate par crate, avec relecture attentive par
+    Sébastien sur les incertitudes `[?]` — ordre : `vanyline-lib`, `vanyline-crds`,
+    `vanyline-tools`, `vanyline-cfgstore`, `controller`, `sandbox`, `app`, `cli`.
+  [ ] Purger la dette harnais crate par crate (backlog dans ./tooling.sdd).
+  [ ] Specs TS/Vue au fil de l'eau : tout fichier `frontend/`, `packages/`, `ext/` touché
+    par une tâche est specé avant modification.
+  [ ] Spec du déploiement (`deploy/`) et des images (`toolchains/`) quand la migration
+    atteint ces zones.
+
+Done when:
+  Chaque fichier `*.rs` du workspace est couvert par une spec revue, le harnais est à
+  zéro dette, et la CI est repassée au vert durablement (`tooling.sdd`,
+  `/.github/workflows/workflows.sdd`).

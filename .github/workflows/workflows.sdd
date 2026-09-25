@@ -1,0 +1,59 @@
+Spec: CI du monorepo vanyline
+
+Platform: GitHub Actions, runners ubuntu-latest, toolchain Rust stable, Node 22
+
+Purpose:
+  Contractualiser la batterie de vérification du monorepo : les jobs de `test.yml` sont la
+  définition du « tout passe » utilisée par le `validator`, AGENTS.md et toutes les specs.
+  La CI ne réinvente rien : elle rejoue exactement les commandes locales.
+
+Owns:
+  ./test.yml
+  ./release.yml
+
+Can read:
+  ../../tooling.sdd
+
+Must:
+  Contenir les jobs : `test` (`cargo test --workspace`), `fmt` (`cargo fmt --all --check`),
+  `clippy` (`cargo clippy --workspace --all-targets -- -D warnings`), `frontend`
+  (check+test `@vanyline/protocol`, check+test `@vanyline/ui`, build+check+test `frontend`),
+  `ext` (check+test des packages partagés puis check+test+build du package `vanyline` de
+  `ext/`), `tsrs` (`cargo test -p vanyline-lib --features ts-rs` puis
+  `git diff --exit-code -- packages/protocol/src/generated/`), et `coverage`
+  (mesure de baseline, sans seuil, push sur `main` seulement).
+  Executer les commandes strictement identiques à la batterie d'AGENTS.md — toute
+  divergence CI/locale est un défaut de la CI.
+  Tourner sur `push` et `pull_request` vers `main` pour tous les jobs de validation.
+
+Must not:
+  Masquer un échec du harnais clippy (`continue-on-error`, filtre de warnings) : la période
+  de purge de dette assume une CI rouge tant que `tooling.sdd` n'est pas soldée — c'est un
+  état documenté, pas un contournement.
+  Additioner un job sans mise à jour simultanée de cette spec et de la batterie d'AGENTS.md.
+
+Scenario: commande locale différente de la CI
+  Given une validation locale qui omet `--all-targets` sur `cargo clippy`
+  When la modification est poussée
+  Then le job `clippy` rouge sur un warning que le local avait laissé passer — la
+  batterie est relancée complète, pas allégée
+
+Scenario: types ts-rs périmés
+  Given une tâche qui modifie `vanyline-lib` sans régénérer les types TS
+  When le job `tsrs` s'exécute
+  Then `git diff --exit-code` échoue et le push est rejeté
+
+Scenario: ci pendant la purge de dette
+  Given un push qui ne touche aucun fichier de la dette harnais déjà comptée
+  When le job `clippy` s'exécute
+  Then le job reste rouge à cause de la dette préexistante (consenti, voir `tooling.sdd`)
+  And le `validator` évalue la tâche sur le delta de dette, pas sur le rouge global
+
+Tasks:
+  [ ] Documenter dans la spec de la release (`docs/release-runbook.md`, agent `release`)
+    l'interaction entre CI rouge (dette) et tag de release — un tag ne part que sur CI
+    verte, donc après purge des crates concernées.
+
+Done when:
+  Les commandes des jobs == la batterie AGENTS.md, et l'état rouge de `clippy` est
+  explicitement rattaché à la dette de `tooling.sdd`.

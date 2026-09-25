@@ -1,0 +1,100 @@
+Spec: Harnais qualité (clippy, fmt, lints)
+
+Platform: clippy/rustc stable 1.97.1, rustfmt stable, table `[workspace.lints]` du Cargo.toml racine
+
+Purpose:
+  Définir le harnais qui guide les agents d'implémentation : lints stricts clippy/rustc au
+  niveau workspace cargo UNIQUE, formatage rustfmt, et le suivi de la dette préexistante
+  jusqu'à l'objectif zéro warning. Le harnais est un outil de guidage : il rend visibles aux
+  agents les règles que la spec `.sdd` ne peut pas tout à fait imposer (panics, prints,
+  arithmétique silencieuse, items publics non documentés).
+
+Can modify:
+  ./Cargo.toml: seules les tables `[workspace.lints.*]` et les lignes `[lints]` des membres
+  ./lib/src/lib.rs: ligne d'exemption `cfg(test)` seulement
+  ./app/src/main.rs: ligne d'exemption `cfg(test)` seulement
+  ./cli/src/main.rs: ligne d'exemption `cfg(test)` seulement
+  ./sandbox/src/lib.rs: ligne d'exemption `cfg(test)` seulement
+  ./sandbox/src/main.rs: ligne d'exemption `cfg(test)` seulement
+  ./sandbox/src/bin/hadolint_lsp.rs: ligne d'exemption `cfg(test)` seulement
+  ./sandbox/src/bin/ruff_lsp.rs: ligne d'exemption `cfg(test)` seulement
+  ./controller/src/main.rs: ligne d'exemption `cfg(test)` seulement
+  ./crds/src/lib.rs: ligne d'exemption `cfg(test)` seulement
+  ./cfgstore/src/lib.rs: ligne d'exemption `cfg(test)` seulement
+  ./cli/tests/rpc_stdio_smoke.rs: ligne d'exemption du crate-test seulement
+  ./sandbox/tests/maint.rs: ligne d'exemption du crate-test seulement
+
+Must:
+  Porter dans `[workspace.lints.clippy]` du `Cargo.toml` racine : les groupes `pedantic` et
+  `cargo` (`priority = -1`) et la famille stricte `unwrap_used`, `expect_used`, `panic`,
+  `unreachable`, `dbg_macro`, `todo`, `unimplemented`, `print_stdout`, `print_stderr`,
+  `arithmetic_side_effects`, tous en `deny`.
+  Exclure `multiple_crate_versions` du harnais (`allow`) : les doublons de versions sont
+  imposés par les dépendances amont (`kube`, `rig-core`, `sqlx`…) et `cargo update` ne les
+  déduplique pas.
+  Porter dans `[workspace.lints.rust]` : `unsafe_code = "deny"` et `missing_docs = "warn"`
+  (le `warn` passe en `deny` quand la dette `missing_docs` est purgée — décision de
+  Sébastien). Niveau `deny` et non `forbid` : `forbid` rend impossible l'exemption ciblée
+  des trois sites `libc` légitimes (kill de groupe de processus dans `tools/src/command.rs`
+  et `sandbox/src/ws/terminal.rs`, `set_var` sous verrou dans les tests de `cli`) ;
+  chaque exemption porte un commentaire SAFETY d'une ligne.
+  Faire hériter chaque membre du workspace via une table `[lints]` avec `workspace = true`
+  à la racine de son `Cargo.toml`.
+  Tolérer la famille panic/unwrap uniquement sous `cfg(test)` via
+  `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` porté par chaque
+  racine de crate (y compris les bin cibles de `sandbox` et le crate de `cli/src`) et par
+  chaque crate d'intégration sous `tests/`.
+  Tenir à **zéro warning imputable au nouveau code** sur tout fichier touché par une tâche
+  (`cargo clippy --workspace --all-targets`), la dette préexistante étant tracée en `Tasks`
+  ci-dessous et ne devant jamais grossir.
+  Reprendre la commande CI exacte dans la batterie du `validator` :
+  `cargo clippy --workspace --all-targets -- -D warnings` et `cargo fmt --all -- --check`.
+
+Must not:
+  Accepter un `#[allow(...)]` d'un lint du harnais dans du code de production sans
+  commentaire de justification d'une ligne citant la spec concernée.
+  Réduire le niveau d'un lint existant du harnais sans décision explicite de Sébastien.
+  Déclarer une table `[lints]` locale dans un membre (l'héritage `workspace = true` est la
+  seule source, sinon la dette se recompte deux fois).
+  Introduire une clé inline `lints.workspace = true` sous `[package]` : seule la table
+  racine `[lints]` est reconnue par cargo (la forme inline produit un
+  `unused manifest key: package.lints` silencieusement ignoré).
+  Réactiver un `#![deny(clippy::unwrap_used, ...)]` de crate : le `deny` vient du
+  workspace, la racine de crate ne porte que l'exemption `cfg(test)`.
+
+Scenario: unwrap ajouté dans du code touché
+  Given une tâche d'implémentation ajoute un `.unwrap()` sur un `Result` dans du code de production
+  When le validateur lance `cargo clippy --workspace --all-targets -- -D warnings`
+  Then la tâche est rejetée et l'erreur remonte dans la synthèse du validateur
+
+Scenario: exemption en test
+  Given un `mod tests` sous `cfg(test)` utilise `.unwrap()` abondamment
+  When le harnais clippy tourne (`--all-targets`)
+  Then aucun warning de la famille stricte n'est émit pour ce module
+
+Scenario: lint hors cible de tâche
+  Given un warning du harnais préexistant dans un fichier qu'une tâche ne touche pas
+  When le validateur évalue la tâche
+  Then ce warning est compté comme dette inchangée et ne bloque pas la tâche
+
+Scenario: dette qui grossit
+  Given une tâche dont le nouveau code introduit un warning du harnais dans une crate déjà endettée
+  When le validateur compare le compteur de dette avant/après
+  Then la tâche est rejetée : la dette ne doit jamais grossir
+
+Tasks:
+  [ ] Purger la dette crate par crate, en commençant par les feuilles de l'ordre de build.
+    Snapshot du 2026-09-21 (stable 1.97.1, `cargo clippy --workspace --all-targets`,
+    stoppé par les dépendances en échec) :
+    `vanyline-tools` 81 erreurs / 67 warnings ; `vanyline-crds` 43 / 62 ; `vanyline-cfgstore`
+    100 / 99 ; total partiel 223 erreurs dont ~42 de la famille stricte
+    (`unwrap`/`expect`/`panic`), 235 warnings dont 228 de `missing_docs`. Les crates en
+    aval (`lib`, `app`, `cli`, `sandbox`, `controller`) ne sont pas mesurées tant que les
+    feuilles ne compilent pas sous le harnais.
+  [ ] Doc `missing_docs` purgée partout, puis basculer `missing_docs = "deny"` (aval de Sébastien).
+  [ ] Basculer la vérification harnais en tout-vert (compteur de dette à zéro) et retirer
+    les exemptions `cfg(test)` devenues inutiles si applicable.
+
+Done when:
+  `cargo clippy --workspace --all-targets -- -D warnings` et `cargo fmt --all -- --check`
+  trient sans aucun warning, et la dette listée en `Tasks` est à zéro.
