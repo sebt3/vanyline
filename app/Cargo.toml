@@ -48,3 +48,5 @@ sea-orm-migration = { version = "2", features = ["sqlx-postgres", "runtime-tokio
 [dev-dependencies]
 sea-orm = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls", "macros", "mock"] }
 sea-orm-migration = { version = "2", features = ["sqlx-postgres", "sqlx-sqlite", "runtime-tokio-rustls"] }
+[lints]
+workspace = true

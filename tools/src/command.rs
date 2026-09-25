@@ -123,6 +123,8 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
                         // mais tous ses descendants. Best-effort : ESRCH (déjà mort) ou
                         // toute autre erreur n'est pas remontée, le timeout reste
                         // l'erreur pertinente à propager à l'appelant.
+                        #[allow(unsafe_code)]
+                        // SAFETY: kill(2) sur pgid du process_group(0) — voir commentaire au-dessus
                         unsafe {
                             libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
                         }

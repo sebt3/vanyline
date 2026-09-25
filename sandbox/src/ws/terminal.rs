@@ -231,6 +231,8 @@ pub fn spawn_shell(
 pub fn kill_process_group(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
     let pid = child.process_id();
     if let Some(pid) = pid {
+        #[allow(unsafe_code)]
+        // SAFETY: kill(2) sur pgid negatif — operation Unix standard, voir commentaire
         unsafe {
             // Safety: we only call libc::kill with a negative process group ID,
             // which is a standard Unix operation. The child process may already be

@@ -23,3 +23,5 @@ thiserror = "2"
 futures = "0.3"
 rand = "0.8"
 base64 = "0.22"
+[lints]
+workspace = true

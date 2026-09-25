@@ -1,4 +1,4 @@
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use percent_encoding::SIMPLE_ENCODE_SET;
 use percent_encoding::define_encode_set;

@@ -38,3 +38,5 @@ axum = { version = "0.8", default-features = false, features = ["http1", "tokio"
 schemars = "1.1.0"
 anyhow = "1"
 tokio-util = "0.7"
+[lints]
+workspace = true

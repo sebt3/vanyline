@@ -1,3 +1,5 @@
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, unsafe_code))]
+
 mod chat;
 mod config;
 mod config_check;
