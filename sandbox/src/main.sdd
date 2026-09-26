@@ -1,0 +1,524 @@
+Spec: Main
+
+Platform: Rust/vanyline-sandbox
+
+Purpose:
+  Point d'entrée unique du binaire `vanyline-sandbox` (../Cargo.toml — `[[bin]]`,
+  `path = "src/main.rs"` ; le même crate publie aussi une cible lib ./lib.rs et trois
+  autres bins — `vanyline-maint`, `vnl-hadolint-lsp`, `vnl-ruff-lsp` — hors périmètre
+  de cette spec). À la différence du binaire controller, ./main.rs ne déclare AUCUN
+  module : la racine documentaire du crate est ./lib.rs, et tout le comportement
+  HTTP/WS/MCP (routes, auth par requête, ticket WS, endpoints git) vit là-bas et dans
+  les modules pairs (`./config.sdd`, `./auth.sdd`, `./telemetry.sdd`, `./lsp.sdd`,
+  `./mcp.sdd`, `./lib.sdd`, `./ws/*.sdd` — à écrire). Ce fichier tient trois
+  responsabilités et rien d'autre : (1) config de démarrage — @Config::parse (clap,
+  14 drapeaux longs chacun surchargeable par variable d'env) puis @Config::validate,
+  dans un ORDRE CONTRACTUEL strict parse → @telemetry::init → validate dont la raison
+  est que les `warn` de validate (`--no-auth`, `STATIC_TOKEN`) ne sont visibles que
+  posé le subscriber tracing ; (2) assemblage de l'état partagé — @AuthState,
+  @LspManager::from_env (env `VNL_LSP_TOOLCHAINS`), @fs_push_channels (canal broadcast
+  `fs_events` + @FsFlushRequests branchés sur le MÊME canal), @TicketStore::new — puis
+  construction du routeur par @build_app (les routes ne sont PAS déclarées ici) ;
+  (3) deux écoutes — le serveur metrics interne (@spawn_metrics_server, échec de bind
+  NON fatal) et le serveur principal, en TLS rustls si la PAIRE cert+key est fournie
+  conjointement, en HTTP clair sinon, avec appairage des deux drapeaux TLS exigé
+  (faute : erreur fatale) et flush OTel (@shutdown_otel) sur la seule voie de retour
+  nominale. Le contrat du fichier : ordre d'initialisation, codes de sortie, appairage
+  TLS, périmètre fatal / non-fatal.
+
+Owns:
+  ./main.rs
+
+Can read:
+  ./lib.rs
+  ./config.rs
+  ./auth.rs
+  ./telemetry.rs
+  ./lsp.rs
+  ./ws/ticket.rs
+  ../Cargo.toml
+  ../Dockerfile
+  /vanyline.sdd
+  /tooling.sdd
+  /docs/architecture.md
+  /controller/src/sandbox.sdd
+  /crds/src/lib.sdd
+  /deploy/sandbox/sandbox-test.yaml
+
+Structure:
+  ./main.rs — 58 lignes, aucun module `#[cfg(test)]`, aucune ligne d'exemption
+    `cfg_attr(test, allow(...))` (contrairement à ./lib.rs ligne 1 — divergence avec
+    /tooling.sdd, cf. `[?]` des `Tasks`). Blocs physiques : imports std/`anyhow`/
+    `clap::Parser as _`/huit items du crate lib (@AppState, @LspManager,
+    @auth::AuthState, @build_app, @config::Config, @fs_push_channels,
+    @spawn_metrics_server, @ws::ticket::TicketStore — @telemetry étant appelé par
+    chemin complet) ; @main unique (`#[tokio::main]`, `async`, renvoie
+    @anyhow::Result), corps en séquence stricte : parse → `telemetry::init` → `validate`
+    → `Arc::new(config)` → parse `metrics_listen` + `spawn_metrics_server` → @AuthState::new
+    → @LspManager::from_env → @fs_push_channels → littéral @AppState → @build_app →
+    parse `listen` + log `listening on {addr}` → `match` TLS à trois branches
+    (paire Some/Some → rustls ; None/None → HTTP clair ; mixte → @anyhow::bail) →
+    `telemetry::shutdown_otel()` → `Ok(())`.
+
+Must:
+  Ordonner l'initialisation EXACTEMENT ainsi, chaque étape conditionnant la suivante :
+    1) @Config::parse (clap — avant tout tracing, raison commentée dans le fichier :
+      l'endpoint otel doit être connu de @telemetry::init ; la validation complète
+      attend le tracing) ; 2) @telemetry::init(config.otel_endpoint.as_deref()) —
+      installe le recorder Prometheus global et le subscriber tracing (fmt sur stdout,
+      @EnvFilter lu depuis `RUST_LOG`, défaut compilé `vanyline_sandbox=info,tower_http=debug`),
+      OTel optionnel non fatal en interne ; 3) @config.validate() — les `warn` de ce
+      pas ne sont visibles QUE parce que 2) précède 3) ; 4) @Arc::new(config) ;
+      5) parse de `metrics_listen` en @std::net::SocketAddr puis @spawn_metrics_server
+      en attente bornée au bind ; 6) @AuthState::new(config.clone()) ; 7)
+      @LspManager::from_env(config.sandbox_root.clone()) ; 8) @fs_push_channels() ;
+      9) littéral @AppState { config, auth, tickets: @TicketStore::new(), lsp,
+      fs_events, fs_flush } ; 10) @build_app(state) ; 11) parse de `listen` +
+      `tracing::info!("listening on {addr}")` ; 12) branch TLS ; 13)
+      @telemetry::shutdown_otel() puis `Ok(())`.
+  Partager une UNIQUE instance de @Config derrière @Arc, clonée vers @AuthState et vers
+    @AppState — aucune relecture ni revalidation en cours de vie.
+  Appeler @fs_push_channels (et non deux constructions séparées) : le @broadcast::Sender
+    `fs_events` exposé dans @AppState et le @FsFlushRequests doivent partager le MÊME
+    canal (capacité @FS_EVENTS_CAPACITY = 64, contrat de ./lib.rs).
+  Lancer le serveur metrics via @spawn_metrics_server : l'échec de BIND y est traité
+    en interne par un `warn` et le démarrage principal continue (le contrat du
+    non-fatal est porté par ./lib.rs ; ./main.rs doit lui passer l'adresse déjà parsée,
+    donc un `metrics_listen` syntaxiquement invalide reste FATAL ici — asymétrie
+    contractée, cf. `[?]`).
+  Exiger la PAIRE TLS : `(Some(cert), Some(key))` → `tracing::info!("TLS enabled")`
+    puis @axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key) puis
+    @axum_server::bind_rustls(addr, tls).serve(app.into_make_service()) ;
+    `(None, None)` → @tokio::net::TcpListener::bind(addr) puis @axum::serve(listener, app) ;
+    tout autre mélange → @anyhow::bail avec le message exact
+    `Both --tls-cert and --tls-key must be provided together`.
+  Écouter par défaut `0.0.0.0:3000` (port MCP + éditeur, cohérent avec @MCP_PORT = 3000
+    de /crds/src/lib.sdd, le `EXPOSE 3000 9090` et l'`ENTRYPOINT` nu du ../Dockerfile)
+    et metrics `0.0.0.0:9090` — les deux issus des défauts compilés de ./config.rs.
+  Ne dépendre d'AUCUN accès réseau ni cluster au démarrage : @AuthState::new ne
+    construit que le client reqwest (JWKS découvert et récupéré paresseusement à la
+    première requête protégée), @LspManager::from_env ne spawn AUCUN processus LSP
+    (sessions à la demande), @TicketStore::new est purement mémoire. Le binaire démarre
+    et sert donc hors cluster (le kube/k8s-openapi de ../Cargo.toml ne sont pas sur le
+    chemin de démarrage).
+  Flusher OTel (@telemetry::shutdown_otel, no-op si OTel absent) sur la voie de retour
+    qui suit la fin de @axum::serve/@serve.
+
+Must not:
+  Contenir de déclaration de module (@mod), de handler, de route, de middleware ou de
+    logique d'auth par requête : tout est la responsabilité de ./lib.rs et de ses
+    modules pairs.
+  Employer `unwrap`/`expect`/`panic!`/`todo!`/`dbg!`/`println!`/`eprintln!` sur le
+    chemin de production (harnais /tooling.sdd) — ./main.rs n'en contient aucun
+    aujourd'hui ; la remontée d'erreur est exclusivement le `?` sur @anyhow::Result.
+  Appeler @Config::parse_and_validate : cette fonction (./config.rs) valide AVANT
+    l'init tracing et contredit la raison d'être de l'ordre en `Must` — ./main.rs fait
+    parse et validate séparés, autour de @telemetry::init.
+  Installer un gestionnaire de signal, un arrêt gracieux (aucune poignée
+    `with_graceful_shutdown` ni équivalent), une boucle de retry sur bind, ou un
+    réordonnancement des étapes (par ex. binder avant de logger, ou valider avant
+    l'init tracing).
+  Exposer les routes du routeur principal sur le port metrics, ou l'inverse : deux
+    écouteurs distincts, le second construit par ./lib.rs.
+  Retenter quoi que ce soit après une erreur fatale : le `?` quitte @main, le runtime
+    tokio est détruit, les tâches déjà lancées (dont le serveur metrics) meurent avec
+    lui.
+
+Depends on:
+  ./lib.rs (cible lib `vanyline_sandbox`) — @AppState (champ par champ), @build_app
+    (table des routes et middlewares), @fs_push_channels/@FS_EVENTS_CAPACITY,
+    @spawn_metrics_server (contrat bind non-fatal), @LspManager (re-export).
+  ./config.rs — @Config : les 14 drapeaux + env + défauts, et @Config::validate
+    (règle no_auth ⇒ OK-avec-warn, static_token ⇒ OK-avec-warn, sinon issuer ET
+    audience obligatoires) ; spec sœur à écrire.
+  ./auth.rs — @AuthState::new : construction du client reqwest, CA optionnelle
+    `oidc_ca_cert` (lecture + parse PEM = seuls échecs possibles au démarrage).
+  ./lsp.rs — @LspManager::from_env : lit l'env `VNL_LSP_TOOLCHAINS` (`std::env::var`,
+    HORS clap et hors @Config) ; absente/vide ⇒ aucune toolchain ; JSON invalide ⇒
+    erreur fatale remontée par le `?`. Producteur de cette env : le controller
+    (/controller/src/sandbox.sdd, `VNL_LSP_TOOLCHAINS` = tableau JSON `[{name,bin,args}]`).
+  ./ws/ticket.rs — @TicketStore::new : magasin mémoire vide au démarrage.
+  ./telemetry.rs — @init (Prometheus + subscriber + OTel optionnel non fatal) et
+    @shutdown_otel.
+  ./mcp.rs, ./git.rs, ./ws/ — branchés INDIRECTEMENT par @build_app, jamais cités par
+    ./main.rs.
+  `tokio` 1 (features `full`) — macro @tokio::main (runtime multi-thread par défaut).
+  `clap` 4 (features `derive`, `env`) — @Config::parse via l'import @clap::Parser as _ ;
+    priorité flag > env > défaut compilé.
+  `anyhow` 1 — @Result de @main, @anyhow::bail ; le `Termination` std rend l'affichage
+    `Error: {debug}` sur stderr avec code de sortie 1.
+  `axum` 0.8 — @axum::serve (branche HTTP clair) ; tout le reste du routeur vient de
+    ./lib.rs.
+  `axum-server` 0.7 (feature `tls-rustls`) — @bind_rustls + @RustlsConfig::from_pem_file
+    (branche TLS).
+  `tracing` 0.1 — les deux `info` du fichier (`listening on {addr}`, `TLS enabled`).
+  /tooling.sdd — harnais ; la ligne d'exemption `cfg(test)` que sa section
+    `Can modify` attribue à ./sandbox/src/main.rs n'existe PAS dans le fichier
+    (cf. `[?]`).
+  /vanyline.sdd — règle un-fichier-une-spec ; la règle « JWT jamais exposé au
+    navigateur » est portée par les modules (ticket WS), pas ici.
+
+Exposes:
+  Le binaire `vanyline-sandbox` seul — ./main.rs n'expose AUCUN item (cible bin ; les
+    items publics du crate viennent de ./lib.rs) :
+  - @main — `#[tokio::main] async fn main() -> @anyhow::Result<()>`, sans argument,
+      point d'entrée exclusif de ce binaire.
+  - Aucun autre symbole (pas de @Cli local : la config est @config::Config, item public
+      de la cible lib).
+  Surface observable du binaire (contractée par l'assemblage, spécifiée ailleurs) :
+  - routeur principal construit par @build_app — routes `/mcp`, `/git/*`,
+    `/ws/ticket` sous @auth::require_auth ; `/health`,
+    `/.well-known/oauth-protected-resource` publics ; `/ws/fs`, `/ws/terminal`,
+    `/ws/lsp/{toolchain}` sous @ws_auth_middleware par ticket (contrat ./lib.rs) ;
+  - routeur metrics — `GET /metrics` sur le port `metrics_listen` (contrat ./lib.rs).
+
+Accepts:
+  Ligne de commande : les 14 drapeaux longs de @Config (noms Rust → flag kebab → env →
+    défaut compilé), et rien d'autre hormis `--help` :
+    - @config.listen : `--listen` / `MCP_LISTEN` / `0.0.0.0:3000`
+    - @config.tls_cert : `--tls-cert` / `MCP_TLS_CERT` / absent
+    - @config.tls_key : `--tls-key` / `MCP_TLS_KEY` / absent
+    - @config.oidc_issuer : `--oidc-issuer` / `OIDC_ISSUER` / absent
+    - @config.oidc_audience : `--oidc-audience` / `OIDC_AUDIENCE` / absent
+    - @config.auth_groups_admin : `--auth-groups-admin` / `AUTH_GROUPS_ADMIN` /
+      `kubernetes-admin`
+    - @config.auth_groups_read : `--auth-groups-read` / `AUTH_GROUPS_READ` /
+      `kubernetes-view,kubernetes-edit`
+    - @config.no_auth : `--no-auth` / `NO_AUTH` / `false`
+    - @config.static_token : `--static-token` / `STATIC_TOKEN` / absent
+    - @config.public_url : `--public-url` / `MCP_PUBLIC_URL` / absent
+    - @config.oidc_ca_cert : `--oidc-ca-cert` / `OIDC_CA_CERT` / absent
+    - @config.metrics_listen : `--metrics-listen` / `METRICS_LISTEN` / `0.0.0.0:9090`
+    - @config.otel_endpoint : `--otel-endpoint` / `OTEL_EXPORTER_OTLP_ENDPOINT` / absent
+    - @config.sandbox_root : `--sandbox-root` / `VNL_SANDBOX_ROOT` / `/workspace`
+  Aucun `--version` (aucun attribut `version` sur @Config) ; flag > env > défaut.
+  Variables d'environnement additionnelles, NON gérées par clap : `VNL_LSP_TOOLCHAINS`
+    (lue par ./lsp.rs au démarrage, posée par le controller — spec sœur) ; `RUST_LOG`
+    (lue par @EnvFilter dans ./telemetry.rs, repli sur le défaut compilé si absente ou
+    invalide).
+  Aucun prérequis réseau : pas de cluster, pas d'OIDC joignable, pas de collector OTLP
+    pour démarrer (cf. `Handles`).
+  Consommateurs réels en production : pods créés par le controller — `args:
+    ["--no-auth"]`, containerPort @MCP_PORT = 3000, env `VNL_SANDBOX_ROOT` et
+    `VNL_LSP_TOOLCHAINS` (/controller/src/sandbox.sdd) ; /deploy/sandbox/sandbox-test.yaml
+    (mêmes env, toolchains en `volumes[].image`) ; ./Dockerfile `ENTRYPOINT` sans
+    argument (tout vient alors de l'env/défauts).
+
+Returns:
+  Logs tracing (fmt, stdout, filtre `RUST_LOG` sinon
+  `vanyline_sandbox=info,tower_http=debug`) — messages émis ou rendus visibles par
+  ./main.rs :
+  - exact `listening on {addr}` (adresse principale parsée, ÉMIS AVANT tout bind effectif)
+  - exact `TLS enabled` (branche TLS, avant lecture des fichiers PEM)
+  - exact `Authentication disabled (--no-auth). Development use only!` (`warn`, via
+    validate rendu visible par l'ordre d'init)
+  - exact `STATIC_TOKEN is set — bypasses OIDC. Development/demo only!` (`warn`)
+  - selon ./lib.rs : `metrics server listening on {addr}` (`info`) ou `could not bind
+    metrics server on {addr}: … — /metrics unavailable` (`warn`)
+  stderr : usage clap sur erreur de parse ; `Error: {chaîne anyhow Debug}` sur toute
+    erreur fatale ; avertissement OTel pré-subscriber (émis par ./telemetry.rs).
+  Codes de sortie : 2 (parse clap — avant tout log), 1 (toute erreur fatale remontée
+    par `?`), 0 (retour nominal après fin de @serve — voie purement théorique,
+    cf. `Handles` « arrêt ») ; SIGTERM sur pod = 143/137, code subi et non choisi.
+  Comportement HTTP des deux écouteurs (statuts, payloads) : hors de ./main.rs —
+    specs ./lib.rs et modules branchés.
+
+Raises:
+  @main ne catch AUCUNE erreur : chaque `?` est fatal, quitte @main, et le `Termination`
+  std rend `Error: {debug}` sur stderr, code 1. Sites, dans l'ordre d'exécution :
+  - @Config::parse : erreur clap → exit 2 + usage, sans passage par le `Result`.
+  - @telemetry::init : échec d'installation du recorder Prometheus (seule erreur
+    remontée ; l'échec OTel interne est non-fatal par construction).
+  - @Config::validate : messages exacts
+    `--oidc-issuer (or OIDC_ISSUER) is required. Use --no-auth or STATIC_TOKEN for local dev.`
+    puis, audience absente avec issuer présent,
+    `--oidc-audience (or OIDC_AUDIENCE) is required. Use --no-auth or STATIC_TOKEN for local dev.`
+  - parse `metrics_listen` : adresse @SocketAddr invalide ⇒ fatal (asymétrie avec le
+    bind non-fatal — cf. `[?]`).
+  - @AuthState::new : `oidc_ca_cert` illisible ou PEM invalide (contextes `reading OIDC
+    CA cert: …` / `parsing OIDC CA cert`), ou échec du builder reqwest.
+  - @LspManager::from_env : `VNL_LSP_TOOLCHAINS` JSON invalide ⇒ `LSP toolchain parse
+    error: …` ; env absente ou vide n'EST PAS une erreur (liste vide).
+  - parse `listen` : adresse invalide ⇒ fatal.
+  - Appairage TLS : @anyhow::bail `Both --tls-cert and --tls-key must be provided
+    together` (dans les deux sens : cert seule ou key seule).
+  - @RustlsConfig::from_pem_file : fichier absent/illisible ou PEM invalide.
+  - Bind : @TcpListener::bind ou @bind_rustls en échec (port déjà pris).
+  - @axum::serve / @serve : erreur du serveur → `?` ⇒ @telemetry::shutdown_otel EST
+    ALORS SAUTÉ.
+
+Handles:
+  OIDC injoignable au démarrage : AUCUNE vérification réseau — le serveur démarre et
+    sert ; l'échec de discovery/JWKS est reporté à la première requête protégée
+    (paresse, ./auth.rs).
+  Port metrics déjà occupé : `warn` (./lib.rs) et poursuite du démarrage — la sandbox
+    tourne sans endpoint `/metrics`.
+  `metrics_listen` ou `listen` syntaxiquement invalide : exit 1 — un typage erroné
+    d'adresse est fatal, y compris pour le port secondaire (asymétrie assumée par le
+    code, à trancher cf. `[?]`).
+  Port principal déjà pris : le log `listening on {addr}` a DÉJÀ été émis avant le
+    bind — le processus annonce une écoute puis meurt avec exit 1 (fenêtre trompeuse
+    pour un observateur, consécutive à l'ordre figé du fichier).
+  Adresse écoutée demandée avec port `0` (éphémère) : le log `listening on {addr}`
+    affiche l'adresse DEMANDÉE (`127.0.0.1:0`), jamais le port réellement attribué par
+    le noyau — ni ici ni dans ./lib.rs (@spawn_metrics_server logge de même l'adresse
+    passée) le port effectif n'est observable en sortie (cf. `[?]`).
+  Paire TLS incomplète : le bail intervient APRÈS le spawn du serveur metrics et après
+    le log `listening on` — le process meurt en ayant annoncé et lancé des choses non
+    tenues (cf. `[?]`).
+  `VNL_LSP_TOOLCHAINS` absente ou vide : démarrage normal sans aucune toolchain LSP
+    (les sessions `/ws/lsp/{toolchain}` répondront « non configurée », ./lsp.rs) ;
+    JSON invalide : exit 1 — le pod sandbox configuré par le controller ne peut donc
+    pas porter un JSON cassé sans refuser de démarrer.
+  Endpoint OTLP invalide ou injoignable : @telemetry::init dégrade en interne (un
+    avertissement stderr, éventuellement avant le subscriber) et le serveur démarre
+    sans export de traces — jamais fatal.
+  `--no-auth` : démarrage autorisé avec `warn` visible ; idem `STATIC_TOKEN`
+    (priorité à no_auth dans validate : warn no_auth seul si les deux sont posés).
+  `RUST_LOG` absente ou invalide : ./telemetry.rs retombe sur le défaut compilé — le
+    contrat de ./main.rs est seulement « init tracing AVANT validate ».
+  Arrêt : AUCUN gestionnaire de signal ni arrêt gracieux ; SIGTERM tue le process —
+    @telemetry::shutdown_otel n'est en pratique JAMAIS atteint (la voie `Ok(())`
+    exige que @serve revienne `Ok`, ce qui n'arrive qu'avec une poignée d'arrêt
+    jamais câblée ; la voie `Err` saute le flush par le `?`) — cf. `[?]`.
+  Ticket store : vide à chaque démarrage, purement mémoire — les tickets émis avant
+    une mort/relance du process sont perdus (30 s de TTL, ./ws/ticket.rs).
+  Erreur d'un `?` après spawn des tâches tokio (metrics, etc.) : destruction du
+    runtime tue les tâches sans nettoyage explicite.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-26 (comportement actuel du code, rien
+    de nouveau n'est supposé).
+  [?] Ligne d'exemption `cfg(test)` : /tooling.sdd (`Can modify`, ligne 18) attribue à
+    ./sandbox/src/main.rs « ligne d'exemption `cfg(test)` seulement », mais le fichier
+    ne contient PAS cette ligne (ligne 1 = `use std::sync::Arc;`) et aucun module
+    `#[cfg(test)]`. ./lib.rs, lui, la porte. Ajouter la ligne (aligner sur le harnais,
+    utile si des tests unitaires de @main voient le jour) ou retirer l'entrée de
+    /tooling.sdd (la ligne serait vestigiale, comme cela a été tranché côté
+    controller) ?
+  [?] `METRICS_LISTEN` — doc comment de ./config.rs : « Omit to disable the metrics
+    server entirely », mais le drapeau porte `default_value = "0.0.0.0:9090"` : omis ⇒
+    serveur ACTIF sur 9090, aucune valeur n'éteint le serveur (chaîne vide ⇒ parse
+    @SocketAddr fatal). Désactivation réelle (valeur vide/sentinelle acceptée, ou
+    drapeau `--no-metrics`) ou correction du doc comment (« omis = actif par défaut ») ?
+  [?] Asymétrie fatal/non-fatal du port metrics : parse de `metrics_listen` FATAL ici
+    vs bind NON-fatal (./lib.rs) — une faute de frappe sur le port SECONDAIRE empêche
+    la sandbox de démarrer alors que son indisponibilité effective est acceptée.
+    Rendre le parse metrics non-fatal (warn + pas de /metrics), ou assumer (config
+    invalide = crash-loop visible par K8s, préférable à un silence) ?
+  [?] @telemetry::shutdown_otel() inatteignable en pratique : @axum::serve/@serve ne
+    revient `Ok` que moyennant une poignée d'arrêt gracieux jamais câblée, et la voie
+    `Err` saute le flush par le `?` ; les spans OTel en batch sont donc perdues à
+    chaque arrêt de pod. Contracter l'arrêt gracieux ( CancellationToken +
+    `with_graceful_shutdown` / handle axum_server, sortie 0 réelle + flush garanti) ou
+    accepter la mort subie (supprimer alors le faux sentiment de la ligne 56) ?
+  [?] Fenêtre trompeuse avant bail TLS : avec un seul des deux drapeaux TLS, le log
+    `listening on {addr}` et le serveur metrics sont émis/lancés AVANT le bail.
+    Vérifier l'appairage des drapeaux AVANT le parse de `listen` et le spawn metrics
+    (coût : réordonnancement mineur) ou laisser l'ordre actuel ?
+  [?] Env clap à chaîne vide (ex. `MCP_LISTEN=""`) : clap accepte la valeur vide, la
+    parse @SocketAddr échoue, exit 1 — comportement accidentel jamais testé. Valider
+    « non-vide » dans @Config::validate ou assumer (l'apiserver K8s et la CI n'envoient
+    jamais d'env vides en pratique) ?
+  [?] @Config::parse_and_validate (./config.rs, ligne 93) n'a AUCUN appelant dans le
+    workspace (vérifié par grep le 2026-09-26) et son ordre (validate avant tracing)
+    contredit la raison d'être de ./main.rs. À traiter dans la spec ./config.rs :
+    supprimer ou re-documenter — signalé ici car ./main.rs en est le consommateur
+    naturel absent.
+  [?] Log de l'adresse écoutée : `listening on {addr}` (et `metrics server listening
+    on {addr}` côté ./lib.rs) affiche l'adresse DEMANDÉE, émis AVANT tout bind — avec
+    un port `0` demandé, le log littéral porte `:0` et le port réellement attribué par
+    le noyau est invisible en sortie. Le rendre effectif (logger `listener.local_addr()`
+    après bind dans la branche HTTP ; l'équivalent n'existe pas trivialement côté
+    axum_server — branche à asymétrie possible) ou assumer le log déclaratif actuel
+    (le port éphémère n'est pas un mode de déploiement soutenu) ?
+  [?] `NO_AUTH` en variable d'env : comportement de clap sur une valeur d'env non
+    booléenne pour un drapeau booléen (`NO_AUTH=1`, `NO_AUTH=`) jamais exercé ni
+    documenté — fixer le contrat (quelles valeurs comptent comme vrai) dans la spec
+    ./config.rs avec un Scenario, la surface observable depuis ./main.rs étant
+    identique à `--no-auth`.
+  [ ] Harnais de tests de ./main.rs à poser avant le premier `implementer` : ./main.rs
+    n'a aucun module de test et le crate n'a pas de test d'intégration sur le binaire.
+    Proposition : tests d'intégration `sandbox/tests/main_startup.rs` lançant le
+    binaire via `env!("CARGO_BIN_EXE_vanyline-sandbox")` (le crate ne dépend d'aucun
+    cluster au démarrage — tous ces tests tournent hors cluster) pour les Scenarios
+    `clap_help_liste_quatorze_drapeaux`, `clap_drapeau_inconnu_exit_2`,
+    `clap_version_absente_rejelee`, `validate_echoue_sans_oidc_exit_1`,
+    `warn_no_auth_visible_dans_logs`, `warn_static_token_visible_dans_logs`,
+    `metrics_listen_invalide_exit_1`, `metrics_bind_occupe_non_fatal`,
+    `tls_cert_sans_cle_exit_1`,
+    `port_principal_pris_exit_1_apres_log`, `lsp_toolchains_json_invalide_exit_1`,
+    `lsp_toolchains_absentes_demarre_sans_lsp`, `health_200_sur_port_principal`,
+    `metrics_200_prometheus_apres_requete_principale`, `flag_surcharge_env`,
+    `otel_endpoint_injoignable_demarre_quand_meme` ; convention « ports sondés » pour
+    `<P1>`/`<P2>` : le test se lie d'abord à `127.0.0.1:0`, lit le port via
+    `local_addr()`, relâche puis passe cette adresse explicite au binaire — le log
+    `listening on {addr}` n'affiche que l'adresse DEMANDÉE (jamais le port éphémère
+    attribué par le noyau, cf. `[?]`), une adresse explicite est donc la seule
+    observable ; Scenario
+    `tls_paire_valide_sert_https` taggé intégration locale (certificat auto-signé
+    généré hors test, ex. script ou fixture openssl) — à défaut d'openssl en
+    dev-dependancy, prévoir une fixture PEM commitée ou le saut conditionnel.
+  [ ] Convertir en tests taggés par leur titre les Scenarios ci-dessous, les faire
+    compiler et échouer d'abord, puis verrouiller l'implémentation au minimum et
+    faire passer la synthèse du validator au vert (batterie complète, AGENTS.md).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe (les
+    tests d'intégration binaire tournent sans cluster ; seul
+    `tls_paire_valide_sert_https` requiert une fixture de certificats).
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici et,
+    le cas échéant, dans /tooling.sdd, ./config.rs et ./lib.rs.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt)
+    est verte sur `vanyline-sandbox`, et `cargo run -p vanyline-sandbox -- --help`
+    énumère les quatorze drapeaux avec les défauts contractés.
+
+Scenario: clap_help_liste_quatorze_drapeaux
+  Given le binaire `vanyline-sandbox`
+  When il est invoqué avec le seul argument `--help`
+  Then le code de sortie est 0 et stdout énumère les quatorze flags longs (`--listen`,
+    `--tls-cert`, `--tls-key`, `--oidc-issuer`, `--oidc-audience`, `--auth-groups-admin`,
+    `--auth-groups-read`, `--no-auth`, `--static-token`, `--public-url`,
+    `--oidc-ca-cert`, `--metrics-listen`, `--otel-endpoint`, `--sandbox-root`) sous le
+    nom de commande `vanyline-sandbox`, avec les défauts affichés `0.0.0.0:3000`,
+    `0.0.0.0:9090`, `/workspace`, `kubernetes-admin` et
+    `kubernetes-view,kubernetes-edit`
+
+Scenario: clap_drapeau_inconnu_exit_2
+  Given le binaire `vanyline-sandbox` lancé hors cluster
+  When il est invoqué avec un drapeau inexistant (par ex. `--namespace`)
+  Then le code de sortie est 2, l'usage clap est écrit sur stderr, et stdout ne
+    contient aucun log de démarrage (aucune ligne `listening on`)
+
+Scenario: clap_version_absente_rejelee
+  Given le binaire `vanyline-sandbox`
+  When il est invoqué avec `--version`
+  Then le code de sortie est 2 avec message d'erreur clap — aucun drapeau `--version`
+    n'est généré (verrou de l'absence)
+
+Scenario: validate_echoue_sans_oidc_exit_1
+  Given le binaire invoqué sans argument et dans un environnement où aucune des
+    variables `OIDC_ISSUER`, `OIDC_AUDIENCE`, `NO_AUTH`, `STATIC_TOKEN` n'est posée
+  When le processus s'exécute
+  Then le code de sortie est 1, stderr contient le message exact
+    `--oidc-issuer (or OIDC_ISSUER) is required. Use --no-auth or STATIC_TOKEN for local dev.`,
+    et stdout ne contient AUCUNE ligne `listening on` ni `metrics server listening on`
+    — la validation précède toute écoute
+
+Scenario: warn_no_auth_visible_dans_logs
+  Given le binaire invoqué avec `--no-auth --listen <P1> --metrics-listen <P2>` (P1, P2 : ports libres sondés par le test — cf.
+    convention de la section `Tasks`)
+  When la ligne `listening on` apparaît sur stdout (le test arrête alors le processus)
+  Then stdout contient au préalable le `warn` au message exact
+    `Authentication disabled (--no-auth). Development use only!` — la preuve que
+    @Config::validate s'exécute APRÈS @telemetry::init (sinon ce warn serait perdu)
+
+Scenario: warn_static_token_visible_dans_logs
+  Given le binaire invoqué avec `--static-token demo-token --listen <P1>
+    --metrics-listen <P2>` (P1, P2 : ports libres sondés par le test — cf. convention
+    de la section `Tasks`), sans `OIDC_ISSUER`/`OIDC_AUDIENCE`
+  When la ligne `listening on` apparaît sur stdout (le test arrête alors le processus)
+  Then le processus reste vivant (aucun code de sortie avant que le test ne
+    l'arrête), stdout contient le `warn` au message exact
+    `STATIC_TOKEN is set — bypasses OIDC. Development/demo only!`, et le
+    serveur est lancé — STATIC_TOKEN seul dispense l'OIDC
+
+Scenario: metrics_listen_invalide_exit_1
+  Given le binaire invoqué avec `--no-auth --metrics-listen pas-une-addresse --listen <P1>`
+    (le port principal n'est jamais atteint — la parse metrics tue avant)
+  When le processus s'exécute
+  Then le code de sortie est 1 et stderr contient le préfixe `Error:` — une adresse
+    metrics invalide est FATALE (à comparer au bind metrics non-fatal, cf. `[?]`) ;
+    stdout ne contient pas `listening on`
+
+Scenario: metrics_bind_occupe_non_fatal
+  Given un socket déjà lié sur l'adresse `A` (occupé par le test lui-même)
+  When le binaire est invoqué avec `--no-auth --metrics-listen A --listen <P1>`
+    (P1 port libre sondé — cf. convention `Tasks`)
+  Then le `warn` `could not bind metrics server on A: … — /metrics unavailable`
+    apparaît sur stdout, la ligne `listening on` suit, et le processus ne sort pas —
+    l'échec de bind metrics ne bloque jamais le démarrage (contrat ./lib.rs exercé
+    depuis @main)
+
+Scenario: tls_cert_sans_cle_exit_1
+  Given un fichier certificat quelconque existant, le binaire invoqué avec
+    `--no-auth --tls-cert <fichier> --listen <P1> --metrics-listen <P2>` (P1, P2 : ports libres sondés par le test — cf.
+    convention de la section `Tasks`)
+    (drapeau `--tls-key` absent)
+  When le processus s'exécute
+  Then le code de sortie est 1 et stderr contient le message exact
+    `Both --tls-cert and --tls-key must be provided together`, sans aucune ligne
+    `TLS enabled` ; la symétrie (clé sans cert) produit le même résultat
+
+Scenario: tls_paire_valide_sert_https
+  Given un couple certificat/clé auto-signés pour `localhost` (fixture de test — tag
+    intégration locale, génération de certificats hors périmètre cargo) et le binaire
+    invoqué avec `--no-auth --tls-cert <cert> --tls-key <cle> --listen <P1>
+    --metrics-listen <P2>` (P1, P2 : ports libres sondés — cf. convention `Tasks`)
+  When le log `TLS enabled` est apparu et que `GET https://localhost:<P1>/health`
+    est émis en acceptant le certificat auto-signé
+  Then la réponse est 200 avec le corps `{"status":"ok"}` — la branche
+    @axum_server::bind_rustls de ./main.rs sert réellement le routeur de @build_app
+
+Scenario: port_principal_pris_exit_1_apres_log
+  Given un socket déjà lié par le test sur l'adresse `P`
+  When le binaire est invoqué avec `--no-auth --listen P --metrics-listen <P2>`
+    (P2 port libre sondé — cf. convention `Tasks`)
+  Then stdout porte la ligne `listening on P` (émise AVANT le bind), puis le code de
+    sortie est 1 avec le message d'erreur du bind sur stderr — documente la fenêtre
+    trompeuse log-avant-bind de l'ordre actuel
+
+Scenario: lsp_toolchains_json_invalide_exit_1
+  Given l'environnement `VNL_LSP_TOOLCHAINS` posé à une chaîne JSON invalide
+    (par ex. `{pas du json`) et le binaire invoqué avec
+    `--no-auth --listen <P1> --metrics-listen <P2>` (P1, P2 : ports libres sondés par le test — cf.
+    convention de la section `Tasks`)
+  When le processus s'exécute
+  Then le code de sortie est 1 et stderr contient `LSP toolchain parse error` — une
+    env LSP corrompue empêche le démarrage (config sandbox du controller tenue pour
+    valide par construction, cf. /controller/src/sandbox.sdd)
+
+Scenario: lsp_toolchains_absentes_demarre_sans_lsp
+  Given l'environnement `VNL_LSP_TOOLCHAINS` réellement absente (et non posée à la
+    chaîne vide) et le
+    binaire invoqué avec `--no-auth --listen <P1> --metrics-listen <P2>` (P1, P2 : ports libres sondés par le test — cf.
+    convention de la section `Tasks`)
+  When la ligne `listening on` apparaît
+  Then le processus est vivant et `GET http://<P1>/health` répond 200 —
+    l'absence de toolchain LSP n'est jamais une erreur de démarrage
+
+Scenario: health_200_sur_port_principal
+  Given le binaire invoqué avec `--no-auth --listen <P1> --metrics-listen <P2>` (P1, P2 : ports libres sondés par le test — cf.
+    convention de la section `Tasks`)
+  When un `GET /health` HTTP est émis sur `P1`
+  Then la réponse est 200 avec le corps JSON `{"status":"ok"}` — la chaîne
+    @Config → @AppState → @build_app → écoute est prouvée de bout en bout (le détail
+    des routes appartient à ./lib.rs)
+
+Scenario: metrics_200_prometheus_apres_requete_principale
+  Given le binaire lancé comme au Scenario `health_200_sur_port_principal` avec le
+    port metrics `P2` (sondé puis demandé explicitement, donc restitué tel quel par le
+    log `metrics server listening on {addr}` — qui n'affiche que l'adresse DEMANDÉE)
+    et une requête `GET /health` déjà servie sur `P1`
+  When un `GET /metrics` est émis sur `P2`
+  Then la réponse est 200, de type `text/plain; version=0.0.4`, et le corps contient
+    la famille `http_requests_total` — le recorder posé par @telemetry::init et le
+    middleware de @build_app alimentent bien @spawn_metrics_server
+
+Scenario: flag_surcharge_env
+  Given l'environnement `MCP_LISTEN` posée à `127.0.0.1:34001` et le binaire invoqué
+    avec `--no-auth --listen 127.0.0.1:34002 --metrics-listen <P2>` (P2 port libre
+    sondé — cf. convention `Tasks`)
+  When le processus démarre
+  Then le log porte exactement `listening on 127.0.0.1:34002` — le drapeau surcharge
+    la variable d'env (priorité clap), `34001` n'apparaît dans aucun log
+
+Scenario: otel_endpoint_injoignable_demarre_quand_meme
+  Given l'environnement `OTEL_EXPORTER_OTLP_ENDPOINT` posée à un collecteur injoignable
+    (`http://127.0.0.1:1`) et le binaire invoqué avec
+    `--no-auth --listen <P1> --metrics-listen <P2>` (P1, P2 : ports libres sondés par le test — cf.
+    convention de la section `Tasks`)
+  When l'exécution atteint le point d'écoute (ligne `listening on` sur stdout)
+  Then le processus est vivant et `GET /health` répond 200 — l'échec OTel est une
+    dégradation silencieuse (éventuel avertissement stderr toléré), jamais un arrêt

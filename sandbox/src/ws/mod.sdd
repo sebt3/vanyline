@@ -1,0 +1,37 @@
+Spec: Ws
+
+Purpose:
+  Module `ws` de `vanyline-sandbox` : sous-système d'authentification et de handlers
+  WebSocket de la sandbox. Le fichier ./mod.rs ne fait que déclarer les quatre
+  sous-modules `fs`, `lsp`, `terminal` et `ticket` — aucun comportement propre (pas de
+  types partagés, pas de garde commune, pas de réexports) : le contrat vit dans les
+  specs des sous-modules (règle `mod.rs` de `/vanyline.sdd` et
+  `.specdd/bootstrap.project.md`).
+
+Owns:
+  ./mod.rs
+
+Structure:
+  ./mod.rs — documentation de module + déclarations `pub mod fs;`, `pub mod lsp;`,
+    `pub mod terminal;`, `pub mod ticket;`, rien d'autre.
+  ./ticket.sdd — @TicketStore, @TicketClaims, @TICKET_TTL_SECS, @ws_auth_middleware et
+    @redeem_from_query : tickets court-vécu à usage unique authentifiant le handshake
+    d'upgrade WebSocket (câblage des routes spécifié dans `../lib.sdd`).
+  ./fs.sdd — handler `GET /ws/fs` : opérations filesystem sur le workspace, upgrade
+    déjà authentifié par @ws_auth_middleware.
+  ./terminal.sdd — handler `GET /ws/terminal` : session PTY réelle relayée sur
+    WebSocket, upgrade déjà authentifié par @ws_auth_middleware.
+  ./lsp.sdd — handler `GET /ws/lsp` : relais WebSocket ↔ server LSP du workspace,
+    upgrade déjà authentifié par @ws_auth_middleware.
+
+  Consommation externe (références directes aux sous-modules, jamais via ./mod.rs) :
+  `../lib.rs` branche les trois handlers sur leurs routes avec
+  @crate::ws::ticket::ws_auth_middleware en couche par route et construit le
+  @TicketStore partagé ; `../main.rs`, `../mcp.rs` et `../tools_impl.rs` construisent
+  aussi des @TicketStore.
+
+Done when:
+  ./mod.rs continue de ne porter que la documentation de module et les quatre
+  déclarations ; toute fonction, constante, impl, type partagé ou réexport ajouté dans
+  ./mod.rs exige d'étendre cette spec (nouveaux `Exposes`/`Must`/`Scenario`) en
+  conséquence.

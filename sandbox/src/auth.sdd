@@ -1,0 +1,585 @@
+Spec: Auth
+
+Platform: Rust/vanyline-sandbox/axum-middleware
+
+Purpose:
+  Couche d'authentification HTTP du serveur sandbox : le middleware axum @require_auth
+  (monté par @build_app sur ./lib.rs sur le router `protected` — `/mcp`, les 16 routes
+  `/git/*`, `POST /ws/ticket`), la machine de validation JWT/OIDC par JWKS (@AuthState,
+  @validate_token), le RBAC par groupes (@check_access → @AccessLevel) et l'enveloppe HTTP
+  des erreurs d'auth (@AuthError, réponses 401/403 JSON avec `WWW-Authenticate` RFC 9728).
+  L'état réel de l'authentification est contracté ici, tel que codé : TROIS modes évalués
+  dans l'ordre `no_auth` → `static_token` → OIDC JWT/JWKS, ce dernier étant le seul mode
+  d'authentification production réellement implémenté. Le second mode « SA TokenReview »
+  historiquement documenté n'a JAMAIS été implémenté (correction 2026-08-12, cf.
+  ../../AGENTS.md et ../../docs/architecture.md section « Serveur MCP ») — il n'a donc
+  aucune ligne de contrat ici, et sa réapparition supposée dans tout commentaire futur est
+  un écart à signaler, pas un comportement. Frontière de fichier assumée : la création et
+  la rédemption des tickets WebSocket court-vécus à usage unique ne vivent PAS ici mais
+  dans ./ws/ticket.rs (@TicketStore, @TICKET_TTL_SECS, @ws_auth_middleware) ; ce fichier
+  fournit au chemin ticket les deux types qu'il consomme (@AccessLevel, @AuthInfo injecté
+  en extensions par @require_auth, lu par `handle_ws_ticket` de ./lib.rs). Un seul fichier,
+  un seul contrat : pas de regroupement.
+
+Owns:
+  ./auth.rs
+
+Can read:
+  ./lib.rs
+  ./config.rs
+  ./mcp.rs
+  ./ws/ticket.rs
+  ./main.rs
+  ../Cargo.toml
+  ../../docs/architecture.md
+  ../../AGENTS.md
+  ../../vanyline.sdd
+  ../../tooling.sdd
+
+Depends on:
+  @crate::AppState et @crate::config::Config (./lib.rs, ./config.rs) — @require_auth lit
+    `state.config.no_auth`, `static_token`, `oidc_issuer`, `oidc_audience`, `public_url` ;
+    @check_access via @Config::admin_groups() / @Config::read_groups() (découpage
+    `split(',')` + `str::trim`, ./config.rs). @AuthState ne valide PAS lui-même la
+    cohérence de @Config : c'est @Config::validate(), appelé par ./main.rs (ligne 16) —
+    jamais par @AuthState::new ni par @build_app (voir `Handles`).
+  @crate::config::oauth_metadata_url (./config.rs) — fabrique l'URI absolue
+    `resource_metadata` du header `WWW-Authenticate` (défaut
+    `http://localhost:3000/.well-known/oauth-protected-resource`, slash final nettoyé).
+  @jsonwebtoken (v11, ../Cargo.toml) — @jsonwebtoken::decode_header, @jsonwebtoken::decode,
+    @jsonwebtoken::jwk::JwkSet, @jsonwebtoken::DecodingKey::from_rsa_components,
+    @jsonwebtoken::Validation::new(@jsonwebtoken::Algorithm::RS256) avec
+    @Validation::set_audience / @Validation::set_issuer. Les défauts de @Validation::new
+    (claims requis `exp`, leeway, `validate_aud`) sont ceux de la librairie et ne sont pas
+    redéfinis ici — à verrouiller par test, voir `Tasks`.
+  @reqwest (v0.12, `default-features = false`, features `json` + `rustls-tls-native-roots`,
+    ../Cargo.toml) — client HTTP construit une fois par @AuthState::new ; racines TLS
+    natives de la plateforme, éventuellement complétées par @reqwest::Certificate::from_pem
+    du CA optionnel `config.oidc_ca_cert` (@builder.add_root_certificate — ajoute, ne
+    remplace pas). Aucun timeout HTTP configuré (défaut reqwest : pas de timeout) —
+    faiblesse tracée en `Tasks`.
+  @axum 0.8 (@middleware::Next, @extract::Request/@State, @response::IntoResponse,
+    @Json, @StatusCode, @header::AUTHORIZATION/@header::WWW_AUTHENTICATE) — style
+    `middleware::from_fn_with_state`, le @AppState est injecté par @State.
+  @thiserror (v2) — derive @thiserror::Error sur @AuthError (impl @std::error::Error +
+    @std::fmt::Display depuis les gabarits `#[error(...)]`).
+  @anyhow (Context) — erreurs internes @AuthState::new / @get_jwks_uri / @refresh_jwks
+    (ne sortent jamais du crate sous forme typée, voir `Returns`).
+  @tokio::sync::RwLock — verrou asynchrone du cache JWKS (partagé, jamais détenu à travers
+    un appel réseau : les fetchs ont lieu hors verrou, seule la lecture/écriture du cache
+    est verrouillée).
+  @metrics (v0.24) — compteur `mcp_auth_errors_total` avec label `reason`, incrémenté
+    uniquement dans @authenticate.
+  @tracing — @tracing::error! (échec refresh JWKS) et @tracing::debug! (échec decode JWT) ;
+    jamais la valeur du token.
+  @std::time::{Duration, Instant} — TTL du cache (@JWKS_CACHE_TTL = 3600 s) horodaté en
+    @Instant (monotonique, insensible à l'horloge système).
+
+Exposes:
+  @AuthState — `pub struct` non-`Clone` (partagé via @Arc dans @AppState), champs privés
+    `config: Arc<Config>`, `cache: RwLock<Option<JwksCache>>`, `http: reqwest::Client`.
+    Constructeur @AuthState::new(`Arc<Config>`) -> `@anyhow::Result<Self>` : construit le
+    client HTTP ; cache initialement `None`.
+  @AuthState::validate_token(`&str`) -> `Result<@Claims, @AuthError>` — `pub async`.
+  @AuthState::check_access(`&@Claims`) -> `Result<@AccessLevel, @AuthError>` — `pub`, synchrone.
+  @Claims — `pub struct` derives `Deserialize, Clone` (PAS de `Debug`, PAS de `Serialize`,
+    pas de feature ts-rs) : champs `pub sub: String` (obligatoire à la désérialisation) et
+    `pub groups: Option<Vec<String>>`. Les claims `iss`, `aud`, `exp` sont vérifiés par
+    @jsonwebtoken avant désérialisation mais N'EXISTENT PAS dans le type — claims inconnus
+    ignorés (désérialisation serde non stricte).
+  @AccessLevel — `pub enum { Admin, Read }` derives `Debug, Clone, PartialEq, Eq`. Porté
+    par @AuthInfo et par `TicketClaims` de ./ws/ticket.rs ; AUCUN point du crate ne
+    branche sur la valeur (`Tasks` `[?]`).
+  @AuthInfo — `pub struct { pub subject: String, pub access: @AccessLevel }`, derive
+    `Clone`, marqué `#[allow(dead_code)]` avec commentaire « Fields are read by tool
+    handlers in derived projects » — en réalité lu dans ce crate par `handle_ws_ticket`
+    (./lib.rs, extracteur `Extension<auth::AuthInfo>`) et par rien d'autre ; écart de
+    commentaire tracé en `Tasks`. Injecté par @require_auth dans les extensions de requête
+    AVANT @Next::run.
+  @AuthError — `pub enum` derive `Debug` + @thiserror::Error, 6 variantes sans payload,
+    @Display exacts (caractère par caractère, `—` = tiret long littéral U+2014 du gabarit) :
+      @AuthError::MissingToken — `"missing or malformed Authorization header"`
+      @AuthError::InvalidToken — `"invalid or expired token"`
+      @AuthError::JwksFetchFailed — `"could not fetch JWKS from identity provider"`
+      @AuthError::KeyNotFound — `"signing key not found in JWKS"`
+      @AuthError::UnsupportedAlgorithm — `"unsupported signing algorithm (RS256 required)"`
+      @AuthError::InsufficientPermissions —
+        `"insufficient permissions — check group membership in Authentik"`
+    Aucune variante ne porte de marqueur `VNL-*` — écart à la convention AGENTS.md
+    (« messages d'erreur avec identifiant unique »), contrairement à @WsAuthError de
+    ./ws/ticket.rs (`VNL-SBX-WS-001/002`) — tracé en `Tasks`.
+  @axum::response::IntoResponse pour @AuthError — réponse via
+    @AuthError::into_response_with_metadata(`None`) : URI `resource_metadata` TOUJOURS le
+    défaut localhost, même quand `config.public_url` est configuré (seul @require_auth
+    connaît l'URL configurée) — asymétrie contractée par scenario.
+  @require_auth — `pub async fn` middleware axum (signature `State(@AppState)`,
+    @Request, @Next -> @Response). Sur erreur de @authenticate : réponse
+    @into_response_with_metadata avec `state.config.public_url`. Monté par @build_app
+    (./lib.rs) sur le router `protected` uniquement — `/health`,
+    `/.well-known/oauth-protected-resource`, `/ws/fs`, `/ws/terminal`, `/ws/lsp/{toolchain}`
+    sont hors de sa portée (ces trois dernières sous @ws_auth_middleware de ./ws/ticket.rs).
+  Éléments privés mais contrat du fichier :
+    @AuthError::into_response_with_metadata(`Option<&str>`) -> @Response — méthode inherente
+      privée porteuse du format de réponse (seule @IntoResponse l'expose hors du module,
+      mais les tests du fichier l'appellent directement avec une URL explicite).
+    @JWKS_CACHE_TTL — `const` privée, 3600 secondes.
+    @OidcDiscovery — `struct` Deserialize, seul champ requis `jwks_uri: String`.
+    @JwksCache — `struct { jwks: JwkSet, jwks_uri: String, fetched_at: @Instant }`.
+    @AuthState::build_http_client — lecture/parse PEM du CA optionnel (voir `Raises`).
+    @AuthState::get_jwks_uri — @GET `{issuer trimé}/.well-known/openid-configuration`,
+      @error_for_status, parse JSON, rend `jwks_uri`.
+    @AuthState::refresh_jwks — réutilise le `jwks_uri` en cache s'il existe, sinon
+      @get_jwks_uri ; @GET du JWKS, @error_for_status, parse ; remplace le cache entier
+      avec `fetched_at: @Instant::now()`.
+    @AuthState::ensure_jwks — rafraîchit si cache absent OU `fetched_at.elapsed() >
+      @JWKS_CACHE_TTL` (comparaison strictement supérieure : exactement TTL → pas de
+      recharge).
+    @authenticate — corps de @require_auth, les trois modes (voir `Handles`).
+  Compteur métrique `mcp_auth_errors_total` — label `reason` ∈ `missing_token`,
+    `invalid_token`, `jwks_fetch_failed`, `key_not_found`, `unsupported_algorithm`,
+    `insufficient_permissions` (+ branche `_ => "unknown"` inatteignable depuis
+    @validate_token, défensive).
+  Module de test `tests` — 12 tests existants : matrice check_access (5), formats de
+    réponse 401/403 (3 + 2 sur l'URI du header), multi-groupes read (1),
+    `get_jwks_uri_without_issuer_returns_error_not_panic` (1). Aucun test de
+    @validate_token, @refresh_jwks, @ensure_jwks ni @require_auth bout-en-bout — lacunes
+    visées par les `Scenario` ci-dessous.
+
+Accepts:
+  En-tête `Authorization` — protocole strict `Bearer <token>` : préfixe `"Bearer "`
+    sensible à la casse (un `bearer` minuscule ou un autre schéma (`Basic`, `Token`) ne
+    le respecte pas), le reste de la valeur étant le token tel quel. En-tête absent,
+    valeur non-UTF-8 (@HeaderValue::to_str en échec), ou sans ce préfixe → @MissingToken
+    dans les deux modes à bearer (jamais traité comme « pas encore authentifié → 401 »
+    autrement). En mode `no_auth` l'en-tête est ignoré, aucune vérification.
+  @AuthState::validate_token — n'importe quelle `&str` : une chaîne non-JWS, un JWS sans
+    `kid` dans le header, un JWT signé par une clé absente du cache, un JWT à l'`alg`
+    header autre que `RS256` (ex. `ES256`, `HS256`, `none`) — tous acceptés en entrée et
+    refusés en sortie (voir `Raises`) ; AUCUN appel réseau n'est déclenché avant que le
+    header ait été décodé avec un `kid` (garde anti-amplification, contractée par scenario).
+  JWT validé — header : `kid` obligatoire. Clé : JWK de type RSA uniquement
+    (@AlgorithmParameters::RSA ; EC/oct/OKP → refus avant toute vérification de
+    signature). Signature : `RS256` épinglé, la clé du header non-`RS256` échoue au
+    @jsonwebtoken::decode et tombe en @InvalidToken, PAS en @UnsupportedAlgorithm
+    (ce dernier n'est rendu que pour un JWK non-RSA). Claims vérifiés par
+    @jsonwebtoken::Validation : `aud` doit contenir exactement la chaîne de
+    `config.oidc_audience`, `iss` doit égaler `config.oidc_issuer` (chaîne exacte, sans
+    normalisation de slash final — un issuer configuré avec `/` et un claim `iss` sans
+    `/` ne matchent pas), `exp` exigé et non dépassé selon les défauts de la librairie
+    (leeway jsonwebtoken). Claims corps : `sub` obligatoire de type string (un `sub`
+    numérique ou objet échoue en @InvalidToken), `groups` soit absent soit tableau de
+    chaînes exactement (tout autre forme JSON échoue en @InvalidToken, l'erreur serde est
+    effondrée, loggée en @tracing::debug). Claims supplémentaires (`email`, `preferred_username`,
+    etc.) ignorés silencieusement — seul `sub` devient @AuthInfo.subject.
+  @check_access — le claim `groups` comparé par égalité de chaîne EXACTE (sensible à la
+    casse, non-trimé côté claims) aux groupes de @Config (trimés côté config, ./config.rs) ;
+    un nom de groupe JWT avec un espace résiduel (ex: `" kubernetes-view"`) ne matchera
+    pas, car seuls les groupes de configuration sont trimés, jamais le claim.
+  @AuthState::new — `oidc_ca_cert : Some(chemin)` : chemin lisible pointant vers un PEM
+    certifiable (@reqwest::Certificate::from_pem) ; tout le reste du client HTTP est
+    construit avec les défauts reqwest (pas de timeout, pas de keep-alive configuré,
+    redirections suivies par défaut).
+  Découverte OIDC — n'importe quelle réponse JSON de `{issuer}/.well-known/openid-configuration`
+    portant un champ `jwks_uri: String` ; le schéma/la forme de ce `jwks_uri` ne sont
+    PAS re-vérifiés contre l'issuer (un issuer compromis renverrait un `jwks_uri`
+    détourné — confiance totale dans le document de découverte).
+  Mode `static_token` — comparaison `token == expected` sur la chaîne complète ; le token
+    attendu est la valeur brute de `config.static_token`, y compris une chaîne vide
+    (@Config::validate ne teste que `is_some()` — un `STATIC_TOKEN=""` rend le header
+    exact `"Bearer "` suffisant pour obtenir @AccessLevel::Admin, `[?]` en `Tasks`).
+
+Returns:
+  @require_auth sur succès — réponse du handler interne, avec @AuthInfo injecté dans les
+    extensions de la requête AVANT @Next::run. Valeurs de `subject` selon le mode :
+    mode `no_auth` → `"dev-no-auth"`, @AccessLevel::Admin ; mode `static_token` correct →
+    `"static-token"`, @AccessLevel::Admin (le RBAC par groupes n'est JAMAIS consulté dans
+    ce mode) ; mode OIDC → `claims.sub` et le @AccessLevel rendu par @check_access.
+  @AuthState::validate_token — @Claims { sub, groups } tels que désérialisés du JWT.
+  @AuthState::check_access — @AccessLevel::Admin si `groups` intersecte
+    @Config::admin_groups() (testé en PREMIER : un membre des deux listes rend Admin) ;
+    @AccessLevel::Read sinon si `groups` intersecte @Config::read_groups() ; erreur sinon.
+  @AuthError::into_response_with_metadata — table de mapping exacte :
+    @AuthError::InsufficientPermissions → 403, corps JSON
+      `{"error":"insufficient_scope","error_description":"insufficient permissions — check
+      group membership in Authentik"}`, SANS header `WWW-Authenticate`.
+    Toute autre variante → 401, corps JSON `{"error":"invalid_token",
+    "error_description":"<@Display de la variante>"}`, PLUS header `WWW-Authenticate` de
+    valeur LITTÉRALE `Bearer error="invalid_token", resource_metadata="<URI>"` où `<URI>` =
+    @oauth_metadata_url(public_url) — le paramètre `error="invalid_token"` du header est
+    le même pour toutes les variantes 401, y compris @MissingToken (dont seul le
+    `error_description` du corps distingue le cas).
+  @AuthState::get_jwks_uri — la valeur de `jwks_uri` du document de découverte, sans
+    re-normalisation.
+  @AuthState::ensure_jwks — `Ok(())` sans aucun appel réseau quand le cache est présent et
+    d'âge ≤ @JWKS_CACHE_TTL (strictement) ; `Ok(())` après recharge sinon.
+  Compteur `mcp_auth_errors_total` — incrémente de 1 l'axe `reason` correspondant sur
+    chaque rejet du middleware (les deux branches @MissingToken — mode statique et mode
+    OIDC — partagent le reason `missing_token`).
+
+Raises:
+  @AuthState::new — @anyhow::Error (et donc échec de démarrage du binaire, ./main.rs
+    ligne 23) si `oidc_ca_cert` est configuré et : fichier illisible (context
+    `"reading OIDC CA cert: {chemin}"`) ou PEM non certifiable (context `"parsing OIDC CA
+    cert"`) ; ou échec du builder reqwest. Sans CA configuré, aucune de ces erreurs.
+  @AuthState::validate_token — @AuthError uniquement, jamais d'@anyhow en sortie :
+    @AuthError::InvalidToken — header JWT indécodable, `kid` absent du header, composantes
+    RSA invalides (@DecodingKey::from_rsa_components en échec), ou TOUT échec de
+    @jsonwebtoken::decode (signature invalide, `alg` ≠ RS256, `exp` dépassé/absent, `aud`
+    non conforme, `iss` non conforme, désérialisation @Claims en échec) — tous effondrés
+    en une seule variante, cause réelle tracée en @tracing::debug uniquement ;
+    @AuthError::JwksFetchFailed — @ensure_jwks en échec (cause tracée en @tracing::error,
+    masquée au demandeur) ou cache subitement `None` après un @ensure_jwks réussi
+    (branche défensive, inatteignable en pratique : le cache ne repasse jamais à `None`) ;
+    @AuthError::KeyNotFound — `kid` du header absent du @JwkSet en cache ;
+    @AuthError::UnsupportedAlgorithm — JWK trouvé mais de type ≠ RSA.
+    Ordre d'évaluation verrouillé : decode_header + kid AVANT tout réseau ; ensure_jwks
+    avant lookup de clé ; lookup avant type de clé ; type avant signature/claims.
+  @AuthState::get_jwks_uri / @refresh_jwks (privées, @anyhow::Error avec @Context) —
+    issuer absent du config (message long affirmant l'inatteignabilité — vrai seulement
+    sous @Config::validate(), voir `Handles`) ; requête découverte/JWKS en échec,
+    statut HTTP en erreur (@error_for_status), ou parse JSON en échec (contextes
+    `"OIDC discovery request failed"` / `"OIDC discovery returned error status"` /
+    `"OIDC discovery parse failed"` / `"JWKS fetch failed"` / `"JWKS returned error
+    status"` / `"JWKS parse failed"`). @refresh_jwks EN ÉCHEC ne touche pas au cache :
+    l'ancienne @JwksCache (éventuellement périmée) reste en place.
+  @authenticate → @AuthError — propage les erreurs ci-dessus ; rend @MissingToken sans
+    réseau quand l'en-tête est absent/sans préfixe `Bearer ` ; en mode statique, token
+    ≠ attendu → @InvalidToken (JAMAIS @MissingToken, distinction contractée).
+  Panique sous @allow(clippy::expect_used) (invariant VMP-130) — @require_auth sur
+    n'importe quelle variante 401 panic via @HeaderValue::from_str().expect si le header
+    fabriqué est invalide. La justification du commentaire (« format! produit toujours une
+    valeur ASCII valide ») est FAUSSE en général : elle ne tient que si `config.public_url`
+    ne contient ni octet non-ASCII, ni espace, ni `"`. Entrée opérateur (jamais
+    attaquante), mais une URL mal formée au démarrage fait panic d'un thread de requête à
+    chaque 401 — faiblesse tracée en `Tasks`, non bénie.
+
+Handles:
+  Ordre et exclusion des trois modes (dans @authenticate, séquence d'`if`/`return`) —
+    1. `config.no_auth == true` → passage immédiat Admin `dev-no-auth`, l'en-tête n'est
+      pas même lu ; 2. sinon `config.static_token == Some(_)` → mode token statique, le
+      chemin OIDC est inatteignable (y compris token statique erroné : @InvalidToken,
+      pas de repli OIDC) ; 3. sinon mode OIDC. Les deux premiers modes sont des bypaths
+      dev/démo (@Config::validate logge un @tracing::warn dans les deux cas) ; si
+      `no_auth` ET `static_token` sont tous deux actifs, `no_auth` gagne.
+  Cache JWKS — un seul @RwLock partagé : @ensure_jwks teste l'âge sous lecture, le fetch
+    a lieu hors verrou, @refresh_jwks remplace le cache entier sous écriture. Pas de
+    single-flight : N requêtes concurrentes voyant un cache périmé déclenchent N fetchs
+    du JWKS (ruée de requêtes concurrentes, volumétrie sandbox = 1 processus, 1 à quelques
+    utilisateurs). Rotation de clé dans la fenêtre de validité du cache : le nouveau `kid`
+    rend @KeyNotFound → 401 @InvalidToken côté client jusqu'au renouvellement du TTL
+    (jusqu'à 1 h) — AUCUN re-fetch à la demande sur @KeyNotFound, tracé `Tasks`.
+    Le `jwks_uri` de la découverte est mémorisé avec le cache et réutilisé par tous les
+    refresh suivants : la découverte n'est rejouée qu'après un restart (ou jamais si le
+    premier cache a réussi).
+  Confiance dans @Config::validate — « should be unreachable » du message de
+    @get_jwks_uri quand `oidc_issuer` est `None` n'est vrai QUE pour le binaire
+    ./main.rs qui appelle @Config::validate avant @AuthState::new. Un consommateur
+    bibliothèque (et les tests de ce fichier, exactement ce cas) construit un @AuthState
+    avec issuer/audience `None` sans validation : @get_jwks_uri rend alors une erreur
+    @anyhow (jamais panic — verrouillé par test existant), et @validate_token valide
+    contre `audience = ""` / `issuer = ""` (@unwrap_or("")) — un JWT portant des claims
+    `aud`/`iss` vides serait accepté dès lors que sa clé est trouvée dans le cache
+    (voir `Tasks` `[?]`).
+  Mesure métrique et log — le compteur `mcp_auth_errors_total` n'est incrémenté QUE dans
+    @authenticate (les appels directs à @validate_token/@check_access, hors middleware,
+    ne comptent pas) ; mapping des reason dans @inspect_err, la branche `_ => "unknown"`
+    est inatteignable (MissingToken et InsufficientPermissions ne sortent jamais de
+    @validate_token). Le token lui-même n'est jamais loggé (seules les causes
+    @jsonwebtoken, qui ne l'embarquent pas, en debug).
+  Frontière avec ./ws/ticket.rs — @require_auth protège `POST /ws/ticket` (le 401 d'une
+    émission sans credentials vient de CE fichier) ; @AccessLevel est importé par
+    `TicketClaims` (./ws/ticket.rs) et voyagera dans le ticket, mais @ws_auth_middleware
+    consomme le ticket et JETTE les claims : aucune session `/ws/fs`, `/ws/terminal` ou
+    `/ws/lsp` ne branche sur `subject` ou `access`. Le niveau @AccessLevel::Read n'est
+    consommé par AUCUN code du crate (routes `/git/*` et `/mcp` exigent seulement un
+    AuthInfo valide) — le RBAC read-vs-admin est décoratif en l'état, `[!]` en `Tasks`.
+  Frontière avec ./lib.rs — le champ `auth` de @AppState est un @Arc<@AuthState> ; @build_app
+    ne câble @require_auth que sur le router `protected` ; le 403/401 rendu par @require_auth
+    utilise `config.public_url`, alors que tout handler qui retourne un @AuthError par son
+    propre @IntoResponse obtient l'URI localhost par défaut (différence visible de
+    `resource_metadata` selon le chemin — contractée par scenario).
+  Testabilité actuelle — les tests du fichier construisent un @AuthState sans issuer et
+    ne testent que @check_access, les formats de réponse et l'erreur sans issuer ; rien
+    de @validate_token/@refresh_jwks/@ensure_jwks/@require_auth bout-en-bout (les
+    Scenario le visant supposent un serveur HTTP simulé — mock/serveur axum local — et
+    un @RwLock de cache injectable, cf. `Tasks`).
+
+Must:
+  Garder l'ordre d'évaluation `no_auth` → `static_token` → OIDC dans @authenticate, avec
+    @AuthInfo injecté avant @Next::run dans les trois modes de succès.
+  Exiger le préfixe exact `"Bearer "` (sensible à la casse) sur `Authorization` dans les
+    modes statique et OIDC ; tout écart → @AuthError::MissingToken (401 + compteur
+    `missing_token`).
+  Comparer le token statique par égalité de chaîne complète avec `config.static_token`,
+    sans hachage ni normalisation ; un token statique valide donne @AccessLevel::Admin
+    sans consulter les groupes ; un token statique erroné rend @InvalidToken.
+  En mode OIDC : exiger un `kid` dans le header, résoudre la clé dans le @JwkSet en cache,
+    n'accepter que @AlgorithmParameters::RSA, épingler @jsonwebtoken::Algorithm::RS256,
+    contrôler `aud` contre `config.oidc_audience` et `iss` contre `config.oidc_issuer` et
+    refuser tout autre algorithme ou clé non-RSA avant vérification de signature —
+    jamais `alg: none`, `HS256` ou clé contrôlée par l'attaquant ne doit pouvoir passer.
+  Vérifier d'abord `decode_header` + présence de `kid` AVANT tout déclenchement du fetch
+    JWKS (un token poubelle ne doit pas générer de trafic sortant).
+  Gérer le cache JWKS par TTL de @JWKS_CACHE_TTL (3600 s) sur @Instant monotonique,
+    comparaison strictement `>` ; en cas d'échec de recharge, CONSERVER l'ancienne cache et
+    rendre @AuthError::JwksFetchFailed au demandeur.
+  Dans @check_access : tester admin en premier (un utilisateur des deux listes rend
+    @AccessLevel::Admin), read en second, @AuthError::InsufficientPermissions sinon — y
+    compris quand `groups` est absent du JWT (`None` traité comme vide, jamais accordé).
+  Rendre tout 401 avec corps JSON `{"error":"invalid_token","error_description":<Display>}`
+    ET header `WWW-Authenticate` `Bearer error="invalid_token",
+    resource_metadata="<oauth_metadata_url>"` ; rendre @InsufficientPermissions en 403
+    avec corps `{"error":"insufficient_scope",...}` et sans `WWW-Authenticate`.
+  Renseigner `resource_metadata` depuis `config.public_url` dans la voie @require_auth et
+    depuis le défaut localhost dans la voie @IntoResponse directe (asymétrie actuelle
+    verrouillée, à moins d'arbitrage `Tasks`).
+  Incrémenter `mcp_auth_errors_total` avec le label `reason` exact de la table d'`Exposes`
+    pour chaque rejet du middleware ; logger l'échec de refresh JWKS en @tracing::error!
+    et l'échec de decode en @tracing::debug! — sans jamais inclure le token.
+  Garder les @Display des 6 variantes byte-identiques (dont le tiret long `—` de
+    @InsufficientPermissions) : ils voyent dans `error_description` des réponses HTTP.
+
+Must not:
+  Réintroduire ou documenter un mode SA TokenReview, NetworkPolicy applicatif ou tout
+    mécanisme d'auth hors ces trois modes : ce qui n'existe pas dans le code n'a pas de
+    contrat (correction actée 2026-08-12).
+  Accepter un JWT dont l'algorithme n'est pas RS256 avec clé RSA du JWKS, un `kid` absent,
+    une signature non vérifiée, un `aud` ou un `iss` différents des chaînes configurées,
+    ou un `sub` non-string — aucun de ces contrôles ne doit devenir optionnel ou
+    « configurable au runtime ».
+  Accorder quoi que ce soit sur un claim `groups` absent, vide ou non-listé, ni faire
+    correspondre les groupes en insensible à la casse ou en sous-chaîne.
+  Remplacer @MissingToken par @InvalidToken (ou l'inverse) sur les chemins actuels :
+    en-tête absent/sans préfixe → MissingToken ; présent mais faux (statique) ou JWT
+    invalide → InvalidToken.
+  Exposer le JWT brut ou @Claims au navigateur : @AuthInfo (subject + niveau) est la
+    seule donnée qui franchit la frontière, et le frontend ne voit que des tickets
+    (règle transverse ../../vanyline.sdd).
+  Écrire une réponse d'erreur APRÈS un upgrade WebSocket dans ce middleware — @require_auth
+    ne protège pas `/ws/*` ; le rejet WS appartient à @ws_auth_middleware (./ws/ticket.rs),
+    sous peine du piège axum 401→426 documenté dans ../../docs/architecture.md.
+  Logger la valeur du token, du static token ou du ticket à quelque niveau que ce soit.
+  Sortir du contrat « panic VMP-130 » sans corriger d'abord la validation de
+    `config.public_url` (le `expect` actuel ne tient que sur opérateur bienformé).
+  Faire grossir la dette harnais du fichier (../../tooling.sdd) : le seul `expect` de
+    production est celui de VMP-130, dûment commenté ; tout nouveau `unwrap`/`expect`/
+    `panic!` hors `cfg(test)` est interdit.
+
+Tasks:
+  [ ] Convertir chaque `Scenario` en test dédié taggé par son titre ; les Scenario
+    réseau (@validate_token bout-en-bout, @refresh_jwks, @ensure_jwks, @require_auth OIDC)
+    exigent un serveur HTTP simulé (serveur axum local ou mock) et une injection du cache
+    @JwksCache — aujourd'hui inaccessibles aux tests (champs privés, aucun point
+    d'injection `cfg(test)`) : ajouter le strict minimum de hooks de test dans ./auth.rs
+    une fois la spec approuvée.
+  [!] Le niveau @AccessLevel::Read n'est appliqué par AUCUN code : `/mcp` et les 16 routes
+    `/git/*` (dont `POST /git/commit`, `POST /git/push`) exigent seulement un AuthInfo
+    valide, un ticket Read ouvre `/ws/terminal` (PTY complet) comme un Admin, et
+    @ws_auth_middleware jette les claims consommés. Le RBAC read-vs-admin est décoratif.
+    Intention réelle de Sébastien : contracter Read comme décoratif assumé, ou exiger une
+    application effective (gating écritures vs lectures) ?
+  [?] @AuthError ne porte aucun identifiant `VNL-*` alors que l'AGENTS.md l'exige et que
+    ./ws/ticket.rs le fait (`VNL-SBX-WS-001/002`). Namespace `VNL-SBX-AUTH-*` à créer, ou
+    exemption assumée pour ce fichier ?
+  [?] Rotation de clé : @KeyNotFound dans la fenêtre TTL (jusqu'à 1 h) force 401 +
+    re-login sans jamais re-fetcher le JWKS à la demande. Forcer un @refresh_jwks unique
+    avant de rendre @KeyNotFound ?
+  [?] Aucun timeout sur le client reqwest de @AuthState : un IdP qui pend bloque les
+    requêtes authentifiées indéfiniment (accumulation de connexions). Timeout + policy de
+    retry à décider ; pendant ce temps, le 401 rendu sur @JwksFetchFailed (alors que le
+    token du client est peut-être valide) est un `invalid_token` trompeur — 502/503 avec
+    même `WWW-Authenticate` serait-il plus juste ?
+  [?] `jwks_uri` mémorisé à vie : la découverte OIDC n'est jamais rejouée tant que le
+    premier cache a réussi (un IdP qui déménage son JWKS impose un restart). Choix assumé
+    ou découverte rejouée à chaque refresh ?
+  [?] Comparaison du static token par `==` : non constante en temps. Bypasse dev/démo
+    (le commentaire du champ le dit « NOT for production ») : acceptable en l'état, ou
+    comparaison constante en temps ?
+  [?] Invariant VMP-130 faux dans l'énoncé : `config.public_url` avec espace, `"` ou
+    non-ASCII fait `expect`-paniquer le thread de requête sur chaque 401. Valider
+    `public_url` au démarrage (@Config::validate) plutôt que porter l'`expect` ?
+  [?] Fallback `audience/issuer = ""` (@unwrap_or("")) dans @validate_token : un
+    @AuthState construit hors @Config::validate (bibliothèque, tests) avec les deux
+    `None` accepte les JWT portant `aud`/`iss` vides si la clé est trouvée. Garder dans
+    @AuthState::new une garde explicite citant ./config.rs, ou assumer que seuls les
+    consommateurs validés appellent ?
+  [?] `STATIC_TOKEN=""` : @Config::validate ne teste que `is_some()` — le header exact
+    `"Bearer "` (token vide) donne alors Admin. Trou de garde à trancher (rejeter la
+    chaîne vide dans validate, ou ici).
+  [?] Commentaire de @AuthInfo (« Fields are read by tool handlers in derived projects »)
+    + `#[allow(dead_code)]` : en réalité lus dans CE crate par `handle_ws_ticket`
+    (./lib.rs). Le `dead_code` et son commentaire viennent du fork du template
+    kydah-mcp-template : reformuler, ou le `#[allow]` est-il encore nécessaire ?
+  [?] Le header `WWW-Authenticate` porte `error="invalid_token"` pour TOUS les 401 y
+    compris en-tête absent (@MissingToken) et panne amont (@JwksFetchFailed). Conforme
+    aux 3 erreurs autorisées par la RFC 6750, mais le corps seul distingue les cas —
+    garder ou affiner ?
+  [?] Défauts exacts de @jsonwebtoken::Validation::new en v11 (`exp` requis ? leeway 60 s
+    ? `validate_aud`) : la spec contracte « selon défauts librairie », les verrouiller par
+    test (claims requis effectifs, marge de leeway tolérée) plutôt que les supposer.
+  [?] Thundering herd du refresh (pas de single-flight) : assumé vu le volumétrie d'une
+    sandbox, ou addition d'un `oneshot`/verrou de refresh ?
+
+Done when:
+  Chaque Scenario a un test dédié taggé par son titre, compilé, exécuté, vert.
+  Les formats de réponse (statuts, corps JSON, header `WWW-Authenticate`, @Display des 6
+    variantes) sont verrouillés caractère par caractère, y compris la voie directe
+    @IntoResponse vs voie @require_auth.
+  Les chemins JWT (non-JWT sans réseau, kid absent, JWK non-RSA, aud/iss/exp non
+    conformes, rotation @KeyNotFound) sont couverts par tests avec serveur simulé.
+  Le harnais (../../tooling.sdd) reste vert sur le fichier : `cargo clippy --workspace
+    --all-targets -- -D warnings`, `cargo fmt --all -- --check`, aucun nouveau
+    `unwrap`/`expect` hors VMP-130 et `cfg(test)`.
+  Sébastien a tranché tous les `[?]` et l'`[!]` de `Tasks` — la spec relue fait foi du
+    contrat, notamment sur l'application (ou l'abandon assumé) du niveau @AccessLevel::Read.
+
+Scenario: priorite_no_auth_sur_tous_les_autres_modes
+  Given un @AppState avec `no_auth: true` ET `static_token: Some("s3cret")` (les deux
+    bypasses actifs simultanément) et un router protégé par @require_auth
+  When une requête arrive sans aucun en-tête `Authorization`
+  Then la requête atteint le handler suivant avec un @AuthInfo `subject` égal à
+    `"dev-no-auth"` et @AccessLevel::Admin, et aucun compteur `mcp_auth_errors_total`
+    n'est incrémenté
+
+Scenario: static_token_valide_passe_sans_controle_de_groupes
+  Given un @AppState avec `no_auth: false`, `static_token: Some("s3cret")` et des groupes
+    admin/read configurés non vides
+  When une requête présente l'en-tête `Authorization: Bearer s3cret`
+  Then le handler suivant est atteint avec @AuthInfo `subject == "static-token"`,
+    @AccessLevel::Admin, et @check_access n'est jamais appelé (aucun claim à vérifier)
+
+Scenario: static_token_incorrect_renvoie_401_invalid_token
+  Given le même @AppState en mode `static_token: Some("s3cret")`
+  When une requête présente `Authorization: Bearer mauvais`
+  Then la réponse est un 401, corps JSON `{"error":"invalid_token",
+    "error_description":"invalid or expired token"}`, avec header `WWW-Authenticate`, et
+    le compteur `mcp_auth_errors_total{reason="invalid_token"}` est incrémenté de 1 —
+    sans aucun repli sur le chemin OIDC
+
+Scenario: en_tete_authorization_absent_ou_sans_prefixe_bearer_refuse
+  Given un @AppState en mode OIDC (sans `no_auth` ni `static_token`)
+  When une requête arrive sans en-tête `Authorization`, puis avec
+    `Authorization: Basic dXNlcjpwYXNz`, puis avec `Authorization: bearer x` (schéma
+    minuscule, jamais reconnu par @strip_prefix("Bearer ")), puis avec une valeur
+    d'en-tête non-UTF-8
+  Then chacune des quatre réponses est un 401 de variante @AuthError::MissingToken
+    (corps `error_description == "missing or malformed Authorization header"`), sans
+    aucun appel réseau sortant, et le compteur `mcp_auth_errors_total{reason="missing_token"}`
+    compte 4 incrémentations
+
+Scenario: header_www_authenticate_verrouille_url_configured_et_defaut_localhost
+  Given @AuthError::InvalidToken
+  When il est rendu via @into_response_with_metadata avec `Some("https://mcp.example.com")`,
+    puis avec `None`
+  Then le premier porte le header exact
+    `Bearer error="invalid_token", resource_metadata="https://mcp.example.com/.well-known/oauth-protected-resource"` ;
+    le second porte `resource_metadata="http://localhost:3000/.well-known/oauth-protected-resource"` ;
+    et dans @require_auth avec `config.public_url = Some(...)`, seule la voie configurée
+    est utilisée — la voie @IntoResponse directe d'un handler reste au défaut localhost
+
+Scenario: corps_json_erreur_401_et_403_verrouilles
+  Given les six variantes de @AuthError rendues via @into_response_with_metadata
+  When les corps JSON et statuts sont lus
+  Then les cinq variantes non-@InsufficientPermissions rendent 401 avec
+    `{"error":"invalid_token","error_description":<Display exact de la variante>}` et
+    header `WWW-Authenticate` ; @InsufficientPermissions rend 403 avec
+    `{"error":"insufficient_scope","error_description":"insufficient permissions — check
+    group membership in Authentik"}` (tiret long littéral inclus) et AUCUN header
+    `WWW-Authenticate`
+
+Scenario: matrice_check_access_admin_read_et_refus
+  Given un @AuthState avec `admin_groups = "kubernetes-admin"` et
+    `read_groups = "kubernetes-view"`
+  When @check_access est appelé sur des @Claims portant respectivement
+    `["kubernetes-admin"]`, `["kubernetes-view"]`, `["kubernetes-admin","kubernetes-view"]`,
+    `["some-other-group"]`, `groups: None`, `[]`, et une majuscule décalée
+    `["Kubernetes-Admin"]`
+  Then les rendus sont dans l'ordre : @AccessLevel::Admin, @AccessLevel::Read,
+    @AccessLevel::Admin (admin prioritaire), @AuthError::InsufficientPermissions,
+    @AuthError::InsufficientPermissions, @AuthError::InsufficientPermissions,
+    @AuthError::InsufficientPermissions (comparaison sensible à la casse)
+
+Scenario: config_multi_groupes_read_tous_acceptes
+  Given un @AuthState avec `read_groups = "kubernetes-view,kubernetes-edit"` (liste
+    multi-valeurs découpée par @Config::read_groups)
+  When @check_access reçoit des @Claims portant `["kubernetes-edit"]` puis
+    `["kubernetes-view"]`
+  Then chacun rend @AccessLevel::Read
+
+Scenario: validate_token_sur_chaine_non_jwt_renvoie_invalid_token_sans_appel_reseau
+  Given un @AuthState OIDC dont le serveur de découverte/JWKS simulé compte les requêtes
+    reçues
+  When @validate_token est appelé avec `"pas-un-jwt"`, puis avec un JWS bien formé mais
+    dont le header ne porte pas de `kid`
+  Then les deux appels rendent @AuthError::InvalidToken et le compteur de requêtes du
+    serveur simulé reste à 0 (le décodage du header précède tout fetch JWKS)
+
+Scenario: validate_token_kid_absent_du_jwks_cache_renvoie_key_not_found
+  Given un @AuthState dont le cache JWKS est pré-rempli avec un @JwkSet RSA contenant la
+    clé `kid-existante` et un JWT RS256 valide signé et daté portant `kid: "kid-inconnu"`
+  When @validate_token est appelé sur ce JWT
+  Then le résultat est @AuthError::KeyNotFound et aucune requête réseau n'est émise
+    (cache plus jeune que le TTL)
+
+Scenario: validate_token_jwk_non_rsa_renvoie_unsupported_algorithm
+  Given un cache JWKS pré-rempli contenant sous le `kid` demandé une clé de type EC
+    (@AlgorithmParameters non-RSA)
+  When @validate_token est appelé sur un JWT portant ce `kid`
+  Then le résultat est @AuthError::UnsupportedAlgorithm, avant toute vérification de
+    signature
+
+Scenario: validate_token_rejette_audience_issuer_exp_et_alg_non_conformes
+  Given un @AuthState OIDC avec issuer et audience simulés cohérents avec une clé RSA en
+    cache, et des JWT validement signés par cette clé ne différant que sur un défaut :
+    (a) `aud` différent de `config.oidc_audience`, (b) `iss` différent de
+    `config.oidc_issuer` (y compris slash final manquant), (c) `exp` dépassé au-delà du
+    leeway jsonwebtoken, (d) header `alg: HS256`, (e) `sub` de type numérique
+  When @validate_token est appelé sur chacun
+  Then chacun rend @AuthError::InvalidToken (tous effondrés en la seule variante), et le
+    défaut (d) ne rend JAMAIS @AuthError::UnsupportedAlgorithm — réservé aux JWK non-RSA
+
+Scenario: require_auth_oidc_inserte_authinfo_groupe_ou_renvoie_403
+  Given un serveur simulé de découverte + JWKS exposant une clé RSA et un JWT RS256
+    valide signé par elle, claims `sub: "alice"`, `groups: ["kubernetes-view"]`
+    (lecture seule), contre un @AuthState dont `admin_groups`/`read_groups` reconnaissent
+    ce groupe
+  When @require_auth traite `Authorization: Bearer <ce JWT>`
+  Then le handler suivant est atteint avec @AuthInfo `subject == "alice"` et
+    @AccessLevel::Read ; et quand le même JWT porte `groups: ["autre-groupe"]`, la
+    réponse est 403 `insufficient_scope` sans `WWW-Authenticate` avec compteur
+    `reason="insufficient_permissions"`
+
+Scenario: decouverte_oidc_construit_url_et_jwks_uri_reutilise_en_cache
+  Given un @AuthState OIDC avec `oidc_issuer = "https://idp.example/realm/"` et un serveur
+    simulé exposant `/.well-known/openid-configuration` (avec `jwks_uri`) et l'URL JWKS,
+    en comptant les requêtes par chemin
+  When @refresh_jwks est appelé deux fois (cache d'abord vide, rechargé entre les deux)
+  Then la première passe interroge `{issuer sans slash final}/.well-known/openid-configuration`
+    PUIS le `jwks_uri` rendu ; la seconde interroge directement le `jwks_uri` mémorisé
+    sans rejouer la découverte (compteur découverte inchangé)
+
+Scenario: refresh_jwks_declenche_seulement_si_cache_strictement_perime
+  Given un @AuthState avec un cache JWKS dont le `fetched_at` est injecté à des âges
+    contrôlés
+  When @ensure_jwks est appelé avec un cache d'âge @JWKS_CACHE_TTL moins 60 secondes,
+    puis d'âge @JWKS_CACHE_TTL plus 60 secondes, puis avec le cache absent
+  Then le premier ne fait aucun appel réseau (recharge seulement si `elapsed() >
+    @JWKS_CACHE_TTL`, comparaison stricte), le second recharge, le troisième recharge
+    (cache `None` équivaut à périmé)
+
+Scenario: echec_fetch_jwks_conserve_ancienne_cache_et_renvoie_jwks_fetch_failed
+  Given un @AuthState avec une cache JWKS valide mais dont l'âge dépasse le TTL, et un
+    serveur JWKS simulé qui répond désormais un statut 500
+  When @validate_token est appelé sur un JWT au `kid` présent dans l'ancienne cache
+  Then @ensure_jwks échoue, @validate_token rend @AuthError::JwksFetchFailed (message
+    `"could not fetch JWKS from identity provider"`, cause réelle en @tracing::error),
+    et l'ancienne @JwksCache reste en place dans le @RwLock (vérifiable en rendant ensuite
+    le serveur simulé disponible : le refresh repart de l'ancienne cache, qui n'a pas été
+    vidée)
+
+Scenario: get_jwks_uri_sans_issuer_renvoie_erreur_sans_panic
+  Given un @AuthState construit directement avec `oidc_issuer: None` (sans passer par
+    @Config::validate, cas bibliothèque/tests)
+  When @get_jwks_uri est appelé
+  Then le résultat est un @anyhow::Error portant le message « should be unreachable » et
+    aucun panic ne se produit (test existant `get_jwks_uri_without_issuer_returns_error_not_panic`)

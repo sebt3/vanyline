@@ -1,0 +1,463 @@
+Spec: Ticket
+
+Platform: Rust/vanyline-sandbox/axum-middleware
+
+Purpose:
+  Sous-système d'authentification WebSocket du serveur sandbox : le magasin mémoire de
+  tickets court-vécus à usage unique (@TicketStore, @TICKET_TTL_SECS) et la garde
+  @ws_auth_middleware montée par @build_app (../lib.rs, ../lib.sdd) sur les trois routes
+  d'upgrade `GET /ws/fs`, `GET /ws/terminal`, `GET /ws/lsp/{toolchain}`. Contrainte source
+  : l'API WebSocket du navigateur ne permet aucun header `Authorization` sur le handshake ;
+  le client se fait émettre un ticket opaque par `POST /ws/ticket` (@handle_ws_ticket de
+  ../lib.rs, derrière @auth::require_auth — le contrat de ce handler vit dans ../lib.sdd)
+  et le présente en query string `?ticket=` sur la requête d'upgrade. Ce fichier possède
+  TOUTE la mécanique du ticket : format (32 caractères alphanumériques, opaque, aucun claim
+  embarqué ni signé), émission (claims `subject` + `access` copiés de l'@auth::AuthInfo,
+  TTL 30 s sur horloge monotone), rachat (retrait inconditionnel de la map, `Some`
+  seulement si présent et non expiré), typologie des rejets (@WsAuthError, identifiants
+  `VNL-SBX-WS-001`/`VNL-SBX-WS-002` cités par ../lib.sdd) et enveloppe HTTP 401 JSON.
+  C'est un contrat DE SÉCURITÉ : non-réutilisabilité, atomicité du rachat sous
+    concurrence, indistinguabilité des rejets et absence de fuite de la valeur du
+  ticket sont des exigences, pas des observations ; les faiblesses restantes (trace
+  d'URL, purge, claims jetés) sont tracées en `Tasks`, jamais bénies. La route d'émission,
+  la table de routage et les modes d'auth qui fabriquent les claims appartiennent à
+  ../lib.sdd et ../auth.sdd ; ce fichier les transporte et les consomme, un seul fichier,
+  un seul contrat — pas de regroupement avec ./fs.rs, ./terminal.rs, ./lsp.rs (handlers
+  d'upgrade consommant la garde).
+
+Owns:
+  ./ticket.rs
+
+Can read:
+  ../auth.rs
+  ../lib.rs
+  ./fs.rs
+  ./terminal.rs
+  ./lsp.rs
+  ./mod.rs
+  ../../tests/http.rs
+  ../Cargo.toml
+  ../../docs/architecture.md
+  ../../vanyline.sdd
+  ../../tooling.sdd
+  ../../../.specdd/bootstrap.project.md
+
+Depends on:
+  ../auth.rs — @AccessLevel porté par @TicketClaims (même forme que @auth::AuthInfo :
+    `subject` + `access`, ../auth.sdd) ; les valeurs effectives des claims proviennent des
+    trois modes de @authenticate (`dev-no-auth`/Admin, `static-token`/Admin, OIDC
+    `sub` + Admin/Read) — ce fichier ne les produit jamais, ne les valide pas, ne les
+    branche nulle part.
+  ../lib.rs — @AppState porte le @TicketStore (champ `tickets`) ; @handle_ws_ticket
+    (../lib.sdd) est l'unique appelateur @TicketStore::issue en production et définit le
+    corps de réponse `{"ticket":…,"expires_in_secs":30}` ; @build_app câble
+    @ws_auth_middleware par route sur les trois upgrades WS et @TraceLayer par-dessus le
+    router entier (source de la fuite d'URL tracée en `Tasks`).
+  ./fs.rs, ./terminal.rs, ./lsp.rs — destinataires aval de la garde : ils ne reçoivent
+    aucune donnée d'identité (la garde jette les @TicketClaims, cf. `Handles`).
+  @rand 0.8 (../Cargo.toml, `rand = "0.8"`) — @rand::thread_rng (ChaChaRng amorcé sur
+    entropie OS en 0.8) + @rand::distributions::Alphanumeric ; chemins de modules propres
+    à rand 0.8, une montée vers 0.9 casse ces imports (`distributions` → `distr`).
+  @axum 0.8 — @extract::State, @Request<@axum::body::Body>, @middleware::Next,
+    @response::IntoResponse/@Json/@StatusCode.
+  @thiserror v2 — derive @thiserror::Error sur @WsAuthError (@Display depuis les gabarits
+    `#[error(…)]`).
+  @std — @HashMap, @Arc, @std::sync::Mutex (verrou synchrone, PAS @RwLock asynchrone),
+    @Instant, @Duration.
+
+Exposes:
+  @ws_auth_middleware — `pub async fn` middleware axum (`State(@crate::AppState)`,
+    @Request<@Body>, @Next -> @Response), monté par @build_app en couche par route sur
+    `/ws/fs`, `/ws/terminal`, `/ws/lsp/{toolchain}` (jamais sur `POST /ws/ticket`, jamais
+    sur les routes protégées par @auth::require_auth). Doc du fichier : « Lit le ticket en
+    query string (`?ticket=`), le consomme via @redeem_from_query, renvoie 401 en cas
+    d'erreur (MissingTicket/InvalidTicket), sinon laisse passer vers le handler. » La doc
+    ne cite que deux routes alors que trois la portent — écart tracé en `Tasks`.
+  @TICKET_TTL_SECS — `pub const u64 = 30` (secondes) ; consommé par @handle_ws_ticket
+    (../lib.rs) pour le champ `expires_in_secs` de la réponse d'émission.
+  @TicketClaims — `pub struct { pub subject: String, pub access: @AccessLevel }`, derives
+    `Debug, Clone, PartialEq, Eq`. Aucun derive @serde, aucun @Display : les claims ne
+    sortent du store que par @TicketStore::redeem, jamais sérialisés ni loggés.
+  @WsAuthError — `pub enum` derive `Debug` + @thiserror::Error, deux variantes sans
+    payload, @Display byte-exacts (documentés par la doc de variante comme « returned by
+    the WS extractor when the ticket is missing/consumed » — le cas « consumed » rend en
+    réalité @InvalidTicket, pas @MissingTicket) :
+      @WsAuthError::MissingTicket — `"VNL-SBX-WS-001: missing or malformed ticket"`
+      @WsAuthError::InvalidTicket — `"VNL-SBX-WS-002: invalid or expired ticket"`
+  @axum::response::IntoResponse pour @WsAuthError — les DEUX variantes -> `401`, corps
+    JSON `{"error": "<@Display exact>"}`, AUCUN header `WWW-Authenticate` et aucun champ
+    `error_description` (le commentaire « matching the token-auth error path » ne vaut que
+    pour le statut : la voie JWT de ../auth.rs rend un format différent — écart tracé en
+    `Tasks`).
+  @TicketStore — `pub struct` derives `Debug, Clone`, `Default` = @TicketStore::new ;
+    champ privé unique `tickets: @Arc<@Mutex<@HashMap<String, (@TicketClaims, @Instant)>>>`.
+    `Clone` = même map sous-jacente (l'@Arc est cloné, pas la map) — invariant utilisé par
+    @crate::AppState et par les tests. Le champ privé reste accessible aux tests du même
+    fichier (pattern d'injection d'entrée expirée, test 3).
+  @TicketStore::new() -> @TicketStore — map vide.
+  @TicketStore::issue(@TicketClaims) -> @String — 32 tirages indépendants
+    @Alphanumeric via @rand::thread_rng (alphabet `[A-Za-z0-9]`, 62 valeurs, ≈ 190 bits
+    d'entropie), entrée insérée `(claims, @Instant::now() + 30 s)`, rend la valeur du
+    ticket (copie `clone` avant insertion).
+  @TicketStore::redeem(&str) -> @Option<@TicketClaims> — @HashMap::remove PUIS test
+    d'expiration : l'entrée disparaît de la map dans tous les cas (valide, expirée, ou
+    absence = no-op) ; `Some(claims)` seulement si présente ET `@Instant::now() <
+    expires_at` (comparaison strictement inférieure : à l'égalité, théoriquement
+    inobservable, c'est expiré). Doc exacte : « Removes the entry no matter what (valid or
+    expired) ».
+  @redeem_from_query(&@TicketStore, @Option<@String>) -> @Result<@TicketClaims,
+    @WsAuthError> — fonction pure de mapping : @None -> @Err(@MissingTicket) ;
+    @Some(t) racheté -> @Ok(claims) ; @Some(t) inconnu/expiré/consommé ->
+    @Err(@InvalidTicket).
+  Module de test `tests` — 5 tests existants : `ticket_redeem_returns_claims`,
+    `ticket_is_single_use`, `expired_ticket_redeem_none_and_removed` (injection directe
+    d'une entrée expirée dans le champ privé), `issuance_without_auth_returns_401` et
+    `issuance_with_static_token_returns_ticket` (tous deux des tests de ROUTE qui testent
+    @handle_ws_ticket de ../lib.rs depuis ce fichier — cf. `Tasks`).
+
+Accepts:
+  @TicketStore::issue — n'importe quel @TicketClaims : aucune validation (le store est une
+    API publique `pub` ; `subject` vide ou bidon est accepté en tant qu'API — en pratique
+    ../lib.rs n'y injecte que des claims issus de @auth::require_auth). Un nouveau tirage
+    qui collide avec une clé existante (probabilité ≈ 2^-190) ÉCRASE l'entrée précédente
+    sans erreur — cas théorique non testé, cf. `Tasks`.
+  @TicketStore::redeem — n'importe quelle `&str` : vide, non-alphanumérique, très longue —
+    aucun contrôle de forme : un ticket malformé est par construction indiscernable d'un
+    ticket inconnu (@None, donc @InvalidTicket en aval).
+  Parsing de query par @ws_auth_middleware — la query brute de @Request::uri, découpée sur
+    `&`, chaque paire scindée sur le PREMIER `=` (@str::split_once) : seule une paire dont
+    la clé est EXACTEMENT `"ticket"` (sensible à la casse, sans percent-décodage) compte,
+    la PREMIÈRE occurrence gagne, la valeur est prise telle quelle (peut contenir d'autres
+    `=`). Aucun paramètre de query du tout, query vide, ou aucune paire `ticket=` (ex.
+    `?ticket` sans `=`, `?Ticket=x`) -> @None -> @MissingTicket. Conséquence de
+    l'absence de percent-décodage : correct pour les tickets émis ici (strictement
+    alphanumériques, jamais encodés par un client sain), silencieusement cassé pour tout
+    émetteur de ticket externe futur (cf. `Tasks`).
+  @ws_auth_middleware — toute requête HTTP atteignant les trois routes, headers d'upgrade
+    WebSocket présents ou non : la garde ne regarde que la query, la validation de
+    l'upgrade appartient au handler aval (@WebSocketUpgrade) et intervient APRÈS la
+    consommation du ticket.
+  Le chemin ticket ne consulte JAMAIS : header `Authorization`, cookies, IP, méthode HTTP,
+    corps. Un JWT valide présenté sur `/ws/fs` n'a aucun effet — seul le query-paramètre
+    compte.
+
+Returns:
+  @TicketStore::issue — @String de 32 caractères `[A-Za-z0-9]` ; l'entrée correspondante
+    vit dans la map jusqu'à son rachat (aucune purge spontanée, cf. `Handles`).
+  @TicketStore::redeem — @Some(@TicketClaims) copié tel qu'émis (`subject` et `access`
+    intacts) si présent et non expiré ; @None sinon. Effet de bord contractuel : retrait
+    de la map dans TOUS les cas.
+  @redeem_from_query — table exacte : @None -> @Err(@MissingTicket) ; rachat réussi ->
+    @Ok(claims) ; sinon @Err(@InvalidTicket).
+  @ws_auth_middleware sur succès — la réponse du handler aval (@next.run), claims jetés
+    (aucune extension injectée). Sur rejet — `401` + `{"error":"VNL-SBX-WS-001: missing or
+    malformed ticket"}` ou `{"error":"VNL-SBX-WS-002: invalid or expired ticket"}`
+    (enveloppes citées par l'`Example` de ../lib.sdd — cohérence byte-exigée).
+  @TicketStore par @Default/@new — store vide : tout rachat rend @None.
+
+Raises:
+  Aucune erreur typée au-delà de @WsAuthError — pas de @Result sur les méthodes du store,
+    pas d'@anyhow, pas d'erreur de génération aléatoire (rand 0.8 @thread_rng n'en rend
+    pas).
+  Paniques contractés (deux seuls points, tous deux `#[allow(clippy::expect_used)]` avec
+    commentaire justificatif « poison means a bug in *our* code, not an external actor ») :
+    @TicketStore::issue et @TicketStore::redeem sur mutex empoisonné, message exact
+    `"ticket store mutex should not be poisoned"`. Sous ce module le verrou ne protège que
+    des insert/remove @std — l'empoisonnement ne peut venir que d'un panic dans du code
+    std ; le panic traverse le middleware et tue la tâche de la requête (statut client :
+    connexion coupée, pas de 500 rendu). Renvoyé par ../lib.sdd section `Raises`.
+  Aucun autre `unwrap`/`expect`/`panic!` hors `cfg(test)` n'est toléré (harnais
+    ../../tooling.sdd ; l'exemption crate-wide `cfg(test)` vue dans ../lib.sdd `[!]` ne
+    change rien à la voie production).
+
+Handles:
+  Provenance des claims transportés (modes de ../auth.rs, cf. ../auth.sdd) : `no_auth` ->
+    `"dev-no-auth"`/Admin ; `static_token` -> `"static-token"`/Admin ; OIDC -> `sub` du
+    JWT + @AccessLevel des groupes. La garde les CONSOMME ET LES JETTE : aucune extension
+    @AuthInfo ni @TicketClaims n'est injectée vers ./fs.rs, ./terminal.rs, ./lsp.rs —
+    aucune session éditeur/terminal/LSP ne sait qui elle sert (@AccessLevel::Read ouvre
+    donc le PTY complet comme un Admin, ../auth.sdd `[!]`, ../lib.sdd `[?]`).
+  Consommation AVANT upgrade : la garde s'exécute avant l'extracteur @WebSocketUpgrade,
+    contournement délibéré du piège axum (un 401 rendu APRÈS extraction est converti en
+    426 par le framework — ../../docs/architecture.md section « WebSocket éditeur »).
+    Conséquence contractuelle : toute requête qui passe la garde CONSOMME le ticket, y
+    compris un `GET /ws/fs?ticket=<valide>` sans headers d'upgrade, rejeté ensuite en
+    aval — le replay du même ticket rend alors `VNL-SBX-WS-002`.
+  Concurrence : un seul @Mutex synchrone, le @HashMap::remove est atomique sous ce verrou
+    — parmi N tentatives concurrentes avec le même ticket, exactement UNE rend @Some. La
+    lock n'est jamais tenue à travers un `await` (issue/redeem sont synchrones, le
+    @MutexGuard tombe à leur retour) — conforme à la discipline du crate (../lib.rs
+    @FsFlushRequests, ../lib.sdd).
+  Stockage : mémoire du seul processus (HashMap sous @Arc), zéro persistance — un restart
+    de la sandbox invalide tous les tickets en cours (le client doit repasser par
+    `POST /ws/ticket`) ; cohérent avec « une sandbox = un process »
+    (../../docs/architecture.md).
+  Expiration sur @Instant monotone : un saut d'horloge système n'avance ni ne retarde
+    aucune expiration ; TTL figé 30 s, non configurable, non réglable par le client
+    (`expires_in_secs` de la réponse est informatif).
+  Indistinguabilité des rejets : ticket inconnu, expiré, déjà consommé ou malformé ->
+    même `401` au même corps `VNL-SBX-WS-002` ; aucun oracle (statut, corps, header,
+    temps) ne doit permettre de distinguer « existait mais expiré » de « n'a jamais
+    existé ». Le lookup @HashMap + @String:eq n'est PAS à temps constant, mais l'entropie
+    de 190 bits rend toute attaque temporelle sur la valeur impraticable — l'exigence
+    operative est l'absence d'oracle fonctionnel, verrouillée par scenario.
+  Valeur du ticket dans l'URL : surface de fuite inhérente au design (historique
+    navigateur, proxies, logs d'ingress) compensée par TTL 30 s + usage unique ; À NOTER :
+    @TraceLayer::new_for_http() (câblé dans ../lib.rs) logge l'URI complète en INFO —
+    `?ticket=…` y figure (cf. `Tasks` `[!]`, non béni). Ce fichier lui-même ne fait
+    AUCUN logging (aucun import @tracing) : ni les 401, ni les tickets, ni les claims
+    n'apparaissent dans les logs du module.
+  Absence de purge : un ticket émis et jamais présenté reste dans la map INDÉFINIMENT
+    (aucune tâche de purge, aucun balayage au passage ; seul un rachat retire les entrées)
+    — croissance bornée par le débit d'émission, lui-même derrière @auth::require_auth,
+    mais jamais reclaimed (même question ouverte que ../lib.sdd, tranchable ici qui est le
+    propriétaire).
+  Collision à l'émission : @HashMap::insert écrase silencieusement en cas d'égalité de
+    clé (probabilité ≈ 2^-190, non testable) — le ticket préexistant écrasé est remplacé
+    avec les claims du nouveau, sans signal.
+  Doc de module : « the frontend calls `POST /ws/ticket` » — en production c'est `app` qui
+    présente le JWT OIDC (relais de ticket, ../../docs/architecture.md) ; le navigateur ne
+    voit jamais le JWT (règle ../../vanyline.sdd) et ne voit qu'un ticket dans les deux
+    cas — imprécision de commentaire tracée en `Tasks`, pas un contrat.
+  @TicketStore::default() est strictement @TicketStore::new() (map vide).
+
+Must:
+  @TICKET_TTL_SECS vaut `30` ; l'expiration est calculée à l'émission comme
+    `@Instant::now() + 30 s` (base monotone, jamais @SystemTime).
+  @TicketStore::issue produit exactement 32 caractères de `[A-Za-z0-9]` tirés
+    indépendamment via @rand::thread_rng + @Alphanumeric ; le ticket est OPAQUE : aucune
+    structure, aucun claim, aucune signature ne sont encodés dans la valeur — la possession
+    seule authentifie.
+  @TicketStore::redeem retire l'entrée de la map dans TOUS les cas AVANT de tester
+    l'expiration, et ne rend @Some que pour une entrée présente et strictement non expirée.
+  Garantir l'usage unique sous concurrence : deux rachats du même ticket, dans n'importe
+    quel entrelacement de threads, ne peuvent pas tous deux rendre @Some (retrait atomique
+    sous le verrou unique).
+  @redeem_from_query mappe exactement : query/ticket absent -> @MissingTicket ; présent
+    mais non rachetable -> @InvalidTicket. Un ticket de valeur VIDE (`?ticket=`) est un
+    ticket PRÉSENT et invalide -> `002`, jamais `001`.
+  @ws_auth_middleware ne lit QUE la query (première paire à clé exacte `"ticket"`, sans
+    percent-décodage), consomme AVANT tout traitement d'upgrade, et ne transmet rien
+    d'identitaire en aval : succès -> @next.run sans extension ajoutée ; rejet -> la
+    réponse @IntoResponse de @WsAuthError, le handler aval n'est jamais atteint.
+  @WsAuthError::into_response rend `401` pour les deux variantes avec corps exactement
+    `{"error":"<Display>"}`, et les @Display byte-exacts portant `VNL-SBX-WS-001` et
+    `VNL-SBX-WS-002` — ces deux identifiants sont cités tels quels par ../lib.sdd
+    (`Example`) et ../auth.sdd (`Exposes`), la cohérence est contractuelle.
+  @TicketStore est partagé par clone : tout clone (dont celui tenu dans @AppState) voit et
+    consomme la même map — le ticket émis via une poignée est rachetable via une autre.
+  Ne jamais écrire la valeur d'un ticket nulle part (log, metric, message d'erreur, corps
+    de réponse) et ne jamais sérialiser ticket ni @TicketClaims (aucun derive @serde).
+  Relâcher le mutex avant tout retour : aucune section critique à travers un `await`.
+
+Must not:
+  Accepter un second rachat du même ticket, y compris quand le premier passage n'a jamais
+    abouti (upgrade absent, handler en échec, connexion refermée juste après) — la
+    consommation sans succès est le chemin voulu, pas une faille à « réparer » par un
+    remboursement.
+  Laisser une entrée en map après une tentative de rachat (valide ou expirée — le test
+    existant `expired_ticket_redeem_none_and_removed` verrouille la double-absence).
+  Distinguer dans une réponse (statut, corps, header, ou latence contractée) un ticket
+    inconnu, expiré, consommé ou malformé.
+  Authentifier ce chemin par un autre facteur que le query-paramètre `ticket` : header
+    `Authorization`, cookie, IP ou JWT présenté sur `/ws/*` ne doivent rien débloquer.
+  Injecter quoi que ce soit d'issu du rachat dans les extensions de la requête en l'état
+    actuel du contrat (les claims sont jetés — tout changement passe par l'arbitrage
+    `Tasks`, cf. ../lib.sdd `[?]`).
+  Logger la valeur du ticket, à quelque niveau @tracing que ce soit, dans ce fichier.
+  Exposer le JWT brut ou @auth::Claims via le ticket : le ticket est opaque et ne porte
+    que `subject` + `access` en mémoire serveur (règle racine ../../vanyline.sdd).
+  Utiliser @SystemTime ou l'horloge wall-clock pour l'expiration, ni persister les tickets
+    (disque, cache externe, processus partagé).
+  Introduire un nouveau `unwrap`/`expect`/`panic!` hors `cfg(test)` au-delà des deux
+    `expect` d'empoisonnement existants (dette harnais ../../tooling.sdd).
+  Ajouter une purge, un renouvellement ou un allongement de TTL sans que la décision des
+    `Tasks` `[?]` ne l'ait contractualisée.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec issue du reverse-engineering ; aucun comportement
+    accidentel ne devient contrat avant cette relecture (.specdd/bootstrap.project.md).
+  [ ] Cartographie de la couverture existante (à re-tagger par les titres de Scenario) :
+    `ticket_redeem_returns_claims`, `ticket_is_single_use`,
+    `expired_ticket_redeem_none_and_removed`, `issuance_without_auth_returns_401`,
+    `issuance_with_static_token_returns_ticket` (./ticket.rs — les deux derniers testent en
+    réalité @handle_ws_ticket de ../lib.rs) ; gardes de routes : `ticket_query_required`
+    (./fs.rs, assertion de corps `002` non faite sur le second volet),
+    `terminal_ticket_required` (./terminal.rs), `lsp_ticket_required` et
+    `lsp_ticket_required_with_valid_ticket` (./lsp.rs).
+  [ ] Convertir en tests taggés les Scenarios sans couverture directe :
+    `format_ticket_alphanumerique_de_trente_deux_caracteres`,
+    `emissions_successives_ne_repetent_jamais_le_meme_ticket`,
+    `rachats_paralleles_du_meme_ticket_un_seul_gagnant`, `ttl_et_default_sont_verrouilles`,
+    `store_clone_voit_la_meme_map_de_tickets`, `requete_sans_ticket_rejetee_en_001` (volets
+    `?other=1`, `?ticket` sans `=`, `?Ticket=x` non couverts),
+    `parametre_ticket_vide_rejete_en_002`, `parametre_ticket_duplique_premier_gagnant`,
+    `corps_401_verrouille_le_format_des_deux_identifiants`,
+    `rejets_inconnu_expire_et_consomme_sont_indistinguables`,
+    `ticket_valide_consomme_malgre_upgrade_absent`,
+    `claims_valides_ne_sont_pas_injectes_en_aval`,
+    `aucun_log_du_module_ne_fuit_la_valeur_d_un_ticket`.
+  [!] Fuite du ticket dans les logs par @TraceLayer (../lib.rs) : la couche
+    @TraceLayer::new_for_http() avec réglages PAR DÉFAUT logge l'URI de chaque requête en
+    INFO — l'URI inclut `?ticket=<valeur>`. Un ticket déjà consommé loggé est inoffensif,
+    mais un ticket loggé et pas encore présenté reste valable jusqu'à 30 s : toute
+    personne lisant les logs du pod (ou un collecteur de logs) peut le rejouer dans la
+    fenêtre. Filtrer l'URI (@tower_http::trace::TraceLayer::make_span_config sans URI, ou
+    scrub du query-paramètre `ticket`) ou considérer les logs du cluster comme de
+    confiance ? Décision à prendre ici et sur ../lib.sdd, cette faiblesse n'est PAS un
+    contrat.
+  [?] Chemin d'auth WS sans métrique ni log : contrairement à @authenticate de ../auth.rs
+    (compteur `mcp_auth_errors_total`), les 401 `001`/`002` ne sont comptés ni loggés
+    nulle part — un brute-force de tickets ou un client cassé est invisible. Ajouter un
+    compteur (ex. `ws_auth_errors_total{reason="missing|invalid"}`), ou assumer
+    l'inobservabilité de ce chemin ?
+  [?] Commentaire @WsAuthError::into_response « matching the token-auth error path » :
+    seul le statut 401 correspond — la voie JWT rend `{"error":"invalid_token",
+    "error_description":…}` + `WWW-Authenticate` (RFC 9728, ../auth.sdd), la voie ticket
+    rend `{"error":"VNL-SBX-WS-00N: …"}` sans header. Écart commentaire/code : verrouiller
+    la divergence (le format ticket n'est pas une erreur OAuth — défendable) ou aligner ?
+  [?] Doc de @ws_auth_middleware « partagé par `/ws/fs` et `/ws/terminal` » : la garde est
+    montée sur TROIS routes (`/ws/lsp/{toolchain}` inclus, ../lib.sdd) — corriger le
+    commentaire (le comportement des trois routes est bien le contrat).
+  [?] Aucune purge des tickets abandonnés : un ticket émis-jamais-présenté reste à vie
+    dans la map (seul un rachat libère). Même question ouverte que ../lib.sdd — le
+    propriétaire est ici : purge opportuniste à chaque @issue, tâche périodique, ou assumé
+    (émission derrière auth, volumétrie sandbox : 1 process, quelques utilisateurs) ?
+  [?] Générateur aléatoire : @rand::thread_rng sous rand 0.8 est un ChaChaRng amorcé sur
+    entropie OS (CSPRNG en pratique, ≈190 bits pour 32 caractères) mais n'est pas marqué
+    « cryptographique » par la crate. Exiger une source explicite (`getrandom`/`ring`)
+    pour ce bearer token, ou assumer rand 0.8 avec la propriété verrouillée par la spec ?
+    Corollaire pratique : la montée vers rand 0.9 casse ces imports — un test de format
+    (`format_ticket_alphanumerique_de_trente_deux_caracteres`) ne détecterait PAS un
+    dégradé vers un PRNG non amorcé.
+  [?] Claims transportés puis jetés par la garde (@TicketClaims consommés, aucune
+    extension injectée) : aucune session `/ws/fs`, `/ws/terminal`, `/ws/lsp` ne connaît
+    `subject`/`access` — pas d'audit possible, @AccessLevel::Read ouvre le PTY complet
+    (../auth.sdd `[!]`, ../lib.sdd `[?]`). Injecter @AuthInfo dans la requête après rachat,
+    ou supprimer le transport des claims (ticket = simple capability) ?
+  [?] Testabilité de l'expiration : TTL 30 s sans seam — le test existant injecte une
+    entrée backdatée via le champ privé (acceptable tant que le test reste dans le
+    module). Ajouter un seam `cfg(test)` (TTL ou horloge injectables) ou verrouiller le
+    pattern d'injection privée comme façon officielle de tester l'expiration ?
+  [?] Frontière de tests : `issuance_without_auth_returns_401` et
+    `issuance_with_static_token_returns_ticket` testent @handle_ws_ticket (../lib.rs) depuis
+    ./ticket.rs. Déplacer vers ../../tests/http.rs, ou accepter la colocalité « chemin du
+    ticket » ? (../lib.sdd référence déjà ces deux tests à ce fichier — cohérence à garder
+    quelle que soit la décision.)
+  [?] Collision d'émission (insert qui écrase en cas d'égalité de clé, ≈2^-190) : assumé
+    silencieusement ou garde (« régénérer si déjà présent ») ?
+  [!] Modes de contournement dans les tickets : `no_auth` et `static_token` (../auth.rs)
+    mettent Admin + PTY complet dans un ticket. @Config::validate ne fait qu'un
+    @tracing::warn — un pod démarré par erreur en mode bypass expose un terminal
+    root-equivalent à quiconque peut joindre l'ingress sans le moindre claim. Contracter
+    « production interdit, vérifié par le déploiement » (NetworkPolicy/ingress) ou exiger
+    un refus en startup ?
+  [?] Doc de module « the frontend calls `POST /ws/ticket` (behind `require_auth`) » : en
+    production l'appelant réel est `app` (relais de ticket, JWT présenté,
+    ../../docs/architecture.md) — reformuler le commentaire pour refléter le relais, ou
+    le garder (le mécanisme est identique, l'identité de l'appelant non) ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre, compilé, exécuté,
+    vert.
+  Les deux enveloppes 401 sont verrouillées byte par byte et cohérentes avec l'`Example`
+    de ../lib.sdd ; l'usage unique et l'absence d'oracle sont verrouillés y compris sous
+    concurrence.
+  La fuite @TraceLayer (`[!]`) est tranchée par Sébastien (correction ou acceptation
+    explicite tracée), ainsi que tous les `[?]` — la spec relue fait foi.
+  Le harnais reste vert sur le fichier (../../tooling.sdd) : `cargo clippy --workspace
+    --all-targets -- -D warnings`, `cargo fmt --all -- --check`, aucun nouveau
+    `unwrap`/`expect` hors les deux `expect` d'empoisonnement et `cfg(test)`.
+
+Scenario: ticket_rachete_rend_les_claims_emis
+  Given un @TicketStore::new vide et des @TicketClaims `subject: "user-u"`, @AccessLevel::Admin
+  When @TicketStore::issue émet un ticket pour ces claims puis @TicketStore::redeem est appelé sur cette valeur
+  Then @redeem rend @Some et les claims rendus sont égaux (subject et access) à ceux émis
+
+Scenario: second_rachat_du_meme_ticket_echoue
+  Given un @TicketStore::new et un ticket émis pour un @TicketClaims valide
+  When @redeem est appelé une première fois sur ce ticket (succès), puis une seconde fois
+  Then la seconde @redeem rend @None — le ticket est à usage unique strict
+
+Scenario: ticket_expire_renvoie_aucun_et_disparait_de_la_map
+  Given un @TicketStore dont la map contient une entrée injectée avec `expires_at` dans le passé (60 s de retard)
+  When @redeem est appelé sur cette clé expirée, puis rappelée une seconde fois sur la même clé
+  Then les deux appels rendent @None — l'entrée expirée a été retirée par la première tentative, pas seulement refusée
+
+Scenario: format_ticket_alphanumerique_de_trente_deux_caracteres
+  Given un @TicketStore::new et n'importe quel @TicketClaims
+  When @issue est appelé vingt fois
+  Then chaque ticket rendu a une longueur exacte de `32` et ne contient que des caractères `[A-Za-z0-9]`
+
+Scenario: emissions_successives_ne_repetent_jamais_le_meme_ticket
+  Given un @TicketStore::new
+  When @issue est appelé cent fois avec les mêmes claims
+  Then les cent tickets sont deux à deux distincts et chacun se rachète avec @Some
+
+Scenario: rachats_paralleles_du_meme_ticket_un_seul_gagnant
+  Given un @TicketStore partagé en clones (@Arc interne) et un ticket émis, avec N (>= 8) threads prêts à racheter cette valeur simultanément
+  When les N threads appellent @redeem sur le même ticket
+  Then exactement UN thread reçoit @Some et les N-1 autres reçoivent @None
+
+Scenario: ttl_et_default_sont_verrouilles
+  Given le crate compilé
+  When on lit @TICKET_TTL_SECS et qu'on appelle @TicketStore::default puis @redeem sur n'importe quelle valeur
+  Then @TICKET_TTL_SECS vaut `30` et le store par défaut rachète tout en @None (map vide)
+
+Scenario: store_clone_voit_la_meme_map_de_tickets
+  Given un @TicketStore et un clone pris avant toute émission
+  When @issue est appelé sur l'original puis @redeem sur le clone, puis un second @redeem sur l'original
+  Then le rachat du clone rend @Some avec les claims émis et le second rachat de l'original rend @None — la map est unique derrière les clones
+
+Scenario: requete_sans_ticket_rejetee_en_001
+  Given un @build_app monté avec @ws_auth_middleware sur `/ws/fs`
+  When `GET /ws/fs` sans query, puis `GET /ws/fs?other=1`, puis `GET /ws/fs?ticket` (clé sans `=`), puis `GET /ws/fs?Ticket=ab12` (casse différente)
+  Then les quatre réponses sont `401` avec corps `{"error":"VNL-SBX-WS-001: missing or malformed ticket"}`
+
+Scenario: ticket_inconnu_rejete_en_002
+  Given un @build_app avec @ws_auth_middleware et un @TicketStore vide
+  When `GET /ws/terminal?ticket=jamais-emis-00000000000000000000`
+  Then la réponse est `401` avec corps `{"error":"VNL-SBX-WS-002: invalid or expired ticket"}` et aucun upgrade WebSocket n'a lieu
+
+Scenario: parametre_ticket_vide_rejete_en_002
+  Given un @build_app avec @ws_auth_middleware
+  When `GET /ws/fs?ticket=` (paramètre présent, valeur vide)
+  Then la réponse est `401` avec `VNL-SBX-WS-002` — un ticket vide est PRÉSENT et invalide, jamais « manquant » (`001`)
+
+Scenario: parametre_ticket_duplique_premier_gagnant
+  Given un @TicketStore contenant un ticket valide `t_valide`
+  When `GET /ws/fs?ticket=t_valide&ticket=intrus` (le valide en premier), puis sur une app neuve `GET /ws/fs?ticket=intrus&ticket=t_valide2` (l'invalide en premier)
+  Then la première requête passe la garde (le handler aval reçoit la requête, pas un 401) et consomme `t_valide`
+  And la seconde requête est un `401 VNL-SBX-WS-002` et ne consomme pas `t_valide2` — la première occurrence de la query gagne, la seconde est ignorée
+
+Scenario: corps_401_verrouille_le_format_des_deux_identifiants
+  Given les deux variantes @WsAuthError rendues via @IntoResponse
+  When les réponses HTTP sont lues
+  Then chacune est `401` avec corps JSON exactement `{"error":"VNL-SBX-WS-001: missing or malformed ticket"}` et `{"error":"VNL-SBX-WS-002: invalid or expired ticket"}` (byte-exact, cohérent avec l'`Example` de ../lib.sdd)
+  And aucune des deux ne porte de header `WWW-Authenticate` ni de champ `error_description`
+
+Scenario: rejets_inconnu_expire_et_consomme_sont_indistinguables
+  Given un @TicketStore injecté avec une entrée expirée (`expires_at` passé) et une entrée valide rachetée une première fois
+  When `GET /ws/fs?ticket=…` est émis pour la clé expirée, pour la clé consommée et pour une clé jamais émise
+  Then les trois réponses sont `401` avec un corps JSON IDENTIQUE (`VNL-SBX-WS-002`) — aucun oracle ne distingue expiration, consommation et inexistence
+
+Scenario: ticket_valide_consomme_malgre_upgrade_absent
+  Given un @build_app avec un ticket valide émis dans son @TicketStore (configuration `no_auth` pour l'émission)
+  When un `GET /ws/fs?ticket=<valide>` SANS headers d'upgrade WebSocket est émis (la requête n'atteint pas un upgrade, elle est rejetée en aval par l'extracteur)
+  Then la réponse n'est pas un `401` (la garde a laissé passer ; le rejet vient de l'extracteur @WebSocketUpgrade)
+  And le même ticket rejoué immédiatement rend `401 VNL-SBX-WS-002` — la consommation a eu lieu avant le handler, succès aval ou non
+
+Scenario: claims_valides_ne_sont_pas_injectes_en_aval
+  Given un router @Router::new avec une route `/ws/probe` portant @ws_auth_middleware et un handler-sonde qui répond `200` si les extensions de la requête ne portent aucune donnée d'identité
+  When une requête validement ticketée atteint le sonde
+  Then le handler est atteint et aucune extension @auth::AuthInfo ni @TicketClaims n'est présente dans la requête — la garde consomme le ticket et jette les claims
+
+Scenario: aucun_log_du_module_ne_fuit_la_valeur_d_un_ticket
+  Given un collecteur @tracing branché et un @TicketStore
+  When @issue émet un ticket, qu'un rachat échoué et un passage de garde avec `?ticket=<valeur>` sur une app produisent leurs réponses
+  Then aucun enregistrement de log capturé pendant l'opération ne contient la valeur du ticket (le module n'émet aucun log ; toute trace trouvée provient d'une couche externe — voir `Tasks` `[!]` @TraceLayer)
+
+Example: enveloppes et formes observables
+  ticket émis → 32 caractères `[A-Za-z0-9]` ex: `aB3xK9…` (valeur jamais revue par le serveur après rachat)
+  401 garde → `{"error":"VNL-SBX-WS-001: missing or malformed ticket"}` ou `{"error":"VNL-SBX-WS-002: invalid or expired ticket"}`
+  rachat réussi → @TicketClaims { subject: idem @auth::AuthInfo à l'émission, access: Admin ou Read } — consommé par la garde, jamais transmis en aval

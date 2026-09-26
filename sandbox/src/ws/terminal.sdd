@@ -1,0 +1,504 @@
+Spec: Terminal
+
+Platform: Rust/vanyline-sandbox/axum + portable-pty
+
+Purpose:
+  Session terminal de la sandbox : le handler de `GET /ws/terminal` qui ouvre un PTY réel
+  (@portable_pty, pas un simulateur) et le relie bidirectionnellement à un WebSocket, plus
+  ses deux auxiliaires publics @spawn_shell (ouverture PTY + spawn du shell) et
+  @kill_process_group (nettoyage à la fermeture). Le fichier forme un seul contrat — la
+  session terminal de bout en bout (démarrage, relais, signaux de contrôle, teardown) — et
+  ses deux fonctions `pub`, qui n'ont aucun autre appelateur de production dans le crate
+  (vérifié par grep : seuls @terminal_session et le module de test les appellent).
+  L'authentification n'est PAS ce contrat : la garde @ws_auth_middleware (./ticket.sdd) a
+  validé et consommé le ticket AVANT l'upgrade ; le handler ne voit aucune identité.
+  Contrat de sécurité documenté en `Handles` et `Tasks` `[!]` : le PTY est un shell de
+  commande du pod — @AccessLevel::Read l'obtient comme Admin (../auth.sdd `[!]`, claims
+  jetés par la garde ./ticket.sdd). Héritage racine : `../../vanyline.sdd` (jamais de JWT
+  brut au navigateur — ici seul le ticket compte), sémantique détaillée dans
+  `../../docs/architecture.md` section « WebSocket éditeur — /ws/terminal ».
+
+Owns:
+  ./terminal.rs
+
+Can read:
+  ../lib.rs
+  ../lib.sdd
+  ./ticket.rs
+  ./ticket.sdd
+  ./mod.rs
+  ../venv.rs
+  ../venv.sdd
+  ../auth.sdd
+  ../config.rs
+  ../Cargo.toml
+  ../../docs/architecture.md
+  ../../vanyline.sdd
+  ../../tooling.sdd
+  ../../../.specdd/bootstrap.project.md
+
+Exposes:
+  @handle_ws_terminal — `pub async fn(State(@AppState), @WebSocketUpgrade) -> impl
+    @IntoResponse` : handler de `GET /ws/terminal`, câblé dans ../lib.rs avec
+    @ws_auth_middleware en couche par route. Rend l'upgrade (`101`) sans aucune
+    vérification propre puis détache @terminal_session via @WebSocketUpgrade::on_upgrade.
+    Déclaré `pub mod terminal;` via ./mod.rs.
+  @spawn_shell — `pub fn(cwd: &@Path, size: @PtySize) -> @anyhow::Result<(@Box<dyn
+    @MasterPty + Send>, @Box<dyn @Child + Send + Sync>)>` : ouvre un PTY
+    (@native_pty_system + @openpty) et spawn le shell dessus. Surface publique utilisée
+    par @terminal_session (seul appelateur de production) et par les tests du fichier —
+    aucun autre appelateur dans le crate.
+  @kill_process_group — `pub fn(&mut @Box<dyn @Child + Send + Sync>)` : SIGKILL sur le
+    groupe de processus du shell, best-effort, ne rend rien, ne logge rien. Publique pour
+    les mêmes raisons.
+  @PTY_BUF_SIZE — constante privée = `16 * 1024` : taille du tampon de lecture du PTY ET
+    capacité (en NOMBRE d'items) du canal mpsc interne — les deux usages d'une même
+    constante, cf. `Tasks` `[?]`.
+  Privé mais observable par les routes : @terminal_session (boucle de relais),
+    @parse_text_frame (analyse des frames texte de contrôle).
+  Module de test `tests` — 7 tests existants : `spawn_shell_writes_and_reads`,
+    `kill_process_group_kills_foreground_child`, `detached_background_job_survives_by_design`,
+    `resize_updates_pty_size`, `terminal_ticket_required` (route : sans ticket → `401`,
+    ticket inconnu → `401`), `spawn_shell_active_le_venv_du_cwd`,
+    `spawn_shell_sans_venv_pas_de_VIRTUAL_ENV`. Helper `wait_for_shell_ready` :
+    synchronisation sur le premier octet du prompt initial (jamais sur un marqueur echo —
+    le réécho canonique du tty rendrait le marqueur auto-référent, piège documenté en
+    commentaire).
+
+Accepts:
+  @handle_ws_terminal — uniquement la requête d'upgrade déjà filtrée par la garde : aucune
+    query, aucun chemin, aucun message client n'influence le PTY (le `cwd` ne vient que de
+    @state.config.sandbox_root — @Config de ../config.rs, `/workspace` par défaut, jamais
+    une entrée utilisateur). Headers d'upgrade validés par l'extracteur @WebSocketUpgrade
+    en aval de la garde (./ticket.sdd : la garde ne regarde que `?ticket=`).
+  @spawn_shell — `cwd` : n'importe quel chemin (API publique, aucune validation — le site
+    de production passe `sandbox_root` de la config ; la doc exige que la valeur vienne de
+    la config, pas d'une entrée utilisateur, cf. ../venv.sdd `[?]` sur le nommage du
+    paramètre). `size` : n'importe quel @PtySize, transmis tel quel à @openpty — y compris
+    @PtySize::default() `0×0` que les tests utilisent avec succès (`Tasks` `[?]`).
+  Frames WS entrantes — binaire : tout octet, toute taille, aucune frontière de message
+    (les fragments d'une sortie ANSI/UTF-8 traversent octet pour octet) ; texte : tout
+    UTF-8, parse JSON tenté et loupé = silence. Pas de protocole de contrôle autre que
+    `resize` : aucun message « change cwd », « redémarre », « tue » n'existe.
+  @kill_process_group — n'importe quel @Box<dyn @Child>, vivant, déjà mort, ou déjà
+    ramassé (@process_id() `None` est un cas nominal).
+
+Returns:
+  @handle_ws_terminal — toujours un upgrade `101` (le refus `401` est la réponse de la
+    garde, jamais la sienne). Une fois l'upgrade accepté, la session ne rend AUCEUN
+    message d'erreur applicatif : une session qui échoue au spawn ou au setup se
+    content de fermer le socket.
+  @spawn_shell — @Ok((master, child)) : le master sert au contrôle (resize) et à la
+    lecture/écriture clonées ; l'enfant est le shell, leader de session (son @process_id
+    == pgid). Shell résolu ainsi : `SHELL` du processus serveur (@std::env::var, lu au
+    spawn, PAS l'environnement du client), sinon littéral `/bin/bash`.
+    @CommandBuilder::new(shell) avec @set_controlling_tty(true) et @cwd(cwd) ; argv =
+    [programme] seul — aucun argument (bash interactif non-login : lit `~/.bashrc`, pas
+    `~/.bash_profile`). Environnement : héritage complet du processus serveur, plus
+    l'overlay @venv_overlay(cwd) appliqué paire par paire via `cmd.env` (`VIRTUAL_ENV` +
+    `PATH` préfixé de `.venv/bin` si marqueur, rien sinon — ../venv.sdd). `TERM` n'est
+    JAMAIS posé explicitement (hérité, donc possiblement absent du pod — `Tasks` `[?]`).
+  @terminal_session — rien ; ses seuls effets observables sont les frames binaires sortantes
+    (octets lus du PTY, jamais enveloppés ni convertis en texte/JSON) et la fermeture.
+    Taille initiale du PTY de session : `rows: 24, cols: 80, pixel_width: 0,
+    pixel_height: 0` (codée en dur — le client envoie sa vraie taille en frame `resize`
+    dès l'ouverture, cf. ../../docs/architecture.md section Frontend).
+  @parse_text_frame — @Some(@PtySize) uniquement pour un objet JSON avec `type ==
+    "resize"` (chaîne exacte, sensible à la casse) et `cols`/`rows` en @u64 ; @None pour
+    tout le reste : JSON invalide, non-objet, `type` absent/non-chaîne/autre, `cols`/`rows`
+    absents, nuls, booléens, flottants (`80.5` → @None) ou négatifs. `pixel_*` toujours
+    `0`. Les `cols`/`rows` @u64 passent par un cast `as @u16` TRONQUANT : `65616` devient
+    `80`, `70000` devient `4464` (`Tasks` `[?]`).
+  @kill_process_group — `()`. Erreur de kill (processus déjà mort, EPERM) ignorée sans
+    log ni signalement.
+  Cycle de vie complet : une connexion WS = un PTY + un shell, indépendants des autres
+    sessions (le frontend ouvre un onglet = une connexion = un ticket propre, jamais
+    partagé). Le shell NE survit PAS à la fermeture : @kill_process_group tue le shell et
+    (via hangup noyau) ses jobs foreground ; les jobs explicitement détachés (`cmd &`,
+    nohup, disown) survivent PAR DESIGN — cas d'usage « service de dev en arrière-plan »
+    documenté en commentaire et ../../docs/architecture.md.
+
+Raises:
+  Aucune erreur propagée en production : @terminal_session ne rend rien et ne panique pas
+    (aucun `unwrap`/`expect`/`panic!` hors `cfg(test)` — harnais ../../tooling.sdd). Le
+    seul `unsafe` est @libc::kill sous `#[allow(unsafe_code)]` avec commentaire SAFETY
+    (kill(2) sur pgid négatif, opération Unix standard, valeur de retour ignorée).
+  @spawn_shell — @anyhow::Error sur échec d'@openpty ou de @spawn_command, remonté à
+    @terminal_session qui logge `tracing::error` `"PTY spawn error: {e}"` puis ferme la
+    session sans message d'erreur au client.
+  Messages d'erreur exacts du fichier (verrouillables) : `"PTY spawn error: {e}"`,
+    `"PTY reader error: {e}"`, `"PTY writer error: {e}"` (niveau error, session fermée
+    dans les trois cas) ; `"PTY write error: {e}"` (warn, session FERMÉE — échec de
+    `write_all` sur stdin), `"PTY flush error: {e}"` et `"PTY resize error: {e}"` (warn,
+    session POURSUIVIE — asymétrie write/flush contractuelle).
+
+Handles:
+  Protocole WS (paraphrase fidèle de la doc de module et du code) :
+    - frame binaire entrante -> octets écrits tels quels sur le stdin du PTY (`write_all`
+      + `flush` sur le writer du master) ;
+    - octets lus du PTY -> frame binaire sortante, sans découpage ni transformation ;
+    - frame texte entrante -> JSON de contrôle ; `{"type":"resize","cols":N,"rows":M}` ->
+      @MasterPty::resize (SIGWINCH propagé par le noyau aux apps du PTY) ; TOUT autre
+      contenu (JSON valide d'un autre type, non-JSON) est ignoré silencieusement, sans
+      log ni erreur ;
+    - @Message::Close, erreur WS, ou fin de stream -> break de la boucle puis
+      @kill_process_group ;
+    - @Message::Ping / @Message::Pong -> ignorés, la session continue (axum répond
+      automatiquement Pong aux Ping) : les traiter comme une fermeture coupait le
+      terminal au premier keepalive d'un proxy — bug corrigé, documenté en commentaire et
+      ../../docs/architecture.md, verrouillé par Scenario.
+  Boucle de relais @terminal_session — @tokio::select! SANS `biased`, délibérément :
+    avec `biased`, un flux de sortie continu (commande verbeuse) rendrait `rx.recv()`
+    quasi toujours prêt et affamerait `ws.recv()` — donc le clavier de l'utilisateur,
+    Ctrl-C compris. Le tirage pseudo-aléatoire par défaut est le contrat (raison
+    explicitée en commentaire, reprise ../../docs/architecture.md). La branche `else ->
+    break` est un filet (inatteignable sans gardes sur les branches — `Tasks`).
+  Lecture PTY — tâche @tokio::task::spawn_blocking détachée (`let _reader_handle`,
+    @JoinHandle non annulable) : tampon de `PTY_BUF_SIZE` octets ; @Ok(0) (EOF, démo :
+    shell terminé) -> break ; `blocking_send` en erreur (canal fermé = session finie) ->
+    break ; @WouldBlock -> @thread::yield_now (spin sans sommeil — `Tasks` `[?]`) ;
+    toute autre erreur -> break. Commentaire/code : le commentaire « the _reader_handle
+    drops the cloned reader when terminal_session ends » est imprécis — la lecture
+    bloquante ne rend la main (et le fd cloné) que quand le PTY renvoie EOF/EIO, typiquement
+    après le kill du shell.
+  Backpressure — canal @tokio::sync::mpsc borné à `PTY_BUF_SIZE` MESSAGES (chaque item
+    peut peser jusqu'à 16 KiB, plafond mémoire théorique par session ≈ 256 Mio —
+    `Tasks` `[?]`) : canal plein, @blocking_send bloque la lectrice, la sortie PTY est
+    throttlée par le noyau ; l'entrée clavier reste servie grâce au select non biaisé.
+  Chemins de setup en échec — après un spawn réussi mais @try_clone_reader ou
+    @take_writer en erreur, @terminal_session return en logs `error` SANS appeler
+    @kill_process_group : le sort du shell déjà lancé dépend alors du hangup noyau à la
+    fermeture du master, avec la nuance que la tâche spawn_blocking peut détenir un clone
+    du fd master — non vérifié, `Tasks` `[?]`.
+  Kill — deux mécanismes, pas un seul : @libc::kill(-(pid), @SIGKILL) tue le shell
+    (leader de session, pgid == pid) ; la mort du leader déclenche le hangup NOYAU du
+    terminal contrôlant, qui envoie SIGHUP au groupe foreground — c'est ce hangup qui tue
+    le job foreground en cours (vérification empirique `/proc/<pid>/stat` champ pgrp,
+    consignée en commentaire avant l'écriture, pas une supposition). Un job backgroundé
+    n'est jamais le groupe foreground : jamais atteint, survit. Best-effort :
+    @process_id() `None` (déjà ramassé) -> no-op.
+  PTY mort, client fantôme, multi-connexions — shell qui s'éteint (`exit`) : la lectrice
+    reçoit EOF/EIO, `rx` se ferme, la session break, kill best-effort. Client
+    déconnecté sans Close (TCP sans FIN) : AUCUN timeout de session ni idle n'existe — le
+    shell vit tant que le socket tient (keepalive TCP/ingress seul recours, hors contrat —
+    `Tasks` `[?]`). N connexions = N shells, sans aucun quota (`Tasks` `[?]`).
+  Sécurité — le fichier ne fait AUCUNE contrôle d'accès lui-même (la garde en amont est
+    le contrat ./ticket.sdd) et ne peut pas en faire : les @TicketClaims sont jetés par la
+    garde, aucune identité n'atteint @terminal_session. Conséquences contractuelles :
+    [!] un ticket @AccessLevel::Read ouvre le PTY complet comme un Admin (../auth.sdd
+    `[!]`, RBAC décoratif, arbitrage à rendre là-haut) ; les modes `no_auth`/`static_token`
+    (../ticket.sdd `[!]`) fabriquent un Admin et donc un terminal de pod pour quiconque
+    joint l'ingress ; le terminal EST une exécution de commande dans le pod — seuls le
+    ticket court-vécu, la NetworkPolicy et l'ingress (hors contrat) le bornent. En
+    retour : le contenu des frames binaires est du texte de terminal, jamais filtré — pas
+    d'injection hors sémantique du shell, et aucun champ client n'entre dans un chemin
+    (`cwd` = config, jamais de confinement à faire ici).
+  Enfant jamais wait() — @terminal_session ne réclame pas le statut de l'enfant ; le sort
+    du zombie (récolte au drop du @Box<dyn @Child> par portable-pty, ou reparenting)
+    n'est ni documenté ni vérifié — `Tasks` `[?]`.
+  Observabilité — seuls les SETUP failure et les échecs write/flush/resize sont loggés ;
+    ouvrir ou fermer une terminal ne produit AUCUN log (qui a ouvert quel terminal quand :
+    inexistant, lié aux claims jetés — `Tasks` `[?]`).
+
+Must:
+  Servir `GET /ws/terminal` uniquement après ticket valide consommé en amont
+    (@ws_auth_middleware, ./ticket.sdd) ; le handler lui-même ne vérifie rien et rend
+    l'upgrade sans condition une fois la garde passée.
+  Relayer les frames binaires entrantes octet pour octet sur le stdin du PTY (aucune
+    interprétation, aucun contrôle en bande) et la sortie PTY en frames binaires brutes.
+  Traiter `{"type":"resize","cols":N,"rows":M}` comme resize (objet JSON, `type` chaîne
+    exacte `"resize"`, `cols`/`rows` entiers non négatifs) et TOUT le reste du texte
+    comme ignoré silencieusement — ni log, ni erreur, ni fermeture.
+  Survivre aux Ping/Pong (les ignorer, réponse Pong automatique d'axum) — verrou de la
+    régression keepalive.
+  Fermer la session (break de boucle) sur : Close, erreur WS, fin de stream, erreur de
+    `ws.send` vers le client, `write_all` PTY en erreur, EOF/erreur de lecture PTY, canal
+    PTY fermé — puis appeler @kill_process_group.
+  Conduire la boucle de relais par @tokio::select! non biaisé — la réactivité clavier
+    sous flux de sortie continu est un contrat, pas un détail d'implémentation.
+  Ouvrir chaque session avec `cwd = @state.config.sandbox_root` et la taille initiale
+    `24×80` (pixel 0/0) — jamais un chemin fourni par le client, jamais une taille
+    imposée au client avant sa première frame `resize`.
+  Spawn le shell résolu par `SHELL` du processus serveur (sinon `/bin/bash`), argv =
+    programme seul (interactif non-login), tty contrôlant, environnement hérité du
+    serveur + overlay @venv_overlay recalculé à CHAQUE spawn (un `.venv` créé après le
+    démarrage du serveur est vu par le terminal ouvert juste après — ../venv.sdd, tests
+    existants).
+  Tuer à la fermeture par kill(2) @SIGKILL sur le pgid du shell + compter sur le hangup
+    noyau pour le foreground ; laisser vivre les jobs détachés (`&`, nohup, disown) —
+    comportement voulu, cas d'usage service de dev documenté, verrouillé par Scenario.
+  Rester dans le harnais (../../tooling.sdd) : unique exemption `#[allow(unsafe_code)]`
+    justifiée par commentaire SAFETY sur le @libc::kill ; aucun `unwrap`/`expect`/
+    `panic!`/`println!` en production ; le module de test porte son exemption locale.
+
+Must not:
+  Accepter un chemin, un cwd, une taille ou un shell imposés par le client (ni query, ni
+    frame de contrôle, ni contenu binaire ne changent le `cwd` ou le binaire du shell).
+  Partager un PTY ou un shell entre deux connexions WebSocket — une session = un PTY =
+    un shell ; chaque connexion paie son propre ticket (usage unique, ./ticket.sdd).
+  Interpréter un motif en bande dans les octets binaires (aucun escape « contrôle ») ou
+    répondre applicativement à un échec de spawn/lecture : la seule signalisation au
+    client est la fermeture du socket.
+  Couper la session sur Ping, Pong, frame texte invalide, JSON de type inconnu, échec de
+    `flush` ou échec de `resize` (ces deux derniers : warn et poursuite).
+  Tuer les jobs explicitement détachés du shell — « réparer » leur survie casserait le
+    cas d'usage service de dev exposé par Service/Ingress.
+  Connaître ou propager une identité : le fichier ne lit aucun claim, ne logge aucun
+    utilisateur (la garde en amont jette les claims — ./ticket.sdd).
+  Envelopper la sortie PTY en JSON/texte, ni mélanger trames de contrôle et données sur
+    un même canal (binaire = données, texte = contrôle, jamais l'inverse).
+  Introduire un nouveau `unwrap`/`expect`/`panic!` hors `cfg(test)`, ni un second
+    `unsafe` sans exemption justifiée (../../tooling.sdd).
+
+Depends on:
+  ./mod.rs — déclaration `pub mod terminal;` du module.
+  ../lib.rs — câblage `GET /ws/terminal` + couche @ws_auth_middleware par route ;
+    @AppState dont @terminal_session ne consomme que `config` ; @Config.sandbox_root
+    (../config.rs, `/workspace` par défaut).
+  ./ticket.rs — @ws_auth_middleware : précondition d'exécution (ticket consommé avant
+    l'extracteur @WebSocketUpgrade) ; le contrat détaillé vit en ./ticket.sdd.
+  ./venv.rs — @venv_overlay : appliqué par @spawn_shell à chaque spawn, contrat en
+    ../venv.sdd (marqueur `.venv/pyvenv.cfg`, jamais appliqué au LSP — le shell PTY est
+    un process séparé du LSP).
+  ../auth.sdd — contexte `[!]` uniquement (Read = Admin, modes bypass) : ce fichier
+    n'appelle aucun code d'auth.
+  @portable_pty — @native_pty_system, @PtySize, @CommandBuilder, @MasterPty
+    (@try_clone_reader, @take_writer, @resize), @Child (@process_id).
+  @axum 0.8 — @extract::ws (@Message, @Utf8Bytes, @WebSocket), @WebSocketUpgrade,
+    @State, @IntoResponse ; @tokio — @sync::mpsc, @task::spawn_blocking ; @serde_json —
+    analyse des frames texte ; @libc — @libc::kill, @SIGKILL, @pid_t ; @anyhow —
+    erreur de @spawn_shell ; @tracing — logs error/warn.
+
+Tasks:
+  [ ] Relecture complète par Sébastien (reverse du 2026-09-26) — aucun comportement
+    accidentel ci-dessus ne devient contrat avant cette relecture
+    (.specdd/bootstrap.project.md) ; priorité aux `[!]`/`[?]`.
+  [!] Sécurité du terminal : un ticket @AccessLevel::Read ouvre le PTY complet (shell du
+    pod) exactement comme un Admin — la garde jette les claims (./ticket.sdd), ce fichier
+    ne PEUT pas discriminer sans changement d'abord en amont (../auth.sdd `[!]`,
+    ../lib.sdd `[?]`). Le contrat « Read = décoratif » ou le gating réel se décide là-haut,
+    pas ici ; en attendant cette spec documente le trou sans l'approuver.
+  [!] Modes `no_auth`/`static_token` : ticket Admin sans identité réelle -> terminal
+    public pour quiconque joint l'ingress (dérive de ../ticket.sdd `[!]`) — la décision
+    (refus au démarrage vs NetworkPolicy) est là-bas, l'exposition PTY est ici.
+  [?] `SHELL` posé mais VIDNE (chaîne vide) : @std::env::var rend @Ok("") ->
+    @CommandBuilder::new("") -> spawn en erreur -> fermeture silencieuse du terminal. Le
+    vide devrait-il compter comme « non posé » (défaut `/bin/bash`) ?
+  [?] `TERM` jamais posé explicitement : vim/top/plein écran dépendent du `TERM` hérité
+    du processus serveur, possiblement absent dans un pod lancé par K8s -> apps
+    dégradées en « dumb ». Poser `TERM=xterm-256color` au spawn (le client est xterm.js)
+    ou assumer l'héritage ?
+  [?] Cast `as u16` des `cols`/`rows` sans vérification : `65616` -> `80`, `70000` ->
+    `4464` — resize silencieux avec taille fausse. Contrôle `u64::try_into` (et ignorer
+    si hors plage) ou acquis « clients sains » ?
+  [?] @PTY_BUF_SIZE fait tampon de lecture ET capacité du canal mpsc : 16384 MESSAGES de
+    jusqu'à 16 KiB = plafond ≈ 256 Mio par session abandonnée qui n'évacue pas. Valeur
+    voulue ou confusion ? Séparer les constantes et dimensionner en mémoire ?
+  [?] Spin sur @WouldBlock : @thread::yield_now sans sommeil — boucle occupée 100 % si le
+    reader est non bloquant (rare avec portable-pty unix, jamais prouvé). Dors le cas
+    échéant, ou assumé ?
+  [?] Retours anticipés après spawn réussi (échecs @try_clone_reader / @take_writer) :
+    @kill_process_group n'est PAS appelé — le shell survit-il (hangup noyau à la fermeture
+    du master, avec un fd master possiblement retenu par la tâche spawn_blocking) ? À
+    vérifier empiriquement, puis resserrer (kill avant tout return) ou contractualiser.
+  [?] Enfant jamais wait() : zombie après kill ? Récolte effective au drop du
+    @Box<dyn @Child> de portable-pty ? Observer `/proc` avant de trancher (ajouter un
+    `wait` en teardown ou assumer).
+  [?] Aucun quota : N onglets = N shells, aucune limite par connexion, par utilisateur ni
+    par pod (les onglets frontend sont multiples par design — IdeShell) ; aucun timeout
+    de session ni idle (socket fantôme = shell éternel, hors keepalive TCP/ingress).
+    Bornir ici, au level ingress, ou assumer le modèle « une sandbox = un utilisateur
+    actif » ?
+  [?] Zéro log d'ouverture/fermeture de terminal + claims jetés : aucun audit possible de
+    « qui a tenu quel shell quand ». Decision liée à ./ticket.sdd (injecter ou non
+    @AuthInfo) ; ici au minimum un log `info` sujet + ouverture/fermeture ?
+  [?] @PtySize::default() (`0×0`) accepté par @spawn_shell (les tests s'en servent) :
+    API publique tolérante aux tailles dégénérées — contrat assumé ou validation ?
+  [?] Ligne `else => break` du select : filet inatteignable sans garde sur les branches
+    — la garder défensive ou la documenter comme morte ?
+  [?] Commentaire « the _reader_handle drops the cloned reader when terminal_session
+    ends » : imprécis (le @JoinHandle drop n'annule rien ; le fd cloné ne se libère que
+    quand la lecture bloquante rend la main). Corriger le commentaire ou reformuler le
+    contrat de la lectrice ?
+  [?] Commentaire de design (lignes « We no longer need to access master… / Actually /
+    Let's just… ») : prose exploratoire laissée dans le code, lisible comme du
+    tâtonnement. Nettoyage à prévoir, hors contrat.
+  [ ] Échec de @master.resize : log warn et poursuite — chemin jamais couvert (aucune
+    taille déterministement rejetable par TIOCSWINSZ) ; trouver un injecteur de faute ou
+    assumer l'absence de test.
+  [ ] Harnais de test session : les Scenarios de niveau session (taille initiale, Ping,
+    Close, frames texte sur la vraie connexion) exigent un client WS réel
+    (@tokio-tungstenite sur @TcpListener branché sur @build_app) — les tests actuels
+    @oneshot/@tower ne pilotent pas les frames WS. Le poser avant de cocher `Done when`.
+  [ ] Cartographie des tests existants -> Scenarios (re-taggage par titre) :
+    `spawn_shell_writes_and_reads` -> `echo_stdin_traverse_le_relais` ;
+    `kill_process_group_kills_foreground_child` -> `job_foreground_tue_a_la_fermeture` ;
+    `detached_background_job_survives_by_design` -> `job_detache_survit_par_design` ;
+    `resize_updates_pty_size` -> `resize_direct_sur_master` ;
+    `terminal_ticket_required` -> `ticket_absent_ou_inconnu_rejete_401` ;
+    `spawn_shell_active_le_venv_du_cwd` -> `overlay_venv_actif_au_spawn` ;
+    `spawn_shell_sans_venv_pas_de_VIRTUAL_ENV` -> `sans_marqueur_virtual_env_vide`.
+  [ ] Écrire les tests manquants par Scenario sans couverture : `shell_non_login_argv_
+    programme_seul`, `sessions_concurrentes_independantes`, `kill_sur_enfant_deja_reape_no_op`,
+    `spawn_shell_shell_inexistant_rend_erreur`, `spawn_shell_honore_la_taille_demandee`,
+    et tous les Scenarios marqués « harnais session » ci-dessus.
+
+Done when:
+  Chaque Scenario est couvert par un test taggé de son titre, compilé, exécuté, vert
+    (dont le harnais de test session WS si Sébastien en valide la pose).
+  Les `[!]` sécurité sont tranchés en amont (auth/ticket) et reportés ici ; tous les
+    `[?]` ont une décision consignée — la spec relue fait foi.
+  Le harnais reste vert sur le fichier (../../tooling.sdd) : clippy `--all-targets
+    -D warnings`, fmt, aucun nouveau `unwrap`/`expect`/`unsafe` non justifié.
+
+Scenario: ticket_absent_ou_inconnu_rejete_401
+  Given un @build_app en configuration JWT sans ticket émis
+  When `GET /ws/terminal` sans paramètre `ticket`, puis avec `?ticket=inconnu`
+  Then les deux réponses sont `401` et aucun upgrade WebSocket n'a lieu, aucun PTY n'est
+    ouvert (test existant `terminal_ticket_required`)
+
+Scenario: echo_stdin_traverse_le_relais
+  Given un @spawn_shell réussi dans un sandbox_root temporaire et ses handles reader/writer
+  When `echo pty_hello` est écrit sur le writer (stdin du PTY)
+  Then la sortie lue sur le reader contient `pty_hello` — aller simple du relais binaire,
+    écho du tty inclus (test existant `spawn_shell_writes_and_reads`)
+
+Scenario: octets_non_utf8_traversent_intacts
+  Given un @spawn_shell réussi et ses handles
+  When une séquence d'octets bruts non-UTF-8 (ex. `\x1b]0;titre\x07` suivie de `echo ok\r`)
+    est écrite sur le stdin
+  Then le reader renvoie ces octets tels quels (préfixe ESC `0x1b` et octet `0xC3` invalide
+    éventuel intacts) puis `ok` — le relais ne valide ni ne transforme jamais l'encodage
+
+Scenario: shell_non_login_argv_programme_seul
+  Given un @spawn_shell réussi avec le shell par défaut et ses handles
+  When `shopt -q login_shell && echo L || echo N\r` est écrit sur le stdin après le prompt
+  Then la sortie contient `N` — argv = [programme] seul, aucun flag : bash interactif
+    NON login (lit `~/.bashrc`, jamais `~/.bash_profile`)
+
+Scenario: spawn_shell_honore_la_taille_demandee
+  Given un @spawn_shell appelé avec @PtySize `rows: 30, cols: 120`
+  When @master.get_size est lu juste après le spawn
+  Then la taille rendue est exactement `rows 30, cols 120` — @spawn_shell transmet la
+    taille sans la retoucher
+
+Scenario: taille_initiale_de_la_session_est_24_par_80
+  Given une session WS ouverte avec un ticket valide (harnais session requis, cf. `Tasks`)
+  When aucun frame `resize` n'est envoyé et que `stty size` est tapé dans le terminal
+  Then la sortie est `24 80` — la taille de session codée en dur s'applique jusqu'à la
+    première frame de resize du client
+
+Scenario: resize_direct_sur_master
+  Given un @spawn_shell réussi (taille par défaut du test)
+  When @master.resize est appelé avec `rows: 40, cols: 100`
+  Then @master.get_size rend `rows 40, cols 100` (test existant `resize_updates_pty_size`)
+
+Scenario: frame_texte_resize_appliquee_a_la_session
+  Given une session WS ouverte avec ticket valide (harnais session requis)
+  When la frame texte `{"type":"resize","cols":100,"rows":40}` est envoyée puis `stty
+    size` tapé
+  Then la sortie du terminal est `40 100` — le JSON de contrôle resize le PTY (SIGWINCH
+    propagé par le noyau aux apps du terminal)
+
+Scenario: frame_texte_type_inconnu_ignoree
+  Given une session WS ouverte avec ticket valide (harnais session requis)
+  When les frames `{"type":"coucou"}`, `{"resize":true}` puis un texte non-JSON `pas du
+    json` sont envoyées, puis `echo vivant\r`
+  Then la session n'est jamais fermée, aucune erreur n'est émise, `vivant` revient, et
+    `stty size` est inchangé — tout contenu texte hors gabarit resize est ignoré en silence
+
+Scenario: resize_valeurs_invalides_ignorees
+  Given une session WS ouverte avec ticket valide (harnais session requis)
+  When les frames `{"type":"resize","cols":"80","rows":24}`, `{"type":"resize","rows":24}`,
+    `{"type":"resize","cols":-1,"rows":24}` puis `{"type":"resize","cols":80.5,"rows":24}`
+    sont envoyées
+  Then `stty size` reste inchangé — chaîne, absence, négatif et flottant ne sont pas des
+    @u64 et @parse_text_frame rend @None sans effet ni log
+
+Scenario: resize_hors_domaine_u16_tronque
+  Given un @spawn_shell réussi suivi de @master.resize avec la taille produite par la
+    frame `{"type":"resize","cols":65616,"rows":100}` (cols cast `as u16` -> `80`)
+  When @master.get_size est lu
+  Then la taille est `rows 100, cols 80` — le cast `as u16` est TRONQUANT, pas filtrant
+    (comportement actuel documenté, question ouverte en `Tasks` `[?]`)
+
+Scenario: ping_ne_ferme_pas_la_session
+  Given une session WS ouverte avec ticket valide (harnais session requis)
+  When une frame @Ping est envoyée, puis `echo toujours_la\r`
+  Then la connexion reste ouverte (pas de Close), et `toujours_la` revient — Ping/Pong ne
+    sont jamais un signal de fermeture (régression keepalive proxy)
+
+Scenario: close_du_client_tue_le_shell
+  Given une session WS ouverte (harnais session requis) dans laquelle `sleep 2 && touch
+    _interdit` tourne en foreground
+  When le client envoie un frame @Close
+  Then la session se termine et le fichier `_interdit` n'apparaît jamais — Close passe
+    par le même teardown que toute fin de boucle : @kill_process_group
+
+Scenario: job_foreground_tue_a_la_fermeture
+  Given un @spawn_shell réussi, synchronisé sur son prompt, dans lequel `sleep 2 && touch
+    _should_not_exist` tourne en foreground (pas de `&`)
+  When @kill_process_group est appelé puis les handles tombés
+  Then le fichier `_should_not_exist` n'existe pas après 3 s — le hangup noyau du terminal
+    (leader de session mort) tue le job foreground (test existant
+    `kill_process_group_kills_foreground_child`)
+
+Scenario: job_detache_survit_par_design
+  Given un @spawn_shell réussi dans lequel `(sleep 2 && touch _should_exist) &` tourne
+    (job explicitement backgroundé, jamais groupe foreground)
+  When @kill_process_group est appelé puis les handles tombés
+  Then le fichier `_should_exist` EXISTE après 3 s — survie délibérée (cas d'usage
+    service de dev), pas une fuite (test existant `detached_background_job_survives_by_design`)
+
+Scenario: kill_sur_enfant_deja_reape_no_op
+  Given un @spawn_shell réussi dans lequel `exit` a été écrit et l'enfant laissé s'éteindre
+    (ou déjà ramassé, @process_id() `None`)
+  When @kill_process_group est appelé
+  Then l'appel rend `()` sans panic ni log — le meilleur effort absorbe le mort
+
+Scenario: sortie_du_shell_termine_la_session
+  Given une session WS ouverte avec ticket valide (harnais session requis)
+  When `exit\r` est tapé
+  Then la lecture PTY rend EOF/EIO, la boucle se termine, @kill_process_group est un
+    no-op, et le WebSocket est fermé côté serveur — le PTY mourant ne laisse pas de
+    session zombie
+
+Scenario: spawn_shell_shell_inexistant_rend_erreur
+  Given le processus de test avec l'environnement `SHELL=/chemin/inexexistent/vnl-faux`
+  When @spawn_shell est appelé sur un sandbox_root temporaire
+  Then @spawn_shell rend @Err (le @CommandBuilder ne peut pas exec le binaire) — et au
+    niveau session cela se traduirait par log `error` + fermeture silencieuse du socket
+    sans message d'erreur applicatif
+
+Scenario: overlay_venv_actif_au_spawn
+  Given un sandbox_root temporaire contenant `.venv/pyvenv.cfg` (fichier) et un script
+    exécutable `.venv/bin/vnl-term-marker`
+  When @spawn_shell est appelé sur ce sandbox_root puis `"$VIRTUAL_ENV/bin/vnl-term-marker"`
+    tapé après le prompt
+  Then la sortie contient `term-venv-ok` — l'overlay @venv_overlay est appliqué au shell
+    à chaque spawn et un venv créé après le démarrage du serveur est vu (test existant
+    `spawn_shell_active_le_venv_du_cwd`)
+
+Scenario: sans_marqueur_virtual_env_vide
+  Given un sandbox_root temporaire SANS `.venv/pyvenv.cfg`
+  When @spawn_shell est appelé puis `echo "[$VIRTUAL_ENV]"` tapé après le prompt
+  Then la sortie contient `[]` — pas de marqueur, pas d'overlay, `VIRTUAL_ENV` reste vide
+    (test existant `spawn_shell_sans_venv_pas_de_VIRTUAL_ENV`)
+
+Scenario: sessions_concurrentes_independantes
+  Given deux @spawn_shell réussis dans le même sandbox_root temporaire, avec leurs handles
+    distincts
+  When `echo dans_un` est tapé dans le premier et lu depuis les deux readers
+  Then les @process_id des deux enfants diffèrent, la sortie `dans_un` n'apparaît que sur
+    le reader du premier — aucune connexion ne voit le PTY d'une autre (le ticket
+    d'ailleurs n'est pas réutilisable, ./ticket.sdd)
+
+Example: protocole et formes observables
+  upgrade accepté → frames : binaire sortant = octets du PTY ; binaire entrant = stdin ;
+    texte entrant = contrôle uniquement
+  resize accepté → `{"type":"resize","cols":100,"rows":40}` (taille initiale serveur : 24×80)
+  fin de session → Close / erreur WS / fin de stream / EOF PTY → kill(-pgid, SIGKILL) ;
+    jobs `&` survivent, foreground meurt
+  logs → `error` : `PTY spawn error: {e}` / `PTY reader error: {e}` / `PTY writer error:
+    {e}` (session fermée) ; `warn` : `PTY write error: {e}` (fermée) / `PTY flush error:
+    {e}` / `PTY resize error: {e}` (poursuivies)

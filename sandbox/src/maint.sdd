@@ -1,0 +1,1050 @@
+Spec: maint
+
+Platform: Rust/vanyline-sandbox
+
+Purpose:
+  Cœur de l'utilitaire `vanyline-maint` — second binaire du crate `vanyline-sandbox`
+  (surface CLI `clap` dans ./bin/maint.rs, sa spec sœur) — qui exécute toute la maintenance
+  des workspaces git des Projects dans les pods à image sandbox lancés par les Jobs du
+  controller : `init` (clone bare + caches + refspec), `fetch` (`fetch --prune`), `purge`
+  (destruction du layout), `checkout` (worktree par sandbox), `remove` (retrait du
+  worktree) et `detect` (langages → JSON + patch `Project.status`). Invoqué EN ARGV
+  uniquement, jamais via un shell (`/vanyline.sdd` « Must not », règle AGENTS.md
+  « maintenance des projets ») : c'est ici que les entrées libres du CR (repoUrl, branche,
+  nom de sandbox, ids de cache) sont validées avant tout effet de bord. Le controller
+  recrée ses Jobs (TTL `3600 s`, cf. /controller/src/project.sdd) : chaque sous-commande
+  doit être REJOUABLE — l'idempotence est un contrat, pas une optimisation. Le fichier porte
+  aussi deux contrats de duplication assumés : le layout (`repo.git`, `worktrees/`, `cache/`,
+  mapping `pnpm` → `pnpm-store`) miroir de `controller/src/project.rs` (règle « le
+  controller reste isolé ») et @is_dockerfile_path miroir exact de `dockerfileName()` du
+  frontend (risque n° 7 du design docker-lsp : cohérence détection/mapping sandbox/éditeur
+  — second consommateur interne : @toolchain_for_path de ./tools_impl.rs). Contrat d'un
+  seul fichier : la logique est ici à 100 %, l'argv, stdout et les codes de sortie sont
+  dans ./bin/maint.rs.
+
+Owns:
+  ./maint.rs
+
+Can read:
+  ./bin/maint.rs
+  ./lib.rs
+  ./tools_impl.rs
+  ../../tests/maint.rs
+  ../../controller/src/project.sdd
+  ../../controller/src/sandbox.sdd
+  ../../crds/src/lib.sdd
+  ../../frontend/src/components/panels/dockerfileName.ts
+  ../../docs/architecture.md
+  ../../vanyline.sdd
+  ../../tooling.sdd
+
+Structure:
+  ./maint.rs en cinq blocs. (1) Layout et mapping : @BARE_REPO_DIR, @WORKTREES_DIR,
+  @CACHE_DIR, @cache_dir_name, @cache_path, @worktree_path — dupliqués délibérément avec
+  `controller/src/project.rs`, figés par tests jumeaux des deux côtés. (2) Sécurité :
+  @MaintError (erreurs identifiées `VNL-MAINT-001`…`VNL-MAINT-006`) et validateurs purs ou
+  quasi-purs @validate_branch, @validate_repo, @validate_sandbox_name. (3) Maintenance git :
+  @run_init (avec @set_fetch_refspec privé), @run_fetch, @run_checkout (avec
+  @resolve_default_branch privé), @run_remove, @run_purge. (4) Détection : @list_head_tree
+  (privé), @is_dockerfile_path, @detect_languages et ses constantes de marqueurs, @run_detect,
+  @run_detect_and_patch et @patch_project_languages (privé — seule partie async, seule
+  portion à toucher l'API K8s). (5) Module `#[cfg(test)]` privé (validateurs, layout,
+  @is_dockerfile_path) ; les tests d'intégration git (tempdir + `git` réel) vivent dans
+  ../../tests/maint.rs.
+
+Exposes:
+  Constantes de layout : @BARE_REPO_DIR (`pub const &str` = `"repo.git"`), @WORKTREES_DIR
+    (`"worktrees"`), @CACHE_DIR (`"cache"`).
+  Helpers de layout : @cache_dir_name, @cache_path, @worktree_path (fonctions pures).
+  Validateurs : @validate_branch, @validate_repo, @validate_sandbox_name.
+  Sous-commandes : @run_init, @run_fetch, @run_checkout, @run_remove, @run_purge
+    (sync), @run_detect (sync), @run_detect_and_patch (async).
+  Détection : @detect_languages, @is_dockerfile_path — ce dernier est un helper partagé
+    consommé aussi par @toolchain_for_path (`./tools_impl.rs`, mapping LSP docker) et
+    miroir contractuel de `dockerfileName()` du frontend.
+  @MaintError : enum `pub` dérivant `thiserror::Error`, champs `pub`, six variantes
+    identifiées `VNL-MAINT-001` à `006`.
+  Privés mais contractuels : @FETCH_REFSPEC, @set_fetch_refspec, @resolve_default_branch,
+    @list_head_tree, @patch_project_languages, @LANGUAGE_ORDER, @RUST_MARKER,
+    @JS_TS_MARKERS, @VUE_MARKER_EXT, @PYTHON_MARKER_EXTS, @PYTHON_FILE_MARKERS.
+  Rien d'autre : le module `tests` est privé ; la surface CLI (sous-commandes clap
+    `init`/`fetch`/`purge`/`checkout`/`remove`/`detect` et leurs flags `--repo`,
+    `--workspace`, `--cache` répétable, `--sandbox`, `--branch`, `--default-branch`,
+    `--project`) est le contrat de ./bin/maint.rs (spec sœur).
+
+Accepts:
+  @run_init(workspace: &Path, repo: &str, caches: &[String]) — `workspace` : répertoire
+    EXISTANT, jamais créé ni validé par maint (les Jobs le montent via PVC) ; `repo` : URL
+    https/ssh, forme scp-like (`git@host:org/repo.git`) ou chemin local, transmis verbatim
+    à `git clone` — @run_init ne valide PAS lui-même : c'est le CLI qui appelle
+    @validate_repo avant (cf. `[?]` des `Tasks`) ; `caches` : identifiants dans l'ordre
+    reçu, doublons et chaînes vides acceptés, seul `"pnpm"` est mappé.
+  @run_fetch(workspace) / @run_purge(workspace) — même règle de `workspace` ; `fetch` exige
+    `repo.git` préexistant mais ne le vérifie pas en amont (l'échec remonte en @GitFailed).
+  @run_checkout(workspace, sandbox, branch, default_branch: Option<&str>) — `sandbox` validé
+    par @validate_sandbox_name, `branch` par @validate_branch, `default_branch` par
+    @validate_branch SEULEMENT si `Some` et non vide ; `Some("")` et `None` sont équivalents
+    (résolution `symbolic-ref`, repli `"main"`). Le builder du controller n'omet le flag
+    `--default-branch` que si absent OU vide (cf. /controller/src/sandbox.sdd) : `Some("")`
+    n'est atteignable que par CLI manuel.
+  @run_remove(workspace, sandbox) — `sandbox` validé.
+  @run_detect(workspace) / @run_detect_and_patch(workspace, project: Option<&str>) —
+    `project` : nom du Project à patcher, NON validé (un nom `""` produit une erreur API en
+    K8sPatch) ; l'appel réseau n'a lieu que si `project` est `Some`.
+  Environnement runtime implicite : exécutable `git` sur le `PATH` (fonctions requises :
+    `clone --bare`, `fetch --prune`, `worktree add/remove/prune`, `show-ref`,
+    `symbolic-ref`, `ls-tree`, `check-ref-format --branch`, `config`) ; environnement du
+    processus portant hérité des pods de Jobs (`HOME`, `GIT_SSH_COMMAND` — jamais modifiés
+    ici) ; pour le patch K8s : `kube::Config::infer()` — en cluster le ServiceAccount du
+    pod (`project-<name>-maint`, cf. /controller/src/project.sdd), hors cluster le
+    kubecontext de l'appelant.
+
+Returns:
+  @cache_dir_name : `"pnpm-store"` pour `"pnpm"`, identité pour tout autre (y compris
+    `""`) ; @cache_path : `"cache/<cache_dir_name>"` ; @worktree_path :
+    `"worktrees/<sandbox_name>"` (concaténation brute, la validité du nom incombe aux
+    validateurs).
+  @run_init, @run_fetch, @run_checkout, @run_remove, @run_purge : @Result<@(),
+    @MaintError> — `Ok(())` signifie l'effet de bord atteint (y compris via idempotence).
+  @validate_branch, @validate_repo, @validate_sandbox_name : @Result<@(), @MaintError> —
+    `Ok(())` = entrée acceptée.
+  @is_dockerfile_path : @bool. Règle sur le basename (dernier segment après le dernier
+    `/`, chaîne entière sans `/`) mis en minuscules : égal à `"dockerfile"` ou
+    `"containerfile"`, OU préfixé par `"dockerfile."`/`"containerfile."`, OU suffixé par
+    `".dockerfile"` (avec le point). Chaîne vide ⟹ `false`.
+  @detect_languages : @Vec<@String> — sous-ensemble de @LANGUAGE_ORDER dans SON ordre
+    fixe `["rust", "js-ts", "vue", "python", "dockerfile"]`, filtré par les marqueurs,
+    possiblement vide. Valeurs exactement ces cinq chaînes (alphabet contracté dans
+    /crds/src/lib.sdd @ProjectStatus::languages).
+  @run_detect et @run_detect_and_patch : @String JSON compact (`serde_json::json!` +
+    `to_string`, sans espaces) à une seule clé `"languages"`, ex.
+    `{"languages":["rust","js-ts"]}`, SANS newline final — le `println!` (et son `\n`) est
+    la responsabilité de ./bin/maint.rs.
+  @MaintError Display (formats exacts, identifiants uniques exigés par /vanyline.sdd) :
+    `VNL-MAINT-001: invalid branch name '{name}': {reason}`,
+    `VNL-MAINT-002: invalid repo url '{url}': {reason}`,
+    `VNL-MAINT-003: invalid sandbox name '{name}': {reason}`,
+    `VNL-MAINT-004: git {args:?} failed with {status}: {stderr}`,
+    `VNL-MAINT-005: io error on {path}: {source}`,
+    `VNL-MAINT-006: k8s patch status project '{project}' failed: {message}`.
+
+Raises:
+  @MaintError::InvalidBranch (`VNL-MAINT-001`) — raisons textuelles exactes pour les refus
+    locaux : `"branch name is empty"`, `"branch name starts with '-'"`, `"branch name
+    contains control characters"` ; refus git : stderr de `check-ref-format` `trim()` ;
+    ÉCHEC DE SPAWN du `git` : variante InvalidBranch (PAS GitFailed) avec raison
+    `"git check-ref-format failed: {e}"` (choix de classification, cf. `[?]` des `Tasks`).
+  @MaintError::InvalidRepo (`VNL-MAINT-002`) — raisons `"repo url is empty"`, `"repo url
+    starts with '-'"`, `"repo url contains control characters"` ; levée par le CLI
+    ./bin/maint.rs, jamais par @run_init lui-même.
+  @MaintError::InvalidSandboxName (`VNL-MAINT-003`) — raisons `"sandbox name is empty"`,
+    `"sandbox name starts with '-'"`, `"sandbox name is '<n>', which is a path
+    traversal"` (pour `.`/`..`), `"sandbox name contains invalid characters (only
+    A-Za-z0-9._-)"`.
+  @MaintError::GitFailed (`VNL-MAINT-004`) — toute commande git exécutée mais sortant avec
+    un statut non nul : `status` = @ExitStatus::to_string (forme `"exit status: N"`),
+    `stderr` = stderr lossy BRUT (non `trim()`, contrairement au motif de
+    @validate_branch), `args` = argv complet de l'appel. Échec de SPAWN (`git` absent ou
+    non exécutable) : même variante avec `status` = Display de l'@std::io::Error et
+    `stderr` vide. Sites : clone, config refspec, fetch, show-ref, worktree
+    add/remove/prune (remove : voir Handles — l'échec de `worktree remove` n'EST PAS une
+    erreur ici), symbolic-ref (avalé par l'appelant, cf. @run_checkout), ls-tree.
+  @MaintError::Io (`VNL-MAINT-005`) — @std::fs::create_dir_all des caches dans @run_init
+    et @std::fs::remove_dir_all dans @run_purge uniquement (le `remove_dir_all` de repli
+    de @run_remove ignore SON erreur, `let _ =`).
+  @MaintError::K8sPatch (`VNL-MAINT-006`) — @run_detect_and_patch avec `project` `Some`
+    seulement : `kube::Config::infer()` en échec ⇒ message préfixé `"config: {e}"` ;
+    @kube::Client::try_from en échec ⇒ `"client: {e}"` ; `patch_status` en échec (403 RBAC,
+    404 Project absent, nom invalide dont `""`) ⇒ message = erreur kube verbatim. Hors
+    cluster sans kubeconfig : `Config::infer` échoue ⇒ K8sPatch (test existant
+    `detect_and_patch_with_project_fails_without_cluster`).
+  Panics tolérés et justifiés : @str::to_str().unwrap() sur des chemins construits en
+    interne (`workspace.join("repo.git")`) sous `#[allow(clippy::unwrap_used)]` commenté
+    « toujours UTF-8 dans ce déploiement » — @run_init, @run_fetch, @list_head_tree,
+    @set_fetch_refspec ; un `workspace` non-UTF-8 panique (cf. `[?]` des `Tasks`). Aucune
+    autre voie de panic, aucun `unwrap`/`expect` hors zones justifiées et du module
+    `tests` (../../tooling.sdd).
+  Aucun log : le module ne contient aucun `tracing` — diagnostic et stdout sont rendus par
+    ./bin/maint.rs (codes de sortie : cf. `Handles`).
+
+Handles:
+  Layout du workspace — sous `workspace` : `repo.git` (clone bare), `worktrees/<sandbox>`
+    (un worktree git par sandbox), `cache/<dir>` (un répertoire par cache déclaré, `pnpm`
+    → `cache/pnpm-store`). Ces trois noms et le mapping sont les littéraux jumeaux de
+    `controller/src/project.rs` (mounts du pod sandbox et argv des Jobs) ; la dérive est
+    couverte par tests aux mêmes valeurs des deux côtés.
+  `init` — ordre contractuel : (a) @mkdir -p de chaque `cache/<dir>` dans l'ordre de
+    `caches`, TOUJOURS (même quand le clone existe déjà, même si `caches` est vide —
+    aucune commande git alors pour les caches) ; (b) `git clone --bare -- <repo>
+    <workspace>/repo.git` SEULEMENT si `repo.git` n'existe pas (@Path::exists, indifférent
+    fichier/dossier) ; (c) pose de la refspec @FETCH_REFSPEC =
+    `"+refs/heads/*:refs/remotes/origin/*"` par `git config --replace-all
+    remote.origin.fetch`, QUE le clone vienne d'être fait ou que le bare préexistât —
+    donc `init` rejouable à l'infini, sans re-clone (un marker dans `repo.git` survit,
+    test existant `init_is_idempotent`) et sans duplicata de refspec (`--replace-all`,
+    test existant `init_idempotent_refspec_not_duplicated`). Le `--` avant les
+    positionnels ferme l'injection d'argument depuis `repo` (défense en profondeur derrière
+    @validate_repo côté CLI). Cible `refs/remotes/origin/*` JAMAIS `refs/heads/*` : le
+    fetch périodique ne doit jamais écraser les branches locales créées par `checkout` ;
+    c'est ce que `GET /git/unpushed` de la sandbox interroge (../../docs/architecture.md
+    section « Maintenance des workspaces », décision WS-11).
+  Échec de clone — @GitFailed avec le stderr de git ; `repo.git` ne reste pas en place
+    (git nettoie son clone partiel — assertion du test existant `init_bad_repo_fails`).
+  `repo.git` préexistant mais fantaisiste (fichier régulier au lieu d'un dépôt) — clone
+    sauté (test `exists()` seul), la pose de refspec échoue ensuite en @GitFailed : état
+    sans réparation automatique, seul `purge` le débarrasse (cf. `[?]` des `Tasks`).
+  `fetch` — `git --git-dir <workspace>/repo.git fetch --prune`, aucune commande de
+    préparation, aucune vérification d'existence : bare absent ⇒ @GitFailed (test existant
+    `fetch_without_bare_fails`). Grâce à la refspec posée par `init`, le fetch alimente
+    `refs/remotes/origin/*` (test existant `fetch_populates_remote_tracking_refs`) et
+    `--prune` retire les tracking refs disparues en amont.
+  `checkout` — validations AVANT toute action (sandbox → branch → default non vide), y
+    compris avant le test d'idempotence. Le worktree cible `worktrees/<sb>` existe-t-il
+    (@Path::exists) ⇒ `Ok(())` immédiat, SANS vérifier que c'est un worktree inscrit ni
+    sur quelle branche il est (premier-arrivant gagnant, cf. `[?]`). Sinon résolution de la
+    branche par défaut : `Some(db)` non vide ⇒ `db` tel quel ; `None` ou `Some("")` ⇒
+    `git --git-dir repo.git symbolic-ref --short HEAD` (cwd = workspace), stdout `trim()`,
+    et EN CAS D'ÉCHEC (code non nul comme échec de spawn) repli silencieux `"main"` sans
+    aucun log (test à créer, cf. `[?]`). Puis détection : `git --git-dir repo.git show-ref
+    --verify --quiet refs/heads/<branch>` — succès ⇒ `worktree add worktrees/<sb>
+    <branch>` ; échec ⇒ création `worktree add -b <branch> worktrees/<sb> <default>`.
+    Périmètre de `show-ref` : uniquement `refs/heads/*` du bare, donc les branches
+    présentes AU CLONE uniquement (le fetch périodique n'écrit que dans
+    `refs/remotes/origin/*`) — une branche créée en amont après le clone est
+    silencieusement CRÉÉE DEPUIS LE DÉFAUT, divergeant des commits upstream (cf. `[?]`).
+    Après un `init`, HEAD du bare pointe la branche par défaut du dépôt source au moment
+    du clone : un changement de branche par défaut en amont n'est JAMAIS suivi
+    (cf. `[?]`). Le worktree d'une branche déjà inscrite ailleurs (autre sandbox, même
+    branche) fait échouer `worktree add` (règle git « already checked out ») ⇒
+    @GitFailed (cf. `[?]`). Rejet (répertoire supprimé manuellement alors que
+    l'inscription git subsiste) : `worktree add` échoue (`already exists`) — `checkout`
+    ne `prune` jamais de lui-même, seul `remove` répare (cf. `[?]`).
+  `remove` — `git worktree remove --force worktrees/<sb>` dont le code de sortie non nul
+    ET l'échec de spawn ne sont PAS des erreurs mais des branches de logique (état
+    incohérent) : dans ces deux cas repli @std::fs::remove_dir_all dont la PROPRE erreur
+    est ignorée (`let _ =`) ; puis `git worktree prune` TOUJOURS, dont l'échec est la
+    SEULE voie d'erreur de @run_remove. Conséquences : retirer un worktree inexistant est
+    `Ok` (test existant `remove_nonexistent_worktree_ok`) ; réparer un worktree dont le
+    répertoire a été supprimé à la main est `Ok` et la réinscription (`checkout` futur)
+    redevient possible (test existant `remove_incoherent_worktree_falls_back`) ; un
+    répertoire `worktrees/<x>` jamais inscrit est détruit par le repli puis `Ok` ;
+    `--force` détruit sans sommation les modifications non commitées du worktree (perte
+    de données est assumée côté cleanup de Sandbox) ; la BRANCHE créée par `checkout`
+    (`refs/heads/<branch>` du bare) survit au `remove` — `remove` ne supprime que le
+    worktree, jamais la ref ni les commits poussés dedans.
+  `purge` — destruction dans l'ordre fixe `repo.git`, `worktrees`, `cache` ; @NotFound
+    ignoré par répertoire (workspace vierge ⇒ `Ok`, test existant
+    `purge_on_empty_workspace_ok`) ; toute AUTRE erreur I/O (EACCES…) est @Io et ABORT
+    immédiatement — les répertoires suivants du tuple ne sont pas traités, le replay est
+    idempotent. Ne touche à rien d'autre sous `workspace`.
+  `detect` — lit l'arbre HEAD du clone bare (`git ls-tree -r --name-only HEAD`, chemins
+    relatifs au dépôt, séparateur `/` indépendant de l'OS) : UNIQUEMENT le dernier commit
+    de HEAD — jamais les worktrees, jamais le contenu non commité ni non push. bare
+    absent ou HEAD sans commit (dépôt source vide cloné) ⇒ @GitFailed (test existant
+    `detect_without_bare_fails`, pas `{"languages":[]}` — cf. `[?]`). Marqueurs :
+    `rust` si un chemin EQUAL `Cargo.toml` (racine) ou finit par `/Cargo.toml` (n'importe
+    quel sous-chemin, membre de workspace) ; `js-ts` si un chemin est EXACTEMENT
+    `package.json` ou `tsconfig.json` À LA RACINE uniquement (un `package.json` imbriqué ne
+    compte pas) ; `vue` si un chemin finit par `.vue` à n'importe quelle profondeur ;
+    `python` si un chemin finit par `.py` ou `.pyi` OU si son basename est
+    `pyproject.toml` ou `setup.cfg`, n'importe où (setup.py est couvert par `.py`) ;
+    `dockerfile` via @is_dockerfile_path. Sensibilité à la casse : TOUS les marqueurs sont
+    case-sensitive SAUF `dockerfile` (insensible) — `cargo.toml`, `App.VUE`, `main.PY` ne
+    détectent rien (decision documentée en commentaire source : « présence seulement,
+    jamais de version », ../../docs/architecture.md décision 2026-08-15). Les marqueurs
+    sont indépendants : `vue` sans `package.json` ⇒ `["vue"]` seul (le couplage toolchain
+    `vue` → node est un contrat du controller, pas d'ici).
+  Piège git `core.quotePath` — @list_head_tree ne passe pas `-z` : un chemin contenant des
+    octets non-ASCII ou de contrôle est émis ENTRE GUILLEMETTS avec escapes octaux
+    (`"caf\303\251/main.py"`). La dernière position `"` casse TOUTES les correspondances
+    par suffixe/basename : un marqueur niché sous un répertoire non-ASCII n'est JAMAIS
+    détecté (les marqueurs ASCII aux chemins ASCII sont intacts). Comportement actuel
+    contracté tel quel, cf. `[?]`.
+  `detect --project` — après calcul des langages (donc AUCUN appel réseau si la détection
+    échoue), @patch_project_languages installe d'abord explicitement le provider TLS
+    `rustls::crypto::ring` (`install_default`, erreur « provider déjà installé » ignorée —
+    correctif WS-10 : rustls voit `aws_lc_rs` et `ring` activés par les dépendances du
+    binaire commun, l'auto-détection paniquerait sinon), puis envoie un `Patch::Merge`
+    (JSON merge patch RFC 7386) sur le SOUS-RESSOURCE `status` (`patch_status`,
+    `PatchParams::default()`) du Project nommé, dans le namespace
+    `kube::Config::infer().default_namespace` (en cluster : celui du pod du Job), corps
+    construit À LA MAIN `{"status":{"languages":[…],"detectedAt":"<RFC 3339 now>"}}` —
+    JAMAIS une sérialisation de @ProjectStatus (écraserait `cloned`/`worktrees`/
+    `conditions`, garde symétrique des `skip_serializing_if` de /crds/src/lib.sdd). En
+    merge patch, un `languages: []` détecté ÉCRASE la liste précédente (le tableau est
+    remplacé globalement — `detect` est le producteur exclusif de cette clé).
+    `project = None` : comportement strictement identique à @run_detect, zéro réseau
+    (mode CLI hors cluster, test existant
+    `detect_and_patch_without_project_matches_plain_detect`).
+  Conséquence Job (contrat ./bin/maint.rs, cité pour le lien) — `Ok` ⇒
+    @ExitCode::SUCCESS (`0`) ; `Err(e)` ⇒ stderr `vanyline-maint: {e}` +
+    @ExitCode::FAILURE (`1`) — pour `detect`, le JSON n'est imprimé que sur succès, un
+    échec du patch K8s fait donc ÉCHOUER le Job (retry jusqu'au `backoffLimit: 3` du Job,
+    cf. /controller/src/project.sdd) ; erreur d'usage clap ⇒ sortie `2`.
+  Duplication assumée — layout vs `controller/src/project.rs` (anti-dérive par tests
+    jumeaux) ; @is_dockerfile_path vs `frontend/src/components/panels/dockerfileName.ts`
+    (les deux évoluent ensemble, verrouillé par la table de vérité partagée).
+  Conséquence K8s — le patch n'a de sens que porté par le SA `project-<name>-maint`
+    (droit `projects/status: patch` scopé `resourceNames` au seul Project, RBAC construit
+    par /controller/src/project.sdd) ; @run_remove/@run_init/@run_fetch/@run_purge
+    n'appellent JAMAIS l'API K8s (aucun SA requis pour leurs Jobs).
+
+Must:
+  N'invoquer git QUE par @std::process::Command avec `.args(argv)` — aucun `sh`, aucun
+    `-c`, aucune interpolation de chaîne en commande (règle /vanyline.sdd ; l'autre moitié
+    du verrou, côté builders du controller, est `git_pod_template_no_shell`).
+  Contracter les chaînes de commande git EXACTES (argv dans cet ordre) :
+    - init clone : `git clone --bare -- <repo> <workspace>/repo.git`
+    - init refspec : `git --git-dir <workspace>/repo.git config --replace-all
+      remote.origin.fetch "+refs/heads/*:refs/remotes/origin/*"`
+    - fetch : `git --git-dir <workspace>/repo.git fetch --prune`
+    - checkout test branche : `git --git-dir repo.git show-ref --verify --quiet
+      refs/heads/<branch>` (cwd = workspace)
+    - checkout existant : `git --git-dir repo.git worktree add worktrees/<sb> <branch>`
+      (cwd = workspace)
+    - checkout création : `git --git-dir repo.git worktree add -b <branch>
+      worktrees/<sb> <default>` (cwd = workspace)
+    - checkout résolution défaut : `git --git-dir repo.git symbolic-ref --short HEAD`
+      (cwd = workspace)
+    - remove : `git --git-dir repo.git worktree remove --force worktrees/<sb>` (cwd =
+      workspace) puis TOUJOURS `git --git-dir repo.git worktree prune` (cwd = workspace)
+    - detect : `git --git-dir <workspace>/repo.git ls-tree -r --name-only HEAD`
+    - validation branche : `git check-ref-format --branch <name>` (sans cwd forcé)
+  Respecter les ordres d'opérations contractés : init = mkdir caches (ordre de la liste) →
+    clone conditionnel → refspec ; checkout = validate_sandbox_name → validate_branch →
+    validate_branch(default non vide) → test d'existence → résolution du défaut → show-ref
+    → `worktree add` ; remove = `worktree remove --force` → repli `rm -rf` →
+    `worktree prune` ; purge = `repo.git` → `worktrees` → `cache`.
+  Rendre `init`, `checkout`, `remove` et `purge` REJOUABLES : le controller recrée ses
+    Jobs (TTL `3600 s` + redémarrages) — `init` ne reclone jamais un `repo.git` existant
+    et ne duplique pas la refspec ; `checkout` sur dossier existant est un `Ok` no-op ;
+    `remove` ignore les codes de sortie de suppression et répare les états incohérents ;
+    `purge` ignore @NotFound.
+  Valider les entrées libres AVANT toute action git ou filesystem dans @run_checkout et
+    @run_remove (sandbox → branch → default), et imposer au CLI l'appel à @validate_repo
+    avant @run_init (chaîne `init` du binaire).
+  Fermer l'injection d'argument : `--` avant les positionnels de `clone` ; refus local du
+    préfixe `-` et des caractères de contrôle pour branche, repo et sandbox ; charset
+    `[A-Za-z0-9._-]` + exclusion explicite de `.` et `..` pour les noms de sandbox (le nom
+    entre dans `worktrees/<name>` — anti path traversal).
+  Cibler la refspec de fetch sur `refs/remotes/origin/*`, JAMAIS `refs/heads/*` (ne pas
+    écraser les branches locales des worktrees), et la poser avec `--replace-all`
+    (idempotence).
+  Émettre @detect_languages dans l'ordre fixe filtré @LANGUAGE_ORDER et sérialiser la
+    sortie `detect` en JSON compact à clé unique `"languages"`.
+  Garder @run_detect_and_patch avec `project = None` strictement sans effet réseau
+    (équivalence bit-à-bit avec @run_detect).
+  Construire le patch `detect --project` À LA MAIN : merge patch `Patch::Merge` sur
+    `patch_status`, exactement les deux clés `status.languages` et `status.detectedAt`,
+    `detectedAt` = horodatage courant du patch au format requis par `meta/v1 Time`
+    (RFC 3339) ; installer le provider rustls `ring` avant @kube::Client::try_from et
+    ignorer l'erreur d'@install_default.
+  Garder l'alignement des littéraux de layout avec `controller/src/project.rs`
+    (`"repo.git"`, `"worktrees"`, `"cache"`, mapping `"pnpm"` → `"pnpm-store"`) et la
+    table de vérité de @is_dockerfile_path alignée sur `dockerfileName()` du frontend.
+  Porter un identifiant unique `VNL-MAINT-00x` dans chaque message d'erreur (exigence
+    /vanyline.sdd) et ne loguer, n'imprimer, n'écrire sur stdout/stderr AUCUNE ligne depuis
+    ce module (rendu = responsabilité du binaire).
+  Rester dans le harnais (../../tooling.sdd) : seuls `unwrap` admis = @to_str().unwrap()
+    sous `#[allow(clippy::unwrap_used)]` justifié d'une ligne sur les chemins internes
+    construits depuis des entrées validées, plus l'exemption globale du module `tests`.
+
+Must not:
+  Interpoler une entrée (repo, branche, nom de sandbox, cache, projet) dans une commande
+    shell, ni employer `sh -c` sous quelque forme que ce soit.
+  Re-cloner, écraser ou re-créer un `repo.git` existant, ni effacer une refspec existante
+    autrement que par `--replace-all`.
+  Écrire la refspec de fetch sur `refs/heads/*`.
+  Créer le répertoire `workspace` lui-même, ni le valider, ni le purger au-delà du trio
+    `repo.git`/`worktrees`/`cache` lors de `purge`.
+  Traiter le code de sortie non nul de `git worktree remove --force`, l'échec de spawn de
+    cette commande, ou l'erreur du `remove_dir_all` de repli comme des erreurs — seule
+    l'échec de `worktree prune` l'est.
+  Supprimer une branche (`refs/heads/*`) du bare dans `remove`, ni toucher aux commits.
+  Faire dépendre un marqueur de détection d'un autre (`vue` n'implique pas `js-ts` dans la
+    sortie ; le couplage toolchain vit dans le controller).
+  Détecter quoi que ce soit d'autre que la PRÉSENCE de marqueurs : jamais de version, de
+    edition, de `rust-toolchain.toml`, `.nvmrc`, `engines.node` ni version Python
+    (décision 2026-08-15, ../../docs/architecture.md).
+  Étendre `detect` aux worktrees, au contenu non commité ou à `refs/remotes/origin/*` :
+    l'arbre HEAD du bare est l'unique source.
+  Sérialiser un @ProjectStatus complet dans le patch `detect --project`, ni y ajouter une
+    troisième clé (`cloned`, `worktrees`, `conditions`, `lastFetch`…) — garde symétrique
+    de /crds/src/lib.sdd.
+  Retirer le `--` de protection de `clone --bare --`, ni le refus local des entrées
+    vides/préfixe `-`/caractères de contrôle, même si git sait déjà refuser.
+  Rendre `case-insensitive` un marqueur autre que `dockerfile` (`.VUE`, `.PY`,
+    `Cargo.TOML` ne doivent PAS être détectés), ni élargir le charset des noms de sandbox
+    au-delà de `[A-Za-z0-9._-]`.
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!`/`tracing` hors des exemptions
+    citées (../../tooling.sdd), ni appeler l'API K8s depuis une autre sous-commande que
+    `detect --project`.
+
+Depends on:
+  ./lib.rs — déclaration `pub mod maint;` (le module est la surface publique du crate pour
+    le binaire et les tests d'intégration).
+  ./bin/maint.rs — SEUL consommateur des sous-commandes : parsing clap, appel à
+    @validate_repo avant @run_init, impression du JSON de `detect`, mapping
+    @Result→@ExitCode (sa spec sœur contractualise l'argv exact, alignée sur les builders
+    /controller/src/project.sdd et /controller/src/sandbox.sdd).
+  ./tools_impl.rs — @toolchain_for_path consomme @is_dockerfile_path pour le mapping LSP
+    docker (le helper a donc deux maîtres d'usage : détection et éditeur).
+  `git` (exécutable runtime, hors cargo) — sémantique exacte de `clone --bare`, `fetch
+    --prune` + refspec, `worktree add/remove/prune` (dont l'interdit « une branche = un
+    seul worktree »), `show-ref`, `symbolic-ref`, `ls-tree` (+ quoting `core.quotePath`),
+    `check-ref-format --branch`.
+  @std::process (Command) et @std::fs — toute la mécanique subprocess et filesystem.
+  `thiserror` 2 — dérive de @MaintError ; `serde_json` 1 — sortie `detect` et corps du
+    merge patch.
+  `kube` 4 (features `client`, `rustls-tls`, `ring`) — @Config::infer, @Client, @Api,
+    @Patch/@PatchParams, `patch_status` ; `k8s-openapi` 0.28 — @Time(+jiff::Timestamp) pour
+    `detectedAt` ; `rustls` 0.23 (feature `ring`) — installation explicite du provider
+    (fix WS-10 documenté ../../docs/architecture.md) ; `vanyline-crds` — le TYPE
+    @Project comme paramètre de type de @Api (aucune lecture/écriture d'un autre CRD).
+  /crds/src/lib.sdd — alphabet des valeurs de `languages`, mécanisme
+    `skip_serializing_if` de @ProjectStatus (anti-écrasement) que le patch manuel respecte
+    par construction inverse ; /controller/src/project.sdd et /controller/src/sandbox.sdd
+    — producteurs des argv (`init`/`fetch`/`purge`/`detect` et `checkout`/`remove`), RBAC
+    du SA `project-<name>-maint`, discipline des Jobs (backoff/TTL) qui suppose
+    l'idempotence documentée ici.
+  ../../frontend/src/components/panels/dockerfileName.ts — miroir contractuel de
+    @is_dockerfile_path (le fichier TS est la source de vérité de la table de vérité).
+  ../../docs/architecture.md — sections « Maintenance des workspaces — `vanyline-maint` »
+    et « Détection de langages » (décisions WS-10/WS-11) ; /vanyline.sdd — règle
+    argv-sans-shell et identifiants d'erreur ; ../../tooling.sdd — harnais clippy/fmt.
+  ../../tests/maint.rs — batterie d'intégration git existante (tempdir + `git` réel),
+    exemptée en une ligne au profit du harnais.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]`/`[!]` ci-dessous avec Sébastien avant toute tâche
+    `[x]`. Relecture de reverse-engineering du 2026-09-26 (spec produite par
+    `spec-reverse`).
+  [?] `checkout` aveugle aux branches upstream post-clonage : la refspec d'`init` dirige
+    le fetch vers `refs/remotes/origin/*`, alors @run_checkout ne teste que
+    `refs/heads/<branch>` du bare — snapshot du clone. Une branche créée en amont APRÈS
+    `init` est donc silencieusement CRÉÉE DEPUIS LE DÉFAUT (`worktree add -b`) au lieu de
+    pointer les commits upstream (divergence d'historique pour la sandbox). Contrat
+    assumé (« une branche de sandbox est une branche de travail locale ») ou création à
+    ajouter depuis `refs/remotes/origin/<branch>` quand elle existe ?
+  [?] Idempotence `checkout` au seul @Path::exists : `worktrees/<sb>` présent mais non
+    inscrit (résidu crash) ⇒ `Ok` sans worktree usable ; worktree existant sur AUTRE
+    branche (changement de `spec.branch` — déjà tracé côté /controller/src/sandbox.sdd) ⇒
+    `Ok` sans mouvement. Verrouiller « premier-arrivant » par une phrase de contrat ou
+    resserrer (vérifier l'inscription et/ou la branche) ?
+  [?] `checkout` ne `prune` pas avant `worktree add` : worktree inscrit dont le
+    répertoire a été supprimé à la main ⇒ échec `already exists` en @GitFailed, réparation
+    uniquement par un `remove` (prouvé par `remove_incoherent_worktree_falls_back`).
+    Ajouter un `worktree prune` en préambule de `checkout` ou considérer que le parcours
+    cleanup→recréation du controller y pourvoit toujours ?
+  [?] Deux sandboxes sur la MÊME branche : le second `worktree add <branch>` échoue
+    (règle git « already checked out ») ⇒ Job checkout en échec permanent (3 backoffs).
+    Cas d'usage à soutenir (worktree partagé, `-d` detached ?) ou blocage à remonter plus
+    haut (validité `spec.branch` par sandbox au controller) ?
+  [?] Repli `"main"` du défaut : @resolve_default_branch échoue silencieusement (code non
+    nul COMME échec de spawn) et l'appelant remplace par `"main"` sans log — un `git`
+    absent ou une HEAD détachée font créer les branches depuis `"main"` (ou échouer si
+    `"main"` n'existe pas, ex. dépôt par défaut `trunk`). De plus HEAD du bare ne bougeant
+    jamais après le clone, un changement de branche par défaut en amont n'est jamais suivi.
+    Tracer un `warn` ? Distinguer échec de spawn (erreur) de code non nul (repli) ?
+  [?] Dépôt source vide (aucun commit) : `init` réussit (clone d'un dépôt vide), mais
+    `detect` échoue (`ls-tree HEAD` sans commit ⇒ @GitFailed, pas `{"languages":[]}`) et
+    `checkout` échoue (point de création `"main"` inexistant). Le Job init du controller
+    enchaîne git puis detect ⇒ l'init d'un projet vide échoue en boucle. Contrat « projet
+    vide = erreur » ou sortie `{"languages":[]}` + message d'attente ?
+  [?] `core.quotePath` : un chemin non-ASCII est émis entre guillemets échappés par
+    `ls-tree`, et la quote finale casse TOUTES les correspondances de marqueurs — un
+    `Dockerfile`/`.py`/
+    `Cargo.toml` niché sous un répertoire non-ASCII n'est jamais détecté. Passer `-z`
+    (records NUL, sans quoting) ou assumer (détection sur dépôts ASCII) ?
+  [?] `repo.git` occupé par un fichier régulier : clone sauté (`exists()`), pose de
+    refspec en @GitFailed — état sans réparation (le Job init est rouge jusqu'à la purge).
+    Traiter (détection explicite d'un layout invalide, message portant l'identifiant) ou
+    assumer (impossible par Jobs légitimes) ?
+  [?] @validate_branch classe l'échec de SPAWN de `git check-ref-format` en
+    @InvalidBranch (`VNL-MAINT-001`) — un « environment broken » porte un code de refus de
+    nom. Nuisible (fausse piste de debug) ou accepté ? (Les autres commandes classent le
+    spawn en @GitFailed.)
+  [?] @run_init ne valide pas `repo` lui-même : la chaîne de validation vit uniquement
+    dans ./bin/maint.rs. Un futur appelant bibliothèque (CLI `vanyline sandbox`, outil de
+    debug) qui oublierait @validate_repo passe directement à `git clone` (protégé par le
+    `--`, mais les URL aberrantes atteignent le réseau). Déménager @validate_repo DANS
+    @run_init (défense en profondeur) ou figer « validation = responsabilité du bord
+    CLI » ?
+  [?] `--project ""` et noms de projet non validés côté maint : l'erreur vient de l'API
+    (K8sPatch). Suffisant (l'apiserver est le validating layer) ou filtre local ?
+  [!] ../../docs/architecture.md section « Maintenance des workspaces » documente les
+    erreurs « `VNL-MAINT-001` à `005` » : `006` (@K8sPatch, apparu avec `detect
+    --project`/WS-10) est absent de la doc. Corriger la doc (ou cette spec — le code dit
+    `006`).
+  [!] Deux styles de ciblage du bare coexistent : `init`/`fetch`/`detect`/refspec passent
+    le `--git-dir` ABSOLU (`workspace.join("repo.git")`, sans `current_dir`), alors
+    `checkout`/`remove`/résolution passent `--git-dir repo.git` RELATIF avec `cwd =
+    workspace` (et le chemin de worktree relatif aussi). Équivalents en pratique (le cwd
+    est forcé) mais divergents en cas de refactor ; unifier (absolu partout, ou relatif +
+    cwd partout) et le dire ici.
+  [!] @run_detect est `pub` mais ./bin/maint.rs n'appelle QUE
+    @run_detect_and_patch(None) — @run_detect n'a que des appelants de test. Le double
+    chemins de sérialisation JSON est une duplication mineure ; internaliser @run_detect
+    ou le garder comme surface publique testée ?
+  [!] ./bin/maint.rs (spec sœur, cité ici seulement) porte `println!`/`eprintln!` alors
+    que `print_stdout`/`print_stderr` sont `deny` au workspace (../../Cargo.toml) et
+    qu'aucune ligne de ../../tooling.sdd ne recense ./bin/maint.rs dans ses exemptions —
+    vérifier l'état réel de `cargo clippy --workspace --all-targets` et faire régulariser
+    par la spec sœur (exemption justifiée ou `tracing`/`ExitCode` sans print).
+  [ ] Convertir en tests unitaires/intégration taggés par leur titre les Scenarios
+    aujourd'hui sans test : `validate_branch_mappe_defaut_de_spawn_en_invalid_branch`
+    (shim PATH avec un `git` non exécutable), `init_recre_les_caches_supprimes_sans_reclone`,
+    `init_repo_git_fichier_regular_echoue_en_refspec`,
+    `fetch_prune_supprime_les_tracking_refs_disparues`,
+    `checkout_rejects_invalid_default_branch`,
+    `checkout_default_branch_vide_resout_par_symbolic_ref`,
+    `checkout_resolution_symbolique_defaut_non_main_du_bare`,
+    `checkout_repli_main_quand_resolution_echoue` (HEAD détachée + défaut `trunk` ⇒
+    échec sur point de création `"main"`), `checkout_deux_sandboxes_sur_meme_branche_echoue`,
+    `checkout_repertoire_supprime_a_la_maine_echoue_sans_prune`,
+    `remove_supprime_un_repertoire_non_inscrit`,
+    `remove_force_detruit_les_modifications_non_committees`,
+    `remove_ne_supprime_pas_la_branche_du_bare`,
+    `detect_marqueurs_sensibles_a_la_casse_sauf_dockerfile`,
+    `detect_markers_sous_repertoire_non_ascii_exclus_par_le_quoting` (dépend du
+    `core.quotePath` par défaut — poser le git config explicite dans le test),
+    `detect_sur_bare_vide_sans_commit_echoue`.
+  [ ] Créer le harnais d'intégration cluster du crate (aujourd'hui absent, comme dans
+    /controller/src/project.sdd) puis convertir les Scenarios préfixés `cluster_` ; hors
+    batterie CI unitaire (convention projet).
+  [ ] Cartographie des tests existants → Scenarios homonymes : les 17 tests du module
+    `tests` de ./maint.rs (`layout_constants`, `cache_dir_name_mapping`,
+    `cache_path_uses_mapping`, `validate_branch_ok`, `validate_branch_rejects_empty`,
+    `validate_branch_rejects_leading_dash`, `validate_branch_rejects_control_chars`,
+    `validate_branch_rejects_git_invalid`, `validate_repo_ok`, `validate_repo_rejects`,
+    `validate_sandbox_name_ok`, `validate_sandbox_name_rejects`, `worktree_path_value`,
+    `checkout_rejects_invalid_sandbox`, `checkout_rejects_invalid_branch`,
+    `remove_rejects_invalid_sandbox`, `is_dockerfile_path_truth_table`) et les 47 tests
+    de ../../tests/maint.rs portent pour l'immense majorité les mêmes titres que leurs
+    Scenarios (mapping direct, détail par Scenario dans les bodies `test existant`).
+    Trois exceptions sans Scenario homonyme, recouvertes par d'autres :
+    `detect_both_rust_js_ts` et `detect_all_rust_js_ts_vue_order_fixed` (recouverts par
+    `detect_python_order_fixed_full` et les Scenarios de marqueurs) et
+    `detect_dockerfile_order_fixed_full` (recouvert par
+    `detect_dockerfile_file_detected` + `detect_python_order_fixed_full`).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre (les tests cités
+    « existant » passent déjà ; les Scenarios listés aux `Tasks` restent à écrire, les
+    `cluster_*` sous le harnais à créer) et passe.
+  Tous les `[?]`/`[!]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici
+    et dans ../../docs/architecture.md, /controller/src/project.sdd,
+    /controller/src/sandbox.sdd et /crds/src/lib.sdd selon leur périmètre.
+  La batterie complète est verte sur `vanyline-sandbox` (check, test, build,
+    clippy `--all-targets -D warnings`, fmt — ../../tooling.sdd).
+
+Scenario: layout_constants
+  Given @BARE_REPO_DIR, @WORKTREES_DIR et @CACHE_DIR
+  When on lit leurs valeurs
+  Then `"repo.git"`, `"worktrees"` et `"cache"` — littéraux jumeaux de
+    `controller/src/project.rs` (test existant `layout_constants`)
+
+Scenario: cache_dir_name_mapping
+  Given @cache_dir_name
+  When elle reçoit `"cargo"`, `"pnpm"`, `"custom"`
+  Then `"cargo"`, `"pnpm-store"`, `"custom"` — seul `pnpm` est mappé, tout le reste passe
+    par identité (test existant `cache_dir_name_mapping`)
+
+Scenario: cache_path_uses_mapping
+  Given @cache_path
+  When elle reçoit `"pnpm"` puis `"cargo"`
+  Then `"cache/pnpm-store"` et `"cache/cargo"` — le mapping s'applique avant le préfixe
+    (test existant `cache_path_uses_mapping`)
+
+Scenario: worktree_path_value
+  Given @worktree_path
+  When elle reçoit `"sb1"`
+  Then le résultat est `"worktrees/sb1"` (test existant `worktree_path_value`)
+
+Scenario: validate_branch_ok
+  Given @validate_branch
+  When elle reçoit `"main"`, `"feat/x"`, `"user/topic-1.2"`
+  Then les trois sont `Ok` — la sémantique est celle de `git check-ref-format --branch`,
+    pas d'une réimplémentation (test existant `validate_branch_ok`)
+
+Scenario: validate_branch_rejects_empty
+  Given @validate_branch
+  When elle reçoit `""`
+  Then @InvalidBranch (`VNL-MAINT-001`) avec raison `"branch name is empty"`, refus LOCAL
+    sans appel git (test existant `validate_branch_rejects_empty`)
+
+Scenario: validate_branch_rejects_leading_dash
+  Given @validate_branch
+  When elle reçoit `"-oops"`
+  Then @InvalidBranch avec raison `"branch name starts with '-'"` — ferme l'injection
+    d'option (test existant `validate_branch_rejects_leading_dash`)
+
+Scenario: validate_branch_rejects_control_chars
+  Given @validate_branch
+  When elle reçoit `"a\nb"`
+  Then @InvalidBranch avec raison `"branch name contains control characters"` — un
+    caractère de contrôle est refusé AVANT d'atteindre git (test existant
+    `validate_branch_rejects_control_chars`)
+
+Scenario: validate_branch_rejects_git_invalid
+  Given @validate_branch
+  When elle reçoit `"a..b"`, `"a b"` ou `"end/"`
+  Then @InvalidBranch avec le stderr `trim()` de git comme raison — la sémantique exacte
+    de `check-ref-format` fait foi (test existant `validate_branch_rejects_git_invalid`)
+
+Scenario: validate_branch_mappe_defaut_de_spawn_en_invalid_branch
+  Given un `PATH` pointé sur un répertoire temporaire contenant un fichier `git` NON
+    exécutable (shim de test)
+  When @validate_branch reçoit `"main"`
+  Then le résultat est @InvalidBranch (PAS @GitFailed) dont la raison commence par
+    `"git check-ref-format failed:"` — classification actuelle, cf. `[?]` des `Tasks`
+
+Scenario: validate_repo_ok
+  Given @validate_repo
+  When elle reçoit `"https://github.com/o/r.git"`, `"git@github.com:o/r.git"` ou
+    `"/srv/git/repo.git"`
+  Then les trois sont `Ok` — URL, scp-like et chemin local sont également plausibles, pas
+    de parsing d'URL (test existant `validate_repo_ok`)
+
+Scenario: validate_repo_rejects
+  Given @validate_repo
+  When elle reçoit `""`, `"-flag"` ou `"a\nb"`
+  Then @InvalidRepo (`VNL-MAINT-002`) dans les trois cas — vide, préfixe `-` et caractère
+    de contrôle sont les seules fermetures (test existant `validate_repo_rejects`)
+
+Scenario: validate_sandbox_name_ok
+  Given @validate_sandbox_name
+  When elle reçoit `"demo-branch"`, `"sb1"`, `"a.b_c"`
+  Then les trois sont `Ok` — charset `[A-Za-z0-9._-]` (test existant
+    `validate_sandbox_name_ok`)
+
+Scenario: validate_sandbox_name_rejects
+  Given @validate_sandbox_name
+  When elle reçoit `""`, `"a/b"`, `".."`, `"."`, `"-x"` ou `"a b"`
+  Then @InvalidSandboxName (`VNL-MAINT-003`) dans les six cas — slash, `.`/`..`, préfixe
+    `-` et espace sont exclus, le nom entre dans `worktrees/<name>` (test existant
+    `validate_sandbox_name_rejects`)
+
+Scenario: init_creates_bare_and_caches
+  Given un workspace vide et un dépôt source git avec un commit
+  When @run_init avec `caches = ["cargo", "pnpm"]`
+  Then `repo.git/HEAD` existe (clone bare) et `cache/cargo` ainsi que `cache/pnpm-store`
+    aussi — mapping appliqué, cible de clone absolue (test existant
+    `init_creates_bare_and_caches`)
+
+Scenario: init_is_idempotent
+  Given un workspace déjà initialisé dans lequel on dépose un fichier marqueur dans
+    `repo.git/`
+  When @run_init est rappelé avec les mêmes arguments
+  Then `Ok(())`, le marqueur survit (AUCUN re-clone) et les caches sont toujours présents
+    (test existant `init_is_idempotent`)
+
+Scenario: init_recre_les_caches_supprimes_sans_reclone
+  Given un workspace initialisé dont on a supprimé `cache/cargo`, avec un marqueur encore
+    présent dans `repo.git/`
+  When @run_init est rappelé avec `caches = ["cargo"]`
+  Then `cache/cargo` est recréé (mkdir inconditionnel) et le marqueur de `repo.git/`
+    survit (clone sauté)
+
+Scenario: init_sets_fetch_refspec
+  Given un workspace initialisé par @run_init
+  When on lit `remote.origin.fetch` du bare (`git config`)
+  Then la valeur est exactement `+refs/heads/*:refs/remotes/origin/*` — `git clone --bare`
+    n'en pose AUCUNE, la pose est le correctif WS-11 (test existant
+    `init_sets_fetch_refspec`)
+
+Scenario: init_idempotent_refspec_not_duplicated
+  Given un workspace initialisé DEUX FOIS par @run_init
+  When on énumère toutes les valeurs de `remote.origin.fetch` (`config --get-all`)
+  Then il y en a EXACTEMENT une — `--replace-all` garantit l'idempotence sur Jobs rejoués
+    (test existant `init_idempotent_refspec_not_duplicated`)
+
+Scenario: init_bad_repo_fails
+  Given un workspace vide et une URL de repo pointant dans le vide
+  When @run_init (repo recevable par @validate_repo mais injoignable)
+  Then @GitFailed (`VNL-MAINT-004`) avec un stderr git non vide et `repo.git` ABSENT après
+    coup — git nettoie le clone partiel (test existant `init_bad_repo_fails`)
+
+Scenario: init_repo_git_fichier_regular_echoue_en_refspec
+  Given un workspace où `repo.git` est un FICHIER régulier (layout corrompu)
+  When @run_init est appelé avec un repo pourtant valide
+  Then @GitFailed issu de la pose de refspec (`config --git-dir` sur un non-dépôt) — le
+    test `exists()` seul saute le clone, état sans réparation automatique, cf. `[?]`
+
+Scenario: fetch_ok
+  Given un workspace initialisé depuis un dépôt source
+  When @run_fetch
+  Then `Ok(())` — `fetch --prune` sur le bare (test existant `fetch_ok`)
+
+Scenario: fetch_without_bare_fails
+  Given un workspace sans `repo.git` (jamais initialisé)
+  When @run_fetch
+  Then @GitFailed — aucune vérification d'existence préalable, git dit lui-même (test
+    existant `fetch_without_bare_fails`)
+
+Scenario: fetch_populates_remote_tracking_refs
+  Given un bare initialisé puis une branche `feature` créée en amont APRÈS l'init
+  When @run_fetch
+  Then la référence `refs/remotes/origin/feature` existe dans le bare — preuve que la
+    refspec d'`init` dirige le fetch vers les tracking refs, pas `FETCH_HEAD` seulement
+    (test existant `fetch_populates_remote_tracking_refs`)
+
+Scenario: fetch_prune_supprime_les_tracking_refs_disparues
+  Given un bare dont `refs/remotes/origin/feature` existe (fetché) puis la branche
+    `feature` supprimée en amont
+  When @run_fetch
+  Then `refs/remotes/origin/feature` a disparu du bare — sémantique `--prune` (contrat
+    consommé par `GET /git/unpushed`)
+
+Scenario: checkout_existing_branch
+  Given un bare initialisé contenant la branche `main` (avec `README.md` commité)
+  When @run_checkout pour sandbox `sb1` sur `main`, `default_branch = None`
+  Then `worktrees/sb1/` existe avec `README.md` dedans — `show-ref` a trouvé la branche,
+    `worktree add` simple (test existant `checkout_existing_branch`)
+
+Scenario: checkout_creates_branch_from_default
+  Given un bare initialisé dont HEAD pointe `main`
+  When @run_checkout pour `sb1` sur la branche inexistante `feature-x`
+  Then `worktrees/sb1/` existe et HEAD du worktree est `feature-x` — branche créée depuis
+    le défaut résolu (`worktree add -b`) (test existant `checkout_creates_branch_from_default`)
+
+Scenario: checkout_explicit_default_branch
+  Given un bare initialisé
+  When @run_checkout pour `sb1` sur la branche inexistante `feature-y` avec
+    `default_branch = Some("main")`
+  Then `worktrees/sb1/` existe — `Some(db)` non vide dispense la résolution par
+    `symbolic-ref` (test existant `checkout_explicit_default_branch`)
+
+Scenario: checkout_resolution_symbolique_defaut_non_main_du_bare
+  Given un dépôt source dont la branche par défaut est `trunk` (commit contenant
+    `TRUNK.md`), cloné en bare par `init`
+  When @run_checkout pour `sb1` sur la branche inexistante `feature` avec
+    `default_branch = None`
+  Then `worktrees/sb1/` est sur `feature` ET contient `TRUNK.md` — le point de création
+    vient de `symbolic-ref --short HEAD` (`trunk`), pas du repli `"main"`
+
+Scenario: checkout_default_branch_vide_resout_par_symbolic_ref
+  Given le même bare initialisé (défaut `trunk`)
+  When @run_checkout avec `default_branch = Some("")` sur la branche inexistante
+    `feature2`
+  Then `Ok(())` et worktree créé depuis `trunk` — `Some("")` est strictement équivalent à
+    `None` (non validé par @validate_branch, résolu puis repli)
+
+Scenario: checkout_repli_main_quand_resolution_echoue
+  Given un bare issu d'un dépôt par défaut `trunk`, HEAD du bare détachée au préalable
+    (`update-ref HEAD <sha>` — `symbolic-ref` échoue)
+  When @run_checkout sur la branche inexistante `feature` avec `default_branch = None`
+  Then @GitFailed — le repli `"main"` est utilisé silencieusement et `refs/heads/main`
+    n'existe pas dans ce dépôt `trunk`-only : preuve observationnelle du repli (cf. `[?]`)
+
+Scenario: checkout_is_idempotent
+  Given un worktree `worktrees/sb1` déjà créé dans lequel on dépose un marqueur
+  When @run_checkout est rappelé à l'identique
+  Then `Ok(())` et le marqueur survit — test d'existence du RÉPERTOIRE seul, aucun
+    travail git (test existant `checkout_is_idempotent`)
+
+Scenario: checkout_rejects_invalid_sandbox
+  Given n'importe quel workspace (même `/tmp`)
+  When @run_checkout avec sandbox `"a/b"`
+  Then @InvalidSandboxName avant toute commande git ou création — `/` est interdit dans
+    le nom qui entre dans `worktrees/<n>` (test existant `checkout_rejects_invalid_sandbox`)
+
+Scenario: checkout_rejects_invalid_branch
+  Given n'importe quel workspace
+  When @run_checkout avec la branche `"a..b"`
+  Then @InvalidBranch (sémantique git) avant toute action (test existant
+    `checkout_rejects_invalid_branch`)
+
+Scenario: checkout_rejects_invalid_default_branch
+  Given n'importe quel workspace
+  When @run_checkout avec `branch = "feat"` valide mais `default_branch = Some("a..b")`
+  Then @InvalidBranch — `default_branch` non vide est validé par @validate_branch, et la
+    validation précède jusqu'au test d'idempotence
+
+Scenario: checkout_deux_sandboxes_sur_meme_branche_echoue
+  Given un bare initialisé avec `main`
+  When @run_checkout pour `sb1` sur `main` réussit, puis @run_checkout pour `sb2` sur
+    la MÊME branche `main`
+  Then @GitFailed — git interdit une branche checkoutée dans deux worktrees ; cas d'usage
+    à trancher, cf. `[?]` des `Tasks`
+
+Scenario: checkout_repertoire_supprime_a_la_maine_echoue_sans_prune
+  Given un worktree `worktrees/sb1` inscrit puis son répertoire supprimé par
+    `remove_dir_all` manuel (état incohérent, inscription git survivante)
+  When @run_checkout pour `sb1` sur `main` (le test d'existence laisse passer, la
+    branche est dans `refs/heads/`)
+  Then @GitFailed — `worktree add` refuse le chemin déjà inscrit ; seul un `remove`
+    (qui `prune`) répare, `checkout` ne prune jamais lui-même, cf. `[?]`
+
+Scenario: remove_removes_worktree
+  Given un worktree `worktrees/sb1` créé par checkout
+  When @run_remove pour `sb1`
+  Then `worktrees/sb1` n'existe plus et `worktree prune` a réussi (test existant
+    `remove_removes_worktree`)
+
+Scenario: remove_incoherent_worktree_falls_back
+  Given un worktree dont le répertoire a été supprimé à la main (inscription survivante)
+  When @run_remove pour `sb1`
+  Then `Ok(())` — l'échec de `worktree remove` déclenche le repli `rm -rf` (erreur
+    ignorée) puis `prune` nettoie l'inscription, et un `checkout` postérieur REUSSIT (la
+    preuve que prune a fonctionné) (test existant `remove_incoherent_worktree_falls_back`)
+
+Scenario: remove_nonexistent_worktree_ok
+  Given un workspace initialisé sans aucun worktree
+  When @run_remove pour la sandbox inexistante `"never-created"`
+  Then `Ok(())` — remove échoue, repli sur dossier absent (ignoré), prune réussit (test
+    existant `remove_nonexistent_worktree_ok`)
+
+Scenario: remove_rejects_invalid_sandbox
+  Given n'importe quel workspace
+  When @run_remove avec sandbox `".."`
+  Then @InvalidSandboxName, aucune commande git exécutée — le path traversal est fermé
+    côté maint, jamais côté controller (test existant `remove_rejects_invalid_sandbox`)
+
+Scenario: remove_supprime_un_repertoire_non_inscrit
+  Given un workspace initialisé où `worktrees/ghost/` a été créé à la main (JAMAIS
+    inscrit comme worktree git)
+  When @run_remove pour `"ghost"`
+  Then `Ok(())` et `worktrees/ghost/` détruit par le repli `rm -rf` — `remove` est aussi
+    un destructeur de répertoire, pas seulement un dé-inscripteur git
+
+Scenario: remove_force_detruit_les_modifications_non_committees
+  Given un worktree checkouté dans lequel un fichier suivi est modifié sans commit
+  When @run_remove
+  Then `Ok(())` et le répertoire est intégralement détruit — `--force` ne demande jamais
+    confirmation ; la perte des modifications non commitées est le contrat du cleanup
+    sandbox
+
+Scenario: remove_ne_supprime_pas_la_branche_du_bare
+  Given une branche `feature` créée par checkout dans le bare (`worktree add -b`) avec
+    un commit ajouté dedans
+  When @run_remove puis @run_checkout à l'identique pour la même sandbox
+  Then `Ok` aux deux étapes et le worktree restauré CONTIENT le commit de `feature` —
+    `remove` détruit le worktree et son inscription, jamais `refs/heads/feature` ni les
+    commits
+
+Scenario: purge_removes_everything
+  Given un workspace initialisé avec caches et `worktrees/demo-branch/`
+  When @run_purge
+  Then `repo.git`, `worktrees` et `cache` ont disparu, rien d'autre sous `workspace`
+    n'est mentionné (test existant `purge_removes_everything`)
+
+Scenario: purge_on_empty_workspace_ok
+  Given un workspace vierge (aucun des trois répertoires)
+  When @run_purge
+  Then `Ok(())` — @NotFound ignoré par répertoire, le Job purge du finalizer est rejouable
+    (test existant `purge_on_empty_workspace_ok`)
+
+Scenario: detect_rust_only
+  Given un dépôt avec `Cargo.toml` à la racine, commité, cloné en bare
+  When @run_detect
+  Then le JSON exact `{"languages":["rust"]}` — compact, clé unique, sans espace (test
+    existant `detect_rust_only`)
+
+Scenario: detect_nested_cargo_toml_workspace_member
+  Given un dépôt dont seul `crates/foo/Cargo.toml` existe (aucun à la racine)
+  When @run_detect
+  Then `{"languages":["rust"]}` — le suffixe `/Cargo.toml` compte (membre de workspace)
+    (test existant `detect_nested_cargo_toml_workspace_member`)
+
+Scenario: detect_js_ts_package_json
+  Given un dépôt avec seul `package.json` à la racine
+  When @run_detect
+  Then `{"languages":["js-ts"]}` (test existant `detect_js_ts_package_json`)
+
+Scenario: detect_js_ts_tsconfig_json
+  Given un dépôt avec seul `tsconfig.json` à la racine
+  When @run_detect
+  Then `{"languages":["js-ts"]}` — les deux marqueurs sont indépendants et racine-only
+    (test existant `detect_js_ts_tsconfig_json`)
+
+Scenario: detect_nested_package_json_ignored
+  Given un dépôt avec seul `frontend/package.json` (aucun à la racine)
+  When @run_detect
+  Then `{"languages":[]}` — `js-ts` est délibérément racine-uniquement, contrairement aux
+    autres marqueurs (test existant `detect_nested_package_json_ignored`)
+
+Scenario: detect_vue_nested_only
+  Given un dépôt avec seul `src/App.vue` (aucun `package.json`)
+  When @run_detect
+  Then `{"languages":["vue"]}` — profondeur quelconque et INDÉPENDANCE de `js-ts` (le
+    couplage toolchain node vit dans le controller) (test existant `detect_vue_nested_only`)
+
+Scenario: detect_python_by_py_file
+  Given un dépôt avec `src/main.py` commité
+  When @run_detect
+  Then `{"languages":["python"]}` — extension `.py` à n'importe quelle profondeur (test
+    existant `detect_python_by_py_file`)
+
+Scenario: detect_python_by_pyi_only
+  Given un dépôt avec seul `stubs/foo.pyi`
+  When @run_detect
+  Then `{"languages":["python"]}` — les stubs `.pyi` comptent seuls (test existant
+    `detect_python_by_pyi_only`)
+
+Scenario: detect_python_by_pyproject_no_py
+  Given un dépôt avec seul `pyproject.toml`, AUCUN fichier `.py`
+  When @run_detect
+  Then `{"languages":["python"]}` — projet packaging-only marqué par basename (test
+    existant `detect_python_by_pyproject_no_py`)
+
+Scenario: detect_python_by_setup_cfg
+  Given un dépôt avec seul `setup.cfg`
+  When @run_detect
+  Then `{"languages":["python"]}` (test existant `detect_python_by_setup_cfg`)
+
+Scenario: detect_python_nested_marker
+  Given un dépôt avec seul `services/api/pyproject.toml` (nichés)
+  When @run_detect
+  Then `{"languages":["python"]}` — contraste voulu avec `js-ts` racine-only (test
+    existant `detect_python_nested_marker`)
+
+Scenario: detect_python_negative
+  Given un dépôt avec uniquement `notes.md`, `data.pyc`, `kernel.pyx`
+  When @run_detect
+  Then `{"languages":[]}` — suffixes `.py`/`.pyi` stricts : `.pyx` ne finit PAS par `.py`,
+    `.pyc` non plus (test existant `detect_python_negative`)
+
+Scenario: detect_dockerfile_root_only
+  Given un dépôt avec seul `Dockerfile` à la racine
+  When @run_detect
+  Then `{"languages":["dockerfile"]}` (test existant `detect_dockerfile_root_only`)
+
+Scenario: detect_dockerfile_nested
+  Given un dépôt avec seul `deploy/prod/Dockerfile`
+  When @run_detect
+  Then `{"languages":["dockerfile"]}` — n'importe quelle profondeur (test existant
+    `detect_dockerfile_nested`)
+
+Scenario: detect_dockerfile_variant_dev
+  Given un dépôt avec seul `Dockerfile.dev`
+  When @run_detect
+  Then `{"languages":["dockerfile"]}` — préfixe `Dockerfile.` (test existant
+    `detect_dockerfile_variant_dev`)
+
+Scenario: detect_dockerfile_extension_suffix
+  Given un dépôt avec seul `build/app.dockerfile`
+  When @run_detect
+  Then `{"languages":["dockerfile"]}` — suffixe `.dockerfile` AVEC le point (test
+    existant `detect_dockerfile_extension_suffix`)
+
+Scenario: detect_containerfile_detected
+  Given un dépôt avec seul `Containerfile`
+  When @run_detect
+  Then `{"languages":["dockerfile"]}` — le nom Containerfile produit la VALEUR dockerfile
+    (test existant `detect_containerfile_detected`)
+
+Scenario: detect_containerfile_variant
+  Given un dépôt avec seul `Containerfile.base`
+  When @run_detect
+  Then `{"languages":["dockerfile"]}` — préfixe `Containerfile.` (le design omettait ce
+    cas, le helper frontend fait foi) (test existant `detect_containerfile_variant`)
+
+Scenario: detect_dockerfile_case_insensitive
+  Given un dépôt avec seul `dockerfile` (minuscule intégrale)
+  When @run_detect
+  Then `{"languages":["dockerfile"]}` — SEUL marqueur insensible à la casse (test existant
+    `detect_dockerfile_case_insensitive`)
+
+Scenario: detect_marqueurs_sensibles_a_la_casse_sauf_dockerfile
+  Given un dépôt avec `cargo.toml` (minuscule), `App.VUE`, `main.PY` et `SETUP.CFG`
+    commités, aucun autre marqueur
+  When @run_detect
+  Then `{"languages":[]}` — hors `dockerfile`, la comparaison est sensible à la casse
+    (documentée en commentaire source : `.VUE` n'est pas détecté)
+
+Scenario: detect_dockerfile_negative_names
+  Given un dépôt avec `docker-compose.yml`, `mydockerfile` et `notes.dockerfile.txt`
+  When @run_detect
+  Then `{"languages":[]}` — `mydockerfile` ne matche pas (le suffixe est `.dockerfile`
+    AVEC le point ; nom exact = égalité) (test existant `detect_dockerfile_negative_names`)
+
+Scenario: detect_markers_sous_repertoire_non_ascii_exclus_par_le_quoting
+  Given un dépôt avec `café/Dockerfile`, `café/main.py` et `café/Cargo.toml` (composant
+    non-ASCII, `core.quotePath` par défaut `true`)
+  When @run_detect
+  Then `{"languages":[]}` — `ls-tree` émet le chemin entre guillemets (échappé) et la
+    quote finale casse toutes les correspondances par suffixe ; comportement actuel
+    contracté tel quel, cf. `[?]` des `Tasks`
+
+Scenario: detect_vue_with_package_json_order_fixed
+  Given un dépôt avec `package.json` (racine) et `src/components/HelloWorld.vue`
+  When @run_detect
+  Then `{"languages":["js-ts","vue"]}` — `js-ts` avant `vue` dans l'ordre figé (test
+    existant `detect_vue_with_package_json_order_fixed`)
+
+Scenario: detect_dockerfile_file_detected
+  Given un dépôt avec `Dockerfile` et `App.vue`
+  When @run_detect
+  Then `{"languages":["vue","dockerfile"]}` — `dockerfile` en DERNIÈRE position, après
+    `vue` (test existant `detect_dockerfile_file_detected`)
+
+Scenario: detect_python_order_fixed_full
+  Given un dépôt portant les cinq familles : `Cargo.toml`, `package.json`, `App.vue`,
+    `src/main.py`, `Dockerfile`
+  When @run_detect
+  Then `{"languages":["rust","js-ts","vue","python","dockerfile"]}` — ordre @LANGUAGE_ORDER
+    complet, indépendamment de l'ordre des fichiers dans l'arbre (test existant
+    `detect_python_order_fixed_full`)
+
+Scenario: detect_no_markers
+  Given un dépôt avec un seul `README.md`
+  When @run_detect
+  Then `{"languages":[]}` — liste vide sérialisée, jamais une clé absente ni une erreur
+    (test existant `detect_no_markers`)
+
+Scenario: detect_without_bare_fails
+  Given un workspace sans `repo.git`
+  When @run_detect
+  Then @GitFailed (`ls-tree` sur un dépôt absent) — `detect` appelé avant `init` est une
+    erreur, pas un vide (test existant `detect_without_bare_fails`)
+
+Scenario: detect_sur_bare_vide_sans_commit_echoue
+  Given un dépôt source créé par `git init` SANS aucun commit, cloné en bare par
+    @run_init (le clone d'un dépôt vide réussit)
+  When @run_detect
+  Then @GitFailed — `ls-tree -r --name-only HEAD` échoue sans commit ; `{"languages":[]}`
+    n'est rendu que pour un arbre HEAD SANS marqueur, cf. `[?]` des `Tasks`
+
+Scenario: is_dockerfile_path_truth_table
+  Given @is_dockerfile_path
+  When on lui passe la table de vérité : vrais `"Dockerfile"`, `"deploy/Dockerfile"`,
+    `"Dockerfile.dev"`, `"Containerfile"`, `"Containerfile.base"`,
+    `"build/app.dockerfile"`, `"dockerfile"` ; faux `""`, `"docker-compose.yml"`,
+    `"mydockerfile"`, `"notes.dockerfile.txt"`
+  Then chaque verdict matche la table — miroir exact de `dockerfileName()` du frontend,
+    les deux évoluent ensemble (test existant `is_dockerfile_path_truth_table`)
+
+Scenario: detect_and_patch_without_project_matches_plain_detect
+  Given un dépôt à `Cargo.toml` cloné en bare
+  When @run_detect_and_patch avec `project = None`
+  Then le JSON rendu est identique bit-à-bit à @run_detect et AUCUN appel réseau n'a eu
+    lieu (mode local/CLI hors cluster) (test existant
+    `detect_and_patch_without_project_matches_plain_detect`)
+
+Scenario: detect_and_patch_with_project_fails_without_cluster
+  Given le même workspace, hors cluster et sans kubeconfig utilisable
+  When @run_detect_and_patch avec `project = Some("whatever")`
+  Then @K8sPatch (`VNL-MAINT-006`, message préfixé `"config:"` depuis l'échec de
+    @Config::infer) — et le Job `detect` du controller échoue donc (exit `1`, retry
+    backoff) (test existant `detect_and_patch_with_project_fails_without_cluster`)
+
+Scenario: cluster_patch_status_langues_seules_sans_projectstatus
+  Given un cluster de dev, un Project `demo` dont @ProjectStatus porte `cloned: true`,
+    `pvcName` et des `conditions`, et un workspace avec marqueurs à détecter (harnais
+    d'intégration cluster à créer)
+  When @run_detect_and_patch avec `project = Some("demo")`, porté par le SA
+    `project-demo-maint`
+  Then `status.languages` porte la liste détectée et `status.detectedAt` un timestamp RFC
+    3339, et `cloned`/`pvcName`/`worktrees`/`conditions` sont INTACTS — le merge patch
+    manuel ne contient que les deux clés (symétrie des `skip_serializing_if` de
+    /crds/src/lib.sdd)
+
+Scenario: cluster_patch_ecrase_liste_langues_preexistante
+  Given un Project `demo` dont `status.languages = ["rust"]` et un workspace dont la
+    détection vaut désormais `["js-ts","vue"]` (harnais cluster à créer)
+  When @run_detect_and_patch avec `project = Some("demo")`
+  Then `status.languages` vaut exactement `["js-ts","vue"]` et `detectedAt` est
+    re-horodaté — un tableau en merge patch est REMPLACÉ globalement, `detect` est le
+    producteur exclusif de la clé ; un re-detect sans marqueur patcherait `[]` (effacement
+    effectif)

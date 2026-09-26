@@ -1,0 +1,296 @@
+Spec: venv
+
+Platform: Rust/vanyline-sandbox/std
+
+Purpose:
+  Activation du virtualenv Python de workspace (feature python-support) : @venv_overlay
+  calcule l'overlay d'environnement `VIRTUAL_ENV` + `PATH` préfixé de
+  `<sandbox_root>/.venv/bin` quand le marqueur `<sandbox_root>/.venv/pyvenv.cfg` existe
+  en tant que FICHIER, et rend un overlay vide sinon. Fonction pure : lit le filesystem
+  et l'environnement du processus portant, ne spawn rien, ne modifie jamais
+  l'environnement de ce processus — l'application est faite par les consommateurs :
+  terminal PTY (@spawn_shell dans `./ws/terminal.rs`, via `cmd.env`) et
+  `execute_command` (@dispatch_command dans `./tools_impl.rs`, via le champ `envs`
+  `#[serde(skip)]` de @ExecuteCommandOptions — contrat de la spec sœur
+  `../../tools/src/command.sdd`). Jamais appliqué au LSP (pyright auto-découvre
+  `<workspace>/.venv` lui-même). Seul `<sandbox_root>/.venv` est reconnu — pas de
+  walk-up (venv niché = activation manuelle, périmètre design). Contrat d'un seul
+  fichier, pas de regroupement.
+
+Owns:
+  ./venv.rs
+
+Can read:
+  ./lib.rs
+  ./tools_impl.rs
+  ./ws/terminal.rs
+  ../../tools/src/command.sdd
+  ../../docs/architecture.md
+  ../../tooling.sdd
+
+Exposes:
+  @venv_overlay — seule fonction publique du module (déclarée `pub mod venv;` dans
+    ./lib.rs) : `pub fn venv_overlay(sandbox_root: &Path) -> Vec<(String, String)>`.
+    Fonction synchrone (aucun tokio), sans état. Le contenu du Vec est décrit en
+    `Returns` ; jamais d'erreur (cf. `Raises`).
+
+Accepts:
+  `sandbox_root: &Path` — un chemin de système de fichiers. Aucune validation de
+    `sandbox_root` lui-même : un chemin inexistant, illisible ou aberrant produit un
+    overlay vide, jamais une erreur. Le doc-comment et le contrat des appelants
+    exigent que la valeur vienne de la CONFIG du process (`config.sandbox_root`),
+    jamais d'une entrée utilisateur ni d'un argument LLM.
+  Aucun autre paramètre. Entrées implicites lues à CHAQUE appel : le filesystem (stat du
+    marqueur) et le `PATH` courant du processus portant via @std::env::var — pas le
+    `PATH` d'un sessionnel ou d'un terminal, pas un snapshot.
+
+Returns:
+  Marqueur absent (cas par défaut) — @Vec vide (longueur 0). Sont « absents » :
+    aucun `.venv`, `.venv` dossier sans `pyvenv.cfg`, `pyvenv.cfg` dossier,
+    `pyvenv.cfg` lien symbolique cassé, `.venv` fichier régulier, chaîne de chemins
+    inaccessible (EACCES avalé — cf. `Tasks`), `sandbox_root` inexistant.
+  Marqueur présent (fichier régulier, ou symlink vers un fichier régulier) — exactement
+    2 paires `(clé, valeur)`, dans cet ordre, jamais 1 ni 3 :
+    1. `("VIRTUAL_ENV", "<sandbox_root>/.venv")` — construit par @Path::join puis
+      @OsStr::to_string_lossy, JAMAIS canonifié (un `.venv` symlink reste écrit tel
+      quel sous `<sandbox_root>/.venv`) ;
+    2. `("PATH", "<sandbox_root>/.venv/bin:<PATH>")` — concaténation POSIX avec `:`
+      codé en dur (le sandbox ne tourne que dans un pod Linux) ; préfixe
+      `<sandbox_root>/.venv/bin` dont l'existence N'EST PAS vérifiée (cf. `Tasks`) ;
+      base = `PATH` du processus portant lu à l'instant de l'appel, erreur de lecture
+      (@VarError) mappée sur chaîne vide par `unwrap_or_default` — un `PATH` non posé
+      produit donc une valeur finissant par `:` (cf. `Tasks`).
+  Valeurs en UTF-8 lossy : un composant non-UTF-8 de `sandbox_root` est rendu en
+    U+FFFD (@String::from_utf8_lossy), jamais une erreur ni un panic.
+
+Raises:
+  Aucune — @venv_overlay ne panique pas et ne remonte aucune erreur (signature sans
+    @Result), ne logge rien (aucun tracing dans le fichier). Tout erreur filesystem sur le test du marqueur (EACCES, ENOTDIR,
+    ELOOP, …) est avalée silencieusement par @Path::is_file et traitée comme « marqueur
+    absent » (cf. `Tasks`) ; @VarError sur `PATH` devient la chaîne vide.
+
+Handles:
+  Marqueur — le chemin testé est `<sandbox_root>/.venv/pyvenv.cfg` via @Path::is_file :
+    fichier régulier, ou lien symbolique dont la cible est un fichier régulier (le
+    symlink est suivi). Dossier, symlink cassé, chemin cassé en amont (`.venv` fichier
+    régulier ⟹ ENOTDIR) ou inaccessible ⟹ traité absent. Le CONTENU du fichier n'est
+    jamais lu ni interprété : un `pyvenv.cfg` vide ou de contenu aberrant est un
+    marqueur valide (cf. `Tasks`).
+  Racine seule — aucun walk-up, aucune recherche récursive : seul `.venv` fils direct
+    de `sandbox_root` est reconnu. Un `.venv` niché dans un sous-répertoire n'est
+    jamais activé (périmètre design, documenté dans le doc-comment et
+    `../../docs/architecture.md` section « Activation `.venv/` »).
+  Pas de cache — recalcul filesystem + env complet à CHAQUE appel : un `.venv` créé en
+    cours de session (par `python -m venv .venv`, uv ou poetry) est vu par la commande
+    ou le terminal ouvert juste après. Corollaire de la base prise sur le `PATH` du
+    process : deux appels successifs rendent la même valeur `PATH`, le préfixe n'est
+    jamais cumulé sur un overlay déjà rendu.
+  Pureté — aucun @std::env::set_var : l'overlay ne modifie pas l'environnement du
+    processus portant (le server sandbox garde son `PATH` d'origine), il n'est appliqué
+    qu'aux environnements des processus enfants que les consommateurs spawntent.
+  Consommation — deux sites d'appel dans le crate, chacun recalculant pour son process :
+    @dispatch_command (`./tools_impl.rs`) passe @venv_overlay(`sandbox_root`) dans
+    `envs` de @ExecuteCommandOptions avant @command::execute (overlay vide ⟹
+    comportement historique strict) ; @spawn_shell (`./ws/terminal.rs`) applique les
+    paires dans l'ordre du Vec via `cmd.env` sur le shell PTY (`$SHELL` ou
+    `/bin/bash`) — le site d'appel réel passe `cwd` = `sandbox_root` de la config
+    (cf. `Tasks` sur le nommage du paramètre). Processus LSP : jamais.
+
+Depends on:
+  @std::path (@Path, @Path::join, @OsStr::to_string_lossy) et @std::env::var — seules
+    dépendances du fichier (pas de tokio, pas de tracing, pas de crate d'erreur).
+  ./lib.rs — déclaration `pub mod venv;` du module.
+  ../../tools/src/command.rs — point d'application pour `execute_command` : le champ
+    `envs` de @ExecuteCommandOptions (`#[serde(skip)]`, non injectable par le LLM,
+    appliqué en additif juste avant spawn). Application et sécurité détaillées par la
+    spec sœur `../../tools/src/command.sdd`.
+  ./tools_impl.rs — @dispatch_command : consommateur MCP, recalcule l'overlay à chaque
+    `tools/call execute_command`.
+  ./ws/terminal.rs — @spawn_shell : consommateur PTY, applique l'overlay à chaque
+    spawn de shell ; intégration vérifiée par les tests `spawn_shell_active_le_venv_du_cwd`
+    et `spawn_shell_sans_venv_pas_de_VIRTUAL_ENV` de ce fichier.
+
+Must:
+  Reconnaître comme seul marqueur un FICHIER régulier `<sandbox_root>/.venv/pyvenv.cfg`
+    (@Path::is_file, pas @Path::exists).
+  Rendre sur marqueur présent exactement 2 paires dans l'ordre `VIRTUAL_ENV` puis
+    `PATH` — égalité exacte (valeurs et ordre) assertie en test.
+  Recalculer l'intégralité (stat du marqueur + lecture du `PATH`) à chaque appel —
+    aucun cache, aucune mémoïsation.
+  Préfixer `PATH` de `<sandbox_root>/.venv/bin` sur le `PATH` courant du processus
+    portant lu à l'appel — jamais remplacer entièrement le `PATH`, jamais le vider.
+  Rester pure : ne jamais modifier l'environnement du processus portant.
+  Exiger des appelants que `sandbox_root` (ou le `cwd` qui lui est passé) vienne de la
+    config du process, jamais d'une entrée utilisateur ni d'un argument LLM.
+  Rester compatible harnais (../../tooling.sdd) : aucun `unwrap`/`expect`/`panic!`/
+    `println!` en production ; `unwrap_or_default` sur @VarError est la seule tolérance
+    d'erreur du fichier ; le module de test porte l'exemption locale unwrap/expect.
+
+Must not:
+  Appliquer l'overlay à un processus LSP (pyright auto-découvre le venv lui-même —
+    contrat des appelants).
+  Marcher vers les répertoires parents ou détecter un `.venv` ailleurs que fils direct
+    de `sandbox_root`.
+  Mettre en cache le marqueur ou l'overlay entre appels.
+  Lire ou interpréter le contenu de `pyvenv.cfg`.
+  Rendre un overlay partiel (1 paire) ou de plus de 2 paires.
+  Canonifier ou normaliser les chemins rendus (lossy sur place, jamais @fs::canonicalize).
+  Exposer une voie quelconque par laquelle un LLM injecterait ces paires : la
+    non-injectabilité du champ `envs` consommateur est testée côté sandbox
+    (`tests/http.rs::tools_call_execute_command_envs_non_injectables`).
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat (reverse
+    du 2026-09-26), en priorité sur les points `[?]` ci-dessous.
+  [?] `PATH` du process portant non posé ⟹ `unwrap_or_default` rend la base vide et la
+    valeur finale finit par `:` (`<bin>:`) — un élément vide dans `PATH` est
+    interprété comme le répertoire courant par la recherche exec POSIX/`sh`
+    (précédent implicite du cwd dans la résolution de commandes). Garde (omettre le
+    `:` quand la base est vide) ou considérer acquis que le pod pose toujours `PATH` ?
+  [?] Erreurs I/O sur la chaîne du marqueur (EACCES sur `.venv` mode 000, ENOTDIR,
+    ELOOP…) : @Path::is_file les avale et le overlay tombe silencieusement à vide,
+    sans aucun log — un venv réel mais illisible devient « inexistant » de façon
+    invisible. Silence voulu ou trace `tracing` (debug/warn) à ajouter ?
+  [?] `<sandbox_root>/.venv/bin` n'est jamais vérifié : un venv à demi créé (marqueur
+    posé, `bin/` absent ou incomplet) donne `VIRTUAL_ENV` posé + préfixe mort ⟹ le
+    shell affiche le prompt du venv mais exécute le `python` du `PATH` de base
+    (incohérence sys.prefix). Vérifier `bin` (@Path::is_dir) comme condition
+    supplémentaire, ou le marqueur suffit (préfixe sur dossier absent est inerte pour
+    la recherche exec) ?
+  [?] Contenu du marqueur jamais validé : un fichier vide nommé `pyvenv.cfg` (créé par
+    erreur par un outil ou un utilisateur) active l'overlay. Convention « marqueur
+    d'existence pur » assumée, ou sanity check minimal (le fichier contient `home =`) ?
+  [?] `sandbox_root` non-UTF-8 : les valeurs sont rendues en lossy (U+FFFD) et
+    pointent vers un chemin qui n'existe pas telles quelles (le filesystem, lui,
+    voit le vrai chemin). Accepté (la config du pod est ASCII en pratique) ou overlay
+    à sauter si `sandbox_root` n'est pas UTF-8 ?
+  [?] @spawn_shell (`./ws/terminal.rs`) appelle @venv_overlay avec son paramètre `cwd`,
+    pas avec `config.sandbox_root` explicite — égalité vérifiée uniquement parce que
+    le seul site d'appel réel passe `sandbox_root` (commenté dans le code). Contrat
+    tenu par convention fragile ou resserrage (passer `config.sandbox_root` en dur) ?
+  [ ] Dériver un test par Scenario encore sans test (chacun taggé du titre de son
+    Scenario) : `racine_inexistente_overlay_vide`, `venv_fichier_regulier_overlay_vide`,
+    `pyvenv_cfg_symlink_vers_fichier_est_un_marqueur`,
+    `pyvenv_cfg_symlink_casse_n_est_pas_un_marqueur`,
+    `repertoire_venv_inaccessible_traite_comme_absent` (lancé non-root comme en CI),
+    `bin_absent_overlay_quand_meme_pose`, `deux_appels_successifs_path_identique`,
+    `marqueur_vide_de_contenu_active_overlay`, `chemin_non_utf8_values_en_fffd`
+    (création de composant non-UTF-8 via @OsStringExt côté Linux).
+  [ ] Aucun test possible en-process pour le cas `PATH` non posé (le modifier
+    globalement fausserait les autres tests parallèles, et @std::env::set_var est
+    `unsafe` en edition 2024 hors verrou) : le point `[?]` du `:` final doit être
+    tranché avant d'écrire un test (process enfant dédié avec env épuré, ou simple
+    décision).
+  [ ] Cartographie des tests existants → Scenarios : `venv_overlay_absent` →
+    `tmpdir_vide_overlay_vide` ; `venv_overlay_dossier_sans_marqueur` →
+    `dossier_venv_sans_marqueur_overlay_vide` ; `venv_overlay_marqueur_est_un_dossier` →
+    `pyvenv_cfg_dossier_n_est_pas_un_marqueur` ; `venv_overlay_present` →
+    `overlay_present_exactement_virtual_env_puis_path` ;
+    `venv_overlay_recalcule_a_chaque_appel` →
+    `venv_cree_entre_deux_appels_vu_des_le_second`. Application côté consommateurs :
+    couverte par `spawn_shell_active_le_venv_du_cwd` /
+    `spawn_shell_sans_venv_pas_de_VIRTUAL_ENV` (`./ws/terminal.rs`) et
+    `tools_call_execute_command_envs_non_injectables` (`./tests/http.rs`) — hors du
+    périmètre de test de CE fichier, référencé ici pour non-répétition.
+
+Done when:
+  Chaque Scenario dispose d'un test taggé par son titre et passe.
+  Les questions `[?]` sont tranchées par Sébastien (garde `PATH` vide, vérification
+    de `bin`, validation du marqueur, traçabilité des erreurs I/O, non-UTF-8, paramètre
+    de @spawn_shell).
+  La batterie complète est verte sur `vanyline-sandbox` (../../tooling.sdd).
+
+Scenario: tmpdir_vide_overlay_vide
+  Given un répertoire temporaire vide (aucun `.venv`)
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat est un @Vec vide — pas de marqueur, pas d'overlay
+
+Scenario: dossier_venv_sans_marqueur_overlay_vide
+  Given un répertoire temporaire contenant uniquement un dossier `.venv/` sans
+    `pyvenv.cfg`
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat est vide — le marqueur est le FICHIER `pyvenv.cfg`, pas le dossier
+    `.venv`
+
+Scenario: pyvenv_cfg_dossier_n_est_pas_un_marqueur
+  Given un répertoire temporaire contenant `.venv/pyvenv.cfg` en tant que DOSSIER
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat est vide — le test du marqueur est `is_file`, pas `exists`
+
+Scenario: overlay_present_exactement_virtual_env_puis_path
+  Given un répertoire temporaire contenant `.venv/pyvenv.cfg` en tant que fichier
+    (contenu `home = /usr/bin`)
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat égale exactement la liste des deux paires
+    `[("VIRTUAL_ENV", "<tmp>/.venv"), ("PATH", "<tmp>/.venv/bin:<PATH courant>")]`
+    dans cet ordre, la valeur de `PATH` étant recalculée à l'identique dans le test —
+    aucune paire `VIRTUAL_ENV_PROMPT` ni autre variable
+
+Scenario: venv_cree_entre_deux_appels_vu_des_le_second
+  Given un répertoire temporaire sur lequel @venv_overlay a d'abord rendu un Vec vide
+  When on crée `.venv/pyvenv.cfg` en tant que fichier, puis on rappelle @venv_overlay
+  Then le second appel rend 2 paires — aucun cache : un `.venv` créé en cours de
+    session est vu dès l'appel suivant
+
+Scenario: racine_inexistente_overlay_vide
+  Given un chemin `<tmp>/absent` sous un répertoire temporaire existant, dont le
+    composant final `absent` n'existe pas
+  When @venv_overlay est appelé sur ce chemin
+  Then le résultat est vide, sans erreur ni panic — un `sandbox_root` invalide n'est
+    jamais une erreur
+
+Scenario: venv_fichier_regulier_overlay_vide
+  Given un répertoire temporaire où `.venv` est un fichier RÉGULIER (et non un dossier)
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat est vide — le stat de `.venv/pyvenv.cfg` échoue (ENOTDIR) et est
+    traité comme « marqueur absent »
+
+Scenario: pyvenv_cfg_symlink_vers_fichier_est_un_marqueur
+  Given un fichier `pyvenv.cfg` réel ailleurs dans un répertoire temporaire, et
+    `.venv/pyvenv.cfg` en tant que lien symbolique pointant vers ce fichier
+  When @venv_overlay est appelé sur le répertoire temporaire
+  Then le résultat contient 2 paires — `is_file` suit les liens symboliques et la
+    cible est un fichier régulier
+
+Scenario: pyvenv_cfg_symlink_casse_n_est_pas_un_marqueur
+  Given un répertoire temporaire où `.venv/pyvenv.cfg` est un lien symbolique cassé
+    (cible inexistante)
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat est vide — un lien cassé ne résout pas en fichier régulier
+
+Scenario: repertoire_venv_inaccessible_traite_comme_absent
+  Given un répertoire temporaire contenant `.venv/` (avec un `pyvenv.cfg` valide
+    dedans) mis en mode `000`, inaccessible au processus de test lancé non-root comme
+    en CI
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat est vide — l'EACCES sur le stat est avalé et traité comme « absent »,
+    sans log (cf. `Tasks`)
+
+Scenario: bin_absent_overlay_quand_meme_pose
+  Given un répertoire temporaire contenant `.venv/pyvenv.cfg` valide mais AUCUN
+    `.venv/bin`
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat contient les 2 paires et la valeur de `PATH` préfixe un répertoire
+    inexistant — l'existence de `bin` n'est pas vérifiée (cf. `Tasks`)
+
+Scenario: deux_appels_successifs_path_identique
+  Given un répertoire temporaire contenant `.venv/pyvenv.cfg` en tant que fichier
+  When @venv_overlay est appelé deux fois de suite sur ce répertoire
+  Then les deux appels rendent des valeurs strictement identiques — la base du préfixe
+    est toujours le `PATH` du processus portant, jamais l'overlay retourné par l'appel
+    précédent (aucun cumul du préfixe)
+
+Scenario: marqueur_vide_de_contenu_active_overlay
+  Given un répertoire temporaire contenant `.venv/pyvenv.cfg` de zéro octet (fichier
+    créé par erreur, jamais un vrai venv)
+  When @venv_overlay est appelé sur ce répertoire
+  Then le résultat contient les 2 paires — le contenu du marqueur n'est jamais lu ni
+    validé (cf. `Tasks`)
+
+Scenario: chemin_non_utf8_values_en_fffd
+  Given un chemin `<tmp>/nv<0xFF>/.venv/pyvenv.cfg` créé en tant que fichier (composant
+    non-UTF-8, possible sur Linux, construit via octets bruts)
+  When @venv_overlay est appelé sur `<tmp>/nv<0xFF>`
+  Then le résultat contient les 2 paires et les valeurs de `VIRTUAL_ENV` et de `PATH`
+    portent le caractère de remplacement `U+FFFD` à l'emplacement de l'octet invalide —
+    `to_string_lossy` ne fait jamais erreur ni panic (cf. `Tasks`)

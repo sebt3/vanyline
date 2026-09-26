@@ -1,0 +1,328 @@
+Spec: Mcp
+
+Purpose:
+  Serveur MCP HTTP de la sandbox : point d'entrée unique `POST /mcp` (transport
+  « HTTP streamable » POST-only fait main sur axum, JSON-RPC 2.0 — pas de dépendance à
+  l'API server `rmcp`, cf. `docs/architecture.md` section « Serveur MCP ») et endpoint
+  public `GET /.well-known/oauth-protected-resource` (RFC 9728). Le fichier couvre le
+  protocole — enveloppes JSON-RPC, dispatch `initialize` / `tools/list` / `tools/call`,
+  notifications, codes d'erreur, métriques — et délègue l'exécution des outils à
+  ./tools_impl.rs (5 familles de dispatch) et l'authentification au middleware
+  @require_auth de ./auth.rs (aucune ligne de ce fichier ne parle d'auth). Le serveur est
+  strictement SANS ÉTAT : aucune session MCP (pas d'`Mcp-Session-Id`, pas de GET SSE, pas
+  de DELETE), chaque requête HTTP est autonome — choix assumé du template d'origine.
+  L'articulation avec `lib/src/prefixed_mcp.sdd` est un contrat de nommage côté CLIENT :
+  le préfixage `{serveur}/{outil}` est appliqué par la passerelle `vanyline-lib`, jamais
+  ici — ce serveur ne voit et ne rend que des noms d'outils d'origine.
+
+Owns:
+  ./mcp.rs
+
+Can read:
+  ./lib.rs
+  ./auth.rs
+  ./tools_impl.rs
+  ./config.rs
+
+Depends on:
+  ./lib.rs — @AppState (config, lsp, canaux fs) et le câblage des routes : `POST /mcp`
+    dans le router protégé par @auth::require_auth, `GET /.well-known/oauth-protected-resource`
+    dans le router public (aucune auth sur cet endpoint)
+  ./auth.rs — @require_auth : les échecs d'auth sur `/mcp` (401/403, corps JSON
+    `error`/`error_description`, header `WWW-Authenticate`) sont produits par lui, jamais
+    sous forme d'enveloppe JSON-RPC — ce fichier ne s'exécute qu'après une auth réussie
+  ./tools_impl.rs — @lsp_tools (déclarations) et @dispatch_filesystem, @dispatch_search,
+    @dispatch_command, @dispatch_lsp, @dispatch_edit_and_check (exécution, forme
+    `Option<Value>` : `None` = nom étranger à la famille)
+  ../../tools/src/mcp.rs — @vanyline_tools::mcp::filesystem_tools, @search_tools,
+    @command_tools : déclarations JSON des 8 outils partagés avec le CLI (source unique)
+  ./config.rs — @Config::public_url, @Config::oidc_issuer, @DEFAULT_PUBLIC_URL
+    (`http://localhost:3000`)
+  ../../lib/src/prefixed_mcp.sdd — client de ce serveur (côté harnais LLM) : enveloppes
+    appelantes, portage des noms préfixés vers les noms d'origine émis par le client
+
+Exposes:
+  @JsonRpcRequest — requête désérialisée : `jsonrpc` (string requis, JAMAIS relu —
+    `#[allow(dead_code)]`), `id` (`Option<Value>`, tout type JSON), `method` (string
+    requis), `params` (défaut `Value::Null` par `#[serde(default)]`) ; champs inconnus
+    ignorés (comportement serde par défaut)
+  @JsonRpcResponse — réponse sérialisée : `jsonrpc` littéral `"2.0"`, `id` / `result` /
+    `error` chacun sauté si `None` (`skip_serializing_if`) ; constructeurs @JsonRpcResponse::ok
+    et @JsonRpcResponse::err (pub(crate)) mutuellement exclusifs par construction
+  @RpcError — `{ "code": i32, "message": string }`
+  @handle — handler `POST /mcp` (route câblée dans ./lib.rs, derrière @require_auth)
+  @oauth_metadata — handler `GET /.well-known/oauth-protected-resource` (route publique)
+  @handle_initialize, @handle_tools_list, @handle_tools_call — pub(crate), testables en
+    unitaire sans couche HTTP
+
+Accepts:
+  @handle : `POST /mcp`, corps JSON unique (jamais de batch — un tableau JSON ne se
+    désérialise pas en @JsonRpcRequest), `Content-Type: application/json` exigé par
+    l'extracteur axum ; @AppState (config, LSP manager, canaux fs) injecté par l'état du router
+  @handle_tools_call : `params.name` — n'importe quelle chaîne, aucun contrôle
+    d'existence local avant les familles ; `params.arguments` — transmis CLONÉ tel quel
+    aux dispatchs, `Value::Null` par défaut si absent
+  @oauth_metadata : aucun paramètre ; lit `config.public_url` et `config.oidc_issuer`
+
+Returns:
+  Enveloppe de réponse (toutes requêtes avec `id`) : HTTP 200 + `Content-Type:
+    application/json`, corps `{"jsonrpc":"2.0","id":<echo>,…}` avec exactement un des
+    membres `result` / `error` (l'autre champ absent de la sérialisation). Un `id` JSON
+    quelconque (nombre, chaîne, objet) est échoé à l'identique.
+  Notification (requête sans `id`, OU `id` explicitement `null` — `Option<Value>` rend
+    `null` en `None`) : HTTP 202 `Accepted`, corps vide, quel que soit `method`.
+  `initialize` : `result` = `{protocolVersion: "2024-11-05", capabilities: {tools: {}},
+    serverInfo: {name: env!("CARGO_PKG_NAME"), version: env!("CARGO_PKG_VERSION")}}` —
+    `params` du client (dont son `protocolVersion`) ignoré, aucun état retenu, aucun
+    identifiant de session émis (ni header `Mcp-Session-Id`, ni champ de résultat).
+  `tools/list` : `result` = `{tools: [...]}`, concaténation dans l'ordre —
+    filesystem (5 : `read_file`, `write_file`, `edit_file`, `delete_file`,
+    `list_directory`), search (2 : `find_files`, `search`), command (1 :
+    `execute_command`), @tools_impl::lsp_tools (8 : `lsp_diagnostics`, `lsp_definition`,
+    `lsp_references`, `lsp_rename`, `lsp_document_symbols`, `lsp_workspace_symbols`,
+    `inspect_symbol`, `edit_and_check`) — 16 outils au total, noms d'origine sans
+    préfixe. `params` (dont `cursor`) ignoré, pas de pagination ni de `nextCursor`.
+  `tools/call` réussi ou en échec d'outil : `result` = l'enveloppe rendue par le dispatch
+    (`{content: [{type: "text", text}], isError: bool}`) — un échec d'exécution d'outil
+    (chemin hors sandbox, LSP absent…) reste un `result` avec `isError: true`, JAMAIS un
+    code JSON-RPC ; la frontière protocole/outil est le `None` des dispatchs (nom de tool
+    non reconnu par la famille).
+  `oauth_metadata` : HTTP 200 JSON `{resource, authorization_servers,
+    bearer_methods_supported: ["header"]}` où `resource` = `config.public_url` brut ou
+    @DEFAULT_PUBLIC_URL, et `authorization_servers` = `[oidc_issuer]` à un élément, ou
+    tableau vide si `oidc_issuer` absent.
+  Métriques : compteur `mcp_requests_total`, label `method` = méthode brute du client, ou
+    `"notification"` sur la branche sans `id` (incrémenté AVANT le dispatch, donc aussi
+    pour `notifications/initialized` porteur d'un `id`).
+
+Raises:
+  (sous HTTP 200 — ce serveur ne code jamais une erreur JSON-RPC dans le statut HTTP)
+  @RpcError -32601 — méthode inconnue : `message` = `Method not found: {method}`, `id` échoé.
+  @RpcError -32602 — `params.name` absent de `tools/call` OU présent mais non-chaîne :
+    `message` = `Missing tool name in params` (le message dit « missing » aussi pour un
+    nom non-chaîne, cf. `Tasks` `[?]`).
+  @RpcError -32602 — aucun dispatch de la chaîne n'a reconnu le nom : `message` =
+    `Unknown tool: {name}`.
+  Aucun autre code JSON-RPC n'est jamais émis : ni -32700 (parse error), ni -32600
+    (requête invalide), ni -32603 (erreur interne) — les corps cassés meurent dans
+    l'extracteur axum avant @handle (cf. `Handles`).
+
+Handles:
+  Corps invalide, `Content-Type` absent/erroné, champ `method` ou `jsonrpc` manquant,
+    batch (tableau JSON), body > limite axum : rejet par l'extracteur `Json` d'axum
+    (415/422/413 selon le cas), corps d'erreur au format axum — jamais d'enveloppe
+    JSON-RPC, jamais de -32700 (cf. `Tasks` `[?]`).
+  `jsonrpc` ≠ `"2.0"` : accepté, le champ est désérialisé puis jamais relu.
+  `params` absent : `Value::Null` (défaut serde) — sur `tools/call` cela donne
+    `Missing tool name in params` ; sur `tools/list`/`initialize` c'est ignoré de toute façon.
+  `arguments` absent sur `tools/call` : `Value::Null` transmis au dispatch — l'erreur de
+    désérialisation des arguments est alors une erreur d'OUTIL (`isError: true`,
+    `invalid arguments for {name}: …`) produite par ./tools_impl.rs, pas par ce fichier.
+  `notifications/initialized` porteur d'un `id` (anormal pour une notification) :
+    HTTP 202 sans corps, même branche que les notifications, sans réponse JSON-RPC
+    (commentaire source : « handle gracefully »).
+  Méthode inconnue SANS `id` : la branche notification (202) prime sur le dispatch — le
+    test `Method not found` n'est atteint que pour les requêtes avec `id`.
+  `/mcp` en dehors de POST (GET, DELETE…) : 405 par le router axum — aucune route MCP
+    sessionnelle (GET SSE, DELETE) n'existe.
+  Échec d'exécution d'un outil reconnu : enveloppe `isError: true` du dispatch rendue
+    comme `result` — jamais convertie en code JSON-RPC.
+  Zéro client, client déconnecté en cours de route, canal réponse fermé : rien de
+    spécifique — handler synchrone requête/réponse, aucun canal à maintenir ouvert.
+
+Must:
+  Répondre à toute requête avec `id` par HTTP 200 + JSON `{"jsonrpc":"2.0",…}` avec `id`
+    échoé exactement (tout type JSON accepté et restitué) et un seul des membres `result`
+    ou `error`.
+  Traiter toute requête sans `id` exploitable comme notification : 202, corps vide,
+    aucune enveloppe — y compris méthodes inconnues et `notifications/initialized` avec `id`.
+  Réserver les codes JSON-RPC : -32601 aux méthodes inconnues (avec `id`), -32602 aux
+    deux seuls défauts de `params` de `tools/call` (nom absent/non-chaîne, outil inconnu
+    de toutes les familles).
+  Dépiler `tools/call` dans l'ordre strict filesystem → search → command → lsp →
+    edit_and_check, premier `Some` gagnant, nom testé par nom (aucune table de
+    routage) — un nom présent dans deux familles serait résolu par la première (aucun
+    aujourd'hui, les 16 noms sont distincts).
+  Déclarer `initialize` avec `protocolVersion` fixe `"2024-11-05"` et `serverInfo`
+    `{name: CARGO_PKG_NAME, version: CARGO_PKG_VERSION}` — la version demandée par le
+    client n'est pas comparée, c'est le client qui tranche (sémantique de négociation MCP).
+  Rendre `tools/list` complet à chaque appel, reconstruit à neuf (fonctions de
+    `vanyline_tools` + @tools_impl::lsp_tools), sans cache ni état.
+  Rendre `GET /.well-known/oauth-protected-resource` sans authentification (router
+    public de ./lib.rs) avec `bearer_methods_supported: ["header"]` en dur.
+  Compter chaque requête dans `mcp_requests_total` avant dispatch : label `method` =
+    `"notification"` pour la branche sans `id`, méthode brute sinon.
+  Rester sans état entre deux requêtes : `tools/call` sans `initialize` préalable
+    fonctionne, deux `initialize` successifs sont indépendants.
+
+Must not:
+  Émettre ou exiger un `Mcp-Session-Id`, ouvrir un flux SSE, gérer une suppression de
+    session — le contrat est POST-only sans session (les clients `lib` s'en accommodent,
+    cf. le test « deux appels séquentiels » de `lib/src/prefixed_mcp.sdd`).
+  Traduire une erreur d'authentification (@require_auth) en enveloppe JSON-RPC, ni
+    réévaluer un token ou un niveau d'accès ici — ./auth.rs rend 401/403 avant @handle.
+  Appliquer ou reconnaître un préfixe `{serveur}/{outil}` : le nom préfixé est une
+    vue du client `vanyline-lib` (@PrefixedMcpTool), le fil ne porte que des noms d'origine.
+  Répondre autre chose que 200 à une erreur JSON-RPC légitime, ni autre chose que 202
+    sans corps à une notification.
+  Convertir un échec d'exécution d'outil (chemin, LSP, commande) en code JSON-RPC —
+    l'outil a été trouvé, son échec vit dans `isError: true`.
+  Utiliser `println!`/`eprintln!`/`dbg!` (harnais `./tooling.sdd`) — aucune sortie de
+    trace n'existe aujourd'hui dans ce fichier.
+
+Example: échange complet typique
+  → `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26",…}}`
+  ← 200 `{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"vanyline-sandbox","version":"…"}}}`
+  → `{"jsonrpc":"2.0","method":"notifications/initialized"}` → ← 202 vide
+  → `{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"read_file","arguments":{"path":"../etc/passwd"}}}`
+  ← 200 `{"jsonrpc":"2.0","id":2,"result":{"content":[{"type":"text","text":"VNL-SBX-001: …"}],"isError":true}}`
+  → `{"jsonrpc":"2.0","id":3,"method":"foo"}`
+  ← 200 `{"jsonrpc":"2.0","id":3,"error":{"code":-32601,"message":"Method not found: foo"}}`
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
+    accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
+  [ ] Convertir en tests taggés par leur titre les Scenarios sans couverture actuelle.
+    Couverture unitaire existante (mod tests de ./mcp.rs) : `initialize` (version +
+    écho d'id), `tools/list` (16 outils, noms), `tools/call` outil inconnu et nom absent,
+    formes des enveloppes ok/err. Non couvert : tout le niveau HTTP — notifications
+    (`notification_sans_id_recoit_202_sans_corps`, `id_explicite_null_traite_comme_notification`,
+    `initialized_avec_id_porteur_recoit_202`), méthode inconnue avec id (`methode_inconnue_avec_id_rend_32601`),
+    HTTP 200 sur erreur RPC (`erreur_rpc_rend_http_200`), `jsonrpc` non validé
+    (`jsonrpc_non_2_0_accepte`), rejet sans enveloppe (`corps_invalide_rejete_sans_enveloppe_rpc`),
+    les deux formes de `oauth_metadata`, arguments absents
+    (`arguments_absents_produisent_erreur_outil`).
+  [?] `id` explicitement `null` traité comme notification (202) — effet de bord de
+    `Option<Value>` (serde rend `null` → `None`). JSON-RPC réserve `null` aux réponses ;
+    contrat assumé ou distinction notification/requête à durcir ?
+  [?] Corps invalide / `method` manquant / batch : rejet axum brut (415/422/413), aucun
+    -32700 ni enveloppe — le client rmcp s'en satisfait-il partout, ou faut-il une
+    conversion en réponse JSON-RPC conforme ?
+  [?] `jsonrpc` désérialisé mais jamais vérifié (`#[allow(dead_code)]`) : un client
+    envoyant `"jsonrpc":"1.0"` est servi normalement — validation à ajouter ou assumé ?
+  [?] Outil inconnu → JSON-RPC -32602 ; la spec MCP tend vers un tool-result
+    `isError: true` pour un nom d'outil invalide (le -32602 étant réservé aux `params`
+    mal formés). Trancher le statut de `Unknown tool:` (le client `prefixed_mcp` ne
+    distingue pas les deux aujourd'hui).
+  [?] `params.name` non-chaîne rend `Missing tool name in params` (message trompeur,
+    le nom EST présent) — message distinct ou même réponse assumée ?
+  [?] Absence totale de session MCP (pas d'`Mcp-Session-Id`, pas d'exigence
+    `initialize`-avant-`tools/call`) : le MCP streamable HTTP laisse le session id
+    optionnel (server MAY) — ce choix « template » est-il un contrat définitif ou une
+    dette à reprendre quand kydah-code branchera la sandbox ?
+  [?] `tools/list` ignore `params.cursor` et ne paginera jamais — contrat assumé
+    (16 outils, liste courte stable) ou pagination à prévoir ?
+  [?] `oauth_metadata` rend `resource` = `public_url` BRUT (une `/` finale reste dans
+    le JSON) alors que le `resource_metadata` de ./auth.rs passe par
+    @config::oauth_metadata_url qui la retire — deux URI publics inégaux pour un même
+    serveur. Harmoniser sur @oauth_metadata_url ?
+  [?] Label métrique `method` = chaîne brute du client (cardinalité non bornée sur
+    `mcp_requests_total`, alimentable par n'importe quel client authentifié) — normaliser
+    sur un ensemble fermé (les 4 méthodes connues + `unknown`) ?
+  [?] Deux notifications comptées `method="notification"` quelle que soit leur méthode
+    réelle : perte d'information voulue, ou label séparé par méthode réelle ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre.
+  Les décisions `[?]` sont tranchées par Sébastien et reflétées dans la spec.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur `vanyline-sandbox`.
+
+Scenario: initialize_rend_version_protocole_et_infos_serveur
+  Given un `POST /mcp` authentifié `{"jsonrpc":"2.0","id":1,"method":"initialize","params":null}`
+  When la réponse est lue
+  Then HTTP 200 et `result.protocolVersion` vaut `"2024-11-05"`
+  And `result.capabilities.tools` est un objet
+  And `result.serverInfo.name` et `result.serverInfo.version` sont des chaînes non vides
+  And la réponse ne porte aucun header `Mcp-Session-Id`
+
+Scenario: initialize_echoe_identifiant_non_numberique
+  Given un `initialize` avec `"id":"req-abc"`
+  When la réponse est lue
+  Then `"id":"req-abc"` est échoé à l'identique et `error` est absent
+
+Scenario: notification_sans_id_recoit_202_sans_corps
+  Given un `POST /mcp` `{"jsonrpc":"2.0","method":"notifications/initialized"}` sans champ `id`
+  When la réponse est lue
+  Then le statut est 202 et le corps est vide, sans enveloppe JSON-RPC
+
+Scenario: id_explicite_null_traite_comme_notification
+  Given un `POST /mcp` `{"jsonrpc":"2.0","id":null,"method":"tools/list"}`
+  When la réponse est lue
+  Then le statut est 202 et le corps est vide
+  But aucun listing d'outils n'est produit
+
+Scenario: initialized_avec_id_porteur_recoit_202
+  Given un `POST /mcp` `{"jsonrpc":"2.0","id":7,"method":"notifications/initialized"}`
+    (notification anormalement dotée d'un id)
+  When la réponse est lue
+  Then le statut est 202 et le corps est vide, sans réponse pour l'id 7
+
+Scenario: methode_inconnue_avec_id_rend_32601
+  Given un `POST /mcp` `{"jsonrpc":"2.0","id":3,"method":"foo/bar"}`
+  When la réponse est lue
+  Then HTTP 200, `error.code` vaut -32601 et `error.message` vaut `Method not found: foo/bar`
+  And `result` est absent de la sérialisation
+
+Scenario: outils_listes_en_noms_origine_et_16_entrees
+  Given un `tools/list` authentifié avec `params: {"cursor": "n'importe"}`
+  When le résultat est lu
+  Then `result.tools` compte exactement 16 entrées nommées, sans préfixe `/`
+  And l'ordre est filesystem, search, command puis la famille lsp (dernier : `edit_and_check`)
+  And aucun `nextCursor` n'est rendu malgré le `cursor` envoyé
+
+Scenario: outils_appelles_par_nom_origine_sans_initialisation
+  Given aucune requête `initialize` préalable sur ce serveur
+  When un `tools/call` de `list_directory` avec `{"path": ""}` arrive authentifié
+  Then HTTP 200 porte un `result` d'outil (enveloppe `content`/`isError`) et non un refus
+    « session non initialisée »
+
+Scenario: tools_call_sans_nom_rend_32602
+  Given un `tools/call` de `params` `{"arguments": {}}` sans champ `name`
+  When la réponse est lue
+  Then HTTP 200, `error.code` vaut -32602 et `error.message` vaut `Missing tool name in params`
+
+Scenario: outils_inconnu_de_toutes_familles_rend_32602
+  Given un `tools/call` de `params` `{"name": "nope", "arguments": {}}`
+  When la chaîne de dispatch a parcouru les cinq familles sans reconnaissance
+  Then HTTP 200, `error.code` vaut -32602 et `error.message` vaut `Unknown tool: nope`
+
+Scenario: erreur_execution_outil_reste_enveloppe_is_error
+  Given `sandbox_root` configuré et un `tools/call` de `read_file` avec `{"path": "../outside"}`
+  When la réponse est lue
+  Then HTTP 200 porte `result.isError` à vrai et le texte de l'erreur `VNL-SBX-001`
+  But le corps ne contient pas de membre `error` JSON-RPC
+
+Scenario: arguments_absents_produisent_erreur_outil
+  Given un `tools/call` de `read_file` avec `params` réduit à `{"name": "read_file"}`
+  When `arguments` par défaut `null` atteint le dispatch filesystem
+  Then HTTP 200 porte `result.isError` à vrai et un texte `invalid arguments for read_file`
+
+Scenario: erreur_rpc_rend_http_200
+  Given n'importe quelle requête avec id produisant un @RpcError
+  When la réponse HTTP est inspectée
+  Then le statut est 200, `Content-Type: application/json`, avec `error` et jamais `result`
+
+Scenario: jsonrpc_non_2_0_accepte
+  Given un `initialize` dont le corps porte `"jsonrpc":"1.0"`
+  When la réponse est lue
+  Then HTTP 200 rend un `result` normal et une réponse dont le propre champ vaut `"2.0"`
+
+Scenario: corps_invalide_rejete_sans_enveloppe_rpc
+  Given un `POST /mcp` au corps `{"jsonrpc":"2.0","method":` (JSON tronqué)
+    puis un second porteur d'un batch `[{…}]`
+  When chaque réponse est lue
+  Then le statut est un 4xx de rejet d'extracteur axum
+  But aucun corps ne contient de membre `"jsonrpc"` ni le code -32700
+
+Scenario: oauth_metadata_avec_issuer_ressource_config
+  Given `public_url` = `https://mcp.example.com` et `oidc_issuer` = `https://id.example.com/real`
+  When un `GET /.well-known/oauth-protected-resource` NON authentifié arrive
+  Then HTTP 200 et `resource` vaut `https://mcp.example.com`
+  And `authorization_servers` vaut exactement `["https://id.example.com/real"]`
+  And `bearer_methods_supported` vaut `["header"]`
+
+Scenario: oauth_metadata_sans_issuer_tableau_vide_et_defaut
+  Given `public_url` non configuré et `oidc_issuer` non configuré
+  When le même endpoint public est appelé
+  Then `resource` vaut `http://localhost:3000` et `authorization_servers` vaut `[]`

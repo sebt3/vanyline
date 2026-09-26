@@ -1,0 +1,263 @@
+Spec: Maint Bin
+
+Purpose:
+  Entrée du binaire `vanyline-maint` — second binaire du crate `vanyline-sandbox` (déclaré en
+  `[[bin]]` dans `../../Cargo.toml`), CLI invoqué en argv direct par les Jobs du controller
+  (`command: ["vanyline-maint", ...]`, jamais de shell). Ce fichier ne contient QUE le câblage :
+  parsing clap des six sous-commandes (`init`, `fetch`, `purge`, `checkout`, `remove`, `detect`),
+  délégation à `../maint.rs` (toute la logique y vit, sous sa spec sœur `../maint.sdd`), codes de
+  sortie et canaux de rendu (JSON de résultat sur stdout, erreur préfixée sur stderr). Les
+  sémantiques git, la validation des noms de branche/sandbox, le patch K8s et la refspec de fetch
+  ne sont PAS le contrat d'ici — ce sont ceux de `../maint.rs`. Sont contrat d'ici : la liste des
+  sous-commandes acceptées et l'orthographe exacte de leurs flags (contrat inter-crates avec le
+  controller, co-diffusé — image sandbox et controller avancent ensemble,
+  `../../../docs/architecture.md`), les codes de sortie et la discipline stdout/stderr.
+
+Owns:
+  ./maint.rs
+
+Can read:
+  ../maint.rs — logique déléguée intégralement (propriété de sa spec sœur `../maint.sdd`, en cours de rédaction parallèle)
+  ../../Cargo.toml — enregistrement `[[bin]] name = "vanyline-maint", path = "src/bin/maint.rs"`
+  ../lib.rs — `pub mod maint;` rendant le module accessible au binaire
+  ../tests/maint.rs — patron git existant (`make_source_repo`, workspaces temporaires), réutilisable pour les tests au niveau binaire
+
+References:
+  ../../../docs/architecture.md — section « Maintenance des workspaces — `vanyline-maint` » (table des sous-commandes, décisions structurantes, release couplée)
+  ../../../controller/src/project.sdd — argv réels des Jobs init/fetch/detect/purge (émetteur du contrat argv)
+  ../../../controller/src/sandbox.sdd — argv réels des Jobs checkout/remove (émetteur du contrat argv)
+  ../../../vanyline.sdd — contraintes racines (identifiants d'erreur uniques, pas de bruit sur stdout)
+  ../../../tooling.sdd — harnais clippy `print_stdout`/`print_stderr` (cf. Tasks `[?]`)
+  ../../../AGENTS.md — règle système : toute maintenance des workspaces s'exécute via `vanyline-maint` en argv, jamais par script shell assemblé par le controller
+
+Must:
+  Exposer exactement six sous-commandes et leurs flags (dérivation clap, kebab-case par défaut),
+    orthographe figée — c'est le contrat inter-crates avec les Jobs du controller :
+    `init --repo <url> --workspace <dir> [--cache <id>]...` (`--cache` répétable, valeurs conservées
+    dans l'ordre d'apparition dans argv, admissible absente) ; `fetch --workspace <dir>` ;
+    `purge --workspace <dir>` ; `checkout --workspace <dir> --sandbox <nom> --branch <ref> [--default-branch <ref>]` ;
+    `remove --workspace <dir> --sandbox <nom>` ;
+    `detect --workspace <dir> [--project <nom>]`. Un flag requis absent = erreur clap avant toute
+    exécution.
+  Accepter sans erreur les argv exacts construits par le controller (évolution simultanée
+    controller↔binaire seulement, co-diffusion depuis le même dépôt) :
+    init = `[vanyline-maint, init, --repo, <spec.repoUrl>, --workspace, /workspace]` + paires
+    `--cache <id>` (ordre de `effective_caches`) ; fetch =
+    `[vanyline-maint, fetch, --workspace, /workspace]` ;
+    purge = `[vanyline-maint, purge, --workspace, /workspace]` ; detect =
+    `[vanyline-maint, detect, --workspace, /workspace, --project, <name>]` (les quatre :
+    `../../../controller/src/project.sdd`) ; checkout =
+    `[vanyline-maint, checkout, --workspace, /workspace, --sandbox, <n>, --branch, <b>]` suivi de
+    `--default-branch <ref>` (jamais émis vide par le controller) ; remove =
+    `[vanyline-maint, remove, --workspace, /workspace, --sandbox, <n>]` (les deux :
+    `../../../controller/src/sandbox.sdd`).
+  Dispatcher vers la seule couche de logique `../maint.rs`, sans rien exécuter d'autre : `init` =
+    @maint::validate_repo immédiatement suivi de @maint::run_init dans le même appel enchaîné —
+    c'est ICI que `--repo` est validé, avant le moindre `mkdir` (@run_init ne l'appelle pas
+    lui-même) ; `fetch` = @maint::run_fetch ; `purge` = @maint::run_purge ; `checkout` =
+    @maint::run_checkout — la valeur de `--default-branch` est transmise telle quelle (y compris
+    vide), l'interprétation absent/vide lui appartient ; `remove` = @maint::run_remove ; `detect` =
+    @maint::run_detect_and_patch, unique appel `await` du fichier.
+  Rendre les codes de sortie : exécution en `Ok(())` → `0` (@ExitCode::SUCCESS) ; exécution en
+    @MaintError → une ligne `vanyline-maint: {e}` sur stderr (`{e}` = @Display de @MaintError, qui
+    porte l'identifiant `VNL-MAINT-001` à `VNL-MAINT-006`) puis `1` (@ExitCode::FAILURE). Le code
+    de sortie d'un sous-processus git n'est JAMAIS propagé tel quel : toute exécution en échec
+    rend `1` ; le controller (Jobs `backoffLimit: 3`) ne distingue que `0` de non-`0`.
+  Réserver stdout au JSON de résultat de `detect` : la ligne unique produite par `../maint.rs`
+    (via `serde_json`), imprimée par `println!` seulement après le succès de TOUTES les phases
+    (détection, puis patch K8s si `--project` fourni). Aucune autre sous-commande, aucune branche
+    d'erreur n'écrit sur stdout.
+  Porter les métadonnées clap `name = "vanyline-maint"` et `version` (version du crate) :
+    `--help` et `--version` rendent `0` avec sortie sur stdout (comportement clap par défaut,
+    aucune erreur personnalisée).
+  Démarrer le runtime via @tokio::main : nécessaire pour l'unique `await` de `detect` ; les
+    commandes git (synchrones, bloquantes via `../maint.rs`) s'exécutent dans ce runtime — accepté
+    pour des processus aussi courts que les Jobs.
+
+Must not:
+  Lancer un shell (`sh`, `-c`) ni interpoler argv dans une chaîne shell — le binaire ne lance
+    AUCUN sous-processus lui-même ; les commandes git sont l'exclusivité de `../maint.rs`, en argv
+    (règle système de `../../../AGENTS.md`).
+  Écrire sur stdout autre chose que la ligne JSON de `detect` — le stdout des autres commandes
+    reste vide octet par octet (le parsing du JSON de `detect` en dépend).
+  Valider ici les noms de sandbox ou de branche (validations propriétés de `../maint.rs`) — la
+    seule validation exercée à cette couche est celle de `--repo` pour `init`.
+  Appeler l'API K8s, construire un @kube::Config ou un client K8s depuis ce fichier — le patch de
+    status appartient à `../maint.rs`.
+  Rendre un code de sortie autre que `0`/`1` de son propre chef (le `2` n'existe que via clap) ou
+    propager le statut d'un sous-processus git comme code de sortie.
+  Initialiser `tracing`, un subscriber ou toute infrastructure de log — diagnostics limités à la
+    ligne stderr de l'erreur.
+
+Depends on:
+  ../maint.rs — @maint::validate_repo, @maint::run_init, @maint::run_fetch, @maint::run_purge,
+    @maint::run_checkout, @maint::run_remove, @maint::run_detect_and_patch, @maint::MaintError
+    (son @Display est exactement la ligne rendue sur stderr)
+  `clap` (features derive, env) — @Parser, @Subcommand, @Cli::parse ; aucun attribut `env` n'étant
+    déclaré sur @Cli, les variables d'environnement ne jouent aucun rôle
+  `tokio` (feature full) — @tokio::main, runtime démarré pour toute sous-commande bien que `detect`
+    seule l'exploite
+  `std` — @ExitCode, @PathBuf (typage des flags), @std::process côté `../maint.rs` uniquement
+
+Exposes:
+  Le binaire `vanyline-maint` du crate `vanyline-sandbox` (enregistré `[[bin]]` dans
+    `../../Cargo.toml`), second point d'entrée à côté de `vanyline-sandbox` (`../main.rs`).
+  Sous-commandes CLI : `init`, `fetch`, `purge`, `checkout`, `remove`, `detect` (noms dérivés par
+    clap de l'enum privé @Cmd, minuscules — aucun alias, aucune sous-commande masquée).
+  Aucune surface de librairie : aucun item `pub`, seul @main est exécutable, uniquement par
+    lancement de processus.
+
+Accepts:
+  argv du processus uniquement (@Cli::parse sur les arguments de ligne de commande). Pas de point
+    d'entrée programmatique ; @Cli et @Cmd sont privés.
+  Flags requis par sous-commande (absents → erreur clap, cf. Returns) : `--repo` et `--workspace`
+    pour `init` ; `--workspace` pour `fetch` et `purge` ; `--workspace`, `--sandbox`, `--branch`
+    pour `checkout` ; `--workspace` et `--sandbox` pour `remove` ; `--workspace` pour `detect`.
+  Facultatifs : `--cache` (répétable, zéro occurrence admise), `--default-branch`, `--project`.
+
+Returns:
+  Un @ExitCode : `0` (exécution en `Ok`, `--help`, `--version`), `1` (exécution en @MaintError,
+    précédée de la ligne stderr préfixée), `2` (erreur de parsing clap, code par défaut de clap 4 —
+    cf. Tasks `[?]`).
+  Seules autres sorties du processus : la ligne JSON de `detect` sur stdout, la ligne
+    `vanyline-maint: <message VNL-MAINT-NNN>` sur stderr, le message d'usage de clap sur stderr.
+
+Raises:
+  Aucun panic sur le chemin de ce fichier (aucun `unwrap`/`expect`/indexation/arithmétique) et
+    aucune erreur propagée : tout échec est matérialisé en code de sortie + stderr.
+  Les erreurs de parsing clap ne portent PAS le préfixe `VNL-MAINT` (format propre à clap) ; le
+    préfixe `vanyline-maint: ` plus l'identifiant `VNL-MAINT-001` à `006` ne qualifient que les
+    erreurs d'exécution remontées de `../maint.rs`.
+
+Handles:
+  stdout/stderr des sous-processus git réussis : capturés et jetés par
+    @std::process::Command::output dans `../maint.rs` — un Job réussi ne produit rien d'autre que
+    ce que le binaire imprime lui-même ; en échec, le stderr de git est encapsulé dans le message
+    @MaintError.
+  `init` sans aucun `--cache` : initialisation sans cache (boucle de création des répertoires
+    itérée zéro fois, déléguée à `../maint.rs`).
+  `detect` avec `--project` : l'ordre est détection → patch K8s → impression — un échec du patch
+    (@maint::MaintError::K8sPatch, `VNL-MAINT-006`) donne exit `1` et laisse stdout totalement vide
+    alors même que la détection avait réussi.
+  `--project` vide (`--project ""`) : accepté par clap comme `Some("")` → @run_detect_and_patch
+    tente le patch avec un nom vide → échec réseau/API → exit `1` (asymétrie avec le flag
+    `--default-branch` vide, traité comme absent par `../maint.rs` — cf. Tasks `[?]`).
+  Erreur de parsing (sous-commande absente, flag inconnu, flag requis manquant) : usage clap sur
+    stderr, code `2`, aucun code applicatif n'est atteint, stdout muet.
+  `#[tokio::main]` démarre un runtime complet même pour les commandes purement synchrones
+    (`fetch`, `purge`, …) : coût non motivé par leur exécution, sous-produit du besoin
+    d'`await` de `detect` — documenté, non corrigé.
+  `main` rend un @ExitCode au lieu d'appeler `std::process::exit` : les buffers stdout/stderr sont
+    vidés normalement à la fin de `main`.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement accidentel
+    ne devient contrat qu'après cette relecture (`../../../.specdd/bootstrap.project.md`).
+  [ ] Couverture existante : AUCUN test ne vise le binaire lui-même aujourd'hui — les tests
+    unitaires de `../maint.rs` et d'intégration de `../tests/maint.rs` appellent les fonctions de
+    librairie en direct. Convertir chaque Scenario ci-dessous en test taggé par son titre,
+    exécutant le binaire (via `CARGO_BIN_EXE_vanyline-maint` dans un test d'intégration).
+  [?] `println!` (JSON de `detect`) et `eprintln!` (ligne d'erreur) sans aucun `#[allow]` local
+    alors que `print_stdout`/`print_stderr` sont `deny` au niveau workspace
+    (`../../../tooling.sdd`) ; la CI est pourtant présentée comme verte et `../../../cli/src/main.rs`
+    accumule les mêmes appels, cas déjà signalé `[?]` pour le `print!` du mode `--crds` dans
+    `../../../controller/src/main.sdd`. Vérifier si clippy épargne par conception le `main` des
+    binaires ou si cette échappatoire est accidentelle, puis trancher : exemption documentée par
+    binaire (le JSON sur stdout ne peut PAS être remplacé par `tracing`), `#[allow]` explicite
+    sur `main`, ou autre canal.
+  [?] `--workspace` n'est validé nulle part (ni ici, ni dans `../maint.rs`) : une valeur vide ou
+    relative est interprétée relativement au CWD du processus — `purge --workspace ""`
+    supprimerait récursivement `repo.git`, `worktrees` et `cache` sous le CWD. Dans les Jobs du
+    controller la valeur est toujours `/workspace` (absolu, sousPath du PVC) ; durcir ici (refuser
+    vide/non-absolu) ou assumer (la validation des arguments relève de `../maint.rs`) ?
+  [?] `--project ""` tente un patch d'API avec un nom vide (exit `1`) alors que le flag vide
+    `--default-branch ""` est traité comme absent par `../maint.rs` (résolution `symbolic-ref`,
+    repli `main`) : asymétrie voulue ou à uniformiser (vide = absent partout) ?
+  [?] Le code `2` des erreurs de parsing est le défaut de clap, jamais épinglé par un test ni
+    mentionné dans les specs du controller : contractualiser le triplet `0`/`1`/`2` comme contrat
+    controller↔binaire, ou considérer que seul `0` vs non-`0` compte (critère de relance des Jobs) ?
+  [?] `--version` rend `vanyline-maint <CARGO_PKG_VERSION>` (actuellement la version workspace
+    `0.0.11-alpha.5`) : contrat à épingler par un test ou sortie accidentelle à documenter
+    lâchement ?
+  [!] La spec sœur `../maint.sdd` est rédigée en parallèle : vérifier à la relecture que la
+    frontière y est décrite miroir de celle d'ici — validation de `--repo` à la couche binaire,
+    validations sandbox/branche dans la couche logique.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre, exécutant le binaire.
+  Les décisions `[?]`/`[!]` sont tranchées par Sébastien et reflétées dans la spec.
+  La batterie complète du workspace (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte.
+
+Scenario: init_accepte_l_argv_du_controller
+  Given un dépôt source temporaire contenant un `Cargo.toml` (patron `make_source_repo` de
+    `../tests/maint.rs`) et un workspace vide `<dir>`
+  When le binaire est exécuté avec l'argv exact du controller :
+    `init --repo <dépôt source> --workspace <dir> --cache cargo --cache pnpm`
+  Then le code de sortie est `0`, stdout est vide, et `<dir>/repo.git`, `<dir>/cache/cargo`,
+    `<dir>/cache/pnpm-store` existent (orthographe `--cache` répétable et mapping `pnpm-store`
+    éprouvés au niveau CLI)
+
+Scenario: init_repo_invalide_ne_cree_aucun_cache
+  Given un workspace temporaire vide `<dir>`
+  When le binaire est exécuté avec `init --repo "" --workspace <dir> --cache cargo`
+  Then le code de sortie est `1`, stderr commence par `vanyline-maint: ` et contient
+    `VNL-MAINT-002`, stdout est vide, et `<dir>/cache` n'a PAS été créé (la validation de `--repo`
+    précède tout `mkdir`)
+
+Scenario: fetch_sans_clone_sort_un_en_vnl_maint_004
+  Given un workspace temporaire vide `<dir>` (aucun `repo.git`)
+  When le binaire est exécuté avec `fetch --workspace <dir>`
+  Then le code de sortie est `1`, stdout est vide et stderr contient `VNL-MAINT-004`
+
+Scenario: purge_workspace_vide_sort_zero_silencieux
+  Given un workspace temporaire vide `<dir>`
+  When le binaire est exécuté avec `purge --workspace <dir>`
+  Then le code de sortie est `0` et stdout comme stderr sont vides (NotFound ignoré, succès)
+
+Scenario: checkout_rejette_branche_invalide_sans_action
+  Given un workspace temporaire vide `<dir>`
+  When le binaire est exécuté avec `checkout --workspace <dir> --sandbox sb1 --branch a..b`
+  Then le code de sortie est `1`, stderr contient `VNL-MAINT-001`, et `<dir>/worktrees/sb1`
+    n'existe pas (la validation déléguée s'exécute avant toute action git)
+
+Scenario: checkout_accepte_l_argv_avec_default_branch
+  Given un workspace `<dir>` initialisé par `init` depuis un dépôt source dont la branche par
+    défaut est `main`
+  When le binaire est exécuté avec :
+    `checkout --workspace <dir> --sandbox demo-branch --branch feature-x --default-branch main`
+  Then le code de sortie est `0` et `<dir>/worktrees/demo-branch` existe (l'orthographe kebab-case
+    `--default-branch` est bien celle acceptée — une dérive de nom clap partirait en exit `2`)
+
+Scenario: detect_imprime_seule_la_ligne_json_sur_stdout
+  Given un workspace `<dir>` initialisé par `init` depuis un dépôt source ne contenant qu'un
+    `Cargo.toml`
+  When le binaire est exécuté avec `detect --workspace <dir>` (sans `--project`, donc sans appel
+    réseau)
+  Then le code de sortie est `0`, stdout est exactement la ligne unique `{"languages":["rust"]}`
+    suivie d'un saut de ligne, et stderr est vide
+
+Scenario: detect_avant_init_n_imprime_rien_sur_stdout
+  Given un workspace temporaire `<dir>` sans `repo.git`
+  When le binaire est exécuté avec `detect --workspace <dir>`
+  Then le code de sortie est `1`, stdout est vide (rien n'est imprimé avant succès complet) et
+    stderr contient `VNL-MAINT-004`
+
+Scenario: absence_de_sous_commande_sort_deux_sans_stdout
+  Given le binaire sans aucun argument
+  When il est exécuté
+  Then le code de sortie est `2`, stdout est vide et stderr contient l'usage clap nommant
+    `vanyline-maint` et ses six sous-commandes
+
+Scenario: flag_inconnu_sur_fetch_sort_deux_anti_derive
+  Given un workspace temporaire vide `<dir>`
+  When le binaire est exécuté avec `fetch --workspace <dir> --project p` (flag de `detect`, pas de
+    `fetch`)
+  Then le code de sortie est `2`, aucune commande ne s'exécute : stdout vide, stderr porte l'erreur
+    clap, `<dir>` est intact — une dérive d'orthographe entre controller et binaire est ainsi
+    rattrapable en test
+
+Scenario: version_repond_zero_et_nomme_le_binaire
+  Given le binaire
+  When il est exécuté avec `--version`
+  Then le code de sortie est `0`, stdout commence par `vanyline-maint ` et stderr est vide

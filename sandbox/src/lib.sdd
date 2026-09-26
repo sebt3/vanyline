@@ -1,0 +1,404 @@
+Spec: Lib
+
+Purpose:
+  Surface `lib` du crate `vanyline-sandbox` (serveur du pod de travail) : le câblage HTTP
+  complet du serveur principal — table de routage axum (MCP, git, tickets, WS éditeur),
+  états partagés (@AppState), atelier de push/flush `/ws/fs` (@FsFlushRequests) et le
+  serveur de métriques interne. Le fichier ne traite aucune requête lui-même (les handlers
+  vivent dans ./mcp.rs, ./git.rs, ./ws/*) ; il décide uniquement de QUI est joignable, par
+  quelle méthode, sous quelle garde d'auth, et dans quel ordre de middlewares — plus le
+  mécanisme aller-retour flush/ack consommé par `edit_and_check` (08d, ./tools_impl.rs).
+  Le binaire ./main.rs consomme cette surface (bind, TLS, OTel) ; le TLS et le bind ne sont
+  PAS le contrat de ce fichier. Héritage racine : le frontend ne voit jamais le JWT OIDC
+  brut, seulement des tickets court-vécus (`../../vanyline.sdd`) ; la mécanique détaille
+  dans `../../docs/architecture.md` section « Serveur MCP ».
+
+Owns:
+  ./lib.rs
+
+References:
+  ../tests/http.rs — tests d'intégration HTTP locaux du crate (router, auth, MCP, git, métriques)
+  ./main.rs — unique consommateur de production de @build_app et @spawn_metrics_server
+  ../../docs/architecture.md — section « Serveur MCP » (flux ticket, MCP HTTP streaming)
+  ../../vanyline.sdd — contrainte racine « jamais de JWT brut au navigateur »
+  ../../tooling.sdd — harnais clippy (l'exemption `cfg(test)` du crate root est à tracer, cf. Tasks)
+
+Must:
+  @build_app expose exactement la table de routage suivante, chemins et méthodes tels quels.
+    Protégées par @auth::require_auth (une seule couche @middleware::from_fn_with_state sur
+    le sous-@Router) : `POST /mcp`, `GET /git/status`, `GET /git/unpushed`, `GET /git/diff`,
+    `POST /git/stage`, `POST /git/unstage`, `POST /git/commit`, `GET /git/branches`,
+    `POST /git/branches`, `POST /git/checkout`, `DELETE /git/branches/{name}`,
+    `POST /git/push`, `GET /git/log`, `GET /git/ssh-key`, `POST /git/ssh-key`,
+    `POST /git/merge`, `POST /git/merge/abort`, `POST /ws/ticket`.
+    Publiques sans @auth::require_auth : `GET /health`, `GET /.well-known/oauth-protected-resource`.
+    Upgrade WS protégées par @ws::ticket::ws_auth_middleware (couche par route, pas par groupe) :
+    `GET /ws/fs`, `GET /ws/terminal`, `GET /ws/lsp/{toolchain}`.
+  Ordre des couches de @build_app, requête de l'extérieur vers l'intérieur : @TraceLayer
+    (ajoutée en dernier = la plus externe), puis @track_metrics, puis la garde d'auth de la
+    route (@require_auth des routes protégées, @ws_auth_middleware des routes WS), puis le
+    handler. @track_metrics et @TraceLayer enveloppent le @Router fusionné entier, fallback
+    404/405 compris.
+  @handle_ws_ticket répond `200` + JSON `{"ticket": <opaque>, "expires_in_secs": 30}` avec
+    un ticket du @TicketStore de l'état, claims = (`subject`, `access`) de l'@auth::AuthInfo
+    injecté par @require_auth ; le ticket est rachetable une seule fois avec ces mêmes claims.
+    `expires_in_secs` porte @ws::ticket::TICKET_TTL_SECS (30).
+  @AppState est `Clone` à état partagé : tous les champs sont des poignées (`Arc`,
+    @TicketStore interne en `Arc<Mutex<…>>`, @broadcast::Sender clonable) — tout clone voit
+    la même map de tickets, le même canal `fs_events` et la même table de waiters de flush.
+  @fs_events_channel crée un canal @tokio::sync::broadcast de @String de capacité
+    @FS_EVENTS_CAPACITY (`64`), ne rend que le `Sender` (le `Receiver` initial est aussitôt
+    déposé) ; les sessions `/ws/fs` s'abonnent ensuite (`./ws/fs.rs`).
+  @fs_push_channels rend un (@broadcast::Sender, @FsFlushRequests) branchés sur le MÊME
+    canal : une frame publiée sur `AppState.fs_events` atteint les abonnés exactement comme
+    une frame `flush-request` publiée par @FsFlushRequests::request_flush, et réciproquement.
+    Helper unique — les constructeurs d'@AppState (main + tests) doivent l'utiliser plutôt
+    que de construire les deux champs séparément.
+  @FsFlushRequests::request_flush émet `{"event":"flush-request","id":N,"path":<chemin>}`
+    puis attend l'ack borné à `timeout` : rend `true` si l'ack arrive, `false` au timeout ou
+    si le channel de réponse est déposé. Le waiter est INSÉRÉ AVANT le broadcast (un client
+    rapide peut acquitter avant l'`await`) et retiré à l'acquit comme au timeout — aucune
+    fuite de waiter. La lock des waiters n'est jamais tenue à travers un `await`.
+  Les ids de flush démarrent à `1` (le `0` est falsy en JS) et sont uniques et strictement
+    croissants sur toute la durée de vie de l'atelier.
+  @FsFlushRequests::handle_ack résout le waiter du premier ack reçu pour un id ; id inconnu,
+    déjà résolu ou timeout écoulé : no-op silencieux (ack multi-onglets : premier gagnant).
+  La récupération de mutex empoisonné est la règle dans @FsFlushRequests::waiters :
+    `PoisonError::into_inner`, jamais de propagation — le crate interdit `unwrap`/`expect`
+    hors `cfg(test)`.
+  @FS_FLUSH_TIMEOUT_SECS vaut `2` ; c'est le timeout de référence utilisé en production par
+    `edit_and_check` (`./tools_impl.rs`) pour ses appels à @request_flush.
+  @build_metrics_app est un @Router nu : une seule route `GET /metrics`, sans état, sans
+    TraceLayer, sans @track_metrics, sans aucune auth. `/metrics` n'est jamais atteignable
+    sur le router principal de @build_app.
+  @metrics_handler : `@telemetry::render_metrics()` `Some(body)` → `200` +
+    `content-type: text/plain; version=0.0.4; charset=utf-8` + corps ; `None` (recorder
+    Prometheus pas encore installé) → `503`, corps vide.
+  @spawn_metrics_server n'échoue jamais : échec de bind → log `warn` et le serveur principal
+    continue sans `/metrics` ; erreur de @axum::serve en service → log `warn` dans la tâche
+    détachée. Bind sur `addr` fourni par l'appelant (production : `config.metrics_listen`,
+    `0.0.0.0:9090` par défaut ; le port ne doit jamais être exposé hors cluster —
+    NetworkPolicy, hors du contrat de ce fichier).
+  @track_metrics incrémente le compteur @metrics `http_requests_total` (labels `method`,
+    `path`, `status`) et observe l'histogramme `http_request_duration_seconds` (labels
+    `method`, `path`) pour toute requête traversant le router principal, réponses d'erreur
+    (401, 404, 405) comprises, et rend la réponse inchangée.
+  Sous `cfg(test)` uniquement, le crate root lève `clippy::unwrap_used` et
+    `clippy::expect_used` pour tout le crate (`#![cfg_attr(test, allow(…))]`), pas seulement
+    sous des `mod tests` — exemption au harnais de ../../tooling.sdd, à tracer.
+  @health répond `200` + JSON `{"status":"ok"}`, sans auth ni état.
+
+Must not:
+  Rendre reachable une route protégée (table ci-dessus) sans que @auth::require_auth s'exécute
+    — les seuls contournements sont les modes de config explicites de `./auth.rs`
+    (`no_auth`, `static_token`), jamais une faille de câblage.
+  Ouvrir un upgrade WS sur `/ws/fs`, `/ws/terminal` ou `/ws/lsp/{toolchain}` sans ticket
+    valide consommé — la garde s'exécute avant l'extracteur @WebSocketUpgrade (choix
+    délibéré de `./ws/fs.rs` pour éviter la conversion 426 d'axum).
+  Exposer `/metrics` (ou une métrique quelconque) sur le port principal, ou instrumenter le
+    router métriques lui-même.
+  Réutiliser un ticket, ou laisser un ticket expiré rachetable (mécanique dans
+    ./ws/ticket.rs ; ici le contrat est que les trois routes WS portent la garde).
+  Tenir la lock des waiters de flush à travers un `await`, ou laisser un waiter orphelin
+    après timeout.
+  Modifier, absorber ou retarder une réponse dans @track_metrics (simple passe-plat avec
+    mesure).
+  Interpoler quoi que ce soit d'issu de l'URL dans une commande ou un chemin ici — ce
+    fichier ne fait que router (`POST /ws/ticket` inclus).
+
+Depends on:
+  ./auth.rs — @AuthState, @AuthInfo, @require_auth (garde des routes protégées)
+  ./ws/ticket.rs — @TicketStore, @TicketClaims, @TICKET_TTL_SECS, @ws_auth_middleware, @WsAuthError
+  ./ws/fs.rs — @handle_ws_fs ; ./ws/terminal.rs — @handle_ws_terminal ; ./ws/lsp.rs — @handle_ws_lsp
+  ./mcp.rs — @mcp::handle (JSON-RPC MCP), @mcp::oauth_metadata (RFC 9728)
+  ./git.rs — les seize handlers git routés ici sur seize routes (contrat propre à ./git.sdd)
+  ./config.rs — @Config (lu par les middlewares d'état, jamais par @build_app directement)
+  ./lsp.rs — @LspManager (tenu dans @AppState, réexporté à la racine)
+  ./telemetry.rs — @render_metrics (`None` avant @init_prometheus)
+  `axum` — @Router, @middleware, @Json, @StatusCode ; `tower-http` — @TraceLayer
+  `tokio` — @broadcast, @oneshot, @timeout, @spawn ; `metrics` — macros @counter!/@histogram!
+  `serde_json` — frames de push et corps JSON
+
+Exposes:
+  Modules publics du crate (racine de modules, chacun sous sa spec) : @auth, @config, @git,
+    @lsp, @lsp_client, @maint, @mcp, @telemetry, @tools_impl, @venv, @ws.
+  @AppState — état partagé (`config`, `auth`, `tickets`, `lsp`, `fs_events`, `fs_flush`), `Clone`.
+  @LspManager — réexportation de @crate::lsp::LspManager à la racine du crate.
+  @FS_EVENTS_CAPACITY (`64`), @fs_events_channel, @FS_FLUSH_TIMEOUT_SECS (`2`),
+    @fs_push_channels.
+  @FsFlushRequests — @FsFlushRequests::new, @FsFlushRequests::request_flush,
+    @FsFlushRequests::handle_ack (et @FsFlushRequests::waiter_count sous `cfg(test)`
+    `pub(crate)`, consommé par les tests de ./ws/fs.rs).
+  @build_app, @build_metrics_app, @spawn_metrics_server.
+  Privés mais observables par les routes : @handle_ws_ticket, @health, @metrics_handler,
+    @track_metrics.
+
+Accepts:
+  @build_app : un @AppState (l'appelant construit config/auth/tickets/lsp — cf. ./main.rs).
+  @build_metrics_app : rien.
+  @spawn_metrics_server : un @std::net::SocketAddr déjà parsé.
+  @FsFlushRequests::new : un @broadcast::Sender<@String> (doit être un clone du sender que
+    les sessions `/ws/fs` relayent — sinon les acks ne peuvent jamais revenir).
+  @FsFlushRequests::request_flush : `path` (chemin relatif affiché) + `timeout`.
+  @FsFlushRequests::handle_ack : l'`id` u64 porté par la frame `flush-ack` (validation
+    syntaxique de la frame faite en amont par `./ws/fs.rs`).
+
+Returns:
+  @build_app : un @Router axum (sans serve — ni bind ni TLS ici).
+  @build_metrics_app : un @Router nu.
+  @fs_events_channel : le @broadcast::Sender<@String> seul.
+  @fs_push_channels : (Sender, Arc<@FsFlushRequests>) partageant le canal.
+  @FsFlushRequests::request_flush : `bool` (`true` = ack reçu, `false` = timeout/repli).
+  @spawn_metrics_server : `()` — succès comme échec de bind rendent la même valeur.
+  Réponse de `POST /ws/ticket` : `{"ticket":"<32 alphanum>","expires_in_secs":30}`.
+
+Raises:
+  Aucune erreur propagée par les entrées publiques de ce fichier (router, handlers,
+    canal, spawn) — les erreurs sont rendues en statuts HTTP par les middlewares
+    (`./auth.rs`, `./ws/ticket.rs`) ou dégradées (warn du spawn, timeout du flush).
+  Panics possibles par conception : @TicketStore::issue (appelé par @handle_ws_ticket)
+    `expect` sur mutex empoisonné (justifié : poison = bug interne) ; le reste de
+    @FsFlushRequests récupère les empoisonnements sans paniquer.
+
+Handles:
+  Modes d'auth des routes protégées (détaillés dans ./auth.rs, ici seulement leurs effets
+    observables sur le câblage) : `no_auth` → tout passe avec subject `dev-no-auth` et
+    access Admin ; `static_token` → Bearer exact, subject `static-token`, Admin ; sinon JWT
+    OIDC RS256 via JWKS + contrôle des groups (`Admin`/`Read`, 403 sinon).
+  Extraction du ticket WS (`./ws/ticket.rs`) : la query string est découpée brute sur
+    `&`/`=`, premier param `ticket` gagnant, sans percent-décodage (acceptable : les tickets
+    émis sont strictement alphanumériques) ; `?ticket=` (valeur vide) est traité comme un
+    ticket PRÉSENT et invalide — `VNL-SBX-WS-002`, pas `VNL-SBX-WS-001`.
+  @TicketClaims consommé par @ws_auth_middleware est jeté : ni `subject` ni `access`
+    n'atteignent `fs_session`, la session terminal ou le bridge LSP (aucune extension
+    injectée) — cf. Tasks `[?]`.
+  Cas « zéro abonné » de @request_flush : @broadcast::Sender::send rend `Err` quand aucun
+    `Receiver` n'existe (aucune session `/ws/fs` ouverte) ; l'erreur est avalée, le waiter
+    attend le timeout complet puis @request_flush rend `false` — chemin nominal du repli
+    debounce de `edit_and_check`, pas une erreur.
+  Abonné trop lent sur `fs_events` : la frame perdue (Lagged) inclut éventuellement un
+    `flush-request` jamais revu → ack impossible → timeout ; politique de log dans ./ws/fs.rs.
+  Réponse d'un `handle_ack` dont le récepteur est déjà parti (timeout passé) : `send` en
+    échec silencieusement — le repli est déjà rendu à l'appelant du flush.
+  `GET /metrics` avant @telemetry::init (appelé par ./main.rs, qui installe le recorder via
+    @init_prometheus) : branche `503` théoriquement inatteignable dans le binaire, testable
+    uniquement dans un processus sans init (cf. Tasks `[?]`).
+  Aucun middleware CORS sur les deux routers — `tower-http` n'est utilisé que pour
+    @TraceLayer ; le multi-onglets se règle par le broadcast `fs_events`, pas par des
+    en-têtes.
+  Aucun champ d'@AppState n'est optionnel : @build_app refuse un état incomplet à la
+    compilation, pas à l'exécution.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
+    accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
+  [ ] Cartographie couverture existante (à re-tagger par les titres de Scenario) :
+    `health_returns_200_ok` (../tests/http.rs) ; auth MCP `mcp_without_token_returns_401`,
+    `mcp_with_malformed_bearer_returns_401`, `mcp_with_valid_static_token_returns_200`,
+    `mcp_with_wrong_static_token_returns_401` ; métriques
+    `metrics_returns_200_with_prometheus_content_type`, `metrics_body_is_valid_prometheus_text`
+    ; tickets `issuance_without_auth_returns_401`, `issuance_with_static_token_returns_ticket`
+    (./ws/ticket.rs) ; gardes WS `ticket_query_required` (./ws/fs.rs),
+    `terminal_ticket_required` (./ws/terminal.rs), `lsp_ticket_required_with_valid_ticket`
+    (./ws/lsp.rs) ; flush `request_flush_resolved_by_ack`,
+    `request_flush_times_out_without_ack`, `handle_ack_unknown_and_double_noop` (./ws/fs.rs),
+    `edit_and_check_case_b_flush_requested_before_write`,
+    `edit_and_check_flush_timeout_mentions_fallback` (./tools_impl.rs).
+  [ ] Convertir en tests taggés les Scenarios sans couverture actuelle :
+    `routes_git_sans_auth_retourne_401` (aucun test git hors `no_auth` aujourd'hui),
+    `emission_ticket_en_no_auth_porte_sujet_dev_no_auth`, `ticket_vide_en_query_rejete_comme_invalide`,
+    `flush_sans_abonne_rend_faux_au_timeout`, `ids_de_flush_uniques_et_monotoniques_depuis_un`,
+    `canal_fs_events_capacite_soixante_quatre`,
+    `middleware_metriques_compte_requete_sante_avec_labels`,
+    `middleware_metriques_compte_les_chemins_inconnus`,
+    `spawn_metrics_server_sur_port_occupe_ne_demord_pas`,
+    `spawn_metrics_server_expose_metrics_sur_port_lie`.
+  [?] Cardinalité des labels de @track_metrics : le `path` est l'URI BRUTE et le code
+    affirme « routes are static in this template so cardinality is low », alors que
+    `DELETE /git/branches/{name}` et `GET /ws/lsp/{toolchain}` sont paramétrées ET que le
+    fallback 404 accepte n'importe quel chemin (un client quelconque crée une série
+    métrique par chemin inventé). Incohérence commentaire/code à trancher : normaliser sur
+    le gabarit de route, borner par whitelist, ou assumer la protection ingress ?
+  [?] Garde de niveau d'accès : @require_auth distingue `Admin`/`Read` mais AUCUNE route de
+    @build_app n'exploite ce niveau — un JWT `Read` passe `POST /git/commit`, `POST
+    /git/push`, `POST /git/ssh-key` (création de clé) et `tools/call` MCP. Renfort ailleurs
+    (handlers git, hypothèse à vérifier dans ./git.rs) ou trou de garde à combler ici ?
+  [?] @ws_auth_middleware consomme le ticket puis JETTE les @TicketClaims : `subject` et
+    `access` ne sont disponibles ni dans les sessions WS ni pour l'audit. Contrat voulu
+    (simple gate) ou extension à injecter dans la requête ?
+  [?] @TicketStore ne purge les tickets expirés qu'au `redeem` : un ticket émis puis
+    abandonné reste dans la map indéfiniment (le routeur n'offre pas de tâche de purge).
+    Émission sous auth donc limitée au débit d'un client légitime — acceptable ou purge à
+    brancher ici ?
+  [?] Interaction garde d'auth × 404/405 sur le router fusionné (sémantique axum des
+    `route_layers` après `merge` : `GET /mcp` sans jeton fait-il tourner @require_auth
+    d'abord (401) ou le method-mismatch d'abord (405) ? `POST /git/inconnu` ?). Comportement
+    jamais épinglé par un test ; à observer, puis soit le contractualiser, soit le corriger.
+  [?] La branche `503` de @metrics_handler n'est testable qu'en processus sans
+    @init_prometheus (recorder global en @OnceLock) : la garder (défensive) ou exiger
+    l'invariant « toujours installée » et la retirer ?
+  [!] `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` au crate root
+    désarme le harnais sur TOUT le crate compilé en test (y compris le code non-test des
+    `#[cfg(test)]` modules des autres fichiers), pas seulement sous `mod tests` : exemption
+    à inscrire à la dette de ../../tooling.sdd ou à restreindre fichier par fichier ?
+  [?] Le parsing maison de la query du ticket (split brute, pas de percent-décodage) est
+    correct pour les tickets émis ici (alphanumériques) mais casserait silencieusement tout
+    émetteur de ticket externe futur — verrouiller par un test ou passer à une crate query ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre.
+  Les décisions `[?]`/`[!]` sont tranchées par Sébastien et reflétées dans la spec.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur le workspace.
+
+Scenario: sante_repond_sans_autorisation
+  Given un @build_app en configuration JWT (ni `no_auth` ni `static_token`)
+  When `GET /health` sans en-tête `Authorization`
+  Then la réponse est `200` et le corps JSON est `{"status":"ok"}`
+
+Scenario: mcp_sans_autorisation_retourne_401
+  Given un @build_app en configuration JWT
+  When `POST /mcp` sans en-tête `Authorization`
+  Then la réponse est `401` avec un en-tête `WWW-Authenticate` Bearer
+
+Scenario: jeton_statique_valide_laisse_passer_mcp
+  Given un @build_app configuré avec `static_token` = `s3cret`
+  When `POST /mcp` avec `Authorization: Bearer s3cret` et une requête `initialize`
+  Then la réponse est `200` et le JSON-RPC rendu porte `protocolVersion` `2024-11-05`
+
+Scenario: jeton_statique_errone_retourne_401
+  Given un @build_app configuré avec `static_token` = `s3cret`
+  When `POST /mcp` avec `Authorization: Bearer pas-le-bon`
+  Then la réponse est `401`
+
+Scenario: routes_git_sans_auth_retourne_401
+  Given un @build_app en configuration JWT (ni `no_auth` ni `static_token`)
+  When chacune des routes git protégées est appelée sans `Authorization` (`GET /git/status`, `POST /git/commit`, `DELETE /git/branches/x`, `GET /git/branches`, `GET /git/log`)
+  Then chacune répond `401`
+
+Scenario: emission_ticket_sans_auth_retourne_401
+  Given un @build_app en configuration JWT
+  When `POST /ws/ticket` sans `Authorization`
+  Then la réponse est `401`
+
+Scenario: emission_ticket_rend_ticket_rachetable_une_fois
+  Given un @build_app configuré avec `static_token` = `s3cret` et un clone du @TicketStore gardé hors de l'app
+  When `POST /ws/ticket` avec `Authorization: Bearer s3cret`
+  Then la réponse est `200` avec un JSON `ticket` de 32 caractères alphanumériques et `expires_in_secs` égal à `30`
+  And le ticket se rachète une fois sur le store partagé avec `subject` `static-token` et access Admin
+  But un second rachat du même ticket échoue
+
+Scenario: emission_ticket_en_no_auth_porte_sujet_dev_no_auth
+  Given un @build_app configuré avec `no_auth` actif et un clone du @TicketStore gardé hors de l'app
+  When `POST /ws/ticket` sans aucune autorisation
+  Then la réponse est `200`
+  And le ticket racheté porte `subject` `dev-no-auth` et access Admin
+
+Scenario: ws_fs_sans_ticket_valide_retourne_401
+  Given un @build_app en configuration JWT
+  When `GET /ws/fs` sans param `ticket`, puis avec `?ticket=inconnu`
+  Then les deux réponses sont `401` en JSON `{"error": …}`
+  And la seconde porte l'identifiant `VNL-SBX-WS-002`
+
+Scenario: ws_terminal_sans_ticket_valide_retourne_401
+  Given un @build_app en configuration JWT
+  When `GET /ws/terminal` sans ticket, puis avec un ticket inconnu
+  Then les deux réponses sont `401` sans aucun upgrade WebSocket
+
+Scenario: ws_lsp_avec_ticket_valide_depasse_la_garde
+  Given un @build_app en configuration `no_auth` et un ticket émis dans son @TicketStore
+  When `GET /ws/lsp/rust?ticket=<ticket>` avec les en-têtes d'upgrade WebSocket
+  Then la requête atteint le handler LSP (la garde ne renvoie pas `401`)
+  And le ticket est consommé
+
+Scenario: ticket_vide_en_query_rejete_comme_invalide
+  Given un @build_app en configuration JWT
+  When `GET /ws/fs?ticket=` (param présent, valeur vide)
+  Then la réponse est `401` et le message d'erreur porte `VNL-SBX-WS-002` (ticket invalide, non pas manquant)
+
+Scenario: canal_fs_events_partage_entre_push_et_flush
+  Given un @AppState construit par @fs_push_channels et un abonné branché sur `fs_events`
+  When @request_flush est appelée sur `fs_flush` avec un timeout court, sans ack
+  Then l'abonné reçoit la frame `{"event":"flush-request","id":1,"path":<chemin>}` exactement telle que produite par l'atelier
+  And une frame publiée directement sur `fs_events` est reçue par ce même abonné
+
+Scenario: flush_ack_resout_request_flush_en_vrai
+  Given un @AppState avec un abonné à `fs_events`
+  When @request_flush est lancée en parallèle et que l'id de la frame reçue est acquitté par @handle_ack
+  Then @request_flush rend `true` dans le timeout
+  And @waiter_count vaut `0` après coup
+
+Scenario: flush_timeout_rend_faux_et_ne_laisse_aucun_waiter
+  Given un @AppState avec un abonné à `fs_events` qui n'acquitte jamais
+  When @request_flush est appelée avec un timeout court
+  Then elle rend `false` au bout du timeout
+  And @waiter_count vaut `0`
+
+Scenario: flush_sans_abonne_rend_faux_au_timeout
+  Given un @AppState dont le canal `fs_events` n'a aucun abonné
+  When @request_flush est appelée avec un timeout court
+  Then elle rend `false` après le timeout, sans panic malgré l'absence de récepteur
+  And @waiter_count vaut `0`
+
+Scenario: ids_de_flush_uniques_et_monotoniques_depuis_un
+  Given un @AppState avec un abonné muet à `fs_events` et un timeout court
+  When trois @request_flush consécutives sont exécutées
+  Then les frames émises portent les ids `1`, `2`, `3` dans cet ordre
+
+Scenario: ack_inconnu_et_double_ack_sont_no_op
+  Given un @AppState avec un flush en attente d'ack (id connu)
+  When @handle_ack est appelée avec un id jamais émis, puis deux fois avec l'id en attente
+  Then rien ne se produit pour l'id inconnu
+  And le flush en attente est résolu `true` par le premier ack
+  But le second ack ne provoque ni panic ni effet, et @waiter_count vaut `0`
+
+Scenario: canal_fs_events_capacite_soixante_quatre
+  Given un abonné à un canal @fs_events_channel qui ne lit rien
+  When 65 frames sont publiées, puis que l'abonné lit
+  Then la lecture rend un `Lagged` signalant des frames perdues après saturation des `64` slots
+  And @FS_EVENTS_CAPACITY vaut `64`
+
+Scenario: etat_partage_survit_aux_clones_de_appstate
+  Given un @AppState dont un clone du @TicketStore est gardé hors de l'app et @build_app construit sur l'original
+  When `POST /ws/ticket` réussit via l'app (static token) et que le ticket est racheté sur le clone externe
+  Then le rachat réussit sur le clone — la map de tickets est bien unique derrière les clones d'@AppState
+
+Scenario: middleware_metriques_compte_requete_sante_avec_labels
+  Given le recorder Prometheus installé et un @build_app configuré avec `no_auth`
+  When une `GET /health` traverse l'app puis que @build_metrics_app est interrogée sur `/metrics`
+  Then le texte rendu contient le compteur `http_requests_total` avec les labels `method="GET"`, `path="/health"`, `status="200"`
+  And l'histogramme `http_request_duration_seconds` porte les labels `method` et `path`
+
+Scenario: middleware_metriques_compte_les_chemins_inconnus
+  Given le recorder Prometheus installé et un @build_app configuré avec `no_auth`
+  When une requête `GET /chemin/invente/<unique>` traverse l'app (fallback `404`)
+  Then la réponse est `404`
+  And le rendu de @build_metrics_app contient une série `http_requests_total` dont le label `path` est le chemin inventé — illustration directe du trou de cardinalité documenté en Tasks `[?]`
+
+Scenario: metrics_rend_200_en_texte_prometheus
+  Given le recorder Prometheus installé
+  When `GET /metrics` sur @build_metrics_app
+  Then la réponse est `200`, `content-type` exactement `text/plain; version=0.0.4; charset=utf-8`
+  And le corps est du texte d'exposition Prometheus parseable
+
+Scenario: metrics_hors_du_router_principal
+  Given un @build_app configuré avec `no_auth`
+  When `GET /metrics` traverse l'app principale
+  Then la réponse est `404` — `/metrics` n'existe que sur le router interne de @build_metrics_app
+
+Scenario: spawn_metrics_server_sur_port_occupe_ne_demord_pas
+  Given un @tokio::net::TcpListener déjà lié sur une adresse
+  When @spawn_metrics_server est appelé sur cette même adresse
+  Then l'appel rend `()` sans panic ni erreur
+  And une log `warn` mentionnant l'échec de bind est émise
+
+Scenario: spawn_metrics_server_expose_metrics_sur_port_lie
+  Given le recorder Prometheus installé et une adresse libre
+  When @spawn_metrics_server est appelé sur cette adresse puis que `GET http://<adresse>/metrics` est émis
+  Then la réponse est `200` avec le corps Prometheus
+
+Example: enveloppes JSON observables
+  `POST /ws/ticket` (auth passe) → `{"ticket":"<32 alphanum>","expires_in_secs":30}`
+  frame de push flush → `{"event":"flush-request","id":1,"path":"src/main.rs"}`
+  réponse `/health` → `{"status":"ok"}`
+  401 ticket → `{"error":"VNL-SBX-WS-001: missing or malformed ticket"}` ou `{"error":"VNL-SBX-WS-002: invalid or expired ticket"}`

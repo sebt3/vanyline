@@ -1,0 +1,345 @@
+Spec: Telemetry
+
+Platform: Rust/vanyline-sandbox/tracing-subscriber/metrics-exporter-prometheus/opentelemetry
+
+Purpose:
+  Observabilité du process sandbox : un enregistreur de métriques Prometheus (toujours
+  actif), un subscriber @tracing structuré avec filtre @EnvFilter (variable `RUST_LOG`,
+  défaut `vanyline_sandbox=info,tower_http=debug`), et l'export de traces OpenTelemetry
+  OTLP/gRPC optionnel (activé par `--otel-endpoint` / `OTEL_EXPORTER_OTLP_ENDPOINT`).
+  Le module est le seul propriétaire des globaux du process — enregistreur @metrics et
+  subscriber par défaut @tracing — ; les deux @std::sync::OnceLock statiques garantissent
+  une installation unique. Côté consommateur : ./main.rs appelle @init au démarrage (avant
+  @crate::config::Config::validate) puis @shutdown_otel en sortie propre ; ./lib.rs rend
+  @render_metrics sur `GET /metrics` (port séparé `config.metrics_listen`) et alimente les
+  compteurs via @track_metrics. L'en-tête du fichier documente des non-réalisions
+  explicites (auth de `/metrics`, métriques métier, propagation W3C `traceparent`,
+  attributs de ressource supplémentaires, export de métriques OTLP) : ce sont des frontières
+  actées, pas des oublis — reprises en `Must not`.
+
+Owns:
+  ./telemetry.rs
+
+Can read:
+  ./main.rs
+  ./lib.rs
+  ./config.rs
+  ../Cargo.toml
+  /sandbox/tests/http.rs
+
+Depends on:
+  @tracing_subscriber (0.3, feature `env-filter`) — @EnvFilter::try_from_default_env (lit
+    `RUST_LOG`), @tracing_subscriber::fmt::layer (sortie stdout par défaut, format ANSI
+    avec horodatage, jamais JSON), @registry et @SubscriberInitExt::init (subscriber global
+    du process, posable une seule fois — comportement d'un second `.init()` non verrouillé,
+    voir `Tasks` `[?]`).
+  @metrics_exporter_prometheus 0.18 — @PrometheusBuilder::install_recorder (installe le
+    recorder global de la crate @metrics) et @PrometheusHandle::render (format d'exposition
+    0.0.4). ../Cargo.toml désactive les fonctionnalités par défaut (seule `http-listener`
+    est activée, et ce fichier ne l'utilise pas) : pas de collecteur de processus dans le
+    rendu, et le point d'écoute HTTP est porté par ./lib.rs, pas par l'exporteur.
+  @opentelemetry 0.32 / @opentelemetry_sdk 0.32 (fonctionnalités `trace`, `rt-tokio`) —
+    @SdkTracerProvider, @BatchSpanProcessor::builder (traiteur par lots paramétrés par
+    défaut ; exige un runtime tokio actif — `[?]` dans `Tasks`), @Resource,
+    @opentelemetry::global::set_tracer_provider. La connexion gRPC du client @tonic étant
+    paresseuse, un collecteur injoignable au démarrage n'est pas une erreur de construction.
+  @opentelemetry_otlp 0.32 (fonctionnalité `grpc-tonic`) — @SpanExporter::builder().with_tonic()
+    construit l'exporteur pointé vers l'endpoint passé en paramètre.
+  @tracing_opentelemetry 0.33 — @layer().with_tracer : couche qui convertit les spans
+    @tracing filtrés en spans OTLP exportées.
+  @anyhow — @Context sur l'échec d'installation du recorder et sur celui de l'exporteur.
+  ./lib.rs — @metrics_handler appelle @render_metrics à chaque requête `GET /metrics`
+    (`None` → 503, `Some` → 200 `text/plain; version=0.0.4; charset=utf-8`) ;
+    @track_metrics alimente `http_requests_total` et `http_request_duration_seconds` via
+    les macros @metrics dès que le recorder est posé.
+  ./config.rs — source de @crate::config::Config::otel_endpoint (`--otel-endpoint` /
+    `OTEL_EXPORTER_OTLP_ENDPOINT`) et de @crate::config::Config::metrics_listen ; ./main.rs
+    impose l'ordre @init → @crate::config::Config::validate pour que les avertissements
+    `tracing` de la validation soient rendus.
+
+Exposes:
+  @crate::telemetry::init_prometheus — `pub fn() -> @anyhow::Result<()>`. Installe le
+    recorder Prometheus global via @PrometheusBuilder::new().install_recorder() et le range
+    dans la statique privée `PROMETHEUS: @std::sync::OnceLock<@PrometheusHandle>`.
+    Idempotent par appel séquentiel : si `PROMETHEUS` est déjà rempli, retour immédiat
+    `Ok(())` sans rien réinstaller.
+  @crate::telemetry::render_metrics — `pub fn() -> Option<@std::string::String>`. `None`
+    tant que @init_prometheus n'a pas réussi ; `Some(handle.render())` ensuite — texte au
+    format d'exposition Prometheus 0.0.4, limité aux métriques déclarées via les macros
+    @metrics (pas de collecteur de processus).
+  @crate::telemetry::init — `pub fn(otel_endpoint: Option<&str>) -> @anyhow::Result<()>`.
+    Ordonnance exacte : 1) @init_prometheus (son erreur se propage via `?`, subscriber
+    alors jamais installé) ; 2) construction du filtre — @EnvFilter::try_from_default_env,
+    repli sur la chaîne littérale `"vanyline_sandbox=info,tower_http=debug"` (unique
+    `unwrap` toléré, couvert par `#[allow(clippy::unwrap_used)]`) ; 3) si
+    `otel_endpoint` est `Some`, tentative @try_init_otel_tracer — l'échec est absorbé en un
+    avertissement sur stderr (`WARN  OpenTelemetry init failed (continuing without
+    traces): {e}`) et la couche otel est omise ; 4) installation du subscriber global :
+    @registry avec le filtre au niveau registry (donc appliqué à TOUTES les couches, otel
+    comprise), la couche @fmt, et la couche otel optionnelle.
+  @crate::telemetry::shutdown_otel — `pub fn()`. Rince les spans en attente via
+    `provider.shutdown()` si la statique privée `OTEL_PROVIDER: @std::sync::OnceLock<@SdkTracerProvider>`
+    est remplie ; erreur de vidage absorbée en avertissement stderr (`WARN  OTel shutdown
+    error: {e}`) ; no-op sinon. Ne propage rien, ne panique pas.
+  Item privé @build_resource — @Resource avec l'attribut `service.name` =
+    `env!("CARGO_PKG_NAME")` (`"vanyline-sandbox"`) et `service.version` =
+    `env!("CARGO_PKG_VERSION")` ;
+    aucun autre attribut (les attributs k8s sont une non-réalisation documentée).
+  Item privé @try_init_otel_tracer — construit l'exporteur OTLP gRPC sur l'endpoint, un
+    @BatchSpanProcessor, un @SdkTracerProvider portant @build_resource, publie un clone
+    comme provider global @opentelemetry, range l'original dans `OTEL_PROVIDER` (échec de
+    @OnceLock::set silencieusement, `.ok()`), retourne le tracer nommé
+    `env!("CARGO_PKG_NAME")`.
+  Aucun type public, aucune route, aucun outil : la surface HTTP (`GET /metrics`,
+    `GET /health`) appartient à ./lib.rs.
+
+Accepts:
+  @init — `otel_endpoint` : `None` (OTel désactivé, aucune tentative de construction
+    d'exporteur), `Some(URL gRPC formellement valide)` (ex. `http://alloy:4317` — un
+    collecteur injoignable n'est pas une erreur à ce stade, connexion tonic paresseuse),
+    `Some(chaîne invalide)` (ex. sans schéma — la construction de l'exporteur échoue,
+    absorbée en avertissement).
+  Environnement — `RUST_LOG` : directive @EnvFilter valide (prend le pas sur le défaut),
+    invalide (repli silencieux sur le défaut, sans message), absente (défaut). Les autres
+    variables standard `OTEL_*` ne sont pas lues par ce fichier (leur prise en compte par
+    le SDK est une question ouverte, `Tasks`).
+  @init_prometheus / @render_metrics / @shutdown_otel — aucun paramètre.
+
+Returns:
+  @init_prometheus — `Ok(())` en cas de succès comme de no-op idempotent ; jamais d'autre
+    valeur.
+  @render_metrics — `Option` au sens d'@Exposes ; le texte rendu est exactement celui de
+    @PrometheusHandle::render, sans retraitement.
+  @init — `Ok(())` quand @init_prometheus réussit, quel que soit le sort d'OTel ;
+    sinon @Err propagé de @init_prometheus sans que le subscriber @tracing soit installé.
+  @shutdown_otel — rien (`()`), dans tous les cas.
+  @try_init_otel_tracer (privé) — @Ok(tracer) ou @Err après installation partielle : si la
+    construction de l'exporteur échoue, rien n'est publié ; dans les cas où le provider est
+    construit, le provider global @opentelemetry est déjà remplacé AVANT le retour.
+
+Raises:
+  @init_prometheus — @Err @anyhow chaîné du contexte exact `"failed to install Prometheus
+    metrics recorder"` quand @install_recorder échoue (recorder global déjà posé par un
+    tiers, hors @init_prometheus).
+  @init — ne peut remonter que l'erreur d'@init_prometheus ci-dessus ; ne remonte JAMAIS
+    d'erreur liée à OTel.
+  @render_metrics / @shutdown_otel — jamais d'erreur.
+  @try_init_otel_tracer (privé) — @Err contexté `"building OTLP span exporter"` sur endpoint
+    invalide ; dans @init cette erreur meurt en avertissement stderr.
+  Panics : hors le `unwrap` toléré du littéral de filtre, aucune panic contractuelle ; un
+    appel à @init avec endpoint OTel hors runtime tokio panique via @BatchSpanProcessor
+    (comportement implicite non béni, `Tasks` `[?]`).
+
+Handles:
+  Double appel séquentiel d'@init_prometheus — le contrôle `PROMETHEUS.get().is_some()`
+    rend le second appel no-op `Ok(())` ; ./sandbox/tests/http.rs s'appuie sur cette
+    idempotence via son propre @OnceLock de test.
+  Course TOCTOU d'@init_prometheus — `is_some()` et @install_recorder ne sont pas atomiques
+    : deux appels concurrents peuvent voir le second échouer avec l'erreur
+    `"failed to install Prometheus metrics recorder"` au lieu du no-op documenté. Cas
+    purement théorique aujourd'hui (un seul appel au démarrage), signalé `[?]`.
+  Collecteur OTLP injoignable au démarrage — @init réussit (construction tonic paresseuse) ;
+    les spans sont silencieusement abandonnées quand la file du traiteur par lots est pleine
+    (paramètres par défaut de @BatchSpanProcessor).
+  Endpoint OTLP malformé — avertissement stderr, @init continue sans couche otel,
+    `OTEL_PROVIDER` reste vide, @shutdown_otel devient un no-op.
+  Échec d'@init_prometheus dans @init — le subscriber n'est jamais installé : ./main.rs
+    s'interrompt sur l'erreur `?` sans qu'aucun log @tracing n'ait pu paraître.
+  `RUST_LOG` absente ou invalide — repli silencieux sur
+    `vanyline_sandbox=info,tower_http=debug` : niveau `info` pour le crate, `debug` pour
+    les spans HTTP de la couche trace de @tower_http (posée dans ./lib.rs).
+  @init appelé plus d'une fois avec un endpoint OTel — @opentelemetry::global::set_tracer_provider
+    remplace le provider global mais le second @OTEL_PROVIDER.set échoue en silence (`.ok()`) :
+    @shutdown_otel rincerait le premier provider, pas celui en service. Signalé `[?]`.
+  Sortie de ./main.rs — @shutdown_otel n'est atteint que sur arrêt propre du serveur ; les
+    chemins d'erreur `?` (bind, TLS, erreur du serveur) l'enjambent et les spans en file
+    peuvent être perdues. Signalé `[?]`.
+  Consommation par ./lib.rs — @metrics_handler rend 503 tant que @render_metrics vaut
+    `None` (recorder non posé, ex. tests appelant @build_metrics_app sans @init_prometheus),
+    200 avec `content-type: text/plain; version=0.0.4; charset=utf-8` sinon.
+  @track_metrics sans recorder — les macros @metrics sur un recorder absent sont des
+    no-op silencieux : pas de compteur avant @init_prometheus, aucune erreur.
+
+Must:
+  Installer le subscriber global dans cet ordre et cette composition : @registry + filtre
+    @EnvFilter au niveau registry + couche @fmt + couche otel optionnelle — le filtre au
+    niveau registry s'applique donc aussi aux spans destinées à OTel.
+  Utiliser exactement le filtre de repli `vanyline_sandbox=info,tower_http=debug` quand
+    `RUST_LOG` est absente ou invalide.
+  Rendre @init_prometheus idempotent en appel séquentiel (no-op `Ok(())`), verrouillé par
+    la statique @OnceLock.
+  Rendre @render_metrics `None` avant toute installation réussie du recorder, `Some` après.
+  Tolérer tous les échecs OpenTelemetry dans @init : avertissement stderr, @init retourne
+    `Ok(())`, le serveur démarre sans export de traces.
+  Porter la ressource OTel `service.name` = `env!("CARGO_PKG_NAME")` et
+    `service.version` = `env!("CARGO_PKG_VERSION")`, sans autre attribut.
+  Exiger un appel unique de @init au démarrage, avant @crate::config::Config::validate
+    (contrat suivi par ./main.rs), pour que les avertissements @tracing de la validation
+    soient rendus par le subscriber.
+  Ne jamais paniquer ni propager d'erreur dans @shutdown_otel, y compris provider absent ou
+    erreur de vidage (avertissement stderr dans ce dernier cas).
+  Circonscrire l'unique `unwrap` du fichier au parse du filtre littéral de repli, dans @init,
+    sous `#[allow(clippy::unwrap_used)]` avec commentaire de justification d'une ligne —
+    ce commentaire doit citer la présente spec (à mettre à jour, `Tasks`).
+
+Must not:
+  Interrompre le démarrage sur un échec OTel, ni retourner @Err depuis @init pour une
+    raison OTel.
+  Installer un point d'écoute HTTP depuis l'exporteur Prometheus : le rendu passe
+    exclusivement par @render_metrics et le routeur de ./lib.rs, sur le port séparé
+    `config.metrics_listen`.
+  Authentifier `/metrics` ni porter l'authentification dans l'application — protection
+    assumée au niveau réseau (NetworkPolicy, reverse-proxy), frontière documentée.
+  Propagateur W3C `traceparent`, export de métriques par OTLP, attributs de ressource
+    k8s, métriques métier pré-câblées : non-réalisions documentées de l'en-tête du fichier,
+    ne pas les présenter comme acquises.
+  Introduire un second `unwrap`/`expect`/`panic!`, ni un `#[allow]` du harnais sans
+    justification d'une ligne citant une spec (/tooling.sdd).
+  Logger en @tracing dans @init AVANT l'installation du subscriber (le subscriber n'existe
+    pas encore à ce stade : les deux avertissements stderr du fichier sont un choix
+    contraint en amont de `.init()`, discutable seulement pour @shutdown_otel — `Tasks`).
+  Remplacer le filtre au niveau registry par des filtres par couche : le contrat est un
+    filtre unique couvrant fmt et otel.
+
+Tasks:
+  [ ] Ajouter les tests du module : un test par Scenario, taggé par son titre. Les Scenarios
+    qui touchent les globaux du process (@init, layers otel, subscriber) exigent des
+    binaires de test dédiés (@OnceLock et subscriber global sont par process) ; les Scenarios
+    sans dépendance au global @tracing restent en tests unitaires cfg(test) du module.
+  [?] Les deux @eprintln! du fichier (échec otel dans @init, erreur de vidage dans
+    @shutdown_otel) violent `print_stderr` `deny` du harnais : dette sandbox préexistante
+    non mesurée (/tooling.sdd, « crates en aval non mesurées »). Pour @init le @tracing::warn
+    est impossible (subscriber pas encore posé) ; pour @shutdown_otel il serait disponible.
+    Trancher : exempter explicitement, ou basculer @shutdown_otel en @tracing::warn et
+    consigner l'exemption de @init.
+  [?] Le commentaire de justification de `#[allow(clippy::unwrap_used)]` sur @init ne cite
+    aucune spec, en infraction avec le « Must not » de /tooling.sdd. Après approbation de
+    la présente spec, le mettre à jour pour citer `telemetry.sdd`.
+  [?] Repli silencieux sur `RUST_LOG` invalide : @EnvFilter::try_from_default_env().unwrap_or_else
+    avale l'erreur sans aucun message — un opérateur qui règle mal `RUST_LOG` obtient le
+    niveau `info` sans le savoir. Choix assumé ou avertissement à ajouter (impossible en
+    @tracing avant `.init()`, donc stderr — même arbitrage que le `[?]` ci-dessus) ?
+  [?] Ordre de @init : @init_prometheus passe avant le subscriber ; si la pose du recorder
+    échoue, ./main.rs s'interrompt sans qu'aucun log @tracing ait pu être émis (l'erreur ne
+    vit que dans le code de sortie du process). Installer le subscriber en premier pour
+    loguer la panne, ou maintenir l'ordre actuel ?
+  [?] Idempotence d'@init_prometheus sous concurrence : le contrôle `is_some()` n'est pas
+    atomique avec @install_recorder — deux appels simultanés peuvent produire un @Err là où
+    la documentation promet un no-op `Ok(())`. Contrat mono-appel au démarrage suffisant,
+    ou verrou à ajouter ?
+  [?] Double @init avec endpoint OTel : @opentelemetry::global::set_tracer_provider remplace
+    le provider global alors que @OTEL_PROVIDER.set échoue silencieusement — @shutdown_otel
+    rincerait alors le mauvais provider. Contractualiser « @init appelé une seule fois »
+    (déjà son doc) comme invariant dur, ou rendre le remplacement cohérent ?
+  [?] @BatchSpanProcessor::builder().build() avec la fonctionnalité `rt-tokio` exige un
+    runtime tokio courant : @init appelé hors runtime (tests unitaires, ou évolution de
+    ./main.rs qui initialiserait avant @tokio::main) panique. Documenter l'exigence dans la
+    doc de @init, ou rendre le chemin sans panic ?
+  [?] ./main.rs ne rappelle @shutdown_otel qu'en sortie propre : tout chemin `?` (bind
+    principal, TLS, erreur du serveur) sort sans rincer les spans OTel en file. Perte
+    acceptable (process en échec) ou rinçement différé à installer ?
+  [?] Second appel de @tracing_subscriber::SubscriberInitExt::init dans un même process :
+    comportement dépendant de tracing-subscriber (second subscriber inerte ou signalement
+    au premier log selon les versions), non verrouillé par test. Verrouiller un Scenario
+    après arbitrage ?
+  [?] Testabilité du filtre de repli et de l'avertissement stderr de @init : le format
+    @fmt écrit sur le stdout réel du process et @eprintln! sur son stderr — un test fidèle
+    passe par la capture du processus fils (@std::process::Command sur le binaire) ou par
+    un refactor extrayant le filtre en fonction testable. Le refactor est hors périmètre
+    Owns de cette spec ; trancher la stratégie de test avant d'écrire les Scenarios de
+    filtre de repli et d'avertissement stderr.
+  [?] Variables `OTEL_*` standard (timers du traiteur par lots, ratio d'échantillonnage) :
+    la doc du module ne dit pas si le SDK les honore ici (construit avec les paramètres par
+    défaut). Vérifier et consigner ce qui est effectivement lu.
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe, les Scenarios globaux
+    dans leurs binaires dédiés.
+  La batterie complète (check/test/build/clippy `--all-targets -D warnings`/fmt) est verte
+    sur le crate sandbox avec ces tests ajoutés.
+  Sébastien a tranché tous les `[?]` de `Tasks` et le commentaire `#[allow]` cite la spec.
+
+Scenario: render_metrics_absent_avant_init_puis_present_apres
+  Given un binaire de test où @init_prometheus n'a jamais été appelé
+  When @render_metrics est appelé avant toute initialisation
+  Then il retourne `None`, et après un appel réussi d'@init_prometheus il retourne `Some`
+    d'un texte au format d'exposition Prometheus 0.0.4
+
+Scenario: init_prometheus_deux_appels_sequentiels_retournent_ok
+  Given un premier appel d'@init_prometheus ayant retourné `Ok(())`
+  When @init_prometheus est rappelé immédiatement une deuxième fois
+  Then le deuxième appel retourne `Ok(())` sans réinstaller de recorder (aucune erreur de
+    recorder déjà posé) et @render_metrics continue de rendre `Some`
+
+Scenario: render_contient_les_compteurs_incrementes
+  Given le recorder initialisé par @init_prometheus et un compteur déclaré par la macro
+    @metrics sous le nom `vnl_spec_test_total` incrémenté de 1
+  When @render_metrics rend le snapshot courant
+  Then le texte contient une ligne d'échantillon `vnl_spec_test_total` de valeur `1`
+
+Scenario: init_prometheus_erreur_quand_un_recorder_tier_est_deja_pose
+  Given un binaire de test dédié où @metrics_exporter_prometheus::PrometheusBuilder a posé
+    un recorder global directement, hors @init_prometheus
+  When @init_prometheus est appelé ensuite
+  Then il retourne @Err et la chaîne @anyhow contient exactement
+    `"failed to install Prometheus metrics recorder"`
+
+Scenario: init_propage_l_erreur_prometheus_sans_installer_le_subscriber
+  Given le même état qu'« init_prometheus_erreur_quand_un_recorder_tier_est_deja_pose »,
+    avec le subscriber @tracing encore jamais posé dans ce process
+  When @init(None) est appelé
+  Then il retourne le même @Err que celui d'@init_prometheus et le subscriber global
+    @tracing reste absent (@tracing::subscriber::get_default échoue, aucun rendu @fmt ne
+    sera produit ensuite)
+
+Scenario: init_sans_endpoint_otel_installe_le_subscriber_standard
+  Given un binaire de test dédié avec @init_prometheus déjà à `Ok(())` et `RUST_LOG` absente
+  When @init(None) est appelé
+  Then il retourne `Ok(())` et un subscriber global @tracing est posé : une ligne
+    @tracing::info! cible `vanyline_sandbox` est rendue sur stdout au format @fmt, sans
+    qu'aucune trace OTLP ne soit tentée (aucun endpoint configuré)
+
+Scenario: init_endpoint_otel_invalide_non_fatal_et_sans_provider
+  Given un binaire de test dédié avec @init_prometheus déjà à `Ok(())`
+  When @init(Some("://pas-une-url")) est appelé avec une chaîne d'endpoint malformée
+  Then il retourne `Ok(())` (échec OTel absorbé), une ligne
+    `WARN  OpenTelemetry init failed (continuing without traces):` est écrite sur stderr,
+    et @shutdown_otel reste un no-op (aucun provider OTel enregistré)
+
+Scenario: init_endpoint_otel_injoignable_non_fatal_et_shutdown_sans_panic
+  Given un binaire de test dédié avec @init_prometheus déjà à `Ok(())` et un collecteur
+    OTLP formellement valide mais injoignable (`http://127.0.0.1:1`)
+  When @init(Some("http://127.0.0.1:1")) est appelé, puis une span @tracing ouverte, puis
+    @shutdown_otel appelé
+  Then @init retourne `Ok(())` malgré le collecteur absent, et @shutdown_otel retourne
+    sans paniquer ni propager d'erreur (une ligne `WARN  OTel shutdown error:` sur stderr
+    est acceptable, pas une exigence)
+
+Scenario: shutdown_otel_noop_repetable_sans_provider
+  Given un process où OTel n'a jamais été initialisé avec succès (@init(None) ou @init
+    jamais appelé)
+  When @shutdown_otel est appelé deux fois de suite
+  Then les deux appels retournent `()` sans panic, sans message sur stderr et sans effet
+
+Scenario: filtre_de_repli_quand_rust_log_absente
+  Given un process fils lancé avec `RUST_LOG` retirée de l'environnement (binaire de
+    ./main.rs en mode `--no-auth`, ou équivalent dédié)
+  When @init(None) s'est exécuté puis que des spans @tracing de cible `vanyline_sandbox`
+    aux niveaux `info` et `trace` sont émises
+  Then la ligne `info` apparaît sur stdout et la ligne `trace` n'apparaît pas — niveaux
+    effectifs `vanyline_sandbox=info` et `tower_http=debug` du filtre de repli
+
+Scenario: rust_log_invalide_replie_silencieusement_sur_le_defaut
+  Given un process fils lancé avec `RUST_LOG` réglée sur une directive @EnvFilter invalide
+    (ex. `"!!! pas un filtre"`)
+  When @init(None) s'est exécuté et qu'une span @tracing cible `vanyline_sandbox` de niveau
+    `info` est émise
+  Then la span est rendue sur stdout (le filtre de repli s'applique) et aucun message
+    n'avertit que `RUST_LOG` a été ignorée
+
+Scenario: resource_otel_porte_seulement_nom_et_version_du_crate
+  Given un test unitaire cfg(test) du module appelant le constructeur privé @build_resource
+  When la ressource est inspectée
+  Then elle porte `service.name` = `"vanyline-sandbox"` (env! `CARGO_PKG_NAME`) et
+    `service.version` = la version du workspace via env! `CARGO_PKG_VERSION`, et aucun
+    attribut k8s ou supplémentaire

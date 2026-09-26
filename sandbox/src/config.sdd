@@ -1,0 +1,553 @@
+Spec: Config
+
+Platform: Rust/vanyline-sandbox
+
+Purpose:
+  Feuille de route de démarrage du binaire `vanyline-sandbox` : ./config.rs déclare,
+  parse, valide et expose TOUTE la configuration du serveur en un seul type @Config
+  (14 champs, un fichier = une spec, sans regroupement). Trois responsabilités :
+  (1) surface CLI/env — chaque champ porte un drapeau long kebab-case, une variable
+  d'environnement et un défaut compilé, avec priorité flag > env > défaut, gérés par
+  @clap::Parser (features `derive` + `env`) ; (2) validation d'amorçage @Config::validate
+  — uniquement le triptyque d'auth (`no_auth` / `static_token` / couple
+  `oidc_issuer`+`oidc_audience`) : deux `warn` de développement et deux refus
+  fail-fast, rien d'autre ; (3) helpers consommés par les modules pairs — découpage
+  des listes de groupes (@admin_groups / @read_groups, lus par @auth::check_access)
+  et fabrique d'URI de métadonnées OAuth @oauth_metadata_url (consommée par ./auth.rs
+  pour le header `WWW-Authenticate` RFC 9728). Le fichier ne valide PAS les adresses,
+  le TLS, les chemins ni les URL (cf. `Must not`) et ne décide aucun mode d'auth par
+  requête — il ne fait qu'autoriser ou refuser le démarrage.
+
+Owns:
+  ./config.rs
+
+Can read:
+  ./main.rs
+  ./auth.rs
+  ./mcp.rs
+  ./lib.rs
+  ./telemetry.rs
+  /vanyline.sdd
+  /tooling.sdd
+  /docs/architecture.md
+  /controller/src/sandbox.sdd
+  /deploy/sandbox/sandbox-test.yaml
+  /sandbox/Dockerfile
+
+Structure:
+  ./config.rs — 238 lignes, module de la lib `vanyline_sandbox`. Blocs physiques :
+    @DEFAULT_PUBLIC_URL (constante `&'static str`) + @oauth_metadata_url (fonction
+    libre publique) ; @Config (`#[derive(Parser, Debug, Clone)]`, 14 champs `pub`, un
+    doc comment par champ) ; impl de @Config (@parse_and_validate, @validate,
+    @admin_groups, @read_groups) ; module @tests (`#[cfg(test)]`, fixture @base() —
+    @Config à tous les défauts compilés — et 12 tests : @admin_groups_single,
+    @read_groups_multiple, @groups_trimmed, @validate_no_auth_skips_oidc_check,
+    @validate_requires_issuer, @validate_requires_audience,
+    @validate_static_token_skips_oidc_check, @validate_passes_with_both_oidc_params,
+    @oauth_metadata_url_uses_default_when_none, @oauth_metadata_url_uses_public_url,
+    @oauth_metadata_url_trims_trailing_slash, @sandbox_root_defaults_to_workspace).
+    Aucun `#[cfg(...)]` hors `cfg(test)`, aucune exemption de harnais dans le fichier.
+
+References:
+  ./main.sdd — consomme @Config::parse + @Config::validate autour de @telemetry::init ;
+    ses `[?]` `parse_and_validate` sans appelant, `NO_AUTH` env et env à chaîne vide
+    sont à trancher ICI (ce fichier en est le sujet).
+  ./auth.sdd — consomme `no_auth`, `static_token`, `oidc_issuer`, `oidc_audience`,
+    `oidc_ca_cert`, `public_url` et @admin_groups/@read_groups ; ses `[?]` sur le
+    `static_token` à chaîne vide et l'invariant VMP-130 (`public_url` malformé)
+    remontent à la validation (ou à son absence) dans ce fichier.
+  ./mcp.sdd — consomme @DEFAULT_PUBLIC_URL ; son `[?]` d'harmonisation du champ
+    `resource` (brut là-bas, jamais tranché) avec @oauth_metadata_url est à trancher
+    ici.
+  ./lib.sdd — @spawn_metrics_server branche `metrics_listen` (bind non-fatal).
+
+Must:
+  Exposer exactement quatorze champs de configuration, chacun avec son drapeau long,
+    sa variable d'environnement et son défaut compilé (priorité flag > env > défaut,
+    détail dans `Accepts`) : @Config::listen, @Config::tls_cert, @Config::tls_key,
+    @Config::oidc_issuer, @Config::oidc_audience, @Config::auth_groups_admin,
+    @Config::auth_groups_read, @Config::no_auth, @Config::static_token,
+    @Config::public_url, @Config::oidc_ca_cert, @Config::metrics_listen,
+    @Config::otel_endpoint, @Config::sandbox_root.
+  Capturer toute la configuration AU MOMENT DU PARSE (appel clap dans @Config::parse
+    ou @Config::parse_and_validate) : @Config ne relit l'environnement ni les
+    arguments jamais ensuite — une modification de l'env en cours de vie du process
+    est invisible.
+  Valider le démarrage dans cet ordre court-circuit EXACT (premier cas atteint gagne,
+    un seul message produit) : 1) `no_auth == true` ⇒ @Ok avec le `warn` au message
+    exact `Authentication disabled (--no-auth). Development use only!`, aucune autre
+    vérification ; 2) `static_token.is_some()` ⇒ @Ok avec le `warn` au message exact
+    `STATIC_TOKEN is set — bypasses OIDC. Development/demo only!` ; 3)
+    `oidc_issuer.is_none()` ⇒ @Err ; 4) `oidc_audience.is_none()` ⇒ @Err ; 5) sinon
+    @Ok sans message.
+  Refuser le démarrage par @anyhow::bail! aux deux messages exacts :
+    `--oidc-issuer (or OIDC_ISSUER) is required. Use --no-auth or STATIC_TOKEN for local dev.`
+    puis, issuer présent mais audience absente,
+    `--oidc-audience (or OIDC_AUDIENCE) is required. Use --no-auth or STATIC_TOKEN for local dev.`
+  Traiter l'absence et la chaîne vide comme DEUX états distincts sur les champs
+    optionnels : @validate teste `is_none()` uniquement — un `oidc_issuer` posé à la
+    chaîne vide passe la validation (comportement verrouillé par Scenario, faute de
+    validation syntaxique ; la restitution @Some("") par clap 4 pour une env vide
+    reste à confirmer, cf. `[?]` des `Tasks`).
+  Émettre les `warn` de @validate via @tracing (niveau `warn`, cible du crate) SANS
+    installer de subscriber ni dédupliquer : chaque appel de @validate les réémet, et
+    lancées avant l'installation du subscriber (@telemetry::init de ./main.rs) elles
+    sont silencieusement perdues — c'est ce contrat qui fonde l'ordre parse → init →
+    validate de ./main.rs.
+  Découper `auth_groups_admin` et `auth_groups_read` avec @str::split sur le
+    séparateur `,` puis @str::trim sur chaque segment, dans l'ordre d'origine :
+    @admin_groups et @read_groups restituent un @Vec d'@str empruntées, sans
+    déduplication, sans suppression d'éléments vides, sans normalisation de casse,
+    et sans jamais signaler d'erreur.
+  Fabriquer @oauth_metadata_url par concaténation de la base et du suffixe
+    `/.well-known/oauth-protected-resource`, où la base vaut `public_url` à défaut
+    @DEFAULT_PUBLIC_URL, amputée de TOUS ses `/` finaux (`trim_end_matches('/')`, pas
+    un seul) ; ne rien valider d'autre (syntaxe, schéma, espaces) de `public_url`.
+  Maintenir @DEFAULT_PUBLIC_URL à la valeur exacte `http://localhost:3000` comme
+    source unique du repli localhost, partagée avec @mcp::oauth_metadata (le défaut
+    `resource` de ./mcp.rs lit la constante, pas un littéral dupliqué).
+  Porter @Config les derives @clap::Parser, @std::fmt::Debug et @Clone, le nom de
+    commande `vanyline-sandbox` et l'`about` exact
+    `MCP HTTP Streamable server — OAuth2/OIDC secured` ; @Config::sandbox_root est un
+    @std::path::PathBuf — le seul champ non-@String ; le seul booléen est
+    @Config::no_auth (drapeau sans valeur en ligne de commande).
+
+Must not:
+  Valider dans @validate quoi que ce soit hors du triptyque d'auth : la syntaxe de
+    `listen` / `metrics_listen` (parse @std::net::SocketAddr, fatale, côté ./main.rs),
+    l'appairage `tls_cert`/`tls_key` (géré par ./main.rs), la bienformation de
+    `oidc_issuer`/`oidc_audience`/`public_url` (aucun contrôle d'URL), l'existence de
+    `sandbox_root` (le chemin vient du PVC monté), ni le contenu des listes de
+    groupes — y ajouter un jour ces contrôles est une décision à arbitrer, pas un
+    glissement.
+  Normaliser une valeur au parse ou à la validation : pas de trim de `oidc_issuer`
+    (le trim du slash final de l'issuer est fait par ./auth.rs pour la seule URL de
+    discovery, pas pour le contrôle `iss` du JWT), pas de trim de `public_url`, pas de
+    minuscules sur les groupes.
+  Assimiler un `static_token` posé à la chaîne vide à une absence : la chaîne vide
+    reste un token statique valide pour @validate et ./auth.rs compare à la valeur
+    brute (danger documenté en `[?]`, référence ./auth.sdd).
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` (harnais /tooling.sdd) —
+    ./config.rs n'en contient aucun hors `cfg(test)`.
+  Appeler @Config::parse_and_validate depuis ./main.rs, ou laisser @validate s'y
+    exécuter avant @telemetry::init sans le justifier : cet ordre perd les `warn` de
+    développement (cf. ./main.sdd `Must not` et le `[?]` de suppression).
+  Lire autre chose que argv et l'environnement : aucun accès fichier, réseau ou K8s
+    dans ce fichier ; l'env `VNL_LSP_TOOLCHAINS` est lue par ./lsp.rs hors @Config et
+    `RUST_LOG` par ./telemetry.rs — elles ne doivent pas migrer ici.
+
+Depends on:
+  `clap` 4 (features `derive`, `env`) — derive de @Config, drapeaux kebab-case auto,
+    `env` par champ, `default_value` compilés.
+  `anyhow` 1 — @anyhow::Result et @anyhow::bail! de @validate / @parse_and_validate.
+  `tracing` 0.1 — les deux @tracing::warn! de @validate.
+  `std` — @std::path::PathBuf, @str::split, @str::trim, @format!.
+  /tooling.sdd — harnais clippy/fmt appliqué au fichier (aucune exemption actuelle).
+  /vanyline.sdd — règle un-fichier-une-spec ; aucune contrainte transverse de
+    sécurité propre à ce fichier (les garde-fous d'auth vivent dans les consommateurs).
+
+Exposes:
+  @DEFAULT_PUBLIC_URL — constante `pub` de type `&'static str` = `http://localhost:3000`,
+    repli du public URL et du `resource` MCP.
+  @oauth_metadata_url — fonction publique `(public_url: @Option<&str>) -> @String`,
+    URI absolue RFC 9728 du document protected-resource ; consommée par ./auth.rs
+    (header `WWW-Authenticate`) uniquement.
+  @Config — struct publique aux 14 champs `pub` (cf. `Accepts`), derives @Parser /
+    @Debug / @Clone ; c'est LE type de configuration partagé sous @Arc par ./main.rs,
+    ./auth.rs, ./lib.rs, ./mcp.rs, ./git.rs, ./tools_impl.rs et ./ws/.
+  @Config::parse_and_validate — fonction publique `() -> @anyhow::Result<Self>` :
+    @clap::Parser::parse (argv + env, sortie processus directe sur erreur clap) puis
+    @validate. AUCUN appelant de production dans le workspace (grep 2026-09-26,
+    cf. `[?]` des `Tasks`).
+  @Config::validate — méthode publique `(&self) -> @anyhow::Result<()>` : le
+    triptyque d'auth ; appelée par ./main.rs après @telemetry::init.
+  @Config::admin_groups et @Config::read_groups — méthodes publiques
+    `(&self) -> @Vec<&str>`, évaluées à chaque @auth::check_access (aucun cache).
+  Le module @tests (`cfg(test)`) — 12 tests unitaires pur mémoire, sans processus,
+    sans réseau, sans fixture.
+
+Accepts:
+  Quatorze drapeaux longs (champ Rust → drapeau kebab → variable d'env → défaut
+    compilé), et rien d'autre hormis `--help` (aucun `--version`, aucun attribut
+    `version`) :
+    - @Config::listen : `--listen` / `MCP_LISTEN` / `0.0.0.0:3000` — adresse MCP +
+      éditeur, parsée en @std::net::SocketAddr par ./main.rs
+    - @Config::tls_cert : `--tls-cert` / `MCP_TLS_CERT` / absent — chemin PEM, lu par
+      ./main.rs
+    - @Config::tls_key : `--tls-key` / `MCP_TLS_KEY` / absent — chemin PEM, lu par
+      ./main.rs
+    - @Config::oidc_issuer : `--oidc-issuer` / `OIDC_ISSUER` / absent — URL OIDC ;
+      ./auth.rs en dérive l'URL de discovery (slash final tranché là seulement) et
+      contrôle le claim `iss` en chaîne exacte ; ./mcp.rs l'expose dans
+      `authorization_servers`
+    - @Config::oidc_audience : `--oidc-audience` / `OIDC_AUDIENCE` / absent —
+      client_id Authentik, contrôlé en claim `aud`
+    - @Config::auth_groups_admin : `--auth-groups-admin` / `AUTH_GROUPS_ADMIN` /
+      `kubernetes-admin` — liste séparée par virgules
+    - @Config::auth_groups_read : `--auth-groups-read` / `AUTH_GROUPS_READ` /
+      `kubernetes-view,kubernetes-edit`
+    - @Config::no_auth : `--no-auth` / `NO_AUTH` / `false` — drapeau sans valeur en
+      ligne de commande ; sa truthiness en variable d'env n'est pas arbitrée
+      (cf. `[?]`)
+    - @Config::static_token : `--static-token` / `STATIC_TOKEN` / absent — token
+      bearer de démo, donne @AccessLevel::Admin côté ./auth.rs
+    - @Config::public_url : `--public-url` / `MCP_PUBLIC_URL` / absent — URL publique,
+      jamais validée
+    - @Config::oidc_ca_cert : `--oidc-ca-cert` / `OIDC_CA_CERT` / absent — chemin PEM
+      de CA ; lu par @AuthState::build_http_client (seul champ dont la lecture peut
+      faire échouer le démarrage — mais par ./auth.rs, pas ici)
+    - @Config::metrics_listen : `--metrics-listen` / `METRICS_LISTEN` / `0.0.0.0:9090` —
+      le doc comment du champ prétend « Omit to disable the metrics server entirely » :
+      contredit par le défaut compilé, aucune valeur n'éteint le serveur (cf. `[?]`)
+    - @Config::otel_endpoint : `--otel-endpoint` / `OTEL_EXPORTER_OTLP_ENDPOINT` /
+      absent — endpoint OTLP gRPC ; sans valeur @telemetry::init démarre sans export
+    - @Config::sandbox_root : `--sandbox-root` / `VNL_SANDBOX_ROOT` / `/workspace` —
+      racine de confinement des outils/fs/git/PTY, existence non vérifiée ici
+  Ordre de priorité à chaque champ : valeur du drapeau, sinon variable d'env posée,
+    sinon défaut compilé.
+  Consommateurs réels en production : pods du controller — `args: ["--no-auth"]` +
+    env `VNL_SANDBOX_ROOT` = `/home/vanyline/workspace` (/controller/src/sandbox.sdd,
+    valeur DIVERGENTE du défaut compilé, cf. `[?]`) ; /deploy/sandbox/sandbox-test.yaml —
+    mêmes args, `VNL_SANDBOX_ROOT=/workspace` ; /sandbox/Dockerfile `ENTRYPOINT` nu
+    (tout vient alors de l'env et des défauts).
+
+Returns:
+  @Config::validate — @Ok(()) sur les trois voies (`no_auth`, `static_token`,
+    `oidc_issuer` + `oidc_audience`) ; effets de bord limités aux @tracing::warn! des
+    voies de développement ; @Ok silencieux sur la voie nominale.
+  @Config::admin_groups et @Config::read_groups — @Vec d'@str empruntées dans
+    l'ordre des segments, nombre d'éléments = nombre de virgules + 1 (jamais un @Vec
+    vide : une liste vide donne un unique élément vide, cf. `Handles`).
+  @oauth_metadata_url — @String fini : avec `public_url` configurée, l'URL de base
+    amputée de ses `/` finaux suivie de `/.well-known/oauth-protected-resource` ;
+    sans, `http://localhost:3000/.well-known/oauth-protected-resource`.
+  @Config::parse_and_validate — @Ok(@Config) complet (défauts compilés appliqués)
+    quand argv/env sont valides ET le triptyque d'auth est satisfait.
+
+Raises:
+  @Config::validate — @anyhow::Error par @anyhow::bail! dans les deux seuls cas
+    (`oidc_issuer` absent, puis `oidc_audience` absente avec issuer présent) ; les
+    deux absents ne produit QUE le message issuer (l'audience n'est jamais atteinte).
+  @Config::parse (donc @Config::parse_and_validate) — erreurs clap (drapeau inconnu,
+    valeur manquante, valeur booléenne d'env invalide) : sortie du processus avec le
+    code 2 et l'usage sur stderr sous le nom `vanyline-sandbox`, SANS passer par le
+    @anyhow::Result — @Config::parse_and_validate ne peut donc jamais remonter une
+    erreur clap sous forme d'@Err ; @clap::Parser::try_parse (utilisé par les tests)
+    les restitue en @Err réutilisable.
+  Aucune panic possible : @validate, @admin_groups, @read_groups et
+    @oauth_metadata_url sont totaux sur toute entrée (y compris chaîne vide, `public_url`
+    chargé d'espaces ou de slashes seulement).
+
+Handles:
+  `no_auth` ET `static_token` simultanés : la voie `no_auth` seule (court-circuit),
+    un seul `warn` — le `warn` `STATIC_TOKEN` n'est pas émis ; ./auth.rs applique la
+    même priorité à l'exécution (./auth.sdd).
+  Variable d'env posée à la chaîne vide (`OIDC_ISSUER=`, `STATIC_TOKEN=`) :
+    comportement attendu @Some("") et non @None sous clap 4, mais jamais exercé par
+    un test ni cité d'une doc clap — distinct de l'absence pour @validate (`is_some`) ;
+    truthiness à confirmer, cf. `[?]` des `Tasks`.
+  `public_url` ne contenant QUE des slashes (par ex. `/`) : `trim_end_matches('/')`
+    vide la base et @oauth_metadata_url produit l'URI racine-relative
+    `/.well-known/oauth-protected-resource` — comportement actuel accidentel, verrouillé
+    par Scenario en attendant l'arbitrage `[?]`.
+  `public_url` malformé (espaces, guillemets) : restitué tel quel par
+    @oauth_metadata_url ; la casse effective (header HTTP invalide) est portée par
+    l'`expect` VMP-130 de ./auth.rs, pas par ce fichier.
+  Liste de groupes vide (`AUTH_GROUPS_ADMIN=""`) : @str::split sur une chaîne vide
+    produit UN élément vide — `[""]`, pas une liste vide ; @auth::check_access ne
+    matche alors aucun groupe réel : refus silencieux par l'absurde, cf. `[?]`.
+  Groupes en double, blancs internes (` group a ` → `group a`) : conservés ; seul le
+    pourtour de chaque segment est tranché.
+  `sandbox_root` inexistant ou non monté : @Config l'accepte sans vérifier ; les
+    échecs surviennent à l'usage (confinement ./tools_impl.rs, PTY ./ws/terminal.rs).
+  `listen` / `metrics_listen` syntaxiquement invalides : acceptés par clap (`@String`
+    brut), tués à l'exécution par la parse @std::net::SocketAddr de ./main.rs — la
+    fatalité est un contrat de ./main.sdd, pas d'ici.
+  @validate appelé avant tout subscriber @tracing : les @tracing::warn! tombent dans
+    l'implant no-op global et disparaissent sans erreur ni log — raison d'être de
+    l'ordre d'./main.rs.
+  @validate appelé plusieurs fois : le même jeu de @tracing::warn! est réémis à
+    chaque appel (aucun état interne).
+  @Config::parse_and_validate sans appelant : voie morte en production ; documentée,
+    non bénie, suppression à trancher (`[?]`).
+
+Tasks:
+  [ ] Relecture de reverse-engineering du 2026-09-26 : comportement actuel du code,
+    rien de nouveau supposé. Trancher chaque `[?]` avec Sébastien avant toute `[x]`.
+  [?] @Config::parse_and_validate n'a AUCUN appelant de production (grep workspace
+    2026-09-26 ; seules mentions : sa définition et ./main.sdd) ET son ordre interne
+    (validate dans la foulée de parse, donc avant @telemetry::init) ferait perdre les
+    deux `warn` que ./main.rs s'ingénie à rendre visibles. Supprimer la fonction
+    (./main.rs fait parse et validate séparés autour de l'init tracing), ou la
+    conserver re-documentée comme utilitaire de bin/tests secondaires ?
+  [?] Doc comment du champ `metrics_listen` : « Omit to disable the metrics server
+    entirely » alors que le champ porte `default_value = "0.0.0.0:9090"` — omis ⇒
+    serveur ACTIF, et aucune valeur ne l'éteint (chaîne vide ⇒ parse @SocketAddr
+    fatale côté ./main.rs). Corriger le commentaire (« omis = actif par défaut ») ou
+    donner un vrai mécanisme d'extinction (sentinelle, `--no-metrics`) ? Même `[?]`
+    porté par ./main.sdd.
+  [?] Truthiness de la variable d'env `NO_AUTH` sur un drapeau booléen clap 4 : les
+    valeurs `NO_AUTH=1`, `NO_AUTH=`, `NO_AUTH=false` ne sont exercées par aucun test
+    ni par la doc du repo (le drapeau CLI ne prend pas de valeur, l'env si). Vérifier
+    le comportement réel de clap 4 (parseur booléen `FromStr` vs présence seule) et
+    contracter par un Scenario « ces valeurs comptent pour vrai/faux ».
+  [?] Chaîne vide ≠ absence : une env `OIDC_ISSUER=""` passe @validate (`is_some`)
+    puis fait échouer la discovery OIDC à la première requête protégée (URL construite
+    par ./auth.rs sur une base vide). Accepter (les opérateurs K8s ne posent pas d'env
+    vides) ou resserrer (@validate traitant @Some("") comme @None, ou validateur clap
+    non-vide) ? Trancher au passage la restitution réelle de clap pour une env vide.
+  [?] `static_token` à chaîne vide : @validate l'accepte et ./auth.rs compare alors à
+    la chaîne vide — tout porteur d'un header `Authorization: Bearer ` (token vide)
+    serait admis Admin. Refuser @Some("") dans @validate, ou assumer (réservé à la
+    démo derrière un flag explicite) ? Lié au `[?]` équivalent de ./auth.sdd.
+  [?] Groupes : liste vide ⇒ `[""]` et non liste vide — l'intention « pas de groupe »
+    rend le contrôle inopérant via un élément vide fantôme jamais égalable. Verrouillé
+    tel quel par le Scenario `groupes_liste_vide_donne_un_element_vide` ; si
+    l'intention est « vide = aucun groupe », corriger (filtrer les vides) et reprendre
+    le Scenario.
+  [?] `public_url` sans aucun contrôle de forme : une valeur `/` produit une URI
+    racine-relative, une valeur contenant un espace ou une guillemet casse le header
+    `WWW-Authenticate` (l'invariant VMP-130 de ./auth.rs ne tient que sur un opérateur
+    bienformé). Ajouter ici une validation d'URL absolue (validateur clap ou
+    @validate) ou maintenir la confiance opérateur et corriger ./auth.rs ?
+  [?] Divergence du `resource` public : @mcp::oauth_metadata renvoie `public_url`
+    BRUT (slash final conservé), @oauth_metadata_url le tranche — deux URI publics
+    inégaux pour un même serveur selon l'entrée (corps RFC 9728 vs header). Harmoniser
+    ./mcp.rs sur @oauth_metadata_url ? (posé en `[?]` dans ./mcp.sdd, le sujet est ce
+    helper).
+  [?] Défaut de `sandbox_root` : `/workspace` compilé (et déployé par
+    /deploy/sandbox/sandbox-test.yaml) contre `/home/vanyline/workspace` posé par le
+    controller (/controller/src/sandbox.sdd). Deux valeurs coexistent ; quel est le
+    défaut canonique — aligner, ou documenter le choix des deux terrains ?
+  [?] @Config dérive @Clone mais ./main.rs ne le clone jamais (partage sous @Arc) :
+    @Clone sert aux fixtures de tests des modules pairs (./auth.rs, ./mcp.rs,
+    ./ws/*) — le vérifier avant tout nettoyage du derive.
+  [ ] Convertir chaque Scenario ci-dessous en un test taggé par son titre (module
+    @tests de ./config.rs), le faire compiler et échouer d'abord, puis verrouiller
+    l'implémentation au minimum et passer la batterie du validator (AGENTS.md). Les
+    12 tests existants couvrent déjà : `admin_groups_defaut_liste_unique`,
+    `read_groups_defaut_deux_listes`, `groupes_escaces_autour_des_elements`,
+    `validate_no_auth_accepte_sans_oidc`, `validate_static_token_accepte_sans_oidc`,
+    `validate_issuer_manquant_refuse`, `validate_audience_manquante_refuse`,
+    `validate_issuer_et_audience_acceptes`,
+    `oauth_metadata_url_aucune_valeur_repli_localhost`,
+    `oauth_metadata_url_valeur_configuree`,
+    `oauth_metadata_url_slash_final_unique_tranche`. À créer :
+    `oauth_metadata_url_slashes_finaux_multiples_tranches`,
+    `oauth_metadata_url_base_tout_slash_relatif_actuel`,
+    `groupes_liste_vide_donne_un_element_vide`,
+    `validate_no_auth_prioritaire_sur_static_token`,
+    `validate_issuer_chaine_vide_accepte_actuellement`,
+    `validate_reiteration_reemet_les_warn`,
+    `warn_no_auth_exact_via_subscriber_capture`,
+    `warn_static_token_exact_via_subscriber_capture`,
+    `config_defauts_compiles_apres_parse_vide`, `config_quatorze_drapeaux_recus`,
+    `config_drapeau_inconnu_rejete`, `env_surcharge_le_defaut_compile`,
+    `drapeau_surcharge_la_variable_env`, `parse_ne_valide_pas`. Attention héritée de
+    /tooling.sdd : les tests qui posent l'env (@std::env::set_var — Scenarios
+    `env_surcharge_le_defaut_compile` et `drapeau_surcharge_la_variable_env`, clap
+    lisant l'env du process) doivent tourner sous verrou ou en série (les tests du
+    crate s'exécutent en parallèle).
+  [ ] Après arbitrage des `[?]` : répercuter les décisions dans ./config.rs (doc
+    comment `metrics_listen` notamment), ./main.sdd (renvoi du `[?]`
+    `parse_and_validate`), ./auth.sdd et ./mcp.sdd (renvois croisés).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe ;
+    les Scenarios marqués « actuel » le sont explicitement comme verrous de
+    comportement en attente d'arbitrage.
+  Chaque `[?]` des `Tasks` porte une décision écrite de Sébastien, répercutée dans
+    ./config.rs et les specs liées (./main.sdd, ./auth.sdd, ./mcp.sdd).
+  `cargo run -p vanyline-sandbox -- --help` énumère les quatorze drapeaux avec les
+    défauts contractés ; la batterie complète (check, test, build, clippy
+    `--all-targets -D warnings`, fmt) est verte sur `vanyline-sandbox`.
+
+Scenario: oauth_metadata_url_aucune_valeur_repli_localhost
+  Given @oauth_metadata_url
+  When elle est appelée avec @None
+  Then elle retourne exactement
+    `http://localhost:3000/.well-known/oauth-protected-resource` — le défaut compilé
+    @DEFAULT_PUBLIC_URL sert de base
+
+Scenario: oauth_metadata_url_valeur_configuree
+  Given @oauth_metadata_url
+  When elle est appelée avec @Some("https://mcp.example.com")
+  Then elle retourne exactement
+    `https://mcp.example.com/.well-known/oauth-protected-resource` — la base
+    configurée remplace le repli sans autre transformation
+
+Scenario: oauth_metadata_url_slash_final_unique_tranche
+  Given @oauth_metadata_url
+  When elle est appelée avec @Some("https://mcp.example.com/")
+  Then elle retourne la même URI qu'avec la valeur sans slash final — un `/` terminal
+    est amputé avant concaténation
+
+Scenario: oauth_metadata_url_slashes_finaux_multiples_tranches
+  Given @oauth_metadata_url
+  When elle est appelée avec @Some("https://mcp.example.com///")
+  Then elle retourne `https://mcp.example.com/.well-known/oauth-protected-resource` —
+    TOUS les `/` finaux sont retirés (`trim_end_matches` retire chaque occurrence),
+    pas un seul
+
+Scenario: oauth_metadata_url_base_tout_slash_relatif_actuel
+  Given @oauth_metadata_url — verrou de comportement ACTUEL, cf. `[?]` des `Tasks`
+  When elle est appelée avec @Some("/")
+  Then elle retourne la chaîne `/.well-known/oauth-protected-resource`, dépourvue de
+    base (vidée par le trim des slashes) — aucune validation d'URL absolue n'est
+    exercée ici
+
+Scenario: admin_groups_defaut_liste_unique
+  Given un @Config construit par la fixture @base() (tous défauts compilés)
+  When @admin_groups est appelé
+  Then le résultat est le @Vec d'un seul élément, la chaîne `kubernetes-admin` — le
+    défaut compilé ne contient aucune virgule
+
+Scenario: read_groups_defaut_deux_listes
+  Given un @Config construit par la fixture @base()
+  When @read_groups est appelé
+  Then le résultat est `["kubernetes-view", "kubernetes-edit"]` dans cet ordre — le
+    défaut compilé se découpe sur la virgule sans blancs résiduels
+
+Scenario: groupes_escaces_autour_des_elements
+  Given un @Config construit par @base() avec `auth_groups_read` posé à la chaîne
+    `" group-a , group-b "`
+  When @read_groups est appelé
+  Then le résultat est `["group-a", "group-b"]` — chaque segment est tranché de ses
+    blancs environnants, l'ordre d'origine est conservé
+
+Scenario: groupes_liste_vide_donne_un_element_vide
+  Given un @Config construit par @base() avec `auth_groups_admin` posé à la chaîne
+    vide — verrou de comportement ACTUEL, cf. `[?]` des `Tasks`
+  When @admin_groups est appelé
+  Then le résultat est le @Vec d'un seul élément, la chaîne vide (`[""]`), et NON une
+    liste vide — @str::split sur une chaîne vide produit un segment vide
+
+Scenario: validate_no_auth_accepte_sans_oidc
+  Given un @Config construit par @base() avec `no_auth` = `true`, `oidc_issuer` =
+    @None et `oidc_audience` = @None
+  When @validate est appelé
+  Then le résultat est @Ok — `no_auth` dispense du couple OIDC (dispense de
+    développement assumée, signalée par son `warn`)
+
+Scenario: validate_static_token_accepte_sans_oidc
+  Given un @Config construit par @base() avec `static_token` = @Some("demo-token"),
+    sans `oidc_issuer` ni `oidc_audience`
+  When @validate est appelé
+  Then le résultat est @Ok — la PRÉSENCE de `static_token`, pas sa valeur, dispense
+    l'OIDC
+
+Scenario: validate_no_auth_prioritaire_sur_static_token
+  Given un @Config construit par @base() avec `no_auth` = `true` ET `static_token` =
+    @Some("s3cret"), sans couple OIDC, et un subscriber @tracing de capture installé
+  When @validate est appelé
+  Then le résultat est @Ok et UN SEUL événement `warn` est capturé, au message exact
+    `Authentication disabled (--no-auth). Development use only!` — le `warn`
+    `STATIC_TOKEN` n'est pas émis (court-circuit de la voie `no_auth`)
+
+Scenario: validate_issuer_manquant_refuse
+  Given un @Config construit par @base() avec `oidc_audience` = @Some("aud") et
+    `oidc_issuer` = @None
+  When @validate est appelé
+  Then le résultat est @Err dont le message est exactement
+    `--oidc-issuer (or OIDC_ISSUER) is required. Use --no-auth or STATIC_TOKEN for local dev.`
+
+Scenario: validate_audience_manquante_refuse
+  Given un @Config construit par @base() avec `oidc_issuer` =
+    @Some("https://example.com") et `oidc_audience` = @None
+  When @validate est appelé
+  Then le résultat est @Err dont le message est exactement
+    `--oidc-audience (or OIDC_AUDIENCE) is required. Use --no-auth or STATIC_TOKEN for local dev.`
+
+Scenario: validate_issuer_et_audience_acceptes
+  Given un @Config construit par @base() avec `oidc_issuer` =
+    @Some("https://example.com") et `oidc_audience` = @Some("my-client")
+  When @validate est appelé
+  Then le résultat est @Ok — la voie nominale OIDC ne produit AUCUN `warn`
+
+Scenario: validate_issuer_chaine_vide_accepte_actuellement
+  Given un @Config construit par @base() avec `oidc_issuer` = @Some("") (l'équivalent
+    d'une env `OIDC_ISSUER` posée vide) et `oidc_audience` = @Some("aud") — verrou de
+    comportement ACTUEL, cf. `[?]` des `Tasks`
+  When @validate est appelé
+  Then le résultat est @Ok — @validate teste l'absence (`is_none`), pas le contenu :
+    la chaîne vide passe et l'échec de discovery est repoussé à l'exécution
+
+Scenario: validate_reiteration_reemet_les_warn
+  Given un @Config construit par @base() avec `no_auth` = `true` et un subscriber
+    @tracing de capture installé
+  When @validate est appelé DEUX fois
+  Then deux `warn` identiques sont capturés — @validate est sans état interne et ne
+    déduplique pas ses avertissements
+
+Scenario: warn_no_auth_exact_via_subscriber_capture
+  Given un @Config construit par @base() avec `no_auth` = `true` et un subscriber
+    @tracing de capture installé AVANT l'appel
+  When @validate est appelé
+  Then un événement de niveau `warn` est capturé au message EXACT
+    `Authentication disabled (--no-auth). Development use only!` — c'est ce message,
+    émis APRÈS @telemetry::init, que ./main.rs rend visible
+
+Scenario: warn_static_token_exact_via_subscriber_capture
+  Given un @Config construit par @base() avec `static_token` = @Some("demo-token")
+    et un subscriber @tracing de capture installé AVANT l'appel
+  When @validate est appelé
+  Then un événement de niveau `warn` est capturé au message EXACT
+    `STATIC_TOKEN is set — bypasses OIDC. Development/demo only!` (tiret long tel
+    quel au source)
+
+Scenario: config_defauts_compiles_apres_parse_vide
+  Given @Config via @clap::Parser::try_parse_from avec comme seuls arguments le nom
+    du programme, dans un environnement où AUCUNE des quatorze variables d'env n'est
+    posée
+  When le parse réussit
+  Then `listen` vaut `0.0.0.0:3000`, `metrics_listen` vaut `0.0.0.0:9090`,
+    `sandbox_root` vaut `/workspace`, `auth_groups_admin` vaut `kubernetes-admin`,
+    `auth_groups_read` vaut `kubernetes-view,kubernetes-edit`, `no_auth` vaut `false`,
+    et les huit champs optionnels (`tls_cert`, `tls_key`, `oidc_issuer`,
+    `oidc_audience`, `static_token`, `public_url`, `oidc_ca_cert`, `otel_endpoint`)
+    sont @None — les défauts compilés sont l'unique source de cette ligne de conduite
+
+Scenario: config_quatorze_drapeaux_recus
+  Given @Config via @clap::Parser::try_parse_from avec les quatorze drapeaux longs
+    kebab (`--listen`, `--tls-cert`, `--tls-key`, `--oidc-issuer`, `--oidc-audience`,
+    `--auth-groups-admin`, `--auth-groups-read`, `--no-auth`, `--static-token`,
+    `--public-url`, `--oidc-ca-cert`, `--metrics-listen`, `--otel-endpoint`,
+    `--sandbox-root`) et des valeurs distinctes des défauts (`--no-auth` posé sans
+    valeur)
+  When le parse réussit
+  Then les quatorze champs portent exactement les valeurs passées — la surface
+    drapeau complète est exercée (kebab-case auto, drapeau booléen sans valeur,
+    @std::path::PathBuf pour `sandbox_root`)
+
+Scenario: config_drapeau_inconnu_rejete
+  Given @Config via @clap::Parser::try_parse_from avec le drapeau inexistant
+    `--namespace`
+  When le parse est tenté
+  Then le résultat est @Err (erreur clap réutilisable, sans sortie processus) — via
+    @Config::parse, et donc @Config::parse_and_validate, la même erreur serait une
+    sortie code 2 avec l'usage `vanyline-sandbox` sur stderr
+
+Scenario: env_surcharge_le_defaut_compile
+  Given la variable d'environnement `MCP_LISTEN` posée à `127.0.0.1:34001` (sous
+    verrou de série, cf. `Tasks`) et @Config via @clap::Parser::try_parse_from sans
+    autre argument
+  When le parse réussit
+  Then `listen` vaut `127.0.0.1:34001` — la variable d'env surcharge le défaut compilé
+    `0.0.0.0:3000` (les quatorze noms d'env du tableau `Accepts` se vérifient de la
+    même façon ; un test sérialisé par variable suffit à couvrir la mécanique `env`)
+
+Scenario: drapeau_surcharge_la_variable_env
+  Given la variable `MCP_LISTEN` posée à `127.0.0.1:34001` et @Config via
+    @clap::Parser::try_parse_from avec le drapeau `--listen 127.0.0.1:34002` (sous
+    verrou de série, cf. `Tasks`)
+  When le parse réussit
+  Then `listen` vaut `127.0.0.1:34002` — la priorité est flag > env > défaut compilé
+
+Scenario: parse_ne_valide_pas
+  Given @Config via @clap::Parser::try_parse_from sans argument et sans aucune des
+    variables d'auth (`OIDC_ISSUER`, `OIDC_AUDIENCE`, `NO_AUTH`, `STATIC_TOKEN`)
+  When le parse réussit
+  Then `listen` porte son défaut et @validate appelé sur le résultat rend @Err — la
+    validation est un pas SÉPARÉ du parse (raison d'être de l'ordre parse →
+    @telemetry::init → @validate de ./main.rs ; @Config::parse_and_validate n'est pas
+    impliqué)

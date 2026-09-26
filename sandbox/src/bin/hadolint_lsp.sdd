@@ -1,0 +1,527 @@
+Spec: Hadolint LSP Bin
+
+Purpose:
+  Binaire `vnl-hadolint-lsp` — serveur LSP stdio minimal autonome, troisième `[[bin]]` du crate
+    `vanyline-sandbox` (après `vanyline-sandbox` et `vanyline-maint`, `../../Cargo.toml`), baké dans
+    l'image toolchain `docker` à côté du binaire statique `hadolint` épinglé. Contrat du fichier :
+    un shim LSP « maison » qui ne fait QUE traduire des diagnostics hadolint en notifications
+    `textDocument/publishDiagnostics` — rôle `diagnostics-merge` du multiplexeur LSP de `../lsp.rs`
+    (feature docker-lsp). Il reçoit le doc-sync en fan-out (le multiplexeur ne lui envoie JAMAIS de
+    requête, cf. `@aux_answers_requests` dans `../lsp.rs`), lance `hadolint --format json
+    --no-color -` avec le CONTENU du buffer sur stdin (jamais l'URI en argv, jamais de shell), et
+    publie la conversion. Il n'implémente aucune capacité LSP au-delà du doc-sync : toutes les
+    requêtes hors `initialize`/`shutdown` reçoivent `-32601` par réflexe défensif. Un seul fichier,
+    un seul contrat : le patron LSP (framing, debounce, générations, abandon de résultat périmé,
+    dégradation silencieuse) est partagé avec son jumeau `./ruff_lsp.rs` (clone quasi verbatim —
+    sa spec sœur `./ruff_lsp.sdd` est rédigée en parallèle, cf. Tasks `[!]`) mais n'est PAS facturé
+    dans un module commun aujourd'hui.
+
+Owns:
+  ./hadolint_lsp.rs
+
+Can read:
+  ../lsp.rs — @lsp::FrameReader, @lsp::encode_message (framing `Content-Length` réutilisé),
+    @spawn_aux_startup (mode de lancement : cwd = sandbox_root, stdio pipés), rôle
+    `diagnostics-merge`, @aux_answers_requests (jamais de requête vers cet aux), drain stderr de
+    l'aux vers `tracing`, cycle de vie (mort du primaire ⟹ kill des aux)
+  ../tests/hadolint_lsp.rs — harnais bout-en-bouche existant (faux hadolint en tête de `PATH`,
+    journalisation argv/stdin du fils via env `VNL_FAKE_HADOLINT_ARGS`/`VNL_FAKE_HADOLINT_STDIN`)
+  ../../Cargo.toml — enregistrement `[[bin]] name = "vnl-hadolint-lsp", path =
+    "src/bin/hadolint_lsp.rs"`
+  ./ruff_lsp.rs — jumeau `vnl-ruff-lsp` (patron partagé, divergences : codes `VNL-SBX-LSP-012`/
+    `-013`, sévérités ruff)
+  ../../../toolchains/docker/Dockerfile — build `cargo build --release -p vanyline-sandbox --bin
+    vnl-hadolint-lsp` + copie `/usr/local/bin/vnl-hadolint-lsp` (hadolint v2.15.1 épinglé, SHA256
+    vérifié)
+  ../../../toolchains/docker/test-toolchain-docker.sh — smoke bout-en-bouche dans l'image réelle
+    (LSP_SMOKE_OK, HADOLINT_CONFIG_OK — cwd et `.hadolint.yaml`)
+
+References:
+  ../../../docs/architecture.md — section « Wrapper `vnl-hadolint-lsp` » (design docker-lsp :
+    déclencheurs, stdin jamais argv, fin de range = fin de ligne, dégradation silencieuse)
+  ../../../controller/src/sandbox.sdd — preset `docker_lsp_composite` : primaire
+    `docker-langserver --stdio`, aux `{role: "diagnostics-merge", bin:
+    "/toolchains/docker-lsp/usr/local/bin/vnl-hadolint-lsp", args: [], sans initOptions}` (émetteur
+    de la spec d'invocation)
+  ../../../vanyline.sdd — contrainte racine « messages d'erreur avec identifiant unique » (cf.
+    Tasks `[?]` codes stderr)
+  ../../../tooling.sdd — ligne 19 : exemption `cfg(test)` seulement pour ce fichier ; harnais
+    `print_stderr` (cf. Tasks `[?]` `eprintln!`)
+  ../../../AGENTS.md — pas de `println!`/`eprintln!` en principe, exemptions binaires tracées
+
+Must:
+  Être enregistré troisième `[[bin]]` du crate (`vnl-hadolint-lsp` dans `../../Cargo.toml`) et
+    n'exposer AUCUN item `pub` : tout est privé au binaire, seul @main est exécutable.
+  Framing : décoder stdin via @lsp::FrameReader (`Content-Length`) par lectures de 8192 octets,
+    encoder toute sortie via @lsp::encode_message ; une trame = un seul `write_all` sous verrou
+    asynchrone stdout + `flush` — jamais deux trames entremêlées.
+  Distinguer requête et notification par la présence d'un `id` non-null et non-absent dans la
+    trame JSON.
+  Répondre aux requêtes — exactement deux méthodes répondent, tout le reste en erreur JSON-RPC
+    `-32601` avec message `Method not found` :
+    `initialize` ⟹ `result` = `{"capabilities":{"textDocumentSync":{"openClose":true,"change":2}},
+    "serverInfo":{"name":"vnl-hadolint-lsp","version":<CARGO_PKG_VERSION>}}`, les `params` du
+    client entièrement ignorés ; `shutdown` ⟹ `result` = `null`.
+  Traiter les notifications : `exit` ⟹ la boucle principale rend @ExitCode::SUCCESS ;
+    `textDocument/didOpen` ⟹ enregistrer le doc puis lint IMMÉDIAT ; `textDocument/didChange` ⟹
+    appliquer les `contentChanges` au doc connu puis lint DEBouncé ; `textDocument/didSave` ⟹ si
+    doc connu, disqualifier les debounce en sommeil puis lint IMMÉDIAT ; `textDocument/didClose`
+    ⟹ retirer le doc et publier un `publishDiagnostics` vide ; toute autre notification
+    (`initialized` incluse et `$/...`) ignorée silencieusement, sans réponse ni log.
+  Publier `textDocument/publishDiagnostics` avec `params` = `{uri, version, diagnostics}` —
+    l'URI est toujours celui du document linté (le champ `file` de hadolint, `<stdin>`, est
+    IGNORED), `version` = la version du doc à l'instant de la publication (`didClose` : la version
+    connue du doc retiré).
+  Règle de fraîcheur (cœur du contrat anti-obsolescence) : état partagé `docs` (URI → texte +
+    version) et `gens` (URI → compteur) derrière un @std::sync::Mutex, jamais tenu à travers un
+    await. Chaque mutation (didOpen/didSave/re-déclenchement) incrémente la génération ; chaque
+    lint capture `(texte, version, génération)` SYNCHRONEMENT à son déclenchement (avant le
+    @tokio::spawn — sinon il hériterait de la génération d'un `didChange` survenu pendant
+    l'ordonnancement, double publication vue en intégration) ; à la complétion, si le couple
+    `(version, génération)` n'est plus courant, le résultat est ABANDONNÉ et un lint debouncé du
+    contenu courant est re-déclenché si le doc existe encore. Un lint debouncé se re-vérifie au
+    réveil du sommeil (`current_gen` == sienne, sinon il se disqualifie lui-même) — invariant :
+    jamais deux tâches vivantes à la même génération.
+  Debounce : @DEBOUNCE = 500 ms pile, déclencheurs tranchés par le design docker-lsp : `didOpen`
+    et `didSave` immédiats (`didOpen` immédiat requis pour que le tool MCP `lsp_diagnostics` —
+    didOpen + attente sur fichier jamais modifié — voie hadolint), `didChange` debouncé.
+  Lancer hadolint par @tokio::process::Command avec argv LITTÉRAUX exacts :
+    `hadolint --format json --no-color -` (résolution par `PATH`, sans chemin absolu) ; stdin,
+    stdout, stderr du fils pipés ; AUCUN `current_dir` posé ici — le fils hérite du cwd du wrapper
+    (posé par @spawn_aux_startup dans `../lsp.rs` = sandbox_root, racine du projet git), c'est CE
+    cwd que hadolint scanne pour son `.hadolint.yaml`, zéro interpolation d'aucune valeur LSP.
+  Écrire le contenu du buffer sur le stdin du fils dans une tâche séparée puis `shutdown` le
+    stdin (au-delà de la capacité du pipe, un write séquentiel avant attente bloquerait les deux
+    bouts) ; le code de sortie ≠ 0 du fils (violations trouvées) est NORMAL — la stdout est rendue
+    dans tous les cas, seule la conversion décide.
+  Convertir la sortie hadolint (`@convert_hadolint_output`) : tableau JSON d'objets
+    `{file,line,column,level,code,message}` ⟹ diagnostics LSP
+    `{range,severity,code,source,message}` avec : positions hadolint 1-based ⟹ ranges LSP 0-based
+    (`start = (line-1, column-1)`), ligne clampée à la dernière ligne du doc, colonne clampée à la
+    longueur UTF-16 de la ligne ; `end` = FIN DE LIGNE (design risque 2 : hadolint ne donne qu'un
+    point) en unités UTF-16 ; sévérités `error`⟹1, `warning`⟹2, `info`⟹3, `style`⟹4, tout le
+    reste (inconnu ou absent)⟹3 ; `code` verbatim (chaîne) ; `source` = `"hadolint"` ;
+    `column` absent ⟹ défaut 1 (donc caractère 0) ; `message` absent ⟹ chaîne vide. Entrée
+    non-tableau, JSON invalide ou objet sans `line` numérique ⟹ contribution vide (`vec![]`,
+    l'objet est filtré).
+  Appliquer les `contentChanges` (`@apply_content_changes`) dans l'ordre, chacun sur le texte muté
+    par le précédent : sans `range` ou `range: null` ⟹ remplacement TOTAL (le client MCP full-sync
+    de `../lsp_client.rs` omet le champ) ; avec `range` ⟹ édit incrémental dont les positions sont
+    converties en offsets OCTETS par @utf16_offset (colonnes en unités UTF-16 comme le spec LSP,
+    lignes et colonnes clamppées aux bornes du texte, jamais de coupure au milieu d'un caractère).
+    Un changement sans `text` chaîne ou au `range` malformé (position sans `line`/`character`
+    numériques) est ignoré, le texte reste intact — un range malformé ne corrompt jamais
+    au-delà de lui-même.
+  Dégradation silencieuse (le wrapper ne meurt JAMAIS à cause de hadolint) : spawn en échec, stdin
+    du fils indisponible ou erreur d'E/S ⟹ message `vnl-hadolint-lsp: {cause} — contribution vide
+    pour {uri}` sur stderr et publication `[]` ; stdout non-JSON ⟹ message
+    `vnl-hadolint-lsp: sortie hadolint non-JSON — contribution vide pour {uri}` sur stderr et
+    publication `[]`. Les lignes stderr utilisent `eprintln!` (stdout réservé aux trames LSP,
+    comme `../maint.rs`) — le multiplexeur draine ce stderr vers `tracing`.
+  Repartir d'une mutex empoisonnée sans propager (@PoisonError::into_inner) : les sections
+    critiques ne font qu'insérer/retirer, la map reste intacte.
+  Démarrer le runtime par @tokio::main ; @main rend @ExitCode::SUCCESS dans les deux cas de fin
+    (notification `exit`, ou EOF/erreur de lecture sur stdin).
+
+Must not:
+  Lancer un shell (`sh -c` ou autre), ni placer l'URI, l'URL ou un chemin de fichier dans les argv
+    passés à hadolint — le seul flux de contenu est le stdin ; aucune valeur LSP (URI, contenu,
+    initOptions) n'est interpolée dans la commande.
+  Accéder au fichier désigné par l'URI : le lint travaille EXCLUSIVEMENT sur le contenu du buffer
+    (le fichier sur disque peut être plus vieux ou plus récent, c'est hors contrat).
+  Écrire sur stdout autre chose que des trames LSP `Content-Length` valides (JSON-RPC uniquement)
+    — diagnostics de fonctionnement réservés à stderr.
+  Mourir, paniquer ou retourner un code non nul à cause d'un hadolint absent, lent, bavard, en
+    erreur ou crachant du non-JSON — la seule dégradation est la contribution vide.
+  Publier un diagnostic plus vieux que le buffer : la vérification `(version, génération)` est
+    impérative avant toute publication (hors `didClose` qui publie `[]` par construction).
+  Répondre à une requête LSP standard autre que `initialize`/`shutdown` (`hover`, `completion`,
+    `codeAction`, etc.) autrement que par `-32601` — aucune capacité n'est annoncée au-delà du
+    doc-sync.
+  Lire un argument de ligne de commande, une variable d'environnement ou un fichier de config, ni
+    initialiser `tracing` — @main ignore argv entièrement, le preset du controller passe `args: []`.
+  Tenir la mutex std de l'état interne à travers un `await` (le verrou asynchrone ne protège que
+    stdout).
+
+Depends on:
+  vanyline_sandbox::lsp (../lsp.rs, items `pub`) — @FrameReader (@push/@next_frame) et
+    @encode_message : le framing du wrapper EST celui de la session ; toute évolution du framing
+    côté `../lsp.rs` est un changement de contrat ici
+  `tokio` (features full) — @tokio::main, @tokio::spawn, @tokio::time::sleep, @tokio::process,
+    @tokio::io (stdin/stdout, @AsyncReadExt/@AsyncWriteExt), @tokio::sync::Mutex
+  `serde_json` — @Value, @json! pour les enveloppes JSON-RPC et la conversion
+  `std` — @HashMap, @Arc, @Mutex/@PoisonError, @ExitCode, @Duration
+
+Exposes:
+  Le binaire `vnl-hadolint-lsp` (troisième `[[bin]]` du crate, baké `/usr/local/bin/` dans
+    l'image toolchain `docker`), lancé UNIQUEMENT comme enfant `aux` du multiplexeur (rôle
+    `diagnostics-merge`, preset `docker_lsp_composite`) — jamais par l'utilisateur, jamais par un
+    Job.
+  Surface protocolle (le vrai « Exposes » d'un serveur stdio sans API) :
+    requêtes `initialize` (réponse capacités minimales) et `shutdown` (résultat `null`) ; erreur
+    `-32601` pour toute autre requête ; notifications consommées `exit`,
+    `textDocument/didOpen`/`didChange`/`didSave`/`didClose` ; notifications produites
+    `textDocument/publishDiagnostics`.
+  Aucun item `pub` : @main, @State, @run_lint, @run_hadolint, @handle_frame,
+    @apply_content_changes, @convert_hadolint_output sont privés (les tests unitaires du module
+    `tests` y accèdent par `super::*`).
+
+Accepts:
+  stdin : trames JSON-RPC 2.0 `Content-Length` du multiplexeur uniquement (fan-out des
+    notifications doc-sync + copie d'`initialize`, invariant 2/3 de `../lsp.rs`).
+  `initialize` : `params` ignorés (absents, vides ou malformés — la réponse est constante).
+  `textDocument/didOpen` : `params.textDocument.uri` (chaîne) requis ; `text` optionnel ⟹ chaîne
+    vide ; `version` optionnel ⟹ `1` ; `languageId` ignoré.
+  `textDocument/didChange` : `textDocument.uri` requis et URI DÉJÀ ouverte (autrement notification
+    orpheline ignorée) ; `contentChanges` absent ou non-tableau ⟹ aucun edit appliqué mais debounce
+    armé quand même ; `textDocument.version` optionnel ⟹ la version connue est conservée.
+  `textDocument/didSave` / `textDocument/didClose` : `params.textDocument.uri` requis ; `didSave`
+    sur URI inconnue ⟹ ignoré (aucun contenu à relinté).
+  argv : ignoré. Environnement : lu uniquement par la résolution `PATH` de `hadolint` (aucun env
+    propre au wrapper).
+
+Returns:
+  @main rend toujours @ExitCode::SUCCESS (`0`) — y compris sur erreur de lecture stdin. Aucun
+    chemin ne produit `1` : la défaillance de service se matérialise en contribution vide, jamais
+    en code de sortie (le multiplexeur, lui, tue l'aux par @Child::kill à la mort du primaire — le
+    wrapper n'a pas à s'auto-terminer sur la perte du primaire, il voit EOF et finit `0`).
+  stdout : trames `initialize` (résultat capacités), `shutdown` (résultat `null`), `-32601`
+    (erreur), `textDocument/publishDiagnostics` (`{uri, version, diagnostics}`, `version`
+    optionnelle côté client mais toujours portée ici).
+  stderr : lignes `vnl-hadolint-lsp: ...` (échec de spawn/E-S, stdout non-JSON) — seul canal de
+    diagnostic, jamais une trame complète n'y manque en plus de la contribution vide.
+
+Raises:
+  Aucun panic attendu sur les chemins de service : offsets bornés par clamp (@utf16_offset,
+    @convert_hadolint_output), arithmétique 1-based protégée par @usize::try_from + repli `0`,
+    mutex empoisonnée récupérée, `text.replace_range` alimenté uniquement par des offsets
+    monotoniquement bornés et re-ordonnés (start ≤ end).
+  Les exemptions @clippy::unwrap_used/@expect_used ne vivent que sous `cfg(test)`
+    (la ligne `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]`, suivie par
+    `../../../tooling.sdd`).
+
+Handles:
+  Trame non-JSON sur stdin : ignorée silencieusement, le flux n'est pas considéré corrompu — la
+    trame suivante est traitée normalement.
+  Trame sans `method` (réponse d'un tiers, notification orpheline) : ignorée — le wrapper n'émet
+    jamais de requête, donc ne reçoit jamais de réponse légitime.
+  `id: null` sur une trame à méthode : traité comme NOTIFICATION (l'absence de réponse peut faire
+    pendre un émetteur qui se croirait en requête — JSON-RPC réserve `null`, cf. Tasks `[?]`).
+  `didChange`/`didSave` sur URI jamais ouverte (ou déjà fermée) : ignorés, sans log ni hadolint
+    lancé.
+  `didOpen` répété sur la même URI : le doc est écrasé, la génération bumpée (les lints en vol
+    d'une réouverture se disqualifient), lint immédiat du nouveau contenu.
+  Résultat périmé sur URI entre-temps FERMÉE : abandon sans re-déclenchement (le `didClose` a déjà
+    publié `[]`).
+  `exit` sans `shutdown` préalable, et inversement `shutdown` sans `exit` : acceptés sans état —
+    le serveur n'a aucune machine à états LSP (initialize multiples répondent, doc-sync accepté
+    avant initialize — laxisme assumé car le client unique est le multiplexeur, cf. Tasks `[?]`).
+  Sortie par EOF sans `exit` (le multiplexeur ferme le canal stdin ⟹ canal mort puis kill) : break
+    de la boucle, fin `0`. Des lints en vol à la terminaison sont simplement abandonnés (tâches
+    tokio tuées avec le processus ; le fils hadolint perd son stdin et s'éteint).
+  `write_all`/`flush` sur stdout en échec (pipeline fermé) : erreur ignorée, la boucle continue
+    jusqu'à EOF (cf. Tasks `[?]`).
+  stderr du fils hadolint : capturé (piped pour ne rien laisser fuiter sur le stderr du wrapper)
+    puis JETÉ — jamais relu ni journalisé (cf. Tasks `[?]`).
+  Codes de sortie hadolint ≠ 0 (violations trouvées ⟹ exit 1) : NORMAL, la stdout est convertie
+    quand même.
+  Positions inversées dans un `range` de didChange (end < start) : les offsets sont ré-ordonnés
+    (swap silencieux) puis `replace_range` — tolérance jamais testée, cf. Tasks `[?]`.
+  CRLF : le découpage en lignes se fait sur `\n` seul ; un `\r` de fin de ligne reste dans le
+    contenu de ligne (longueur UTF-16 et clamp le comptent) — classe « cosmétique CRLF » reconnue
+    par le design docker-lsp.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement accidentel
+    ne devient contrat qu'après cette relecture (`../../../.specdd/bootstrap.project.md`).
+  [!] Cohérence avec le jumeau `./ruff_lsp.sdd` (rédigée en parallèle) : le patron partagé
+    (framing @lsp::encode_message/@FrameReader, `initialize` capacités minimales, `-32601`
+    défensif, déclencheurs didOpen/didSave immédiats + didChange debouncé 500 ms, capture
+    `(texte, version, génération)` + abandon périmé, stdin-pipe en tâche séparée, dégradation
+    silencieuse, cwd hérité, stdout réservée aux trames) doit être énoncé MOT POUR MOT de même dans
+    les deux specs ; vérifier à la relecture que les titres de Scenario communs sont miroirs.
+    Divergences légitimes à ce jour : codes d'erreur stderr (voir `[?]` suivant), mapping sévérités
+    (hadolint 4 niveaux ⟹ 1/2/3/4 vs ruff qui relaie ses propres valeurs), fin de range
+    (`end_location` ruff avec repli fin-de-ligne vs fin-de-ligne hadolint), colonnes (scalaires
+    Unicode ruff vs UTF-16 hadolint — cf. `../../../docs/architecture.md`). Trancher aussi :
+    maintenir le clone quasi verbatim ou factoriser le patron dans un module partagé du crate.
+  [?] Identifiants d'erreur stderr : `ruff_lsp.rs` préfixe ses diagnostics de fonctionnement
+    `VNL-SBX-LSP-012` (spawn/E-S) / `VNL-SBX-LSP-013` (stdout non-JSON), alors qu'ici les messages
+    sont en clair (`vnl-hadolint-lsp: impossible de lancer hadolint: ...`) — la contrainte racine
+    de `../../../vanyline.sdd` demande un identifiant unique par message d'erreur. Harmoniser :
+    ajouter des codes à hadolint (lesquels, avant 012 ?), les retirer de ruff, ou exempter le
+    stderr des wrappers (à acter quelque part) ?
+  [?] `eprintln!` sans `#[allow]` local alors que `print_stderr` est `deny` au niveau workspace
+    (`../../../tooling.sdd`) — même question ouverte que `./maint.sdd` (exemption des binaires à
+    stdout protocolaire) ; vérifier que l'échappatoire est délibérée et la tracer comme ligne
+    d'exemption dédiée, comme la ligne `cfg(test)` déjà suivie (tooling.sdd ligne 19).
+  [?] Swap silencieux des ranges inversés (end < start) dans @apply_content_changes : tolérance
+    accidentelle (le spec LSP interdit un range inverse) ou contrat de robustesse ? Jamais couvert
+    par un test — trancher entre le bénir (Scenario + test) ou ignorer le changement comme un
+    range malformé.
+  [?] `"code": null` publié quand l'objet hadolint n'a pas de `code` : @Diagnostic.code LSP attend
+    string|integer, `null` est non conforme (le merger de `../lsp.rs` et le frontend tolèrent).
+    hadolint émet toujours un `code` ⟹ branche jamais exercée en réel : filtrer l'objet, omettre
+    la clé, ou assumer `null` ?
+  [?] `id: null` traité comme notification : un émetteur JSON-RPC strict n'envoie jamais cela
+    (réservé), et le multiplexeur non plus — laxisme sans risque ou faille silencieuse (requête
+    jamais traitée ni refusée) ? Idem : requête sans `method` = ignorée sans `-32601` possible.
+  [?] stderr du fils hadolint jeté (piped puis abandonné dans `wait_with_output`) : en cas
+    d'avertissement hadolint (config invalide par ex.) l'information ne remonte NULLE PART. Le
+    drainer vers le stderr du wrapper (visible via le drain `tracing` du multiplexeur) ou assumer
+    le silence (seule la contribution compte) ?
+  [?] Aucune machine à états LSP : `initialize` répond à l'infini, `shutdown` ne désarme rien,
+    doc-sync et lints fonctionnent sans `initialize`. Assumer (client unique = multiplexeur,
+    défense déjà ailleurs) ou imposer un garde « non initialisé ⟹ ignoré » ?
+  [!] Le test unitaire `convert_hadolint_output_example` documente une coquille de l'exemple du
+    fichier de tâche d'origine (`end.character` 18 au lieu de 15 pour `ADD --link x /y`) : le
+    contrat retenu et testé est « fin de range = fin de ligne » (15). Confirmer que l'exemple de
+    tâche est bien l'erreur, pas un troisième avis.
+  [ ] Lacunes de couverture (Scenarios ci-dessous sans test à ce jour — les convertir, taggés par
+    leur titre ; les autres Scenarios ont déjà leur test, unitaire dans le module `tests` de
+    `./hadolint_lsp.rs` ou bout-en-bouche dans `../tests/hadolint_lsp.rs`) :
+    `hadolint_output_non_json_degrades_empty`, `did_change_sur_uri_jamais_ouvert_ignoree`,
+    `did_save_sur_uri_jamais_ouvert_ignoree`, `trame_non_json_ignoree_serveur_vivant`,
+    `reponse_sans_methode_ignoree`, `eof_stdin_termine_sans_exit_en_zero`,
+    `exit_sans_shutdown_termine_en_zero`, `did_open_version_absente_publie_version_un`,
+    `did_change_version_absente_conserve_la_version`, `did_open_reouverture_recapitale_le_doc`,
+    `convert_hadolint_output_champs_absents`, `cwd_du_wrapper_propage_a_hadolint`
+    (le dernier en test cargo via faux hadolint écrivant `$PWD` ; le respect réel de
+    `.hadolint.yaml` est couvert hors cargo par `HADOLINT_CONFIG_OK` de
+    `../../../toolchains/docker/test-toolchain-docker.sh`).
+  [ ] Lisibilité signalée (non bloquant) : @convert_hadolint_output est appelée APRÈS un
+    pré-parse `serde_json::from_str` de contrôle dans @run_lint (double parse du même stdout,
+    cosmétique) ; un `didChange` sans `contentChanges` applicables (notification sans edits) arme
+    quand même un relint debouncé — comportement couvert mais digne d'un commentaire.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre (unitaire ou bout-en-bouche
+    sur `CARGO_BIN_EXE_vnl-hadolint-lsp`, faux hadolint en tête de `PATH`).
+  Les décisions `[?]`/`[!]` sont tranchées par Sébastien et reflétées dans la spec, en cohérence
+    avec `./ruff_lsp.sdd`.
+  La batterie complète du workspace (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte, et le smoke image (`../../../toolchains/docker/test-toolchain-docker.sh`)
+    n'a pas régressé sur LSP_SMOKE_OK/HADOLINT_CONFIG_OK.
+
+Scenario: initialize_handshake
+  Given le binaire spawné avec un faux hadolint en tête de `PATH` (harnais
+    `../tests/hadolint_lsp.rs`)
+  When une requête `initialize` (`id` 1) arrive sur stdin
+  Then la réponse porte `id` 1, `result.capabilities.textDocumentSync.change = 2`,
+    `openClose = true`, `serverInfo.name = "vnl-hadolint-lsp"` et un `serverInfo.version` non vide
+    (CARGO_PKG_VERSION)
+  When une requête `shutdown` puis la notification `exit` suivent, stdin fermé
+  Then la réponse `shutdown` porte `result: null` sans `error`, et le process termine code `0`
+  (test existant `initialize_handshake` — le premier Then seul peut être scindé si un test séparé
+  du versionnage est voulu)
+
+Scenario: unknown_request_rejected_not_hung
+  Given le binaire démarré et initialisable
+  When une requête `textDocument/hover` (`id` 7) lui parvient (le multiplexeur ne fait jamais
+    ça — défense)
+  Then une réponse `id` 7 avec `error.code = -32601` est émise dans les 5 s, sans que le serveur
+    se mette à pendre
+  When une requête `initialize` valide suit immédiatement
+  Then elle reçoit son `result` (le serveur est vivant) — test existant
+    `unknown_request_rejected_not_hung`
+
+Scenario: did_open_publishes_converted
+  Given le binaire avec faux hadolint émettant un DL3008 warning ligne 1 colonne 1 dès que le
+    contenu reçu contient `BAD`, exit `1` (violations = code non nul NORMAL)
+  When une notification `textDocument/didOpen` (uri `file:///w/Dockerfile`, version 1, texte
+    `FROM BAD:tag latest\nRUN echo x\n`) arrive
+  Then un `textDocument/publishDiagnostics` parvient avec `params.uri` et `params.version = 1`, un
+    unique diagnostic `source: "hadolint"`, `code: "DL3008"`, `severity: 2`, `range` 0-based de
+    `(0, 0)` à `(0, 19)` (fin de ligne en unités UTF-16)
+  And le faux hadolint a reçu sur stdin le CONTENU exact du buffer et uniquement les argv
+    littéraux `--format json --no-color -` — aucun chemin, aucun shell (contrat de sécurité) — test
+    existant `did_open_publishes_converted`
+
+Scenario: clean_content_publishes_empty
+  Given le même harnais, contenu sans violation pour le faux hadolint (tableau `[]` rendu)
+  When un `didOpen` propre arrive
+  Then une `publishDiagnostics` avec `diagnostics: []` est publiée dans les 3 s — jamais de
+    silence après un déclencheur — test existant `clean_content_publishes_empty`
+
+Scenario: did_change_debounced
+  Given un doc ouvert propre (publication initiale `[]` consommée)
+  When un `didChange` incrémental (édit range sur `latest` → `BAD:tag`, version 2) arrive
+  Then AUCUNE publication n'intervient dans les ~300 ms qui suivent
+  And la publication arrive entre ~400 ms et 3 s (debounce de 500 ms), porte le diagnostic du
+    contenu POST-édit, et le faux hadolint a reçu le buffer édité
+  And plus aucune publication ne suit dans la seconde qui suit (une seule publication finale,
+    pas de re-déclenchement) — test existant `did_change_debounced`
+
+Scenario: did_save_immediate
+  Given un doc ouvert propre (publication initiale consommée)
+  When un `didChange` full-sync introduisant `BAD` (debounce armé) est IMMÉDIATEMENT suivi d'un
+    `didSave`
+  Then la publication du contenu courant arrive en moins de 400 ms (le save ne subit pas le
+    debounce) avec le diagnostic attendu
+  And le debounce en sommeil s'est disqualifié : plus AUCUNE publication dans la seconde qui suit
+    — test existant `did_save_immediate`
+
+Scenario: stale_result_discarded
+  Given un faux hadolint LENT (300 ms avant d'émettre)
+  When un `didOpen` de contenu avec `BAD` (v1, lint en vol) est suivi d'un `didChange` full-sync
+    vers un contenu propre (v2)
+  Then la publication finale est `diagnostics: []` (le résultat v1, périmé, n'est JAMAIS publié,
+    et le lint debouncé du contenu courant le remplace)
+  And rien ne suit dans la seconde qui suit — test existant `stale_result_discarded`
+
+Scenario: did_close_publishes_empty
+  Given un doc ouvert avec un diagnostic publié
+  When la notification `textDocument/didClose` de cette URI arrive
+  Then une `publishDiagnostics` `diagnostics: []` avec l'URI et la version connue est publiée
+    (la part du wrapper est retirée de la fusion de session)
+  And plus aucune publication ne suit dans les 800 ms — test existant `did_close_publishes_empty`
+
+Scenario: spawn_failure_degrades_empty
+  Given un `PATH` réduit à un répertoire vide (hadolint introuvable)
+  When un `didOpen` arrive
+  Then une `publishDiagnostics` `diagnostics: []` est publiée (contribution vide) et stderr du
+    wrapper porte un message mentionnant `hadolint`
+  And une requête `initialize` suivante reçoit son `result` — le serveur a survécu — test existant
+    `spawn_failure_degrades_empty`
+
+Scenario: hadolint_output_non_json_degrades_empty
+  Given un faux hadolint qui rend `ceci n'est pas du json` sur stdout (exit 0)
+  When un `didOpen` arrive
+  Then une `publishDiagnostics` `diagnostics: []` est publiée (jamais de faux-positif à partir de
+    garbage)
+  And stderr porte `sortie hadolint non-JSON` avec l'URI, et le serveur répond encore à
+    `initialize`
+
+Scenario: did_change_sur_uri_jamais_ouvert_ignoree
+  Given le binaire démarré, aucune URI ouverte
+  When un `textDocument/didChange` (uri jamais vue, contenu avec `BAD`) arrive
+  Then AUCUN hadolint n'est lancé (le journal argv du faux reste absent)
+  And aucune publication n'arrive dans les 800 ms, et le serveur répond à `initialize`
+
+Scenario: did_save_sur_uri_jamais_ouvert_ignoree
+  Given le binaire démarré, aucune URI ouverte
+  When un `textDocument/didSave` (uri jamais vue) arrive
+  Then aucune publication n'arrive dans les 800 ms et aucun hadolint n'est lancé
+  And le serveur reste fonctionnel
+
+Scenario: trame_non_json_ignoree_serveur_vivant
+  Given le binaire démarré et initialisable
+  When une trame `Content-Length` valide au payload `pas du json {{{` est écrite sur stdin
+  Then AUCUNE trame de réponse ou de notification n'est émise en réaction (pas de `-32601`, pas
+    d'erreur de parse)
+  When une requête `initialize` suit dans la foulée
+  Then elle reçoit son `result` (le flux n'est pas considéré corrompu)
+
+Scenario: reponse_sans_methode_ignoree
+  Given le binaire démarré
+  When une trame de FORME réponse (`{"jsonrpc":"2.0","id":42,"result":{}}`, sans `method`) est
+    écrite sur stdin
+  Then aucune trame n'est émise en réaction (dans les 500 ms) et le serveur répond encore à une
+    requête valide suivante
+
+Scenario: eof_stdin_termine_sans_exit_en_zero
+  Given le binaire démarré, avec ou sans docs ouverts
+  When le client ferme simplement son stdin (EOF, sans `shutdown` ni `exit`)
+  Then le process termine de lui-même en moins de 5 s avec le code `0`
+
+Scenario: exit_sans_shutdown_termine_en_zero
+  Given le binaire démarré, sans aucun `initialize` ni doc-sync préalable
+  When la seule notification `exit` arrive, stdin fermé ensuite
+  Then le process termine en moins de 5 s avec le code `0` (aucun `shutdown` requis)
+
+Scenario: did_open_version_absente_publie_version_un
+  Given un faux hadolint rendant `[]`
+  When un `textDocument/didOpen` arrive SANS le champ `version` dans `textDocument`
+  Then la `publishDiagnostics` publiée porte `params.version = 1` (défaut LSP-posé par le wrapper)
+
+Scenario: did_change_version_absente_conserve_la_version
+  Given un doc ouvert en version 1, publication initiale consommée
+  When un `didChange` full-sync sans `version` dans `textDocument` édite le contenu, et que la
+    publication debouncée arrive
+  Then la `publishDiagnostics` porte la version précédente `1` (le wrapper ne synthétise aucune
+    version) et le diagnostic correspond au nouveau contenu
+
+Scenario: did_open_reouverture_recapitale_le_doc
+  Given un faux hadolint piloté par le contenu (vide sans `BAD`, un DL avec `BAD`)
+  When un `didOpen` propre (v1) est publié (`[]` consommé), puis un second `didOpen` sur la MÊME
+    URI avec un contenu contenant `BAD` (v2)
+  Then la publication finale porte la version 2 et le diagnostic du nouveau contenu (le doc est
+    remplacé, la génération bumpée disqualifie tout lint en vol de l'ouverture précédente)
+
+Scenario: cwd_du_wrapper_propage_a_hadolint
+  Given le binaire spawné avec un cwd de travail `<dir>` posé par le test (à la place du
+    sandbox_root du multiplexeur) et un faux hadolint qui journalise `$PWD`
+  When un `didOpen` déclenche un lint
+  Then le fichier journal porte `<dir>` exact : le wrapper ne pose AUCUN `current_dir` et
+    transmet son propre cwd au fils, sans jamais passer l'URI/le chemin du document en argv ni en
+    flag `--config` (le respect réel du `.hadolint.yaml` par hadolint depuis ce cwd est éprouvé
+    hors cargo par `HADOLINT_CONFIG_OK`, `../../../toolchains/docker/test-toolchain-docker.sh`)
+
+Scenario: convert_hadolint_output_example
+  Given la sortie JSON de tâche `[DL3007 warning ligne 1 col 1, DL3020 error ligne 3 col 5]` et le
+    doc `FROM ubuntu:latest\nRUN echo x\nADD --link x /y\n`
+  When la conversion est appelée
+  Then les diagnostics sont structurellement exacts : 0-based, `start (0,0)`/`(2,4)`, `end` = fin
+    de ligne en unités UTF-16 (`(0,18)`/`(2,15)`), sévérités 2 puis 1, `code` verbatim,
+    `source: "hadolint"`, ordre conservé — test unitaire existant `convert_hadolint_output_example`
+
+Scenario: convert_hadolint_output_levels
+  Given une sortie avec les niveaux `error`, `warning`, `info`, `style` et `mystere`
+  When la conversion est appelée
+  Then les sévérités rendues sont exactement `[1, 2, 3, 4, 3]` (inconnu ⟹ info) — test unitaire
+    existant `convert_hadolint_output_levels`
+
+Scenario: convert_hadolint_output_clamps
+  Given des diagnostics dont la ligne est hors du doc (ligne 99 dans un doc de 2 lignes), la
+    colonne hors borne (99), ou la cible une ligne vide
+  When la conversion est appelée
+  Then la ligne est clamppée à la dernière ligne, la colonne à la fin de ligne (début comme fin),
+    et la ligne vide donne une range `0..0` — test unitaire existant `convert_hadolint_output_clamps`
+
+Scenario: convert_hadolint_output_utf16
+  Given un doc dont une ligne contient un emoji `🐛` (2 unités UTF-16, 1 char, 4 octets)
+  When la conversion traite une colonne juste avant le caractère suivant et une colonne hors
+    borne
+  Then clamps et `end.character` sont comptés en unités UTF-16 (`11`, `12`), jamais en chars ni
+    en octets — test unitaire existant `convert_hadolint_output_utf16`
+
+Scenario: convert_hadolint_output_garbage
+  Given les entrées `{}`, `not json`, et un tableau d'un objet sans champ `line`
+  When la conversion est appelée sur un doc quelconque
+  Then le résultat est le vecteur vide dans les trois cas (non-tableau ⟹ vide ; objet sans `line`
+    numérique ⟹ filtré) — test unitaire existant `convert_hadolint_output_garbage`
+
+Scenario: convert_hadolint_output_champs_absents
+  Given un objet hadolint `{"line":1,"message":"minimal"}` sur un doc d'une ligne de 4 caractères
+    (sans `column`, sans `level`, sans `code`)
+  When la conversion est appelée
+  Then le diagnostic a `start.character = 0` (défaut colonne 1), `severity = 3` (level absent),
+    `message` reprise, `source: "hadolint"` — le devenir du `code` manquant (`null` vs clé
+    omise vs objet filtré) suit la décision `[?]` de la section Tasks avant écriture de l'assertion
+
+Scenario: apply_content_changes_full_replace
+  Given le texte `abc\ndef`
+  When un changement sans `range`, puis un changement avec `range: null`, sont appliqués
+  Then chacun remplace la TOTALITÉ du texte (le champ est optionnel en LSP — omission et `null`
+    traités pareil) — test unitaire existant `apply_content_changes_full_replace`
+
+Scenario: apply_content_changes_incremental
+  Given `FROM ubuntu:latest\n `
+  When un édit range `(0,12)..(0,18)` → `22.04`, puis sur un autre doc une insertion en fin de
+    fichier (range vide à la fin), puis une suppression multi-lignes `(0,0)..(2,0)` sont appliqués
+  Then les résultats sont exactement `FROM ubuntu:22.04\n `, `a\nbc` et `c\n` — test unitaire
+    existant `apply_content_changes_incremental`
+
+Scenario: apply_content_changes_bounded
+  Given les textes `abc` et `a`
+  When des ranges hors bornes (`(0,0)..(99,99)`, `(5,5)..(7,2)`) et un range malformé (`start`
+    absent) sont appliqués
+  Then les positions sont clamppées (résultats `Z` et `aQ`, déterministes, aucune panique) et le
+    changement malformé est ignoré sans toucher au texte — test unitaire existant
+    `apply_content_changes_bounded`
+
+Scenario: apply_content_changes_sequence
+  Given le texte `one\ntwo\nthree` et deux changements dans une même notification
+  When ils sont appliqués
+  Then le résultat est `ONE\ntwo\nthree!` : chaque changement s'applique dans l'ordre sur le texte
+    DÉJÀ muté par le précédent — test unitaire existant `apply_content_changes_sequence`
