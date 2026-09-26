@@ -1,0 +1,406 @@
+Spec: Main
+
+Platform: Rust/vanyline-controller
+
+Purpose:
+  Point d'entrée unique du binaire `vanyline-controller` (../Cargo.toml — `[[bin]]`,
+  `path = "src/main.rs"`) : ce fichier ne contient AUCUNE logique de reconcile et ne construit
+  aucun manifeste — il déclare l'arbre de modules du crate (@owner, @project, @sandbox,
+  @application, @error — racine de binaire, pas de cible lib) et tient trois responsabilités :
+  (1) parser la configuration de démarrage (@Cli, clap derive — 13 drapeaux longs, chacun
+  surchargeable par variable d'environnement, défauts figés à la compilation via
+  `env!("CARGO_PKG_VERSION")` / `concat!`), avec un mode spécial `--crds` qui imprime les
+  quatre manifests CRD sur stdout puis quitte sans jamais toucher le cluster (source de
+  `deploy/controller/crds.yaml` via /deploy/controller/generate-crds.sh) ; (2) construire le
+  client kube unique (@kube::Client::try_default — in-cluster d'abord, kubeconfig sinon), dont
+  l'échec est la seule condition d'arrêt fatal du binaire (exit 1) ; (3) assembler et lancer
+  les quatre reconcileurs (Owner, Project, Sandbox, Application) en parallèle dans un seul
+  process (@tokio::join!), chacun avec son `Context` (les quatre partagent le même client sous
+  @Arc + images par défaut : sandbox/app composées `{repo}:{tag}`, huit images toolchain/LSP
+  transmises verbatim). Le contrat du fichier est donc exactement : configuration, démarrage,
+  câblage — la sémantique de chaque reconcileur vit dans ses specs sœurs (`owner.sdd`,
+  `project.sdd`, `sandbox.sdd`, `application.sdd`, `error.sdd`, à écrire).
+
+Owns:
+  ./main.rs
+
+Can read:
+  ./owner.rs
+  ./project.rs
+  ./sandbox.rs
+  ./application.rs
+  ./error.rs
+  ../Cargo.toml
+  /crds/src/lib.sdd
+  /tooling.sdd
+  /vanyline.sdd
+  /docs/architecture.md
+  /deploy/controller/controller.yaml
+  /deploy/controller/generate-crds.sh
+  /.github/workflows/release.yml
+
+Structure:
+  ./main.rs — quatre blocs physiques : ligne 1, exemption `cfg_attr(test, allow(...))` (seule
+    ligne modifiable par /tooling.sdd pour ce fichier, ligne 21 de sa section `Can modify`) ;
+    déclarations de modules privés @application/@error/@owner/@project/@sandbox (lignes 3-7) ;
+    @Cli (derive @clap::Parser, `#[command(name = "vanyline-controller")]`, 13 champs
+    commentés) ; @main (`#[tokio::main]`, ordre strict : parse → branche `--crds` + return →
+    init tracing → log de démarrage → client kube (exit 1 à l'échec) → composition des deux
+    images → quatre `Context` + quatre streams `.run(...).for_each(warn)` → @tokio::join!).
+    Aucun module `#[cfg(test)]` n'existe dans le fichier.
+
+Must:
+  Porter en ligne 1 la seule exemption autorisée par /tooling.sdd pour ./main.rs :
+    `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` — le harnais garde
+    ces lints en deny hors `cfg(test)`.
+  Déclarer les cinq modules privés @application, @error, @owner, @project, @sandbox :
+    ./main.rs est la racine du crate binaire, aucun autre fichier ne déclare ces modules.
+  Dériver @Cli de @clap::Parser avec `#[command(name = "vanyline-controller")]` et exactement
+    les 13 drapeaux listés en @Exposes, chacun avec sa variable d'env et son défaut tels
+    qu'écrits (défauts = expressions compilées : `env!("CARGO_PKG_VERSION")` nue pour
+    sandbox/app, `concat!("...", "v", env!("CARGO_PKG_VERSION"))` pour les huit toolchain/LSP) ;
+    la priorité flag > env > défaut est celle de clap feature `env`.
+  Traiter `--crds` EN PREMIER dans @main : imprimer @vanyline_crds::crd_manifests sur stdout
+    par `print!` puis `return` — avant @tracing_subscriber::fmt::try_init, avant toute
+    construction de client, en code de sortie 0.
+  Initialiser tracing (@fmt::try_init, résultat ignoré) puis logger l'`info` de démarrage au
+    message exact avant toute connexion au cluster.
+  Construire le client par @kube::Client::try_default ; à l'échec : log `error` unique puis
+    @std::process::exit(1) — c'est le seul chemin de mort volontaire du binaire hors erreurs
+    CLI.
+  Composer les images sandbox et app exactement comme `format!("{repo}:{tag}")`
+    (@sandbox_image_repo + @sandbox_image_tag d'une part, @app_image_repo + @app_image_tag
+    d'autre part) et transmettre les huit chaînes toolchain/LSP sans aucune transformation.
+  Construire les quatre `Context` avec le MÊME client (@Arc + @Client::clone) et le câblage
+    exact : @owner::Context { client } ; @project::Context { client, sandbox_image : image
+    sandbox composée } ; @application::Context { client, default_image : image app composée } ;
+    @sandbox::Context { client, default_image : image sandbox composée, toolchain_image_rust,
+    toolchain_image_node, toolchain_image_docker, toolchain_image_python, lsp_image_rust,
+    lsp_image_node, lsp_image_docker, lsp_image_python }.
+  Pour chaque reconcileur : `<module>::build_controller(client)` (watcher @Api::all
+    cluster-wide, config par défaut — cf. specs sœurs), puis `.run(reconcile, error_policy,
+    ctx)`, puis `.for_each` loggant chaque `Err` du flux en `warn` au message
+    `<owner|project|application|sandbox> reconcile loop error` (champ structuré `error`) ; les
+    quatre runs sont lancés en concurrence par un unique @tokio::join! (owner, project,
+    sandbox, application).
+  Ne proposer AUCUN filtrage de namespace : les quatre watchers sont cluster-wide, cohérents
+    avec le ClusterRole de /deploy/controller/controller.yaml (cf. /docs/architecture.md,
+    section « Opérateur Kubernetes »).
+
+Must not:
+  Contenir de logique de reconcile, de construction de manifestes ou de calcul de status :
+    tout comportement observable autre que démarrage/câblage appartient aux specs des modules
+    déclarés ici.
+  Écrire sur stdout autre chose que les manifests du mode `--crds` et les logs tracing (émis
+    après l'init) ; aucun `println!`/`eprintln!`/`dbg!` ; le seul `print!` du fichier est celui
+    de `--crds` (tension avec le lint deny `print_stdout` — cf. `[?]` des `Tasks`).
+  Employer `unwrap`/`expect`/`panic!` sur un chemin de production (le `unwrap_or_else` du
+    client kube est le seul et ne viole pas le harnais).
+  Filtrer le watch par namespace, activer une leader election, exposer un endpoint de santé,
+    des métriques ou un port HTTP quel qu'il soit.
+  Installer un gestionnaire de signal, une logique d'arrêt gracieux, un redémarrage
+    automatique d'un reconcileur qui terminerait, ou un ordre d'exécution entre reconcileurs
+    (aucun ne doit attendre l'autre au démarrage).
+  Retenter la construction du client kube en cas d'échec, ni transformer l'exit 1 en boucle
+    d'attente.
+
+Depends on:
+  ./owner.rs, ./project.rs, ./sandbox.rs, ./application.rs — @Context, @build_controller,
+    @reconcile, @error_policy de chaque reconcileur (specs sœurs à écrire).
+  ./error.rs — @ControllerError, type d'erreur partagé des quatre reconcileurs.
+  `clap` 4 (features `derive`, `env`) — @Parser de @Cli, flags longs + env + défauts.
+  `tokio` 1 (features `full`) — macro @tokio::main (runtime multi-thread par défaut),
+    @tokio::join!.
+  `kube` 4 (features `runtime`, `derive`) — @kube::Client::try_default ; les flux @Controller
+    sont fabriqués par les modules sœurs.
+  `futures` 0.3 — @StreamExt::for_each sur chaque flux de reconcileur.
+  `tracing` 0.1 + `tracing-subscriber` 0.3 (features `fmt` par défaut, `env-filter`) —
+    @fmt::try_init, macros `info`/`warn`/`error`, lecture de `RUST_LOG`.
+  `vanyline-crds` — @crd_manifests (sortie du mode `--crds`), contrat de la spec
+    /crds/src/lib.sdd.
+  /tooling.sdd — harnais clippy/fmt ; la ligne 1 d'exemption `cfg(test)` y est tracée
+    (`Can modify`).
+  /vanyline.sdd — règle un-fichier-une-spec ; la règle « aucun champ de CRD interpolé dans une
+    commande shell » est portée par les modules (`vanyline-maint` en argv), pas ici.
+
+Exposes:
+  Le binaire `vanyline-controller` seul : le crate ne publie aucun item (pas de cible lib) ;
+    @Cli est une struct privée, @main est le point d'entrée.
+  @Cli — drapeaux (tous `#[arg(long, env = ..., default_value = ...)]` sauf @crds, sans env) ;
+    noms de champs Rust snake_case, flags CLI kebab-case dérivés par clap :
+    - @crds : `--crds` (booléen d'action, absent ⇒ `false`, aucune variable d'env, ne prend
+      pas de valeur)
+    - @sandbox_image_tag : `--sandbox-image-tag` / `SANDBOX_IMAGE_TAG` / défaut
+      `env!("CARGO_PKG_VERSION")` (version nue, SANS préfixe `v`) — image des pods sandbox et
+      des Jobs de maintenance quand `Sandbox.spec.image` est absent
+    - @sandbox_image_repo : `--sandbox-image-repo` / `SANDBOX_IMAGE_REPO` / défaut
+      `ghcr.io/sebt3/vanyline-sandbox`
+    - @toolchain_image_rust : `--toolchain-image-rust` / `TOOLCHAIN_IMAGE_RUST` / défaut
+      `ghcr.io/sebt3/vanyline-toolchains-rust:v<CARGO_PKG_VERSION>` (rust-analyzer baké)
+    - @toolchain_image_node : `--toolchain-image-node` / `TOOLCHAIN_IMAGE_NODE` / défaut
+      `ghcr.io/sebt3/vanyline-toolchains-node:v<CARGO_PKG_VERSION>` (langage `js-ts`)
+    - @toolchain_image_docker : `--toolchain-image-docker` / `TOOLCHAIN_IMAGE_DOCKER` / défaut
+      `ghcr.io/sebt3/vanyline-toolchains-docker:v<CARGO_PKG_VERSION>` (langage `dockerfile`)
+    - @toolchain_image_python : `--toolchain-image-python` / `TOOLCHAIN_IMAGE_PYTHON` / défaut
+      `ghcr.io/sebt3/vanyline-toolchains-python:v<CARGO_PKG_VERSION>`
+    - @lsp_image_rust : `--lsp-image-rust` / `LSP_IMAGE_RUST` / défaut IDENTIQUE à celui de
+      @toolchain_image_rust (résolue par `sandbox::resolve_toolchain_lsp` quand
+      `toolchain.lsp` est absent)
+    - @lsp_image_node : `--lsp-image-node` / `LSP_IMAGE_NODE` / défaut identique à
+      @toolchain_image_node
+    - @lsp_image_docker : `--lsp-image-docker` / `LSP_IMAGE_DOCKER` / défaut identique à
+      @toolchain_image_docker (sert aussi le composite hadolint de `build_sandbox_pod`)
+    - @lsp_image_python : `--lsp-image-python` / `LSP_IMAGE_PYTHON` / défaut identique à
+      @toolchain_image_python (sert aussi le composite pyright de `build_sandbox_pod`)
+    - @app_image_tag : `--app-image-tag` / `APP_IMAGE_TAG` / défaut
+      `env!("CARGO_PKG_VERSION")` (version nue, SANS préfixe `v`) — image du Deployment `app`
+      quand `Application.spec.image` est absent
+    - @app_image_repo : `--app-image-repo` / `APP_IMAGE_REPO` / défaut
+      `ghcr.io/sebt3/vanyline-app`
+  @main — entrée asynchrone sans argument, ne retournant jamais de valeur (runtime tokio
+    multi-thread par défaut du macro @tokio::main).
+  Modules privés déclarés ici (tout le crate est arrimé à ce fichier) : @application,
+    @error, @owner, @project, @sandbox — leurs contrats respectifs vivent dans leurs specs
+    propres.
+  Rien d'autre : aucun item `pub` dans ./main.rs.
+
+Accepts:
+  Ligne de commande : le binaire accepte exclusivement les 13 flags de @Exposes et les
+    drapeaux standards dérivés par clap (`--help`) ; AUCUN `--version` n'est généré (aucun
+    attribut `version` sur @Cli). Toute autre entrée est une erreur de parse.
+  Environnement : les 12 variables `env = ...` listées ci-dessus sont lues par clap, priorité
+    stricte flag > variable d'env > défaut compilé. `RUST_LOG` est lue par tracing-subscriber
+    (feature `env-filter`) pour filtrer les logs.
+  Mode reconcile : des credentials découvrables par @kube::Client::try_default — soit le
+    ServiceAccount in-cluster (pod du controller, cf. /deploy/controller/controller.yaml),
+    soit un kubeconfig local (`KUBECONFIG` ou contexte kubectl). Le controller watche les
+    quatre CRDs sur TOUT le cluster (chaque `build_controller` module fait un @Api::all) —
+    @main n'offre aucun filtrage par namespace.
+  Consommateurs réels des variables d'env : /deploy/controller/controller.yaml ne pose à ce
+    jour que `SANDBOX_IMAGE_TAG` et `APP_IMAGE_TAG` (tags avec préfixe `v`) et `RUST_LOG`
+    (`info,vanyline_controller=debug`) ; les images toolchain/LSP comptent sur leur défaut
+    compilé.
+
+Returns:
+  Mode `--crds` : sur stdout, exactement la sortie de @vanyline_crds::crd_manifests (quatre
+    manifests YAML de @CustomResourceDefinition séparés par `---`, cf. spec sœur
+    /crds/src/lib.sdd) ; code de sortie 0 ; AUCUNE ligne de log (l'init tracing est
+    postérieure au `return`) — stdout propre garanti pour la redirection shell.
+  Mode reconcile : aucune valeur de retour — le process tourne indéfiniment (le flux
+    `Controller::run` de kube-rs est infini en pratique ; @tokio::join! ne se termine pas).
+    Codes de sortie observés : 0 (mode `--crds`, `--help`), 2 (erreur de parse clap, usage sur
+    stderr), 1 (client kube impossible, après le log d'erreur).
+  Logs (sur stdout, défaut du subscriber fmt) :
+    - un `info` de démarrage au message exact
+      `controller starting (owner + project + sandbox + application reconcilers active)`
+    - un `error` unique à l'échec du client, dont le texte commence par
+      `failed to build kube client from in-cluster or kubeconfig context`
+    - un `warn` par erreur de flux de reconcileur (`<module> reconcile loop error`, avec le
+      champ structuré `error`)
+
+Raises:
+  @main ne retourne pas de @Result et ne panique pas sur le chemin nominal : l'échec du client
+    kube est traité par `unwrap_or_else` (conforme au harnais — ce n'est pas un `unwrap_used`)
+    qui loggue en `error` puis appelle @std::process::exit(1) ; l'erreur de parse clap quitte
+    le process (exit 2) sans panic.
+  Erreurs de reconcile (@ControllerError, ./error.rs) : JAMAIS remontées ici — routées vers
+    l'@error_policy de chaque module (requeue 10 s/15 s/30 s selon module et variante, specs
+    sœurs) ; les erreurs du flux @Controller lui-même (watcher, etc.) sont loggées en `warn`
+    par le `for_each` et ignorées, le flux poursuit.
+  @Cli::parse et @crd_manifests : aucune erreur interceptée par @main — la sérialisation YAML
+    est tenue pour infaillible par le crate crds (cf. son propre `Raises`).
+
+Handles:
+  `--crds` sans aucun cluster ni kubeconfig : la branche retourne AVANT l'init tracing et avant
+    @kube::Client::try_default — le mode manifests fonctionne hors ligne et son stdout reste
+    vierge de toute log, qualité exigée par la redirection de
+    /deploy/controller/generate-crds.sh.
+  Init tracing en double (subscriber déjà posé) : le @Result de @fmt::try_init est
+    explicitement ignoré (`let _ =`) — aucune panne possible de ce fait.
+  Cluster injoignable en mode reconcile : log d'erreur unique puis exit 1 — pas de retry, pas
+    d'attente.
+  Erreur d'un reconcileur ou de son watcher : `warn` + poursuite ; un reconcileur qui échoue
+    n'arrête ni les trois autres ni le process.
+  Arrêt du pod Kubernetes : aucun gestionnaire de signal (pas de handler SIGTERM, pas de
+    graceful shutdown) — la mort du process est exogène ; la responsabilité de nettoyage porte
+    sur les finalizers côté ressources, @main ne doit rien nettoyer à l'arrêt.
+  Extinction éventuelle d'un des quatre flux : @tokio::join! attend les quatre — un
+    reconcileur qui meurt silencieusement ne déclenche aucune réaction ni restart (cf. `[?]`)
+  Valeur d'env vide (`SANDBOX_IMAGE_TAG=""` par ex.) : clap accepte la chaîne vide comme
+    valeur ; l'image composée est alors `<repo>:` (référence invalide pour K8s) — comportement
+    accidentel documenté, non béni (cf. `[?]`)
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-26 (comportement actuel du code, rien de
+    nouveau n'est supposé).
+  [?] `print!` du mode `--crds` (ligne 144) SANS `#[allow(clippy::print_stdout)]` alors que
+    `print_stdout` est `deny` dans `[workspace.lints.clippy]` : le harnais ne semble pas mordre
+    (CI clippy verrouillée verte, cf. /tooling.sdd ; mécanisme d'exonération non identifié —
+    comportement de clippy dans le `main` macro-étendu par @tokio::main ?). Ajouter l'`#[allow]`
+    justifié d'une ligne (sortie contractuelle de CLI consommée par generate-crds.sh) ou
+    confirmer officiellement la franchise du harnais sur ce site ?
+  [?] Asymétrie de préfixe `v` entre défauts compilés du MÊME fichier et tags publiés :
+    `SANDBOX_IMAGE_TAG`/`APP_IMAGE_TAG` ont pour défaut la version NUE `0.0.11-alpha.5` alors
+    que les huit images toolchain/LSP portent `:v<version>` dans leur défaut, et que
+    /.github/workflows/release.yml publie `:${{ github.ref_name }}` (tag git avec préfixe `v`).
+    Le défaut sandbox/app ne désigne donc JAMAIS une image publiée, et
+    /deploy/controller/controller.yaml doit surcharger par env (`v0.0.11-alpha.5`). Le doc
+    comment de `--sandbox-image-tag` (« Défaut : version du controller — les composants sont
+    versionnés et publiés ensemble ») est en contradiction avec le code. À trancher : défauts
+    sandbox/app préfixés `v` comme les toolchains, ou publication CI aussi en tag nu, ou
+    contrat « ces deux env DOIVENT être fournies au déploiement » (défaut leurre + doc comment
+    à corriger).
+  [?] Ligne 1 (`cfg_attr(test, allow(...))`) : ./main.rs ne contient AUCUN module
+    `#[cfg(test)]` — l'exemption est aujourd'hui vestigiale. La garder (harnais d'un futur
+    module de tests unitaires de @Cli, cf. tâche harnais ci-dessous) ou la retirer (et retirer
+    la ligne 21 de /tooling.sdd) ?
+  [?] Niveau de log par défaut sans `RUST_LOG` : avec la feature `env-filter`, le subscriber
+    fmt par défaut filtre a priori en `error` — l'`info` de démarrage serait invisible hors
+    `RUST_LOG`. Le déploiement en pose toujours un ; le contrat « démarrage visible » mérite-t-il
+    un défaut explicite (`EnvFilter` avec directive `info`) ?
+  [?] Aucun gestionnaire de signal et aucune supervision : SIGTERM (arrêt de pod) tue le
+    process sans grace period, et si l'un des quatre flux de reconcileur terminait,
+    @tokio::join! attendrait les autres sans réagir (reconcileur mort silencieusement). Accepté
+    en v1 (liveness déléguée au restart de pod par K8s) ou à contracter (arrêt sur SIGTERM +
+    exit si un reconcileur meurt) ?
+  [?] Valeur d'env vide acceptée par clap (`SANDBOX_IMAGE_TAG=""` ⇒ image `repo:` invalide
+    pour K8s) : comportement accidentel, aucune validation non-vide. Valider à l'usage ou
+    assumer (l'apiserver rejettera le pod) ?
+  [?] `--version` absent (aucun attribut `version` sur @Cli) : voulu (le tag d'image et
+    `--crds` suffisent) ou oubli — l'ajouter ?
+  [?] Décalage documentaire latéral (hors périmètre de cette spec, découvert au câblage) : le
+    doc comment de `project::Context::sandbox_image` (./project.rs, ligne ~581) annonce « l'env
+    `SANDBOX_IMAGE` » alors que la variable réelle est la paire `SANDBOX_IMAGE_TAG` +
+    `SANDBOX_IMAGE_REPO` composée ici — correction à porter dans ./project.rs et sa spec.
+  [?] Rôle de @sandbox_image_tag sur les Jobs de maintenance : le doc comment du flag affirme
+    que l'image sandbox sert aussi aux Jobs de maintenance des projets (cohérent avec
+    `project::Context::sandbox_image`) mais le nom du flag ne le dit pas ; un opérateur qui
+    surcharge `SANDBOX_IMAGE_TAG` pour les pods déplace aussi l'image des Jobs git — contrat
+    unifié assumé ou image de maintenance à séparer ?
+  [ ] Harnais de tests du binaire à trancher avant le premier `implementer` : le crate n'a pas
+    de répertoire `tests/` et ./main.rs aucun module `tests`. Proposition : Scenarios
+    `crds_imprime_quatre_manifests_et_sort`, `crds_sort_avant_tracing_et_client_kube`,
+    `cli_drapeau_inconnu_exit_2`, `cli_aide_liste_les_treize_drapeaux`,
+    `cli_version_absente_rejelee`, `client_kube_injoignable_exit_1` en test d'intégration
+    `controller/tests/main_cli.rs` lançant le binaire via
+    `env!("CARGO_BIN_EXE_vanyline-controller")` (aucun cluster requis — l'absence de cluster
+    EST l'entrée de deux d'entre eux) ; Scenarios `cli_defauts_compiles_sans_env`,
+    `cli_env_surcherge_defaut_et_flag_surcharge_env`,
+    `cli_lsp_surcharge_separement_de_la_toolchain` en module `#[cfg(test)]` dans ./main.rs via
+    @Cli::try_parse_from (manipulation d'env `unsafe` en édition 2024 — choisir `temp_env` en
+    dev-dependency ou `#[allow]` motivé sous `cfg(test)`) ; Scenarios
+    `demarrage_lance_les_quatre_reconcilers_cluster`,
+    `reconcile_en_erreur_ne_tue_pas_le_processus`, `image_sandbox_composee_propagee_au_pod`
+    taggés intégration cluster (kube n'est JAMAIS mocké, cf. /docs/architecture.md « Tests »).
+  [ ] Convertir en tests taggés par leur titre les Scenarios ci-dessous (aucun test n'existe
+    aujourd'hui pour ./main.rs), les faire compiler et échouer d'abord, puis implémenter/
+    verrouiller au minimum et faire passer la synthèse du validator au vert (batterie
+    complète, AGENTS.md).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe (tests CLI
+    sans cluster ; les trois Scenarios marqués intégration cluster ne sont validés que sur un
+    cluster de test réel, kube n'est pas mocké).
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici (et le cas
+    échéant dans ./project.rs et /tooling.sdd).
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est verte
+    sur `vanyline-controller`, et `cargo run -p vanyline-controller -- --crds` produit un
+    stdout identique à /deploy/controller/crds.yaml quand un changement de schéma l'a justifié.
+
+Scenario: crds_imprime_quatre_manifests_et_sort
+  Given le binaire `vanyline-controller` lancé hors cluster (aucun kubeconfig requis)
+  When il est invoqué avec le seul drapeau `--crds`
+  Then stdout est exactement la sortie de @vanyline_crds::crd_manifests (quatre documents YAML
+    contenant chacun `kind: CustomResourceDefinition`, séparés par `---`), le code de sortie
+    est 0 et stderr est vide (test d'intégration lançant le binaire, sans cluster)
+
+Scenario: crds_sort_avant_tracing_et_client_kube
+  Given un environnement sans cluster : ni ServiceAccount in-cluster ni kubeconfig valide
+    (`KUBECONFIG` pointe un fichier inexistant)
+  When le binaire est invoqué avec `--crds`
+  Then le code de sortie est 0, stdout porte les quatre manifests, et stderr ne contient ni
+    `controller starting` ni `failed to build kube client` — la branche `--crds` retourne avant
+    l'init tracing et avant @kube::Client::try_default
+
+Scenario: cli_defauts_compiles_sans_env
+  Given @Cli visé par @Cli::try_parse_from avec le seul argv `["vanyline-controller"]`, dans un
+    environnement où les douze variables d'env du controller sont absentes
+  When le parse réussit
+  Then `crds` est `false`, `sandbox_image_tag` et `app_image_tag` valent
+    `env!("CARGO_PKG_VERSION")` (version nue), `sandbox_image_repo` vaut
+    `ghcr.io/sebt3/vanyline-sandbox`, `app_image_repo` vaut `ghcr.io/sebt3/vanyline-app`, et
+    chacune des huit images toolchain/LSP vaut exactement son défaut `concat!`
+    (`ghcr.io/sebt3/vanyline-toolchains-rust:v<CARGO_PKG_VERSION>`, idem node/docker/python, et
+    les quatre LSP égales à leurs homonymes toolchain) — test unitaire, sans cluster
+
+Scenario: cli_env_surcherge_defaut_et_flag_surcharge_env
+  Given un environnement où `SANDBOX_IMAGE_TAG` vaut `de-l-env`
+  When @Cli::try_parse_from est appelé sans drapeau, puis appelé avec le drapeau
+    `--sandbox-image-tag` suivi de `du-flag` dans le même environnement
+  Then la première parse donne `sandbox_image_tag` = `de-l-env` (l'env surcharge le défaut
+    compilé) et la seconde donne `sandbox_image_tag` = `du-flag` (le flag surcharge l'env) —
+    test unitaire, manipulation d'env sous `cfg(test)`
+
+Scenario: cli_lsp_surcharge_separement_de_la_toolchain
+  Given un environnement où seule `LSP_IMAGE_RUST` vaut `img-lsp:custom` (`TOOLCHAIN_IMAGE_RUST`
+    absente)
+  When @Cli::try_parse_from est appelé sans drapeau
+  Then `lsp_image_rust` vaut `img-lsp:custom` alors que `toolchain_image_rust` reste à son
+    défaut compilé — les paires toolchain/LSP sont indépendantes (test unitaire)
+
+Scenario: cli_drapeau_inconnu_exit_2
+  Given le binaire `vanyline-controller` lancé hors cluster
+  When il est invoqué avec un drapeau inexistant (par ex. `--namespace`)
+  Then le code de sortie est 2 (erreur de parse clap par défaut), l'usage est écrit sur stderr,
+    et AUCUN log de démarrage ni tentative de construction de client kube n'apparaît
+
+Scenario: cli_aide_liste_les_treize_drapeaux
+  Given le binaire `vanyline-controller`
+  When il est invoqué avec `--help`
+  Then le code de sortie est 0 et stdout énumère les treize flags longs (`--crds`,
+    `--sandbox-image-tag`, `--sandbox-image-repo`, les quatre `--toolchain-image-*`, les
+    quatre `--lsp-image-*`, `--app-image-tag`, `--app-image-repo`) sous le nom de commande
+    `vanyline-controller`
+
+Scenario: cli_version_absente_rejelee
+  Given le binaire `vanyline-controller`
+  When il est invoqué avec `--version`
+  Then le code de sortie est 2 avec message d'erreur clap — aucun drapeau `--version` n'est
+    généré (verrou de l'absence, cf. `[?]` des `Tasks`)
+
+Scenario: client_kube_injoignable_exit_1
+  Given un environnement sans cluster : ni in-cluster (`KUBERNETES_SERVICE_HOST` absent), et
+    `KUBECONFIG` pointant un fichier inexistant
+  When le binaire est invoqué sans `--crds`
+  Then un unique log `error` est émis — dont le texte commence par le message de la section
+    Returns — et le processus sort avec le code 1, sans retry ni attente (test d'intégration
+    lançant le binaire ; l'absence de cluster EST l'entrée)
+
+Scenario: demarrage_lance_les_quatre_reconcilers_cluster
+  Given un cluster de test réel (tag intégration cluster — kube n'est pas mocké) avec les
+    quatre CRDs installées et le RBAC de /deploy/controller/controller.yaml appliqué
+  When le binaire y est lancé in-cluster, `RUST_LOG` posé
+  Then le message de démarrage de la section Returns apparaît et le processus ne sort pas ; la
+    pose immédiate d'un @Owner de test est réconciliée (ServiceAccount `owner-<name>` créé) et
+    celle d'un @Project à Owner fantôme produit l'erreur `VNL-CTL-002` — reconcileurs owner et
+    project démontrés ; les watchers sandbox et application sont exercés respectivement par le
+    Scenario `image_sandbox_composee_propagee_au_pod` et par les tests de la spec
+    `application.sdd`
+
+Scenario: reconcile_en_erreur_ne_tue_pas_le_processus
+  Given un cluster de test réel (tag intégration cluster) avec le controller lancé
+  When une CR est posée qui fait échouer son reconcile de façon durable (par ex. un @Project
+    dont l'@Owner référencé est inexistant — erreur `VNL-CTL-002`)
+  Then les warn de l'error_policy (requeue 30 s) se répètent pour le Project, tandis qu'un
+    @Owner valide posé ensuite est néanmoins réconcilié — l'échec d'un reconcileur n'arrête ni
+    les autres ni le processus (tag intégration cluster)
+
+Scenario: image_sandbox_composee_propagee_au_pod
+  Given un cluster de test réel (tag intégration cluster) avec le controller lancé avec
+    `SANDBOX_IMAGE_REPO=repo.test/sandbox` et `SANDBOX_IMAGE_TAG=perso1`, et un @Project cloné
+    (`status.cloned` à `true`) sous un @Owner existant
+  When un @Sandbox sans `spec.image` est posé sur une branche clonée
+  Then le pod créé porte l'image exacte `repo.test/sandbox:perso1` — la composition
+    `format!("{repo}:{tag}")` de ./main.rs et sa transmission à `sandbox::Context::default_image`
+    sont vérifiées de bout en bout (tag intégration cluster)

@@ -1,0 +1,936 @@
+Spec: Project
+
+Platform: Rust/vanyline-controller
+
+Purpose:
+  Reconciler `Project` de `vanyline-controller` (opérateur kube-rs) — le contrat cluster
+  d'un dépôt git d'un Owner : PVC workspace (créé, ou PVC existant référencé jamais géré),
+  trio RBAC `project-<name>-maint` (droit `projects/status: patch` scopé à CE Project pour
+  le Job `detect`), Job `project-<name>-init` (clone bare + mkdir caches + détection, créé
+  une fois), `CronJob` `project-<name>-fetch` (`fetch --prune` + détection, planning dérivé
+  de `spec.fetchInterval`), et finalizer `vanyline.solidite.fr/project-cleanup` (Job purge
+  puis levée — le PVC créé part par GC en cascade, un PVC référencé ne meurt jamais).
+  Toute la maintenance git s'exécute dans des pods à image sandbox via `vanyline-maint` en
+  argv direct (`command: ["vanyline-maint", ...]`) — JAMAIS de shell interpolé, règle
+  contractuelle de /vanyline.sdd « Must not ». Le fichier porte aussi les helpers de layout
+  (`repo.git`, `worktrees/<n>`, `cache/<dir>`) et de sécurité (`@SANDBOX_UID`,
+  @sandbox_security_context) consommés par `./sandbox.rs` (Jobs checkout/remove, pod
+  sandbox) : ces items `pub` sont des contrats internes au crate, pas de l'API publique du
+  binaire. Le status est écrit par @compute_status (routine, `cloned` + condition `Ready`)
+  et n'écrase JAMAIS `languages`/`detectedAt` posés par le Job `detect` — protection portée
+  par les `skip_serializing_if` de @ProjectStatus, contractés par la sœur
+  `/crds/src/lib.sdd` (qui cite `compute_status` comme l'autre moitié du mécanisme).
+
+Owns:
+  ./project.rs
+
+Can read:
+  ./main.rs
+  ./error.rs
+  ./owner.rs
+  ./sandbox.rs
+  ../Cargo.toml
+  /vanyline.sdd
+  /tooling.sdd
+  /crds/src/lib.sdd
+  /docs/architecture.md
+  /sandbox/src/maint.rs
+
+Structure:
+  ./project.rs en trois blocs. (1) Helpers purs de noms et de layout : @WORKSPACE_MOUNT_PATH,
+  @DEFAULT_WORKSPACE_SIZE, @DEFAULT_WORKSPACE_ACCESS_MODE, @project_pvc_name,
+  @effective_pvc_name, @effective_sub_path, @bare_repo_path, @worktree_path,
+  @cache_dir_name, @cache_path, @effective_caches, @maint_sa_name — le layout
+  (`repo.git`/`worktrees/`/`cache/` et le mapping `pnpm` → `pnpm-store`) est dupliqué
+  délibérément avec `sandbox/src/maint.rs` (règle « le controller reste isolé », figée par
+  des tests aux mêmes littéraux des deux côtés). (2) Builders purs de manifests : trio RBAC
+  (@build_maint_service_account, @build_maint_role, @build_maint_role_binding), PVC
+  (@build_workspace_pvc), pods de Jobs (@git_pod_template, @sandbox_security_context,
+  @SANDBOX_UID), Jobs/CronJob (@build_init_job, @build_fetch_cronjob, @build_purge_job,
+  @ProjectJobContext, @fetch_schedule) et status (@compute_status). (3) Moteur de reconcile :
+  @Context, @fetch_owner, @apply, @cleanup, @reconcile (sous @finalizer kube-runtime avec
+  @FINALIZER), @error_policy, @build_controller — câblé dans `./main.rs` (controller Project
+  tournant avec `Context { client, sandbox_image }`, l'image venant de
+  `SANDBOX_IMAGE_REPO`:`SANDBOX_IMAGE_TAG`). (4) Module `#[cfg(test)]` : 35 tests unitaires
+  de construction pure (aucun harnais cluster n'existe à ce jour dans le crate).
+
+Must:
+  Fabriquer TOUTES les commandes de conteneurs de Jobs en argv `Vec<String>` passé à
+    `command:` du container, premier élément `"vanyline-maint"`, sans jamais `sh`/`-c` ni
+    interpolation d'un champ de CR dans une chaîne shell (figé par le test existant
+    `git_pod_template_no_shell` ; règle /vanyline.sdd « Must not »).
+  Poser sur @ProjectStatus écrit par @compute_status : `pvc_name` = @effective_pvc_name,
+    `cloned` = l'argument booléen, `last_fetch` `None`, `worktrees` vide, une et une seule
+    condition `Ready` — `("True", "InitJobSucceeded", "PVC workspace et clone bare en
+    place")` quand cloné, `("False", "WaitingForInitJob", "En attente de la fin du job
+    project-init")` sinon — avec `observed_generation` = `metadata.generation` de la CR et
+    `last_transition_time` = `jiff::Timestamp::now()` À CHAQUE appel (comportement actuel,
+    cf. `[?]` des `Tasks`), et `languages` vide / `detected_at` `None` — ces deux derniers
+    NE PARAÎSSANT JAMAIS dans le JSON du patch grâce aux `skip_serializing_if` de
+    @ProjectStatus (`/crds/src/lib.sdd`), ce qui préserve le travail du Job `detect`.
+  Écrire le status par `Api::<Project>::patch_status` avec un `Patch::Merge` (JSON merge
+    patch RFC 7386) et `PatchParams::default()`, corps `{"status": <ProjectStatus sérialisé
+    camelCase>}`, À CHAQUE `Event::Apply` réussi jusqu'au bout.
+  Déduire `cloned` UNIQUEMENT de l'état du Job init courant :
+    `jobs.get_opt("project-<name>-init")` → `status.succeeded > 0` ; Job absent ⇒ créer le
+    Job par `create` (jamais patch — spec de Job immuable) et considérer `cloned = false`
+    pour ce tour.
+  Créer le `CronJob` `project-<name>-fetch` (SSA @owner::FIELD_MANAGER force) seulement une
+    fois `cloned` vrai, avec `concurrencyPolicy: "Forbid"` posé par @apply (le builder
+    @build_fetch_cronjob laisse le champ NON posé — voir Scenario
+    `fetch_cronjob_concurrency_policy_non_posee_par_le_builder` et son `[?]`).
+  Exiger comme précondition de tout `Event::Apply` : l'@Owner référencé (`spec.owner`, même
+    namespace) existe AVEC `status.pvcName` posé — sinon erreur @ControllerError::OwnerNotReady
+    (`VNL-CTL-002`). La présence de `status.pvcName` (pas la condition `Ready` de l'Owner)
+    est le garde-fou testé.
+  Appliquer dans l'ordre, à chaque `Event::Apply` après la précondition Owner : ServiceAccount,
+    Role, RoleBinding `project-<name>-maint`, puis PVC workspace (seulement si
+    @build_workspace_pvc retourne `Some`), puis init Job (créé une fois, ci-dessus), puis
+    CronJob fetch (si `cloned`), puis patch du status, puis bump des Sandboxes — le tout en
+    SSA `Patch::apply(@owner::FIELD_MANAGER).force()` SAUF les Jobs (create simple) et le
+    status (merge patch sans champ manager).
+  Ne créer AUCUN PVC et n'en gérer aucun quand `spec.existingPvc` est posé
+    (@build_workspace_pvc retourne `None`) ; les mounts utilisent alors le PVC référencé
+    (@effective_pvc_name) avec le `subPath` de @effective_sub_path si fourni — même règle
+    que `owner::build_home_pvc`.
+  Résoudre la taille/mode d'accès du PVC créé par priorité : `spec.storageSize` /
+    `spec.storageAccessMode` > `owner.spec.projectDefaults.storageSize`/`.storageAccessMode`
+    passés en paramètres par l'appelant > constantes du fichier (`@DEFAULT_WORKSPACE_SIZE` =
+    `"10Gi"`, @DEFAULT_WORKSPACE_ACCESS_MODE = `"ReadWriteOnce"`) ; pour la storage class :
+    `spec` > défaut Owner > AUCUN repli (`None` ⇒ classe par défaut du cluster).
+  Ne porter sur @build_maint_role qu'UNE seule règle — `apiGroups:
+    ["vanyline.solidite.fr"]`, `resources: ["projects/status"]`, `resourceNames: [<ce
+    Project>]`, `verbs: ["patch"]` — @build_maint_role_binding lie le SA homonyme au Role
+    homonyme (`apiGroup: "rbac.authorization.k8s.io"`), et les trois objets portent un
+    @owner_reference vers le Project (GC en cascade à sa suppression).
+  Poser sur @git_pod_template et dans tous les pods de Jobs : @sandbox_security_context
+    (`runAsUser` = `runAsGroup` = `fsGroup` = @SANDBOX_UID = `1000`, `runAsNonRoot: true`),
+    `restartPolicy: "Never"`, volumes `workspace` (PVC @effective_pvc_name) et `home` (PVC
+    `ctx.owner_pvc_name`), mounts `workspace` → @WORKSPACE_MOUNT_PATH (`/workspace`, avec
+    `subPath` de @effective_sub_path) et `home` → `owner::HOME_MOUNT_PATH`
+    (`/home/vanyline`), env `HOME` = `/home/vanyline` et `GIT_SSH_COMMAND` =
+    `"ssh -i /home/vanyline/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"`
+    INCONDITIONNELLEMENT (clé dans le home de l'Owner ; inopérant tant que la clé
+    n'existe pas, sans effet pour un remote HTTPS), label de template
+    `vanyline.solidite.fr/project: <name>`, et les mêmes env/mounts sur l'initContainer
+    comme sur le container principal.
+  Enchaîner git puis détection dans les Jobs `init` et `fetch` : `init_command` `Some` ⇒
+    initContainer `"git"` (commande git) puis container principal `"detect"`
+    (`vanyline-maint detect --workspace /workspace --project <name>`) ; `init_command`
+    `None` ⇒ un seul container `"git"` (cas `purge`, comme les Jobs checkout/remove de
+    `./sandbox.rs` qui réutilisent le helper). SA `project-<name>-maint` posé sur les pods
+    init/fetch (ils appellent l'API K8s via `detect`), AUCUN SA sur purge/checkout/remove
+    (`None` ⇒ SA par défaut du namespace).
+  Fixer les argv exacts : init = `["vanyline-maint", "init", "--repo", <spec.repoUrl>,
+    "--workspace", "/workspace"]` suivi de paires `("--cache", <id>)` pour chaque élément de
+    @effective_caches dans l'ordre de la liste ; fetch = `["vanyline-maint", "fetch",
+    "--workspace", "/workspace"]` ; detect = `["vanyline-maint", "detect", "--workspace",
+    "/workspace", "--project", <name>]` ; purge = `["vanyline-maint", "purge",
+    "--workspace", "/workspace"]`. Les identifiants de cache passent tels quels (`--cache
+    pnpm`) : le mapping répertoire (`pnpm-store`) est aussi connu du controller
+    (@cache_dir_name, pour les mounts du pod sandbox) et de `vanyline-maint` — duplication
+    assumée.
+  Fixer la discipline des Jobs : `backoffLimit: 3` et `ttlSecondsAfterFinished: 3600` sur
+    init, jobTemplate de fetch et purge ; `ownerReferences` vers le Project (controller_ref
+    dérivé) sur le Job init, le CronJob fetch et le Job purge.
+  Dériver le planning du CronJob par @fetch_schedule : `"@every <spec.fetchInterval>"`,
+    défaut `"@every 1h"` — transcription verbatim, sans validation de la durée.
+  Écrire @compute_status avant le bump, puis horodater l'annotation
+    `vanyline.solidite.fr/egress-bump` (= timestamp courant) par `Patch::Merge` sur TOUTES
+    les Sandboxes du namespace dont `spec.project` égale le nom du Project — bump
+    INCONDITIONNEL à chaque reconcile réussi (pas de détection de changement : c'est le
+    signal « re-réconcile tes netpols/egress » pour les Sandboxes, décision documentée
+    /docs/architecture.md section WS-13, sans watch inter-CRD).
+  Gérer @Event::Cleanup par @cleanup : Job purge créé une fois (create simple), et retour
+    @ControllerError::PurgePending (`VNL-CTL-003`) tant que `succeeded` n'est pas `> 0` —
+    l'erreur est ce qui EMPÊCHE kube-runtime de lever le finalizer ; `Ok` seulement quand le
+    Job a réussi. Le PVC (s'il était créé) part ensuite par GC via son `ownerReference` ;
+    un PVC référencé survit à la Project (données nettoyées par la purge via `subPath`).
+  Traiter le cleanup en best-effort v1 : si l'@Owner est introuvable OU son `status.pvcName`
+    absent, log `tracing::warn!` et `Action::await_change()` — le finalizer est levé SANS
+    purge (cf. `[?]` des `Tasks` sur le cas `existingPvc`).
+  Requeue : `15 s` quand `cloned` faux, `300 s` quand vrai (@apply) ; @error_policy :
+    `PurgePending` ⇒ `tracing::info!` + requeue `10 s`, toute autre erreur ⇒
+    `tracing::warn!` + requeue `30 s`.
+  Envelopper tout @reconcile dans `kube::runtime::finalizer` avec l'identifiant
+    @FINALIZER = `"vanyline.solidite.fr/project-cleanup"` ; les erreurs propres au cadre
+    finalizer (patch d'ajout/retrait du finalizer) sont converties en
+    @ControllerError::Finalizer(String) (`VNL-CTL-004`, message stringifié) — les erreurs
+    métier du closure (`OwnerNotReady`, `PurgePending`, `Kube`) traversent sans conversion
+    et gardent leur identité pour @error_policy.
+  Retomber sur le namespace `"default"` si l'objet n'en a pas (@reconcile — défensif, une
+    CR namespaced en a toujours un en pratique).
+  Construire @build_controller comme `Controller::new(Api::<Project>::all(client),
+    watcher::Config::default())` : watch des Projects TOUS namespaces, aucune clause de
+    filtrage, aucun generator ni watch des CRD sœurs.
+  Exempter le seul profil test du harnais (`#![allow(clippy::unwrap_used,
+    clippy::expect_used)]` dans le module `tests`) et justifier d'une ligne chaque
+    `#[allow(clippy::expect_used)]` de production (sur @owner_reference et les builders qui
+    l'appellent — `apiVersion`/`kind` toujours posés par le derive @CustomResource,
+    l'`expect` est structurellement inatteignable).
+  Conserver l'alignement des littéraux de layout avec `sandbox/src/maint.rs` :
+    `"repo.git"`, `"worktrees/"`, `"cache/"`, mapping `"pnpm"` → `"pnpm-store"` — figé des
+    deux côtés par tests jumeaux (`bare_repo_and_worktree_paths` et `cache_dir_name_mapping`
+    ici, `layout_constants`/`worktree_path_value` côté maint).
+  Logger exclusivement via `tracing` (`warn!` sur erreur de reconcile, `info!` sur purge
+    en attente, `warn!` sur owner manquant en cleanup) — harnais /tooling.sdd.
+
+Must not:
+  Interpoler `spec.repoUrl`, un nom de cache, un nom de Project/Sandbox ou une quelconque
+    valeur de CR dans une commande shell : les builders ne produisent QUE des `Vec<String>`
+    passés en `command:` (argv), l'assainissement des noms relevant de `vanyline-maint`.
+  Valider les entrées libres : `repoUrl` (passé verbatim en argv), `fetchInterval` (passé
+    verbatim dans `"@every …"`), `storageSize` (quantité transmise telle quelle à
+    l'apiserver), identifiants de caches (aucun contrôle ni dédupliquage), `existingPvc.name`
+    (aucune vérification d'EXISTENCE du PVC référencé — cf. `[!]` des `Tasks`).
+  Créer, patcher ou supprimer un PVC quand `spec.existingPvc` est posé : le controller ne
+    fait que le monter. Un PVC référencé ne doit JAMAIS disparaître par GC ni par purge.
+  Écrire `languages` ou `detectedAt` dans le corps sérialisé du patch de @compute_status,
+    ni plus généralement sérialiser un @ProjectStatus complet dans le patch dédié du Job
+    `detect` (garde symétrique de `/crds/src/lib.sdd` : ce n'est pas ce fichier qui les
+    impose, mais c'est ici qu'elles sont décisives).
+  Patcher ou re-créer un Job existant : init et purge sont créés par `create` simple et
+    seulement absents ; un Job déjà présent (réussi, en cours ou épuisé) est lu, jamais
+    modifié.
+  Accorder au SA `project-<name>-maint` un droit autre que `patch` sur le sous-ressource
+    `projects/status` de CE Project (`resourceNames` exclusif) — pas de `get`, pas de liste,
+    pas les autres Projects du namespace.
+  Poser un SA sur le Job purge (ni sur checkout/remove de `./sandbox.rs`) : la purge
+    n'appelle pas l'API K8s.
+  Supprimer le CronJob fetch lorsque `cloned` redevient faux : seul le `ownerReference`
+    (GC à la suppression de la Project) le retire ; le reconciler ne fait que le repatcher
+    quand `cloned` est vrai.
+  Lever le finalizer sans succès du Job purge, SAUF branchement best-effort « Owner
+    introuvable » assumé (Must « Traiter le cleanup en best-effort v1 »).
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` hors des exemptions
+    justifiées ci-dessus (harnais /tooling.sdd).
+  Regrouper dans ce reconciler un watch d'@Owner, de @Sandbox ou d'autre chose : la
+    propagation vers les Sandboxes passe par la SEULE annotation de bump.
+
+Depends on:
+  ./error.rs — @ControllerError (`VNL-CTL-001` Kube, `VNL-CTL-002` OwnerNotReady,
+    `VNL-CTL-003` PurgePending, `VNL-CTL-004` Finalizer).
+  ./owner.rs — @owner::FIELD_MANAGER (`"vanyline-controller"`, manager SSA partagé) et
+    @owner::HOME_MOUNT_PATH (`/home/vanyline`, mount du home et valeur de `HOME`).
+  ./main.rs — construction du @Context (image sandbox `SANDBOX_IMAGE_REPO`:`SANDBOX_IMAGE_TAG`)
+    et branchement `build_controller().run(reconcile, error_policy, ctx)`.
+  ./sandbox.rs — consommateur interne : @git_pod_template/@ProjectJobContext (Jobs
+    `checkout`/`remove`), @sandbox_security_context/@SANDBOX_UID (pod sandbox), layout
+    (@bare_repo_path, @worktree_path, @cache_path, @cache_dir_name, @effective_caches,
+    @effective_pvc_name, @effective_sub_path, @WORKSPACE_MOUNT_PATH) pour les mounts du pod.
+  `kube` 4 (features client/runtime) — @Client, @Api, @Patch/@PatchParams/@PostParams,
+    @Controller, @Action, runtime @finalizer/@Event.
+  `k8s-openapi` 0.28 — types @Job/@JobSpec/@CronJob/@CronJobSpec, @PodSpec/@Container/@Volume/
+    @VolumeMount/@EnvVar/@PodSecurityContext, @PersistentVolumeClaim(+Spec),
+    @ServiceAccount/@Role/@RoleBinding/@PolicyRule/@RoleRef/@Subject, @Condition/@ObjectMeta/@Time,
+    @Quantity.
+  `vanyline-crds` — @Project/@ProjectSpec/@PvcRef/@ProjectStatus, @Owner (lecture), @Sandbox
+    (bump), `controller_owner_ref` (dérive @CustomResource).
+  `serde_json` — corps des merge patches (`status`, annotation de bump).
+  `tracing` — logs du reconcile et de l'error policy.
+  Contrat runtime externe (hors cargo) : le binaire `vanyline-maint` de l'image sandbox
+    (`/sandbox/src/maint.rs`, section /docs/architecture.md « Maintenance des workspaces »)
+    — les argv construits ici doivent rester exactement ses sous-commandes `init`/`fetch`/
+    `purge`/`detect` ; controller et image sandbox avancent ensemble (release couplée).
+  /tooling.sdd — harnais clippy/fmt ; /vanyline.sdd — règle argv-sans-shell ;
+    /crds/src/lib.sdd — sérialisation @ProjectStatus (anti-écrasement `languages`).
+
+Exposes:
+  Layout et noms (contrats internes au crate, consommés par ./sandbox.rs) :
+    @WORKSPACE_MOUNT_PATH (`pub const &str` = `"/workspace"`), @project_pvc_name,
+    @effective_pvc_name, @effective_sub_path, @bare_repo_path (`pub const fn`),
+    @worktree_path, @cache_dir_name, @cache_path, @effective_caches, @maint_sa_name.
+  Sécurité partagée : @SANDBOX_UID (`pub const i64` = `1000`), @sandbox_security_context.
+  Builders purs : @ProjectJobContext (`pub struct { sandbox_image, owner_pvc_name }`),
+    @build_workspace_pvc, @build_maint_service_account, @build_maint_role,
+    @build_maint_role_binding, @init_job_name, @fetch_cronjob_name, @purge_job_name,
+    @fetch_schedule, @git_pod_template, @build_init_job, @build_fetch_cronjob,
+    @build_purge_job, @compute_status.
+  Moteur : @Context (`pub struct { client, sandbox_image }`), @reconcile, @error_policy,
+    @build_controller.
+  Privés mais contractuels : @FINALIZER, @DEFAULT_WORKSPACE_SIZE,
+    @DEFAULT_WORKSPACE_ACCESS_MODE, @owner_reference, @fetch_owner, @apply, @cleanup.
+  Rien au-delà : le module `tests` est privé ; aucun autre item n'est atteignable hors du
+    fichier.
+
+Accepts:
+  @reconcile : @Arc<Project> émise par le watch (tous namespaces) et @Arc<Context>
+    `{ client, sandbox_image }`.
+  Builders : @Project (nom, namespace, uid, generation, spec lu tel quel — `owner`,
+    `repoUrl`, `existingPvc{name,subPath}`, `storageSize`/`storageClass`/`storageAccessMode`,
+    `gitSecret` lu par PERSONNE, `caches`, `fetchInterval`, `defaultBranch` non lu ici) et
+    @ProjectJobContext (image et PVC home résolus par l'appelant, aucune validation ici).
+  @compute_status : un booléen `cloned` résolu par l'appelant depuis le Job init.
+  @build_workspace_pvc : trois `Option<&str>` de défauts (`default_size`, `default_class`,
+    `default_access_mode`) fournis par l'appelant depuis `owner.spec.projectDefaults`.
+  Chaînes libres acceptées sans contrôle : tailles/quantités storage, modes d'accès, ids de
+    caches (y compris `""` et doublons), `fetchInterval` (y compris des durées invalides pour
+    le parseur cron), noms (validité RFC 1123 attendue de l'appelant/apiserver).
+
+Returns:
+  @project_pvc_name : `"project-<name>"` ; @maint_sa_name : `"project-<name>-maint"` ;
+    @init_job_name/@fetch_cronjob_name/@purge_job_name : `"project-<name>-init"`,
+    `"-fetch"`, `"-purge"`.
+  @effective_pvc_name : `existing_pvc.name` si posé, sinon @project_pvc_name ;
+    @effective_sub_path : `existing_pvc.subPath` (uniquement), sinon `None`.
+  @bare_repo_path : `"repo.git"` ; @worktree_path : `"worktrees/<sandbox>"` ;
+    @cache_dir_name : `"pnpm-store"` pour `"pnpm"`, identité sinon ; @cache_path :
+    `"cache/<dir>"` ; @effective_caches : `spec.caches` cloné tel quel, sinon
+    `["cargo", "pnpm", "pip"]` dans cet ordre.
+  @fetch_schedule : `"@every <interval>"` (défaut `"@every 1h"`).
+  @sandbox_security_context : @PodSecurityContext `{ runAsUser: 1000, runAsGroup: 1000,
+    runAsNonRoot: true, fsGroup: 1000 }`.
+  Builders : manifests complets décrits dans les Must (noms, namespaces, ownerReferences,
+    argv, env, volumes/mounts, sécurité, backoff/ttl, schedule) ; @build_workspace_pvc :
+    @Option<@PersistentVolumeClaim> (`None` iff `existing_pvc` posé) ; @compute_status :
+    @ProjectStatus (une condition `Ready`, `observed_generation` reprise,
+    `last_transition_time` = maintenant).
+  @reconcile/@apply : @Action::requeue(300 s si cloné, sinon 15 s) ; @cleanup (succès) :
+    @Action::await_change().
+  @error_policy : @Action::requeue(10 s pour `PurgePending`, 30 s sinon).
+  @build_controller : @Controller<Project> non démarré.
+
+Raises:
+  @apply : @ControllerError::OwnerNotReady (`VNL-CTL-002`, owner existant sans
+    `status.pvcName`) ; @ControllerError::Kube (`VNL-CTL-001`) sur tout appel API échouant :
+    owner introuvable (`Api::get` ⇒ NotFound ⇒ `VNL-CTL-001`, PAS `VNL-CTL-002`), SSA
+    rejeté (ex: champs PVC immuables, `Quantity` invalide, `schedule` cron invalide),
+    `create` du Job en 409 (course) — tous remontés par `?`, status et bump alors NON écrits
+    ce tour-ci.
+  @cleanup : @ControllerError::PurgePending (`VNL-CTL-003`) tant que la purge n'a pas
+    réussi ; @ControllerError::Kube sur les appels API.
+  @reconcile : @ControllerError::Finalizer (`VNL-CTL-004`) pour les échecs du cadre
+    finalizer eux-mêmes (patch d'ajout/retrait du finalizer, message stringifié — le type
+    kube d'origine est perdu à la conversion).
+  Panics structurellement inatteignables : `expect` de @owner_reference (et des trois
+    builders de Jobs qui l'appellent directement) si `apiVersion`/`kind` manquaient —
+    impossible par le derive @CustomResource, couverts par l'`#[allow]` justifié.
+  Aucune validation métier ici : une taille storage aberrante, un `fetchInterval` non
+    parsable ou un PVC référencé inexistant ne lèvent AUCUNE erreur de construction — ils
+    échouent plus tard (apiserver, CronJob controller, pod en `ErrImagePull`/`Unschedulable`
+    côté K8s, jamais dans le status du Project pour ces trois cas).
+
+Handles:
+  `spec.existingPvc` posé : aucun PVC créé ; les pods montent le PVC référencé, avec
+    `subPath` si fourni (cas kydah-code) ou le volume entier sinon ; la purge respecte le
+    même `subPath` (le `--workspace` pointe sur le sous-répertoire monté).
+  `spec.caches` avec ordre ou doublons personnalisés : passé verbatim (ordre de la spec,
+    doublons compris) en paires `--cache` répétées — pas de déduplication ni de tri.
+  `spec.gitSecret` posé : IGNORE (clé SSH dans le home de l'Owner, mécanique remplacée par
+    `GIT_SSH_COMMAND` inconditionnel — champ CRD conservé pour compatibilité, cf.
+    `/crds/src/lib.sdd`).
+  Objet sans namespace : reconcile sous `"default"` (défensif).
+  Status préexistant enrichi par `detect` (`languages`/`detectedAt`) : le patch de routine
+    omet ces deux clés ⇒ valeurs préservées à travers les reconciles (Scenario
+    `cluster_status_merge_n_ecrase_pas_languages`).
+  Status partiel écrit par `detect` (seulement `languages`/`detectedAt`) : lu par les
+    sœurs via `.status.as_ref()` et `#[serde(default)]` — rien à faire côté reconciler.
+  Owner supprimé AVANT le cleanup du Project : branche best-effort (warn + await_change),
+    le finalizer part sans purge.
+  Job purge déjà présent et réussi au moment du cleanup (re-tour après TTL, relance du
+    controller) : `await_change` immédiat, pas de re-création.
+  Job purge encore en cours : `PurgePending` ⇒ requeue 10 s par @error_policy, finalizer
+    maintenu.
+  Course sur `create` (Job créé entre le `get_opt` et le `create`) : `VNL-CTL-001` 409 ⇒
+    requeue 30 s, sans effet durable.
+  Échec définitif du Job init (`backoffLimit` épuisé) : `cloned` reste `false` — le
+    reconciler ne distingue pas « en cours » de « définitivement échoué » (cf. `[?]`).
+  `status` absent de la CR au premier reconcile : @compute_status le pose intégralement au
+    premier Apply complet.
+  PVC référencé manquant : rien n'est vérifié au reconcile — les pods de Jobs échouent en
+    `Unschedulable`/`FailedMount` côté K8s, le Project reste `Ready: False`
+    (`WaitingForInitJob`) sans message d'erreur explicite.
+  Échec du bump (list/patch d'une Sandbox) APRES le patch de status : status déjà écrit,
+    erreur ⇒ requeue 30 s, le bump est repris au tour suivant (idempotent, juste re-horodaté).
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]`/`[!]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-26 (spec produite par `spec-reverse`).
+  [?] Recreation en boucle du Job init après TTL : `ttlSecondsAfterFinished: 3600` fait
+    supprimer le Job init ~1 h après son succès ; le reconcile suivant ne le trouve plus, le
+    RECRÉE (`create`), et `cloned` repasse `false` tant que le nouveau Job n'a pas réussi —
+    donc `Ready: False` + requeue 15 s + re-execution d'`init` (idempotent, sauve l'affaire)
+    en cycle quasi-perpétuel, avec fenêtre d'indisponibilité pour le reconciler Sandbox
+    (`ProjectNotReady`). Voulu (idempotence assumée comme contrat) ou bug de conception à
+    corriger (ne jamais re-créer après un succès — ex: se souvenir de `status.cloned` et ne
+    recréer que si le clone a disparu, ou retirer le TTL, ou nommer le Job par génération) ?
+  [?] `cloned` aveugle à l'échec définitif : Job init avec `backoffLimit` épuisé (condition
+    `Failed`) ⇒ `cloned` faux, raison `WaitingForInitJob` à vie, sans distinction visible du
+    « en cours ». Faut-il un troisième état (reason `InitJobFailed`, message porteur de
+    l'échec du Job) ou l'auto-récupération par TTL/recréation est-elle le mécanisme voulu
+    (elle rejoue l'init toutes les heures au lieu de signaler l'échec) ?
+  [?] `repoUrl` effectivement immuable après le premier clone : le Job existant n'est jamais
+    re-créé et `init` idempotent ne reclone pas — un changement de `spec.repoUrl` ne
+    redirige JAMAIS le bare (`origin` garde l'URL d'origine). Contrat assumé (« modifier
+    repoUrl d'un Project cloné n'a pas de sens ») ou action de reconcile à ajouter
+    (`set-url`, ou Job init régénéré) ?
+  [?] Cleanup et `existingPvc` : si l'@Owner (ou son `status.pvcName`) est parti en premier,
+    la purge est sautée ALORS que c'est précisément le cas `existingPvc` (PVC partagé jamais
+    supprimé par GC) qui a besoin de la purge pour nettoyer ses données — et le
+    `owner_pvc_name` refusé ne sert au Job purge que pour le mount `home`, que la commande
+    `purge` n'utilise pas. La purge devrait-elle tourner sans l'Owner (volume `home`
+    conditionnel quand `existingPvc` posé) ?
+  [?] @compute_status re-stampe `lastTransitionTime = now()` et re-patch la condition à
+    CHAQUE reconcile : contraire de la convention K8s (transition = moment du CHANGEMENT de
+    statut) ; en merge patch, `conditions` est remplacé globalement à chaque fois. Corriger
+    (conserver l'ancien temps tant que `status` de la condition ne change pas) ou assumer ?
+  [?] Le patch de routine contient `"lastFetch": null`, `"worktrees": []` et `conditions`
+    complets : dès qu'un champ alimenté ailleurs (ex: `lastFetch` par le CronJob, cf.
+    commentaire « pas encore suivis en v1 ») existera, le reconcile de routine l'EFFACERA à
+    chaque tour — même débat que le `[?]` de `/crds/src/lib.sdd` sur l'extension des
+    `skip_serializing_if` ; décision à prendre là-bas, répercutée ici.
+  [?] @apply n'exige que `status.pvcName` de l'@Owner, pas sa condition `Ready` : un Owner
+    dont le PVC est posé au status mais pas `Ready` laisse démarrer PVC/Jobs. Le garde-fou
+    actuel (pvcName présent) est-il le contrat, ou faut-il exiger `Ready: True` ?
+  [?] `fetchInterval` non validé : `"@every 1heures"` est patché tel quel, le CronJob est
+    rejeté (ou reste inactif) côté apiserver/cron SANS le moindre reflet dans le status du
+    Project. Valider côté reconcile (rejet explicite en `ControllerError`) ou documenter
+    comme entrée système (l'apiserver est le validating layer) ?
+  [?] Dérive sur PVC déjà créé : modifier `spec.storageSize` (baisse refusée par
+    l'apiserver), `storageAccessMode` ou `storageClass` (immuables après binding) fait
+    échouer le SSA ⇒ requeue 30 s en boucle, la CR garde un champ menteur. Accepté (erreur
+    visible dans les logs) ou traiter (ne plus patcher un PVC `Bound`, conditionner le
+    patch) ?
+  [?] `GIT_SSH_COMMAND` en dur `"/home/vanyline/.ssh/id_ed25519"` alors que `HOME` vient de
+    @owner::HOME_MOUNT_PATH : les deux sources peuvent diverger si la constante bouge.
+    Construire la valeur depuis la constante, ou figer par un test d'arrêteur ?
+  [?] @build_fetch_cronjob (builder) laisse `concurrencyPolicy` NON posé (défaut K8s =
+    `Allow`) ; seul @apply force `"Forbid"`. Tout autre consommateur du builder obtiendrait
+    `Allow`. Le contrat « fetch = Forbid » doit-il vivre dans le builder (et un Scenario
+    unitaire le vérifiant sans @apply) ?
+  [!] Incohérence documentaire : /docs/architecture.md (table des reconcilers) décrit le
+    PVC du Project comme « créé ou **référence vérifiée** » — le code ne vérifie JAMAIS
+    l'existence du PVC référencé (aucun `pvcs.get_opt` dans @apply). Soit corriger la doc,
+    soit ajouter la vérification (avec son erreur dédiée) ; à trancher, le présent contrat
+    documente le code tel qu'il est (aucune vérification).
+  [!] `#[allow(dead_code)]` redondants : @WORKSPACE_MOUNT_PATH, @DEFAULT_WORKSPACE_SIZE et
+    @DEFAULT_WORKSPACE_ACCESS_MODE (entre autres) sont bel et bien utilisés (dans ce fichier
+    et/ou ./sandbox.rs) — allows vestigiaux à retirer (dette de lisibilité, à tracer côté
+    /tooling.sdd).
+  [!] Doc comment de @fetch_schedule : « cf. note `@every` dans le contexte de cette tâche »
+    — référence pendante à une tâche disparue, reformuler la note dans la doc du code.
+  [ ] Couverture unitaire existante (./project.rs `mod tests`, 35 tests) : verrouillent les
+    Scenarios homonymes `project_pvc_name_format`, `bare_repo_and_worktree_paths`,
+    `cache_dir_name_mapping`, `cache_path_uses_mapping`, `effective_caches_default`,
+    `effective_caches_custom`, `effective_pvc_name_generated`, `effective_pvc_name_existing`,
+    `effective_sub_path_cases`, `build_workspace_pvc_none_when_existing`,
+    `build_workspace_pvc_default_size`, `build_workspace_pvc_owner_default_size`,
+    `build_workspace_pvc_access_mode_owner_default`,
+    `build_workspace_pvc_access_mode_spec_overrides_default`,
+    `build_workspace_pvc_spec_overrides_default`, `build_workspace_pvc_owner_reference`,
+    `job_names`, `fetch_schedule_default`, `fetch_schedule_custom`,
+    `git_pod_template_runs_as_non_root`, `build_init_job_shape`,
+    `build_init_job_ignores_git_secret`, `build_init_job_existing_pvc_sub_path`,
+    `build_fetch_cronjob_shape`, `build_purge_job_shape`, `git_jobs_service_account`,
+    `git_pod_template_no_shell`, `init_job_detect_container_order`,
+    `compute_status_cloned_true`, `compute_status_cloned_false`,
+    `compute_status_worktrees_and_last_fetch_empty`, `maint_sa_name_value`,
+    `build_maint_service_account_shape`, `build_maint_role_shape`,
+    `build_maint_role_binding_shape`.
+  [ ] Convertir en tests unitaires taggés par leur titre les Scenarios de construction pure
+    sans test : `build_workspace_pvc_classe_absente_sans_defaut`,
+    `build_workspace_pvc_classe_defaut_owner_surchargee_par_spec`,
+    `rbac_trois_objets_owner_reference_controle`,
+    `fetch_schedule_transcrit_intervalle_sans_validation`,
+    `sandbox_security_context_valeurs_uid_1000`,
+    `git_pod_template_sans_init_un_seul_container_git`,
+    `git_pod_template_avec_init_env_et_mounts_dupliques`,
+    `git_pod_template_env_home_et_ssh_inconditionnel`,
+    `git_pod_template_labels_du_template_seulement`,
+    `git_pod_template_volumes_et_mounts_fixes`, `git_pod_template_restart_policy_never`,
+    `init_job_caches_repetes_dans_l_ordre_de_la_spec`,
+    `git_jobs_backoff_limit_3_et_ttl_3600`,
+    `jobs_et_cronjob_owner_references_vers_project`,
+    `fetch_cronjob_concurrency_policy_non_posee_par_le_builder`,
+    `compute_status_json_omet_languages_et_detected_at`,
+    `compute_status_pvc_name_reflete_existing_pvc`,
+    `compute_status_conditions_generation_et_transition`.
+  [ ] Créer le harnais d'intégration cluster du crate (aujourd'hui ABSENT : aucun test
+    ignoré/taggé cluster dans `controller/`) puis convertir les Scenarios taggés
+    « intégration cluster » (préfixe `cluster_`) — batteries non mockées, cluster de dev,
+    hors batterie CI unitaire (convention projet).
+  [ ] Étendre les tests existants pour couvrir l'intégralité de leurs Scenarios homonymes :
+    `build_workspace_pvc_default_size` ne vérifie pas le `namespace` ni le nom du PVC ;
+    `build_fetch_cronjob_shape` ne vérifie pas les `ownerReferences` du CronJob ni l'absence
+    de `concurrencyPolicy` ; `build_purge_job_shape` ne vérifie ni volumes ni absence de SA
+    (couvert ailleurs mais pas dans ce test).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre (unitaires dans la
+    batterie cargo, `cluster_*` sous le harnais d'intégration à créer) et passe.
+  Tous les `[?]`/`[!]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici et
+    dans /docs/architecture.md / /crds/src/lib.sdd si elles les touchent.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur `vanyline-controller`.
+
+Scenario: project_pvc_name_format
+  Given @project_pvc_name
+  When elle reçoit `"demo"`
+  Then le résultat est exactement `"project-demo"` (test existant `project_pvc_name_format`)
+
+Scenario: effective_pvc_name_generated
+  Given un @Project sans `spec.existingPvc`, nommé `demo`
+  When on appelle @effective_pvc_name
+  Then le résultat est `"project-demo"` (test existant `effective_pvc_name_generated`)
+
+Scenario: effective_pvc_name_existing
+  Given un @Project avec `existingPvc = { name: "code-server-home", subPath: "repo" }`
+  When on appelle @effective_pvc_name
+  Then le résultat est `"code-server-home"` — le nom référencé éclipse le nom généré (test
+    existant `effective_pvc_name_existing`)
+
+Scenario: effective_sub_path_cases
+  Given trois @Project : sans `existingPvc`, avec `existingPvc` + `subPath: "repo"`, avec
+    `existingPvc` sans `subPath`
+  When on appelle @effective_sub_path sur chacun
+  Then les résultats sont `None`, `Some("repo")`, `None` — un `subPath` n'existe que via un
+    PVC référencé (test existant `effective_sub_path_cases`)
+
+Scenario: bare_repo_and_worktree_paths
+  Given @bare_repo_path et @worktree_path
+  When on les évalue (`worktree_path("sb1")`)
+  Then les valeurs sont `"repo.git"` et `"worktrees/sb1"` — littéraux alignés sur
+    `sandbox/src/maint.rs` (test existant `bare_repo_and_worktree_paths`)
+
+Scenario: cache_dir_name_mapping
+  Given @cache_dir_name
+  When elle reçoit `"cargo"`, `"pnpm"`, `"custom"`, `"pip"`
+  Then les résultats sont `"cargo"`, `"pnpm-store"`, `"custom"`, `"pip"` — seul `pnpm` est
+    mappé, `pip` passe par le fallback identité (test existant `cache_dir_name_mapping`)
+
+Scenario: cache_path_uses_mapping
+  Given @cache_path
+  When elle reçoit `"pnpm"` puis `"cargo"`
+  Then les résultats sont `"cache/pnpm-store"` et `"cache/cargo"` (test existant
+    `cache_path_uses_mapping`)
+
+Scenario: effective_caches_default
+  Given un @Project avec `spec.caches` absent
+  When on appelle @effective_caches
+  Then le résultat est exactement `["cargo", "pnpm", "pip"]` dans cet ordre (test existant
+    `effective_caches_default`)
+
+Scenario: effective_caches_custom
+  Given un @Project avec `caches: ["cargo"]`
+  When on appelle @effective_caches
+  Then le résultat est `["cargo"]` — la liste de la spec éclipse le défaut complet (test
+    existant `effective_caches_custom`)
+
+Scenario: build_workspace_pvc_none_when_existing
+  Given un @Project avec `existingPvc.name = "code-server-home"`
+  When on appelle @build_workspace_pvc avec n'importe quels défauts
+  Then le retour est `None` — un PVC référencé n'est jamais créé ni géré (test existant
+    `build_workspace_pvc_none_when_existing`)
+
+Scenario: build_workspace_pvc_default_size
+  Given un @Project sans `storageSize` et sans défaut Owner
+  When @build_workspace_pvc produit le PVC
+  Then `requests.storage` vaut `Quantity("10Gi")` et `accessModes` vaut
+    `["ReadWriteOnce"]` — les constantes de repli du fichier (test existant
+    `build_workspace_pvc_default_size`)
+
+Scenario: build_workspace_pvc_owner_default_size
+  Given le même Project et `default_size = Some("20Gi")` (résolu depuis
+    `owner.spec.projectDefaults` par l'appelant)
+  When @build_workspace_pvc produit le PVC
+  Then `requests.storage` vaut `Quantity("20Gi")` (test existant
+    `build_workspace_pvc_owner_default_size`)
+
+Scenario: build_workspace_pvc_spec_overrides_default
+  Given un @Project avec `storageSize: "5Gi"` et `default_size = Some("20Gi")`
+  When @build_workspace_pvc produit le PVC
+  Then `requests.storage` vaut `Quantity("5Gi")` — la spec éclipse le défaut Owner (test
+    existant `build_workspace_pvc_spec_overrides_default`)
+
+Scenario: build_workspace_pvc_access_mode_owner_default
+  Given un @Project sans `storageAccessMode` et `default_access_mode = Some("ReadWriteMany")`
+  When @build_workspace_pvc produit le PVC
+  Then `accessModes` vaut `["ReadWriteMany"]` (test existant
+    `build_workspace_pvc_access_mode_owner_default`)
+
+Scenario: build_workspace_pvc_access_mode_spec_overrides_default
+  Given un @Project avec `storageAccessMode: "ReadWriteOncePod"` et
+    `default_access_mode = Some("ReadWriteMany")`
+  When @build_workspace_pvc produit le PVC
+  Then `accessModes` vaut `["ReadWriteOncePod"]` (test existant
+    `build_workspace_pvc_access_mode_spec_overrides_default`)
+
+Scenario: build_workspace_pvc_classe_absente_sans_defaut
+  Given un @Project sans `storageClass` et `default_class = None`
+  When @build_workspace_pvc produit le PVC
+  Then `storageClassName` est `None` — PAS de repli constant : la classe par défaut du
+    cluster tranchera à l'apiserver
+
+Scenario: build_workspace_pvc_classe_defaut_owner_surchargee_par_spec
+  Given le même Project : d'abord avec `default_class = Some("fast")`, puis avec
+    `spec.storageClass = "gold"` en plus
+  When @build_workspace_pvc produit le PVC dans les deux cas
+  Then `storageClassName` vaut `"fast"` dans le premier cas, `"gold"` dans le second —
+    priorité spec > défaut Owner
+
+Scenario: build_workspace_pvc_owner_reference
+  Given un @Project `demo` (uid posé) sans `existingPvc`
+  When @build_workspace_pvc produit le PVC
+  Then le PVC porte exactement un `ownerReference` vers `demo` de kind `Project` — la GC en
+    cascade supprimera le PVC avec la Project (test existant
+    `build_workspace_pvc_owner_reference`)
+
+Scenario: maint_sa_name_value
+  Given @maint_sa_name
+  When elle reçoit `"demo"`
+  Then le résultat est `"project-demo-maint"` (test existant `maint_sa_name_value`)
+
+Scenario: build_maint_service_account_shape
+  Given un @Project `demo` dans le namespace `ns`
+  When @build_maint_service_account produit le SA
+  Then `metadata` = `{ name: "project-demo-maint", namespace: "ns" }` avec un
+    `ownerReference` unique vers `demo`/`Project` (test existant
+    `build_maint_service_account_shape`)
+
+Scenario: build_maint_role_shape
+  Given un @Project `demo`
+  When @build_maint_role produit le Role
+  Then une unique règle : `apiGroups: ["vanyline.solidite.fr"]`,
+    `resources: ["projects/status"]`, `resourceNames: ["demo"]`, `verbs: ["patch"]` —
+    verrou anti-escalade : sans `resourceNames`, le SA pourrait patcher le status des autres
+    Projects du namespace (test existant `build_maint_role_shape`)
+
+Scenario: build_maint_role_binding_shape
+  Given un @Project `demo` dans `ns`
+  When @build_maint_role_binding produit le RoleBinding
+  Then `roleRef` = `{ apiGroup: "rbac.authorization.k8s.io", kind: "Role", name:
+    "project-demo-maint" }` et un unique subject `{ kind: "ServiceAccount", name:
+    "project-demo-maint", namespace: "ns" }` (test existant `build_maint_role_binding_shape`)
+
+Scenario: rbac_trois_objets_owner_reference_controle
+  Given un @Project `demo` (uid posé)
+  When on construit SA, Role et RoleBinding de maintenance
+  Then les trois objets portent un unique `ownerReference` vers `demo`/`Project` avec
+    `controller: true` et `blockOwnerDeletion: true` (dérive `controller_owner_ref`) — la GC
+    cascade nettoie le trio à la suppression de la Project
+
+Scenario: job_names
+  Given @init_job_name, @fetch_cronjob_name, @purge_job_name
+  When elles reçoivent `"demo"`
+  Then les résultats sont `"project-demo-init"`, `"project-demo-fetch"`,
+    `"project-demo-purge"` (test existant `job_names`)
+
+Scenario: fetch_schedule_default
+  Given un @Project sans `fetchInterval`
+  When on appelle @fetch_schedule
+  Then le résultat est `"@every 1h"` (test existant `fetch_schedule_default`)
+
+Scenario: fetch_schedule_custom
+  Given un @Project avec `fetchInterval: "30m"`
+  When on appelle @fetch_schedule
+  Then le résultat est `"@every 30m"` (test existant `fetch_schedule_custom`)
+
+Scenario: fetch_schedule_transcrit_intervalle_sans_validation
+  Given un @Project avec `fetchInterval` absurde (`"1heures"`, ou `"-5m"`, ou `"1j"`)
+  When on appelle @fetch_schedule
+  Then le résultat est la transcription verbatim `"@every <chaîne>"` — le reconciler ne
+    valide PAS la durée ; le rejet relèvera du parseur cron de l'apiserver/du CronJob
+    controller, jamais d'une erreur ici (cf. `[?]` des `Tasks`)
+
+Scenario: sandbox_security_context_valeurs_uid_1000
+  Given @sandbox_security_context (aussi consommé par ./sandbox.rs pour le pod sandbox)
+  When on lit ses champs
+  Then `runAsUser = 1000`, `runAsGroup = 1000`, `runAsNonRoot = true`, `fsGroup = 1000` —
+    aucun workload à image sandbox ne tourne root, et `fsGroup` aligne la propriété des PVC
+    montés en écriture
+
+Scenario: git_pod_template_runs_as_non_root
+  Given @git_pod_template appelé sans initContainer ni SA (forme purge)
+  When on lit `securityContext` du pod
+  Then les quatre champs valent ceux de @sandbox_security_context (test existant
+    `git_pod_template_runs_as_non_root`)
+
+Scenario: git_pod_template_sans_init_un_seul_container_git
+  Given @git_pod_template avec `init_command = None` et une commande argv
+  When on construit le template
+  Then `initContainers` est `None` et `containers` compte exactement un container nommé
+    `"git"`, image = `ctx.sandbox_image`, portant `command` verbatim
+
+Scenario: git_pod_template_avec_init_env_et_mounts_dupliques
+  Given @git_pod_template avec `init_command = Some(argv git)` et `command = argv detect`
+  When on construit le template
+  Then `initContainers[0]` s'appelle `"git"` (commande d'init), `containers[0]` s'appelle
+    `"detect"` (commande principale), même image sandbox sur les deux, et les DEUX containers
+    portent les mêmes env (`HOME`, `GIT_SSH_COMMAND`) et les mêmes volumeMounts
+
+Scenario: git_pod_template_env_home_et_ssh_inconditionnel
+  Given @git_pod_template appelé pour n'importe quel Project (avec ou sans `gitSecret`, avec
+    ou sans initContainer)
+  When on lit l'env des containers
+  Then `HOME` vaut `"/home/vanyline"` et `GIT_SSH_COMMAND` vaut exactement
+    `"ssh -i /home/vanyline/.ssh/id_ed25519 -o StrictHostKeyChecking=accept-new"` — posés
+    TOUJOURS (clé SSH dans le home de l'Owner ; inopérant sans clé, sans effet en HTTPS)
+
+Scenario: git_pod_template_labels_du_template_seulement
+  Given @git_pod_template pour le Project `demo`
+  When on lit les labels du template pod
+  Then la map est exactement `{ "vanyline.solidite.fr/project": "demo" }` — ni plus ni
+    moins, et les labels sont sur le TEMPLATE, pas sur les objets Job/CronJob eux-mêmes
+
+Scenario: git_pod_template_restart_policy_never
+  Given @git_pod_template sous n'importe quelle forme
+  When on lit `restartPolicy` du pod
+  Then la valeur est `"Never"` (sémantique Job : le pod ne se redémarre pas en place)
+
+Scenario: git_pod_template_volumes_et_mounts_fixes
+  Given un @Project avec `existingPvc = { name: "ext", subPath: "sous" }` et un ctx
+    `owner_pvc_name = "owner-alice-home"`
+  When on construit le template
+  Then les volumes sont exactement `workspace` → PVC `"ext"` et `home` → PVC
+    `"owner-alice-home"` ; les mounts sont `workspace` → `/workspace` avec `subPath: "sous"`
+    et `home` → `/home/vanyline` sans subPath — et un Project SANS `existingPvc` donne le PVC
+    `"project-<name>"` monté entier (subPath `None`)
+
+Scenario: build_init_job_shape
+  Given un @Project `demo` complet minimal et un ctx (image registry, `owner-alice-home`)
+  When @build_init_job construit le Job
+  Then nom `"project-demo-init"`, `backoffLimit: 3`, `ttlSecondsAfterFinished: 3600`,
+    initContainer `"git"` avec l'argv init (`--repo https://github.com/owner/repo`,
+    `--workspace /workspace`, trois paires `--cache` défaut), container `"detect"` avec
+    l'argv detect `--project demo`, SA `"project-demo-maint"`, volumes `workspace`+`home`,
+    un `ownerReference` vers `demo`/`Project` (test existant `build_init_job_shape`)
+
+Scenario: init_job_caches_repetes_dans_l_ordre_de_la_spec
+  Given un @Project avec `caches: ["pnpm", "cargo", "pnpm"]` (ordre custom, doublon)
+  When @build_init_job construit l'argv de l'initContainer
+  Then les paires finales sont `--cache pnpm --cache cargo --cache pnpm` — ordre de la
+    spec, doublons conservés, aucune déduplication (le mapping de répertoire vit dans
+    `vanyline-maint`, pas dans la commande)
+
+Scenario: build_init_job_ignores_git_secret
+  Given un @Project avec `gitSecret: "demo-deploy-key"`
+  When @build_init_job construit le Job
+  Then les volumes sont toujours exactement `workspace` et `home` (AUCUN volume
+    `"git-secret"`), et `GIT_SSH_COMMAND` pointe sur `/home/vanyline/.ssh/id_ed25519`, jamais
+    sur `/git-secret` — l'ancien mécanisme Secret monté est mort (test existant
+    `build_init_job_ignores_git_secret`)
+
+Scenario: build_init_job_existing_pvc_sub_path
+  Given un @Project avec `existingPvc = { name: "code-server-home", subPath: "demo" }`
+  When @build_init_job construit le Job
+  Then le volume `workspace` référence le PVC `"code-server-home"` et le mount `workspace`
+    porte `subPath: "demo"` — le clone vit dans le sous-répertoire du PVC partagé (test
+    existant `build_init_job_existing_pvc_sub_path`)
+
+Scenario: build_fetch_cronjob_shape
+  Given un @Project `demo` et un ctx
+  When @build_fetch_cronjob construit le CronJob
+  Then nom `"project-demo-fetch"`, `schedule: "@every 1h"`, jobTemplate avec
+    `backoffLimit: 3`/`ttl: 3600`, initContainer `"git"` argv `fetch --workspace /workspace`,
+    container `"detect"` argv avec `--project demo`, SA `"project-demo-maint"` (test existant
+    `build_fetch_cronjob_shape`)
+
+Scenario: fetch_cronjob_concurrency_policy_non_posee_par_le_builder
+  Given @build_fetch_cronjob appelé directement (sans @apply)
+  When on lit `spec.concurrencyPolicy`
+  Then le champ est `None` — le builder seul produit un CronJob au défaut K8s `Allow` ; le
+    `"Forbid"` contractuel est posé par @apply uniquement (cf. `[?]` des `Tasks`)
+
+Scenario: build_purge_job_shape
+  Given un @Project `demo` et un ctx
+  When @build_purge_job construit le Job
+  Then un seul container `"git"` avec l'argv `["vanyline-maint", "purge", "--workspace",
+    "/workspace"]` — pas d'initContainer, pas de detect (test existant
+    `build_purge_job_shape`)
+
+Scenario: git_jobs_service_account
+  Given @build_init_job, @build_fetch_cronjob et @build_purge_job pour `demo`
+  When on lit les `serviceAccountName` des pods
+  Then init et fetch portent `"project-demo-maint"` (ils patchent le status via `detect`),
+    purge porte `None` (SA par défaut du namespace — il n'appelle pas l'API K8s) (test
+    existant `git_jobs_service_account`)
+
+Scenario: git_pod_template_no_shell
+  Given les trois manifests init/fetch/purge construits pour `demo`
+  When on inspecte chaque `command` de chaque container
+  Then le premier élément est `"vanyline-maint"` et aucun argument n'est `"sh"` ni `"-c"` —
+    verrou de la règle « jamais de shell interpolé » (test existant
+    `git_pod_template_no_shell`)
+
+Scenario: git_jobs_backoff_limit_3_et_ttl_3600
+  Given @build_init_job, @build_fetch_cronjob (jobTemplate) et @build_purge_job
+  When on lit `backoffLimit` et `ttlSecondsAfterFinished` des trois specs de Job
+  Then partout `backoffLimit = 3` et `ttlSecondsAfterFinished = 3600` — trois retries puis
+    auto-nettoyage du Job 1 h après la fin (et la re-création du Job init par le reconcile
+    qui suit ce TTL est le comportement documenté au `[?]` des `Tasks`)
+
+Scenario: jobs_et_cronjob_owner_references_vers_project
+  Given @build_init_job, @build_fetch_cronjob et @build_purge_job pour un @Project `demo`
+    avec uid
+  When on lit les `ownerReferences` des trois objets (Job, CronJob, Job)
+  Then chacun porte un unique ownerRef vers `demo`/`Project` (`controller: true`,
+    `blockOwnerDeletion: true`) — la suppression de la Project GC les trois objets
+
+Scenario: init_job_detect_container_order
+  Given @build_init_job pour `demo`
+  When on compare initContainer et container principal
+  Then l'initContainer `"git"` porte l'argv `init` (`argv[1] == "init"`) et le container
+    `"detect"` l'argv `detect` avec la paire `--project demo` dans l'ordre — la détection
+    s'exécute APRÈS le clone, jamais en shell chaîné (test existant
+    `init_job_detect_container_order`)
+
+Scenario: compute_status_cloned_true
+  Given @compute_status appelé avec `cloned = true` sur `demo`
+  When on lit le @ProjectStatus
+  Then `cloned: true`, `pvcName: "project-demo"`, une condition `Ready` unique à
+    `status: "True"`, `reason: "InitJobSucceeded"`, message français posé (test existant
+    `compute_status_cloned_true`)
+
+Scenario: compute_status_cloned_false
+  Given @compute_status appelé avec `cloned = false`
+  When on lit le status
+  Then `cloned: false`, condition `Ready` à `status: "False"`, `reason:
+    "WaitingForInitJob"` (test existant `compute_status_cloned_false`)
+
+Scenario: compute_status_worktrees_and_last_fetch_empty
+  Given @compute_status dans les deux états booléens
+  When on inspecte `last_fetch` et `worktrees`
+  Then `last_fetch` est `None` et `worktrees` est vide partout — champs non suivis en v1
+    (commentaire source : `lastFetch` viendrait du CronJob, `worktrees` du reconciler
+    Sandbox) (test existant `compute_status_worktrees_and_last_fetch_empty`)
+
+Scenario: compute_status_json_omet_languages_et_detected_at
+  Given le @ProjectStatus produit par @compute_status (languages vides, detectedAt `None`)
+  When il est sérialisé en JSON tel que @apply l'envoie (`{"status": …}`)
+  Then les clés `languages` et `detectedAt` sont ABSENTES du document — sans les
+    `skip_serializing_if` de `/crds/src/lib.sdd`, ce patch écraserait à chaque reconcile les
+    valeurs écrites par le Job `detect`
+
+Scenario: compute_status_pvc_name_reflete_existing_pvc
+  Given un @Project avec `existingPvc.name = "code-server-home"`
+  When @compute_status construit le status
+  Then `pvcName` vaut `"code-server-home"` (et non `"project-<name>"`) — ce que voient le
+    CLI, `app` et le reconciler Sandbox (qui en dérive les mounts)
+
+Scenario: compute_status_conditions_generation_et_transition
+  Given un @Project `demo` de `metadata.generation = 7`
+  When @compute_status construit la condition `Ready`
+  Then `observedGeneration` vaut `7` et `lastTransitionTime` est un horodatage courant —
+    re-stampé à CHAQUE appel, pas seulement au changement d'état (comportement verrouillé
+    tel quel, cf. `[?]` des `Tasks`)
+
+Scenario: cluster_owner_absent_reconcile_en_erreur_vnl_ctl_001
+  Tag: intégration cluster (non mocké — hors batterie unitaire)
+  Given un cluster de dev et un @Project `demo` référençant un @Owner inexistant
+  When le reconciler traite la Project
+  Then la reconciliation échoue en `VNL-CTL-001` (le `get` de l'Owner rend un NotFound
+    kube, PAS `VNL-CTL-002`) ⇒ log warn + requeue 30 s, et RIEN n'est créé (pas de RBAC,
+    pas de PVC, pas de Job, status intact)
+
+Scenario: cluster_owner_sans_pvc_name_reconcile_en_erreur_vnl_ctl_002
+  Tag: intégration cluster (non mocké)
+  Given un @Owner `alice` existant dont le `status.pvcName` n'est pas encore posé
+  When le @Project `demo` qui le référence est reconcilié
+  Then la reconciliation échoue en `VNL-CTL-002` (`OwnerNotReady`) ⇒ requeue 30 s, aucun
+    objet dérivé créé — la présence de `status.pvcName` (pas la condition `Ready`) est le
+    seul garde-fou exercé
+
+Scenario: cluster_premier_reconcile_cree_rbac_pvc_et_init_job
+  Tag: intégration cluster (non mocké)
+  Given un @Owner `alice` prêt (`status.pvcName` posé) et un @Project `demo` sans
+    `existingPvc`, owner aux `projectDefaults` vides
+  When le premier @Event::Apply complet aboutit
+  Then existent : SA/Role/RoleBinding `project-demo-maint`, PVC `project-demo` (`10Gi`,
+    `ReadWriteOnce`, ownerRef), Job `project-demo-init`, et le status porte `cloned: false`
+    avec la condition `Ready: False`/`WaitingForInitJob` ; le requeue est à 15 s
+
+Scenario: cluster_existing_pvc_ne_cree_aucun_pvc
+  Tag: intégration cluster (non mocké)
+  Given un @Project avec `existingPvc = { name: "code-server-home", subPath: "repo" }` sur
+    un Owner prêt
+  When @apply aboutit
+  Then AUCUN PVC `project-<name>` n'apparaît, et le pod de l'init Job monte le PVC
+    `"code-server-home"` avec le `subPath` `"repo"` — l'Owner doit toujours être prêt (le
+    volume `home` des Jobs en dépend pour la clé SSH)
+
+Scenario: cluster_init_job_cree_une_seule_fois
+  Tag: intégration cluster (non mocké)
+  Given un Project dont l'init Job `project-demo-init` existe (en cours ou réussi)
+  When @apply tourne de nouveau
+  Then le Job est reconnu (pas de second `create`, aucune erreur 409) et son `uid` reste
+    inchangé entre deux reconciles — les spec de Job étant immuables, le reconciler ne
+    patche jamais un Job existant
+
+Scenario: cluster_reussite_init_cree_cronjob_concurrency_forbid
+  Tag: intégration cluster (non mocké)
+  Given un Project dont le Job `project-demo-init` a `status.succeeded = 1`
+  When @apply tourne après ce succès
+  Then le CronJob `project-demo-fetch` existe, patché en SSA avec `concurrencyPolicy:
+    "Forbid"` et le schedule dérivé de `fetchInterval`, et le status passe à `cloned: true`,
+    `Ready: True`/`InitJobSucceeded` avec requeue 300 s
+
+Scenario: cluster_status_merge_n_ecrase_pas_languages
+  Tag: intégration cluster (non mocké)
+  Given un Project cloné dont `status.languages = ["rust"]` et `status.detectedAt` ont été
+    posés par le Job `detect` (patch dédié hors reconciler)
+  When plusieurs @Event::Apply successifs aboutissent (régime 300 s ou re-reconciles
+    forcés)
+  Then `status.languages` et `status.detectedAt` sont restés intacts — le merge patch de
+    @compute_status ne contient ni l'une ni l'autre clé (`skip_serializing_if`, verrou
+    symétrique de /crds/src/lib.sdd)
+
+Scenario: cluster_bump_annotation_sur_sandboxes_du_project_seulement
+  Tag: intégration cluster (non mocké)
+  Given deux @Sandbox dans le namespace : `sb1` (`spec.project: demo`) et `sb2`
+    (`spec.project: autre`)
+  When @apply aboutit deux fois de suite
+  Then `sb1` porte l'annotation `vanyline.solidite.fr/egress-bump` avec un timestamp
+    RECRI à chaque reconcile (valeur strictement plus récente), `sb2` reste sans
+    l'annotation — c'est le seul canal de propagation Project→Sandboxes (pas de watch
+    inter-CRD)
+
+Scenario: cluster_requeue_15s_sans_clone_300s_apres_clone
+  Tag: intégration cluster (non mocké)
+  Given un Project en attente d'init (Job pas encore réussi) puis dont le Job init réussit
+  When on observe la périodicité des reconciles (horodatage du `lastTransitionTime` de la
+    condition ou logs)
+  Then l'attente produit des reconciles rapprochés (ordre de grandeur 15 s, au moins 3 en
+    60 s) et le régime cloné espace les reconciles (ordre de grandeur 300 s, aucun pendant
+    5 min) — bornes tolérantes, jamais un timing exact
+
+Scenario: cluster_cleanup_cree_job_purge_puis_leve_finalizer
+  Tag: intégration cluster (non mocké)
+  Given un Project `demo` avec PVC créé par le controller et son Owner encore prêt
+  When la Project est supprimée (`kubectl delete`)
+  Then le Job `project-demo-purge` est créé (argv `purge --workspace /workspace`, pas de
+    SA) ; tant qu'il n'a pas réussi le finalizer tient (`VNL-CTL-003`, requeue 10 s) ; une
+    fois `succeeded > 0`, le finalizer est levé et la Project disparaît — le PVC
+    `project-demo` part alors par GC (ownerReference), jamais par le reconciler
+
+Scenario: cluster_cleanup_owner_absent_purge_sautee
+  Tag: intégration cluster (non mocké)
+  Given un @Project dont l'@Owner a été supprimé (ou n'a plus de `status.pvcName`) AVANT la
+    suppression du Project
+  When @cleanup tourne
+  Then log `tracing::warn!` « purge ignorée (best-effort v1) », AUCUN Job purge créé,
+    finalizer levé immédiatement (`await_change`) — cf. `[?]` des `Tasks` : dans le cas
+    `existingPvc` c'est justement là que les données survivent (le PVC référencé n'est
+    jamais supprimé)
+
+Scenario: cluster_cleanup_pvc_reference_survit_al_project
+  Tag: intégration cluster (non mocké)
+  Given un @Project avec `existingPvc` pointant un PVC `code-server-home` (préexistant au
+    controller) et son Owner encore prêt
+  When le Project est supprimé et la purge réussit
+  Then le PVC `code-server-home` EST ENCORE là (le controller ne supprime jamais un PVC
+    référencé) ; seules ses données `repo.git`/`worktrees/`/`cache/` sous le `subPath` ont
+    été purgées par `vanyline-maint`
+
+Scenario: cluster_purge_pending_requeue_10s
+  Tag: intégration cluster (non mocké)
+  Given une Project en cleanup avec son Job purge en cours d'exécution (`succeeded = 0`)
+  When @error_policy reçoit la `VNL-CTL-003` remontée par @cleanup
+  Then log `tracing::info!` (pas warn) et requeue 10 s — distinctive des autres erreurs
+    (warn, 30 s) parce que la purge est une attente normale, pas une anomalie
+
+Scenario: cluster_watch_couvre_tous_les_namespaces
+  Tag: intégration cluster (non mocké)
+  Given @build_controller branché dans `./main.rs` (`Api::all`)
+  When des @Project existent dans deux namespaces distincts
+  Then les deux sont reconciliés (le namespace de chaque reconcile vient de l'objet ; le
+    repli `"default"` n'est qu'une assurance) — aucun filtrage par namespace dans le watcher

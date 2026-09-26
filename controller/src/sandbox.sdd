@@ -1,0 +1,1234 @@
+Spec: Sandbox
+
+Platform: Rust/vanyline-controller
+
+Purpose:
+  Reconciler des CR `Sandbox` (`vanyline.solidite.fr/v1alpha1`, namespaced) — troisième
+    maillon de la chaîne Owner → Project → Sandbox : traduit une CR Sandbox (project +
+    branche + toolchains) en enfants désirés (Job checkout, Pod, Service ClusterIP,
+    NetworkPolicy ingress, NetworkPolicy egress conditionnelle, Ingress publique
+    conditionnelle), porte la phase du Pod dans `SandboxStatus` (consommée par le push
+    `ws/sandbox-state` de l'app) et retire le worktree git via finalizer. Le fichier est
+    un seul contrat indivisible « CR → manifests + cycle de vie » : les builders purs
+    (testables sans cluster, unitaires) produisent exactement ce que la boucle de
+    reconcile applique (tests d'intégration cluster non mockés) — les séparer figerait le
+    même contrat dans deux specs. Il porte aussi l'injection d'env des toolchains OCI
+    volumes (`PATH`/`LD_LIBRARY_PATH`/`RUSTUP_HOME`/`PYTHONUSERBASE`, presets
+    `rust`/`node`/`docker`/`python`) et la résolution LSP mono-process ou composite
+    (Volar/hadolint/pyright) via l'env JSON `VNL_LSP_TOOLCHAINS` dont le consommateur est
+    `sandbox/src/lsp.rs`. Contexte : /docs/architecture.md sections « Opérateur
+    Kubernetes », « NetworkPolicies egress à trois niveaux (WS-13) », « Suspension
+    manuelle », « Détection de langages et toolchains automatiques », « Ingress par
+    Sandbox (`sandbox-ingress-wiring`) ».
+
+Owns:
+  ./sandbox.rs
+
+Can read:
+  ./main.rs
+  ./error.rs
+  ./owner.rs
+  ./project.rs
+  ./application.rs
+  ../Cargo.toml
+  /crds/src/lib.sdd
+  /docs/architecture.md
+  /tooling.sdd
+  /vanyline.sdd
+
+Structure:
+  ./sandbox.rs — sept blocs, dans l'ordre physique : (1) noms et constantes — @pod_name,
+    @toolchain_root, @BASE_PATH, @FINALIZER, @SERVICE_PORT_NAME, plus @checkout_job_name,
+    @worktree_remove_job_name, @netpol_name, @netpol_egress_name, @ingress_name ;
+    (2) env toolchain — @toolchain_preset, @resolve_toolchain_env,
+    @aggregate_toolchain_env, @effective_toolchains, @cache_env_var, @combine_sub_path ;
+    (3) LSP — @resolve_toolchain_lsp, @node_lsp_composite, @docker_lsp_composite,
+    @python_lsp_composite ; (4) structures de contexte — @SandboxPodContext (builders
+    purs), @Context (reconciler) ; (5) builders d'enfants — @build_sandbox_pod,
+    @build_checkout_job, @build_worktree_remove_job, @build_sandbox_service,
+    @build_sandbox_ingress, @build_sandbox_netpol, @build_sandbox_egress_netpol (avec
+    @egress_rule_to_peer, @egress_ports_to_netpol_ports, @dns_egress_rule) ;
+    (6) status — @compute_status ; (7) reconciler — @fetch_project, @fetch_owner,
+    @fetch_application, @apply, @cleanup, @reconcile, @error_policy, @build_controller ;
+    puis le module `#[cfg(test)]` (builders purs uniquement, aucun test de reconcile —
+    le crate n'a pas de harnais cluster, cf. `Tasks`).
+
+Must:
+  Traiter le contrat en un seul fichier : builders purs (aucun appel réseau — le
+    contexte est résolu par l'appelant) et boucle reconcile cohabitent, les Scenario
+    unitaires portent les manifests, les Scenario `_cluster` portent la boucle (tests
+    d'intégration cluster réel non mockés, taggés `integration`).
+  Appliquer les presets d'env toolchain (`toolchain_preset`) uniquement quand
+    @Toolchain.env est vide, par correspondance exacte sur @Toolchain.name : `rust` →
+    `PATH` = `{root}/usr/local/cargo/bin:{root}/usr/bin`, `LD_LIBRARY_PATH` =
+    `{root}/usr/lib/x86_64-linux-gnu:{root}/usr/lib/aarch64-linux-gnu:{root}/usr/local/lib`,
+    `RUSTUP_HOME` = `{root}/usr/local/rustup` ; `node` et `docker` → même
+    `LD_LIBRARY_PATH`, `PATH` = `{root}/usr/local/bin` (docker = preset runtime node,
+    décision design docker-lsp, aucune env spécifique) ; `python` → `PATH` =
+    `{root}/usr/local/bin:/home/vanyline/.local/bin` (segment user-site LITTÉRAL, miroir
+    de @HOME_MOUNT_PATH + `/.local`, délibérément sans `{root}` — le volume toolchain est
+    read-only), `LD_LIBRARY_PATH` standard, `PYTHONUSERBASE` = `/home/vanyline/.local`,
+    `PIP_USER` = `1`. Nom inconnu ⇒ aucune variable.
+  Substituer partout `{root}` par @toolchain_root ( `/toolchains/<name>` ) dans les
+    valeurs d'env, preset ou explicite.
+  Résoudre l'env d'une toolchain (@resolve_toolchain_env) : `toolchain.env` non vide
+    remplace ENTIÈREMENT le preset (jamais de fusion) ; sinon preset ; sinon rien.
+  Agréger (@aggregate_toolchain_env) dans l'ordre de la liste : segments `PATH`
+    concaténés puis `BASE_PATH` (`/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`)
+    en suffixe FINAL TOUJOURS — `PATH` est donc toujours émise, même sans toolchain ;
+    `LD_LIBRARY_PATH` émise seulement si au moins un segment, sans suffixe ; toute autre
+    clé posée telle quelle, en collision la DERNIÈRE toolchain de la liste gagne ; clés
+    non-`PATH`/`LD_LIBRARY_PATH` émis dans l'ordre alphabétique (itération @BTreeMap —
+    déterminisme requis par le server-side apply).
+  Dériver les toolchains effectives (@effective_toolchains) : `spec.toolchains` non vide
+    ⇒ le clone tel quel, JAMAIS fusionné avec la dérivation (tout ou rien) ; sinon
+    @Project.status.languages ⇒ toolchains avec images du contexte, ordre FIGÉ push
+    séquentiel `rust` puis `node` puis `python` puis `docker` (indépendamment de l'ordre
+    des marqueurs d'entrée) ; marqueurs `js-ts` OU `vue` ⇒ un seul `node` ; marqueur
+    `python` ⇒ `python` ; `dockerfile` ⇒ `docker` ; status absent ou langues vides ⇒
+    liste vide.
+  Résoudre le LSP (@resolve_toolchain_lsp) : `toolchain.lsp = Some` ⇒ clone verbatim ;
+    sinon preset par nom — `rust` → image `ctx.lsp_image_rust`, bin
+    `/toolchains/rust-lsp/usr/local/bin/rust-analyzer`, args vides ; `node` → image
+    `ctx.lsp_image_node`, bin `/toolchains/node-lsp/usr/local/bin/typescript-language-server`,
+    args `["--stdio"]` ; `docker` → image `ctx.lsp_image_docker`, bin
+    `/toolchains/docker-lsp/usr/local/bin/docker-langserver`, args `["--stdio"]` ;
+    `python` → image `ctx.lsp_image_python`, bin
+    `/toolchains/python-lsp/usr/local/bin/pyright-langserver`, args `["--stdio"]` ;
+    sinon `None` — pas de route `/ws/lsp` pour cette toolchain (éditeur dégradé). Les
+    champs `bin`/`args` des presets sont des constantes de code ; seules les images sont
+    paramétrables (flags CLI du controller, @main.rs).
+  Réserver les variantes composites aux presets DÉRIVÉS (preset-only, décision
+    2026-09-06) : `node_lsp_composite` (primaire `/toolchains/node-lsp/usr/local/bin/vue-language-server
+    --stdio`, aux `tsserver-forward` = `typescript-language-server --stdio` avec
+    `initOptions.plugins[0]` = `{name: "@vue/typescript-plugin", location:
+    "/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server"}`) activée
+    ssi `spec.toolchains` vide ET `languages` contient `vue` ; `docker_lsp_composite`
+    (primaire `docker-langserver --stdio`, aux `diagnostics-merge` =
+    `/toolchains/docker-lsp/usr/local/bin/vnl-hadolint-lsp`, args `[]`, sans
+    `initOptions`) ssi vide ET `dockerfile` ; `python_lsp_composite` (primaire
+    `pyright-langserver --stdio`, aux `diagnostics-merge` =
+    `/toolchains/python-lsp/usr/local/bin/vnl-ruff-lsp`, args `[]`, sans `initOptions`)
+    ssi vide ET `python`. Les trois primaires et aux vivent dans l'image LSP du nom
+    montée sur `/toolchains/<name>-lsp` — pas de montage supplémentaire vs mono-process.
+  Émettre `VNL_LSP_TOOLCHAINS` = tableau JSON `[{name, bin, args}]` dans l'ordre des
+    toolchains effectives, avec la clé `aux` OMISE quand vide (jamais `"aux":[]` — garde
+    de non-régression stricte des bytes pour les pods hors composite) et posée (tableau
+    d'objets `{role, bin, args[, initOptions]}`) uniquement pour les trois composites ;
+    échec de sérialisation ⇒ @tracing::warn et env absente (best-effort v1, jamais
+    d'erreur remontée).
+  Monter les caches du Project (@effective_caches, défaut `["cargo", "pnpm", "pip"]`) :
+    un @VolumeMount du volume `workspace` par cache en `/project-cache/<cache_dir_name>`
+    avec `sub_path` = @combine_sub_path(`cache/<cache_dir_name>`) ; les noms connus
+    portent leur convention d'env (@cache_env_var) : `cargo` → `CARGO_HOME`, `pnpm` →
+    `npm_config_store_dir`, `pip` → `PIP_CACHE_DIR`, valeur `/project-cache/<dir>` ;
+    tout autre nom ⇒ montage seul, aucune env.
+  Combiner les sous-chemins (@combine_sub_path) : @effective_sub_path du Project
+    `Some(base)` ⇒ préfixe `base/<chemin-relatif>` ; `None` (PVC créé par le controller
+    ou `existing_pvc` sans `sub_path`) ⇒ chemin relatif nu.
+  Construire le Pod (@build_sandbox_pod) : nom @pod_name (`sandbox-<sandbox>`), namespace
+    de la CR, labels `vanyline.solidite.fr/owner` (= Owner du Project), `.../project`,
+    `.../sandbox`, une seule @ownerReference (controller) vers la Sandbox (GC en cascade) ;
+    `service_account_name` = @SandboxPodContext.owner_service_account (SA de l'Owner —
+    identité sans RBAC attaché) ; un seul container `sandbox` : image
+    `spec.image` sinon @Context.default_image, `args` = `["--no-auth"]` (jamais de
+    `command`), port nommé `mcp` = @MCP_PORT, `env`, `volume_mounts`, `resources` =
+    `spec.resources` clone (passe-plat, `None` compris), sondes readiness ET liveness
+    identiques : HTTP GET `/health` sur @MCP_PORT, `initial_delay_seconds: 5`,
+    `period_seconds: 10` ; `security_context` = @project::sandbox_security_context
+    (uid/gid 1000, non-root, fsGroup 1000).
+  Monter dans le Pod, dans cet ordre : `home` = PVC home de l'Owner au complet en
+    @HOME_MOUNT_PATH (`/home/vanyline`, sans subPath, écriture) ; `workspace` = PVC
+    workspace du Project (@effective_pvc_name) en `HOME_MOUNT_PATH/workspace` avec
+    subPath worktree ; SECOND montage du même volume `workspace` en
+    `/workspace/repo.git` (@WORKSPACE_MOUNT_PATH + @bare_repo_path) subPath repo.git,
+    LÉCU-ÉCRITURE — le pointeur `gitdir:` absolu écrit par `git worktree add` sous le
+    chemin du Job ne résout que sous ce chemin exact dans le pod (fix WS-11, isolation
+    limitée à l'object store partagé) ; caches (ci-dessus) ; volumes toolchain et LSP en
+    @VolumeImage (`ImageVolumeSource`, `pull_policy: "IfNotPresent"`) montés
+    respectivement `/toolchains/<name>` et `/toolchains/<name>-lsp` (read-only par la
+    nature du source image ; deux montages de la MÊME image par défaut — redondance
+    documentée inoffensive, décision lsp-integration).
+  Poser l'env du Pod dans cet ordre : `VNL_SANDBOX_ROOT` = `HOME_MOUNT_PATH/workspace`,
+    puis les env de caches dans l'ordre d'@effective_caches, puis
+    @aggregate_toolchain_env (`PATH`, éventuellement `LD_LIBRARY_PATH`, autres clés
+    triées), puis `VNL_LSP_TOOLCHAINS` si au moins une toolchain a un LSP résolu.
+  Construire les Jobs git (@build_checkout_job, @build_worktree_remove_job) en argv de
+    `vanyline-maint` strictement — `checkout --workspace /workspace --sandbox <n>
+    --branch <b>` (+ `--default-branch <db>` si `project.spec.default_branch` est
+    `Some` ET non vide ; `Some("")` est traité comme absent), `remove --workspace
+    /workspace --sandbox <n>` — via @project::git_pod_template sans initContainer et
+    sans service account (le template pose image = @ProjectJobContext.sandbox_image
+    (= @Context.default_image), label `.../project` seul, HOME/GIT_SSH_COMMAND, volumes
+    workspace+home, restart `Never`, non-root) ; `backoff_limit: 3`,
+    `ttl_seconds_after_finished: 3600`, noms @checkout_job_name (`sandbox-<n>-checkout`)
+    et @worktree_remove_job_name (`sandbox-<n>-remove`), ownerReference vers la SANDBOX
+    (pas le Project).
+  Construire le Service (@build_sandbox_service) : nom @service_name (`sandbox-<n>`),
+    sélecteur = UNIQUEMENT `vanyline.solidite.fr/sandbox: <n>` (seul label garanti
+    unique au pod), port nommé `mcp` (`SERVICE_PORT_NAME`), `port` = @MCP_PORT,
+    `targetPort` = @MCP_PORT ; `type` non posé (l'apiserver applique ClusterIP) ;
+    ownerReference Sandbox.
+  Construire la NetworkPolicy ingress (@build_sandbox_netpol), TOUJOURS produite : nom
+    @netpol_name (`sandbox-<n>`), `podSelector` = label sandbox, `policyTypes`
+    `[Ingress]`, une règle ingress restreinte au port @MCP_PORT/TCP, `from` =
+    (1) pods du MÊME namespace portant `.../owner: <owner>` (code-server, autres
+    sandboxes du même Owner — incluant donc le pod lui-même), (2) pods du même namespace
+    portant la clé `APP_LABEL` par `matchExpressions` `Exists` (valeur non contrainte —
+    relais `POST /ws/ticket` de l'app), (3) UNIQUEMENT si
+    `application.spec.ingress_controller` est `Some` : `namespaceSelector`
+    `kubernetes.io/metadata.name: <ns>` + `podSelector` `pod_labels` combinés sur le même
+    peer ; ownerReference Sandbox.
+  Construire la NetworkPolicy egress (@build_sandbox_egress_netpol) : union ordonnée
+    `owner.spec.egress` puis `project.spec.egress` puis `sandbox.spec.egress` ; les trois
+    vides ⇒ `None` ; sinon nom @netpol_egress_name (`sandbox-<n>-egress`, objet DISTINCT
+    de la netpol ingress car conditionnel), `policyTypes` `[Egress]`, même `podSelector`
+    sandbox, règle DNS TOUJOURS EN TÊTE (`to: None` — aucune restriction de destination,
+    décision 2026-08-01 de ne dépendre d'aucun label kube-dns du cluster ; ports 53/UDP
+    et 53/TCP), puis une règle par @EgressRule : peer = `ipBlock` si `cidr` présent
+    (précédence explicite, `pod_selector`/`namespace_selector` ignorés même posés), sinon
+    les selectors passés tels quels ; `ports` vides ⇒ `None` (sémantique K8s « tous les
+    ports »), `protocol: None` ⇒ `"TCP"` explicite posé ; ownerReference Sandbox.
+  Construire l'Ingress (@build_sandbox_ingress), quand l'Application de l'Owner est
+    résolue : nom @ingress_name (`sandbox-<n>`), host `{sandbox}.sandboxes.{application.spec.host}`,
+    `ingressClassName` = `application.spec.ingress_class_name`, annotations = copie de
+    `application.spec.ingress_annotations` PUIS insertion de l'annotation cert-manager
+    dérivée (@cert_manager_annotation_key : `Some("Issuer")` ⇒ `cert-manager.io/issuer`,
+    sinon `cert-manager.io/cluster-issuer`) avec `tls_issuer_name` pour valeur — une clé
+    identique dans les annotations de l'Application est ÉCRASÉE ; TLS posé
+    INCONDITIONNELLEMENT (un Ingress = un Certificate, ingress-shim cert-manager) : bloc
+    `spec.tls` hosts `[host]`, secret @tls_secret_name (`sandbox-<n>-cert`) ; une règle,
+    path `/` type `Prefix`, backend Service @service_name par NUMÉRO de port @MCP_PORT
+    (`name` laissé `None`) ; ownerReference Sandbox.
+  Calculer le status (@compute_status) : `phase` = la phase calculée telle quelle,
+    `service` = @service_name TOUJOURS, une unique condition `Ready` — `Running` ⇒
+    `True`/`PodRunning`, `Suspended` ⇒ `False`/`Suspended`, TOUTE autre valeur (`Failed`,
+    `Provisioning`, chaîne inconnue) ⇒ `False`/`NotRunning` — `message` =
+    `phase=<phase>`, `observed_generation` = generation de la CR,
+    `last_transition_time` = horodatage de calcul (régénéré à chaque reconcile).
+  Boucler @reconcile : namespace = celui de la CR, repli `"default"` ; finalizer
+    `vanyline.solidite.fr/sandbox-cleanup` (@FINALIZER) avec dispatch
+    @Event::Apply → @apply, @Event::Cleanup → @cleanup ; erreurs du mécanisme finalizer
+    mappées @ControllerError::Finalizer (VNL-CTL-004).
+  Gate d'@apply : le Project référencé doit exister et porter `status.cloned == true`
+    sinon @ControllerError::ProjectNotReady (VNL-CTL-005) ; l'Owner du Project doit
+    porter dans son status `pvcName` ET `serviceAccount` sinon
+    @ControllerError::OwnerNotReady (VNL-CTL-002) — ni l'un ni l'autre ne crée quoi que
+    ce soit dans ces cas.
+  Gérer le Job checkout dans @apply : `get_opt` du Job `sandbox-<n>-checkout` ; présent
+    ⇒ `checked_out = (status.succeeded > 0)` et AUCUNE recréation tant qu'il existe
+    (échec épuisé = silence jusqu'à auto-suppression TTL 1 h, puis recréation au
+    reconcile suivant) ; absent ⇒ `create` et `checked_out = false`.
+  Gérer la suspension dans @apply : `spec.suspended == true` ⇒ suppression du Pod si
+    présent (`pods.delete`, params par défaut), phase `"Suspended"` ; le Job checkout, le
+    Service, les NetworkPolicy et l'Ingress restent maintenus (seul le Pod tombe) ; le
+    Job checkout n'est JAMAIS conditionné par `suspended` — une Sandbox créée suspendue
+    obtient son worktree (reprise rapide par worktree conservé).
+  Calculer la phase sinon : `checked_out == false` ⇒ `"Provisioning"` sans créer le Pod ;
+    sinon Pod existant ⇒ `"Running"` si phase K8s `Running`, `"Failed"` si `Failed`,
+    TOUT autre état (`Pending`, `Unknown`, `Succeeded`…) ⇒ `"Provisioning"` ; Pod absent
+    ⇒ `create` du manifeste @build_sandbox_pod puis `"Provisioning"`. Un Pod existant
+    n'est JAMAIS patché ni recréé (v1 immutable).
+  Maintenir les enfants après la phase, dans l'ordre : @fetch_application (Application
+    de `owner.spec.application_ref`, `None` si le champ est absent) ; Service en
+    @Patch::Apply ; netpol ingress en @Patch::Apply ; netpol egress en @Patch::Apply si
+    @build_sandbox_egress_netpol rend `Some`, sinon SUPPRESSION EXPLICITE si l'objet
+    existe (`get_opt` + `delete`) ; Ingress en @Patch::Apply si Application résolue,
+    sinon suppression explicite si existant (miroir du cas egress — sans ça un Ingress
+    survivrait indéfiniment au retrait de `application_ref`) ; patch de status en
+    @Patch::Merge(@compute_status) sur le sous-resource `status`.
+  Employer pour les apply enfants @PatchParams::apply(@owner::FIELD_MANAGER)
+    (`vanyline-controller`) + `.force()`, et pour le patch de status @PatchParams::default()
+    + @Patch::Merge (l'isolation est obligatoire — `force()` hors contexte Apply est
+    rejeté par kube-rs, bug corrigé à `controller-bootstrap`, cf. /docs/architecture.md).
+  Requeue : `Ok` d'@apply ⇒ `Action::requeue` 300 s si phase `Running` ou `Suspended`,
+    15 s sinon ; @error_policy : @ControllerError::WorktreeRemovalPending ⇒ info +
+    requeue 10 s, @ControllerError::ProjectNotReady ⇒ info + requeue 15 s, toute autre
+    erreur ⇒ warn + requeue 30 s (les deux premières branches sont soupçonnées
+    inatteignables — cf. `[!]` des `Tasks`).
+  Gérer @cleanup : Project introuvable ⇒ warn + `Action::await_change()` (le finalizer
+    part, le worktree est abandonné — best-effort v1) ; Owner introuvable ou sans
+    `status.pvcName` ⇒ même chose ; sinon Job `sandbox-<n>-remove` : succeeded > 0 ⇒
+    `await_change()` (finalizer levé) ; absent ⇒ `create` du Job puis
+    @ControllerError::WorktreeRemovalPending (le finalizer reste) ; présent non succeeded
+    ⇒ le code rappelle `create` — cf. `[!]` des `Tasks` pour le 409 qui en résulte.
+  Construire @build_controller : `Controller::new(Api::all(client),
+    watcher::Config::default())` — watch cluster-wide de toutes les Sandboxes ; AUCUN
+    watch des ressources dépendantes : la propagation des changements Owner/Project
+    repose sur l'annotation de bump `vanyline.solidite.fr/egress-bump` patchée par
+    ./owner.rs et ./project.rs sur les Sandboxes concernées, plus les requeues.
+  Garder le harnais de /tooling.sdd : `expect` uniquement sous
+    `#[allow(clippy::expect_used)]` justifié d'une ligne (« garanti par
+    #[derive(CustomResource)] ») sur les builders posant l'ownerReference ; aucun
+    `unwrap`/`panic!`/`println!`/`eprintln!`/`dbg!` en production ; logs par @tracing
+    (`warn` chemins d'erreur, `info` requeues motivés) ; jamais de champ de CR interpolé
+    dans une commande shell — maintenance git par `vanyline-maint` en argv exclusivement
+    (/vanyline.sdd « Must not »).
+  Supposer à l'exécution : K8s ≥ v1.31 (volumes `image:`, GA v1.36) pour les toolchains,
+    cert-manager + un IngressClass pour l'Ingress, DNS wildcard `*.sandboxes.{host}`
+    provisionné hors repo, image sandbox écoutant @MCP_PORT avec `/health` et acceptant
+    `--no-auth`.
+
+Must not:
+  Modifier un Pod, un Job, un Service ou une NetworkPolicy existants par autre chose que
+    le server-side apply de leur manifeste reconstruit — et jamais recréer/patcher un Pod
+    existant : un changement de spec (branche, toolchains, image, resources) n'est
+    jamais répercuté sur un Pod vivant (cf. `[?]` docs vs code dans les `Tasks`).
+  Fusionner `spec.toolchains` explicite avec la dérivation automatique, ni ajouter de
+    `aux` à une toolchain explicite ou à un `lsp` custom, ni émettre `"aux":[]`.
+  Conditionner la création du Job checkout à `spec.suspended`.
+  Supprimer un worktree, `repo.git` ou quoi que ce soit sur les PVC autrement que par le
+    Job `vanyline-maint remove` ; ne crée, ne supprime, ne patche JAMAIS un PVC ou un
+    objet de l'Owner/du Project — leurs statuses sont lus en écriture nulle.
+  Écrire `spec` de la Sandbox, ni patcher son status avec `force()`/SSA — status
+    uniquement en `Patch::Merge` avec `PatchParams::default()`.
+  Rendre un `Action::await_change()` sur le chemin Apply (le requeue est toujours
+    temporisé) ; `await_change()` est réservé à la sortie de @cleanup.
+  Valider ici le contenu de `spec.branch`, l'existence du projet référencé, les noms
+    d'images, l'unicité des noms de toolchains ou le format des CIDR — ces validités sont
+    reportées à l'apiserver (schéma CRD de /crds/src/lib.sdd) ou aux appels API.
+  Employer `unwrap`/`expect` hors des `#[allow]` justifiés ci-dessus et de
+    l'exemption `cfg(test)` de ./main.rs ; `println!`/`eprintln!`/`dbg!` sont proscrits.
+  Cibler kube-dns par des labels dans la règle egress DNS (décision 2026-08-01) ni
+    aucune convention de label du cluster hors `vanyline.solidite.fr/*`, `APP_LABEL` et
+    `kubernetes.io/metadata.name`.
+
+Depends on:
+  `kube` 4 — @Api, @Patch/@PatchParams/@PostParams/@DeleteParams, @Controller/@Action,
+    @finalizer/@Event, @Resource/@ResourceExt (@name_any, @namespace, @controller_owner_ref).
+  `k8s-openapi` 0.28 — Pod/Container/PVC volumes/ImageVolumeSource, Service, Job/JobSpec,
+    NetworkPolicy et Ingress networking v1, @Condition, @IntOrString.
+  `vanyline-crds` (/crds/src/lib.sdd) — @Sandbox/@SandboxSpec/@SandboxStatus,
+    @Project/@Owner/@Application, @Toolchain/@LspSpec/@EgressRule/@EgressPort,
+    @IngressControllerRef, @MCP_PORT (3000), @service_name.
+  ./error.rs — @ControllerError : @Kube (VNL-CTL-001), @OwnerNotReady (VNL-CTL-002),
+    @Finalizer (VNL-CTL-004), @ProjectNotReady (VNL-CTL-005),
+    @WorktreeRemovalPending (VNL-CTL-006) ; VNL-CTL-003 (PurgePending) n'est pas
+    consommé ici.
+  ./owner.rs — @FIELD_MANAGER (`vanyline-controller`), @HOME_MOUNT_PATH
+    (`/home/vanyline`) ; statuses `pvcName`/`serviceAccount` produits par ./owner.rs.
+  ./project.rs — @WORKSPACE_MOUNT_PATH (`/workspace`), @effective_pvc_name,
+    @effective_sub_path, @worktree_path, @bare_repo_path, @cache_dir_name, @cache_path,
+    @effective_caches, @git_pod_template, @sandbox_security_context/@SANDBOX_UID,
+    @ProjectJobContext ; layout PVC posé par ./project.rs.
+  ./application.rs — @APP_LABEL, @cert_manager_annotation_key, @tls_secret_name (mêmes
+    mécanismes TLS que l'Ingress de l'Application).
+  ./main.rs — câblage @Context depuis les flags/env CLI : `SANDBOX_IMAGE_REPO`+`_TAG`,
+    `TOOLCHAIN_IMAGE_{RUST,NODE,DOCKER,PYTHON}`, `LSP_IMAGE_{RUST,NODE,DOCKER,PYTHON}`.
+  `serde_json` (env `VNL_LSP_TOOLCHAINS`, merge patch de status), `tracing` (logs).
+  /tooling.sdd (harnais), /vanyline.sdd (règle argv vs shell), /docs/architecture.md
+    (sections « Opérateur Kubernetes », WS-13, WS-10, « Ingress par Sandbox »).
+  Exécution (hors repo) : image sandbox (--no-auth, /health, MCP_LISTEN=3000,
+    `vanyline-maint` checkout/remove), cert-manager, IngressClass, DNS wildcard,
+    feature gate `volumes[].image`, annotation de bump posée par ./owner.rs et ./project.rs.
+
+Exposes:
+  Crate binaire (`[[bin]]` ./main.rs) — la surface pub est l'interface de module, pas
+    une lib externalisée. Réconciler : @Context (client + 9 images : défaut sandbox,
+    4 toolchains, 4 LSP),
+    @reconcile, @error_policy, @build_controller. Builders et helpers pub (consommés
+    par ./main.rs et le module de tests, calibrés pour l'exercer sans cluster) :
+    @pod_name, @toolchain_root, @aggregate_toolchain_env, @effective_toolchains,
+    @SandboxPodContext (owner, PVC home, SA + 9 images), @build_sandbox_pod,
+    @checkout_job_name, @worktree_remove_job_name, @netpol_name, @netpol_egress_name,
+    @ingress_name, @build_checkout_job, @build_worktree_remove_job,
+    @build_sandbox_service, @build_sandbox_ingress, @build_sandbox_netpol,
+    @build_sandbox_egress_netpol, @compute_status.
+  Privés : @BASE_PATH, @FINALIZER, @SERVICE_PORT_NAME, @toolchain_preset,
+    @resolve_toolchain_env, @resolve_toolchain_lsp, @node_lsp_composite,
+    @docker_lsp_composite, @python_lsp_composite, @cache_env_var, @combine_sub_path,
+    @egress_rule_to_peer, @egress_ports_to_netpol_ports, @dns_egress_rule,
+    @fetch_project, @fetch_owner, @fetch_application, @apply, @cleanup — contrat
+    observable uniquement via les fonctions pub ci-dessus et les enfants produits.
+
+Accepts:
+  @reconcile : @Arc<@Sandbox> émis par le watch (nom/namespace posés par l'apiserver —
+    CR namespaced obligatoire) + @Arc<@Context> ; namespace absent (impossible en
+    pratique) ⇒ repli `"default"`.
+  Builders purs : @Sandbox + @Project (+ @Owner/Application/owner_egress/project_egress
+    selon le builder) + contexte résolu par l'appelant ; AUCUN appel réseau ; chaînes non
+    assainies (noms, branches, images, CIDR) — validité RFC 1123/CIDR reportée à
+    l'apiserver.
+  @aggregate_toolchain_env : tranche de @Toolchain dans l'ordre significatif (l'ordre
+    EST contractuel) ; @compute_status : phase = toute chaîne, mapping tolérant.
+
+Returns:
+  Builders : manifests K8s complets typés (@Pod, @Job, @Service, @NetworkPolicy,
+    @Ingress) toujours affublés du namespace de la CR et d'une unique ownerReference vers
+    la Sandbox (GC en cascade — Pod inclus), champs non posés laissés `None` pour que
+    l'apiserver applique ses défauts.
+  @aggregate_toolchain_env ⇒ @Vec<@EnvVar> ordonnée (PATH, [LD_LIBRARY_PATH], autres
+    triées) ; @effective_toolchains ⇒ @Vec<@Toolchain> (explicites clonées ou dérivées,
+    env vides = preset à résoudre en aval) ; @build_sandbox_egress_netpol ⇒
+    @Option<@NetworkPolicy> ; @compute_status ⇒ @SandboxStatus.
+  @apply/@cleanup/@reconcile ⇒ @Action : requeue 300/15 s (apply), await_change
+    (cleanup au relâchement), requeue 10/15/30 s (@error_policy).
+
+Raises:
+  @apply : @ControllerError::ProjectNotReady (VNL-CTL-005) si Project absent du gate
+    cloné, @OwnerNotReady (VNL-CTL-002) si status Owner incomplet, @Kube (VNL-CTL-001)
+    sur tout appel API en échec (fetch Project/Owner/Application, get_opt, create,
+    patch, delete, patch_status).
+  @cleanup : @Kube (dont 409 AlreadyExists sur le rappel de `create` — cf. `[!]`
+    Tasks), @WorktreeRemovalPending (VNL-CTL-006) quand le Job remove vient d'être
+    créé/attendu ; les absences Project/Owner ne lèvent PAS — warn + relâchement.
+  @reconcile : @Finalizer (VNL-CTL-004) — map_err GÉNÉRIQUE qui absorbe aussi les
+    erreurs utilisateur stringifiées (cf. `[!]` Tasks).
+  Builders : pas de Result ; point de panique unique — `expect` sur
+    @controller_owner_ref, couvert par `#[allow(clippy::expect_used)]` justifié
+    (invariant du derive @CustomResource).
+
+Handles:
+  `Project.status` absent ou `cloned: false` ⇒ VNL-CTL-005 (requeue, aucune création) ;
+    `Owner.status` absent sans pvcName/serviceAccount ⇒ VNL-CTL-002 ; `languages` vide
+    ou absent ⇒ dérivation vide ⇒ aucun volume toolchain, `PATH` = @BASE_PATH seul, pas
+    de `LD_LIBRARY_PATH`, pas de `VNL_LSP_TOOLCHAINS`.
+  `existing_pvc` sans `sub_path` ⇒ @combine_sub_path nu (le PVC n'appartient qu'au
+    Project) ; avec `sub_path` ⇒ préfixe sur worktree, repo.git et caches (kydah-code).
+  `project.spec.default_branch = Some("")` ⇒ traité comme absent (pas de
+    `--default-branch` dans l'argv du Job checkout).
+  `toolchain.env` explicite posant les mêmes clés que les conventions de cache
+    (`CARGO_HOME`…) ⇒ doublons non dédupliqués dans l'env du container (dernier gagne
+    côté runtime K8s) — non testé, cf. `[?]` Tasks.
+  Deux toolchains du même nom ⇒ volumes `toolchain-<name>` dupliqués, rejet par
+    l'apiserver (le builder ne déduplique pas) — cf. Scenario
+    `pod_toolchain_nom_duplique_volumes_en_double` et `[?]` Tasks.
+  Pod en phase `Failed` ⇒ status `Failed`/NotRunning, Pod laissé en place (aucun
+    redémarrage automatique en v1) ; phase `Succeeded`/`Unknown`/`Pending` ⇒
+    `"Provisioning"` indéfini.
+  `application_ref` présent mais Application supprimée/absente ⇒ @fetch_application
+    erreur @Kube : l'@apply s'interrompt AVANT le patch de status (status figé, Ingress
+    non supprimé) — distinct du `None` propre qui déclenche la suppression ; cf. `[?]`.
+  Suspension sans Pod ⇒ suppression ignorée (`get_opt` préalable) ; netpol egress ou
+    Ingress à supprimer alors qu'absents ⇒ ignorés de même.
+  Sérialisation @VNL_LSP_TOOLCHAINS en échec (branch théorique — valeurs internes) ⇒
+    warn + env absente, pod construit sans LSP.
+  Cleanup avec Project ou Owner disparus ⇒ worktree abandonné, finalizer levé
+    (suppression de la CR jamais bloquée éternellement par un prérequis manquant).
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]`/`[!]` ci-dessous avec Sébastien avant toute tâche
+    `[x]`. Relecture de reverse-engineering du 2026-09-26 (aucune spec préexistante
+    dans ./).
+  [!] Atteignabilité des branches dédiées d'@error_policy : ./reconcile enveloppe TOUTE
+    erreur du `finalizer()` (y compris `Error::UserError` qui porte les erreurs
+    utilisateur de @apply/@cleanup) dans @ControllerError::Finalizer(String) par
+    `map_err` — les variantes @WorktreeRemovalPending et @ProjectNotReady n'arrivent
+    donc vraisemblablement JAMAIS typées dans @error_policy, et les requeues voulus
+    10 s/15 s (info) seraient en réalité 30 s (warn). À vérifier en cluster (scénario
+    `reconcile_project_non_clone_requeue_reel_cluster`) puis trancher : soit propager
+    `UserError(e)` sans stringifier dans ./reconcile (correction minimale, même patron
+    à corriger dans ./project.rs pour @PurgePending), soit assumer et documenter 30 s.
+  [!] @cleanup branche `Some(_)` (Job remove existant non encore succeeded) : le code
+    rappelle `jobs.create(...)` sur un objet qui existe ⇒ 409 @AlreadyExists propagé en
+    @Kube au lieu de l'attente voulue ; le retry « effectif » est le warn 30 s générique
+    jusqu'à l'auto-suppression TTL (1 h après fin) du Job échoué qui rouvre la branche
+    `None`. ./project.rs::cleanup renvoie lui `PurgePending` sans recréer — aligner
+    (renvoyer @WorktreeRemovalPending sans `create` quand le Job existe) ou assumer.
+  [!] Commentaire périmé du test `cache_mounts_and_env` (« default ["cargo", "pnpm"] »
+    alors qu'@effective_caches vaut défaut `["cargo", "pnpm", "pip"]`), déjà signalé dans
+    /crds/src/lib.sdd `Tasks` — corriger le commentaire et étendre le test aux mounts +
+    `PIP_CACHE_DIR` (scénario `pod_caches_defaut_cargo_pnpm_pip`).
+  [?] Pod jamais muté vs doc : /docs/architecture.md « Limites connues » écrit
+    « Changement de spec Sandbox = recréation du pod (immutable en v1) » ; le code ne
+    recrée JAMAIS le pod (uniquement suspendre/reprendre, ou suppression manuelle du
+    pod). Lequel est le contrat : immunité totale (compléter la doc) ou recréation sur
+    hash de spec (feature à spécifier) ?
+  [?] Changement de `spec.branch` après un checkout réussi : le Job checkout est nommé
+    par seule Sandbox (sans empreinte de branche), `succeeded > 0` persiste tant qu'il
+    vit ⇒ aucune re-checkout, le worktree reste sur la branche d'origine (et le pod
+    éventuel aussi). Voulu (une Sandbox = une branche de naissance) ou erreur à
+    répercuter (re-checkout + recréation) ?
+  [?] `ttl_seconds_after_finished: 3600` du Job checkout efface la preuve de succès une
+    heure après la fin : tout reconcile ultérieur recrée et re-fait tourner
+    `vanyline-maint checkout` (≈ une relance d'heure en heure par Sandbox actif, jamais
+    bloquant car le succès est relisible tant que le Job vit). L'idempotence de
+    `checkout` est supposée — confirmation, ou preuve de succès durable à porter
+    ailleurs (annotation/status) ?
+  [?] `application_ref` pendant (Application supprimée ou jamais créée) :
+    @fetch_application échoue en @Kube et interrompt l'@apply AVANT Service/netpol/
+    Ingress/status — status figé à sa dernière valeur et Ingress existant non supprimé,
+    warn toutes les 30 s. Dégradation voulue (l'admin doit réparer la référence) ou
+    traitement « équivalent None » (Ingress supprimé, enfants maintenus) ?
+  [?] Application SANS `spec.ingress_controller` : @build_sandbox_ingress crée
+    l'Ingress (dès qu'une Application est référencée) mais @build_sandbox_netpol
+    n'ouvre pas le tiers contrôleur ⇒ domaine routable mais trafic bloqué au réseau.
+    Créer l'Ingress seulement quand `ingress_controller` est `Some`, ou la netpol à
+    deux peers est-elle la configuration assumée (le contrôleur réel alors déjà couvert
+    par un autre peer) ?
+  [?] `@SandboxStatus::phase` : ./crds/src/lib.rs (et /crds/src/lib.sdd) documentent
+    `Provisioning | Running | Failed` sans `Suspended`, que CE fichier émet (WS-13,
+    /docs/architecture.md) ; et la phase `Failed` n'est jamais émise par la boucle sans
+    Pod K8s `Failed`. Corriger la doc du champ là-bas (et la valeur attendue par le
+    push `ws/sandbox-state` de l'app) ?
+  [?] Doublons d'env non dédupliqués : `toolchain.env` explicite posant `CARGO_HOME`,
+    `PIP_CACHE_DIR` ou `PATH` interagit avec les env de caches/cache agrégé par la
+    sémantique « dernier gagne » du runtime K8s, sans test. Confirmé (le contrat est
+    l'ordre posé, la résolution au runtime) ou déduplication à imposer ?
+  [?] Toolchains du même nom : deux @Toolchain homonymes ⇒ @build_sandbox_pod émet deux
+    volumes `toolchain-<nom>` en double (le builder ne déduplique ni ne valide) ⇒ rejet
+    de l'apiserver à l'apply puis warn toutes les 30 s. Validation amont (erreur
+    utilisateur, ou déduplication) ou rejet apiserver assumé ?
+  [?] `compute_status` régénère `lastTransitionTime: now()` à CHAQUE reconcile (patch
+    Merge des `conditions`) : l'horodatage n'est pas le temps de transition réel, et le
+    status mute de resourceVersion toutes les 300 s — même famille que le `[?]` de
+    /crds/src/lib.sdd sur les Status ; trancher les deux ensemble.
+  [ ] Convertir en tests unitaires taggés par leur titre les Scenario sans test
+    existant : `agregat_collision_non_path_derniere_gagne`,
+    `job_checkout_default_branch_vide_non_passe`,
+    `status_failed_ready_false_not_running`,
+    `status_service_toujours_pose_et_generation_suivie`,
+    `error_policy_worktree_pending_requeue_dix_secondes`,
+    `error_policy_project_not_ready_requeue_quinze_secondes`,
+    `error_policy_erreur_courante_requeue_trente_secondes`,
+    `pod_toolchain_nom_duplique_volumes_en_double` (si la `[?]` toolchains dupliquées
+    tranche vers un contrat builder),
+    `ingress_annotation_certmanager_ecrase_celle_de_l_application`.
+  [ ] Étendre quatre tests existants pour couvrir leur Scenario complet :
+    `cache_mounts_and_env` (monts + env `pip`, cf. `[!]` commentaire),
+    `build_checkout_job_owner_reference` (assert `backoff_limit = 3` et
+    `ttl_seconds_after_finished = 3600`),
+    `mcp_port_and_probes` (assert `initialDelaySeconds = 5` et `periodSeconds = 10`),
+    `build_sandbox_service_shape` (assert ownerReference Sandbox unique).
+  [ ] Rédiger le harnais d'intégration cluster (kubeconfig du cluster de test, CR
+    éphémères préfixées) — le crate n'a AUCUN test de reconcile aujourd'hui (les
+    ~85 tests de ./sandbox.rs sont des builders purs, conformes à
+    /docs/architecture.md « pas de mock de l'API K8s ») — puis écrire les Scenario
+    `_cluster` ci-dessous, taggés `integration`, dont les deux qui tranchent les
+    `[!]` : `reconcile_project_non_clone_requeue_reel_cluster`,
+    `cleanup_job_remove_exist_non_succeeded_attente_cluster`.
+  [ ] Vérifier en revue que la batterie locale reste la source de vérité CI :
+    `cargo test -p vanyline-controller` (les `_cluster` derrière un feature/flag
+    explicite hors CI par défaut — décision à prendre avec Sébastien, la CI
+    `test.yml` n'a pas de cluster).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre (unitaires purs
+    pour les builders, `_cluster` taggés `integration` pour la boucle) et passe.
+  Tous les `[?]`/`[!]` des `Tasks` ont une décision écrite de Sébastien, répercutée
+    ici (et dans ./error.rs, ./project.rs, /crds/src/lib.sdd pour les recoupements).
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt)
+    est verte sur `vanyline-controller`, sans nouveau `#[allow]` non justifié.
+
+Scenario: preset_rust_path_ld_rustup_home
+  Given une @Toolchain nommée `rust` à `env` vide
+  When @aggregate_toolchain_env l'agrège seule
+  Then `PATH` contient `/toolchains/rust/usr/local/cargo/bin` et `/toolchains/rust/usr/bin`
+    et finit par @BASE_PATH, `LD_LIBRARY_PATH` contient les chemins x86_64 et aarch64
+    du volume, `RUSTUP_HOME` = `/toolchains/rust/usr/local/rustup` (test existant
+    `rust_preset`)
+
+Scenario: preset_node_sans_rustup_home
+  Given une @Toolchain nommée `node` à `env` vide
+  When @aggregate_toolchain_env l'agrège seule
+  Then `PATH` contient `/toolchains/node/usr/local/bin`, `LD_LIBRARY_PATH` les deux
+    arches du volume, et AUCUNE clé `RUSTUP_HOME` n'est émise (test existant
+    `node_preset`)
+
+Scenario: preset_docker_egale_runtime_standard
+  Given une @Toolchain nommée `docker` à `env` vide
+  When @resolve_toolchain_env la résout, puis @aggregate_toolchain_env agrège rust+node+docker
+  Then son `PATH` = `/toolchains/docker/usr/local/bin` et son `LD_LIBRARY_PATH` = le
+    triple standard du volume — exactement 2 clés ; dans l'agrégat le segment docker suit
+    node et précède @BASE_PATH, et l'ordre `LD_LIBRARY_PATH` node < docker (test existant
+    `toolchain_preset_docker_standard_only`)
+
+Scenario: preset_python_user_site_et_pip
+  Given une @Toolchain nommée `python` à `env` vide
+  When @resolve_toolchain_env la résout
+  Then exactement 4 clés : `PATH` =
+    `/toolchains/python/usr/local/bin:/home/vanyline/.local/bin` (user-site LITTÉRAL,
+    pas de `{root}`), `LD_LIBRARY_PATH` triple standard, `PYTHONUSERBASE` =
+    `/home/vanyline/.local`, `PIP_USER` = `1` (test existant `toolchain_preset_python_env`)
+
+Scenario: agregat_path_concatene_dans_ordre_des_toolchains
+  Given les toolchains `[rust, node]` à `env` vides
+  When @aggregate_toolchain_env les agrège
+  Then les segments rust précèdent node dans `PATH` (et dans `LD_LIBRARY_PATH`), la
+    valeur finit par @BASE_PATH (test existant `multiple_toolchains_order_preserved`)
+
+Scenario: agregat_env_explicite_remplace_le_preset_entierement
+  Given une @Toolchain `custom` dont `env` = `{PATH: "{root}/bin"}`
+  When @aggregate_toolchain_env l'agrège
+  Then `PATH` contient `/toolchains/custom/bin` et finit par @BASE_PATH, `LD_LIBRARY_PATH`
+    est ABSENTE (le preset n'est pas fusionné, et `custom` n'en a pas) (test existant
+    `explicit_env_overrides_preset`)
+
+Scenario: agregat_toolchain_inconnue_path_egal_base_path
+  Given une @Toolchain `unknown` à `env` vide sans preset
+  When @aggregate_toolchain_env l'agrège
+  Then `PATH` est exactement @BASE_PATH et `LD_LIBRARY_PATH` est absente (test existant
+    `unknown_toolchain_no_preset_no_env`)
+
+Scenario: agregat_collision_non_path_derniere_gagne
+  Given deux @Toolchain explicites dont les `env` posent toutes deux la clé `FOO` avec
+    des valeurs distinctes
+  When @aggregate_toolchain_env les agrège dans l'ordre A puis B
+  Then l'env émise pour `FOO` porte la valeur de B (dernière toolchain gagnante), posée
+    après `PATH`/`LD_LIBRARY_PATH`
+
+Scenario: toolchains_effectives_explicites_prioritaires
+  Given une Sandbox dont `spec.toolchains` = [rust(image custom)] et un Project dont
+    `languages` = ["rust"]
+  When @effective_toolchains résout
+  Then le résultat est le clone exact de `spec.toolchains` — l'entrée custom (son image,
+    `env` vide, `lsp` `None`) est seule dans le résultat, la dérivation depuis
+    `languages` est court-circuitée (test existant
+    `effective_toolchains_explicit_spec_priority`)
+
+Scenario: toolchains_effectives_derivent_rust
+  Given une Sandbox à `spec.toolchains` vide et `languages` = ["rust"]
+  When @effective_toolchains résout
+  Then une toolchain `rust` à l'image `ctx.toolchain_image_rust`, env vide, `lsp` `None`
+    (test existant `effective_toolchains_derives_rust`)
+
+Scenario: toolchains_effectives_derivent_node_depuis_js_ts
+  Given `languages` = ["js-ts"]
+  When @effective_toolchains résout
+  Then une toolchain `node` à l'image `ctx.toolchain_image_node` (test existant
+    `effective_toolchains_derives_js_ts`)
+
+Scenario: toolchains_effectives_derivent_node_depuis_vue_seul
+  Given `languages` = ["vue"] sans `js-ts`
+  When @effective_toolchains résout
+  Then une toolchain `node` (invariant 5 vue-lsp : `vue` implique `node` seul) (test
+    existant `effective_toolchains_derives_node_from_vue_alone`)
+
+Scenario: toolchains_effectives_vue_et_js_ts_un_seul_node
+  Given `languages` = ["js-ts", "vue"] puis ["rust", "vue"]
+  When @effective_toolchains résout dans les deux cas
+  Then un SEUL `node` dans le premier cas, `[rust, node]` dans le second (test existant
+    `effective_toolchains_vue_js_ts_no_duplicate`)
+
+Scenario: toolchains_effectives_derivent_python_et_docker
+  Given `languages` = ["python"] puis ["dockerfile"]
+  When @effective_toolchains résout dans les deux cas
+  Then `python` à l'image `ctx.toolchain_image_python` puis `docker` à l'image
+    `ctx.toolchain_image_docker`, env vides et `lsp` `None` (tests existants
+    `effective_toolchains_derives_python` et `effective_toolchains_derives_dockerfile`)
+
+Scenario: toolchains_effectives_ordre_fixe_independant_des_marqueurs
+  Given `languages` = ["dockerfile", "python", "vue", "js-ts", "rust"] puis
+    ["rust", "vue", "dockerfile"]
+  When @effective_toolchains résout dans les deux cas
+  Then les noms sont exactement `["rust", "node", "python", "docker"]` puis
+    `["rust", "node", "docker"]` — ordre de push figé, pas l'ordre des marqueurs (tests
+    existants `effective_toolchains_python_full_order` et
+    `effective_toolchains_derives_docker_alone_after_rust_and_node`)
+
+Scenario: toolchains_effectives_multiples_langues_avec_rust_et_node
+  Given `languages` = ["rust", "js-ts"]
+  When @effective_toolchains résout
+  Then `[rust(image rust), node(image node)]` dans cet ordre (test existant
+    `effective_toolchains_derives_both`)
+
+Scenario: toolchains_effectives_vides_sans_status
+  Given une Sandbox à `spec.toolchains` vide et un Project sans `status`
+  When @effective_toolchains résout
+  Then la liste est vide (test existant `effective_toolchains_empty_when_no_languages`)
+
+Scenario: lsp_explicite_emporte_le_preset
+  Given une @Toolchain `rust` portant `lsp` = {image "custom-lsp:1", bin custom, args ["--x"]}
+  When @resolve_toolchain_lsp résout avec un contexte aux images par défaut
+  Then le `lsp` explicite est cloné verbatim (image/bin/args), le preset est ignoré (test
+    existant `resolve_toolchain_lsp_explicit_wins`)
+
+Scenario: lsp_preset_rust_sans_args
+  Given une @Toolchain `rust` sans `lsp`
+  When @resolve_toolchain_lsp résout
+  Then image `ctx.lsp_image_rust`, bin `/toolchains/rust-lsp/usr/local/bin/rust-analyzer`,
+    args vides (test existant `resolve_toolchain_lsp_preset_rust`)
+
+Scenario: lsp_preset_node_stdio
+  Given une @Toolchain `node` sans `lsp`
+  When @resolve_toolchain_lsp résout
+  Then image `ctx.lsp_image_node`, bin
+    `/toolchains/node-lsp/usr/local/bin/typescript-language-server`, args `["--stdio"]`
+    (test existant `resolve_toolchain_lsp_preset_node`)
+
+Scenario: lsp_preset_docker_stdio_et_custom_verbatim
+  Given une @Toolchain `docker` sans `lsp`, puis la même avec un `lsp` custom
+  When @resolve_toolchain_lsp résout les deux
+  Then le preset : image `ctx.lsp_image_docker`, bin
+    `/toolchains/docker-lsp/usr/local/bin/docker-langserver`, args `["--stdio"]` ; le
+    custom est cloné verbatim (test existant `resolve_toolchain_lsp_preset_docker`)
+
+Scenario: lsp_preset_python_stdio_et_custom_verbatim
+  Given une @Toolchain `python` sans `lsp`, puis la même avec un `lsp` custom
+  When @resolve_toolchain_lsp résout les deux
+  Then le preset : image `ctx.lsp_image_python`, bin
+    `/toolchains/python-lsp/usr/local/bin/pyright-langserver`, args `["--stdio"]` ; le
+    custom verbatim (test existant `resolve_toolchain_lsp_preset_python`)
+
+Scenario: lsp_aucun_preset_pour_nom_inconnu
+  Given une @Toolchain `custom` sans `lsp`
+  When @resolve_toolchain_lsp résout
+  Then `None` — pas de montage LSP ni de route `/ws/lsp` (test existant
+    `resolve_toolchain_lsp_unknown_is_none`)
+
+Scenario: pod_nom_sandbox_prefixe_et_namespace
+  Given une Sandbox `demo-branch` dans le namespace `ns`
+  When @build_sandbox_pod construit
+  Then `metadata.name` = `sandbox-demo-branch`, `metadata.namespace` = `ns` (test
+    existant `pod_name_and_namespace`)
+
+Scenario: pod_non_root_uid_1000
+  Given n'importe quelle Sandbox/Project/contexte
+  When @build_sandbox_pod construit
+  Then `security_context` = runAsUser/runAsGroup/fsGroup `project::SANDBOX_UID` (1000) et
+    `runAsNonRoot: true` (test existant `pod_runs_as_non_root`)
+
+Scenario: pod_ownerref_unique_et_labels_trio
+  Given une Sandbox `demo-branch` du projet `demo` de l'Owner `alice`
+  When @build_sandbox_pod construit
+  Then une seule ownerReference {kind Sandbox, name demo-branch} et les labels
+    `vanyline.solidite.fr/owner=alice`, `.../project=demo`, `.../sandbox=demo-branch` (test
+    existant `owner_reference_and_labels`)
+
+Scenario: pod_service_account_de_l_owner
+  Given un contexte dont `owner_service_account` = `owner-alice`
+  When @build_sandbox_pod construit
+  Then `spec.serviceAccountName` = `owner-alice` (test existant
+    `service_account_from_context`)
+
+Scenario: pod_image_de_la_spec_sinon_defaut
+  Given une Sandbox sans `spec.image`, puis la même avec `image: "custom:tag"`
+  When @build_sandbox_pod construit les deux
+  Then `spec.image` du container vaut `ctx.default_image` dans le premier cas,
+    `"custom:tag"` dans le second (test existant `image_default_vs_spec`)
+
+Scenario: pod_arg_unique_no_auth
+  Given n'importe quelle Sandbox
+  When @build_sandbox_pod construit
+  Then `args` = exactement `["--no-auth"]` et `command` non posé (test existant
+    `no_auth_arg`)
+
+Scenario: pod_port_mcp_et_sondes_health_identiques
+  Given n'importe quelle Sandbox
+  When @build_sandbox_pod construit
+  Then un unique port conteneur `mcp`/@MCP_PORT, readiness ET liveness = HTTP GET
+    `/health` sur @MCP_PORT (test existant `mcp_port_and_probes`) — `initialDelay 5`,
+    `period 10` contractés par le code (à asseoir dans l'extension du test, cf. `Tasks`)
+
+Scenario: pod_env_racine_sandbox
+  Given @HOME_MOUNT_PATH = `/home/vanyline`
+  When @build_sandbox_pod construit
+  Then l'env `VNL_SANDBOX_ROOT` = `/home/vanyline/workspace` (test existant
+    `vnl_sandbox_root_env`)
+
+Scenario: pod_montage_worktree_sous_chemin_worktrees
+  Given un Project sans `existing_pvc` et la Sandbox `demo-branch`
+  When @build_sandbox_pod construit
+  Then le montage `workspace` est en `/home/vanyline/workspace` avec `subPath`
+    `worktrees/demo-branch` (test existant `worktree_mount_no_existing_pvc`)
+
+Scenario: pod_montage_worktree_prefixe_sub_path_du_project
+  Given un Project dont `existing_pvc.subPath` = `demo`
+  When @build_sandbox_pod construit
+  Then `subPath` du montage worktree = `demo/worktrees/demo-branch` (test existant
+    `worktree_mount_with_existing_pvc_subpath`)
+
+Scenario: pod_second_montage_repo_bare_sur_chemin_gitdir
+  Given un Project sans `existing_pvc`, puis avec `subPath: "demo"`
+  When @build_sandbox_pod construit les deux
+  Then un montage `workspace` en `/workspace/repo.git`, `subPath` `repo.git` dans le
+    premier cas, `demo/repo.git` dans le second (test existants
+    `bare_repo_mount_present_no_existing_pvc` et
+    `bare_repo_mount_present_with_existing_pvc_subpath`)
+
+Scenario: pod_montage_repo_bare_non_lecture_seule
+  Given n'importe quel Project
+  When @build_sandbox_pod construit
+  Then le montage `/workspace/repo.git` n'a PAS `readOnly: true` (git doit écrire
+    HEAD/index/objets) (test existant `bare_repo_mount_is_writable`)
+
+Scenario: pod_caches_defaut_cargo_pnpm_pip
+  Given un Project dont `spec.caches` est `None` (défaut `["cargo", "pnpm", "pip"]`)
+  When @build_sandbox_pod construit
+  Then les monts `/project-cache/cargo` (`subPath cache/cargo`) et
+    `/project-cache/pnpm-store` (`subPath cache/pnpm-store`) existent, les env
+    `CARGO_HOME=/project-cache/cargo` et `npm_config_store_dir=/project-cache/pnpm-store`
+    sont posées — ET le mont `/project-cache/pip` + `PIP_CACHE_DIR=/project-cache/pip`
+    existent aussi (extension du test existant `cache_mounts_and_env`, cf. `Tasks`)
+
+Scenario: pod_ressources_passthrough
+  Given une Sandbox portant `spec.resources` (request cpu 100m), puis la même sans
+  When @build_sandbox_pod construit les deux
+  Then le container porte exactement les @ResourceRequirements de la spec, respectivement
+    `None` (test existant `resources_passthrough`)
+
+Scenario: pod_volume_toolchain_image_if_not_present
+  Given une Sandbox à toolchains dérivées `["rust"]`
+  When @build_sandbox_pod construit
+  Then un volume `toolchain-rust` de source `image` {reference: image rust du contexte,
+    pullPolicy `IfNotPresent`} monté en `/toolchains/rust`, et l'env `PATH` du pod
+    contient le segment cargo du volume (test existant
+    `build_sandbox_pod_derived_toolchain_volumes`)
+
+Scenario: pod_volumes_outillage_rust_node_y_compris_lsp
+  Given une Sandbox à toolchains explicites `[rust, node]` (sans `lsp`)
+  When @build_sandbox_pod construit
+  Then exactement 6 volumes : `home`, `workspace`, `toolchain-rust`, `toolchain-node`,
+    `toolchain-rust-lsp`, `toolchain-node-lsp`, chacun toolchain avec source image
+    `pullPolicy IfNotPresent` (test existant `volumes_home_workspace_and_toolchains`)
+
+Scenario: pod_toolchain_nom_duplique_volumes_en_double
+  Given deux toolchains explicites homonymes `rust` (images différentes)
+  When @build_sandbox_pod construit
+  Then le builder émet DEUX volumes `toolchain-rust` (aucune déduplication ni validation
+    côté builder) — le rejet intervient à l'apply par l'apiserver ; contrat à confirmer
+    (cf. `[?]` toolchains dupliquées des `Tasks`)
+
+Scenario: pod_lsp_derive_volume_et_env_json
+  Given une Sandbox dérivée `["rust"]`
+  When @build_sandbox_pod construit
+  Then volume `toolchain-rust-lsp` à l'image `ctx.lsp_image_rust`, monté en
+    `/toolchains/rust-lsp`, et `VNL_LSP_TOOLCHAINS` = tableau JSON d'une entrée
+    {name rust, bin rust-analyzer, args tableau} (test existant
+    `build_sandbox_pod_derived_lsp_volume_and_env`)
+
+Scenario: pod_lsp_explicite_volume_custom_et_json_verbatim
+  Given une toolchain explicite `rust` avec `lsp` custom {custom-lsp:1, bin custom, args
+    ["--x"]}
+  When @build_sandbox_pod construit
+  Then le volume `-lsp` porte l'image custom et l'env JSON reflète bin/args custom sans
+    clé `aux` (test existant `build_sandbox_pod_explicit_lsp_volume_and_env`)
+
+Scenario: pod_toolchain_inconnue_sans_lsp_ni_env_json
+  Given une toolchain explicite `custom` sans `lsp`
+  When @build_sandbox_pod construit
+  Then AUCUN volume `toolchain-custom-lsp` et AUCUNE env `VNL_LSP_TOOLCHAINS` (test
+    existant `build_sandbox_pod_no_lsp_when_unknown`)
+
+Scenario: pod_env_lsp_ordre_des_toolchains_effectives
+  Given un projet `["rust", "js-ts"]`
+  When @build_sandbox_pod construit
+  Then `VNL_LSP_TOOLCHAINS` = [rust, node] dans cet ordre (test existant
+    `build_sandbox_pod_lsp_env_order_rust_then_node`)
+
+Scenario: composite_volar_json_exact_aux_tsserver_forward
+  Given un projet dérivé `["js-ts", "vue"]`, toolchains explicites vides
+  When @build_sandbox_pod construit
+  Then l'entrée node de `VNL_LSP_TOOLCHAINS` est EXACTEMENT le JSON contrat : primaire
+    `/toolchains/node-lsp/usr/local/bin/vue-language-server --stdio` + aux
+    `tsserver-forward` (`typescript-language-server --stdio`, `initOptions.plugins[0]`
+    @vue/typescript-plugin location `/toolchains/node-lsp/usr/local/lib/node_modules/@vue/language-server`),
+    sans clé superflue ; volume/montage `toolchain-node-lsp` inchangés (même image) (test
+    existant `build_sandbox_pod_node_vue_composite_entry_exact`)
+
+Scenario: node_sans_vue_cle_aux_omise_pas_vide
+  Given un projet dérivé `["js-ts"]` sans `vue`
+  When @build_sandbox_pod construit
+  Then l'entrée node est le preset mono-process ts-language-server et la clé `aux` est
+    ABSENTE (jamais `"aux":[]` — non-régression bytes) (test existant
+    `build_sandbox_pod_node_no_vue_no_aux_key`)
+
+Scenario: toolchains_explicites_jamais_volar
+  Given `spec.toolchains` = [node explicite] et `languages` = ["vue"]
+  When @build_sandbox_pod construit
+  Then l'entrée node est le preset mono-process, sans `aux` — la gate composite exige
+    `spec.toolchains` vide (invariant 1) (test existant
+    `build_sandbox_pod_explicit_toolchains_never_volar`)
+
+Scenario: lsp_custom_jamais_aux_meme_avec_vue
+  Given `spec.toolchains` = [node avec `lsp` custom] et `languages` = ["vue"]
+  When @build_sandbox_pod construit
+  Then le custom passe verbatim, sans `aux` (invariant 2) (test existant
+    `build_sandbox_pod_custom_lsp_no_aux`)
+
+Scenario: volar_rust_ordre_fixe_rust_puis_node
+  Given un projet dérivé `["vue", "rust"]`
+  When @build_sandbox_pod construit
+  Then entrées LSP = [rust mono-process, node composite Volar] — ordre de la dérivation,
+    pas celui des marqueurs (test existant `build_sandbox_pod_vue_rust_entry_order`)
+
+Scenario: composite_hadolint_json_exact
+  Given un projet dérivé `["dockerfile"]`
+  When @build_sandbox_pod construit
+  Then l'entrée docker est EXACTEMENT {name docker, bin docker-langserver, args
+    ["--stdio"], aux [{role diagnostics-merge, bin vnl-hadolint-lsp, args []}]} sans
+    `initOptions`, volumes `toolchain-docker` (image toolchain) + `toolchain-docker-lsp`
+    (image LSP) montés `/toolchains/docker` et `/toolchains/docker-lsp` (test existant
+    `build_pod_docker_composite_json`)
+
+Scenario: volar_et_hadolint_coexistentes
+  Given un projet dérivé `["vue", "dockerfile"]`
+  When @build_sandbox_pod construit
+  Then deux entrées composites indépendantes : node/tsserver-forward puis
+    docker/diagnostics-merge, ordre figé node puis docker (test existant
+    `build_pod_vue_and_dockerfile_both_composites`)
+
+Scenario: docker_explicite_ou_custom_jamais_composite
+  Given un `docker` explicite sans `lsp`, puis avec `lsp` custom, `languages`
+    ["dockerfile"]
+  When @build_sandbox_pod construit les deux
+  Then le premier reçoit le preset mono-process sans `aux`, le second le custom verbatim
+    sans `aux` (test existant `build_pod_explicit_toolchains_never_composite`)
+
+Scenario: composite_pyright_json_exact
+  Given un projet dérivé `["python"]`
+  When @build_sandbox_pod construit
+  Then l'entrée python est EXACTEMENT {name python, bin pyright-langserver, args
+    ["--stdio"], aux [{role diagnostics-merge, bin vnl-ruff-lsp, args []}]} sans
+    `initOptions`, volumes `toolchain-python` + `toolchain-python-lsp` montés
+    `/toolchains/python` et `/toolchains/python-lsp` (test existant
+    `build_pod_python_composite_json`)
+
+Scenario: python_explicite_ou_custom_jamais_aux
+  Given un `python` explicite sans `lsp`, puis avec `lsp` custom, `languages` ["python"]
+  When @build_sandbox_pod construit les deux
+  Then preset pyright mono-process sans `aux`, puis custom verbatim sans `aux` (tests
+    existants `build_sandbox_pod_python_explicit_never_ruff_aux` et
+    `build_sandbox_pod_python_custom_lsp_no_aux`)
+
+Scenario: python_rust_ordre_fixe_et_path_user_site_agrege
+  Given un projet dérivé `["python", "rust"]`
+  When @build_sandbox_pod construit
+  Then entrées LSP = [rust, python composite] ; et `PATH` = segments rust puis python
+    COMPLET (avec `/home/vanyline/.local/bin`) puis @BASE_PATH — valeur entière figée —
+    avec `PYTHONUSERBASE`/`PIP_USER` posées (tests existants
+    `build_sandbox_pod_python_rust_entry_order` et
+    `build_sandbox_pod_python_path_env_aggregation`)
+
+Scenario: cache_env_var_conventions_connues_et_inconnu
+  Given les identifiants `pip`, `cargo`, `pnpm` et `inconnu`
+  When @cache_env_var les résout
+  Then respectivement `("PIP_CACHE_DIR", "/project-cache/pip")`,
+    `("CARGO_HOME", "/project-cache/cargo")`,
+    `("npm_config_store_dir", "/project-cache/pnpm-store")`, `None` (test existant
+    `cache_env_var_pip`)
+
+Scenario: noms_jobs_checkout_et_remove
+  Given le nom de Sandbox `demo-branch`
+  When @checkout_job_name et @worktree_remove_job_name le formatent
+  Then `sandbox-demo-branch-checkout` et `sandbox-demo-branch-remove` (test existant
+    `checkout_job_name_and_worktree_remove_job_name`)
+
+Scenario: job_checkout_argv_sans_branche_defaut
+  Given un Project à `default_branch: None` et la Sandbox `demo-branch` (branche `main`)
+  When @build_checkout_job construit
+  Then l'argv du container unique est exactement `[vanyline-maint, checkout,
+    --workspace, /workspace, --sandbox, demo-branch, --branch, main]` (test existant
+    `build_checkout_job_argv_no_default_branch`)
+
+Scenario: job_checkout_argv_avec_branche_defaut
+  Given `default_branch: Some("develop")`
+  When @build_checkout_job construit
+  Then l'argv se termine par `--default-branch develop` après `--branch main` (test
+    existant `build_checkout_job_argv_with_default_branch`)
+
+Scenario: job_checkout_default_branch_vide_non_passe
+  Given `default_branch: Some("")`
+  When @build_checkout_job construit
+  Then l'argv NE contient PAS `--default-branch` (le vide est traité comme absent)
+
+Scenario: job_checkout_ownerref_et_politique_reessai
+  Given une Sandbox `demo-branch`
+  When @build_checkout_job construit
+  Then une ownerReference unique {kind Sandbox, name demo-branch} et `backoff_limit: 3`,
+    `ttl_seconds_after_finished: 3600` (test existant
+    `build_checkout_job_owner_reference`, extension cf. `Tasks`)
+
+Scenario: job_remove_argv_unique
+  Given la Sandbox `demo-branch`
+  When @build_worktree_remove_job construit
+  Then l'argv = `[vanyline-maint, remove, --workspace, /workspace, --sandbox,
+    demo-branch]` (test existant `build_worktree_remove_job_argv`)
+
+Scenario: service_selecteur_unique_label_et_port_mcp
+  Given la Sandbox `demo-branch`
+  When @build_sandbox_service construit
+  Then nom `sandbox-demo-branch`, sélecteur = {`vanyline.solidite.fr/sandbox`:
+    `demo-branch`} (clé unique), un port nommé `mcp` `port` = @MCP_PORT (test existant
+    `build_sandbox_service_shape`) — ownerReference Sandbox posée par le code (à asseoir)
+
+Scenario: netpol_ingress_cible_owner_app_et_port_mcp
+  Given la Sandbox `demo-branch`, l'Owner `alice`, sans Application
+  When @build_sandbox_netpol construit
+  Then `podSelector` = label sandbox, `policyTypes` `[Ingress]`, règle unique au port
+    @MCP_PORT/TCP, `from` = [peer matchLabels owner `alice` (sans namespaceSelector),
+    peer matchExpressions `Exists` sur @APP_LABEL (valeur libre)] (test existant
+    `build_sandbox_netpol_shape`)
+
+Scenario: netpol_ingress_ajoute_peer_controleur_ingress
+  Given une Application dont `ingress_controller` = {namespace `kydah-core`, podLabels
+    traefik+controller}
+  When @build_sandbox_netpol construit
+  Then un TROISIÈME peer combinant `namespaceSelector`
+    `kubernetes.io/metadata.name: kydah-core` ET `podSelector` des labels du contrôleur
+    sur le même objet, sans `ipBlock` (test existant
+    `build_sandbox_netpol_ingress_controller_peer`)
+
+Scenario: netpol_egress_none_quand_les_trois_niveaux_sont_vides
+  Given owner_egress, project_egress et `sandbox.spec.egress` vides
+  When @build_sandbox_egress_netpol construit
+  Then `None` — aucune netpol egress, l'egress du pod reste libre (test existant
+    `build_sandbox_egress_netpol_none_when_all_empty`)
+
+Scenario: netpol_egress_dns_toujours_en_tete_sans_destination
+  Given une unique @EgressRule cidr quelconque
+  When @build_sandbox_egress_netpol construit
+  Then `egress[0]` est la règle DNS : `to: None` (AUCUNE restriction de destination) et
+    ports 53/UDP + 53/TCP (test existant `build_sandbox_egress_netpol_dns_always_present`)
+
+Scenario: netpol_egress_union_proprietaire_projet_sandbox
+  Given une règle par niveau (cidr 10.0.0.0/24, 10.0.1.0/24, 10.0.2.0/24)
+  When @build_sandbox_egress_netpol construit
+  Then `egress` = DNS + les 3 règles (les trois CIDR présents, un ipBlock par règle) (test
+    existant `build_sandbox_egress_netpol_union_three_levels`)
+
+Scenario: netpol_egress_cidr_devient_ip_block
+  Given une @EgressRule `cidr: 10.42.7.0/24` seule
+  When @build_sandbox_egress_netpol construit
+  Then `egress[1]` cible un unique peer `ipBlock` cidr dit, `pod_selector` `None` (test
+    existant `build_sandbox_egress_netpol_cidr_rule`)
+
+Scenario: netpol_egress_selecteurs_passes_tels_quels
+  Given une @EgressRule sans cidr, `pod_selector` app=registry +
+    `namespace_selector` kubernetes.io/metadata.name=tools
+  When @build_sandbox_egress_netpol construit
+  Then le peer porte les deux selectors copiés, `ipBlock` `None` (test existant
+    `build_sandbox_egress_netpol_selector_rule`)
+
+Scenario: netpol_egress_cidr_predominant_sur_selecteurs
+  Given une @EgressRule portant cidr ET pod_selector
+  When @build_sandbox_egress_netpol construit
+  Then le peer est `ipBlock` uniquement, `pod_selector` ignoré (précédence explicite,
+    l'exclusivité CRD n'étant pas validée à la construction) (test existant
+    `build_sandbox_egress_netpol_cidr_precedence_over_selector`)
+
+Scenario: netpol_egress_ports_restrictifs_avec_protocole
+  Given une @EgressRule ports [{443, TCP}]
+  When @build_sandbox_egress_netpol construit
+  Then la règle porte `ports` = [{443, TCP}] exactement, `end_port` non posé (test
+    existant `build_sandbox_egress_netpol_ports_restriction`)
+
+Scenario: netpol_egress_ports_vides_signifient_tous_ports
+  Given une @EgressRule `ports: []`
+  When @build_sandbox_egress_netpol construit
+  Then la règle a `ports: None` (sémantique K8s : tous ports) (test existant
+    `build_sandbox_egress_netpol_empty_ports_means_all_ports`)
+
+Scenario: netpol_egress_protocole_absent_pose_tcp
+  Given une @EgressRule ports [{8080, protocol: None}]
+  When @build_sandbox_egress_netpol construit
+  Then le port porte `protocol: "TCP"` posé explicitement (test existant
+    `build_sandbox_egress_netpol_protocol_defaults_to_tcp`)
+
+Scenario: netpol_egress_nom_selecteur_politypes_ownerref
+  Given une @EgressRule cidr quelconque sur la Sandbox `demo-branch`
+  When @build_sandbox_egress_netpol construit
+  Then nom `sandbox-demo-branch-egress`, `podSelector` label sandbox, `policyTypes`
+    `[Egress]`, ownerReference {kind Sandbox, name demo-branch} (test existant
+    `build_sandbox_egress_netpol_shape`)
+
+Scenario: ingress_nom_sandbox_prefixe
+  Given le nom `demo-branch`
+  When @ingress_name le format
+  Then `sandbox-demo-branch` — collision assumée avec pod/service/netpol ingress, kinds
+    distincts (test existant `ingress_name_format`)
+
+Scenario: ingress_hotete_backend_tls_certmanager
+  Given la Sandbox `demo-branch` et l'Application `main` (host `app.example.com`, classe
+    nginx, issuer `self-sign`, kind non posé)
+  When @build_sandbox_ingress construit
+  Then nom `sandbox-demo-branch`, ownerReference Sandbox, classe `nginx`, host/règle
+    `demo-branch.sandboxes.app.example.com`, path `/` Prefix, backend Service
+    `sandbox-demo-branch` port NUMÉRO @MCP_PORT (`name` `None`), TLS hosts [host] secret
+    `sandbox-demo-branch-cert`, annotation `cert-manager.io/cluster-issuer: self-sign`
+    (test existant `build_sandbox_ingress_shape`)
+
+Scenario: ingress_issuer_namespaced_quand_kind_issuer
+  Given la même Application avec `tls_issuer_kind: "Issuer"`
+  When @build_sandbox_ingress construit
+  Then l'annotation est `cert-manager.io/issuer` et `cluster-issuer` est absente (test
+    existant `build_sandbox_ingress_tls_issuer_kind_issuer`)
+
+Scenario: ingress_annotations_application_reprises_derivee_gagne
+  Given une Application dont `ingress_annotations` contient une clé custom
+  When @build_sandbox_ingress construit
+  Then la clé custom survit À CÔTÉ de l'annotation cert-manager dérivée (test existant
+    `build_sandbox_ingress_annotations_passthrough`)
+
+Scenario: ingress_annotation_certmanager_ecrase_celle_de_l_application
+  Given une Application dont `ingress_annotations` contient une clé EN CONFLIT avec
+    l'annotation dérivée (par ex. `cert-manager.io/cluster-issuer`)
+  When @build_sandbox_ingress construit
+  Then la valeur dérivée de `tls_issuer_name` ÉCRASE celle de l'Application (`insert`
+    après copie des annotations custom) — l'annotation Application est perdue ;
+    comportement déduit du code, à asseoir par un test (cf. `Tasks`)
+
+Scenario: status_running_ready_true_pod_running
+  Given la phase `"Running"` pour la Sandbox `demo-branch`
+  When @compute_status calcule
+  Then `phase: Running`, `service: sandbox-demo-branch`, condition unique `Ready` =
+    `True`/`PodRunning` (test existant `compute_status_running`)
+
+Scenario: status_provisioning_ready_false_not_running
+  Given la phase `"Provisioning"`
+  When @compute_status calcule
+  Then `Ready` = `False`/`NotRunning`, `message` `phase=Provisioning` (test existant
+    `compute_status_provisioning`)
+
+Scenario: status_suspended_motif_distinct_suspended
+  Given la phase `"Suspended"`
+  When @compute_status calcule
+  Then `Ready` = `False`/`Suspended` — reason distinct de `NotRunning` pour ne pas
+    confondre arrêt volontaire et échec (test existant `compute_status_suspended`)
+
+Scenario: status_failed_ready_false_not_running
+  Given la phase `"Failed"`
+  When @compute_status calcule
+  Then `phase: Failed`, `Ready` = `False`/`NotRunning` (la phase `Failed` tombe dans le
+    catch-all, sans reason dédié)
+
+Scenario: status_service_toujours_pose_et_generation_suivie
+  Given une Sandbox de generation 3 et n'importe quelle phase, y compris `Provisioning`
+  When @compute_status calcule
+  Then `service` est toujours `sandbox-<name>` et `observedGeneration` = 3 ;
+    `lastTransitionTime` = horodatage du calcul (cf. `[?]` churn des `Tasks`)
+
+Scenario: error_policy_worktree_pending_requeue_dix_secondes
+  Given une @ControllerError::WorktreeRemovalPending
+  When @error_policy la classe
+  Then `Action::requeue(10 s)` (atteignabilité réelle suspectée — cf. `[!]` Tasks)
+
+Scenario: error_policy_project_not_ready_requeue_quinze_secondes
+  Given une @ControllerError::ProjectNotReady
+  When @error_policy la classe
+  Then `Action::requeue(15 s)`
+
+Scenario: error_policy_erreur_courante_requeue_trente_secondes
+  Given une @ControllerError::Kube ou @OwnerNotReady ou @Finalizer
+  When @error_policy les classe
+  Then `Action::requeue(30 s)` dans tous les cas (défaut)
+
+Scenario: reconcile_attend_clone_du_project_cluster
+  Given une Sandbox dont le Project a `status.cloned: false` (intégration cluster réel,
+    non mockée)
+  When le reconciler tourne
+  Then AUCUN Job checkout ni Pod n'est créé et la reconcile est requeueue — VNL-CTL-005
+    en message (durée réelle du requeue tranchée par le scénario `[!]`
+    `reconcile_project_non_clone_requeue_reel_cluster`)
+
+Scenario: reconcile_attend_pvc_et_sa_de_l_owner_cluster
+  Given une Sandbox dont le Project est cloné mais l'Owner n'a pas `status.pvcName`
+    (intégration cluster réel)
+  When le reconciler tourne
+  Then VNL-CTL-002, rien de créé pour la Sandbox
+
+Scenario: reconcile_cree_job_checkout_puis_pod_cluster
+  Given une Sandbox prête (Project cloné, Owner prêt), sans Job ni Pod (intégration
+    cluster réel)
+  When le reconciler tourne deux fois (Job créé ; Job `succeeded: 1`)
+  Then premier passage : Job `sandbox-<n>-checkout` + phase `Provisioning` sans Pod ;
+    second : Pod `sandbox-<n>` créé avec worktree, repo.git et toolchains
+
+Scenario: reconcile_checkout_job_existant_non_recree_cluster
+  Given le Job checkout `sandbox-<n>-checkout` existant avec `succeeded: 1`
+    (intégration cluster réel)
+  When le reconciler tourne plusieurs fois
+  Then le Job n'est ni recréé ni modifié — `checked_out` lu sur son status ; `spec.branch`
+    n'a aucune incidence (cf. `[?]` branche des `Tasks`)
+
+Scenario: reconcile_phase_pod_running_requeue_long_cluster
+  Given une Sandbox dont le Pod est en phase K8s `Running` (intégration cluster réel)
+  When le reconciler tourne
+  Then `status.phase: Running`, condition `Ready: True/PodRunning` et requeue 300 s ;
+    phase non stable (`Pending`…) ⇒ requeue 15 s
+
+Scenario: reconcile_pod_failed_non_recree_cluster
+  Given une Sandbox dont le Pod est en phase K8s `Failed` (intégration cluster réel)
+  When le reconciler tourne
+  Then `status.phase: Failed` (`Ready: False/NotRunning`) et le Pod reste en place,
+    jamais recréé automatiquement
+
+Scenario: reconcile_suspension_supprime_pod_et_phase_suspended_cluster
+  Given une Sandbox avec Pod en cours, puis `spec.suspended: true` (intégration cluster
+    réel)
+  When le reconciler tourne après la bascule
+  Then le Pod est supprimé, `status.phase: Suspended` (`Ready: False/Suspended`), et le
+    Service, les NetworkPolicy et l'Ingress subsistent
+
+Scenario: reconcile_suspension_cree_quand_meme_job_checkout_cluster
+  Given une Sandbox créée directement `suspended: true` (intégration cluster réel)
+  When le reconciler tourne
+  Then le Job checkout est créé et exécuté malgré la suspension (reprise rapide par
+    worktree conservé), sans Pod
+
+Scenario: reconcile_netpol_egress_supprimee_quand_niveaux_vides_cluster
+  Given une Sandbox dont la netpol `sandbox-<n>-egress` existe (règles Owner/Project
+    préalablement posées), puis les trois niveaux d'egress vidés et bump (intégration
+    cluster réel)
+  When le reconciler tourne
+  Then la netpol egress est SUPPRIMÉE explicitement (la GC par ownerReference ne suffit
+    pas ici), la netpol ingress subsiste
+
+Scenario: reconcile_ingress_supprime_quand_application_ref_retire_cluster
+  Given une Sandbox avec Ingress `sandbox-<n>` existant, puis `owner.spec.applicationRef`
+    retiré (intégration cluster réel)
+  When le reconciler tourne
+  Then l'Ingress est supprimé explicitement ; le pendant (crée quand Some) est couvert
+    par le scénario suivant
+
+Scenario: reconcile_ingress_cree_quand_application_ref_pose_cluster
+  Given une Sandbox dont l'Owner acquiert `applicationRef` vers une Application existante
+    avec `ingressController` posé (intégration cluster réel)
+  When le reconciler tourne
+  Then Ingress `sandbox-<n>` (host `{sandbox}.sandboxes.{host}`, TLS secret
+    `sandbox-<n>-cert`) + peer contrôleur dans la netpol ingress apparaissent
+
+Scenario: reconcile_application_ref_pendant_bloque_statut_cluster
+  Given une Sandbox dont `owner.spec.applicationRef` pointe une Application absente
+    (intégration cluster réel) — observation à chaud du `[?]` pendant
+  When le reconciler tourne
+  Then l'apply s'interrompt sur VNL-CTL-001 avant Service/netpol/Ingress/status — à
+    confirmer puis bénir ou corriger (cf. `[?]` Tasks)
+
+Scenario: reconcile_job_pod_existant_jamais_mute_cluster
+  Given une Sandbox avec Pod `Running`, puis `spec.image` ou `spec.resources` modifiés
+    (intégration cluster réel) — observation à chaud du `[?]` docs vs code
+  When le reconciler tourne
+  Then le Pod garde son image/resources d'origine (aucune recréation) — contrat figé
+    après arbitrage
+
+Scenario: reconcile_project_non_clone_requeue_reel_cluster
+  Given une Sandbox dont le Project n'est pas cloné (intégration cluster réel) — tranche
+    le `[!]` atteignabilité error_policy
+  When le reconciler tourne et qu'on observe l'espacement des requeues
+  Then la durée RÉELLE observée (15 s info ou 30 s warn) départage l'intention et le
+    comportement enveloppé par le finalizer
+
+Scenario: reconcile_changement_branche_ne_redecheckoute_pas_cluster
+  Given une Sandbox avec checkout réussi sur `main`, puis `spec.branch` changé en
+    `dev` (intégration cluster réel) — tranche le `[?]` branche
+  When le reconciler tourne
+  Then le Job checkout n'est pas relancé et le worktree reste sur `main` (ou contrat
+    contraire après arbitrage)
+
+Scenario: reconcile_recreation_job_checkout_apres_ttl_cluster
+  Given un Job checkout succeeded auto-supprimé par TTL (intégration cluster réel,
+    observation après `ttl_seconds_after_finished` ou TTL raccourci pour le test)
+  When le reconciler tourne ensuite
+  Then le Job est recréé et re-exécuté (idempotence `vanyline-maint checkout` supposée,
+    cf. `[?]` TTL)
+
+Scenario: cleanup_supprime_worktree_via_job_puis_leve_finalizer_cluster
+  Given une Sandbox existante avec worktree, qu'on supprime (intégration cluster réel)
+  When le reconciler traite @Event::Cleanup puis que le Job remove réussit
+  Then Job `sandbox-<n>-remove` (argv `remove`, `vanyline-maint`) créé, finalizer levé
+    seulement après `succeeded > 0`, et les enfants (Pod/Service/netpols/Ingress/Job
+    checkout) GC par ownerReferences
+
+Scenario: cleanup_project_disparu_leve_finalizer_cluster
+  Given une Sandbox dont le Project a été supprimé avant elle (intégration cluster réel)
+  When le reconciler traite @Event::Cleanup
+  Then warn « project introuvable » et finalizer levé sans Job (worktree abandonné,
+    best-effort v1) — idem Owner disparu
+
+Scenario: cleanup_job_remove_exist_non_succeeded_attente_cluster
+  Given une Sandbox en suppression dont le Job remove existe sans `succeeded`
+    (intégration cluster réel) — tranche le `[!]` 409
+  When le reconciler traite @Event::Cleanup
+  Then l'observation du log/spacing (409 VNL-CTL-001 warn 30 s vs attente propre)
+    départage le comportement réel du rappel de `create`

@@ -1,0 +1,326 @@
+Spec: Error
+
+Platform: Rust/vanyline-controller/thiserror/kube-rs
+
+Purpose:
+  Enum d'erreurs unique du binaire `vanyline-controller` (@ControllerError) : le type de
+  retour des quatre reconcilers (@owner::reconcile, @project::reconcile, @sandbox::reconcile,
+  @application::reconcile) et l'entrée unique de leurs quatre @error_policy. C'est la
+  contractualisation, pour le domaine `CTL` (controller), de la convention « messages
+  d'erreur avec identifiant unique » de l'AGENTS.md : chaque variante porte un marqueur
+  stable `VNL-CTL-<NNN>` en tête de son @Display, même famille `VNL-*` que
+  /lib/src/error.rs (@VnyError), /cfgstore/src/error.rs, /tools/src/error.rs (@ToolsError)
+  et les erreurs d'`app`. Le contrat d'une erreur de controller ne vit pas que dans cet
+  enum : il comprend ce qu'elle fait au réconcile — requeue de combien de secondes, log à
+  quel niveau — ce que décident les @error_policy des quatre reconcilers, consommées ici
+  comme contrat (les politiques elles-mêmes seront verrouillées par les specs sœurs
+  ./owner.sdd, ./project.sdd, ./sandbox.sdd, ./application.sdd, absentes à ce jour).
+  Groupement assumé en fichier unique : 24 lignes, un seul type, aucun comportement hors
+    derives. Le crate n'a qu'une cible `[[bin]]` (../Cargo.toml, aucun `lib.rs`) : le module
+  est déclaré `mod error;` (privé) dans ./main.rs — @ControllerError n'est jamais une
+  surface publique inter-crates, il ne sort du binaire que par ses chaînes de @Display,
+  observables uniquement dans les logs du controller.
+
+Owns:
+  ./error.rs
+
+Can read:
+  ./main.rs
+  ./owner.rs
+  ./project.rs
+  ./sandbox.rs
+  ./application.rs
+  ../Cargo.toml
+  /vanyline.sdd
+  /tooling.sdd
+  /tools/src/error.sdd
+  /lib/src/error.sdd
+
+Depends on:
+  @thiserror (v2, ../Cargo.toml) — derive @thiserror::Error : implémente @std::error::Error,
+    génère le @std::fmt::Display depuis les attributs `#[error(...)]` et le @From du champ
+    `#[from]`. Un seul @Display par variante, aucune autre derive (pas de `Clone`,
+    `PartialEq`, `Serialize`, ni ts-rs) : type purement interne à un binaire, jamais un
+    type de transport.
+  @kube::Error (kube 4, ../Cargo.toml) — payload de @ControllerError::Kube via `#[from]` :
+    toute erreur d'API K8s des quatre reconcilers (patch/apply/create/get/list,
+    `patch_status`, `finalizer` hors phases gardées) remonte par l'opérateur `?` convertie
+    en `VNL-CTL-001`. Le @Display de @kube::Error est interpolé dans `{0}` — son contenu
+    exact appartient à kube, pas à ce fichier.
+  Les quatre reconcilers ./owner.rs, ./project.rs, ./sandbox.rs, ./application.rs — seuls
+    consommateurs du type (construction + matching dans leurs @error_policy), branchés sur
+    kube-rs par @Controller::run dans ./main.rs.
+  @kube::runtime::finalizer — sémantique d'erreur porteuse de contrat pour Project et
+    Sandbox : le helper ajoute le finalizer avant @Event::Apply et ne le retire qu'après un
+    `Ok` de @Event::Cleanup ; en cas d'erreur en phase Cleanup, le finalizer RESTE et
+    l'erreur part à @error_policy — c'est ce mécanisme que @ControllerError::PurgePending et
+    @ControllerError::WorktreeRemovalPending exploitent volontairement comme signal de
+    requeue (commentaire explicite ./project.rs l.770-772 ; comportement de kube 4 à
+    confirmer, cf. `Tasks`). En phase Apply l'erreur remonte sans effet sur le finalizer.
+
+Exposes:
+  @ControllerError — `pub enum` (privé au crate, cf. `Purpose`) avec derives `Debug` et
+    @thiserror::Error exactement. 6 variantes, aucun gating de feature. Le @Display de
+    chaque variante commence par son marqueur `VNL-CTL-*` suivi de `": "` — les rendus
+    ci-dessous sont exacts, caractère par caractère, `{owner}`/`{project}`/… désignant les
+    champs nommés :
+      @ControllerError::Kube(@kube::Error) —
+        `"VNL-CTL-001: Kubernetes API error: {0}"` ; champ `#[from]` →
+        @From<@kube::Error> généré, utilisable par `?`, et @std::error::Error::source()
+        rend l'@kube::Error d'origine
+      @ControllerError::OwnerNotReady { owner, project } —
+        `"VNL-CTL-002: Owner '{owner}' not found or not Ready (no pvc_name in status) for Project '{project}'"` ;
+        deux champs `String` ; voir `Handles` sur la portée réelle du mot « not found » et
+        sur `{project}` en contexte Sandbox
+      @ControllerError::PurgePending { project } —
+        `"VNL-CTL-003: purge job for Project '{project}' not finished yet"` ; variante de
+        contrôle (signal de requeue du cleanup Project, jamais une anomalie en soi)
+      @ControllerError::Finalizer(String) —
+        `"VNL-CTL-004: finalizer error: {0}"` ; payload = chaîne de l'erreur d'origine
+        stringifiée par @ToString::to_string (stringification LOSSY : la source n'est PAS
+        chaînée, seul le texte survit — y compris le marqueur `VNL-CTL-001` ou `VNL-CTL-003`
+        d'origine, qui reste donc lisible dans le message, en second marqueur)
+      @ControllerError::ProjectNotReady { project, sandbox } —
+        `"VNL-CTL-005: Project '{project}' not cloned yet for Sandbox '{sandbox}'"` ;
+        variante de contrôle (requeue tant que le Job init du Project n'a pas réussi)
+      @ControllerError::WorktreeRemovalPending { sandbox } —
+        `"VNL-CTL-006: worktree removal job for Sandbox '{sandbox}' not finished yet"` ;
+        variante de contrôle (signal de requeue du cleanup Sandbox)
+  @std::error::Error — implémenté par la derive : @source() ne rend `Some` que pour
+    @ControllerError::Kube (seul `#[from]`), `None` pour les cinq autres variantes.
+  @std::fmt::Debug — dérivé, utilisable dans les tests/inspect des quatre modules
+    consommateurs.
+  Contrat de consommation — les @error_policy des quatre reconcilers (définitions vivent
+    dans les fichiers appelants, contractualisées ici comme comportement attendu de cette
+    erreur, verrouillables par test unitaire en appelant directement les politiques) :
+      owner::error_policy — toute erreur : log @tracing::warn! `"owner reconcile error,
+        requeue in 30s"` et @Action::requeue(@std::time::Duration::from_secs(30)) ; aucune
+        distinction de variante
+      project::error_policy — @ControllerError::PurgePending : @tracing::info! et
+        requeue 10 s ; toute autre variante : @tracing::warn! et requeue 30 s
+      sandbox::error_policy — @ControllerError::WorktreeRemovalPending : @tracing::info!
+        et requeue 10 s ; @ControllerError::ProjectNotReady : @tracing::info! et requeue
+        15 s ; toute autre variante : @tracing::warn! et requeue 30 s
+      application::error_policy — toute erreur : @tracing::warn! et requeue 30 s, aucun
+        matching de variante
+  ./main.rs — les quatre @Controller::run tournent sous @tokio::join! ; les erreurs du canal
+    de side-effects kube-rs sont logguées @tracing::warn! et le binaire ne panique JAMAIS
+    sur une erreur de reconcile (seul le client kube absent au démarrage fait sortir, code
+    1 — hors contrat de ce fichier).
+
+Accepts:
+  @ControllerError::Kube — n'importe quel @kube::Error (HTTP 404/403/409 AlreadyExists,
+    erreurs de watch, de désérialisation, de transport…) : aucune validation, aucun
+    filtrage, le contenu est rendu tel quel dans `{0}`.
+  Variantes à champs nommés — n'importe quel `String` dans `owner`/`project`/`sandbox` :
+    les noms viennent de @ResourceExt::name_any ou de @Spec refs, non validés ici.
+  @ControllerError::Finalizer(String) — n'importe quelle chaîne, y compris le rendu
+    @Display complet d'une autre @ControllerError (cas courant : les erreurs des phases
+    gardées de ./project.rs et ./sandbox.rs stringifiées par `map_err`).
+
+Returns:
+  Rien hors conversion et @Display : le fichier ne définit aucune fonction. Surface
+    observable = le @Display verrouillé de `Exposes`, le @Debug dérivé, et @source()
+    (`Some` pour @Kube uniquement). C'est la chaîne de @Display qui est l'observable
+    ultime du binaire : c'est elle que les @error_policy injectent dans les logs via
+    `%error`, et dans laquelle un `VNL-CTL-<NNN>` est recherché par un humain ou un grep de
+    log.
+
+Raises:
+  Aucune — le fichier ne retourne jamais d'erreur, ne panique jamais, ne logge jamais
+    (aucune dépendance à @tracing dans ./error.rs) : les derives thiserror n'introduisent
+    ni panic ni effet de bord. Les erreurs de ce type ne sont que transportées, matchées et
+    stringifiées par les modules consommateurs.
+
+Handles:
+  Signaux de contrôle « job pas fini » — @ControllerError::PurgePending et
+    @ControllerError::WorktreeRemovalPending ne sont PAS des échecs : leurs cleanup
+    appelants (./project.rs::cleanup, ./sandbox.rs::cleanup) les remontent volontairement
+    pour que le finalizer kube-rs NE SE RETIRE PAS et que @error_policy requeue à 10 s ;
+    un `Ok` retirerait le finalizer avant la fin du Job de purge/de retrait de worktree.
+    Ces deux variantes sont le seul cas où une erreur du crate est un flux nominal, loggué
+    en `info` et non `warn`.
+  @ControllerError::ProjectNotReady — construite uniquement par ./sandbox.rs::apply quand
+    @ProjectStatus.cloned est `false` ou absent ; flux nominal de provisioning d'une
+    Sandbox créée avant la fin du Job init de son Project ; requeue 15 s en `info`.
+  @ControllerError::OwnerNotReady — construite par ./project.rs::apply (statut Owner sans
+    @OwnerStatus::pvc_name) et ./sandbox.rs::apply (deux sites : `pvc_name` absent, puis
+    `service_account` absent). Deux imprécisions de message documentées sans les bénir :
+    le mot « not found » ne se réalise jamais par cette variante (un Owner absent fait
+    échouer le `owners.get(..)` en amont → @ControllerError::Kube `VNL-CTL-001` NotFound,
+    jamais `VNL-CTL-002`) ; et en contexte Sandbox le message dit « for Project » alors que
+    le déclencheur est un Sandbox (le champ `{project}` porte le Project référencé —
+    ambiguïté documentée en `Tasks`). Le matching du champ `service_account` est aussi
+    étiqueté « no pvc_name in status » dans le gabarit.
+  Erreurs des phases gardées par finalizer — ./project.rs::reconcile et
+    ./sandbox.rs::reconcile wrap TOUTE erreur du helper finalizer (échec de patch du
+    finalizer, et éventuellement la phase Cleanup selon le comportement exact de kube 4,
+    incertain — cf. `Tasks`) en @ControllerError::Finalizer(String) par `map_err` : le
+    marqueur d'origine survit noyé dans `{0}` (double marqueur, ex.
+    `VNL-CTL-004: finalizer error: … VNL-CTL-001: …`), et la discrimination de variante est
+    alors perdue pour @error_policy (retombe sur le bras `warn` + 30 s) ; @source() rend
+    `None` (chaînage perdu).
+  Best-effort v1 en cleanup — ./project.rs::cleanup et ./sandbox.rs::cleanup avalent les
+    erreurs de fetch Owner/Project (introuvable pendant une suppression) par un
+    @tracing::warn! et retournent @Action::await_change() : ces cas ne produisent AUCUNE
+    @ControllerError (le purge/retrait est simplement ignoré, données workspace laissées
+    sur le PVC).
+  Owner/ServiceAccount/Secret absents en phase Apply (Owner et Application reconcilers) —
+    ne passent jamais par `VNL-CTL-002` : `get`/`get_opt` d'objets K8s → @kube::Error →
+    `VNL-CTL-001` → requeue 30 s par les politiques globales de ces reconcilers.
+  Aucun événement K8s — @ControllerError ne produit pas d'@Event Kubernetes sur les
+    ressources, uniquement des lignes de log du pod controller (aucune construction
+    d'évènement dans les quatre reconcilers).
+
+Must:
+  Préfixer le @Display de chaque variante par son marqueur `VNL-<DOMAINE>-<NNN>` exact,
+    suivi de `": "`, marqueurs uniques dans l'enum et numérotation contiguë `001..006` —
+    contractisation AGENTS.md de l'« identifiant unique », même discipline que
+    /lib/src/error.sdd et /tools/src/error.sdd ; les six rendus de `Exposes` sont stables et
+    verrouillables par test sur le rendu complet (pas un simple `contains`).
+  Conserver @From<@kube::Error> généré par `#[from]` sur @ControllerError::Kube : les
+    quatre reconcilers s'appuient massivement sur `?` pour les appels kube ; supprimer le
+    `#[from]` casserait tout le crate.
+  Garder @ControllerError::PurgePending et @ControllerError::WorktreeRemovalPending comme
+    motifs discriminés par les @error_policy de ./project.rs et ./sandbox.rs (bras `info` +
+    requeue 10 s) : ce matching est le mécanisme de progression des cleanups finalizer ;
+    le perdre (renommage, regroupement) transformerait un flux nominal en boucle `warn` à
+    30 s.
+  Garder @ControllerError::ProjectNotReady discriminée par sandbox::error_policy (15 s,
+    `info`).
+  Contenir @ControllerError::Finalizer par stringification `to_string()` uniquement, sans
+    chaîner la source (aucun `#[source]`/`#[from]` sur ce champ) — état verrouillé, la
+    question du chaînage est ouverte en `Tasks`, pas tranchée.
+  Rendre toute erreur requeue-able : aucune @error_policy ne retourne @Action::teardown()
+    ni @Action::await_change() sur erreur — une erreur ne stoppe jamais le reconciler
+    (l'état « terminal » du controller est @Action::await_change() sur succès de cleanup,
+    jamais sur erreur).
+  N'avoir comme derives que `Debug` et @thiserror::Error, et rester un module privé du
+    binaire (`mod error;` dans ./main.rs) : ni serde, ni ts-rs, ni re-export — le crate
+    n'a pas de cible lib.
+
+Must not:
+  Renommer, renuméroter ou réaffecter un marqueur `VNL-CTL-*` sans décision de spec actée
+    par Sébastien — les marqueurs sont lus dans les logs du cluster et doivent rester des
+    identifiants fiables (règle /vanyline.sdd).
+  Introduire une variante sans marqueur, sans ligne dans `Exposes`, ou dont le @Display ne
+    commence pas par son marqueur.
+  Transformer @ControllerError en type public inter-crates ou de transport : le crate
+    n'existe que comme binaire ; toute surface « publique » doit rester `pub(crate)`
+    d'usage.
+  Faire porter à @ControllerError le rôle de code d'arrêt du binaire : ./main.rs ignore
+    les erreurs de reconcile (log `warn` seulement), une erreur ne doit jamais devenir un
+    `exit`/panic.
+  Chaîner la cause dans @ControllerError::Finalizer (ajouter `#[source]`) ou changer son
+    gabarit sans arbitrage préalable des `Tasks` — le double marqueur dans `{0}` est l'état
+    observé, pas un contrat voulu.
+  Logger dans ./error.rs ou y émettre un événement K8s depuis ce type — le logging
+    appartient aux @error_policy (via @tracing) des fichiers appelants.
+
+Tasks:
+  [ ] Ajouter un module `#[cfg(test)]` à ./error.rs (aucun test n'existe pour ce fichier) :
+    un test par Scenario, taggé par son titre. Scénarios unitaires = @Display exacts,
+    @From/@source, et appels directs des quatre @error_policy (fonctions pures, testables
+    hors cluster) ; les effets réels du helper finalizer kube-rs sur les variantes de
+    contrôle relèvent des tests d'intégration cluster non mockés du crate (conventions
+    projet), pas de tests unitaires d'ici.
+  [?] Comportement exact de @kube::runtime::finalizer (kube 4) sur l'erreur retournée par
+    la fermeture en phase Cleanup : le code de ./project.rs et ./sandbox.rs (et leurs
+    commentaires « un `Ok` retire le finalizer, donc on renvoie `Err` ») suppose une
+    propagation NON wrappée de l'erreur de cleanup — sinon @error_policy ne verrait que
+    @ControllerError::Finalizer (bras `warn` 30 s) et les branches `PurgePending`/
+    `WorktreeRemovalPending` (info 10 s) seraient du code mort, avec un cleanup qui
+    progresse quand même mais plus lentement et mal loggué. Source de kube-runtime hors de
+    portée locale pendant la revue : à vérifier (lecture du crate ou test d'intégration
+    cluster observant les logs) et à trancher avec Sébastien.
+  [?] Portée réelle du mot « not found » dans le message de `VNL-CTL-002` : un Owner absent
+    produit `VNL-CTL-001` (NotFound via `?`), jamais `VNL-CTL-002`. Le message est-il à
+    corriger (« not Ready » seulement) ou faut-il réellement mapper NotFound du fetch Owner
+    en @ControllerError::OwnerNotReady ?
+  [?] @ControllerError::OwnerNotReady en contexte Sandbox : message « … for Project » alors
+    que le déclencheur est un Sandbox, et second site de construction qui discrimine
+    @OwnerStatus::service_account sous un gabarit « no pvc_name in status ». Corriger le
+    message (champs génériques) ou accepter l'imprécision du log ?
+  [?] ./sandbox.rs::cleanup, branche « Job existe mais pas encore terminé » (`Some(_)`),
+    RE-CRÉE le Job de retrait de worktree sous le même nom déterministe
+    (`sandbox-<name>-remove`) qu'il vient d'observer existant : @jobs.create sur un nom
+    existant rend @kube::Error AlreadyExists → `VNL-CTL-001` → requeue 30 s, au lieu de
+    @ControllerError::WorktreeRemovalPending attendu. Branches des deux `match` quasi
+    identiques — duplication suspecte d'un cas « create si absent » désolidarisé du cas
+    « attendre si présent » (./project.rs::cleanup, lui, ne recrée pas). Bug probable,
+    documenté sans le bénir : trancher (réparer côté sandbox.rs, ou bénir et spécifier).
+  [?] Incohérence de discipline entre ./project.rs::cleanup (ne recrée jamais le Job de
+    purge absent, laisse le finalizer attendre une recréation qui ne vient que si le Job a
+    été détruit par TTL/GC) et ./sandbox.rs (recréation systématique, cf. [?] précédent) :
+    aligner les deux cleanups sur une seule stratégie, laquelle ?
+  [?] @ControllerError::Finalizer stringifie sans chaîner : @source() rend `None` et la
+    discrimination de variante est perdue pour @error_policy. Chaîner (généraliser
+    `#[from]`) ou confirmer la stringification sans chaînage comme contrat v1 (le message
+    garde le marqueur d'origine en texte) ?
+  [?] Le cleanup best-effort v1 (Owner/Project introuvables → purge/worktree ignorés,
+    données laissées sur le PVC, simple log `warn`) est un contrat de conception ou une
+    dette à fermer (données orphelines jamais purgées) ? À clore avant ./project.sdd et
+    ./sandbox.sdd.
+  [?] Les politiques owner/application ne distinguent aucune variante (30 s pour tout) :
+    confirmation v1 (le commentaire « pas de distinction transitoire/fatale en v1 ») ou
+    trou à combler quand OwnerNotReady y deviendra fréquent ?
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les six rendus exacts de `Exposes` et le @source() (`Some` pour @Kube seul) sont vérifiés
+    par test.
+  Les quatre @error_policy verrouillent les délais de requeue et le niveau de log de
+    `Exposes` par test unitaire (appel direct).
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: display_exhaustif_des_marqueurs_vnl_ctl
+  Given une instance de chaque variante de @ControllerError avec des payloads fixés
+    (@OwnerNotReady { owner: "alice", project: "depot" }, @PurgePending { project:
+    "depot" }, @Finalizer("cause"), @ProjectNotReady { project: "depot", sandbox: "sb1" },
+    @WorktreeRemovalPending { sandbox: "sb1" }) et une @ControllerError::Kube construite
+    depuis un @kube::Error minimal via @From
+  When chacune est rendue par @Display
+  Then chaque rendu est exactement le gabarit de `Exposes` avec payloads injectés,
+    commençant par son marqueur `VNL-CTL-001..006` suivi de `": "`, et les six marqueurs
+    sont deux à deux distincts
+
+Scenario: conversion_from_kube_error_et_source_chainee
+  Given une fonction retournant `Result<(), @ControllerError>` qui propage un
+    @kube::Error par l'opérateur `?`
+  When l'erreur remonte
+  Then elle est une @ControllerError::Kube dont l'@Display est
+    `VNL-CTL-001: Kubernetes API error: ` suivi de l'@Display du @kube::Error d'origine,
+    et @std::error::Error::source() rend `Some` de ce @kube::Error
+
+Scenario: source_absente_sur_les_cinq_autres_variantes
+  Given @ControllerError::Finalizer("x") et les quatre variantes à champs nommés vues comme
+    @std::error::Error
+  When @std::error::Error::source() est appelé sur chacune
+  Then chacune rend `None` (aucun chaînage de cause hors `#[from]` de @Kube)
+
+Scenario: error_policy_project_purge_pending_requeue_dix_secondes
+  Given un appel direct à project::error_policy avec une @ControllerError::PurgePending
+    { project: "depot" } (objet Project factice, @Context minimal)
+  When la politique retourne
+  Then l'@Action est un requeue de 10 s — et avec une autre variante (ex. une
+    @ControllerError::Finalizer("x")) le requeue est de 30 s
+
+Scenario: error_policy_sandbox_discipline_les_variantes_de_controle
+  Given des appels directs à sandbox::error_policy avec @ControllerError::WorktreeRemovalPending,
+    @ControllerError::ProjectNotReady, puis une autre variante (ex. @ControllerError::Finalizer("x"))
+  When la politique retourne à chaque fois
+  Then les requeues sont respectivement de 10 s, 15 s et 30 s
+
+Scenario: error_policy_owner_et_application_toujours_trente_secondes
+  Given des appels directs à owner::error_policy et application::error_policy balayant les
+    six variantes de @ControllerError
+  When chacune retourne
+  Then chaque appel produit un requeue de 30 s, sans différence de variante
+
+Scenario: aucune_erreur_ne_stoppe_le_reconcile
+  Given les quatre @error_policy appelées avec chacune des six variantes de
+    @ControllerError (24 appels)
+  When les @Action résultat sont inspectés
+  Then aucun n'est un teardown ni un await_change : toute erreur de reconcile est
+    requeueée, seule une fin de cleanup en succès (hors contrat de ce fichier) arrête le
+    reconciler

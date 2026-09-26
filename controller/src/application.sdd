@@ -1,0 +1,680 @@
+Spec: Application
+
+Platform: Rust/vanyline-controller
+
+Purpose:
+  Reconciler de la CRD `Application` (`vanyline.solidite.fr/v1alpha1`, instance déployée
+  d'`app`) : builders purs des sept ressources enfants (Secret cookie, ServiceAccount,
+  Role, RoleBinding, Deployment, Service, Ingress), boucle `reconcile` server-side apply
+  idempotente, calcul de phase depuis les conditions du Deployment, status CRD et politique
+  d'erreur. Contrat secret au cœur du fichier : les valeurs sensibles (OIDC, chaîne de
+  connexion Postgres, cookie secret) ne vivent JAMAIS dans la CR — la CR ne porte que des
+  `secretRef`, et le seul secret que le controller écrit lui-même est le cookie auto-généré
+  (`spec.cookieSecretRef` absent), jamais régénéré une fois créé. Le fichier forme un seul
+  contrat (pas de regroupement) et expose deux helpers de convention TLS
+  (@cert_manager_annotation_key, @tls_secret_name) réutilisés par `./sandbox.rs` pour son
+  Ingress de Sandbox — un Ingress = un Certificate, même mécanisme partout. Contexte
+  documentaire : /docs/architecture.md sections « CRD Application (`controller-application-crd`) »
+  et « Ingress par Sandbox (`sandbox-ingress-wiring`) » ; types de la CR contractualisés par
+  /crds/src/lib.sdd (@ApplicationSpec, @ApplicationStatus).
+
+Owns:
+  ./application.rs
+
+Can read:
+  ./main.rs
+  ./error.rs
+  ./owner.rs
+  ./sandbox.rs
+  ../Cargo.toml
+  /crds/src/lib.sdd
+  /lib/src/k8s.rs
+  /tooling.sdd
+  /vanyline.sdd
+  /docs/architecture.md
+
+Structure:
+  ./application.rs — six blocs dans l'ordre physique : (1) constantes et conventions de
+    nommage @APP_PORT, @APP_LABEL, @application_name, @cookie_secret_name, @tls_secret_name,
+    @cert_manager_annotation_key, @effective_cookie_secret_ref ; (2) helper privé
+    @app_owner_ref puis les sept builders publics (service account, role, role binding,
+    deployment, service, ingress, cookie secret) ; (3) @Context ; (4) fabrication et garantie
+    du cookie (@generate_cookie_secret_value privé, @ensure_cookie_secret privé) ;
+    (5) projection de status (@deployment_phase privé, @compute_status public) ; (6) boucle
+    (@reconcile, @error_policy, @build_controller) ; puis le module `#[cfg(test)]` (20 tests
+    purs, sans cluster ni mock de l'API K8s — convention du crate).
+
+Must:
+  Exposer @APP_PORT comme `pub const APP_PORT: i32 = 8080` — port HTTP du pod `app`, écho du
+    défaut `LISTEN_ADDR` de `app/src/config.rs` (`0.0.0.0:8080`) ; un seul contrat de port
+    pour le ContainerPort, le Service, la sonde et le backend d'Ingress.
+  Exposer @APP_LABEL comme la clé de label unique `vanyline.solidite.fr/application`, posée
+    sur le metadata du Deployment, dans son `spec.selector.matchLabels` et sur les labels du
+    pod template — le Service et l'Ingress ne sélectionnent/visent que par cette map d'un
+    seul entrée `{APP_LABEL: <nom CR>}`. Le label est aussi consommé par `./sandbox.rs`
+    (peer NetworkPolicy `Exists` pour l'appel `POST /ws/ticket`).
+  Implémenter les conventions de nommage exactement : @application_name = `application-<name>`
+    (nom commun des Deployment/Service/Ingress/ServiceAccount/Role/RoleBinding, même patron
+    que `sandbox-<name>`), @cookie_secret_name = `<name>-cookie` (nom dérivé du NOM DE LA CR,
+    PAS du nom d'objet dérivé — cf. `[?]` des `Tasks`), @tls_secret_name = `<x>-cert`
+    (appelé avec le nom d'objet dérivé pour l'Ingress applicatif : `application-<name>-cert`).
+  Résoudre @cert_manager_annotation_key par le seul test `Some("Issuer")` =>
+    `"cert-manager.io/issuer"`, tout le reste (`None`, `Some("ClusterIssuer")`, toute autre
+    chaîne) => `"cert-manager.io/cluster-issuer"` ; réutilisé tel quel par
+    `./sandbox.rs::build_sandbox_ingress`.
+  Résoudre @effective_cookie_secret_ref comme `spec.cookie_secret_ref` cloné si présent,
+    sinon @cookie_secret_name du nom de la CR — source unique du nom référencé par l'env
+    `COOKIE_SECRET` du Deployment.
+  Poser sur CHAQUE objet créé (Secret cookie, ServiceAccount, Role, RoleBinding, Deployment,
+    Service, Ingress) exactement une @OwnerReference vers la CR via @app_owner_ref
+    (controller-owner, apiVersion `vanyline.solidite.fr/v1alpha1`, kind `Application`, name =
+    nom de la CR, `blockOwnerDeletion` non posé) — la GC K8s en cascade remplace tout
+    finalizer, et @reconcile ne pose JAMAIS de finalizer.
+  Construire @build_application_service_account : un ServiceAccount namespaced nommé
+    @application_name, sans secret ni automount personnalisé — sans lui `app` tourne avec le
+    `default` du namespace et ses appels CRDs échouent en `VNL-K8S-002: ... is forbidden`.
+  Construire @build_application_role comme un @Role NAMESPACED (jamais un ClusterRole — `app`
+    ne gère que les CRs de son namespace) à trois @PolicyRule, toutes sur l'unique apiGroup
+    `vanyline.solidite.fr` : (`owners`, `projects`) => verbes `get`,`list`,`create`,`delete`
+    exactement (pas de patch, pas de watch) ; (`sandboxes`) => `get`,`list`,`watch`,`create`,
+    `delete`,`patch` (`watch` = hub WS `/api/ws/sandbox-state`, `patch` = suspension) ;
+    (`applications`) => `get` seul (`app` ne modifie jamais sa propre CR). Les verbes
+    reproduisent exactement ceux de `vanyline_lib::k8s::VnlK8sClient` — toute évolution du
+    client K8s de l'app impose de toucher cette règle.
+  Construire @build_application_role_binding liant (rôle RBAC `rbac.authorization.k8s.io`,
+    kind `Role`, même nom @application_name) au ServiceAccount éponyme (unique @Subject,
+    kind `ServiceAccount`, namespace de la CR) — les trois objets RBAC partagent le même nom.
+  Construire @build_application_deployment avec : un seul container nommé `app` ; image =
+    `spec.image` cloné, sinon l'argument `default_image` (résolu par `./main.rs` depuis
+    `--app-image-repo`/`--app-image-tag`, env `APP_IMAGE_REPO`/`APP_IMAGE_TAG` — pas une
+    constante, cf. `[?]` correspondant de /crds/src/lib.sdd) ; `replicas` = `spec.replicas` ou `1`
+    (pass-through sans validation, l'apiserver borne) ; un unique @ContainerPort `http`/8080
+    ; `serviceAccountName` = @application_name ; labels APP_LABEL sur metadata, selector et
+    template ; readiness et liveness probes IDENTIQUES : HTTP GET `/health` sur le port
+    numérique @APP_PORT, `initialDelaySeconds` 5, `periodSeconds` 10 — pas de startup probe,
+    pas de resources ni de securityContext.
+  Poser l'env du container EXACTEMENT ainsi, dans cet ordre de construction : trois
+    variables à valeur littérale `OIDC_REDIRECT_URL` = `https://{spec.host}/auth/callback`
+    (calculé depuis `host`, jamais lu d'un secret — source unique de vérité), `VNL_K8S_NAMESPACE`
+    = namespace de la CR (repli `"default"` si absent), `VNL_APPLICATION_NAME` = nom de la CR
+    (sert à l'`ensure_owner` de l'app, condition d'exposition publique des Sandboxes) ; puis
+    pour chaque champ non-`None` de `spec.storage_defaults`, la variable valeur correspondante
+    (`homeStorageClass` -> `VNL_DEFAULT_HOME_STORAGE_CLASS`, `homeAccessMode` ->
+    `VNL_DEFAULT_HOME_ACCESS_MODE`, `projectStorageClass` -> `VNL_DEFAULT_PROJECT_STORAGE_CLASS`,
+    `projectAccessMode` -> `VNL_DEFAULT_PROJECT_ACCESS_MODE`) — jamais de variable pour un
+    champ `None` ni pour `storage_defaults` absent (défauts lus par `app`, jamais par ce
+    reconciler) ; puis quatre variables depuis `spec.oidc_secret_ref` par @SecretKeySelector
+    (`issuerUrl`/`clientId`/`clientSecret`/`scopes` -> `OIDC_ISSUER_URL`/`OIDC_CLIENT_ID`/
+    `OIDC_CLIENT_SECRET`/`OIDC_SCOPES`, `optional` non posé) ; `OIDC_CA_CERT` depuis la clé
+    `caCert` du même secret avec `optional: Some(true)` (clé absente => env absente, l'app
+    démarre quand même) ; `DATABASE_URL` depuis `spec.database_secret_ref` clé `uri` ;
+    `COOKIE_SECRET` depuis @effective_cookie_secret_ref clé `cookieSecret` (`optional` non
+    posé). Sans `storage_defaults` : exactement 10 variables.
+  Construire @build_application_service : Service sans `spec.type` explicite (ClusterIP par
+    défaut d'apiserver), nommé @application_name, selector `{APP_LABEL: <nom CR>}`, port
+    unique `http` 8080 -> targetPort numérique 8080.
+  Construire @build_application_ingress : `spec.ingressClassName` = valeur de la CR ; une
+    seule @IngressRule sur `spec.host`, un seul chemin `/` de type `Prefix`, backend Service
+    @application_name par numéro de port `Some(8080)` (pas par nom) ; annotations = clone de
+    `spec.ingress_annotations` avec INSERTION postérieure de l'annotation cert-manager
+    (@cert_manager_annotation_key -> `spec.tls_issuer_name`) — l'annotation dérivée gagne en
+    cas de collision de clé (cf. `[?]` des `Tasks`) ; bloc `spec.tls` TOUJOURS posé : hosts
+    `[spec.host]`, secret @tls_secret_name(@application_name) — on part du principe que
+    cert-manager (ingress-shim) est présent dans le cluster, il émet le Certificate lui-même ;
+    aucun mode « sans TLS » n'existe.
+  Construire @build_cookie_secret comme un builder PUR : il ne génère rien, il pose la
+    `cookie_data_value` reçue (déjà encodée par l'appelant) dans `data["cookieSecret"]` en
+    @ByteString, Secret nommé @cookie_secret_name(<nom CR>), type Opaque (défaut),
+    ownerReference. Le type `Secret` n'est jamais appliqué en SSA : il n'est que CREATE.
+  Générer @generate_cookie_secret_value par 64 octets aléatoires de `rand::rngs::OsRng`
+    encodés base64 STANDARD (chaîne de 88 caractères) — l'app exige un décodage >= 64 octets.
+  Assumer le double encodage documenté de /docs/architecture.md : la chaîne base64 est
+    enveloppée dans un @ByteString que la sérialisation K8s re-base64 pour le wire ; le pod,
+    via `secretKeyRef`, ne voit que la chaîne base64 simple (comportement vérifié en lisant
+    le `serde` de @ByteString, contrat explicite).
+  Garantir @ensure_cookie_secret : si `spec.cookie_secret_ref` est `Some` ne RIEN faire (le
+    secret vit ailleurs, le controller ne vérifie même pas son existence) ; sinon chercher
+    `<nom CR>-cookie` par `get_opt` — présent => ne jamais y retoucher (JAMAIS de
+    régénération ni de patch : une régénération invaliderait toutes les sessions actives, le
+    check « existe déjà ? » précède toute écriture) ; absent => créer (PostParams::default(),
+    jamais SSA) le Secret avec la valeur générée. L'appel est la PREMIÈRE étape de
+    @reconcile, avant tout patch du Deployment qui référence ce secret.
+  Mapper @deployment_phase sur trois valeurs seulement : une condition `Available`/`True` =>
+    `"Running"` (prioritaire) ; sinon une condition `Available`/`False` dont `reason` est
+    `"Failed"` OU `"ProgressDeadlineExceeded"` => `"Failed"` ; tout le reste (conditions
+    absentes, vides, `Available`/`False` d'autre reason, autres conditions seules) =>
+    `"Provisioning"`.
+  Calculer @compute_status : `phase` transmis tel quel et une condition UNIQUE `Ready` —
+    `status` `"True"`/reason `"DeploymentReady"` si `phase == "Running"`, sinon
+    `"False"`/reason `"NotReady"` ; `message` = `phase={phase}` ; `observedGeneration` =
+    generation metadata de la CR ; `lastTransitionTime` = horodatage du calcul.
+  Ordonner @reconcile EXACTEMENT ainsi, dans le namespace de la CR (repli `"default"` si
+    absent) : (1) @ensure_cookie_secret ; (2) SSA @Patch::Apply avec
+    `PatchParams::apply(FIELD_MANAGER).force()` (`FIELD_MANAGER` importé de ./owner.rs —
+    `"vanyline-controller"`) du ServiceAccount, du Role puis du RoleBinding ; (3) lecture du
+    Deployment EXISTANT par `get_opt` pour calculer `phase` (absent => `"Provisioning"`) —
+    le status reflète donc l'état AVANT le apply du cycle ; (4) SSA du Deployment (image =
+    @Context.default_image en repli) ; (5) SSA du Service ; (6) SSA de l'Ingress ; (7) patch
+    du status par `patch_status` en @Patch::Merge JSON `{"status": compute_status(...)}` avec
+    `PatchParams::default()` — JAMAIS les `PatchParams` de l'Apply ici (le `force()` hors
+    contexte Apply est rejeté par kube-rs, bug historique corrigé et documenté dans
+    /docs/architecture.md section « Déploiement »).
+  Requeuer @reconcile à chaque cycle, sans exception : 300 s si `phase == "Running"`, 15 s
+    sinon. Le controller ne WATCH AUCUN enfant (seules les Applications sont watchées) : la
+    dérive de phase d'un Deployment (repli, dégradation) n'est rattrapée que par le requeue
+    périodique — 15 s max tant que `Running` n'est pas atteint, 300 s une fois atteint.
+  Politique d'erreur @error_policy : journaliser `tracing::warn!` avec l'erreur et requeue
+    30 s, QUELLE QUE SOIT l'erreur — aucune distinction transitoire/fatale en v1 (patron de
+    ./owner.rs), aucune erreur terminale, pas de backoff exponentiel.
+  Construire @build_controller comme `Controller::new(Api::all(client), Config::default())`
+    sur @Application : watch des Applications SUR TOUT LE CLUSTER (les CRDs sont namespaced
+    mais le controller tourne cluster-wide, RBAC de `deploy/controller/` en conséquence) ;
+    `.run(reconcile, error_policy, ctx)` reste à l'appelant (`./main.rs`, qui pilote l'arrêt
+    via `tokio::join!` des quatre reconcilers).
+  Documenter @Context : `client` (kube::Client cloné par appel d'API) et `default_image`
+    injecté par `./main.rs` (`{APP_IMAGE_REPO}:{APP_IMAGE_TAG}`).
+  Garder le harnais de /tooling.sdd : 8 exemptions `#[allow(clippy::expect_used)]`
+    (@app_owner_ref + les 7 builders qui l'appellent, justification d'une ligne « garanti par
+    #[derive(CustomResource)] » — l'expect est structurellement inatteignable) et le
+    `#![allow(unwrap_used, expect_used)]` du module `#[cfg(test)]` ; en production du fichier,
+    aucun `unwrap`/`panic!`/`println!`/`eprintln!` — la seule trace de log est le `warn!` de
+    @error_policy.
+
+Must not:
+  Écrire une valeur sensible dans la CR ou dans un manifeste construit ici : uniquement des
+    @SecretKeySelector (`secretKeyRef`) pour OIDC, la base et le cookie ; le seul secret dont
+    le controller connaît la valeur est le cookie auto-généré, et sa valeur ne sort que dans
+    le Secret K8s.
+  Lire `OIDC_REDIRECT_URL` (ou son dérivé) dans un secret : il est recalculé depuis
+    `spec.host` à chaque construction du Deployment, et n'est pas présent dans le schéma du
+    secret OIDC.
+  Régénérer, patcher ou supprimer le Secret cookie existant, ou patcher quoi que ce soit
+    d'autre que par SSA quand `spec.cookie_secret_ref` est fourni.
+  Valider l'existence des secrets référencés (`oidc_secret_ref`, `database_secret_ref`,
+    `cookie_secret_ref` externe, clés à l'intérieur) : la CR est reconcilée « en aveugle »,
+    une référence pendante se révèle en impasse de démarrage du pod, jamais en erreur de
+    reconcile (cf. Scenario `reconcile_secret_oidc_absent_stagne_en_provisioning`).
+  Poser un finalizer, un webhook, ou patcher le `spec` de la CR Application : le seul patch
+    de la CR est `patch_status` ; la suppression des enfants est déléguée à la GC par
+    ownerReferences.
+  Consommer `spec.ingress_controller` : ce champ d'@ApplicationSpec est lu par
+    `./sandbox.rs` (peer NetworkPolicy des Sandboxes), jamais par ce reconciler.
+  Créer un ClusterRole, donner à `app` `update`/`patch` sur `owners`/`projects`, `update` sur
+    `sandboxes`, ou plus que `get` sur `applications` : la règle RBAC est tenue au strict des
+    verbes réellement appelés par `VnlK8sClient`.
+  Émettre une annotation TLS, un bloc `tls` ou une classe d'Ingress calculés ailleurs que
+    depuis `spec.ingress_class_name`/`spec.tls_issuer_name`/`spec.tls_issuer_kind` ; ne pas
+    non plus dériver de certificat ou d'issuer soi-même — cert-manager est un prérequis
+    externe.
+  Dépendre d'un enfant watché ou d'un trigger externe : aucun `watches`/`owns` n'est déclaré
+    sur le Controller ; tout pilotage du rythme passe par `Action::requeue`.
+
+Depends on:
+  `kube` (Api, PatchParams/PostParams/Patch, Controller/watcher, @Resource/@ResourceExt pour
+    @controller_owner_ref et @name_any) et `k8s-openapi` 0.28 (types de manifests,
+    @ByteString, @IntOrString, @Condition, @Time sur `jiff::Timestamp`).
+  /crds/src/lib.sdd — @Application, @ApplicationSpec (champs requis `oidcSecretRef`,
+    `databaseSecretRef`, `host`, `ingressClassName`, `tlsIssuerName` — validés au schéma CRD,
+    pas ici), @ApplicationStorageDefaults, @ApplicationStatus.
+  ./error.rs — @ControllerError ; seule la variante @Kube (`VNL-CTL-001`) est atteignable
+    ici, par propagation `?` de chaque appel d'API (get_opt, patch, create, patch_status).
+  ./owner.rs — @FIELD_MANAGER (constante importée, pas dupliquée).
+  ./main.rs — injection de @Context.default_image et branchement du reconciler dans le
+    `tokio::join!` des quatre boucles.
+  `base64` (engine STANDARD) + `rand` (@OsRng) — fabrication de la valeur de cookie.
+  `serde_json` — enveloppe `json!({"status": ...})` du patch de status ; `tracing` — warn de
+    @error_policy.
+  ./sandbox.rs — consommateur aval de @cert_manager_annotation_key et @tls_secret_name (la
+    convention TLS est un contrat inter-fichiers ; les modifier casse sa spec sœur).
+  /tooling.sdd — harnais (les 8 exemptions `expect_used` de ce fichier comptent dans la dette
+    tracée) ; /vanyline.sdd — contrainte « jamais de secret en clair dans une CR ».
+
+Exposes:
+  @APP_PORT (`pub const i32` = `8080`) et @APP_LABEL (`pub const &str` =
+    `"vanyline.solidite.fr/application"`).
+  @application_name, @cookie_secret_name, @tls_secret_name : `pub fn(&str) -> String`.
+  @cert_manager_annotation_key : `pub fn(Option<&str>) -> &'static str` — réutilisé par
+    ./sandbox.rs.
+  @effective_cookie_secret_ref : `pub fn(&Application) -> String`.
+  Builders publics purs : @build_application_service_account, @build_application_role,
+    @build_application_role_binding, @build_application_service, @build_application_ingress,
+    @build_cookie_secret (`pub fn(&Application[, String]) -> manifeste`) et
+    @build_application_deployment (`pub fn(&Application, &str) -> Deployment`).
+  @compute_status : `pub fn(&Application, &str) -> @ApplicationStatus`.
+  @Context (`pub struct { client, default_image }`), @reconcile
+    (`pub async fn(Arc<Application>, Arc<Context>) -> Result<Action, ControllerError>`),
+    @error_policy (`pub fn(...) -> Action`), @build_controller
+    (`pub fn(Client) -> Controller<Application>`).
+  Privés mais contractuels (testés par le module `tests` interne) : @app_owner_ref,
+    @generate_cookie_secret_value, @ensure_cookie_secret, @deployment_phase.
+
+Accepts:
+  Builders : une référence @Application avec `metadata.name` et `uid` posés (le derive
+    @CustomResource garantit apiVersion/kind — fondement des `expect` exemptés) et un
+    @ApplicationSpec conforme au schéma (cinq champs requis déjà validés à l'apiserver) ;
+    namespace éventuellement absent (replis « default » / metadata.namespace `None`) ;
+    `default_image` : toute chaîne, aucun contrôle de forme.
+  @reconcile / @error_policy / @build_controller : ce que fournit kube-runtime (CR Arc,
+    Context Arc, Client) ; @tls_secret_name et @cert_manager_annotation_key : toute chaîne,
+    aucun assainissement.
+
+Returns:
+  Builders : manifests k8s-openapi complets « champ posé ou laissé `None` » (les défauts
+    d'apiserver — type de Service, type de Secret, DNS policy, etc. — ne sont pas matérialisés
+    ici et n'apparaissent donc pas dans les tests purs).
+  @reconcile : @Action::requeue de 300 s (phase `"Running"`) ou 15 s (toute autre) ; effets
+    d'API : jusqu'à 1 create (Secret cookie) + 6 SSA + 1 patch_status par cycle.
+  @compute_status : @ApplicationStatus { phase: Some, conditions: [une seule `Ready`] }.
+  @error_policy : toujours @Action::requeue(30 s) ; @build_controller : le Controller non
+    démarré.
+
+Raises:
+  @reconcile : @ControllerError::Kube (`VNL-CTL-001: Kubernetes API error: ...`) par `?` sur
+    chacun des neuf appels d'API d'un cycle complet (dix avec le `create` conditionnel du
+    cookie) — aucune autre variante, aucune erreur enrichie d'identifiant
+    propre au fichier ; une erreur remontée passe par @error_policy (warn + requeue 30 s),
+    JAMAIS par l'abandon de la CR.
+  Builders, @deployment_phase, @compute_status, helpers de nommage : aucune erreur possible —
+    fonctions totales ; leurs `expect` (@app_owner_ref) sont inatteignables par construction
+    du derive @CustomResource (exemptions justifiées).
+  @generate_cookie_secret_value : aucune erreur (`OsRng` est infaillible, l'encodage base64
+    non plus).
+
+Handles:
+  CR sans namespace (jamais atteignable par l'apiserver, atteignable en test) : @reconcile
+    travaille dans `"default"`, l'env `VNL_K8S_NAMESPACE` porte `"default"`, et les metadata
+    des enfants ont `namespace: None` (cf. `[?]` des `Tasks`).
+  Deployment enfant absent (premier cycle, ou suppression externe) : phase lue
+    `"Provisioning"`, le SSA le recrée — auto-cicatrisation sans détection d'absence
+    explicite, au plus un cycle de retard.
+  Suppression de la CR Application : aucun code à faire — les ownerReferences en cascade
+    suppriment les sept enfants (le Secret cookie inclus, donc les sessions de l'app sont
+    invalidées si une Application du même nom est recréée : un nouveau cookie est tiré).
+  Secret cookie préexistant (créé manuellement, ou par une version précédente du controller,
+    ou par un autre reconcile en concurrence) : laissé intact tel quel ; en cas de course de
+    création (deux reconciles simultanés), le `create` perdant rend une erreur Kube -> warn +
+    requeue 30 s, le cycle suivant voit le secret et converge (cf. `[?]`).
+  `cookie_secret_ref: Some(...)` : aucune création, aucune vérification — référence pendante
+    ou référence portant le même nom que le secret qui aurait été auto-généré : l'impasse est
+    celle du pod (`CreateContainerConfigError`), pas du reconcile.
+  Clé `caCert` absente du secret OIDC : env `OIDC_CA_CERT` simplement absente du conteneur
+    (`optional: Some(true)`), l'app démarre — les autres clés manquantes (requises, `optional`
+    non posé) bloquent en revanche le démarrage du pod.
+  `storage_defaults` partiel : uniquement les champs `Some` deviennent des variables d'env —
+    la disparition d'un champ entre deux cycles est nettoyée par le SSA (`env` est une liste
+    fusionnée par clé `name` au schéma builtin, et le controller déclare la liste entière).
+  `available == true` ET condition `Available/False` reason `Failed` simultanées :
+    `"Running"` gagne (`available` testé en premier).
+  Conditions du Deployment jamais vues en test (`ReplicaSetUpdated` seule, etc.) : tombent
+    toutes dans le repli `"Provisioning"` — aucun log, aucune métrique sur ce choix.
+  Erreur d'API sur n'importe quel appel : la boucle redémarre le cycle complet 30 s plus
+    tard, les SSA étant idempotents et le cookie « create-if-absent ».
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-25.
+  [?] @deployment_phase filtre reasons `"Failed"`/`"ProgressDeadlineExceeded"` sur la
+    condition `type == "Available"` — or un apiserver réel pose ces reasons sur la condition
+    `Progressing` (Available ne porte que `MinimumReplicasAvailable`/`...Unavailable`) : la
+    phase `"Failed"` semble inatteignable en cluster réel, les tests unitaires utilisant des
+    conditions synthétiques. Corriger le filtre (sur `Progressing/False`), ou l'assumer en
+    v1 (« Failed n'arrivera jamais, Provisioning éternel ») ?
+  [?] @cookie_secret_name documente `<application-name>-cookie` avec le vocabulaire du
+    fichier (`application_name` = `application-<name>`), mais le code produit `<nom CR>-cookie`
+    (`demo-cookie`, vérifié par test) — correction du commentaire (la valeur est le contrat
+    vécu, référencé par des secrets déployés) ou renommage en `application-demo-cookie`
+    (casse les secrets existants) ? Même glissement dans le doc de @effective_cookie_secret_ref
+    et de @ensure_cookie_secret.
+  [?] @cert_manager_annotation_key : toute valeur de `tls_issuer_kind` autre que `"Issuer"`
+    (faute de frappe incluse, ex. `"issuer"`, `"cluster_issuer"`) bascule silencieusement sur
+    `cert-manager.io/cluster-issuer` — acceptable (chaîne libre, cf. `[?]` correspondant de
+    /crds/src/lib.sdd) ou à verrouiller (schéma enum / validation au reconcile) ?
+  [?] @compute_status horodate `lastTransitionTime = now()` à CHAQUE reconcile : le patch
+    Merge réécrit `conditions` toutes les 15/300 s même à phase inchangée — churn de
+    resourceVersion/`conditions[].lastTransitionTime` non sémantique. Geler le temps quand la
+    phase est stable, ou assumer ?
+  [?] Le `phase` est lu AVANT le SSA du Deployment : le status rendu par un cycle reflète
+    l'état d'avant-apply (un retard d'un cycle, <15 s, est structurel). Assumé (patron
+    classique) ou à déplacer après le apply ?
+  [?] Course de création du cookie (get puis create, deux controller/leader) : le perdant
+    rend une erreur Kube brute -> warn + requeue 30 s. Accepté (auto-correctif) ou à
+    rattraper en `AlreadyExists` -> succès ?
+  [?] Collision d'annotations Ingress : l'annotation cert-manager dérivée ECRASE une clé
+    identique posée par l'utilisateur dans `ingressAnnotations` (ordre d'insertion) ; et avec
+    `tls_issuer_kind: "Issuer"` une annotation `cert-manager.io/cluster-issuer` libre
+    survit à côté de l'`issuer` dérivé (deux issuers potentiellement actifs sur le même
+    Ingress). Arbitrer : défense de l'espace de noms `cert-manager.io/*` dans
+    `ingressAnnotations`, ou confiance dans l'auteur de la CR ?
+  [?] `cookieSecretRef` pointant le même nom que le secret auto-généré (ex. `"demo-cookie"`) :
+    @ensure_cookie_secret saute la création (référence « externe ») et la référence reste
+    pendante ad vitam — garde (refus ou création malgré tout) ou comportement assumé ?
+  [?] Repli namespace `"default"` (deux endroits : ns de travail du reconcile et
+    `VNL_K8S_NAMESPACE`) : inatteignable via l'apiserver (CR namespaced), uniquement testable
+    en synthétique — ceinture-and-braces acceptée ou retrait ?
+  [?] SSA `.force()` avec `spec.replicas` déclaré : un HPA ou un `kubectl scale` externe est
+    écrasé à chaque cycle (force résout le conflit en faveur du controller). Limite v1 à
+    documenter ici (aucun HPA n'est prévu) ?
+  [!] Le Role `app` est figé sur les verbes de `VnlK8sClient` à la date de lecture
+    (get/list/create/delete sur owners/projects ; get/list/watch/create/delete/patch
+    sur sandboxes ; get sur applications) : vérifié contre /lib/src/k8s.rs, AUCUN test ne
+    le garantit — une évolution du client côté `app` produit un 403 runtime (`VNL-K8S-002`)
+    sans rougir le CI. Ajouter un test de cohérence (liste des verbes du client vs règle du
+    Role) ou assumer la révision manuelle ?
+  [ ] Couverture existante (module `tests`, 20 tests purs, sans cluster) :
+    `application_name_and_cookie_secret_name`, `effective_cookie_secret_ref_some`,
+    `effective_cookie_secret_ref_none`, `build_application_deployment_shape`,
+    `build_application_deployment_replicas_and_image`, `build_application_deployment_env`,
+    `build_application_deployment_storage_defaults_env`, `build_application_service_shape`,
+    `build_application_service_account_shape`, `build_application_role_shape`,
+    `build_application_role_binding_shape`, `build_application_ingress_shape`,
+    `build_application_ingress_annotations`, `build_cookie_secret_shape`,
+    `deployment_phase_running`, `deployment_phase_failed`, `deployment_phase_provisioning`,
+    `compute_status_running`, `compute_status_provisioning`, `test_generate_cookie_secret_value` —
+    ils verrouillent les Scenarios homonymes (le dernier est à renommer au titre de son
+    Scenario, cf. tâche suivante).
+  [ ] Convertir en tests taggés par leur titre les Scenarios sans test existant :
+    `tls_secret_name_suffixe_cert`, `cert_manager_annotation_key_selon_kind`,
+    `build_application_deployment_namespace_absent`,
+    `deployment_phase_available_true_prioritaire_sur_failed`, `compute_status_failed`,
+    `error_policy_requeue_trente_secondes`, `owner_reference_controller_sur_tous_les_builders`.
+  [ ] Décider l'harnais des Scenarios intégration (aucun répertoire `controller/tests/`
+    n'existe à ce jour ; convention projet : cluster réel non mocké, taggés comme tels —
+    cf. `reconcile_cree_toutes_les_ressources_et_cookie_secret` et suites) : script de smoke
+    sur le cluster de dev (façon release runbook) ou tests `#[ignore]` exécutés à la main ;
+    les Scenarios `reconcile_requeue_trois_cents_secondes_quand_running` et
+    `reconcile_secret_oidc_absent_stagne_en_provisioning` nécessitent d'observer des pods qui
+    ne démarrent jamais — prévoir un temps de grâce long et une assertion sur le status, pas
+    sur les pods.
+  [ ] Vérifier en relou la cohérence Role RBAC ↔ `VnlK8sClient` (/lib/src/k8s.rs) et
+    répercuter la liste exacte dans le Scenario `build_application_role_shape` si le client
+    évolue.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre (unitaires purs verts
+    en local ; Scenarios intégration exécutés au moins une fois sur le cluster de dev).
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée dans la spec et
+    le code.
+  La batterie complète est verte sur `vanyline-controller` (`cargo check/test/build`,
+    `clippy --all-targets -D warnings`, `fmt --check`) et la dette d'exemptions
+    `expect_used` n'a pas grossi (/tooling.sdd).
+
+Scenario: application_name_and_cookie_secret_name
+  Given @application_name et @cookie_secret_name
+  When elles reçoivent `"demo"`
+  Then @application_name retourne `"application-demo"` et @cookie_secret_name retourne
+    `"demo-cookie"` — le Secret cookie dérive du nom de la CR, pas du nom d'objet dérivé
+    (test existant `application_name_and_cookie_secret_name`)
+
+Scenario: tls_secret_name_suffixe_cert
+  Given @tls_secret_name
+  When elle reçoit `"application-demo"`, puis `"sandbox-web"`
+  Then les retours sont exactement `"application-demo-cert"` et `"sandbox-web-cert"` — la
+    convention « un Ingress = un secret de certificat » vaut aussi pour l'Ingress de Sandbox
+    qui l'appelle (test à créer)
+
+Scenario: cert_manager_annotation_key_selon_kind
+  Given @cert_manager_annotation_key
+  When elle reçoit `None`, puis `Some("Issuer")`, puis `Some("ClusterIssuer")`, puis
+    `Some("nimporte_quoi")`
+  Then les retours sont dans l'ordre `"cert-manager.io/cluster-issuer"`,
+    `"cert-manager.io/issuer"`, `"cert-manager.io/cluster-issuer"`,
+    `"cert-manager.io/cluster-issuer"` — seule la chaîne exactement `"Issuer"` active la forme
+    namespaced (test à créer, verrouille le `[?]` de validation de kind)
+
+Scenario: effective_cookie_secret_ref_some
+  Given une @Application `"demo"` dont `cookie_secret_ref` est `Some("custom-cookie")`
+  When @effective_cookie_secret_ref est appelée
+  Then le retour est `"custom-cookie"` — la référence externe gagne sans transformation
+    (test existant `effective_cookie_secret_ref_some`)
+
+Scenario: effective_cookie_secret_ref_none
+  Given une @Application `"demo"` dont `cookie_secret_ref` est `None`
+  When @effective_cookie_secret_ref est appelée
+  Then le retour est `"demo-cookie"` — repli sur le Secret auto-généré (test existant
+    `effective_cookie_secret_ref_none`)
+
+Scenario: build_application_service_account_shape
+  Given une @Application `"demo"` (namespace `"ns"`, uid posés)
+  When @build_application_service_account est appelée
+  Then le ServiceAccount s'appelle `"application-demo"` dans `"ns"`, porte exactement une
+    ownerReference (name `"demo"`) et aucun autre champ (test existant
+    `build_application_service_account_shape`)
+
+Scenario: build_application_role_shape
+  Given une @Application `"demo"`
+  When @build_application_role est appelée
+  Then le Role `"application-demo"` porte exactement trois règles sur l'apiGroup
+    `"vanyline.solidite.fr"` : (`owners` + `projects`) => verbes exactement
+    `["get", "list", "create", "delete"]` (sans `patch` ni `watch`) ; (`sandboxes`) => contient
+    `patch` (suspension) et `watch` (hub WS sandbox-state) parmi get/list/create/delete ;
+    (`applications`) => verbes exactement `["get"]` — et le Role est un Role namespaced,
+    jamais un ClusterRole (test existant `build_application_role_shape`)
+
+Scenario: build_application_role_binding_shape
+  Given une @Application `"demo"` (namespace `"ns"`)
+  When @build_application_role_binding est appelée
+  Then le RoleBinding `"application-demo"` a un `roleRef` (apiGroup
+    `"rbac.authorization.k8s.io"`, kind `"Role"`, name `"application-demo"`) et un unique
+    Subject (kind `"ServiceAccount"`, name `"application-demo"`, namespace `"ns"`) (test
+    existant `build_application_role_binding_shape`)
+
+Scenario: build_application_deployment_shape
+  Given une @Application `"demo"` (namespace `"ns"`, `image`/`replicas`/`cookie_secret_ref`
+    `None`, secrets refs `"oidc-secret"`/`"db-secret"`)
+  When @build_application_deployment est appelée avec l'image par défaut
+  Then le Deployment `"application-demo"` porte : label metadata `APP_LABEL -> "demo"` ; une
+    unique ownerReference (name `"demo"`, kind `"Application"`) ; `replicas` `Some(1)` par
+    défaut ; `serviceAccountName` `"application-demo"` ; un unique container `"app"` avec un
+    unique port `"http"`/8080 ; readiness ET liveness HTTP GET `"/health"` sur le port
+    numérique 8080, identiques (test existant `build_application_deployment_shape`)
+
+Scenario: build_application_deployment_replicas_and_image
+  Given trois @Application `"demo"` : `replicas = Some(3)`, puis `image = None`, puis
+    `image = Some("custom:tag")`
+  When @build_application_deployment est appelée avec `default_image` à chaque fois
+  Then le premier Deployment a `replicas == Some(3)` (pass-through, pas de borne basse) ; le
+    second a l'image `default_image` ; le troisième a l'image `"custom:tag"` — l'image de la
+    CR gagne, le repli n'intervient qu'à `None` (test existant
+    `build_application_deployment_replicas_and_image`)
+
+Scenario: build_application_deployment_env
+  Given une @Application `"demo"` sans `storage_defaults`
+  When @build_application_deployment est appelée
+  Then le container porte EXACTEMENT 10 variables d'env : `OIDC_REDIRECT_URL` valeur littérale
+    `"https://app.example.com/auth/callback"` (calculée depuis `host`, sans `valueFrom`) ;
+    `VNL_K8S_NAMESPACE` valeur littérale `"ns"` ; `VNL_APPLICATION_NAME` valeur littérale
+    `"demo"` ; `OIDC_ISSUER_URL`/`OIDC_CLIENT_ID`/`OIDC_CLIENT_SECRET`/`OIDC_SCOPES` par
+    `secretKeyRef` {name : `"oidc-secret"`, clé respectivement `"issuerUrl"`/`"clientId"`/
+    `"clientSecret"`/`"scopes"`, `optional` non posé} ; `OIDC_CA_CERT` même secret clé
+    `"caCert"` avec `optional == Some(true)` ; `DATABASE_URL` secretKeyRef {`"db-secret"`,
+    `"uri"`} ; `COOKIE_SECRET` secretKeyRef {`"demo-cookie"`, `"cookieSecret"`} — aucune
+    variable ne porte de valeur sensible en littéral (test existant
+    `build_application_deployment_env`)
+
+Scenario: build_application_deployment_storage_defaults_env
+  Given une @Application `"demo"` dont `storage_defaults` pose `homeStorageClass =
+    "local-path"`, `homeAccessMode = "ReadWriteOnce"`, `projectAccessMode =
+    "ReadWriteOnce"` et laisse `projectStorageClass` à `None`
+  When @build_application_deployment est appelée
+  Then les variables d'env `VNL_DEFAULT_HOME_STORAGE_CLASS`/`VNL_DEFAULT_HOME_ACCESS_MODE`/
+    `VNL_DEFAULT_PROJECT_ACCESS_MODE` portent ces valeurs littérales AUCUNE `valueFrom`, et
+    `VNL_DEFAULT_PROJECT_STORAGE_CLASS` est ABSENTE — un champ `None` ne crée pas de variable
+    vide (test existant `build_application_deployment_storage_defaults_env`)
+
+Scenario: build_application_deployment_namespace_absent
+  Given une @Application `"demo"` synthétique SANS namespace (cas inatteignable via
+    l'apiserver, testable en builder pur)
+  When @build_application_deployment est appelée
+  Then `metadata.namespace` du Deployment est `None` et l'env `VNL_K8S_NAMESPACE` porte la
+    valeur littérale `"default"` (test à créer — verrouille le repli du `[?]` namespace)
+
+Scenario: build_application_service_shape
+  Given une @Application `"demo"`
+  When @build_application_service est appelée
+  Then le Service `"application-demo"` a le selector `{APP_LABEL: "demo"}`, un port unique
+    `"http"` 8080 vers targetPort numérique 8080, et `spec.type` NON posé (ClusterIP laissé à
+    l'apiserver) (test existant `build_application_service_shape`)
+
+Scenario: build_application_ingress_shape
+  Given une @Application `"demo"` (`host` `"app.example.com"`, `ingress_class_name`
+    `"nginx"`, `tls_issuer_name` `"self-sign"`, annotations vides)
+  When @build_application_ingress est appelée
+  Then l'Ingress `"application-demo"` a : `ingressClassName` `"nginx"` ; une unique règle sur
+    `"app.example.com"` avec un unique chemin `"/"` de type `"Prefix"` vers le Service
+    `"application-demo"` par numéro de port `Some(8080)` (jamais par nom) ; un bloc `tls`
+    unique (hosts `["app.example.com"]`, secret `"application-demo-cert"`) — le TLS est
+    toujours posé (test existant `build_application_ingress_shape`)
+
+Scenario: build_application_ingress_annotations
+  Given deux @Application `"demo"` (`tls_issuer_name` `"self-sign"`) : l'une avec une
+    annotation libre `custom.example.com/foo: bar` et `tls_issuer_kind` `None`, l'autre avec
+    `tls_issuer_kind = Some("Issuer")`
+  When @build_application_ingress est appelée sur chacune
+  Then la première porte `cert-manager.io/cluster-issuer -> "self-sign"` ET conserve
+    `custom.example.com/foo -> "bar"` ; la seconde porte `cert-manager.io/issuer ->
+    "self-sign"` et PAS de clé `cert-manager.io/cluster-issuer` (test existant
+    `build_application_ingress_annotations`)
+
+Scenario: build_cookie_secret_shape
+  Given une @Application `"demo"` (namespace `"ns"`)
+  When @build_cookie_secret est appelée avec la valeur `"YWJj"`
+  Then le Secret `"demo-cookie"` dans `"ns"` porte une unique ownerReference (name `"demo"`,
+    kind `"Application"`) et `data["cookieSecret"]` comme octets bruts `b"YWJj"` dans un
+    @ByteString — le builder pose la valeur reçue, n'en génère aucune (test existant
+    `build_cookie_secret_shape`)
+
+Scenario: owner_reference_controller_sur_tous_les_builders
+  Given une @Application `"demo"` (uid posés)
+  When les sept builders sont appelés (service account, role, role binding, deployment,
+    service, ingress, cookie secret)
+  Then chaque objet porte EXACTEMENT une ownerReference : `api_version ==
+    "vanyline.solidite.fr/v1alpha1"`, `kind == "Application"`, `name == "demo"`,
+    `controller == Some(true)` et `block_owner_deletion` non posé — contrat de GC en cascade
+    qui remplace tout finalizer (test à créer, généralise les assertions partielles
+    existantes)
+
+Scenario: generate_cookie_secret_value_soixante_quatre_octets
+  Given @generate_cookie_secret_value (privé, testé via le module interne)
+  When elle est appelée deux fois et que chaque retour est décodé en base64 STANDARD
+  Then chaque décodage donne EXACTEMENT 64 octets, non tous nuls, et les deux retours
+    diffèrent (aléa @OsRng) — la chaîne de 88 caractères est celle que l'app décode en >= 64
+    octets (test existant `test_generate_cookie_secret_value`, à renommer au titre)
+
+Scenario: deployment_phase_running
+  Given une liste de @DeploymentCondition contenant `Available/True` (reason
+    `"MinimumReplicasAvailable"`)
+  When @deployment_phase est appelée
+  Then le retour est `"Running"` (test existant `deployment_phase_running`)
+
+Scenario: deployment_phase_failed
+  Given une condition `Available/False` de reason `"Failed"`, puis une autre de reason
+    `"ProgressDeadlineExceeded"`
+  When @deployment_phase est appelée sur chacune
+  Then chacune donne `"Failed"` (test existant `deployment_phase_failed` — verrou UNITAIRE :
+    cf. `[?]` sur l'atteignabilité de ces reasons sur la condition Available en cluster réel)
+
+Scenario: deployment_phase_provisioning
+  Given `None` de conditions, puis une liste vide, puis une condition `Available/False` de
+    reason `"ScalingReplicaSet"`
+  When @deployment_phase est appelée sur les trois
+  Then les trois donnent `"Provisioning"` — tout ce qui n'est pas Available ni un des deux
+    reasons d'échec est « en cours », sans log (test existant
+    `deployment_phase_provisioning`)
+
+Scenario: deployment_phase_available_true_prioritaire_sur_failed
+  Given une liste contenant SIMULTANÉMENT `Available/True` et `Available/False` (reason
+    `"Failed"`)
+  When @deployment_phase est appelée
+  Then le retour est `"Running"` — le test `available` passe avant celui de l'échec (test à
+    créer)
+
+Scenario: compute_status_running
+  Given une @Application `"demo"` et la phase `"Running"`
+  When @compute_status est appelée
+  Then le @ApplicationStatus a `phase == Some("Running")` et une condition UNIQUE `Ready` :
+    `status "True"`, `reason "DeploymentReady"`, `message "phase=Running"`,
+    `observed_generation` = generation de la CR (test existant `compute_status_running`)
+
+Scenario: compute_status_provisioning
+  Given une @Application `"demo"` et la phase `"Provisioning"`
+  When @compute_status est appelée
+  Then `phase == Some("Provisioning")` et l'unique condition `Ready` porte `status "False"`,
+    `reason "NotReady"` (test existant `compute_status_provisioning`)
+
+Scenario: compute_status_failed
+  Given une @Application `"demo"` et la phase `"Failed"`
+  When @compute_status est appelée
+  Then `phase == Some("Failed")` et l'unique condition `Ready` porte `status "False"`,
+    `reason "NotReady"`, `message "phase=Failed"` — `"Failed"` n'a pas de reason dédié (test
+    à créer)
+
+Scenario: error_policy_requeue_trente_secondes
+  Given @error_policy et n'importe quelle @ControllerError construite (ex.
+    @PurgePending{"p"}) — l'erreur est ignorée à dessein
+  When @error_policy est appelée
+  Then le retour est exactement `Action::requeue(Duration::from_secs(30))`, pour deux
+    variantes distinctes de l'erreur (test à créer)
+
+Scenario: reconcile_cree_toutes_les_ressources_et_cookie_secret
+  Given (intégration — cluster réel, non mocké) une @Application `"demo"` applyée dans un
+    namespace de test avec `cookieSecretRef` ABSENT, et un @Context dont `default_image` est
+    une image existante du registre du cluster
+  When @reconcile est invoquée (via le controller en marche ou appel direct)
+  Then le Secret `"demo-cookie"` existe (clé `data.cookieSecret` non vide, décodable en 64
+    octets) et les six objets `"application-demo"` (ServiceAccount, Role, RoleBinding,
+    Deployment, Service, Ingress) existent, chacun avec la ownerReference controller vers la
+    CR ; le `status.phase` de la CR est posé (`"Provisioning"` au premier cycle) et le patch
+    de status a été accepté (Merge + `PatchParams::default()` — le `force()` de l'Apply n'y
+    est jamais utilisé, bug historique verrouillé)
+
+Scenario: reconcile_cookie_secret_jamais_regenerer
+  Given (intégration — cluster réel) une @Application `"demo"` et le Secret `"demo-cookie"`
+    PRÉ-EXISTANT créé à la main avec une valeur V dans `data.cookieSecret`
+  When trois cycles de reconcile s'enchaînent
+  Then le Secret porte toujours exactement la valeur V (octets identiques), sans que le
+    controller l'ait patché ou recréé — le check « existe déjà ? » précède toute écriture et
+    une régénération casserait les sessions en cours
+
+Scenario: reconcile_cookie_secret_ref_externe_aucune_generation
+  Given (intégration — cluster réel) une @Application `"demo"` avec `cookieSecretRef:
+    "cookie-externe"` (secret pré-créé portant la clé `cookieSecret`)
+  When reconcile s'exécute
+  Then AUCUN Secret `"demo-cookie"` n'est créé par le controller, et l'env `COOKIE_SECRET` du
+    Deployment référence le secret `"cookie-externe"` clé `"cookieSecret"`
+
+Scenario: reconcile_requeue_quinze_secondes_premier_passage
+  Given (intégration — cluster réel) une @Application `"demo"` fraîchement applyée (aucun
+    Deployment enfant `"application-demo"` encore existant)
+  When le premier cycle complet de @reconcile s'exécute
+  Then l'@Action retournée est exactement `requeue(15s)` et le status posé porte
+    `phase == "Provisioning"` avec condition `Ready/False` reason `"NotReady"` — le status est
+    calculé sur le Deployment lu AVANT le apply du cycle
+
+Scenario: reconcile_requeue_trois_cents_secondes_quand_running
+  Given (intégration — cluster réel) une @Application `"demo"` dont le Deployment enfant a
+    atteint la condition `Available/True` (rollout terminé)
+  When un cycle de @reconcile s'exécute ensuite
+  Then l'@Action est exactement `requeue(300s)` et le status porte `phase == "Running"` avec
+    condition `Ready/True` reason `"DeploymentReady"` — le rattrapage de la dérive d'un pod
+    Running dégradé ne peut plus se faire qu'au prochain requeue de 5 minutes
+
+Scenario: reconcile_secret_oidc_absent_stagne_en_provisioning
+  Given (intégration — cluster réel) une @Application `"demo"` dont `oidcSecretRef` référence
+    un secret INEXISTANT (les autres refs valides)
+  When reconcile s'exécute sur plusieurs cycles (plusieurs minutes, temps de grâce des pods
+    long)
+  Then aucun cycle ne remonte d'erreur (le controller ne vérifie pas les secrets) ; le
+    Deployment `"application-demo"` est bien créé mais ses pods ne démarrent pas
+    (`CreateContainerConfigError`) et le `status.phase` reste `"Provisioning"` avec requeue
+    15 s indéfini — référence pendante non validée = impasse silencieuse (verrou du contrat
+    « ne pas valider l'existence des secrets »)
+
+Scenario: suppression_application_gc_supprime_les_enfants
+  Given (intégration — cluster réel) une @Application `"demo"` entièrement materialisée (sept
+    enfants)
+  When la CR est supprimée par l'apiserver
+  Then la suppression aboutit immédiatement (aucun finalizer porté par la CR) et l'ensemble
+    des enfants — Deployment, Service, Ingress, ServiceAccount, Role, RoleBinding et Secret
+    `"demo-cookie"` — est collecté par la GC en cascade via les ownerReferences ; une
+    recréation homonyme repart d'un cookie entièrement neuf (sessions invalidées, effet de
+    bord documenté de l'auto-génération)
