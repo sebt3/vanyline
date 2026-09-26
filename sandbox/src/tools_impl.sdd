@@ -1,0 +1,874 @@
+Spec: tools_impl
+
+Purpose:
+  Backend des 16 tools MCP de la sandbox : le dispatch `tools/call` de ./mcp.rs
+  (ordre strict filesystem → search → command → lsp → edit_and_check, premier `Some`
+  gagnant) atterrit ici. Le fichier porte trois contrats distincts formant un seul
+  périmètre — ils se partagent l'enveloppe MCP de résultat et la garde de confinement :
+  1) LA garde anti-évasion du workspace : @confine_path / @confine (marqueurs
+    `VNL-SBX-001`/`002`/`003`) — la spec sœur `../../tools/src/filesystem.sdd` dit
+    explicitement qu'elle n'est PAS dans le crate `vanyline-tools` et que chaque
+    méthode d'application est contractuelle : elle vit ici. Toute voie d'accès à un
+    chemin (arguments d'outil, URI LSP `file://`, `WorkspaceEdit`) passe par elle.
+  2) La couche sandbox des familles filesystem / search / command : délègue l'exécution
+    à `vanyline-tools` (jamais dupliquée ici — specs sœurs `../../tools/src/*.sdd`),
+    ajoute confinement, overlay venv (`./venv.sdd`) et mapping erreurs → rendu MCP
+    (`isError`, texte).
+  3) Les familles LSP (7 tools + `edit_and_check`) : résolution de position 1-based →
+    0-based, rendu des réponses aux agents, application de `WorkspaceEdit` (seule voie
+    d'écriture de la famille LSP, sous garde @confine), détection de toolchain par
+    extension (@toolchain_for_path, miroir `dockerfileName`/`lspToolchainForPath` du
+    frontend — cf. ./maint.sdd) et les 8 déclarations `tools/list` de la famille
+    (@lsp_tools, les 8 autres viennent de `../../tools/src/mcp.sdd`).
+  Contrat d'un seul fichier, pas de regroupement. Aucune déclaration de route HTTP ni
+  d'auth ici — ./mcp.rs et ./auth.rs les portent.
+
+Owns:
+  ./tools_impl.rs
+
+Can read:
+  ./mcp.rs
+  ./lib.rs
+  ./config.rs
+  ./venv.rs
+  ./maint.rs
+  ./lsp.rs
+  ./lsp_client.rs
+  ../../tools/src/filesystem.sdd
+  ../../tools/src/command.sdd
+  ../../tools/src/mcp.sdd
+  ../../docs/architecture.md
+  ../../tooling.sdd
+
+Depends on:
+  ./lib.rs — @AppState (`config`, `auth`, `tickets`, `lsp`, `fs_events`, `fs_flush`),
+    @FS_FLUSH_TIMEOUT_SECS (`2` s, timeout d'acquittement du flush éditeur) et
+    @FsFlushRequests::request_flush (broadcast `flush-request` + attente ack, `true` =
+    ack reçu, `false` = timeout — contrat ./lib.sdd)
+  ./config.rs — @Config::sandbox_root : racine de confinement, toujours la valeur de la
+    config du process, jamais une entrée utilisateur ; servie NON canonifiée (la
+    canonification est interne à @confine_path)
+  ./lsp.rs — @LspManager::has / @LspManager::get_or_spawn (session par toolchain) et
+    @LspSession::cached_diagnostics / @wait_for_diagnostics / @invalidate_diagnostics /
+    @has_editor_client / @next_doc_version (cache de diagnostics, versionnement
+    `didChange`, détection d'abonné éditeur sur l'URI)
+  ./lsp_client.rs — @LspClient (@initialize, @ensure_open, @request, @did_change,
+    @diagnostics) et @DIAGNOSTICS_TIMEOUT (`2` s — `edit_and_check` attend
+    `DIAGNOSTICS_TIMEOUT * 2`, soit `4` s)
+  ./venv.rs — @venv_overlay (`./venv.sdd`) : overlay `VIRTUAL_ENV` + `PATH` recalculé à
+    CHAQUE @dispatch_command ; la racine qui lui est passée vient de la config, jamais
+    d'une entrée LLM (contrat de la spec sœur)
+  ./maint.rs — @is_dockerfile_path (`./maint.sdd`) : règle de NOM DE BASE
+    (`Dockerfile`/`Containerfile`/variantes, insensible à la casse), miroir
+    `dockerfileName()` du frontend — évaluée AVANT les extensions dans
+    @toolchain_for_path
+  ../../tools/src/filesystem.rs — @read_file, @write_file, @edit_file, @delete_file,
+    @list_directory et leurs Options (désérialisées directement depuis `arguments` —
+    champs et défauts contractés par `../../tools/src/filesystem.sdd` ; `path` requis,
+    `offset`/`limit`/`raw`/`replace_all` par défaut serde)
+  ../../tools/src/search.rs — @find_files, @search (`path` avec `#[serde(default)]` =
+    chaîne vide ⟹ racine après confine)
+  ../../tools/src/command.rs — @execute_command / @ExecuteCommandOptions : `envs` est
+    `#[serde(skip)]` (non injectable par le LLM — test
+    `tests/http.rs::tools_call_execute_command_envs_non_injectables`) ; `timeout_secs`
+    absent ⟹ `0` ⟹ PAS de timeout côté sandbox (le schéma et le CLI disent `30` —
+    écart `[?]` déjà ouvert dans `../../tools/src/mcp.sdd`, cf. `Tasks`)
+  ./mcp.rs — unique appelant des cinq @dispatch_* et de @lsp_tools ; le nom d'outil
+    inconnu de toutes les familles devient `-32602` chez lui, jamais ici
+  std : @serde_json, @thiserror, @anyhow, @tokio::task::spawn_blocking, @tracing
+
+Exposes:
+  @SandboxError — erreur de confinement (`pub enum`, @thiserror) : @PathEscape
+    (`VNL-SBX-001: path escapes sandbox root: {path} (resolved outside {root})`),
+    @InvalidRoot (`VNL-SBX-002: invalid sandbox root: {0}`), @AncestorResolutionFailed
+    (`VNL-SBX-003: failed to resolve path ancestor {ancestor}: {source}`)
+  @confine_path — `pub fn confine_path(sandbox_root: &Path, user_path: &str) ->
+    Result<PathBuf, SandboxError>` : LA garde, synchrones (I/O bloquants), consommée
+    par @confine (MCP), par les ops WS `/ws/fs` (`./ws/fs.rs`) et par ./git.rs (tests)
+  @confine — `pub async fn confine(sandbox_root: &Path, raw_path: &str) ->
+    Result<String, Value>` : @confine_path sur `spawn_blocking` ; succès = chemin
+    résolu en `String` (lossy), échec = enveloppe @err_result prête à rendre
+  @ok_result / @err_result — constructeurs d'enveloppe MCP `{content: [{type: "text",
+    text}], isError: false|true}` (pub, réutilisés par les autres modules)
+  @dispatch_filesystem — `tools/call` des 5 outils filesystem ; @None si nom étranger
+  @dispatch_search — `tools/call` de `find_files` / `search` ; @None sinon
+  @dispatch_command — `tools/call` de `execute_command` (+ overlay venv) ; @None sinon
+  @dispatch_lsp — `tools/call` des 7 outils `lsp_*` / `inspect_symbol` ; @None sinon ;
+    consomme `state.lsp` et `state.config.sandbox_root`
+  @dispatch_edit_and_check — `tools/call` de `edit_and_check` ; @None sinon ; timeouts
+    de prod (`FS_FLUSH_TIMEOUT_SECS`, `DIAGNOSTICS_TIMEOUT * 2`) injectés à
+    `run_edit_and_check` (cœur testable à timeouts injectés)
+  @lsp_tools — les 8 déclarations `tools/list` de la famille (name/description/
+    inputSchema) : `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_rename`,
+    `lsp_document_symbols`, `lsp_workspace_symbols`, `inspect_symbol`, `edit_and_check`
+    — concaténées par ./mcp.rs après les 8 de `vanyline_tools` (16 au total)
+  @toolchain_for_path — `pub fn toolchain_for_path(path: &str) ->
+    Option<(&'static str, &'static str)>` : (nom de toolchain, languageId LSP)
+  @resolve_position + @PositionResolution (`Unique`/`Ambiguous`) + @LspSymbolTarget +
+    @LspDiagnosticsArgs / @LspDocumentSymbolsArgs / @LspWorkspaceSymbolsArgs /
+    @LspRenameArgs / @EditAndCheckArgs — types d'arguments `pub` (désérialisation serde)
+  Internes (contractuels sans être `pub`) : @join_lexical, @is_ident_char,
+    @line_snippet, @ambiguity_note, @location_has_uri, @display_path_for_uri,
+    @render_location, @hover_contents_to_text / @hover_marked_string_to_text /
+    @hover_segments / @split_fenced_code_blocks / @hover_signature_and_doc /
+    @hover_sections, @severity_label, @symbol_kind_label, @symbol_name_and_detail,
+    @render_document_symbol_entry / @render_document_symbols /
+    @render_workspace_symbols, @flat_enclosing / @deepest_containing /
+    @collect_reference_context / @render_references_grouped, @LspArgs,
+    @workspace_edit_files, @position_to_offset, @apply_text_edits, @AppliedSite /
+    @AppliedFile, @apply_workspace_edit, @format_applied_files, @render_rename_preview,
+    @BEFORE_CAPTURE_WAIT, @FLUSH_FALLBACK_NOTE, @replacement_count_from_edit_message,
+    @DiagKey / @diag_key / @render_diag_line / @count_diag_keys / @diff_diagnostics /
+    @DiagnosticsDiff, @EditMode
+
+Accepts:
+  Cinq @dispatch_* : `(sandbox_root ou &AppState, name: &str, arguments: Value)` —
+    `name` n'importe quelle chaîne (testé nom par nom, aucune table de routage) ;
+    `arguments` transmis cloné/consommé par la famille, désérialisé par serde dans les
+    Options du crate `vanyline-tools` ou dans les structs LSP locaux ; arguments
+    invalides ⟹ erreur d'OUTIL `invalid arguments for {name}: {e}` (message serde_json
+    embarqué), jamais un `None` (le `None` est réservé au nom étranger à la famille)
+  @confine_path : `sandbox_root` doit exister et être canonifiable (sinon
+    `VNL-SBX-002`) ; `user_path` — chaîne : vide ou entièrement composée de `/` (au
+    moins un `/`, ex: `"/"`, `"sub/"` ⟹ `"sub"`) ; relative ⟹ jointe à `sandbox_root` ;
+    absolue ⟹ utilisée telle quelle, doit rester sous la racine canonifiée
+  Position partagée (@LspSymbolTarget, tools à cible : `lsp_definition`,
+    `lsp_references`, `lsp_rename`, `inspect_symbol`) : `path` (string requis), `line`
+    (u64 REQUIS, 1-based, sans `serde(default)` — son absence tombe dans `invalid
+    arguments`), `symbol` (Option, mode recommandé, `Some("")` n'active pas le mode),
+    `character` (Option<u64>, 1-based, ignoré si `symbol` non vide)
+  @EditAndCheckArgs : `path`, `mode` (`"write"` | `"edit"`, toute autre valeur est une
+    erreur avant tout I/O), `content` (requis en write), `old_string` + `new_string`
+    (requis en edit), `replace_all` (défaut `false`) ; en `write`, `old_string`/
+    `new_string` présents sont silencieusement ignorés ; en `edit`, `content` présent
+    est silencieusement ignoré (patterns serde plats, pas d'union serde)
+  @LspWorkspaceSymbolsArgs : `query` requis ; `path` Option = INDICE de toolchain
+    uniquement — `toolchain_for_path` sur la valeur brute, JAMAIS ouvert, lu ni confiné
+    (R5)
+  Entrées implicites : filesystem du workspace (lecture/écriture), sessions LSP
+    (spawning à la demande), canaux `fs_events`/`fs_flush` de l'@AppState, `PATH` du
+    process portant (via @venv_overlay)
+
+Returns:
+  Tous les dispatch retournent `Option<Value>` : @None = nom étranger à la famille
+    (mcp.rs enchaîne) ; @Some(Value) = enveloppe @ok_result (`isError: false`) ou
+    @err_result (`isError: true`) — un échec d'exécution (évasion, LSP absent, lecture,
+    timeout) reste un `result` d'outil, JAMAIS une erreur JSON-RPC (contrat ./mcp.rs).
+  @confine_path : chemin canonifié/résolu sous racine canonifiée (les composants
+    inexistants du bout sont rajoutés lexicalement — `write_file` peut cibler un
+    fichier absent) ; @confine en fait une chaîne lossy.
+  filesystem : texte de `vanyline-tools` rendu tel quel pour `read_file`/`edit_file`/
+    `list_directory` ; `wrote {resolved}` et `deleted {resolved}` pour write/delete
+    (chemin confiné RÉSOLU, donc absolu — cf. `Tasks` `[?]` sur l'incohérence avec les
+    rendus relatifs de la famille LSP).
+  search/command : texte du crate (`pattern`, `glob`, `cwd`, `timeout_secs` passés
+    tels quels ; `cwd` vide ⟹ @confine ⟹ `sandbox_root` effectif, jamais le cwd du
+    process sandbox).
+  @toolchain_for_path : `("rust", "rust")` (`.rs`), `("node", "typescript")`
+    (`.ts`/`.tsx`/`.mts`/`.cts`), `("node", "javascript")` (`.js`/`.jsx`/`.mjs`/`.cjs`),
+    `("node", "vue")` (`.vue`), `("python", "python")` (`.py`/`.pyi`), `("docker",
+    "dockerfile")` (règle de nom de base @is_dockerfile_path, évaluée AVANT les
+    extensions) — comparaison en minuscules sur suffixe de la chaîne entière
+    (insensible à la casse, contrairement à la DÉTECTION de ./maint.rs) ; @None sinon
+    (fallback : pas de LSP).
+  @resolve_position : `Unique { line0, character0 }` (0-based) ou `Ambiguous
+    { line0, character0, matches ≥ 2, second_char1 }` (1re occurrence retenue, colonne
+    1-based de la 2e pour la note).
+  `lsp_diagnostics` (trois états distincts, jamais deux) : `Ok(None)` ⟹ `"not yet
+    analyzed: no diagnostics received from the LSP server within the timeout — this
+    does NOT mean the file is clean, retry shortly"` ; vecteur vide ⟹ `"no
+    diagnostics: file analyzed, no issues found"` ; sinon lignes `{display}:{ligne}:{
+    colonne}: {severity}: {message}` (1-based, chemin relatif au workspace).
+  `lsp_definition` / `inspect_symbol` : lignes ordonnées `cible:` / `signature:` /
+    `doc:` / `défini à:` (ou `no definitions`) — une section vide est omise ; cibles
+    et locations rendues par @render_location (`{chemin}:{ligne 1-based}: {snippet}`
+    si fichier confiné lisible, sans snippet sinon).
+  `lsp_references` / `inspect_symbol` (section refs) : @render_references_grouped —
+    en-tête `références (N):`, tri déterministe `(display, ligne)`, en-tête de bloc
+    `  dans {label} · {signature} — L{n}` (signature = snippet de la ligne de
+    l'englobant, forme plate SANS `detail` uniquement), réf confinée `    L{n}:
+    {snippet}` (ou `    L{n}` nu), réf jamais lue (hors workspace, autre toolchain,
+    cap, échec de lecture) `  L{n}` — deux espaces, jamais de snippet (R5).
+  `lsp_document_symbols` : plates triées par `(ligne, nom)` + arbre hiérarchique
+    indenté de 2 espaces par niveau (ordre du serveur) ; vide/null ⟹ `"no symbols
+    (file analyzed yet — the outline is empty)"`.
+  `lsp_workspace_symbols` : une ligne par symbole `{display}:{ligne}: {kind} {nom}
+    [ · {detail}]`, ORDRE DU SERVEUR conservé (ranking) ; vide ⟹ `no symbol matching
+    "{query}"` ; méthode absente (`"code":-32601` dans l'erreur) ⟹ message de
+    dégradation rendu en SUCCÈS (`ok_result`, jamais un fallback grep).
+  `lsp_rename` : `result` null ⟹ `{cible}\nno rename` ; `preview: true` ⟹
+    @render_rename_preview (`aperçu — {N} sites dans {M} fichiers — AUCUN fichier
+    modifié`, sites `  L{l}:{c}[: {snippet}]`, lecture confinée seule) ; défaut ⟹
+    @apply_workspace_edit puis `{cible}\nrename appliqué\n{N} remplacements dans {M}
+    fichiers` + par fichier `{display} — {n} remplacements` + `  L{l}: {avant} →
+    {après}` ; aucun fichier après application ⟹ `no rename`.
+  `edit_and_check` : en-tête `édition appliquée: {display} (write, {nbytes} octets)`
+    ou `(edit, {n} remplacement(s))` (singulier si n = 1) ; puis mention de flush non
+    acquitté (cas B) `flush non acquitté — fenêtre de debounce de l'éditeur possible`,
+    mention `aucune analyse préalable — le diff est calculé contre vide` si capture
+    avant sans résultat ; sections `diagnostics APPARUS (N):`, `diagnostics DISPARUS
+    (N):` (lignes indentées même forme que `lsp_diagnostics`), `diagnostics INCHANGÉS
+    (N) — non listés` ; timeout de ré-analyse ⟹ VNL-SBX-LSP-011 rendu en `ok_result`
+    (ÉTAT MOU, l'édition EST appliquée) + `L'édition EST appliquée sur le disque.` +
+    (cas B) `ré-analyse en attente de l'éditeur (fichier ouvert dans un onglet).`
+
+Raises:
+  Aucune erreur typée hors enveloppes : les dispatchs ne `raise`/paniquent pas sur les
+    entrées. Écarts documentés :
+  @confine — @expect sur @JoinError de @spawn_blocking (panic interne de @confine_path
+    ⟹ panic du process portant) sous @allow(clippy::expect_used) justifié d'une ligne —
+    exemption au harnais `../../tooling.sdd` (cf. `Tasks` `[?]`).
+  @dispatch_lsp — six @unreachable!() de garde d'invariants internes (target_info
+    toujours `Some` pour les tools à cible, variant @LspArgs cohérent avec `name`, nom
+    toujours connu après le filtre d'entrée) — inaccessibles par toute entrée du
+    client, mais `unreachable` est deny par le harnais (dette tracée, cf. `Tasks`).
+  Erreurs internes en message (aucune variante Rust) : @anyhow de @resolve_position /
+    @position_to_offset / @apply_text_edits / @apply_workspace_edit portent les codes
+    `VNL-SBX-LSP-007`/`008`/`009`/`010`, rendus via `err_result(e.to_string())`.
+
+Handles:
+  Garde de confinement (@confine_path, cœur sécurité) :
+  - Racine canonifiée en premier (@fs::canonicalize) ; échec ⟹ `VNL-SBX-002` +
+    `tracing::warn!` — vérifiée AVANT même le raccourci « chemin vide ⟹ racine ».
+  - `user_path` vide ou que-des-`/` ⟹ racine elle-même.
+  - Barres obliques finales multiples ignorées (`trim_end_matches('/')`).
+  - Candidate absolue telle quelle, relative jointe à `sandbox_root`.
+  - Canonicalisation de l'ANCRÊTRE LE PLUS PROFOND EXISTANT (marche `.exists()` vers
+    le haut) puis rajout lexical du suffixe inexistant via @join_lexical (`..` ⟹
+    @pop — un `pop` au-dessus du sommet est un no-op, le contrôle final
+    `starts_with(racine)` rejette alors ; `.` ignoré ; composants autres que
+    Normal/ParentDir/CurDir écartés) — écriture d'un fichier inexistant sous la racine
+    OK, évasion par `..` (existants OU via segments intermédiaires inexistants)
+    REJETÉE, évasion par lien symbolique REJETÉE (l'ancêtre canonifié sort de la
+    racine) — tests `dotdot_via_nonexistent_intermediate_rejected`,
+    `single_token_dotdot_bypass_rejected`, `symlink_escape_rejected`.
+  - Si l'ancêtre trouvé EST `sandbox_root` (égalité de chaîne avec la racine non
+    canonifiée), la racine canonifiée déjà calculée est réutilisée (pas de
+    re-canonicalisation).
+  - Échec de canonicalisation de l'ancêtre ⟹ `VNL-SBX-003` (distinct de `002` —
+    branche jamais déclenchable en userland container, test stubé, cf. `Tasks`).
+  - Marché jusqu'à la racine système sans rien trouver ⟹ candidate brut non canonifié,
+    puis contrôle `starts_with` (branche @None du `deepest` — quasi inatteignable,
+    `/` existe toujours ; cf. `Tasks` `[?]`).
+  - Le contrôle final est @Path::starts_with (composants, pas chaîne) — `/work-evil`
+    ne passe pas sous `/work`.
+  @confine exécute la garde hors du thread tokio (I/O bloquants) et rend l'erreur avec
+    son affichage complet (`VNL-SBX-001: … (resolved outside …)`) dans l'enveloppe
+    `err_result`, avec `tracing::warn!` côté serveur.
+  Families délèguent APRÈS confine : `read_file` reçoit le chemin résolu avec les
+    options de pagination brutes du client (`offset`/`limit`/`raw` non confinées — la
+    lecture ne sort jamais du chemin confiné) ; `execute_command` passe `cwd` résolu et
+    `envs` = @venv_overlay recalculé à chaque appel (un `.venv` créé en cours de
+    session est vu dès la commande suivante ; contrat `./venv.sdd`).
+  Lecture de réponses LSP hors workspace (R5 partout) : @display_path_for_uri ne fait
+    AUCUNE lecture (rendu de chemin : relatif si `file://` confiné OK — préfixe
+    `file://{sandbox_root}/` amputé, sinon chemin confiné résolu ; URI brute sinon
+    avec `tracing::debug!`) ; @render_location / @render_rename_preview /
+    @collect_reference_context confinent AVANT toute lecture et ne lisent jamais une
+    URI brute, non-`file://` ou hors racine ; localisation sans `uri` ni `targetUri`
+    (@location_has_uri) filtrée avant rendu.
+  Hover (meilleur effort seulement) : erreur de `textDocument/hover` ou contenu
+    null/absent ⟹ sections signature/doc omises + `tracing::warn!`, JAMAIS d'échec du
+    tool ; les 3 formes LSP (`string`, tableau de `MarkedString`, `MarkupContent`)
+    sont aplaties ; signature = 1re section de code (bloc ```clôturé``` ou entrée
+    `{language, value}`), doc = 3 lignes non vides de prose restante ; fence jamais
+    fermée ⟹ pas une section (contenu en prose, marqueur retiré) ; bloc vide ⟹ pas
+    une section ; nulle part de code ⟹ 1re ligne non vide = signature, 3 suivantes =
+    doc.
+  Englobants des références : englobant profond hiérarchique exact (children en
+    priorité, `range` contenant la ligne) d'abord, heuristique plate « dernier symbole
+    démarré à ou avant la réf » ensuite (les deux serveurs réels rendent la forme
+    plate — arbitrage R2) ; collect un @documentSymbol par FICHIER DISTINCT (cap
+    `MAX_REFERENCE_FILES = 20`, fichier cible compté et traité en tête, contenu du
+    préambule réutilisé — jamais relu ni re-`didOpen`), toutes erreurs best-effort
+    `tracing::warn!` (réf rendue sans englobant, jamais une erreur tool).
+  @apply_workspace_edit (seule écriture de la famille LSP) : URI `file://` amputée,
+    @confine (échec ⟹ `VNL-SBX-LSP-009: {message du confine}`, extrait du `text` de
+    l'enveloppe) ; lecture brute, @apply_text_edits, écriture par `filesystem::write_file` ;
+    fichiers traités en séquence — une erreur en cours de route laisse les fichiers
+    précédents DÉJÀ écrits (aucun rollback, rattrapé par `lsp_rename` preview) ; URI
+    non-`file://` : @unwrap_or(&uri) la laisse passer dans @confine comme chemin
+    RELATIF (écrit un fichier au nom littéral sous la racine — cf. `Tasks` `[?]`).
+  @apply_text_edits : `range` manquant/malformé, ligne hors limites, `start > end` ⟹
+    variantes `VNL-SBX-LSP-008` ; `newText` absent ⟹ chaîne vide ; edits triés par
+    `start` décroissant puis `replace_range` — edits CHEVAUCHANTS non détectés
+    (cf. `Tasks` `[!]`, vecteur de panic possible).
+  @position_to_offset : `character` clampé en fin de ligne ; colonne comptée en
+    caractères (approximation UTF-16 LSP acceptée) ; `line` hors limites ⟹
+    `VNL-SBX-LSP-007: line {line} out of range ({n} lines)` — la `{line}` y est
+    0-BASED alors que @resolve_position rend le même code avec une ligne 1-based
+    (cf. `Tasks` `[?]`).
+  Décodage des args LSP : `line == 0` ou `line > nombre de lignes` ⟹ `-007` ;
+    symbol absent en tant qu'identifiant délimité ⟹ `VNL-SBX-LSP-010: symbol "{s}"
+    not found as identifier on line {line} of {path}` ; recherche littérale manuelle
+    avec bordures `[A-Za-z0-9_]` — JAMAIS de regex compilée depuis l'entrée (anti-
+    ReDoS, R5) ; contenu vide ⟹ la ligne 1 existe (`content.lines()` sur
+    contenu vide rend 1 ligne vide).
+  Toolchain absente : extension non couverte ⟹ `VNL-SBX-LSP-006: no LSP for file
+    extension` (préambule) ; session non configurée pour la toolchain ⟹ `VNL-SBX-LSP-
+    006: no LSP configured for toolchain {toolchain}` ; indice `path` invalide de
+    `lsp_workspace_symbols` ⟹ `VNL-SBX-LSP-006: no LSP configured for that extension`
+    (un indice invalide est une ERREUR, pas un indice ignoré) ; aucune toolchain
+    rust/node configurée ⟹ `VNL-SBX-LSP-006: no LSP toolchain configured in this
+    sandbox`. Quatre messages distincts sous un même code (cf. `Tasks` `[?]`).
+  `edit_and_check` cas A/cas B : cas A (aucun abonné éditeur sur l'URI) ⟹ le tool
+    relit le disque APRÈS écriture, `initialize` + `ensure_open` + `didChange`
+    versionné (@next_doc_version) — la relecture disc est la source, jamais la valeur
+    des args ; cas B (fichier ouvert dans un onglet) ⟹ flush demandé à l'éditeur AVANT
+    écriture (@request_flush sur le chemin RELATIF, timeout `2` s), puis broadcast
+    `{"event":"file-changed","path":{relatif}}` APRÈS écriture — JAMAIS de `didChange`
+    du tool (deux émetteurs actifs = désync interdit) ; send ratée (zéro abonné entre-
+    temps) non fatale ; flush non acquitté ⟹ le tool écrit QUAND MÊME + mention
+    obligatoire.
+  Timeout de ré-analyse : `wait_for_diagnostics` muet pendant `DIAGNOSTICS_TIMEOUT * 2`
+    ⟹ VNL-SBX-LSP-011 rendu en `ok_result` avec les secondes écoulées
+    (`as_secs_f64`), jamais `err_result`.
+  Diff des diagnostics : identifiants `(ligne 1-based, colonne 1-based, sévérité,
+    message)` en COMPTEURS (@HashMap, jamais un Set) — doublons légaux conservés avec
+    leur multiplicité ; `appeared`/`gone` dans l'ordre des flux `after`/`before`,
+    `unchanged` = somme des min.
+  Zéro client, canal `fs_events` sans abonné, session LSP morte en cours d'appel :
+    erreurs de session/rendu remontées en `err_result` (message de ./lsp_client.rs,
+    codes `-005`/`-32601` portés par sa spec ./lsp_client.sdd) ; rien de spécifique à
+    un canal WS fermé ici — ./mcp.rs est requête/réponse.
+
+Must:
+  Confine TOUT chemin d'outil avant TOUT appel à `vanyline-tools`, toute lecture,
+    toute écriture, toute ouverture LSP (`ensure_open`) — les cinq familles sans
+    exception ; l'unique écriture hors dispatch filesystem/`edit_and_check` est
+    @apply_workspace_edit, elle-même sous @confine avec `VNL-SBX-009` sur évasion.
+  Résoudre les `..` LEXICALEMENT avant le contrôle de racine (canonicaliser l'ancêtre
+    existant le plus profond, jamais le candidat complet — le candidat peut ne pas
+    exister, c'est voulu pour `write_file`).
+  Rendre les échecs d'exécution comme enveloppes `isError: true` avec le message
+    d'erreur du crate ou le code `VNL-SBX-*`, jamais comme erreur JSON-RPC ni `None`.
+  Réserver @None des dispatchs au seul nom étranger à la famille.
+  Appliquer @venv_overlay à `execute_command` uniquement (jamais aux sessions LSP —
+    contrat `./venv.sdd`), recalculé à chaque appel, `sandbox_root` venant de la config.
+  Faire précéder `execute_command` de @confine sur `cwd` MÊME VIDE pour que le cwd par
+    défaut effectif soit `sandbox_root` et non le cwd du process sandbox.
+  Résoudre la position des tools à cible en 1-based côté client / 0-based côté LSP,
+    `symbol` prioritaire sur `character`, mode symbole sans regex, ambiguïté rendue en
+    note citant la colonne de la 2e occurrence.
+  Rendre `lsp_diagnostics` sur trois états distincts (pas encore analysé / analysé
+    propre / diagnostics) — un agent ne doit jamais pouvoir confondre « pas encore
+    d'analyse » et « propre ».
+  Conserver l'ordre du serveur pour `lsp_workspace_symbols` (re-trier détruirait le
+    ranking) ; trier les plates de `lsp_document_symbols` par `(ligne, nom)` ; rendu
+    des références déterministe (tri `(display, ligne)`).
+  Tenter lecture et `didOpen` que sur URI `file://` confinées OK, de la MÊME toolchain
+    que la session, cap 20 fichiers, fichier cible réutilisé sans relecture ni
+    re-ouverture ; toute erreur de collecte best-effort.
+  Valider l'union `edit_and_check` AVANT tout I/O ; invalider le cache de diagnostics
+    APRÈS la capture avant et AVANT l'écriture ; ne jamais émettre de `didChange` en
+    cas B ; rendre VNL-SBX-LSP-011 en succès (édition appliquée).
+  Déclarer les 8 tools via @lsp_tools avec `required` minimal (`path` ; `line` et
+    `new_name` selon tool ; `query` ; `path`+`mode`) et descriptions mentionnant les
+    cibles supportées et `VNL-SBX-LSP-006`.
+  Router `lsp_workspace_symbols` AVANT le préambule confine/lecture (aucun fichier à
+    confiner ni lire, aucun @ensure_open — rien n'est ouvert).
+  Rester compatible harnais (`../../tooling.sdd`) : aucune sortie directe (`tracing`
+    seulement) ; exemptions `expect_used`/`unreachable` bornées et tracées (cf.
+    `Raises`, `Tasks`).
+
+Must not:
+  Laisser passer un chemin non confiné vers `vanyline-tools`, vers @filesystem::read_file
+    / @write_file directs, vers @ensure_open ou vers une lecture de snippet — y compris
+    les URI issues des réponses LSP (`uri`, `targetUri`, `WorkspaceEdit`), qui sont des
+    entrées non fiables au même titre que les args du client.
+  Lire, ouvrir ou écrire derrière une URI non-`file://` ou hors racine (rendu brut
+    uniquement, sans effet de bord).
+  Confondre le mapping toolchain (insensible à la casse, suffixe d'extension) avec la
+    DÉTECTION de ./maint.rs (sensible à la casse) — `MAIN.PY` route pyright, jamais
+    l'inverse ; le mapping n'est jamais un signal de détection de langage.
+  Modifier un fichier en mode `preview` de `lsp_rename` (aucune écriture possible par
+    construction — @render_rename_preview n'appelle jamais rien qui écrive).
+  Dupliquer la logique des outils de `vanyline-tools` (ici : confine + enveloppe +
+    rendu, pas d'autre sémantique filesystem/search/command).
+  Transformer une erreur d'outil en `None` (le client recevrait `-32602 Unknown tool`
+    pour un outil qui a bel et bien existé).
+  Utiliser `println!`/`eprintln!`/`dbg!` (harnais) — traces via `tracing` seulement.
+  Accepter un `envs` ou une racine de confinement fournis par l'arguments JSON d'un
+    tool (`envs` est `#[serde(skip)]`, `sandbox_root` vient de la config).
+
+Example: évasion et édition validée
+  → `tools/call read_file {"path": "../../etc/passwd"}`
+  ← `{content: [{text: "VNL-SBX-001: path escapes sandbox root: ../../etc/passwd
+    (resolved outside /workspace)"}], isError: true}`
+  → `tools/call edit_and_check {"path": "src/main.rs", "mode": "edit", "old_string":
+    "let x = 1;", "new_string": "let x = \"a\";"}` (cas A)
+  ← ok : `édition appliquée: src/main.rs (edit, 1 remplacement)` /
+    `diagnostics APPARUS (1):` / `  src/main.rs:12:9: error: mismatched types` /
+    `diagnostics DISPARUS (0):` / `diagnostics INCHANGÉS (2) — non listés`
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering (2026-09-26) ; le
+    comportement accidentel ne devient contrat qu'après cette relecture
+    (`.specdd/bootstrap.project.md`).
+  [?] @unreachable!() ×6 dans @dispatch_lsp (branches d'invariants internes jamais
+    atteignables par une entrée client) alors que `clippy::unreachable` est deny par le
+    harnais (`../../tooling.sdd`) : dette à purger (remplacer par des `err_result`
+    défensifs ou restructurer le match) ou exemption à tracer explicitement ?
+  [?] @confine — @expect sur @JoinError : un panic dans @confine_path (I/O inattendu
+    sous spawn_blocking, ex: panic de `canonicalize` sur état interne tokio) tue le
+    process portant. L'exemption d'une ligne cite une justification mais pas la spec ;
+    resserrer le motif (`catch_unwind` → `err_result` ?) ou le statut de panic du
+    blocking-task est-il un contrat assumé ?
+  [?] @apply_text_edits ne détecte pas les edits CHEVAUCHANTS : tri par `start`
+    décroissant puis `replace_range` — des `TextEdit` qui se recouvrent (jamais émis
+    par rust-analyzer/tsserver pour un rename, possible par un serveur LSP bugué ou
+    malveillant, et la toolchain est configurable par la CR Sandbox) peuvent décaler
+    les offsets et faire paniquer `replace_range` (index hors séquence/char boundary).
+    Détecter le chevauchement et rendre `-008`, ou considérer les serveurs LSP comme
+    fiables ?
+  [?] @apply_workspace_edit — `uri.strip_prefix("file://").unwrap_or(&uri)` : une URI
+    non-`file://` (ex: `untitled:foo`) devient un chemin RELATIF et passe @confine :
+    l'écrit atterrit sous la racine sous un nom littéral `untitled:foo`. Confiné mais
+    aberrant — rejeter explicitement toute URI non-`file://` par `VNL-SBX-LSP-009` ?
+  [?] Timeout de `execute_command` : le schéma annoncé (`../../tools/src/mcp.sdd`) et
+    le CLI appliquent `30` s en l'absence du champ, la sandbox mappe une absence en `0`
+    = AUCUN timeout — un appel LLM sans `timeout_secs` peut bloquer le pod
+    indéfiniment. Aligner la sandbox sur 30 (défaut mappé dans @dispatch_command),
+    aligner le schéma, ou exiger le champ ? (question ouverte dans
+    `../../tools/src/mcp.sdd`, répercutée ici côté sandbox.)
+  [?] Deux rendu 0-based/1-based du même code `VNL-SBX-LSP-007` : @resolve_position
+    rend la ligne 1-based (ligne hors limites), @position_to_offset la rend 0-based
+    (position de `TextEdit` hors limites). Deux codes distincts, ou convention de
+    rendu à documenter dans les deux messages ?
+  [?] Quatre messages `VNL-SBX-LSP-006` distincts selon le site (extension / toolchain
+    non configurée / indice invalide / aucune toolchain LSP) — les descriptions
+    @lsp_tools n'en citent qu'un (`no LSP configured for that extension`) : normaliser
+    les libellés ou les assumer distincts (le code reste le contrat) ?
+  [?] Rendu des chemins incohérent entre familles : `wrote {résolu}` / `deleted
+    {résolu}` (absolu canonifié) vs rendus LSP relatifs au workspace (`display_path`)
+    — harmoniser sur le relatif, ou l'absolu est-il voulu pour write/delete ?
+  [?] @display_path_for_uri et le `display_path` du préambule amputent le préfixe
+    construit sur `sandbox_root` CONFIG non canonifiée : avec une racine de config
+    contenant un composant symlink, le strip échoue et le rendu retombe sur l'absolu
+    canonifié (cas réel du PVC ?) — canonifier `config.sandbox_root` au démarrage ou
+    accepter le repli ?
+  [?] `run_edit_and_check` cas A : une erreur d`initialize`/`ensure_open`/`didChange`
+    (étape 5) survient APRÈS l'écriture sur le disque et rend `err_result` sans
+    mentionner que l'édition est appliquée (contrairement au timeout -011 qui le dit).
+    Ajouter la mention « l'édition EST appliquée » sur ces erreurs ?
+  [?] @confine_path — la branche « aucun ancêtre existant » (candidate brut non
+    canonifié) est inatteignable en pratique (`/` existe toujours) et le `unwrap_or
+    (&candidate)` de `strip_prefix` est défensif mort : branche à supprimer, à
+    contractualiser comme défensive, ou cas réel non vu (namespace, `/` absent) ?
+  [?] @confine_path — marche `.exists()` puis `canonicalize` non atomiques : une
+    substitution de symlink entre les deux (TOCTOU, attaquant ayant un shell dans le
+    même pod) peut valider un chemin ensuite redirigé hors racine. Le modèle de menace
+    (code exécutable dans son propre workspace) rend-il ce race hors périmètre ?
+  [?] Coût de la garde : @confine refait @canonicalize à chaque appel, multiplié par
+    l'usage (double confine par location dans @render_location, par URI de réf, par
+    site de preview) — canonique en cache (root seulement) ou le coût est-il négligeable
+    (spawn_blocking dédiés) ?
+  [?] `edit_and_check` `mode: "write"` ignore `old_string`/`new_string` fournis et
+    `"edit"` ignore `content` : silencieux assumé, ou refus explicite des champs hors
+    mode (les schémas les déclarent sans contrainte croisée) ?
+  [ ] Dériver un test par Scenario encore sans test, chacun taggé du titre de son
+    Scenario. Cartographie des tests existants (module `tests` de ./tools_impl.rs et
+    ./tests/http.rs) : `relative_path_within_root`, `empty_path_resolves_to_root`,
+    `trailing_slash_ignored`, `absolute_path_inside_root_ok`, `absolute_path_outside_root_rejected`,
+    `dot_dot_escape_rejected`, `dotdot_simple_escape_still_blocked`,
+    `dotdot_via_nonexistent_intermediate_rejected`, `single_token_dotdot_bypass_rejected`,
+    `symlink_escape_rejected`, `nonexistent_file_within_root_ok`, `invalid_root_errors`,
+    `avoids_redundant_canonicalize_when_ancestor_is_root` (stub
+    `ancestor_resolution_failure_is_distinct_from_invalid_root` : la branche `-003`
+    n'est PAS déclenchable en userland — test volontairement muet) ;
+    `tools_call_write_then_read_file`, `tools_call_read_file_confinement_rejected`,
+    `tools_call_edit_file_nominal`, `tools_call_delete_file_nominal`,
+    `tools_call_list_directory_nominal`, `tools_call_read_file_missing_argument`,
+    `tools_call_find_files_*`, `tools_call_search_*`, `tools_call_execute_command_*`
+    (dont `default_cwd_is_sandbox_root` et `envs_non_injectables`) ; côté LSP :
+    `lsp_diagnostics_*`, `lsp_definition_*`, `lsp_references_*`, `inspect_symbol_*`,
+    `lsp_rename_*`, `lsp_document_symbols_*`, `lsp_workspace_symbols_*`,
+    `resolve_position_*`, `hover_split_*`, `toolchain_for_path_*`, `apply_text_edits_*`,
+    `workspace_edit_files_*`, `format_applied_files_*`, `render_rename_preview_*`,
+    `flat_enclosing_*`, `deepest_containing_*`, `edit_and_check_*`,
+    `diagnostics_diff_counts_duplicates`.
+    Scenarios sans test direct à ce jour (à écrire, taggés du titre) :
+    `lsp_tools_declarent_huit_outils`, `arguments_invalides_rendus_erreur_outil`,
+    `nom_etranger_a_la_famille_rend_none` (seul `lsp_unknown_tool_returns_none` couvre
+    la famille lsp), `references_cap_vingt_fichiers_rend_les_restes_nus`,
+    `workspace_edit_partiel_erreur_laisse_fichiers_ecrits`,
+    `textedit_range_manquant_leve_008` (couvert en substance par
+    `apply_text_edits_invalid_range_errors`, à recadrer),
+    `hover_bloc_vide_et_contenu_null_sans_section` (partiellement couvert par
+    `hover_split_empty`), `resolve_position_symbole_ambigu_note_seconde_occurrence`
+    (couvert en substance par `resolve_position_symbol_ambiguous_first_and_second_col`
+    et `lsp_definition_ambiguous_symbol_noted`, à recadrer). Les comportements
+    délibérément SANS Scenario (décision `[?]`/`[!]` à rendre contractuelle avant) :
+    edits chevauchants (panic possible, cf. `[!]`), URI non-`file://` d'un
+    `WorkspaceEdit` écrite en fichier littéral, timeout absent de `execute_command`
+    (= aucun timeout) ; la branche `VNL-SBX-003` reste le stub
+    `ancestor_resolution_failure_is_distinct_from_invalid_root` (non déclenchable en
+    userland).
+  [ ] La spécification de `./lsp.rs` (sessions, cache de diagnostics, `has_editor_client`,
+    compteurs de version) n'existe pas encore ; les contrats consommés ici sont cités
+    depuis le code — à recoudre quand `./lsp.sdd` sera rédigée.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre.
+  Les décisions `[?]`/`[!]` sont tranchées par Sébastien et reflétées dans la spec.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur `vanyline-sandbox`, exemptions du harnais bornées et citant
+    cette spec.
+
+Scenario: chemin_relatif_resous_sous_racine_canonifiee
+  Given une racine de sandbox temporaire contenant `sub/file.txt`
+  When @confine_path est appelé avec `"sub/file.txt"`
+  Then le résultat est le chemin canonifié de la racine rejoint de `sub/file.txt`
+
+Scenario: chemin_vide_ou_slashes_resolvent_la_racine
+  Given une racine de sandbox temporaire
+  When @confine_path est appelé avec `""`, puis avec `"/"`, puis avec `"sub/"`
+  Then les deux premiers rendent la racine canonifiée elle-même
+  And le troisième rend la racine rejointe de `sub` (barre finale ignorée)
+
+Scenario: chemin_absolu_sous_racine_accepte_hors_racine_rejette
+  Given une racine de sandbox temporaire et l'absolu de `<racine>/sub` comme `dedans`
+  When @confine_path est appelé avec `dedans`, puis avec `"/etc/passwd"`
+  Then le premier appel rend le canonique de `<racine>/sub`
+  And le second rend @SandboxError::PathEscape portant `path` = `"/etc/passwd"`
+
+Scenario: points_points_via_segment_inexistant_rejete
+  Given une racine de sandbox temporaire
+  When @confine_path est appelé avec `"sub/newdir/../../../etc/evilfile"`
+  Then l'erreur est @SandboxError::PathEscape — la résolution lexicale des `..` avant
+    le contrôle de racine ferme la voie de l'ancêtre canonifié
+
+Scenario: contournement_segment_unique_voisin_rejete
+  Given un répertoire propriétaire contenant `.ssh/authorized_keys` et un sous-
+    répertoire `workspace` servant de racine
+  When @confine_path est appelé sur `workspace` avec `"bogus/../../.ssh/authorized_keys"`
+  Then l'erreur est @SandboxError::PathEscape — un seul segment inexistant ne rétablit
+    pas la sortie par l'ancêtre canonifié
+
+Scenario: lien_symbolique_evadant_rejete
+  Given un lien symbolique `<racine>/escape_link` pointant hors de la racine
+  When @confine_path est appelé avec `"escape_link/some_file"`
+  Then l'erreur est @SandboxError::PathEscape — l'ancêtre existant canonifié sort de la racine
+
+Scenario: fichier_inexistant_sous_racine_accepte
+  Given une racine de sandbox temporaire et le chemin `"new/dir/file.txt"` dont aucun
+    composant après la racine n'existe
+  When @confine_path est appelé avec ce chemin
+  Then le résultat est la racine canonifiée rejointe de `new/dir/file.txt` — la garde
+    permet de cibler un fichier à créer
+
+Scenario: racine_non_canonisable_leve_invalidroot
+  Given un chemin de racine inexistant
+  When @confine_path est appelé avec cette racine
+  Then l'erreur est @SandboxError::InvalidRoot (`VNL-SBX-002`) et non @SandboxError::PathEscape
+
+Scenario: arguments_invalides_rendus_erreur_outil
+  Given un @dispatch_filesystem appelé avec `name` = `"read_file"` et `arguments` `null`
+  When le dispatch désérialise les arguments
+  Then le résultat est `Some` avec `isError: true` et un texte
+    `invalid arguments for read_file`
+  But aucun appel filesystem n'a eu lieu
+
+Scenario: nom_etranger_a_la_famille_rend_none
+  Given @dispatch_filesystem avec `name` = `"execute_command"`, @dispatch_search avec
+    `"read_file"`, @dispatch_command avec `"search"`, @dispatch_lsp avec `"find_files"`
+    et @dispatch_edit_and_check avec `"lsp_rename"`
+  When chacun est appelé
+  Then chacun rend @None — la chaîne de ./mcp.rs enchaîne sur la famille suivante
+
+Scenario: ecriture_suppression_rendent_chemin_resolu
+  Given une racine de sandbox temporaire confinée
+  When @dispatch_filesystem `write_file` écrit `"sub/nouveau.txt"` puis `delete_file`
+    le supprime
+  Then l'enveloppe du write est `isError: false` avec le texte `wrote {résolu}` (le
+    chemin confiné résolu)
+  And celle du delete est `isError: false` avec le texte `deleted {résolu}`
+
+Scenario: cwd_vide_de_execute_command_vaut_racine_sandbox
+  Given une sandbox dont le cwd du process diffère de `sandbox_root`
+  When @dispatch_command exécute `pwd` avec `cwd` absent des arguments
+  Then la commande s'exécute dans `sandbox_root` — `cwd` passe par @confine même vide
+
+Scenario: overlay_venv_non_injectable_et_recalcule
+  Given un workspace dont `.venv/pyvenv.cfg` est créé APRÈS un premier
+    `execute_command` sans venv
+  When un second `execute_command` de `echo $VIRTUAL_ENV` est dispatché
+  Then la sortie reflète le venv — @venv_overlay est recalculé à CHAQUE appel
+  And un `"envs"` présent dans les arguments JSON du tool est ignoré (`#[serde(skip)]`)
+
+Scenario: mapping_toolchain_par_extension_insensible_casse
+  Given les chemins `"a/main.rs"`, `"x/y.TS"`, `"w.jsx"`, `"App.Vue"`,
+    `"pkg/MODULE.PYI"`
+  When @toolchain_for_path est appelé sur chacun
+  Then les rendus sont `("rust", "rust")`, `("node", "typescript")`,
+    `("node", "javascript")`, `("node", "vue")`, `("python", "python")` — la casse du
+    mapping n'a pas d'effet (contrairement à la détection de ./maint.rs)
+
+Scenario: nom_dockerfile_prioritaire_sur_extension
+  When @toolchain_for_path est appelé sur `"dockerfile.main"`, `"build/Dockerfile.dev"`,
+    `"Containerfile"` et sur `"main.rs"`
+  Then les trois premiers rendent `("docker", "dockerfile")` (règle de nom de base
+    @is_dockerfile_path évaluée AVANT les extensions)
+  And `"main.rs"` rend `("rust", "rust")` — l'extension seule ne bascule rien d'autre
+
+Scenario: extension_inconnue_sans_lsp_rend_006
+  Given un fichier `notes.txt` sous la racine
+  When @dispatch_lsp est appelé avec `"lsp_diagnostics"` sur ce chemin
+  Then l'enveloppe est `isError: true` avec le texte contenant `VNL-SBX-LSP-006`
+
+Scenario: resolve_position_ligne_zero_rejete_007
+  Given le contenu `"alpha beta\n"` et un @LspSymbolTarget à la ligne `0`
+  When @resolve_position est appelé
+  Then l'erreur porte `VNL-SBX-LSP-007: line 0 out of range (1 lines)`
+
+Scenario: resolve_position_symbole_absent_rejete_010
+  Given le contenu `"alpha beta\n"`, la ligne `1` et le symbole `"gamma"`
+  When @resolve_position est appelé
+  Then l'erreur porte `VNL-SBX-LSP-010: symbol "gamma" not found as identifier on
+    line 1` avec le chemin du target
+
+Scenario: resolve_position_symbole_bordures_identifiant_seulement
+  Given le contenu `"ma_fonction fonction_x fonction\n"` à la ligne 1
+  When @resolve_position est appelé avec le symbole `"fonction"`
+  Then la position retenue est le début de la 3e occurrence (l'unique occurrence
+    délimitée par des non-identifiants ou les bords de ligne) — les sous-chaînes
+    collées à des identifiants (`ma_fonction`, `fonction_x`) ne comptent pas
+
+Scenario: resolve_position_symbole_ambigu_note_seconde_occurrence
+  Given une ligne où le symbole `"fonction"` apparaît deux fois en tant
+    qu'identifiant délimité
+  When @resolve_position est appelé avec ce symbole
+  Then le résultat est @PositionResolution::Ambiguous retenant la 1re occurrence
+  And la note rendue par l'outil (mode cible) cite le nombre d'occurrences et la
+    colonne 1-based de la 2e (`préciser character: …`)
+
+Scenario: resolve_position_character_zero_sature_en_colonne_zero
+  Given une ligne existante
+  When @resolve_position est appelé avec `character: 0` sans symbole
+  Then la colonne 0-based rendue est `0` (saturée, pas d'underflow)
+
+Scenario: resolve_position_symbole_vide_retombe_sur_character
+  Given une ligne existante, `symbol: ""` et `character: 4`
+  When @resolve_position est appelé
+  Then le mode symbole vide n'active pas : la colonne 0-based est `3`
+
+Scenario: resolve_position_symbole_prieur_sur_character
+  Given une ligne où le symbole `"x"` est présent, avec `character: 9`
+  When @resolve_position est appelé avec les deux
+  Then la résolution du symbole gagne et `character` est ignoré
+
+Scenario: diagnostics_attente_expiree_rend_not_yet_analyzed
+  Given une session LSP de test qui ne publie jamais de diagnostics
+  When @dispatch_lsp `lsp_diagnostics` expire son attente
+  Then l'enveloppe est `isError: false` avec le texte `not yet analyzed` mentionnant
+    explicitement que ce N'EST PAS un fichier propre et qu'il faut réessayer
+
+Scenario: diagnostics_analyse_vide_rend_message_propre
+  Given une session LSP qui publie un vecteur de diagnostics vide
+  When @dispatch_lsp `lsp_diagnostics` répond
+  Then le texte est exactement `no diagnostics: file analyzed, no issues found` —
+    distinct du message `not yet analyzed`
+
+Scenario: diagnostics_listes_rend_lignes_un_bases
+  Given une session LSP publiant un diagnostic sévérité 1 au couple (0-based)
+    `(range.start.line, range.start.character)` et un message
+  When @dispatch_lsp `lsp_diagnostics` répond
+  Then la ligne rendue est `{chemin relatif}:{ligne+1}:{colonne+1}: error: {message}`
+
+Scenario: definition_sections_ordre_et_hover_best_effort
+  Given un fichier `.rs` dont la définition d'un symbole est ailleurs dans le workspace
+    et dont le hover répond une erreur serveur
+  When @dispatch_lsp `lsp_definition` cible ce symbole par son nom
+  Then la réponse s'ouvre sur la ligne `cible:` (chemin relatif, ligne 1-based,
+    snippet de la ligne) puis `défini à:` avec les locations rendues
+    `chemin:ligne: snippet`
+  And les sections `signature:` et `doc:` sont OMISES (hover en erreur best-effort,
+    le tool ne devient pas une erreur)
+
+Scenario: references_groupees_englobant_et_hors_workspace_nu
+  Given une requête de références dont le résultat couvre le fichier cible, un second
+    fichier confiné de la même toolchain et une URI hors workspace
+  When @dispatch_lsp `lsp_references` répond
+  Then la sortie compte `références (N):`, des en-têtes de fichier (chemin
+    d'affichage, colonne 0), des blocs `  dans … — L…` au premier run consécutif de
+    chaque englobant, et des lignes `    L…: snippet` pour les fichiers lus
+  And la référence hors workspace est rendue `  L…` nue — aucune lecture, aucun
+    snippet tentés (R5)
+  And le rendu est trié par (chemin d'affichage, ligne)
+
+Scenario: references_cap_vingt_fichiers_rend_les_restes_nus
+  Given des références s'étendant sur plus de `20` fichiers distincts confinés de la
+    même toolchain
+  When @dispatch_lsp `lsp_references` collecte le contexte
+  Then les fichiers au-delà de la cap sont rendus sans englobant ni snippet et un
+    `tracing::warn!` unique signale le dépassement
+
+Scenario: workspace_symbols_aucune_toolchain_rend_006
+  Given aucune toolchain LSP configurée dans la sandbox
+  When @dispatch_lsp `lsp_workspace_symbols` arrive sans `path`
+  Then l'erreur est `VNL-SBX-LSP-006: no LSP toolchain configured in this sandbox`
+
+Scenario: workspace_symbols_indice_invalide_rend_006
+  Given la toolchain rust configurée et un indice `path: "notes.txt"`
+  When @dispatch_lsp `lsp_workspace_symbols` est appelé avec cet indice
+  Then l'erreur est `VNL-SBX-LSP-006: no LSP configured for that extension` — un
+    indice invalide est une erreur, jamais un indice silencieusement ignoré
+  And le fichier indice n'est ni lu ni confiné (R5)
+
+Scenario: workspace_symbols_methode_absente_degrade_en_succes
+  Given un serveur LSP dont la réponse `workspace/symbol` porte `"code":-32601`
+  When @dispatch_lsp `lsp_workspace_symbols` interroge ce serveur
+  Then l'outil rend un SUCCÈS (`isError: false`) invitant à utiliser
+    `lsp_document_symbols` fichier par fichier — jamais un fallback de recherche texte
+
+Scenario: document_symbols_plats_triees_et_prefixees
+  Given un serveur qui répond un tableau plat de `SymbolInformation` dans le désordre,
+    dont une entrée d'un autre fichier que celui ouvert
+  When @dispatch_lsp `lsp_document_symbols` rend ce résultat
+  Then les lignes plates sont triées par (ligne, nom) et l'entrée d'un autre fichier
+    est préfixée de son chemin d'affichage
+
+Scenario: document_symbols_hierarchiques_arbre_indente
+  Given un serveur qui répond la forme hiérarchique (`selectionRange` + `children`)
+  When @dispatch_lsp `lsp_document_symbols` rend ce résultat
+  Then l'arbre est rendu indenté de 2 espaces par niveau, enfants après parent,
+    ordre du serveur conservé
+
+Scenario: document_symbols_vide_message_explicite
+  Given un serveur qui répond un tableau vide (ou null)
+  When @dispatch_lsp `lsp_document_symbols` rend ce résultat
+  Then le texte est `no symbols (file analyzed yet — the outline is empty)` — distinct
+    d'un échec de requête
+
+Scenario: rename_preview_aucune_ecriture
+  Given un rename d'un symbole utilisé sur deux sites d'un fichier `.rs`
+  When @dispatch_lsp `lsp_rename` est appelé avec `preview: true`
+  Then la réponse commence par la ligne cible puis `aperçu — N sites dans M fichiers —
+    AUCUN fichier modifié` avec chaque site `  L:ligne:colonne: snippet`
+  And le fichier sur le disque est INCHANGÉ
+
+Scenario: rename_applique_rapport_avant_apres
+  Given le même rename de deux sites
+  When @dispatch_lsp `lsp_rename` est appelé avec `preview: false`
+  Then la réponse porte `rename appliqué`, `{N} remplacements dans {M} fichiers` et
+    par site `  L…: avant → après`
+  And le fichier est modifié sur le disque
+
+Scenario: rename_result_null_rend_no_rename
+  Given un serveur LSP qui répond `null` à `textDocument/rename`
+  When @dispatch_lsp `lsp_rename` est appelé
+  Then la réponse est la ligne cible puis `no rename`, sans écriture
+
+Scenario: textedit_range_manquant_leve_008
+  Given un contenu et une liste de `TextEdit` dont l'un porte un `range` manquant ou
+    un `range.start.line` hors limites
+  When @apply_text_edits est appelé
+  Then l'erreur porte le code `VNL-SBX-LSP-008`
+
+Scenario: workspace_edit_uri_hors_racine_leve_009_sans_ecriture
+  Given un `WorkspaceEdit` dont la seule URI canonifiée sort de la racine
+  When @apply_workspace_edit est appelé
+  Then l'erreur porte `VNL-SBX-LSP-009` suivi du message du confine
+  And AUCUN fichier n'est écrit
+
+Scenario: workspace_edit_files_concatene_changes_et_documentchanges
+  Given un `WorkspaceEdit` combinant `changes` et `documentChanges` sur la même URI
+  When @workspace_edit_files est appelé
+  Then les edits de cette URI sont concaténés en une seule entrée (dédup par URI,
+    `changes` d'abord)
+
+Scenario: workspace_edit_partiel_erreur_laisse_fichiers_ecrits
+  Given un `WorkspaceEdit` de deux fichiers où le premier s'applique et le second
+    échoue (edit malformé)
+  When @apply_workspace_edit est appelé
+  Then l'erreur remonte et le premier fichier reste écrit — aucun rollback (comportement
+    documenté, cf. `Tasks`)
+
+Scenario: edit_and_check_union_valide_avant_io
+  Given un @dispatch_edit_and_check de `mode: "coucou"`, puis de `mode: "write"` sans
+    `content`, puis de `mode: "edit"` sans `old_string`
+  When les trois appels parviennent au dispatch
+  Then chacun rend `isError: true` avec le message d'arguments invalides correspondant
+  And dans les trois cas aucun fichier n'a été lu, écrit ni ouvert côté LSP
+
+Scenario: edit_and_check_chemin_evade_ne_jamais_ecrit
+  Given un @dispatch_edit_and_check dont le `path` est `"../../etc/passwd"`
+  When l'outil valide le chemin avant d'écrire
+  Then l'enveloppe porte `VNL-SBX-001` et le fichier hors racine est intact
+
+Scenario: edit_and_check_cas_a_didchange_unique_et_diff_sections
+  Given un fichier `.rs` fermé dans l'éditeur (aucun abonné sur son URI) avec des
+    diagnostics publiés d'avance
+  When @dispatch_edit_and_check applique un `mode: "edit"` qui casse le typage
+  Then le tool relit le disque, envoie `initialize` + `ensure_open` + un seul
+    `didChange` versionné (le tool est le seul émetteur)
+  And le rapport rend les sections `diagnostics APPARUS (N):`, `diagnostics DISPARUS
+    (N):`, `diagnostics INCHANGÉS (N) — non listés`
+
+Scenario: diff_diagnostics_survit_aux_doublons
+  Given un état « avant » et un état « après » où le même diagnostic (même position,
+    même message) est publié deux fois
+  When @diff_diagnostics calcule l'écart
+  Then chaque clé est comptée avec sa multiplicité (compteurs @HashMap, jamais un Set)
+    et `appeared`/`gone` respectent les surplus nets
+
+Scenario: edit_and_check_cas_b_jamais_didchange_et_notifie
+  Given un fichier ouvert dans un onglet (abonné éditeur sur son URI)
+  When @dispatch_edit_and_check applique une édition
+  Then @request_flush du chemin RELATIF est appelé AVANT l'écriture sur le disque
+  And après l'écriture le tool diffuse `{"event":"file-changed","path":…}` et
+    N'ÉMET AUCUN `didChange` (l'éditeur tient la balle)
+
+Scenario: edit_and_check_flush_non_acquitte_ecrit_quand_meme
+  Given un fichier ouvert dans un onglet dont le flush n'est jamais acquitté
+    (frontend absent, timeout `FS_FLUSH_TIMEOUT_SECS` écoulé)
+  When @dispatch_edit_and_check applique une édition
+  Then l'édition est appliquée et le rapport porte la mention `flush non acquitté —
+    fenêtre de debounce de l'éditeur possible`
+
+Scenario: edit_and_check_reanalyse_mute_rend_011_en_succes
+  Given un fichier ouvert dans un onglet (cas B) et une session LSP qui ne publie
+    rien dans la fenêtre d'attente (`DIAGNOSTICS_TIMEOUT * 2`)
+  When @dispatch_edit_and_check attend la ré-analyse jusqu'au timeout
+  Then l'enveloppe est `isError: false` — état mou — avec le message citant
+    `VNL-SBX-LSP-011` et les secondes écoulées, la ligne `L'édition EST appliquée sur
+    le disque.` et `ré-analyse en attente de l'éditeur (fichier ouvert dans un onglet).`
+
+Scenario: edit_and_check_sans_analyse_preable_diff_contre_vide
+  Given un fichier jamais analysé (aucun diagnostic en cache, attente de capture de
+    `300` ms muette)
+  When @dispatch_edit_and_check applique une édition propre
+  Then le rapport porte la mention `aucune analyse préalable — le diff est calculé
+    contre vide` et tous les diagnostics présents sont listés en APPARUS
+
+Scenario: hover_bloc_cloture_signature_doc_three_lignes
+  Given un hover `MarkupContent` markdown dont le texte porte un bloc ```clôturé```,
+    puis trois lignes de prose non vides, puis un second bloc clôturé
+  When @hover_signature_and_doc découpe ce contenu
+  Then la signature est le contenu du PREMIER bloc, sans fences
+  And la doc est exactement les trois lignes non vides — le second bloc est exclu
+
+Scenario: hover_fence_jamais_fermee_retourne_en_prose
+  Given un hover dont le texte ouvre une fence ``` jamais refermée
+  When @hover_signature_and_doc découpe ce contenu
+  Then le contenu de la fence retourne en prose et seul le marqueur est retiré —
+    aucune signature de bloc n'est extraite
+
+Scenario: hover_bloc_vide_et_contenu_null_sans_section
+  Given un hover à la fence immédiatement refermée (bloc vide) puis un hover de
+    contenu null ou vide
+  When @hover_signature_and_doc est appelé sur les deux
+  Then le premier ne produit aucune section de code (bloc vide non signé) et le
+    second rend `("", "")`
+
+Scenario: lsp_tools_declarent_huit_outils
+  Given l'appel à @lsp_tools
+  When la liste est inspectée
+  Then elle contient exactement `lsp_diagnostics`, `lsp_definition`, `lsp_references`,
+    `lsp_rename`, `lsp_document_symbols`, `lsp_workspace_symbols`, `inspect_symbol`,
+    `edit_and_check` (dans cet ordre, `edit_and_check` en 8e)
+  And chaque description de tool ciblé mentionne `VNL-SBX-LSP-006` pour les extensions
+    non couvertes
+  And @lsp_tools combiné aux 8 outils de `vanyline_tools` fait les 16 outils de
+    `tools/list` de ./mcp.rs
+

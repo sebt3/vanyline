@@ -1,0 +1,817 @@
+Spec: Git
+
+Purpose:
+  Surface git HTTP du crate `vanyline-sandbox` : les seize routes `/git/*` (routées et
+  protégées par @auth::require_auth dans `./lib.rs`, table contractée par ./lib.sdd) qui
+  exposent le dépôt de travail du pod (worktree normal sous `config.sandbox_root`,
+  `VNL_SANDBOX_ROOT`, défaut `/workspace`, ./config.rs) à l'éditeur web et à l'app. Le
+  fichier implémente TOUT le comportement de ces routes : lancement de sous-processus
+  `git` (et `ssh-keygen` pour les endpoints SSH), parsing des sorties (porcelain v2,
+  log `%x1f`, for-each-ref), confinement des chemins via @crate::tools_impl::confine_path
+  (./tools_impl.rs), garde anti-injection de flags (@reject_leading_dash), classification
+  des stderr de push, et l'enveloppe HTTP des erreurs (@GitError → @IntoResponse : corps
+  JSON `{"error": <Display>}` avec identifiant `VNL-SBX-0XX`). Chaque commande git
+  s'exécute dans une tâche @tokio::task::spawn_blocking, jamais sur l'executor asynchrone.
+  Le fichier ne câble aucune route (c'est ./lib.rs), n'applique AUCUN contrôle de niveau
+  d'accès (voir `Handles` — cohérent avec le `[?]`/`[!]` de ./lib.sdd et ./auth.sdd :
+  @AccessLevel::Read n'est branché nulle part, un JWT Read peut commit/push/merge), et
+  ne pose AUCUNE variable d'environnement `GIT_*` (les sous-processus héritent de l'env
+  du serveur, `HOME` inclus). Un seul fichier, un seul contrat : pas de regroupement.
+
+Owns:
+  ./git.rs
+
+Can read:
+  ./lib.rs
+  ./auth.rs
+  ./config.rs
+  ./tools_impl.rs
+  ./main.rs
+  ../tests/http.rs
+  ../Cargo.toml
+  ../../docs/architecture.md
+  ../../vanyline.sdd
+  ../../tooling.sdd
+
+Exposes:
+  @GitError — `pub enum` @thiserror::Error, 13 variantes, @Display exacts (voyagent dans
+    le corps JSON des réponses HTTP, caractère par caractère) :
+      @GitError::CommandFailed — `"VNL-SBX-004: git {args:?} failed with {status}: {stderr}"`
+      @GitError::ParseFailed — `"VNL-SBX-005: could not parse git status output at line {line_no}: {line:?}"`
+      @GitError::DetachedHead — `"VNL-SBX-006: cannot determine unpushed commits: HEAD is detached"`
+      @GitError::DiffFailed — `"VNL-SBX-007: git diff failed for {path}: {status}: {stderr}"`
+      @GitError::EmptyCommit — `"VNL-SBX-008: nothing staged to commit"`
+      @GitError::CheckoutRefused — `"VNL-SBX-011: checkout refused: working tree is dirty (branch: {branch})"`
+      @GitError::PushRejected — `"VNL-SBX-009: push rejected (non fast-forward): {stderr}"`
+      @GitError::GitWriteFailed — `"VNL-SBX-010: git write failed (no credentials): {stderr}"`
+      @GitError::InvalidPath — `"VNL-SBX-015: path escapes sandbox root: {path}"`
+      @GitError::SshKeyFailed — `"VNL-SBX-016: ssh key provisioning failed: {stderr}"`
+      @GitError::MergeNotStarted — `"VNL-SBX-012: merge not started: {stderr}"`
+      @GitError::NoMergeInProgress — `"VNL-SBX-013: no merge in progress to abort"`
+      @GitError::InvalidRef — `"VNL-SBX-014: invalid ref/name {value:?}: must not start with '-'"`
+    Les identifiants vont de `VNL-SBX-004` à `VNL-SBX-016` (les `001`–`003` ne vivent pas
+    ici). @impl @IntoResponse pour @GitError (mapping statut : voir `Returns`).
+  @FileState — `pub enum` Serialize `rename_all = "snake_case"` : `modified`, `added`,
+    `deleted`, `renamed`, `untracked`, `conflicted`.
+  Types JSON Serialize (`pub struct`, champs publics, noms serde par défaut) :
+    @FileEntry { path, state, staged } ; @GitStatus { branch, files, clean } ;
+    @DiffResponse { path, diff } ; @OkResponse { ok } ;
+    @CommitResponse { sha /* 40 hex complet */, title } ;
+    @CommitEntry { sha /* tronqué à 7 */, title, author, date } ;
+    @UnpushedStatus { branch, upstream, commits, truncated } ;
+    @LogCommit { sha, parents, refs, title, author, date } ;
+    @LogResponse { branch, commits, truncated } ;
+    @BranchEntry { name, is_remote, upstream } ;
+    @BranchesResponse { current, merging, branches } ;
+    @SshKeyStatus { exists, public_key } ; @SshKeyResponse { public_key } ;
+    @PushResponse { ok, pushed /* u32 */ } ;
+    @MergeResponse { conflicted, sha } (`sha` : SHA 40 hex si `conflicted:false`, JSON
+      `null` sinon) ;
+  Types Deserialize (corps/query des requêtes) : @DiffParams { path: String (requis),
+    staged: Option<bool> } ; @StageRequest { paths: Vec<String> } ;
+    @UnstageRequest { paths: Vec<String> } ; @CommitRequest { message: String } ;
+    @LogParams { limit: Option<u32>, all: Option<bool> } ;
+    @CreateBranchRequest { name: String, from: Option<String> } ;
+    @CheckoutRequest { branch: String } ; @MergeRequest { branch: String }.
+  @PushErrorKind — `pub enum { Rejected, AuthFailed, Other }` (classification interne,
+    jamais sérialisée).
+  Entrées de routage (`pub async fn`, câblées par ./lib.rs sur les seize routes) :
+    @handle_status (`GET /git/status`), @handle_unpushed (`GET /git/unpushed`),
+    @handle_diff (`GET /git/diff`), @handle_stage (`POST /git/stage`),
+    @handle_unstage (`POST /git/unstage`), @handle_commit (`POST /git/commit`),
+    @handle_branches (`GET /git/branches`), @handle_create_branch (`POST /git/branches`),
+    @handle_checkout (`POST /git/checkout`), @handle_delete_branch
+    (`DELETE /git/branches/{name}`), @handle_push (`POST /git/push`),
+    @handle_log (`GET /git/log`), @handle_ssh_key_status (`GET /git/ssh-key`),
+    @handle_ssh_key_create (`POST /git/ssh-key`), @handle_merge (`POST /git/merge`),
+    @handle_merge_abort (`POST /git/merge/abort`).
+  Helpers `pub` testables (aussi consommés hors module possible) : @parse_status,
+    @run_status, @run_unpushed, @log_args, @parse_log_line, @parse_log,
+    @classify_push_stderr, @ssh_key_paths, @ssh_home.
+  Éléments privés mais contrat du fichier : @UNPUSHED_MAX_COMMITS (`200`) ; @run_git ;
+    @is_dirty ; @reject_leading_dash ; @ref_exists ; @resolve_default_branch ;
+    @parse_commits ; @diff_args ; @stage_args ; @unstage_args ; @merge_args ;
+    @merge_abort_args ; @parse_commit_output ; @branch_list_args ; @create_branch_args ;
+    @checkout_args ; @delete_branch_args ; @push_args ; @count_pushed_args ;
+    @parse_count ; @map_state_char ; @parse_ordinary ; @parse_rename ; @parse_unmerged ;
+    @entry_from_xy ; @parse_branches ; @read_public_key.
+  Module de test `tests` — ~35 tests unitaires (parses purs, argv exacts, @is_dirty sur
+    vrais dépôts tempfile, @ssh_key_paths) ; aucun test HTTP ici, les tests d'intégration
+    des routes vivent dans ../tests/http.rs (cf. `Tasks`).
+
+Accepts:
+  Chaque route accepte la requête exactement comme typée ci-dessous ; le parsing/la validation
+    des extrauteurs axum (query, JSON) précèdent le handler : corps JSON absent/malformé
+    ou query non conforme → rejet automatique axum (`400`/`422`) avant toute exécution de
+    ce fichier. Auth : les seize routes sont derrière @auth::require_auth (./auth.rs) —
+    ici on suppose @AuthInfo valide, AUCUN handler ne lit `subject` ni `access`.
+  `GET /git/status` — aucun paramètre. Lit le dépôt dans `config.sandbox_root`.
+  `GET /git/unpushed` — aucun paramètre.
+  `GET /git/diff` — query @DiffParams : `path` (requis ; la chaîne vide `?path=` réussit
+    la désérialisation mais suit le chemin « chemin → racine », voir `Handles`) ; `staged`
+    absent, `false`
+    ou toute valeur ≠ `true` → diff du working tree ; `staged=true` → diff de l'index
+    (`git diff --staged`). `staged=abs` (non booléen) → 400/422 axum.
+  `POST /git/stage` et `POST /git/unstage` — JSON `{"paths": ["a", "b/c", …]}` ; liste
+    vide → no-op succès sans exécuter git. Chaque chemin est confinement-testé par
+    @confine_path (relative jointe à la racine, absolue admise si retombant sous la
+    racine, `..`/symlinks résolus, slash final ignoré, ./tools_impl.rs).
+  `POST /git/commit` — JSON `{"message": "<string>"}` ; message vide ou `-m`-like accepté
+    (passé en argv séparé après `-m`, jamais réinterprété comme flag). Pas de `-a` :
+    seules les modifications stagées sont committées.
+  `GET /git/branches` — aucun paramètre.
+  `POST /git/branches` — JSON `{"name": "<branche>", "from": "<ref>"?}` ; `name` et
+    `from` (si présent) ne doivent pas commencer par `-` ; `from` absent → HEAD courant.
+  `POST /git/checkout` — JSON `{"branch": "<branche>"}` ; pas de `-` initial ; vérification
+    arbre+index propres AVANT checkout (les untracked ne comptent pas — `git diff` ne les
+    voit pas).
+  `DELETE /git/branches/{name}` — nom dans le segment d'URL (un nom contenant `/` type
+    `feat/x` exige l'encodage `%2F` dans le segment, axum le décode avant @handle_delete_branch) ;
+    pas de `-` initial ; suppression FORCÉE (`-D`), sans vérification de fusion mergée.
+  `POST /git/push` — aucun corps utile (aucun extracteur de corps) ; cible déduite (voir
+    `Handles`), remote toujours nommé `origin`, pas de refspec explicite `src:dst`.
+  `GET /git/log` — query @LogParams : `limit` absent → `100`, sinon u32 (non numérique →
+    rejet axum) ; `all=true` → `git log --all`, sinon branche courante seulement.
+  `GET /git/ssh-key` — aucun paramètre ; ne dépend PAS de `sandbox_root` mais de @ssh_home
+    (`$HOME` si défini et non vide, sinon `/home/vanyline` — repli sur le montage PVC du
+    pod, ./main.rs et docs/architecture.md).
+  `POST /git/ssh-key` — aucun paramètre ; idempotent par la présence du fichier PRIVÉ.
+  `POST /git/merge` — JSON `{"branch": "<ref>"}` ; pas de `-` initial ; merge de la ref
+    dans la branche courante (aucun message custom, git auto-committe ou laisse les
+    conflits).
+  `POST /git/merge/abort` — aucun paramètre.
+  Enveloppe d'exécution de chaque commande : `std::process::Command` avec `.output()`
+    (stdin relié à null, stdout/stderr capturés), argv construits de façon structurée
+    (jamais de shell), cwd du PROCESSUS serveur (le dépôt est visé par `-C <racine>` dans
+    tous les argv, SAUF le `--git-dir` de @resolve_default_branch, voir `Tasks [?]`) ;
+    env hérité du serveur, AUCUN `GIT_*` posé, AUCUN timeout appliqué au sous-processus.
+
+Returns:
+  Enveloppes HTTP nominales (toutes `200` + `application/json`, sérialisation serde des
+    types d'`Exposes`) :
+    `GET /git/status` → @GitStatus : `branch` = valeur de `# branch.head` (dont la chaîne
+      littérale `"(detached)"` si HEAD détaché) ; `files[]` = (@FileEntry) dans l'ordre de
+      la sortie git ; `state` mappé X sinon Y (X ≠ `.` ⇒ `staged: true`, sinon Y ⇒
+      `staged: false`) ; `T`→`modified`, `C`→`renamed` ; `clean` = `files` vide.
+    `GET /git/unpushed` → @UnpushedStatus : `branch` = nom court du HEAD ; `upstream` =
+      `Some("origin/<branche>")` si `refs/remotes/origin/<branche>` existe, sinon `None` ;
+      `commits[]` (@CommitEntry, sha tronqué à 7 caractères) = `git log <comparaison>..HEAD`
+      (comparaison = `origin/<branche>` si upstream, sinon `origin/<branche par défaut>`),
+      plafonné à @UNPUSHED_MAX_COMMITS (`200`) avec `truncated: true` au-delà.
+    `GET /git/diff` → @DiffResponse : `path` = la valeur BRUTE reçue dans la query (pas le
+      chemin confiné) ; `diff` = stdout texte de `git diff` (vide si aucun écart — réponse
+      `200` avec patch vide, pas une erreur).
+    `POST /git/stage`, `POST /git/unstage`, `POST /git/checkout`, `DELETE /git/branches/{name}`,
+      `POST /git/merge/abort`, `POST /git/branches` → @OkResponse `{"ok":true}`.
+    `POST /git/commit` → @CommitResponse : `sha` = SHA COMPLET (40 hex) du commit créé
+      (relu par `git log -1` après commit), `title` = première ligne (`%s`).
+    `GET /git/branches` → @BranchesResponse : `current` = `git rev-parse --abbrev-ref HEAD`
+      brut (`"HEAD"` littéral si détaché, PAS d'erreur ici contrairement à /git/unpushed) ;
+      `merging` = succès de `git rev-parse --verify MERGE_HEAD` ; `branches[]` = refs sous
+      `refs/heads` ET `refs/remotes` (les distants inclus, `is_remote: true`, nom court du
+      type `"origin/main"`), `upstream` = `upstream:short` abrégé sans préfixe `refs/…/`,
+      `null` si absent.
+    `POST /git/push` → @PushResponse `{ok: true, pushed}` avec `pushed` = nombre de commits
+      COMPTÉ AVANT le push : `git rev-list --count origin/<cible>..HEAD` si le ref distant
+      existe, sinon `rev-list --count HEAD` (tous les commits).
+    `GET /git/log` → @LogResponse : `branch` = nom court du HEAD (détaché → `"HEAD"` sans
+      erreur) ; `commits[]` (@LogCommit, sha COMPLET, `parents` = shas séparés par espaces
+      (`[]` si commit racine), `refs` = `%D` splitté sur `", "` (`[]` si vide), `date` =
+      `%aI` ISO 8601) tronqué à `limit` avec `truncated` calculé via `--max-count=limit+1`.
+    `GET /git/ssh-key` → @SshKeyStatus : `exists` = le fichier PRIVÉ `~/.ssh/id_ed25519`
+      est un fichier régulier ; `public_key` = contenu trimé de `id_ed25519.pub` si lisible
+      (lu même quand `exists` est `false` — le `.pub` peut exister seul), `null` sinon.
+    `POST /git/ssh-key` → @SshKeyResponse `{public_key}` (contenu trimé).
+    `POST /git/merge` → @MergeResponse : exit 0 → `{conflicted:false, sha:"<40 hex>"}` ;
+      exit 1 → `200` `{conflicted:true, sha:null}` (le conflit est un RÉSULTAT normal,
+      jamais un statut d'erreur) ; tout autre code → erreur @MergeNotStarted.
+  Mapping erreurs → statut (impl @IntoResponse de @GitError, UNIFORME) :
+    @GitError::InvalidRef → `400` ; TOUTES les autres variantes → `500`. Corps dans les
+    deux cas : `{"error": "<@Display exact, incluant le VNL-SBX-0XX>"}`.
+    Aucun 404, aucun 409, aucun 422 produit par CE fichier ; les 401/403 viennent de
+    ./auth.rs en amont.
+
+Raises:
+  @GitError::CommandFailed (VNL-SBX-004, 500) — processus `git` non lançable (binaire
+    absent : `status` = message de l'@std::io::Error, `stderr` vide) ou exit ≠ 0 sur
+    status/unpushed/log/branches/create/checkout/delete/stage/unstage/commit/merge-abort ;
+    sur `GET /git/status` d'un répertoire sans dépôt : git sort en erreur (code de sortie
+    1) et
+    le statut est 500 VNL-SBX-004 avec le stderr git (`not a git repository`…), jamais un
+    état « vide ».
+  @GitError::ParseFailed (VNL-SBX-005, 500) — toute sortie git inattendue dans les parses
+    (@parse_status ligne de tag inconnu ou header `# branch.head` absent (`line_no: 0`),
+    @parse_commits / @parse_log / @parse_commit_output / @parse_branches ligne mal
+    séparée, @parse_count non numérique). Branches défensives : la sortie de git est
+    censée être pilotée par les `--pretty=format:`/`--format=` posés ici.
+  @GitError::DetachedHead (VNL-SBX-006, 500) — @handle_unpushed et @handle_push quand
+    `rev-parse --abbrev-ref HEAD` rend `"HEAD"`. @handle_log et @handle_branches N'ONT
+    PAS cette garde (ils rendent `"HEAD"` comme nom de branche, asymétrie verrouillée).
+  @GitError::DiffFailed (VNL-SBX-007, 500) — @handle_diff sur tout exit ≠ 0 de `git diff`
+    (dont dépôt absent et pathspec inconnu — git ne sort en erreur que sur pathspec
+    invalide/ambigu, un fichier propre rend un diff vide en `200`).
+  @GitError::EmptyCommit (VNL-SBX-008, 500) — @handle_commit quand `git diff --cached
+    --quiet` sort 0 (rien de stagé). Attention : c'est une erreur-utilisateur rendue en
+    500, pas 4xx (`Tasks [?]`).
+  @GitError::CheckoutRefused (VNL-SBX-011, 500) — @handle_checkout quand l'arbre OU
+    l'index est sale (deux `git diff --quiet`, `--cached` pour l'index). Un code de sortie
+    de `git diff` autre que 0/1 (dépôt corrompu, git absent) est une VRAIE erreur
+    CommandFailed — jamais interprété comme « propre ».
+  @GitError::PushRejected (VNL-SBX-009, 500) — push dont le stderr contient `rejected` ou
+    `non-fast-forward` (testé EN PREMIER, avant la classification auth).
+  @GitError::GitWriteFailed (VNL-SBX-010, 500) — push dont le stderr contient l'un de :
+    `Authentication failed`, `Permission denied`, `Could not read from remote repository`,
+    `Host key verification failed`, `failed to authenticate`, `unable to get credential`
+    (heuristique par sous-chaînes, @classify_push_stderr — un stderr multilingue ou
+    reformulé tombe en @CommandFailed).
+  @GitError::InvalidPath (VNL-SBX-015, 500) — @handle_diff/@handle_stage/@handle_unstage
+    quand @confine_path échoue (évasion `..`, symlink hors racine, racine non canonicalisable).
+  @GitError::SshKeyFailed (VNL-SBX-016, 500) — @handle_ssh_key_create seulement : `.ssh`
+    non créable, `ssh-keygen` non lançable ou en échec (stderr propagé), fichier `.pub`
+    absent/illisible après génération ou (cas clé déjà présente) `.pub` illisible.
+    @handle_ssh_key_status ne rend JAMAIS d'erreur (état « pas de clé » = normal).
+  @GitError::MergeNotStarted (VNL-SBX-012, 500) — @handle_merge sur tout code de sortie ≠
+    0 et ≠ 1 (stderr git dans le message).
+  @GitError::NoMergeInProgress (VNL-SBX-013, 500) — @handle_merge_abort sur TOUT échec de
+    `git merge --abort` (le CommandFailed est intégralement effondré en ce message : y
+    compris git cassé, pas seulement « pas de merge en cours »).
+  @GitError::InvalidRef (VNL-SBX-014, 400) — @reject_leading_dash sur `name`/`from`
+    (create), `branch` (checkout, merge) et le segment `{name}` (delete) commençant par
+    `-` (y compris le caractère `-` seul).
+  Panics sous `#[allow(clippy::expect_used)]` (harnais ../../tooling.sdd) — chaque
+    `.await.expect("… blocking task panicked")` sur le @JoinHandle : ne se déclenche que
+    si la closure spawn_blocking panique elle-même (les parses ici n'indexent jamais sans
+    garde, pas de panic interne connue) ; un panic propage la fermeture de la connexion
+    axum (500 sans corps JSON typé).
+
+Handles:
+  Table exacte des commandes git (toutes préfixées `-C <sandbox_root>` sauf mention, cwd =
+    processus serveur, env hérité, GIT_* jamais posé) :
+      status : `git status --porcelain=v2 --branch`
+      unpushed : `git rev-parse --abbrev-ref HEAD` ; `git show-ref --verify --quiet
+        refs/remotes/origin/<branche>` ; @resolve_default_branch (`git rev-parse
+        --git-common-dir` puis `git --git-dir <dir> symbolic-ref --short HEAD`, REPLI sur
+        `"main"` sans erreur dans les deux cas d'échec — même convention que
+        `vanyline-maint`) ; `git log <comparaison>..HEAD --max-count=201
+        --pretty=format:%H\x1f%s\x1f%an\x1f%aI`
+      diff : `git diff [--staged] -- <chemin confiné relatif>`
+      stage : `git add -- <chemins confinés…>` (non `git add -A` : jamais de staging global)
+      unstage : `git restore --staged -- <chemins…>`
+      commit : `git diff --cached --quiet` (sonde) ; `git commit -m <message>` ;
+        `git log -1 --pretty=format:%H\x1f%s`
+      branches (GET) : `git rev-parse --abbrev-ref HEAD` ; `git rev-parse --verify
+        MERGE_HEAD` (échec de spawn ou exit ≠ 0 ⇒ `merging:false`, erreur avalée) ;
+        `git for-each-ref --format=%(refname)%09%(upstream:short) refs/heads refs/remotes`
+      branches (POST) : `git branch <name> [<from>]`
+      checkout : `git diff --quiet` + `git diff --cached --quiet` ; `git checkout <branche>`
+      delete : `git branch -D <name>`
+      push : `git rev-parse --abbrev-ref HEAD` ; `git show-ref --verify --quiet
+        refs/remotes/origin/<branche>` ; (repli) @resolve_default_branch ; `git rev-list
+        --count origin/<cible>..HEAD` ou `git rev-list --count HEAD` ; `git push origin
+        <cible>`
+      log : `git rev-parse --abbrev-ref HEAD` ; `git log [--all] --max-count=<limit+1>
+        --pretty=format:%H\x1f%P\x1f%D\x1f%s\x1f%an\x1f%aI`
+      merge : `git merge <branche>` ; (si exit 0) `git rev-parse HEAD`
+      merge-abort : `git merge --abort`
+      ssh-key (POST) : `ssh-keygen -t ed25519 -N "" -f <HOME>/.ssh/id_ed25519` (préalable
+        @fs::create_dir_all sur `.ssh`)
+  Stratégie anti-injection de flags : `--` est posé sur diff/stage/unstage (le pathspec
+    neutre les `-` initiaux) ; pour les positions de refs (branch/checkout -D/merge,
+    sans `--` possible — `git checkout -- x` changerait le sens en pathspec), la garde
+    @reject_leading_dash en amont rejette tout nom commençant par `-` (400 VNL-SBX-014) ;
+    le commentaire source justifie ce choix uniforme et doit rester vrai.
+  Cas « HEAD détaché » : rendu littéralement (`"(detached)"` dans status, `"HEAD"` dans
+    branches/log) SAUF unpushed/push où c'est une erreur VNL-SBX-006 ; @handle_checkout
+    sur HEAD détaché avec arbre propre tente `git checkout <cible>` normalement.
+  Confinement : les trois routes à chemin (@handle_diff/@handle_stage/@handle_unstage)
+    convertissent chaque entrée en chemin relatif à la racine APRES @confine_path ;
+    @handle_diff renvoie dans la réponse le chemin UTILISATEUR BRUT, pas le chemin confiné.
+    Un `path=` vide arrive à @confine_path qui rend la racine elle-même → `git diff -- ""`
+    → comportement git (erreur pathspec vide → VNL-SBX-007 500), `[?]` dans `Tasks`.
+  Sorties géantes : AUCUNE limite de taille sur stdout (un `git diff` de 100 Mo entre
+    intégralement dans la réponse JSON, un `git log --all --max-count=<énorme>` pareil) ;
+    conversion non-UTF8 tolérée par @String::from_utf8_lossy (octets invalides → U+FFFD,
+    jamais d'erreur). `[?]` dans `Tasks`.
+  Réseau / push : @handle_push est le seul chemin qui peut toucher le réseau (remote
+    `origin`). Aucun timeout applicatif : un `git push` qui pend (SSH qui attend une
+    empreinte, helper HTTP qui réclame des identifiants — `GIT_TERMINAL_PROMPT` n'est PAS
+    désactivé et git peut ouvrir `/dev/tty` malgré stdin=null) bloque un thread
+    spawn_blocking INDÉFINIMENT. L'authentification du push repose entièrement sur la clé
+    SSH provisionnée par `POST /git/ssh-key` (et `known_hosts` pré-rempli hors de ce
+    fichier) ou sur tout credential helper présent dans l'image. `[!]` dans `Tasks`.
+  Provisionnement SSH : @ssh_home lit `$HOME` à CHAQUE appel (vide ou absent ⇒ repli
+    `/home/vanyline`) ; GET et POST partagent @ssh_key_paths (`id_ed25519` /
+    `id_ed25519.pub`) ; POST est idempotent par le fichier PRIVÉ (présent ⇒ relit et rend
+    la publique sans régénérer ; si `.pub` est illisible dans cet état → VNL-SBX-016).
+    Les permissions POSIX laissées sont celles d'@fs::create_dir_all (0o755 + umask) pour
+    `.ssh` et de ssh-keygen pour la privée — aucun chmod explicite ici, `[?]` `Tasks`.
+  Absence de garde par niveau : ce fichier ne lit jamais @AccessLevel — un JWT `Read`
+    (./auth.rs) passe commit/push/merge/checkout/ssh-key création, comme l'annonce le
+    `[?]` de ./lib.sdd et l'`[!]` de ./auth.sdd. Ce n'est PAS béni ici : même question
+    ouverte, même arbitrage attendu (voir `Tasks`).
+  Échec de spawn `ssh-keygen` (binaire absent) : VNL-SBX-016 avec le message de l'@io::Error
+    dans `stderr` (format `"could not execute ssh-keygen: {e}"`).
+  @run_git est un doublon assumé de la logique inline de @run_status (commentaire source :
+    ne pas refactorer @run_status, code mergé et testé) — la duplication est un fait du
+    fichier actuel, pas un contrat à perpétuer (`Tasks` `[?]`).
+  Modes bypath d'auth (`no_auth`/`static_token`, ./auth.sdd) : toutes les routes git
+    deviennent accessibles avec respectivement aucun header ou le Bearer exact ; le
+    comportement de CE fichier est alors inchangé (il ne voit jamais le mode).
+
+Must:
+  Exposer exactement les seize handlers de la table de ./lib.sdd, chacun sur sa route et
+    sa méthode, avec les formes requête/réponse contractées dans `Accepts`/`Returns`.
+  Exécuter chaque sous-processus (`git`, `ssh-keygen`) dans @tokio::task::spawn_blocking,
+    jamais sur l'executor asynchrone, et propager tout @GitError en réponse via
+    @IntoResponse (corps `{"error": <Display>}` avec identifiant `VNL-SBX-0XX`).
+  Prefixer toutes les commandes git de `-C <config.sandbox_root>` (sauf le `--git-dir` de
+    @resolve_default_branch, écart tracé) et les lancer par argv structurés — jamais de
+    shell, jamais d'interpolation de champ utilisateur dans une chaîne de commande.
+  Appliquer @confine_path (./tools_impl.rs) à tout chemin entrant de diff/stage/unstage
+    et rejeter toute évasion par VNL-SBX-015 (le message porte le chemin UTILISATEUR
+    d'origine pour les entrées du corps, le chemin confiné dans le seul cas de
+    `strip_prefix` échoué).
+  Appliquer @reject_leading_dash (400 VNL-SBX-014) à `name`, `from`, `branch` et au
+    segment `{name}` AVANT tout argv git — la garde protège merge/checkout/create/delete
+    qui n'ont pas de séparateur `--`.
+  Passer `--` dans les argv de diff/stage/unstage (chemins en position pathspec, jamais
+    réinterprétables en flags).
+  Mapper le parsing porcelain v2 comme contracté : tag `1`/`2`/`u`/`?`, `!` ignoré,
+    tout autre tag → VNL-SBX-005 avec `line_no` ; X (index) l'emporte sur Y (worktree)
+    quand X ≠ `.` ; `T`→modified, `C`→renamed, lignes `u` ⇒ `Conflicted` + `staged:true`
+    quel que soit le couple ; `origPath` des renommages jeté ; header `# branch.head`
+    absent → VNL-SBX-005 `line_no:0`.
+  Distinguer les codes de sortie 0/1 de `git diff --quiet` (propre/sale) et traiter TOUT
+    autre code comme une erreur (checkout strict : ne jamais laisser passer un checkout
+    sur un état non vérifiable).
+  Traiter le conflit de merge (exit 1 de `git merge`) comme un résultat `200`
+    `{conflicted:true, sha:null}`, et uniquement les autres codes comme VNL-SBX-012.
+  Classer le stderr d'un push échoué par @classify_push_stderr avec l'ordre exact :
+    Rejected (`rejected`/`non-fast-forward`) AVANT AuthFailed (les six sous-chaînes),
+    Other → CommandFailed ; un stderr portant à la fois un motif Rejected et un motif
+    Auth rend Rejected.
+  Calculer `pushed` AVANT le `git push` (le compte après le push serait toujours 0) et
+    le compter `rev-list --count origin/<cible>..HEAD` seulement si `refs/remotes/origin/
+    <cible>` existe, sinon `rev-list --count HEAD`.
+  Résoudre la branche par défaut via le HEAD symbolique du GIT COMMUN DIR (le dépôt bare
+    du PVC, pas le HEAD du worktree) avec repli silencieux `"main"` — jamais une erreur.
+  Tronquer `commits` de unpushed à `200` et de log à `limit` (défaut `100`), en
+    interrogeant git avec `max-count+1` et en posant `truncated` en conséquence.
+  Tronquer `@CommitEntry.sha` (unpushed) à exactement 7 caractères (convention fixe, pas
+    `--abbrev` de git) et rendre les SHA complets 40 hex ailleurs (commit, merge, log).
+  Gérer les clés SSH sous @ssh_home avec les chemins `id_ed25519`/`id_ed25519.pub`, une
+    idempotence fondée sur le fichier PRIVÉ, `ssh-keygen -t ed25519 -N ""` (sans
+    passphrase) et des `public_key` TOUJOURS trimés.
+  Rendre `400` pour @GitError::InvalidRef et `500` pour les douze autres variantes
+    (comportement actuel verrouillé, y compris les erreurs-utilisateur en 500 — voir
+    `Tasks` pour l'arbitrage).
+  Ignorer les lignes vides dans tous les parses de sortie et ne JAMAIS paniquer sur une
+    sortie inattendue (toujours @ParseFailed avec `line_no` et la ligne fautive).
+
+Must not:
+  Appliquer un niveau @AccessLevel, lire @AuthInfo ou différencier Read/Admin — ce fichier
+    ne fait PAS de RBAC (le `[!]` de ./auth.sdd reste ouvert ; introduire ici un garde
+    sans arbitrage de Sébastien est hors contrat).
+  Poser une variable d'environnement `GIT_*`, désactiver les prompts, poser un timeout ou
+    brider la taille des sorties — le code actuel ne le fait pas ; le documenter comme
+    dette `[?]`/`[!]`, pas comme propriété à pérenniser silencieusement.
+  Exposer le JWT, un secret ou le contenu de la clé PRIVÉE dans une réponse (seule la
+    clé publique sort, jamais le fichier privé ni son contenu).
+  Utiliser `git add -A`/`.` , `push --force` ou `branch -D` sur une liste implicite : le
+    staging est strictement liste-de-chemins, le push strictement `origin <cible>` sans
+    `--force`, et `-D` ne s'applique qu'au nom explicitement demandé.
+  Committer autre chose que l'index (`-a` implicite interdit), ou auto-merge/auto-abort
+    sans demande explicite d'une route.
+  Interpréter un code de sortie git ambigu comme « propre », « sans merge » ou « sans
+    amont » silencieusement (sauf les deux avalages explicitement contractés : `merging`
+    avalé à `false` et repli `"main"` de @resolve_default_branch).
+  Paniquer hors des `.expect` sur @JoinHandle déjà commentés, ni introduire de nouveau
+    `unwrap`/`expect`/`panic!` hors `cfg(test)` (harnais ../../tooling.sdd).
+  Sortir de `sandbox_root` par les chemins : @confine_path est la seule porte, et un
+    chemin absolu légitime sous la racine est le seul cas absolu accepté.
+  Répondre autre chose que `{"error": …}` pour une erreur de CE fichier (les 401/403
+    d'./auth.rs et les 400/422 de validation axum gardent leurs formats propres, hors
+    contrat ici).
+
+Depends on:
+  ./lib.rs — @AppState (seul champ lu : `config.sandbox_root`) ; câblage des seize routes.
+  ./config.rs — @Config::sandbox_root (`VNL_SANDBOX_ROOT`, défaut `/workspace`) ; @HOME du
+    process (via @ssh_home) pour les routes SSH.
+  ./tools_impl.rs — @confine_path (règles de confinement : canonicalisation de l'ancêtre
+    existant le plus profond, évasion → erreur, racine devant exister).
+  ./auth.rs — indirection par le middleware de ./lib.sdd uniquement (ce fichier ne l'appelle
+    pas) ; @AccessLevel jamais importé ici.
+  ./maint.rs et `vanyline-maint` (controller) — convention partagée du repli `"main"` de
+    @resolve_default_branch (../../docs/architecture.md, section `vanyline-maint`).
+  `git` (binaire du pod, image sandbox) et `ssh-keygen` — exécutables externes, hors
+    contrat de version exacte ; le comportement du fichier suppose porcelain v2 (git ≥ 2.11)
+    et `for-each-ref` avec `%(upstream:short)`.
+  `axum` (extracteurs @State/@Query/@Path/@Json, @IntoResponse), `serde`/`serde_json`,
+    `thiserror` v2, `tokio::task::spawn_blocking`, `std::process::Command`, `std::fs`.
+  ../../vanyline.sdd — le frontend ne voit jamais le JWT : les routes git sont appelées
+    avec le Bearer par l'app/les clients autorisés (le ticket WS ne s'applique pas ici).
+  ../../tooling.sdd — harnais clippy (les `expect_used` autorisés dans le fichier sont ceux des
+    @JoinHandle, chacun justifié en une ligne citant la spec au moment du renfort).
+
+Tasks:
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
+    accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
+  [ ] Cartographie couverture existante : unitaires du fichier (parses status/commits/
+    branches/log/count, argv diff/stage/unstage/create/delete/merge, @is_dirty ×3,
+    @reject_leading_dash ×2, @ssh_key_paths, @classify_push_stderr ×3, @parse_commit_output
+    ×3) ; intégration ../tests/http.rs : `git_status_endpoint_nominal`,
+    `git_status_endpoint_clean`, `git_status_endpoint_not_a_repo`,
+    `git_unpushed_endpoint_with_upstream`, `git_unpushed_endpoint_without_upstream`,
+    `git_unpushed_endpoint_no_local_commits`, `git_unpushed_endpoint_detached_head`.
+    Les douze autres routes n'ont AUCUN test HTTP (aucun test de diff/stage/unstage/
+    commit/branches/checkout/delete/push/log/ssh-key/merge/merge-abort au niveau route).
+  [ ] Convertir en tests taggés les Scenario sans couverture actuelle (la majeure partie
+    de la liste : tout ce qui touche une route autre que status/unpushed, plus les
+    enveloppes d'erreur 400/500 et les cas limites).
+  [?] @handle_push avec une branche courante SANS homologue `origin/<branche>` pousse en
+    réalité `git push origin <branche par défaut>` — ex. depuis `feat` sans `origin/feat`
+    avec défaut `main`, la commande est `push origin main` : ce n'est PAS la branche
+    courante qui est poussée, alors que le compteur `pushed` est calculé `origin/main..HEAD`
+    (delta de la branche courante). Comportement voulu (pousser le défaut quand la branche
+    est neuve ? cas nominal = premier push d'un repo vide) ou bug à corriger (pousser
+    `<branche>` elle-même, ex. `push -u origin <branche>`) ? À trancher AVANT d'épingler
+    le Scenario `push_sans_homologue_remote_pousse_le_nom_par_defaut`.
+  [?] @resolve_default_branch : le second appel `git --git-dir <dir> symbolic-ref …` n'a
+    PAS de `-C` ; si `rev-parse --git-common-dir` rend un chemin RELATIF (cas usuel
+    `".git"` avec `-C`), il est résolu contre le cwd du PROCESSUS serveur, pas du dépôt —
+    succès aléatoire selon le cwd de ./main.rs. Forcer `-C` (ou canonicaliser) ou
+    contractualiser le repli `"main"` ?
+  [!] Aucun timeout sur les sous-processus git/ssh-keygen et `GIT_TERMINAL_PROMPT` jamais
+    posé : un push dont l'auth demande un échange interactif (helper http, host non connu
+    avec StrictHostKeyChecking interactif) bloque un thread spawn_blocking indéfiniment
+    (la garde auth des stderr ne s'applique qu'APRÈS la mort du process). Timeout applicatif
+    (ex. `tokio::time::timeout` autour du blocking + kill) + `GIT_TERMINAL_PROMPT=0` à
+    décider.
+  [?] Erreurs-utilisateur rendues en 500 : @EmptyCommit (rien de stagé), @CheckoutRefused
+    (arbre sale), @DetachedHead, @NoMergeInProgress, @InvalidPath — candidates naturelles
+    à 4xx (409/400/422). Le commentaire de @IntoResponse (« statut par défaut inchangé
+    (500) … InvalidRef est neuve et correspond à 400 ») assume le statu quo partiel :
+    généraliser la migration 4xx ou verrouiller les 500 actuels par contrats + tests ?
+  [?] @handle_merge : `git merge` sort aussi 1 sur des échecs SANS fusion engagée (ex. «
+    Your local changes to the following files would be overwritten by merge ») → réponse
+    `conflicted:true` mensongère (aucun MERGE_HEAD, rien à aborter). Distinguer via
+    présence de MERGE_HEAD (comme @handle_branches) ou assumer l'heuristique exit 1 ?
+  [?] @handle_merge_abort effondre TOUT CommandFailed en VNL-SBX-013 « no merge in
+    progress » (git absent, dépôt corrompu → même message trompeur). Vérifier d'abord
+    `MERGE_HEAD` ?
+  [?] `GET /git/diff?path=` (vide) : @confine_path rend la racine, `strip_prefix` rend
+    `""`, `git diff -- ""` échoue → VNL-SBX-007 500 au lieu d'un 400 explicite. Verrouiller
+    ou rejeter la chaîne vide en amont ?
+  [?] Aucune limite de taille : un `git log?limit=4000000000` ou un diff géant entre
+    intégralement en RAM/réponse ; `limit + 1` sur `u32::MAX` fait `--max-count=0` en
+    release (= illimité, pas d'erreur). Bordure à borner (clamp `limit`, plafond d'octets)
+    ou assumée (client = éditeur authentifié) ?
+  [?] RBAC : aucune route ne branche @AccessLevel::Read (cohérent ./lib.sdd `Tasks [?]`
+    et ./auth.sdd `Tasks [!]`) — décision globale Read-décoratif vs gating écritures
+    (commit/push/merge/checkout/ssh-key création) à prendre une fois, répercutée ici.
+  [?] Permissions des fichiers SSH : `.ssh` créé à 0o755+umask (pas 0o700 explicite) et
+    privé à 0o600 par ssh-keygen seulement — ssh refuse un `known_hosts`/clés dans un
+    `.ssh` trop ouvert selon les versions ; poser un chmod explicite 0o700 ?
+  [?] Doublon assumé @run_git / logique inline de @run_status (commentaire : « tâche 02,
+    déjà mergée — ne pas refactorer ») : la dette de duplication est-elle soldée à la
+    prochaine intervention sur @run_status ?
+  [?] Le tag porcelain `!` (ignoré par prudence alors que `--ignored` n'est jamais demandé)
+    et le sort de `origPath` (jeté) : états du schéma JSON figés côté frontend ?
+
+Done when:
+  Chaque Scenario a un test dédié taggé par son titre, compilé, exécuté, vert (unitaires
+    purs pour les parses/argv ; intégrations `no_auth` sur repo git réel pour les routes).
+  Les douze routes sans couverture HTTP actuelle ont chacune au moins un test de route
+    nominal + un test d'enveloppe d'erreur.
+  Les `[?]`/`[!]` sont tranchés par Sébastien (notamment cible du push, timeouts, et
+    migration 4xx des erreurs-utilisateur) et la spec relue fait foi.
+  La batterie complète reste verte : `cargo check/test/build --workspace`, `cargo clippy
+    --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, sans nouveau
+    `unwrap`/`expect`/`panic!` hors `cfg(test)` et les @JoinHandle `expect` commentés
+    (../../tooling.sdd).
+
+Scenario: parse_status_repo_propre_rend_branch_main_et_clean
+  Given la sortie porcelain v2 fixture contenant uniquement les en-têtes `# branch.oid` et
+    `# branch.head main`
+  When @parse_status est appelée sur cette chaîne
+  Then le résultat est `Ok` avec `branch == "main"`, `files` vide et `clean == true`
+
+Scenario: parse_status_melee_stagee_non_stagee_renommee_et_untracked
+  Given une sortie porcelain v2 mélangeant une ligne `1 A.` stagée, une ligne `1 .M` non
+    stagée, une ligne `2 R100 to_new.txt<TAB>to_old.txt` et une ligne `? untracked.txt`
+  When @parse_status est appelée
+  Then les quatre entrées sont rendues dans l'ordre avec : `added`/`staged:true`,
+    `modified`/`staged:false`, `renamed` (path `"to_new.txt"`, `origPath` jeté),
+    `untracked`/`staged:false` ; et `clean == false`
+
+Scenario: parse_status_conflige_toujours_conflicted_et_stage
+  Given une sortie porcelain v2 contenant une ligne `u` de conflit (code `AA`)
+  When @parse_status est appelée
+  Then l'entrée rendue porte `state == Conflicted` et `staged == true` quel que soit le
+    code XY de la ligne
+
+Scenario: parse_status_ligne_de_tag_inconnu_rejette_avec_position
+  Given une sortie porcelain v2 valide suivie d'une ligne inconnue `X foo` en troisième
+    position
+  When @parse_status est appelée
+  Then l'erreur est @GitError::ParseFailed avec `line_no == 3` et `line == "X foo"`
+
+Scenario: parse_status_en_tete_branch_head_absent_rejette_en_ligne_zero
+  Given une sortie porcelain v2 ne contenant que l'en-tête `# branch.oid`
+  When @parse_status est appelée
+  Then l'erreur est @GitError::ParseFailed avec `line_no == 0` et le message
+    `"missing '# branch.head' header in git status output"`
+
+Scenario: parse_status_tete_detachee_passee_litteralement
+  Given une sortie porcelain v2 dont `# branch.head` vaut `(detached)`
+  When @parse_status est appelée
+  Then le résultat est `Ok` avec `branch == "(detached)"` (aucune erreur dédiée ici)
+
+Scenario: status_route_sortie_valide_de_vrai_depot
+  Given un @AppState en `no_auth` dont `sandbox_root` pointe sur un dépôt git réel avec un
+    fichier modifié non stagé (../tests/http.rs, pattern existant)
+  When `GET /git/status` traverse l'app
+  Then la réponse est `200` et le JSON porte la branche du dépôt et un @FileEntry
+    `modified`/`staged:false`, `clean:false`
+
+Scenario: status_route_sur_repertoire_sans_depot_renvoie_500_vnl_sbx_004
+  Given un @AppState en `no_auth` dont `sandbox_root` est un répertoire vide sans `.git`
+  When `GET /git/status` traverse l'app
+  Then la réponse est `500` et le corps JSON `{"error": …}` commence par
+    `"VNL-SBX-004:"` et contient le stderr git « not a git repository »
+
+Scenario: unpushed_delta_calcule_sur_upstream_origin
+  Given un dépôt réel avec remote `origin`, la branche courante ayant
+    `refs/remotes/origin/<branche>` et 2 commits locaux d'avance
+  When `GET /git/unpushed` traverse l'app (no_auth)
+  Then la réponse `200` porte `upstream == "origin/<branche>"`, 2 @CommitEntry dont le
+    `sha` a exactement 7 caractères, et `truncated == false`
+
+Scenario: unpushed_sans_amont_comparé_a_la_branche_par_defaut
+  Given un dépôt réel où la branche courante n'a pas de `refs/remotes/origin/<branche>`
+    mais où `origin/<défaut>` existe (défaut résolu par le HEAD symbolique du dépôt nu)
+  When `GET /git/unpushed` traverse l'app
+  Then la réponse porte `upstream: null` et le delta des commits est calculé contre
+    `origin/<défaut>`
+
+Scenario: unpushed_tete_detachee_renvoie_500_vnl_sbx_006
+  Given un dépôt réel en HEAD détaché
+  When `GET /git/unpushed` traverse l'app
+  Then la réponse est `500` avec le message exact
+    `"VNL-SBX-006: cannot determine unpushed commits: HEAD is detached"`
+
+Scenario: unpushed_tronque_a_deux_cents_commits_avec_drapeau
+  Given un dépôt réel avec 205 commits non poussés (création par commits vides en boucle)
+  When `GET /git/unpushed` traverse l'app
+  Then la réponse porte exactement `200` commits et `truncated == true`
+
+Scenario: diff_rend_le_patch_brut_et_le_chemin_utilisateur
+  Given un dépôt réel dont `a/b.txt` est modifié en working tree et `sandbox_root` confiné
+  When `GET /git/diff?path=a/b.txt` traverse l'app (no_auth)
+  Then la réponse `200` porte `path == "a/b.txt"` (chaîne brute de la query) et `diff`
+    égal au stdout de `git diff -- a/b.txt` (patch unifié non vide)
+
+Scenario: diff_staged_true_utilise_l_index
+  Given un dépôt réel avec une modification stagée et une seconde modification non stagée
+    du même fichier
+  When `GET /git/diff?path=f&staged=true` puis `GET /git/diff?path=f` traversent l'app
+  Then la première réponse ne contient que le patch de l'index (`git diff --staged`) et
+    la seconde uniquement le patch du working tree
+
+Scenario: diff_chemin_evadant_renvoie_500_vnl_sbx_015
+  Given un @AppState en `no_auth` avec un dépôt réel sous `sandbox_root`
+  When `GET /git/diff?path=../../etc/passwd` traverse l'app
+  Then la réponse est `500` avec le message `"VNL-SBX-015: path escapes sandbox root:
+    ../../etc/passwd"` (chemin utilisateur d'origine, pas le chemin résolu)
+
+Scenario: diff_query_path_absente_rejetee_par_axum
+  Given un @AppState en `no_auth`
+  When `GET /git/diff` sans paramètre `path` traverse l'app
+  Then la réponse est une erreur de validation axum (400/422) avec corps non-@GitError,
+    et aucun processus git n'est lancé
+
+Scenario: stage_liste_vide_est_un_no_op_ok_sans_git
+  Given un @AppState en `no_auth` sur un dépôt réel
+  When `POST /git/stage` avec corps `{"paths":[]}` traverse l'app
+  Then la réponse est `200` `{"ok":true}` et l'index du dépôt est inchangé (aucun
+    `git add` exécuté)
+
+Scenario: stage_et_unstage_deplacent_les_chemins_dans_l_index
+  Given un dépôt réel avec un fichier untracked `n.txt` et un fichier stagé `s.txt`
+  When `POST /git/stage` avec `{"paths":["n.txt"]}` puis `POST /git/unstage` avec
+    `{"paths":["s.txt"]}` traversent l'app
+  Then chaque réponse est `200 {"ok":true}` ; `n.txt` apparaît stagé (`A`) dans le status
+    porcelain et `s.txt` n'est plus dans l'index ; la table argv observée est `add --
+    n.txt` et `restore --staged -- s.txt`
+
+Scenario: stage_chemin_evadant_rejette_vnl_sbx_015
+  Given un @AppState en `no_auth` avec un dépôt réel
+  When `POST /git/stage` avec `{"paths":["../outside.txt"]}` traverse l'app
+  Then la réponse est `500` `"VNL-SBX-015: path escapes sandbox root: ../outside.txt"`
+    et aucun fichier hors de la racine n'est touché
+
+Scenario: commit_sans_rien_stage_renvoie_500_vnl_sbx_008
+  Given un dépôt réel dont l'index est identique à HEAD
+  When `POST /git/commit` avec `{"message":"x"}` traverse l'app
+  Then la réponse est `500` avec le message exact `"VNL-SBX-008: nothing staged to
+    commit"` (erreur-utilisateur en 500 — verrouillée telle quelle, cf. `Tasks [?]`)
+
+Scenario: commit_de_l_index_retourne_sha_complet_et_titre
+  Given un dépôt réel avec `f.txt` stagé (contenu « h ») et identité git configurée
+  When `POST /git/commit` avec `{"message":"sujet\n\ncorps"}` traverse l'app
+  Then la réponse `200` porte `sha` = le SHA complet à 40 hex du commit créé (vérifié par
+    `git rev-parse HEAD`) et `title == "sujet"` ; la commande exécutée est `commit -m
+    <message>` sans `-a` (le fichier modifié non stagé du dépôt reste non committé)
+
+Scenario: branches_liste_locales_et_remotes_avec_upstream
+  Given un dépôt réel avec une branche locale `main` amont de `origin/main` et une branche
+    locale `feat/x` sans amont, `main` étant la branche checkoutée
+  When `GET /git/branches` traverse l'app
+  Then la réponse `200` porte `current == "main"`, `merging == false`, et `branches`
+    contient {name:"main", is_remote:false, upstream:"origin/main"} et
+    {name:"feat/x", is_remote:false, upstream:null} et {name:"origin/main",
+    is_remote:true, upstream:null}
+
+Scenario: branches_fusion_en_cours_detectee_et_tete_detachee_pas_erreur
+  Given un dépôt réel en HEAD détaché avec un `MERGE_HEAD` présent (merge engagé puis
+    interrompu par un conflit)
+  When `GET /git/branches` traverse l'app
+  Then la réponse `200` porte `current == "HEAD"` (chaîne littérale, pas d'erreur) et
+    `merging == true`
+
+Scenario: creation_branche_acceptee_depuis_from_ou_head
+  Given un dépôt réel avec un commit sur `main`, HEAD sur `main`
+  When `POST /git/branches` avec `{"name":"feat/a"}` puis avec
+    `{"name":"feat/b","from":"main"}` traversent l'app
+  Then chaque réponse est `200 {"ok":true}` et `git branch --list` montre `feat/a` et
+    `feat/b` pointant sur le commit courant ; les argv observés sont `branch feat/a` et
+    `branch feat/b main`
+
+Scenario: refs_avec_tiret_initial_renvoient_400_vnl_sbx_014
+  Given un @AppState en `no_auth` sur un dépôt réel en merge conflictuel
+  When les requêtes suivantes traversent l'app : `POST /git/branches` avec
+    `{"name":"--help"}`, `POST /git/checkout` avec `{"branch":"-f"}`, `DELETE
+    /git/branches/--abort`, `POST /git/merge` avec `{"branch":"--abort"}`, `POST
+    /git/branches` avec `{"name":"ok","from":"-h"}`
+  Then CHACUNE répond `400` avec un message `"VNL-SBX-014: …"` et AUCUN effet git
+    (le merge en cours du dépôt n'est pas annulé, aucune branche créée/supprimée)
+
+Scenario: checkout_refuse_quand_arbre_ou_index_sale
+  Given un dépôt réel propre avec une seconde branche `dev`, puis (a) un fichier tracké
+    modifié en working tree, puis (b) seulement un fichier stagé
+  When `POST /git/checkout` avec `{"branch":"dev"}` traverse l'app dans chacun des deux
+    états
+  Then chaque réponse est `500` `"VNL-SBX-011: checkout refused: working tree is dirty
+    (branch: dev)"` et la branche courante n'a pas changé
+
+Scenario: checkout_accepte_les_untracked_et_bascule
+  Given un dépôt réel dont le working tree ne contient qu'un fichier UNTRACKED en plus de
+    HEAD, avec la branche `dev` existante
+  When `POST /git/checkout` avec `{"branch":"dev"}` traverse l'app
+  Then la réponse est `200 {"ok":true}` (les untracked ne bloquent pas — `git diff` ne
+    les voit pas), `git rev-parse --abbrev-ref HEAD` vaut `dev`, et si `dev` est déjà la
+    branche courante un second checkout rend aussi `200`
+
+Scenario: suppression_de_branche_forcee_et_refus_sur_branche_courante
+  Given un dépôt réel avec `feat` fusionnée et HEAD sur `main`
+  When `DELETE /git/branches/feat` traverse l'app puis `DELETE /git/branches/main`
+  Then la première répond `200 {"ok":true}` avec `git branch -D feat` (forçage `-D`,
+    même sans fusion) et la seconde répond `500 VNL-SBX-004` avec le stderr git
+    « cannot delete branch … checked out »
+
+Scenario: push_rend_ok_et_le_compte_effectue_avant_le_push
+  Given un dépôt réel avec remote `origin` (dépôt nu local) sur `main`, 2 commits locaux
+    d'avance, et `refs/remotes/origin/main` existant
+  When `POST /git/push` traverse l'app
+  Then la réponse `200` est `{"ok":true,"pushed":2}` (comptée par `rev-list --count
+    origin/main..HEAD` AVANT le push) et le dépôt nu contient désormais les 2 commits
+
+Scenario: push_sans_homologue_remote_pousse_le_nom_par_defaut
+  Given un dépôt réel sur la branche `feat` SANS `refs/remotes/origin/feat`, avec HEAD
+    symbolique du dépôt nu sur `main` (situation de branche locale neuve)
+  When `POST /git/push` traverse l'app
+  Then la commande réellement exécutée est `git push origin main` (la branche par défaut,
+    PAS `feat` — comportement actuel à confirmer/infirmer par le `[?]` des `Tasks`) et la
+    réponse porte `pushed` = `rev-list --count origin/main..HEAD`
+
+Scenario: push_rejet_non_fast_forward_renvoie_vnl_sbx_009
+  Given un dépôt réel dont `origin` (dépôt nu) a un commit que la branche locale n'a pas
+    (rejet garanti)
+  When `POST /git/push` traverse l'app
+  Then la réponse est `500` dont le message commence par `"VNL-SBX-009: push rejected
+    (non fast-forward):"` et contient le stderr de git
+
+Scenario: push_echec_identification_renvoie_vnl_sbx_010
+  Given un dépôt réel dont l'`origin` rejette l'accès (SSH sans clé : stderr portant
+    « Permission denied » ou « Could not read from remote repository » — ou stderr
+    simulé via @classify_push_stderr en unitaire)
+  When le push échoue avec ce stderr
+  Then l'erreur rendue est @GitError::GitWriteFailed `"VNL-SBX-010: git write failed
+    (no credentials): <stderr>"` en 500
+
+Scenario: classification_stderr_push_rejected_premier_sur_stderr_ambigu
+  Given un stderr contenant à la fois « rejected » et « Permission denied »
+  When @classify_push_stderr est appelée dessus
+  Then le rendu est @PushErrorKind::Rejected (la branche Rejected est testée avant Auth) ;
+    un stderr portant seulement « Host key verification failed » rend AuthFailed, et
+    « fatal: bad config » rend Other
+
+Scenario: log_par_defaut_cent_commits_tri_git_et_branche
+  Given un dépôt réel avec 105 commits sur `main`
+  When `GET /git/log` traverse l'app (no param)
+  Then la réponse `200` porte `branch == "main"`, exactement `100` @LogCommit aux `sha`
+    complets 40 hex, `date` en `%aI`, et `truncated == true` (sonde `--max-count=101`)
+
+Scenario: log_all_vrai_balaye_toutes_les_refs
+  Given un dépôt réel dont la branche courante a 1 commit et une autre branche en a 3
+  When `GET /git/log?all=true&limit=10` traverse l'app
+  Then la réponse contient les commits des DEUX branches (argv `log --all
+    --max-count=11 …`) et `all=false`/absent ne rend que ceux de la branche courante
+
+Scenario: log_limite_zero_rend_liste_vide_tronquee
+  Given un dépôt réel avec au moins un commit
+  When `GET /git/log?limit=0` traverse l'app
+  Then la réponse `200` porte `commits == []` et `truncated == true` (git interrogé avec
+    `--max-count=1`)
+
+Scenario: parse_log_ligne_malformee_et_sortie_vide
+  Given la chaîne `"abc sans separateur"` d'une part et la chaîne vide d'autre part
+  When @parse_log est appelée sur chacune
+  Then la première rend @GitError::ParseFailed (`line_no == 1`, ligne reproduite) et la
+    seconde `Ok(vec![])` ; @parse_log_line sur une ligne à 6 champs `\u{1f}` rend le
+    @LogCommit attendu (parents splittés sur espaces, refs sur `", "`, vides → `[]`)
+
+Scenario: ssh_key_status_lorsqu_absente_rend_false_sans_erreur
+  Given un @ssh_home temporaire (via env HOME du test) ne contenant aucun `.ssh`
+  When `GET /git/ssh-key` traverse l'app (no_auth)
+  Then la réponse est `200` `{"exists":false,"public_key":null}` — l'absence de clé est
+    un état normal, jamais une erreur
+
+Scenario: ssh_key_creation_genere_puis_est_idempotente
+  Given un @ssh_home temporaire sans clé
+  When `POST /git/ssh-key` traverse l'app deux fois de suite
+  Then la première réponse `200` porte une `public_key` trimée commençant par
+    `ssh-ed25519 ` ; la seconde répond `200` avec la MÊME clé (aucune régénération — la
+    clé privée `~/.ssh/id_ed25519` et sa `.pub` existent sous le HOME, argv `ssh-keygen
+    -t ed25519 -N "" -f <priv>` exécuté une seule fois) ; `GET /git/ssh-key` renvoie
+    alors `{"exists":true,"public_key":<identique>}`
+
+Scenario: merge_reunion_auto_commitmee_rend_le_sha
+  Given un dépôt réel sur `main` avec une branche `feature` en avance non conflictuelle
+  When `POST /git/merge` avec `{"branch":"feature"}` traverse l'app
+  Then la réponse `200` est `{"conflicted":false,"sha":"<40 hex>"}` égal à `git rev-parse
+    HEAD` (merge auto-committé par git)
+
+Scenario: merge_conflit_rend_200_conflicted_et_non_une_erreur
+  Given un dépôt réel où `main` et `feature` modifient toutes deux la même ligne d'un
+    fichier tracké
+  When `POST /git/merge` avec `{"branch":"feature"}` traverse l'app
+  Then la réponse est `200` (PAS une erreur HTTP) `{"conflicted":true,"sha":null}`,
+    `MERGE_HEAD` existe et `GET /git/status` montre désormais une entrée `conflicted`
+
+Scenario: merge_ref_inconnue_renvoie_vnl_sbx_012
+  Given un dépôt réel sans branche `ghost` ni `origin/ghost`
+  When `POST /git/merge` avec `{"branch":"ghost"}` traverse l'app
+  Then la réponse est `500` `"VNL-SBX-012: merge not started: <stderr>"` (code de sortie
+    autre que 0/1) et le dépôt est inchangé (aucun MERGE_HEAD)
+
+Scenario: merge_abort_sans_fusion_renvoie_vnl_sbx_013
+  Given un dépôt réel sans aucune fusion en cours (pas de MERGE_HEAD)
+  When `POST /git/merge/abort` traverse l'app
+  Then la réponse est `500` avec le message exact `"VNL-SBX-013: no merge in progress to
+    abort"`
+
+Scenario: merge_abort_annule_la_fusion_engagee
+  Given un dépôt réel avec un merge conflictuel en cours (MERGE_HEAD présent)
+  When `POST /git/merge/abort` traverse l'app
+  Then la réponse est `200 {"ok":true}` (argv `merge --abort`), MERGE_HEAD a disparu et
+    `GET /git/branches` rend `merging == false`
+
+Scenario: toute_erreur_git_est_enveloppee_en_json_error
+  Given n'importe quelle route git déclenchée en erreur (dépôt absent pour status,
+    chemin évadant pour diff, `--abort` pour checkout…) sur l'app en `no_auth`
+  When le corps des réponses est lu
+  Then chaque réponse a un `content-type` JSON, un statut `400` (seul InvalidRef) ou
+    `500` (toutes les autres variantes), et un corps exact `{"error":"VNL-SBX-0XX: …"}`
+    — jamais un corps texte ou un statut 4xx inventé par ce module
+
+Scenario: routes_git_sous_require_auth_decorees_par_auth_sdd
+  Given un @AppState en mode JWT (ni `no_auth` ni `static_token`)
+  When les seize routes `/git/*` sont appelées sans `Authorization` puis avec un JWT
+    portant le groupe @AccessLevel::Read uniquement
+  Then sans jeton chacune répond `401` (garde ./auth.rs, jamais exécutée par ce module)
+    et avec le jeton Read chacune est ACCEPTÉE (commit/push inclus — le module ne branche
+    aucun niveau ; comportement acté comme `[?]`/`[!]` dans ./lib.sdd, ./auth.sdd et les
+    `Tasks` de cette spec, non comme une bénédiction)
+
+Example: enveloppes JSON observables
+  `GET /git/status` → `{"branch":"main","files":[{"path":"src/lib.rs","state":"modified",
+    "staged":false}],"clean":false}`
+  `GET /git/unpushed` → `{"branch":"main","upstream":"origin/main","commits":[{"sha":
+    "dce4196","title":"init","author":"Alice","date":"2024-01-01T10:00:00Z"}],
+    "truncated":false}`
+  `POST /git/commit` → `{"sha":"dce41965c9aa085042cef737c1eaa4141a055b5a","title":"init"}`
+  `POST /git/push` → `{"ok":true,"pushed":2}`
+  `POST /git/merge` (conflit) → `200 {"conflicted":true,"sha":null}`
+  erreur 500 → `{"error":"VNL-SBX-011: checkout refused: working tree is dirty (branch: dev)"}`
+  erreur 400 → `{"error":"VNL-SBX-014: invalid ref/name \"--abort\": must not start with '-'"}`

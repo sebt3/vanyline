@@ -1,0 +1,612 @@
+Spec: Fs
+
+Platform: Rust/vanyline-sandbox/axum-websocket
+
+Purpose:
+  Handler `GET /ws/fs` du serveur sandbox : session filesystem temps réel de l'éditeur —
+  RPC JSON sur WebSocket (une requête = une frame texte = une réponse, plus des frames de
+  push serveur→client), confinée dans `@Config::sandbox_root`. Le fichier possède la
+  boucle de session (select requêtes/push), le dispatch des ops (`read`/`write`/`edit`/
+  `delete`/`mkdir`/`rename`/`list`/`root`/`flush-ack`), la corrélation par `id`
+  (@attach_req_id) et le relai du broadcast `fs_events` vers le client. Il ne traite
+  aucune requête lui-même hors dispatch : les effets disque viennent des MÊMES fonctions
+  `vanyline_tools::filesystem::*` que le chemin MCP, avec le MÊME confinement
+  (@crate::tools_impl::confine_path, marqueurs `VNL-SBX-001`/`002`/`003`) — c'est un
+  contrat DE SÉCURITÉ : aucune opération ne doit pouvoir toucher un chemin hors de la
+  racine. L'authentification n'est PAS ici : le ticket est validé et consommé en amont
+  par @ws_auth_middleware (./ticket.sdd), et les claims sont jetés. Point clé souvent
+  mal lu : il n'y a AUCUN surveillant filesystem (pas de crate `notify`, aucune inotify)
+    dans ce fichier — le « watch » de l'éditeur se réduit au relai TEL QUEL des frames
+    publiées sur `fs_events` par d'autres (`file-changed` par `edit_and_check` de
+    ../tools_impl.rs, `flush-request` par @FsFlushRequests de ../lib.rs — atelier à
+    capacité `64`, timeout `2 s`, ids de flush depuis `1`, contractés par ../lib.sdd). Un
+    fichier, un contrat — pas de regroupement avec ./ticket.rs (handshake), ./terminal.rs,
+    ./lsp.rs.
+
+Owns:
+  ./fs.rs
+
+Can read:
+  ./ticket.rs
+  ./terminal.rs
+  ./lsp.rs
+  ./mod.rs
+  ../lib.rs
+  ../tools_impl.rs
+  ../auth.rs
+  ../config.rs
+  ../../Cargo.toml
+  ../../../tools/src/filesystem.rs
+  ../../../tools/src/output.rs
+  ../../../tools/src/error.rs
+  ../../tests/http.rs
+  ../../../docs/architecture.md
+  ../../../vanyline.sdd
+  ../../../tooling.sdd
+  ../../../../.specdd/bootstrap.project.md
+
+Depends on:
+  ../lib.rs — @AppState (champs `config`, `fs_events`, `fs_flush`), @FS_FLUSH_TIMEOUT_SECS
+    (`2`) ; @FsFlushRequests::handle_ack (no-op sur id inconnu/double ack, contrat
+    ../lib.sdd) ; la capacité `64` du canal `fs_events` (@FS_EVENTS_CAPACITY) ; @build_app
+    câble @handle_ws_fs sur `GET /ws/fs` avec @ws_auth_middleware en couche par route.
+  ../tools_impl.rs — @confine_path + @SandboxError : règles de confinement (chemin vide =
+    racine, chemin absolu accepté s'il retombe dans la racine, `/` finaux ignorés,
+    canonicalisation de l'ancêtre existant le plus profond → symlinks sortants rejetés,
+    suffixe inexistant autorisé) et @Display des erreurs `VNL-SBX-001` (évasion),
+    `VNL-SBX-002` (racine invalide), `VNL-SBX-003` (ancêtre non résoluble). Sa spec
+    (../tools_impl.sdd) n'existe pas encore — le détail de ces règles y vivra, ici on en
+    consomme les effets observables.
+  `vanyline_tools` (../../../tools/src/) — @filesystem::{read_file, write_file, edit_file,
+    delete_file, mkdir, rename_file, list_directory} et leurs Options ; @output
+    (READ_MAX_LINES `200`, READ_MAX_BYTES `16 KiB`, LIST_MAX_ENTRIES `200`, marqueur
+    `[truncated — N more lines, call again with offset=X]`, numérotation `%5d\t`) ;
+    @ToolsError dont le @Display fournit les marqueurs `VNL-TLS-001`…`VNL-TLS-009` rendus
+    tels quels dans `"error"`.
+  ./ticket.rs — @ws_auth_middleware : garde amont qui valide/consomme `?ticket=` AVANT
+    l'extracteur @WebSocketUpgrade (choix délibéré contre la conversion 426 d'axum) ;
+    les @TicketClaims sont jetés — aucune identité n'atteint @fs_session.
+  @axum 0.8 (features `ws`) — @extract::ws (@Message, @WebSocket), @WebSocketUpgrade,
+    @State ; @tokio — @select!, @sync::broadcast ; @serde_json — parsing/enveloppes ;
+    @tracing — unique log du module : warn sur Lagged (les warn de confinement viennent
+    de ../tools_impl.rs, pas de ce fichier).
+
+Exposes:
+  @handle_ws_fs — `pub async fn(State(@AppState), @WebSocketUpgrade) -> impl @IntoResponse`
+    routé sur `GET /ws/fs` (../lib.sdd) : `upgrade.on_upgrade(|ws| fs_session(state, ws))`
+    sans lire la query (le ticket a déjà été consommé par la garde amont). Sans headers
+    d'upgrade, l'extracteur @WebSocketUpgrade rejette lui-même (ticket déjà consommé —
+    ./ticket.sdd `Handles`).
+  @TicketQuery — `pub struct { pub ticket: @Option<@String> }` derive @Deserialize avec
+    `#[serde(default)]` : DÉCLARÉ MAIS JAMAIS UTILISÉ nulle part (la garde de ./ticket.rs
+    découpe la query brute à la main) — code mort `pub`, cf. `Tasks` `[?]`.
+  @fs_session — `async fn(@AppState, @WebSocket) -> ()` (privé) : souscrit `fs_events`
+    APRÈS l'upgrade, puis boucle @tokio::select! SANS `biased;` entre `ws.recv()` et
+    `events.recv()` — voir `Handles` pour chaque branche.
+  @attach_req_id — `fn(@serde_json::Value, &@str) -> @serde_json::Value` (privé) : copie
+    `"id"` de la requête dans la réponse quand la requête est un JSON valide portant ce
+    champ ; sinon réponse strictement inchangée.
+  @dispatch_fs_message — `pub async fn(&@AppState, &@str) -> @serde_json::Value` :
+    parsing + validation + dispatch des ops. `pub` mais sans appelateur hors ./fs.rs et
+    ses tests (surface de test du contrat de dispatch).
+  Module de test `tests` + helpers `make_state`/`ok` (`cfg(test)`) — 25 tests existants
+    (cartographie en `Tasks`) : `read_file_returns_content`, `read_file_with_limit_truncates`,
+    `write_file_creates`, `edit_file_replaces`, `delete_file_removes`,
+    `list_directory_returns_entries`, `path_escape_rejected`, `unknown_op_rejected`,
+    `invalid_json_rejected`, `read_raw_returns_untouched_content`, `read_default_still_numbered`,
+    `ticket_query_required` (teste la GARDE de ./ticket.rs + ../lib.rs depuis ce fichier),
+    `mkdir_creates`, `mkdir_creates_parents`, `rename_moves`, `rename_escape_rejected`,
+    `rename_missing_to_rejected`, `root_op_returns_canonical_root`, `root_op_needs_no_path`,
+    `attach_req_id_echoes_id`, `attach_req_id_preserves_error_response`,
+    `request_flush_resolved_by_ack`, `request_flush_times_out_without_ack`,
+    `handle_ack_unknown_and_double_noop`, `flush_ack_malformed_rejected`.
+
+Accepts:
+  Handshake : toute requête `GET /ws/fs` arrivée vivante après la garde (ticket valide
+    consommé). Ce handler ne relit ni query, ni header, ni cookie ; @AccessLevel des
+    claims étant jetés (./ticket.sdd), un accès `Read` obtient TOUTES les ops, écritures
+    et suppressions comprises (cf. `Tasks` `[?]`).
+  Frames texte : une requête JSON par frame ; forme `{"op": <string>, ...params}`, `id`
+    optionnel (number ou string, copié verbatim, peut être `null` → `"id":null` recopié).
+    Le serveur répond dans l'ordre de réception ; la sérialisation des appels en vol est
+    un contrat du CLIENT (../../../docs/architecture.md section « WebSocket éditeur » :
+    `SandboxFsClient` sérialise, une requête à la fois).
+  Table des ops (paramètres exactement comme lus par @dispatch_fs_message) :
+    `root` — aucun paramètre (ni `path`) → racine canonique.
+    `flush-ack` — `ackFor` requis, u64 STRICT (chaîne, négatif, décimal, absent → rejet) ;
+      aucun `path` requis ; testé AVANT l'extraction de `path`.
+    `read` — `path` requis ; `offset` (défaut `0`), `limit` (défaut `0` =
+      @output::READ_MAX_LINES `200` lignes et @output::READ_MAX_BYTES `16 KiB`), `raw`
+      (bool défaut `false`).
+    `write` — `path` + `content` (string) requis.
+    `edit` — `path` + `old_string` + `new_string` requis ; `replace_all` (bool défaut `false`).
+    `delete` / `mkdir` — `path` requis, rien d'autre.
+    `rename` — `path` + `to` requis ; les DEUX chemins confinés séparément.
+    `list` — `path` requis ; `depth` (défaut `0` = profondeur effective `1`).
+  Conversion silencieuse des paramètres numériques/booléens : `offset`/`limit`/`depth`
+    non numeriques (chaîne, bool, négatif, décimal) -> `as_u64` échoue -> défaut `0` SANS
+    erreur ; `raw`/`replace_all` non booléens -> `false`. Un `path` non-string (number,
+    objet, `null`) == `path` absent -> `missing path`.
+  Toute autre valeur de `"op"` (y compris non-string : absent, number, objet) -> `missing
+    op` si `op` absent/non-string, `unknown op` si string inconnue AVEC `path` présent,
+    `missing path` si string inconnue SANS `path` (l'extraction du path précède le match —
+    effet de bord d'ordonnancement, cf. `Tasks` `[?]`).
+  Frames non texte : @Message::Binary, @Message::Ping, @Message::Pong -> frame texte
+    d'erreur `{"ok":false,"error":"unexpected binary frame"}`, connexion gardée ouverte
+    (le libellé « binary » couvre aussi les keepalive Ping/Pong — cf. `Tasks` `[!]`).
+    @Message::Close, erreur WS ou flux fini -> fin immédiate de la session.
+  Côté push : fs_session n'« accepte » rien du broadcast — il ne filtre rien, ne parse
+    rien, toute @String publiée sur `fs_events` part telle quelle au client.
+
+Returns:
+  Enveloppes de succès (clés exactes, `id` additionnel si la requête en portait un) :
+    `read` -> `{"ok":true,"content":<string>,"truncated":<bool>}` — par défaut contenu
+      NUMÉROTÉ (`%5d\t`, numérotation globale à partir de `offset+1`) et borné (`200`
+      lignes / `16 KiB`, marqueur final `[truncated — N more lines, call again with
+      offset=X]`) ; `raw:true` -> contenu brut intégral, jamais numéroté ni tronqué.
+    `write` -> `{"ok":true,"wrote":<chemin absolu résolu>}` (parents créés, écriture
+      atomique `.{name}.vny-tmp-{pid}` puis rename, permissions préservées).
+    `edit` -> `{"ok":true,"content":"edited <path>: N replacement(s)"}` — la clé
+      `content` porte le MESSAGE de l'outil, pas le contenu du fichier (cf. `Tasks` `[?]`).
+    `delete` -> `{"ok":true,"deleted":<absolu>}` ; `mkdir` -> `{"ok":true,"mkdir":<absolu>}` ;
+      `rename` -> `{"ok":true,"renamed":<absolu de destination>}`.
+    `list` -> `{"ok":true,"entries":<string>,"truncated":<bool>}` — arbre compact trié,
+      un nom par ligne, indent `2 espaces`/niveau, suffixe `/` pour les dossiers, vide ->
+      `"<path> is empty"`, > `200` entrées -> marqueur `[truncated at 200 entries …]`.
+    `root` -> `{"ok":true,"root":<racine canonique absolue>}`.
+    `flush-ack` valide -> `{"ok":true}` NU, puis @attach_req_id dans la boucle copie l'id
+      de corrélation du client — le `id` du flush, lui, voyage exclusivement dans `ackFor`
+      (jamais dans `id` : le client l'écraserait et son pending ne se résoudrait jamais —
+      piège asserti côté sandboxWs).
+  Enveloppe d'erreur unique : `{"ok":false,"error":<string>}` — l'`id` de la requête y est
+    aussi recopié. Vocabulaire des `"error"` : littéraux de protocole SANS identifiant
+    (`"invalid JSON"`, `"missing op"`, `"unknown op"`, `"missing path"`, `"missing content"`,
+    `"missing old_string"`, `"missing new_string"`, `"missing to"`,
+    `"flush-ack requires numeric ackFor"`, `"unexpected binary frame"`) ; @Display de
+    @SandboxError (`VNL-SBX-001: path escapes sandbox root: …`, `VNL-SBX-002: invalid
+    sandbox root: …`, `VNL-SBX-003: failed to resolve path ancestor …`) ; @Display de
+    @ToolsError (`VNL-TLS-001` introuvable + indice `parent directory contains:` / `does
+    not exist either`, `002` pas un fichier, `003` pas un dossier, `004` permission, `005`
+    argument invalide — offset hors plage, `old_string` vide, dossier non vide à supprimer,
+    parent de destination absent pour `rename` —, `006` `old_string` introuvable + ligne la
+    plus proche, `007` ambiguïté avec compte, `009` erreur I/O — UTF-8 invalide inclus).
+  Push : chaque frame reçue du broadcast est renvoyée SANS aucune transformation (ni parse,
+    ni re-sérialisation, ni enveloppe) — `{"event":"file-changed","path":…}` et
+    `{"event":"flush-request","id":N,"path":…}` atteignent le client byte pour byte.
+  @dispatch_fs_message sans erreur : rend TOUJOURS un @Value objet, jamais de @Result.
+
+Raises:
+  Aucune propagation d'erreur au-delà des enveloppes JSON : @dispatch_fs_message et
+    @fs_session ne rendent rien de typé, ne lèvent rien. En production, ce fichier ne
+    contient aucun `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` (harnais
+    ../../../tooling.sdd) — la seule panic théorique viendrait d'en amont (@TicketStore
+    sous ./ticket.sdd, hors session).
+  Panique amont observable ici : @confine_path est appelé SYNCHRONEMENT dans le thread
+    d'exécution asynchrone (contrairement à la voie MCP qui passe par @spawn_blocking —
+    ../tools_impl.rs `confine`) : I/O bloquant sur le worker tokio, cf. `Tasks` `[?]`.
+
+Handles:
+  Cycle de vie de session : souscription `fs_events` APRÈS l'upgrade et APRÈS chaque
+    connexion — le broadcast n'est pas un historique : un client connecté ne reçoit AUCUN
+    événement antérieur (pas de rattrapage) ; chaque connexion a son propre abonné ; la
+    souscription est abandonnée au retour de @fs_session.
+  Boucle @select! sans `biased;` : lecture et push ont priorité fluide dans les deux sens
+    — un flux d'événements ne doit pas affamer la lecture des requêtes, ni l'inverse.
+  Mort du client : échec de `send` (réponse OU frame de push) -> `return` immédiat ;
+    @Message::Close / @Err(_) / @None -> `return`. Aucun `Close` explicite renvoyé, aucun
+    cleanup à faire (le drop de l'abonné suffit). Déconnexion PENDANT une opération : le
+    dispatch est déjà attendu jusqu'au bout — l'effet disque EST appliqué, la réponse est
+    perdue ; `atomic_write` (../../../tools/src/filesystem.rs) garantit l'absence de
+    fichier tronqué. L'envoi du message `unexpected binary frame` est en `let _ =` : son
+    échec est ignoré et la boucle CONTINUE (contrairement aux deux autres send).
+  Canal de push saturé (@Lagged, capacité `64` par ../lib.sdd) : @tracing::warn
+    `"fs_events subscriber lagged: {n} pushed frames dropped"` et la session CONTINUE —
+    mieux vaut un canal en retard qu'un éditeur débranché ; un `flush-request` perdu dans
+    le lot ne pourra pas être acquitté et son @request_flush rendra `false` au timeout
+    (repli debounce, ../lib.sdd). @RecvError::Closed (tous les @Sender tombés —
+    quasi-inatteignable, @AppState les tient) -> `return`.
+  Ordonnancement du dispatch : `root` et `flush-ack` sont interceptés AVANT l'extraction
+    de `path` (ops sans chemin) ; toute autre op exige `path` AVANT de connaître l'op —
+    d'où `{"op":"bogus"}` -> `missing path` et non `unknown op`.
+  Confinement : TOUT chemin (`path` et `to` de `rename`) passe par @confine_path avant
+    effet ; chemin vide ou que-des-`/` = racine elle-même ; chemin absolu accepté
+    uniquement s'il retombe sous la racine canonique ; symlinks résolus par canonicalisation
+    de l'ancêtre existant le plus profond -> une évasion par symlink rend `VNL-SBX-001` ;
+    une racine non canonicalisable rend `VNL-SBX-002` pour CHAQUE op (y compris `root`).
+  Sémantique des outils sous-jacente (résumée ici, contrat propre à `vanyline_tools`) :
+    `write` crée les parents manquants ; `mkdir` = `create_dir_all` (parents inclus,
+    idempotent sur dossier existant, `VNL-TLS-003` sur un chemin pris par un FICHIER) ;
+    `delete` sur dossier = `remove_dir` NON récursif (`VNL-TLS-005` « directory is not
+    empty » — jamais de cascade silencieuse) ; `rename` NE crée PAS le parent de
+    destination (`VNL-TLS-005`) ; `read`/`edit` sur dossier -> `VNL-TLS-002` ; `list` sur
+    fichier -> `VNL-TLS-003` ; fichier binaire (UTF-8 invalide) -> `VNL-TLS-009` ; fichier
+    vide lu -> `content:""` sans erreur ; `offset` >= nombre de lignes -> `VNL-TLS-005`.
+  Détection de troncature : `"truncated": !raw && content.contains("truncated")` (read) et
+    `entries.contains("truncated")` (list) — heuristique SOUS-STRING, pas détection du
+    marqueur : tout contenu ou nom de fichier contenant le mot `truncated` produit
+    `"truncated":true` sur une sortie complète — heuristique accidentelle, cf. `Tasks` `[!]`.
+  Multi-onglets : N sessions `/ws/fs` reçoivent la MÊME frame de push (broadcast) ; parmi
+    leurs `flush-ack`, le premier acquitte réellement (@handle_ack no-op ensuite, ../lib.sdd)
+    — les acks suivants reçoivent quand même `{"ok":true}`.
+  Aucun surveillant filesystem : ce fichier n'émet JAMAIS de frame `file-changed` ni
+    `flush-request` — il ne fait que relayer `fs_events` ; les émetteurs sont
+    `edit_and_check` (../tools_impl.rs) et @FsFlushRequests (../lib.rs). Un fichier
+    modifié hors de ces deux voies (curl dans le terminal, git du controller) ne produit
+    AUCUNE notification.
+  Limites de trame WS : @WebSocketUpgrade accepté sans réglage (aucun
+    `max_message_size`/`max_frame_size` nulle part dans le crate) -> défauts axum 0.8 en
+    vigueur (à vérifier et épingler, cf. `Tasks` `[?]`) ; au-delà, la trame est rejetée
+    au niveau WS et la session meurt par la branche @Err(_).
+  Limites de taille en réponse : `read` non-raw borné à `200` lignes / `16 KiB` ;
+    `read` raw sans AUCUNE limite (fichier entier en mémoire) ; `list` borné à `200`
+    entrées. Aucun quota de payload d'`write` côté application.
+  Session sans durée de vie bornée : aucun idle timeout, aucun keepalive émis par le
+    serveur (un Ping entrant reçoit son Pong automatique de tokio-tungstenite puis tombe
+    dans la branche « unexpected binary frame » — cf. `Tasks` `[!]`) ; l'inactivité ne
+    ferme jamais côté serveur.
+  Logging : le module n'émet QU'UN seul log (warn Lagged) ; `confine_path` en amont logge
+    warn sur évasion/racine invalide. Aucune trace d'identité (claims jetés), aucune
+    donnée ticket.
+
+Must:
+  Confiner `path` (et `to` de `rename`) via @confine_path AVANT tout effet de bord, et
+    rendre le @Display de @SandboxError dans `"error"` en cas d'évasion — le marqueur
+    `VNL-SBX-001` doit être présent dans le message (asserti par les tests existants
+    `path_escape_rejected`/`rename_escape_rejected`).
+  Répondre exactement une frame texte par frame texte entrante (succès, erreur ou
+    `unknown op`), dans l'ordre de réception.
+  Copier `"id"` VERBATIM (number, string ou `null`) dans la réponse quand la requête est
+    un JSON valide qui en porte un — y compris sur les réponses d'erreur, `ok:false` et
+    `error` intacts ; réponse STRICTEMENT inchangée (pas de `"id":null` ajouté) quand la
+    requête est non-JSON ou sans `id` — les clients legacy gardent le comportement
+    séquentiel sans `id`.
+  Lire les défauts exactement : `offset=0`, `limit=0` (= `200` lignes/`16 KiB`), `raw=false`,
+    `replace_all=false`, `depth=0` (= `1`) ; `raw:true` rend le contenu brut avec
+    `"truncated":false`, jamais numéroté, jamais tronqué, sans tenir compte de `limit`.
+  Traiter `flush-ack` sans `path`, exiger `ackFor` u64 strict, appeler
+    @FsFlushRequests::handle_ack, répondre `{"ok":true}` nu (l'id client recopié par la
+    boucle) ; un ack malformé ne résout AUCUN waiter et rend le message exact `"flush-ack
+    requires numeric ackFor"`.
+  Relayer les frames du broadcast TELLES QUELLES (même @String, pas de re-encodage) et
+    N'EN INVENTER AUCUNE.
+  Sur @Lagged : log `warn` et poursuite de la session ; sur send en échec d'une frame de
+    push : fin de session (même traitement qu'une réponse).
+  Maintenir la boucle @select! sans `biased;` : ni un flux d'événements ni un flux de
+    requêtes ne doit affamer l'autre sens.
+  Rendre chaque réponse d'erreur sous la forme `{"ok":false,"error":<string>}` avec le
+    marqueur du crate d'origine quand il existe (`VNL-SBX-*`, `VNL-TLS-*`) — l'absence
+    d'identifiant sur les littéraux de protocole est l'état actuel, sa correction passe
+    par l'arbitrage `Tasks`.
+  Zéro `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` en dehors de `cfg(test)` ;
+    unique @tracing du fichier : le warn Lagged (../../../tooling.sdd).
+
+Must not:
+  Toucher un chemin hors de @sandbox_root — sous AUCUNE forme : `..` lexicaux, chemin
+    absolu hors racine, symlink intérieur pointant dehors, `to` de `rename` non confine :
+    le refus doit précéder tout appel à `vanyline_tools`.
+  Traiter une écriture comme annulable parce que le client s'est déconnecté en cours de
+    route — l'effet disque d'une op partie est complet et assumé ; ne jamais introduire
+    de « rollback » implicite sans arbitrage de spec.
+  Réplay d'événements passés à une session qui se connecte (le broadcast n'est pas un
+    historique) — toute promesse de rattrapage exigerait une extension de contrat.
+  Bufferiser, fusionner, filtrer ou envelopper une frame de push ; filtrer les clients
+    par chemin ou par identité (aucune identité disponible — claims jetés, ./ticket.sdd).
+  Accepter une sémantique pour les frames binaires autres que le rejet texte
+    `unexpected binary frame` (le PTY binaire appartient à /ws/terminal, ./terminal.sdd).
+  Résoudre un waiter de flush sur un `ackFor` absent, chaîne, négatif ou décimal ; ni
+    placer l'id de flush dans `id` (corrélation client = `id`, flush = `ackFor`, cloison
+    étanche).
+  Bénir la détection de troncature par sous-chaîne comme un contrat de fidélité — elle
+    est documentée comme heuristique, ses faux positifs sont un défaut à trancher
+    (`Tasks` `[!]`), pas une feature.
+  Introduire un identifiant, un champ ou un verbe de protocole nouveau sans que cette
+    spec (et le client `SandboxFsClient` en face) ne le contracte d'abord.
+  Authentifier, autoriser ou auditer quoi que ce soit dans ce fichier (la garde est en
+    amont ; l'`access` est jeté) — tout durcissement de niveau (`Read` vs `Admin`) passe
+    par ./ticket.sdd d'abord.
+
+Tasks:
+  [ ] Relecture par Sébastien — spec issue de reverse-engineering ; aucun comportement
+    accidentel ne devient contrat avant relecture (.specdd/bootstrap.project.md).
+  [ ] Cartographie de la couverture existante (à re-tagger par les titres de Scenario) :
+    `read_file_returns_content`, `read_file_with_limit_truncates`, `write_file_creates`,
+    `edit_file_replaces`, `delete_file_removes`, `list_directory_returns_entries`,
+    `path_escape_rejected`, `unknown_op_rejected`, `invalid_json_rejected`,
+    `read_raw_returns_untouched_content`, `read_default_still_numbered`, `mkdir_creates`,
+    `mkdir_creates_parents`, `rename_moves`, `rename_escape_rejected`,
+    `rename_missing_to_rejected`, `root_op_returns_canonical_root`, `root_op_needs_no_path`,
+    `attach_req_id_echoes_id`, `attach_req_id_preserves_error_response`,
+    `request_flush_resolved_by_ack`, `request_flush_times_out_without_ack`,
+    `handle_ack_unknown_and_double_noop`, `flush_ack_malformed_rejected` (./fs.rs) ;
+    `ticket_query_required` (./fs.rs — teste en réalité la garde de ./ticket.rs et le
+    routeur de ../lib.rs ; cf. aussi ./ticket.sdd `Tasks`).
+  [ ] Convertir en tests taggés les Scenarios sans couverture directe — tout ce qui
+    touche la boucle @fs_session (relai de push byte-for-byte, multi-session, Lagged,
+    close, client déconnecté en cours d'écriture, rafale d'événements, frames Ping/Pong)
+    exige un harnais WS réel (upgrade tour/testing) qui n'existe pas encore ; les
+    Scenarios de dispatch direct sont couvrables via @dispatch_fs_message.
+  [!] Faux positifs de `"truncated"` par sous-chaîne : un fichier dont le contenu (mode
+    non-raw) ou un nom d'entrée (`list`) contient le mot `truncated` est annoncé tronqué
+    alors que la réponse est complète. Détecter le marqueur réel (`[truncated — …` /
+    `[truncated at … entries`) ou renvoyer la valeur des outils ? Décision à prendre avec
+    Sébastien — ce comportement n'est PAS béni.
+  [!] Frames @Message::Ping/@Message::Pong : traitées comme « unexpected binary frame » —
+    chaque keepalive (proxy, client) vaudrait une frame d'erreur parasite au client (le
+    Pong de réponse est lui émis automatiquement en dessous). Silencieux Ping/Pong ou
+    libellé corrigé ? À trancher (../../../docs/architecture.md signale déjà le piège
+    keepalive côté /ws/terminal).
+  [?] @TicketQuery `pub` jamais utilisé (le middleware de ./ticket.rs découpe la query à
+    la main) : supprimer, ou câbler l'extraction dessus des deux côtés ?
+  [?] `{"op":"bogus"}` (sans `path`) répond `"missing path"` et non `"unknown op"` —
+    effet d'ordonnancement (extraction du path avant le match). Le verrouiller tel quel
+    ou reordonner (inconnu d'abord) ? Le frontend ne doit rien y lire d'implicite.
+  [?] Les erreurs de protocole (`invalid JSON`, `missing op`, `missing path`, …)
+    n'apportent AUCUN identifiant unique (règle AGENTS.md « messages d'erreur avec
+    identifiant unique »), contrairement aux `VNL-SBX-*`/`VNL-TLS-*` : introduire des
+    `VNL-SBX-WS-0xx` (breaking pour toute correspondance côté frontend) ou assumer les
+    littéraux ?
+  [?] `edit` rend la clé `"content"` pour un message `"edited <path>: N replacement(s)"`
+    : renommer en `"message"` (net mais breaking `SandboxFsClient`) ou verrouiller ?
+  [?] @confine_path appelé de façon synchrone sur le thread asynchrone ici, alors que la voie
+    MCP l'appelle via @spawn_blocking avec le commentaire explicite « confine_path does
+    blocking filesystem I/O » (../tools_impl.rs) : aligner (spawn_blocking) ou assumer
+    (I/O local rapide sur PVC) ?
+  [?] `read` `raw:true` sans aucune limite de taille (fichier entier en mémoire puis en
+    trame WS) : plafond applicatif à introduire, ou le plafond de trame axum suffit-il ?
+  [?] Tailles max de trame/message WS jamais configurées (@WebSocketUpgrade nu) : vérifier
+    les défauts effectifs d'axum 0.8 et les épingler par un test (une requête `write`
+    géante au-delà du plafond tue la session par @Err — comportement jamais observé).
+  [?] Aucun contrôle d'@AccessLevel : un ticket `Read` (lecture seule côté app/auth)
+    obtient `write`/`edit`/`delete`/`rename`/`mkdir` (claims jetés par la garde,
+    ./ticket.sdd `[?]`, ../lib.sdd `[?]`) — la décision de câbler un garde de niveau
+    appartient à ./ticket.sdd, ce fichier n'expose alors que le consommateur.
+  [?] Aucune limite de débit/taille de payload applicative (un client peut streamer des
+    `write` de la taille max de trame en boucle) : assumé (réseau interne + NetworkPolicy)
+    ou garde à poser ?
+  [?] `make_state` des tests écrit dans `std::env::temp_dir()/vanyline-sandbox-fs-test/<nom>`
+    SANS nettoyage entre exécutions (certains tests ré-écrivent, `write_file_creates`
+    nettoie à la main) : migrer vers `tempfile::TempDir` (déjà en dev-dependency) ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre, compilé, exécuté,
+    vert — y compris les Scenarios de boucle WS qui exigent un harnais d'upgrade réel.
+  Le confinement est verrouillé par scénarios (traversal lexical, absolu, symlink) avec
+    le marqueur `VNL-SBX-001`, et la cloison `id`/`ackFor` du flush est non-régressive.
+  Les décisions `[!]`/`[?]` sont tranchées par Sébastien (faux positifs `truncated`,
+    Ping/Pong, identifiants d'erreurs, TicketQuery mort, niveaux d'accès) et reflétées
+    dans la spec relue.
+  Le harnais reste vert sur le fichier (../../../tooling.sdd) : clippy `--all-targets
+    -D warnings`, fmt, aucun nouvel `unwrap`/`expect` hors `cfg(test)`.
+
+Scenario: lecture_numerotee_par_defaut
+  Given un @AppState dont la racine contient `sub/file.txt` (20 lignes commençant par `hello`)
+  When @dispatch_fs_message reçoit `{"op":"read","path":"sub/file.txt"}`
+  Then la réponse porte `ok:true`, `truncated:false` et un `content` dont la première ligne commence par `    1\t` (numérotation `%5d\t`)
+
+Scenario: lecture_raw_rend_le_contenu_brut
+  Given le même fichier `sub/file.txt`
+  When @dispatch_fs_message reçoit `{"op":"read","path":"sub/file.txt","raw":true}`
+  Then `content` commence par `hello\n`, ne contient aucun préfixe numéroté ni `truncated`, et `truncated` vaut `false`
+
+Scenario: lecture_avec_limit_rend_le_marqueur_de_troncature
+  Given le même fichier de 20 lignes
+  When @dispatch_fs_message reçoit `{"op":"read","path":"sub/file.txt","limit":10}`
+  Then `ok:true`, `truncated:true` et `content` contient le marqueur `[truncated` avec un `offset=` actionnable
+
+Scenario: lecture_de_fichier_binaire_en_erreur
+  Given un fichier `bin.dat` contenant des octets non UTF-8 sous la racine
+  When @dispatch_fs_message reçoit `{"op":"read","path":"bin.dat"}`
+  Then `ok:false` et `error` contient `VNL-TLS-009` (erreur I/O — UTF-8 invalide), le fichier restant intact
+
+Scenario: lecture_offset_hors_plage_en_erreur
+  Given `sub/file.txt` (20 lignes)
+  When @dispatch_fs_message reçoit `{"op":"read","path":"sub/file.txt","offset":999}`
+  Then `ok:false` et `error` contient `VNL-TLS-005` avec le motif `offset` hors plage
+
+Scenario: traversal_de_chemins_rejete_vnl_sbx_001
+  Given n'importe quel @AppState valide
+  When @dispatch_fs_message reçoit `{"op":"read","path":"../../etc/passwd"}`
+  Then `ok:false` et `error` contient `VNL-SBX-001` — aucun accès système n'a été tenté
+
+Scenario: lien_symbolique_sortant_rejete
+  Given un symlink `escape_link` sous la racine pointant vers un dossier extérieur contenant `some_file`
+  When @dispatch_fs_message reçoit `{"op":"read","path":"escape_link/some_file"}`
+  Then `ok:false` et `error` contient `VNL-SBX-001` — la canonicalisation de l'ancêtre existant a confiné le résultat hors racine
+
+Scenario: chemin_absolu_hors_racine_rejete
+  Given un @AppState valide
+  When @dispatch_fs_message reçoit `{"op":"read","path":"/etc/passwd"}`
+  Then `ok:false` avec `VNL-SBX-001` — un chemin absolu n'est accepté que s'il retombe sous la racine
+
+Scenario: chemin_absolu_dedans_racine_accepte
+  Given `sub/file.txt` sous la racine absolue de la sandbox
+  When @dispatch_fs_message reçoit `{"op":"read","path":"<racine absolue>/sub/file.txt"}`
+  Then `ok:true` — l'absolu interne est l'ami du confinement, pas une évasion
+
+Scenario: chemin_vide_designe_la_racine
+  Given un @AppState valide
+  When `{"op":"list","path":""}` puis `{"op":"read","path":""}` sont dispatchés
+  Then le `list` réussit et arbore la racine ; le `read` rend `ok:false` avec `VNL-TLS-002` (c'est un dossier)
+
+Scenario: ecriture_repond_chemin_absolu_et_ecrit_le_disque
+  Given une racine vide de `new.txt`
+  When @dispatch_fs_message reçoit `{"op":"write","path":"new.txt","content":"abc"}`
+  Then `ok:true`, `wrote` est le chemin absolu finissant par `/new.txt`, et le fichier existe sur disque avec le contenu `abc`
+
+Scenario: ecriture_cree_les_repertoires_manquants
+  Given aucune arborescence `a/b/` sous la racine
+  When @dispatch_fs_message reçoit `{"op":"write","path":"a/b/c.txt","content":"x"}`
+  Then `ok:true` et `a/b/c.txt` existe — `write` crée les parents (contrôle préalable de confinement sur le chemin complet)
+
+Scenario: ecriture_sur_repertoire_refusee
+  Given le dossier `sub/` existant
+  When @dispatch_fs_message reçoit `{"op":"write","path":"sub","content":"x"}`
+  Then `ok:false` avec `VNL-TLS-002` — aucune corruption du dossier
+
+Scenario: edition_remplace_et_compte_les_remplacements
+  Given `sub/file.txt` contenant trois occurrences de `apple`
+  When deux dispatch `{"op":"edit","path":"sub/file.txt","old_string":"apple","new_string":"orange","replace_all":true}` puis sans `replace_all` sur un motif unique
+  Then le premier rend `content` contenant `edited` et `3 replacement(s)`, le second `1 replacement(s)` — le disque suit
+
+Scenario: edition_ambigue_sans_replace_all_refusee
+  Given `sub/file.txt` avec trois occurrences de `apple`
+  When @dispatch_fs_message reçoit un `edit` de `apple` sans `replace_all`
+  Then `ok:false` avec `VNL-TLS-007` et le compte `3` — le fichier n'est pas modifié
+
+Scenario: edition_sans_correspondance_refusee_avec_indice
+  Given `sub/file.txt`
+  When @dispatch_fs_message reçoit un `edit` dont `old_string` est absent du fichier
+  Then `ok:false` avec `VNL-TLS-006` et l'indice `Closest line in file:` (Levenshtein)
+
+Scenario: edition_old_string_vide_refusee
+  Given `sub/file.txt`
+  When @dispatch_fs_message reçoit un `edit` avec `"old_string":""`
+  Then `ok:false` avec `VNL-TLS-005` et le motif `must not be empty`
+
+Scenario: edition_champs_manquants_rejetes
+  Given un @AppState valide
+  When un `edit` sans `old_string`, puis un `edit` sans `new_string` (avec `path` sinon valide) sont dispatchés
+  Then les deux rendent `ok:false` avec respectivement `"missing old_string"` et `"missing new_string"`
+
+Scenario: suppression_supprime_le_fichier
+  Given `sub/file.txt` existant
+  When @dispatch_fs_message reçoit `{"op":"delete","path":"sub/file.txt"}`
+  Then `ok:true`, `deleted` finit par `/sub/file.txt` et le fichier a disparu du disque
+
+Scenario: suppression_dossier_non_vide_refusee
+  Given un dossier `non_empty/` contenant un fichier
+  When @dispatch_fs_message reçoit `{"op":"delete","path":"non_empty"}`
+  Then `ok:false` avec `VNL-TLS-005` et `directory is not empty` — jamais de suppression en cascade silencieuse
+
+Scenario: mkdir_cre_les_parents_et_est_idempotent
+  Given aucune arborescence `a/b/c` sous la racine
+  When `{"op":"mkdir","path":"a/b/c"}` est dispatché deux fois
+  Then les deux rendent `ok:true` avec `mkdir` finissant par `/a/b/c`, et le dossier existe — idempotence sur dossier existant
+
+Scenario: mkdir_sur_chemin_pris_par_un_fichier_refusee
+  Given un fichier `sub/file.txt`
+  When @dispatch_fs_message reçoit `{"op":"mkdir","path":"sub/file.txt"}`
+  Then `ok:false` avec `VNL-TLS-003` (pas un répertoire)
+
+Scenario: rename_deplace_la_source_vers_la_destination
+  Given `sub/file.txt` existant
+  When @dispatch_fs_message reçoit `{"op":"rename","path":"sub/file.txt","to":"sub/renamed.txt"}`
+  Then `ok:true`, `renamed` finit par `/sub/renamed.txt`, la source a disparu et la destination porte le contenu d'origine
+
+Scenario: rename_avec_destination_fuyante_rejete_sans_deplacer
+  Given `sub/file.txt` existant
+  When @dispatch_fs_message reçoit `{"op":"rename","path":"sub/file.txt","to":"../../etc/passwd"}`
+  Then `ok:false` avec `VNL-SBX-001` ET `sub/file.txt` est toujours en place — le confinement de `to` s'exécute avant l'effet
+
+Scenario: rename_sans_to_rejete
+  Given `sub/file.txt` existant
+  When @dispatch_fs_message reçoit `{"op":"rename","path":"sub/file.txt"}`
+  Then `ok:false` avec le message exact `"missing to"`
+
+Scenario: rename_vers_parent_inexistant_refusee
+  Given `sub/file.txt` et aucun dossier `nulled/`
+  When @dispatch_fs_message reçoit `{"op":"rename","path":"sub/file.txt","to":"nulled/x.txt"}`
+  Then `ok:false` avec `VNL-TLS-005` (le parent de `to` n'existe pas) — `rename` NE crée pas les parents, contrairement à `write`
+
+Scenario: list_arbre_indente_profondeur_demandee
+  Given la racine contenant `sub/file.txt`
+  When @dispatch_fs_message reçoit `{"op":"list","path":"","depth":2}`
+  Then `ok:true`, `truncated:false`, `entries` contient une ligne `sub/` et une ligne indentée de deux espaces `  file.txt`
+
+Scenario: list_sur_fichier_refusee
+  Given `sub/file.txt`
+  When @dispatch_fs_message reçoit `{"op":"list","path":"sub/file.txt"}`
+  Then `ok:false` avec `VNL-TLS-003`
+
+Scenario: root_rend_la_racine_canonique_sans_chemin
+  Given un @AppState valide
+  When @dispatch_fs_message reçoit `{"op":"root"}` (sans `path`, sans `op` supplémentaire)
+  Then `ok:true` et `root` est la racine absolue canonique (non vide, finissant par `/sandbox` en configuration de test) — unique moyen pour le frontend de connaître `sandbox_root`
+
+Scenario: op_inconnue_avec_chemin_repond_unknown_op
+  Given un @AppState valide
+  When @dispatch_fs_message reçoit `{"op":"bogus","path":"sub"}`
+  Then `ok:false` avec le message exact `"unknown op"`
+
+Scenario: op_inconnue_sans_chemin_repond_missing_path
+  Given un @AppState valide
+  When @dispatch_fs_message reçoit `{"op":"bogus"}` (sans `path`)
+  Then `ok:false` avec `"missing path"` — l'extraction du path précède le match des ops (comportement documenté, voir `Tasks` `[?]`, pas un contrat de vocabulaire)
+
+Scenario: requete_non_json_repond_invalid_json
+  Given un @AppState valide
+  When @dispatch_fs_message reçoit la chaîne `not json`
+  Then `ok:false` avec le message exact `"invalid JSON"`
+
+Scenario: op_absente_ou_non_textuelle_repond_missing_op
+  Given un @AppState valide
+  When `{"path":"sub"}` (sans `op`), puis `{"op":5,"path":"sub"}` (op numérique), puis `null` (JSON valide non objet) sont dispatchés
+  Then les trois rendent `ok:false` avec le message exact `"missing op"`
+
+Scenario: reponse_reprend_l_id_de_la_requete
+  Given une réponse de dispatch quelconque
+  When @attach_req_id est appelé avec la requête `{"op":"read","path":"a","id":7}`
+  Then la réponse porte `"id":7` en plus de ses champs intacts
+
+Scenario: reponse_erreur_reprend_l_id_textuel
+  Given la réponse d'erreur `{"ok":false,"error":"unknown op"}`
+  When @attach_req_id est appelé avec la requête `{"op":"bogus","id":"x1"}`
+  Then la sortie porte `"id":"x1"`, `ok:false` et `error` byte-exacts — la copie d'id ne masque jamais une erreur
+
+Scenario: requete_sans_id_laisse_la_reponse_inchangee
+  Given une réponse de dispatch quelconque
+  When @attach_req_id est appelé avec une requête sans champ `id`, puis avec une requête non-JSON
+  Then les deux sorties sont strictement égales à la réponse d'origine (aucun `"id":null` introduit) — les clients legacy gardent le séquencement strict
+
+Scenario: frame_binaire_repond_unexpected_binary_frame_sans_clore
+  Given une session /ws/fs ouverte (upgrade réel via harnais WS)
+  When le client envoie une frame binaire (ou un Ping), puis une requête `{"op":"root"}` valide
+  Then le client reçoit d'abord `{"ok":false,"error":"unexpected binary frame"}` SANS fermeture, puis la réponse normale à `root` — une trame invalide ne tue pas la session (contrairement à une trame invalide côté PTY)
+
+Scenario: flush_ack_valide_resout_le_flush_et_reprend_l_id_client
+  Given un @AppState avec un abonné à `fs_events` et un @request_flush en vol (frame `{"event":"flush-request","id":N,"path":"a.rs"}` reçue)
+  When @dispatch_fs_message reçoit `{"op":"flush-ack","ackFor":N,"id":99}` (sans `path`), suivi de @attach_req_id sur cette requête
+  Then la réponse nue est strictement `{"ok":true}`, la sortie porte `"id":99` (corrélation client) distinct de `ackFor`, @request_flush résout `true` et @waiter_count retombe à `0`
+
+Scenario: flush_ack_malforme_rejete_sans_resoudre_le_waiter
+  Given un @request_flush en attente avec waiter actif (id N connu)
+  When sont dispatchés dans l'ordre : sans `ackFor`, `"ackFor":"N"` (chaîne), `"ackFor":-1`, `"ackFor":N.5` (décimal)
+  Then chacun rend `ok:false` avec le message EXACT `"flush-ack requires numeric ackFor"`, et le waiter est toujours présent (@waiter_count intact) — puis l'ack valide `{"op":"flush-ack","ackFor":N,"id":42}` résout tout et la réponse porte `"id":42`
+
+Scenario: frames_de_push_relayees_telles_queles
+  Given une session /ws/fs ouverte (harnais WS) branchée sur `fs_events`
+  When une frame `{"event":"file-changed","path":"src/main.rs"}` est publiée directement sur le canal par le test
+  Then le client reçoit cette frame EXACTE (même chaîne, aucun enrichissement, aucune re-sérialisation) sans avoir rien demandé
+
+Scenario: deux_sessions_recoivent_la_meme_frame_de_push
+  Given DEUX sessions /ws/fs ouvertes sur le même @AppState (multi-onglets)
+  When une frame de push est publiée sur `fs_events`
+  Then les deux clients la reçoivent (broadcast, pas de partage round-robin) et une requête `{"op":"root"}` sur l'une répond normalement — chaque session est indépendante
+
+Scenario: session_survit_aux_frames_perdues_par_lagged
+  Given une session /ws/fs dont l'abonné ne lit pas pendant que plus de `64` frames sont publiées (saturation, contrat capacité ../lib.sdd)
+  When l'abonné se remet à lire et que le client envoie ensuite `{"op":"root"}`
+  Then la session est toujours ouverte et répond `ok:true` — le @Lagged produit un warn et des frames perdues, jamais une déconnexion
+
+Scenario: ecriture_terminee_malgre_client_deconnecte
+  Given une session /ws/fs et une écriture lente dont la réponse ne peut être lue (le client ferme juste après l'envoi de la frame `write`)
+  When la requête `{"op":"write","path":"late.txt","content":"x"}` est traitée et que le send de réponse échoue
+  Then la session se termine proprement ET `late.txt` est écrit intégralement sur disque — une op partie va au bout (atomic_write), aucune réponse perdue n'annule l'effet
+
+Scenario: rafale_de_push_n_affame_pas_les_requetes
+  Given une session /ws/fs ouverte et un émetteur qui publie en continu des frames de push (sous la capacité)
+  When le client envoie `{"op":"root","id":1}` pendant le flux
+  Then la réponse portant l'id `1` est rendue en un temps borné sans attendre la fin du flux — la boucle select sans `biased;` maintient les deux sens fluides
+
+Scenario: frame_de_close_termine_la_session
+  Given une session /ws/fs ouverte avec un abonné à `fs_events`
+  When le client envoie un frame Close (ou coupe brutalement la connexion TCP)
+  Then la session rend (retour de @fs_session), l'abonné au broadcast est libéré (le nombre d'abonnés actifs redescend) et aucune frame n'est émise après le close
+
+Example: enveloppes JSON observables
+  requête avec corrélation → `{"op":"read","path":"src/main.rs","raw":true,"id":7}` → `{"content":"…","ok":true,"truncated":false,"id":7}`
+  erreur de confinement → `{"ok":false,"error":"VNL-SBX-001: path escapes sandbox root: ../../etc/passwd (resolved outside /…/sandbox)"}`
+  succès d'écriture → `{"ok":true,"wrote":"/…/sandbox/new.txt"}`
+  push émis par un tiers, relaié par fs_session → `{"event":"file-changed","path":"src/main.rs"}` et `{"event":"flush-request","id":1,"path":"src/main.rs"}`
+  aller-retour flush → client : `{"op":"flush-ack","ackFor":1,"id":99}` → serveur : `{"ok":true,"id":99}` (l'id du flush vit dans `ackFor`, JAMAIS dans `id`)
+  erreur de protocole sans identifiant → `{"ok":false,"error":"invalid JSON"}` / `"missing op"` / `"unknown op"` / `"missing path"` / `"missing content"` / `"missing old_string"` / `"missing new_string"` / `"missing to"` / `"unexpected binary frame"` / `"flush-ack requires numeric ackFor"`

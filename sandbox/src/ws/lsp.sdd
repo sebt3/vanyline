@@ -1,0 +1,557 @@
+Spec: WebSocket LSP bridge
+
+Platform: Rust/vanyline-sandbox/axum-websocket
+
+Purpose:
+  Pont WebSocket `GET /ws/lsp/{toolchain}` entre l'éditeur navigateur et le process LSP
+  partagé de la toolchain, géré par @crate::lsp::LspManager/@crate::lsp::LspSession
+  (../lsp.rs, monolithe — sa spec propre en cours contracte le manager, la session,
+  le multiplexage d'ids, le framing stdio `Content-Length` et les children aux ; CE
+  fichier ne contracte ici que le plan de transport WS et la session par socket).
+  Le fichier possède quatre mécaniques : (1) la boucle bidirectionnelle
+  @lsp_session — une frame texte = un message JSON-RPC complet, JAMAIS de framing
+  `Content-Length` côté WS (le framing ne concerne que le stdio de l'enfant, cf.
+  @crate::lsp::encode_message appliqué par la tâche écrivaine de la session) ;
+  (2) la normalisation bidirectionnelle des URIs (@rewrite_uris/@rewrite_uri_string) :
+  le navigateur ne connaît jamais `VNL_SANDBOX_ROOT` (même règle que `/ws/fs`,
+  ../../docs/architecture.md section « WebSocket éditeur »), il envoie et reçoit des
+  URIs `file:///<relatif>`, le process exige des URIs absolues — le bridge réécrit
+  dans les deux sens par walker JSON récursif plus un cas spécial `WorkspaceEdit.changes`
+  (URIs en CLÉS d'objet) ; (3) le replay multi-client de `initialize` : un LSP réel
+  rejette un second `initialize` (observé : rust-analyzer répond -32601 au second
+  onglet), le bridge n'envoie la requête réelle qu'au client gagnant de
+  @crate::lsp::LspSession::try_mark_initialized, met son issue (succès OU échec réel)
+  en cache, et rejoue cette issue aux clients suivants sans jamais recontacter le
+  process ; (4) l'observation best-effort `didOpen`/`didClose` (@peek_lsp_method) qui
+  alimente le suivi `editor_uris` de la session (détection cas A/B de `edit_and_check`,
+  design R1 sq1) — observation jamais bloquante ni décideuse. Le fichier expose aussi
+  les close codes dégradés @CLOSE_NO_LSP (`4004`, toolchain sans LSP configuré) et
+  @CLOSE_SPAWN_FAILED (`4005`, spawn échoué). L'auth du handshake est ASSURÉE EN AMONT
+  par @crate::ws::ticket::ws_auth_middleware (./ticket.sdd, même garde que `/ws/fs` et
+  `/ws/terminal`, câble ./lib.rs) — ce fichier ne valide ni ne consomme aucun ticket.
+  Un seul fichier, un seul contrat — pas de regroupement avec ../lsp.rs ni ./ticket.rs.
+
+Owns:
+  ./lsp.rs
+
+Can read:
+  ../lsp.rs
+  ../lsp_client.rs
+  ../lib.rs
+  ./ticket.rs
+  ./fs.rs
+  ./terminal.rs
+  ../Cargo.toml
+  ../../tests
+  ../../../docs/architecture.md
+  ../../../frontend/src/api/lsp.ts
+  ../../../vanyline.sdd
+  ../../../tooling.sdd
+  ../../../../.specdd/bootstrap.project.md
+
+Depends on:
+  ../lib.rs — @build_app câble `GET /ws/lsp/{toolchain}` (GET seul) sur @handle_ws_lsp
+    avec @middleware::from_fn_with_state(@ws_auth_middleware) en couche de la route
+    (../lib.sdd) ; le label metric `path` de @track_metrics est l'URI brute, segment
+    toolchain inclus (trou de cardinalité déjà `[?]` dans ../lib.sdd, pas rouvert ici).
+  ./ticket.rs — @ws_auth_middleware : ticket à usage unique racheté AVANT l'extracteur
+    @WebSocketUpgrade, rejets `401` `VNL-SBX-WS-001`/`VNL-SBX-WS-002` (contrat et
+    scénarios dans ./ticket.sdd ; ici seuls le câblage et ses conséquences sont cités).
+  ../lsp.rs — toute la mécanique aval, appelée ici sans être re-contractée :
+    @LspManager::get_or_spawn (une session par toolchain, spawn paresseux à la
+    connexion, course de spawn résolue par `Arc::ptr_eq`), @LspSession::subscribe /
+    @unsubscribe (@ClientId = compteur global de session), @LspSession::send
+    (validation JSON `VNL-SBX-LSP-001`, id non entier `VNL-SBX-LSP-002`, process mort
+    `VNL-SBX-LSP-003` ; réécriture d'id session et routage des réponses vers
+    l'abonné), @LspSession::try_mark_initialized / @set_initialize_outcome /
+    @wait_for_initialize_outcome (timeout interne 30 s), @mark_editor_uri_open /
+    @mark_editor_uri_close, @encode_message (utilisé ici pour observer la trame telle
+    que l'enfant la recevrait).
+  @axum 0.8 (../Cargo.toml, feature `ws`) — @extract::ws (@Message, @CloseFrame,
+    @WebSocket), @Path, @State, @WebSocketUpgrade, @IntoResponse ; l'auto-réponse
+    Ping→Pong est celle d'axum/tungstenite, ce fichier n'envoie aucun frame de contrôle.
+  @serde_json — parsing, réécriture et fabrication des frames (aucun type dédié).
+  @tracing — @tracing::error! sur les deux seules branches loggées (spawn échoué,
+    payload sortant non-UTF8).
+  Client navigateur réel (référence, hors contrat) : `frontend/src/api/lsp.ts` —
+    @codemirror/lsp-client sur cette transport `wsTransport` (un message JSON par
+    frame texte), ids JSON-RPC numériques (doc du package `readonly id: number`).
+
+Exposes:
+  @handle_ws_lsp — `pub async fn(State(@AppState), @Path(@String), @WebSocketUpgrade)
+    -> impl @IntoResponse` : handler de `GET /ws/lsp/{toolchain}` (la route est
+    GET-only c/ ../lib.rs ; un autre verbe rend `405` APRÈS consommation du ticket par
+    la garde). @upgrade.on_upgrade détache @lsp_session(state, toolchain, ws) ; la
+    racine `{toolchain}` d'axum 0.8 capture un seul segment ; le segment de l'URL est
+    percent-décodé en entrée d'@Path (comportement extracteur axum — non verrouillé
+    par test ici, à confirmer si un cas importé) ; `/ws/lsp` (sans segment) est un
+    `404` de routage, jamais ce handler.
+  @CLOSE_NO_LSP — `pub const u16 = 4004` : close code « toolchain sans LSP configuré
+    (mode dégradé) ».
+  @CLOSE_SPAWN_FAILED — `pub const u16 = 4005` : close code « spawn du process LSP
+    échoué ».
+  @UriDirection — `pub(super) enum { ToAbsolute, ToRelative }` (visible du seul module
+    `ws`) : direction de réécriture des URIs du pont.
+  @rewrite_uri_string — `pub(super) fn(&@str, root: &@str, @UriDirection) -> @String`,
+    attendu ASCII (doc du fichier). @ToAbsolute : ne touche que les URIs commençant
+    par `file:///` ; `file://{root}` (URI == racine) et tout préfixe `file://{root}/`
+    sont déjà absolus -> inchangés ; sinon `file:///a/b` -> `file://{root}/a/b` après
+    @trim_start_matches('/') (les slash multiples en tête sont absorbés, ex.
+    `file:////a` -> `file://{root}/a`). @ToRelative : seulement le préfixe exact
+    `file://{root}/` -> `file:///<suite>` ; une URI égale à `file://{root}` sans slash
+    final (la racine elle-même) N'EST PAS réécrite ; toute autre URI est inchangée.
+    Un `root` avec slash de terminaison est normalisé par @strip_suffix('/') avant
+    usage (le `Display` de @PathBuf n'en met pas sous Unix — précaution documentée).
+    Tranches par octets uniquement après test de préfixe ASCII -> jamais de panic sur
+    valeur non-ASCII.
+  Clé URI (@is_uri_key, privé) — une clé porte une URI si elle vaut exactement `"uri"`
+    OU se termine par `"Uri"` (sensible à la casse : `"URI"`, `"url"` ou `"uriX"` ne
+    comptent pas) : couvre `rootUri`, `targetUri` et tout `*Uri` futur (design :
+    allowlist interdite, la réécriture doit survivre aux nouveaux types de messages).
+  @rewrite_uris — `pub(super) fn(&mut @serde_json::Value, root, @UriDirection)` :
+    walker récursif. Objet : clé `"changes"` dont la valeur est un objet -> seules ses
+    CLÉS sont réécrites via @rewrite_uri_string (map `uri -> TextEdit[]` de
+    `WorkspaceEdit`), les valeurs sont clonées sans exploration, puis STOP pour cette
+    valeur (aucune récursion dedans, pas même sur un `changes` imbriqué) ; clé `uri`/
+    `*Uri` avec valeur string -> valeur réécrite, SANS récursion dans cette valeur ;
+    toute autre clé -> récursion dans la valeur. Tableau : récursion sur chaque
+    élément. Scalars : rien. Les clés non-`changes` portant un nom URI dont la valeur
+    n'est pas une string ne sont ni réécrites ni explorées.
+  @peek_lsp_method — privé, best-effort : sur une trame stdio `Content-Length: N\r\n
+    \r\n{corps}`, rend @Some((méthode, @Option<uri>)) avec uri =
+    `params/textDocument/uri` (absente -> @None, la méthode est rendue quand même —
+    un `initialize` rend `Some(("initialize", None))`, pas @None) ; @None sur :
+    terminateur `\r\n\r\n` absent, en-tête sans `Content-Length` valide (insensible à
+    la casse, même sémantique que @crate::lsp::FrameReader), corps annoncé incomplet,
+    `body_start + length` en dépassement (@checked_add, pas de overflow), JSON
+    invalide, absence de `method` string. Appelée UNIQUEMENT sur
+    @encode_message(payload) — les octets tels que l'enfant les recevrait — jamais
+    sur la frame WS brute (confusion des deux plans de transport).
+  @lsp_session — `async fn` privé du module (les tests du fichier y ont accès) :
+    contrat de session détaillé dans Accepts/Returns/Handles ;
+    @session.unsubscribe(client_id) sur TOUTES les sorties de boucle.
+  Close frame de repli — @Message::Close(@CloseFrame) : `4004` + reason exacte
+    `"no lsp for toolchain"` ; `4005` + reason exacte `"lsp spawn failed"`.
+  Frame d'erreur send — @Message::Text du JSON exact
+    `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid JSON-RPC request"}}`
+    (les messages internes `VNL-SBX-LSP-001/002/003` ne sortent JAMAIS vers le
+    navigateur — masqués derrière `-32600`, cf. `Tasks`).
+  Replay `initialize` — @Message::Text `{"jsonrpc":"2.0","id":<id du client>,"result":
+    <résultat premier caché>}` ou `{...,"error":<erreur première cachée>}` ou, après
+    le timeout de 30 s de @wait_for_initialize_outcome (valeur ../lsp.rs) :
+    `{...,"error":{"code":-32603,"message":"LSP initialize timed out (shared session)"}}`.
+  Module de test `tests` (14 tests existants, `#![allow(clippy::unwrap_used,
+    clippy::expect_used)]`) : `lsp_ticket_required`,
+    `lsp_ticket_required_with_valid_ticket`, `rewrite_inbound_makes_uri_absolute`,
+    `rewrite_inbound_keeps_already_absolute`, `rewrite_outbound_makes_uri_relative`,
+    `rewrite_outbound_keeps_foreign_uri`, `rewrite_walker_covers_nested_keys`,
+    `rewrite_does_not_touch_non_file_uris`, `rewrite_changes_object_keys_inbound`,
+    `rewrite_changes_object_keys_outbound`, `rewrite_changes_keeps_non_uri_keys`,
+    `rewrite_changes_does_not_touch_text_document_uri`,
+    `rewrite_roundtrip_inbound_then_outbound`, `peek_lsp_method_valid_malformed_and_uri`
+    — cartographie vers les titres de Scenario en `Tasks`.
+
+Accepts:
+  Handshake — toute requête `GET` parvenue à l'handler, c'est-à-dire dont le ticket a
+    déjà été racheté (et donc consommé) par la garde : ce fichier ne relit ni query,
+    ni header, ni identité (les @TicketClaims sont jetés en amont, ./ticket.sdd — un
+    @AccessLevel::Read ouvre donc le LSP complet comme un Admin, même `[?]` que
+    ../lib.sdd, non rouvert ici). Sans headers d'upgrade valides, l'extracteur
+    @WebSocketUpgrade rejette (`426`, extension `OnUpgrade` absente en test `oneshot`)
+    APRÈS consommation du ticket.
+  Segment `{toolchain}` — toute valeur de chemin (percent-décodée) : inconnue ->
+    repli `4004` APRÈS upgrade réussi (le client voit `101` puis le close) ; connue ->
+    lookup/spawn via @LspManager::get_or_spawn (jamais @LspManager::has séparément).
+  Frames entrantes : `@Message::Text` = un message JSON-RPC par frame, aucune
+    syntaxe `method`/`jsonrpc` exigée (une notification, un response, un JSON valide
+    quelconque sont forwardés tels quels après réécriture) ; `@Message::Binary`,
+    @Message::Ping, @Message::Pong entrants -> ignorés silencieusement (le Ping est
+    répondu Pong par axum avant ce niveau) ; aucune limite de taille de frame n'est
+    imposée par ce fichier (celle d'axum s'applique).
+  Multi-clients — N sockets WS simultanés sur une même toolchain partagent le même
+    @Arc<LspSession> et le même process : chaque socket = un @clientId distinct de
+    @subscribe ; les réponses sont routées vers leur demandeur par la session (id
+    d'origine restauré avant émission sur le canal du client) ; les notifications
+    serveur (ex. `publishDiagnostics`) sont diffusées à tous les abonnés par la
+    session, ce fichier ne filtre rien.
+  Root de réécriture — @Config::sandbox_root (../config.rs), lu UNE fois à
+    l'ouverture de la session via `.display().to_string()` : un changement de config
+    en vol n'est jamais relu ; le root attendu est ASCII (doc de @rewrite_uri_string).
+
+Returns:
+  @handle_ws_lsp — upgrade `101` puis détachement de @lsp_session ; rien d'autre
+    (aucune donnée d'identité ne descend).
+  @lsp_session — @() ; outputs contractuels sur le socket :
+    - @Message::Close `4004`/`4005` (reasons exacts ci-dessus) puis retour immédiat,
+      sans jamais @subscribe dans ces deux branches ;
+    - @Message::Text de tout payload sortant de `rx.recv()` : parse JSON -> réécriture
+      @ToRelative -> re-sérialisé ; parse JSON échoué mais UTF8 -> texte passé BRUT
+      (sans réécriture d'URI) ; non-UTF8 -> @tracing::error! exact `"LSP: non-UTF8
+      server payload, breaking"` puis fin de session ;
+    - @Message::Text `-32600` (forme exacte en `Exposes`) sur tout `@send().await`
+      en échec — JSON invalide (`001`), id non entier (`002`), process mort (`003`)
+      — puis CONTINUATION de la boucle (la session n'est jamais rompue par un échec
+      d'envoi ; c'est @send qui rejette, le frame fautif n'atteint pas l'enfant) ;
+    - replay `initialize` (formes exactes en `Exposes`) au client perdant, posé sur
+      le socket SANS réécriture d'URI (cf. `Tasks` `[?]`) ;
+    - @Message::Close du client, erreur de lecture, @None de `ws.recv()`, @None de
+      `rx.recv()` (canal fermé : process mort — la lectrice de ../lsp.rs `clear` les
+      subs à l'EOF — ou session détruite), erreur d'@ws.send sortant, ou branche
+      `else` du @tokio::select! -> fin de boucle puis @session.unsubscribe(client_id)
+      AVANT tout retour (nettoie subs, `pending`, barrières de fusion, resolves
+      internes et tenants `editor_uris` de ce client, contrat ../lsp.rs).
+  @peek_lsp_method — @Option<(@String, @Option<@String>)> : jamais d'effet sur le
+    forwarding (mêmes octets, mêmes chemins d'erreur, observation purement additive).
+  @rewrite_uris — mutation en place, aucune valeur rendue ; idempotent dans chaque
+    sens (une URI déjà dans la forme cible ressort inchangée ; test de roundtrip
+    existant).
+  @rewrite_uri_string — @String ; toute URI non-`file://` (ex. `http://…`) ressort
+    byte-identique dans les deux directions.
+
+Raises:
+  Aucune erreur typée ni @Result — @handle_ws_lsp et @lsp_session ne propagent
+    jamais rien (toutes les erreurs sont rendues en frames WS ou en log).
+  Logs @tracing::error! de la voie production, exhaustifs : `tracing::error!(toolchain,
+    error = %e, "LSP spawn error")` sur échec de @get_or_spawn (puis close `4005`) ;
+    `"LSP: non-UTF8 server payload, breaking"` (puis fin de session). Le repli `4004`
+    n'est JAMAIS loggué (dégradé normal). Aucun `println!`/`eprintln!`/`dbg!` —
+    harnais ../../../tooling.sdd.
+  Aucun `unwrap`/`expect`/`panic!` hors `cfg(test)` dans ce fichier : les deux
+    sérialisations `unwrap_or_default()` ne paniquent pas (une valeur issue de
+    @serde_json se re-sérialise ; l'échec théorique rend une chaîne vide — payload
+    vide alors rejeté `VNL-SBX-LSP-001` par @send, close-frame ignoré par `let _ =`) ;
+    toutes les tranches d'@str sont protégées par un test de préfixe ASCII.
+
+Handles:
+  Cycle de vie du process : le process LSP est spawné PARESSEUSEMENT à la première
+    connexion WS (ou quand la session enregistrée est morte — @get_or_spawn), jamais
+    au démarrage du serveur ni à l'émission d'un ticket. Il LUI SURVIT À TOUTES les
+    déconnexions : @lsp_session ne fait qu'@unsubscribe, jamais de `shutdown`/`exit`
+    LSP ni de kill ; le process ne meurt que par EOF de son propre fait, sortie du
+    sandbox (@Drop de ../lsp.rs tue l'enfant) ou remplacement par un spawn ultérieur.
+    Une reconnexion après mort du process obtient un process NEUF (flag `initialized`
+    neuf, cache d'issue neuf — sinon le navigateur, qui renvoie toujours son
+    `initialize`, resterait bloqué sur un replay éternel).
+  Séquence d'initialisation partagée : `initialize` avec `method == "initialize"` ET
+    `id` entier (as_i64) -> test-and-set @try_mark_initialized. Gagnant : la requête
+    part réellement (avec son `id` mémorisé comme `pending_initialize_id` pour
+    repérer la réponse dans le flux sortant, `id` d'origine déjà restauré par la
+    lectrice de ../lsp.rs) ; la première réponse sortante portant cet `id` (succès
+    OU erreur) est mise en cache (@set_initialize_outcome) et le slot est libéré.
+    Perdant : @wait_for_initialize_outcome (immédiat si déjà posée, borné à 30 s) et
+    réponse synthétique rejouant l'issue EXACTE du premier (jamais une erreur
+    générique — un échec réel, ex. typescript-language-server sans `node_modules`,
+    est rejoué tel quel : c'est l'information qu'aurait eue ce client s'il était
+    arrivé le premier), sans aucun octet vers l'enfant. Un `initialize` sans `id`
+    entier (absent ou chaîne) n'est PAS intercepté : il part tel quel vers l'enfant.
+    L'interception se joue APRÈS la réécriture @ToAbsolute (le `rootUri`/
+    `workspaceFolders` du gagnant est donc absolu côté enfant) ; les params du
+    perdant sont jetés.
+  Observation `editor_uris` : sur chaque frame texte JSON valide, la trame
+    `encode_message(payload)` (payload réécrit @ToAbsolute, donc URI absolue — la
+    même que voient les tools) est passée à @peek_lsp_method ; `method ==
+    "textDocument/didOpen"` -> @mark_editor_uri_open(uri, client_id) ;
+    `"textDocument/didClose"` -> @mark_editor_uri_close(uri, client_id) ; toute autre
+    méthode (dont `didChange` : rien à marquer, l'URI est déjà tenue depuis son
+    `didOpen`) -> rien. Corps non-JSON ou sans `method` -> observation aveugle,
+    forwarding strictement inchangé. La déconnexion (même sans `didClose`, WS coupé
+    brutalement) purgera les tenants du client par @unsubscribe (../lsp.rs).
+  Plan de transport : frame texte WS = JSON-RPC nu dans les deux sens ; le framing
+    `Content-Length` n'existe qu'entre la session et le stdio de l'enfant (tâche
+    écrivaine de ../lsp.rs). La trame observée par @peek_lsp_method est reconstituée
+    par @encode_message à CHAQUE frame entrante (coût d'une duplication d'octets par
+    message, accepté — cf. `Tasks`).
+  Sorties et propreté : toute fin de boucle (close client, erreur transport, `None`
+    du canal serveur, échec d'@ws.send, `else` du select) converge vers
+    @session.unsubscribe(client_id) — le @ClientId est alloué par le compteur
+    @next_client de la session et ne peut entrer en collision avec un client encore
+    connecté. Le @tokio::select! n'est pas biaisé : à readiness simultanée la branche
+    est tirée au hasard (l'ordre serveur/entrant n'est garanti qu'entre tours de
+    boucle).
+  Blocage du perdant : @wait_for_initialize_outcome s'exécute DANS la boucle du
+    client perdant — pendant son attente (jusqu'à 30 s) ce socket ne lit plus ni ses
+    frames entrantes ni son canal serveur (les payloads s'empilent dans le canal
+    non borné, rien n'est perdu) ; cf. `Tasks` `[?]`.
+  Non-fuite du root : côté sortant toute URI sous `file://{root}/` devient
+    `file:///<relatif>` — le navigateur ne voit jamais `VNL_SANDBOX_ROOT` (règle
+    ../../docs/architecture.md), dans la limite des cas non réécrits tracés en
+    `Tasks` (URI == racine sans slash final, percent-encodage divergent entre root
+    brut et URI encodée, replay `initialize` non repassé par le walker).
+
+Must:
+  transporter un message JSON-RPC par frame texte dans les deux sens, sans jamais
+    ajouter ni exiger de framing `Content-Length` côté WS.
+  Réécrire toute URI `uri`/`*Uri` (valeur string) rencontrée dans tout message JSON
+    valide, dans les objets ET tableaux, à quelque profondeur que ce soit, dans la
+    direction du sens de circulation (@ToAbsolute entrant, @ToRelative sortant), avec
+    réécriture des CLÉS de tout objet porté par une clé `"changes"` — le walker doit
+    rester valable pour tout futur type de message LSP sans retouche (pas d'allowlist).
+  Réserver l'`initialize` réel au premier client (@try_mark_initialized), mettre en
+    cache son issue complète (SUCCÈS et ÉCHEC) et rejouer cette issue exacte, sous
+    l'id du client demandeur, à tout client suivant — sans jamais renvoyer la requête
+    à l'enfant.
+  Fermer avec `4004` + reason `"no lsp for toolchain"` quand @get_or_spawn rend
+    @Ok(None), et `4005` + reason `"lsp spawn failed"` + log @tracing::error! quand
+    il rend @Err — dans les deux cas APRÈS un upgrade `101` réussi, sans @subscribe.
+  Envoyer la frame d'erreur `-32600` (forme exacte verrouillée) sur tout échec de
+    @session.send et CONTINUER la boucle dans tous les cas.
+  Ignorer silencieusement les frames binaires entrantes et ne jamais répondre
+    manuellement aux Ping (axum le fait).
+  Appeler @session.unsubscribe(client_id) sur TOUTES les voies de sortie de
+    @lsp_session, y compris erreurs et panic-free breaks.
+  Observer `didOpen`/`didClose` sur la trame @encode_message(payload) post-réécriture
+    (URI absolue, identique à celle des tools) sans jamais que l'observation modifie
+    le forwarding.
+  Rendre `4004`/`4005` et les corps exacts (`Exposes`) disponibles en constantes
+    @CLOSE_NO_LSP/@CLOSE_SPAWN_FAILED `pub` pour que le frontend et les tests les
+    citent sans littéraux flottants.
+
+Must not:
+  Exposer `VNL_SANDBOX_ROOT` au navigateur par une URI sortante sous le root qui
+    resterait absolue (hors cas non couverts explicitement tracés en `Tasks` `[?]`).
+  Traiter un JSON entrant invalide comme une raison de rompre la session : les
+    octets bruts sont passés à @send (qui rend `VNL-SBX-LSP-001`) et la boucle
+    continue après la frame `-32600`.
+  Rompre la session quand le process meurt en cours de route par une erreur
+    inventée ici : c'est la fermeture du canal (`rx.recv() -> None`) qui termine la
+    boucle, puis @unsubscribe.
+  Réutiliser le même @ClientId pour deux connexions, ou laisser un abonn, un
+    `pending`, une barrière de fusion ou un tenant `editor_uris` vivant après
+    @unsubscribe (effectué par ../lsp.rs, ici : toujours APPELER unsubscribe).
+  Envoyer deux `initialize` réels au même process vivant, ou fabriquer pour le
+    perdant une erreur générique quand l'issue réelle (succès ou échec) est
+    disponible.
+  Laisser transparaître `VNL-SBX-LSP-001`/`002`/`003` dans une frame WS (le masque
+    `-32600` est le contrat actuel — toute exposition des identifiants internes
+    passe par l'arbitrage `Tasks`).
+  Valider, relire ou consommer un ticket ici (la garde ./ticket.rs l'a fait), ni
+    brancher quoi que ce soit sur une identité (aucune n'arrive).
+  Écrire un `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` hors `cfg(test)`
+    (harnais ../../../tooling.sdd).
+
+Tasks:
+  [ ] Relecture par Sébastien — spec issue du reverse-engineering ; aucun comportement
+    accidentel ne devient contrat avant cette relecture (../../../../.specdd/bootstrap.project.md).
+  [ ] Cartographie de la couverture existante (à re-tagger par les titres de Scenario) :
+    `lsp_ticket_required`, `lsp_ticket_required_with_valid_ticket` (gardes, en
+    réalité contrat ./ticket.sdd colocalisé ici), `rewrite_inbound_makes_uri_absolute`,
+    `rewrite_inbound_keeps_already_absolute`, `rewrite_outbound_makes_uri_relative`,
+    `rewrite_outbound_keeps_foreign_uri`, `rewrite_walker_covers_nested_keys`,
+    `rewrite_does_not_touch_non_file_uris`, `rewrite_changes_object_keys_inbound`,
+    `rewrite_changes_object_keys_outbound`, `rewrite_changes_keeps_non_uri_keys`,
+    `rewrite_changes_does_not_touch_text_document_uri`,
+    `rewrite_roundtrip_inbound_then_outbound`, `peek_lsp_method_valid_malformed_and_uri`
+    (./lsp.rs) ; côté ../lsp.rs (sa spec) : `manager_unknown_toolchain_returns_none`
+    (volet lookup du `4004`) et les tests du cache `initialize` (groupe « Tests cache
+    initialize », bug réel du double initialize découvert via ce bridge).
+  [ ] Harnais d'intégration WS à décider avant d'écrire les Scenarios de session
+    (`processus_lsp_ne_survit_...`, `initialize_part_unique...`, `notifications_...`,
+    `-32600`, didOpen/didClose) : aucune dépendance client WebSocket en dev-deps
+    (../Cargo.toml) — monter le serveur réel sur port éphémère + `tokio-tungstenite`
+    en dev-dep, ou extraire un seam testable de @lsp_session ? Décision à trancher.
+  [ ] Convertir en tests taggés les Scenarios sans couverture directe :
+    `uri_slash_multiples_absorbees_en_entree`, `racine_reelle_jamais_exposee_sortie`,
+    `initialize_sans_id_entier_non_intercepte`, tous les Scenarios de session WS.
+  [?] Collision d'id sur le cache `initialize` : `pending_initialize_id` matche la
+    première réponse sortante portant l'id d'origine du gagnant — si ce client envoie
+    entre-temps une autre requête réutilisant le même id, c'est SA réponse qui sera
+    cachée comme issue `initialize`. Le client navigateur (@codemirror/lsp-client)
+    incrmente ses ids, mais rien ici ne le vérifie. Verrouiller (le match ne peut
+    porter que sur une réponse sans `method`) ou ignorer ?
+  [?] `initialize` avec `id` en chaîne (possible pour un client non codemirror ; le
+    package officiel n'envoie que des nombres) : le partage est court-circuité ET
+    @send rejette tout id non entier (`VNL-SBX-LSP-002`) -> le client reçoit `-32600`
+    sur son `initialize`. Refuser (`-32600`) est-il le comportement voulu pour un id
+    chaîne, ou faut-il normaliser/rejeter plus tôt ?
+  [?] Le `-32600` masque `VNL-SBX-LSP-003` : quand le process vient de mourir, le
+    navigateur reçoit « invalid JSON-RPC request » pour une requête parfaitement
+    valide (jusqu'à la fermeture du canal) — diagnostic éditeur trompeur. Exposer
+    l'identifiant interne (règle ../../../vanyline.sdd « messages d'erreur avec
+    identifiant unique ») ou assumer le masque ?
+  [?] Le replay `initialize` sort du cache AVANT le walker @ToRelative : si un serveur
+    met des URIs absolues dans son `result` d'initialize (extensions non standard),
+    le root fuit chez les clients perdants (le gagnant, lui, reçoit sa réponse
+    réécrite). Réécrire le replay, ou assumer (aucun serveur connu ne le fait) ?
+  [?] Percent-encodage : `root` est inséré BRUT dans `file://{root}/…` (un espace ou
+    un accent dans `sandbox_root` produit une URI mal formée) et la comparaison
+    sortante ne décode pas — une URI `file:///%20...` ne correspondrait jamais au
+    préfixe et fuiterait en absolu. Root ASCII assumé (doc du fichier) : le
+    contractualise-t-on (refus au démarrage ?) ou normalise-t-on l'encodage ?
+  [?] Une URI égale à `file://{root}` (la racine elle-même, sans slash final) n'est
+    jamais relative en sortie — fuite de chemin absolue par `workspaceFolders`
+    notamment. Réécrire `file://{root}` -> `file:///` en @ToRelative ?
+  [?] `wait_for_initialize_outcome` bloque la boucle du perdant jusqu'à 30 s (plus
+    aucune frame de ce socket servie, payloads empilés) : acceptable (le client JS a
+    son propre timeout 30 s) ou à rendre non bloquant ?
+  [?] Observation `peek_lsp_method` re-encode chaque frame entrante via
+    @encode_message (duplication d'octets + scan du séparateur par message, alors que
+    l'observation ne lit que `method`/`uri` déjà sous la main dans `msg`) : coût
+    accepté par design (observer LITTÉRALEMENT les octets de l'enfant) ou simplifiable
+    sans risque ?
+  [?] Clé `"changes"` spéciale à TOUTE profondeur et quel que soit le message : un
+    champ nommé `changes` portant une map hors `WorkspaceEdit` verrait ses clés
+    réécrites si elles ressemblent à des URIs. Faux positif assumé ou ciblage sur
+    `WorkspaceEdit` ?
+  [?] `try_mark_initialized` est consommé AVANT le `send` : si l'envoi échoue (process
+    mort entre-temps), le flag reste posé, aucune issue ne sera jamais cachée, et
+    tous les clients suivants attendent 30 s puis `-32603` alors que le process n'a
+    rien reçu. Race rare — la traiter (défaire le flag à l'échec) ou l'assumer ?
+  [?] Métriques du bridge : aucun compteur d'erreurs `-32600`, de closes `4004`/`4005`
+    ni de connexions LSP actives — le dégradé est invisible côté observabilité
+    (../lib.sdd ne compte que le HTTP brut). Ajouter ou assumer ?
+  [?] Aucun timeout d'inactivité du process : après départ du dernier onglet, le LSP
+    reste vivant indéfiniment (RAM du pod sandbox). Assumer (un pod = un utilisateur)
+    ou idle-timeout dans ../lsp.rs (propriétaire du cycle de vie) ?
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre, compilé,
+    exécuté, vert — y compris via le harnais WS dont le choix est en `Tasks`.
+  Les close codes (`4004`/`4005`), la frame `-32600` et les replays `initialize` sont
+    verrouillés byte par byte ; l'invariance du forwarding face à l'observation est
+    verrouillée.
+  Les `[?]` sont tranchés par Sébastien (collision d'id, ids chaîne, masque `-32600`,
+    fuites d'URI root, blocage 30 s, flag initialize) — la spec relue fait foi.
+  Le harnais reste vert sur le fichier (../../../tooling.sdd) : `cargo clippy
+    --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`, aucun
+    nouveau `unwrap`/`expect` hors `cfg(test)`.
+
+Scenario: ticket_manquant_refuse_le_handshake
+  Given un @build_app avec un @TicketStore vide (configuration `static_token`)
+  When `GET /ws/lsp/rust` sans query puis `GET /ws/lsp/rust?ticket=unknown` (avec en-têtes d'upgrade)
+  Then les deux réponses sont `401` (corps `VNL-SBX-WS-001` puis `VNL-SBX-WS-002`, mécanique ./ticket.sdd) et aucun process LSP n'est lancé
+
+Scenario: ticket_valide_sans_upgrade_consomme_et_rejete
+  Given un ticket valide émis via `POST /ws/ticket` sur une app @build_app
+  When `GET /ws/lsp/rust?ticket=<valide>` SANS en-têtes d'upgrade WebSocket
+  Then la réponse n'est pas `401` (la garde est passée, l'extracteur @WebSocketUpgrade rejette après) et le ticket est consommé — le rejeu rend `401 VNL-SBX-WS-002`
+
+Scenario: toolchain_inconnue_close_4004_apres_upgrade
+  Given un @LspManager sans aucune toolchain configurée et un client WS réel sur `GET /ws/lsp/rust` (ticket valide)
+  When la poignée de main aboutit (`101`)
+  Then le serveur envoie immédiatement un close frame de code `4004` avec reason exacte `"no lsp for toolchain"` puis ferme, sans aucun @subscribe ni process
+
+Scenario: spawn_echoue_close_4005_et_log
+  Given une toolchain `echo` configurée dont le binaire de commande n'existe pas (spawn @get_or_spawn en échec) et un client WS sur `GET /ws/lsp/echo`
+  When la poignée de main aboutit
+  Then le client reçoit un close `4005` reason `"lsp spawn failed"` et un enregistrement @tracing::error! `"LSP spawn error"` portant toolchain et erreur est émis
+
+Scenario: texte_json_valide_reecrit_en_absolu_puis_forwarde
+  Given un process LSP factice echo (configure une toolchain `fake`) et un client WS avec session établie
+  When le client envoie la frame texte `{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///src/main.rs"}}}`
+  Then le process reçoit la notification avec `"uri": "file://{sandbox_root}/src/main.rs"` (Content-Length posé par la session, jamais par le bridge) et aucune frame n'est retournée au client
+
+Scenario: uri_deja_absolue_inchangee_a_l_entree
+  Given le même pont établi sur toolchain `fake`
+  When le client envoie une requête portant `"uri": "file://{sandbox_root}/src/main.rs"`
+  Then les octets passés à @session.send portent l'URI inchangée (pas de double préfixage)
+
+Scenario: uri_hors_workspace_inchangee_en_sortie
+  Given un process factice qui répond à la requête du client par `{"id":1,"result":{"uri":"file:///other/path/x.ts"}}`
+  When le bridge relaie cette réponse au client en frame texte
+  Then l'URI ressort `file:///other/path/x.ts` inchangée (préfixe hors root non touché par @ToRelative)
+
+Scenario: racine_reelle_jamais_exposee_sortie
+  Given un process factice répondant `{"id":1,"result":[{"uri":"file://{sandbox_root}/a.rs"}]}`
+  When le bridge relaye la réponse
+  Then la frame texte reçue contient exactement `"file:///a.rs"` — aucun octet du chemin absolu du sandbox ne figure dans la frame
+
+Scenario: walker_atteint_tableaux_et_cles_star_uri
+  Given un message entrant avec `params.textDocument.uri`, un tableau `result` portant `uri` et un objet portant `targetUri`, plus un champ `message` valant `"file:///x"`
+  When la frame est forwardée par le bridge (process factice observant)
+  Then les trois URIs `uri`/`uri` de tableau/`targetUri` sont devenues absolues sous le root et `message` est resté `"file:///x"` (seules les clés `uri`/`*Uri` portent une URI)
+
+Scenario: workspace_edit_reecrit_les_cles_de_changes
+  Given un process factice répondant un `WorkspaceEdit` dont `result.changes` est la map `{"file://{sandbox_root}/src/main.rs": []}`
+  When le bridge relaie la réponse au client
+  Then la map `changes` porte la clé `"file:///src/main.rs"` et plus aucune clé absolue, la valeur tableau étant conservée
+
+Scenario: roundtrip_inbound_outbound_identique
+  Given une URI `file:///src/main.rs` soumise au walker @ToAbsolute avec root `/home/coder/workspace` puis au walker @ToRelative sur le résultat
+  When les deux réécritures s'enchaînent
+  Then la valeur finale est byte-identique à la valeur initiale (les deux directions sont l'inverse exacte l'une de l'autre)
+
+Scenario: uri_slash_multiples_absorbees_en_entree
+  Given une URI entrante `"file:////src/main.rs"` (slash multiples) et le root de test
+  When @rewrite_uri_string en @ToAbsolute
+  Then le résultat est `file://{root}/src/main.rs` — les slash redondants après `file:` sont absorbés
+
+Scenario: initialize_part_unique_rejoue_aux_suivants
+  Given une toolchain à process factice qui répond `{"id":7,"result":{"capabilities":{}}}` à tout `initialize` réel, et deux clients WS connectés sur la même toolchain
+  When le client A envoie `{"id":1,"method":"initialize",...}` puis le client B envoie `{"id":42,"method":"initialize",...}`
+  Then le process ne reçoit qu UN seul `initialize`, celui de A ; B reçoit sans délai une frame `{"jsonrpc":"2.0","id":42,"result":{"capabilities":{}}}` construite depuis le cache, sans octet vers l'enfant
+
+Scenario: echec_reel_d_initialize_est_rejoue_a_l_identique
+  Given le même dispositif mais le process répond `{"id":1,"error":{"code":-32001,"message":"boom"}}` au premier `initialize`
+  When un second client envoie son propre `initialize` (id différent)
+  Then le second reçoit une réponse synthétique portant exactement l'objet `error` du premier (`-32001`, `"boom"`), pas une erreur générique, et aucun second `initialize` n'atteint l'enfant
+
+Scenario: initialize_sans_id_entier_non_intercepte
+  Given un pont établi sur toolchain `fake` (session jamais initialisée)
+  When le client envoie `{"jsonrpc":"2.0","method":"initialize","params":{}}` (aucun `id`)
+  Then la frame part telle quelle vers @session.send (pas de test-and-set, pas de cache) — une notification `initialize` ne bénéficie d'aucun partage
+
+Scenario: did_open_marque_le_tenant_et_did_close_le_lache
+  Given un pont établi (client A) sur toolchain à process factice, avec accès au @LspSession via le manager du test
+  When A envoie `textDocument/didOpen` sur `file:///a.rs` puis le test interroge @LspSession::has_editor_client sur l'URI absolue, puis A envoie `textDocument/didClose` sur la même URI et le test réinterroge
+  Then après `didOpen` @has_editor_client rend `true` (URI réécrite en absolu avant observation — la même que voient les tools) et après `didClose` rend `false`
+
+Scenario: deconnexion_d_un_client_lache_ses_uris_sans_toucher_les_autres
+  Given les clients A et B tiennent tous deux `file:///a.rs` (didOpen observés)
+  When la socket WS de A se ferme brutalement (aucun `didClose`)
+  Then @has_editor_client sur l'URI absolue reste `true` (B est encore tenant, purgé par @unsubscribe pour le seul A) ; quand B se ferme aussi, l'URI devient `false`
+
+Scenario: notifications_serveur_diffusees_aux_deux_clients_en_relatif
+  Given deux clients WS sur la même toolchain `fake` et un process émettant la notification `textDocument/publishDiagnostics` avec `"uri": "file://{root}/a.rs"`
+  When le bridge relaie
+  Then A et B reçoivent TOUS DEUX la notification en frame texte avec l'URI réduite à `file:///a.rs` (le filtrage par client ne concerne que les réponses à id)
+
+Scenario: reponse_routee_vers_son_seul_demandeur
+  Given deux clients sur la même session, le process répondant à chaque requête par le même écho d'id restauré
+  When seul le client A envoie `{"id":3,"method":"textDocument/hover",...}`
+  Then seule la socket de A reçoit la réponse `"id":3` ; la socket de B ne reçoit rien (le multiplexage ../lsp.rs route par @ClientId, le bridge ne diffuse aucune réponse)
+
+Scenario: requete_sur_process_mort_repond_32600_et_vit
+  Given un pont établi sur toolchain `fake`, le process child venant d'être tué (la tâche écrivaine n'accepte plus les commandes, la lectrice n'a pas encore fermé les canaux)
+  When le client envoie une requête JSON parfaitement valide
+  Then il reçoit la frame texte exactement `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid JSON-RPC request"}}` et aucune chaîne `VNL-SBX-LSP` ne fuit ; l'échec d'envoi ne rompt pas la boucle lui-même — seule la fermeture ultérieure du canal serveur (EOF de la lectrice) met fin à la session
+
+Scenario: id_non_entier_rejete_en_32600
+  Given un pont établi sur toolchain `fake` vivante
+  When le client envoie `{"jsonrpc":"2.0","id":"abc","method":"textDocument/hover","params":{}}`
+  Then le bridge renvoie la frame `-32600` (le message exact en `Exposes`) et RIEN n'atteint l'enfant (@send a rejeté `VNL-SBX-LSP-002` en interne), la boucle continuant
+
+Scenario: texte_non_json_passe_brut_et_repond_32600
+  Given le même pont établi
+  When le client envoie la frame texte `pas-du-json`
+  Then les octets bruts sont passés à @send (aucune réécriture d'URI possible), qui rejette `VNL-SBX-LSP-001`, et le client reçoit la frame `-32600` sans que la session se rompe
+
+Scenario: payload_sortant_non_utf8_rompt_la_session_avec_log
+  Given un process factice écrivant des octets invalides en UTF-8 sur son stdout, cadraqués `Content-Length`, et un collecteur @tracing
+  When la lectrice de la session publie ce payload sur le canal du client et que @lsp_session le lit
+  Then le parse JSON échoue, @String::from_utf8 échoue, un @tracing::error! `"LSP: non-UTF8 server payload, breaking"` est émis, la boucle se termine et @unsubscribe est appelé (le navigateur n'a reçu aucune frame partiellement invalide)
+
+Scenario: canal_serveur_ferme_termine_la_session_et_debranche
+  Given un pont établi puis le process LSP tué de son côté (EOF stdout : la lectrice de ../lsp.rs `clear` les abonnements, fermant les canaux)
+  When @lsp_session reçoit `None` de `rx.recv()`
+  Then la boucle se termine sans frame d'erreur inventée et @session.unsubscribe(client_id) est exécuté — aucune trace du client mort ne subsiste (subs, pending, editor_uris purgés, contrat ../lsp.rs)
+
+Scenario: binaire_ignore_ping_et_pong_sans_effet
+  Given un pont établi sur toolchain `fake`
+  When le client envoie une frame binaire puis le serveur reçoit un Ping
+  Then aucune frame binaire n'atteint @send ni ne termine la session ; le Ping reçoit un Pong (répondu par axum, jamais par une écriture explicite ici) et une frame texte envoyée juste après est toujours servie normalement
+
+Scenario: observation_aveugle_sur_json_invalide_forwarding_inchange
+  Given un process factice observant les octets reçus et un pont établi
+  When le client envoie une frame texte dont le JSON est invalide
+  Then @peek_lsp_method n'est même pas consultable (pas de réécriture possible) et les octets transmis à @send sont EXACTEMENT les octets de la frame — l'observation ne peut ni modifier ni bloquer un envoi (mêmes octets, mêmes chemins d'erreur)
+
+Scenario: processus_lsp_ne_survit_a_toutes_les_deconnexions
+  Given une toolchain `fake`, un premier client WS qui ouvre un document puis se déconnecte proprement (close)
+  When un second client WS se connecte sur la même toolchain et envoie `initialize`
+  Then le second obtient le REPLAY de l'issue du premier (aucun second `initialize` réel) — la session et son process ont survécu à la déconnexion ; en revanche après la MORT du process (kill du child), une nouvelle connexion spawne un process neuf et un `initialize` repart réellement (flag et cache neufs)
+
+Example: enveloppes et formes verrouillées
+  close dégradés → `4004 "no lsp for toolchain"` / `4005 "lsp spawn failed"` (après `101`)
+  échec send → `{"jsonrpc":"2.0","id":null,"error":{"code":-32600,"message":"invalid JSON-RPC request"}}`
+  timeout initialize partagé → `{"jsonrpc":"2.0","id":<id client>,"error":{"code":-32603,"message":"LSP initialize timed out (shared session)"}}`
+  URI aller → `file:///src/main.rs` → `file://{sandbox_root}/src/main.rs` ; URI retour → l'inverse exact

@@ -1,0 +1,601 @@
+Spec: LspClient
+
+Platform: Rust/vanyline-sandbox/tokio
+
+Purpose:
+  Client LSP bas niveau au-dessus d'une session partagée @crate::lsp::LspSession
+  (./lsp.rs) : abonnement/désabonnement d'un client (une instance par appel de tool
+  MCP — ./tools_impl.rs en construit un neuf à chaque tool `lsp_*` et pour
+  `edit_and_check`), envoi de requêtes et notifications JSON-RPC 2.0 en JSON brut
+  (AUCUN framing ici : le framing `Content-Length` stdio et le décodage des trames
+  serveur appartiennent à ./lsp.rs — @encode_message/@FrameReader, spec ./lsp.sdd en
+  cours), cycle de vie `initialize`/`initialized` partagé à l'échelle de la session
+  (un seul `initialize` envoyé au process, tous clients confondus), corrélation
+  requête→réponse par id d'origine restauré par la session, et collecte des
+  diagnostics push via le cache de session. Le spawn du process, son kill, la
+  détection de mort (EOF stdout), la multiplexaison des réponses et la réécriture
+  des ids sont TANTÔT dans ./lsp.rs : ce fichier ne contracte que la mécanique
+  client. Une frontière mérite d'être nommée ici : le cache d'issue `initialize`
+  (@LspSession::set_initialize_outcome/@wait_for_initialize_outcome, timeout 30 s)
+  n'est câblé QUE par le bridge navigateur ./ws/lsp.rs — @LspClient::initialize ne
+  l'écrit ni ne le lit jamais (voir `Handles` et `Tasks`). Un seul fichier, un seul
+  contrat : pas de regroupement.
+
+Owns:
+  ./lsp_client.rs
+
+Can read:
+  ./lsp.rs
+  ./tools_impl.rs
+  ./ws/lsp.rs
+  ../Cargo.toml
+  ../../docs/architecture.md
+  ../../vanyline.sdd
+  ../../tooling.sdd
+
+Depends on:
+  @crate::lsp::LspSession (./lsp.rs, spec ./lsp.sdd en cours) — seuls points d'appui :
+    @LspSession::subscribe (abonnement à la construction, canal non borné
+    @tokio::sync::mpsc::UnboundedReceiver<Vec<u8>> recevant les réponses (id d'origine
+    restauré, JSON brut sans framing) et les notifications broadcast),
+    @LspSession::unsubscribe (au @Drop), @LspSession::send (toute trame sortante —
+    valide le JSON (`VNL-SBX-LSP-001`), exige un `id` entier si présent
+    (`VNL-SBX-LSP-002`), erreur `VNL-SBX-LSP-003: LSP process is dead` quand le canal
+    stdin est fermé ; réécrit l'`id` des requêtes en session id et mémorise le mapping
+    client→(session id, id d'origine) ; en mode composite `aux`, fan-out des
+    notifications et barrières de fusion — transparents pour CE client, la réponse
+    fusionnée unique lui parvient sur SON canal avec l'id d'origine),
+    @LspSession::try_mark_initialized (test-and-set partagé du flag `initialize`),
+    @LspSession::try_mark_uri_open (test-and-set partagé des URIs ouvertes),
+    @LspSession::wait_for_diagnostics (attente bornée du cache `publishDiagnostics`,
+    `Some(vec)` publie-inclusive-vide / `None` jamais-publié).
+    CE fichier ne dépend PAS de @set_initialize_outcome/@wait_for_initialize_outcome
+    (voie exclusive du bridge ./ws/lsp.rs) ni de @next_doc_version (appelé par
+    ./tools_impl.rs, le `version` arrive en paramètre de @LspClient::did_change).
+  Mort du process vue d'ici — la lectrice de ./lsp.rs, sur EOF stdout, baisse
+    `alive`, VIDE la map `subs` (tous les receivers des clients fermés) et tue le
+    primaire ; d'ici, la mort d'un process en cours d'attente se matérialise UNIQUEMENT
+    par @rx.recv() rendant `None` → `VNL-SBX-LSP-004`. Un envoi peut passer `Ok`
+    sur un process déjà mort mais pas encore détecté (canal stdin pas encore vidé par
+    la tâche écrivaine) : `VNL-SBX-LSP-003` n'est garanti qu'après la détection.
+  @serde_json (@Value, @json!, @from_slice, @to_string via @ToString du Value) — les
+    messages sont fabriqués et relus comme @Value opaques, aucun type LSP typé n'existe.
+  @tokio::sync::mpsc — type du canal d'abonnement (non borné, pas de pression
+    rétrograde : les frames s'accumulent dans le canal tant que le client n'attend pas).
+  @anyhow — tous les messages d'erreur du fichier sont des @anyhow::Error à marqueur
+    `VNL-SBX-LSP-004`/`VNL-SBX-LSP-005` (les `-001/-002/-003` viennent de la session).
+  @std::sync::atomic::{AtomicU64, @Ordering::SeqCst} — compteur d'ids JSON-RPC par
+    client (@LspClient::next_id, départ 1).
+  @tracing — @tracing::debug! aux deux seules branches de parsing en échec (voir
+    `Handles`) ; @tracing est aussi la destination du stderr du process, mais côté
+    ./lsp.rs.
+  @crate::lsp::{ClientId, LspManager, LspToolchain} — @ClientId pour le champ et le
+    @Drop ; @LspManager/@LspToolchain uniquement dans le module de fakes `cfg(test)`.
+
+Exposes:
+  @DIAGNOSTICS_TIMEOUT — `pub const` @std::time::Duration, exactement 2 secondes
+    (@from_secs(2)). Consommé par @LspClient::diagnostics et HORS fichier par
+    ./tools_impl.rs (`edit_and_check` attend la ré-analyse `DIAGNOSTICS_TIMEOUT * 2`,
+    ~4 s) — changer la valeur déplace donc deux contrats, verrouillé par `Scenario`.
+  @LspClient — `pub struct`, champs privés : `session: Arc<LspSession>`,
+    `client_id: @ClientId`, `rx: mpsc::UnboundedReceiver<Vec<u8>>`,
+    `next_id: AtomicU64` (initialisé à 1), `root_uri: String`. Ni `Clone` ni `Debug`.
+    Aucune phase de shutdown : le drop seul désabonne (voir @Drop).
+  @LspClient::new(@Arc<LspSession>, String) -> Self — synchrone, appelle
+    @session.subscribe() À LA CONSTRUCTION (les frames arrivent dès lors que d'autres
+    clients émettent, même avant tout `initialize`). `root_uri` est stocké tel quel,
+    JAMAIS validé (ni contrôle `file://`, ni slash, ni échappement — le constructeur
+    réel est ./tools_impl.rs qui fabrique `format!("file://{}", sandbox_root)`).
+  @LspClient::initialize(`&mut self`) -> `@anyhow::Result<@Value>` — `pub async`.
+  @LspClient::notify(`&self`, method `&str`, params @Value) -> `@anyhow::Result<()>`
+    — `pub async`, générique : n'importe quelle méthode, aucun filtre.
+  @LspClient::did_open(`&self`, uri, language_id, text `&str`) -> Result<()> —
+    notification `textDocument/didOpen`, forme verrouillée :
+    `{"textDocument":{"uri":…,"languageId":…,"version":1,"text":…}}` — `version`
+    LITTÉRALEMENT 1, jamais un compteur.
+  @LspClient::did_change(`&self`, uri `&str`, version i32, full_text `&str`) ->
+    Result<()> — notification `textDocument/didChange` full-sync :
+    `{"textDocument":{"uri":…,"version":…},"contentChanges":[{"text":…}]}` —
+    `version` DANS `textDocument` (@VersionedTextDocumentIdentifier de la spec LSP) :
+    un `version` en champ frère est silencieusement droppé par rust-analyzer et
+    typescript-language-server (→ `edit_and_check` bloqué `VNL-SBX-LSP-011`,
+    commentaire source 2026-09). La valeur vient du appelant
+    (@LspSession::next_doc_version, démarre à 2) ; CE client ne la contrôle pas.
+  @LspClient::ensure_open(`&self`, uri, language_id, text) -> Result<()> — envoie
+    `did_open` seulement si @session.try_mark_uri_open(uri) rend `true` (premier
+    appelant tous clients de la session confondus, éditeur navigateur inclus) ; sinon
+    no-op `Ok(())` SILENCIEUX, y compris quand le texte de cet appel diverge de celui
+    du premier `didOpen` (le buffer serveur garde le texte d'ouverture — voir
+    `Tasks`).
+  @LspClient::request(`&mut self`, method `&str`, params @Value) ->
+    `@anyhow::Result<@Value>` — `pub async`. Envoie la requête, consomme son canal
+    jusqu'à la réponse d'id correspondant, rend le `result` cloné. Voir `Raises` pour
+    la table d'erreurs et `Handles` pour le sort des trames intermédiaires.
+  @LspClient::diagnostics(`&mut self`, uri, language_id, text `&str`) ->
+    `@anyhow::Result<Option<Vec<@Value>>>` — séquence `initialize` (résultat ignoré,
+    erreur propagée) → `ensure_open` (erreur propagée) →
+    @session.wait_for_diagnostics(uri, @DIAGNOSTICS_TIMEOUT). Trois états rendus :
+    `Some(vec)` non vide (diagnostics), `Some(vec![])` (serveur a publié « rien à
+    signaler » — distinct par contrat, un agent ne doit pas confondre), `None` (aucune
+    publication vue en 2 s — « pas encore analysé », ./tools_impl.rs le rend comme
+    message explicite, jamais comme « propre »).
+  @Drop pour @LspClient — UNIQUEMENT @session.unsubscribe(client_id) : retire le
+    canal, les entrées `pending` de ce client, ses barrières `merges` et ses tenants
+    `editor_uris` (contrat ./lsp.rs). Ne fait JAMAIS : `didClose`, `shutdown`, `exit`,
+    kill du process, invalidation du cache de diagnostics. `open_uris` et le flag
+    `initialized` de la session survivent au drop (ré-abonnement ultérieur : l'URI
+    reste « ouverte », un nouveau client ne renverra jamais `didOpen`).
+  Module `lsp_test_fakes` — `#[cfg(test)]` mais `pub`, explicitement partagé avec les
+    tests de ./tools_impl.rs (`use crate::lsp_client::lsp_test_fakes`) :
+    @FAKE_LSP_PY (mini-LSP Python complet : initialize compté `initializeCount`,
+    hover MarkupContent objet, definition/references/rename/documentSymbol/
+    workspace/symbol, `didOpen` publie des diagnostics UNE SEULE FOIS par URI comme un
+    vrai serveur — choix délibéré qui rend visible le bug du double `didOpen`),
+    @FAKE_LSP_NODIAG_PY (ne publie jamais rien → chemin `None` du timeout),
+    @FAKE_LSP_EDIT_CHECK_PY (journal des méthodes reçues dans le fichier argv[1],
+    publication `didOpen` différée de 0,1 s dans un thread pour reproduire la course
+    réelle didOpen→didChange, `didChange` publie « diag v2 » si le texte contient
+    `BAD` sinon `[]` → observable du diff), @make_manager(name, script) qui écrit le
+    script dans un @tempfile::TempDir et construit un @LspManager mono-toolchain
+    `python3 <script>`, `sandbox_root` = le tempdir. Étant donné qu'un autre fichier
+    consomme ces fakes, leur comportement de test est un contrat inter-fichiers.
+  Tests existants du fichier (module `tests`) : `client_initialize_once`,
+    `client_request_returns_hover`, `client_diagnostics_captures_publish`,
+    `client_diagnostics_second_call_same_uri_reads_cache`,
+    `client_diagnostics_none_on_no_publish`. Rien sur les chemins d'erreur 004/005,
+    `notify` mort, `ensure_open` multi-clients, `Drop` ni `initialized` — visés par
+    les `Scenario` ci-dessous.
+
+Accepts:
+  @LspClient::new — n'importe quel @Arc<LspSession> (vivant ou mort — l'abonnement
+    d'un client sur une session déjà morte ne rend pas d'erreur, il ne recevra rien)
+    et n'importe quel `root_uri: String`, y compris vide ou non-`file://` : aucune
+    validation nulle part avant le process.
+  @notify/@request — `method: &str` arbitraire (le client ne valide aucun nom de
+    méthode LSP ; une méthode inconnue part telle quelle vers le process) et
+    `params: @Value` arbitraire, TOUJOURS sérialisé sous la clé `"params"` — un
+    @Value::Null émet `"params":null` (jamais la clé absente, contrairement à
+    l'optionnalité LSP).
+  @did_open/@did_change/@ensure_open — uri/language_id/text passés verbatim dans le
+    JSON : pas d'échappement d'URI (un chemin avec espace ou caractère non-ASCII
+    produit un `file://` non conforme à la RFC 8089 — la construction `file://{chemin}`
+    est faite par ./tools_impl.rs, `[?]` dans `Tasks`).
+  @did_change — `version: i32` non contrôlé (le client n'exige ni monotonicité ni
+    valeur > version du `didOpen` ; c'est ./tools_impl.rs qui appelle
+    @LspSession::next_doc_version, contrat hors fichier).
+  Réponses serveur — toute trame JSON dont `id` se lit en i64 (`as_i64`) ET égale
+    l'id attendu est « la réponse » ; toute autre trame (notification sans `id`,
+    requête serveur→client avec `id`+`method`, `id` string ou flottant, `id` d'une
+    autre requête) est ignorée et la boucle continue.
+  Framing : le client n'encode et ne décode AUCUN en-tête `Content-Length` — sortant
+    JSON brut vers @session.send (la tâche écrivaine de ./lsp.rs framer), entrant
+    payload pur déjà déframé et re-sérialisé par la lectrice de ./lsp.rs. Un serveur
+    qui écrit sans `Content-Length` ne produit jamais de trame décodable : la session
+    buffer sans fin (contrat ./lsp.sdd), et CE client attend `VNL-SBX-LSP-004` jusqu'à
+    l'EOF côté session.
+
+Returns:
+  @initialize — sur GAIN de @try_mark_initialized : le `result` (clone) de la réponse
+    `initialize` du serveur, verbatim (typiquement `{"capabilities":…,"serverInfo":…}`
+    — les capabilities sont rendues à l'appelant mais JAMAIS retenues ni appliquées :
+    le client envoie `capabilities: {}` au serveur et ne négocie rien par la suite,
+    cf. `Handles`). SUR PERTE (session déjà initialisée) : @Value::Null, sans émettre
+    un octet — pas de rejeu du résultat d'origine, pas d'attente de l'issue en cache
+    (voie ./ws/lsp.rs uniquement).
+  @request — le @Value `result` de la réponse, verbatim (objet, tableau ou `null`
+    JSON-RPC légitime rendu comme @Value::Null par @clone).
+  @notify/@did_open/@did_change/@ensure_open — `Ok(())` (le `Ok(())` de
+    @ensure_open couvre aussi le no-op « URI déjà ouverte », non distinguable).
+  @diagnostics — `Some(Vec<Value>)` (les `diagnostics` du dernier
+    `publishDiagnostics` fondu pour l'URI — cache de session, pas le canal de CE
+    client : un push arrivé avant l'abonnement de cette instance est visible) ;
+    `Some(vec![])` si le serveur a explicitement publié le tableau vide ; `None` si
+    rien n'a été publié pour cette URI pendant @DIAGNOSTICS_TIMEOUT.
+  @request/@initialize — ids JSON-RPC d'émission : compteur PAR CLIENT `next_id`,
+    départ 1, +1 par `initialize` gagnant et par `request` (SeqCst, transtypé `as
+    i64`). Ces ids sont les ids ORIGINAUX (la session les réécrit en session ids
+    globaux) ; deux clients concurrents peuvent émettre le même id sans collision, la
+    session route par (client, session id) et restaure l'id d'origine par destinataire.
+
+Raises:
+  Toutes les erreurs du fichier sont des @anyhow::Error à marqueur `VNL-SBX-LSP-NNN`,
+    texte exact verrouillé (les outils MCP le rendent brut à l'agent).
+  `VNL-SBX-LSP-004: LSP process closed while waiting for initialize response` —
+    @initialize, quand @rx.recv() rend `None` (mort du process ou `subs` vidé par la
+    lectrice ./lsp.rs) pendant l'attente de la réponse.
+  `VNL-SBX-LSP-004: LSP process closed while waiting for response` — @request, même
+    cause (deux messages 004 distincts, verrouillés tels quels).
+  `VNL-SBX-LSP-005: LSP server error: {error}` — @request UNIQUEMENT, quand la
+    réponse d'id correspondant porte `"error"` : `{error}` est l'objet JSON-RPC
+    sérialisé (la sous-chaîne `"code":-32601` est déterministe — ./tools_impl.rs
+    s'appuie dessus pour la dégradation `workspace/symbol` non supporté, rendue en
+    SUCCÈS d'outil et non en erreur).
+  `VNL-SBX-LSP-005: LSP response has neither 'result' nor 'error'` — @request quand
+    la réponse d'id correspondant n'a ni `result` ni `error` ; @initialize dans le
+    MÊME cas — y compris donc quand la réponse d'`initialize` porte un `"error"` :
+    @initialize ne teste que `result`, l'objet erreur est jeté et le message rendu est
+    « neither 'result' nor 'error' », trompeur (`[?]` dans `Tasks`, verrouillé tel
+    quel par `Scenario` en attendant l'arbitrage).
+  Erreurs PROPAGÉES de @LspSession::send (aucune n'est fabriquée ici) :
+    `VNL-SBX-LSP-003: LSP process is dead` sur toute méthode émettrice
+    (@initialize/@request/@notify/@did_open/@did_change/@ensure_open) quand le canal
+    stdin est fermé. `VNL-SBX-LSP-001` (JSON invalide) et `VNL-SBX-LSP-002` (`id` non
+    entier) sont INATTEIGNABLES depuis ce fichier : le JSON vient de @json! (toujours
+    valide) et l'id est un i64 fabriqué par le client.
+  @initialize IGNORE l'erreur de l'envoi de `initialized` (`let _ =` en source) :
+    une mort du process entre la réponse `initialize` et cette notification rend
+    quand même `Ok(result)`.
+  Aucun panic sur les chemins de production (harnais ../../tooling.sdd) ; les
+    `unwrap`/`expect` du fichier vivent sous `#[allow(clippy::unwrap_used,
+    clippy::expect_used)]` dans `cfg(test)` uniquement.
+
+Handles:
+  Cycles de vie imbriqués — le process LSP n'est initialisé QU'UNE FOIS par session
+    (@try_mark_initialized, swap SeqCst) : le premier @LspClient::initialize envoie
+    `initialize` (id propre au client, `processId: null`, `rootUri: root_uri`,
+    `capabilities: {}` — capacités de client VIDES, choix assumé qui fait répondre
+    rust-analyzer/typescript-language-server en formes plates, SymbolInformation
+    notamment, cf. commentaire du fake documentSymbol), attend SA réponse sans aucun
+    timeout local, puis envoie la notification `initialized`
+    (`{"jsonrpc":"2.0","method":"initialized","params":{}}`). Les clients suivants
+    rendent `Null` immédiatement. Le flag est consommé AVANT l'envoi : un échec
+    d'`initialize` (send mort, EOF, réponse erreur) laisse `initialized = true` pour
+    la vie de la session — les suivants obtiennent `Ok(Null)` et `diagnostics()`
+    continue (didOpen + attente) sur un serveur jamais initialisé (`[!]`/`[?]`).
+  Cache d'issue non utilisé ici — @set_initialize_outcome/@wait_for_initialize_outcome
+    (et leur timeout de 30 s, y compris la mise en cache de l'ÉCHEC justifiée par le
+    commentaire de ./lsp.rs : « typescript-language-server sans node_modules ») ne
+    sont appelés QUE par le bridge navigateur ./ws/lsp.rs. La voie tools MCP
+    (CE fichier) n'en profite ni n'y contribue — asymétrie documentaire `[?]`.
+  Boucles de corrélation (@initialize et @request) — drainage du canal jusqu'à
+    l'id : notification sans `id` → ignorée DÉFINITIVEMENT (perdue pour ce client —
+    pas de file d'attente de notifications pour un futur consommateur ; les
+    `publishDiagnostics` ne sont pas perdus pour l'écosystème car ./lsp.rs les met en
+    cache avant broadcast) ; requête serveur→client (`method` + `id` —
+    `client/registerCapability`, `window/workDoneProgress/create` chez
+    rust-analyzer) → ignorée sans JAMAIS répondre au serveur (`[?]`) ; `id` non-entier
+    ou non correspondant → ignoré ; JSON indécodable sur le canal →
+    @tracing::debug!("LSP client: failed to parse init response: …") ou `…response:
+    …` puis continue — branche en pratique inatteignable (la lectrice ./lsp.rs filtre
+    déjà le non-JSON et re-sérialise du valide, `[?]` code défensif mort).
+  Aucun timeout applicatif local — @initialize et @request attendent `rx.recv()` sans
+    échéance : un serveur qui ne répond JAMAIS et ne meurt JAMAIS les pend
+    indéfiniment (seules l'EOF stdout de ./lsp.rs — qui vide `subs` — ou la mort de la
+    task appelante libèrent). Les 30 s de @wait_for_initialize_outcome et les 2 s de
+    @DIAGNOSTICS_TIMEOUT sont hors de ces deux boucles. `[?]` à trancher.
+  Buffering — canal non borné : les frames reçues pendant qu'AUCUNE boucle d'attente
+    ne tourne restent en file et sont drainées par l'appel @request/@initialize
+    suivant (une réponse tardive à une requête abandonnée par un drop est perdue avec
+    le canal). Pas de backpressure sur le serveur.
+  Mort du process en plein rendu — partiels de trame : jamais livrés (./lsp.rs
+    n'émet une frame que complète) ; réponse jamais livrée : @rx fermé par le
+    `subs.clear()` de la lectrice → `VNL-SBX-LSP-004`. Mort pendant une notification :
+    `notify` peut avoir rendu `Ok(())` juste avant (fenêtre entre détection EOF et
+    mort de la tâche écrivaine) — au pire un fire-and-forget perdu, jamais une erreur
+    mensongère garantie avant détection.
+  Abandon par drop — @Drop = @unsubscribe : les `pending` du client sont retirés, une
+    réponse serveur qui arrive ensuite tombe en « unknown session_id » warn côté
+    session et ne réveille personne ; aucune notification de fermeture (ni `didClose`,
+    ni `shutdown`, ni `exit`) n'est jamais émise par CE fichier — la mort propre du
+    process LSP n'existe nulle part (kill only, @Drop de @LspSessionInner côté
+    ./lsp.rs, `[?]`).
+  Consommateurs réels — ./tools_impl.rs : un @LspClient NEUF par appel de tool
+    (`lsp_workspace_symbols` ligne ~1718, tools de position ~1886,
+    `edit_and_check` ~2937), `root_uri = file://{sandbox_root}`, uris de fichiers
+    `file://{chemin confiné}` ; `edit_and_check` consomme @DIAGNOSTICS_TIMEOUT * 2
+    comme délai de ré-analyse et pilote `did_change` avec @LspSession::next_doc_version
+    (cas A — jamais de `didChange` quand un éditeur navigateur tient l'URI, cas B,
+    design R1 — règle portée par ./tools_impl.rs, pas ici).
+  Fakes de test — @make_manager lance `python3` : les tests du fichier (et de
+    ./tools_impl.rs) dépendent d'un `python3` sur le PATH et d'un shell d'exécution
+    tokio (@tokio::test) ; le timeout de @FAKE_LSP_EDIT_CHECK_PY (différé 0,1 s) est
+    un réglage de course observé « vert-rouge » au développement de la tâche 08d — ne
+    pas « simplifier » en publication instantanée.
+
+Must:
+  N'émettre `initialize` qu'UNE SEULE FOIS par session, via @try_mark_initialized
+    gagné, et rendre @Value::Null sans rien émettre aux clients suivants ; envoyer la
+    notification `initialized` APRÈS avoir reçu la réponse (jamais avant, jamais en
+    cas de perte du test-and-set).
+  Verrouiller la forme de `initialize` : `"jsonrpc":"2.0"`, `"method":"initialize"`,
+    `params.processId` littéralement `null`, `params.rootUri == root_uri`,
+    `params.capabilities` objet vide `{}`, `params.workspaceFolders` =
+    `[{uri: root_uri, name: ""}]`.
+  Corréler les réponses sur l'id ORIGINAL entier du client (`next_id` par client,
+    départ 1, monotone) et ignorer tout le reste (notifications, autres ids, ids
+    non-entiers, requêtes serveur→client) sans jamais répondre aux requêtes serveur.
+  Rendre les messages d'erreur byte-exacts de `Raises` (004 en deux variantes, 005 en
+    trois, l'objet `error` JSON-RPC sérialisé inclus dans le message -005 de
+    `request` — la sous-chaîne `"code":-32601` doit rester déterministe pour la
+    dégradation `workspace/symbol` de ./tools_impl.rs).
+  Envoyer `didOpen` au plus UNE FOIS par URI et par session (@try_mark_uri_open,
+    éditeur navigateur inclus) — un second `didOpen` est une violation de protocole
+    observée comme cause des diagnostics « one-shot ».
+  Placer `version` DANS `textDocument` pour `didChange` (forme verrouillée de
+    `Exposes`) et `version: 1` fixe dans `didOpen`.
+  Distincter les trois états de @diagnostics : `Some(non vide)`, `Some(vec![])`
+    (publié « propre ») et `None` (jamais publié — timeout @DIAGNOSTICS_TIMEOUT de
+    2 s), et lire le cache de SESSION (pas le canal local) pour qu'un push antérieur à
+    l'abonnement soit re-servi sans nouveau `didOpen`.
+  Toujours émettre la clé `"params"` (même @Value::Null) dans requêtes et
+    notifications.
+  Désabonner au @Drop (@unsubscribe) et RIEN d'autre.
+  Logger en @tracing::debug! (et seulement là) les deux échecs de parsing sur canal,
+    sans jamais logger le contenu complet d'une trame ni le stderr du process (rôles
+    de ./lsp.rs).
+
+Must not:
+  Émettre `shutdown`, `exit`, `didClose` ou toute notification de fermeture — ni
+    @Drop, ni aucune méthode de ce fichier ne le fait aujourd'hui ; ne pas introduire
+    ce comportement sans le statuer d'abord (`Tasks`).
+  Tuer, envoyer un signal ou attendre le process enfant : la gestion de process est
+    entièrement propriété de ./lsp.rs.
+  Encoder ou décoder un en-tête `Content-Length` ici (framing = ./lsp.rs), ni écrire
+    quoi que ce soit d'autre sur stdin du process que des objets JSON-RPC par
+    @session.send.
+  Retenir, interpréter ou appliquer les `capabilities` rendues par le serveur (le
+    résultat d'`initialize` est traversant) ; négocier une capacité client non vide.
+  Envoyer un second `didOpen` sur une URI déjà marquée ouverte, un second
+    `initialize` sur une session initialisée, ou un `didChange` dont la `version`
+    serait gérée localement (la source de vérité est @LspSession::next_doc_version,
+    côté ./tools_impl.rs).
+  Confondre `None` et `Some(vec![])` dans @diagnostics, ni inventer un timeout
+    supplémentaire dans @request/@initialize sans arbitrage `Tasks` (le hang
+    « serveur qui ne répond pas » est le comportement actuel verrouillé).
+  Mélanger les ids entre clients : deux @LspClient sur la même session n'ont pas à se
+    coordonner (la session réécrit et route), mais ce fichier ne doit JAMAIS lire ou
+    écrire un id de session global.
+  Faire grossir la dette harnais (../../tooling.sdd) : aucun `unwrap`/`expect`/`panic!`
+    hors `cfg(test)` ; le module de fakes garde ses `#[allow]` ciblés existants ;
+    jamais `println!`/`eprintln!`.
+
+Tasks:
+  [ ] Convertir chaque `Scenario` en test dédié taggé par son titre. Besoins de
+    harnais : le fake-observateur @FAKE_LSP_EDIT_CHECK_PY ne journalise que les NOMS
+    de méthodes — les Scenario sur les formes (`initialize` params, `didChange`
+    version) et sur les ids (`request_ids_monotoniques`) exigent de journaliser aussi
+    les payloads/ids (extension du fichier-témoin, à faire dans le module de fakes,
+    contrat inter-fichiers avec ./tools_impl.rs) ; les Scenario de mort (004) exigent
+    un fake qui s'arrête sur commande (le `FAKE_LSP_EXIT_PY` de ./lsp.rs n'est pas
+    `pub`), et le Scenario « aucun timeout » un fake qui lit sans jamais répondre.
+  [!] @initialize ne teste QUE `result` : une RÉPONSE D'ERREUR à `initialize`
+    (ex. typescript-language-server sans `node_modules`, cf. commentaire ./lsp.rs)
+    rend le message trompeur `VNL-SBX-LSP-005: … neither 'result' nor 'error'` et
+    JETTE l'objet erreur. @request fait l'inverse (extrait l'erreur). Corriger
+    @initialize pour propager l'erreur comme @request, ou assumer ?
+  [!] Le flag `initialized` est consommé AVANT l'envoi : tout échec d'`initialize`
+    (send `VNL-SBX-LSP-003`, EOF `VNL-SBX-LSP-004`, réponse erreur) laisse la session
+    « initialisée » pour toujours, sans @set_initialize_outcome — les clients suivants
+    obtiennent `Ok(Null)` et @diagnostics continue sur un serveur jamais initialisé
+    (attente de 2 s puis `None`). Réinitialiser le flag à l'échec, ou câbler ici le
+    cache d'issue (comme ./ws/lsp.rs) pour que l'échec réel soit re-servi ?
+  [?] @LspClient::initialize ne lit pas @wait_for_initialize_outcome : un second tool
+    MCP appelle sur une session initialisée par le navigateur et reçoit `Null` (pas
+    les capabilities du serveur). Actuel et testé (`client_initialize_once`) — assumé
+    (les tools ne consomment pas le résultat) ou voie à unifier avec ./ws/lsp.rs ?
+  [?] @request/@initialize sans aucun timeout local : un serveur vivant qui ne
+    répond jamais pend l'appel de tool MCP indéfiniment (le tool MCP n'a pas non
+    plus de deadline, cf. ./tools_impl.rs ?) — ajouter un plafond (30 s comme le
+    bridge ?) ou rester sur la détection par EOF ?
+  [?] Requêtes serveur→client (`id`+`method`, ex. `client/registerCapability`,
+    `window/workDoneProgress/create` de rust-analyzer) : silencieusement ignorées,
+    jamais répondues. Un serveur strict peut s'offusquer. Répondre
+    `MethodNotFound`, ou documenter comme délibéré ?
+  [?] @ensure_open no-op sur URI déjà ouverte IGNORE le texte de l'appelant : si le
+    fichier a changé sur le disque depuis l'ouverture (par l'éditeur ou un autre
+    tool), le buffer serveur reste l'ancien texte. Compensé par @did_change côté
+    `edit_and_check` (cas A) et interdit cas B (design R1) — assumé, ou `didChange`
+    implicite quand le texte diverge ?
+  [?] Construction `file://{chemin}` sans échappement (côté ./tools_impl.rs, consommé
+    tel quel ici) : espace/`#`/non-ASCII → URI non conforme. Échapper ici ou là-bas ?
+  [?] Branche « JSON indécodable sur le canal → debug + continue » : inatteignable en
+    pratique (la lectrice ./lsp.rs ne broadcast que du JSON re-sérialisé). Code
+    défensif gardé ou supprimé ?
+  [?] Aucune fermeture propre nulle part dans le crate : ni `shutdown`/`exit` ici,
+    ni appelant — le process LSP est tué (@kill) à la mort de @LspSessionInner ou EOF.
+    Ajouter un arrêt soigné quelque part (spec ./lsp.sdd à statuer) ?
+  [?] `did_open` à `version: 1` fixe : si l'éditeur navigateur a déjà ouvert l'URI à
+    une version N > 1, un @did_open d'un tool (URI non encore tenue côté tools — map
+    `open_uris` partagée donc normalement impossible, mais l'éditeur n'y participe
+    PAS : il tient `editor_uris`, pas `open_uris`) pourrait envoyer un `didOpen`
+    redondant côté serveur. Vérifier avec Sébastien si le bridge navigateur doit
+    alimenter `try_mark_uri_open` aussi (état actuel : seul @ensure_open le fait).
+  [?] @DIAGNOSTICS_TIMEOUT = 2 s, et ./tools_impl.rs dépend du double : toute
+    retouche doit réinterroger `edit_and_check` et `lsp_diagnostics` (deux Scenario
+    hors de ce fichier).
+
+Done when:
+  Chaque `Scenario` a un test dédié taggé par son titre, compilé, exécuté, vert
+    (avec les extensions de fakes listées en `Tasks`, sans régression des tests de
+    ./tools_impl.rs qui consomment `lsp_test_fakes`).
+  Les messages `VNL-SBX-LSP-004/005` et les formes JSON (`initialize`, `initialized`,
+    `didOpen`, `didChange`) sont verrouillés caractère par caractère.
+  Les chemins d'erreur (mort en attendant 004 ×2, erreur serveur 005 avec
+    `"code":-32601` déterministe, réponse sans `result` ni `error`, `notify` sur
+    process mort 003) sont couverts par tests.
+  Le harnais (../../tooling.sdd) reste vert : clippy `--all-targets -D warnings`,
+    fmt, aucun `unwrap`/`expect` hors `cfg(test)`.
+  Sébastien a tranché les `[?]` et `[!]` de `Tasks` — en particulier le sort du
+    message trompeur d'`initialize` en erreur et la non-réinitialisation du flag
+    `initialized` à l'échec.
+
+Scenario: initialize_un_seul_client_gagne_et_rend_le_resultat
+  Given une session @LspSession vive sur @FAKE_LSP_PY et deux @LspClient A et B
+    partageant cette session (même `root_uri`)
+  When A appelle @initialize, puis B appelle @initialize
+  Then A rend un objet JSON (le `result` du fake, `initializeCount == 1`) ; B rend
+    @Value::Null ; @session.is_initialized() est `true` (test existant
+    `client_initialize_once`)
+
+Scenario: initialize_deja_effectue_nemet_aucune_trame
+  Given une session dont @try_mark_initialized a déjà été gagné (un premier client a
+    appelé @initialize sur @FAKE_LSP_EDIT_CHECK_PY, journal d'observateur actif)
+  When un second @LspClient appelle @initialize puis @notify("x/sonde", `{}`)
+  Then @initialize rend @Value::Null sans ajouter de ligne `"initialize"` au journal
+    (seule la ligne `"x/sonde"` de la sonde suit) — le client perdant le test-and-set
+    n'émet rien du tout
+
+Scenario: initialize_params_verrouillees
+  Given un @LspClient avec `root_uri = "file:///workspace"` sur un fake qui journalise
+    le payload complet de `initialize`
+  When @initialize réussit
+  Then la trame reçue est exactement `"jsonrpc":"2.0"`, `method == "initialize"`,
+    `params.processId == null`, `params.rootUri == "file:///workspace"`,
+    `params.capabilities == {}`, `params.workspaceFolders == [{"uri":
+    "file:///workspace","name":""}]`
+
+Scenario: initialize_notifie_initialized_apres_la_reponse
+  Given un @LspClient sur @FAKE_LSP_EDIT_CHECK_PY avec journal d'observateur
+  When @initialize réussit
+  Then le journal gagne une ligne `"initialized"` STRICTEMENT APRÈS la ligne
+    `"initialize"` et rien d'autre entre les deux, et la notification `initialized`
+    porte `"params":{}`
+
+Scenario: initialize_reponse_erreur_du_serveur_message_actuel_trompeur
+  Given un fake dont `initialize` répond
+    `{"error":{"code":-32001,"message":"no node_modules"}}` (aucun `result`)
+  When @LspClient::initialize est appelé
+  Then le résultat est une erreur @anyhow dont le message est exactement
+    `"VNL-SBX-LSP-005: LSP response has neither 'result' nor 'error'"` — l'objet
+    `error` n'apparaît PAS dans le message (comportement actuel verrouillé en attendant
+    l'arbitrage `Tasks`)
+
+Scenario: initialize_processus_meurt_en_attendant_vnl_sbx_lsp_004
+  Given un fake qui ne répond JAMAIS à `initialize` puis s'arrête (EOF stdout, ex.
+    exit sur la 2e trame)
+  When @LspClient::initialize attend la réponse
+  Then l'appel rend `VNL-SBX-LSP-004: LSP process closed while waiting for initialize
+    response` dans un délai borné (la lectrice de ./lsp.rs a vidé `subs` à l'EOF)
+
+Scenario: initialize_echec_consomme_le_flag_de_session
+  Given une session vive sur un fake dont `initialize` répond une erreur JSON-RPC
+  When un premier @LspClient échoue à @initialize, puis un second client appelle
+    @initialize
+  Then le premier rend l'erreur -005 actuelle ; le second rend `Ok(@Value::Null)`
+    immédiatement (flag `initialized` resté `true`, aucun rejeu) — verrouille
+    l'existence du comportement `[!]` documenté, en attendant son arbitrage
+
+Scenario: request_rend_le_result_en_sautant_les_notifications
+  Given un @LspClient initialisé sur @FAKE_LSP_PY et un `did_open` dont le fake émet
+    un `publishDiagnostics` juste avant la réponse `hover`
+  When @request("textDocument/hover", …) est appelé
+  Then l'appel rend `result.contents.value == "hover:file:///workspace/main.rs"`
+    sans bloquer (la notification sans `id` a été sautée) — test existant
+    `client_request_returns_hover`
+
+Scenario: request_erreur_serveur_vnl_sbx_lsp_005_avec_erreur_serialisee
+  Given un @LspClient initialisé sur @FAKE_LSP_PY et sa méthode sentinelle
+    `workspace/symbol` en query `"NOSUPPORT"` (réponse `{"error":{"code":-32601,
+    "message":"unknown request"}}`)
+  When @request("workspace/symbol", `{"query":"NOSUPPORT"}`) est appelé
+  Then l'erreur rendue commence par `"VNL-SBX-LSP-005: LSP server error: "` et
+    contient la sous-chaîne exacte `"code":-32601` (dépendance de la dégradation
+    `workspace/symbol` de ./tools_impl.rs)
+
+Scenario: request_reponse_sans_result_ni_error_en_erreur
+  Given un fake qui répond à la requête `{"jsonrpc":"2.0","id":<id>}` (ni `result`
+    ni `error`)
+  When @request est appelé
+  Then l'erreur est exactement `VNL-SBX-LSP-005: LSP response has neither 'result'
+    nor 'error'`
+
+Scenario: request_processus_meurt_en_attendant_vnl_sbx_lsp_004
+  Given un @LspClient initialisé sur un fake qui s'éteint immédiatement après avoir
+    reçu une requête `x/pendable` (aucune réponse)
+  When @request("x/pendable", …) attend
+  Then l'appel rend `VNL-SBX-LSP-004: LSP process closed while waiting for response`
+    dans un délai borné par l'EOF (fermeture de `subs` par ./lsp.rs)
+
+Scenario: request_aucun_timeout_local_verrouille_le_hang
+  Given un @LspClient sur un fake qui lit `x/sans-reponse`, ne répond jamais et ne
+    meurt pas
+  When @request("x/sans-reponse", …) est attendu par `tokio::time::timeout(1s, …)`
+  Then le timeout du test expire (l'appel est toujours en attente) — verrouille
+    l'ABSENCE de timeout local dans @request, comportement `[?]` en `Tasks` (la future
+    décision devra changer ce test)
+
+Scenario: request_ids_monotoniques_par_client
+  Given un fake qui journalise l'`id` de chaque requête reçue et un @LspClient neuf
+    (session déjà initialisée par autrui, donc @initialize local ne consomme pas d'id)
+  When @request est appelé trois fois de suite (`x/a`, `x/b`, `x/c`)
+  Then les ids journalisés sont strictement croissants et valent 1, 2, 3 (départ du
+    compteur par client) — une requête émise par un AUTRE client de la session ne
+    décale pas ces ids (la session possède son propre compteur global, invisible ici)
+
+Scenario: notify_sur_processus_mort_vnl_sbx_lsp_003
+  Given une session dont le process est mort et dont la tâche écrivaine a échoué sur
+    stdin (canal fermé) — état atteignable en test en renvoyant `send` après l'EOF
+    jusqu'à ce que la détection soit consommée
+  When @notify("textDocument/didOpen", …) est appelé
+  Then l'erreur est `VNL-SBX-LSP-003: LSP process is dead` (propagée verbatim de
+    @LspSession::send, sans marqueur ajouté par CE fichier)
+
+Scenario: did_open_forme_verrouillee_version_un
+  Given un @LspClient sur un fake journalisant les payloads de notification
+  When @did_open("file:///w/a.rs", "rust", "fn main(){}") est appelé
+  Then la trame émise est exactement `method == "textDocument/didOpen"` et
+    `params == {"textDocument":{"uri":"file:///w/a.rs","languageId":"rust",
+    "version":1,"text":"fn main(){}"}}` avec `"params"` TOUJOURS présent
+
+Scenario: did_change_version_dans_text_document
+  Given un @LspClient sur un fake journalisant les payloads de notification
+  When @did_change("file:///w/a.rs", 2, "fn main(){;}}") est appelé
+  Then la trame émise est `method == "textDocument/didChange"` et
+    `params == {"textDocument":{"uri":"file:///w/a.rs","version":2},
+    "contentChanges":[{"text":"fn main(){;}}"}]}` — `version` À L'INTÉRIEUR de
+    `textDocument` (jamais en champ frère de `contentChanges`), full-sync sans `range`
+
+Scenario: ensure_open_premier_appel_unique_par_uri_tous_clients
+  Given une session et deux @LspClient A et B sur la même session, fake comptant les
+    `didOpen` reçus par URI (ne publie des diagnostics qu'une fois par URI)
+  When A appelle @ensure_open(uri, …), puis B appelle @ensure_open(uri, …) avec un
+    texte DIFFÉRENT
+  Then le fake ne reçoit qu'UN seul `textDocument/didOpen` (celui de A, avec le texte
+    de A) ; B rend `Ok(())` sans émettre — verrou de la violation de protocole du
+    double `didOpen`
+
+Scenario: diagnostics_capture_le_publish_push
+  Given un @LspClient neuf (non initialisé) sur @FAKE_LSP_PY
+  When @diagnostics("file:///workspace/main.rs", "rust", "fn main(){}") est appelé
+  Then le résultat est `Some(vec)` non vide, `diags[0]["message"] == "fake diag"` et
+    `diags[0]["severity"] == 1` — test existant `client_diagnostics_captures_publish`
+
+Scenario: diagnostics_second_client_ressert_le_cache_sans_nouveau_didopen
+  Given une URI déjà ouverte et publiquée par un premier @LspClient (session
+    @FAKE_LSP_PY, qui ne publie qu'une fois par URI)
+  When un SECOND @LspClient (nouvel abonnement, comme un second appel de tool MCP)
+    appelle @diagnostics sur la MÊME URI
+  Then il rend `Some(vec)` identique (lu au cache de session, sans timeout, sans
+    nouveau `didOpen`) — test existant
+    `client_diagnostics_second_call_same_uri_reads_cache`
+
+Scenario: diagnostics_none_quand_rien_na_ete_publie
+  Given un @LspClient sur @FAKE_LSP_NODIAG_PY (aucune publication, jamais)
+  When @diagnostics est appelé
+  Then l'appel aboutit (aucun hang) et rend `None` — distinct de `Some(vec![])` —
+    test existant `client_diagnostics_none_on_no_publish`
+
+Scenario: diagnostics_some_vide_quand_le_serveur_publie_rien
+  Given un @LspClient initialisé sur @FAKE_LSP_EDIT_CHECK_PY et une URI jamais publiée
+  When @did_open(uri, …) immédiatement suivi de @did_change(uri, 2, "propre") (le
+    fake publie `[]` dès la réception du `didChange`, avant sa publication `didOpen`
+    différée de 0,1 s), puis attente à la manière de @diagnostics
+    (@session.wait_for_diagnostics(uri, @DIAGNOSTICS_TIMEOUT))
+  Then le résultat est `Some(vec![])` (« analysé, propre »), JAMAIS `None`
+
+Scenario: constantes_de_timeout_verrouillees
+  Given la constante publique @DIAGNOSTICS_TIMEOUT
+  When sa valeur est lue
+  Then elle est exactement `2s` — et le test documente la dépendance ./tools_impl.rs
+    qui attend la ré-analyse `DIAGNOSTICS_TIMEOUT * 2` (`edit_and_check`) : changer
+    cette constante oblige à ré-interroger les deux Scenario hors fichier
+
+Scenario: drop_desabonne_sans_tuer_ni_fermer
+  Given une session @FAKE_LSP_EDIT_CHECK_PY avec journal d'observateur, un client A
+    dont une requête est en attente chez un fake à réponse retardée, et un client B
+    vivant
+  When A est dropé, puis la réponse retardée destinée à A arrive côté session
+  Then la session reste @is_alive() et le process en vie (B obtient toujours ses
+    réponses) ; le journal ne gagne AUCUNE ligne `"didClose"`, `"shutdown"` ou
+    `"exit"` ; la réponse tardive destinée à A est avalée par la session (warn
+    « unknown session_id »), sans panic ni erreur pour B

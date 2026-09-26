@@ -1,0 +1,1295 @@
+Spec: LSP multiplexeur — session, manager et composite
+
+Platform: Rust/vanyline-sandbox/tokio
+
+Purpose:
+  Orchestrateur LSP du sandbox : ce fichier possède UNIQUEMENT le cycle de vie des
+  processus LSP et le multiplexage autour. Il couvre : (1) la lecture de la config
+  toolchains LSP depuis l'env `VNL_LSP_TOOLCHAINS` (@parse_lsp_toolchains,
+  @lsp_toolchains_from_env, @LspManager::from_env — env posée par le controller, JSON
+  contracté dans ../../controller/src/sandbox.sdd) ; (2) le framing stdio
+  `Content-Length` dans les deux sens (@encode_message, @FrameReader) ; (3) la session
+  @LspSession — un process PRIMAIRE par toolchain partagé entre l'éditeur navigateur
+  (route WS `GET /ws/lsp/{toolchain}`, pont ./ws/lsp.rs), les tools MCP `lsp_*`
+  (chaque appel construit un @crate::lsp_client::LspClient neuf, ./lsp_client.rs) et
+  `edit_and_check` — avec multiplexage multi-clients (abonnement @subscribe /
+  @unsubscribe, réécriture d'`id` client en session id global, restauration de l'id
+  d'origine à la livraison, broadcast des notifications à tous les abonnés) ;
+  (4) l'état partagé de session qu'exploitent les clients : initialisation unique
+  (@try_mark_initialized + cache d'issue @set_initialize_outcome /
+  @wait_for_initialize_outcome, succès ET échec), URIs ouvertes (@try_mark_uri_open),
+  versions de documents côté tools (@next_doc_version), URIs tenues par des éditeurs
+  navigateur (@mark_editor_uri_open / @mark_editor_uri_close / @has_editor_client,
+  piste cas A/B du design R1), cache et attente des diagnostics push
+  (@cached_diagnostics / @wait_for_diagnostics / @invalidate_diagnostics) ;
+  (5) le manager @LspManager — une session par toolchain, spawn paresseux à la
+  première demande, re-spawn après mort, course de spawn résolue ; (6) le mode
+  COMPOSITE (multiplexeur multi-processus, enfants `aux` déclarés par la spec de
+  toolchain, preset-only) : fan-out des notifications et de `initialize`, routage des
+  requêtes par méthode (@merge_route_for_method), barrières de fusion @PendingMerge
+  avec réponse client unique primary-first, forwarding `tsserver/request` ↔
+  `tsserver/response` (composite Volar), fusion des diagnostics par parts (rôles
+  `tsserver-forward` et `diagnostics-merge` — composites Volar/hadolint/pyright,
+  ../../docs/features/vue-lsp.md et ../../docs/features/docker-lsp.md), provenance des
+  complétions et routage de `completionItem/resolve` ; (7) la mort : EOF stdout du
+  primaire = mort de la session (kill des aux, canaux clients fermés), EOF d'un aux =
+  session dégradée qui survit, @Drop = kill primaire + aux.
+  Hors périmètre, contracté par les specs sœurs sans duplication ici : la mécanique
+  client JSON-RPC et les codes `VNL-SBX-LSP-004/005` (./lsp_client.sdd), le pont WS,
+  la réécriture d'URIs et les close codes `4004`/`4005` (./ws/lsp.sdd), la résolution
+  extension → toolchain (`toolchain_for_path`), les 8 tools MCP `lsp_*`
+  (`lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_rename`,
+  `lsp_document_symbols`, `lsp_workspace_symbols`, `inspect_symbol`,
+  `edit_and_check` — déclarés dans @tools_impl::lsp_tools, énumérés par `tools/list`
+  de ./mcp.sdd), leur rendu au LLM et les codes `VNL-SBX-LSP-006`…`011`
+  (./tools_impl.rs — sa spec propre), les wrappers aux `vnl-hadolint-lsp` /
+  `vnl-ruff-lsp` et leurs codes stderr `VNL-SBX-LSP-012`/`013`
+  (./bin/hadolint_lsp.sdd, ./bin/ruff_lsp.sdd), la production de
+  `VNL_LSP_TOOLCHAINS` et les presets d'argv exacts (../../controller/src/sandbox.sdd
+  — ce fichier ne fait que CONSOMMER le JSON). Un seul fichier, un seul contrat : pas
+  de regroupement.
+
+Owns:
+  ./lsp.rs
+
+Can read:
+  ./lsp_client.rs
+  ./ws/lsp.rs
+  ./tools_impl.rs
+  ./mcp.rs
+  ./main.rs
+  ./lib.rs
+  ./config.rs
+  ./bin/hadolint_lsp.rs
+  ./bin/ruff_lsp.rs
+  ../Cargo.toml
+  ../../controller/src/sandbox.rs
+  ../../docs/features/vue-lsp.md
+  ../../docs/features/docker-lsp.md
+  ../../docs/architecture.md
+  ../../vanyline.sdd
+  ../../tooling.sdd
+  ../../.specdd/bootstrap.project.md
+
+Depends on:
+  ../../controller/src/sandbox.sdd — producteur de `VNL_LSP_TOOLCHAINS` : tableau
+    JSON `[{name, bin, args[, aux]}]`, clé `aux` OMISE quand vide (jamais `"aux":[]`),
+    `aux` = objets `{role, bin, args[, initOptions]}` émis UNIQUEMENT pour les trois
+    composites dérivés : node/Volar (primaire `vue-language-server --stdio`, aux
+    `tsserver-forward` = `typescript-language-server --stdio` +
+    `initOptions.plugins[0]` = `@vue/typescript-plugin`), docker (primaire
+    `docker-langserver --stdio`, aux `diagnostics-merge` = `vnl-hadolint-lsp`), python
+    (primaire `pyright-langserver --stdio`, aux `diagnostics-merge` = `vnl-ruff-lsp`) ;
+    `bin` = chemins absolus sous les volumes toolchain montés (`/toolchains/…`).
+    CE fichier valide la SHAPE du JSON (serde), jamais l'existence des binaires ni la
+    cohérence des presets.
+  ./main.sdd — @LspManager::from_env appelé au démarrage (`VNL_LSP_TOOLCHAINS` lue
+    HORS clap et hors @Config) ; JSON invalide ⇒ message `LSP toolchain parse
+    error: {e}` ⇒ exit 1 du binaire. @LspManager inséré dans @AppState (./lib.rs).
+  ./lsp_client.rs — voie tools MCP : @subscribe/@unsubscribe/@send,
+    @try_mark_initialized, @try_mark_uri_open, @wait_for_diagnostics,
+    @next_doc_version (appelé par ./tools_impl.rs). N'utilise JAMAIS
+    @set_initialize_outcome/@wait_for_initialize_outcome (voie bridge exclusive).
+  ./ws/lsp.rs — voie navigateur : même plan d'abonnement + @set_initialize_outcome /
+    @wait_for_initialize_outcome / @mark_editor_uri_open / @mark_editor_uri_close ;
+    close codes `4004` (toolchain absente ⇒ @get_or_spawn rend `Ok(None)`) et `4005`
+    (spawn en échec ⇒ @get_or_spawn rend `Err`).
+  ./bin/hadolint_lsp.sdd et ./bin/ruff_lsp.sdd — exécutables spawnés comme aux
+    `diagnostics-merge` des composites docker/python : ils parlent le même framing
+    `Content-Length` sur stdio (contrat consommé ici, produit là-bas).
+  @tokio::process (@Command, @Stdio::piped) — spawn primaire et aux, `kill` au
+    @Drop et à la mort du primaire ; @tokio::io (@AsyncReadExt/@AsyncWriteExt) pour
+    stdin/stdout/stderr ; @tokio::sync::{@mpsc, @Notify} ; @tokio::time pour les deux
+    timeouts (initialize 30 s, diagnostics = délai passé par l'appelant).
+  @serde/@serde_json (@Value opaque partout — aucun type LSP typé n'existe dans le
+    crate), @anyhow pour toutes les erreurs, @tracing pour tout le logging.
+  Specs sœurs rédigées ./lsp_client.sdd, ./ws/lsp.sdd, ./mcp.sdd, ./main.sdd,
+    ./lib.sdd, ../../controller/src/sandbox.sdd, ./bin/hadolint_lsp.sdd,
+    ./bin/ruff_lsp.sdd — rappel de cohérence : CE fichier ne re-contracte rien
+    qu'elles possèdent (mécanique client, pont WS, enveloppes MCP, presets argv,
+    wrappers aux).
+  @std::sync::{@Arc, @Mutex} + atomiques (@AtomicBool/@AtomicU64, @Ordering::SeqCst
+    partout) — état partagé de session, les mutex @std::sync::Mutex sont tenus sur
+    des sections courtes jamais à travers un `.await`.
+
+Exposes:
+  @LspAux — `pub struct` (@Serialize/@Deserialize) : `role: String`, `bin: String`,
+    `args: Vec<String>`, `init_options: @Value` sous la clé JSON `initOptions`
+    (@default ⇒ absent ⟹ `Value::Null`). Rôles réellement spawnés
+    (@KNOWN_AUX_ROLES) : `"tsserver-forward"` (répond aux requêtes fan-out + reçoit
+    le forwarding tsserver) et `"diagnostics-merge"` (NE répond À AUCUNE requête —
+    @aux_answers_requests le code ainsi ; reçoit `initialize` + notifications +
+    publie ses diagnostics). Rôle inconnu au spawn ⇒ @tracing::warn! + enfant ignoré,
+    jamais une erreur de session. `aux` n'est jamais déclaré par l'utilisateur
+    (preset-only, décision 2026-09-06 côté controller).
+  @LspToolchain — `pub struct` : `name`, `bin` (chemin absolu attendu dans le volume
+    toolchain monté), `args: Vec<String>`, `aux: Vec<LspAux>` (@default ⇒ absent
+    ⟹ mono-process). Deux entrées de même `name` dans le JSON : la dernière gagne
+    silencieusement (@HashMap insert — `[?]` dans `Tasks`).
+  @parse_lsp_toolchains(@str) -> `@anyhow::Result<Vec<LspToolchain>>` — erreur
+    `LSP toolchain parse error: {e}` (message préfixé consommé par ./main.rs pour
+    l'exit 1, verrouillé ./main.sdd).
+  @lsp_toolchains_from_env() -> `@anyhow::Result<Vec<LspToolchain>>` — lit
+    `VNL_LSP_TOOLCHAINS` ; env absent OU chaîne vide ⇒ `Ok(vec![])` sans erreur ;
+    sinon délègue à @parse_lsp_toolchains.
+  @encode_message(&[@u8]) -> `Vec<@u8>` — exactement `Content-Length: {len}\r\n\r\n`
+    + payload (len = longueur en OCTETS du payload).
+  @FrameReader — décodeur incrémental : @new, @push(&[@u8]) (ajoute au buffer),
+    @next_frame() -> `@Option<Vec<@u8>>` (payload pur). Cherche `\r\n\r\n`, décode le
+    pré-header en lossy UTF-8, ligne `content-length:` insensible à la casse (trim
+    aussi), parse en `usize` ; corps incomplet ⇒ `None` (rien ne consomme) ; extrait
+    `body_start..body_start+len` et draine. En-tête SANS `Content-Length` valide ⇒
+    `None` RÉPÉTÉ sans jamais drainer (`[!]` dans `Tasks` : croissance non bornée).
+  @ClientId — `pub struct`(@pub u64), copie/hash — alloué par le compteur de session
+    @next_client (départ 1).
+  @LspSession — `pub struct` (Arc intérieur), méthodes publiques :
+    - @spawn(&@LspToolchain, racine: &@Path) -> `Result<@Arc<Self>>` async : primaire
+      `bin` + `args`, `cwd` = racine sandbox (chemin NON résolu — jamais
+      `canonicalize`, `VNL_SANDBOX_ROOT` peut être un symlink), stdio pipé. Erreurs :
+      spawn primaire ⇒ `LSP spawn error for {name}: {e}` ; stdio manquant ⇒
+      `missing stdin`/`missing stdout`/`missing stderr` (AUCUN identifiant
+      `VNL-SBX-LSP` sur ces messages — `[?]` `Tasks`). Pré-pass aux : rôle inconnu ⇒
+      warn `"LSP: unknown aux role, aux ignored"` + ignoré ; spawn aux en échec ⇒ warn
+      `"LSP: aux degraded (spawn failed): {e}"` — ni l'un ni l'autre n'annule la
+      session. Index d'enfant : position dans la liste RÉELLEMENT spawnée + 1 (0
+      réservé au primaire) — rôle ignoré ou spawn raté ne décale pas les suivants.
+      Démarre : écrivaine primaire+aux (canal 64 places → stdin encodé), lectrices
+      primaire+aux (chunk 8192 → @FrameReader → dispatch), loggeurs stderr
+      (@tracing::debug!, perte UTF-8 lossy + trim).
+    - @subscribe() -> (@ClientId, `@mpsc::UnboundedReceiver<Vec<@u8>>`) : réponses
+      (id d'origine restauré, JSON re-sérialisé SANS framing) et notifications
+      (mono-process : octets d'origine ; composite `publishDiagnostics` : trame
+      synthétisée avec le fondu). Mort du primaire ⇒ canaux vidés (le receiver rend
+      `None`, lu comme `VNL-SBX-LSP-004` par ./lsp_client.rs, fin de session côté
+      ./ws/lsp.rs).
+    - @unsubscribe(@ClientId) : retire le canal, les `pending` du client, ses
+      barrières `merges`, ses `ClientResolve` enregistrés chez chaque aux, et le
+      client de toutes les sets `editor_uris` (URI sans aucun tenant disparaît).
+    - @send(@ClientId, `Vec<@u8>`) -> `@anyhow::Result<()>` async : voir `Accepts`,
+      `Raises`, `Handles` — toute trame sortante passe par ici.
+    - @is_alive() — `true` tant que le PRIMAIRE n'a pas rendu EOF stdout (la mort
+      d'un aux ne la baisse PAS).
+    - @is_initialized() / @try_mark_initialized() — test-and-set (swap SeqCst) du
+      flag d'initialisation PARTAGÉ de la session : le premier gagnant a le droit
+      d'envoyer le seul `initialize` réel du process vivant.
+    - @set_initialize_outcome(`@Result<@Value, @Value>`) — pose l'issue (SUCCÈS comme
+      ÉCHEC) dans le cache et @notify_waiters ; posée par le gagnant côté bridge
+      ./ws/lsp.rs uniquement.
+    - @wait_for_initialize_outcome() -> `@Option<@Result<@Value, @Value>>` async :
+      cache déjà posé ⇒ immédiat ; sinon attend @Notify borné à 30
+      secondes (constante en dur `from_secs(30)`) ; `None` seulement en timeout réel
+      (le bridge rend alors `-32603 "LSP initialize timed out (shared session)"`,
+      contrat ./ws/lsp.sdd). Course bénigne assumée en source : `notify_waiters` sans
+      permit — un réveil manqué coûte de la latence (30 s au pire), jamais de
+      faux `None` sur cache déjà peuplé (re-check après le `select!`).
+    - @try_mark_uri_open(&@str) -> `bool` — test-and-set d'ouverture d'URI dans
+      `open_uris` (carte tenue par les outils MCP — le bridge n'y participe PAS, il
+      tient `editor_uris`) ; `true` = premier appelant ⇒ doit envoyer `didOpen`, `false` =
+      déjà ouverte ⇒ ne RIEN envoyer. Ne suit JAMAIS `didClose` : l'URI reste ouverte
+      jusqu'à la mort du process.
+    - @cached_diagnostics(&@str) -> `@Option<Vec<@Value>>` — le FONDU des parts par
+      enfant (mono-process : exactement ce qu'a publié le primaire) ; `None` si jamais
+      publié (ou invalidé) pour l'URI. Alimenté par la lectrice pour TOUTE
+      publication, abonnés présents ou non.
+    - @wait_for_diagnostics(&@str, timeout) -> `@Option<Vec<@Value>>` async : cache
+      présent ⇒ immédiat ; sinon boucle @Notify bornée au délai. `Some(vec)` dès
+      qu'une publication a été vue — `vec` VIDE inclus (« analysé, propre ») — `None`
+      seulement si rien n'a jamais été publié dans le délai (états distincts, jamais
+      confondus). Même course bénigne `notify_waiters` que ci-dessus.
+    - @next_doc_version(&@str) -> `i32` — compteur PAR URI des outils (cas A) :
+      départ 2 (le `didOpen` de @ensure_open porte la version 1 — monotonie 1→2→3),
+      +1 par appel. Jamais consulté pour les compteurs navigateur (indépendants,
+      cas B interdit de `didChange` croisé).
+    - @invalidate_diagnostics(&@str) — retire l'URI du cache ET de `diag_parts`
+      (toutes parts d'enfant). Préalable obligatoire d'une ré-analyse (`edit_and_check`)
+      sinon le stale d'avant l'édition serait resservi. Aucun notify, aucun effet si
+      absent.
+    - @has_editor_client(&@str) -> `bool` / @mark_editor_uri_open(&@str, @ClientId) /
+      @mark_editor_uri_close(&@str, @ClientId) — multi-tenant : l'URI cesse d'être
+      tenue seulement quand plus aucun client ne la tient. Alimentées par le bridge
+      ./ws/lsp.rs SEULEMENT (les @LspClient des outils ne s'enregistrent pas).
+    - Compteurs `#[cfg(test)] pub(crate)` : @pending_merge_count,
+      @completion_provenance_uri_count — gardes d'invariants mono-process, jamais
+      utilisés hors tests.
+  @LspManager — `pub struct` + @Clone + @Default :
+    - @new(`Vec<LspToolchain>`, racine) — map par `name` (doublon : dernier gagne).
+    - @from_env(racine) -> `Result<Self>` — @lsp_toolchains_from_env ; ne spawn
+      AUCUN process au construction (spawn 100 % paresseux).
+    - @has(&@str) -> `bool` — toolchain configurée (indépendant de l'état de session).
+    - @get_or_spawn(&@str) -> `Result<@Option<@Arc<LspSession>>>` async : toolchain
+      inconnue ⇒ `Ok(None)` ; session existante vivante ⇒ la cloner ; sinon spawn
+      (échec ⇒ `Err` propagé, le bridge le traduit `4005`, ./ws/lsp.sdd) ; course :
+      si une autre tâche a inséré entre-temps une session vivante (`Arc::ptr_eq`
+      distinct), ACCEPTER l'existant et abandonner la sienne (le process surnuméraire
+      est tué à son @Drop).
+    - @Default — aucune toolchain, racine `/workspace`.
+    - @Clone — clone la map `specs`, la racine, et COPIE la map `sessions` à l'instant
+      t : deux clones divergent sur les spawns ultérieurs (`[!]` `Tasks`).
+  @Drop pour la session interne — baisse `alive` (primaire ET aux) AVANT kill, puis
+    kill forcé du primaire et de chaque aux. Jamais `shutdown`/`exit` LSP, jamais
+    d'attente de sortie : kill only.
+  Comportements internes contractuels (non publics mais verrouillés par tests) :
+    table de routage @merge_route_for_method, fusionneurs @merge_hover /
+    @merge_locations / @merge_code_actions / @merge_prepare_rename / @merge_rename /
+    @merge_completions, forwarding tsserver @handle_tsserver_request /
+    @send_tsserver_response, provenance @record_completion_provenance /
+    @route_completion_resolve, barrières @PendingMerge et helpers
+    @record_*_merge_part / @insert_merge_part / @try_complete_merge /
+    @abandon_merge_expectation / @complete_merge.
+
+Accepts:
+  `VNL_LSP_TOOLCHAINS` — tout JSON de shape `[{name,bin,args[,aux]}]` ; champs JSON
+    inconnus ignorés (serde default) ; `args`/`aux` manquants ⇒ vides ; `bin`/`args`
+    passés verbatim à @tokio::process::Command (aucune validation d'existence, aucun
+    shell : jamais d'interprétation de shell, la règle argv du monorepo est respectée
+    par construction).
+  @send — payload : octets d'UN message JSON-RPC (JSON brut, jamais une trame
+    `Content-Length` — le framing est posé en aval par la tâche écrivaine). Toute
+    méthode est acceptée sans validation de nom ; `params` absent/null acceptés ;
+    `id` : ABSENT (notification) ou entier i64 (requête — `0` et négatifs inclus).
+    Toute trame PORTANT un `id` entier est traitée comme requête : y compris une
+    RESPONSE forwardée par un client (cas réel du pont WS qui relaie tout) — l'id est
+    réécrit et un `pending` est créé (`[?]` `Tasks`).
+  Multi-clients — N abonnés simultanés (onglets WS + un @LspClient par appel de
+    tool) sur la même session, donc le même process ; ids d'origine identiques entre
+    clients sans collision (la session possède l'espace d'ids, pas les clients).
+  @spawn — `sandbox_root` non résolu (symlink `VNL_SANDBOX_ROOT` préservé) ; des
+    specs `aux` avec rôles connus ou inconnus, binaires absents, canaux saturés : tous
+    dégradés, jamais mourants (sauf primaire).
+  Process serveur (côté fil) — trames `Content-Length` avec en-tête multi-lignes
+    insensible à la casse ; trames non-JSON (ignorées warn) ; notifications sans
+    `id` ; réponses à id inconnu (ignorées warn) ; notifications serveur→client avec
+    `id` (ex. `window/workDoneProgress/create` de rust-analyzer) : traitées comme
+    notifications (`id` non testé sur la voie entrante), broadcast si `method`
+    présente.
+
+Returns:
+  Routage sortant par @send (résumé contractuel, détail en `Handles`) :
+    - mono-process (`aux: []` — tout le déployé hors composites) : requête ⇒ id
+      réécrit en session id, vers le primaire ; notification ⇒ OCTETS D'ORIGINE
+      verbatim (le chemin historique `return` tôt, sans re-sérialisation) ; réponse
+      serveur livrée avec l'id d'origine restauré. @pending_merge_count == 0
+      TOUJOURS, @completion_provenance_uri_count == 0 TOUJOURS (invariant 8 — la
+      table de routage et la provenance ne sont jamais consultées).
+    - composite : notification ⇒ primaire (octets d'origine) puis copie verbatim aux
+      VIVANTS (@try_send, jamais bloquant) ; requête `MergeRoute::All` ⇒ primaire +
+      chaque aux VIVANT dont le rôle répond (`aux_answers_requests`, `tsserver-forward`
+      seul), barrière, UNE réponse client fusionnée ; `completionItem/resolve` avec
+      au moins un aux demandeur ⇒ troisième voie par provenance (voir `Handles`) ;
+      `initialize` ⇒ primaire + copie à chaque aux vivant avec `initOptions` fondus.
+  Livraison client — réponse du primaire : JSON re-sérialisé avec l'id d'origine ;
+    notification mono : octets serveur d'origine ; notification composite
+    `publishDiagnostics` : trame clonée dont `params.diagnostics` est remplacé par le
+    fondu (les autres champs — `uri`, `version` — de la trame déclenchante) ; autres
+    notifications composite : part brute de l'enfant qui publie.
+  @wait_for_diagnostics / @cached_diagnostics — le fondu primary-first (concat des
+    parts par index croissant d'enfant, 0 = primaire d'abord, indépendant de l'ordre
+    d'arrivée des publications).
+  @get_or_spawn — `Ok(None)` toolchain inconnue ; `Ok(Some(Arc))` session vivante
+    (éventuellement celle d'une autre tâche en cas de course) ; `Err` spawn primaire
+    en échec (message `LSP spawn error for {name}: {e}`, sans marqueur — `[?]`).
+  @next_doc_version — 2 au premier appel d'une URI, +1 ensuite.
+  Fondu de fusion (barrière @PendingMerge, détail table en `Handles`) — hover :
+    tous `MarkupContent` ⇒ objet du primaire avec `contents.value` concaténée
+    primary-first séparée par `"\n\n---\n\n"` (`kind` et champs secondaires du
+    primaire) ; SINON repli tableau de marked strings ; tous null ⇒ `null` ; un seul
+    ⇒ celui-là verbatim. definition/typeDefinition/implementation/references :
+    concat primary-first (objet `Location` seul wrapé en tableau, tableaux mélangés
+    `Location`/`LocationLink` acceptés, toutes parts null ⇒ `null`, un `[]` reçu EST
+    une réponse ⇒ `[]` final). codeAction : TOUJOURS un tableau (null ⇒ contribution
+    vide). prepareRename : premier non-null (primaire d'abord, fallback aux). rename :
+    pli `WorkspaceEdit` primary-first (`changes`×`changes` : merge objet par URI,
+    tableaux concaténés primary-first, URI disjointes ajoutées ; documentChanges×
+    documentChanges : concat ; variantes MIXTES : variante du primaire conservée,
+    edits de l'aux abandonnés avec warn explicite ; primaire sans variante adopte
+    celle de l'aux ; champs secondaires de l'aux jamais copiés). completion : dédup à
+    la clé `(label, kind)` (`label` chaîne ou `label.label` objet LSP 3.17 ; `kind`
+    absent ≠ présent ; item sans clé jamais dédupé), l'item retenu est le plus ancien
+    ⇒ le primaire gagne ; `isIncomplete` = OR des parts ; shape de sortie
+    `CompletionList {isIncomplete, items}` si AU MOINS UNE part était un
+    `CompletionList`, sinon tableau nu (compat @codemirror/lsp-client qui lit les
+    deux). Méthode `All` sans fusionneur (impossible par la table fermée, défense) ⇒
+    part du primaire ou `null` + warn.
+
+Raises:
+  @send fabrique exactement trois messages, verrouillés byte par byte :
+    - `VNL-SBX-LSP-001: invalid JSON payload` — payload non JSON.
+    - `VNL-SBX-LSP-002: JSON-RPC id must be an integer, got non-integer` — `id`
+      présent non-i64 (chaîne, flottant, objet, tableau, `true`…).
+    - `VNL-SBX-LSP-003: LSP process is dead` — canal stdin du primaire fermé
+      (détection effective après que la tâche écrivaine a rompu ; un envoi peut encore
+      rendre `Ok` sur un process mort non encore détecté — fenêtre connue).
+  Famille complète pour cohérence inter-specs (les autres membres APPARTIENNENT
+    ailleurs, cités sans les re-contracter) : `004`/`005` @LspClient
+    (./lsp_client.sdd), `006`–`011` tools MCP (./tools_impl.rs), `012`/`013` wrappers
+    aux sur stderr uniquement (./bin/hadolint_lsp.sdd, ./bin/ruff_lsp.sdd).
+  Erreurs SANS marqueur (exception à la règle « identifiant unique » de
+    ../../vanyline.sdd, `[?]` `Tasks`) : `LSP spawn error for {name}: {e}` (spawn
+    primaire — le bridge le masque derrière `4005`, ./tools_impl.rs le rend en texte
+    d'outil), `missing stdin|stdout|stderr`, `aux spawn error: {e}` (aux — loggé
+    seulement), `LSP toolchain parse error: {e}` (seul message lu par ./main.rs qui
+    lui donne le rôle exit 1).
+  Jamais de panic sur les chemins de production : @Mutex std poisonés récupérés par
+    @into_inner partout, @send_to_client/@try_send avalent les canaux fermés, les
+    fusions sur JSON inattendu contribuent vide avec warn (contrat des fusionneurs :
+    JAMAIS une panique). Harnais ../../tooling.sdd : aucun `unwrap`/`expect`/`panic!`
+    hors `cfg(test)` (le module de tests porte `#![allow(clippy::unwrap_used,
+    clippy::expect_used)]`).
+
+Handles:
+  Cycle de vie du primaire — le process naît à la première @get_or_spawn (WS ou
+    tool), survit à TOUTES les déconnexions d'abonnés (aucun abonn n'a le droit de le
+    tuer : @Drop de @LspClient ne fait que @unsubscribe), et meurt par : EOF stdout
+    de son propre fait ⇒ session morte ; @Drop de la session (sortie du sandbox /
+    remplacement par re-spawn) ⇒ kill forcé. Pas d'idle-timeout, pas de
+    `shutdown`/`exit` LSP — arbitrage `[?]` `Tasks` (propriétaire du cycle de vie,
+    c'est ICI que la décision se prend, cf. ./lsp_client.sdd et ./ws/lsp.sdd qui
+    renvoient tous deux ici).
+  EOF stdout du primaire — @alive=false, @subs.clear() (tous les receivers fermés ⇒
+    `VNL-SBX-LSP-004` côté tools, fin de session côté WS), puis kill de chaque aux
+    AVEC drapeau `alive` de l'aux baissé AVANT le kill (leur EOF ne doit pas sonner
+    « degraded » : c'est la mort, pas une dégradation). `pending`/`merges`/caches NE
+    sont PAS purgés (résidu sur session morte, rattrapé par le re-spawn d'une NEUVE
+    session — `[!]` `Tasks`). Une session morte est remplacée à la prochaine
+    @get_or_spawn (process neuf, flag `initialized` neuf, caches neufs).
+  EOF stdout d'un aux — session SURVIT (@is_alive reflète le primaire seul) ;
+    drapeau aux baissé ; SES parts de diagnostics purgées de `diag_parts` et cache
+    recompté (URI sans aucune part restante retirée du cache — des diagnostics de
+    serveur mort resservis feraient passer `edit_and_check` au vert sur erreurs
+    fantômes ; pas de notify : réduction, pas information nouvelle) ; ids internes en
+    attente purgés avec sort par variante d'@InternalPending : `TsserverForward` ⇒
+    `tsserver/response` `[[vue_id, null]]` immédiate (le primaire ne pend jamais),
+    `ClientMerge` ⇒ part levée à `None` + tentative de complétion (un serveur mort ne
+    bloque pas la fusion), `ClientResolve` ⇒ fallback item tel quel au client
+    (no-op, warn) ; warn « degraded » seulement si la session est encore vivante.
+  Tâche écrivaine — canal `mpsc(64)` → @encode_message → stdin + flush ; erreur
+    d'écriture ⇒ break (le process voit EOF stdin) ; la mort de la tâche ne notifie
+    PAS la session (la lectrice fera l'EOF).
+  Tâche lectrice primaire — chunk 8192 → @FrameReader → parse JSON (non-JSON ⇒ warn
+    « LSP: non-JSON frame, ignoring »). Trame avec `id` lisible i64 : si une barrière
+    @merges gouverne ce session id ⇒ PART de fusion (@record_primary_merge_part —
+    error primaire ⇒ échec fast, sinon consignée en part 0) ; sinon chemin historique
+    @pending (id d'origine restauré, livraison au seul client émetteur, id inconnu ⇒
+    warn). Trame sans `id` : `tsserver/request` ⇒ INTERCEPTÉE (jamais broadcast,
+    jamais) et forwarding ; toute autre notification ⇒ @dispatch_notification_frame
+    (index 0). Trame avec `id` NON-i64 (ex. serveur écho d'un id chaîne — JSON-RPC
+    légitime) : tombe dans la voie notification (`[?]` `Tasks`).
+  Tâche lectrice aux — mêmes framing/filtres, mais les ids internes ne sont JAMAIS
+    routés à un client : réponse à id interne dispatchée par variante d'@InternalPending
+    (@Initialize : succès rien / erreur warn dégradé ; @TsserverForward : dépile
+    `result.body` — tout ce qui n'est pas un body exploitable (erreur JSON-RPC,
+    `null`/sentinelle NoContent, objet sans `body`, non-objet) ⇒ body `null` — puis
+    `tsserver/response` ; @ClientMerge : consignée en part ; @ClientResolve : résultat
+    relayé au client id restauré, erreur ou trame sans `result` ⇒ fallback item +
+    warn). Id interne sans correspondance ⇒ warn drop. Notifications d'un aux ⇒
+    @dispatch_notification_frame avec SON index d'enfant.
+  Forwarding tsserver (composite Volar) — `tsserver/request` du primaire : trame
+    malformée (params pas `[ [id, commande:string, payload?] ]`) ⇒ warn « malformed »
+    + drop SANS réponse (vue_id non exploitable) ; sinon exécution contre le PREMIER
+    aux `tsserver-forward` VIVANT via `workspace/executeCommand` `command:
+    "typescript.tsserverRequest"`, `arguments: [command, payload]` EXACTEMENT (3e
+    argument `ExecuteInfo` jamais envoyé) ; `vue_id` restitué TEL QUEL (numérique ou
+    chaîne). Aucun aux vivant du rôle, canal injoignable (@try_send plein/fermé,
+    re-check `alive` après envoi) ⇒ réponse `[[vue_id, null]]` IMMÉDIATE.
+    @send_tsserver_response : notification `tsserver/response`, `params:
+    [[vue_id, body]]`, via `cmd_tx` @try_send — primaire mort ⇒ ignorée. Mono-process
+    (`aux: []`) : la trame est QUAND MÊME interceptée (plus de broadcast navigateur)
+    puis `[[id, null]]` renvoyé — comportement assumé par la tâche 05, verrouillé.
+  Barrière de fusion @PendingMerge (composite, méthodes `MergeRoute::All`) —
+    insérée AVANT l'envoi au primaire (sinon deux réponses sortantes) ; clé = session
+    id du primaire (l'espace d'ids historique `next_req`/`pending` est intact) ;
+    `expected` = aux répondants VIVANTS comptés à l'insertion + 1 (le primaire) ;
+    part 0 = primaire, parts 1..N = index d'aux. Aux injoignable (@try_send en échec,
+    ou mort entre comptage et envoi — re-check `alive` APRÈS `try_send`) ⇒ sa part est
+    RETIRÉE du compte (@abandon_merge_expectation, jamais d'attente perpétuelle) puis
+    @try_complete_merge. Erreur PRIMAIRE ⇒ réponse erreur immédiate au client (objet
+    `error` TEL QUEL, id restauré), barrière retirée, parts aux tardives ignorées
+    silencieusement. Erreur/absence de résultat d'un AUX ⇒ part `None` (contribution
+    vide) + warn — la fusion continue, jamais une erreur globale. Barrière complète ⇒
+    @complete_merge : parts triées par index (primary-first INDÉPENDAMMENT de l'ordre
+    d'arrivée), fusion @merge_result_for, UNE réponse `{jsonrpc, id: orig_id, result}`.
+    @unsubscribe du client purge sa barrière (aucune réponse vers un désabonné ; parts
+    aux tardives ⇒ debug). Barrière ouverte sans timeout : un primaire qui ne répond
+    jamais pend le client (cohérent avec l'absence de timeout des specs sœurs).
+  Provenance completion (tâche 08) — écrite à la complétion d'une barrière
+    `textDocument/completion` seulement, APRÈS dédup (les items droppés n'ont jamais
+    été vus d'un éditeur), REMPLACEMENT de l'entrée de l'URI (la dernière complétion
+    fait foi), requête sans `params.textDocument.uri` ⇒ rien (debug). Cache borné à
+    @MAX_COMPLETION_PROVENANCE_URIS = 64 URIS, éviction QUELCONQUE (ordre
+    @HashMap) au-delà. Purge immédiate de l'URI à toute notification
+    `textDocument/didChange` ou `textDocument/didClose` (composite seulement — le
+    chemin mono `return` avant). Jamais écrit ni consulté en mono-process ni en
+    composite 100 % `diagnostics-merge` (@has_requesting_aux, porte de niveau RÔLE).
+  Troisième voie `completionItem/resolve` (composite avec aux demandeur) — clé
+    `(label, kind)` de `params` cherchée dans TOUTES les URI du cache ⇒ ensemble des
+    enfants distincts : un seul PRIMAIRE (0) ⇒ `false` = laisser au chemin historique
+    (c'EST le routage primaire requis) ; un seul AUX vivant ⇒ copie avec id interne +
+    @ClientResolve, réponse = résultat de l'aux id restauré ; zéro / plusieurs
+    enfants (ambigu) / aux mort / injoignable / réponse erreur / EOF de l'aux ⇒
+    fallback no-op `{result: item}` sous l'id d'origine — JAMAIS une erreur globale,
+    le no-op est l'échec acceptable documenté. `@aux: []` ou composite sans rôle
+    demandeur ⇒ chemin primaire historique strict (les serveurs mono ont leur mémoire
+    d'items).
+  Fusion diagnostics (tâche 06) — publication d'un enfant ⇒ REMPLACEMENT de sa part
+    dans `diag_parts[uri][child_index]` (jamais append) ; concat primary-first écrite
+    dans `diagnostics_cache` AVANT tout broadcast (navigateur et outils voient le
+    MÊME contenu) ; abonnés mono : octets d'origine ; abonnés composite : trame
+    synthétisée (clone, `params.diagnostics` := fondu) — jamais une part brute.
+  Verrouillages d'hygiène — aucun verrou @merges tenu pendant @pending (jamais
+    d'inversion : @send, @unsubscribe et la lectrice aux séquencent ; @insert_merge_part
+    appelé hors des verrous `pending_internal`) ; @diag_parts puis @diagnostics_cache
+    toujours dans cet ordre ; envois clients collectés puis émis HORS verrou.
+  Consommateurs (référence, hors contrat de CE fichier) — ./tools_impl.rs résout
+    extension → toolchain (`toolchain_for_path` : `.rs`→rust, `.ts/.tsx/.vue/…`→node,
+    `.py/.pyi`→python, `Dockerfile*`→docker, la règle du NOM de fichier prime sur
+    l'extension) et fabrique `file://{chemin}` sans échappement ; les 8 tools MCP
+    construisent un @LspClient NEUF par appel (cas A tools : jamais de `didChange`
+    si @has_editor_client — cas B, design R1) ; `edit_and_check` consomme
+    @invalidate_diagnostics + @wait_for_diagnostics (délai `DIAGNOSTICS_TIMEOUT * 2`
+    ≈ 4 s défini ./tools_impl.rs). La table de rendu au LLM des résultats et le
+    mapping outil↔méthode LSP appartiennent à la future spec de ./tools_impl.rs.
+
+Must:
+  Préserver l'INVARIANT 8 (mono-process, tout ce qui est déployé hors composites) :
+    avec `aux: []`, AUCUNE consultation de la table de routage, des barrières, de la
+    provenance ou du cache de fusion ; notification sortante = octets d'origine
+    verbatim ; réponse client = id restauré ; @pending_merge_count et
+    @completion_provenance_uri_count à 0 ; broadcast `publishDiagnostics` byte
+    identique à la trame serveur.
+  Router les méthodes `MergeRoute::All` EXACTEMENT par la table fermée : `hover`,
+    `definition`, `typeDefinition`, `implementation`, `references`, `codeAction`,
+    `prepareRename`, `rename`, `completion` ; `semanticTokens/full|range|delta` et
+    `workspace/semanticTokens/refresh` en `Primary` EXPLICITE (deux flux de tokens
+    sur un même document ne sont pas concaténables — l'enrichissement tsserver passe
+    par le canal `tsserver/request`, le multiplexeur ne voit qu'un flux complet) ;
+    tout le reste `Primary` par défaut assumé (`formatting`, `documentSymbol`,
+    `signatureHelp` non listées au design).
+  Ne fan-out vers les aux QUE ce que leur rôle permet : notifications et copie
+    d'`initialize` à tout aux VIVANT ; requêtes en barrière uniquement aux rôles qui
+    répondent (`tsserver-forward`) — un `diagnostics-merge` ne reçoit JAMAIS de
+    requête et ne compte JAMAIS dans `expected`.
+  Une SEULE réponse client par requête fusionnée, id d'origine restauré, résultat
+    primary-first ; ids internes des aux jamais vus d'un client ; trames brutes
+    d'enfants jamais diffusées (ni réponses, ni `tsserver/*`).
+  Enregistrer tout `InternalPending` AVANT l'envoi correspondant (pas de course avec
+    la lectrice aux) et re-vérifier `alive` APRÈS `try_send` (injoignable ⇒ purge +
+    dégradation immédiate, jamais un pend).
+  Copie d'`initialize` vers chaque aux : id interne propre à l'enfant (compteur par
+    enfant — l'espace du primaire intact), `params.initializationOptions` fusionné
+    avec les `initOptions` du spec (clés du spec GAGNANTES, pas de merge profond ;
+    spec non-objet ⇒ copie verbatim du client ; le spec seul si le client n'avait pas
+    d'options).
+  Déterminer le fondu diagnostics par index croissant (0 = primaire), jamais par
+    ordre d'arrivée, et écrire cache + broadcast du MÊME contenu en composite.
+  Traiter la mort du primaire comme la mort de la session (kill des aux, canaux
+    fermés) et la mort d'un aux comme une dégradation qui ne bloque ni n'annule
+    aucune réponse client : part de barrière levée, tsserver body null, resolve
+    fallback item, parts de diagnostics purgées.
+  Maintenir les trois caches d'état partagé exactement comme documenté : @initialized
+    par swap (une consommation du flag = plus jamais de 2e `initialize` sur le même
+    process vivant, même si le 1er échoue — `[!]` repris ./lsp_client.sdd) ;
+    @open_uris sans `didClose` ; @editor_uris multi-tenant purgées à l'@unsubscribe.
+  Bornes de timeouts verrouillées : 30 s pour @wait_for_initialize_outcome (la
+    valeur sœur `-32603` est ./ws/lsp.sdd) ; @wait_for_diagnostics n'utilise AUCUNE
+    constante interne (le délai vient de l'appelant — 2 s `DIAGNOSTICS_TIMEOUT` côté
+    ./lsp_client.rs, ~4 s `edit_and_check` ./tools_impl.rs).
+  Démarrer chaque enfant (primaire et aux) avec `cwd` = racine sandbox non résolue,
+    les trois stdio pipés, stderr → @tracing::debug! (primaire et aux), et logguer
+    via @tracing exclusivement (harnais ../../tooling.sdd — jamais
+    `println!`/`eprintln!`).
+  Répondre @send par `VNL-SBX-LSP-001`/`002`/`003` aux trois rejets, messages exacts,
+    et ne JAMAIS laisser une trame rejetée atteindre un enfant.
+  Résoudre la course de @get_or_spawn en acceptant la session d'une autre tâche
+    vivante (`Arc::ptr_eq` distinct ⇒ utiliser `existing`), le process surnuméraire
+    n'étant tué que par son @Drop.
+
+Must not:
+  Envoyer `shutdown`, `exit`, `didClose` ou négocier une fermeture propre : le kill
+    au @Drop est la seule mort commandée (arbitrage `[?]` préalable).
+  Laisser filtrer vers un client : une réponse brute d'aux, un id interne, une trame
+    `tsserver/request`/`tsserver/response`, ou une part brute de diagnostics en
+    composite.
+  Faire échouer une session pour un problème d'aux : rôle inconnu, spawn raté,
+    initialize en erreur, canal saturé, mort en vol — warn/debug et dégradation,
+    jamais une erreur @send.
+  Paniquer sur JSON inattendu dans les fusions, les trames serveur ou les mutex
+    poisonés (contribuer vide + warn, @into_inner partout).
+  Composer une commande shell : `bin`/`args` passent en argv à @tokio::process::Command
+    (règle argv de ../../vanyline.sdd), aucune interpolation, aucun `sh -c`.
+  Résoudre/canonicaliser `sandbox_root`, réécrire des URIs, valider des chemins — le
+    confinement et la réécriture `file:///` ↔ absolu appartiennent à ./ws/lsp.rs et
+    ./tools_impl.rs.
+  Retenir un abonn, un `pending`, une barrière ou un tenant `editor_uris` après
+    @unsubscribe ; relivrer une réponse à un client désabonné.
+  Consulter la table `MergeRoute` ou la provenance quand `aux` est vide, ni écrire
+    une part de barrière pour un rôle qui ne répond pas.
+  Faire grossir la dette harnais (../../tooling.sdd) : aucun `unwrap`/`expect`/
+    `panic!`/`dbg!`/`print!` hors `cfg(test)`.
+
+Tasks:
+  [ ] Convertir chaque `Scenario` sans « test existant » en test dédié taggé par son
+    titre ; re-tagger les tests existants (~90, tous dans `mod tests` du fichier) vers
+    les titres de Scenario correspondants cités entre parenthèses.
+  [!] @FrameReader sur en-tête sans `Content-Length` valide retourne `None` à
+    répétition SANS jamais drainer le buffer : un serveur qui écrit un en-tête
+    aberrant (ou un flux non framé) fait croître `buf` indéfiniment et deadlocke la
+    lectrice. Borne de croissance + mort de session, ou assumption ?
+  [!] @send en échec `VNL-SBX-LSP-003` (requête) : la barrière composite est retirée
+    mais l'entrée `pending` insérée avant l'envoi FUIT (la source l'assume comme
+    dette pré-tâche-07 : « il fuitait déjà son pending »). Idem à l'EOF primaire :
+    `subs` vidé, `pending`/`merges` conservés. Purger, ou documenter comme résidu
+    mort ?
+  [?] @LspManager @Clone copie la map `sessions` à l'instant t : deux clones qui
+    vivent divergent au prochain spawn (deux processes pour une même toolchain).
+    Aucun second clone en production aujourd'hui (@AppState unique) — verrouiller
+    sémantique (sessions map partagées en @Arc) ou assumer ?
+  [?] Trame client PORANT un `id` entier mais n'étant pas une requête (response
+    client→serveur relayée par le pont WS, ou requête malveillante) : son `id` est
+    réécrit et un `pending` est créé — la response est corrompue, le mapping pollue.
+    Filtrer sur la présence de `method` dans @send ?
+  [?] Réponse serveur avec `id` non-lisible-i64 (ex. id chaîne, JSON-RPC légitime) :
+    la lectrice la traite comme notification et la BROADCAST à tous les abonnés si
+    elle porte une `method`. Répondre une erreur protocole, dropper, ou verrouiller
+    l'actuel ?
+  [?] Messages d'erreur sans identifiant `VNL-SBX-LSP` : `LSP spawn error for …`,
+    `missing stdin|stdout|stderr` (propagés au frontend masqué `4005` et aux outils
+    en texte brut) — contre la règle « identifiant unique » de ../../vanyline.sdd.
+    Étiqueter (ex. `VNL-SBX-LSP-003`-adjacent) ou assumer ?
+  [?] Aucune fermeture propre nulle part dans le crate (`shutdown`/`exit` LSP) : le
+    kill only est accepté par ./lsp_client.sdd qui renvoie ICI l'arbitrage — statuer
+    dans CE fichier (séquence `shutdown`→`exit` au @Drop ? idle-timeout ?).
+  [?] Aucune purge ni timeout d'inactivité côté @LspManager : un process LSP vit
+    jusqu'à la fin du pod, y compris après départ du dernier onglet (RAM du pod
+    sandbox). Assumé (un pod = un utilisateur) ou idle-timeout propriétaire ici ?
+  [?] @try_mark_uri_open ignore `didClose` : après fermeture navigateur d'un fichier,
+    l'URI reste « ouverte » pour la vie du process — un tool ne renverra jamais le
+    `didOpen` que le serveur a pourtant oublié. Câbler `didClose` (voie bridge) sur
+    la purge de `open_uris`, ou assumer ?
+  [?] Dégradation d'aux invisible hors `tracing` : spawn raté, initialize raté, mort
+    en vol ne remontent dans AUCUN résultat d'outil, aucune frame WS, aucune
+    métrique (./lib.sdd ne compte pas le LSP). Exposer un signal (compteur, champ de
+    health) ou assumer ?
+  [?] Doublons de `name` dans `VNL_LSP_TOOLCHAINS` : dernier gagne silencieusement
+    (@LspManager::new, @HashMap). Rejeter au parse ou assumer ?
+  [?] `route_completion_resolve` : `msg["id"].as_i64().unwrap_or(0)` est du code
+    défensif mort (@send valide l'id entier en amont) — le retirer ? Par ailleurs le
+    timeout de 30 s de @wait_for_initialize_outcome est un littéral en dur, séparé du
+    message `-32603` de ./ws/lsp.rs : constante partagée ?
+
+Done when:
+  Chaque `Scenario` a un test dédié taggé par son titre (les tests existants cités
+    sont re-taggés), compilé, exécuté, vert — y compris les gardes mono-process
+    byte-identiques et les composites sur fakes enregistreurs (pattern `python3` +
+    log de trames déjà en place dans `mod tests`).
+  Les messages `VNL-SBX-LSP-001/002/003`, la table `MergeRoute`, les formes de fusion
+    (séparateur hover `"\n\n---\n\n"`, CompletionList vs tableau, `tsserver/response`
+    `[[vue_id, body]]`, `arguments` de l'`executeCommand`) sont verrouillés byte par
+    byte par tests.
+  Les invariants composites sont tenus : zéro barrière/provenance en mono-process,
+    une seule réponse fusionnée, ids internes jamais visibles, aux morts jamais
+    bloquants.
+  Le harnais (../../tooling.sdd) reste vert sur le fichier : `cargo clippy --workspace
+    --all-targets -- -D warnings`, `cargo fmt --all -- --check`, aucun
+    `unwrap`/`expect` hors `cfg(test)`.
+  Sébastien a tranché les `[?]`/`[!]` de `Tasks` — en particulier : fermeture propre
+    vs kill, idle-timeout, croissance @FrameReader, fuite de `pending` sur `003`,
+    trames à `id` non requête.
+
+Example: enveloppes et valeurs verrouillées
+  framing stdio → `Content-Length: {n}\r\n\r\n{payload}` (n = octets du payload)
+  rejets @send → `VNL-SBX-LSP-001: invalid JSON payload` / `VNL-SBX-LSP-002: JSON-RPC
+    id must be an integer, got non-integer` / `VNL-SBX-LSP-003: LSP process is dead`
+  tsserver entrant → `params: [[vue_id, "commande", payload?]]` ; sortant →
+    `{"jsonrpc":"2.0","method":"tsserver/response","params":[[vue_id, body]]}`
+  executeCommand relayé → `{"command":"typescript.tsserverRequest",
+    "arguments":[command, payload]}` exactement (jamais de 3e élément)
+  fusion hover (tous MarkupContent) → `value` primaire + `"\n\n---\n\n"` + `value`
+    aux, `kind` = celui du primaire ; fusion completion → dédup `(label, kind)`,
+    `isIncomplete` en OR, `CompletionList` si une part en est une sinon tableau nu
+  no-op resolve → `{"jsonrpc":"2.0","id":<id d'origine>,"result":<item reçu verbatim>}`
+  index enfants → 0 réservé au primaire ; aux indexés 1..N dans l'ordre de la liste
+    réellement spawnée (rôle inconnu/spawn raté ne décale pas les retenus)
+
+Scenario: encode_message_pose_len_tete_content_length
+  Given un payload JSON de n octets
+  When @encode_message est appelé dessus
+  Then l'octet-flux rendu est exactement `Content-Length: {n}\r\n\r\n` suivi du
+    payload sans transformation (test existant `encode_has_content_length_header`)
+
+Scenario: frame_reader_reassemble_les_eclats_de_trame
+  Given un @FrameReader vide
+  When on @push le début d'une trame `Content-Length: N\r\n\r\n` coupée en plein
+    en-tête, puis la fin de l'en-tête, puis un premier morceau du corps, puis le reste
+  Then @next_frame ne rend `None` que tant que la trame est incomplète, puis le
+    payload pur exactement une fois (tests existants
+    `frame_reader_reassembles_split_chunks`, `frame_reader_reads_two_messages`)
+
+Scenario: frame_reader_absorbe_deux_trames_d_un_seul_push
+  Given un @FrameReader vide
+  When un seul @push contient deux trames complètes dos à dos
+  Then deux @next_frame consécutives rendent les deux payloads dans l'ordre, un
+    troisième rend `None` (test existant `frame_reader_reads_two_messages`)
+
+Scenario: frame_reader_en_tete_insensible_a_la_casse
+  Given la trame `content-length: 13\r\n\r\n{"a":1}` écrite en minuscules (avec
+    d'autres en-têtes multi-lignes et un `Content-Length:` en casse mixte)
+  When @next_frame est appelé après un @push complet
+  Then le payload est extrait — le préfixe est comparé en minuscules après trim
+    (comportement sans test direct aujourd'hui)
+
+Scenario: frame_reader_corps_incomplet_ne_consomme_rien
+  Given une trame annoncée à `Content-Length: 50` dont seuls 20 octets de corps sont
+    poussés
+  When @next_frame est appelé
+  Then `None` est rendu et le buffer n'est pas drainé ; après le push du complément,
+    @next_frame rend le payload complet
+
+Scenario: parse_lsp_toolchains_accepte_tableau_valide
+  Given le JSON `[{"name":"rust","bin":"/toolchains/rust/bin/rust-analyzer","args":[]}]`
+  When @parse_lsp_toolchains est appelé
+  Then une spec est rendue avec `name`/`bin`/`args` exacts et `aux` vide
+    (test existant `parse_lsp_toolchains_valid_json`)
+
+Scenario: parse_lsp_toolchains_tableau_vide_accepte
+  Given le JSON `[]`
+  When @parse_lsp_toolchains est appelé
+  Then `Ok(vec![])` sans erreur (test existant `parse_lsp_toolchains_empty_array`)
+
+Scenario: parse_lsp_toolchains_json_invalide_message_verrouille
+  Given une chaîne JSON syntaxiquement invalide (ex. `{name:`)
+  When @parse_lsp_toolchains est appelé
+  Then l'@anyhow::Error a un message préfixé `LSP toolchain parse error:` (préfixe
+    verrouillé : ./main.sdd s'en sert pour l'exit 1, test existant
+    `parse_lsp_toolchains_invalid_json_errors`)
+
+Scenario: parse_aux_cle_initoptions_et_defauts
+  Given un JSON de toolchain avec `aux: [{"role":"tsserver-forward",
+    "bin":"/x","args":[],"initOptions":{"plugins":[]}}]` puis le même SANS les clés
+    `aux` et `initOptions`
+  When @parse_lsp_toolchains parse les deux
+  Then la première porte l'aux avec `init_options` posé depuis `initOptions` ; la
+    seconde a `aux` vide et `init_options` = `Value::Null` (test existant
+    `parse_aux_roundtrip_and_default_empty`)
+
+Scenario: lsp_toolchains_env_absente_ou_vide_rend_liste_vide
+  Given le processus avec `VNL_LSP_TOOLCHAINS` absente, puis posée à la chaîne vide
+  When @lsp_toolchains_from_env est appelé dans les deux cas
+  Then `Ok(vec![])` est rendu sans erreur (l'absence de LSP n'est jamais une erreur ;
+    ./main.sdd verrouille le démarrage sans toolchain)
+
+Scenario: manager_toolchain_inconnue_rend_none_sans_erreur
+  Given un @LspManager construit sans la toolchain `go`
+  When @get_or_spawn("go") est appelé
+  Then `Ok(None)` est rendu, aucun process n'est lancé (test existant
+    `manager_unknown_toolchain_returns_none`)
+
+Scenario: manager_reutilise_la_session_vivante
+  Given un @LspManager avec la toolchain `fake` (process echo) déjà spawné
+    (@is_alive == true)
+  When @get_or_spawn("fake") est rappelé
+  Then le MÊME @Arc de session est rendu, un seul process existe (test existant
+    `manager_reuses_alive_session`)
+
+Scenario: manager_respawner_replace_la_session_morte
+  Given une session dont le process vient de mourir (EOF stdout)
+  When @get_or_spawn est rappelé
+  Then une session NEUVE est spawnée et stockée ; la morte n'est plus atteignable
+    (test existant `manager_respawns_dead_session`)
+
+Scenario: manager_course_de_spawn_accepte_la_session_de_l_autre
+  Given deux appels @get_or_spawn concurrents sur une toolchain sans session (les
+    deux spawnent)
+  When les deux appels se terminent
+  Then les deux rendent le MÊME @Arc (le gagnant de l'insertion), et la session
+    abandonnée est tuée à son @Drop — un seul process survivant (sans test direct à
+    ce jour)
+
+Scenario: manager_defaut_aucune_toolchain_racine_workspace
+  Given @LspManager::default()
+  When on interroge @has sur n'importe quel nom
+  Then `false` partout ; la racine interne est `/workspace` (aucun test direct —
+    verrouiller par test)
+
+Scenario: session_requete_repond_au_seul_demandeur_id_retabli
+  Given une session sur un fake echo et deux clients abonnés A et B
+  When A @send une requête `{"id":7,"method":"x/ping"}`
+  Then seul le canal de A reçoit `{"id":7,"result":"pong:<session id>"}` (id
+    d'origine restauré, la session id interne ne sort jamais) ; B ne reçoit rien
+    (test existant `session_request_response`)
+
+Scenario: deux_clients_meme_id_originel_sans_collision
+  Given deux clients A et B abonnés à la même session
+  When A puis B envoient chacun `{"id":1,"method":"x/ping"}`
+  Then chacun reçoit SA réponse sous l'id 1, sans cross-routage (tests existants
+    `session_routes_same_id_to_each_client` et, côté fake MCP,
+    `merge_concurrent_no_cross` côté fusion)
+
+Scenario: notification_serveur_broadcastee_a_tous_abonnes
+  Given deux clients abonnés et un fake émettant une notification `fake/notify` en
+    réponse à une notification reçue
+  When un des clients @send une notification
+  Then les DEUX canaux reçoivent la notification broadcast (mono-process : octets
+    d'origine) ; un client désabonné ne reçoit plus rien (test existant
+    `session_broadcasts_notifications`)
+
+Scenario: trame_non_json_de_stdout_ignoree_avec_warn
+  Given un fake écrivant sur stdout une trame `Content-Length` correctement cadrée
+    dont le corps n'est pas du JSON
+  When la lectrice la décode
+  Then un warn « LSP: non-JSON frame, ignoring » est émis et la session continue,
+    vivante et utilisable (sans test direct — verrouiller)
+
+Scenario: reponse_serveur_sur_session_id_inconnu_ignoree
+  Given une session dont le `pending` a été purgé par @unsubscribe entre-temps
+  When le serveur répond sur l'ancien session id
+  Then un warn « response for unknown session_id » est émis, aucune trame ne sort
+    vers un client, la session reste vivante
+
+Scenario: stderr_processus_loggue_en_debug
+  Given un fake écrivant sur stderr
+  When la ligne arrive au collecteur @tracing
+  Then un @tracing::debug! « LSP stderr: … » portant le nom de toolchain est émis
+    (perte UTF-8 lossy, trim) — et jamais sur stdout (harnais)
+
+Scenario: eof_stdout_primaire_ferme_tous_les_canaux
+  Given une session avec deux abonnés et un fake qui s'éteint
+  When le process meurt (EOF stdout)
+  Then @is_alive devient `false`, les deux receivers rendent `None` (lu `004`/fin de
+    session par les specs sœurs), les aux sont tués (drapeaux aux baissés AVANT kill),
+    et un @send ultérieur rend `VNL-SBX-LSP-003` (test existant
+    `primary_death_kills_session`)
+
+Scenario: drop_de_session_tue_primaire_et_aux
+  Given une session composite (primaire + aux vivant) pointée par le dernier @Arc
+  When le @Arc est dropé
+  Then @Drop kill le primaire puis chaque aux (drapeau `alive` baissé d'abord),
+    sans envoyer `shutdown`/`exit` (sans test direct — verrouiller par signal de
+    mort du process)
+
+Scenario: send_json_invalide_rejete_001
+  Given une session vivante et un client abonné
+  When @send est appelé avec les octets `pas-du-json`
+  Then l'erreur est exactement `VNL-SBX-LSP-001: invalid JSON payload` et rien
+    n'atteint le process (test existant `send_rejects_invalid_json`)
+
+Scenario: send_id_chaine_rejete_002
+  Given la requête `{"id":"abc","method":"x/a"}` puis `{"id":1.5,"method":"x/a"}`
+    (flottant)
+  When @send est appelé
+  Then l'erreur est exactement `VNL-SBX-LSP-002: JSON-RPC id must be an integer, got
+    non-integer` dans les deux cas (tests existants `send_rejects_non_integer_id`,
+    `send_rejects_float_id`)
+
+Scenario: send_apres_mort_du_process_rejete_003
+  Given une session dont le process est mort et dont la tâche écrivaine a rompu
+    (canal fermé, état attendu par polling de la détection)
+  When @send envoie une requête valide puis une notification valide
+  Then les deux appels rendent exactement `VNL-SBX-LSP-003: LSP process is dead` ;
+    `Ok` reste possible sur le process mort NON encore détecté (fenêtre assumée des
+    specs sœurs)
+
+Scenario: try_mark_initialized_unique_gagnant_par_session
+  Given une session neuve
+  When @try_mark_initialized est appelé deux fois
+  Then le premier rend `true` et @is_initialized devient `true`, le second rend
+    `false` — le flag ne se relève que par mort/re-spawn du process
+
+Scenario: issue_initialize_succes_rejouee_immediatement
+  Given une session avec @try_mark_initialized consommé et @set_initialize_outcome
+    posée `Ok({"capabilities":{}})`
+  When @wait_for_initialize_outcome est appelé
+  Then le succès caché est rendu sans délai ni attente (test existant
+    `initialize_outcome_cached_and_replayed_immediately`)
+
+Scenario: issue_initialize_echec_cachee_aussi
+  Given @set_initialize_outcome posé `Err({"code":-32001,…})` (cas réel :
+    typescript-language-server sans `node_modules`)
+  When @wait_for_initialize_outcome est appelé par un client arrivé après l'échec
+  Then l'@Err identique est rendu immédiatement — jamais une attente de 30 s pour
+    rien (test existant `initialize_outcome_caches_failure_too`)
+
+Scenario: attente_initialize_reveillee_par_la_pose
+  Given un client en @wait_for_initialize_outcome (cache vide, flag consommé par
+    un tiers)
+  When @set_initialize_outcome pose le succès
+  Then l'attente est réveillée (@Notify) et rend le succès posé (test existant
+    `initialize_outcome_wakes_pending_waiter`)
+
+Scenario: attente_initialize_expire_apres_trente_secondes
+  Given un @wait_for_initialize_outcome sans pose d'issue, horloge tokio simulée
+    (@tokio::time::pause)
+  When 30 s simulées s'écoulent
+  Then `None` est rendu à la deadline exactement (timeout verrouillé à `from_secs(30)`
+    — côté ./ws/lsp.sdd la frame `-32603 "LSP initialize timed out (shared session)"`
+    en découle)
+
+Scenario: try_mark_uri_open_premier_appelant_unique
+  Given une session neuve
+  When @try_mark_uri_open("file:///w/a.rs") est appelé, rappelé, puis appelé sur une
+    autre URI
+  Then les appels rendent `true`, `false`, `true` — et une `didClose` (même envoyée
+    par @send) NE retire JAMAIS l'URI de `open_uris` (`[?]` `Tasks`)
+
+Scenario: next_doc_version_demarre_deux_et_incremente_par_uri
+  Given une session neuve
+  When @next_doc_version est appelé deux fois sur `file:///a.rs` puis une fois sur
+    `file:///b.rs`
+  Then les valeurs sont 2, 3, puis 2 — compteurs indépendants par URI, départ 2 (le
+    `didOpen` de @ensure_open porte 1) (test existant
+    `next_doc_version_increments_per_uri`)
+
+Scenario: invalidate_diagnostics_force_l_attente_fraiche
+  Given une URI dont des diagnostics sont en cache (fake qui republie à chaque
+    `didOpen`)
+  When @invalidate_diagnostics(uri) puis @wait_for_diagnostics(uri, délai) après une
+    nouvelle publication
+  Then le rendu est le FONDUS frais, pas le stale d'avant invalidation ; l'URI
+    absente du cache ne provoque aucun effet ni notify (test existant
+    `invalidate_diagnostics_then_wait_gets_fresh`)
+
+Scenario: did_change_trame_full_sync_version_inclus_dans_text_document
+  Given une session sur un fake qui rejoue la dernière notification reçue avec sa
+    trame brute
+  When @send transmet le `didChange` full-sync produit par ./lsp_client.rs
+    (`contentChanges:[{"text":…}]` seul, `version` DANS `textDocument`)
+  Then le process reçoit `version` dans `textDocument`, un seul élément dans
+    `contentChanges` SANS `range`, une trame à exactement un terminateur
+    `\r\n\r\n` précédé de `Content-Length: ` (test existant
+    `did_change_frame_full_sync_shape`)
+
+Scenario: editor_uris_multi_tenants_lache_au_dernier
+  Given deux clients C1 et C2 tenant la même URI (@mark_editor_uri_open)
+  When @mark_editor_uri_close de C1, puis @has_editor_client, puis close de C2
+  Then l'URI reste tenue après le premier close et cesse de l'être après le second
+    (test existant `editor_uri_tracking_open_close_unsubscribe`)
+
+Scenario: unsubscribe_libere_tous_les_tenants_d_un_client
+  Given un client tenant trois URI différentes
+  When @unsubscribe de ce client (déconnexion WS sans `didClose`)
+  Then les URI sans autre tenant disparaissent, celles tenues par d'autres restent
+    (test existant `unsubscribe_cleans_all_editor_uris`)
+
+Scenario: wait_for_diagnostics_some_vide_contre_none
+  Given deux sessions : l'une sur un fake publiant le tableau VIDE de diagnostics,
+    l'autre sur un fake qui ne publie jamais
+  When @wait_for_diagnostics attend sur chacune (délai court)
+  Then la première rend `Some(vec![])` (« analysé, propre ») dès la publication ; la
+    seconde rend `None` après le délai (jamais publié ≠ propre — états distincts
+    verrouillés, relais des specs sœurs ./lsp_client.sdd `client_diagnostics_none_on_no_publish`)
+
+Scenario: composite_role_aux_inconnu_ignore_sans_erreur
+  Given une spec composite avec un aux `role: "role-mystere"` et un aux valide
+  When @LspSession::spawn
+  Then le spawn réussit, un warn « unknown aux role, aux ignored » est émis, et le
+    seul aux retenu porte l'index 1 (rôle ignoré ne décale pas) (test existant
+    `aux_unknown_role_ignored`)
+
+Scenario: composite_spawn_aux_en_echoue_degrade_sans_annuler
+  Given une spec composite dont l'aux pointe un binaire inexistant
+  When @LspSession::spawn
+  Then la session est rendue `Ok` (primaire vivant), warn « aux degraded (spawn
+    failed) » émis ; le mono-process primaire reste pleinement fonctionnel (test
+    existant `aux_spawn_failure_degrades_not_fails`)
+
+Scenario: composite_initialize_recu_par_les_deux_avec_initoptions_spec
+  Given un composite (aux `tsserver-forward` avec `initOptions` non vide)
+  When un client @send une requête `initialize`
+  Then le primaire ET l'aux reçoivent `initialize` : la copie aux porte un id interne
+    propre et `params.initializationOptions` = options du client fusionnées avec
+    celles du spec (clés du spec gagnantes ; spec seul si le client n'en avait pas) ;
+    la réponse de l'aux ne sort JAMAIS vers le client (test existant
+    `composite_initialize_reaches_both_injected_options_on_aux`)
+
+Scenario: composite_notifications_docsync_en_fan_out_verbatim
+  Given un composite initialisé
+  When un client @send `textDocument/didOpen` (notification)
+  Then primaire et aux VIVANT reçoivent les MÊMES octets ; un aux mort ne reçoit
+    rien et ne bloque pas ; un aux au canal saturé perd la trame silencieusement
+    (dégradation incluse) (test existant `composite_didOpen_fanout_to_both`)
+
+Scenario: composite_requete_hors_table_primaire_seul
+  Given un composite (aux `tsserver-forward`)
+  When un client @send `textDocument/documentSymbol` (méthode hors table `All`) et
+    séparément `textDocument/formatting` / `textDocument/signatureHelp`
+  Then ces requêtes n'atteignent QUE le primaire, AUCUNE barrière n'est créée
+    (@pending_merge_count 0), @pending_merge_count retombe à 0 après chaque réponse
+    (test existant `composite_other_request_primary_only`)
+
+Scenario: tsserver_request_relaye_en_execute_command_aux
+  Given un composite Volar où le primaire émet `tsserver/request`
+    `[[vue_id, "command", payload]]`
+  When la lectrice primaire intercepte la trame
+  Then l'aux `tsserver-forward` reçoit `workspace/executeCommand` `command:
+    "typescript.tsserverRequest"`, `arguments: [command, payload]` exacts ; la réponse
+    aux (objet tsserver complet) est dépilée en `result.body` et `tsserver/response`
+    `[[vue_id, body]]` revient au PRIMAIRE avec le `vue_id` verbatim ; le navigateur
+    ne voit jamais ces deux trames (test existant `forward_project_info_roundtrip`)
+
+Scenario: tsserver_erreur_aux_reponse_body_null
+  Given le même composite, l'aux répondant une erreur JSON-RPC à l'`executeCommand`
+  When la réponse aux arrive
+  Then un warn dégradé est émis et `tsserver/response` `[[vue_id, null]]` part au
+    primaire — le primaire ne pend jamais (test existant `forward_aux_error_null_body`)
+
+Scenario: tsserver_resultat_sans_body_body_null
+  Given un aux répondant un résultat sans champ `body` (ou `null`/NoContent/non-objet)
+  When la lectrice aux dépile
+  Then le body rendu au primaire est `null` (tout ce qui n'est pas un body
+    exploitable ⟹ `null`) (test existant `forward_no_body_result_null`)
+
+Scenario: tsserver_aux_meurt_en_cours_reponse_null_immediate
+  Given une requête tsserver acceptée par un aux puis EOF de cet aux avant réponse
+  When la lectrice aux purge ses @InternalPending
+  Then chaque `TsserverForward` en attente reçoit `[[vue_id, null]]` (best effort —
+    primaire mort ⟹ ignoré) et la session survit dégradée (test existant
+    `forward_aux_dead_null_body_no_hang`)
+
+Scenario: tsserver_aucun_aux_vivant_body_null_immediat
+  Given un composite dont l'unique aux `tsserver-forward` est marqué mort
+  When le primaire émet `tsserver/request`
+  Then `[[vue_id, null]]` part IMMÉDIATEMENT sans aucune trame sur un fil mort (test
+    existant `forward_no_alive_aux_null_body_immediate`)
+
+Scenario: tsserver_requests_concurrents_bien_correles
+  Given deux `tsserver/request` d'ids `vue` distincts (numérique et chaîne) en parallèle
+  When l'aux répond aux deux `executeCommand` dans le désordre
+  Then chaque `tsserver/response` porte le `vue_id` et le body de SA requête (ids
+    internes par aux, corrélés @InternalPending) (test existant
+    `forward_concurrent_correlation`)
+
+Scenario: tsserver_trame_malformee_drop_sans_reponse
+  Given `tsserver/request` dont `params` n'est pas `[ [id, "cmd", …] ]` (commande
+    absente ou non-string, params non-tableau)
+  When la lectrice primaire traite la trame
+  Then warn « malformed tsserver/request » + drop, AUCUNE réponse, aucune
+    perturbation de la session (test existant `forward_malformed_params_dropped`)
+
+Scenario: tsserver_canal_aux_sature_body_null_immediat
+  Given un aux marqué vivant dont le canal de stdin est plein (64 places)
+  When une requête tsserver arrive
+  Then @try_send échoue, l'@InternalPending est retiré, `[[vue_id, null]]` part
+    immédiatement (test existant `forward_aux_saturated_channel_null_body`)
+
+Scenario: tsserver_intercepte_meme_en_monoproces_assume
+  Given une session MONO-process à qui un serveur inconnu enverrait
+    `tsserver/request`
+  When la lectrice primaire traite la trame
+  Then elle est INTERCEPTÉE (pas de broadcast navigateur) et `[[id, null]]` est
+    renvoyée au primaire — comportement assumé de la tâche 05, verrouillé par test
+
+Scenario: diag_fusion_parts_primaire_puis_aux_ordre_index
+  Given un composite deux enfants publiant chacun des diagnostics sur la même URI
+  When les deux publications sont reçues (primaire d'abord, aux ensuite)
+  Then le cache et les abonnés voient la concaténation primaire-d'abord, et en
+    composite les abonnés ne voient qu'une trame synthétisée (jamais une part brute —
+    `params.uri`/`version` de la trame déclenchante conservés) (test existant
+    `diag_merge_primary_then_aux_order`)
+
+Scenario: diag_fusion_independante_de_l_ordre_d_arrivee
+  Given le même composite, publications aux AVANT celles du primaire
+  When le fondu est calculé
+  Then l'ordre du fondu est index croissant (primaire d'abord) — déterminisme
+    indépendant de l'arrivée (test existant `diag_merge_order_independent_of_arrival`)
+
+Scenario: diag_publication_remplace_la_part_de_lenfant
+  Given un enfant ayant publié N diagnostics sur une URI
+  When le MÊME enfant republie une liste différente
+  Then sa part est REMPLACÉE (jamais appendue) — le cache ne porte que la dernière
+    publication par enfant (test existant `diag_replace_per_child_not_append`)
+
+Scenario: diag_invalidate_efface_toutes_les_parts
+  Given une URI avec parts primaire + aux (le primaire ne republie pas)
+  When @invalidate_diagnostics(uri) puis publication aux seule
+  Then le fondu suivant ne contient PAS la part primaire stale — toutes les parts
+    ont été effacées, y compris celles jamais republiées (test existant
+    `diag_invalidate_clears_all_parts`)
+
+Scenario: diag_attente_resout_sur_publication_de_aux
+  Given une URI sans diagnostics en cache et @wait_for_diagnostics lancé
+  When l'AUX (pas le primaire) publie
+  Then l'attente est réveillée et rend le fondu (la publication d'un aux est une
+    information légitime — rôle `diagnostics-merge` des composites hadolint/ruff)
+    (test existant `diag_wait_resolves_on_aux_push`)
+
+Scenario: diag_aux_eof_purge_ses_parts_et_recompote
+  Given une URI au fondu primaire+aux en cache
+  When l'aux meurt (EOF)
+  Then ses parts disparaissent du cache (URI sans aucune part restante retirée
+    entièrement), le primaire restant est recompté, sans notify — des diagnostics de
+    serveur mort ne restent jamais publiés (test existant
+    `diag_aux_eof_drops_its_parts`)
+
+Scenario: diag_mono_process_broadcast_byte_identique
+  Given une session mono-process dont le serveur publie `publishDiagnostics`
+  When l'abonné reçoit la notification
+  Then les octets sont EXACTEMENT la trame du serveur (pas de synthèse, pas de
+    re-sérialisation) (test existant `diag_mono_process_bytes_unchanged`)
+
+Scenario: aux_meurt_session_survit_degradee
+  Given un composite au primaire vivant
+  When l'unique aux meurt (EOF)
+  Then @is_alive reste `true`, un warn unique « aux degraded (stdout EOF) » est émis,
+    les requêtes suivantes partent au primaire seul (barrières vides ⇒ chemin
+    primaire), @get_or_spawn ne re-spawn PAS (la session est vivante) ; à la mort du
+    PRIMAIRE en revanche, les EOF des aux tués ne sonnent PAS « degraded » (bruit
+    évité) (tests existants `aux_death_session_survives_degraded`, volet mort du
+    primaire de `primary_death_kills_session`)
+
+Scenario: merge_hover_markup_concatene_primary_first
+  Given un composite répondant un `hover` `MarkupContent` des deux côtés (primaire
+    et aux, avec `range` côté primaire)
+  When le client envoie `textDocument/hover`
+  Then UNE réponse client : objet du primaire, `contents.value` = valeur primaire +
+    `"\n\n---\n\n"` + valeur aux, `kind` et champs secondaires du primaire (test
+    existant `merge_hover_concat_markup`)
+
+Scenario: merge_hover_repli_normalise_tableau_marked_strings
+  Given un hover primaire en chaîne (`MarkedString`) et un hover aux en
+    `{language, value}` (pas tous `MarkupContent`)
+  When la fusion s'exécute
+  Then `contents` devient le TABLEAU des marked strings primary-first, dans l'objet
+    du primaire ; parts non-objet ou sans `contents` contribuent vide + warn (volet
+    du test existant `merge_hover_concat_markup`, à isoler par test propre)
+
+Scenario: merge_definition_concat_les_locations
+  Given definition/typeDefinition/implementation/references répondant tableaux
+    (primaire) et un (aux) sur la même requête
+  When la barrière se complète
+  Then le résultat est la concaténation primary-first des items, `Location` objet
+    seul wrapé en tableau, mélange `Location`/`LocationLink` accepté verbatim (tests
+    existants `merge_locations_definition_concat`,
+    `merge_location_single_object_wrapped`)
+
+Scenario: merge_locations_toutes_null_rend_null_et_vide_est_vide
+  Given toutes les parts null pour `references`, puis un serveur répondant `[]` et
+    l'autre null
+  When les barrières se complètent
+  Then `null` est rendu dans le premier cas ; `[]` dans le second (un `[]` reçu EST
+    une réponse) (volet des tests existants `merge_locations_definition_concat`)
+
+Scenario: merge_codeaction_tableau_toujours_null_vide
+  Given `codeAction` : primaire null, aux un codeAction
+  When la fusion s'exécute
+  Then le résultat est un tableau d'une entrée (jamais `null` — la fusion de
+    codeActions est TOUJOURS un tableau) ; non-tableau inconnu ⇒ vide + warn (test
+    existant `merge_codeaction_concat_null_is_empty`)
+
+Scenario: merge_preparerename_primaire_gagne_puis_fallback_aux
+  Given `prepareRename` : primaire non-null / primaire null + aux non-null / tous
+    null (trois barrières)
+  When chaque fusion s'exécute
+  Then le primaire non-null gagne ; sinon l'aux ; sinon `null` (test existant
+    `merge_prepare_rename_primary_wins_then_fallback`)
+
+Scenario: merge_rename_changes_concat_par_uri
+  Given un `rename` où primaire et aux rendent des `WorkspaceEdit` variante
+    `changes` avec URI partagées et disjointes
+  When le pli s'exécute
+  Then les edits des URI communes sont concaténés primary-first dans le MÊME
+    tableau, les URI disjointes sont ajoutées, une valeur non-tableau côté primaire
+    n'est JAMAIS écrasée (warn) ; `documentChanges`×`documentChanges` : concat des
+    tableaux (test existant `merge_rename_changes_concat`)
+
+Scenario: merge_rename_variantes_mixtes_primaire_gagne_avec_warn
+  Given primaire variante `changes`, aux variante `documentChanges`
+  When le pli `fold_workspace_edit` s'exécute
+  Then la variante du PRIMAIRE est conservée, les edits de l'aux sont ABANDONNÉS
+    avec warn explicite ; primaire sans variante ⇒ adopte celle de l'aux ; champs
+    secondaires (`changeAnnotation`, metadata) de l'aux jamais copiés (volet à
+    isoler par test propre des fixtures de `merge_rename_changes_concat`)
+
+Scenario: merge_aux_erreur_part_vide_fusion_continue
+  Given un client sur `textDocument/hover` en composite, l'aux répondant une erreur
+    JSON-RPC et le primaire un hover
+  When la barrière se complète
+  Then le client reçoit le hover du primaire (part aux levée `None` + warn dégradé),
+    JAMAIS une erreur globale (test existant `merge_aux_error_part_skipped`)
+
+Scenario: merge_erreur_primaire_fail_fast_id_restaure
+  Given une requête `All` dont le PRIMAIRE répond une erreur JSON-RPC
+  When la barrière est gouvernante
+  Then une réponse `{"id":<id d'origine>,"error":<objet tel quel>}` part immédiatement,
+    la barrière est retirée et les parts aux qui arrivent après sont ignorées en
+    silence (@pending_merge_count revient à 0) (test existant
+    `merge_primary_error_fails_fast`)
+
+Scenario: merge_aux_eof_a_mid_barriere_part_levee
+  Given une barrière ouverte dont l'aux meurt avant de répondre
+  When la lectrice aux purge @ClientMerge
+  Then la part est levée à `None`, @try_complete_merge est tenté — la fusion primaire
+    n'est jamais bloquée par un serveur mort (test existant `merge_aux_eof_mid_merge`)
+
+Scenario: merge_concurrentes_sans_croisement_de_parts
+  Given deux requêtes `All` concurrentes (deux clients) sur le même composite
+  When les réponses primaire/aux arrivent en ordre croisé
+  Then chaque client reçoit SA fusion (barrière clé sur le session id primaire ;
+    parts jamais mélangées entre barrières) (test existant `merge_concurrent_no_cross`)
+
+Scenario: merge_unsubscribe_en_cours_purge_barriere
+  Given une requête `All` en attente de part aux
+  When le client se désabonne (@unsubscribe — fermeture d'onglet)
+  Then la barrière est retirée, la réponse aux tardive est avalée (debug), aucune
+    trame ne part vers le désabonné, @pending_merge_count retombe à 0 (test existant
+    `merge_unsubscribe_mid_merge`)
+
+Scenario: semtok_semantic_tokens_primaire_seul_wire_quiet
+  Given un composite (aux `tsserver-forward`)
+  When le client envoie `textDocument/semanticTokens/full`, puis `range`, `delta`,
+    `workspace/semanticTokens/refresh`
+  Then aucune de ces requêtes n'atteint l'aux, aucune barrière n'existe — le
+    primaire répond seul, sa réponse est livrée telle quelle (jamais de fusion de
+    flux de tokens) (tests existants `semtok_routes_primary_only_end_to_end`,
+    `semtok_range_and_delta_wire_quiet`)
+
+Scenario: semtok_echec_forwarding_degrade_en_tokens_template
+  Given un composite Volar où le calcul tsserver du primaire passe par le canal
+    tâche 05 et où l'aux est injoignable
+  When une requête `semanticTokens/full` est servie
+  Then le primaire répond ses tokens template/style seuls (body null du forwarding
+    dégradé — les clients voient un flux complet sans les tokens script enrichis)
+    (test existant `semtok_forward_failure_degrades_to_template_tokens`)
+
+Scenario: merge_completion_dedup_label_kind_primaire_gagne
+  Given un composite dont primaire et aux publient des `CompletionItem` aux clés
+    `(label, kind)` qui se recouvrent partiellement
+  When `textDocument/completion` est fusionné
+  Then chaque clé n'apparaît qu'une fois, l'item RETENU est celui du primaire (le
+    plus ancien) ; un item sans `label` exploitable est conservé sans être dédupable
+    (test existant `merge_completion_replaces_stays_primary_guard`)
+
+Scenario: merge_completion_kind_absent_distinct_de_present
+  Given deux items de même `label`, l'un sans `kind`, l'autre `kind: 3` (une part
+    par enfant)
+  When la fusion s'exécute
+  Then les DEUX items sont retenus — `kind` absent ≠ `kind` présent (décision
+    développeur 2026-09-06) (test existant `merge_completion_kind_absent_distinct`)
+
+Scenario: merge_completion_is_incomplete_en_ou_et_shape_selon_parts
+  Given (a) primaire `CompletionList{isIncomplete:true}` + aux tableau, (b) les deux
+    en tableaux purs
+  When chaque fusion s'exécute
+  Then (a) rend `{"isIncomplete":true,"items":[…]}` (OR des parts, shape list car AU
+    MOINS UNE part est une list) ; (b) rend le tableau nu (test existant
+    `merge_completion_incomplete_or_and_array_shape`)
+
+Scenario: resolve_routee_lenfant_dorigine_par_provenance
+  Given un composite où l'aux a fourni l'item de complétion `(label, kind)` retenu
+    (provenance écrite à la barrière completion)
+  When le client envoie `completionItem/resolve` sur cet item
+  Then une copie de la requête part AVEC l'id interne de CET aux ; la réponse
+    arrive au client sous l'id d'origine avec le RÉSULTAT de l'aux ; le primaire ne
+    voit pas la requête (test existant `resolve_routes_to_aux`)
+
+Scenario: resolve_routee_au_primaire_quand_provenance_primaire
+  Given un item dont la provenance porte l'index 0 (primaire)
+  When `completionItem/resolve` est envoyé
+  Then le CHEMIN HISTORIQUE primaire s'exécute (session id, pending, réponse du
+    primaire id restauré) — aucune trame surnuméraire (test existant
+    `resolve_routes_to_primary`)
+
+Scenario: resolve_item_inconnu_fallback_noop_sans_trame
+  Given un composite initialisé mais un item absent de TOUTE la provenance (ex.
+    après une complétion jamais servie)
+  When `completionItem/resolve` arrive
+  Then `{"id":<origine>,"result":<item verbatim>}` est rendu immédiatement, AUCUNE
+    trame sur les fils enfants, AUCUNE barrière (test existant
+    `resolve_unknown_item_no_wire`)
+
+Scenario: resolve_provenance_ambigue_fallback_noop
+  Given deux enfants distincts ayant fourni le MÊME `(label, kind)` dans des URI
+    différentes (provenance croisée)
+  When `completionItem/resolve` arrive
+  Then warn ambiguïté + fallback item tel quel — on ne devine jamais le serveur, le
+    resolve ne part à AUCUN enfant (test existant `resolve_ambiguous_no_wire`)
+
+Scenario: resolve_erreur_de_lenfant_fallback_item
+  Given un resolve routé à un aux qui répond une erreur JSON-RPC (ou trame sans
+    `result`)
+  When la lectrice aux traite la réponse
+  Then le client reçoit l'item TEL QUEL (no-op) + warn — jamais une erreur globale,
+    jamais un pend (test existant `resolve_aux_error_fallback_item`)
+
+Scenario: resolve_aux_meurt_avant_reponse_fallback_item
+  Given un resolve routé à un aux puis EOF de cet aux
+  When la purge des @ClientResolve s'exécute
+  Then chaque resolve en attente reçoit son fallback item (warn « aux died mid
+    completionItem/resolve ») (test existant `resolve_aux_eof_fallback_item`)
+
+Scenario: resolve_unsubscribe_en_cours_aucune_reponse
+  Given un resolve routé à un aux, l'@unsubscribe du client avant la réponse
+  When la réponse de l'aux arrive
+  Then l'@InternalPending du désabonné a été purgé par @unsubscribe, la réponse est
+    avalée (warn id inconnu), aucune trame ne sort vers le client (test existant
+    `resolve_unsubscribe_mid_resolve`)
+
+Scenario: did_change_et_did_close_purgent_la_provenance
+  Given une URI avec provenance écrite (composite avec aux demandeur)
+  When une notification `textDocument/didChange` puis une `didClose` passent par
+    @send sur cette URI
+  Then la provenance de l'URI est retirée IMMÉDIATEMENT (@completion_provenance_uri_count
+    baisse) — un resolve qui retombe alors en no-op est l'échec acceptable ; en
+    MONO-process la purge n'a jamais lieu car le chemin retourne avant (jamais écrit,
+    jamais purgé) (test existant `resolve_didChange_purges_provenance`)
+
+Scenario: provenance_cap_sixante_quatre_uris_eviction_queconque
+  Given une session composite où 65 URI différentes font une complétion fusionnée
+  When la 65e écrit sa provenance
+  Then la map borne à 64 entrées, l'éviction est QUELCONQUE (ordre @HashMap — aucun
+    ordre d'LRU à tester) ; cache borné heuristique assumé (scénario de garde — pas
+    de test direct à ce jour, @completion_provenance_uri_count le permet)
+
+Scenario: resolve_monoproces_chemin_primaire_inchange
+  Given une session MONO-process, complétion servie normalement par le primaire
+  When `completionItem/resolve` arrive
+  Then la table de provenance N'EST JAMAIS consultée (@completion_provenance_uri_count
+    reste 0), la requête part au primaire (session id, réponse id restauré) — les
+    serveurs mono gardent leur mémoire d'items (test existant
+    `mono_completion_resolve_primary_unchanged`)
+
+Scenario: dm_toutes_requetes_primaire_seul_aucune_barriere
+  Given un composite 100 % `diagnostics-merge` (hadolint/ruff)
+  When le client envoie hover/definition/completion/rename… (méthodes `All` incluses)
+  Then chaque requête part au primaire SEUL (aucun octet vers l'aux, aucune barrière
+    — @aux_answers_requests false ⇒ la barrière est structurellement impossible), et
+    @pending_merge_count reste 0 (test existant `dm_requests_route_to_primary_only`)
+
+Scenario: dm_notifications_docsync_rejoignent_lenfant
+  Given le même composite `diagnostics-merge`
+  When `initialize` (copie sans `initOptions` — spec vide) puis `didOpen`/`didChange`
+    passent par @send
+  Then l'aux reçoit `initialize` (fan-out invariant 3, réponse aux en erreur ⇒ warn
+    dégradé seulement) et les notifications doc-sync (invariant 2) (test existant
+    `dm_docsync_notifications_reach_aux`)
+
+Scenario: dm_diagnostics_fusionnes_primary_first
+  Given le primaire (docker-langserver) et l'aux `diagnostics-merge`
+    (`vnl-hadolint-lsp`) publiant chacun leurs diagnostics sur la même URI
+  When les deux publications arrivent
+  Then cache et abonnés portent le fondu primaire-d'abord + aux (fusion indépendante
+    du rôle — « requêtes du client → primaire seul » ne concerne pas les
+    diagnostics) (test existant `dm_diagnostics_merge_primary_first`)
+
+Scenario: dm_aux_meurt_degradation_silencieuse
+  Given le composite `diagnostics-merge` dont l'aux s'éteint
+  When l'EOF de l'aux est traité puis une requête client passe
+  Then la session survit (primaire seul), parts de l'aux purgées, une requête
+    n'échoue jamais ; si la MORT vient du primaire juste avant, le warn « degraded »
+    des aux est TU (la session est morte, pas dégradée) (test existant
+    `dm_aux_dead_silent_degradation`)
+
+Scenario: dm_resolve_completion_rejoint_le_primaire
+  Given le composite `diagnostics-merge` et une complétion jamais fusionnée
+  When `completionItem/resolve` arrive
+  Then il emprunte le chemin primaire HISTORIQUE (résultat du primaire, trame visible
+    sur son fil) — JAMAIS le fallback no-op de la tâche 08, car @has_requesting_aux
+    est false (porte de niveau rôle) (test existant
+    `dm_completion_resolve_routes_to_primary`)
+
+Scenario: monoproces_octets_sur_le_fil_inchanges
+  Given une session mono-process et une séquence initialize/didOpen/hover/
+    notification/`publishDiagnostics`
+  When tout transite par @send et la lectrice
+  Then les octets vus par l'enfant (requêtes : id réécrit, notifications : verbatim)
+    et livrés aux abonnés (réponses : id restauré, notifications : brutes) sont ceux
+    du chemin historique d'avant les composites — garde de non-régression de tout le
+    LSP déployé (test existant `mono_process_wire_bytes_unchanged`)
