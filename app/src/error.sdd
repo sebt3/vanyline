@@ -1,0 +1,481 @@
+Spec: Error
+
+Platform: Rust/vanyline-app/thiserror+axum
+
+Purpose:
+  Type d'erreur unique du binaire `vanyline-app` (@AppError) : le type d'erreur de tous les
+  handlers HTTP de l'app (les `Result<_, @AppError>` de ./api/*.rs, rendus par axum via
+  @IntoResponse) ET le véhicule de propagation des modules WebSocket (./ws/chat.rs,
+  ./ws/sandbox_state.rs) où l'erreur ne passe jamais par @IntoResponse — elle est loggée
+  par @tracing::error au wrapper de socket. Le fichier porte trois conversions @From
+  manuelles (@sea_orm::DbErr, @vanyline_lib::VnyError, @vanyline_cfgstore::CfgStoreError)
+  plus le @From<@reqwest::Error> généré par le `#[from]` de la variante @AppError::RequestError,
+  et le barème complet variante → statut HTTP + corps JSON. Chaque variante porte un
+  marqueur `VNL-<DOMAINE>-<NNN>` en tête de son @Display — convention AGENTS.md « messages
+  d'erreur avec identifiant unique », même famille que ../../lib/src/error.rs (@VnyError),
+  ../../tools/src/error.rs (@ToolsError) et ../../cfgstore/src/error.sdd (@CfgStoreError).
+  Les gabarits `VNL-LLM-001`/`VNL-LLM-002`/`VNL-MCP-001`/`VNL-AGT-001`/`VNL-INT-001` sont
+  byte-identiques à leurs jumeaux de @VnyError ; en revanche les marqueurs `VNL-CFG-001` à
+  `VNL-CFG-008` sont émis EN DUR hors de ce fichier (./config.rs, ./main.rs) pour des erreurs
+  de variables d'environnement sans rapport avec @CfgStoreError — collision de namespace
+  déjà `[?]` dans ../../cfgstore/src/error.sdd, reprise en `[!]` ici (cohérence obligatoire,
+  voir `Tasks`). Un seul fichier, un seul contrat : pas de regroupement.
+
+Owns:
+  ./error.rs
+
+Can read:
+  ./main.rs
+  ./k8s.rs
+  ./config.rs
+  ./api/conversations.rs
+  ./api/sandboxes.rs
+  ./api/llm_providers.rs
+  ./api/mcp_servers.rs
+  ./ws/chat.rs
+  ./ws/sandbox_state.rs
+  ../Cargo.toml
+  ../../lib/src/error.rs
+  ../../lib/src/error.sdd
+  ../../cfgstore/src/error.sdd
+  ../../vanyline.sdd
+
+Depends on:
+  @thiserror (derive @thiserror::Error sur @AppError) — génère @std::error::Error (avec
+    @std::error::Error::source() `Some` uniquement pour @AppError::RequestError, seul champ
+    `#[from]`), le @std::fmt::Display depuis les attributs `#[error(...)]`, et
+    @From<@reqwest::Error>. Seules derives du type : `Debug` + @thiserror::Error — ni
+    serde, ni ts-rs, ni `Clone`/`PartialEq`.
+  @axum (v0.8, ../Cargo.toml, features `ws` + `macros`) — @IntoResponse implémentée à la
+    main (pas un derive axum), @Json et @StatusCode (`FORBIDDEN`, `BAD_GATEWAY`, `NOT_FOUND`,
+    `UNPROCESSABLE_ENTITY`, `INTERNAL_SERVER_ERROR`, `CONFLICT`, `BAD_REQUEST`).
+  @serde_json::json! — corps d'erreur `json!({ "error": message })`, sérialisé par @Json.
+  @vanyline_lib::VnyError (../../lib/src/error.rs) — payload de @AppError::UnprocessableReference
+    et source de @From<@VnyError>. L'app compile vanyline-lib avec la feature `k8s` en
+    permanence (../Cargo.toml ligne `vanyline-lib = { …, features = ["k8s"] }`) : les
+    branches @VnyError::K8sConfigError/@VnyError::K8sApiError du match, gated `#[cfg(feature
+    = "k8s")]` côté lib, sont toujours compilées ici ; sans cette feature le @From ne
+    compilerait pas. Aucun `#[cfg(...)]` dans ce fichier.
+  @vanyline_cfgstore::CfgStoreError (../../cfgstore/src/error.rs, contrat
+    ../../cfgstore/src/error.sdd) — source de @From<@CfgStoreError> ; seul son @Display
+    traverse (documenté là-bas comme « From → HTTP 500, message = @Display complet »).
+  @sea_orm::DbErr — source de @From<@sea_orm::DbErr> (famille complète d'erreurs ORM).
+  @reqwest::Error (../Cargo.toml, default-features=false + rustls-tls + json) — payload et
+    `#[from]` de @AppError::RequestError.
+
+Exposes:
+  @AppError — `pub enum` à portée crate (./main.rs déclare `mod error;` sans `pub` : le
+    binaire n'expose rien hors de lui-même ; les modules du crate l'importent par
+    `crate::error::AppError`). Derives `Debug` + @thiserror::Error exactement. 16 variantes,
+    aucun gating de feature. Le @Display de chaque variante commence par son marqueur suivi
+    de `": "` SAUF @AppError::UnprocessableReference qui n'a pas de marqueur propre (gabarit
+    `"{0}"`, marqueur hérité du @VnyError embarqué — voir `Tasks`). Rendus exacts, caractère
+    par caractère, `{0}` désignant le champ 0 :
+      @AppError::Forbidden — `"VNL-AUTH-004: Forbidden"`
+      @AppError::LlmError(String) — `"VNL-LLM-001: LLM provider error: {0}"` (gabarit
+        byte-identique à @VnyError::LlmError)
+      @AppError::LlmProviderNotFound — `"VNL-LLM-002: LLM provider not found"` (identique à
+        @VnyError::LlmProviderNotFound)
+      @AppError::McpError(String) — `"VNL-MCP-001: MCP server error: {0}"` (identique à
+        @VnyError::McpError)
+      @AppError::AgentNotFound — `"VNL-AGT-001: Agent not found"` (identique à
+        @VnyError::AgentNotFound)
+      @AppError::UnprocessableReference(@vanyline_lib::VnyError) — `"{0}"` : rend
+        directement le @Display du @VnyError embarqué, sans préfixe `VNL-*` propre à l'app
+      @AppError::ConversationNotFound — `"VNL-CNV-001: Conversation not found"`
+      @AppError::ConversationAccessDenied — `"VNL-CNV-002: Access denied to conversation"`
+      @AppError::RequestError(@reqwest::Error) — `"VNL-REQ-001: Request error: {0}"` ; champ
+        `#[from]` → @From<@reqwest::Error> généré + @std::error::Error::source() `Some`
+      @AppError::InternalError(String) — `"VNL-INT-001: Internal error: {0}"` (identique à
+        @VnyError::InternalError)
+      @AppError::K8sConfigError(String) — `"VNL-K8S-001: Kubernetes config error: {0}"`
+      @AppError::K8sApiError(String) — `"VNL-K8S-002: Kubernetes API error: {0}"`
+      @AppError::K8sNotFound(String) — `"VNL-K8S-003: Kubernetes resource not found: {0}"`
+      @AppError::SandboxNotExposed — `"VNL-SBX-001: sandbox has no public endpoint (owner
+        has no application_ref)"`
+      @AppError::SandboxBranchEmpty — `"VNL-SBX-002: branch must not be empty"`
+      @AppError::GitPathInvalid — `"VNL-SBX-003: invalid git path segment"`
+    Les marqueurs `VNL-K8S-001`/`VNL-K8S-002` sont partagés avec @VnyError::K8sConfigError/
+    @VnyError::K8sApiError mais les corps de message diffèrent (`Kubernetes config error`
+    ici vs `Cannot reach Kubernetes cluster` là-bas) — voir `Tasks`.
+  @From<@sea_orm::DbErr> pour @AppError — manuel, une seule règle : toute @sea_orm::DbErr
+    devient @AppError::InternalError(`format!("VNL-DB-006: {e}")`), donc un @Display final à
+    DOUBLE marqueur : `VNL-INT-001: Internal error: VNL-DB-006: {@Display de la DbErr}`.
+    Le commentaire d'@doc verrouille l'intention : consolidation des `fn db_err` verbatim
+    dupliqués dans 9 modules, « même code qu'avant, aucun comportement observable changé ».
+    Utilisé massivement par `.map_err(AppError::from)?` dans ./api/*.rs et ./ws/*.rs, et par
+    l'opérateur `?` dans toute fonction retournant `Result<_, @AppError>`.
+  @From<@vanyline_lib::VnyError> pour @AppError — manuel, match à 4 branches, chaque
+    conversion emballe le @Display COMPLET du @VnyError (`e.to_string()`) dans le payload de
+    la variante cible (donc double marqueur systématique, voir `Handles`) :
+      @VnyError::K8sConfigError(_) → @AppError::K8sConfigError (statut 502)
+      @VnyError::K8sApiError(s) avec `s.contains("404") || s.contains("NotFound") ||
+        s.contains("not found")` → @AppError::K8sNotFound (404) — heuristic de sous-chaînes
+        sensible à la casse, évaluée sur le SEUL payload `s`, pas sur le @Display complet
+      @VnyError::K8sApiError(_) (sans ces sous-chaînes) → @AppError::K8sApiError (500)
+      toute autre variante (`_`) → @AppError::InternalError (500) — y compris
+        @VnyError::LlmError, @VnyError::LlmProviderNotFound, @VnyError::UnknownReference :
+        la sémantique fine (502/404/422 qu'une variante AppError homonyme aurait rendue) est
+        perdue par cette conversion — voir `Tasks`. Cette conversion ne produit JAMAIS
+        @AppError::UnprocessableReference : les appelants qui veulent un 422 le construisent
+        à la main (`./api/conversations.rs` : `AppError::UnprocessableReference(VnyError::
+        UnknownReference("agent", name))`).
+  @From<@vanyline_cfgstore::CfgStoreError> pour @AppError — manuel, aucune distinction de
+    variante : `Self::InternalError(e.to_string())` → HTTP 500 avec le @Display complet de
+    @CfgStoreError comme payload, rendu final `VNL-INT-001: Internal error: {display
+    VNL-CFG-* complet}`. Cohérent avec ce que promet ../../cfgstore/src/error.sdd (« From →
+    HTTP 500, message = @Display complet ») : toute modification de l'un casse l'autre.
+  @IntoResponse pour @AppError — consomme `self` par valeur, matche `&self` (le @Display est
+    pris via `self.to_string()` sur la référence). Rend `(status, @Json(json!({"error":
+    message})))` : corps JSON à clé unique `"error"`, valeur = @Display complet (marqueurs
+    inclus, aucun champ `code` séparé), @Content-Type `application/json`. Barème exhaustif
+    variante → statut :
+      @AppError::Forbidden → 403 `FORBIDDEN`
+      @AppError::LlmError → 502 `BAD_GATEWAY`
+      @AppError::LlmProviderNotFound → 404 `NOT_FOUND`
+      @AppError::McpError → 502 `BAD_GATEWAY`
+      @AppError::AgentNotFound → 404 `NOT_FOUND`
+      @AppError::UnprocessableReference → 422 `UNPROCESSABLE_ENTITY`
+      @AppError::ConversationNotFound → 404 `NOT_FOUND`
+      @AppError::ConversationAccessDenied → 403 `FORBIDDEN`
+      @AppError::RequestError → 502 `BAD_GATEWAY`
+      @AppError::InternalError → 500 `INTERNAL_SERVER_ERROR`
+      @AppError::K8sConfigError → 502 `BAD_GATEWAY`
+      @AppError::K8sApiError → 500 `INTERNAL_SERVER_ERROR`
+      @AppError::K8sNotFound → 404 `NOT_FOUND`
+      @AppError::SandboxNotExposed → 409 `CONFLICT`
+      @AppError::SandboxBranchEmpty → 422 `UNPROCESSABLE_ENTITY`
+      @AppError::GitPathInvalid → 400 `BAD_REQUEST`
+    Le match est exhaustif (compilateur) : toute nouvelle variante impose une ligne ici.
+  @std::error::Error — implémenté par la derive : `source()` rend `Some` du @reqwest::Error
+    d'origine pour @AppError::RequestError uniquement, `None` pour les 15 autres variantes.
+  Module de test `tests` — 5 tests existants, couverture partielle :
+    `unprocessable_reference_maps_to_422`, `k8s_config_error_maps_to_502`,
+    `k8s_api_error_maps_to_500`, `k8s_not_found_maps_to_404`,
+    `sandbox_branch_empty_maps_to_422` — uniquement des assertions de statut sur 5 des 16
+    variantes ; les 11 autres statuts, les 3 conversions @From et le corps JSON ne sont
+    testés nulle part dans ce fichier (dette tracée en `Tasks`).
+
+Accepts:
+  Payloads `String` arbitraires dans `LlmError`/`McpError`/`InternalError`/`K8sConfigError`/
+    `K8sApiError`/`K8sNotFound` : aucune validation, troncature ni contrôle de grammaire ;
+    UTF-8, espaces et guillemets rendus tels quels. Un payload portant lui-même un marqueur
+    `VNL-*` est accepté et produit un double marqueur (cas courant, voir `Handles`).
+  @AppError::UnprocessableReference accepte n'importe quel @VnyError, pas seulement
+    @VnyError::UnknownReference : le type ne restreint pas, et le barème @IntoResponse rend
+    422 quel que soit le @VnyError embarqué (les usages actuels n'embarquent que
+    `UnknownReference("agent", …)`).
+  @AppError::RequestError accepte n'importe quelle @reqwest::Error (transport, timeout, ou
+    erreur explicite de statut selon comment le client l'a fabriquée) ; le @Display
+    n'interpole que le niveau 0 via `{0}`, pas la chaîne des causes.
+  @From<@sea_orm::DbErr> accepte toute la famille @sea_orm::DbErr (connexion, requête,
+    transaction…) sans distinction : un seul seau `VNL-DB-006`.
+  @From<@vanyline_lib::VnyError> accepte toute variante, y compris les variantes k8s ;
+    l'heuristic `404`/`NotFound`/`not found` est une recherche de sous-chaînes sensible à la
+    casse sur le payload — `"4041"`, un URL de port ou un nom de ressource contenant `404`
+    déclenche le même bras `K8sNotFound` qu'un vrai 404.
+  @IntoResponse accepte `self` par valeur quel que soit l'état du payload — aucune branche
+    d'erreur interne, la fonction ne peut pas échouer.
+
+Returns:
+  @IntoResponse::into_response — une @axum::response::Response : statut selon le barème
+    d'`Exposes`, corps `{"error":"<@Display complet>"}` en `application/json`. C'est la
+    surface observable HTTP principale de tout handler `Result<_, @AppError>` de ./api/*.rs.
+  @Display — exactement les gabarits d'`Exposes` avec payloads injectés ; c'est aussi ce
+    que loggent les wrappers WS (`tracing::error!("ws chat error: {e}")`,
+    `tracing::error!("ws sandbox-state error: {e}")`).
+  @std::error::Error::source() — `Some` du @reqwest::Error d'origine pour
+    @AppError::RequestError, `None` pour les 15 autres.
+  Les @From ne retournent rien d'autre que la variante @AppError décrite.
+  @Debug dérivé — rendu structurel par défaut, jamais contractualisé au-delà de son
+    existence.
+
+Raises:
+  Aucune — le fichier ne panique jamais et ne retourne jamais d'erreur : les trois @From
+    manuels ont des matches exhaustifs sans branche `unreachable!`, @IntoResponse est
+    totale. Le harnais clippy du workspace (`deny` de `unwrap`/`expect`/`panic`/`unreachable`
+    via `tooling.sdd`) s'applique ici sans aucune exemption `#[allow]` dans le fichier.
+
+Handles:
+  Rendus finaux des conversions (double marqueur systématique, verbatim) :
+    @From<@sea_orm::DbErr> → `VNL-INT-001: Internal error: VNL-DB-006: {DbErr}`
+    @VnyError::K8sConfigError("boom") → `VNL-K8S-001: Kubernetes config error: VNL-K8S-001:
+      Cannot reach Kubernetes cluster: boom` — le même marqueur deux fois, corps différents
+    @VnyError::K8sApiError("… 404 …") → `VNL-K8S-003: Kubernetes resource not found:
+      VNL-K8S-002: Kubernetes API error: {payload}`
+    @VnyError::K8sApiError("boom") → `VNL-K8S-002: Kubernetes API error: VNL-K8S-002:
+      Kubernetes API error: boom`
+    @VnyError::LlmError("x") → `VNL-INT-001: Internal error: VNL-LLM-001: LLM provider
+      error: x` (et statut 500, alors que @AppError::LlmError eût rendu 502)
+    @VnyError::UnknownReference("agent", "ghost") → `VNL-INT-001: Internal error:
+      VNL-CFG-003: Unknown agent reference: 'ghost'` (500 par `?`/From ; le 422 exige la
+      construction manuelle @AppError::UnprocessableReference)
+    @CfgStoreError::ReadOnly → `VNL-INT-001: Internal error: VNL-CFG-009: Config store is
+      read-only`
+    Même philosophie de double marqueur que ../../cfgstore/src/error.sdd et
+    ../../lib/src/error.sdd : le type n'effectue aucune déduplication.
+  Sites de construction avec marqueur en dur PORTÉS PAR @AppError mais hors de ce fichier —
+    ces marqueurs n'ont pas de variante dédiée et voyagent dans @AppError::InternalError ou
+    les variantes payload : `"VNL-DB-007: context not found"` (./api/conversations.rs ×2,
+    ./ws/chat.rs — rendu 500 alors qu'une absence de contexte ressemble à un 404, déjà `[?]`
+    dans ./db/entities/chat_contexts.sdd), `"VNL-DB-008: created conversation not found"`
+    (./api/conversations.rs), `"VNL-LLM-003"`/`"VNL-LLM-004"`/`"VNL-LLM-005"` dans
+    @AppError::LlmError (./api/llm_providers.rs::discover_models — `VNL-LLM-005` est aussi
+    le code du hook @before_create de ./db/entities/llm_providers.rs),
+    `"VNL-MCP-002"`/`"VNL-MCP-003"` dans @AppError::McpError (./api/mcp_servers.rs), et
+    `"VNL-SBX-002: sandbox ticket response missing 'ticket'"` dans @AppError::InternalError
+    (./api/sandboxes.rs::ws_ticket — COLLISION : le marqueur `VNL-SBX-002` désigne aussi
+    @AppError::SandboxBranchEmpty, `VNL-SBX-002: branch must not be empty` — voir `Tasks`).
+  Marqueurs émis hors @AppError dans le crate (jamais rendus en HTTP par ce fichier) :
+    @AppError::Forbidden partage `VNL-AUTH-004` avec un simple log de ./main.rs (« cannot
+    build miryad-core OIDC client ») ; ./config.rs émet `VNL-CFG-001`…`VNL-CFG-006` et
+    ./main.rs `VNL-CFG-005`/`VNL-CFG-008` + `VNL-DB-003`/`VNL-DB-004`/`VNL-DB-005` +
+    `VNL-NET-001`/`VNL-NET-002` comme chaînes `Result<_, @String>` ou messages @tracing —
+    hors du type @AppError, mais dans le même espace de marques que lui (voir `[!]` de
+    `Tasks` pour la collision avec ../../cfgstore/src/error.sdd).
+  Chemin WebSocket — ./ws/chat.rs (`run_socket`, `handle_message`, `resolve_extra_mcp`,
+    `load_history`, `persist_message`) et ./ws/sandbox_state.rs (`ensure_watch_loop`,
+    `run_socket`) propagent @AppError dans des `Result<_, @AppError>`, et le wrapper non-async
+    de chaque socket (`handle_socket`) consomme l'erreur par `if let Err(e) = run_socket(…)
+    { tracing::error!(…) }` : @IntoResponse n'est JAMAIS appelée sur ce chemin, aucune
+    réponse HTTP n'est produite, la conversation WS rend ses erreurs métier par des events
+    @ChatEvent (`send_error("VNL-AGT-001"…)`/`send_error("VNL-LLM-001"…)` de ./ws/chat.rs)
+    construits à la main, pas par @AppError.
+  ./k8s.rs construit @AppError::K8sConfigError par `map_err(|e| …)` explicite (jamais le
+    @From<@VnyError>) — contrat ./k8s.sdd ; variante et rendu identiques à ce que la
+    conversion aurait produits pour @VnyError::K8sConfigError.
+  @From<@reqwest::Error> généré par `#[from]` coexiste avec la pratique des appelants :
+    ./api/sandboxes.rs préfère `.map_err(AppError::RequestError)` explicite ; les deux
+    chemins produisent la même variante.
+
+Must:
+  Préfixer le @Display de chaque variante (sauf @AppError::UnprocessableReference, seul
+    exception assumée) par son marqueur `VNL-<DOM>-<NNN>` exact suivi de `": "`, selon les
+    16 gabarits d'`Exposes`, et les verrouiller par test caractère par caractère.
+  Appliquer le barème d'`Exposes` variante → statut HTTP sur les 16 variantes, match
+    exhaustif, corps `{"error": "<@Display complet>"}` en `application/json` pour toutes.
+  Préserver les 5 gabarits byte-identiques à leurs jumeaux @VnyError (`VNL-LLM-001`,
+    `VNL-LLM-002`, `VNL-MCP-001`, `VNL-AGT-001`, `VNL-INT-001`) : les messages circulent
+    déjà stringifiés d'un type à l'autre par la conversion.
+  Conserver au @From<@sea_orm::DbErr> sa forme unique `InternalError("VNL-DB-006: {e}")` :
+    le préfixe `VNL-DB-006: ` est à l'INTÉRIEUR du payload, le rendu final garde donc le
+    préfixe `VNL-INT-001: Internal error: ` devant.
+  Conserver au @From<@CfgStoreError> sa forme `InternalError(e.to_string())` → 500 avec
+    @Display complet, en cohérence avec le contrat publié ../../cfgstore/src/error.sdd.
+  Conserver au @From<@VnyError> ses 4 branches dans l'ordre (K8sConfig → K8sNotFound si
+    sous-chaînes `404`/`NotFound`/`not found` sur le payload → K8sApi → InternalError) et
+    l'emballage de `e.to_string()` complet dans le payload.
+  Conserver le `#[from]` de @AppError::RequestError (source @std::error::Error +
+    @From<@reqwest::Error> générés).
+  Rester dans les derives `Debug` + @thiserror::Error uniquement et n'émettre aucun
+    `println!`/`eprintln!`/`unwrap`/`panic` (harnais du workspace, cf. `tooling.sdd`).
+
+Must not:
+  Renommer, renuméroter ou réaffecter un marqueur publié (`VNL-AUTH-004`, `VNL-LLM-001/002`,
+    `VNL-MCP-001`, `VNL-AGT-001`, `VNL-CNV-001/002`, `VNL-REQ-001`, `VNL-INT-001`,
+    `VNL-K8S-001/002/003`, `VNL-SBX-001/002/003`) ni retoucher un gabarit sans décision de
+    spec actée — ces chaînes sortent dans les corps HTTP de l'app, les logs WS, et sont
+    lues par les specs voisines (../../lib/src/error.sdd, ../../cfgstore/src/error.sdd,
+    ./k8s.sdd, ./db/entities/*.sdd).
+  Ajouter une variante sans ligne dans `Exposes` ET dans le match @IntoResponse : le match
+    exhaustif force la seconde, la spec force la première.
+  Changer un statut du barème (ex: passer @AppError::SandboxNotExposed de 409 à 404, ou
+    @AppError::K8sApiError de 500 à 502) sans arbitrage de Sébastien — le frontend traite
+    les statuts par usage.
+  Transformer @AppError en type de transport (serde/ts-rs) ou lui ajouter
+    `Clone`/`PartialEq` : la diffusion se fait par @Display stringifié.
+  Dédupliquer, valider ou tronquer un payload (marqueurs imbriqués, UTF-8, sous-chaînes
+    `404`) dans le type lui-même.
+  Supprimer les doubles marqueurs des @From (ex: enlever `VNL-DB-006: ` du payload de
+    @From<@DbErr> au profit du seul `VNL-INT-001`) : les marqueurs `VNL-DB-*` sont cherchés
+    dans les logs et messages côté opérateur.
+  Faire appel à @IntoResponse depuis les chemins WS pour formater une réponse : la
+    propagation WS est log-only, la forme des erreurs WS est @ChatEvent (./ws/chat.rs).
+
+Tasks:
+  [!] Collision de namespace `VNL-CFG-*` avec ../../cfgstore/src/error.sdd : ./config.rs et
+    ./main.rs émettent EN DUR `VNL-CFG-001`…`VNL-CFG-008` pour des erreurs d'environnement,
+    mêmes marqueurs que @CfgStoreError pour des sémantiques sans rapport — le `[?]` de
+    ../../cfgstore/src/error.sdd couvre déjà le fond ; cette spec en reprend la conclusion
+    à trancher ENSEMBLE (règle « un espace `VNL-CFG-*` par crate » ou renommage des
+    marqueurs de l'app). Noter la sur-collision interne à l'app : `VNL-CFG-005` porte deux
+    messages différents selon ./config.rs (`COOKIE_SECRET is required`) et ./main.rs
+    (`COOKIE_SECRET must be at least 64 bytes`).
+  [?] Collision interne `VNL-SBX-002` : @AppError::SandboxBranchEmpty
+    (`branch must not be empty`) ET ./api/sandboxes.rs::ws_ticket
+    (`sandbox ticket response missing 'ticket'` dans @AppError::InternalError) émettent le
+    même marqueur pour deux pannes distinctes. Renommer en `VNL-SBX-004` (ou autre) ?
+  [?] Heuristic du @From<@VnyError> : sous-chaînes `404`/`NotFound`/`not found` sensibles à
+    la casse, évaluées sur le payload seul — faux positifs (`"4041"`, tout nom contenant
+    `404`), faux négatifs (`"Not Found"`, `"NOT_FOUND"`). Le lib pourrait typer un
+    @VnyError::K8sNotFound dédié (avec la feature `k8s`) plutôt que deviner par chaîne.
+    À trancher avec ../../lib/src/error.sdd.
+  [?] Perte de sémantique du `_ => InternalError` du @From<@VnyError> : @VnyError::LlmError
+    → 500 (au lieu du 502 de @AppError::LlmError), @VnyError::LlmProviderNotFound → 500 (au
+    lieu de 404), @VnyError::UnknownReference → 500 (le 422 n'existe que par construction
+    manuelle @AppError::UnprocessableReference). Fallback inconditionnel voulu (et alors le
+    documenter comme tel) ou mapping à enrichir variante par variante ?
+  [?] Double marqueur systématique des conversions (`VNL-INT-001: … VNL-DB-006: …`,
+    `VNL-K8S-001: … VNL-K8S-001: …`) : politique assumée (alignée cfgstore/lib) ou dette à
+    purger (payload nu + variante porteuse) ?
+  [?] `VNL-K8S-001`/`VNL-K8S-002` portés par deux enums différents avec des corps de message
+    différents : même convention de double titularité que `VNL-CFG-001` (déjà `[?]` entre
+    ../../lib/src/error.sdd et ../../cfgstore/src/error.sdd) ou collision propre aux K8S ?
+  [?] @AppError::UnprocessableReference n'a pas de marqueur propre et son type accepte tout
+    @VnyError (donc un @VnyError::IoError embarqué rendrait 422 avec un message
+    `VNL-IO-001: …`) : introduire un marqueur propre (`VNL-REF-001` ?) et/ou restreindre la
+    variante aux erreurs de référence ?
+  [?] `VNL-DB-007: context not found` et `VNL-DB-008: created conversation not found`
+    rendus en 500 alors qu'ils décrivent des absences (404 ?) — le `[?]` existe déjà dans
+    ./db/entities/chat_contexts.sdd pour 007 ; étendre l'arbitrage à 008.
+  [?] @From<@reqwest::Error> généré par `#[from]` : aucun call-site ne l'utilise par `?`
+    (les appelants `.map_err(AppError::RequestError)` explicitement) — le `#[from]` reste
+    pour @std::error::Error::source() ou est-il de la dette ?
+  [ ] Combler les tests du module : les 5 tests existants ne couvrent que 5 des 16 statuts ;
+    ajouter un test par Scenario taggé par son titre (11 statuts manquants, corps JSON +
+    @Content-Type, les 3 @From manuels avec rendus complets, @std::error::Error::source(),
+    unicité des marqueurs, chemin WS log-only).
+  [ ] Décider du sort du commentaire d'@doc du @From<@sea_orm::DbErr> (référence
+    historique « Phase 3 (miryad-core-integration) ») : le reformuler vers ./error.sdd ou
+    le conserver tel quel.
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les 16 gabarits @Display et le barème complet variante → statut → corps JSON sont
+    verrouillés par test (les 5 tests existants conservés ou absorbés sans régression).
+  Les rendus finaux des 3 @From manuels (doubles marqueurs inclus, caractère par caractère)
+    sont assertés, et la cohérence avec ../../cfgstore/src/error.sdd (« From → HTTP 500,
+    message = @Display complet ») est vérifiée dans les deux specs.
+  Sébastien a tranché tous les `[?]` et le `[!]` de `Tasks` — la collision `VNL-CFG-*` est
+    résolue en coordination avec ../../cfgstore/src/error.sdd.
+
+Scenario: display_exhaustif_des_seize_variantes_apperror
+  Given une instance de chaque variante de @AppError avec payloads fixés (`LlmError("boom")`,
+    `McpError("boom")`, `InternalError("boom")`, `K8sConfigError("x")`, `K8sApiError("x")`,
+    `K8sNotFound("x")`, `UnprocessableReference(VnyError::UnknownReference("agent", "ghost"))`,
+    `RequestError` fabriquée comme dans `conversion_reqwest_generee_source_std_error_et_502`,
+    et les 8 variantes sans payload : Forbidden, LlmProviderNotFound, AgentNotFound,
+    ConversationNotFound, ConversationAccessDenied, SandboxNotExposed, SandboxBranchEmpty,
+    GitPathInvalid)
+  When chacune est rendue par @Display
+  Then chaque rendu est exactement le gabarit d'`Exposes`, chaque marqueur suivi de `": "`,
+    et le rendu de @AppError::UnprocessableReference est exactement
+    `VNL-CFG-003: Unknown agent reference: 'ghost'` sans préfixe propre à l'app
+
+Scenario: bareme_exhaustif_statuts_http_des_seize_variantes
+  Given une instance de chaque variante de @AppError (mêmes payloads fixés que
+    `display_exhaustif_des_seize_variantes_apperror`)
+  When chacune est passée à @IntoResponse::into_response
+  Then les statuts sont exactement le barème d'`Exposes` : 403 (Forbidden,
+    ConversationAccessDenied), 502 (LlmError, McpError, RequestError, K8sConfigError), 404
+    (LlmProviderNotFound, AgentNotFound, ConversationNotFound, K8sNotFound), 422
+    (UnprocessableReference, SandboxBranchEmpty), 500 (InternalError, K8sApiError), 409
+    (SandboxNotExposed), 400 (GitPathInvalid)
+
+Scenario: corps_json_error_unique_et_content_type
+  Given @AppError::Forbidden rendu par @IntoResponse::into_response
+  When le corps de la réponse est lu comme JSON
+  Then il est exactement `{"error":"VNL-AUTH-004: Forbidden"}` (clé unique `error`, pas de
+    champ `code` séparé) et l'en-tête @Content-Type est `application/json`
+
+Scenario: conversion_dberr_vers_internal_error_prefixe_vnl_db_006
+  Given une @sea_orm::DbErr de test (par ex. `DbErr::Custom("x".into())`) convertie par
+    @From<@sea_orm::DbErr> puis rendue par @IntoResponse
+  When on observe l'erreur obtenue
+  Then c'est un @AppError::InternalError (statut 500) dont le @Display est exactement
+    `VNL-INT-001: Internal error: VNL-DB-006: x` — double marqueur, `VNL-DB-006: ` à
+    l'intérieur du payload
+
+Scenario: conversion_vnyerror_k8s_config_double_marqueur_et_502
+  Given @VnyError::K8sConfigError("boom") converti par @From<@vanyline_lib::VnyError> puis
+    rendu par @IntoResponse
+  When on observe la réponse et le @Display
+  Then le statut est 502 et le message est exactement `VNL-K8S-001: Kubernetes config error:
+    VNL-K8S-001: Cannot reach Kubernetes cluster: boom` (même marqueur deux fois, corps
+    différents)
+
+Scenario: conversion_vnyerror_k8s_api_avec_signature_not_found_vers_404
+  Given trois @VnyError::K8sApiError dont le payload contient respectivement `"404"`,
+    `"NotFound"` et `"not found"`, chacune convertie par @From<@vanyline_lib::VnyError>
+  When chacune est rendue par @IntoResponse
+  Then chacune devient un @AppError::K8sNotFound de statut 404, au @Display `VNL-K8S-003:
+    Kubernetes resource not found: VNL-K8S-002: Kubernetes API error: {payload}`
+
+Scenario: conversion_vnyerror_k8s_api_sans_signature_vers_500
+  Given @VnyError::K8sApiError("boom") (payload sans aucune des trois sous-chaînes)
+    converti par @From<@vanyline_lib::VnyError> puis rendu par @IntoResponse
+  When on observe la réponse
+  Then le statut est 500 (@AppError::K8sApiError, pas @AppError::K8sNotFound) et le message
+    est `VNL-K8S-002: Kubernetes API error: VNL-K8S-002: Kubernetes API error: boom`
+
+Scenario: heuristic_not_found_insensible_a_la_casse_et_a_faux_positifs
+  Given @VnyError::K8sApiError("Not Found") (casse différente), @VnyError::K8sApiError("port
+    4041 ouvert") (sous-chaîne `404` fortuite), toutes deux converties par
+    @From<@vanyline_lib::VnyError>
+  When chacune est rendue par @IntoResponse
+  Then la première rend 500 (`Not Found` ne matche pas `"not found"` sensible à la casse) et
+    la seconde rend 404 (faux positif `404` dans `4041`) — l'heuristic est documentée comme
+    fragile, son comportement actuel est verrouillé tel quel tant que `Tasks` n'a pas tranché
+
+Scenario: conversion_vnyerror_autres_variantes_degradees_en_500
+  Given @VnyError::LlmError("x") et @VnyError::UnknownReference("agent", "ghost"), chacune
+    convertie par @From<@vanyline_lib::VnyError> puis rendue par @IntoResponse
+  When on observe les réponses
+  Then les deux ont le statut 500 (@AppError::InternalError) avec pour messages
+    respectifs `VNL-INT-001: Internal error: VNL-LLM-001: LLM provider error: x` et
+    `VNL-INT-001: Internal error: VNL-CFG-003: Unknown agent reference: 'ghost'` — la
+    conversion ne produit jamais 502 ni 422, ni @AppError::UnprocessableReference
+
+Scenario: conversion_cfgstore_toutes_variantes_vers_500_display_complet
+  Given @CfgStoreError::ReadOnly et @CfgStoreError::NotFound { kind: "provider", name: "p",
+    layer: Layer::Workspace }, chacun converti par @From<@vanyline_cfgstore::CfgStoreError>
+    puis rendu par @IntoResponse
+  When on observe les réponses
+  Then les deux ont le statut 500 (@AppError::InternalError, aucune distinction de variante)
+    avec pour messages `VNL-INT-001: Internal error: VNL-CFG-009: Config store is read-only`
+    et `VNL-INT-001: Internal error: VNL-CFG-006: provider 'p' not found in Workspace layer`
+    — cohérent avec « From → HTTP 500, message = @Display complet » de
+    ../../cfgstore/src/error.sdd
+
+Scenario: unprocessable_reference_rend_le_marqueur_du_vny_interne
+  Given @AppError::UnprocessableReference(VnyError::UnknownReference("agent", "ghost"))
+    construit à la main comme le fait ./api/conversations.rs, rendu par @IntoResponse
+  When le corps de la réponse est lu comme JSON
+  Then le statut est 422 et le corps est exactement `{"error":"VNL-CFG-003: Unknown agent
+    reference: 'ghost'"}` — le marqueur du 422 est celui du @VnyError embarqué, aucun
+    marqueur propre à l'app n'apparaît
+
+Scenario: conversion_reqwest_generee_source_std_error_et_502
+  Given une @reqwest::Error fabriquée en test (ex: une URL invalide passée à
+    @reqwest::Client::get puis `.send().await`) propagée par l'opérateur `?` dans une
+    fonction retournant `Result<(), AppError>`, puis rendue par @IntoResponse
+  When on observe l'erreur, sa @std::error::Error::source() et la réponse
+  Then l'erreur est un @AppError::RequestError de statut 502, son @Display commence par
+    `VNL-REQ-001: Request error: `, et sa @std::error::Error::source() rend `Some` de la
+    @reqwest::Error d'origine
+
+Scenario: source_std_error_absente_partout_sauf_request_error
+  Given @AppError::Forbidden, @AppError::InternalError("x".into()) et un
+    @AppError::RequestError construits depuis une @reqwest::Error de test, vus comme
+    @std::error::Error
+  When @std::error::Error::source() est appelé sur chacun
+  Then les deux premiers rendent `None` et le troisième `Some` de la @reqwest::Error d'origine
+
+Scenario: marqueurs_propres_de_apperror_uniques_dans_le_fichier
+  Given le contenu de ./error.rs lu par `include_str!` dans un test du crate
+  When chaque marqueur propre à ce fichier (`VNL-AUTH-004`, `VNL-LLM-001`, `VNL-LLM-002`,
+    `VNL-MCP-001`, `VNL-AGT-001`, `VNL-CNV-001`, `VNL-CNV-002`, `VNL-REQ-001`, `VNL-INT-001`,
+    `VNL-K8S-001`, `VNL-K8S-002`, `VNL-K8S-003`, `VNL-SBX-001`, `VNL-SBX-002`,
+    `VNL-SBX-003`) est dénombré hors du module de tests
+  Then chacun apparaît exactement une fois, dans son gabarit `#[error(...)]`, et deux
+    variantes n'y partagent jamais le même marqueur ; le seul marqueur compté deux fois est
+    `VNL-DB-006` (une fois dans le commentaire d'@doc du @From, une fois dans le `format!`)
+
+Scenario: ws_ne_render_jamais_apperror_en_http
+  Given une fonction de socket WS (`run_socket` de ./ws/chat.rs ou ./ws/sandbox_state.rs)
+    qui retourne `Err(AppError::ConversationNotFound)` sur un handshake simulé, son wrapper
+    (`handle_socket`) instrumenté par une couche de capture @tracing
+  When le wrapper consomme le résultat
+  Then aucun statut HTTP n'est produit (@IntoResponse n'est pas appelée — la socket est
+    simplement terminée) et un log @tracing::error au format `ws chat error: VNL-CNV-001:
+    Conversation not found` (ou `ws sandbox-state error: …` selon le module) est émis

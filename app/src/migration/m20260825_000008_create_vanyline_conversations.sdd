@@ -1,0 +1,399 @@
+Spec: Migration m20260825 000008 Create Vanyline Conversations
+
+Purpose:
+  Huitième migration enfant de l'`app` : DDL de création de la table
+  `vanyline_conversations` — pivot des sessions de chat, rattachée à un owner
+  (utilisateur `miryad_users`), à un agent optionnel (`vanyline_agents`) et à un
+  contexte obligatoire (`vanyline_chat_contexts`), avec titre et état `todo`
+  sérialisés en chaîne brute — et de son pendant `down` (`drop_table`). Le
+  fichier est purement déclaratif : une instruction `create_table`, deux
+  instructions `create_index` séparées (règle régression Phase 3), une
+  instruction `drop_table`, aucune logique, aucune donnée seedée, aucun
+  `#[cfg(test)]`. Cette spec contracte la DDL EXACTE (8 colonnes, NULL/DEFAULT,
+  les 3 FK sortantes avec leur action `ON DELETE`, les 2 index de lookup) et la
+  correspondance Iden ↔ SQL ; l'orchestration (ordre d'application n°8 sur dix,
+  table de suivi `seaql_migrations_app`, politique d'irrémédiabilité) appartient
+  à `./mod.sdd` et n'est pas dupliquée ici. La cohérence avec l'entité
+  consommatrice se lit en regard de `./../db/entities/conversations.sdd`
+  (déjà rédigée, miroir ORM du même schéma).
+
+Owns:
+  ./m20260825_000008_create_vanyline_conversations.rs
+
+Can read:
+  ./mod.rs
+  ./m20260825_000006_create_vanyline_agents.rs
+  ./m20260825_000007_create_vanyline_chat_contexts.rs
+  ./m20260825_000009_create_vanyline_messages.rs
+  ../db/entities/conversations.rs
+  ../db/test_support.rs
+  ../api/conversations.rs
+  ../ws/chat.rs
+
+Exposes:
+  @Migration (struct publique, `#[derive(DeriveMigrationName)]`) — nom de
+    migration dérivé du nom de module, soit exactement
+    `m20260825_000008_create_vanyline_conversations`, chaîne enregistrée dans
+    `seaql_migrations_app` (contrat de table de suivi : `./mod.sdd`).
+  `impl @MigrationTrait for @Migration` (async, `#[async_trait::async_trait]`) :
+    @up(&self, manager: &@SchemaManager) -> `Result<(), @DbErr>` — trois
+      instructions séquentielles : `create_table`, puis `create_index` sur
+      `owner_id`, puis `create_index` sur `context_id` (rendu de cette dernière
+      directement retourné par le `await`, sans `?`).
+    @down(&self, manager: &@SchemaManager) -> `Result<(), @DbErr>` — une seule
+      instruction `drop_table`.
+  Quatre enum privés `#[derive(DeriveIden)]`, jamais exportés hors du fichier :
+    @Conversation — `Table` → `#[sea_orm(iden = "vanyline_conversations")]`
+      (nom littéral, jamais dérivé du module) ; `Id`, `OwnerId`, `AgentId`,
+      `ContextId`, `Title`, `Todo`, `CreatedAt`, `UpdatedAt` → snake_case par
+      DeriveIden : `id`, `owner_id`, `agent_id`, `context_id`, `title`, `todo`,
+      `created_at`, `updated_at`.
+    @User — alias de destination de FK, `Table` → `miryad_users` + `Id` (table
+      créée par le migrateur `miryad-core`, pas par l'app).
+    @Agent — alias de destination de FK, `Table` → `vanyline_agents` + `Id`
+      (table créée par `./m20260825_000006_create_vanyline_agents.rs`).
+    @ChatContext — alias de destination de FK, `Table` → `vanyline_chat_contexts`
+      + `Id` (table créée par `./m20260825_000007_create_vanyline_chat_contexts.rs`).
+  Tests : aucun — le fichier ne contient pas de module `tests` ; la couverture
+    actuelle est indirecte : test d'application complète `./mod.rs`
+    (`migrations_apply_cleanly`), et les tests `real_db` de `./../api/conversations.rs`
+    (dont la régression Phase 3 `two_successive_conversations_get_distinct_ids`
+    sur l'auto-incrément).
+
+Accepts:
+  Rien en entrée runtime : @up et @down ne consomment que le
+    `&@SchemaManager` fourni par SeaORM ; aucune donnée applicative, aucun
+    paramètre de configuration, aucune lecture d'environnement.
+
+Returns:
+  @up : `Ok(())` quand la table `vanyline_conversations` existe avec le schéma
+    décrit en `Must` ET les deux index nommés existent APRÈS l'appel. La
+    protection `if_not_exists()` ne couvre que le `create_table` : un rejeu
+    direct hors historique échoue sur les index déjà présents (voir `Raises`
+    et le Scenario `up_rejoue_hors_historique_echoue_sur_les_index`).
+  @down : `Ok(())` quand `vanyline_conversations` a été supprimée — observable
+    tel quel sur SQLite ; sur PostgreSQL avec `vanyline_messages` en place,
+    voir `Raises` (dépendance entrante).
+
+Raises:
+  `@DbErr` propagé brut depuis `manager.create_table(...)` /
+    `manager.create_index(...)` / `manager.drop_table(...)` : le fichier
+    n'intercepte, ne transforme et ne logge aucune erreur (aucun `tracing`).
+  Cas concrets de remontée :
+    - rejeu de @up hors historique `seaql_migrations_app` sur une base où la
+        table et ses index existent déjà : le `create_table` est absorbé par
+        `if_not_exists()` mais le premier `create_index` — sans `if_not_exists`
+        — retourne une erreur SQL « index … already exists » ;
+    - @down sans `if_exists()` sur un schéma où la table est absente (second
+        `down`, `down` sur base partielle) → erreur SQL de drop sur objet
+        inexistant ;
+    - @down sur PostgreSQL tant que `./m20260825_000009_create_vanyline_messages.rs`
+        est appliquée : `vanyline_messages.conversation_id` porte une FK
+        entrante, un `DROP TABLE` sans `CASCADE` est refusé par le backend ;
+        jamais observable en tests (SQLite, FK non appliquées par défaut),
+        voir `Tasks` `[!]`.
+  En amont, l'échec de @up dans le parcours normal est traité par l'appelant du
+    @Migrator (`./../main.rs`, log `VNL-DB-005` + `exit(1)` — contrat
+    `./../main.rs.sdd`, pas de celui-ci).
+
+Handles:
+  Table préexistante : `if_not_exists()` fait du `create_table` un no-op réussi
+    si une table `vanyline_conversations` existe déjà, QUEL QUE SOIT SON SCHÉMA
+    — une table divergente (créée à la main ou par une version différente)
+    passe sans erreur ni correction (comportement aux limites documenté, pas
+    approuvé, voir `Tasks`).
+  État partiel possible : @up contient TROIS instructions indépendantes, sans
+    transaction (`exec_trans` non utilisé) — si le second `create_index`
+    échoue, la table et le premier index restent créés et le `DbErr` remonte
+    tel quel ; aucun rollback.
+  Cohérence SET NULL : l'action `ON DELETE SET NULL` sur `agent_id` n'est
+    licite que parce que la colonne est la seule référenceable en NULL — les
+    deux invariants sont liés (voir `Must not`).
+  Rien d'autre : pas de retry, pas de log, pas de garde `#[cfg(...)]`, pas de
+    purge de l'historique `seaql_migrations_app`.
+
+Must:
+  - Créer la table `vanyline_conversations` via `@Table::create()` avec
+      `if_not_exists()`, exactement HUIT colonnes, dans cet ordre de déclaration
+      et avec ces définitions exactes :
+        `id` — `@ColumnDef::new(@Conversation::Id).integer().not_null()
+          .auto_increment().primary_key()` : clé primaire entière
+          auto-incrémentée mono-colonne ;
+        `owner_id` — `.integer().not_null()` ;
+        `agent_id` — `.integer()` : UNIQUE colonne référençable en NULL de la
+          table (indispensable à l'action SET NULL de sa FK) ;
+        `context_id` — `.integer().not_null()` ;
+        `title` — `.string()` : NULL, sans défaut SQL ;
+        `todo` — `.string()` : NULL, sans défaut SQL — état todo sérialisé en
+          chaîne brute, lu et persisté par `./../ws/chat.rs` entre les tours de
+          chat (format non contractué ici) ;
+        `created_at` — `.timestamp_with_time_zone().not_null()
+          .default(@Expr::current_timestamp())` : `DEFAULT CURRENT_TIMESTAMP` ;
+        `updated_at` — même définition que `created_at` : `DEFAULT CURRENT_TIMESTAMP`
+          comme valeur d'insertion UNIQUEMENT — aucun trigger SQL ni hook ORM ne
+          la recharge (les appelants la posent explicitement, ex:
+          `./../ws/chat.rs`).
+  - Déclarer exactement TROIS clés étrangères nommées implicitement
+      (`@ForeignKey::create()` sans `.name(...)`, nom généré par le backend ;
+      aucune clause `on_update` → NO ACTION par défaut partout), chacune avec
+      son action `on_delete` exacte :
+        `owner_id` → `miryad_users(id)` : `@ForeignKeyAction::Cascade` — la
+          suppression d'un utilisateur emporte ses conversations ;
+        `agent_id` → `vanyline_agents(id)` : `@ForeignKeyAction::SetNull` — la
+          suppression d'un agent laisse la conversation avec `agent_id` NULL ;
+        `context_id` → `vanyline_chat_contexts(id)` :
+          `@ForeignKeyAction::Restrict` — impossible de supprimer un contexte
+          encore référencé (la colonne étant NOT NULL, aucune alternative SET
+          NULL n'existerait).
+  - Créer les deux index NON-UNIQUES par des instructions séparées
+      `@SchemaManager::create_index`, jamais chaînées sur le `@Table::create()`
+      (règle régression Phase 3 de `./mod.sdd`, commentée dans le fichier) :
+        `idx_vanyline_conversations_owner_id` sur (`owner_id`) — lookup du
+          filtrage par owner de `list_conversations` (`./../api/conversations.rs`) ;
+        `idx_vanyline_conversations_context_id` sur (`context_id`) — lookup
+          côté FK, dont les vérifications RESTRICT.
+  - Conserver le mapping Iden : table identifiée par le littéral
+      `vanyline_conversations`, colonnes en snake_case dérivé (`owner_id`,
+      `agent_id`, `context_id`, `created_at`, `updated_at`), identique au
+      `#[sea_orm(table_name = ...)]` et aux champs de l'entité
+      `./../db/entities/conversations.rs` ; destinations de FK littérales
+      `miryad_users`, `vanyline_agents`, `vanyline_chat_contexts`.
+  - Rendre @down exactement `drop_table(@Table::drop().table(@Conversation::Table))`
+      — sans `if_exists()`, sans purge d'historique (c'est SeaORM qui tient
+      `seaql_migrations_app`, pas l'enfant).
+  - S'appliquer après ses prérequis de FK (contrat d'ordre porté par
+      `./mod.sdd`, rappelé sans le dupliquer) : `…000006` (cible `vanyline_agents`)
+      et `…000007` (cible `vanyline_chat_contexts`) appliquées avant, migrateur
+      `miryad-core` (cible `miryad_users`) aussi — en PostgreSQL l'ordre est
+      auto-vérifié par la résolution des FK au `CREATE TABLE`, en SQLite
+      uniquement par l'ordre du vec de `@Migrator::migrations`.
+  - S'appliquer avec le même appel builder sur les deux backends rencontrés :
+      SQLite (harnais `./../db/test_support.rs::real_db`, `sqlite::memory:`,
+      où `TIMESTAMPTZ` et `CURRENT_TIMESTAMP` sont acceptés par typage
+      dynamique) et PostgreSQL (production) — rendu PostgreSQL réel (type
+      rendu par `.string()`/`.timestamp_with_time_zone()`, horodatage avec
+      fuseau) vérifié par AUCUN test de ce dépôt, voir `Tasks`.
+  - Rester la 8ᵉ migration du vec de `@Migrator::migrations` (position :
+      contrat de `./mod.sdd`).
+  - Respecter le harnais du workspace (`./../../../tooling.sdd`) : aucun
+      `println!`/`eprintln!`/`unwrap`/`expect`/`panic!` dans le fichier.
+
+Must not:
+  - Modifier le `up` déjà appliqué en production (colonnes, types, NULL,
+      défauts, actions de FK, index, ordre) : l'historique est identifié par
+      nom dans `seaql_migrations_app` ; toute évolution du schéma passe par
+      une migration ajoutée en fin de vec (`./mod.sdd`).
+  - Rendre `agent_id` NOT NULL : casserait l'invariant qui rend
+      `ON DELETE SET NULL` licite (une suppression d'agent deviendrait
+      impossible ou erreur selon le backend).
+  - Remplacer `Restrict` de la FK `context_id` par `Cascade` ou `SetNull` :
+      `SetNull` est impossible (colonne NOT NULL) et `Cascade` ferait
+      supprimer des conversations par la suppression d'un contexte —
+      changement de contrat, pas de refactor.
+  - Chaîner un `.index(...)` non-UNIQUE sur le `@Table::create()` (règle Phase
+      3 de `./mod.sdd` : fragment SQL orphelin invalide, Postgres et SQLite).
+  - Renommer, réordonner ou supprimer une colonne, un index nommé
+      (`idx_vanyline_conversations_owner_id`, `idx_vanyline_conversations_context_id`)
+      ou un littéral Iden.
+  - Ajouter un trigger (ex: rafraîchissement automatique de `updated_at`), un
+      CHECK, une donnée seedée (INSERT) ou une écriture dans
+      `seaql_migrations_app` : @up reste une DDL sèche.
+  - Compter sur l'application des FK en tests SQLite sans activer
+      explicitement `PRAGMA foreign_keys` (le harnais `real_db` ne l'active
+      pas — voir `Tasks`).
+
+Depends on:
+  `sea-orm-migration` (`@MigrationTrait`, `@DeriveMigrationName`,
+    `@SchemaManager`) et `@sea_orm`/`@sea_query` (`@Table`, `@ColumnDef`,
+    `@ForeignKey`, `@Index`, `@Expr`, `@DeriveIden`, `@DbErr`) — sémantique de
+    rendu SQL par backend et nommage snake_case hérités.
+  ./mod.sdd — ordre d'application (8ᵉ de dix), table de suivi
+    `seaql_migrations_app`, règle Phase 3, politique d'irrémédiabilité `[?]`.
+  ./m20260825_000006_create_vanyline_agents.rs — cible de la FK `agent_id`
+    (doit précéder).
+  ./m20260825_000007_create_vanyline_chat_contexts.rs — cible de la FK
+    `context_id` (doit précéder) ; sa règle d'index séparé est reprise en
+    commentaire dans le fichier.
+  `@miryad_core::migration::Migrator` (crate externe) — cible `miryad_users`
+    de la FK `owner_id` (doit précéder, contrat `./mod.sdd`).
+  ./m20260825_000009_create_vanyline_messages.rs — FK ENTRANTE
+    `vanyline_messages.conversation_id` → `vanyline_conversations(id)`
+    `ON DELETE CASCADE` : la suppression SQL d'une conversation emporte ses
+    messages ; dépendance qui rend le @down de ce fichier impossible en
+    PostgreSQL tant que 000009 est en place (voir `Raises`).
+  ./../db/entities/conversations.rs — miroir ORM exact du schéma ; spec sœur
+    `./../db/entities/conversations.sdd` (déjà rédigée, décrite comme cohérente
+    colonne par colonne avec ce DDL).
+  ./../api/conversations.rs — CRUD HTTP (liste filtrée par `owner_id` et triée
+    par `updated_at` descendant, suppression par owner) ; ./../ws/chat.rs —
+    lecture/persistance de `todo`, rafraîchissement manuel de `updated_at`.
+  ./../db/test_support.rs — `real_db()` applique cette migration dans les
+    tests ; harnais SQLite en mémoire, `PRAGMA foreign_keys` NON activé.
+
+Tasks:
+  [!] Cohérence avec `./../db/entities/conversations.sdd` : le DDL porte trois
+      FK sortantes et une FK entrante (messages) alors que `@Relation` de
+      l'entité est vide (jointures manuelles côté consommateurs). Le tranche
+      « entités plates vs relations SeaORM » est ouverte dans la spec entité
+      (`[!]` de `./../db/entities/conversations.sdd`) — ne rien décider ici,
+      mais toute résolution change la documentation de ce côté (le schéma,
+      lui, est gelé).
+  [!] @down en PostgreSQL est cassé par la FK entrante de `vanyline_messages`
+      (DROP TABLE refusé sans rollback préalable de 000009) et @down n'est
+      appelé nulle part (ni runtime, ni tests, ni CI) ; la politique
+      d'irrémédiabilité est `[?]` dans `./mod.sdd`. Le Scenario
+      `down_supprime_la_table_sans_toucher_aux_autres` (SQLite) est conditionné
+      à ce tranche — si le rollback est déclaré inexistant, retirer le
+      Scenario et déclarer la migration irréversible.
+  [!] @up n'est PAS intégralement idempotent : `if_not_exists()` ne protège que
+      le `create_table`, les deux `create_index` n'ont pas d'`if_not_exists` —
+      un rejeu direct hors historique échoue sur le premier index (cf.
+      `Raises`). Le chemin normal est protégé par `seaql_migrations_app`, donc
+      asymétrie sans conséquence en pratique — mais elle diffère des
+      migrations mono-instruction (ex: `./m20260825_000004_create_vanyline_mcp_servers.sdd`,
+      dont @up est totalement idempotent). Trancher : figer en l'état (protégé
+      par l'historique) ou uniformiser.
+  [?] Les 3 FK ne portent AUCUN `.name(...)` : noms générés par le backend
+      (Postgres : `vanyline_conversations_owner_id_fkey` …). Des tests ou
+      opérations d'exploitation devront-ils cibler une FK par nom (ex:
+      `ALTER TABLE … DROP CONSTRAINT`) ? Si oui, nommer exige une nouvelle
+      migration, ce `up` étant gelé.
+  [?] Aucune clause `on_update` sur les trois FK → NO ACTION partout :
+      `miryad_users.id`/`vanyline_agents.id`/`vanyline_chat_contexts.id`
+      devenant non modifiables en référence — délibéré (clés primaires
+      entières jamais mutées) ou oubli ?
+  [?] FK `context_id` en RESTRICT + colonne NOT NULL : la suppression d'un
+      contexte encore référencé est bloquée au niveau SQL. Aucun chemin
+      d'API observé pour supprimer un `chat_context` — confirmer avec
+      Sébastien que RESTRICT est le garde-fou voulu (et qu'aucune purge de
+      contextes n'est prévue sans suppression préalable des conversations).
+  [?] Index `owner_id` mono-colonne vs requête réelle (`WHERE owner_id = ?
+      ORDER BY updated_at DESC` dans `./../api/conversations.rs`) : l'index
+      couvre le filtre, pas le tri ; un index composite
+      (`owner_id`, `updated_at`) — à poser via une future migration — est-il
+      jugé nécessaire, ou la volumétrie par owner le rend-elle inutile ?
+  [?] Rendu PostgreSQL jamais testé dans ce dépôt (tout le harnais est SQLite
+      en mémoire) : `TIMESTAMPTZ` + `DEFAULT CURRENT_TIMESTAMP` (SQLite rend
+      un horodatage UTC sans marqueur de fuseau, lu `DateTimeUtc` par SeaORM —
+      aller-retour non vérifié contre un vrai timestamptz), et type rendu par
+      `.string()`. Même question posée dans les specs sœurs (ex:
+      `./m20260825_000004_create_vanyline_mcp_servers.sdd`) : la DDL PostgreSQL
+      est-elle validée au déploiement (`docs/release-runbook.md`) ou faut-il
+      un test contre Postgres réel ?
+  [?] `real_db()` (`./../db/test_support.rs`) n'active pas `PRAGMA
+      foreign_keys` : en l'état AUCUN test SQLite n'exerce le comportement des
+      3 FK (Cascade/SET NULL/RESTRICT), les Scenarios ci-dessous doivent
+      activer le pragma eux-mêmes. Faut-il activer le pragma dans le harnais
+      (contrat de `./../db/test_support.rs`, spec à rédiger) pour que toutes
+      les migrations enfants soient testées FK-enforcées ?
+  [ ] Dériver et écrire les tests de chaque Scenario ci-dessous, taggés par
+      leur titre — à ce jour le fichier n'a AUCUN test propre.
+  [ ] À l'occasion d'une évolution future (sans jamais modifier ce `up`) : vérifier que la
+      liste des enfants « avec FK vers `miryad_users` » de `./mod.sdd` inclut
+      bien cet enfant (c'est le cas : FK `owner_id`) et que sa phrase d'ordre
+      (« 000006 et 000007 avant 000008, 000008 avant 000009 ») reste exacte.
+
+Done when:
+  Chaque Scenario a un test taggé vert exécuté contre `real_db()` (avec
+  `PRAGMA foreign_keys = ON` activé par le test pour les Scenarios de FK) ;
+  les `[?]`/`[!]` sont tranchés avec Sébastien ou reportés vers leur spec
+  propriétaire (`./mod.sdd`, `./../db/entities/conversations.sdd`,
+  `./../db/test_support.rs`) ; la DDL de @up est gelée telle quelle (toute
+  évolution = nouvelle migration en fin de vec).
+
+Scenario: table_vanyline_conversations_creee_avec_huit_colonnes
+  Given `@crate::db::test_support::real_db()` (migrateurs miryad-core puis app
+    appliqués)
+  When `PRAGMA table_info(vanyline_conversations)` est exécuté sur la connexion
+    SQLite du harnais
+  Then exactement huit colonnes sont listées dans l'ordre `id`, `owner_id`,
+    `agent_id`, `context_id`, `title`, `todo`, `created_at`, `updated_at`, avec
+    `notnull` = 1 pour `id`/`owner_id`/`context_id`/`created_at`/`updated_at` et
+    `notnull` = 0 pour `agent_id`/`title`/`todo`, `id` seule colonne `pk` = 1,
+    et un `dflt_value` contenant `CURRENT_TIMESTAMP` pour `created_at` et
+    `updated_at`
+
+Scenario: insertion_minimale_utilise_les_defauts_sql
+  Given `@crate::db::test_support::real_db()`
+  When une ligne `vanyline_conversations` est insérée avec seuls `owner_id` et
+    `context_id` renseignés (`id`, `agent_id`, `title`, `todo`, `created_at`,
+    `updated_at` en `ActiveValue::NotSet`, colonnes omises du SQL)
+  Then la relecture de la ligne retourne `agent_id`/`title`/`todo` à `None` et
+    `created_at == updated_at` dans une fenêtre de quelques minutes autour de
+    `@chrono::Utc::now` — les `DEFAULT CURRENT_TIMESTAMP` de la DDL sont bien
+    les valeurs par défaut réelles
+
+Scenario: deux_conversations_identiques_obtiennent_des_cles_auto_increment_distinctes
+  Given `@crate::db::test_support::real_db()`
+  When deux lignes `vanyline_conversations` sont insérées successivement avec
+    les mêmes `owner_id`, `context_id` et `title`
+  Then les deux insertions réussissent (aucune contrainte UNIQUE hormis la clé
+    primaire) et les deux `last_insert_id` sont distincts — régression
+    verrouillée côté API par le test existant
+    `two_successive_conversations_get_distinct_ids` (`./../api/conversations.rs`)
+
+Scenario: les_deux_index_nommes_de_lookup_sont_presents
+  Given `@crate::db::test_support::real_db()`
+  When `PRAGMA index_list(vanyline_conversations)` puis `PRAGMA
+    index_info(...)` sont exécutés sur la connexion SQLite du harnais
+  Then les index `idx_vanyline_conversations_owner_id` (colonne unique
+    `owner_id`) et `idx_vanyline_conversations_context_id` (colonne unique
+    `context_id`) existent tous deux non-UNIQUE — et aucun autre index nommé
+    n'est porté par la table
+
+Scenario: up_rejoue_hors_historique_echoue_sur_les_index
+  Given `@crate::db::test_support::real_db()` (table et index déjà créés par le
+    @Migrator)
+  When @up de cette migration est rappelé directement sur un @SchemaManager de
+    cette connexion, court-circuitant l'historique `seaql_migrations_app`
+  Then un `@DbErr` est retourné — le `create_table` est absorbé par
+    `if_not_exists()` mais le premier `create_index` (sans `if_not_exists`)
+    échoue sur l'index préexistant — et `PRAGMA table_info(vanyline_conversations)`
+    retourne toujours les mêmes huit colonnes (documente l'asymétrie `[!]` de
+    `Tasks`, pas un comportement à corriger sans tranche)
+
+Scenario: fk_owner_cascade_supprime_les_conversations_du_owner
+  Given `@crate::db::test_support::real_db()` avec `PRAGMA foreign_keys = ON`
+    activé sur la connexion, un utilisateur `miryad_users`, un `chat_context`
+    et une conversation insérés
+  When la ligne `miryad_users` de l'owner est supprimée par un DELETE SQL brut
+  Then la conversation n'existe plus (`find_by_id` retourne `None`) —
+    l'action `ON DELETE CASCADE` de la FK `owner_id` est appliquée par le
+    backend
+
+Scenario: fk_agent_set_null_sur_suppression_de_lagent
+  Given `@crate::db::test_support::real_db()` avec `PRAGMA foreign_keys = ON`
+    activé, un utilisateur, un `chat_context`, un agent `vanyline_agents` et
+    une conversation avec `agent_id = Some(agent)` insérés
+  When la ligne `vanyline_agents` est supprimée par un DELETE SQL brut
+  Then la conversation existe toujours et son `agent_id` relu vaut `None` —
+    l'action `ON DELETE SET NULL` est licite parce que la colonne est NULLable
+
+Scenario: fk_context_restrict_bloque_la_suppression_d_un_contexte_reference
+  Given `@crate::db::test_support::real_db()` avec `PRAGMA foreign_keys = ON`
+    activé, un utilisateur, un `chat_context` et une conversation avec
+    `context_id` pointant ce contexte insérés
+  When la ligne `vanyline_chat_contexts` est supprimée par un DELETE SQL brut
+  Then SeaORM retourne un `@DbErr` de violation de clé étrangère (SQLite :
+    « FOREIGN KEY constraint failed ») et le contexte est toujours présent —
+    l'action `ON DELETE RESTRICT` protège le contexte référencé
+
+Scenario: updated_at_n_est_pas_recharge_sans_trigger
+  Given `@crate::db::test_support::real_db()` avec une conversation insérée
+    (horodatages posés par les défauts SQL)
+  When sa colonne `title` est mise à jour via `@ActiveModel` SANS toucher le
+    champ `updated_at` (seule colonne dirty : `title`)
+  Then la relecture retourne le nouveau `title` mais un `updated_at` strictement
+    inchangé — il n'existe aucun trigger SQL ni hook `before_update`, le
+    rafraîchissement est à la charge explicite des appelants (`./../ws/chat.rs`)
+
+Scenario: down_supprime_la_table_sans_toucher_aux_autres
+  Given `@crate::db::test_support::real_db()` (les dix migrations appliquées)
+  When @down de cette migration est appelé directement sur un @SchemaManager de
+    cette connexion (rollback nominal — politique `[?]` de `./mod.sdd` et
+    dépendance PostgreSQL de `vanyline_messages` non observable en SQLite, cf.
+    `Tasks` `[!]`)
+  Then la table `vanyline_conversations` n'existe plus (toute requête dessus
+    retourne un `@DbErr` de table manquante), les autres tables `vanyline_*` et
+    le contenu de `seaql_migrations_app` sont intacts, et aucun `@DbErr` n'est
+    retourné par @down lui-même

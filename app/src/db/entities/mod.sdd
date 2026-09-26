@@ -1,0 +1,57 @@
+Spec: Db Entities
+
+Purpose:
+  Module `entities` de la couche base de données de l'`app` : registre déclaratif des
+  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les dix
+  sous-modules d'entités — aucun comportement propre, aucune réexportation, aucune
+  fonction utilitaire : le contrat table ↔ entité (colonnes, clé primaire, relations)
+  vit dans chaque fichier enfant (specs séparées en cours de rédaction, règle
+  `mod.rs` de `/vanyline.sdd` et `.specdd/bootstrap.project.md`).
+  Convention observable dans les enfants, à ce jour : chaque entité est un
+  `#[derive(DeriveEntityModel)]` dont `#[sea_orm(table_name = "…")]` cible une table
+  préfixée `vanyline_` (ex: `vanyline_agents`) ; SeaORM génère dans chaque sous-module
+  les types `Model`, `Entity`, `ActiveModel`, `Column` et `PrimaryKey` consommés par
+  `crate::config_store` et les handlers `crate::api::*`.
+
+Owns:
+  ./mod.rs
+
+Structure:
+  ./mod.rs — dix déclarations `pub mod`, dans cet ordre, rien d'autre :
+    `pub mod agents;`, `pub mod chat_contexts;`, `pub mod conversations;`,
+    `pub mod llm_providers;`, `pub mod mcp_servers;`, `pub mod messages;`,
+    `pub mod model_profiles;`, `pub mod owner_links;`, `pub mod skills;`,
+    `pub mod toolsets;`.
+  ./agents.sdd — entité `agents` (table `vanyline_agents`), spec à venir.
+  ./chat_contexts.sdd — entité `chat_contexts` (table `vanyline_chat_contexts`), spec à venir.
+  ./conversations.sdd — entité `conversations` (table `vanyline_conversations`), spec à venir.
+  ./llm_providers.sdd — entité `llm_providers` (table `vanyline_llm_providers`), spec à venir.
+  ./mcp_servers.sdd — entité `mcp_servers` (table `vanyline_mcp_servers`), spec à venir.
+  ./messages.sdd — entité `messages` (table `vanyline_messages`), spec à venir.
+  ./model_profiles.sdd — entité `model_profiles` (table `vanyline_model_profiles`), spec à venir.
+  ./owner_links.sdd — entité `owner_links` (table `vanyline_owner_links`), spec à venir.
+  ./skills.sdd — entité `skills` (table `vanyline_skills`), spec à venir.
+  ./toolsets.sdd — entité `toolsets` (table `vanyline_toolsets`), spec à venir.
+
+Must:
+  - Exposer chaque sous-module en `pub` : les consommateurs y accèdent par le chemin
+      `crate::db::entities::<entite>::…` (`config_store.rs`, `api/conversations.rs`,
+      `api/owners.rs`, `api/llm_providers.rs`).
+
+Must not:
+  - Porter une fonction, constante, `impl`, type ou réexportation dans ./mod.rs
+      lui-même : tout ajout hors déclarations `pub mod` exige d'étendre cette spec.
+  - Modifier la visibilité d'un sous-module (`pub mod` → `mod`) sans casser
+      volontairement les consommateurs listés ci-dessus.
+
+Depends on:
+  ./agents.rs, ./chat_contexts.rs, ./conversations.rs, ./llm_providers.rs,
+    ./mcp_servers.rs, ./messages.rs, ./model_profiles.rs, ./owner_links.rs,
+    ./skills.rs, ./toolsets.rs — chaque enfant dépend de `sea_orm`.
+
+Tasks:
+  [ ] Spec de chaque entité enfant (colonnes, clé primaire, relations, correspondance
+      avec les migrations) — en cours, une spec par fichier enfant.
+  [?] Le préfixe de table `vanyline_` est une convention portée par les enfants, pas
+      une contrainte de ./mod.rs : à confirmer comme contrat global (ou non) lors de
+      la spec de `./../mod.sdd` ou de la spec migrations.

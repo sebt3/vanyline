@@ -1,0 +1,114 @@
+Spec: Conversations Entity
+
+Purpose:
+  Entité SeaORM ./conversations.rs : déclaration pure du modèle `Conversation` —
+  une session de chat rattachée à un owner (utilisateur) et à un contexte de chat.
+  Le fichier ne contient aucune logique applicative : un `#[derive(DeriveEntityModel)]`
+  dont `#[sea_orm(table_name = "vanyline_conversations")]` fait correspondre `@Model`
+  à la table créée par la migration `./../migration/m20260825_000008_create_vanyline_conversations.rs`,
+  un `@Relation` vide, et un `@ActiveModelBehavior` vide. La vérité du schéma SQL
+  (colonnes, NULL, `DEFAULT CURRENT_TIMESTAMP`, clés étrangères, index) vit dans la
+  migration — spec contractuelle `./../migration/m20260825_000008_create_vanyline_conversations.sdd`
+  (en cours de rédaction) ; cette spec-ci documente le miroir côté entité et ses
+  consommateurs : `../../api/conversations.rs` (CRUD HTTP, liste filtrée par owner,
+  tri `updated_at` descendant) et `../../ws/chat.rs` (résolution `agent_id`/`context_id`,
+  lecture/persistance du champ `todo`, rafraîchissement manuel de `updated_at`).
+
+Owns:
+  ./conversations.rs
+
+Exposes:
+  @Model — struct publique persistée, une ligne de `vanyline_conversations`, dérivant
+    `Clone`, `Debug`, `PartialEq`, `Serialize`, `Deserialize`, `DeriveEntityModel`.
+    Champs (nom Rust ↔ colonne SQL ↔ type, colonnes et contraintes fidèles à la
+    migration citée en Purpose) :
+    - `id: i32` ↔ colonne `id` `integer NOT NULL auto_increment PRIMARY KEY`
+        (`#[sea_orm(primary_key)]`)
+    - `owner_id: i32` ↔ colonne `owner_id` `integer NOT NULL` — FK vers
+        `miryad_users(id)` `ON DELETE CASCADE` (au niveau SQL uniquement)
+    - `agent_id: Option<i32>` ↔ colonne `agent_id` `integer NULL` — FK vers
+        `vanyline_agents(id)` `ON DELETE SET NULL`
+    - `context_id: i32` ↔ colonne `context_id` `integer NOT NULL` — FK vers
+        `vanyline_chat_contexts(id)` `ON DELETE RESTRICT`
+    - `title: Option<String>` ↔ colonne `title` `string NULL`
+    - `todo: Option<String>` ↔ colonne `todo` `string NULL` — état todo sérialisé en
+      chaîne brute, persisté par `../../ws/chat.rs` entre les tours de chat
+    - `created_at: DateTimeUtc` ↔ colonne `created_at` `timestamptz` `NOT NULL`
+        `DEFAULT CURRENT_TIMESTAMP`
+    - `updated_at: DateTimeUtc` ↔ colonne `updated_at` `timestamptz` `NOT NULL`
+        `DEFAULT CURRENT_TIMESTAMP`
+  @Entity, @Column, @PrimaryKey — types générés par `DeriveEntityModel` (accédés par
+    les consommateurs sous `crate::db::entities::conversations::{Entity, Column, …}`).
+  @Relation — enum publique `DeriveRelation` vide : aucune relation SeaORM déclarée,
+    y compris vers `./messages.rs` alors que la table `vanyline_messages` porte une FK
+    entrante vers `vanyline_conversations` (cf. Tasks `[!]`).
+  @ActiveModel — type généré ; @ActiveModelBehavior — impl vide `impl ActiveModelBehavior
+    for ActiveModel {}`, donc aucun crochet `before_insert`/`before_update`.
+
+Accepts:
+  Rien directement : l'entité est consommée via l'API SeaORM (`Entity::find_by_id`,
+  `Entity::find().filter(Column::OwnerId.eq(…))`, `ActiveModel` + `Entity::update`).
+
+Returns:
+  @Model lu depuis la base (champs snake_case tels quels) ; `ActiveModel` converti
+  depuis un `Model` géré via `IntoActiveModel`.
+
+Must:
+  - Cartographier exactement la table `vanyline_conversations` : 8 colonnes, mêmes
+      noms, `id` entier auto-incrementé comme unique clé primaire — toute divergence
+      avec la migration est un bug de l'un des deux fichiers.
+  - Dériver `Serialize`/`Deserialize` sur @Model avec les noms de champs Rust tels
+      quels (snake_case, sans renames ni skip) : le round-trip JSON doit être fidèle
+      pour toutes les combinaisons null/non-null des champs optionnels.
+  - Rester un contrat de données sans comportement propre : `@Relation` vide,
+      `@ActiveModelBehavior` vide.
+
+Must not:
+  - Déclarer une relation SeaORM (`belongs_to`/`has_many`) sans étendre d'abord cette
+      spec : aujourd'hui les consommateurs joignent à la main (`find_by_id` sur
+      `chat_contexts`/`agents`, recherche des messages par `conversation_id`).
+  - Porter une logique métier (création de contexte, résolution d'agent, persistance
+      de todo) : elle vit dans `../../api/conversations.rs` et `../../ws/chat.rs`.
+  - S'attendre à un rafraîchissement automatique de `updated_at` : ni trigger SQL, ni
+      crochet `before_update` — les appelants le posent explicitement (ex:
+      `conv_active.updated_at = Set(chrono::Utc::now())` dans `../../ws/chat.rs`).
+
+Handles:
+  Aucune erreur propre : les `DbErr` de SeaORM remontent aux appelants, qui les
+  convertissent via l'helper d'erreurs DB centralisé dans `../../error.rs`.
+
+Scenario: round_trip_json_conversation_complete
+  Given un @Model `Conversation` avec `id = 5`, `owner_id = 42`, `agent_id = Some(3)`,
+    `context_id = 1`, `title = Some("Build session")`, `todo = Some("Fix the linker")`
+    et horodatages `Utc::now()`
+  When il est sérialisé en JSON puis désérialisé en @Model
+  Then tous les champs sont restitués à l'identique (test existant
+    `conversation_roundtrip_serializes`, module `tests` du fichier)
+
+Depends on:
+  `sea_orm` (prelude, `DeriveEntityModel`, `DeriveRelation`, `ActiveModelBehavior`),
+    `serde`, `chrono` (via `DateTimeUtc`)
+  ./../migration/m20260825_000008_create_vanyline_conversations.rs — source de vérité
+    du schéma (spec sœur en cours)
+  ./../migration/m20260825_000009_create_vanyline_messages.rs — FK entrante
+    `vanyline_messages.conversation_id` → `vanyline_conversations.id`
+  ./mod.rs — module parent qui déclare `pub mod conversations;`
+
+Tasks:
+  [!] `@Relation` est vide alors que le schéma porte trois FK sortantes (owner, agent,
+      context) et une FK entrante (messages) : les consommateurs font des jointures
+      manuelles. Trancher avec Sébastien — contrat délibéré « entités plates, jointures
+      explicites » (alors le consigner comme règle pour toutes les entités) ou dette à
+      combler par des relations SeaORM déclarées.
+  [?] `updated_at` est tenu à la main par les appelants (`../../ws/chat.rs`) :
+      aucune protection contre un update oublieux du timestamp (une modif de `todo` sans
+      reset de `updated_at` passerait inaperçue dans le tri de `list_conversations`).
+      Décider si le contrat reste à la charge des appelants ou migre vers un hook
+      `before_update` / trigger SQL.
+  [?] `todo` est une `Option<String>` opaque (contenu todo sérialisé, format non
+      contractué ici) : confirmer que le format de la chaîne relève de la spec de
+      `../../ws/chat.rs` et non de cette entité.
+  [?] Les dérivations `Serialize`/`Deserialize` sur @Model sont vérifiées par un round-trip
+      en test, mais aucun producteur/consommateur de ce JSON n'a été observé hors tests
+      (les handlers exposent leur propre DTO `ConversationOut`) : confirmer qu'elles ne
+      sont pas de la dette morte.

@@ -1,0 +1,405 @@
+Spec: Config
+
+Platform: Rust/vanyline-app/std
+
+Purpose:
+  Configuration de démarrage de l'`app` : lecture unique et fail-fast des variables
+  d'environnement en @Config (16 champs @pub), plus le mapping Config →
+  @miryad_core::auth::OidcConfig. Le fichier ne fait aucun réseau, aucune validation
+  sémantique, aucun logging : il lit l'environnement et retourne soit un @Config complet,
+  soit une @Err(@String) dont le message porte un marqueur en dur `"VNL-CFG-001"` …
+  `"VNL-CFG-006"`. Ces marqueurs sont l'identité d'erreur de ce fichier — leur contenu,
+  pas seulement leur préfixe, est le contrat (cf. `Exposes`/`Scenario`).
+  Le triplet {variables requises + variables posées par le controller} forme le contrat
+  de déploiement entre le reconciler Application (../../controller/src/application.rs,
+  env du Deployment `app`) et ce fichier. Les variables vides ou malformées passent ici
+  et ne font échouer le processus qu'ensuite, dans ./main.rs (cookie, listen addr) ou
+  miryad-core/sea-orm (OIDC, DB) — ce décalage fail-fast est le comportement actuel,
+  documenté tel quel, pas un contrat de validation de ce fichier.
+  Fichier isolé : un seul contrat, pas de regroupement.
+
+Owns:
+  ./config.rs
+
+Can read:
+  ./main.rs
+  ./error.rs
+  ./k8s.rs
+  ./api/owners.rs
+  ../Cargo.toml
+  ../../controller/src/application.rs
+  ../../cfgstore/src/error.sdd
+
+Exposes:
+  @Config — @struct @pub @Clone aux 16 champs tous @pub, aucun @Default, aucun builder,
+    aucun accesseur : les consommateurs lisent les champs directement (state.config.x).
+    Le module est privé (`mod config;` ./main.rs, sans `pub`) : @Config est en pratique
+    visible du crate uniquement. Aucune variante d'@AppError (./error.rs) n'est définie
+    ici — ./error.rs ne connaît d'ailleurs aucun marqueur `"VNL-CFG-*"`.
+    Champs : @Config::oidc_issuer_url, @Config::oidc_client_id,
+    @Config::oidc_client_secret, @Config::oidc_redirect_url, @Config::oidc_scopes
+    (@Vec<@String>), @Config::oidc_ca_cert, @Config::cookie_secret,
+    @Config::database_url, @Config::listen_addr, @Config::static_dir,
+    @Config::k8s_namespace, @Config::application_name,
+    @Config::default_home_storage_class, @Config::default_home_access_mode,
+    @Config::default_project_storage_class, @Config::default_project_access_mode
+    (les 7 derniers en @Option<@String>).
+  @Config::from_env — `pub fn() -> @Result<Self, @String>` : unique constructeur depuis
+    l'environnement, aucun argument.
+  @Config::oidc_config — `pub fn(&self) -> miryad_core::auth::OidcConfig` : mapping pur,
+    sans I/O ni échec.
+  Marqueurs émis par @from_env, messages @exact (une seule occurrence de chacun dans le
+    fichier) : `"VNL-CFG-001: OIDC_ISSUER_URL is required"`,
+    `"VNL-CFG-002: OIDC_CLIENT_ID is required"`,
+    `"VNL-CFG-003: OIDC_CLIENT_SECRET is required"`,
+    `"VNL-CFG-004: OIDC_REDIRECT_URL is required"`,
+    `"VNL-CFG-005: COOKIE_SECRET is required"`,
+    `"VNL-CFG-006: DATABASE_URL is required"`.
+    Aucun `"VNL-CFG-007"` dans le fichier ; `"VNL-CFG-008"` existe côté ./main.rs
+    (`LISTEN_ADDR` invalide) et `"VNL-CFG-005"` y est réémis pour une autre cause —
+    cf. `Handles` et `Tasks`.
+  Aucune route HTTP, aucun endpoint WS/MCP, aucun tool : ce fichier n'est pas sur le
+    chemin request, il ne s'exécute qu'au démarrage (et dans les tests).
+
+Accepts:
+  Variables requises — @from_env échoue si @env::var est en @Err (variable absente, ou
+  présente mais non-Unicode : le deux sont rendus par le même message `"is required"`,
+  sans distinction) :
+    `OIDC_ISSUER_URL` → @Config::oidc_issuer_url (URL de l'émetteur OIDC, posée en env
+      du Deployment par le reconciler Application depuis `secretRef`/`issuerUrl`).
+    `OIDC_CLIENT_ID` → @Config::oidc_client_id.
+    `OIDC_CLIENT_SECRET` → @Config::oidc_client_secret.
+    `OIDC_REDIRECT_URL` → @Config::oidc_redirect_url (construit par le controller en
+      `https://{spec.host}/auth/callback`).
+    `COOKIE_SECRET` → @Config::cookie_secret. La longueur ≥ 64 octets (et le décodage
+      base64 avec repli sur les octets bruts) ne sont validés ICI ni là — c'est
+      ./main.rs qui les contrôle et quitte en `"VNL-CFG-005"` (autre message).
+    `DATABASE_URL` → @Config::database_url (URL Postgres sea-orm, non parsée ici).
+  Variables à défaut — jamais d'échec, @unwrap_or_else sur la valeur par défaut :
+    `OIDC_SCOPES` (défaut `"openid,email,profile"`) → découpée sur `','`, chaque segment
+      @trim()é, collecté en @Vec<@String> ; la découpe + trim s'appliquent AUSSI à la
+      valeur fournie, jamais seulement au défaut.
+    `LISTEN_ADDR` (défaut `"0.0.0.0:8080"`) → @Config::listen_addr en @String brut :
+      aucune vérification qu'il se parse en @SocketAddr ici (le parse et son échec
+      `"VNL-CFG-008"` + `exit(1)` vivent dans ./main.rs).
+    `STATIC_DIR` (défaut `"./static"`) → racine du @ServeDir serving la SPA (./main.rs).
+  Variables optionnelles — @env::var(…).ok(), absente ⇒ @None :
+    `OIDC_CA_CERT` → @Config::oidc_ca_cert (PEM de la CA de l'émetteur, transmis tel quel
+      à miryad-core via @oidc_config).
+    `VNL_K8S_NAMESPACE` → @Config::k8s_namespace, consommé par ./k8s.rs::@client →
+      @VnlK8sClient::discover (contrat ./k8s.sdd). Posé par le controller = namespace de
+      la CR Application (`"default"` si absent).
+    `VNL_APPLICATION_NAME` → @Config::application_name, nom de la CR Application dont ce
+      pod est le Deployment ; @ensure_owner (./api/owners.rs) le recopie dans
+      `OwnerSpec.application_ref` (condition d'exposition publique des Sandboxes).
+    `VNL_DEFAULT_HOME_STORAGE_CLASS` → @Config::default_home_storage_class →
+      `OwnerSpec.home_storage_class` (@ensure_owner).
+    `VNL_DEFAULT_HOME_ACCESS_MODE` → @Config::default_home_access_mode →
+      `OwnerSpec.home_access_mode`.
+    `VNL_DEFAULT_PROJECT_STORAGE_CLASS` → @Config::default_project_storage_class →
+      `OwnerSpec.project_defaults.storage_class`.
+    `VNL_DEFAULT_PROJECT_ACCESS_MODE` → @Config::default_project_access_mode →
+      `OwnerSpec.project_defaults.storage_access_mode`.
+    Ces six variables ne sont jamais requises : absentes, les reconcilers Owner/Project
+    du controller appliquent leurs propres défauts historiques (RWX/RWO). Le reconciler
+    Application ne pose `VNL_DEFAULT_*` que si `Application.spec.storageDefaults` et le
+    sous-champ correspondant existent.
+  Valeur présente vide (`FOO=""`) : @env::var réussit → traitée comme PRESENTE pour les
+    requises (champ @String vide dans le @Config), et comme `Some("")` pour les
+    optionnelles. Cf. `Tasks`.
+
+Returns:
+  @from_env — @Ok(@Config) intégralement peuplé dès que les six requises sont présentes,
+    sans autre validation. @Err(@String) : le message du PREMIER champ manquant dans
+    l'ordre de déclaration du littéral de structure, soit l'ordre
+    `OIDC_ISSUER_URL` → `OIDC_CLIENT_ID` → `OIDC_CLIENT_SECRET` → `OIDC_REDIRECT_URL` →
+    `COOKIE_SECRET` → `DATABASE_URL` (`OIDC_SCOPES` est évalué entre les deux derniers
+    mais ne peut échouer). Un seul message remonté, jamais la liste des manquantes.
+  @oidc_config — @miryad_core::auth::OidcConfig dont les champs `issuer_url`,
+    `client_id`, `client_secret`, `redirect_url`, `scopes`, `ca_cert` sont des clones
+    un-à-un des champs homonymes de @Config, et `post_login_redirect` /
+    `post_logout_redirect` sont la constante `"/#/"` (hash de la SPA, comportement
+    historique `/#/` revendiqué par le commentaire du fichier) : valeur littérale
+    identique `"/#/"` pour les DEUX redirects, indépendante de `oidc_redirect_url` et
+    de toute variable d'env.
+
+Raises:
+  @from_env ne lève jamais, ne panic pas, ne loggue pas, ne sort pas du processus :
+    l'@Err est un @String brut que ./main.rs rend par @tracing::error puis
+    `std::process::exit(1)`. Ces erreurs de configuration ne transitent JAMAIS par
+    @AppError::@IntoResponse (./error.rs) : elles précocèdent l'existence d'un serveur
+    HTTP, leur canal de sortie est le log du processus.
+  @oidc_config : aucune erreur possible (fonction totale).
+  Jamais d'`unwrap`/`expect`/`panic!`/`println!`/`eprintln!` hors `#[cfg(test)]`
+    (harnais ../../tooling.sdd) : le fichier n'en contient aucun, ses défauts env sont
+    rendus par @unwrap_or_else et ses absences par @map_err.
+
+Handles:
+  Démarrage : @from_env est appelé EXACTEMENT une fois, en premier acte utile de
+    ./main.rs (avant parse de l'adresse, cookie key, connexion DB, migrations, client
+    OIDC) ; l'environnement n'est lu qu'à cet instant — modifier une variable en cours
+    de vie du processus est sans effet (le @Config cloné dans @AppState fait foi jusqu'au
+    redémarrage du pod).
+  Fail-fast diffééré (comportement actuel, frontières hors du fichier) : une requise
+    vide (`DATABASE_URL=""`, `OIDC_ISSUER_URL=""`, …) passe @from_env puis fait échouer
+    ./main.rs plus loin — connexion DB (`"VNL-DB-003"` + exit 1), client OIDC
+    (`"VNL-AUTH-004"` + exit 1) — avec un marqueur qui ne dit plus quelle variable est
+    en cause. `LISTEN_ADDR` non parseable → `"VNL-CFG-008"` + exit 1 (./main.rs).
+    `COOKIE_SECRET` de moins de 64 octets (après repli octets bruts si non-base64) →
+    `"VNL-CFG-005: COOKIE_SECRET must be at least 64 bytes"` + exit 1 (./main.rs) : le
+    marqueur `"VNL-CFG-005"` est donc émis par deux fichiers pour deux causes
+    distinctes (absence ici, longueur là) — cf. `Tasks`.
+  `OIDC_SCOPES=""` : la variable étant présente, le défaut ne s'applique pas, la découpe
+    de la chaîne vide produit `[""]` — un scope vide unique, transmis tel quel à
+    miryad-core. Idem un segment vide en tout position (`"openid,"` → `["openid", ""]`).
+    Comportement verrouillé en Scenario, validité OIDC à trancher (`Tasks`).
+  Optionnel vide : `OIDC_CA_CERT=""` → `Some("")` (et idem `VNL_K8S_NAMESPACE` — déjà
+    questionné sous ./k8s.sdd — , `VNL_APPLICATION_NAME`, les quatre `VNL_DEFAULT_*`) :
+    un Some("") atteint le consommateur (miryad-core pour la CA, @discover pour le
+    namespace, @ensure_owner pour les défauts de stockage). Normalisation à trancher.
+  Consommation lazy des champs K8s : @Config::k8s_namespace n'est lu qu'à la première
+    découverte du client (./k8s.sdd) ; application_name et les quatre default_*
+    uniquement dans la branche de création lazy de @ensure_owner (./api/owners.rs) —
+    les deux conditions de `project_defaults` (`default_project_storage_class.is_some()
+    || default_project_access_mode.is_some()`) décident si un @ProjectDefaults est
+    construit (storage_size y reste @None : la taille n'est jamais portée par l'env).
+  Tests du crate : @Config se construit par littéral de structure complet dans les
+    modules `tests` d'au moins sept fichiers (./api/{conversations,llm_providers,
+    local_tools,mcp_servers,me,projects,sandboxes}.rs — `application_name: None`
+    répété, etc.). Cette duplication est le harnais effectif : aucune fabrique unique.
+
+Must:
+  Échouer avec le message EXACT (caractère par caractère, préfixe + `": "` + texte) de
+    `Exposes` pour chacune des six variables requises absentes, dans l'ordre de
+    déclaration du littéral quand plusieurs manquent.
+  Appliquer `split(',')` + @trim + @collect aux scopes FOURNIS comme au défaut ; le
+    défaut exact est `"openid,email,profile"` (trois scopes, dans cet ordre).
+  Retourner `"0.0.0.0:8080"` et `"./static"` comme défauts littéraux de
+    respectivement `LISTEN_ADDR` et `STATIC_DIR`, sans jamais les valider.
+  Mapper @oidc_config champ à champ (six clones) et figer les deux redirects à
+    `"/#/"` (comportement SPA historique `/#/` — le commentaire du fichier le
+    revendique, le test `oidc_config_maps_all_fields` le verrouille déjà).
+  Dériver @Clone sur @Config : @AppState est @Clone et embarque config par valeur.
+  Rester un constructeur unique sans validation sémantique : seule la PRÉSENCE
+    (@env::var en @Ok) est contrôlée sur les requises.
+
+Must not:
+  Valider le contenu des valeurs ici : URL OIDC, préfixe `postgres://`, longueur de
+    `COOKIE_SECRET`, parseable de `LISTEN_ADDR`, nom de namespace K8s, valeurs
+    d'accessMode — tous ces contrôles vivent (ou devraient vivre) ailleurs ; ce fichier
+    les ignore tous volontairement aujourd'hui.
+  Traiter une valeur vide comme une absence (requis comme optionnel).
+  Réémettre les marqueurs `"VNL-CFG-001"`…`"VNL-CFG-006"` depuis un autre fichier de
+    l'app avec une autre sémantique que « variable d'env absente » (le cas
+    `"VNL-CFG-005"` de ./main.rs est une dette signalée, pas un précédent à imiter).
+  Utiliser @AppError ou ./error.rs pour ces erreurs : @from_env retourne @String.
+  Lire l'environnement ailleurs que dans @from_env (ni les consommateurs, ni
+    @oidc_config : ils ne touchent que @Config).
+  Introduire @Default ou un builder partiel sur @Config sans mettre à jour les ~8
+    littéraux de structure des modules `tests` du crate (l'ajout d'un champ est
+    mécaniquement un changement de harnais multi-fichiers).
+
+Depends on:
+  std::env — @env::var et sa sémantique (@Err sur absente ET non-Unicode, @Ok sur vide).
+  miryad-core (../Cargo.toml, `default-features = false`, feature `swagger-ui`) —
+    @miryad_core::auth::OidcConfig (8 champs) ; consommé par ./main.rs::@OidcClient::new.
+  ./main.rs — unique appelant de @from_env/@oidc_config au démarrage ; validations
+    différées downstream (`"VNL-CFG-008"`, longueur du cookie `"VNL-CFG-005"`) et
+    exit(1) ; @AppState qui clone @Config.
+  ./k8s.rs — consommateur de k8s_namespace (./k8s.sdd, y compris son `[?]` sur
+    `VNL_K8S_NAMESPACE=""`).
+  ./api/owners.rs — consommateur de application_name et des quatre default_* dans
+    @ensure_owner (branch conditionnelle @ProjectDefaults).
+  ../../controller/src/application.rs — producteur cluster des variables
+    `OIDC_REDIRECT_URL`, `VNL_K8S_NAMESPACE`, `VNL_APPLICATION_NAME`, `VNL_DEFAULT_*`
+    du Deployment `app` (contrat ../../controller/src/application.sdd).
+  ../../cfgstore/src/error.sdd — co-titulaire de l'espace de noms `"VNL-CFG-*"` (cf.
+    `[!]` dans `Tasks`).
+
+Tasks:
+  [!] Collision d'espace de noms `"VNL-CFG-*"` avec vanyline-cfgstore — cohérence avec
+    le `[?]` de ../../cfgstore/src/error.sdd : ./config.rs (001–006) et ./main.rs (005
+    bis, 008) émettent EN DUR les mêmes marqueurs que @CfgStoreError::001…010 pour des
+    sémantiques sans rapport (absences d'env vs erreurs de store de configuration).
+    Règle « un espace `"VNL-CFG-*"` par crate » à confirmer, ou renommer les marqueurs
+    de l'app (ex: `VNL-ENV-*`) — une règle à poser dans vanyline.sdd. NON TRANCHÉ, à
+    décider avec Sébastien dans les deux specs à la fois ; les Scenarios ci-dessous
+    verrouillent les chaînes actuelles telles quelles.
+  [?] `"VNL-CFG-007"` n'est émis nulle part dans l'app (séquence 001–006 ici, 008 dans
+    ./main.rs) : trou historique (code supprimé ?) à documenter comme réservé, ou code
+    manquant à identifier.
+  [?] Double usage de `"VNL-CFG-005"` au sein de l'app : absence de `COOKIE_SECRET`
+    (ici) et secret trop court (./main.rs) partagent le marqueur. Faut-il dissocier
+    (ex: 005 = absente, 007 = trop courte — 007 étant justement libre) ?
+  [?] `OIDC_SCOPES=""` → `vec!["".to_string()]` (un scope vide) et non le défaut
+    `"openid,email,profile"` ; segments vides en position médiane/finale conservés de
+    même (`"openid,"` → deux entrées dont `""`). Normaliser (filtrer les segments vides,
+    retomber sur le défaut si liste vide) ou considérer que l'opérateur ne pose jamais
+    ces valeurs (le reconciler Application ne pose jamais `OIDC_SCOPES` — défaut libre
+    côté déploiement) ?
+  [?] Requis vide accepté : `OIDC_ISSUER_URL=""` (et idem les cinq autres) passe
+    @from_env puis fait mourir le processus avec `"VNL-AUTH-004"`/`"VNL-DB-003"`, des
+    marqueurs qui ne nomment plus la variable fautive. Le fail-fast mérite-t-il une
+    règle « requis = non vide » dans @from_env (nouveaux messages à verrouiller), ou
+    le comportement actuel est-il l'accident assumé ?
+  [?] Valeur non-Unicode sur une requise : @env::var échoue, le message dit « is
+    required » alors que la variable EST posée. Distinguer ou accepter (cas rarissime) ?
+  [?] `Some("")` sur les optionnels (`OIDC_CA_CERT`, `VNL_K8S_NAMESPACE`,
+    `VNL_APPLICATION_NAME`, les quatre `VNL_DEFAULT_*`) : normalisation `"" → @None` à
+    ce niveau (règle générale une fois pour toutes) ou contrat « ne jamais poser une de
+    ces variables vide » ? Le `[?]` `VNL_K8S_NAMESPACE` de ./k8s.sdd se résoudrait ici.
+  [?] Les deux littéraux `"/#/"` de @oidc_config sont dupliqués à l'identique dans
+    ./main.rs (@MiryadAuthState.post_login_redirect/post_logout_redirect construits à la
+    main) : deux sources de vérité pour la même constante SPA. Les faire converger
+    (constante ou lecture depuis @oidc_config) ?
+  [?] Stratégie de test de @from_env : @env::var se pilote au niveau du processus, et
+    l'edition 2024 rend @env::set_var/@remove_var `unsafe` (le harnais ../../tooling.sdd
+    deny `unsafe_code` — exemption `#[cfg(test)]` à justifier ligne de spec). Tests
+    série/`#[serial]` sur l'env process, ou extraction d'un noyau testable
+    (`from_env_with(f: impl Fn(&str) -> Result<String, …>)`) — choix d'implémentation à
+    valider avant d'écrire les tests.
+  [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
+    (implementer) ; le test existant `oidc_config_maps_all_fields` couvre le Scenario
+    `oidc_config_copie_les_six_champs`. Puis batterie du validator au vert.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe ; les
+    six messages exacts sont verrouillés caractère par caractère (pas par `contains`).
+  Les `[?]` et le `[!]` de `Tasks` ont une décision écrite de Sébastien, répercutée ici
+    (et dans ../../cfgstore/src/error.sdd pour la collision), et la spec relue fait foi.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur le workspace.
+
+Scenario: from_env_absence_oidc_issuer_url_vnl_cfg_001
+  Given un environnement de test où `OIDC_ISSUER_URL` est absente et les cinq autres
+    requises (`OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`, `OIDC_REDIRECT_URL`,
+    `COOKIE_SECRET`, `DATABASE_URL`) présentes (test d'environnement process, cf.
+    `Tasks` pour la stratégie)
+  When @Config::from_env est appelé
+  Then le résultat est un @Err dont le @String est EXACTEMENT
+    `"VNL-CFG-001: OIDC_ISSUER_URL is required"`
+
+Scenario: from_env_absence_oidc_client_id_vnl_cfg_002
+  Given un environnement où seules `OIDC_ISSUER_URL` est présente parmi les requises,
+    `OIDC_CLIENT_ID` absente, les quatre restantes présentes
+  When @Config::from_env est appelé
+  Then le résultat est un @Err de chaîne EXACTE
+    `"VNL-CFG-002: OIDC_CLIENT_ID is required"`
+
+Scenario: from_env_absence_oidc_client_secret_vnl_cfg_003
+  Given un environnement où `OIDC_ISSUER_URL` et `OIDC_CLIENT_ID` sont présentes,
+    `OIDC_CLIENT_SECRET` absente, les trois restantes présentes
+  When @Config::from_env est appelé
+  Then le résultat est un @Err de chaîne EXACTE
+    `"VNL-CFG-003: OIDC_CLIENT_SECRET is required"`
+
+Scenario: from_env_absence_oidc_redirect_url_vnl_cfg_004
+  Given un environnement où les trois premières requises sont présentes,
+    `OIDC_REDIRECT_URL` absente, `COOKIE_SECRET` et `DATABASE_URL` présentes
+  When @Config::from_env est appelé
+  Then le résultat est un @Err de chaîne EXACTE
+    `"VNL-CFG-004: OIDC_REDIRECT_URL is required"`
+
+Scenario: from_env_absence_cookie_secret_vnl_cfg_005
+  Given un environnement où les quatre variables OIDC requises sont présentes,
+    `COOKIE_SECRET` absente, `DATABASE_URL` présente, et `OIDC_SCOPES` quelconque
+  When @Config::from_env est appelé
+  Then le résultat est un @Err de chaîne EXACTE
+    `"VNL-CFG-005: COOKIE_SECRET is required"` (message d'ABSENCE — à distinguer du
+    message de longueur insuffisante émis par ./main.rs)
+
+Scenario: from_env_absence_database_url_vnl_cfg_006
+  Given un environnement où les cinq premières requises sont présentes et
+    `DATABASE_URL` absente
+  When @Config::from_env est appelé
+  Then le résultat est un @Err de chaîne EXACTE
+    `"VNL-CFG-006: DATABASE_URL is required"`
+
+Scenario: from_env_premiere_erreur_en_ordre_de_declaration
+  Given un environnement où AUCUNE des six variables requises n'est posée
+  When @Config::from_env est appelé
+  Then le résultat est un @Err de chaîne EXACTE `"VNL-CFG-001: OIDC_ISSUER_URL is
+    required"` — un seul message, celui du premier champ déclaré manquant, jamais la
+    liste des six absences
+
+Scenario: from_env_requise_vide_acceptee
+  Given un environnement où toutes les requises sont posées et `OIDC_ISSUER_URL=""`
+    (présente mais vide)
+  When @Config::from_env est appelé
+  Then le résultat est un @Ok
+  And son champ oidc_issuer_url est la chaîne vide (la présence seule fait foi, la
+    validation sémantique est différée hors du fichier)
+
+Scenario: from_env_defaut_listen_addr
+  Given un environnement complet en requises, `LISTEN_ADDR` absente
+  When @Config::from_env est appelé
+  Then le champ listen_addr du @Config retourné est EXACTEMENT `"0.0.0.0:8080"`
+
+Scenario: from_env_defaut_static_dir
+  Given un environnement complet en requises, `STATIC_DIR` absente
+  When @Config::from_env est appelé
+  Then le champ static_dir du @Config retourné est EXACTEMENT `"./static"`
+
+Scenario: from_env_defaut_scopes
+  Given un environnement complet en requises, `OIDC_SCOPES` absente
+  When @Config::from_env est appelé
+  Then le champ oidc_scopes est `["openid", "email", "profile"]` dans cet ordre
+
+Scenario: from_env_scopes_decoupe_et_trim
+  Given un environnement complet en requises et `OIDC_SCOPES=" openid , email ,profile"`
+    (espaces autour des segments)
+  When @Config::from_env est appelé
+  Then le champ oidc_scopes est `["openid", "email", "profile"]` — chaque segment
+    @trim()é, le trim s'applique à la valeur fournie et non seulement au défaut
+
+Scenario: from_env_scopes_vide_donne_un_scope_vide
+  Given un environnement complet en requises et `OIDC_SCOPES=""` (présente vide)
+  When @Config::from_env est appelé
+  Then le champ oidc_scopes est `[""]` — un unique segment vide, PAS le défaut
+    `"openid,email,profile"` (verrouille le comportement actuel, validité à trancher
+    via le `[?]` associé dans `Tasks`)
+
+Scenario: from_env_optionnels_absents_aucun
+  Given un environnement complet en requises et en variables à défaut, et les SEPT
+    optionnelles absentes (`OIDC_CA_CERT`, `VNL_K8S_NAMESPACE`, `VNL_APPLICATION_NAME`,
+    `VNL_DEFAULT_HOME_STORAGE_CLASS`, `VNL_DEFAULT_HOME_ACCESS_MODE`,
+    `VNL_DEFAULT_PROJECT_STORAGE_CLASS`, `VNL_DEFAULT_PROJECT_ACCESS_MODE`)
+  When @Config::from_env est appelé
+  Then le résultat est un @Ok dont les sept champs @Option correspondants valent tous
+    @None (les reconcilers Owner/Project conservent leurs défauts RWX/RWO)
+
+Scenario: from_env_optionnels_lus_tels_quels
+  Given un environnement complet en requises et les sept optionnelles posées à des
+    valeurs distinctes non vides (ex: `VNL_APPLICATION_NAME="app-principale"`,
+    `VNL_DEFAULT_HOME_ACCESS_MODE="ReadWriteOnce"`)
+  When @Config::from_env est appelé
+  Then chaque champ @Option vaut @Some de la valeur littérale posée, sans trim ni
+    normalisation (`application_name == Some("app-principale")`,
+    `default_home_access_mode == Some("ReadWriteOnce")`, idem les cinq autres)
+
+Scenario: from_env_optionnel_vide_some_vide
+  Given un environnement complet en requises et `OIDC_CA_CERT=""` (posée vide), les
+    autres optionnelles absentes
+  When @Config::from_env est appelé
+  Then le champ oidc_ca_cert vaut `Some("")` et non @None — verrouille le comportement
+    actuel atteint miryad-core, normalisation à trancher (`Tasks`)
+
+Scenario: oidc_config_copie_les_six_champs
+  Given un @Config construit par littéral (fonction `full_config` du module `tests` :
+    issuer `"https://issuer.example.com"`, client_id `"client-id"`, secret
+    `"client-secret"`, redirect `"https://app.example.com/auth/callback"`, scopes
+    `["openid", "email"]`, ca_cert `Some("pem")`)
+  When @oidc_config est appelé
+  Then les champs issuer_url, client_id, client_secret, redirect_url, scopes, ca_cert
+    de l'@OidcConfig retourné valent exactement les valeurs correspondantes du @Config
+  And post_login_redirect et post_logout_redirect valent `"/#/"` (test existant
+    `oidc_config_maps_all_fields`)
+
+Scenario: oidc_config_redirects_figes
+  Given un @Config dont oidc_redirect_url vaut `"https://app.example.com/auth/callback"`
+    et ca_cert @None
+  When @oidc_config est appelé avec un oidc_redirect_url différent (ex:
+    `"https://autre.example.org/callback"`) sur un @Config sinon identique
+  Then post_login_redirect et post_logout_redirect valent tous deux EXACTEMENT `"/#/"`
+    dans les deux cas — constants, indépendants de toute variable d'env et de
+    oidc_redirect_url

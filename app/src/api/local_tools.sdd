@@ -1,0 +1,263 @@
+Spec: Local Tools
+
+Purpose:
+  Handler `GET /api/local-tools` du crate `vanyline-app` : expose au frontend la liste des
+  tools intégrés (dits « locaux ») sous forme aplatie paires `name`/`description`, pour
+  alimenter la CheckboxList des `local_tools` d'un toolset dans
+  `../../../packages/ui/src/config/ToolsetsScreen.vue` (via `ConfigRepo.listLocalTools`).
+  La liste n'est JAMAIS stockée ni configurée : elle est dérivée à la volée du registre
+  statique `vanyline-tools` (`@filesystem_tools` + `@search_tools` + `@command_tools`,
+  spec consommateur : `../../tools/src/mcp.sdd`) — même source que `tools/list` du serveur
+  MCP de la sandbox et que la réponse RPC `config/localTools` du CLI. Ce fichier ne fait
+  qu'aplatir (nom + description, sans `inputSchema`) et gating par identité ; le contenu
+  des descripteurs est le contrat de `../../tools/src/mcp.rs`, pas d'ici.
+  Contexte d'assemblage : la route est déclarée dans `./mod.rs` (`GET /local-tools`) puis
+  montée sous le préfixe `/api` par `@nest` dans `../main.rs` — chemin externe réel
+  `GET /api/local-tools`. Un seul contrat pour CE fichier : aplatissement + réponse JSON +
+  garde d'identité ; le montage (chemin complet, méthode) est le contrat de `./mod.sdd`.
+
+Owns:
+  ./local_tools.rs
+
+Exposes:
+  - @struct LocalTool — `pub struct` à deux champs `pub String` : `name`, `description` ;
+    derive uniquement @serde::Serialize (pas de @Deserialize, pas de ts-rs). Sérialise
+    `{"name": …, "description": …}` (ordre de déclaration des champs ; aucune attribute
+    serde de renommage — clés snake_case par défaut).
+  - @fn list_local_tools — `pub async fn(State(@AppState), @AuthUser) ->
+    @Result<@Json<@Vec<@LocalTool>>, @AppError>` : seul handler branché sur une route
+    (`GET /local-tools` via `./mod.rs`). Visibilité `pub` exigée par `./mod.rs`.
+  - @fn flatten_local_tools — `fn` PRIVÉ (visibilité de module, non exporté hors du
+    fichier) : `() -> @Vec<@LocalTool>`, fonction pure documentée par le commentaire du
+    fichier comme « aplati le registre statique `tools::mcp` — pure, testable sans
+    routeur ». Testée directement par les @mod tests du fichier.
+
+Accepts:
+  - @list_local_tools :
+    - @State(@AppState) — n'utilise QUE `state.auth.db` (via @crate::auth, état
+      miryad-core) ; ignore `config`, `cookie_key`, `busy`, `k8s`, `shared_sandbox_state`.
+    - @AuthUser (extracteur miryad-core) — session par cookie ou porteur (précédents de
+      test : cookie absent → refus, cf. Scenarios ; jeton via
+      @miryad_core::auth::issue_token, cf. `bearer_for` de `../db/entities/agents.rs`).
+      Le refus d'auth (401) est produit par l'extracteur AVANT d'entrer dans le corps du
+      handler — son mécanisme interne (cookie de session, signature) est le contrat de
+      miryad-core, pas d'ici.
+    - Aucune donnée de requête lue : pas de body, pas de query, pas de paramètre de
+      chemin. Toute query ou tout body envoyé est silencieusement ignoré.
+    - La MÉTHODE n'est pas acceptée librement : `./mod.rs` n'enregistre que @get ; les
+      autres méthodes sur `/api/local-tools` reçoivent @405 du @MethodRouter axum sans
+      jamais atteindre CE fichier (précédent : scenario de `./mod.sdd`).
+  - @flatten_local_tools : aucun argument.
+
+Returns:
+  - @list_local_tools : sur identité valide ET @resolve_user en @Ok —
+    @Json(Vec<LocalTool>) avec statut @200, corps = tableau JSON (pas d'objet
+    enveloppe), chaque élément étant une paire `{"name": string, "description": string}`. Ordre du tableau =
+    ordre de concaténation du registre : les 5 filesystem (`read_file`, `write_file`,
+    `edit_file`, `delete_file`, `list_directory`), puis les 2 search (`find_files`,
+    `search`), puis `execute_command` — 8 éléments à ce jour (cf. `../../tools/src/mcp.sdd`).
+  - Le contenu est recalculé à CHAQUE requête (reconstruction des @serde_json::Value du
+    registre puis clonage en @String) : aucun cache, aucune static, aucun état — deux
+    requêtes rendent des corps égaux, indépendants de l'ordre d'arrivée et de l'identité.
+  - @flatten_local_tools : @Vec possédé, dans l'ordre ci-dessus, ne contenant QUE les
+    descripteurs dont `tool["name"]` et `tool["description"]` sont tous deux des chaînes
+    JSON (@as_str() en @Some) ; un descripteur sans `name` OU sans `description` chaîne
+    est SILENCIEUSEMENT ÉLIMINÉ (pas d'entrée vide, pas d'erreur, pas de log).
+  - @resolve_user : son @Ok (utilisateur résolu) est explicitement jeté (résultat non
+    nommé, seule l'erreur est propagée par `?`). L'identité résolue n'influence PAS la
+    réponse : la liste rendue est identique pour tout utilisateur authentifié.
+
+Raises:
+  - @401 @StatusCode::UNAUTHORIZED (corps de miryad-core) : cookie/porteur absent,
+    expiré ou invalide — produit par l'extracteur @AuthUser avant le corps du handler
+    (test existant `list_local_tools_without_cookie_returns_401`).
+  - @AppError mappé depuis l'erreur de @resolve_user (seul `?` du handler, via
+    @AppError::from) : sur échec DB de la résolution d'identité, @AppError::InternalError
+    → @500 avec corps `{"error": "VNL-DB-006: …"}` si l'erreur est un @sea_orm::DbErr
+    (mapping de `../error.rs`). Le type d'erreur exact de @resolve_user (crate externe
+    miryad-core 0.1.3, source hors dépôt) n'est pas vérifiable ici — voir Tasks `[?]` ;
+    tout `From` manquant serait une erreur de compilation, pas un chemin d'exécution.
+  - @405 (hors CE fichier) : méthode ≠ GET sur le chemin, par le @MethodRouter de
+    `./mod.rs`, avant tout extracteur.
+  - Aucune panic, aucun `unwrap`/`expect` sur le chemin de production (harnais
+    `../../tooling.sdd`) : les accès `tool["name"]` / `tool["description"]` sur
+    @serde_json::Value non-object retournent `Value::Null` → `as_str()` → @None → entrée
+    éliminée, jamais panic.
+
+Handles:
+  - Source de vérité de la liste : `../../tools/src/mcp.rs` (registre statique, spec
+    `../../tools/src/mcp.sdd`). Tout ajout/retrait/renommage de tool intégré modifie
+    mécaniquement la réponse de cet endpoint SANS modification de CE fichier — ce
+    couplage est le contrat partagé des quatre consommateurs du registre.
+  - Consommateur frontend : `../../../frontend/src/api/httpConfigRepo.ts`
+    (@listLocalTools : `GET /api/local-tools`, type attendu
+    `Array<{ name: string; description: string }>`, dont elle ne retient QUE `name`) ;
+    `../../../packages/ui/src/ports.ts` (@ConfigRepo.listLocalTools():
+    `Promise<string[]>`) ; `../../../packages/ui/src/config/ToolsetsScreen.vue` (remplit la
+    CheckboxList `formLocalTools`/`editLocalTools` des toolsets). `description` est donc
+    transporté mais seul `name` est consommé par le frontend (cf. Tasks `[?]`).
+  - Consommateurs parallèles des MÊMES données (non branchés sur cet endpoint, mention
+    d'alignement) : CLI `config/localTools` (descripteurs verbatim avec `inputSchema`,
+    `../../../cli/src/rpc/handlers.rs`) et `tools/list` MCP de la sandbox (16 tools =
+    8 d'ici + 8 lsp, `../../../sandbox/src/mcp.rs`). La valeur saisie dans
+    @Toolset::local_tools (`../../cfgstore/src/domain.sdd`) est une chaîne libre stockée
+    telle quelle : cet endpoint ne fait que SUGÉRER les noms, il ne valide rien à
+    l'écriture.
+  - Garde d'identité : @resolve_user(&state.auth.db, `user.subject`, `user.email`) sert
+    de porte d'entrée — elle résout (et vraisemblablement provisionne — non vérifiable,
+    source miryad-core hors dépôt, cf. Tasks `[?]`) l'utilisateur interne. Son résultat
+    est jeté : seule son erreur est observable.
+  - Registre anormal (descripteur sans `name`/`description`) : élimination silencieuse
+    (cf. Returns) — pas de rejet, pas de 500.
+
+Must:
+  - Dériver la liste EXCLUSIVEMENT du registre `vanyline-tools` chaîné dans l'ordre
+    filesystem → search → command : aucune liste en dur, aucune config, aucune table DB
+    dans ce fichier (cohérence garantie avec `tools/list` MCP et `config/localTools` CLI).
+  - Répondre @200 avec un tableau JSON de paires `{"name", "description"}` (deux clés
+    chaîne, pas de `inputSchema`) pour toute identité authentifiée.
+  - Exiger @AuthUser PUIS @resolve_user avant de rendre : aucune requête non authentifiée
+    ni aucun échec de résolution d'identité ne doit obtenir de liste.
+  - Éliminer silencieusement tout descripteur dont `name` ou `description` n'est pas une
+    chaîne (y compris absent ou non-object) — jamais d'entrée `null` ni de panic dans la
+    réponse.
+  - Rendre @flatten_local_tools SANS argument, sans I/O ni état : appelable et testable
+    hors routeur (précédents : les 3 tests unitaires directs du fichier).
+  - Jeter explicitement le résultat de @resolve_user (ne pas l'utiliser pour filtrer ou
+    personnaliser la réponse).
+  - Mapper toute erreur de @resolve_user via @AppError::from (`?`) — pas de statut bricolé
+    localement.
+
+Must not:
+  - Exposer `inputSchema`, les types de paramètres ou tout champ de schéma JSON dans la
+    réponse : seuls `name` et `description` traversent.
+  - Stocker, cacher ou muter la liste entre deux requêtes : aucun `static`, aucun champ
+    d'@AppState touché autre que la lecture de `auth.db`.
+  - Filtrer la liste par utilisateur, rôle, couche de config ou outil désactivé : la
+    réponse est identique pour tout appelant authentifié.
+  - Écrire une quelconque ressource (DB, cfgstore, K8s) : lecture seule du registre
+    mémoire + une lecture @resolve_user.
+  - Accepter une méthode autre que GET dans CE fichier : la table de méthodes est la
+    propriété de `./mod.rs`.
+  - Logger ou `println!`/`eprintln!` (harnais `../../tooling.sdd`) : le chemin d'erreur
+    propagate uniquement via @AppError.
+
+Depends on:
+  @vanyline_tools::mcp — @filesystem_tools / @search_tools / @command_tools
+    (`../../tools/src/mcp.rs`, spec `../../tools/src/mcp.sdd`) : source exclusive du
+    contenu (8 descripteurs `name`/`description`/`inputSchema`).
+  miryad-core 0.1.3 (crate crates.io, source hors dépôt) — @AuthUser (extracteur
+    d'identité, refus 401) et @miryad_core::users::resolve_user (porte d'identité sur
+    `state.auth.db`).
+  @axum — @Json, @State ; @serde — @Serialize ; @crate::AppState et @crate::error::AppError
+    (`../error.rs` : @InternalError → 500, @From<@sea_orm::DbErr> → `VNL-DB-006`).
+  ./mod.rs — enregistrement `GET /local-tools` ; ../main.rs — @nest("/api", …) (chemin
+    externe `/api/local-tools`) ; specs : `./mod.sdd`.
+  Contrat frontend (appelant réel) : `../../../frontend/src/api/httpConfigRepo.ts`,
+    `../../../packages/ui/src/ports.ts`,
+    `../../../packages/ui/src/config/ToolsetsScreen.vue`.
+  Hérite des contraintes racines `../../vanyline.sdd` et du harnais `../../tooling.sdd`.
+
+Scenario: flatten_rend_huit_tools
+  Given aucune entrée (@flatten_local_tools est privée mais testable in-module, sans
+    routeur)
+  When @flatten_local_tools est appelée
+  Then elle rend exactement 8 éléments
+  And (test existant `flatten_returns_8_tools`)
+
+Scenario: flatten_contient_les_huit_noms_attendus
+  Given l'appel à @flatten_local_tools
+  When les `name` sont collectés
+  Then ils contiennent `read_file`, `write_file`, `edit_file`, `delete_file`,
+    `list_directory`, `find_files`, `search`, `execute_command`
+  And (test existant `flatten_contains_all_expected_names`)
+
+Scenario: flatten_toutes_descriptions_non_vides
+  Given l'appel à @flatten_local_tools
+  When chaque `description` est testée
+  Then aucune n'est vide
+  And (test existant `flatten_all_descriptions_non_empty`)
+
+Scenario: flatten_ordre_filesystem_puis_search_puis_commande
+  Given l'appel à @flatten_local_tools
+  When les `name` sont lus dans l'ordre du @Vec
+  Then l'ordre exact est `read_file`, `write_file`, `edit_file`, `delete_file`,
+    `list_directory`, `find_files`, `search`, `execute_command`
+  And (test À ÉCRIRE — les tests existants testent l'appartenance, pas l'ordre)
+
+Scenario: list_local_tools_sans_cookie_repond_401
+  Given un @AppState de test (config figé, @crate::auth::test_support::test_auth_state)
+    et @Router::new().@route("/local-tools", @get(@list_local_tools)).@with_state(state)
+  When `GET /local-tools` sans cookie ni porteur est adressé via @oneshot
+  Then le statut est @StatusCode::UNAUTHORIZED
+  And (test existant `list_local_tools_without_cookie_returns_401`)
+
+Scenario: list_local_tools_authentifie_repond_200_et_tableau_de_paires
+  Given le même @AppState branché sur @crate::auth::test_support::test_auth_state_with_db
+    avec une vraie connexion (sqlite en mémoire, `../db/test_support.rs`) et un porteur
+    valide obtenu par @miryad_core::auth::issue_token (précédent `bearer_for` de
+    `../db/entities/agents.rs`)
+  When `GET /local-tools` authentifié est adressé via @oneshot
+  Then le statut est @StatusCode::OK
+  And le corps est un tableau JSON de 8 objets ayant EXACTEMENT les clés `name` et
+    `description`, toutes deux des chaînes non vides
+  And (test À ÉCRIRE — le chemin authentifié n'est couvert par aucun test du dépôt)
+
+Scenario: un_descripteur_sans_nom_ou_description_est_silencieusement_elimine
+  Given un @serde_json::Value de descripteur sans `description` (par ex.
+    `{"name": "outil_fantome", "inputSchema": {}}`) inséré dans une liste simulée
+    reproduisant la boucle de @flatten_local_tools (refactor testable nécessaire, la
+    boucle étant collée à la fonction privée)
+  When l'aplatissement est exécuté
+  Then l'entrée est absente du résultat
+  And aucune entrée `null`/vide n'apparaît, aucune erreur n'est levée
+  And (test À ÉCRIRE — branche `if let` jamais exercée par les données réelles du registre)
+
+Scenario: local_tool_serialize_en_name_et_description
+  Given un @LocalTool { name: "read_file", description: "…" } construit en test
+  When sérialisé par @serde_json::to_value
+  Then l'objet a exactement les clés `name` et `description` (aucune clé en plus, pas de
+    `inputSchema`)
+  And (test À ÉCRIRE — aucun test de sérialisation du type, précédent :
+    `me_response_serializes` de `./me.rs`)
+
+Tasks:
+  [ ] Convertir en tests taggés par leur titre les 4 Scenarios « À ÉCRIRE » (ordre du
+    flatten, 200 authentifié + forme du corps, élimination silencieuse, sérialisation de
+    @LocalTool). Les 4 tests existants du fichier couvrent déjà les Scenarios marqués
+    « existant ».
+  [?] @resolve_user : le résultat est jeté — la fonction sert-elle uniquement de porte
+    d'entrée auth (et de provisioning « premier appel crée l'utilisateur », hypothèse
+    jamais vérifiée car source miryad-core hors dépôt), ou était-il prévu de filtrer la
+    liste par utilisateur/toolsets ? Trancher : assumer la porte pure (et la commenter)
+    ou consommer le résultat.
+  [?] Échec de @resolve_user != DbErr : @resolve_user peut-il rendre une erreur non-DbErr
+    (utilisateur inconnu refusé, cookie valide mais utilisateur supprimé) ? Si oui, le
+    @From choisi donne-t-il le bon statut (500 `VNL-DB-006` est un mapping DB — un
+    utilisateur introuvable mérite-t-il 403/401) ? Vérifier dans la source miryad-core
+    avec Sébastien, éventuellement typer le refus explicitement ici.
+  [?] Branche d'élimination silencieuse (descripteur sans `name`/`description`) : jamais
+    exercée par le registre réel (qui garantit 3 clés par descripteur, cf.
+    `../../tools/src/mcp.sdd`) — comportement de sûreté accidentel ou contrat délibéré ?
+    Si délibéré, une entrée invalide mérite-t-elle un log `tracing::warn` plutôt que le
+    silence ?
+  [?] `description` transportée mais inutilisée par le frontend (@listLocalTools ne garde
+    que `name`) : la garder (tooltip futur, debug) ou alléger la réponse en
+    `Vec<String>` ? Décision frontend ↔ app à prendre avec Sébastien — attention, le RPC
+    CLI `config/localTools` renvoie lui les descripteurs complets : les deux surfaces ne
+    se recopient pas forcément.
+  [?] Nombre 8 codé en dur dans les tests (ici et côté CLI
+    `smoke_local_tools_returns_eight`) : trois consommateurs répètent la constante. Introduire une constante ou un
+    test d'alignement des trois surfaces (`tools/list`, `config/localTools`,
+    `/api/local-tools`) dans `vanyline-tools`, ou accepter la redondance ?
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
+    accidentel (élimination silencieuse, jet du résultat de @resolve_user) ne devient
+    contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre (dont les 4 tests
+    À ÉCRIRE).
+  Les décisions `[?]` (rôle de @resolve_user, mapping d'erreur, devenir de `description`)
+    sont tranchées par Sébastien et reflétées dans la spec.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur `vanyline-app`.

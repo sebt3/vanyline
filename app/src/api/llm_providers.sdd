@@ -1,0 +1,427 @@
+Spec: LLM Providers Handlers
+
+Purpose:
+  Handlers métier non-CRUD de la ressource `llm-providers` du crate `vanyline-app` :
+  `PUT /api/v1/llm-providers/{id}/default` (@set_default_provider — bascule du provider
+  par défaut) et `POST /api/v1/llm-providers/{id}/test` (@test_provider → @discover_models
+  — test réel du provider distant et découverte de ses modèles). Le CRUD de la ressource
+  (GET/POST/PUT/DELETE sur `/api/v1/llm-providers[/{id}]`) est le contrat de
+  `../db/entities/llm_providers.rs` + `resource_router` de miryad-core, pas d'ici ; ces
+  deux routes sont les SEULES écritures de `is_default` et la SEULE écriture valide de
+  `available_models` du système (l'invariant « un seul défaut » n'existe nulle part
+  ailleurs — cf. Tasks de `../db/entities/llm_providers.sdd`).
+  @discover_models est une fonction privée de CE fichier, c'est ici que vit le seul code
+  d'erreur runtime portant `VNL-LLM-005` — code PARTAGÉ avec le hook @before_create de
+  `../db/entities/llm_providers.rs` (validation à la création) : même code, deux surfaces,
+  deux messages distincts (cf. Tasks `[?]`, l'entité pointe déjà vers ici).
+  C'est aussi le SEUL endroit du crate où `api_key` sort du périmètre de la base : il est
+  envoyé comme `Authorization: Bearer` au provider openai-compatible configuré — à lire
+  avec le `[!]` d'exposition en clair déjà ouvert dans `../db/entities/llm_providers.sdd`.
+  Contexte d'assemblage : les deux routes sont déclarées dans `./mod.rs`
+  (@api_v1_router) puis nichées sous `/api/v1` par `../main.rs` ; méthodes et chemins
+  complets sont le contrat de `./mod.sdd`, CE fichier n'en possède que les handlers.
+
+Owns:
+  ./llm_providers.rs
+
+Exposes:
+  - @struct TestResult — `pub struct` à un seul champ `pub models: @Vec<@String>` ;
+    derive uniquement @serde::Serialize (pas de @Deserialize, pas de ts-rs, pas de
+    @utoipa::ToSchema : absent du document OpenAPI, seule la forme brute `{"models": […]}`
+    circule). Visibilité `pub` exigée par la signature @pub de @test_provider.
+  - @fn set_default_provider — `pub async fn(@State(@AppState), @AuthUser,
+    @Path(@i32)) -> @Result<@Json<LlmProviderModel>, @AppError>` : handler de
+    `PUT /api/v1/llm-providers/{id}/default` (branché dans `./mod.rs`).
+  - @fn test_provider — `pub async fn(@State(@AppState), @AuthUser,
+    @Path(@i32)) -> @Result<@Json@TestResult, @AppError>` : handler de
+    `POST /api/v1/llm-providers/{id}/test` (branché dans `./mod.rs`).
+  - @fn discover_models — `async fn` PRIVÉ (visibilité de module) :
+    `(&LlmProviderModel) -> @Result<@Vec<@String>, @AppError>` — fabriqué et appelé
+    uniquement par @test_provider ; aucune validation de provider n'est passée par le
+    garde-fou du hook de création (cf. Scenario « provider_type inconnu stocké par
+    contournement » dans `../db/entities/llm_providers.sdd`).
+  - @mod tests (`#[cfg(test)]`) — un seul @tokio::test
+    (`set_default_provider_switches_the_flag`) + helpers de construction @test_config,
+    @test_state (via @crate::db::test_support::real_db), @admin_user ; exemptés du
+    harnais par @#![allow(clippy::unwrap_used, clippy::expect_used)] (précédent toléré
+    sous @cfg(test), `../../tooling.sdd`).
+
+Accepts:
+  - Les DEUX handlers, séquence d'entrée identique et ordonnée :
+    1. @AuthUser (extracteur miryad-core — session cookie ou porteur) : refus (401)
+      produit AVANT le corps du handler, mécanisme hors dépôt.
+    2. @Path(@i32) : `{id}` doit se lire exactement en @i32 ; non numérique ou hors plage
+      → rejet de l'extracteur axum (400) sans jamais entrer dans le corps.
+    3. @resolve_user(&state.auth.db, `user.subject`, `user.email.as_deref()`) — résout
+      (et provisionne vraisemblablement) l'utilisateur interne ; le champ
+      `id_token` de @AuthUser n'est JAMAIS lu par ces handlers.
+    4. @LlmProviderEntity::find_by_id(id).one() — aucune préfiltre : n'importe quelle
+      ligne de `vanyline_llm_providers` existe pour la suite, y compris `provider_type`
+      hors valeurs connues ou `available_models` à @Value::Null.
+    5. @can_write::<LlmProviderEntity>(&db, &principal_user, &provider) — rbac
+      miryad-core ; l'appel de TEST exige donc le niveau ÉCRITURE (le `read_policy`
+      @Public de l'entité ne suffit pas — cf. Tasks `[?]`). Le test existant positionne
+      l'appartenance au groupe `"admin"` via @sync_group_memberships pour passer —
+      observation, pas contrat vérifiable (crate externe).
+  - @State(@AppState) : n'utilise QUE `state.auth.db` ; ignore `config`, `cookie_key`,
+    `busy`, `k8s`, `shared_sandbox_state`.
+  - Aucun body, aucune query n'est lu par les deux handlers : tout corps envoyé est
+    silencieusement ignoré (notamment `POST …/test` vide — c'est la forme d'appel).
+  - @discover_models ne lit de @LlmProviderModel QUE `provider_type`, `endpoint` et
+    `api_key` ; ignore `id`, `name`, `available_models`, `is_default`.
+  - @provider_type est comparé par chaîne EXACTE : `"ollama"` → branche Ollama ;
+    `"openai-compatible"` → branche compatible OpenAI ; toute autre valeur (majuscules,
+    espaces, chaîne vide) → erreur `VNL-LLM-005`.
+  - Branche `"ollama"` : `GET {endpoint}/api/tags` après @trim_end_matches('/') sur
+    l'`endpoint` — AUCUN header d'autorisation, même quand `api_key` est @Some (la clé
+    est ignorée).
+  - Branche `"openai-compatible"` : `GET {endpoint}/v1/models` après
+    @trim_end_matches('/') sur l'`endpoint` ; si `api_key` @Some(key) → header
+    `Authorization` exactement `Bearer {key}` ; si @None → aucun header d'autorisation.
+  - @trim_end_matches('/') ne retire que les `/` de FIN, sans limite de nombre ; aucune
+    autre normalisation d'URL (schéma, `..`, chaîne vide → erreur reqwest en sortie).
+  - Client @reqwest construit à CHAQUE appel avec @timeout(@std::time::Duration::from_secs(10)) :
+    le délai borne envoi ET lecture du corps JSON.
+
+Returns:
+  - @set_default_provider sur succès : @Json(provider) avec @200 — le @LlmProviderModel
+    (7 clés, `api_key` en clair — contrat de sérialisation de `../db/entities/llm_providers.rs`)
+    lu par @find_by_id AVANT les UPDATE, avec `is_default` écrasé à @true EN MÉMOIRE
+    (`let mut result = provider; result.is_default = true`), jamais re-fetché (choix
+    assumé du commentaire « revue Phase 3 »). Corollaire : si un concurrent modifie une
+    autre colonne (ex. `available_models`) entre le fetch et la réponse, le JSON rendu
+    porte la valeur périmée du fetch. Un provider DÉJÀ défaut passe le même parcours
+    (deux UPDATE réexécutés) et rend @200.
+  - Effets SQL de @set_default_provider, dans cet ordre : @update_many sans aucun filtre
+    posant `is_default = FALSE` sur TOUTES les lignes de la table, puis @update_many
+    filtré @Column::Id.eq(id) posant `is_default = TRUE`. Les deux @UpdateResult sont
+    ignorés (rows_affected non vérifié).
+  - @test_provider sur succès de découverte : @Json(@TestResult) avec @200, corps
+    `{"models": […]}` — la liste retournée est la liste découverte, jamais un re-fetch de
+    la colonne persistée. Effet de bord PERSISTÉ avant la réponse : `available_models` =
+    tableau JSON des mêmes chaînes, posé par @IntoActiveModel + @Entity::update (tous les
+    autres champs en @ActiveValue::Unchanged → une seule colonne écrite).
+  - @discover_models, branche `"ollama"` : pour chaque élément du tableau JSON
+    `resp["models"]`, la valeur chaîne de sa clé `name` ; les éléments sans `name` chaîne
+    sont SILENCIEUSEMENT éliminés (pas d'entrée vide, pas d'erreur). Ordre conservé,
+    doublons conservés.
+  - @discover_models, branche `"openai-compatible"` : idem sur `resp["data"]` avec la clé
+    `id`.
+  - Clé `models`/`data` absente, à `null`, ou non-tableau → `@Vec::new()` (liste VIDE,
+    @Ok) — le `as_array().unwrap_or(&vec![])` transforme toute forme inattendue en succès
+    vide.
+  - Le statut HTTP du provider N'EST JAMAIS inspecté : aucune des deux branches ne teste
+    `response.status()` ; un 401/403/5xx dont le corps est du JSON valide est traité
+    comme une réponse exploitable (→ liste vide si les clés attendues manquent, donc
+    @200 `{"models": []}` côté app — cf. Scenario et Tasks `[!]`).
+
+Raises:
+  - @401 : cookie/porteur absent ou invalide — extracteur @AuthUser avant le corps
+    (miryad-core, même précédent que `./local_tools.sdd`).
+  - Erreurs de @resolve_user et de @can_write propagées par @AppError::from — types
+    d'erreur miryad-core (crate externe hors dépôt) : mapping @From réel non observable
+    depuis ici (cf. Tasks `[?]`) ; @sea_orm::DbErr devient
+    @AppError::InternalError → @500 corps `{"error": "VNL-DB-006: …"}` (`../error.rs`).
+  - @AppError::LlmProviderNotFound → @404, message `VNL-LLM-002: LLM provider not found`,
+    quand @find_by_id rend @None.
+  - @AppError::Forbidden → @403, message `VNL-AUTH-004: Forbidden`, quand @can_write rend
+    @false.
+  - @AppError::LlmError — toujours @502 BAD_GATEWAY ; le @Display de la variante entoure
+    le message interne : `VNL-LLM-001: LLM provider error: {interne}`, donc le corps
+    `{"error": …}` porte DEUX codes imbriqués (ex.
+    `VNL-LLM-001: LLM provider error: VNL-LLM-004: …`) — format à contractualiser, voir
+    Tasks. Codes internes émis par @discover_models :
+    - `VNL-LLM-003: {e}` — échec du @Client::builder (quasi inatteignable, aucune branche
+      de test, cf. Tasks) ;
+    - `VNL-LLM-004: {e}` — échec d'envoi (refus de connexion, DNS, URL invalide, timeout
+      10 s inclus) OU échec de décodage `.json()` (corps non JSON, y compris corps
+      d'erreur HTML d'un proxy) ; les DEUX await (send et json) partagent ce code ;
+    - `VNL-LLM-005: unknown provider type: {provider_type}` — `provider_type` hors des
+      deux valeurs ; même code que le hook @before_create de `../db/entities/llm_providers.rs`
+      mais message différent et rendu HTTP propre ici (@502) là où le hook rend un statut
+      miryad-core inconnu.
+  - @AppError::InternalError → @500 `VNL-DB-006: …` : erreur DB sur @find_by_id, sur l'un
+    des deux @update_many de @set_default_provider, ou sur l'@Entity::update de
+    @test_provider.
+  - Aucune panic, aucun @unwrap/@expect sur le chemin de production (harnais
+    `../../tooling.sdd`) ; accès `resp["models"]` / `resp["data"]` sur JSON non-objet →
+    @Value::Null → liste vide, jamais panic.
+
+Handles:
+  - Routage : `./mod.rs` @api_v1_router déclare `POST /llm-providers/{id}/test` →
+    @test_provider et `PUT /llm-providers/{id}/default` → @set_default_provider ;
+    `../main.rs` niche sous `/api/v1`. Autres méthodes sur ces chemins → @405 du
+    @MethodRouter axum sans jamais entrer ici (contrat de `./mod.sdd`).
+  - Invariant « au plus un `is_default: true` » : maintenu UNIQUEMENT par la paire
+    d'@update_many de @set_default_provider. Les deux UPDATE ne sont PAS dans une
+    transaction : entre les deux, toute lecture voit zéro défaut ; si le second échoue,
+    la base reste SANS défaut (le @500 n'annule pas le premier). Fenêtre et risque
+    documentés en Tasks `[?]` (miroir du `[?]` de `../db/entities/llm_providers.sdd`).
+  - @test_provider persiste `available_models` même sur liste vide issue d'une réponse
+    inattendue du provider (cf. Returns) : un test « réussi au sens HTTP » ÉCRASE les
+    modèles précédents avec `[]`.
+  - Course de suppression : si la ligne est supprimée entre @find_by_id et l'écriture
+    finale, @Entity::update / @update_many rendent @Ok avec 0 ligne affectée —
+    @set_default_provider répond alors un JSON `is_default: true` pour une ligne
+    disparue, @test_provider un `{"models": […]}` sans persistance silencieuse
+    (rows_affected ignoré — cf. Tasks `[?]`).
+  - Sortie réseau de `api_key` : Bearer vers l'`endpoint` stocké en branche
+    openai-compatible uniquement. La clé n'apparaît JAMAIS dans @TestResult ni dans les
+    messages d'erreur (le `{e}` de reqwest porte l'URL, pas les headers — observation,
+    non assertée).
+  - Consommateurs des colonnes écrites ici : `../config_store.rs` @load_providers ignore
+    `available_models` et `is_default` (le domaine @Provider de cfgstore ne les porte
+    pas) ; le frontend (`../../../frontend/src/api/httpConfigRepo.ts`) lit les deux via
+    le CRUD ; `../../../packages/ui/src/config/LlmProvidersScreen.vue` consomme
+    `is_default` (badge « Défaut » + bouton setDefault) et `../../../packages/ui/src/ports.ts`
+    qualifie `is_default` de « concept web-only » (impl RPC F4 → rejet). Aucun
+    consommateur back-end de l'information « provider par défaut » — l'endpoint est
+    purement un registre d'intention.
+  - Alignement structurel avec le handler voisin `./mcp_servers.rs` @test_server (même
+    séquence resolve_user → find → can_write → appel réseau) ; divergence : mcp_servers
+    rend son « not found » en @AppError::McpError (@502) alors qu'ici c'est
+    @LlmProviderNotFound (@404), et mcp_servers centralise ses codes via un préfixeur
+    alors qu'ici les formats sont inline.
+  - Tests existants : un seul @tokio::test, appel DIRECT du handler (pas de router, pas
+    d'extracteurs) sur @real_db (`../db/test_support.rs`, SQLite en mémoire migré),
+    admin provisionné par @resolve_user + @sync_group_memberships(`"admin"`) ;
+    @AuthUser construit à la main (subject `"admin-user"`).
+
+Must:
+  - Garder pour les deux handlers l'ordre exact : @AuthUser → @resolve_user →
+    @find_by_id (404 @LlmProviderNotFound sur @None) → @can_write (403 @Forbidden sur
+    @false) → effet. Aucun effet DB ni réseau avant la fin de la chaîne d'autorisation.
+  - Conserver la bascule de défaut en DEUX @update_many bulk dans l'ordre « FALSE global
+    sans filtre, puis TRUE filtré sur id » : supprimer le premier laisserait cohabiter
+    deux providers `is_default: true` (aucun autre mécanisme ne le défend) ; le remplacer
+    par une boucle ligne-par-ligne ou des re-fetches est ce que le commentaire « revue
+    Phase 3 » écarte explicitement.
+  - Répondre le @LlmProviderModel porté en mémoire (fetch + écrasement @true de
+    `is_default`), sans re-fetch après les UPDATE.
+  - Construire les URLs par simple concaténation après @trim_end_matches('/') :
+    `{endpoint}/api/tags` (ollama) et `{endpoint}/v1/models` (openai-compatible) — aucun
+    @url::Url, aucune validation de schéma.
+  - N'envoyer `Authorization: Bearer {api_key}` QUE sur la branche openai-compatible et
+    seulement quand `api_key` est @Some ; jamais sur ollama.
+  - Poser le timeout @reqwest à 10 s exactement, client reconstruit par appel.
+  - Extraire les listes uniquement par structure JSON (`models[].name` / `data[].id`,
+    @as_str → élimination silencieuse), JAMAIS par statut HTTP du provider — c'est le
+    comportement observable actuel, toute vérification de statut est un changement de
+    contrat (Tasks `[!]`).
+  - Persister `available_models` (valeur Set = liste découverte, colonne unique écrite
+    grâce aux autres champs @Unchanged) AVANT de rendre @200, et rendre dans
+    @TestResult la MÊME liste que celle persistée.
+  - Mapper toute erreur @discover_models sur @AppError::LlmError → @502, avec les codes
+    inline `VNL-LLM-003` (builder), `VNL-LLM-004` (send + json), `VNL-LLM-005`
+    (type inconnu) tels que formatés dans le fichier.
+
+Must not:
+  - Passer la bascule de défaut sous transaction, index unique partiel ou verrou sans
+    l'arbitrage des Tasks `[?]` (partagé avec `../db/entities/llm_providers.sdd`) — la
+    fenêtre sans défaut est du comportement observable actuel, pas un détail interne.
+  - Restreindre le premier @update_many (ex. `filter(is_default = true)`) ou tout autre
+    filtre « optimisation » sans décision explicite : la forme actuelle réécrit
+    sémantiquement toute la table et couvre les lignes déjà à @false.
+  - Abaisser l'autorisation de @test_provider sous @can_write (ex. read @Public) sans
+    arbitrage : le test déclenche un appel réseau sortant AU SEUL niveau écriture
+    aujourd'hui.
+  - Envoyer `api_key` en header sur la branche ollama, le logger (tracing), ou le faire
+    transparaître dans @TestResult ou dans un message d'erreur.
+  - Masquer ou filtrer un champ de la réponse de @set_default_provider (dont `api_key`
+    en clair) à l'initiative de CE fichier : le masque est à trancher globalement sur la
+    sérialisation de l'entité (`../db/entities/llm_providers.sdd` `[!]`).
+  - Introduire une vérification de `rows_affected` ou un re-fetch de contrôle sur les
+    UPDATE (comportement de course documenté en Handles, changement à arbitrer).
+  - Renommer ou dissocier unilatéralement le code `VNL-LLM-005` (partagé avec le hook de
+    création) sans passer par les Tasks des deux specs.
+
+Scenario: Basculer le défaut désactive l'ancien provider et rend le nouveau actif
+  Given deux providers insérés sur @real_db — `a` avec `is_default: @true`, `b` avec
+    `is_default: @false` — et un utilisateur résolu membre du groupe `"admin"`
+  When @set_default_provider est appelé avec @Path(id de b)
+  Then le JSON rendu porte `is_default: @true` et `id` égal à celui de `b`, la ligne `b`
+    en base a `is_default` à @true et la ligne `a` à @false — test existant
+    `set_default_provider_switches_the_flag`
+
+Scenario: Basculer le défaut sur un identifiant inconnu répond 404 sans écrire
+  Given une base sans provider d'id 9999 et un admin résolu
+  When @set_default_provider est appelé avec @Path(9999)
+  Then le handler retourne @Err(@AppError::LlmProviderNotFound) (rendu @404
+    `VNL-LLM-002: LLM provider not found`) et aucun @update_many n'a touché la table
+    (tout provider existant conserve son `is_default`)
+
+Scenario: Basculer le défaut sans droit d'écriture répond 403
+  Given un provider existant et un utilisateur résolu SANS appartenance donnant
+    l'écriture (can_write @false)
+  When @set_default_provider est appelé sur cet id
+  Then le handler retourne @Err(@AppError::Forbidden) (rendu @403 `VNL-AUTH-004`) et
+    l'état `is_default` de la table est inchangé
+
+Scenario: Tester un provider inconnu répond 404 sans appel réseau
+  Given une base sans provider d'id 9999 et un admin résolu
+  When @test_provider est appelé avec @Path(9999)
+  Then le handler retourne @Err(@AppError::LlmProviderNotFound) (@404) et aucune requête
+    HTTP sortante n'est émise (le @discover_models n'est pas atteint)
+
+Scenario: Tester un provider ollama retourne les noms de modèles et les persiste
+  Given un provider ollama dont l'`endpoint` pointe vers un serveur HTTP de test
+    répondant `{"models": [{"name": "llama3"}, {"name": "qwen"}, {"nomiss": 1}]}` et un
+    admin avec can_write
+  When @test_provider est appelé sur cet id
+  Then la réponse @200 est exactement `{"models": ["llama3", "qwen"]}` (élément sans
+    `name` chaîne éliminé), et la colonne `available_models` de la ligne vaut le tableau
+    JSON `["llama3", "qwen"]`
+
+Scenario: Tester un provider openai-compatible envoie le Bearer et extrait data par id
+  Given un provider openai-compatible avec `api_key: @Some("sk-test")`, un endpoint de
+    test capturant les headers et répondant `{"data": [{"id": "gpt-x"}, {"nomiss": 1}]}`
+  When @test_provider est appelé sur cet id
+  Then la requête reçue porte `GET {endpoint}/v1/models` et le header
+    `Authorization: Bearer sk-test`, la réponse est `{"models": ["gpt-x"]}` et
+    `available_models` est persisté à `["gpt-x"]`
+
+Scenario: Tester un openai-compatible sans clé n'envoit aucun header d'autorisation
+  Given un provider openai-compatible avec `api_key: @None` et un endpoint de test
+    capturant les headers
+  When @test_provider est appelé sur cet id
+  Then la requête reçue ne porte AUCUN header `Authorization` et la réponse est dictée
+    par le corps rendu (succès ou liste vide), sans erreur côté app
+
+Scenario: Tester un ollama ignore la clé api_key stockée
+  Given un provider ollama avec `api_key: @Some("cle-ignoree")` et un endpoint de test
+    capturant les headers
+  When @test_provider est appelé sur cet id
+  Then la requête reçue sur `{endpoint}/api/tags` ne porte aucun header `Authorization`
+
+Scenario: Un endpoint avec slash final ne produit pas de double slash
+  Given un provider ollama d'`endpoint` `"http://h:1234//"` et un serveur de test
+    journalisant le chemin demandé
+  When @test_provider est appelé sur cet id
+  Then le chemin reçu est exactement `/api/tags` (les `/` de fin sont retirés, un seul
+    séparateur subsiste)
+
+Scenario: Un provider_type inconnu au test échoue en 502 sous le code VNL-LLM-005
+  Given une ligne stockée avec `provider_type: "bogus"` (contournement programmatique du
+    hook, cf. `../db/entities/llm_providers.sdd`) et un admin avec can_write
+  When @test_provider est appelé sur cet id
+  Then le handler retourne @Err(@AppError::LlmError) rendu @502 dont le message
+    `error` contient `VNL-LLM-005: unknown provider type: bogus` (entouré du préfixe
+    `VNL-LLM-001: LLM provider error:`), et `available_models` de la ligne est inchangé
+
+Scenario: Un provider injoignable ou expiré échoue en 502 sous VNL-LLM-004
+  Given un provider ollama dont l'endpoint refuse les connexions (port fermé) — et,
+    variante timeout, un serveur qui ne répond pas sous 10 s
+  When @test_provider est appelé sur cet id
+  Then le handler retourne @Err(@AppError::LlmError) @502 dont le message contient
+    `VNL-LLM-004`, et rien n'est persisté dans `available_models`
+
+Scenario: Un corps de réponse non JSON échoue en 502 sous VNL-LLM-004
+  Given un provider openai-compatible dont l'endpoint de test répond du HTML (corps
+    invalide pour serde_json, quel que soit le statut)
+  When @test_provider est appelé sur cet id
+  Then le handler retourne @Err(@AppError::LlmError) @502 contenant `VNL-LLM-004` et
+    `available_models` reste inchangé
+
+Scenario: Une réponse d'erreur JSON du provider est un succès vide de 200
+  Given un provider openai-compatible avec mauvaise clé, dont l'endpoint de test répond
+    un @401 au corps JSON `{"error": {"message": "invalid api key"}}` (aucune clé `data`)
+  When @test_provider est appelé sur cet id
+  Then le handler répond @200 `{"models": []}` (le statut 401 n'est pas inspecté) et la
+    colonne `available_models` est ÉCRASÉE à `[]` — comportement actuel à confirmer,
+    voir Tasks `[!]`
+
+Scenario: Une réponse sans la clé attendue ou non-tableau rend une liste vide
+  Given un provider ollama dont l'endpoint de test répond respectivement `{}`,
+    `{"models": null}` puis `{"models": {"a": 1}}`
+  When @test_provider est appelé sur cet id dans chaque cas
+  Then chaque appel rend @200 `{"models": []}` et persiste `available_models` à `[]`
+
+Scenario: La persistance du test n'écrit que available_models
+  Given un provider ollama valide (`is_default: @true`, endpoint d'un serveur de test
+    rendant `{"models": [{"name": "m"}]}`)
+  When @test_provider est appelé sur cet id
+  Then la ligne en base a `available_models == ["m"]` tandis que `name`,
+    `provider_type`, `endpoint`, `api_key` et `is_default` conservent leurs valeurs
+    d'avant l'appel (@ActiveValue::Unchanged sur les autres colonnes)
+
+Scenario: Un identifiant de chemin non numérique est rejeté avant le corps du handler
+  Given le router assemblé comme dans `./mod.sdd` (nest `/api/v1` + @api_v1_router) et
+    un porteur authentifié
+  When une requête `PUT /api/v1/llm-providers/abc/default` est exécutée
+  Then la réponse est le @400 de l'extracteur @Path axum (corps texte brut de
+    l'extracteur, pas l'enveloppe `{"error": …}` de @AppError) et aucun code de CE
+    handler ne s'exécute
+
+Depends on:
+  - @axum (@Json, @Path, @State), @sea_orm (@ColumnTrait, @EntityTrait,
+    @IntoActiveModel, @QueryFilter, @sea_query::Expr), @reqwest (client HTTPS sortant),
+    @serde, @serde_json, @tokio (runtime des tests).
+  - @miryad_core::auth::@AuthUser, @miryad_core::rbac::@can_write,
+    @miryad_core::users::@resolve_user — crate externe miryad-core v0.1, source hors
+    dépôt : sémantique exacte (401, groupes RBAC, erreurs et leur mapping @From)
+    invérifiable depuis ici.
+  - ../error.rs — @AppError (variantes @LlmError, @LlmProviderNotFound, @Forbidden,
+    @InternalError), @From<@sea_orm::DbErr> (`VNL-DB-006`) et @IntoResponse
+    (statuts + corps `{"error": …}` ; contrat : `../error.sdd`).
+  - ../db/entities/llm_providers.rs — @Entity, @Column, @Model consommés ici ; hook
+    @before_create et `[?]` ouvert sur l'invariant `is_default` :
+    `../db/entities/llm_providers.sdd`.
+  - ./mod.rs — déclaration des deux routes ; `../main.rs` — nest `/api/v1` (contrats :
+    `./mod.sdd`, `../main.sdd`).
+  - ../AppState / `../config.rs` / `../auth/mod.rs` (test_support) /
+    ../db/test_support.rs (@real_db) / @miryad_core::users::@sync_group_memberships —
+    utilisés par le @mod tests du fichier.
+  - ../../tooling.sdd — harnais clippy applicable au code de production du fichier.
+
+Tasks:
+  [!] Le test d'un provider ne vérifie JAMAIS le statut HTTP : un 401 (mauvaise clé),
+      404 ou 5xx avec corps JSON valide rend @200 `{"models": []}` ET écrase
+      `available_models` à `[]` — un utilisateur voyant « test réussi, 0 modèle » ne peut
+      pas distinguer un provider sans modèle d'une clé refusée. Faut-il exiger le succès
+      HTTP (@status().is_success()) et quel code alors (VNL-LLM-004 existant ou code
+      propre au statut) ? Trancher avec Sébastien ; le Scenario
+      « réponse d'erreur JSON du provider est un succès vide de 200 » capture l'état
+      actuel et devra être retourné si la vérification est adoptée.
+  [!] Cohérence `api_key` avec le `[!]` ouvert de `../db/entities/llm_providers.sdd` :
+      ici la clé est LUE depuis la base et envoyée en Bearer à l'endpoint stocké (seule
+      sortie réseau du secret) ; si l'arbitrage global du masque aboutit à une valeur
+      sentinelle ou un champ écriture-seule, @discover_models doit lire la clé réelle
+      sinon tout test openai-compatible échouera avec la sentinelle. Les deux `[!]`
+      doivent être tranchés ensemble.
+  [?] Bascule `is_default` non transactionnelle : fenêtre sans défaut entre les deux
+      @update_many, et absence DÉFINITIVE de défaut si le second UPDATE échoue (le @500
+      ne revient pas le premier). Miroir du `[?]` de `../db/entities/llm_providers.sdd` :
+      transaction SeaORM (@begin/@commit), index unique partiel `WHERE is_default`, ou
+      fenêtre assumée ?
+  [?] `rows_affected` ignoré sur les trois écritures : suppression concurrente de la
+      ligne → @set_default_provider rend @200 `is_default: true` pour une ligne morte et
+      @test_provider persiste silencieusement rien. Vérifier `rows_affected` (erreur
+      dédiée ?) ou assumer la course ?
+  [?] Partage du code `VNL-LLM-005` hook-création (entité) vs runtime-test (ici) : deux
+      messages, deux rendus (statut miryad-core inconnu vs @502) sous un même code —
+      voulu (famille `VNL-LLM-`) ou à dissocier (ex. `VNL-LLM-006` côté runtime) ? Le
+      format global des identifiants d'erreur (AGENTS.md : « à contractualiser ») n'est
+      toujours porté par aucune spec ; imbriquement observé ici : `VNL-LLM-001` entourant
+      `VNL-LLM-003/004/005` dans le même message — acceptable ou à aplatir ?
+  [?] Types d'erreur réels de @resolve_user et @can_write (miryad-core hors dépôt) et
+      leurs @From vers @AppError : quel statut si l'utilisateur OIDC valide ne peut pas
+      être résolu (DB KO, provisionnement refusé) ? Un test d'intégration sur @real_db
+      peut-il trancher, ou délégation assumée à miryad-core (précédent `./local_tools.sdd`) ?
+  [?] @test_provider exige @can_write (écriture) alors que la ressource se lit en
+      @Public : un utilisateur non-admin ne peut pas tester un provider. Choix voulu
+      (l'appel réseau sortant avec secret justifie AdminOnly) ou droit de test à
+      dissocier du droit d'écriture ?
+  [?] @VNL-LLM-003 (échec du @Client::builder, timeout figé à 10 s) : branche en pratique
+      inatteignable, aucune couverture possible — la documenter comme défensive ou la
+      retirer au profit du @From<reqwest::Error> @VNL-REQ-001 de `../error.rs` déjà
+      disponible mais inutilisé ici ?
+  [?] Couverture de tests quasi nulle : un seul test (chemin heureux de
+      @set_default_provider, appel direct sans router). @test_provider et
+      @discover_models n'ont AUCUN test — les 15 Scenarios de la présente spec (404/403
+      handler-niveau, branches ollama/openai, Bearer, slash final, VNL-LLM-004/005,
+      écrasement `available_models`, non-numérique via router) sont des tests À ÉCRIRE,
+      avec serveur HTTP de test (ex. @tokio::test + @axum::serve sur port éphémère,
+      précédent @test_state du fichier). À faire dériver en TTD.
+  [?] Réponse de @set_default_provider construite depuis le fetch d'AVANT les UPDATE
+      (colonnes potentiellement périmées, cf. Returns) : acceptable (coût d'un re-fetch)
+      ou alignement sur la base relue ?

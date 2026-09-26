@@ -1,0 +1,712 @@
+Spec: Config Store
+
+Platform: Rust/vanyline-app/sea-orm/async-trait/serde_json/vanyline-cfgstore/tracing
+
+Purpose:
+  Implémentation Postgres (@PgConfigStore) du trait @ConfigStore de `vanyline-cfgstore`
+  (../../cfgstore/src/store.rs, importé via la ré-export `vanyline_lib::store::ConfigStore`) :
+  la LECTURE de la configuration de l'app depuis les six tables `vanyline_*` (providers,
+  model_profiles, mcp_servers, toolsets, agents, skills), projetée ligne-DB → domaine
+  (@Provider, @ModelProfile, @McpServer, @Toolset, @Agent, @SkillMeta de
+  ../../cfgstore/src/domain.rs). Un seul contrat pour le fichier : les onze fonctions
+  privées pures (@provider_type_from_str … @domain_skill_meta, @cfg_err) n'existent que
+  pour la traduction des lignes chargées par les méthodes du trait, et le module de tests
+  (25 tests unitaires sans base) ne teste qu'elles.
+  Le fichier est explicitement un implémenteur PARTIEL du trait : seules les huit lectures
+  obligatoires sont surchargées ; les dix-neuf écritures (@create_*/@update_*/@delete_*/
+  @set_default_agent) retombent sur le défaut du trait @CfgStoreError::ReadOnly et
+  @default_agent y est un @Ok(@None) constant — la vérification demandée par
+  ../../cfgstore/src/store.sdd (« ses écritures retombent toutes sur VNL-CFG-009 et son
+  default_agent est un None constant ») est CONFIRMÉE par le code. Les écritures de config
+  de l'app ne passent JAMAIS par ce store : elles vivent dans le CRUD @resource_router de
+  miryad-core monté par ./main.rs. Seul constructeur observable : ./ws/chat.rs qui bâtit
+  `PgConfigStore::new(db.clone(), user_id)` par session de chat (le store est lié à UN
+  utilisateur, capturé à la construction).
+  La traduction domaine est le point de convergence documenté par les specs entités
+  (./db/entities/*.sdd) : « la transformation est le contrat de ./config_store.rs » y est
+  répété — ce fichier est donc le propriétaire de : résolution `provider_id` → NOM de
+  provider, `model_profile_id` → NOM de profil, filtrage owner manuel par @Column::OwnerId,
+  replis défensifs sur JSON malformé, et mappage VnyError → @CfgStoreError::Config
+  (double marqueur `VNL-CFG-001` imbriqué, posture verrouillée par
+  ../../cfgstore/src/error.sdd).
+
+Owns:
+  ./config_store.rs
+
+Can read:
+  ./db/entities/llm_providers.rs
+  ./db/entities/model_profiles.rs
+  ./db/entities/mcp_servers.rs
+  ./db/entities/toolsets.rs
+  ./db/entities/agents.rs
+  ./db/entities/skills.rs
+  ./db/test_support.rs
+  ./ws/chat.rs
+  ./error.rs
+  ./main.rs
+  ../../cfgstore/src/store.rs
+  ../../cfgstore/src/error.rs
+  ../../cfgstore/src/domain.rs
+  ../../lib/src/error.rs
+  ../../lib/src/lib.rs
+  ../Cargo.toml
+
+Depends on:
+  @sea_orm — @DatabaseConnection (cloné à la construction), @EntityTrait/@ColumnTrait/
+    @QueryFilter : chaque requête est un `Entity::find()` (+ `.filter()`), sans
+    transaction, sans `ORDER BY`, sans jointure (@Relation vide partout côté entités —
+    les résolutions id → nom se font en mémoire).
+  @crate::db::entities — les six types de ligne (@DbLlmProvider, @DbModelProfile,
+    @DbMcpServer, @DbToolset, @agents::Model (alias @AgentRecord), @DbSkill) ; specs
+    ./db/entities/*.sdd (colonnes, FK, index uniques qui bornent ce que les conversions
+    peuvent voir).
+  @vanyline_lib::store::ConfigStore — le trait (défini ../../cfgstore/src/store.rs,
+    ré-exporté par ../../lib/src/lib.rs) : 8 lectures obligatoires surchargées ici, 6
+    défauts @get_* hérités (via @resolve_by_name), 19 écritures héritées en
+    @Err(@CfgStoreError::ReadOnly).
+  @vanyline_lib::domain — @Provider, @ProviderType, @ModelProfile, @McpServer,
+    @McpTransport, @Toolset, @McpSelection, @Agent, @AgentMode, @SkillMeta,
+    @SkillSelection (ré-export du domaine de ../../cfgstore/src/domain.rs ; spec
+    ../../cfgstore/src/domain.sdd) ; @SkillSelection::Default == @SkillSelection::Auto,
+    pilier des replis.
+  @vanyline_cfgstore::CfgStoreError (../../cfgstore/src/error.rs) — type d'erreur exclusif
+    remonté : seules les variantes @Config (`VNL-CFG-001`), @UnknownReference
+    (`VNL-CFG-003`), @DuplicateName (`VNL-CFG-002`, via les défauts @get_*) et @ReadOnly
+    (`VNL-CFG-009`, via les défauts d'écriture) sont atteignables depuis ce fichier.
+  @vanyline_lib::VnyError (../../lib/src/error.rs) — erreur interne des conversions
+    (@UnknownProviderType `VNL-LLM-005`, @LlmProviderNotFound `VNL-LLM-002`,
+    @UnknownReference `VNL-CFG-003`, @ConfigError `VNL-CFG-001`), toujours stringifiée par
+    @cfg_err avant remontée — @VnyError ne franchit jamais la frontière du store ici.
+  @async_trait — méthode d'objet du trait.
+  @serde_json — @from_value des colonnes JSONB (@toolsets, @skills, @local_tools, @mcp),
+    @Value des colonnes @options/@headers.
+  @tracing — unique effet d'observable hors retour : @tracing::warn! de @list_mcp_servers.
+  Consommateurs (hors périmètre) : ./ws/chat.rs (@handle_message, session de chat),
+    ./error.rs (@From<@CfgStoreError> → HTTP 500), la session ../../lib/src/session.rs
+    via @Arc<dyn @ConfigStore>.
+
+Exposes:
+  @PgConfigStore — `pub struct { db: @DatabaseConnection, user_id: i32 }`, les deux champs
+    PRIVÉS ; constructeur @PgConfigStore::new(db, user_id) `pub` (seule voie de
+    construction, ./ws/chat.rs le lui fournit). @async_trait `impl ConfigStore for
+    @PgConfigStore` : @Send + @Sync satisfaits (les deux champs le sont). Aucun autre
+    item `pub` du fichier.
+  Lectures surchargées (8 — les seules méthodes propres) :
+    @list_providers — @load_providers (table ENTIÈRE, aucun filtre) puis @domain_provider
+      par ligne ; conversion fallible, tout-ou-rien.
+    @list_models — @load_model_profiles (filtré `owner_id == user_id`) + @load_providers
+      BRUT (revient sans conversion, sans filtre owner) puis @domain_model_profile par
+      profil ; tout-ou-rien.
+    @list_mcp_servers — requête inline `@mcp_servers::Entity::find().all()` (aucun filtre,
+      aucune loader dédiée) puis @domain_mcp_server par ligne ; les lignes refusées sont
+      SAUTÉES avec @tracing::warn! (`"Skipping MCP server '{}': unknown server_type
+      '{}'"`), jamais d'erreur.
+    @list_toolsets — @load_toolsets (filtré owner) puis @domain_toolset ; infaillible.
+    @list_agents — @load_agent_records (filtré owner) + @load_model_profiles (filtré
+      owner) puis @domain_agent_record par ligne ; tout-ou-rien.
+    @list_skills — @load_skills (filtré owner) puis @domain_skill_meta ; infaillible,
+      sans corps.
+    @load_skill — `find().filter(@Column::OwnerId.eq(user_id)).filter(@Column::Name.eq(
+      name)).one()` ; rendu = `row.body` BRUT (aucun trim) ; zéro ligne ->
+      @CfgStoreError::UnknownReference(`"skill"`, nom). @one() rend la première ligne si
+      plusieurs (index unique `(owner_id, name)` rend le cas inatteignable en pratique).
+    @default_agent — @Ok(@None) constant, sans requête.
+  Lectures héritées (6 — défauts du trait, @resolve_by_name sur les list_x de CETTE
+    instance) : @get_provider, @get_model, @get_mcp_server, @get_toolset, @get_agent,
+    @get_skill ; littéraux de sorte `"provider"`, `"model"`, `"mcp_server"`, `"toolset"`,
+    `"agent"`, `"skill"` ; @get_skill rend une @SkillMeta (JAMAIS le corps — corps =
+    @load_skill).
+  Écritures héritées (19 — aucune surcharge, défaut @Err(@CfgStoreError::ReadOnly)) :
+    @create_provider/@update_provider/@delete_provider, idem model, mcp_server, toolset,
+    agent, skill (18) + @set_default_agent.
+  Privées, sans I/O (contrat « testables sur fixtures construites à la main ») :
+    @provider_type_from_str (`"ollama"` -> @ProviderType::Ollama, `"openai-compatible"`
+      -> @ProviderType::OpenaiCompatible, autre -> @VnyError::UnknownProviderType),
+    @headers_from_json (@Value::Object -> @BTreeMap des seules valeurs @as_str ; non-objet
+      -> map vide), @domain_mcp_server (`"http-streamable"` -> @McpTransport::HttpStreamable,
+      `"sse"` -> @McpTransport::Sse, autre -> @None — le warn est à l'appelant),
+    @domain_provider (name/provider_type/endpoint/api_key passe-through),
+    @domain_model_profile (find id -> provider ; sinon @LlmProviderNotFound ; @options
+      non-objet -> @Map vide ; `max_tokens` i64 -> u64 par `as`), @agent_mode_from_str
+    (`"primary"`/`"subagent"`/`"all"`, autre -> @VnyError::ConfigError),
+    @resolve_model_profile_name (find id -> NOM ; orphelin -> @VnyError::UnknownReference
+    (`"model"`, id en string)), @domain_agent_record, @domain_toolset, @domain_skill_meta
+    et @cfg_err (`@CfgStoreError::Config(e.to_string())`).
+  @mod tests — `#[cfg(test)]` avec `#![allow(clippy::unwrap_used, clippy::expect_used)]`
+    (exemption de harnais sous cfg(test), ./tooling.sdd) : 25 tests unitaires des seules
+    fonctions pures (fixtures @Db* littérales, aucune @DatabaseConnection) — AUCUN test
+    des méthodes du trait, ni du filtrage owner, ni des ReadOnly (voir `Tasks`).
+
+Accepts:
+  @load_providers / @load_mcp_servers : toute ligne des deux tables globales — ni
+    `vanyline_llm_providers` ni `vanyline_mcp_servers` ne portent de colonne owner (specs
+    entités : @owner_column() @None, ressources @AccessPolicy::Public) : tout store,
+    quel que soit son user_id, voit toutes les lignes.
+  @load_model_profiles / @load_toolsets / @load_agent_records / @load_skills /
+    @load_skill (nom) : filtrage manuel `owner_id == self.user_id` (le filtre owner n'est
+    PAS délégué à miryad-core sur ce chemin).
+  @domain_provider : @provider_type exact — comparaison à chaîne exacte (`" ollama "` avec
+    espaces est inconnu) ; `endpoint`/`api_key` passe-through sans validation ;
+    `available_models` et `is_default` de la ligne sont IGNORÉS (inexistants côté
+    domaine).
+  @domain_model_profile : @options toute valeur JSON (objet -> map clonée intégralement,
+    valeur interne passthrough ; non-objet dont `null` -> map vide) ; @max_tokens tout
+    i64 y compris négatif (`as u64`, pas de contrôle) ; @temperature f64 passe-through.
+  @domain_mcp_server : @headers toute valeur JSON (seules les valeurs @as_str d'un objet
+    survivent, clés triées par @BTreeMap) ; @available_tools ignoré.
+  @domain_agent_record : @toolsets JSON -> @Vec<String> (forme hors tableau d'éléments
+    chaîne -> @Vec vide silencieux via @unwrap_or_default, y compris JSON `null`) ;
+    @skills JSON -> @SkillSelection (formes `"auto"`/`"none"`/tableau de noms ; TOUTE
+    autre forme dont `null` -> repli @SkillSelection::Auto = @Default, silencieux) ;
+    @mode inconnu et @model_profile_id orphelin : ERREURS DURES, pas de repli.
+  @domain_toolset : @local_tools/@mcp mêmes replis silencieux (`NOT NULL DEFAULT '[]'` en
+    base, donc forme invalide = écriture anormale uniquement) ; @description/@prompt
+    Option passe-through.
+  @load_skill : n'importe quelle chaîne `name` (vide comprise) — aucune validation, la
+    seule issue négative est l'absence de ligne (propriétaire OU nom).
+  @get_* (hérités) : n'importe quelle chaîne comme nom ; les écritures héritées
+    acceptent n'importe quel (layer, item, patch, name) — tout est ignoré avant le
+    @ReadOnly.
+
+Returns:
+  @list_providers -> @Vec<@Provider> : @name/@endpoint/@api_key (Option) de la ligne,
+    @provider_type converti ; api_key en clair en mémoire (le masque est un arbitrage
+    ouvert de ./db/entities/llm_providers.sdd, ce store ne masque rien).
+  @list_models -> @Vec<@ModelProfile> : @provider porte le NOM du provider résolu par id
+    (tout provider est résolvable — la table provider ne porte aucune colonne owner),
+    @max_tokens u64, @options @serde_json::Map.
+  @list_mcp_servers -> @Vec<@McpServer> : les seules lignes à @server_type connu ;
+    @headers @BTreeMap trié, valeurs chaîne uniquement.
+  @list_toolsets -> @Vec<@Toolset> ; @list_agents -> @Vec<@Agent> (@model porte le NOM
+    du profil, jamais l'id) ; @list_skills -> @Vec<@SkillMeta> (deux champs, jamais
+    `body`).
+  @load_skill -> @Ok(String) : le corps EXACT de la colonne, octet pour octet, sans
+    trim ni normalisation (divergence avec fs_store qui TRIMME — `[?]` d'arbitrage
+    porté par ./db/entities/skills.sdd, jamais tranché ici).
+  @default_agent -> @Ok(@None), toujours, quelle que soit la base.
+  Ordres de listes : AUCUN `ORDER BY` nulle part — l'ordre est celui que la base rend
+    (ordre physique en pratique), non contracté.
+  Chaque appel exécute ses requêtes à la demande : @list_models et @list_agents émettent
+    DEUX requêtes séquentielles sans transaction — pas de garantie d'instantané cohérent
+    entre les deux lectures.
+  @get_* -> clone de l'élément résolu ; @resolve_by_name s'arrête au deuxième match.
+
+Raises:
+  @CfgStoreError::Config (`VNL-CFG-001`) — toute erreur de requête SeaORM (@DbErr
+    stringifié tel quel : connexion tombée, table absente…) par les loaders,
+    @list_mcp_servers et @load_skill ; message = texte brut du @DbErr (aucun marqueur
+    interne, marqueur unique `VNL-CFG-001`).
+  @CfgStoreError::Config à DOUBLE marqueur par @cfg_err (payload = @Display de @VnyError,
+    le type ne déduplique rien — posture verrouillée par ../../cfgstore/src/error.sdd) :
+      une ligne provider au @provider_type inconnu (chemin @list_providers et
+      @get_provider) -> `VNL-CFG-001: Configuration error: VNL-LLM-005: Unknown provider
+      type: {v}` ;
+      un profil dont le @provider_id est absent de la table (chemin @list_models,
+      structurement inatteignable en base — FK RESTRICT + table non filtrée —, atteignable
+      seulement par fixtures) -> `… VNL-LLM-002: LLM provider not found` ;
+      un agent au @model_profile_id orphelin ou hors owner (chemin @list_agents,
+      @get_agent) -> `… VNL-CFG-003: Unknown model reference: '{id}'` ;
+      un agent au @mode inconnu -> le payload porte lui-même le marqueur 001, rendu à
+      préfixe répété deux fois : `VNL-CFG-001: Configuration error: VNL-CFG-001:
+      Configuration error: unknown agent mode: {v}`.
+  @CfgStoreError::UnknownReference (`VNL-CFG-003`) — @load_skill sur nom absent OU
+    appartenant à un autre owner (les deux sont rendus IDENTIQUES, aucune distinction
+    absence/propriété) : `VNL-CFG-003: Unknown skill reference: '{name}'` ; et par les
+    défauts @get_* sur nom absent (sorte propre à chaque méthode).
+  @CfgStoreError::DuplicateName (`VNL-CFG-002`) — par les défauts @get_* uniquement ;
+    structurement INATTEIGNABLE en pratique : les index uniques SQL (`name` global pour
+    providers/mcp_servers, `(owner_id, name)` pour le reste) + le filtre owner garantissent
+    l'unicité dans tout jeu chargé.
+  @CfgStoreError::ReadOnly (`VNL-CFG-009`) — les dix-neuf écritures héritées, sans
+    condition ni effet d'état : `VNL-CFG-009: Config store is read-only`.
+  Jamais depuis ce fichier : @InvalidName, @NotFound, @NameConflict, @Validation, @Io,
+    @WriteError (variantes `VNL-CFG-004`, `VNL-CFG-005`, `VNL-CFG-006`, `VNL-CFG-007`,
+    `VNL-CFG-008`, `VNL-CFG-010`, propres à fs_store/fixture).
+    Jamais de panic sur le chemin de production : aucun @unwrap/@expect, les seuls
+    @unwrap_or_default et le `as u64` sont totaux.
+
+Handles:
+  Asymétrie des lignes poison (posture inégale entre domaines, figée par le code) :
+      @list_providers est TOUT-OU-RIEN (@collect::<Result>) : une ligne au type inconnu —
+    atteignable en base car ./db/entities/llm_providers.rs ne valide le hook QUE sur la
+    création REST — fait échouer TOUTE la liste, et donc aussi @get_provider sur un nom
+    pourtant valide ;
+      @list_models et @list_agents TRAVERSENT les providers au type inconnu :
+    @domain_model_profile ne consomme que le @name des lignes brutes de @load_providers
+    (le type n'est jamais passé par @provider_type_from_str sur ces chemins) ;
+      @list_mcp_servers EST TOLÉRANT : ligne au @server_type inconnu sautée + warn, la
+    liste continue (seule divergence de posture documentée à ce jour) ;
+      @list_agents est tout-ou-rien sur @mode inconnu (guardes d'update inexistantes,
+    cf. ./db/entities/agents.sdd `[!]`) et sur profil orphelin — le premier agent fautif
+    dans l'ordre de parcours avorte le @collect, sans résultat partiel.
+  Cross-owner par FK non bornée : la FK `agents.model_profile_id` n'exige PAS que le
+    profil appartienne au même owner (./db/entities/agents.sdd `[!]`) ; comme
+    @load_model_profiles filtre sur l'owner, un agent d'alice pointant sur un profil de
+    bob rend @UnknownReference("model") et fait échouer TOUT le @list_agents d'alice —
+    une ligne cross-owner empoisonne toutes les lectures d'agents de l'owner (documenté,
+    jamais béni, voir `Tasks`).
+  Repli silencieux sur JSON malformé : @toolsets/@skills (agents), @local_tools/@mcp
+    (toolsets), @options (profils), @headers (MCP) ne font JAMAIS échouer une liste —
+    @unwrap_or_default/map vide — posture défensive assumée par les commentaires du
+    fichier (même philosophie que fs_store sur ses champs mous) ; une corruption durable
+    est ainsi avalée sans trace (aucun warn sur ces replis, contrairement à MCP).
+  @load_skill vs fs_store : corps rendu BRUT ici ; fs_store le rend TRIMÉ — l'écart est
+    l'arbitrage `[?]` porté par ./db/entities/skills.sdd, ce fichier l'applique sans le
+    trancher.
+  Chaîne d'erreurs descendante : @CfgStoreError -> ./error.rs @From ->
+    @AppError::InternalError -> HTTP 500 avec le @Display complet (double marqueur
+    inclus) ; ./ws/chat.rs recharge la config par ce store à chaque message.
+  Two-query sans snapshot : @list_models (profils puis providers) et @list_agents (agents
+    puis profils) lisent dans DEUX requêtes non transactionnelles — une écriture REST
+    concurrente entre les deux est visible à moitié seulement (résolution sur un jeu
+    partiellement neuf) ; aucune incohérence détectée ni refusée.
+  Fichier de test : les 25 tests portent des numéros de commentaire hérités d'un ancien
+    plan (1, 2, 3, 4, 5, 11…25, 27…30 — trous 6-10 et 26) et le commentaire `// 4.` cite
+    l'ancien nom `domain_mcp_server_sse_skipped` alors que le test s'appelle
+    @domain_mcp_server_sse_mapped depuis que `"sse"` est mappé et non plus ignoré —
+    trace d'ancienne méthode, voir `Tasks`.
+  Harnais : production sans @unwrap/@expect/@panic/@print/@dbg ; warn via @tracing ;
+    exemption `#![allow(clippy::unwrap_used, clippy::expect_used)]` confinée sous
+    `#[cfg(test)]` ; le `as u64` de @max_tokens est un cast sign-loss qui vit dans la
+    dette préexistante de ./tooling.sdd (la purge le traitera, ce fichier ne l'ajoute pas).
+
+Must:
+  Surcharger exactement les huit lectures obligatoires et AUCUNE des dix-neuf écritures
+    (le défaut @ReadOnly du trait est la position contractuelle de l'app — store.sdd s'y
+    appuie) ; @default_agent doit rendre @Ok(@None) sans requêter.
+  Filtrer `owner_id == user_id` par @Column::OwnerId sur model_profiles, toolsets, agents
+    et skills (requêtes @list_* et @load_skill), et ne AUCUNEMENT pas filtrer
+    llm_providers ni mcp_servers (tables globales de leurs specs entités).
+  Rendre @load_skill le corps exact de la colonne sans aucun trim ni normalisation, et
+    @UnknownReference(`"skill"`, nom) sur zéro ligne (absent ou d'un autre owner —
+    rendu identique volontaire).
+  Porter dans @Agent.model le NOM du profil résolu par @resolve_model_profile_name —
+    jamais l'id ; orphelin (absent du jeu filtré owner inclus) est une erreur DURE.
+  Convertir @mode et @provider_type par comparaison exacte aux littéraux (`"primary"`,
+    `"subagent"`, `"all"` ; `"ollama"`, `"openai-compatible"`) et rendre les erreurs
+    dures @ConfigError/@UnknownProviderType — jamais un repli silencieux sur ces deux
+    champs.
+  Appliquer @unwrap_or_default (ou map vide) SANS erreur ni log sur : @toolsets/@skills
+    d'agent, @local_tools/@mcp de toolset, @options de profil, @headers de serveur MCP.
+  Sauter les lignes MCP au @server_type inconnu avec un @tracing::warn! nommant serveur
+    et type, sans échec de @list_mcp_servers, et mapper `"sse"` sur @McpTransport::Sse
+    (accepté en config — la connexion elle-même relève `VNL-MCP-004` côté
+    ../../lib/src/prefixed_mcp.sdd, hors du store).
+  Router toute erreur interne par @cfg_err = @CfgStoreError::Config(@Display de
+    @VnyError stringifié), payload tél quel y compris son propre marqueur `VNL-*` —
+    le double marqueur est le rendu attendu par ../../cfgstore/src/error.sdd.
+  Rendre @list_skills sans corps et @get_skill (défaut hérité) en @SkillMeta : le corps
+    ne sort que par @load_skill.
+  Remonter toute @DbErr en @CfgStoreError::Config(message @DbErr) — aucune erreur SeaORM
+    ne doit paniquer ni être avalée.
+  Garder les fonctions de traduction SANS accès à @DatabaseConnection ni I/O (contrat de
+    testabilité sans base des fixtures du @mod tests).
+
+Must not:
+  Écrire en base depuis ce store (aucun insert/update/delete, aucune transaction) : les
+    écritures de config sont le contrat du REST miryad-core ; la moindre écriture ici
+    exige d'abord de retirer le défaut @ReadOnly par spec.
+  Valider, normaliser, tronquer ou TRIMMER le corps de @load_skill, l'@endpoint, l'@url,
+    les valeurs de @options ou le contenu des listes d'outils — le store ne connaît que
+    la forme des clés qu'il convertit.
+  Faire échouer @list_mcp_servers, @list_toolsets ou @list_skills pour une ligne au JSON
+    ou au type inattendu (seul @list_providers, @list_models et @list_agents sont
+    tout-ou-rien, et uniquement sur leurs erreurs dures listées en `Raises`).
+  Révéler l'existence d'un skill d'un autre owner autrement que par le @UnknownReference
+    standard de @load_skill (aucun message distinct).
+  Exposer @available_models, @is_default (providers) ou @available_tools (MCP) dans le
+    domaine — colonnes ligne-only ignorées par les conversions.
+  Exposer @PgConfigStore::db ou user_id (champs privés), ni ajouter un item `pub` hors
+    du duo @PgConfigStore/new.
+  Utiliser les relations SeaORM (aucune n'existe), un ORDER BY, ou une pool de connexions
+    partagée entre appels.
+  Paniquer, @unwrap/@expect hors `#[cfg(test)]`, @println!/@eprintln!/@dbg! — harnais
+    ./tooling.sdd.
+
+Tasks:
+  [ ] Écrire les tests des Scenario de méthode (aucun test actuel des huit lectures +
+    défauts hérités, tout repose sur ./db/test_support.rs @real_db et inserts
+    @Entity::insert pour contourner les hooks miryad-core) :
+    `domain_provider_type_inconnu_est_erreur`,
+    `cfg_err_produit_un_double_marqueur_verrouille`,
+    `list_providers_retourne_le_domaine_sans_filtrer_owner`,
+    `list_providers_type_inconnu_empoisonne_toute_la_liste`,
+    `ligne_poison_fait_echouer_get_provider_valide`,
+    `erreur_requete_remappe_en_vnl_cfg_001`,
+    `list_models_resout_le_provider_par_nom_table_globale`,
+    `list_models_traverse_un_type_de_provider_inconnu`,
+    `list_models_max_tokens_negatif_bascule_en_u64`,
+    `list_mcp_servers_saute_le_type_inconnu_sans_erreur`,
+    `list_mcp_servers_filtre_les_headers_non_string`,
+    `list_toolsets_et_list_skills_sont_infaillibles`,
+    `list_agents_mode_invalide_fait_echouer_toute_la_liste`,
+    `list_agents_profil_dun_autre_owner_fait_echouer_toute_la_liste`,
+    `list_agents_skill_selection_auto_none_named`,
+    `load_skill_retourne_le_corps_brut_sans_trim`,
+    `load_skill_dun_autre_owner_rend_vnl_cfg_003`,
+    `default_agent_ne_designe_jamais_rien`,
+    `dix_neuf_ecritures_rendent_vnl_cfg_009`,
+    `get_skill_rend_les_meta_pas_le_corps`,
+    `get_mcp_server_sur_ligne_sautee_rend_vnl_cfg_003`,
+    `les_quatre_tables_owner_filtrees_isolent_les_owners`.
+    Les 25 Scenario de fonctions pures ont déjà leur test éponyme dans ./config_store.rs.
+  [?] Corps de @load_skill brut vs corps TRIMÉ de fs_store (./db/entities/skills.sdd
+    `[?]`) : lequel consomme le sandbox/les agents — arbitrer ET aligner les deux
+    implémentations dans la même tâche.
+  [!] Empoisonnement cross-owner de @list_agents : FK `model_profile_id` sans contrôle
+    d'owner + @load_model_profiles filtré => un agent pointant sur le profil d'un autre
+    owner (écrit par un insert cross-owner que miryad-core n'interdit pas, cf.
+    ./db/entities/agents.sdd `[!]`) rend TOUT list_agents d'alice en VNL-CFG-001 — déni
+    de service par une seule ligne. Trou à refermer (résolution tous propriétaires ?
+    filtre dur ? validation d'écriture ?) ou posture assumée ? Arbitrage Sébastien.
+  [!] Posture « tout-ou-rien » des lignes poison : @mode inconnu ou @provider_type
+    inconnu (deux champs dont les gardes n'ont pas de couverture update, cf. specs
+    entités `[!]`) font échouer toute liste ET tout @get_x du domaine — là où MCP saute
+    et warn. Faut-il UNE posture (sauter+warn comme MCP, ou ligne dure partout) ?
+    Tant que non tranché, les Scenario fixent l'état actuel.
+  [?] `max_tokens` négatif -> bascule `as u64` en un u64 géant (pas de panique, pas de
+    CHECK — ./db/entities/model_profiles.sdd `[?]`) : CHECK SQL, validation d'écriture,
+    ou assumption ? Le cast vit aussi dans la dette harnais (sign-loss) de ./tooling.sdd.
+  [?] @LlmProviderNotFound de @domain_model_profile est inatteignable en base (FK
+    RESTRICT + @load_providers non filtré) — erreur défensive morte en prod, seule
+    atteignable par fixtures. La garder (défense) ou la documenter inerte ?
+  [?] @DuplicateName (VNL-CFG-002) des @get_* est rendu inatteignable par les index
+    uniques SQL ; @one() de @load_skill rendrait la première ligne sur doublon. Adopter
+    « l'unicité SQL est l'invariant du store » comme contrat explicite ?
+  [?] Deux requêtes sans transaction dans @list_models/@list_agents (instantané
+    incohérent possible sous écriture REST concurrente) : assumption acceptable pour
+    une config rarement mutée, ou snapshot SQL ?
+  [?] Absence de ORDER BY partout (ordre physique rendu) : contrat « ordre non garanti »
+    ou ORDER BY name à ajouter (les fixtures d'autres tests s'accommodent-elles ?) ?
+  [?] Commentaires de test hérités : numéros discontinus (trous 6-10, 26) et
+    `// 4. domain_mcp_server_sse_skipped` au-dessus de @domain_mcp_server_sse_mapped —
+    réécrire selon cette spec ou laisser (vieille méthode) ?
+  [?] @api_key des providers remonte en clair dans @Vec<@Provider> (et l'@Display du
+    domaine le masque quand @None seulement) : le consommateur ws/chat est in-process,
+    mais la question du masque est déjà ouverte côté ./db/entities/llm_providers.sdd
+    `[!]` — s'aligner sur son arbitrage.
+  [?] @missing_docs (warn) : @PgConfigStore/new et les items `pub` n'ont aucun
+    commentaire `///` — la purge ./tooling.sdd les reprendra ; rien d'ajouté ici sans
+    décision.
+
+Done when:
+  Chaque Scenario a un test taggé par son titre et passe (les 25 tests de fonctions pures
+    existent déjà ; les 22 Scenario sans test s'écrivent, dont 20 sur @real_db), batterie
+    workspace verte.
+  Les `[?]`/`[!]` d'arbitrage (trim du corps, empoisonnement cross-owner, posture lignes
+    poison, max_tokens) sont tranchés par Sébastien et répercutés ici et dans les specs
+    entités/miroirs concernées (./db/entities/skills.sdd, ./db/entities/agents.sdd,
+    ../../cfgstore/src/fs_store.sdd).
+  ../../cfgstore/src/store.sdd et ./db/entities/*.sdd restent cohérents avec cette spec
+    (leur attente « écritures ReadOnly + default_agent None constant » y est vérifiée).
+
+Scenario: provider_type_from_str_known_values
+  Given les chaînes `"ollama"`, `"openai-compatible"` et `"bogus"`
+  When @provider_type_from_str est appelée sur chacune
+  Then les deux premières rendent respectivement @ProviderType::Ollama et
+    @ProviderType::OpenaiCompatible, la troisième @VnyError::UnknownProviderType(`"bogus"`)
+    (test existant `provider_type_from_str_known_values`)
+
+Scenario: headers_from_json_keeps_string_values_only
+  Given l'objet JSON `{"X-Foo": "bar", "X-Num": 42}` puis la valeur JSON `null`
+  When @headers_from_json est appelée sur chacun
+  Then le premier rend un map contenant seulement `"X-Foo" -> "bar"` (valeur non-chaîne
+    écartée), le second un map vide (test existant
+    `headers_from_json_keeps_string_values_only`)
+
+Scenario: domain_mcp_server_http_streamable
+  Given une ligne MCP `server_type: "http-streamable"`, `headers` à
+    `{"X-Custom": "value"}` et une url
+  When @domain_mcp_server est appelée
+  Then @Some(@McpServer) est rendu avec @transport @McpTransport::HttpStreamable, nom,
+    url et header fidèles (test existant `domain_mcp_server_http_streamable`)
+
+Scenario: domain_mcp_server_sse_mapped
+  Given une ligne MCP `server_type: "sse"`
+  When @domain_mcp_server est appelée
+  Then @Some est rendu avec @transport @McpTransport::Sse — mappé, plus ignoré (le
+    commentaire `// 4.` du fichier cite l'ancien nom `sse_skipped`, voir `Tasks`)
+    (test existant `domain_mcp_server_sse_mapped`)
+
+Scenario: domain_mcp_server_unknown_type_skipped
+  Given une ligne MCP `server_type: "carrier-pigeon"`
+  When @domain_mcp_server est appelée
+  Then @None est rendu (c'est l'appelant qui warn, pas la fonction) (test existant
+    `domain_mcp_server_unknown_type_skipped`)
+
+Scenario: domain_provider_type_inconnu_est_erreur
+  Given une ligne provider `provider_type: "carrier-pigeon"`
+  When @domain_provider est appelée
+  Then l'erreur @VnyError::UnknownProviderType remontée cite la valeur — aucune branche
+    testée dédiée à ce jour dans ./config_store.rs (test à ajouter, voir `Tasks`)
+
+Scenario: domain_model_profile_resolves_provider_name
+  Given un profil dont `provider_id` désigne un provider `"ollama"` de la liste passée
+  When @domain_model_profile est appelée
+  Then le domaine rendu porte `provider == "ollama"` (le NOM, jamais l'id), nom et modèle
+    fidèles (test existant `domain_model_profile_resolves_provider_name`)
+
+Scenario: domain_model_profile_unknown_provider_errors
+  Given un profil dont `provider_id` (999) n'a aucun correspondant dans la liste
+  When @domain_model_profile est appelée
+  Then @VnyError::LlmProviderNotFound est rendue (test existant
+    `domain_model_profile_unknown_provider_errors`)
+
+Scenario: domain_model_profile_options_object_passthrough
+  Given un profil dont `options` vaut `{"num_ctx": 65536}`
+  When @domain_model_profile est appelée
+  Then la map rendue contient `"num_ctx"` avec la valeur JSON intacte, quelle que soit sa
+    nature interne (test existant `domain_model_profile_options_object_passthrough`)
+
+Scenario: domain_model_profile_options_non_object_defaults_empty
+  Given un profil dont `options` vaut JSON `null`
+  When @domain_model_profile est appelée
+  Then la map rendue est vide, sans erreur (test existant
+    `domain_model_profile_options_non_object_defaults_empty`)
+
+Scenario: domain_model_profile_max_tokens_conversion
+  Given un profil avec `max_tokens: Some(4096)` en i64 de ligne
+  When @domain_model_profile est appelée
+  Then le domaine porte @Some(`4096u64`) (test existant
+    `domain_model_profile_max_tokens_conversion`)
+
+Scenario: domain_toolset_parses_local_tools_and_mcp
+  Given un toolset avec `local_tools: ["read_file", "search"]` et `mcp:
+    [{"server": "fs", "tools": ["read"]}]`
+  When @domain_toolset est appelée
+  Then les deux listes sont typées fidèlement (deux outils locaux ; sélection MCP serveur
+    `"fs"`, outil `["read"]`) (test existant `domain_toolset_parses_local_tools_and_mcp`)
+
+Scenario: domain_toolset_defaults_on_invalid_json
+  Given un toolset dont `local_tools` et `mcp` valent JSON `null`
+  When @domain_toolset est appelée
+  Then les deux listes sont vides, sans erreur (test existant
+    `domain_toolset_defaults_on_invalid_json`)
+
+Scenario: domain_toolset_preserves_description_and_prompt
+  Given un toolset avec description et prompt @Some, puis un second avec les deux @None
+  When @domain_toolset est appelée sur chacun
+  Then le premier rend les deux textes intacts, le second deux @None (test existant
+    `domain_toolset_preserves_description_and_prompt`)
+
+Scenario: domain_skill_meta_index_only
+  Given une ligne skill avec un corps long non vide
+  When @domain_skill_meta est appelée
+  Then la @SkillMeta rendue ne porte que nom et description — le corps n'est jamais
+    présent dans le type (test existant `domain_skill_meta_index_only`)
+
+Scenario: domain_skill_meta_empty_description
+  Given une ligne skill à la description chaîne vide
+  When @domain_skill_meta est appelée
+  Then la description reste `""` — aucune normalisation (test existant
+    `domain_skill_meta_empty_description`)
+
+Scenario: agent_mode_from_str_known_values
+  Given les chaînes `"primary"`, `"subagent"`, `"all"`
+  When @agent_mode_from_str est appelée sur chacune
+  Then les trois variantes @AgentMode correspondantes sont rendues (test existant
+    `agent_mode_from_str_known_values`)
+
+Scenario: agent_mode_from_str_unknown_errors
+  Given la chaîne `"bogus"`
+  When @agent_mode_from_str est appelée
+  Then @VnyError::ConfigError est rendue (test existant
+    `agent_mode_from_str_unknown_errors`)
+
+Scenario: resolve_model_profile_name_found
+  Given un agent dont `model_profile_id` désigne le profil `"qwen-pro"` de la liste
+  When @resolve_model_profile_name est appelée
+  Then `"qwen-pro"` est rendu (test existant `resolve_model_profile_name_found`)
+
+Scenario: resolve_model_profile_name_unknown_errors
+  Given un agent dont `model_profile_id` vaut 999 et une liste de profils sans 999
+  When @resolve_model_profile_name est appelée
+  Then @VnyError::UnknownReference(`"model"`, `"999"`) est rendue — l'id est stringifié
+    dans le payload (test existant `resolve_model_profile_name_unknown_errors`)
+
+Scenario: domain_agent_record_full_conversion
+  Given un agent de ligne `mode: "subagent"`, profil résolu, `toolsets: ["fs", "build"]`
+    et `skills: ["pdf"]`
+  When @domain_agent_record est appelée
+  Then le domaine porte @AgentMode::Subagent, `model == "qwen-pro"` (le NOM), les deux
+    toolsets et @SkillSelection::Named(`["pdf"]`) (test existant
+    `domain_agent_record_full_conversion`)
+
+Scenario: domain_agent_record_skills_auto_and_none
+  Given deux agents de ligne avec `skills` valant respectivement la chaîne JSON `"auto"`
+    puis `"none"`
+  When @domain_agent_record est appelée sur chacun
+  Then @SkillSelection::Auto puis @SkillSelection::None sont rendus (test existant
+    `domain_agent_record_skills_auto_and_none`)
+
+Scenario: domain_agent_record_invalid_toolsets_json_defaults_empty
+  Given un agent de ligne dont `toolsets` vaut JSON `null`
+  When @domain_agent_record est appelée
+  Then la liste d'outils est vide, sans erreur (test existant
+    `domain_agent_record_invalid_toolsets_json_defaults_empty`)
+
+Scenario: domain_agent_record_invalid_skills_json_defaults_auto
+  Given un agent de ligne dont `skills` vaut JSON `null`
+  When @domain_agent_record est appelée
+  Then @SkillSelection::Auto est rendu — le repli @Default est « auto », pas « aucun »
+    (test existant `domain_agent_record_invalid_skills_json_defaults_auto`)
+
+Scenario: domain_agent_record_unknown_model_profile_errors
+  Given un agent dont `model_profile_id` (999) est absent d'une liste de profils vide
+  When @domain_agent_record est appelée
+  Then @VnyError::UnknownReference(`"model"`, `"999"`) est rendue — erreur dure (test
+    existant `domain_agent_record_unknown_model_profile_errors`)
+
+Scenario: domain_agent_record_invalid_mode_errors
+  Given un agent valide par ailleurs mais `mode: "bogus"`
+  When @domain_agent_record est appelée
+  Then @VnyError::ConfigError est rendue — erreur dure, pas de repli (test existant
+    `domain_agent_record_invalid_mode_errors`)
+
+Scenario: list_providers_retourne_le_domaine_sans_filtrer_owner
+  Given une base @real_db avec un provider `provider_type: "ollama"`, `api_key` @Some,
+    `is_default: true` et `available_models` non vide (inserts @Entity::insert)
+  When @list_providers est appelée sur un @PgConfigStore d'un owner QUELCONQUE
+  Then @Ok rend le @Provider avec nom/endpoint/type convertis et api_key en clair, et
+    aucune trace de `is_default` ni `available_models` n'existe côté domaine — un second
+    store construit avec un autre user_id voit la même ligne (table sans colonne owner)
+
+Scenario: list_providers_type_inconnu_empoisonne_toute_la_liste
+  Given une base @real_db avec un provider valide `"ok"` ET un provider inséré en
+    contournant le hook avec `provider_type: "bogus"`
+  When @list_providers est appelée
+  Then @Err(@CfgStoreError::Config) est rendue, aucun vecteur partiel, et le @Display
+    contient `VNL-CFG-001` puis `VNL-LLM-005: Unknown provider type: bogus` (double
+    marqueur)
+
+Scenario: ligne_poison_fait_echouer_get_provider_valide
+  Given la même base qu'« list_providers_type_inconnu_empoisonne_toute_la_liste »
+  When @get_provider(`"ok"`) est appelée sur le nom du provider pourtant valide
+  Then @Err(@CfgStoreError::Config) est rendue (le défaut du trait appelle @list_providers
+    en entier) — @UnknownReference n'est JAMAIS atteint malgré le nom valide
+
+Scenario: erreur_requete_remappe_en_vnl_cfg_001
+  Given un @PgConfigStore construit sur une @DatabaseConnection refermant une base
+    indisponible (ou table absente)
+  When @list_toolsets est appelée
+  Then @Err(@CfgStoreError::Config) est rendue, @Display commençant par
+    `VNL-CFG-001: Configuration error: ` suivi du texte brut du @DbErr SeaORM, sans panic
+
+Scenario: list_models_resout_le_provider_par_nom_table_globale
+  Given un provider (table globale, sans owner) et un profil `vanyline_model_profiles`
+    appartenant à alice et référençant ce provider
+  When @list_models est appelée sur le store d'alice
+  Then le @ModelProfile rendu porte `provider` au NOM du provider et les champs
+    température/max_tokens/options convertis — et un profil de bob est absent de la liste
+
+Scenario: list_models_traverse_un_type_de_provider_inconnu
+  Given un provider `provider_type: "bogus"` (insert contournant le hook) référencé par le
+    profil d'alice
+  When @list_models est appelée sur le store d'alice
+  Then @Ok est rendu : @domain_model_profile ne consulte que le nom du provider —
+    l'asymétrie avec @list_providers est le comportement figé
+
+Scenario: list_models_max_tokens_negatif_bascule_en_u64
+  Given un profil d'alice avec `max_tokens: -1` (aucun CHECK SQL, insert direct)
+  When @list_models est appelée
+  Then @Ok rend `max_tokens == Some(18446744073709551615)` — le `as u64` wrappe en
+    silence, aucune erreur (arbitrage `Tasks`)
+
+Scenario: list_mcp_servers_saute_le_type_inconnu_sans_erreur
+  Given une base @real_db avec un serveur MCP `server_type: "http-streamable"` et un
+    second `server_type: "carrier-pigeon"`
+  When @list_mcp_servers est appelée
+  Then @Ok rend uniquement le serveur streamable ; la ligne invalide est sautée (un
+    @tracing::warn! la nomme), aucune erreur remontée
+
+Scenario: list_mcp_servers_filtre_les_headers_non_string
+  Given un serveur MCP `headers: {"X-Foo": "bar", "X-Num": 42}` et un second avec
+    `headers: null` en JSONB
+  When @list_mcp_servers est appelée
+  Then le premier ne rend que `"X-Foo" -> "bar"` dans un @BTreeMap trié, le second une
+    map vide — aucune erreur dans les deux cas
+
+Scenario: list_toolsets_et_list_skills_sont_infaillibles
+  Given une base @real_db où un toolset d'alice a `local_tools` en objet JSON (forme
+    invalide) et un skill d'alice porte un corps non vide
+  When @list_toolsets puis @list_skills sont appelées sur le store d'alice
+  Then les deux rendent @Ok : le toolset poison apparaît avec @local_tools vide, le skill
+    apparaît en @SkillMeta sans corps
+
+Scenario: list_agents_mode_invalide_fait_echouer_toute_la_liste
+  Given une base @real_db avec pour alice un agent valide et un agent `mode: "bogus"`
+    (insert contournant le hook, seul @before_create à couvrir création)
+  When @list_agents est appelée sur le store d'alice
+  Then @Err(@CfgStoreError::Config) est rendue sans élément partiel, @Display contenant
+    le marqueur `VNL-CFG-001` répété deux fois et `unknown agent mode: bogus`
+
+Scenario: list_agents_profil_dun_autre_owner_fait_echouer_toute_la_liste
+  Given un profil appartenant à bob et un agent d'alice dont `model_profile_id` pointe
+    sur ce profil bob (FK valide, cross-owner non interdit — ./db/entities/agents.sdd `[!]`)
+  When @list_agents est appelée sur le store d'alice
+  Then @Err(@CfgStoreError::Config) est rendue, @Display contenant `VNL-CFG-003: Unknown
+    model reference:` suivi de l'id stringifié — l'agent cross-owner empoisonne toute la
+    liste (comportement constaté, arbitré en `Tasks`, jamais béni)
+
+Scenario: list_agents_skill_selection_auto_none_named
+  Given trois agents d'alice avec `skills` en base valant `"auto"`, `"none"`, puis
+    `["pdf", "render"]`
+  When @list_agents est appelée
+  Then @Ok rend les trois agents appariés par nom aux sélections @SkillSelection::Auto,
+    @SkillSelection::None et @SkillSelection::Named avec les deux noms — l'appariement se
+    fait par nom d'agent, l'ordre de la liste n'étant pas contracté (aucun `ORDER BY`)
+
+Scenario: les_quatre_tables_owner_filtrees_isolent_les_owners
+  Given des lignes model_profiles, toolsets, agents et skills appartenant pour moitié à
+    alice et pour moitié à bob
+  When les quatre lectures (@list_models, @list_toolsets, @list_agents, @list_skills)
+    sont appelées sur le store d'alice
+  Then chaque liste ne contient que les lignes d'alice — le filtre @Column::OwnerId est
+    la seule barrière sur ce chemin (miryad-core n'y est pour rien)
+
+Scenario: load_skill_retourne_le_corps_brut_sans_trim
+  Given un skill d'alice dont `body` vaut `"  corps  \n"` (espaces et saut de ligne)
+  When @load_skill(`"celui-ci"`) est appelée sur le store d'alice
+  Then @Ok rend la chaîne EXACTE `"  corps  \n"`, sans trim (divergence avec fs_store
+    qui trimme — arbitrage `Tasks`)
+
+Scenario: load_skill_dun_autre_owner_rend_vnl_cfg_003
+  Given un skill `"pdf"` appartenant à bob et un store d'alice (alice n'a aucun skill
+    de ce nom)
+  When @load_skill(`"pdf"`) est appelée sur le store d'alice, puis sur le store de bob
+  Then alice rend @CfgStoreError::UnknownReference(`"skill"`, `"pdf"`) (`VNL-CFG-003`,
+    rendu IDENTIQUE à un nom inexistant) et bob rend le corps
+
+Scenario: default_agent_ne_designe_jamais_rien
+  Given une base @real_db peuplée d'agents pour alice, quel que soit leur mode
+  When @default_agent est appelée sur le store d'alice
+  Then @Ok(@None) est rendu, sans qu'aucune requête ne parte (constant)
+
+Scenario: dix_neuf_ecritures_rendent_vnl_cfg_009
+  Given un @PgConfigStore quelconque et la liste des dix-neuf écritures du trait
+    (@create_* / @update_* / @delete_* des six domaines + @set_default_agent)
+  When chacune est appelée avec un (layer, item/patch, nom) de test
+  Then les dix-neuf rendent @Err(@CfgStoreError::ReadOnly) (`VNL-CFG-009`) et la base est
+    strictement inchangée (aucune écriture héritée n'a d'effet)
+
+Scenario: get_skill_rend_les_meta_pas_le_corps
+  Given un skill d'alice `"pdf"` avec un corps non vide
+  When @get_skill(`"pdf"`) (défaut hérité du trait) est appelée sur le store d'alice
+  Then @Ok rend une @SkillMeta (nom + description), le corps n'étant accessible que par
+    @load_skill ; @get_skill(`"absent"`) rend @CfgStoreError::UnknownReference
+    (`"skill"`, `"absent"`)
+
+Scenario: get_mcp_server_sur_ligne_sautee_rend_vnl_cfg_003
+  Given un serveur MCP global `server_type: "carrier-pigeon"` (ligne que
+    @list_mcp_servers saute)
+  When @get_mcp_server est appelée sur son nom
+  Then @CfgStoreError::UnknownReference(`"mcp_server"`, nom) est rendue (`VNL-CFG-003`) —
+    jamais @DuplicateName ni erreur de type, la ligne sautée est indistinguable de
+    l'absence
+
+Scenario: cfg_err_produit_un_double_marqueur_verrouille
+  Given une @VnyError::UnknownProviderType(`"x"`) convertie par @cfg_err
+  When le @Display du @CfgStoreError obtenu est rendu
+  Then le texte est exactement `VNL-CFG-001: Configuration error: VNL-LLM-005: Unknown
+    provider type: x` — deux marqueurs coexistent, verrou partagé avec
+    ../../cfgstore/src/error.sdd

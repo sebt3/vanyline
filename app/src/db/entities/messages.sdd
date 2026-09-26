@@ -1,0 +1,177 @@
+Spec: Messages Entity
+
+Purpose:
+  Entité SeaORM d'un message de conversation de chat (table `vanyline_messages`) :
+  rôle + payload JSON, rattaché à un owner et à une conversation. Fichier purement
+  déclaratif — aucun comportement propre hors ce que génère `@DeriveEntityModel`. Deux
+  contrats s'attachent à ce fichier : (1) le mapping colonne ↔ champ Rust (noms, types,
+  clés), et (2) la forme serde de `@Model`, qui est sérialisée telle quelle dans la
+  réponse HTTP de `@get_messages` (alias `@MessageOut` dans `../../api/conversations.rs`)
+  — le JSON du Model EST donc le contrat de fil de `GET /conversations/{id}/messages`.
+  Le contrat SCHEMA (index composite, clés étrangères et CASCADE, `JSONB`,
+  `DEFAULT CURRENT_TIMESTAMP`) vit dans
+  `../../migration/m20260825_000009_create_vanyline_messages.sdd` (en cours de
+  rédaction) : cette spec ne le redéfinit pas, elle s'y adosse et signale les écarts
+  entre le Rust et le SQL. Groupe : un fichier, un contrat.
+
+Owns:
+  ./messages.rs
+
+Can read:
+  ../../api/conversations.rs — `@get_messages` : filtre via `@Column::ConversationId`,
+    trie via `@Column::CreatedAt`, renvoie `@Json(Vec<MessageModel>)` (le Model directement).
+  ../../ws/chat.rs — `@load_history` (relecture du `payload` en `@vanyline_lib::Message`)
+    et `@persist_message` (construction de `@ActiveModel` + insert, `payload =
+    {"role", "content", "tool_calls"}`).
+  ../../migration/m20260825_000009_create_vanyline_messages.rs — définition SQL de la
+    table (FK, index, `JSONB`, défaut de `created_at`).
+  ../test_support.rs — fixture SQLite en mémoire pour tout futur test DB de l'entité.
+  ./conversations.rs — entité parente (cible de la FK `conversation_id`).
+
+Structure:
+  ./messages.rs — struct `@Model` + `@enum Relation {}` vide + `@impl ActiveModelBehavior`
+    vide + module `#[cfg(test)]` (un test serde). Mapping colonnes (nom implicite
+    snake_case des champs, types Rust ↔ SQL attendu d'après la migration) :
+    `pub id: i32` — `#[sea_orm(primary_key)]`, pas d'`auto_increment = false` → PK
+      auto-incrémentée ; INTEGER auto_increment côté SQL ; insert toujours lancé avec
+      `id: NotSet`, les consommateurs relisent `last_insert_id as i32`.
+    `pub owner_id: i32` — INTEGER NOT NULL ; FK vers `miryad_users(id)` `ON DELETE
+      CASCADE` (côté migration, jamais déclarée dans l'entité).
+    `pub conversation_id: i32` — INTEGER NOT NULL ; FK vers `vanyline_conversations(id)`
+      `ON DELETE CASCADE` (idem, entité muette).
+    `pub role: String` — STRING NOT NULL ; chaîne libre, aucun enum ni CHECK : le
+      vocabulaire `user`/`assistant`/`system` est documentaire (doc comment), pas un
+      type.
+    `pub payload: @serde_json::Value` — JSONB NOT NULL (`custom("JSONB")` côté
+      migration) ; aucun adaptateur `#[serde(...)]`, le `Value` passe tel quel.
+    `pub created_at: @sea_orm::DateTimeUtc` — TIMESTAMP WITH TIME ZONE NOT NULL `DEFAULT
+      CURRENT_TIMESTAMP` ; en JSON (chrono + serde, sans adaptateur) : chaîne RFC 3339.
+
+Exposes:
+  `@pub struct Model` — 6 champs `pub` ci-dessus ; derives `@Clone`, `@Debug`,
+    `@PartialEq`, `@Serialize`, `@Deserialize`, `@DeriveEntityModel` ;
+    `#[sea_orm(table_name = "vanyline_messages")]`.
+  Types générés par `@DeriveEntityModel`, consommés tels quels par les appelants :
+    `@Entity` (`@EntityTrait::find` / `insert` / `find_by_id`), `@ActiveModel`,
+    `@Column` (variantes `Id`, `OwnerId`, `ConversationId`, `Role`, `Payload`,
+    `CreatedAt`), `@PrimaryKey`.
+  `@pub enum Relation` — énuméré `@EnumIter` par `@DeriveRelation`, **vide** : aucune
+    relation SeaORM déclarée alors que deux FK existent au niveau SQL.
+  `@impl ActiveModelBehavior for ActiveModel` — implémentation vide : aucun hook
+    `before_save`/`before_insert`, `created_at` n'est jamais posé côté Rust par
+    l'entité.
+  Aucun module, fonction, constante ou type additionnel hors `#[cfg(test)]`.
+
+Accepts:
+  Rien à l'exécution — le fichier ne définit aucune fonction appelable. Les types
+    exposés acceptent ce qu'accepte SeaORM : `@ActiveModel` avec `@ActiveValue`
+    (`Set`/`NotSet`) par champ, `@Column` pour les filtres et tris.
+
+Returns:
+  Rien — fichier déclaratif. Les générés renvoient ce que garantit SeaORM : `@Model`
+    clonable/comparable/sérialisable ; les inserts via `@Entity` renvoient
+    `@InsertResult` dont les consommateurs tirent `last_insert_id as i32`.
+
+Raises:
+  Aucune erreur depuis ce fichier (aucune fonction). Les `@sea_orm::DbErr` apparaissent
+    exclusivement côté appelants (`map_err(AppError::from)` dans
+    `../../api/conversations.rs` et `../../ws/chat.rs`).
+
+Handles:
+  Module `#[cfg(test)] mod tests` avec exemption module-level
+    `#![allow(clippy::unwrap_used, clippy::expect_used)]` et un test,
+    `@message_roundtrip_serializes` : aller-retour serde complet d'un `@Model` (id,
+    owner_id, conversation_id, role, payload objet JSON imbriqué) vérifiant id, owner_id,
+    conversation_id, role et `payload["text"]`.
+
+Must:
+  - Cibler exactement la table `vanyline_messages` (`table_name` explicite, pas de
+      dérivation implicite).
+  - Garder les six noms de colonnes en snake_case concordant : ce sont à la fois les
+      identifiants SQL de SeaORM et les clés JSON de la réponse de `@get_messages`
+      (`id`, `owner_id`, `conversation_id`, `role`, `payload`, `created_at`).
+  - Sérialiser `created_at` en chaîne RFC 3339 (config serde de chrono, aucun
+      adaptateur) et la désérialiser en `@DateTimeUtc` — l'aller-retour du test
+      existant le vérifie implicitement.
+  - Sérialiser `payload` comme un nœud JSON imbriqué (objet ou tableau tel quel, jamais
+      une chaîne échappée) — structure observée en production d'écriture
+      (`@persist_message`) : `{"role", "content", "tool_calls"}`.
+  - Conserver les six derives de `@Model` (dont `@PartialEq`, utilisé par les tests
+      adjacents et comparaison d'égalité complète) et `@Deserialize` (symétrie de
+      round-trip ; aucun endpoint n'accepte le Model en entrée à ce jour).
+  - Rendre `id` auto-incrémenté : insert avec `id: NotSet`, le Model inséré n'est
+      jamais fourni avec un id posé par l'appelant.
+
+Must not:
+  - Renommer, retirer ou réordonner un champ, ni changer le type de `id` (`i32`) :
+      contrat de fil de `GET /conversations/{id}/messages` et chemins `@Column::*`
+      utilisés par `../../api/conversations.rs` et `../../ws/chat.rs`
+      (`last_insert_id as i32`).
+  - Introduire une variante dans `@Relation` ou un `@impl Related` : les deux FK
+      (owner → `miryad_users`, conversation → `vanyline_conversations`, CASCADE) sont
+      tenues par le moteur SQL uniquement ; aucun JOIN SeaORM n'est déclaré ni utilisé
+      par les consommateurs, qui filtrent à la main sur `@Column::ConversationId`.
+  - Implémenter `before_save`/`before_insert` ou tout automatisme sur `created_at` :
+      les appelants posent `Set(chrono::Utc::now())` explicitement
+      (`@persist_message`) ; un `NotSet` laisserait jouer le `DEFAULT` SQL, cas sans
+      test et non contractuel à ce jour.
+  - Contraindre `role` par un enum Rust, une validation ou un CHECK dans ce fichier
+      sans passer par une extension de cette spec.
+  - Ajouter un comportement hors `#[cfg(test)]` (helper de requête, constante de
+      rôle, conversion `payload`) : cela relève d'un autre fichier et d'une autre
+      spec.
+
+Scenario: aller-retour serde du Model préserve toutes les colonnes
+  Given un `@Model` complet (id 7, owner_id 42, conversation_id 5, role
+    `"assistant"`, payload `{"text": "Hello!", "attachments": []}`, `created_at` courant)
+  When on le sérialise puis le désérialise en `@Model`
+  Then toutes les colonnes sont restituées à l'identique et `payload["text"]` vaut
+    `"Hello!"` — test existant `@message_roundtrip_serializes`
+
+Scenario: forme JSON de fil de la réponse messages
+  Given un `@Model` de message tel que ci-dessus
+  When on le sérialise en JSON via `@serde_json::to_value`
+  Then l'objet a exactement les six clés `id`, `owner_id`, `conversation_id`, `role`,
+    `payload`, `created_at` en snake_case, `payload` est un objet imbriqué (pas une
+    chaîne) et `created_at` est une chaîne RFC 3339 parseable en `@DateTimeUtc` —
+    contrat de `GET /conversations/{id}/messages`
+
+Scenario: aucune relation ni hook déclarés
+  Given l'entité compilée telle quelle
+  When on itère `@Relation` via `@EnumIter` (`Relation::iter().count()`)
+  Then le count vaut 0, garantissant qu'aucune relation SeaORM n'est déclarée malgré
+    les FK SQL ; l'ajouter exige d'étendre d'abord cette spec
+
+Depends on:
+  sea_orm (prelude, `@DeriveEntityModel`, `@DeriveRelation`, `@DateTimeUtc`) ;
+    serde + serde_json (derives de `@Model`, type `payload`).
+  ./mod.rs — déclaration `pub mod messages;` (sans elle l'entité n'est pas atteignable
+    par `crate::db::entities::messages::…`).
+  ../../migration/m20260825_000009_create_vanyline_messages.sdd — contrat SCHEMA de la
+    table (en cours de rédaction) : FK, index composite
+    `idx_vanyline_messages_conversation_id_created_at`, `JSONB`, défauts. La concordance
+    entité ↔ migration est un invariant partagé entre les deux specs.
+
+Tasks:
+  [ ] Test DB réel de l'entité via `../test_support.rs` (`real_db()`) sur le même
+      motif que `./agents.rs` : insert `ActiveModel` complet + relecture,
+      pour tenir l'invariant « le mapping Rust reflète la migration » au-delà du seul
+      round-trip serde (à créer avec la spec de la migration).
+  [?] `role` dupliqué entre la colonne `role` et le champ `role` du `payload` (écrit
+      deux fois par `@persist_message`) : quelle valeur est la source de vérité ?
+      `@load_history` ne lit que `payload.role` (et ignore la colonne), `@get_messages`
+      expose la colonne. Trancher avec Sébastien.
+  [?] Vocabulaire de `role` : le doc comment annonce `user/assistant/system`, mais
+      aucun enum/CHECK/validation n'existe nulle part, et `@load_history` **écarte
+      silencieusement** tout payload dont `role` n'est ni `user` ni `assistant`
+      (`system` donc inclus — jamais envoyé au LLM). Le rôle `system` est-il un cas
+      réel à documenter ailleurs, et son élimination est-elle le comportement voulu ?
+  [?] Schéma du `payload` (`{"role", "content", "tool_calls"}`, parsé en
+      `@vanyline_lib::Message`) : défini dans `../../ws/chat.rs`, jamais contracté ici
+      ni dans `lib`. Faut-il une spec du format de payload (celle de `ws/chat.rs` ou
+      de `lib`) ou ce fichier reste-t-il muet sur son contenu (statut actuel) ?
+  [!] Écart assumé à confirmer comme convention : FK SQL déclarées (avec CASCADE)
+      alors que `@Relation` est vide — la suppression en cascade d'une conversation
+      (ou d'un user) détruit les messages sans que SeaORM le sache. Doit-on le
+      documenter comme convention de toutes les entités `entities/*` (aucun `Related`,
+      jointures et cascades exclusivement côté SQL) dans `./mod.sdd` ?

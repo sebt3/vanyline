@@ -1,0 +1,526 @@
+Spec: Sandbox State WS
+
+Platform: Rust/vanyline-app/axum-websocket/tokio
+
+Purpose:
+  Hub de push des phases des CR @Sandbox vers le frontend sur le WebSocket
+  `/api/ws/sandbox-state` (route GET montée à la RACINE de `../main.rs` APRÈS le
+  @nest("/api", …) — montage et priorité matchit : `../main.sdd` et `../api/mod.sdd`).
+  Une SEULE tâche de watch kube sur TOUS les Sandbox du namespace du client (aucun
+  sélecteur de labels/champs — cf. @VnlK8sClient::watch_sandboxes,
+  `../../../lib/src/k8s.sdd`) ; le scoping par client n'est pas côté kube mais côté app :
+  chaque connexion est abonée au nom d'owner de son utilisateur (lien DB via
+  @crate::api::owners::resolve_owner_name) et tout événement est redirigé project → owner
+  (@VnlK8sClient::get_project, avec cache) avant dispatch — un même namespace peut contenir
+  plusieurs owners (multi-tenant, commentaire du fichier, cf. `../api/sandboxes.rs`).
+  Aucun snapshot initial par connexion : le hub ne pousse que les deltas post-inscription ;
+  le frontend fait son refetch REST de son côté
+  (`../../../frontend/src/composables/useSandboxState.ts`). La forme des événements
+  (@SandboxStateEvent) est définie ICI, localement — elle ne vient pas de `lib` (ni
+  `../../../lib/src/event.rs`, ni ts-rs) et est dupliquée à la main côté TS dans
+  `../../../frontend/src/api/sandboxStateWs.ts` : toute évolution de l'une exige celle de
+  l'autre. L'état partagé (@SharedState) vit dans @AppState::shared_sandbox_state
+  (`../main.rs`) et survit à toutes les connexions pour la vie du process.
+
+Owns:
+  ./sandbox_state.rs
+
+Can read:
+  ./mod.rs — déclaration `pub mod sandbox_state;` (`./mod.sdd`).
+  ../main.rs — @AppState (champ `shared_sandbox_state`, initialisation par @SharedState::new),
+    montage de la route GET `/api/ws/sandbox-state`, extraction @AuthUser (flow miryad-core).
+  ../api/owners.sdd — @crate::api::owners::resolve_owner_name (lecture du lien
+    `vanyline_owner_links.k8s_owner_name`, `@None` = aucun owner).
+  ../api/sandboxes.rs — source du fait « un namespace peut contenir plusieurs owners »
+    cité par le commentaire du fichier (multi-ténance).
+  ../k8s.sdd — @crate::k8s::client (découverte lazy + cache, @AppError::K8sConfigError
+    `"VNL-K8S-001"` sur échec).
+  ../error.sdd — @AppError, @From<@sea_orm::DbErr> (`"VNL-DB-006"`), @Display loggé par le
+    wrapper WS (`tracing::error!("ws sandbox-state error: {e}")`, contractualisé là-bas).
+  ../../../lib/src/k8s.sdd — @VnlK8sClient::watch_sandboxes (@WatchEvent : @Added,
+    @Modified, @Deleted, @Error(@String) ; mapping InitApply→@Added, Apply→@Modified,
+    Delete→@Deleted, @Init/@InitDone ignorés ; erreur → @Error et le lib NE termine jamais
+    le stream), @VnlK8sClient::get_project, @VnyError (erreurs aplatis, NotFound non typé).
+  ../../../crds/src/lib.rs — @Sandbox (champ `metadata.name`: @Option, @SandboxSpec.project:
+    @String, @SandboxStatus.phase: @Option<@String> — valeurs documentées
+    `Provisioning|Running|Failed`, jamais validées ici).
+  ../../../frontend/src/api/sandboxStateWs.ts — miroir TS de @SandboxStateEvent
+    (`phase: string | null`) et ouverture same-origin par cookie OIDC.
+  ../../../frontend/src/composables/useSandboxState.ts — contrat consommateur : map
+    `nom → phase`, `phase == null` = retrait de l'entrée + refetch debounce 300 ms,
+    reconnexion backoff 3 s → 30 s (close quasi immédiat = « pas d'owner K8s » commenté là).
+  ../../../Cargo.toml — harnais `[workspace.lints]` (`../../../tooling.sdd`).
+
+Exposes:
+  @SandboxStateEvent — `pub struct`, @Clone + @Serialize, @serde(rename_all =
+    `"camelCase"`) ; champs `pub sandbox: @String`, `pub phase: @Option<@String>`.
+    `phase = @None` signifie « suppression, ou phase pas encore atteinte » (commentaire du
+    fichier, miroir exact du TS). Sérialisation exacte : `{"sandbox":"<nom>","phase":<chaine|null>}` —
+    le `null` est SÉRIALISÉ (non skip). Ni ts-rs, ni @Deserialize, ni @Debug dérivés.
+  @SharedState — `pub struct`, @Clone (trois champs @Arc, clone bon marché) ; champs
+    `subscribers`, `project_owner`, `watch_handle` PRIVÉS (accessibles seulement du module).
+    @SharedState::new — `#[must_use] pub fn() -> @Self` (subscribers vides, cache vide,
+    watch_handle `@None`). @impl @Default pour @SharedState — délègue à `new` (exigé par
+    clippy pedantic `new_without_default` ; aucun appelant de `default()` trouvé par grep,
+    toutes les constructions passent par `new` — cf. Tasks `[?]` pour le warning cargo vu).
+  @ws_sandbox_state_handler — `pub async` + `#[axum::debug_handler]` : extracteurs
+    @State(@AppState) + @AuthUser + @WebSocketUpgrade → @ws::on_upgrade(@handle_socket).
+    C'est la surface publique du fichier.
+  Rien d'autre n'est `pub` : @Subscriber (struct privé : `tx: @Arc<@mpsc::UnboundedSender<@SandboxStateEvent>>`,
+    `owner: @String`), @OwnerCache (alias privé `@Arc<@parking_lot::Mutex<@HashMap<@String, @Option<@String>>>>`),
+    @resolve_owner, @dispatch, @dispatch_sandbox, @watch_loop, @handle_socket, @run_socket,
+    @ensure_watch_loop sont privés au module.
+  `#[cfg(test)] mod tests` : 3 tests unitaires existants (`event_serializes_camel_case_with_null_phase`,
+    `dispatch_only_reaches_matching_owner`, `dispatch_fans_out_to_all_subscribers_of_owner`) —
+    couverture limitée à la sérialisation et à @dispatch (Tasks `[!]`).
+
+Structure:
+  Ce qui est watché : @VnlK8sClient::watch_sandboxes sans paramètre — TOUS les @Sandbox du
+  namespace du client (namespace = `config.k8s_namespace` (`VNL_K8S_NAMESPACE`) ou contexte
+  kubeconfig, figé à la découverte, cf. `../k8s.sdd`), SANS aucun sélecteur. Le périmètre
+  par client est applicatif : owner string-égal sur dispatch.
+  Flux d'une connexion (@run_socket), dans l'ordre exact :
+  1. @resolve_user(@state.auth.db, `user.subject`, `user.email.as_deref()`) → `principal_user`
+    (side effect d'écriture possible : matérialisation de la ligne `miryad_users` — même
+    question ouverte que `../api/me.sdd` Tasks `[!]`).
+  2. @resolve_owner_name(@state, `principal_user.id`) : @Ok(@None) → `return @Ok(())`
+    IMMÉDIAT — le socket est droppé sans aucune frame de fermeture (close anormal côté
+    navigateur, que le backoff du frontend commente explicitement) ; @Ok(@Some(owner)) →
+    suite ; @Err → Raised.
+  3. Clonage de `state.shared_sandbox_state`.
+  4. @mpsc::unbounded_channel (CAPACITÉ ILLIMITÉE, pas de backpressure sur client lent —
+    Tasks `[?]`) ; @tx englobé dans un @Arc — l'@Arc est l'identité de l'abonnement
+    (aucun @PartialEq sur @Subscriber, désinscription par @Arc::ptr_eq).
+  5. PUSH du @Subscriber { tx, owner } dans `shared.subscribers` — AVANT toute
+    @ensure_watch_loop (l'ordre est fonctionnel : le premier abonné est en place quand le
+    watch démarre, il reçoit donc le replay initial du watcher, pas les suivants).
+  6. @ensure_watch_loop : test `watch_handle.lock().is_some()` → @Ok sans même appeler
+    @crate::k8s::client (un watch lancé → plus jamais de tentative de découverte, une
+    connexion pendant une panne k8s réussit si le watch tourne déjà) ; sinon client
+    construit HORS verrou (deux connexions concurrentes peuvent toutes deux construire le
+    client — gaspillage rare, sans double spawn), puis double-check sous verrou : un seul
+    @tokio::spawn(@watch_loop(client, `shared.clone()`)), handle stocké, plus jamais
+    remplacé (garde d'unicité pour la vie du process — jamais joint, jamais aborté).
+  7. @socket::split → tâche de transfert spawnée, possède `sink` + `rx` :
+    `rx.recv()` → @serde_json::to_string(&event).unwrap_or_default() (échec de sérialisation
+    → frame texte vide — branche morte aujourd'hui : l'événement n'a que @String/@Option<@String>,
+    infaillibles) → @axum::extract::ws::Message::Text ; échec de `sink.send` → `break` →
+    drop de `rx` (les `tx.send` suivants échouent en silence, `let _ =`).
+  8. Tâche principale : `while let @Some(@Ok(_msg)) = ws_stream.next().await {}` — TOUT
+    message entrant est ignoré (le silence du client est la norme ; pas d'écho, pas de
+    protocole applicatif) ; la boucle sort sur `@None` OU sur `@Some(@Err(_))` — l'erreur
+    de flux entrant est avalée sans AUCUN log (Tasks `[!]`).
+  9. Désabonnement : `shared.subscribers.lock().retain(|sub| !@Arc::ptr_eq(&sub.tx, &tx))`
+    — retire exactement sa propre entrée, jamais celles d'autrui.
+  10. `drop(tx)` (dernier @Arc → channel fermé) puis await de la tâche de transfert
+    (`rx.recv()` rend `@None` → elle finit) — aucune tâche leakée à la déconnexion propre.
+  @watch_loop (une seule instance par process, garde en 6) :
+  - En tête de boucle : subscribers vides → @tracing::trace + sleep 2 s + `continue`. LA
+    PAUSE N'EST VÉRIFIÉE QU'À CE POINT : un stream une fois lancé tourne jusqu'à un
+    @WatchEvent::Error ou sa terminaison (que le contrat lib déclare jamais atteinte) —
+    la dernière déconnexion n'arrête pas un stream en cours (Tasks `[?]`).
+  - @tracing::info « sandbox-state watch démarré » ; `client.watch_sandboxes()` ; pin.
+  - @WatchEvent::Added(@s) | @Modified(@s) → @dispatch_sandbox avec
+    `s.status.as_ref().and_then(|st| st.phase.clone())` — pass-through strict, AUCUNE
+    validation des valeurs documentées du CRD.
+  - @WatchEvent::Deleted(@s) → @dispatch_sandbox avec `@None` (le front retire + refetch).
+  - @WatchEvent::Error(msg) → @tracing::warn + `break` → le stream est recréé par la
+    présente boucle après sleep 2 s (la lib ne termine jamais le sien et se reconnecte en
+    interne — qui de la lib ou de l'appelant porte la reprise est l'arbitrage ouvert
+    `../../../lib/src/k8s.sdd` Tasks `[?]` ; l'app, lui, casse et recrée tout).
+  - Terminaison du stream sans Error (normalement inatteignable) : info + sleep 2 s + recréation.
+  @dispatch_sandbox : `metadata.name` absent → return silencieux ; `spec.project` vide →
+  return silencieux (avant TOUT appel k8s) ; sinon @resolve_owner : hit de cache (y compris
+  le `@None` mémorisé) → clone retourné sans appel API ; miss → @VnlK8sClient::get_project —
+  @Ok → `@Some(project.spec.owner)`, @Err → @tracing::warn unique + `@None` — puis le
+  RÉSULTAT (hit comme miss, succès comme erreur) est INSÉRÉ EN CACHE sans TTL ni
+  invalidation ; `owner = @None` → événement jeté.
+  @dispatch : sous verrou `subscribers`, filtre `sub.owner == owner` (égalité de @String
+  stricte), `let _ = sub.tx.send(event.clone())` — un canal fermé (client déjà parti) est
+  ignoré silencieusement, le ramassage des entrées mortes est le point 9 uniquement.
+  Verrous : @parking_lot::Mutex (synchrone) sur les trois champs ; AUCUN await pendant une
+  garde tenue (vérifié sur chaque chemin) ; @resolve_owner fait DEUX acquisitions distinctes
+  (get, puis insert) — fenêtre de double résolution concurrente avec le même résultat,
+  bénin. Pas de deadlock possible (pas de verrou imbriqué : `project_owner` est relâché
+  avant que `subscribers` ne soit pris).
+
+Accepts:
+  - Transport : `GET /api/ws/sandbox-state` avec handshake WebSocket valide ET @AuthUser
+    extractible (session cookie signée `cookie_key` — flow primaire du navigateur
+    same-origin — ou header `Authorization` porteur, cf. `../api/me.sdd` ; extraction peut
+    toucher la base pour valider un bearer). Non-GET → 405 ; GET authentifié SANS en-têtes
+    d'upgrade → refus par l'extracteur @WebSocketUpgrade (400, contrat axum hors fichier).
+  - @AuthUser : champs consommés `subject` (@String) et `email` (@Option) par @resolve_user.
+  - En session : tout message entrant (texte, binaire) est accepté et IGNORE ; ping/pong
+    de niveau protocole gérés par axum ; aucun heartbeat applicatif dans ce sens ni dans
+    l'autre (Tasks `[?]`).
+  - @watch_loop : rien — le namespace vient du client, aucun paramètre.
+  - @SandboxStateEvent côté émission : `sandbox` = `metadata.name` tel quel ; `phase` =
+    @SandboxStatus.phase verbatim (toute valeur de @String, même hors
+    `Provisioning|Running|Failed`).
+
+Returns:
+  - @ws_sandbox_state_handler : réponse d'upgrade 101 (@on_upgrade ne peut pas échouer une
+    fois l'extracteur @WebSocketUpgrade passé).
+  - Sur le socket : une frame texte JSON par événement (forme exacte en Exposes).
+  - @run_socket : @Ok(()) en fin de session propre (client parti) comme en fermeture
+    silencieuse « pas d'owner » ; @Err sinon.
+  - @resolve_owner : @Option<@String> — `@Some(owner)` résolu (cache ou API), `@None` =
+    projet introuvable/en erreur (événement à jeter).
+  - @watch_loop / @handle_socket / tâche de transfert : `()` — ne retournent jamais
+    d'erreur, tout est loggé ou avalé.
+  - @SharedState::new / @default : instance à subscribers vides, cache vide, watch non lancé.
+
+Raises:
+  - Post-handshake, AUCUN statut HTTP n'est possible (l'upgrade est déjà acquis) : toute
+    erreur de @run_socket est interceptée par @handle_socket →
+    @tracing::error!("ws sandbox-state error: {e}") → socket droppé (close anormal, sans
+    frame Close de statut — le frontend backoff s'en accommode).
+  - @resolve_user en @Err(@sea_orm::DbErr) → @AppError::from → `"VNL-DB-006"` (log seul).
+  - @resolve_owner_name en @Err (DbErr) → idem `"VNL-DB-006"` — avant toute inscription
+    (aucun état modifié).
+  - @crate::k8s::client dans @ensure_watch_loop → @AppError::K8sConfigError
+    (`"VNL-K8S-001"`, `../k8s.sdd`) — levée APRÈS l'inscription du @Subscriber (point 5) :
+    l'entrée reste dans `subscribers` avec un canal mort-né, jamais retirée (Tasks `[!]`).
+  - @watch_loop ne lève jamais : @WatchEvent::Error est loggé (warn) et consomme un restart ;
+    la terminaison du stream est logguée (info) et consomme un restart.
+  - @dispatch ne lève jamais : `let _ =` sur l'envoi (canal fermé = client parti).
+  - Jamais d'`unwrap`/`expect`/`panic!`/`println!`/`eprintln!`/`dbg!` en production
+    (`unwrap_or_default` sur la sérialisation n'est pas un `unwrap` et ne panique pas) ;
+    exemptions `unwrap_used`/`expect_used` confinées au `#![allow]` du module `cfg(test)`
+    (`../../../tooling.sdd`).
+
+Handles:
+  - Handshake non authentifié : refus 401 PAR L'EXTRACTEUR miryad-core AVANT upgrade —
+    @run_socket n'est jamais atteint, aucun état bougé. Le statut 401 (et non une 404 du
+    wildcard du nest) prouve aussi que la route racine n'est pas éclipsée (jamais asserté par un
+    test — cf. `../api/mod.sdd` Tasks `[?]`, Scenario ci-dessous).
+  - Utilisateur authentifié sans owner K8s (aucun lien ou lien NULL) : upgrade ACCEPTÉ puis
+    socket immédiatement relâché, AUCUN appel k8s, aucun log d'erreur (`@Ok(())`) — le
+    frontend le sait (« fermeture immédiate — ex: utilisateur sans owner K8s », commentaire
+    de useSandboxState.ts) et applique son backoff.
+  - Late-joiner sans snapshot : une connexion qui arrive pendant un watch déjà en cours ne
+    reçoit RIEN tant qu'aucun changement ne survient ; le frontend compense par son listing
+    REST + refetch debounce. Inverser ce choix (rejeu d'un instantané par connexion)
+    exigerait une évolution de spec.
+  - Replay initial : UNIQUEMENT le premier abonné (celui dont la connexion a déclenché le
+    watch) reçoit les @Added du replay kube-runtime ; les abonnés ultérieurs ne les
+    recevront jamais (conséquence directe de l'ordre subscribe → spawn → watcher interne).
+  - Sandbox orpheline (project introuvable OU erreur transitoire de get_project) : événement
+    jeté + warn une seule fois (le miss est mémorisé pour la vie du process — Tasks `[!]`).
+  - Sandbox sans `metadata.name` ou au `spec.project` vide : jet silencieux, sans log ni
+    appel API (les deux gardes précèdent @resolve_owner).
+  - Multi-owner dans le namespace : le watch est global au namespace, la confidentialité
+    par owner est assurée UNIQUEMENT par le filtre d'égalité dans @dispatch — une régression
+    là est une fuite d'information inter-owners.
+  - Race de démarrage : deux premières connexions simultanées peuvent toutes deux construire
+    un client k8s (construction hors verrou) mais UNE SEULE spawn le @watch_loop
+    (double-check sous verrou) ; le client du perdant est simplement droppé.
+  - Panne de découverte k8s ALORS QU'UN watch tourne déjà : @ensure_watch_loop retourne @Ok
+    sans appel @crate::k8s::client (garde `watch_handle.is_some()` en tête) — les nouvelles
+    connexions réussissent malgré la panne.
+  - Panic du @watch_loop (seule mort possible après démarrage) : le handle stocké reste
+    @Some → plus JAMAIS de restart possible, les connexions restent ouvertes sans jamais
+    recevoir d'événement (Tasks `[!]`).
+  - Erreur sur le flux WS entrant : fin de session SILENCIEUSE (pas de log) — asymétrie
+    avec les erreurs de @run_socket qui, elles, sont logguées (Tasks `[!]`).
+  - Client qui se déconnecte pendant un envoi : @dispatch ignore le canal fermé ; la tâche
+    de transfert casse sur l'échec de `sink.send` ; la désinscription par @Arc::ptr_eq a
+    toujours lieu dans tous les chemins post-inscription propres (points 9-10).
+  - Pas de keepalive applicatif : une connexion oisive dépend du TCP/Ingress ; si un proxy
+    coupe, le frontend se reconnecte (backoff) — le « watch en pause » au réveil est le
+    seul mécanisme, et seulement si le stream avait cassé entre-temps.
+  - Coexistence avec `./chat.rs` : deux WS d'auth cookie sur des routes racine distinctes ;
+    aucun état partagé entre eux (@SharedState n'est consommé que par CE fichier).
+
+Must:
+  - Extraire @AuthUser AVANT tout upgrade (401 sans effet de bord pour une requête non
+    authentifiée) et n'accepter que GET (montage `../main.rs`).
+  - Chaîner @resolve_user PUIS @resolve_owner_name sur `principal_user.id` (même paire
+    d'appels que `../api/me.sdd`) ; sur `@None` rendre @Ok(()) en fermeture immédiate sans
+    AUCUN appel k8s.
+  - Inscrire le @Subscriber dans `shared.subscribers` AVANT @ensure_watch_loop — l'ordre
+    est un contrat (le premier abonné reçoit le replay initial).
+  - Garantir l'unicité de la tâche @watch_loop par `watch_handle` (test hors verrou,
+    client construit hors verrou, double-check sous verrou, spawn unique pour la vie du
+    process) ; ne jamais aborter, joindre ni remplacer le handle.
+  - Dispatcher par égalité STRICTE `sub.owner == owner` ; un événement ne doit jamais
+    atteindre un abonné d'un autre owner.
+  - Résoudre l'owner via le cache `project → owner` en mémorisant le hit COMME le miss
+    (y compris `@None`), avec warn loggé une seule fois par projet en erreur ; jeter
+    l'événement sur `owner = @None`, sur `name` absent, sur `project` vide.
+  - Pousser `phase` verbatim sur @Added/@Modified (aucune validation de valeur) et `@None`
+    sur @Deleted ; sérialiser le `null` (jamais de skip) en camelCase exact.
+  - Sur @WatchEvent::Error : warn + break + sleep 2 s + RE-CRÉATION du stream depuis
+    `client.watch_sandboxes()` ; même sleep 2 s sur terminaison du stream.
+  - À la fin de session propre : retirer son entrée par @Arc::ptr_eq, `drop(tx)` PUIS
+    await de la tâche de transfert (ordre : le drop ferme le canal, l'attend garantit
+    l'extinction de la tâche).
+  - Logger exclusivement en `tracing` (info/warn/trace sur les messages préfixés
+    `sandbox-state`, tels que codés ; wrapper `ws sandbox-state error:` en error) — jamais de print
+    (`../../../tooling.sdd`).
+
+Must not:
+  - Diffuser un @SandboxStateEvent à un abonné dont l'owner diffère de celui résolu du
+    projet — ligne rouge (fuite inter-owners dans un namespace multi-tenant).
+  - Valider, normaliser ou filtrer les valeurs de `status.phase` (le hub est un
+    transparent ; les valeurs `Provisioning|Running|Failed` sont un commentaire du CRD,
+    pas un contrat du hub).
+  - Offrir un snapshot/rejeu par connexion des phases courantes (comportement actuel :
+    deltas uniquement) sans évolution écrite de cette spec et du frontend.
+  - Lancer un second @watch_loop, ni avorter/joindre/écraser le handle stocké, ni relancer
+    le watch après une mort de la tâche (état actuel : handle @Some = jamais de restart).
+  - Interpoler @PartialEq sur @Subscriber ou @SandboxStateEvent (l'identité d'abonnement
+    est @Arc::ptr_eq ; la forme TS n'a pas d'égalité structurale).
+  - Envoyer de frame Close WebSocket de statut explicite (ni 1000 ni autre) : la
+    fermeture se fait par drop — changer cela casserait l'heuristique de backoff du
+    frontend (« close quasi immédiat »).
+  - Modifier la forme JSON (noms de champs camelCase, `phase` null sérialisé) sans la
+    modification appariée de `../../../frontend/src/api/sandboxStateWs.ts`.
+  - Mettre un `unwrap`/`expect`/`panic!`/`println!` en production, ni propager une erreur
+    de @WatchEvent::Error hors de la boucle de restart.
+  - Tester avec un mock d'API server kube (convention anti-mock du projet,
+    `../../../lib/src/k8s.sdd`) : les chemins succès kube sont des intégrations cluster.
+  - Tenir un verrou @parking_lot par-dessus un `.await` (invariant vérifié — ne doit jamais
+    être introduit).
+
+Depends on:
+  ../api/owners.sdd — @resolve_owner_name (lecture du lien user → owner ; `@None` = pas
+    d'owner → fermeture silencieuse).
+  ../k8s.sdd — @crate::k8s::client (découverte lazy unique, `"VNL-K8S-001"` en @Err).
+  ../../../lib/src/k8s.sdd — @VnlK8sClient (@Clone), @VnlK8sClient::watch_sandboxes
+    (@WatchEvent, timeout serveur 300 s interne à la lib, stream jamais terminé par la lib),
+    @VnlK8sClient::get_project (@Err aplati, NotFound non typé).
+  ../../../crds/src/lib.rs — @Sandbox/@SandboxSpec/@SandboxStatus (formes subies :
+    `metadata.name` Option, `spec.project`, `status.phase` Option).
+  ../main.rs — @AppState (`shared_sandbox_state`), montage racine de la route GET
+    (contractualisé `../main.sdd`, priorité vs nest `../api/mod.sdd`).
+  ../error.sdd — @AppError (variantes consommées ici : K8sConfigError via `../k8s.rs`,
+    InternalError/`"VNL-DB-006"` via @From<@sea_orm::DbErr>) et son @Display loggé.
+  Crate externe `miryad-core` : @miryad_core::auth::@AuthUser (extraction/refus — contrat
+    hors dépôt, même réserve de non-specularité que `../auth/mod.sdd`),
+    @miryad_core::users::resolve_user (sémantique upsert jamais lue, cf. `../api/me.sdd`
+    Tasks `[?]`).
+  @tokio (spawn/JoinHandle, sleep), @axum (@WebSocketUpgrade/@WebSocket/@Message),
+  @futures (@SinkExt/@StreamExt/@pin_mut), @parking_lot::Mutex, @serde/@serde_json,
+  @mpsc unbounded.
+  ../../../frontend/src/api/sandboxStateWs.ts + ../../../frontend/src/composables/useSandboxState.ts —
+    miroir de forme et contrat de consommation (map, null = retrait + refetch, backoff).
+  Hérite de `../../../vanyline.sdd` (règle une spec par fichier, anti-JWT-brut-navigateur —
+    ici : auth cookie app, jamais de ticket) et du harnais `../../../tooling.sdd`.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-26.
+  [!] Fuite d'abonné sur échec de @ensure_watch_loop : l'inscription (point 5) précède le
+    `?` de @ensure_watch_loop (point 6) — si @crate::k8s::client échoue (pas de cluster),
+    le @Subscriber au canal mort reste DANS `shared.subscribers` pour la vie du process :
+    les envois suivants y échouent en silence ET l'optimisation « aucun subscriber → watch
+    en pause » est dégradée à perpétuité (le watch, une fois lancé par une connexion
+    réussie ultérieure, ne se mettra plus jamais en pause). Désinscription dans un
+    `match`/drop-guard sur TOUTES les branches d'erreur post-inscription.
+  [!] Miss de projet mémorisé PERMANENT, erreur transitoire incluse : @resolve_owner cache
+    `@None` sur TOUT @Err de @VnlK8sClient::get_project (NotFound, RBAC, timeout réseau
+    confondus — aplatissement lib) sans TTL ni invalidation → après une erreur passagère au
+    premier événement d'un projet, tous les événements de ce projet sont jetés jusqu'au
+    redémarrage du pod (et un projet recréé après suppression ne revient jamais). TTL
+    court sur les miss, ou distinction NotFound (mappage par sous-chaîne dans `../error.rs`)
+    vs autres erreurs ?
+  [!] Panic de @watch_loop = mort définitive non détectée : le handle @Some n'est jamais
+    consulté (finish/panique) → plus de restart possible, les WS ouverts restent vivants
+    mais muets, sans log. Tester le handle (`is_finished`) dans @ensure_watch_loop, ou
+    message d'alerte explicite ?
+  [!] Erreur du flux WS entrant avalée sans log : `while let @Some(@Ok(_))` — un @Some(@Err)
+    (trame corrompue, violation de protocole) termine la session sans aucune trace, alors
+    que les erreurs de @run_socket sont logguées. Logger le @Err (et éventuellement sa
+    nature) au même niveau `error` ?
+  [!] ZÉRO couverture hors @dispatch/sérialisation : @run_socket, @watch_loop,
+    @ensure_watch_loop, @resolve_owner, @dispatch_sandbox, @ws_sandbox_state_handler ne
+    sont testés par aucun test du dépôt (les 3 tests existants = Scenarios 1-3). Les
+    Scenarios kube sont des intégrations cluster (anti-mock), les Scenarios WS « live »
+    (close immédiat, écho, error-path découverte) exigent un vrai client WS
+    (tokio-tungstenite contre instance live) : @axum::@WebSocket ne se construit pas à la
+    main. Quel niveau de couverture attend-on en CI vs intégration manuelle ?
+  [?] Warning cargo vu citant `shared_sandbox_state`/`SharedState` (signalement du
+    mandat, non reproductible ici — pas de cargo dans une session spec-reverse) :
+    suspect n°1 = l'impl @Default de @SharedState jamais appelé (toutes les constructions
+    passent par `new` — grep) ; suspect n°2 = warning antérieur au câblage complet du hub.
+    Lancer `cargo check -p vanyline-app` et identifier le warning exact, puis décider :
+    supprimer le Default (et `#[must_use]` sur `new`), ou le garder (exigence clippy
+    `new_without_default` — la vraie sortie est probablement un `#[allow]` justifié d'une
+    ligne citant cette spec, ou passer les call sites à `default()`).
+  [?] « Watch en pause quand aucun subscriber » n'est vrai qu'en tête de boucle : une fois
+    le stream lancé, la lib ne le terminant jamais, une session de 0 abonné peut durer des
+    heures avec un watch kube actif (interruptible seulement par @WatchEvent::Error). Coût
+    assumé (un watch, léger) ou vérifier les subscribers à chaque événement et casser le
+    stream volontairement ?
+  [?] Canaux non bornés : un client dont la socket s'engorge (proxy lent, frontend en
+    arrière-plan) accumule les événements sans limite (la tâche de transfert attend sur
+    `sink.send` pendant que `rx` grossit). Canal borné + politique (close du client lent,
+    drop des événements anciens) ?
+  [?] Aucun keepalive/ping applicatif côté serveur : une connexion oisive ne vit que du
+    TCP/ingress ; coupure proxy → reconnect frontend (visible : le hub met à jour
+    `connected`). Poser un ping périodique (axum `WebSocketUpgrade::keep_alive`) ou
+    documenter la dépendance à l'ingress ?
+  [?] @resolve_user à l'ouverture d'un WS est potentiellement une ÉCRITURE (matérialisation
+    `miryad_users`, cf. `../api/me.sdd` `[!]`) : un handshake WS doit-il être lecture pure
+    (read-only lookup) ou la porte d'identité upsert est-elle le contrat assumé partout ?
+  [?] Frame texte vide sur échec de sérialisation (`unwrap_or_default`) : branche inatteignable
+    avec la forme actuelle de @SandboxStateEvent (champs infaillibles) — la remplacer par un
+    log warn + saut de la trame (protecteur pour un futur champ faillible), ou la laisser ?
+  [?] `phase = null` sur un @Added sans status (sandbox fraîchement créée, phase pas encore
+    posée) est interprété par le frontend comme « suppression » (retrait de la map +
+    refetch) — juste par coïncidence (le refetch finit par la montrer). Distinguer
+    explicitement (ex: champ `deleted`, ou omission du champ) ou sceller le commentaire
+    actuel des deux côtés comme contrat définitif ?
+  [ ] Dériver chaque Scenario sans test existant en un test taggé par son titre
+    (implementer) ; Scenarios cluster et WS-live au niveau intégration manuelle assumée
+    (conventions anti-mock kube) ; ajouter le test routier « 401 et non 404 » aussi dans la
+    spec de `../main.rs` si Sébastien préfère l'assertion là-bas (cf. `../api/mod.sdd` `[?]`).
+
+Done when:
+  Chaque Scenario est couvert par un test taggé par son titre et passe (les Scenarios
+  marqués cluster ou WS-live au niveau intégration indiqué) ; les `[!]` de fuite d'abonné,
+  miss permanent, panic du watch et erreur entrante non loggée ont une décision écrite de
+  Sébastien répercutée ici ou en tâche d'implémentation ; le warning cargo `[?]` est
+  identifié et éteint ; la batterie workspace (check, test, build, clippy `--all-targets
+  -D warnings`, fmt) est verte.
+
+Scenario: Événement sérialisé en camelCase avec phase nulle
+  Given un @SandboxStateEvent `sandbox = "sbx-1"`, `phase = @None`
+  When il est sérialisé par @serde_json::to_string
+  Then le résultat est exactement `{"sandbox":"sbx-1","phase":null}` — camelCase, et la
+    phase nulle est sérialisée (non omise)
+    # Test existant `event_serializes_camel_case_with_null_phase` — renommer sur ce titre.
+
+Scenario: Dispatch atteint seulement le owner correspondant
+  Given deux abonnés (@Subscriber) d'owners respectivement `"alice"` et `"bob"` avec leurs
+    canaux de réception
+  When @dispatch est appelé avec l'owner `"alice"` et un événement `sandbox = "sbx-1"`
+  Then le canal d'alice reçoit l'événement (sandbox `"sbx-1"`) et le canal de bob reste
+    vide — un événement d'un owner ne fuit jamais vers un autre owner
+    # Test existant `dispatch_only_reaches_matching_owner` — renommer sur ce titre.
+
+Scenario: Dispatch fait un fan out vers tous les abonnés du même owner
+  Given deux abonnés d'owner tous deux `"alice"`
+  When @dispatch est appelé avec l'owner `"alice"` et un événement `sandbox = "sbx-2"`,
+    `phase = @None`
+  Then les DEUX canaux reçoivent l'événement `"sbx-2"` (une connexion par onglet ouvert
+    reçoit chacune sa copie)
+    # Test existant `dispatch_fans_out_to_all_subscribers_of_owner` — renommer sur ce titre.
+
+Scenario: GET sans session sur la route sandbox-state est refusé en 401 sans upgrade
+  Given le router de l'app monté comme `../main.rs` (route racine GET `/api/ws/sandbox-state`
+    avec extracteur @AuthUser), état de test à base mock (pas de session, pas de bearer)
+  When une requête @tower::@ServiceExt::oneshot `GET /api/ws/sandbox-state` sans cookie ni
+    header @Authorization est adressée
+  Then la réponse est un statut 401 (jamais un 101 d'upgrade) — @run_socket n'a pas été
+    atteint, aucun abonné ajouté
+  And le fait que ce soit une 401 et non une 404/405 du wildcard du @nest("/api", …) prouve
+    que la route racine n'est pas éclipsée par le nest
+    # Pattern de test : `handler_me_without_cookie_returns_401` (`../api/me.rs`).
+
+Scenario: Utilisateur sans lien owner voit la connexion fermer sans aucun appel Kubernetes
+  # WS-live : intégration manuelle — instance live + vrai client WS (cookie ou bearer émis
+  # par @issue_token) ; @axum::@WebSocket ne se construit pas à la main, @run_socket est
+  # privé. Environnement SANS cluster joignable (cf. ../k8s.sdd).
+  Given un utilisateur authentifié dont la base ne contient AUCUN lien `vanyline_owner_links`
+    (ou un lien à `k8s_owner_name = NULL` — même sens, cf. ../api/owners.sdd)
+  When ce client ouvre `/api/ws/sandbox-state`
+  Then le serveur accepte le handshake (101) puis ferme immédiatement la connexion (close
+    anormal sans frame de statut — le backoff du frontend commente ce cas)
+  And aucun log « sandbox-state watch démarré » n'apparaît (@ensure_watch_loop jamais appelé)
+  And aucune erreur n'est loggée (la fermeture silencieuse est un @Ok(()))
+
+Scenario: Premier abonné démarre le watch unique et reçoit le replay initial
+  # Test d'intégration cluster (convention anti-mock kube).
+  Given un cluster de test avec une sandbox `"sbx-1"` (project `"p1"` d'owner `"alice"`,
+    `status.phase = "Running"`) déjà présente et AUCUNE connexion WS antérieure
+    (`watch_handle = @None`)
+  When l'utilisateur d'owner `"alice"` ouvre la première connexion sur
+    `/api/ws/sandbox-state`
+  Then une seule ligne info « sandbox-state watch démarré » est loggée et `watch_handle`
+    est passé à @Some
+  And la connexion reçoit `{"sandbox":"sbx-1","phase":"Running"}` via le replay initial
+    (@InitApply → @WatchEvent::Added) — l'inscription a bien précédé le spawn de la boucle
+  And le replay ne déclenche AUCUN appel redondant de get_project au-delà du premier
+    (cache project → owner peuplé)
+
+Scenario: Seconde connexion ne démarre pas de seconde boucle de watch
+  # Test d'intégration cluster.
+  Given le watch déjà démarré (`watch_handle = @Some`, log « watch démarré » apparu une fois)
+    et l'abonné « alice » connecté
+  When une SECONDE connexion WS du même utilisateur (même owner) s'établit
+  Then aucun second log « sandbox-state watch démarré » n'apparaît (double-check sur
+    `watch_handle` : pas de second @tokio::spawn, pas de second watcher kube)
+  And la seconde connexion est pourtant bien abonnée (elle reçoit les changements suivants)
+
+Scenario: Changement de phase poussé verbatim aux abonnés du owner
+  # Test d'intégration cluster.
+  Given les connexions de « alice » (owner du project de la sandbox) et de « bob » (owner
+    d'une AUTRE sandbox du MÊME namespace) établies, sandbox `"sbx-1"` d'alice connue en
+    phase `"Provisioning"`
+  When le contrôleur passe `status.phase` de `"sbx-1"` à `"Running"`
+  Then la connexion d'alice reçoit `{"sandbox":"sbx-1","phase":"Running"}` (valeur
+    verbatim, même hors `Provisioning|Running|Failed` — aucune validation)
+  And la connexion de bob ne reçoit rien sur ce changement (namespace partagé, dispatch
+    filtré par owner)
+
+Scenario: Suppression d'une sandbox poussée avec phase nulle
+  # Test d'intégration cluster.
+  Given la connexion d'alice et la sandbox `"sbx-1"` de son owner connue en phase `"Running"`
+  When la CR @Sandbox `"sbx-1"` est supprimée du cluster
+  Then la connexion d'alice reçoit `{"sandbox":"sbx-1","phase":null}` (@WatchEvent::Deleted
+    → phase `@None`) — le frontend retire l'entrée de sa map et refetch (miroir TS)
+
+Scenario: Projet introuvable — événement jeté et miss mémorisé durablement
+  # Test d'intégration cluster. Créer la CR @Sandbox par kubectl/API directe (le champ
+  # `spec.project` n'est pas contraint schématiquement).
+  Given une @Sandbox `"sbx-orph"` dont le `spec.project` vaut `"fantome"` (AUCUN @Project
+    de ce nom dans le namespace) et une connexion abonnée
+  When la sandbox est créée puis modifiée (au moins deux événements de watch)
+  Then AUCUNE connexion ne reçoit d'événement la concernant (owner `@None` → jeté)
+  And le warn « sandbox-state: project 'fantome' introuvable: … » apparaît EXACTEMENT une
+    fois sur les deux événements (miss mémorisé au cache — pas de second appel API, pas de
+    second log) `[!]`
+
+Scenario: Sandbox sans nom ou à projet vide ignorée silencieusement
+  # Test d'intégration cluster (CR créée par API directe — le cas « sans name » est
+  # pathologique pour un objet stocké mais la garde existe dans le code).
+  Given une @Sandbox `"sbx-noproject"` au `spec.project` vide, avec une connexion abonnée
+  When elle est créée/modifiée/supprimée
+  Then aucun événement n'est poussé et AUCUN warn « introuvable » ni appel get_project
+    n'a lieu pour elle (la garde `project.is_empty()` précède @resolve_owner)
+
+Scenario: Erreur du watch — recréation du stream après deux secondes
+  # Intégration manuelle (cluster) — nécessite d'injecter une erreur de flux (couper la
+  # connexion api-server, ex: arrêt/reprise du kube-api ou NetworkPolicy temporaire).
+  Given un watch en cours avec l'abonné alice connecté
+  When le stream émet un @WatchEvent::Error (message de l'erreur kube)
+  Then un warn « sandbox-state watch error: …, redémarrage… » puis un info « sandbox-state
+    watch stream terminé, redémarrage… » apparaissent
+  And un nouveau « sandbox-state watch démarré » apparaît environ 2 s plus tard (stream
+    recréé depuis `client.watch_sandboxes()` — et non une reprise interne de la lib seule)
+  And alice reçoit les changements de phase postérieurs à la reprise
+
+Scenario: Message entrant ignoré, aucun écho produit
+  # WS-live : intégration manuelle (instance live + client WS authentifié, cluster optionnel
+  # si l'utilisateur a un owner — sinon couplé au Scenario « sans lien owner »).
+  Given une connexion `/api/ws/sandbox-state` établie et maintenue ouverte
+  When le client envoie une frame texte (`"ping-app"`) puis une frame binaire
+  Then aucune frame n'est reçue en écho et la connexion reste ouverte (la boucle
+    d'attente avale les messages — `while let @Some(@Ok(_))`)
+
+Scenario: Échec de découverte k8s après souscription — la connexion ferme, l'abonnement fuit
+  # WS-live : intégration manuelle, environnement SANS cluster joignable, utilisateur AVEC
+  # un lien owner posé (la branche resolve_owner_name @Some doit être atteinte).
+  Given un utilisateur authentifié dont le lien `vanyline_owner_links` pose un owner, sur un
+    environnement où toute découverte k8s échoue (`../k8s.sdd`)
+  When ce client ouvre `/api/ws/sandbox-state`
+  Then le handshake (101) est accepté puis la connexion fermée par le serveur
+  And une erreur « ws sandbox-state error: … VNL-K8S-001 … » est logguée (@AppError::
+    K8sConfigError propagé par @ensure_watch_loop)
+  And `[!]` l'entrée @Subscriber inscrite juste avant reste dans `shared.subscribers` avec
+    son canal mort (aucune désinscription sur cette branche d'erreur) — non assertable
+    sans crochet de test (champ privé, @WebSocket non constructible) ; l'assertion de test
+    se limite au log + fermeture, la fuite étant le `[!]` des Tasks à corriger d'abord

@@ -1,0 +1,312 @@
+Spec: Create Vanyline Toolsets Migration
+
+Purpose:
+  Deuxième migration de la chaîne de l'`app` : pose la table `vanyline_toolsets`
+    — un toolset = ensemble nommé d'outils (liste `local_tools`, sélection de
+    serveurs MCP `mcp`, `prompt` et `description` optionnels), propriété d'un
+    utilisateur miryad (`owner_id` → `miryad_users.id`). Le fichier est
+    purement DDL : un `up` = `CREATE TABLE`, un `down` = `DROP TABLE`, plus les
+    deux enums `@DeriveIden` privés qui portent les identifiants SQL.
+  Contrat central : la DDL EXACTE (colonnes, types, NULL/DEFAULT, FK,
+    unicité). L'entité sœur `../db/entities/toolsets.sdd` délègue explicitement
+    ici les contraintes SQL (« les contraintes ne vivent qu'ici ») — cette spec
+    est la seule source du schéma `vanyline_toolsets`, l'entité ne contracte
+    que la correspondance colonne↔champ côté Rust. Les deux specs se doivent
+    correspondance colonne-par-colonne : tout écart est une régression.
+  Double backend : le DDL doit s'appliquer telle quelle sur PostgreSQL
+    (production, `../main.rs` se connecte via `database_url`) et sur SQLite en
+    mémoire (harnais de test `../db/test_support.rs::real_db`). C'est la paire
+    complète appliquée contre une vraie base —
+    `./mod.sdd::full_migration_set_applies_against_a_real_schema` — qui est le
+    filet contre le SQL invalide sur l'un des deux backends.
+  Place dans la chaîne (`./mod.sdd`) : position 2 dans `@Migrator::migrations`,
+    sans dépendance des autres enfants de l'app — seul prérequis, la table
+    `miryad_users` posée par `@miryad_core::migration::Migrator`, qui doit
+    précéder (cible de la FK).
+
+Owns:
+  ./m20260825_000002_create_vanyline_toolsets.rs
+
+Can read:
+  ./mod.sdd — ordre de la chaîne, table de suivi `seaql_migrations_app`, règle
+    de régression Phase 3 sur `.index(...)` dans `Table::create()`.
+  ./mod.rs — enregistrement de cette migration en position 2, test de paire
+    complète.
+  ../db/entities/toolsets.rs — consommateur direct : les sept champs de
+    `@crate::db::entities::toolsets::Model` en correspondance un-à-un.
+  ../db/test_support.rs — harnais `@real_db` (SQLite en mémoire, FK non
+    appliquées — cf. Tasks).
+  ../main.rs — démarrage production : connection `database_url`, miryad-core
+    puis `@crate::migration::Migrator::up`.
+
+Exposes:
+  @Migration — `pub struct` local au module (module privé, jamais atteignable
+    hors du binaire), `#[derive(DeriveMigrationName)]` :
+    `@MigrationTrait::migration_name()` → `"m20260825_000002_create_vanyline_toolsets"`,
+    nom sous lequel la migration est enregistrée dans `seaql_migrations_app`.
+  @MigrationTrait::up — `async fn up(&self, manager: &@sea_orm_migration::SchemaManager)
+    -> Result<(), @sea_orm::DbErr>` : une seule instruction
+    `manager.create_table(...)`, table `vanyline_toolsets` via
+    `@sea_orm::sea_query::Table::create()` avec `if_not_exists()`
+    (`CREATE TABLE IF NOT EXISTS`). DDL contractuelle, dans l'ordre des `.col` :
+    `id` — `@ColumnDef::integer().not_null().auto_increment().primary_key()` :
+      clé primaire entière auto-incrémentée (sémantique i32 — l'entité expose
+      `id: i32` ; la forme exacte générée, SERIAL/IDENTITY côté Postgres ou
+      INTEGER PRIMARY KEY autoincrement côté SQLite, relève de sea-query et
+      n'est pas contractée).
+    `owner_id` — `integer().not_null()`, sans DEFAULT.
+    `name` — `string()` sans longueur (texte de longueur quelconque), `.not_null()`.
+    `description` — `string()` sans longueur, NULLABLE (ni `.not_null()` ni
+      DEFAULT) — diffère de la sœur `m20260825_000001` (`skills.description` est
+      `NOT NULL DEFAULT ""`) ; correspond aux `Option<String>` de l'entité.
+    `prompt` — `string()` sans longueur, NULLABLE (aucun DEFAULT).
+    `local_tools` — `custom("JSONB").not_null().default(@sea_orm::sea_query::Expr::cust("'[]'"))` :
+      type émis littéralement `JSONB` (JSONB natif côté Postgres — cf. Tasks
+      `[!]` pour le comportement côté SQLite), NOT NULL, valeur par défaut la
+      chaîne SQL littérale `'[]'` (tableau JSON vide).
+    `mcp` — identique à `local_tools` (`JSONB NOT NULL DEFAULT '[]'`).
+    Contrainte de table `UNIQUE (owner_id, name)` — posée par
+    `@sea_orm::sea_query::Index::create().unique().col(owner_id).col(name)`
+    passé à `.index(...)` dans le `Table::create()` : l'unicité porte sur le
+    COUPLE (deux owners peuvent avoir un toolset du même nom ; un même owner
+    ne peut pas dupliquer un nom). C'est la forme `.unique()` autorisée par la
+    règle de régression Phase 3 de `./mod.sdd`.
+    FK `owner_id` → `miryad_users.id` — `@sea_orm::sea_query::ForeignKey::create()`
+      anonyme, `.on_delete(@sea_orm::sea_query::ForeignKeyAction::Cascade)` ;
+      `on_update` non spécifié ⇒ comportement par défaut du backend (`NO ACTION`
+      côté Postgres).
+  @MigrationTrait::down — une seule instruction `drop_table` :
+    `DROP TABLE "vanyline_toolsets"` (sans `if_exists`, sans cascade) ;
+    supprime par la même occasion FK et contrainte `UNIQUE` portées par la
+    table. Ne touche aucune autre table.
+  @Toolset — enum privé `#[derive(DeriveIden)]`, mapping d'identifiants :
+    `Table` → `vanyline_toolsets` (`#[sea_orm(iden = "vanyline_toolsets")]`),
+    variantes `Id`, `OwnerId`, `Name`, `Description`, `Prompt`, `LocalTools`,
+    `Mcp` → identifiants snake_case `id`, `owner_id`, `name`, `description`,
+    `prompt`, `local_tools`, `mcp`.
+  @User — enum privé `#[derive(DeriveIden)]` : `Table` → `miryad_users`
+    (`#[sea_orm(iden = "miryad_users")]`), `Id` → `id`. Utilisé UNIQUEMENT
+    comme cible de la FK : ce fichier ne pose jamais de DDL sur `miryad_users`.
+
+Accepts:
+  Un `@sea_orm_migration::SchemaManager` branché sur une connexion réelle :
+    PostgreSQL en production, SQLite en mémoire dans les tests (`@real_db`).
+    Aucun autre paramètre, aucune lecture de config ou d'environnement.
+  Précondition (hors de ce fichier, contractée par `./mod.sdd`) :
+    `@miryad_core::migration::Migrator::up` déjà appliqué — la FK cible
+    `miryad_users`, table que seul miryad-core crée.
+  En écriture (contrat subi, pas émis) : lignes insérées par le CRUD
+    `miryad-core` (`/api/v1/toolsets`) et lues par
+    `@crate::config_store::PgConfigStore::load_toolsets`.
+
+Returns:
+  `up` : `Ok(())` après création de la table — ou no-op `Ok(())` si la table
+    existe déjà (`IF NOT EXISTS`).
+  `down` : `Ok(())` après suppression de `vanyline_toolsets`.
+
+Raises:
+  `@sea_orm::DbErr` propagé tel quel — aucun `map_err`, `unwrap`, `expect`,
+    retry ou dégradation :
+    - `up` si `miryad_users` est absente (FK non résoluble) ou si le backend
+      rejette le DDL ;
+    - `up` si la table existe dans une forme incompatible : `IF NOT EXISTS`
+      ne compare pas le schéma, il saute la création silencieusement ;
+    - `down` sur table absente (`DROP TABLE` sans `if_exists` → erreur du
+      backend) ou si un objet dépendant bloque le drop.
+  Les violations de contrainte en écriture (NOT NULL, `UNIQUE (owner_id, name)`,
+    FK) ne sont pas levées par ce fichier : il ne fait que poser les
+    contraintes ; l'erreur remonte de la base au CRUD `miryad-core`.
+
+Handles:
+  Rejeu de `up` sur un schéma où la table existe déjà → `CREATE TABLE IF NOT
+    EXISTS` rend l'instruction idempotente (chemin raréfié de toute façon par
+    la table de suivi `seaql_migrations_app`, qui saute une migration déjà
+    enregistrée).
+  INSERT sans `local_tools`/`mcp` → le `DEFAULT '[]'` SQL alimente les deux
+    colonnes avec le tableau JSON vide — cohérent avec les défauts serde
+    `json!([])` de `../db/entities/toolsets.sdd` ; aucune colonne JSON ne peut
+    être NULL en base.
+  INSERT sans `description`/`prompt` → NULL stockés, projetés `None` côté
+    entité.
+  Suppression d'un owner (`miryad_users`) → les toolsets de cet owner sont
+    supprimés par `ON DELETE CASCADE` (effectif côté Postgres ; cf. Tasks `[?]`
+    sur le harnais SQLite où les FK ne sont pas appliquées).
+  Deux lignes `(owner_id, name)` identiques → refusées par la contrainte
+    `UNIQUE` côté base (`23505` Postgres / `SQLITE_CONSTRAINT_UNIQUE` SQLite) ;
+    même `name` pour deux `owner_id` distincts → accepté.
+
+Must:
+  - Poser exactement les sept colonnes dans l'ordre et avec les contraintes
+      telles que listées dans `Exposes` : aucune colonne ajoutée, retirée,
+      renommée, ni changement de type/NULL/DEFAULT — la migration est déjà
+      appliquée en production et verrouillée par son nom dans
+      `seaql_migrations_app` (`./mod.sdd`).
+  - Maintenir la correspondance un-à-un avec les sept champs de
+      `@crate::db::entities::toolsets::Model` (`../db/entities/toolsets.rs`) :
+      `id`/`owner_id` ↔ integer NOT NULL, `name` ↔ NOT NULL,
+      `description`/`prompt` ↔ nullable, `local_tools`/`mcp` ↔ JSONB NOT NULL
+      DEFAULT `'[]'`.
+  - Conserver l'unicité composite `UNIQUE (owner_id, name)` comme SEULE
+      contrainte d'unicité de la table, posée via `.index(...)` + `.unique()`
+      dans le `Table::create()` (règle Phase 3 de `./mod.sdd` : dans
+      `@Table::create()`, `.index(...)` uniquement `.unique()` ; tout index
+      non-UNIQUE exige une instruction séparée
+      `@sea_orm_migration::SchemaManager::create_index`).
+  - Conserver la FK `owner_id` → `miryad_users.id` avec `ON DELETE CASCADE`.
+  - Rester appliquable sans erreur sur PostgreSQL ET SQLite (couvert par le
+      test de paire complète de `./mod.rs`).
+  - Laisser `down` ne supprimer que `vanyline_toolsets` — jamais `miryad_users`
+      ni aucune autre table de la chaîne.
+
+Must not:
+  - Modifier le `up` d'une migration déjà appliquée en production ni la
+      renuméroter/réordonner (règle `./mod.sdd`) : toute correction passe par
+      une nouvelle migration postérieure à `m20260825_000010`.
+  - Introduire un `.index(...)` non-UNIQUE dans le `Table::create()` — le
+      fragment SQL orphelin est invalide sur les DEUX backends (régression
+      Phase 3, `./mod.sdd`).
+  - Poser une contrainte CHECK sur la forme JSON de `local_tools`/`mcp`
+      (array de chaînes, array d'objets) : aucun CHECK n'existe aujourd'hui,
+      la validation de forme est un sujet ouvert (Tasks `[?]`, écho de
+      `../db/entities/toolsets.sdd`).
+  - Émettre du DDL sur `miryad_users` (l'enum `@User` n'existe que pour nommer
+      la cible de la FK) ni insérer/modifier des lignes dans `up` ou `down`.
+  - Compter sur l'application des FK côté SQLite de test : le harnais `@real_db`
+      n'active pas `PRAGMA foreign_keys` — un test qui reposerait sur CASCADE en
+      SQLite serait faux.
+
+Depends on:
+  `sea-orm-migration` (`@MigrationTrait`, `@SchemaManager`, `prelude` avec
+    `@Table`/`@ColumnDef`/`@Index`/`@ForeignKey`/`@Expr`/`@ForeignKeyAction`,
+    macros `DeriveMigrationName`/`DeriveIden`), `async-trait`, `sea-orm`
+    (`@DbErr`).
+  `@miryad_core::migration::Migrator` (crate externe) — crée `miryad_users`
+    avant cette migration : cible de la FK, précondition temporelle.
+  `./mod.sdd` — chaîne d'application (position 2), table de suivi, règle
+    Phase 3.
+  Consommateurs (aval, ne conditionnent pas la compilation) :
+    `../db/entities/toolsets.rs` (mappage exact des sept colonnes),
+    `../config_store.rs` (`@PgConfigStore::load_toolsets` filtre sur
+    `owner_id`), `../main.rs` (routes `/api/v1/toolsets` via `resource_router`).
+
+Scenario: migration_name_is_stable
+  Given `@Migration` de ./m20260825_000002_create_vanyline_toolsets.rs
+  When on appelle `@MigrationTrait::migration_name()`
+  Then le nom retourné est exactement
+    `"m20260825_000002_create_vanyline_toolsets"` — nom enregistré dans
+    `seaql_migrations_app`, jamais modifiable après application
+  # Test unitaire sans base ; à dériver (aucun test actuel dans ce fichier).
+
+Scenario: create_table_poses_exactly_seven_columns
+  Given la base SQLite en mémoire de `@crate::db::test_support::real_db`
+    (migrateurs miryad-core puis app appliqués)
+  When on lit `PRAGMA table_info(vanyline_toolsets)`
+  Then il y a exactement 7 colonnes dans l'ordre `id`, `owner_id`, `name`,
+    `description`, `prompt`, `local_tools`, `mcp`
+  And les drapeaux NOT NULL sont vrais pour `id`, `owner_id`, `name`,
+    `local_tools`, `mcp` et faux pour `description` et `prompt`
+  And le type déclaré de `local_tools` et `mcp` est `JSONB`
+  # À dériver via real_db + SQL brut.
+
+Scenario: insert_without_json_columns_gets_empty_array_defaults
+  Given la base de `@real_db`
+  When un `INSERT INTO vanyline_toolsets (owner_id, name)` fournit seulement
+    `(1, 'fs')` (sans `local_tools`, `mcp`, `description`, `prompt`)
+  Then `local_tools` et `mcp` valent `'[]'` (DEFAULT SQL effectif)
+  And `description` et `prompt` valent NULL
+  # Les FK n'étant pas appliquées en SQLite, aucune ligne de `miryad_users`
+  # n'est nécessaire pour ce test.
+
+Scenario: not_null_columns_reject_explicit_null
+  Given la base de `@real_db`
+  When un `INSERT` explicite passe `NULL` pour `name`
+  Then la base rejette la ligne (erreur NOT NULL, aucune ligne insérée)
+  And il en va de même pour `local_tools` passé explicitement `NULL` malgré
+    son DEFAULT (le DEFAULT ne s'applique qu'à une colonne absente de la
+    liste des colonnes)
+  # Un seul test couvrant les deux inserts.
+
+Scenario: duplicate_toolset_name_for_same_owner_is_rejected
+  Given la base de `@real_db` avec une ligne `(owner_id=1, name='fs')` dans
+    `vanyline_toolsets`
+  When un second insert pose `(owner_id=1, name='fs')`
+  Then la base rejette la ligne par violation de contrainte d'unicité
+    (`SQLITE_CONSTRAINT_UNIQUE` en test, `23505` en Postgres)
+  # Vérifie que l'unicité composite est réellement posée, pas seulement
+  # écrite dans le code de la migration.
+
+Scenario: same_toolset_name_for_different_owners_is_allowed
+  Given la base de `@real_db` avec une ligne `(owner_id=1, name='fs')` dans
+    `vanyline_toolsets`
+  When un insert pose `(owner_id=2, name='fs')`
+  Then l'insert réussit — l'unicité porte sur le couple `(owner_id, name)`,
+    pas sur `name` seul
+
+Scenario: up_is_replayable_on_existing_schema
+  Given une base où l'`up` de `@Migration` a déjà été appliqué (base de
+    `@real_db`)
+  When on rappelle l'`@MigrationTrait::up` de cette migration sur la même
+    connexion
+  Then l'appel retourne `Ok(())` sans `@sea_orm::DbErr` —
+    `CREATE TABLE IF NOT EXISTS` rend le rejeu inoffensif
+  # Construire le SchemaManager depuis la connexion de real_db.
+
+Scenario: down_drops_only_the_toolsets_table
+  Given la base de `@real_db` (dix migrations de l'app appliquées)
+  When on appelle l'`@MigrationTrait::down` de `@Migration`
+  Then `vanyline_toolsets` a disparu (`PRAGMA table_info` retourne zéro
+    colonne)
+  And `vanyline_skills` et `miryad_users` sont toujours présentes — le `down`
+    ne touche que sa propre table
+  # Appeler `down` sur une copie de base (real_db par test) : ne casse que
+  # la base jetable du test.
+
+Scenario: owner_deletion_cascades_toolsets
+  Given une instance PostgreSQL réelle avec les migrateurs miryad-core puis
+    app appliqués, un utilisateur `miryad_users` et un toolset `(owner_id,
+    name='fs')` insérés
+  When la ligne de l'owner est supprimée de `miryad_users`
+  Then la ligne du toolset a été supprimée par `ON DELETE CASCADE`
+  # Nécessite PostgreSQL (les FK ne sont pas appliquées par le harnais
+  # SQLite actuel) — cf. Tasks `[?]` : aucun test exécutable tant qu'un
+  # harnais PG n'existe pas.
+
+Tasks:
+  [!] Double compatibilité SQLite de `custom("JSONB")` : SQLite accepte
+      n'importe quel nom de type, et « JSONB » ne contient aucun mot-clé
+      d'affinité (INT/CHAR/CLOB/TEXT/BLOB/REAL/FLOA/DOUB) → affinité NUMERIC,
+      où le texte JSON (non numérique) reste stocké tel quel. Ça fonctionne,
+      mais par permissivité de SQLite, pas par mappage de type délibéré — ne
+      pas présenter ce comportement comme un contrat voulu. Alternative :
+      `@sea_orm::sea_query::ColumnDef::json_binary()` (JSONB Postgres typé,
+      type natif de l'autre côté). À trancher avec Sébastien.
+  [?] Application des FK côté tests : `@real_db` (SQLite) n'active pas
+      `PRAGMA foreign_keys`, donc `ON DELETE CASCADE` et la FK elle-même ne
+      sont vérifiés que sur PostgreSQL réel, qu'aucun harnais de test actuel
+      n'apporte. Le Scenario `owner_deletion_cascades_toolsets` reste sans
+      test exécutable : harnais PG (CI ou `#[ignore]`) ou acceptation explicite
+      ? À trancher avec Sébastien.
+  [?] `down` non idempotent (`DROP TABLE` sans `if_exists`) : sur schéma sans
+      la table, `down` retourne un `DbErr`. Les dix enfants sont cohérents sur
+      ce point et aucun `down` n'est appelé nulle part (cf. Tasks de
+      `./mod.sdd`) — faut-il l'idempotiser si un rollback est un jour décidé ?
+      Lié à la décision d'irréversibilité de `./mod.sdd`, ne rien changer ici
+      avant.
+  [?] `on_update` non spécifié sur la FK → `NO ACTION` (Postgres) : suffisant
+      (PK de `miryad_users` jamais mutée) à confirmer, ou à expliciter dans le
+      code pour lever le doute ?
+  [?] Forme JSON de `local_tools`/`mcp` : aucun CHECK en base, aucune
+      validation à l'écriture (le repli n'existe qu'à la lecture,
+      `@domain_toolset`) — même question ouverte que le `[?]` de
+      `../db/entities/toolsets.sdd` ; si une contrainte doit exister, sa place
+      est ici (CHECK) ou dans l'entité (`before_create`), pas les deux sans
+      décision.
+  [ ] Dériver les tests des Scenario sans test actuel dans ce fichier :
+      `migration_name_is_stable`, `create_table_poses_exactly_seven_columns`,
+      `insert_without_json_columns_gets_empty_array_defaults`,
+      `not_null_columns_reject_explicit_null`,
+      `duplicate_toolset_name_for_same_owner_is_rejected`,
+      `same_toolset_name_for_different_owners_is_allowed`,
+      `up_is_replayable_on_existing_schema`,
+      `down_drops_only_the_toolsets_table` (tous exécutables sur `@real_db` ;
+      `owner_deletion_cascades_toolsets` attend la décision `[?]` PG).

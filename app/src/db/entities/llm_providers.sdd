@@ -1,0 +1,415 @@
+Spec: LLM Providers Entity
+
+Purpose:
+  Entité SeaORM de la table `vanyline_llm_providers` : la ligne « fournisseur LLM »
+  (endpoint + type + secret) ET sa déclaration de ressource REST via @MiryadResource
+  de miryad-core. Un seul contrat pour le fichier : le type de la ligne (colonnes,
+  sérialisation JSON) et le contrat de la ressource `/api/v1/llm-providers` (nom,
+  politiques d'accès Public/AdminOnly, absence de colonne owner, validation du
+  `provider_type` au hook @before_create) sont indissociables — l'impl
+  @MiryadResource for @Entity porte sur les types générés par le
+  @derive(DeriveEntityModel) du même struct.
+  Le contrat table ↔ schéma SQL (DDL, clé unique, défauts, FK entrante) est celui de
+  la migration ../../migration/m20260825_000003_create_vanyline_llm_providers (contrat
+  de schéma :
+  `../../migration/m20260825_000003_create_vanyline_llm_providers.sdd`, en cours de
+  rédaction) — ce fichier-ci en est le miroir côté Rust ; toute divergence entre les
+  deux est un bug de l'un des deux, jamais un tiers contrat.
+  Particularités parmi les entités sœurs de `./mod.rs` : seule ressource dont la
+  lecture est @AccessPolicy::Public et l'écriture @AccessPolicy::AdminOnly, et seule à
+  porter un secret (`api_key`) — voir Tasks `[!]` sur le masque. Le contrat du hook
+  (validation « perdue lors de la bascule miryad-core » d'après le commentaire du
+  fichier) est de la même famille que `./mcp_servers.rs` (`server_type`, code
+  `VNL-MCP-003`) et `./agents.rs` (`mode`, code `VNL-AGENT-001`), mais chaque fichier
+  possède son propre contrat — pas de regroupement.
+  Articulation avec le domaine config (documentée ici, jamais possédée ici) : le
+  @Provider de `vanyline_cfgstore::domain` (cf.
+  `../../../../cfgstore/src/domain.sdd`) N'EST PAS ce type. Deux formes distinctes
+  coexistent :
+  - la ligne DB / payload REST (CE fichier) : porte `id`, `available_models`,
+    `is_default`, `provider_type` en String (validé uniquement au hook de création
+    REST) ;
+  - le domaine config `Provider` : PAS d'`id`, `provider_type` en enum @ProviderType,
+    seuls `name`/`endpoint`/`api_key` entrent dans le domaine (`available_models` et
+    `is_default` n'y existent pas), et `api_key` y est absent du wire quand @None
+    (@skip_serializing_if) — propriété que ce @Model n'a PAS ;
+  - le frontend (`../../../../frontend/src/api/httpConfigRepo.ts`, hors périmètre)
+    traduit entre les deux (`provider_type` ↔ `type`, retire `api_key` null de la
+    forme canonique).
+
+Owns:
+  ./llm_providers.rs
+
+Exposes:
+  @Model — `pub struct`, derives @Clone @Debug @PartialEq @Serialize @Deserialize
+    @utoipa::ToSchema @DeriveEntityModel ; @derive(ToSchema) enregistré sous le nom
+    OpenAPI `LlmProvider` (@schema(as = LlmProvider)) — schéma du fragment
+    @resource_openapi fusionné dans le document OpenAPI de `../../main.rs`.
+    Aucun @serde(rename) : le JSON REST est en snake_case strictement identique aux
+    noms de champs Rust.
+  @Entity, @ActiveModel, @Column, @PrimaryKey, @Relation — générés par SeaORM ;
+    @Relation est un enum vide (aucune relation déclarée, convention de tous les
+    enfants de `./mod.rs`) : le lien avec `vanyline_model_profiles` est résolu en
+    mémoire par les consommateurs, jamais par SeaORM.
+  @ActiveModelBehavior — impl vide sur @ActiveModel : aucun hook SeaORM
+    (@before_save/@before_insert). Corollaire : @MiryadResource::before_create n'est
+    JAMAIS déclenché par @Entity::insert / @Entity::update — le hook n'est appelé que
+    par le chemin `resource_router` de miryad-core (cf. Scenario « Le chemin
+    programmatique court-circuite le hook »).
+  @MiryadResource for @Entity — contrat de ressource REST :
+    - @resource_name() -> `"llm-providers"` (routes `/api/v1/llm-providers` et
+      `/api/v1/llm-providers/{id}`, branchées par @resource_router dans `../../main.rs`)
+    - @read_policy() -> @AccessPolicy::Public
+    - @write_policy() -> @AccessPolicy::AdminOnly
+    - @owner_column() -> @None (la table ne porte aucune colonne owner — les providers
+      sont une ressource globale)
+    - @before_create(@ActiveModel, &@AuthPrincipal) -> @Result<@ActiveModel, @HookError> :
+      valide que `provider_type` vaut exactement `"ollama"` ou `"openai-compatible"` ;
+      sinon @HookError::with_code(`"VNL-LLM-005"`, message). Le principal est ignoré
+      (argument souligné `_principal`) ; @ActiveValue::NotSet est traité comme la chaîne
+      vide donc rejeté ; @ActiveValue::Unchanged est traité comme @ActiveValue::Set.
+      Le modèle accepté est rendu inchangé (aucune normalisation). Aucun hook
+      d'équivalent `before_update` n'existe dans le trait — le commentaire du fichier
+      qualifie cela de « limite du framework, pas de cette entité ».
+  @fn default_json_array — privée : valeur par défaut de `available_models` à la
+    désérialisation (@serde_json::json!([])).
+
+Structure:
+  Champs de @Model et correspondance SQL (migration
+  `../../migration/m20260825_000003_create_vanyline_llm_providers.rs`) — dans l'ordre :
+  - `id: i32` — @sea_orm(primary_key) ; SQL `INTEGER NOT NULL AUTO_INCREMENT PRIMARY
+    KEY` ; @serde(default) absent du body → `0`.
+  - `name: String` — SQL `STRING NOT NULL` porteur d'un `unique_key` (unicité GLOBALE,
+    pas par owner — la table n'a pas d'owner) ; requis à la désérialisation (pas de
+    default). L'unicité est imposée par l'index SQL uniquement — ni l'entité ni le hook
+    ne la vérifient.
+  - `provider_type: String` — SQL `STRING NOT NULL`, SANS CHECK (le commentaire du hook
+    mentionne un CHECK en base « perdu lors de la bascule miryad-core » — la migration
+    actuelle n'en porte aucun) ; requis à la désérialisation. Le seul garde-fou existant
+    est le hook @before_create, uniquement sur le chemin création REST.
+  - `endpoint: String` — SQL `STRING NOT NULL` ; requis à la désérialisation. Aucune
+    validation de forme nulle part ici (le `trim_end_matches('/')` et la concaténation
+    d'URL vivent dans `../../api/llm_providers.rs`).
+  - `api_key: Option<String>` — SQL `STRING` NULLable, SEULE colonne @Option du model ;
+    clé absente ou `null` → @None. Secret sérialisé en clair dans les réponses REST
+    (voir Tasks `[!]`).
+  - `available_models: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '[]'` ;
+    @serde(default = "default_json_array") : clé ABSENTE → `[]`. Clé présente et à
+    `null` → @serde_json::Value::Null désérialisé tel quel (le default ne couvre que
+    l'absence de clé), donc stockable en JSONB `null` malgré le NOT NULL.
+  - `is_default: bool` — SQL `BOOLEAN NOT NULL DEFAULT false` ; @serde(default) : clé
+    absente → `false` ; clé explicite `null` → erreur de désérialisation (le default ne
+    couvre pas `null`). L'invariant « un seul `true` » n'est imposé NULLE PART : ni
+    entité, ni hook, ni index unique partiel — seul l'endpoint dédié
+    `PUT /llm-providers/{id}/default` le maintient (cf. Handles).
+  Aucun champ temporel (ni `created_at` ni `updated_at`) et aucune colonne owner
+  (contrastes : `./model_profiles.rs`, `./agents.rs`).
+
+Accepts:
+  Côté lecture SQL : toute ligne de `vanyline_llm_providers` dont les colonnes
+    respectent les nullabilités ci-dessus (le @derive(DeriveEntityModel) charge
+    `id`/`name`/`provider_type`/`endpoint`/`available_models`/`is_default` en
+    non-Option : une ligne avec NULL sur une colonne NOT NULL est une erreur SQL,
+    jamais un @None). Accepte aussi une ligne au `provider_type` hors des deux valeurs
+    connues, atteignable par le contournement programmatique du hook (cf. Scenario).
+  Côté désérialisation REST (body que `resource_router` de miryad-core passe en
+    @Model « tel quel », cf. commentaire du fichier) :
+  - corps de création SANS `id` (forme réelle du frontend :
+    `../../../../frontend/src/api/httpConfigRepo.ts` `toRest` n'envoie que `name`,
+    `provider_type`, `endpoint` et `api_key` parmi les présents) → désérialise avec
+    `id == 0`, `available_models == []`, `is_default == false` — c'est LE contrat qui a
+    motivé les @serde(default) (bug Phase 3 : 400 « missing field », même famille que la
+    régression capturée dans `./agents.rs`) ;
+  - clé `api_key` absente ou à `null` → @None (default serde implicite de @Option) ;
+  - clé `available_models` absente → `[]` ; à `null` → @Value::Null ;
+  - clé `is_default` absente → `false` ; à `null` → erreur serde (@bool ne reçoit pas
+    `null`, @serde(default) ne couvre pas le `null` explicite) ;
+  - clés `name` / `provider_type` / `endpoint` absentes → erreur serde (champs sans
+    default) ;
+  - clés `id` / `is_default` fournies dans le body → acceptées au niveau serde (`id`
+    est ensuite censé être écrasé par `resource_router` — claim de commentaire, miroir
+    non vérifié dans ce fichier, voir Tasks).
+  Côté tests unitaires : @before_create ignore totalement l'argument @AuthPrincipal —
+    n'importe quel principal (le `test_principal()` du fichier utilise
+    @PrincipalSource::ApiToken) passe.
+
+Returns:
+  - @Serialize de @Model (réponses REST de `resource_router`) : objet JSON complet,
+    les 7 clés présentes en toutes circonstances — `id`, `name`, `provider_type`,
+    `endpoint`, `api_key`, `available_models`, `is_default` — aucun
+    @skip_serializing_if. `api_key` apparaît à `null` quand @None et à sa valeur
+    string en CLAIR quand @Some. C'est la forme que
+    `../../../../frontend/src/api/httpConfigRepo.ts` consomme (`fromRest` ne retire
+    `api_key` que quand il est null, le conserve sinon).
+  - @resource_name() : `&'static str` `"llm-providers"`, exactement (assertion du test
+    du fichier et liste testée de `../../main.rs::openapi_spec`).
+  - @owner_column() : @None — rien ne borne la ressource à un propriétaire.
+  - @before_create sur entrée valide : @Ok avec l'@ActiveModel rendu INCHANGÉ — le hook
+    ne normalise rien (un `" ollama "` avec espaces reste rejeté tel quel, la
+    comparaison est exacte).
+  - OpenAPI : nom de composant `LlmProvider` et chemins `/api/v1/llm-providers` et
+    `/api/v1/llm-providers/{id}` portés par @resource_openapi :: @Entity, fusionné EN
+    PREMIER fragment dans `../../main.rs` (le test de `../../main.rs` vérifie les
+    chemins, pas le nom de composant).
+
+Raises:
+  - @HookError::with_code(`"VNL-LLM-005"`, message
+    `provider_type must be 'ollama' or 'openai-compatible', got: {provider_type}`)
+    depuis @before_create pour tout `provider_type` hors des deux valeurs acceptées —
+    y compris @ActiveValue::NotSet, traité comme chaîne vide (message finissant par
+    `got: `). Ce code est PARTAGÉ avec l'erreur runtime de @discover_models dans
+    `../../api/llm_providers.rs` (type inconnu au test d'un provider) — voir Tasks.
+    Le rendu HTTP du @HookError (statut, corps) est un comportement de miryad-core, non
+    observable depuis ce fichier.
+  - Erreurs serde sur body invalide (clé requise absente, `is_default: null`) —
+    rendues par axum/`resource_router`, statut hors du périmètre de ce fichier.
+  - En base : violation de la clé unique `name`, violation NOT NULL, et RESTRICT de la
+    FK entrante `vanyline_model_profiles.provider_id` remontent en @DbErr de SeaORM
+    vers l'appelant (`resource_router` en production, @Entity::insert dans les tests de
+    `./agents.rs` et de `../../api/llm_providers.rs`) — statut HTTP correspondant
+    également la propriété de miryad-core.
+  - Aucune autre erreur fabriquée par ce fichier hors hook et tests.
+
+Handles:
+  - CRUD REST : `../../main.rs` monte @resource_router ::<llm_providers::Entity,
+    AppState>() et fusionne @resource_openapi ::<llm_providers::Entity>() dans le
+    document OpenAPI — les tests de `../../main.rs` vérifient l'existence des chemins
+    `/api/v1/llm-providers` et `/api/v1/llm-providers/{id}`.
+  - Routes métier (contrat possédé par `../../api/mod.rs` et `../../api/llm_providers.rs`) :
+    `PUT /api/v1/llm-providers/{id}/default` (@set_default_provider — bascule `is_default`
+    par deux @update_many en rafale, répond un @Model avec `is_default: true`) et
+    `POST /api/v1/llm-providers/{id}/test` (@test_provider → @discover_models, PERSISTE
+    la découverte dans `available_models` par @Entity::update). Les deux autorisent via
+    @can_write ::<Entity> (rbac miryad-core, supposé reposer sur
+    @AccessPolicy::AdminOnly — invérifiable depuis le dépôt, voir Tasks) et montent
+    @AppError::LlmProviderNotFound (`../../error.rs`, 404) sur id inconnu.
+  - Consommation config (lecture) : `../../config_store.rs` @load_providers charge la
+    table ENTIÈRE par @Entity::find().all() sans AUCUN filtre (aucun owner à filtrer —
+    cohérent avec @AccessPolicy::Public), puis @domain_provider projette `name`,
+    `provider_type`, `endpoint`, `api_key` vers le @Provider du domaine ; les colonnes
+    `available_models` et `is_default` n'entrent PAS dans le domaine. Un
+    `provider_type` à valeur inconnue (ligne passée en contournant le hook) n'échoue
+    qu'ici, en @VnyError::UnknownProviderType, jamais à l'insertion.
+  - Seeds de tests : @mod resource_router_regression de `./agents.rs` insère un provider
+    valide (`provider_type: "ollama"`) par @Entity::insert — donc SANS passer par le
+    hook — pour satisfaire la FK `model_profiles.provider_id` ; les tests de
+    `../../api/llm_providers.rs` construisent leurs providers sur @real_db
+    (`../test_support.rs`).
+  - Traduction frontend : `../../../../frontend/src/api/httpConfigRepo.ts`
+    (`providers: '/api/v1/llm-providers'`) — `fromRest` renomme `provider_type` → `type`,
+    retire `api_key` quand null, garde `available_models`/`is_default` (avec repli
+    `[]`/`false` côté client sur JSON `null`) ; `toRest` n'envoie que
+    `name`/`provider_type`/`endpoint`/`api_key`, jamais `id`.
+
+Must:
+  - @sea_orm(table_name) porter exactement `"vanyline_llm_providers"`, identique à
+      l'@sea_orm(iden) de la migration et des migrations sœurs qui référencent la table
+      (`LlmProvider::Table` de `../../migration/m20260825_000005_create_vanyline_model_profiles.rs`).
+  - Porter exactement les 7 colonnes listées en Structure, mêmes noms Rust (snake_case
+      serde par défaut), mêmes nullabilités — tout ajout/retrait de champ exige
+      d'aligner la migration dans le même changement.
+  - Garder @serde(default) sur `id`, @serde(default = "default_json_array") sur
+      `available_models` et @serde(default) sur `is_default` : le corps de création réel
+      du frontend n'envoie aucun des trois (contrat de la famille de régression Phase 3
+      documentée dans `./agents.rs`).
+  - Déclarer @Relation vide : aucune association SeaORM entre `llm_providers` et
+      `vanyline_model_profiles`, même si la FK entrante existe au niveau SQL —
+      l'intégrité est appliquée par la base (RESTRICT) et la résolution se fait en
+      mémoire chez les consommateurs.
+  - Conserver les 4 valeurs du contrat @MiryadResource et le hook tels quels :
+      `"llm-providers"`, @AccessPolicy::Public en lecture, @AccessPolicy::AdminOnly en
+      écriture, @None en @owner_column, l'ensemble {`"ollama"`, `"openai-compatible"`}
+      validé sous le code `"VNL-LLM-005"` — les trois premiers assertés par le test
+      `llm_provider_resource_contract`, le hook par `before_create_accepts_known_provider_types`
+      et `before_create_rejects_unknown_provider_type`.
+  - Que le hook traite @ActiveValue::NotSet comme la chaîne vide (donc rejeté), lise
+      @ActiveValue::Unchanged comme @ActiveValue::Set, et retourne le modèle inchangé
+      quand il l'accepte.
+  - Garder @ActiveModelBehavior vide : la validation métier appartient au chemin
+      miryad-core (`before_create`), pas aux hooks SeaORM d'enregistrement ; en ajouter
+      un ici changerait la surface du hook sans arbitrage de schéma.
+
+Must not:
+  - Introduire une colonne owner ni rendre @owner_column @Some(...) sans migration
+      ajoutant la colonne et arbitrage du passage Public → par-owner (les providers sont
+      aujourd'hui des ressources globales, protégées uniquement par l'écriture
+      AdminOnly).
+  - Ajouter de @skip_serializing_if, ni tout filtrage/masque de `api_key` dans
+      @Serialize/@ToSchema, à l'initiative de ce fichier seul : cela changerait le wire
+      dont dépend `../../../../frontend/src/api/httpConfigRepo.ts`, et la question du
+      masque est à trancher globalement (même sujet que les Tasks de
+      `../../../../cfgstore/src/domain.sdd`) — voir Tasks `[!]`.
+  - Porter de timestamps (`created_at`/`updated_at`) : la table n'en a pas et @auto_time
+      n'est utilisé sur aucune entité sœur de `./mod.rs`.
+  - Présenter @before_create comme le garde global du `provider_type` : @Entity::insert
+      le court-circuite, la voie `PUT` de `resource_router` ne l'exécute pas (aucun
+      `before_update` dans le trait) et le schéma actuel ne porte aucun CHECK.
+  - Supposer dans ce fichier que `resource_router` écrase `id` aux écritures, appelle le
+      hook sur tous les chemins de création, ou que @can_write consomme bien
+      @AccessPolicy::AdminOnly : ce sont des contrats de miryad-core (crate externe, non
+      auditable depuis le dépôt), documentés ici par seule observation.
+
+Scenario: Contrat ressource des quatre items est asserté
+  Given le crate compilé avec ./llm_providers.rs
+  When @Entity::resource_name, @Entity::read_policy, @Entity::write_policy et
+    @Entity::owner_column sont appelés
+  Then ils retournent respectivement `"llm-providers"`, @AccessPolicy::Public,
+    @AccessPolicy::AdminOnly et @None, et le test `llm_provider_resource_contract`
+    passe
+
+Scenario: Hook accepte les deux types de provider admis à la création
+  Given un @ActiveModel construit par @IntoActiveModel depuis un @Model avec
+    `provider_type: "ollama"`, puis un second avec `provider_type: "openai-compatible"`
+  When @Entity::before_create est appelé sur chacun avec un @AuthPrincipal de test
+  Then les deux appels retournent @Ok avec l'@ActiveModel rendu inchangé, et le test
+    `before_create_accepts_known_provider_types` passe
+
+Scenario: Hook rejette un type de provider inconnu sous le code VNL-LLM-005
+  Given un @ActiveModel avec `provider_type: "bogus"` et un @AuthPrincipal de test
+  When @Entity::before_create est appelé
+  Then il retourne @Err dont l'@HookError a @code @Some(`"VNL-LLM-005"`) et le message
+    `provider_type must be 'ollama' or 'openai-compatible', got: bogus` — le test
+    `before_create_rejects_unknown_provider_type` n'asserte que le code
+
+Scenario: Hook rejette comme chaîne vide un provider_type non posé
+  Given un @ActiveModel construit champ par champ avec `provider_type: @ActiveValue::NotSet`
+    (forme uniquement atteignable programmatiquement)
+  When @Entity::before_create est appelé
+  Then il retourne @Err avec @code `"VNL-LLM-005"` et un message se terminant par
+    `got: ` (type vide) — aucune branche testée aujourd'hui dans le fichier, voir Tasks
+
+Scenario: Hook accepte un provider_type inchangé comme une valeur posée
+  Given un @ActiveModel avec `provider_type: @ActiveValue::Unchanged("ollama".to_string())`
+  When @Entity::before_create est appelé
+  Then il retourne @Ok — @ActiveValue::Unchanged est lu exactement comme
+    @ActiveValue::Set
+
+Scenario: Body de création frontend sans id, available_models ni is_default désérialise
+  Given la chaîne JSON
+    `{"name":"p","provider_type":"ollama","endpoint":"http://localhost:11434"}`
+    (forme réelle de `toRest` dans `../../../../frontend/src/api/httpConfigRepo.ts`)
+  When elle est désérialisée en @Model par serde
+  Then elle produit une valeur avec `id == 0`, `api_key == @None`,
+    `available_models == serde_json::json!([])` et `is_default == false`, sans erreur
+    de champ manquant
+
+Scenario: Clé available_models explicitement null survit telle quelle
+  Given la chaîne JSON compacte
+    `{"name":"p","provider_type":"ollama","endpoint":"http://x","available_models":null}`
+  When elle est désérialisée en @Model par serde
+  Then elle réussit et `available_models` vaut @serde_json::Value::Null —
+    @serde(default) ne couvre que l'absence de clé et le JSON `null` satisfait le
+    `NOT NULL` SQL (voir Tasks)
+
+Scenario: Clé is_default explicitement null est rejetée contrairement à son absence
+  Given la chaîne JSON
+    `{"name":"p","provider_type":"ollama","endpoint":"http://x","is_default":null}`
+  When elle est désérialisée en @Model par serde
+  Then la désérialisation échoue (invalid type: null, expected a boolean), alors que
+    l'absence de cette clé réussit et produit `false`
+
+Scenario: Sérialisation expose les sept clés dont api_key en clair
+  Given un @Model avec `id: 4` et `api_key: @Some("sk-test".to_string())`
+  When il est sérialisé en JSON
+  Then l'objet contient les 7 clés `id`, `name`, `provider_type`, `endpoint`,
+    `api_key`, `available_models`, `is_default`, avec `api_key` à la valeur `"sk-test"`
+    en clair — contrairement au @Provider de `../../../../cfgstore/src/domain.sdd`
+    qui masque `api_key` quand il est @None, ici la clé apparaît toujours (`null` à
+    @None)
+
+Scenario: Le chemin programmatique court-circuite le hook
+  Given une @DatabaseConnection obtenue par @real_db (`../test_support.rs`) et un
+    @ActiveModel avec `provider_type: "bogus"` inséré par @Entity::insert
+  When l'insertion est exécutée
+  Then elle réussit (@ActiveModelBehavior est vide, le schéma ne porte aucun CHECK, et
+    le hook @MiryadResource n'est appelé que par `resource_router`), et la ligne ainsi
+    créée produit ensuite @VnyError::UnknownProviderType dans @domain_provider de
+    `../../config_store.rs` ainsi qu'une erreur runtime `VNL-LLM-005` dans
+    @discover_models de `../../api/llm_providers.rs`
+
+Scenario: Unicité du nom et FK de model_profiles bornent les lignes en SQL
+  Given une ligne insérée via @Entity::insert avec `name: "dup"` et, séparément, une
+    ligne `vanyline_model_profiles` référençant ce provider (motif de seed du @mod
+    resource_router_regression de `./agents.rs`)
+  When une seconde insertion avec le même `name` `"dup"` est tentée, puis séparément la
+    suppression du provider référencé
+  Then la seconde insertion échoue en @DbErr (unique_key GLOBAL sur `name`) et la
+    suppression échoue aussi (RESTRICT de la FK
+    `vanyline_model_profiles.provider_id`, migration
+    `../../migration/m20260825_000005_create_vanyline_model_profiles.rs`)
+
+Depends on:
+  @sea_orm (@DeriveEntityModel, @ActiveModelBehavior, prelude), @serde, @serde_json,
+    @utoipa (@ToSchema), @miryad_core::auth (@AuthPrincipal, @PrincipalSource),
+    @miryad_core::resource (@MiryadResource, @AccessPolicy, @HookError) — crate externe
+    miryad-core, hors dépôt.
+  ../../migration/m20260825_000003_create_vanyline_llm_providers.rs — DDL source de
+    vérité de la table (contrat de schéma :
+    `../../migration/m20260825_000003_create_vanyline_llm_providers.sdd`, en cours).
+  ../../migration/m20260825_000005_create_vanyline_model_profiles.rs — FK entrante
+    `model_profiles.provider_id` → cette table (RESTRICT).
+  ./mod.rs — déclaration `pub mod llm_providers;` (cf. `./mod.sdd`).
+  Consommateurs (hors périmètre, comportements cités) : `../../main.rs`
+    (@resource_router + @resource_openapi + test du document OpenAPI),
+    `../../api/mod.rs` et `../../api/llm_providers.rs` (routes `/llm-providers/{id}/test`
+    et `/default`), `../../config_store.rs` (@load_providers, @domain_provider,
+    @provider_type_from_str), `../../error.rs` (@AppError::LlmProviderNotFound),
+    `../test_support.rs` (@real_db), `./agents.rs` (seeds de tests),
+    `../../../../frontend/src/api/httpConfigRepo.ts`,
+    `../../../../cfgstore/src/domain.sdd` (contrat du @Provider de domaine).
+
+Tasks:
+  [!] Exposition en clair de `api_key` en lecture Public : @Serialize de @Model ne
+      filtre jamais `api_key` (aucun @skip_serializing_if) et @read_policy est
+      @AccessPolicy::Public — tout lecteur authentifié de `GET /api/v1/llm-providers`
+      reçoit donc les secrets des providers en clair (et `fromRest` du frontend les
+      conserve dans sa forme canonique quand non null). Le même sujet est ouvert dans
+      `../../../../cfgstore/src/domain.sdd` pour la voie fs_store ; ici la surface est
+      l'API HTTP entière. À trancher avec Sébastien : masque/retrait à la lecture
+      (champ en écriture seule), valeur sentinelle, handler dédié, ou exposition
+      assumée à tout utilisateur authentifié (écriture AdminOnly).
+  [!] Aucune protection du chemin mise à jour : le trait @MiryadResource n'a pas de
+      `before_update` et le schéma ne porte aucun CHECK sur `provider_type` — un
+      `PUT /api/v1/llm-providers/{id}` avec `provider_type: "bogus"` contourne
+      aussi efficacement le hook de création que le chemin programmatique. Le
+      commentaire du hook affirme que le CHECK existait avant la bascule miryad-core :
+      le rétablir dans la migration, un trigger, ou assumer (réservé aux admins) ?
+  [?] Sémantique concrète de @AccessPolicy::Public et @AccessPolicy::AdminOnly chez
+      miryad-core (crate externe, source non lisible depuis le dépôt) : Public exige-t-il
+      au minimum une authentification (Bearer) ou ouvre-t-il l'anonyme ? AdminOnly
+      s'appuie-t-il sur le groupe `admin`, même base que @can_write utilisé dans
+      `../../api/llm_providers.rs` ? Quel statut HTTP rendent @HookError (code
+      `VNL-LLM-005`) et la violation de la clé unique `name` (500 brut, erreur
+      structurée) ? À trancher : test d'intégration via `../test_support.rs` (@real_db)
+      ou délégation assumée à miryad-core.
+  [?] Invariant de `is_default` : pas d'index unique partiel, le hook ne le regarde
+      pas — une création REST peut produire N providers à `is_default: true` ; seul
+      l'endpoint `PUT /llm-providers/{id}/default` maintient l'unicité, via deux UPDATE
+      non transactionnels (fenêtre sans défaut entre les deux, propriété de
+      `../../api/llm_providers.rs`). Index partiel `WHERE is_default`, hook, ou gestion
+      assumée à la main par les admins ?
+  [?] Partage du code `VNL-LLM-005` entre le hook ici (création) et @discover_models de
+      `../../api/llm_providers.rs` (test runtime d'un provider) : deux surfaces
+      distinctes sous un même code — voulu (famille `VNL-LLM-`) ou à dissocier ? Le
+      format des identifiants d'erreur reste à contractualiser (AGENTS.md : « format à
+      contractualiser dans la spec concernée » — aucune spec ne le porte encore).
+  [?] `"available_models": null` en body : accepté par serde (→ @Value::Null), stocké
+      en JSONB `null` malgré le NOT NULL, avalé par le frontend (`?? []`) et écrasé en
+      forme valide par `POST /{id}/test`. Défense en lecture voulue ou porte à fermer
+      (rejeter `null` à l'écriture) ? Même famille que le `[?]` « options null » de
+      `./model_profiles.sdd`.
+  [!] Le commentaire du hook référence `docs/features/miryad-core-integration.md`,
+      introuvable dans le dépôt (`docs/features/` n'existe plus) — commentaire échu
+      aussi dans `./mcp_servers.rs` et `./agents.rs`. Redirect vers l'historique git /
+      `.claude/memory/`, ou document à rétablir ?
+  [?] Les Scenarios « provider_type non posé », « Unchanged », les trois Scenarios de
+      (dé)sérialisation, « sérialisation » et « court-circuit programmatique » n'ont
+      aucun `#[cfg(test)]` équivalent aujourd'hui (les 3 tests du fichier ne couvrent que
+      le contrat et les deux branches testées du hook). Ajouter ces tests, ou considérer
+      que les fixtures de `../../config_store.rs` et
+      `../../../../frontend/src/api/httpConfigRepo.spec.ts` suffisent ?
+  [?] Unicité GLOBALE de `name` (pas `(owner, name)` comme chez les sœurs owner) :
+      confirmer le choix pour une ressource globale Public/AdminOnly — et que voit
+      l'admin en collision de nom (statut renvoyé par miryad-core, voir plus haut) ?
+  [?] Aucun timestamp : cohérent avec les sœurs à ce jour, à confirmer comme choix
+      global (et non omission) à la spec des migrations.

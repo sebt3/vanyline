@@ -1,0 +1,553 @@
+Spec: Conversations REST API (CRUD conversations + lecture messages)
+
+Platform: Rust/vanyline-app/axum+sea-orm
+
+Purpose:
+  Handlers HTTP du CRUD « conversations » de chat et de la lecture des messages :
+  cinq routes montées par `./mod.rs` sous le préfixe `/api` de `../main.rs` —
+  `GET`/`POST` `/api/conversations`, `GET`/`DELETE` `/api/conversations/{id}`,
+  `GET` `/api/conversations/{id}/messages`. CE fichier porte la logique applicative
+  de ces routes (les entités SeaORM sont déclaratives, cf. `../db/entities/`
+  `conversations.sdd`, `messages.sdd`, `chat_contexts.sdd`) : résolution
+  d'identité par @resolve_user de miryad-core, filtrage owner explicite par route,
+  résolution de l'agent par nom (création) ou par id (sortie), création en deux
+  temps du @ChatContext puis de la @Conversation, et DTO de sortie
+  @ConversationOut. Pas de `MiryadResource` ni de `resource_router` ici — le trio
+  Conversation/Message/ChatContext a été délibérément gardé en handlers custom
+  (décision Phase 1 de la bascule miryad-core, cf. `../../../.claude/memory/`
+  `miryad-core-integration.md`) parce que `create_conversation` a un effet de bord,
+  résout un nom côté serveur et filtre sur du JSON.
+  Le contrat de CE fichier couvre aussi ce qui N'EXISTE PAS : aucune route REST
+  d'écriture de message, de mise à jour de `title`/`todo`/agent, ni d'accès direct
+  aux contextes — l'écriture des messages et la mutation des conversations hors
+  création/suppression vivent dans `../ws/chat.rs` (cf. `Tasks` `[!]`).
+  Écriture en deux temps SANS transaction, `VNL-DB-007`/`VNL-DB-008` émis en dur
+  ici (contrat des marqueurs : `../error.sdd`), tri de liste `updated_at`
+  descendant — cohérent avec la spec de l'entité `../db/entities/conversations.sdd`.
+
+Owns:
+  ./conversations.rs
+
+Can read:
+  ./mod.rs — montage des 5 routes (`./mod.sdd`)
+  ../main.rs — @nest("/api", …), @AppState, @FromRef vers @MiryadAuthState (`../main.sdd`)
+  ../error.rs — @AppError, conversions, barème statuts/corps (`../error.sdd`)
+  ../db/entities/conversations.rs — entité et tri contractés (`../db/entities/conversations.sdd`)
+  ../db/entities/chat_contexts.rs — forme JSON d'un contexte embarqué (`../db/entities/chat_contexts.sdd`)
+  ../db/entities/messages.rs — forme JSON brute du Model, contrat de fil des messages
+    (`../db/entities/messages.sdd`)
+  ../db/entities/agents.rs — unicité SQL `(owner_id, name)`, cible de la résolution d'agent
+  ../auth/mod.rs — @test_auth_state / @test_auth_state_with_db (`../auth/mod.sdd`)
+  ../db/test_support.rs — @real_db (`../db/test_support.sdd`)
+  ../../../frontend/src/api/httpChatBackend.ts — appelant réel des trois chemins GET/POST
+  ../../../vanyline.sdd, ../../../tooling.sdd — héritage racine + harnais lints
+
+Exposes:
+  @ChatContextInput — `pub struct`, derives @Debug + @Clone + @Deserialize exactement
+    (pas de @Serialize, pas d'@utoipa::@ToSchema, aucun attribut @serde). Deux champs
+    @pub, TOUS DEUX requis à la désérialisation : `kind: @String`,
+    `data: @serde_json::@Value`. `kind` : aucune validation de vocabulaire à cette
+    frontière — seul `"sandbox"` est interprété ailleurs (le seul consommateur du
+    vocabulaire est `../ws/chat.rs` et le filtre de @list_conversations ci-dessous).
+    `data` : toute valeur JSON acceptée (objet, tableau, scalaire, `null`).
+  @CreateConversation — `pub struct`, derives @Debug + @Deserialize, corps d'entrée
+    de @create_conversation. Deux champs @pub : `agent_name: @Option<@String>`
+    (absent OU JSON `null` → @None — traitement identique, serde standard) et
+    `context: @ChatContextInput` REQUIS (champ manquant → rejet @serde, cf. `Raises`).
+    Champs inconnus du corps : acceptés et ignorés (pas de `deny_unknown_fields`) —
+    un `title` envoyé à la création est donc silencieusement perdu.
+  @ConversationOut — `pub struct`, derives @Debug + @Clone + @Serialize exactement
+    (jamais désérialisé, jamais dans OpenAPI), DTO de sortie des quatre routes de
+    conversation. Aucun attribut @serde : la réponse porte EXACTEMENT les 7 clés
+    `"id"` (@i32), `"agent_name"` (@String | `null`), `"context"` (objet), `"title"`
+    (@String | `null`), `"todo"` (@String | `null`), `"created_at"`, `"updated_at"`
+    (chaînes RFC 3339, @chrono/@serde). `"context"` EMBÈDE le @ChatContextModel tel
+    quel (les 4 clés `"id"`, `"kind"`, `"data"`, `"created_at"` — contrat de
+    `../db/entities/chat_contexts.sdd`) ; `null` explicites, jamais de clés omises.
+  @ListConversationsQuery — `pub struct`, derives @Debug + @Deserialize, requête de
+    liste : `sandbox_name: @Option<@String>` est le SEUL paramètre géré ; les autres
+    paramètres de query sont ignorés (pas de `deny_unknown_fields`).
+  @MessageOut — alias de TYPE PRIVÉ (`type`, pas `pub`) vers @MessageModel : sans
+    existence propre ; il documente que @get_messages rend le Model SeaORM brut.
+  @to_output — fonction PRIVÉE `async fn(&@AppState, @ConversationModel) ->
+    @Result<@ConversationOut, @AppError>` : résout `agent_id` en nom
+    (@AgentEntity::find_by_id, SANS filtre owner — cf. `Tasks` `[!]`) ; agent
+    manquant → `agent_name: @None` silencieux (aucune erreur, aucun marqueur) ;
+    charge le contexte (@ChatContextEntity::find_by_id(`context_id`)) — ligne
+    absente → @AppError::@InternalError(`"VNL-DB-007: context not found"`) ;
+    recopie id/title/todo/created_at/updated_at tels quels. N+1 accepté et commenté
+    dans le source.
+  @resolve_agent_id — fonction PRIVÉE `async fn(&@AppState, user_id, agent_name) ->
+    @Result<@i32, @AppError>` : SELECT sur @vanyline_agents WHERE `owner_id = user_id`
+    AND `name = agent_name` (filtre owner EFFECTIF ; unicité `(owner_id, name)`
+    garantie par l'index UNIQUE SQL, cf. `../db/entities/agents.sdd`) ; aucun
+    résultat → @AppError::@UnprocessableReference(@VnyError::@UnknownReference(`"agent"`,
+    nom)) construite À LA MAIN (le @From<@VnyError> eût produit un 500 — cf.
+    `../error.sdd`).
+  Cinq handlers `pub async fn` (visibilité requise par le montage de `./mod.rs`,
+    aucun autre consommateur hors `./mod.rs` et les tests du fichier), tous avec la
+    signature d'extracteurs (@State(@AppState), @AuthUser, puis @Path ou @Query) :
+    - @list_conversations — `(@Query<@ListConversationsQuery>) -> @Result<@Json<Vec<@ConversationOut>>, @AppError>`
+    - @create_conversation — `(@Json<@CreateConversation>) -> @Result<(StatusCode, Json<ConversationOut>), AppError>`
+    - @get_conversation — `(@Path(id: @i32)) -> @Result<@Json<@ConversationOut>, @AppError>`
+    - @delete_conversation — `(@Path(id: @i32)) -> @Result<@StatusCode, @AppError>`
+    - @get_messages — `(@Path(id: @i32)) -> @Result<@Json<Vec<@MessageOut>>, @AppError>`
+  Modules `#[cfg(test)]` : `tests` (harnais @make_app — @Router autonome qui MIRE le
+    montage de `./mod.rs` SANS le préfixe `/api`, cookie_key `[0u8; 64]`,
+    @test_auth_state ; 4 tests : `list_conversations_without_cookie_returns_401`,
+    `list_conversations_filtered_by_sandbox_without_cookie_returns_401`,
+    `create_conversation_requires_context`, `create_conversation_parses_sandbox_context`)
+    et `id_regression` (régression Phase 3 « `id: Set(0)` » — @real_db + appel DIRECT
+    du handler sans HTTP, test `two_successive_conversations_get_distinct_ids`).
+    Exemptions `#![allow(clippy::unwrap_used, clippy::expect_used)]` au niveau module,
+    tolérées uniquement sous `#[cfg(test)]` (harnais `../../../tooling.sdd`).
+
+Accepts:
+  - @AuthUser de miryad-core sur les CINQ routes (extraction par l'extracteur,
+    JAMAIS de couche d'auth — règle de `./mod.sdd`) : session cookie signée (flow
+    navigateur) ou header `Authorization: Bearer` (précédent @issue_token de
+    `../db/entities/agents.rs`) ; critères de validité = contrat miryad-core.
+  - `GET /api/conversations` : aucun corps ; query optionnelle `sandbox_name`
+    (comparaison de chaînes EXACTE, sensible à la casse, sur `data.sandbox_name`
+    lu comme @str — absent, non-chaîne ou `kind != "sandbox"` → pas de match).
+  - `POST /api/conversations` : @Content-Type `application/json` + corps
+    @CreateConversation ; `context.kind` et `context.data` non validés (aucun
+    vocabulaire, aucune forme de `data` exigée) ; `agent_name` ignoré (@None) quand
+    absent ou `null`.
+  - `GET`/`DELETE` `/api/conversations/{id}` et `GET /api/conversations/{id}/messages` :
+    `{id}` parsé en @i32 — négatif accepté comme valeur (→ pas de ligne → 404) ;
+    non-entier ou hors plage @i32 → rejet @Path d'axum AVANT le handler (cf. `Raises`).
+  - État : @state.auth.db uniquement (une connexion SeaORM partagée) ; @state.config,
+    @state.k8s, @state.busy, @state.shared_sandbox_state ne sont jamais lus par ces
+    handlers (présents dans @AppState des harnais de test seulement).
+  - @resolve_user(db, `user.subject`, `user.email.as_deref()`) est appelé en tête de
+    CHACUNE des cinq routes — y compris les trois @GET (effet d'écriture en base
+    possible selon la sémantique miryad-core, cf. `Tasks` `[!]`, même question que
+    `./me.sdd`).
+
+Returns:
+  - `GET /api/conversations` — @200 @Json : tableau de @ConversationOut des seules
+    conversations dont `owner_id` = l'id @resolve_user de l'appelant (filtre owner
+    EFFECTIF), triées `updated_at` DESC (ordre indéfini à `updated_at` égal ;
+    AUCUNE pagination, AUCUNE limite). `[]` si l'owner n'a aucune conversation.
+    Avec `?sandbox_name=X` : sous-ensemble dont le contexte a `kind == "sandbox"`
+    ET `data.sandbox_name == X` — les conversations non retenues ne déclenchent
+    aucune requête agent, mais leurs contextes sont quand même lus (filtre appliqué
+    après la liste complète).
+  - `POST /api/conversations` — @201 (@StatusCode::@CREATED) @Json(@ConversationOut) :
+    `id` attribué par l'auto-incrément, `agent_name` = le nom résolu (identique à
+    l'entrante si l'agent existe, sinon la route a échoué avant), `title` et `todo`
+    à `null` explicites, `created_at == updated_at` (même horodatage `now` que le
+    `created_at` du contexte créé), `context` = la ligne fraîchement insérée
+    (`kind`/`data` rendus tels quels, `context.id` neuf). Ordre des effets :
+    @resolve_agent_id (si demandé) PUIS insert du @ChatContext PUIS insert de la
+    @Conversation PUIS relecture par id PUIS @to_output.
+  - `GET /api/conversations/{id}` — @200 @Json(@ConversationOut) de la conversation
+    de l'appelant ; @404 (@AppError::@ConversationNotFound, `VNL-CNV-001`) si aucune
+    ligne à cet id ; @403 (@AppError::@ConversationAccessDenied, `VNL-CNV-002`) si la
+    ligne existe mais appartient à un autre owner — les deux états sont
+    DIFFÉRENCIABLES (cf. `Tasks` `[!]`).
+  - `DELETE /api/conversations/{id}` — @204 @NO_CONTENT, corps vide, après suppression
+    réelle ; @404 puis @403 dans le même ordre d'évaluation que @get_conversation ;
+    @404 également si le @delete_many (re-filtré sur id ET owner_id) ne touche
+    AUCUNE ligne (course entre la lecture et la suppression). La suppression des
+    @messages est effectuée par le CASCADE SQL, dont SeaORM ignore l'effet ; le
+    @ChatContext de la conversation, lui, N'EST JAMAIS supprimé (cf. `Handles`, `Tasks`).
+  - `GET /api/conversations/{id}/messages` — @200 @Json : ARRAY des @MessageModel
+    bruts de cette conversation (les 6 clés snake_case verrouillées par
+    `../db/entities/messages.sdd`, `owner_id` INCLUS), triées `created_at` ASC
+    (ordre indéfini à égalité), `[]` si aucune ; mêmes @404/@403 que @get_conversation
+    AVANT toute requête sur les messages. La requête messages ne filtre QUE sur
+    `conversation_id` — l'autorisation repose entièrement sur le contrôle owner
+    préalable de la conversation.
+  - Tout @DbErr (peu importe la requête : @resolve_user, selects, inserts, @delete_many)
+    → @AppError::@from → @AppError::@InternalError → @500, corps
+    `{"error":"VNL-INT-001: Internal error: VNL-DB-006: {…}"}` (double marqueur,
+    les paliers ne sont pas distinguables).
+  - Les deux marqueurs émis en dur DANS CE FICHIER voyagent dans @AppError::@InternalError
+    (donc @500) : `"VNL-DB-007: context not found"` (rendu final
+    `VNL-INT-001: Internal error: VNL-DB-007: context not found`) et
+    `"VNL-DB-008: created conversation not found"` (même forme, VNL-DB-008).
+
+Raises:
+  - @StatusCode::@UNAUTHORIZED (@401) quand l'extraction @AuthUser échoue (aucune
+    session, cookie invalide, bearer absent/expiré) : refus AVANT tout corps de
+    handler, aucune requête DB ; le CORPS de ce 401 appartient à miryad-core, non
+    asserté par les tests du fichier (même `[?]` que `./me.sdd`).
+  - Rejets des extracteurs axum, avant le handler, corps et statut portés par axum
+    (PAS par @AppError) : corps absent/malformé ou `context` (ou `kind`/`data`)
+    manquant → rejet @Json ; `{id}` non numérique ou hors @i32 → rejet @Path
+    (statuts attendus `422`/`400` — à vérifier empiriquement, cf. `Tasks` `[?]`).
+  - @AppError::@ConversationNotFound → @404, `VNL-CNV-001: Conversation not found` :
+    id inconnu sur @get_conversation, @delete_conversation et @get_messages ; et sur
+    @delete_conversation quand le @delete_many affecte 0 ligne.
+  - @AppError::@ConversationAccessDenied → @403, `VNL-CNV-002: Access denied to
+    conversation` : les trois routes à `{id}` quand `conv.owner_id != principal_user.id`.
+  - @AppError::@UnprocessableReference(@VnyError::@UnknownReference(`"agent"`, nom))
+    → @422 sur @create_conversation (agent demandé introuvable POUR CET OWNER —
+    un agent du même nom appartenant à autrui produit le même 422, sans fuite
+    d'existence) ; corps = @Display du @VnyError embarqué, gabarit verrouillé par
+    `../error.sdd` : `{"error":"VNL-CFG-003: Unknown agent reference: '<nom>'"}` —
+    marqueur du @VnyError, aucun marqueur propre à l'app. Émis AVANT toute écriture
+    (aucune ligne insérée en cas de 422).
+  - @AppError::@InternalError avec `"VNL-DB-007: context not found"` → @500 : ligne
+    de contexte absente pour un `context_id` référencé — atteignable par @to_output
+    (liste, création, lecture unitaire) et par la branche filtrée de @list_conversations ;
+    une SEULE conversation de l'owner au contexte cassé fait tomber TOUTE la liste
+    (amplification, cf. `Tasks` `[?]`). Normalement empêchée par la FK
+    `ON DELETE RESTRICT` du schéma — signe une incohérence de données.
+  - @AppError::@InternalError avec `"VNL-DB-008: created conversation not found"` →
+    @500 : branche de relecture post-insert qui rend @None — inatteignable sans
+    panne exotique (cf. `Tasks` `[?]`).
+  - Aucun @Forbidden(@VNL-AUTH-004), aucun statut inventé hors barème : le fichier ne
+    construit que @UnprocessableReference à la main, @ConversationNotFound,
+    @ConversationAccessDenied, et @InternalError via `?`/@From.
+
+Handles:
+  - Isolation owner par route (l'inventaire exact, source de vérité de cette spec) :
+    - @list_conversations : filtre SQL @Column::@OwnerId = id résolu — EFFECTIF.
+    - @create_conversation : `owner_id` forcé à l'id résolu (non fournisable par le
+      corps) ; agent résolu AVEC filtre owner — EFFECTIF.
+    - @get_conversation / @delete_conversation / @get_messages : comparaison manuelle
+      `conv.owner_id != principal_user.id` → @403, plus (delete) re-filtre SQL
+      id+owner_id sur le @delete_many — EFFECTIF.
+    - À l'intérieur de @to_output : la résolution d'agent (@find_by_id sur `agent_id`)
+      n'a AUCUN filtre owner, et la requête messages de @get_messages n'a pas de
+      filtre owner propre (délégué au contrôle sur la conversation). Le seul chemin
+      d'exposition théorique est un `agent_id` de conversation pointant l'agent d'un
+      autre owner — que le schéma n'empêche pas (la FK vérifie l'existence, pas la
+      concorde d'owner) et que le chemin REST de création ne peut pas produire
+      (résolution owner-scopée), mais que `../ws/chat.rs` pourrait écrire. `Tasks`
+      `[!]`, déjà ouvert.
+  - `agent_id` pointant une ligne agent absente (FK `ON DELETE SET NULL` rend le cas
+    rare, inatteignable tant que la FK est appliquée) : @to_output rend
+    `agent_name: null` SANS erreur ni marqueur — asymétrie avec le contexte absent
+    (500 VNL-DB-007), documentée telle quelle.
+  - Contexte référencé absent : @500 `VNL-DB-007` (voir `Raises`) — même message
+    littéral en dur à DEUX call-sites de CE fichier (@to_output + branche filtrée de
+    @list_conversations), un troisième hors fichier dans `../ws/chat.rs` ; pas de
+    constructeur partagé (`../db/entities/chat_contexts.sdd` `[?]`).
+  - `?sandbox_name=` (vide) : compare à la chaîne vide — ne matche que des contextes
+    dont `data.sandbox_name == ""` ; `?sandbox_name` sans `=` : comportement serde
+    non vérifié (cf. `Tasks` `[?]`). Paramètres inconnus ignorés.
+  - Conversation supprimée en course entre la relecture d'autorisation et le
+    @delete_many (autre client, même owner) : @rows_affected == 0 → @404 (pas un
+    faux @204).
+  - Course entre deux @create_conversation : aucune transaction ni verrou — deux
+    inserts contextes/conversations concurrents s'auto-incrémentent sans collision
+    (régression `id: Set(0)` de la Phase 3 verrouillée par le test existant
+    `two_successive_conversations_get_distinct_ids`).
+  - Échec de l'insert de la conversation APRÈS l'insert réussi du contexte : @500
+    (@VNL-DB-006) et le @ChatContext inséré reste ORPHELIN en base — aucun rollback,
+    aucune transaction, commenté « effet de bord » dans le source (`Tasks` `[!]`).
+  - Suppression réussie d'une conversation : @messages en CASCADE SQL (invisibles à
+    SeaORM, cf. `../db/entities/messages.sdd` `[!]`), contexte RESTÉ (la FK
+    `RESTRICT` protège l'autre sens ; rien ne supprime jamais le contexte) →
+    accumulation de lignes mortes (`Tasks` `[!]`).
+  - @resolve_user en échec sur n'importe quelle route : @500 @VNL-DB-006, identique
+    à toute autre panne DB (paliers indistinguables).
+  - Aucun @tracing, aucun @println dans le fichier (harnais `../../../tooling.sdd`).
+
+Must:
+  - Exiger @AuthUser dans la signature des CINQ handlers et appeler @resolve_user
+    AVANT toute requête métier, en chaînant sur l'@id résolu (jamais sur le
+    `subject` brut) : c'est la seule source de l'owner utilisé par tous les filtres.
+  - Filtrer la liste sur @Column::@OwnerId de l'appelant et trier
+    @order_by_desc(@Column::@UpdatedAt) — cohérence avec le contrat de
+    `../db/entities/conversations.sdd` ; ne jamais rendre une conversation
+    d'un autre owner.
+  - Sur les trois routes à `{id}` : charger la ligne, répondre @404(@VNL-CNV-001) si
+    absente, @403(@VNL-CNV-002) si `owner_id` différent, ET seulement ensuite agir.
+    @delete_conversation conserve le re-filtre SQL (id + owner_id) sur son
+    @delete_many et le @rows_affected == 0 → @404.
+  - Résoudre l'agent à la création EXCLUSIVEMENT par @resolve_agent_id (filtre
+    `owner_id` + `name`), lever le @422 @UnprocessableReference construit à la main
+    si absent, et le lever AVANT toute insertion (aucune écriture sur ce chemin).
+  - Créer le contexte PUIS la conversation (ordre et `NotSet` sur les deux `id` —
+    régression Phase 3 verrouillée), horodater les deux lignes et la conversation
+    (`created_at == updated_at`) d'un même @chrono::@Utc::@now, avec `title`/`todo`
+    @None et `owner_id` = appelant.
+  - Rendre @201 à la création, @204 sans corps à la suppression, @200 sinon — et
+    `[]` (jamais @404, jamais `null`) pour liste et messages vides.
+  - Maintenir la forme JSON des DTOs telle que décrite en `Exposes`/`Returns` :
+    7 clés @ConversationOut dont `null` explicites et `context` embarqué 4 clés ;
+    messages = Model brut 6 clés trié `created_at` ASC — interfaces consommées par
+    `../../../frontend/src/api/httpChatBackend.ts`.
+  - Mapper tout @sea_orm::@DbErr par @AppError::@from (→ @500, `VNL-DB-006` sous
+    `VNL-INT-001`) et aucun autre statut inventé.
+  - Émettre exactement les deux littéraux `"VNL-DB-007: context not found"` et
+    `"VNL-DB-008: created conversation not found"` dans @AppError::@InternalError
+    (namespace et barème : `../error.sdd`).
+  - Filtrer `sandbox_name` par comparaison exacte `kind == "sandbox"` +
+    `data.sandbox_name == param`, en ignorant les contextes dont `data.sandbox_name`
+    est absent ou non-chaîne (pas d'erreur, exclusion simple).
+
+Must not:
+  - Accepter un `owner_id`, un `id` ou un `context_id` fournis par le corps de
+    @create_conversation : l'owner est forcé, le contexte est toujours nouvellement
+    créé (un `context_id` existant envoyé est ignoré — jamais réutilisé, jamais
+    vérifié).
+  - Valider `kind` (autre que la comparaison du filtre) ou la forme de `data` à
+    l'écriture : tout @kind/@data est stocké tel quel (le vocabulaire centralisé est
+    un `[?]` ouvert de `../db/entities/chat_contexts.sdd`, pas de CE contrat).
+  - Poser une couche de middleware d'auth ou un garde global : l'identité est
+    l'extracteur de chaque handler (règle `./mod.sdd`).
+  - Paginer, limiter ou projeter la liste/les messages, trier autrement, ou paginer
+    `OFFSET` — aucun de ces mécanismes n'existe aujourd'hui.
+  - Exposer le JWT (@id_token), le `subject` ou un claim dans un corps, un message
+    d'erreur ou un log ; exposer @MessageModel dans un sens d'entrée (le Model n'est
+    qu'une sortie).
+  - Retirer le filtre owner de @resolve_agent_id ou ajouter un filtre owner à la
+    résolution d'agent de @to_output sans arbitrage préalable (`Tasks` `[!]`) — le
+    second changerait le comportement observable documenté ici.
+  - Introduire une transaction, un hook ou un update de `updated_at` implicite dans
+    ce fichier sans extension de spec (la création actuelle est en deux temps sans
+    transaction ; aucune route de mise à jour n'existe).
+  - Serialiser les erreurs WS par @IntoResponse ou brancher un de ces handlers sur
+    une route WS : ces handlers n'existent QUE pour les 5 chemins de `./mod.rs`.
+
+Scenario: list_conversations_sans_session_retourne_401
+  Given un @Router construit par @make_app du module `tests` (les 5 routes montées
+    sans préfixe, @AppState avec @test_auth_state, cookie_key `[0u8; 64]`)
+  When `GET /conversations` (avec et sans `?sandbox_name=my-sandbox`) est adressé
+    sans cookie ni header @Authorization via @tower::@ServiceExt::@oneshot
+  Then la réponse a le statut @401 et le corps du handler ne s'exécute pas — deux
+    tests existants `list_conversations_without_cookie_returns_401` et
+    `list_conversations_filtered_by_sandbox_without_cookie_returns_401`
+
+Scenario: corps_de_création_exige_le_contexte_et_accepte_sandbox
+  Given la chaîne JSON `{"agent_name":"foo"}` (sans `context`) puis la chaîne
+    `{"context":{"kind":"sandbox","data":{"sandbox_name":"my-sandbox"}}}`
+  When chacune est désérialisée en @CreateConversation
+  Then la première échoue avec une erreur @serde mentionnant `"context"` (champ
+    requis) et la seconde réussit avec `kind == "sandbox"` et
+    `data["sandbox_name"] == "my-sandbox"` — deux tests existants
+    `create_conversation_requires_context`, `create_conversation_parses_sandbox_context`
+
+Scenario: deux_conversations_successives_ont_des_ids_distincts
+  Given @real_db de `../db/test_support.rs`, un @AppState authentifié par
+    @test_auth_state_with_db, et @create_conversation appelé DIRECTEMENT deux fois
+    de suite avec le même @AuthUser (`alice`) et le même corps
+    (`kind: "sandbox"`, `sandbox_name: "my-sandbox"`, sans agent)
+  When les deux appels réussissent
+  Then les deux @ConversationOut ont des `id` DISTINCTS (auto-incrément, jamais
+    collision sur un `id` posé) — test existant
+    `two_successive_conversations_get_distinct_ids` (régression Phase 3 `id: Set(0)`)
+
+Scenario: liste_authentifiée_filtre_sur_owner_et_tri_par_updated_at_descendant
+  Given @real_db, deux utilisateurs résolus par @resolve_user (`alice`, `bob`) et
+    leurs bearer tokens émis par @issue_token (précédent `../db/entities/agents.rs`),
+    et trois conversations insérées : deux à alice (`updated_at` distincts, la plus
+    récente insérée en dernier), une à bob
+  When `GET /conversations` authentifié par le bearer d'alice est adressé au @Router
+    de test monté comme @make_app
+  Then la réponse a le statut @200, le corps est un ARRAY de DEUX éléments
+    uniquement (les conversations d'alice), le premier est celui au `updated_at` le
+    plus récent, et chaque élément porte les 7 clés de @ConversationOut
+
+Scenario: liste_filtrée_par_sandbox_name_selon_kind_et_valeur_exacte
+  Given @real_db, un utilisateur authentifié (bearer) et trois conversations à son
+    nom : contextes `("sandbox", {"sandbox_name":"sb-a"})`,
+    `("sandbox", {"sandbox_name":"sb-b"})`, `("autre", {"sandbox_name":"sb-a"})`
+  When `GET /conversations?sandbox_name=sb-a` authentifié est adressé
+  Then @200 avec un ARRAY d'un seul élément — la conversation dont le contexte est
+    exactement `kind == "sandbox"` ET `data.sandbox_name == "sb-a"` — et
+    `context.kind`/`context.data` de l'élément rendent ces valeurs
+
+Scenario: filtre_sandbox_name_exclut_casse_et_type_différents
+  Given les mêmes données que le scénario précédent (conversation `("sandbox",
+    {"sandbox_name":"sb-a"})` incluse)
+  When `GET /conversations?sandbox_name=SB-A` authentifié est adressé, puis
+    `GET /conversations?sandbox_name=sb-a` sur un jeu où le contexte porte
+    `{"sandbox_name": 42}` (non-chaîne)
+  Then chaque réponse est @200 avec un ARRAY VIDE — comparaison exacte, sensible à
+    la casse, qui exclut tout `data.sandbox_name` absent ou non-chaîne
+
+Scenario: création_avec_agent_connu_retourne_201_et_crée_contexte_et_conversation
+  Given @real_db, un utilisateur authentifié (bearer `alice`) et un agent inséré
+    pour cet owner (nom `"agent-1"`, cf. index unique `(owner_id, name)` de
+    `../db/entities/agents.sdd`)
+  When `POST /conversations` authentifié avec le corps
+    `{"agent_name":"agent-1","context":{"kind":"sandbox","data":{"sandbox_name":"sb"}}}`
+    est adressé
+  Then la réponse a le statut @201 et un corps @ConversationOut à 7 clés avec
+    `agent_name == "agent-1"`, `title == null`, `todo == null` (clés PRÉSENTES),
+    `created_at == updated_at`, `context.kind == "sandbox"`,
+    `context.data.sandbox_name == "sb"` et un `context.id` strictement positif ; en
+    base, une nouvelle ligne de contexte ET une nouvelle ligne de conversation
+    (owner = alice, `agent_id` = l'agent résolu, `context_id` = le nouveau contexte)
+
+Scenario: création_sans_agent_name_retourne_201_avec_agent_name_null
+  Given @real_db, un utilisateur authentifié (bearer), aucune autre écriture
+  When `POST /conversations` authentifié est adressé avec le corps
+    `{"context":{"kind":"sandbox","data":{"sandbox_name":"sb"}}}` (puis la variante
+    explicite `"agent_name": null`)
+  Then chaque réponse est @201 avec `"agent_name": null` (clé présente à `null`) et
+    la conversation en base a `agent_id` @None — absent et `null` sont traités
+    identiquement
+
+Scenario: création_avec_agent_inconnu_retourne_422_sans_aucune_écriture
+  Given @real_db, un utilisateur authentifié (bearer `alice`) et un agent nommé
+    `"agent-1"` appartenant à bob (AUTRE owner), aucun agent de ce nom pour alice
+  When `POST /conversations` authentifié avec `agent_name` `"agent-1"` (puis avec
+    `"inexistant"`) est adressé
+  Then chaque réponse a le statut @422 et un corps `{"error": …}` contenant
+    `Unknown agent reference` (gabarit `VNL-CFG-003` verrouillé par `../error.sdd`) ;
+    après les deux appels, les tables `vanyline_chat_contexts` et
+    `vanyline_conversations` n'ont GARDÉ AUCUNE NOUVELLE LIGNE (la résolution
+    précède tout effet) — l'agent d'autrui est refusé comme l'inexistant, sans
+    distinction
+
+Scenario: lecture_unitaire_retourne_404_403_ou_200_selon_appartenance
+  Given @real_db, les bearer tokens de `alice` et `bob`, et une conversation de
+    bob (avec messages) ; id_inexistant = un id sans ligne
+  When `GET /conversations/{id}` est adressé trois fois authentifié par alice :
+    id_inexistant, id de bob, id d'une conversation d'alice (créée au préalable)
+  Then les réponses sont respectivement @404 (corps contenant `VNL-CNV-001`),
+    @403 (corps contenant `VNL-CNV-002`), puis @200 avec le @ConversationOut complet
+    de la conversation d'alice — une conversation d'autrui est DONC distinguable
+    d'une absence (comportement verrouillé tel quel, cf. `Tasks` `[!]`)
+
+Scenario: suppression_retourne_204_supprime_en_cascade_les_messages_et_le_404_suivant
+  Given @real_db, alice authentifiée (bearer), une conversation d'alice portant
+    deux lignes de `vanyline_messages`, et une conversation de bob
+  When `DELETE /conversations/{id}` authentifié par alice est adressé sur la
+    conversation de bob (rejet), puis sur celle d'alice, puis à nouveau sur celle
+    d'alice
+  Then les statuts sont @403 (conversation de bob intacte en base), puis @204
+    (corps vide), puis @404 (`VNL-CNV-001`) ; après le @204, les lignes de messages
+    de cette conversation ont été supprimées par le CASCADE SQL et la ligne de
+    @vanyline_chat_contexts associée est ENCORE PRÉSENTE (comportement documenté,
+    cf. `Tasks` `[!]`)
+
+Scenario: messages_triés_en_six_clés_brutes_ou_tableau_vide
+  Given @real_db, alice authentifiée (bearer), une conversation d'alice avec deux
+    messages insérés directement via @ActiveModel (`created_at` distincts, insérés
+    du plus ancien au plus récent), et une seconde conversation d'alice sans message
+  When `GET /conversations/{id}/messages` authentifié est adressé sur la première
+    puis sur la seconde
+  Then la première réponse est @200 avec un ARRAY de deux objets dont les clés sont
+    EXACTEMENT `id`, `owner_id`, `conversation_id`, `role`, `payload`, `created_at`
+    (Model brut, contrat `../db/entities/messages.sdd`), ordonnés `created_at`
+    ASCendant ; la seconde est @200 avec le ARRAY vide `[]`
+
+Scenario: messages_d_autrui_retourne_403_avant_toute_requête
+  Given @real_db, bearer d'alice, une conversation de bob avec messages
+  When `GET /conversations/{id_de_bob}/messages` authentifié par alice est adressé
+  Then la réponse a le statut @403 avec `VNL-CNV-002` dans le corps — la requête
+    sur @vanyline_messages n'est jamais exécutée (l'autorisation est portée par la
+    conversation, la requête messages elle-même ne filtre que sur `conversation_id`)
+
+Scenario: liste_d_un_owner_sans_conversation_retourne_tableau_vide
+  Given @real_db, un utilisateur authentifié (bearer) résolu par @resolve_user,
+    sans AUCUNE conversation en base
+  When `GET /conversations` authentifié (avec et sans `?sandbox_name=x`) est adressé
+  Then les deux réponses sont @200 avec le ARRAY vide `[]` — jamais @404, jamais
+    `null`
+
+Scenario: conversation_au_contexte_incohérent_fait_tomber_la_liste_en_500_vnl_db_007
+  Given @real_db avec clés étrangères non appliquées (SQLite — vérifier
+    `PRAGMA foreign_keys`, cf. `Tasks` `[?]` faisabilité), alice authentifiée, et
+    une conversation d'alice insérée DIRECTEMENT avec un `context_id` sans ligne
+    correspondante
+  When `GET /conversations` authentifié est adressé
+  Then la réponse a le statut @500 et son corps `{"error": …}` contient exactement
+    `VNL-DB-007: context not found` sous `VNL-INT-001` — une seule ligne incohérente
+    fait échouer toute la liste (amplification verrouillée telle quelle)
+
+Scenario: chemin_id_non_numérique_est_rejeté_avant_le_handler
+  Given le @Router de test (@make_app) authentifié par un bearer valide
+  When `GET /conversations/abc` puis `GET /conversations/-1` sont adressés
+  Then le premier reçoit le rejet @Path d'axum (statut porté par axum, pas
+    @AppError — à vérifier empiriquement, `Tasks` `[?]`) et le second un @404
+    `VNL-CNV-001` (-1 est un @i32 valide, simplement sans ligne)
+
+Depends on:
+  @axum 0.8 (@Json, @Query, @Path, @State, @StatusCode, rejets d'extracteurs) ;
+    @sea_orm (@EntityTrait/@ColumnTrait/@QueryFilter/@QueryOrder, @Set/@NotSet) ;
+    @serde + @serde_json ; @chrono (@Utc::@now, @DateTimeUtc).
+  miryad-core 0.1 (crates.io, source hors dépôt — non relu) : @miryad_core::auth::@AuthUser
+    (extraction + refus 401), @miryad_core::users::@resolve_user (sémantique upsert
+    hors dépôt, cf. `./me.sdd` `[?]`).
+  @vanyline_lib::@VnyError::@UnknownReference — payload du @422 (gabarit verrouillé
+    par `../../../lib/src/error.sdd` et `../error.sdd`).
+  ../error.rs — @AppError, @From<@sea_orm::@DbErr>, @IntoResponse : statuts/corps de
+    tous les échecs (`../error.sdd`, y compris le `[?]` ouvert sur
+    `VNL-DB-007`/`VNL-DB-008` en 500).
+  ../db/entities/conversations.rs, ../db/entities/chat_contexts.rs,
+    ../db/entities/messages.rs, ../db/entities/agents.rs
+    (`../db/entities/*.sdd`) — tables, filtres, tris, formes JSON embarquées.
+  ./mod.rs + ../main.rs — montage `/api/conversations…` (`./mod.sdd`, `../main.sdd`).
+  ../ws/chat.rs — SEUL autre écriteur de messages et mutateur de conversations
+    (todo, updated_at, agent_id) — hors périmètre, source des `[!]` croisés.
+  Supports de test : `../auth/mod.sdd` (@test_auth_state / @test_auth_state_with_db),
+    `../db/test_support.sdd` (@real_db), @issue_token de miryad-core.
+  Consommateur : `../../../frontend/src/api/httpChatBackend.ts` (GET liste avec
+    query, GET messages, POST création — le DELETE n'a pas d'appelant frontend
+    identifié, cf. `Tasks` `[?]`).
+  Héritage : `../../../vanyline.sdd` (racine), `../../../tooling.sdd` (harnais
+    lints, exemptions `cfg(test)`), conventions `AGENTS.md` (identifiants VNL-*).
+
+Tasks:
+  [!] @to_output résout l'agent par @find_by_id SANS filtre owner : si une
+      conversation référence l'agent d'un autre owner (possible en écriture directe
+      ou via `../ws/chat.rs` — la FK ne vérifie que l'existence), son NOM fuit dans
+      `ConversationOut.agent_name`. Déjà ouvert ; trancher avec Sébastien : ajouter
+      le filtre `owner_id` à la résolution de sortie (alignement sur
+      @resolve_agent_id) ou consigner le risque comme acceptable.
+  [!] @create_conversation n'est pas atomique : insert du @ChatContext PUIS de la
+      @Conversation sans transaction — un échec du second insert laisse un contexte
+      orphelin, jamais repris ni nettoyé. Décider : transaction (@TransactionTrait,
+      possible sur Postgres et @real_db) ou contrat « contexte orphelin acceptable,
+      filets elsewhere ».
+  [!] La suppression d'une conversation ne supprime JAMAIS son @ChatContext
+      (accumulation de lignes mortes — la FK `RESTRICT` ne protège que l'inverse),
+      alors que les messages partent en CASCADE SQL. Arbitrer : nettoyage du contexte
+      après @delete_many, FK `RESTRICT` → `CASCADE` (ou colonne owner + purge), ou
+      réutilisation réelle des contextes (cf. `[?]` de
+      `../db/entities/chat_contexts.sdd`).
+  [!] Aucune route REST d'écriture de message ni de mise à jour de
+      `title`/`todo`/agent : tout l'écriture-suite du chat passe par `../ws/chat.rs`.
+      Confirmé comme contrat (le frontend ne fait que liste/messages/création, cf.
+      `httpChatBackend.ts`) ou trou de fonctionnalité à documenter comme dette ?
+  [!] Distinction @404/@403 sur `/conversations/{id}` : un attaquant authentifié
+      peut discriminer l'existence d'une conversation d'autrui par le statut
+      (@403 vs @404). Uniformiser en @404 ou assumer — arbitrage de Sébastien, puis
+      verrouiller par test (le Scenario `lecture_unitaire…` verrouille l'actuel).
+  [!] @resolve_user appelé aussi sur les trois @GET : effet d'écriture en base
+      possible sur une lecture (sémantique miryad-core hors dépôt) — même `[!]` que
+      `./me.sdd`, à trancher une fois pour les deux fichiers.
+  [?] `VNL-DB-007`/`VNL-DB-008` rendus en @500 alors qu'ils décrivent des absences
+      (allure de @404) — `[?]` déjà ouverts dans `../db/entities/chat_contexts.sdd`
+      et `../error.sdd` ; étendre l'arbitrage ici et consolider le constructeur des
+      deux littéraux (trois call-sites du même 007, pas de helper partagé).
+  [?] Statuts exacts des rejets axum (@Json corps invalide/`context` manquant,
+      @Path `{id}` non numérique) : 422/400 ? Corps au format axum (pas
+      `{"error":…}`) ? À vérifier empiriquement par test avant contractualisation,
+      puis confirmer que le frontend ne consomme que « non-2xx → @ApiError ».
+  [?] Amplification de liste : une conversation au contexte manquant fait échouer
+      TOUT le `GET /conversations` (@500), y compris pour rendre les autres ; de
+      plus la branche filtrée lit TOUS les contextes de l'owner avant de filtrer
+      (N+1×2, un rechargement du contexte dans @to_output après lecture pour le
+      filtre). Accepté explicitement (commenté N+1) ou à optimiser/ isoler ?
+  [?] Faisabilité du Scenario `conversation_au_contexte_incohérent…` : nécessite
+      une base sans application des FK (@real_db SQLite, `PRAGMA foreign_keys`
+      éteint — à vérifier) ; sinon l'incohérence VNL-DB-007 est-elle testable
+      autrement (@MockDatabase) ou la branche est-elle déclarée non testable ?
+  [?] `VNL-DB-008` (relecture post-insert à @None) : branche inatteignable en test —
+      la classer « filet défensif » dans la spec ou l'éliminer en rendant le Model
+      d'insert directement (@InsertResult ne rend pas le Model — d'où la relecture).
+  [?] Équilibres non contractés aujourd'hui : `updated_at` à égalité (ordre
+      indéfini), `?sandbox_name` sans `=`, `last_insert_id as @i32` (cast i64→i32,
+      overflow théorique > 2^31), absence totale de pagination sur liste et
+      messages. Les trois premiers sont-ils des contrats ou des angles morts à
+      fermer (limite + pagination) ?
+  [?] Le @DELETE `/api/conversations/{id}` n'a aucun appelant frontend identifié
+      (grep `httpChatBackend.ts` : GET/POST seulement ; l'extension VS Code passe
+      par son RPC interne, hors CE contrat) — consommateur réel à confirmer avant
+      de figer le barème @403/@404/@204.
+  [ ] Lacune de couverture : les tests existants sont 2×@401, 2×@serde, 1×régression
+      ids ; AUCUN test authentifié HTTP de liste/lecture/suppression/messages, aucun
+      @201/@204/@403/@404/@422, aucun test @VNL-DB-007. Dériver les Scenario non
+      couverts en tests taggés par leur titre (précédents @real_db + @issue_token :
+      `../db/entities/agents.rs`, harnais @make_app du fichier).

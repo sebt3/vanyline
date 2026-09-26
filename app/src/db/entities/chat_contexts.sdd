@@ -1,0 +1,189 @@
+Spec: Chat Contexts
+
+Platform: Rust/vanyline-app/sea-orm
+
+Purpose:
+  Entité SeaORM `chat_contexts` : ligne de la table `vanyline_chat_contexts`, le
+  « contexte » attaché à une conversation — aujourd'hui le seul `kind` interprété est
+  `"sandbox"` et `data` porte `{"sandbox_name": "…"}` (docs/features/chat-app-fonctionnel.md
+  pour l'extensibilité prévue). Fichier purement déclaratif : structure @Model, types
+  générés par @DeriveEntityModel, @Relation vide, impl @ActiveModelBehavior sans hook —
+  aucune fonction, aucune requête dans ./chat_contexts.rs ; toute lecture/écriture vit
+  chez les consommateurs (`./../../api/conversations.rs`, `./../../ws/chat.rs`).
+  Le contrat SCHEMA de la table (DDL, index, FK entrante) vit dans
+  `./../../migration/m20260825_000007_create_vanyline_chat_contexts.sdd` (rédigée en
+  parallèle) : cette spec-ci couvre la correspondance modèle ↔ schéma et les
+  conséquences observables chez les consommateurs. Choix de design documenté en
+  commentaire source : PAS de colonne `owner_id` — le contexte se veut réutilisable
+  par plusieurs conversations d'un même owner (état réel : `[?]` in `Tasks`).
+
+Owns:
+  ./chat_contexts.rs
+
+Can read:
+  ./../../migration/m20260825_000007_create_vanyline_chat_contexts.rs
+  ./../../migration/m20260825_000008_create_vanyline_conversations.rs
+  ./../../api/conversations.rs
+  ./../../ws/chat.rs
+  ./../test_support.rs
+
+Exposes:
+  @Model — `pub struct`, derives `Clone Debug PartialEq Serialize Deserialize DeriveEntityModel`,
+    exactement 4 champs publics, bijection avec les 4 colonnes de la migration
+    `m20260825_000007` (DDL entre parenthèses) :
+      @Model::id — @i32, `#[sea_orm(primary_key)]` — clé unique auto_increment par
+        défaut SeaORM (`id` INTEGER NOT NULL AUTO_INCREMENT PRIMARY KEY) ; les écritures
+        consommateurs posent `id: @NotSet`.
+      @Model::kind — @String (`kind` string NOT NULL, index non-UNIQUE
+        `idx_vanyline_chat_contexts_kind`). Le type n'impose aucun vocabulaire ; seul le
+        consommateur interprète `"sandbox"` (voir `Handles`).
+      @Model::data — @serde_json::Value (`data` `custom("JSONB")` NOT NULL en Postgres ;
+        affinité sqlite correspondante : `[?]` in `Tasks`). Toute valeur JSON acceptée,
+        y compris non-objet.
+      @Model::created_at — @DateTimeUtc (`@chrono::DateTime<chrono::Utc>`, ré-exporté par
+        `sea_orm::entity::prelude`) (`created_at` TIMESTAMP WITH TIME ZONE NOT NULL
+        DEFAULT CURRENT_TIMESTAMP). Jamais modifié après insertion (pas de colonne
+        `updated_at`).
+    Aucun attribut serde sur le struct ni les champs : clés JSON exactes `"id"`,
+    `"kind"`, `"data"`, `"created_at"` (snake_case par défaut), pas de
+    `deny_unknown_fields` ; @Model::created_at se sérialise au format chrono/serde
+    (RFC 3339).
+  Types générés par @DeriveEntityModel — @Entity (avec @PrimaryKey @Column @ActiveModel) :
+    @Column porte les identifiants `Id`, `Kind`, `Data`, `CreatedAt` ; les noms SQL sont
+    dérivés snake_case des noms de champs, identiques aux `#[derive(DeriveIden)]` des
+    migrations `…000007` et `…000008`.
+  @Relation — `pub enum` VIDE, derives `Copy Clone Debug EnumIter DeriveRelation` :
+    l'entité ne déclare aucune relation SeaORM (la FK entrante des conversations est
+    traitée manuellement — voir `Must`).
+  @ActiveModelBehavior — `impl ActiveModelBehavior for ActiveModel {}` vide : aucun hook
+    `before_save`/`before_insert`/`before_update` ; le @Model::created_at est posé
+    explicitement par le consommateur (`Set(chrono::Utc::now())` dans
+    `create_conversation`), le `DEFAULT CURRENT_TIMESTAMP` de la table n'est qu'un filet.
+  Module `tests` — sous `#[cfg(test)]` avec exemption `#![allow(clippy::unwrap_used,
+    clippy::expect_used)]` sur une ligne (harnais de `./../../../../tooling.sdd` :
+    tolérée uniquement sous `cfg(test)`), un seul test `chat_context_roundtrip_serializes`
+    (serde pur, sans base — le roundtrip réel en base est couvert indirectement par les
+    tests consommateurs via `@real_db()` de `./../test_support.rs`).
+
+Accepts:
+  (Lecture/écriture, via les types générés) toute valeur des 4 champs conforme aux types
+    Rust ci-dessus ; aucune validation de vocabulaire `kind` ni de forme `data` au niveau
+    du modèle.
+
+Returns:
+  Rien en propre — fichier déclaratif ; les valeurs rendues sont celles des types générés
+    (@Entity::find/insert/… standard SeaORM).
+
+Raises:
+  Rien en propre ; @sea_orm::DbErr remonte chez les consommateurs via `?`/
+    `map_err(AppError::from)`.
+
+Handles:
+  Ligne absente (`@Entity::find_by_id` rend @None) — l'entité ne fait rien ; les trois
+    sites consommateurs (`to_output` et la branche `sandbox_name` du listage dans
+    `./../../api/conversations.rs`, `resolve_extra_mcp` dans `./../../ws/chat.rs`) la
+    convertissent en `AppError::InternalError` avec l'identifiant
+    `VNL-DB-007: context not found`.
+  @Model::kind hors vocabulaire — accepté et stocké tel quel ; `resolve_extra_mcp`
+    retourne silencieusement une liste vide pour tout `kind != "sandbox"` (non bloquant,
+    documenté en commentaire dans `./../../ws/chat.rs`).
+  @Model::data sans `sandbox_name` (ou non-chaîne) alors que `kind == "sandbox"` —
+    accepté au niveau modèle ; `resolve_extra_mcp` émet `ChatEvent::ToolUnavailable`
+    (`"contexte sandbox invalide (sandbox_name absent)"`) et le tour se poursuit.
+  Résolution MCP d'une sandbox d'autrui nommée dans `data` — hors périmètre du modèle
+    (aucun scoping ici) : c'est `resolve_extra_mcp` qui re-vérifie
+    `project.spec.owner == owner` de l'utilisateur appelant.
+
+Must:
+  - Cibler la table `vanyline_chat_contexts` (`#[sea_orm(table_name = "vanyline_chat_contexts")]`),
+    même identité que `@ChatContext::Table` des migrations `…000007` et `…000008`.
+  - Maintenir la bijection exacte des 4 champs avec les 4 colonnes de la migration
+    `…000007` (nom, couple de types Rust↔SQL, NOT NULL, défauts) ; tout écart d'un côté
+    ou de l'autre est une rupture du contrat croisé avec
+    `./../../migration/m20260825_000007_create_vanyline_chat_contexts.sdd`.
+  - Rester utilisable tel quel par les motifs d'appel des consommateurs :
+    `@Entity::find_by_id(context_id).one(db)` (lecture) et
+    `@Entity::insert(ActiveModel { id: NotSet, kind: Set(_), data: Set(_), created_at: Set(_) }).exec(db)`
+    dont `last_insert_id` est casté `as i32` (`create_conversation`).
+  - Exposer la forme JSON de @Model en 4 clés snake_case : @ConversationOut.context
+    EMBÉDURE @Model tel quel (`./../../api/conversations.rs`) — ces clés sont la forme
+    des réponses REST `conversations`.
+  - Garder @Relation vide : la FK `vanyline_conversations.context_id → vanyline_chat_contexts.id`
+    (`ON DELETE RESTRICT`, migration `…000008`) n'est JAMAIS modélisée côté SeaORM ;
+    l'association est résolue à la main par `find_by_id` — N+1 explicitement accepté et
+    commenté chez le consommateur.
+
+Must not:
+  - Porter de fonction, requête, helper ou constante hors dérivés : le fichier ne doit
+    rien exécuter (`ActiveModelBehavior` reste vide — un hook `before_insert` changerait
+    le comportement actuel des consommateurs).
+  - Ajouter une colonne `owner_id` (ou tout champ) au modèle sans étendre d'abord le
+    contrat de schéma `./../../migration/m20260825_000007_create_vanyline_chat_contexts.sdd`
+    — voir le `[?]` de `Tasks` sur la réutilisabilité revendiquée.
+  - Déclarer une @Relation vers `conversations` (ou toute autre entité) sans alignement
+    préalable avec la spec de l'entité `conversations` (et la réciproque).
+  - Imposer un scoping owner dans l'entité : aucun filtre, aucune vérification — le
+    scoping est une responsabilité de `./../../ws/chat.rs` et des handlers REST.
+  - Introduire un attribut serde (`rename`, `rename_all`, `deny_unknown_fields`,
+    `skip_serializing_if`) ou retirer `Serialize`/`Deserialize`/`PartialEq` : cela
+    changerait silencieusement la forme JSON de `ConversationOut.context`.
+
+Scenario: chat_context_model_roundtrip_serde
+  Given un @Model `id: 1`, `kind: "sandbox"`, `data: {"sandbox_name": "my-sandbox"}`,
+    `created_at: Utc::now()`
+  When il est sérialisé puis redésérialisé en @Model
+  Then `id`, `kind` et `data["sandbox_name"]` valent les valeurs d'origine et
+    `created_at.timestamp()` est strictement positif
+    (verrouillé par le test existant `chat_context_roundtrip_serializes`)
+
+Scenario: chat_context_model_se_serialize_en_quatre_cles_snake_case
+  Given un @Model `id: 7`, `kind: "sandbox"`, `data: {"sandbox_name": "sb"}`,
+    `created_at: 2026-08-25T00:00:00Z`
+  When il est sérialisé en JSON
+  Then l'objet a exactement les clés `"id"`, `"kind"`, `"data"`, `"created_at"`, avec
+    `"created_at"` en chaîne RFC 3339 — la forme que l'API REST rend dans
+    `ConversationOut.context`
+
+Scenario: chat_context_relation_enum_vide
+  Given l'enum @Relation de cette entité (derives @EnumIter)
+  When on itère ses variantes (`Relation::iter()`)
+  Then le compteur est à `0` — aucune jointure SeaORM n'est déclarée depuis ou vers
+    `vanyline_chat_contexts`
+
+Depends on:
+  @sea_orm (prelude de `sea_orm::entity::prelude`) — @DeriveEntityModel, @DeriveRelation,
+    @ActiveModelBehavior, @DateTimeUtc, @Set/@NotSet côté consommateurs.
+  @serde (features derive) + @serde_json — champs @Model::data et sérialisation exposée
+    par l'API.
+  @chrono — atteignable via `DateTimeUtc` ; la représentation serde des dates est un contrat
+    par transitivité.
+  ./../../migration/m20260825_000007_create_vanyline_chat_contexts.rs — DDL de référence
+    de la bijection (`Must`), sous contrat
+    `./../../migration/m20260825_000007_create_vanyline_chat_contexts.sdd`.
+  Aucun module interne du crate n'est importé par ./chat_contexts.rs.
+
+Tasks:
+  [?] Le commentaire source affirme que le contexte « est réutilisable par plusieurs
+      conversations d'un même owner », mais le seul chemin d'écriture
+      (`create_conversation`) insère une ligne par conversation et rien ne réutilise ni
+      ne range les contextes par owner (aucune colonne owner, aucun filtre) ; de plus un
+      autre owner pouvant référencer un `context_id` existant n'est empêché ni par le
+      schéma ni par le code. Intention à contractualiser (réutiliser vraiment, ou
+      assumer 1 contexte/conversation) ou garde-fou owner à créer — à trancher avec
+      Sébastien.
+  [?] `data` est typé `custom("JSONB")` en Postgres ; sous sqlite (tests via `@real_db()`)
+      le nom de type `JSONB` tombe en affinité NUMERIC faute de mot-clé reconnu. Vérifier
+      auprès de Sébastien que le roundtrip `serde_json::Value` est bien identique en test
+      et en production ; le contrat de type relève de la spec migration `…000007`.
+  [?] Le vocabulaire de `kind` (aujourd'hui seul `"sandbox"`) est réparti dans les
+      consommateurs (`ws/chat.rs`, `api/conversations.rs`) et nulle part centralisé ni
+      contraint en base (index non-UNIQUE, pas de CHECK). Centraliser (constante ou enum
+      en Rust, CHECK en SQL) ou assumer la dissémination — à trancher.
+  [?] L'erreur `VNL-DB-007: context not found` est un `InternalError` (500) alors qu'elle
+      signale une incohérence de données (conversation orpheline de contexte, normalement
+      empêchée par la FK `RESTRICT`) ; le format d'identifiant (littéral dans trois
+      call-sites, pas de constructeur partagé) reste à contractualiser dans la spec des
+      consommateurs ou celle de `./../../error.rs`.
+  [ ] Dériver les trois `Scenario` en tests taggés (le premier préexiste sous le nom
+      `chat_context_roundtrip_serializes` ; les deux autres sont à ajouter dans le module
+      `tests` du fichier, sans autre modification du fichier source).

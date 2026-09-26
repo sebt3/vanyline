@@ -1,0 +1,146 @@
+Spec: DbTestSupport
+
+Purpose:
+  Fixture de test de la couche base de données de l'`app` : fournit aux tests une base
+  SQLite en mémoire portant la même paire de migrations qu'au démarrage (miryad-core puis
+  app). Elle existe parce que `@sea_orm::MockDatabase` (cf.
+  `@crate::auth::test_support::test_auth_state`) ne programme que des résultats de requête
+  sans poser de vrai schéma —
+  insuffisant pour vérifier un aller-retour DB réel (désérialisation du body + insert
+  réel), d'où la régression `id: Set(0)` trouvée en revue Phase 3 de
+  miryad-core-integration (cf. commentaire d'en-tête de ./test_support.rs). Le contrat
+  d'un fichier de test est observable malgré tout : sa compilation sous `cfg(test)`
+  seulement, la connexion retournée, les messages de panique en cas d'échec, et
+  l'absence de dépendance à un service externe.
+
+Owns:
+  ./test_support.rs
+
+Can read:
+  ../main.rs — référence de la paire de migrations au démarrage (`Database::connect` puis
+    `miryad_core::migration::Migrator::up` puis `migration::Migrator::up`).
+  ../auth/mod.rs — `@test_auth_state` (MockDatabase, sans schéma) et
+    `@test_auth_state_with_db` (injecte une connexion réelle dans `@MiryadAuthState`).
+  ../../Cargo.toml — portée `sqlx-sqlite` limitée aux dev-dependencies.
+
+Exposes:
+  `@pub(crate) async fn real_db() -> @sea_orm::DatabaseConnection` — unique item public du
+    fichier, visible du crate uniquement et sous `cfg(test)` seulement. Consommateurs
+    actuels : `../migration/mod.rs` (test `full_migration_set_applies_against_a_real_schema`),
+    `../db/entities/agents.rs`, `../api/llm_providers.rs` (via son `test_state()`),
+    `../api/conversations.rs` (test `two_successive_conversations_get_distinct_ids`).
+
+Accepts:
+  Aucun paramètre. Appelable uniquement depuis du code compilé sous `cfg(test)` du crate
+    `vanyline-app` (double verrou : `#![cfg(test)]` en tête de ./test_support.rs et
+    `#[cfg(test)] pub(crate) mod test_support;` dans ./mod.rs).
+
+Returns:
+  Une `@sea_orm::DatabaseConnection` vivante sur `sqlite::memory:`, schéma intégralement
+    migré (migrations miryad-core puis app, toutes, sans borne de version : `None`),
+    tables vides — aucun seed. Chaque appel fabrique une base neuve, indépendante des
+    appels précédents.
+
+Raises:
+  Panique (`.expect`, toléré sous `cfg(test)` par l'attribut de module
+  `#![allow(clippy::unwrap_used, clippy::expect_used)]` en tête de fichier), avec l'un des
+  trois messages :
+    `"in-memory sqlite connects"` (échec de connexion),
+    `"miryad-core migrations apply cleanly"` (migrations miryad-core en échec),
+    `"app migrations apply cleanly"` (migrations de l'app en échec).
+
+Handles:
+  Aucun autre chemin : pas de retries, pas de fallback MockDatabase, pas de rattrapage
+    d'erreur asynchrone — tout échec d'installation de la base avorte le test courant par
+    panique, jamais une `Err` propagée.
+
+Must:
+  - Compiler et n'exister que sous `cfg(test)` — `cargo build -p vanyline-app` (profil non
+    test) ne compile pas ./test_support.rs et le binaire ne contient ni SQLite ni la
+    fixture.
+  - Appliquer `@miryad_core::migration::Migrator::up(&db, None)` puis
+    `@crate::migration::Migrator::up(&db, None)`, dans cet ordre — même paire et même
+    ordre que `../main.rs` au démarrage.
+  - Ne dépendre d'aucun service externe : `cargo test -p vanyline-app` passe sans Postgres
+    joignable ni variable d'environnement de base de données.
+  - Retourner une base vide de toute ligne : le seed (users, providers, profils FK…) est à
+    la charge de chaque test (ex: `seed_model_profile` dans `../db/entities/agents.rs`).
+  - Rester le seul harnais qui valide les migrations de l'app contre un vrai moteur SQL —
+    les tests `MockDatabase` ne détectent pas le SQL invalide.
+
+Must not:
+  - Être atteignable depuis du code de production ou un autre crate (`pub(crate)` +
+    `cfg(test)` ; SQLite reste une feature de dev uniquement — la production est Postgres
+    uniquement, cf. `../../Cargo.toml` et AGENTS.md).
+  - Proposer du seed intégré ou une connexion mutualisée entre tests — chaque appel est
+    une base distincte.
+  - Remonter une erreur récupérable à la place du panique : le contrat d'échec est
+    l'abort du test avec un message `expect` identifiable.
+  - Deriver seul de la paire de migrations de `../main.rs` : toute migration ajoutée au
+    démarrage doit l'être ici simultanément (même paire, cf. commentaire d'en-tête).
+
+Depends on:
+  ./mod.rs — déclaration `#[cfg(test)] pub(crate) mod test_support;` (le verrou de
+    compilation est double, fichier + déclaration).
+  @miryad_core::migration::Migrator — migrations du crate externe (tables utilisateurs,
+    sessions, etc.).
+  ../migration/mod.rs — migrations de l'app (tables `vanyline_*`), testées par lui-même
+    via cette fixture.
+  ../auth/mod.rs — `@test_auth_state_with_db` reçoit la connexion retournée pour
+    construire un `@MiryadAuthState` avec vrai schéma.
+  ../../Cargo.toml — dev-dependencies activant `sqlx-sqlite` sur `sea-orm` et
+    `sea-orm-migration` ; la feature est absente des dépendances runtime.
+
+Scenario: fixture absente du build de production
+  Given le crate `vanyline-app` compilé sans `cfg(test)`
+  When `cargo build -p vanyline-app` s'exécute
+  Then ./test_support.rs n'est pas compilé et le binaire ne référence ni
+    `sqlite::memory:` ni `real_db`
+
+Scenario: schéma migré et vide à chaque appel
+  Given deux tests indépendants appelant chacun `real_db()`
+  When chacun requête une table fraîchement migrée (ex: `skills::Entity::find`)
+  Then la requête réussit sur un schéma utilisable et chaque test ne voit aucune ligne,
+    ni les siennes propres vues par l'autre
+
+Scenario: aller-retour DB réel sans Postgres externe
+  Given un environnement sans Postgres joignable et sans `DATABASE_URL` définie
+  When `cargo test -p vanyline-app` s'exécute
+  Then les tests branchés sur `real_db()` (migration, `agents`, `llm_providers`,
+    `conversations`) passent, prouvant que la fixture ne requiert aucun service
+
+Scenario: insert visible avec vraies contraintes d'intégrité
+  Given une connexion obtenue via `real_db()` et les lignes parent seedées
+    (provider puis model_profile)
+  When un test insère une entité avec clés étrangères (`agents`) puis la relit
+  Then l'insert réussit et la relecture restitue les valeurs écrites — la classe de bug
+    `id: Set(0)` (PK jamais réellement attribuée) fait échouer ce test
+
+Scenario: échec de migration = panique à message identifiable
+  Given une migration de l'app volontairement cassée (fragment SQL invalide, ex: tuple
+    `(...)` orphelin dans un `CREATE TABLE`)
+  When `real_db()` s'exécute dans un test
+  Then le test panique sur `.expect` avec un message citant
+    `"app migrations apply cleanly"` (ou `"miryad-core migrations apply cleanly"` selon le
+    côté cassé), jamais une `Err` silencieuse
+
+Tasks:
+  [?] `sqlite::memory:` et le pool de connexions sea-orm : selon le comportement du pool,
+    chaque connexion SQLite en mémoire peut avoir sa propre base privée et le schéma
+    migré « disparaître » selon quelle connexion est tirée. Les tests sont verts aujourd'hui
+    mais cette dépendance (taille de pool, URL partagée `mode=memory&cache=shared`) n'est
+    pas fixée par contrat. Trancher avec Sébastien : épingler explicitement (URL shared-cache
+    ou pool à 1 connexion) ou assumer le comportement par défaut des dépendances ?
+  [?] `#![allow(clippy::unwrap_used, clippy::expect_used)]` au niveau module sans
+    `cfg_attr(test, ...)` (le fichier entier est déjà `#![cfg(test)]`) : `tooling.sdd` ne
+    documente l'exemption de la famille panic/unwrap que via `cfg_attr(test, allow(...))`
+    porté par la racine de crate. Ce motif « module de test dédié » est-il conforme, et
+    `tooling.sdd` doit-il le formaliser (il existe aussi dans `../auth/mod.rs`) ?
+  [?] Double compatibilité des migrations Postgres (production) / SQLite (tests) : la
+    fixture fait de SQLite le seul valideur des migrations en CI. La compatibilité des
+    deux dialectes est-elle un contrat liant (toute migration doit passer sur les deux,
+    cf. commentaire de `../migration/mod.rs` « confirmé contre Postgres ET SQLite ») ou
+    SQLite n'est-il qu'un proxy toléré, Postgres étant validé hors CI ?
+  [?] Aucun test ne couvre les paniques de `Raises` (aucune injection de migration
+    cassée n'existe) : le Scenario « échec de migration » est-il à couvrir par un test
+    d'intégration dédié ou reste-t-il un contrat tenu par revue ?

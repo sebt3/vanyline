@@ -1,0 +1,271 @@
+Spec: Migration m20260825_000004 Create Vanyline Mcp Servers
+
+Purpose:
+  Quatrième migration enfant de l'`app` : DDL de création de la table
+  `vanyline_mcp_servers` — configuration GLOBALE des serveurs MCP joignables par
+  la plateforme (nom unique, transport `server_type`, `url`, `headers` d'authentification,
+  cache de découverte `available_tools`) — et de son pendant `down`
+  (`drop_table`). Le fichier est purement déclaratif : une instruction
+  `create_table`, une instruction `drop_table`, aucune logique, aucune donnée
+  seedée, aucun `#[cfg(test)]`. Cette spec contracte la DDL EXACTE (colonnes,
+  types, NULL/DEFAULT dont les deux colonnes `JSONB`, unicité de `name`) et la
+  correspondance Iden ↔ SQL ; l'orchestration (ordre d'application n°4 sur dix,
+  table de suivi `seaql_migrations_app`, règle de régression Phase 3, politique
+  d'irrémédiabilité) appartient à `./mod.sdd` et n'est pas dupliquée ici. La
+  correspondance avec l'entité consommatrice se lit en regard de
+  `./../db/entities/mcp_servers.rs` (spec `./../db/entities/mcp_servers.sdd` en
+  cours de rédaction).
+
+Owns:
+  ./m20260825_000004_create_vanyline_mcp_servers.rs
+
+Can read:
+  ./mod.rs
+  ./m20260825_000001_create_vanyline_skills.rs
+  ../db/entities/mcp_servers.rs
+  ../db/test_support.rs
+
+Exposes:
+  @Migration (struct publique, `#[derive(DeriveMigrationName)]`) — nom de
+    migration dérivé du nom de module, soit exactement
+    `m20260825_000004_create_vanyline_mcp_servers`, chaîne enregistrée dans
+    `seaql_migrations_app` (contrat de table de suivi : `./mod.sdd`).
+  `impl @MigrationTrait for @Migration` (async, `#[async_trait::async_trait]`) :
+    @up(&self, manager: &@SchemaManager) -> `Result<(), @DbErr>` — une seule
+    instruction `create_table`.
+    @down(&self, manager: &@SchemaManager) -> `Result<(), @DbErr>` — une seule
+      instruction `drop_table`.
+  @McpServer (enum privé, `#[derive(DeriveIden)]`) — mapping d'identifiants SQL,
+    jamais exporté hors du fichier :
+      `Table` → `#[sea_orm(iden = "vanyline_mcp_servers")]` (nom littéral, jamais
+        dérivé du module) ;
+      `Id` / `Name` / `ServerType` / `Url` / `Headers` / `AvailableTools` →
+        snake_case par DeriveIden : `id`, `name`, `server_type`, `url`,
+        `headers`, `available_tools`.
+  Tests : aucun — le fichier ne contient pas de module `tests` ; la seule
+    couverture actuelle est le test d'application complète `./mod.rs`
+    (`migrations_apply_cleanly`).
+
+Accepts:
+  Rien en entrée runtime : @up et @down ne consomment que le
+    `&@SchemaManager` fourni par SeaORM ; aucune donnée applicative, aucun
+    paramètre de configuration, aucune lecture de CRD ou d'environnement.
+
+Returns:
+  @up : `Ok(())` quand la table `vanyline_mcp_servers` existe avec le schéma
+    décrit en `Must` APRÈS l'appel — y compris quand elle préexistait (cas
+    absorbé par `if_not_exists()`, voir `Handles`).
+  @down : `Ok(())` quand `vanyline_mcp_servers` a été supprimée (ou n'a jamais
+    porté d'autre objet portant ce nom).
+
+Raises:
+  `@DbErr` propagé brut depuis `manager.create_table(...)` / `manager.drop_table(
+    ...)` : ./m20260825_000004_create_vanyline_mcp_servers.rs n'intercepte, ne
+    transforme et ne logge aucune erreur (aucun `tracing` dans le fichier).
+  Cas concret de remontée : `drop_table` SANS `if_exists()` sur un schéma où la
+    table est absente (second `down`, `down` sur base partielle) → erreur SQL de
+    drop sur objet inexistant.
+  En amont, l'échec de @up dans le parcours normal est traité par l'appelant du
+    @Migrator (`./../main.rs`, log `VNL-DB-005` + `exit(1)` — contrat
+    `./../main.rs.sdd`, pas de celui-ci).
+
+Handles:
+  Table préexistante : `if_not_exists()` fait de @up un no-op réussi si une
+    table `vanyline_mcp_servers` existe déjà, QUEL QUE SOIT SON SCHÉMA — une
+    table divergente (créée à la main ou par une version différente) passe sans
+    erreur ni correction (comportement aux limites documenté, pas approuvé,
+    voir `Tasks`).
+  Aucun rattrapage de type « une instruction échoue, on annule la précédente » :
+    @up ne contient qu'une instruction, donc pas d'état partiel possible dans ce
+      fichier ; @down idem.
+  Rien d'autre : pas de retry, pas de transaction explicite (`manager
+    .exec_trans` non utilisé), pas de log, pas de garde `#[cfg(...)]`.
+
+Must:
+  - Créer la table `vanyline_mcp_servers` via `@Table::create()` avec
+      `if_not_exists()`, exactement SIX colonnes, dans cet ordre de déclaration
+      et avec ces définitions exactes :
+        `id` — `@ColumnDef::new(@McpServer::Id).integer().not_null()
+          .auto_increment().primary_key()` : clé primaire entière auto-incrémentée
+          mono-colonne ;
+        `name` — `.string().not_null().unique_key()` : contrainte UNIQUE portée
+          par la colonne elle-même (contrainte de colonne, pas d'index nommé),
+          unicité GLOBALE — la table n'a pas de colonne owner ;
+        `server_type` — `.string().not_null()` : SANS défaut et SANS contrainte
+          CHECK en base (les valeurs licites `"sse"`/`"http-streamable"` ne sont
+          imposées qu'au niveau ORM/lecture, voir `Must not` et `Tasks`) ;
+        `url` — `.string().not_null()` : sans défaut, sans validation de format ;
+        `headers` — `.custom("JSONB").not_null()
+          .default(@Expr::cust("'{}'"))` : nom de type SQL émis LITTÉRALEMENT
+          `JSONB` sur tout backend, défaut SQL = fragment brut `'{}'` (objet
+          JSON vide, quotes incluses dans le cust) ;
+        `available_tools` — `.custom("JSONB").not_null()
+          .default(@Expr::cust("'[]'"))` : même type brut, défaut SQL `'[]'`
+          (tableau JSON vide) — cache de découverte des tools, réécrit par
+          `@crate::api::mcp_servers::test_server` (`./../api/mcp_servers.rs`).
+  - Ne passer l'unicité de `name` que par `@ColumnDef::unique_key()` : ce fichier
+      ne contient AUCUN appel `.index(...)` — la règle Phase 3 de `./mod.sdd`
+      (jamais de `.index(...)` non-UNIQUE dans un `create_table`) y est
+      trivialement respectée.
+  - Ne déclarer AUCUNE clé étrangère, aucune référence à `miryad_users` ou à une
+      autre table : table de configuration globale, la protection d'écriture est
+      applicative (`@write_policy()` = AdminOnly côté entité
+      `./../db/entities/mcp_servers.rs`).
+  - Conserver le mapping Iden : table identifiée par le littéral
+      `vanyline_mcp_servers`, colonnes en snake_case dérivé (`server_type`,
+      `available_tools`), identique au `#[sea_orm(table_name = ...)]` et aux
+      champs de l'entité.
+  - Rendre @down exactement `drop_table(@Table::drop().table(@McpServer::Table))`
+      — sans `if_exists()`, sans purge d'historique `seaql_migrations_app`
+      (c'est SeaORM qui tient l'historique, pas l'enfant).
+  - S'appliquer avec le même appel builder sur les deux backends rencontrés :
+      SQLite (harnais `./../db/test_support.rs::real_db`, `sqlite::memory:`) et
+      PostgreSQL (production) — `JSONB` en `.custom(...)` est accepté par les
+      deux (SQLite accepte tout nom de type, typage dynamique ; PostgreSQL y
+      voit son jsonb natif), rendu exact par backend non re-testé dans ce dépôt
+      hors SQLite (voir `Tasks`).
+  - Rester la 4ᵉ migration du vec de `@Migrator::migrations` (position et
+      dépendances d'ordre : contrat de `./mod.sdd`, pas de celui-ci ; aucune FK
+      ici, donc aucun prérequis d'ordre propre au fichier).
+  - Respecter le harnais du workspace (`./../../../tooling.sdd`) : aucun
+      `println!`/`eprintln!`/`unwrap`/`expect`/`panic!` dans ./m20260825_000004_create_vanyline_mcp_servers.rs.
+
+Must not:
+  - Modifier le `up` déjà appliqué en production (colonnes, types, défauts,
+      unicité, ordre) : l'historique est identifié par nom dans
+      `seaql_migrations_app` ; toute évolution du schéma passe par une ONZIÈME
+      migration ajoutée en fin de vec (`./mod.sdd`, règle d'irrémédiabilité).
+  - Remplacer `.custom("JSONB")` par `.json()` (ou tout autre type) ni changer
+      les fragments `Expr::cust("'{}'")` / `Expr::cust("'[]'")` : ce serait
+      réécrire une migration appliquée ; et ce serait contraire à la présente
+      spec sans extension préalable de celle-ci.
+  - Ajouter une colonne owner, une FK vers `miryad_users` ou un index
+      `(owner_id, ...)` : la vocation globale de la table (admin-only, unique
+      par `name`) est le contrat actuel.
+  - Ajouter un `.index(...)` non-UNIQUE dans le `@Table::create()` (règle Phase 3
+      de `./mod.sdd`, ici aucune raison de le faire).
+  - Intervenir sur `seaql_migrations_app` (écrire, purger une ligne) dans @up ou
+      @down : seul le @Migrator écrit l'historique.
+  - Semer des lignes (INSERT) ou poser un CHECK/trigger : @up est une DDL sèche.
+
+Depends on:
+  `sea-orm-migration` (`@MigrationTrait`, `@DeriveMigrationName`, `@SchemaManager`)
+    et `sea-orm`/`sea-query` (`@Table`, `@ColumnDef`, `@Expr`, `@DeriveIden`,
+    `@DbErr`) — sémantique de rendu SQL par backend et nommage snake_case
+    hérités.
+  ./mod.sdd — ordre d'application (4ᵉ de dix), table de suivi
+    `seaql_migrations_app`, règle Phase 3, politique d'irrémédiabilité `[?]`,
+    filet de régression `migrations_apply_cleanly`.
+  ./../db/entities/mcp_servers.rs — consommatrice exacte du schéma :
+    `headers`/`available_tools` en `serde_json::Value` (défauts serde `{}`/`[]`
+    qui miroitent les défauts SQL), validation `before_create` `VNL-MCP-003`
+    sur `server_type` ; spec `./../db/entities/mcp_servers.sdd` en cours —
+    cohérence colonne par colonne à verrouiller des deux côtés.
+  ./../api/mcp_servers.rs — écriture du cache `available_tools` via `test_server` ;
+    ./../config_store.rs — lecture (`list_mcp_servers`, `domain_mcp_server` qui
+    mappe `server_type` → `@McpTransport` et ignore la ligne si inconnu).
+  ./../db/test_support.rs — `real_db()` : c'est lui qui applique cette migration
+    dans les tests ; harnais SQLite en mémoire.
+
+Tasks:
+  [?] `./mod.sdd` affirme que « les dix enfants posent des FK vers
+      `miryad_users` » et que `…000004` « ne dépend que de `miryad_users` » :
+      FAUX pour cette migration, qui ne déclare AUCUNE FK (table globale
+      admin-only). Corriger `./mod.sdd` (phrase à restreindre aux enfants qui
+      ont vraiment une FK) — à valider avec Sébastien.
+  [?] Choix `.custom("JSONB")` + `Expr::cust("'{}'"/"'[]'")` : sortie de
+      l'abstraction de types SeaORM en SQL brut. Sur SQLite (tout l'harnais de
+      tests du dépôt), `JSONB` n'est qu'un nom de type accepté au typage dynamique
+      — l'aller-retour réel `serde_json::Value` ↔ colonne n'est donc vérifié
+      contre un vrai jsonb PostgreSQL AUCUN test de ce dépôt. La DDL Postgres
+      rendue est-elle validée ailleurs (déploiement, `docs/release-runbook.md`) ?
+      À trancher : contractuel en l'état (interdiction de changer, cf. `Must
+      not`), mais le niveau de preuve Postgres est à décider avec Sébastien.
+  [?] `if_not_exists()` masque tout schéma divergent préexistant (`Handles`) :
+      succès silencieux au lieu d'une erreur. Défense accidentelle contre un
+      double-jeu (SeaORM empêche déjà le rejouage via l'historique) ou contrat
+      délibéré (cohabitation avec une table créée hors migrations) ? À trancher.
+  [!] `server_type` sans CHECK en base : le commentaire de
+      `./../db/entities/mcp_servers.rs` (« CHECK en base … restauration par
+      `before_create` seulement ») assume une perte — la DDL accepte donc
+      n'importe quelle chaîne (INSERT direct, données importées, futures
+      migrations de données). Les lecteurs (`domain_mcp_server` ignore la ligne,
+      `build_domain_server` remonte `VNL-MCP-003`) s'en protègent, pas la base.
+      Confirmer avec Sébastien que l'absence de CHECK est le contrat voulu.
+  [!] @down n'est appelé nulle part (ni runtime, ni tests, ni CI) et la politique
+      d'irrémédiabilité est `[?]` dans `./mod.sdd` : le `down` nominal contracté
+      ici (Scenario `down_supprime_la_table`) est conditionné à ce tranche — si
+      le rollback est déclaré inexistant, retirer le Scenario et marquer la
+      migration irréversible.
+  [ ] Dériver et écrire les tests de chaque Scenario ci-dessous, taggés par leur
+      titre — à ce jour le fichier n'a AUCUN test propre (seul le test
+      d'application complète de `./mod.rs` l'exerce de façon indirecte).
+  [ ] Verrouiller la correspondance colonne par colonne avec
+      `./../db/entities/mcp_servers.sdd` dès cette spec sœur rédigée (types
+      Rust `i32`/`String`/`String`/`String`/`Value`/`Value`, défauts serde
+      `{}`/`[]` ↔ défauts SQL `'{}'`/`'[]'`).
+
+Done when:
+  Chaque Scenario a un test taggé vert exécuté contre `real_db()` ; les `[?]`/`[!]`
+  sont tranchés avec Sébastien ou reportés vers leur spec propriétaire
+  (`./mod.sdd`, `./../db/entities/mcp_servers.sdd`) ; la DDL de @up est gelée
+  telle quelle (toute évolution = nouvelle migration) ; et la correction
+  éventuelle de la phrase FK de `./mod.sdd` est faite.
+
+Scenario: table_vanyline_mcp_servers_creee_avec_six_colonnes_non_null
+  Given `@crate::db::test_support::real_db()` (migrateurs miryad-core puis app
+    appliqués)
+  When `PRAGMA table_info(vanyline_mcp_servers)` est exécuté sur la connexion
+    SQLite du harnais
+  Then exactement six colonnes sont listées dans l'ordre `id`, `name`,
+    `server_type`, `url`, `headers`, `available_tools`, toutes avec `notnull` = 1,
+    et `id` est la seule colonne avec `pk` = 1
+
+Scenario: insertion_sans_headers_ni_available_tools_utilise_les_defauts_sql
+  Given `@crate::db::test_support::real_db()`
+  When une ligne `mcp_servers` est insérée avec `name`, `server_type` =
+    `"http-streamable"` et `url` renseignés, `headers` et `available_tools` en
+    `ActiveValue::NotSet` (le SQL omet les colonnes, le DEFAULT s'applique)
+  Then la relecture de la ligne retourne `headers == json!({})` et
+    `available_tools == json!([])` — les fragments `'{}'` et `'[]'` de la DDL
+    sont bien les valeurs par défaut réelles
+
+Scenario: name_unique_global_rejette_le_duplicate
+  Given `@crate::db::test_support::real_db()` avec une ligne insérée, `name` =
+    `"prod-mcp"`
+  When une seconde ligne est insérée avec le même `name` et une `url` différente
+  Then SeaORM retourne un `@DbErr` de violation unique (SQLite : « UNIQUE
+    constraint failed ») et la table ne contient toujours qu'une ligne nommée
+    `"prod-mcp"`
+
+Scenario: not_null_rejete_url_manquant
+  Given `@crate::db::test_support::real_db()`
+  When une ligne est insérée avec `url` en `ActiveValue::NotSet` (et le reste
+    renseigné, hors défauts JSON)
+  Then SeaORM retourne un `@DbErr` de violation NOT NULL sur `url` — la colonne
+    n'a aucun défaut SQL
+
+Scenario: server_type_sans_check_accepte_toute_chaine_en_base
+  Given `@crate::db::test_support::real_db()`
+  When une ligne est insérée via ActiveModel en court-circuitant
+    `@before_create` de l'entité, avec `server_type` = `"bogus"`
+  Then l'insertion réussit au niveau SQL (aucun CHECK dans la DDL) ; le rejet
+    `VNL-MCP-003` n'existe que dans le chemin ORM (`before_create`) et lecture
+    (`./../api/mcp_servers.rs`)
+
+Scenario: up_est_idempotent_grace_a_if_not_exists
+  Given `@crate::db::test_support::real_db()` (table déjà créée par le @Migrator)
+  When @up de cette migration est rappelé directement sur un @SchemaManager de
+    cette connexion, court-circuitant l'historique `seaql_migrations_app`
+  Then aucun `@DbErr` n'est retourné — `if_not_exists()` absorbe le second
+    appel — et `PRAGMA table_info(vanyline_mcp_servers)` retourne les mêmes six
+    colonnes
+
+Scenario: down_supprime_la_table_sans_toucher_aux_autres
+  Given `@crate::db::test_support::real_db()` (les dix migrations appliquées)
+  When @down de cette migration est appelé directement sur un @SchemaManager de
+    cette connexion (rollback nominal — politique `[?]` de `./mod.sdd`, cf.
+    `Tasks`)
+  Then la table `vanyline_mcp_servers` n'existe plus, les autres tables
+    `vanyline_*` et le contenu de `seaql_migrations_app` sont intacts, et aucun
+    `@DbErr` n'est retourné

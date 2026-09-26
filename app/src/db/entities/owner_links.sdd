@@ -1,0 +1,110 @@
+Spec: Owner Links Entity
+
+Purpose:
+  Entité SeaORM `owner_links` de l'`app` : déclaration pure de la table
+  `vanyline_owner_links`, qui porte le lien entre un utilisateur miryad-core
+  (id de la table `miryad_users`) et le nom du Owner CRD Kubernetes
+  (`k8s_owner_name`). Le lien vit dans une table séparée côté `app` parce que
+  le schéma `miryad_users` est fixe — aucun mécanisme d'extension — et que la
+  clé étrangère vers `miryad_users.id` est la seule attache possible (cf.
+  commentaire d'en-tête du fichier).
+  Le fichier ne porte aucun comportement : pas de fonction, pas de hook,
+  pas de relation — uniquement la déclaration de l'entité et la génération
+  SeaORM qui en découle. Le contrat de schéma (types SQL, auto-increment,
+  clé unique, FK réelle, cascade) vit dans la migration
+  `../../migration/m20260825_000010_create_vanyline_owner_links.rs`, spec
+  `../../migration/m20260825_000010_create_vanyline_owner_links.sdd` (en cours
+  de rédaction) ; cette spec-ci ne décrit que le miroir côté entité.
+  Consommateur unique à ce jour : `../../api/owners.rs` — `resolve_owner_name`
+  (lecture par filtre `Column::UserId`) et `ensure_owner` (upsert
+  `INSERT … ON CONFLICT (user_id) DO UPDATE` sur `K8sOwnerName`).
+  `crate::config_store` ne consomme pas cette entité (vérifié par grep).
+  Différence notable avec les entités exposées à l'API (`agents`, `skills`,
+  `mcp_servers`, etc.) : `Model` ne dérive pas `utoipa::ToSchema` — il
+  n'entre dans aucun schéma OpenAPI, seuls ses champs sont lus en interne.
+
+Owns:
+  ./owner_links.rs
+
+Exposes:
+  @Model — ligne de `vanyline_owner_links`, `#[derive(Clone, Debug,
+    PartialEq, Serialize, Deserialize, DeriveEntityModel)]`, table fixée par
+    `#[sea_orm(table_name = "vanyline_owner_links")]` :
+    `id: i32` — `#[sea_orm(primary_key)]` ; côté DDL : `integer NOT NULL
+      AUTO_INCREMENT PRIMARY KEY`.
+    `user_id: i32` — `#[sea_orm(unique)]` ; côté DDL : `integer NOT NULL` +
+      clé unique (c'est la DDL qui impose la contrainte, voir Tasks).
+    `k8s_owner_name: Option<String>` — aucun attribut SeaORM ; côté DDL :
+      `string` nullable.
+  @Entity, @ActiveModel, @Column, @PrimaryKey — types générés par
+    `DeriveEntityModel` ; `Column` porte les variantes `Id`, `UserId`,
+    `K8sOwnerName` ; ce sont les seuls symboles utilisés par les consommateurs
+    (`../../api/owners.rs`).
+  @Relation — enum vide (`#[derive(Copy, Clone, Debug, EnumIter,
+    DeriveRelation)]`, zéro variante) : aucune relation SeaORM déclarée.
+  @ActiveModelBehavior — impl vide : aucun hook `before_insert` /
+    `before_update`, sauvegarde au comportement SeaORM par défaut.
+
+Must:
+  - Porter `table_name = "vanyline_owner_links"` littéralement, aligné sur
+    l'`iden` de la migration ; tout renommage de table exige migration +
+    entité dans le même changement.
+  - Aligner les noms de champs (`id`, `user_id`, `k8s_owner_name`) sur les
+    colonnes DDL : SeaORM les convertit en identifiants SQL par snake_case,
+    ils doivent rester identiques aux `DeriveIden` de la migration.
+  - Maintenir la déclaration `#[sea_orm(unique)]` sur `user_id` : un seul lien
+    par utilisateur, invariant sur lequel `ensure_owner`
+      (`../../api/owners.rs`) fonde son upsert `ON CONFLICT (user_id)`.
+  - Maintenir `k8s_owner_name` en `Option<String>` (nullable), cohérent avec
+    l'absence de `.not_null()` côté DDL.
+  - Garder l'enum `Relation` vide tant que les accès restent des filtres
+    explicites `Column::UserId` : aucun consommateur n'utilise `find_related`
+    ou de jointure déclarée.
+
+Must not:
+  - Déclarer une relation SeaORM vers `miryad_users` : cette table n'a pas
+    d'entité dans `./mod.rs` (schéma externe fixe) ; la FK est réelle côté
+    base (migration, `ON DELETE CASCADE`) mais jamais modélisée ici.
+  - Ajouter `utoipa::ToSchema`, un attribut `#[serde(...)]` ou toute
+    dépendance OpenAPI au `Model` sans étendre cette spec — l'entité ne
+    circule actuellement jamais sérialisée dans une réponse HTTP.
+  - Implémenter un hook dans `ActiveModelBehavior` (injection d'id, de
+    timestamps, validation) : ce serait un comportement nouveau, hors du
+    périmètre déclaratif de ce fichier.
+
+# Scenarios : aucun scenario attaché à ce fichier — il ne porte que de la
+# déclaration (derives, attributs, enums vides) et aucun embranchement
+# exécutable. Les contrats vérifiables sont (1) la compilation — les
+# expansions `Derive*` produisent les types listés en `Exposes` — et (2) la
+# cohérence entité ↔ DDL, testée par les scenarios d'application des
+# migrations de `./../../migration/mod.sdd`. Les comportements aux limites
+# propres au lien (aucun lien, course sur l'upsert, nom NULL) appartiennent à
+# la spec du consommateur, `../../api/owners.sdd`, pas à ce fichier.
+
+Depends on:
+  sea_orm (`entity::prelude::*` : `DeriveEntityModel`, `DeriveRelation`,
+    `ActiveModelBehavior`, `ActiveValue`) et serde (`Serialize`,
+    `Deserialize`).
+  ../../migration/m20260825_000010_create_vanyline_owner_links.rs — DDL
+    réelle de la table ; l'entité n'en est que le miroir compilé, la
+    correspondance des deux est un invariant.
+  ./mod.rs — parent qui expose le module en `pub`.
+
+Tasks:
+  [?] Dérivés `Serialize` / `Deserialize` sur `Model` : aucun code de l'`app`
+    ne sérialise cette entité (consommateur unique `../../api/owners.rs`, qui
+    lit les champs en interne). Dérivation accidentelle ou contrat futur ?
+    À trancher : conserver (et alors décider si la représentation JSON est un
+    contrat) ou supprimer.
+  [?] `k8s_owner_name` nullable : aucun chemin de code n'insère de ligne au
+    nom NULL (`ensure_owner` écrit toujours `Some(name)`), et
+    `resolve_owner_name` traite une ligne à nom NULL exactement comme
+    l'absence de ligne (`and_then`). La ligne à nom NULL est-elle un état
+    licite voulu, ou la colonne devrait-elle passer `NOT NULL` à la prochaine
+    migration ? À trancher avec Sébastien.
+  [!] Unicité de `user_id` double-déclarée : `#[sea_orm(unique)]` sur
+    l'entité (métadonnée déclarative, sans effet à l'exécution) et
+    `.unique_key()` dans la migration (contrainte réellement imposée).
+    Aucune divergence tant que les deux sont maintenues, mais la ligne de
+    `Must` sur l'entité ne doit pas donner l'illusion d'une garantie — la
+    garantie réelle est celle de la migration.

@@ -1,0 +1,506 @@
+Spec: MCP Server Test Endpoint
+
+Purpose:
+  Handler `POST /api/v1/mcp-servers/{id}/test` du crate `vanyline-app` : « tester » un
+  serveur MCP déclaré en base = se connecter réellement au serveur distant (transport
+  `http-streamable` uniquement), lister ses tools, réécrire la colonne `available_tools`
+  de la ligne avec cette liste, et la rendre au frontend. C'est le SEUL chemin du dépôt
+  qui rafraîchit `available_tools` (cf. `../db/entities/mcp_servers.sdd`, Structure).
+  Un seul contrat pour CE fichier, deux responsabilités indissociables :
+  - @build_domain_server — traduction ligne SeaORM (@McpServerModel) → type de domaine
+    @vanyline_lib::domain::McpServer (transport enum + @BTreeMap(String, String)),
+    citée par `../db/entities/mcp_servers.sdd` comme l'un des deux traducteurs du même
+    schéma (l'autre : @domain_mcp_server de `../config_store.rs`, qui rend @None au lieu
+    d'une erreur) ;
+  - @test_server — orchestrateur auth → RBAC → traduction → connexion réseau →
+    persistance → réponse.
+  La connexion elle-même n'est PAS d'ici : elle est le contrat de
+  @vanyline_lib::prefixed_mcp::list_mcp_server_tools (`../../../lib/src/prefixed_mcp.sdd`)
+  — CE fichier ne fait que construire le domaine, appeler, persister et traduire les
+  erreurs en @AppError.
+  Contexte d'assemblage : la route est déclarée `POST /mcp-servers/{id}/test` dans
+  @api_v1_router de `./mod.rs`, montée par @nest("/api/v1", …) dans `../main.rs` —
+  chemin externe réel `POST /api/v1/mcp-servers/{id}/test`. Le montage (chemin, méthode)
+  est le contrat de `./mod.sdd`, pas d'ici.
+
+Owns:
+  ./mcp_servers.rs
+
+Exposes:
+  - @fn build_domain_server — `pub fn(&@McpServerModel) -> @Result<@DomainMcpServer,
+    @AppError>` : fonction PURE (aucune I/O, aucun état, aucun `async`), documentée par le
+    commentaire du fichier comme « pure, testable ». Sa visibilité `pub` n'est consommée
+    par AUCUN autre module du dépôt (grep : seuls @test_server et les @mod tests du
+    fichier l'appellent) — voir Tasks `[?]`.
+  - @struct McpTestResult — `pub struct` à un seul champ `pub tools: @Vec<@String>` ;
+    derive uniquement @serde::Serialize (aucun @Deserialize, aucun @utoipa::ToSchema) —
+    l'endpoint n'entre donc PAS dans le document OpenAPI (qui ne fusionne que les
+    fragments @resource_openapi, cf. @openapi_spec de `../main.rs`). Sa shape `{"tools":
+    string[]}` est reprise telle quelle par le frontend ET par un homonyme du CLI
+    (`../../../cli/src/rpc/protocol.rs::McpTestResult`) : trois définitions de la même
+    forme, sans type partagé (Tasks `[?]`).
+  - @fn test_server — `pub async fn(@State(@AppState), @AuthUser, @Path(@i32)) ->
+    @Result<@Json<@McpTestResult>, @AppError>` : seul handler branché sur une route
+    (`POST /mcp-servers/{id}/test` via `./mod.rs`). Visibilité `pub` exigée par `./mod.rs`.
+  - Rien d'autre : aucune constante, aucun type d'erreur propre, aucun routeur, aucune
+    couche. Les identifiants d'erreur (`VNL-MCP-002`, `VNL-MCP-003`) sont des littéraux
+    dans le code, pas des symboles exportés (cf. Tasks `[?]`).
+
+Accepts:
+  - @build_domain_server : une référence vers @McpServerModel (`../db/entities/mcp_servers.rs`)
+    et RIEN D'AUTRE — ni DB, ni config, ni utilisateur. Champs lus : `server_type`,
+    `headers`, `name`, `url` uniquement (`id` et `available_tools` sont ignorés).
+  - @test_server :
+    - @State(@AppState) — n'utilise QUE `state.auth.db` (cloné en tête, connexion SeaORM
+      de miryad-core) ; ignore `config`, `cookie_key`, `busy`, `k8s`,
+      `shared_sandbox_state`. Le champ `busy` (garde de concurrence d'autres handlers)
+      n'est PAS utilisé ici : deux tests simultanés du même serveur courent en parallèle.
+    - @AuthUser (extracteur miryad-core) — session cookie ou porteur ; son refus (@401)
+      est émis par l'extracteur AVANT le corps du handler, mécanisme de miryad-core
+      (précédent : `./local_tools.sdd`, test `test_server_without_cookie_returns_401`).
+      Champs consommés : `user.subject` et `user.email` (passé en @as_deref).
+    - @Path(id) : `i32` — même type que la clef primaire `id` de la ligne. Un `{id}`
+      non numérique, vide, ou hors plage `i32` est rejeté par l'extracteur axum (@400,
+      corps de rejet axum, jamais une shape `{"error": …}` de `../error.rs`) AVANT
+      d'entrer dans le corps ; l'ordre des extracteurs de la signature (@State →
+      @AuthUser → @Path) fait qu'une requête non authentifiée ET à `{id}` invalide reçoit
+      @401, pas @400.
+    - Aucun body, aucune query lus : un body POST est accepté et silencieusement ignoré
+      (aucun extracteur @Json n'est demandé). La méthode n'est pas décidée ici : `./mod.rs`
+      n'enregistre que @post, les autres méthodes reçoivent @405 du @MethodRouter.
+  - @McpTestResult : aucune entrée — construit à partir du @Vec issu de la découverte.
+
+Returns:
+  - @build_domain_server en @Ok — @DomainMcpServer (@../../../cfgstore/src/domain.rs,
+    réexporté par @vanyline_lib::domain) possédé, champs :
+    - `name` et `url` : clones verbatim de la ligne, AUCUNE validation (une `url` vide,
+      non-URL ou en `http://` clair traverse et sera réellement appelée par @reqwest plus
+      tard) ;
+    - `transport` : `"http-streamable"` → @McpTransport::HttpStreamable, `"sse"` →
+      @McpTransport::Sse, comparaison EXACTE (pas de trim, pas d'insensibilité de casse :
+      `"HTTP-Streamable"`, `" sse"`, `"SSE"` tombent en erreur) ;
+    - `headers` : @BTreeMap(String, String) trié par clé, construit par @filter_map sur
+      un @serde_json::Value::Object en ne gardant QUE les valeurs dont @as_str() est
+      @Some — toute valeur non-chaîne (`123`, `null`, objet, tableau) est éliminée SANS
+      erreur ni log ; toute valeur qui n'est pas un OBJECT du tout (`null`, tableau,
+      chaîne, nombre) donne une map VIDE (branche `_ =>` du match). Cohérent avec
+      @headers_from_json de `../config_store.rs` : les deux traducteurs filtrent pareil.
+  - @test_server en @Ok — @Json(@McpTestResult), statut @200, corps `{"tools": [ … ]}` :
+    - `tools` = noms BRUTS des tools (sans préfixe de serveur), dans l'ordre rendu par
+      `list_all_tools` de rmcp (pagination comprise) : aucun tri, aucune déduplication,
+      aucun filtrage — cf. `../../../lib/src/prefixed_mcp.sdd`. Le préfixage `nom_serveur/`
+      destiné au LLM est fait ailleurs (@PrefixedMcpTool), ce qui rend `available_tools`
+      aligné sur les motifs glob de @McpSelection.tools (filtre @tool_matches appliqué
+      avant préfixage) — cohérence à connaître des consommatrices `ToolsetsScreen.vue` et
+      `McpServersScreen.vue` (cf. Handles).
+    - @Vec vide rendu comme `{"tools": []}` avec @200 (un serveur joignable qui expose
+      zéro tool est un succès).
+  - Effet de bord de @test_server (obligatoire sur tout chemin @Ok) : @McpServerEntity::update
+    sur un @ActiveModel obtenu par `server.clone().@into_active_model()` avec
+    `available_tools` posé via @ActiveValue::Set(@Vec<String> → @serde_json::Value
+    tableau de chaînes). Selon la sémantique SeaORM de @into_active_model (tous les
+    champs en @ActiveValue::Unchanged), la clause `SET` ne porte QUE `available_tools`
+    et le `WHERE` porte `id` — une mise à jour concurrente de `name`/`url`/`headers`
+    n'est donc pas écrasée, et à l'inverse une modification concurrente de
+    `available_tools` (PUT via `resource_router`) est écrasée sans contrôle optimiste.
+    Sémantique SeaORM jamais assertée par un test du dépôt (Tasks `[?]`).
+  - @test_server ne relit PAS la ligne après écriture : la réponse est le @Vec découvert
+    en mémoire, pas ce que la base contient (aucun re-fetch, même motif que
+    @test_provider de `./llm_providers.rs`).
+  - @McpTestResult sérialisé : objet à une seule clé `tools`, tableau de chaînes.
+
+Raises:
+  - @401 (@StatusCode::UNAUTHORIZED, corps miryad-core) : cookie/porteur absent, expiré
+    ou invalide — produit par @AuthUser avant le corps du handler.
+  - @400 (corps de rejet axum) : `{id}` non parsable en `i32`, par @Path avant le corps.
+  - @405 (hors CE fichier) : méthode ≠ POST sur `/api/v1/mcp-servers/{id}/test`, par le
+    @MethodRouter de `./mod.rs`.
+  - @500 @AppError::InternalError, corps `{"error": "VNL-DB-006: …"}` : @sea_orm::DbErr
+    sur @resolve_user, @McpServerEntity::find_by_id, @can_write ou @McpServerEntity::update
+    (mapping @From<@sea_orm::DbErr> de `../error.rs`) — un échec d'écriture en base est
+    donc un @500 qui vient APRÈS la connexion au serveur distant (tools découverts perdus,
+    `available_tools` resté obsolète).
+  - @403 @AppError::Forbidden, corps `{"error": "VNL-AUTH-004: Forbidden"}` :
+    @can_write appliqué à @McpServerEntity rend @Ok(false) pour l'utilisateur résolu —
+    pour cette ressource la @write_policy est @AccessPolicy::AdminOnly
+    (`../db/entities/mcp_servers.sdd`),
+    donc tout utilisateur authentifié non-admin est refusé. La sémantique exacte de
+    @can_write (rôle, groupe `admin`, api token) est du miryad-core externe, hors dépôt
+    (Tasks `[?]`). Le refus intervient AVANT toute traduction et avant toute connexion
+    réseau : un non-admin ne peut pas utiliser cet endpoint comme vecteur de requête
+    sortante (SSRF) vers une `url` choisie par un autre.
+  - @502 @AppError::McpError (`../error.rs` : @Self::McpError(_) → @StatusCode::BAD_GATEWAY,
+    message préfixé `VNL-MCP-001: MCP server error: {0}`), dans quatre situations :
+    - ligne absente pour `id` (y compris `id` négatif ou `0`, acceptés par @Path) →
+      message `VNL-MCP-001: MCP server error: VNL-MCP-002: MCP server not found` —
+      un « introuvable » rendu en @502 et non @404 (contrast : @AppError::LlmProviderNotFound
+      de `./llm_providers.rs` → @404). Voir Tasks `[!]`.
+    - `server_type` inconnu dans la ligne → message `VNL-MCP-001: MCP server error:
+      VNL-MCP-003: server_type must be 'sse' or 'http-streamable', got: {other}` — la
+      règle est la même que @MiryadResource::before_create de l'entité (même code
+      `VNL-MCP-003`, formulation différente ; `../config_store.rs` rend @None + warn ;
+      @VnyError::UnknownServerType de la lib a une troisième formulation, cf.
+      `../../../lib/src/error.sdd`). Ce trou n'existe que parce qu'aucun hook ne valide
+      `server_type` à la mise à jour (Tasks `[!]` de `../db/entities/mcp_servers.sdd`).
+    - `server_type == "sse"` : la traduction ACCEPTE le SSE, puis
+      @list_mcp_server_tools échoue immédiatement en @VnyError::SseNotImplemented
+      (aucune connexion réseau) → message imbriqué `VNL-MCP-001: MCP server error:
+      VNL-MCP-004: SSE transport not yet implemented`. Le commentaire de doc de
+      @build_domain_server dit « `server_type: "sse"` -> erreur claire », ce que le code
+      ne fait pas (il mappe sur @McpTransport::Sse et l'accepte) : l'erreur vient de
+      l'appelant avalant — cf. Tasks `[?]`.
+    - échec de connexion ou de listing distant → @AppError::McpError(@VnyError::@to_string) :
+      @VnyError::McpConnectError (`VNL-MCP-005: Cannot connect to {name}: {détail}`) ou
+      @VnyError::McpToolsError (`VNL-MCP-006: Cannot list tools from {name}: {détail}`),
+      soit en sortie `{"error": "VNL-MCP-001: MCP server error: VNL-MCP-005: …"}`. Le
+      détail de rmcp/@reqwest est renvoyé BRUT au client (mention du nom du serveur et de
+      la cause réseau) — l'appelant est ici par construction un admin (RBAC write).
+  - AUCUN délai (timeout) n'est appliqué par CE fichier : contrairement à
+    @discover_models de `./llm_providers.rs` (@reqwest timeout 10 s) et au RPC CLI
+    `mcp/test` qui enveloppe le même appel dans @tokio::time::timeout de 10 s
+    (`../../../cli/src/rpc/handlers.rs`, message `VNL-MCP-005: … timed out after 10s`),
+    une pair MCP qui accepte la connexion sans répondre laisse la requête HTTP pendue
+    jusqu'aux délais internes rmcp/reqwest ou à la coupure du client/proxy. Tasks `[!]`.
+  - Aucune panic sur le chemin de production : @ok_or_else, `?` et @filter_map partout,
+    aucun `unwrap`/`expect`/`panic!` hors @cfg(test) (harnais `../../../tooling.sdd`).
+  - Silencieux, non levé : @McpServerEntity::update retourne un @UpdateResult dont
+    `rows_affected` est IGNORE — une ligne supprimée entre le @find_by_id et l'@update
+    (suppression CRUD concurrente par un autre admin) donne quand même @200 avec les
+    tools, sans que rien n'ait été écrit. Tasks `[?]`.
+
+Handles:
+  - Ordre exact des étapes (observable, chaque étape est un point de rupture distinct) :
+    @resolve_user → @find_by_id → @can_write → @build_domain_server → @list_mcp_server_tools
+    (@réseau) → @update (écriture) → @Json. Conséquence contractuelle : AUCUNE écriture
+    de `available_tools` sur un chemin d'erreur — un serveur injoignable, en SSE ou à
+    `server_type` invalide laisse la colonne telle quelle (obsolète ou au défaut `[]`).
+  - Découverte réelle : @vanyline_lib::prefixed_mcp::list_mcp_server_tools ouvre une
+    session MCP streamable-HTTP vers `domain.url` avec les en-têtes du domaine (spéc du
+    contrat aval `../../../lib/src/prefixed_mcp.sdd`) ; les en-têtes invalides au sens
+    HTTP y sont éliminés avec un `tracing::warn!` côté lib, jamais par CE fichier. CE
+    fichier ne log rien du tout (harnais `../../../tooling.sdd`).
+  - Secrets : @build_domain_server recopie les `headers` de la ligne — dont l'en-tête
+    `Authorization` des serveurs MCP — dans le domaine, puis la lib les envoie sur le fil
+    vers `url`. C'est le consommateur LÉGITIME du secret, et c'est ce qui rend
+    obligatoire, si le `[!]` « `headers` lu en clair » de `../db/entities/mcp_servers.sdd`
+    est tranché par un masque à la sérialisation, que le masque ne casse PAS ce chemin
+    (la découverte doit recevoir les vrais en-têtes depuis la ligne brute, pas la vue
+    masquée). Cohérence à garder avec la décision ouverte en Tasks de la spec sœur.
+    @test_server ne log ni n'écho ces en-têtes dans la réponse.
+  - Consommateurs frontend : `../../../frontend/src/api/httpConfigRepo.ts`
+    (@testMcpServer(name) : `POST /api/v1/mcp-servers/{id}/test`, type attendu
+    `{ tools: string[] }`, `id` résolu depuis le nom via le cache name↔id alimenté par le
+    listing de la collection) ; `../../../packages/ui/src/config/McpServersScreen.vue`
+    (@discoverTools : état de chargement et message d'erreur PAR ligne, et mise à jour
+    locale `server.available_tools = result.tools` en cas de succès) ;
+    `../../../packages/ui/src/config/ToolsetsScreen.vue` qui relit `available_tools` pour
+    proposer les motifs glob des tools d'un serveur. Une réponse @502 est donc affichée
+    comme erreur par ligne, sans toucher aux autres lignes.
+  - Parité de forme avec le CLI : `../../../cli/src/rpc/handlers.rs` (RPC `mcp/test`)
+    appelle le MÊME @list_mcp_server_tools et rend le MÊME `{"tools": […]}` via son
+    propre @McpTestResult (`../../../cli/src/rpc/protocol.rs`), mais avec un timeout de
+    10 s et un code d'erreur RPC (`VNL-RPC-006`) au lieu du @502 HTTP. Deux surfaces,
+    deux politiques de délai (Tasks `[!]`).
+  - RBAC sur ressources partagées : @can_write est appelé avec la @Model complète lue en
+    base (pas seulement un id), en cohérence avec @MiryadResource pour @Entity de
+    `../db/entities/mcp_servers.sdd` (owner_column @None, write_policy AdminOnly). Cet
+    endpoint custom refait à la main la garde que `resource_router` applique au CRUD — la
+    duplication app ↔ miryad-core est le prix de la décision Phase 1 « handlers axum
+    custom à côté de resource_router » (cf. `./mod.sdd`).
+  - Passage à l'échelle de l'identité : @resolve_user(&db, `user.subject`, `user.email`)
+    est ici CONSOMMÉ (passé à @can_write), contrairement à `./local_tools.rs` qui jette
+    son résultat — même appel, deux usages.
+
+Must:
+  - Garder l'ordre auth → existence → @can_write → traduction → connexion → écriture :
+    aucune connexion au serveur distant avant RBAC, aucune écriture de `available_tools`
+    avant une découverte en @Ok.
+  - Répondre @200 avec `{"tools": […]}` et persister la MÊME liste dans la colonne
+    `available_tools` de la ligne testée.
+  - Traiter `server_type` par comparaison exacte sur `"http-streamable"` et `"sse"`, et
+    rendre @AppError::McpError citant `VNL-MCP-003` ET la valeur reçue pour tout autre
+    contenu.
+  - Filtrer `headers` en @BTreeMap(String, String) en éliminant silencieusement les
+    valeurs non-chaîne et en rendant une map vide pour toute valeur non-object (`null`
+    inclus) — jamais d'erreur ni de panic sur un JSON de headers mal formé.
+  - Garder @build_domain_server pure et sans dépendance d'environnement : appelable et
+    assertable hors routeur, sans DB ni réseau (précédents : les 3 tests unitaires
+    directs du fichier).
+  - Mapper TOUTES les erreurs via @AppError (`@From<@sea_orm::DbErr>` et @ok_or_else /
+    map_err explicites), sans statut bricolé localement ni `println!`/log (harnais
+    `../../../tooling.sdd`).
+  - Garder `id` et `available_tools` de la ligne hors de la traduction (seuls `name`,
+    `transport`, `url`, `headers` traversent dans le domaine).
+
+Must not:
+  - Valider `url` (schéma, boucle locale, présence d'un port) ni refuser un `http://`
+    clair : rien de tel n'existe aujourd'hui ; l'admin est le seul garde-fou avant que
+    l'app n'appelle une URL arbitraire avec ses en-têtes (cf. Tasks `[?]` SSRF).
+  - masquer, tronquer ou normaliser les noms de tools découverts, ni les trier/dédupliquer.
+  - Valider `server_type` en écriture depuis CE fichier : la correction du trou de mise à
+    jour appartient à l'entité (hook ou CHECK), pas au handler de test.
+  - Écrire autre chose que `available_tools` sur la ligne, ni toucher une autre table, un
+    cfgstore ou le K8s.
+  - Rendre un @404 pour une ligne absente, ni un @422 pour un `server_type` invalide :
+    l'état actuel est @502 dans les deux cas (documenté, pas voulu — Tasks `[!]`) ; un
+    changement de statut est une décision à prendre avec Sébastien, pas une correction
+    silencieuse.
+  - Utiliser `state.busy`, `state.config`, `state.k8s` ou `state.shared_sandbox_state`.
+  - Supposer que miryad-core (crate externe 0.1.3, source hors dépôt) garantit un statut,
+    un hook ou une sémantique de rôle non observés ici.
+
+Depends on:
+  @vanyline_lib::prefixed_mcp — @list_mcp_server_tools (`../../../lib/src/prefixed_mcp.rs`,
+    spec `../../../lib/src/prefixed_mcp.sdd`) : connexion streamable-HTTP, @VnyError::
+    SseNotImplemented / McpConnectError / McpToolsError.
+  @vanyline_lib::domain (= @vanyline_cfgstore::domain, `../../../cfgstore/src/domain.rs`,
+    spec `../../../cfgstore/src/domain.sdd`) — @McpServer et @McpTransport du domaine.
+  ../db/entities/mcp_servers.rs — @Model, @Entity, table `vanyline_mcp_servers`,
+    write_policy @AccessPolicy::AdminOnly (spec sœur
+    `../db/entities/mcp_servers.sdd`).
+  miryad-core 0.1.3 (crate crates.io, source hors dépôt) — @AuthUser, @resolve_user,
+    @rbac::can_write, @MiryadResource (source de la politique que @can_write applique).
+  @sea_orm — @EntityTrait (@find_by_id, @update), @IntoActiveModel, @ActiveValue::Set.
+  @axum — @Json, @State, @Path ; @serde (Serialize de @McpTestResult) ; @serde_json.
+  ../error.rs — @AppError::{@McpError → @502, @Forbidden → @403, @InternalError → @500}
+    et @From<@sea_orm::DbErr> (`VNL-DB-006`), spec `../error.sdd`.
+  ./mod.rs — @api_v1_router enregistre `POST /mcp-servers/{id}/test` ; ../main.rs —
+    @nest("/api/v1", …) ; specs : `./mod.sdd`, `../main.sdd`.
+  ../auth/mod.rs (@crate::auth::test_support::{@test_auth_state,
+    @test_auth_state_with_db}) et ../db/test_support.rs (@real_db) — harnais des Scenarios.
+  Contrat frontend (appelant réel) : `../../../frontend/src/api/httpConfigRepo.ts`,
+    `../../../packages/ui/src/config/McpServersScreen.vue`,
+    `../../../packages/ui/src/config/ToolsetsScreen.vue`.
+  Contrat parallèle (même appel, surface non branchée sur CE fichier) :
+    `../../../cli/src/rpc/handlers.rs` + `../../../cli/src/rpc/protocol.rs` (timeout 10 s) ; `./llm_providers.rs` (endpoint homologue pour les providers).
+  Hérite des contraintes racines `../../../vanyline.sdd` et du harnais
+    `../../../tooling.sdd`.
+
+Scenario: build_domain_server_mappe_http_streamable_et_headers_string
+  Given un @McpServerModel avec `server_type: "http-streamable"`, `url` posée, `name`
+    posé et `headers: @serde_json::json!({"Authorization": "Bearer token"})`
+  When @build_domain_server est appelée sur cette ligne
+  Then elle rend @Ok avec `transport == @McpTransport::HttpStreamable`, `name` et `url`
+    identiques à la ligne, et `headers.get("Authorization") == @Some("Bearer token")`
+  And (test existant `build_domain_server_http_streamable`)
+
+Scenario: build_domain_server_accepte_sse_sans_erreur
+  Given un @McpServerModel avec `server_type: "sse"` et
+    `headers: @serde_json::json!({})`
+  When @build_domain_server est appelée
+  Then elle rend @Ok (aucune erreur) avec `transport == @McpTransport::Sse`
+  And (test existant `build_domain_server_sse_maps_to_sse_transport`)
+
+Scenario: build_domain_server_rejette_un_type_inconnu_avec_vnl_mcp_003
+  Given un @McpServerModel avec `server_type: "bogus"`
+  When @build_domain_server est appelée
+  Then elle rend @Err(@AppError::McpError) et le message contient `VNL-MCP-003`
+  And (test existant `build_domain_server_bogus_type_returns_error`)
+
+Scenario: build_domain_server_elimine_les_valeurs_de_header_non_chainees
+  Given un @McpServerModel avec `server_type: "http-streamable"` et
+    `headers: @serde_json::json!({"Authorization": "Bearer x", "X-Port": 8443,
+    "X-Flag": null, "X-Nested": {"k": 1}})`
+  When @build_domain_server est appelée
+  Then le @BTreeMap rendu ne contient QUE la clé `Authorization` (3 clés perdues, aucune
+    erreur, aucun log)
+  And (test À ÉCRIRE — branche @filter_map jamais exercée par les tests du fichier)
+
+Scenario: build_domain_server_headers_non_objet_donne_une_map_vide
+  Given trois @McpServerModel (`server_type: "http-streamable"`) dont `headers` vaut
+    respectivement @serde_json::Value::Null, un @ tableau non vide, et un nombre
+  When @build_domain_server est appelée sur chacun
+  Then les trois rendent @Ok avec `headers.is_empty() == true` (jamais @Err sur une forme
+    inattendue)
+  And (test À ÉCRIRE — branche `_ =>` du match sur `server.headers`)
+
+Scenario: mcp_test_result_serialize_en_un_tableau_sous_la_cle_tools
+  Given un @McpTestResult { tools: @vec!["fs.read".to_string(), "fs.write".to_string()] }
+  When il est sérialisé par @serde_json::to_value
+  Then l'objet a EXACTEMENT une clé `tools`, tableau de deux chaînes dans l'ordre
+  And (test À ÉCRIRE — aucun test de sérialisation du type, précédent :
+    `local_tool_serialize_en_name_et_description` de `./local_tools.sdd`)
+
+Scenario: test_server_sans_cookie_repond_401
+  Given un @AppState de test (config figé, @crate::auth::test_support::@test_auth_state,
+    @Router::new().@route("/mcp-servers/{id}/test", @post(@test_server)).@with_state(state))
+  When `POST /mcp-servers/1/test` sans cookie ni porteur est adressé via @oneshot
+  Then le statut est @StatusCode::UNAUTHORIZED et aucune requête SQL n'est émise
+  And (test existant `test_server_without_cookie_returns_401`)
+
+Scenario: test_server_non_admin_recoit_403_et_ne_connecte_rien
+  Given une base réelle (@../db/test_support.rs::@real_db) avec une ligne
+    `vanyline_mcp_servers` dont `url` pointe vers une adresse nécessairement injoignable
+    (port fermé en `127.0.0.1`), un porteur valide obtenu par
+    @miryad_core::auth::@issue_token pour un utilisateur SANS le groupe `admin`
+    (précédents : `bearer_for` de `../db/entities/agents.rs` et @sync_group_memberships
+    de `./llm_providers.rs` pour le cas admin)
+  When `POST /api/v1/mcp-servers/{id}/test` authentifié est adressé
+  Then le statut est @StatusCode::FORBIDDEN et le corps cite `VNL-AUTH-004`
+  And `available_tools` de la ligne est inchangé et aucune connexion TCP n'a été tentée
+  And (test À ÉCRIRE — le RBAC de cet endpoint n'est couvert par aucun test du dépôt)
+
+Scenario: test_server_ligne_absente_repond_502_vnl_mcp_002
+  Given la même base réelle et un porteur d'ADMIN (groupe `admin` synchronisé), aucun
+    enregistrement pour `id = 999_999`
+  When `POST /api/v1/mcp-servers/999999/test` authentifié est adressé
+  Then le statut est @StatusCode::BAD_GATEWAY (comportement actuel, PAS @404 — cf.
+    Tasks `[!]`) et le corps contient `VNL-MCP-002: MCP server not found`
+  And (test À ÉCRIRE)
+
+Scenario: test_server_server_type_valide_a_la_creation_puis_invalide_repond_502_vnl_mcp_003
+  Given une ligne insérée avec `server_type: "sse"` puis corrompue par un
+    @McpServerEntity::update qui pose `server_type: "bogus"` (aucun hook à la mise à
+    jour, cf. Scenario homonyme de `../db/entities/mcp_servers.sdd`), porteur admin
+  When `POST /api/v1/mcp-servers/{id}/test` est adressé
+  Then le statut est @StatusCode::BAD_GATEWAY et le corps contient `VNL-MCP-003` et la
+    chaîne `bogus`
+  And aucune connexion réseau n'est tentée et `available_tools` est inchangé
+  And (test À ÉCRIRE — croise le `[!]` « server_type non validé en update » de la spec sœur)
+
+Scenario: test_server_transport_sse_repond_502_vnl_mcp_004_sans_ecrire
+  Given une ligne `server_type: "sse"` (état sain, jamais corrompue), porteur admin
+  When `POST /api/v1/mcp-servers/{id}/test` est adressé
+  Then le statut est @StatusCode::BAD_GATEWAY et le corps contient `VNL-MCP-004: SSE
+    transport not yet implemented` imbriqué dans le préfixe `VNL-MCP-001`
+  And `available_tools` de la ligne est inchangé (la persistance est postérieure à la
+    découverte)
+  And (test À ÉCRIRE — aucune connexion SSE n'existe côté lib, la réponse est immédiate)
+
+Scenario: test_server_transport_http_injoignable_repond_502_vnl_mcp_005
+  Given une ligne `server_type: "http-streamable"` dont `url` pointe un port fermé en
+    `127.0.0.1`, porteur admin, base réelle
+  When `POST /api/v1/mcp-servers/{id}/test` est adressé
+  Then le statut est @StatusCode::BAD_GATEWAY et le corps contient `VNL-MCP-001` et
+    `VNL-MCP-005` et le `name` de la ligne
+  And `available_tools` est inchangé
+  And (test À ÉCRIRE)
+
+Scenario: test_server_decouverte_reussie_reecrit_available_tools_et_repond_200
+  Given un faux serveur MCP streamable-HTTP démarré dans le test (pair rmcp in-process,
+    ou @axum servant le handshake + `tools/list` avec deux tools `alpha` et `beta`) et
+    une ligne `server_type: "http-streamable"`, `url` de ce faux serveur,
+    `available_tools: @serde_json::json!(["outdated"])`, porteur admin, base réelle
+  When `POST /api/v1/mcp-servers/{id}/test` est adressé
+  Then le statut est @StatusCode::OK et le corps est exactement
+    `{"tools":["alpha","beta"]}` dans l'ordre rendu par la pair
+  And la reliture de la ligne en base donne
+    `available_tools == @serde_json::json!(["alpha","beta"])`
+    et les colonnes `name`, `url`, `server_type`, `headers` inchangées (la clause `SET`
+    ne porte que `available_tools`)
+  And (test À ÉCRIRE — le chemin @Ok complet, y compris la persistance, n'est couvert par
+    AUCUN test du dépôt)
+
+Scenario: test_server_pair_silencieuse_ne_se_delaisse_pas_cote_app
+  Given une ligne `server_type: "http-streamable"` dont `url` pointe un @tokio::net::@TcpListener
+    qui accepte la connexion sans jamais répondre, porteur admin, base réelle
+  When `POST /api/v1/mcp-servers/{id}/test` est adressé et attendu dans
+    @tokio::time::timeout de 11 secondes par le test
+  Then le timeout du test expire AVANT la réponse (comportement actuel : aucun délai de
+    10 s n'est appliqué ici, contrairement à `./llm_providers.rs` et au RPC CLI)
+  And (test À ÉCRIRE UNIQUEMENT si la décision `[!]` du timeout est prise — test lent de
+    11 s et assertion d'un comportement jugé indésirable)
+
+Scenario: test_server_id_non_numerique_repond_400_apres_authentification
+  Given un porteur admin valide et le router monté @nest("/api/v1", @api_v1_router())
+  When `POST /api/v1/mcp-servers/abc/test` est adressé
+  Then le statut est @StatusCode::BAD_REQUEST (rejet @Path axum, corps de rejet axum et
+    non la shape `{"error": …}` de `../error.rs`) et aucune requête SQL n'est émise
+  And (test À ÉCRIRE — et vérifie en passant que @AuthUser s'exécute avant @Path : la
+    même requête SANS porteur doit rendre @401, pas @400)
+
+Scenario: test_server_ne_reecrit_que_available_tools_sur_ligne_saine
+  Given une ligne insérée en base réelle avec des valeurs connues de `name`, `url`,
+    `server_type`, `headers`
+  When le corps de persistance du handler est reproduit en test — @server.clone().@into_active_model(),
+    `available_tools` posé en @ActiveValue::Set, puis @McpServerEntity::update(@active).exec(@db)
+  Then la reliture de la ligne montre `available_tools` modifié et les quatre autres
+    colonnes strictement identiques (sémantique @ActiveValue::Unchanged de SeaORM)
+  And (test À ÉCRIRE — jamais asserté nulle part dans le dépôt)
+
+Tasks:
+  [!] Un serveur MCP introuvable répond @502 (@AppError::McpError → BAD_GATEWAY) avec un
+      message en `VNL-MCP-002`, alors que l'homologue `./llm_providers.rs` rend @404 via
+      @AppError::LlmProviderNotFound. Un `id` inexistant est une entrée client, pas une
+      passerelle en panne : ajouter @AppError::McpServerNotFound → @404 (et rendre le
+      message en une seule phrase, sans double préfixe `VNL-MCP-001: … VNL-MCP-002: …`) ?
+      Décision à trancher avec Sébastien — la spec documente l'état (@502), pas l'état voulu.
+  [!] Aucun timeout côté app sur une I/O réseau sortante, contrairement aux deux autres
+      surfaces qui font le MÊME appel (`./llm_providers.rs` : reqwest 10 s ; RPC CLI
+      `mcp/test` : @tokio::time::timeout 10 s). Une pair MCP muette occupe une connexion
+      du serveur axum indéfiniment (et le bouton « Discover tools » du `McpServersScreen`
+      reste en spinner). Options : @tokio::time::timeout de 10 s ici (alignement CLI), ou
+      délai porté par rmcp/@reqwest (config @StreamableHttpClientTransportConfig), ou
+      assumption explicite. Le Scenario « pair silencieuse » est écrit pour trancher.
+  [!] `headers` (dont `Authorization`) est ici recopié puis envoyé sur le fil vers une
+      `url` saisie par un admin, pendant que la spec sœur ouvre le `[!]` de sa lecture en
+      clair (@AccessPolicy::Public). Cohérence obligatoire : si le masque à la
+      sérialisation est retenu, @build_domain_server doit continuer de lire la ligne BRUTE
+      (sinon la découverte casse silencieusement sur tous les serveurs authentifiés). À
+      lier à la décision de `../db/entities/mcp_servers.sdd`.
+  [?] Commentaire de doc de @build_domain_server auto-contradictoire : « `server_type:
+      "sse"` -> erreur claire » puis « `server_type: "sse"` mappe sur @McpTransport::Sse —
+      accepté ». Le code ACCEPTE le SSE et c'est @list_mcp_server_tools qui rend
+      `VNL-MCP-004` (le commentaire dit « via prefixed_mcp », ce qui est juste). Le
+      premier membre de phrase est-il une trace d'un état antérieur (SSE rejeté ici) à
+      supprimer, ou l'intention était-elle bien de rejeter SSE dès la traduction (auquel
+      cas c'est le code qui dérive) ? Trancher puis corriger le commentaire.
+  [?] `VNL-MCP-002` et `VNL-MCP-003` sont écrits en littéraux dans CE fichier alors que
+      `../error.rs` porte des variantes à message fixe et que `../../../lib/src/error.rs`
+      porte déjà `VnlError::UnknownServerType` (« VNL-MCP-003: Unknown server type: {0} »)
+      — trois formulations du même code `VNL-MCP-003` selon la surface (hook de l'entité,
+      ici, lib). `AGENTS.md` demande des identifiants d'erreur uniques : centraliser les
+      codes (variantes @AppError dédiées, ou const partagée) ou assumer la redondance ?
+  [?] RBAC et sémantique miryad-core (crate externe, source hors dépôt) : ce que @can_write
+      vérifie réellement pour @AccessPolicy::AdminOnly (membership d'un groupe `admin` ?
+      rôle ? api token ?), le type d'erreur de @resolve_user (le seul @From applicable vu
+      d'ici est @sea_orm::DbErr → @500 `VNL-DB-006` : un utilisateur authentifié mais non
+      résolu mérite-t-il un @500 ?), et si @can_write peut rendre autre chose qu'un
+      @DbErr. À vérifier dans la source miryad-core avec Sébastien, puis à figer dans
+      cette spec.
+  [?] @UpdateResult de @McpServerEntity::update est ignoré (`rows_affected` non relu) :
+      suppression concurrente de la ligne entre la lecture et l'écriture → @200 sans
+      écriture. Vérifier (test de suppression concurrente) puis choisir : assert
+      `rows_affected == 1` (→ erreur explicite) ou assumer le silence.
+  [?] Concurrence : `state.busy` n'est pas utilisé ici (contrairement à d'autres handlers) —
+      deux clics « Discover tools » ou un clic pendant un PUT CRUD concurrent produisent
+      une écriture perdue sur `available_tools` (aucun contrôle optimiste, aucun champ
+      temporel sur la table, cf. spec sœur). Garder le last-write-wins (données non
+      critiques, recalculables) ou ajouter la garde ?
+  [?] SSRF : aucune validation de `url` nulle part (ni ici, ni @before_create, ni dans la
+      migration) et l'app présente les `headers` de la ligne à cette URL. Le RBAC
+      AdminOnly borne le risque à un admin, mais un admin peut faire port-scanner le
+      réseau interne du cluster depuis le pod `app` (et, selon le réseau, l'API K8s).
+      Restreindre les schémas (`http`/`https` uniquement, refus de `localhost`/plages
+      privées) ou assumer (le produit est self-hosted, l'admin est déjà tout-puissant) ?
+  [?] @build_domain_server est `pub` sans consommateur hors du fichier (grep) : la rendre
+      privée (comme @headers_from_json de `../config_store.rs`) ou la garder `pub` parce
+      qu'un traducteur unique est appelé à remplacer les deux (`../config_store.rs`
+      @domain_mcp_server rend @None, ici @Err) ? Question liée : faut-il UNIFICER les deux
+      traductions (deux comportements divergents sur la même donnée : warn+skip vs @502) ?
+  [?] Trois définitions du même `McpTestResult { tools }` (ici, `../../../cli/src/rpc/protocol.rs`,
+      et le type attendu en TS dans `../../../frontend/src/api/httpConfigRepo.ts`) : les
+      faire converger vers un type ts-rs de `vanyline-lib` (précédent @ChatEvent, job CI
+      `tsrs`) ou assumer la triplication ?
+  [?] L'endpoint n'est PAS dans le document OpenAPI (@McpTestResult sans @ToSchema, aucun
+      chemin `/test` dans @openapi_spec de `../main.rs`) : le déclarer (utoipa) ou assumer
+      une API partiellement documentée ?
+  [ ] Convertir en tests taggés par leur titre les 12 Scenarios marqués « À ÉCRIRE », dont
+      les deux plus importants (découverte réussie + persistance, et @403 non-admin) qui
+      couverts par AUCUN test. Précédents de harnais :
+      @test_state de `./llm_providers.rs`, @bearer_for de `../db/entities/agents.rs`,
+      @test_auth_state_with_db de `../auth/mod.rs`, @real_db de `../db/test_support.rs`.
+  [ ] Relecture par Sébastien — spec produite en reverse-engineering ; les comportements
+      accidentels (@502 pour « introuvable », absence de timeout, élimination silencieuse
+      des headers non-chaînes, `rows_affected` ignoré) ne deviennent contrat qu'après cette
+      relecture (`.specdd/bootstrap.project.md`).
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre (les 4 tests
+    existants + les 12 À ÉCRIRE).
+  Les décisions `[!]` (statut « introuvable », timeout, masque/cohérence `headers`) sont
+    tranchées par Sébastien et reflétées ici, avec les Scenarios ajustés.
+  Les `[?]` miryad-core (rôle de @can_write, type d'erreur de @resolve_user) sont levés ou
+    officiellement délégués à miryad-core.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets -D warnings`,
+    fmt) est verte sur `vanyline-app`.

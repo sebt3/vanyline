@@ -1,0 +1,293 @@
+Spec: Me Profile Endpoint (GET /api/me)
+
+Purpose:
+  Handler du profil minimal de l'utilisateur authentifié : @handler_me expose
+  @MeResponse (email + nom de l'Owner K8s lié) pour `GET /api/me`, l'appel que
+  l'écran Compte du frontend émet au montage. Le fichier ne contient que ce
+  handler et son type de réponse ; le montage de la route (`GET /me` dans
+  `./mod.rs`, monté sous `/api` par `../main.rs`), l'extraction d'identité
+  (@AuthUser de miryad-core), la lecture du lien Owner (@resolve_owner_name de
+  `./owners.rs`) et la cartographie statut/corps des erreurs (`../error.rs`) sont
+  les contrats amont/aval cités en Depends on, pas le contrat de CE fichier.
+  Position dans le parcours utilisateur : lecture pure du côté Kubernetes — le
+  handler ne crée jamais d'Owner (le lazy provisioning est réservé à
+  `POST /api/projects`, décision documentée dans `./owners.rs`) ; il ne fait que
+  révéler si un lien `vanyline_owner_links` existe déjà. Côté base en revanche,
+  il passe par @resolve_user qui résout — et selon toute apparence crée — la
+  ligne `miryad_users` de l'appelant : un `GET` avec effet d'écriture en base,
+  documenté tel quel (cf. Tasks `[!]/[?]`).
+  Ligne contractuelle clé : l'email renvoyé vient de la LIGNE BASE
+  (`principal_user.email`), pas du claim @AuthUser.email — le claim ne sert
+  qu'en argument d'entrée de @resolve_user.
+
+Owns:
+  ./me.rs
+
+Exposes:
+  - @MeResponse — `pub struct` dérivant uniquement @serde::@Serialize (pas de
+    @Deserialize, pas de @utoipa::@ToSchema : n'entre dans aucun schéma OpenAPI
+    et n'est jamais désérialisé). Attributs @serde : aucun — noms de champs
+    bruts, aucune `rename`, aucun `skip_serializing_if`.
+    `email: @String` — jamais absent, jamais null (vide `""` si absent en base).
+    `k8s_owner_name: @Option<@String>` — sérialisé `null` explicite quand @None.
+  - @handler_me — `pub async fn(State(AppState), AuthUser)` retournant
+    @Result<@Json<@MeResponse>, @AppError> : seule fonction de production du
+    fichier.
+    Visibilité `pub` requise par le montage `.route("/me", @get(me::handler_me))`
+    de `./mod.rs` ; grep : @handler_me et @MeResponse n'ont aucun autre
+    consommateur hors `./mod.rs` et les tests du fichier.
+  - `@mod tests` (`#[cfg(test)]`) — harnais @make_app/@test_key et deux tests
+    existants : `handler_me_without_cookie_returns_401` (scénario 401 réel) et
+    `me_response_serializes` (forme JSON exacte, deux variantes @None/@Some).
+
+Structure:
+  Flux linéaire du handler, trois étapes dans cet ordre :
+  1. Extraction @AuthUser (miryad-core, hors fichier) — échec = refus avant
+    toute exécution du corps du handler.
+  2. @resolve_user(db, `user.subject`, `user.email.as_deref()`) sur
+    `state.auth.db` → ligne `miryad_users` (`principal_user`, `id: i32`,
+    `email: @Option<@String>`). Erreur → @AppError::@from → @InternalError.
+  3. @resolve_owner_name(`&state`, `principal_user.id`) (`./owners.rs`) →
+    lecture `vanyline_owner_links.k8s_owner_name` filtrée sur `user_id`,
+    `link.and_then(|l| l.k8s_owner_name)` : ligne absente ET ligne à nom NULL
+    donnent @None. Erreur @DbErr → @InternalError de même.
+  Réponse : @Json de @MeResponse avec `email` lu via
+  `principal_user.email.unwrap_or_default()` — le champ du token n'est jamais relu.
+  Aucun accès à @state.config, @state.k8s, @state.busy,
+  @state.shared_sandbox_state (présents dans @AppState du harnais de test
+  uniquement parce que @make_app doit construire un @AppState complet).
+  Le module de test construit un @Router autonome
+  `Router::new().route("/me", get(handler_me))`
+  avec un @AppState figé (config littéral, @test_auth_state de `../auth/mod.rs`,
+  cookie_key `[0u8; 64]`) et frappe la route via @tower::@ServiceExt::oneshot —
+  précédent réutilisable pour les Scenarios non encore écrits.
+
+Accepts:
+  - Comme montée par `./mod.rs` + `../main.rs` : `GET /api/me` — aucune
+    paramètre de chemin ni de query, aucun corps attendu ; le handler ne lit
+    pas le corps (toute méthode non-GET sur le chemin monté relève du
+    @MethodRouter de `./mod.rs`, 405, hors CE contrat).
+  - Identité par @AuthUser de miryad-core : flow primaire session cookie signée
+    (navigateur, `cookie_key`) ; flow header `Authorization` porteur d'un bearer
+    émis par @miryad_core::auth::issue_token utilisé en test (précédent
+    `../db/entities/agents.rs`) — la mécanique d'extraction et ses critères de
+    validité sont le contrat de miryad-core, pas de CE fichier.
+  - État : @state.auth.db (@MiryadAuthState extrait de @AppState par le
+    @FromRef de `../main.rs`) — une seule connexion SeaORM partagée, utilisée
+    pour les deux lectures séquentielles.
+
+Returns:
+  - Succès : @200, @Content-Type `application/json`, corps exactement
+    `{"email": "<string>", "k8s_owner_name": "<string>" | null}` — les DEUX
+    clés toujours présentes (@None se sérialise `null` explicite, asserté par
+    le test existant `me_response_serializes`).
+  - `email` : l'email de la ligne `miryad_users` résolue ; @None en base →
+    chaîne vide `""` (@unwrap_or_default) — jamais null, jamais absent.
+  - `k8s_owner_name` : valeur de `vanyline_owner_links.k8s_owner_name` pour
+    l'id résolu ; @None — et donc JSON `null` — si aucune ligne de lien OU si
+    la ligne existe avec le nom NULL (traitement identique, `and_then` de
+    `./owners.rs`).
+  - Le handler ne retourne JAMAIS @Forbidden, un 404, ou un objet plus riche :
+    deux champs, rien d'autre (aucun `subject`, aucun claim, aucun @id_token).
+
+Raises:
+  - Refus d'@AuthUser (aucune session ni token valable) : statut
+    @StatusCode::UNAUTHORIZED — le refus a lieu avant le corps du handler ;
+    status asserté par le test existant `handler_me_without_cookie_returns_401`.
+    Le CORPS de ce 401 est émis par miryad-core, non asserté ici (cf. Tasks
+    `[?]`).
+  - @resolve_user en @DbErr : `.map_err(@AppError::@from)` →
+    @AppError::@InternalError `"VNL-DB-006: {e}"` → @500, corps
+    `{"error":"VNL-INT-001: Internal error: VNL-DB-006: …"}` (double id :
+    VNL-INT-001 de l'affichage @InternalError, VNL-DB-006 de la conversion).
+  - @resolve_owner_name en @DbErr : propagation `?` par le même @From — même
+    @500, mêmes ids `VNL-INT-001` + `VNL-DB-006`. Les deux chemins d'échec DB
+    sont observables strictement identiques.
+  - Aucune autre source d'erreur : pas d'appel K8s (donc jamais de
+    @VNL-K8S-*), pas de parsing client (jamais de 4xx @AppError), pas d'état
+    métier refusé.
+
+Handles:
+  - Utilisateur authentifié sans ligne `miryad_users` : @resolve_user est
+    appelé avec le `subject` et l'email du claim — résolution (et selon
+    l'apparence création) de la ligne avant lecture du lien (sémantique exacte
+    hors dépôt, cf. Tasks `[?]`).
+  - Utilisateur sans lien Owner : @200 + `k8s_owner_name: null` — l'écran
+    Compte affiche alors « pas encore provisionné » ; /me ne provisionne rien.
+  - Ligne de lien présente mais `k8s_owner_name` NULL : @200 + `null`,
+    exactement comme l'absence de ligne (comportement `and_then` hérité de
+    `./owners.rs`).
+  - Utilisateur dont la ligne base n'a pas d'email : @200 + `"email": ""` —
+    l'absence ne remonte pas au claim @AuthUser.email.
+  - Échec DB sur l'un des deux paliers (résolution utilisateur, lecture du
+    lien) : @500 unique, id `VNL-DB-006` dans le message — le client ne peut
+    pas distinguer les paliers ; le scénario d'erreur de CE fichier prend la
+    lecture du lien comme témoin, la voie @resolve_user produisant un observable
+    identique.
+
+Must:
+  - Exiger l'identité par l'extracteur @AuthUser en argument du handler —
+    aucune route non authentifiée vers @MeResponse (l'auth n'est JAMAIS posée
+    en couche, règle de `./mod.sdd`).
+  - Appeler @resolve_user AVANT @resolve_owner_name et chaîner sur son `id` :
+    la clé du lien est l'id `miryad_users` résolu, jamais le `subject` brut.
+  - Lire l'email de la réponse dans la LIGNE BASE (`principal_user.email`),
+    avec @unwrap_or_default — une chaîne est retournée même sans email.
+  - Répondre @200 avec `k8s_owner_name: null` quand le lien est absent :
+    l'absence de Owner est un état normal de @GET, pas une erreur.
+  - Conserver la forme JSON exacte `{ email, k8s_owner_name }` — clés snake_case
+    littérales, toutes deux toujours présentes : c'est l'interface `Me` de
+    `../../../frontend/src/components/settings/AccountScreen.vue`.
+  - Mapper tout @DbErr par @AppError::@from (id `VNL-DB-006`, @500 via
+    @InternalError `VNL-INT-001`), sans inventer de statut métier.
+  - Rester silencieux : aucun @tracing, aucun @println (harnais
+    `../../../tooling.sdd` ; le fichier est vierge de log aujourd'hui).
+
+Must not:
+  - Appeler @crate::k8s::client, @ensure_owner, ou toute écriture vers
+    Kubernetes / `vanyline_owner_links` : un @GET ne provisionne pas (décision
+    « lazy provisioning restreint à `POST /api/projects` » de `./owners.rs`).
+  - Exposer @AuthUser.id_token, `subject`, ou un quelconque claim dans la
+    réponse ou un log : le JWT brut ne sort jamais de l'app (principe
+    `docs/architecture.md`, sections auth et relais).
+  - Accepter un corps, un paramètre de query ou un header d'affinage : la
+    requête est un simple @GET sans autre entrée que l'identité.
+  - Sérialiser `email` à `null` ou omettre une des deux clés
+    (`skip_serializing_if`, @rename, @ToSchema sur @MeResponse) sans mise à
+    jour conjointe de cette spec et de l'appelant frontend.
+  - Dériver @Deserialize sur @MeResponse : type de sortie uniquement ; toute
+    entrée d'API relèverait d'un contrat nouveau.
+
+Depends on:
+  @axum (@Json, @extract::@State) et @serde::@Serialize ; @sea_orm atteignant
+    la base via @state.auth.db.
+  miryad-core 0.1 (crate externe crates.io, source hors dépôt — non relu) :
+    @miryad_core::auth::@AuthUser (extraction, refus 401),
+    @miryad_core::users::@resolve_user (sémantique upsert/email à confirmer,
+    cf. Tasks), @miryad_core::auth::issue_token (précédent d'émission de token
+    de test, `../db/entities/agents.rs`).
+  ./owners.rs @resolve_owner_name (spec `./owners.sdd` à venir) — lecture
+    `vanyline_owner_links.k8s_owner_name`, y compris la ligne à nom NULL.
+  ./mod.rs — montage unique `.route("/me", @get(me::handler_me))` de la table
+    `./mod.sdd` (`GET /me` → `/api/me`).
+  ../main.rs — @AppState et @impl @FromRef<@AppState> for @MiryadAuthState ;
+    montage @nest("/api", …) + @with_state.
+  ../error.rs — @AppError, @From<@sea_orm::@DbErr> (`VNL-DB-006`),
+    @IntoResponse (statuts, corps `{"error": …}`).
+  ../db/entities/owner_links.rs (spec `../db/entities/owner_links.sdd`) — table
+    lue indirectement via ./owners.rs.
+  Supports de test : @crate::auth::test_support::@test_auth_state /
+    @test_auth_state_with_db de `../auth/mod.rs` (`../auth/mod.sdd`),
+    @../db/test_support::@real_db (`../db/test_support.sdd`).
+  Contrat frontend (appelant littéral) :
+    `../../../frontend/src/components/settings/AccountScreen.vue` (interface
+    `Me { email: string; k8s_owner_name: string | null }`, rendu « pas encore
+    provisionné » sur null) ; fixtures `AccountScreen.spec.ts` et
+    `../../../frontend/src/api/client.spec.ts` (`/api/me` comme URI d'exemple).
+  Héritage : `../../../vanyline.sdd` (racine), `../../../tooling.sdd`
+    (harnais lints — aucune sortie stdout/stderr).
+
+Tasks:
+  [?] @resolve_user : sémantique exacte inconnue — source miryad-core 0.1 hors
+    dépôt (crates.io, inaccessible à la relecture). Crée-t-il la ligne
+    `miryad_users` au premier passage (upsert) ? Backfill-il l'email sur une
+    ligne existante à email NULL quand le claim en porte un ? Les deux
+    réponses changent des comportements observables de /me (effet d'écriture
+    attaché à un @GET ; email `""` persistant malgré un claim renseigné). À
+    trancher avec Sébastien, puis verrouiller par un test sur @real_db.
+  [?] `email: ""` quand la base n'a pas d'email : comportement actuel
+    (@unwrap_or_default) présenté ici comme contrat tel qu'implémenté, mais
+    l'écran Compte affiche alors un champ vide alors que le token peut porter
+    un email. Fallback sur le claim @AuthUser.email, ou assumer la primauté
+    base ? À trancher.
+  [!] @GET /me n'est pas lecture pure côté base : @resolve_user précède toute
+    lecture et, selon toute apparence, insère la ligne utilisateur au premier
+    appel. Effet documenté, jamais asserté par un test. À confirmer (cf. `[?]`
+    ci-dessus) puis soit contractualiser (« premier @GET /me enregistre
+    l'utilisateur »), soit déplacer l'écriture hors du chemin de lecture.
+  [!] Happy path non testé : le fichier ne contient qu'un test 401 et un test
+    de sérialisation ; @200 avec/sans lien, lien à nom NULL, email absent et
+    l'erreur DB @500 `VNL-DB-006` via la route ne sont couverts par AUCUN test
+    (grep : @handler_me n'est appelé que par `./mod.rs` et ces deux tests).
+    Précédent complet pour authentifier en test : `../db/entities/agents.rs`
+    (@real_db + @resolve_user + @issue_token + header `Authorization: Bearer`).
+    Les quatre Scenarios authentifiés et le Scenario d'erreur DB sont à dériver
+    en TTD.
+  [?] Corps de la réponse 401 émise par @AuthUser (forme `{"error": …}` de
+    @AppError, ou corps propre à miryad-core ?) : hors dépôt, non asserté par
+    le test existant qui ne vérifie que le status. À documenter si le frontend
+    doit en consommer autre chose que « non-2xx → @ApiError ».
+  [!] Faisabilité du Scenario « échec DB → 500 » : la séparation entre
+    extraction @AuthUser (qui peut toucher la base pour valider le bearer) et
+    la requête à faire échouer n'est pas tranchée — à installer soit par
+    @MockDatabase à résultats programmés après extraction, soit sur @real_db
+    avec connexion interrompue ; si les paliers sont indissociables en test,
+    l'assertion peut descendre sur @resolve_owner_name dans `./owners.sdd`.
+    Choisir le mécanisme à l'écriture du test, pas ici.
+  [!] `./mod.sdd` référence `docs/features/miryad-core-integration.md` :
+    introuvable sous `docs/` (vérifié par glob) — référence morte du parent,
+    indépendante de CE fichier, à corriger lors de la relecture de `./mod.sdd`.
+
+Scenario: GET /me sans session retourne 401
+  Given un @Router `Router::new().route("/me", get(handler_me))` avec
+    @with_state sur un @AppState de test (config figé, @test_auth_state,
+    cookie_key `[0u8; 64]`) comme construit par @make_app du fichier
+  When `GET /me` est adressé sans cookie ni header @Authorization via
+    @tower::@ServiceExt::oneshot
+  Then la réponse a le statut @StatusCode::UNAUTHORIZED, et le corps du
+    handler ne s'exécute pas (aucun accès DB — statut seul asserté, corps hors
+    contrat) — test existant `handler_me_without_cookie_returns_401`
+
+Scenario: MeResponse sérialise les deux clés avec null explicite
+  Given un @MeResponse avec `email` `"test@example.com"` et
+    `k8s_owner_name` @None, puis un second avec `k8s_owner_name`
+    @Some("owner-abc")
+  When chacun est sérialisé par @serde_json::@to_value
+  Then le premier porte `"email": "test@example.com"` et
+    `"k8s_owner_name": null` (clé PRÉSENTE à null), le second
+    `"k8s_owner_name": "owner-abc"` — test existant `me_response_serializes`
+
+Scenario: Utilisateur authentifié avec lien Owner reçoit son nom
+  Given @real_db de `../db/test_support.rs` (migrations miryad-core + app
+    appliquées), @resolve_user(`"alice"`, @Some(`"alice@example.com"`)) appelé,
+    une ligne `vanyline_owner_links` insérée (`user_id` = id résolu,
+    `k8s_owner_name` @Some(`"owner-alice"`)), un @AppState monté avec
+    @test_auth_state_with_db de `../auth/mod.rs`, et un bearer token émis par
+    @issue_token pour le subject `alice`
+  When `GET /me` est adressé avec le header `Authorization: Bearer <token>`
+    via @oneshot
+  Then la réponse a le statut @200 et le corps JSON est exactement
+    `{"email":"alice@example.com","k8s_owner_name":"owner-alice"}`
+
+Scenario: Utilisateur authentifié sans lien Owner reçoit null
+  Given les mêmes @real_db + @resolve_user + bearer que le scénario précédent,
+    SANS aucune ligne `vanyline_owner_links` pour l'utilisateur
+  When `GET /me` authentifié par bearer est adressé via @oneshot
+  Then la réponse a le statut @200 avec `"k8s_owner_name": null` (clé
+    explicite) et l'email de la ligne base dans `"email"` — un @GET ne crée
+    pas de lien (relecture : `vanyline_owner_links` reste vide)
+
+Scenario: Ligne de lien au nom NULL se lit comme une absence
+  Given @real_db, un utilisateur résolu porteur d'un lien
+    `vanyline_owner_links` inséré avec `k8s_owner_name` @None, et un bearer
+    token émis pour son subject
+  When `GET /me` authentifié est adressé via @oneshot
+  Then la réponse a le statut @200 avec `"k8s_owner_name": null` — identique
+    à l'absence de ligne (comportement `and_then` de @resolve_owner_name)
+
+Scenario: Utilisateur sans email en base reçoit une chaîne vide
+  Given @real_db, @resolve_user(`"bob"`, @None) (ligne sans email), bearer
+    token émis pour `bob`, aucune ligne de lien
+  When `GET /me` authentifié est adressé via @oneshot
+  Then la réponse a le statut @200 avec `"email": ""` — clé présente, chaîne
+    vide, JAMAIS null — et `"k8s_owner_name": null`
+
+Scenario: Échec de la lecture du lien Owner retourne 500 avec VNL-DB-006
+  Given un @AppState authentifiable (bearer émis, extraction @AuthUser
+    réussissante — mécanisme de panne au choix de l'implémenteur, cf. Tasks
+    `[!]` faisabilité) dont la REQUÊTE `vanyline_owner_links` du handler est
+    programmée pour échouer en @DbErr
+  When `GET /me` authentifié est adressé via @oneshot
+  Then la réponse a le statut @StatusCode::INTERNAL_SERVER_ERROR et son corps
+    `{"error": …}` contient `VNL-DB-006` et `VNL-INT-001` — aucune fuite de la
+    chaîne interne au-delà du message, aucun statut inventé

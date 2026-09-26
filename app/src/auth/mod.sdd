@@ -1,0 +1,154 @@
+Spec: Auth mod
+
+Purpose:
+  Racine du module `auth` de l'`app` (déclaré par `mod auth;` dans `../main.rs`). Le
+  fichier ./mod.rs NE porte AUCUNE logique d'authentification en build de production :
+  tout son contenu est sous `#[cfg(test)]`. L'authentification réelle (état
+  @MiryadAuthState, client OIDC, routes, extracteurs) vit dans le crate EXTERNE
+  `miryad-core` (dépendance version 0.1, hors workspace cargo), consommé directement
+  par `../main.rs` (`MiryadAuthState`, `OidcClient`, `auth_router()`). Le contrat propre
+  de ./mod.rs est donc uniquement un contrat de harnais de test : exposer aux tests de
+  l'`app` un constructeur d'@MiryadAuthState avec un client OIDC simulé.
+
+Owns:
+  ./mod.rs
+
+Structure:
+  ./mod.rs — unique fichier du répertoire `app/src/auth/` (aucun sous-module : pas de
+    ./oidc.rs, pas d'autres enfants — la logique auth n'est PAS ici, cf. Purpose).
+    Contenu : un seul module `#[cfg(test)] pub(crate) mod test_support`.
+  ../main.rs — déclare `mod auth;` (privé) ; en build de production le module `auth`
+    est vide, l'`app` n'utilise que `miryad_core::auth` directement.
+  ../db/test_support.sdd — (spec à écrire) `real_db` : connexion sqlite en mémoire avec
+    migrations, documentée comme partenaire de @test_auth_state_with_db.
+  Consommateurs connus (tests uniquement) : `../api/me.rs`, `../api/llm_providers.rs`,
+    `../api/mcp_servers.rs`, `../api/conversations.rs`, `../api/sandboxes.rs`,
+    `../api/projects.rs`, `../api/local_tools.rs`, `../db/entities/agents.rs`.
+
+Exposes:
+  @crate::auth::test_support — module `pub(crate)` réservé aux tests (`#[cfg(test)]`),
+    jamais présent en build de production.
+  @test_auth_state — `pub(crate) fn() -> MiryadAuthState` ; fabrique un état d'auth de
+    test avec une fausse base `sea_orm::MockDatabase` (backend `Sqlite`).
+  @test_auth_state_with_db — `pub(crate) fn(sea_orm::DatabaseConnection) ->
+    MiryadAuthState` ; même état mais branché sur la connexion fournie (sqlite en
+    mémoire avec migrations réelles, cf. `../db/test_support.rs`, quand le test exige un
+    aller-retour DB réel — MockDatabase ne pose que des résultats pré-programmés).
+  Symboles non exposés : @MockMiryadOidcClient est privé au module (implémente
+    `miryad_core::auth::OidcClientTrait` via `#[async_trait::async_trait]`).
+
+Accepts:
+  @test_auth_state — aucun argument.
+  @test_auth_state_with_db — une @sea_orm::DatabaseConnection, volontairement non
+    contrainte (MockDatabase ou connexion réelle).
+
+Returns:
+  Un @MiryadAuthState (type de `miryad-core`) entièrement peuplé :
+  - `oidc_client` : @std::sync::Arc sur @MockMiryadOidcClient.
+  - `cookie_key` : @cookie::Key::from(`&[0u8; 64]`) — clé nulle, valable qu'en test.
+  - `post_login_redirect` et `post_logout_redirect` : `"/"`.
+  - `db` : la connexion (fournie, ou MockDatabase Sqlite pour @test_auth_state).
+  @authorization_url (mock) — tuple figé : URL `https://issuer.example.com/authorize`,
+    @CsrfToken::new(`"csrf"`), @Nonce::new(`"nonce"`).
+
+Raises:
+  Aucune erreur propagée par les constructeurs eux-mêmes.
+  @exchange_code (mock) — retourne toujours une @Err(@AuthError::Oidc) de message
+    `"MRD-TEST-001: mock not used"`, quel que soit le code ou le nonce reçus (les deux
+    arguments sont ignorés) : le mock n'est jamais censé servir un échange réel.
+  Panique `expect("valid test url")` uniquement si la constante d'URL codée en dur
+    devient invalide (impossible tant que le littéral ne bouge pas).
+
+Handles:
+  Aucune route, aucun middleware, aucun handler HTTP ou WS dans ./mod.rs — le contrat
+  runtime de l'authentification est celui de `miryad_core::auth` (hors périmètre de cette
+  spec, cf. Tasks).
+
+Must:
+  - En build de production (hors `cfg(test)`), ./mod.rs ne doit contribuer à aucune
+    ligne de code : le module `auth` de l'`app` y est vide.
+  - @test_auth_state doit être équivalent à appeler @test_auth_state_with_db avec
+    `sea_orm::MockDatabase::new(@sea_orm::DatabaseBackend::Sqlite).into_connection()`.
+  - L'état construit porte exactement les valeurs figées de `Returns` (clé de cookie
+    nulle, redirect `/` / `/`, client OIDC simulé).
+  - @authorization_url doit être déterministe : mêmes valeurs à chaque appel.
+  - @exchange_code ne doit jamais retourner de succès ; l'identifiant d'erreur
+    `MRD-TEST-001` préfixe le message.
+  - Les exemptions harnais `#![allow(clippy::unwrap_used, clippy::expect_used)]` restent
+    confinées à l'attribut interne du module `test_support` (sous `cfg(test)`),
+    conformément à `../../../tooling.sdd` (unwrap/expect acceptés uniquement sous
+    cfg(test)).
+
+Must not:
+  - Ne doit pas porter de logique d'authentification (routes OIDC, extracteurs,
+    middleware, gestion de cookies en production) : c'est le domaine de `miryad-core` ;
+    y introduire du code non-test exige d'étendre cette spec et de passer par le flux
+    spec → test → implémentation.
+  - Ne doit pas être atteignable hors des tests de l'`app` (`pub(crate)` + `cfg(test)`
+    cumulés) ni devenir une dépendance d'un autre crate.
+  - @MockMiryadOidcClient ne doit jamais joindre un IdP réel ni une base autre que la
+    connexion injectée.
+  - La `cookie_key` nulle ne doit jamais servir hors contexte de test.
+
+Scenario: État de test avec base mock
+  Given un appel à @test_auth_state() dans un test de l'`app`
+  When l'état retourné est inspecté
+  Then `post_login_redirect` et `post_logout_redirect` valent `"/"`
+    And `cookie_key` est dérivé de `&[0u8; 64]`
+    And `db` est une connexion MockDatabase backend `Sqlite` acceptant des résultats
+    de requête pré-programmés
+
+Scenario: État de test branché sur une connexion réelle
+  Given une @sea_orm::DatabaseConnection sqlite en mémoire avec migrations appliquées
+    (cf. `../db/test_support.rs`)
+  When @test_auth_state_with_db(db) est appelée
+  Then l'état retourné partage la même configuration figée que @test_auth_state
+    And les entités peuvent insérer puis relire des lignes via `db` (aller-retour réel,
+    impossible avec MockDatabase)
+
+Scenario: Échange de code toujours refusé
+  Given un client de test construisant un état via @test_auth_state
+  When @exchange_code est appelée avec n'importe quel code et n'importe quel @Nonce
+  Then le résultat est `@Err`
+    And le message porte l'identifiant `MRD-TEST-001`
+
+Scenario: URL d'autorisation déterministe
+  Given le client OIDC simulé d'un état de test
+  When @authorization_url est appelée deux fois
+  Then les deux appels retournent la même URL `https://issuer.example.com/authorize`,
+    le même @CsrfToken `"csrf"` et le même @Nonce `"nonce"`
+
+Tasks:
+  [?] `MRD-TEST-001` : préfixe d'identifiant d'erreur unique (format type `MRD-TEST-nnn`)
+    — AGENTS.md demande un format contractualisé dans la spec concernée. Ce mock est le
+    seul endroit du crate à en porter un ; trancher avec Sébastien : convention locale
+    aux tests de l'`app` ou miroir d'une convention de `miryad-core` (dont la source
+    n'est pas dans ce dépôt).
+  [?] MockDatabase avec backend `Sqlite` alors que la production est Postgres/CNPG :
+    choix délibéré (les réponses pré-programmées de sea-orm mock sont indépendantes du
+    backend) ou héritage à corriger en `Postgres` pour lever une ambiguïté de lecture ?
+  [!] `miryad-core` (v0.1, dépendance de registre hors workspace, source absente du
+    dépôt) porte tout le comportement auth réel (@MiryadAuthState, @OidcClientTrait,
+    @AuthError, `auth_router()`). Aucune spec `.sdd` ne couvre ce périmètre dans vanyline :
+    décider avec Sébastien si un contrat miroir (ou une spec amont chez l'éditeur du crate)
+    est requis, sinon cette surface reste non specée alors qu'AGENTS.md l'exige pour tout
+    le code du projet.
+  [?] `mod auth;` dans `../main.rs` produit un module strictement vide en production :
+    confirmer que la structure est voulue (le nom `auth` réservé à du test-only) plutôt
+    que déplacer `test_support` à côté des consommateurs (ex: `../api/test_support.rs`).
+
+Depends on:
+  ../main.rs — déclaration `mod auth;` et construction du @MiryadAuthState réel
+    (`OidcClient`, `cookie_key`, redirects depuis la config).
+  ../db/test_support.rs — partenaire `real_db` pour @test_auth_state_with_db.
+  Crate externe `miryad-core` (`miryad_core::auth`) — fournit @MiryadAuthState,
+    @OidcClientTrait, @AuthError, @OidcLoginResult ; types et contrats subis, non specés
+    ici (cf. Tasks).
+  ../../../tooling.sdd — harnais : exemptions `unwrap_used`/`expect_used` tolérées
+    uniquement sous `cfg(test)`.
+  ../../../vanyline.sdd — règle une spec `.sdd` par fichier `*.rs`.
+
+Done when:
+  ./mod.rs continue de ne porter que `test_support` sous `#[cfg(test)]` avec les
+  comportements ci-dessus ; tout ajout non-test ou toute nouvelle valeur d'état figée
+  exige d'étendre cette spec au préalable.

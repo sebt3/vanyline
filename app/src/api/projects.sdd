@@ -1,0 +1,533 @@
+Spec: Projects REST Handlers
+
+Platform: Rust/vanyline-app/tokio
+
+Purpose:
+  Quatre handlers CRUD de la ressource Project (CRD `vanyline.solidite.fr/v1alpha1`) du
+  crate `vanyline-app`, montés par `./mod.sdd` sur @api_router (`GET` + `POST`
+  `/projects` → `/api/projects`, `GET` + `DELETE` `/projects/{name}` →
+  `/api/projects/{name}`). C'est la surface REST par laquelle le frontend (HomeDashboard
+  via `useCrudResource`) liste, crée et supprime les projets d'un utilisateur. Le contrat
+  central est l'appariement identité → Owner : l'identité arrive par @AuthUser
+  (miryad-core), est traduite en id `miryad_users` par @resolve_user, puis en nom d'Owner
+  par la boîte à outils `./owners.rs` — @resolve_owner_name (lecture) pour les trois
+  routes de lecture/suppression, @ensure_owner (création à la demande) pour @POST
+  seulement : CE fichier est le déclencheur exclusif du provisioning paresseux d'Owner
+  (« décision développeur : owner dérivé / lazy provisioning restreint », commentaire du
+  fichier et `./owners.sdd`). L'accès cluster passe exclusivement par @crate::k8s::client
+  (`../k8s.sdd`, découverte paresseuse + 502) puis @vanyline_lib::k8s::VnlK8sClient. La
+  traduction erreur → statut HTTP est entièrement déléguée à `../error.rs`
+  (@IntoResponse, corps `{"error": …}`). CE fichier ne contient AUCUNE validation
+  métier : le nom et l'URL du repo sont transmis tels quels à l'API Kubernetes.
+
+Owns:
+  ./projects.rs
+
+Can read:
+  ./mod.rs — montage des 4 routes (2 enregistrements `.route` combinés) ; aucune logique
+    d'auth ni de route ailleurs.
+  ./owners.rs (spec `./owners.sdd`) — @resolve_owner_name (lu par les 3 handlers hors
+    création), @ensure_owner (appelé uniquement par @create_project).
+  ../k8s.rs (spec `../k8s.sdd`) — @crate::k8s::client : client K8s découvert
+    paresseusement,
+    caché dans `AppState::k8s`, @AppError::K8sConfigError (`VNL-K8S-001`) → 502.
+  ../error.rs — @AppError, @From<@sea_orm::DbErr> (`VNL-DB-006`), @From<@VnyError>
+    (sniffing `404`/`NotFound`/`not found` → @K8sNotFound), @IntoResponse (statuts +
+    corps `{"error": message}`).
+  ../main.rs — @AppState : champs consommés `auth.db` (via @test_auth_state/real_db),
+    `k8s` (cache client), `config` (jamais lu directement par CE fichier — l'usage de la
+    config passe par @ensure_owner dans `./owners.rs`).
+  ../../../crds/src/lib.rs — @Project (derive @CustomResource : enveloppe `apiVersion`/
+    `kind`/`metadata`/`spec`/`status`), @ProjectSpec, @PvcRef, @EgressRule (structure des
+    corps JSON entrée/sortie, subie et non redéfinie ici).
+  ../../../lib/src/k8s.rs (spec `../../../lib/src/k8s.sdd`) — @VnlK8sClient::list_projects
+    / @get_project / @create_project / @delete_project et @VnyError::K8sApiError.
+  ../../../frontend/src/components/dashboards/HomeDashboard.vue et
+    ../../../frontend/src/components/dashboards/ProjectDashboard.vue — appelants littéraux
+    des 4 chemins (via `useCrudResource` et `client.get`).
+  ../../../Cargo.toml — harnais `[workspace.lints]` (spec `../../../tooling.sdd`).
+
+Exposes:
+  - @CreateProjectBody — `pub struct` @Deserialize uniquement (jamais @Serialize : type
+      d'entrée), `#[serde(rename_all = "camelCase")]`. Champs et clés JSON :
+      `name` (@String, requis), `repoUrl` (@String, requis — nomme le CR, ne va PAS dans
+      le spec… cf. Structure : il EST aussi `spec.repo_url`), `defaultBranch`,
+      `existingPvc` (@Option<@PvcRef>), `storageSize`, `storageClass`,
+      `storageAccessMode`, `gitSecret`, `caches` (@Option<Vec<@String>>),
+      `fetchInterval` — tous @Option avec `serde(default)` ; `egress` : @Vec<@EgressRule>
+      avec `serde(default)` (absent → `@Vec::new()`, jamais `@Option`). Pas de
+      `deny_unknown_fields` : les clés inconnues (y compris un `owner` envoyé par le
+      client) sont silencieusement ignorées.
+  - @list_projects — `pub async fn(State(@AppState), @AuthUser) -> @Result<@Json<Vec<Project>>,
+      @AppError>`. Route `GET /api/projects`.
+  - @get_project — `pub async fn(State(@AppState), @AuthUser, @Path(@String)) ->
+      @Result<@Json<Project>, @AppError>`. Route `GET /api/projects/{name}`.
+  - @create_project — `pub async fn(State(@AppState), @AuthUser, @Json<CreateProjectBody>)
+      -> @Result<(@StatusCode, @Json<Project>), @AppError>`. Route `POST /api/projects`.
+  - @delete_project — `pub async fn(State(@AppState), @AuthUser, @Path(@String)) ->
+      @Result<@StatusCode, @AppError>`. Route `DELETE /api/projects/{name}`.
+  - `#[cfg(test)] mod tests` : 2 tests d'auth uniquement (`list_projects_without_cookie_returns_401`,
+    `get_project_without_cookie_returns_401`) + fabriques `test_key` / `make_app`
+    (config figé, `k8s_namespace: @None`, cache k8s `None`, @test_auth_state de
+    `../auth/mod.rs`, router partiel GET-seuls — voir Tasks `[!]`).
+  - Aucun type d'erreur propre, aucune constante, aucune couche, aucun `#[cfg(feature = …)]`.
+
+Structure:
+  Séquence commune des 4 handlers (préfixe identique, ordre strict) :
+  1. Extraction @AuthUser par miryad-core (avant le corps du handler — cookie de session
+      signé ou bearer ; refus = 401 avant toute DB).
+  2. @resolve_user(`state.auth.db`, `user.subject`, `user.email.as_deref()`) →
+      `principal_user` (id `miryad_users`) ; @DbErr → `?` mappé `VNL-DB-006`. Effet
+      d'écriture supposé sur `miryad_users` (sémantique miryad-core hors dépôt, Tasks
+      `[?]`, miroir du `[!]` de `./me.sdd`).
+  3. Résolution de l'Owner : @resolve_owner_name(`state`, `principal_user.id`) pour
+      list/get/delete ; @ensure_owner(`state`, `principal_user.id`, `user`) pour create
+      SEULEMENT (nom calculé depuis l'email/subject du claim `user`, pas depuis
+      `principal_user`).
+  Spécifique par handler, après ce préfixe :
+  - @list_projects : `None` → retour immédiat @Ok(@Json(@Vec::new())) — AUCUN appel k8s,
+      même en présence d'un cluster ; sinon @crate::k8s::client →
+      @VnlK8sClient::list_projects (liste TOUTES les Project du namespace) puis filtrage
+      CÔTÉ APP par égalité stricte `p.spec.owner == owner` sur le nom résolu.
+  - @get_project : `None` → @AppError::@Forbidden ; sinon client → @get_project(`name`)
+      → comparaison `project.spec.owner != owner` → @Forbidden ; sinon @Json(project).
+  - @create_project : @ensure_owner (peut créer le CR Owner + le lien DB — contrat
+      `./owners.sdd`) → construction @ProjectSpec { owner: owner.clone(), repo_url:
+      body.repo_url, default_branch, existing_pvc, storage_size, storage_class,
+      storage_access_mode, git_secret, caches, fetch_interval, egress } — chaque champ du
+      corps est déplacé TEL QUEL, sans validation, normalisation ni repli (le seul champ
+      non issu du corps est `owner`, dérivé) → client →
+      @VnlK8sClient::create_project(`&body.name`, spec) (`Project::new` pose
+      `apiVersion: "vanyline.solidite.fr/v1alpha1"`, `kind: "Project"`,
+      `metadata.name = body.name`) → @(201, Json(project)).
+      Note d'ordre : @ensure_owner appelle déjà @crate::k8s::client en interne ; l'appel
+      explicite de @create_project est le second (cache atteint, pas de re-découverte).
+  - @delete_project : `None` → @Forbidden ; sinon client → @get_project(`name`) (pour la
+      vérification d'owner) → inégalité → @Forbidden → @delete_project(`name`) →
+      @(204, corps vide). get + delete = DEUX appels API non atomiques.
+  Le paramètre @Path(`name`) est le segment d'URL décodé par axum ; il n'est validé ni
+  sanitisé ici (ni RFC1123, ni longueur, ni charset) et part tel quel dans l'appel kube.
+  Enveloppe JSON des réponses (sortie @Json<@Project>, hors CE fichier, définie par le
+  derive @CustomResource + `#[serde(rename_all = "camelCase")]` de @ProjectSpec) :
+  `apiVersion`, `kind`, `metadata.name`, `spec` camelCase (`repoUrl`, `defaultBranch`,
+  `existingPvc: {name, subPath}`, `storageSize`, `storageClass`, `storageAccessMode`,
+  `gitSecret`, `caches`, `fetchInterval`, `owner`), `egress` absent du CR créé sans règle
+  mais sérialisé `[]` (pas de `skip_serializing_if` sur ce champ côté crds).
+
+Accepts:
+  - `GET /api/projects` : aucune entrée hors identité (pas de query, pas de corps).
+  - `GET` + `DELETE /api/projects/{name}` : `name` = un seul segment de chemin (axum 0.8,
+      pattern `{name}`) ; toute valeur licite en URL, décodée, NON validée.
+  - `POST /api/projects` : corps JSON @CreateProjectBody en camelCase ; requis : `name`
+      et `repoUrl` (une clé manquante ou un type non-@String = rejet d'extraction @Json
+      par axum, pas un @AppError) ; optionnels par défaut serde : les 9 autres champs ;
+      dans `existingPvc`, `subPath` est Option (absent → `null` licite, le derive serde
+      default-ise les @Option imbriqués) ; dans chaque `egress[]`, seuls `description` et
+      `ports` se comportent selon le contrat crds (`ports` a `serde(default)`, les
+      @Option `cidr`/`podSelector`/`namespaceSelector` sont default-isés par le derive).
+      Clés inconnues ignorées (`owner` fourni par le client est ignoré, c'est LA décision
+      « owner dérivé »).
+  - Authentification pour les 4 routes : session cookie signée ou bearer (@AuthUser) —
+      aucune route publique, aucune auth en couche (`./mod.sdd`).
+
+Returns:
+  - @list_projects : @200 + tableau JSON des CR Project complètes dont
+      `spec.owner` == nom résolu ; `[]` (jamais null, jamais 403) si l'utilisateur n'a
+      aucun lien Owner OU si ses projets sont au nombre de zéro — les deux états sont
+      indistinguables pour le client (Tasks `[?]`). Ordre = celui renvoyé par l'API
+      kube (aucun tri appliqué).
+  - @get_project : @200 + CR Project complète (enveloppe camelCase de Structure).
+  - @create_project : @(201, @Json) + CR telle que retournée par l'API kube (le `metadata`
+      est celui du serveur : uid, resourceVersion, namespace posés par kube, pas par
+      l'app) ; `spec.owner` = valeur retournée par @ensure_owner.
+  - @delete_project : @204, corps vide (le @StatusCode nu ne sérialise aucun body).
+  - Jamais de corps d'enveloppe `{"error": …}` sur les chemins de succès ; l'enveloppe
+      `{"error": message}` n'apparaît que sur les @AppError (contrat `../error.rs`).
+
+Raises:
+  - Refus @AuthUser (aucun cookie/bearer valide) : @401 émis par miryad-core AVANT le
+      corps du handler ; corps non contracté par CE fichier (même `[?]` que `./me.sdd`).
+      Asserté par les 2 tests existants.
+  - Rejet d'extraction @Json sur @POST (JSON malformé, `name` ou `repoUrl` manquant,
+      type de champ erroné) : statut de rejet axum 0.8 (@422, corps texte du rejet, PAS
+      l'enveloppe `{"error"}`) — avant tout appel DB/k8s, APRÈS refus @AuthUser le cas
+      échéant. Corps exact non asserté (Tasks `[?]`).
+  - @resolve_user en @DbErr (4 routes) et @resolve_owner_name en @DbErr (list/get/delete) :
+      propagation `?` / `.map_err(@AppError::@from)` → @InternalError `"VNL-DB-006: …"` →
+      @500, corps `{"error":"VNL-INT-001: Internal error: VNL-DB-006: …"}` (double id).
+  - @ensure_owner (POST seul) : ses erreurs sont celles de `./owners.sdd` — @502
+      `VNL-K8S-001` (découverte impossible), @500 `VNL-K8S-002` (create Owner en échec,
+      dont AlreadyExists de course), @500 `VNL-DB-006` (upsert du lien) — remontées telles
+      quelles par `?`.
+  - @crate::k8s::client en échec de découverte : @AppError::K8sConfigError,
+      `"VNL-K8S-001"` → @502 (4 routes, contrat `../k8s.sdd`).
+  - Erreurs de l'API kube (list/get/create/delete) : toutes d'abord @VnyError::K8sApiError
+      (message = @Display kube) puis @From<@VnyError> de `../error.rs` par sniffing de
+      chaîne : message contenant `404`, `NotFound` ou `not found` → @K8sNotFound
+      (`"VNL-K8S-003"`, @404 — cas pratique : get/delete d'un projet inexistant, le
+      message kube standard contient `… not found`) ; tout le reste → @K8sApiError
+      (`"VNL-K8S-002"`, @500 — cas pratiques : RBAC forbidden, nom RFC1123 invalide
+      refusé par l'API server, AlreadyExists sur création en doublon). Conséquence
+      contractuelle aujourd'hui : les erreurs 4xx côté kube deviennent des @500 sauf les
+      NotFound (Tasks `[!]`).
+  - @AppError::@Forbidden : @403, corps `{"error":"VNL-AUTH-004: Forbidden"}` — émis par
+      get/delete quand l'utilisateur n'a aucun lien Owner, ou quand le projet existe mais
+      porte un autre `spec.owner`.
+  - Aucune panic, aucun `unwrap`/`expect`/`println!` hors `cfg(test)` (harnais
+      `../../../tooling.sdd`).
+
+Handles:
+  - Montage (consommateur unique `./mod.rs`) : `GET` + `POST` `/projects`, `GET` +
+      `DELETE` `/projects/{name}` sous @nest("/api", …) de `../main.rs` — chemins externes
+      `/api/projects`, `/api/projects/{name}` ; méthodes non enregistrées sur ces chemins
+      (PUT, PATCH…) → @405 par le @MethodRouter avant @AuthUser (`./mod.sdd`).
+  - Lazy provisioning restreint : @ensure_owner n'est appelé QUE par @create_project ;
+      list/get/delete sont des lectures pures vis-à-vis de `vanyline_owner_links` et du
+      cluster (ne créent jamais d'Owner, ne « réparent » jamais un lien) — décision
+      héritée de `./owners.sdd`, CE fichier en est l'application REST.
+  - Asymétrie « aucun Owner » : @list_projects répond @200 `[]` (état normal) alors que
+      @get_project et @delete_project répondent @403 `VNL-AUTH-004` — trois interprétations
+      du même @None de @resolve_owner_name, figées par les Scenarios.
+  - Le filtrage de @list_projects est côté app (list namespace complet puis
+      `spec.owner ==`), pas par field-selector kube : l'identité RBAC du SA de l'app doit
+      pouvoir lister toutes les Project du namespace ; la frontière de confidentialité
+      EST cette comparaison de chaînes (cf. Tasks `[!]` collision de noms d'Owner via
+      `./owners.sdd`).
+  - Suppression = get-puis-delete en deux appels : fenêtre de course (le projet disparaît
+      entre les deux → @delete_project rend NotFound → @404 alors que l'intention était
+      déjà satisfaite) ; aucun finalizer/wait côté app, le gc des ressources du CR (PVC,
+      Jobs) est le contrat du controller.
+  - Oracle d'existence pour un projet d'autrui : get/delete d'un nom existant mais
+      appartenant à un autre → @403, nom inexistant → @404 — un client peut distinguer
+      « existe et n'est pas à moi » de « n'existe pas » (Tasks `[!]`).
+  - Le corps de @POST traverse sans validation : `name` vide ou non-RFC1123, `repoUrl`
+      vide, `storageSize` non-quantitatif, `fetchInterval` non-CronJob → acceptés par
+      l'app, c'est l'API server / le controller qui tranchent (et leurs 4xx ressortent en
+      @500, voir Raises).
+  - Tests existants du fichier : les 2 refus sans cookie (GET uniquement — le router de
+      test ne monte ni POST ni DELETE, `make_app` ne route que deux @get) ; `make_app`
+      construit un @AppState hors-ligne (cache k8s `None`, sqlite simulé via
+      @test_auth_state) — précédent réutilisable pour les Scenarios offline, @real_db de
+      `../db/test_support.rs` pour les Scenarios DB, cluster pour les Scenarios kube
+      (convention anti-mock de `../k8s.sdd`).
+
+Must:
+  - Exiger @AuthUser sur les 4 handlers (paramètre du handler, jamais de couche) puis
+      chaîner @resolve_user → résolution Owner sur `principal_user.id` (jamais le
+      `subject` brut comme clé de lien).
+  - Réserver @ensure_owner à @create_project et n'utiliser que @resolve_owner_name
+      (lecture seule) pour list/get/delete — aucune des trois lectures ne doit pouvoir
+      écrire l'Owner ou son lien.
+  - Interpréter @None de @resolve_owner_name par route : `[]` + @200 en liste, @Forbidden
+      en get et delete ; et en @POST, @ensure_owner (qui lui ne rend jamais @None).
+  - Filtrer la liste par égalité stricte `spec.owner == owner` sur la sortie de
+      @resolve_owner_name ; ne rien trier, ne rien transformer des CR filtrées (le client
+      reçoit les CR brutes sérialisées par le contrat crds).
+  - Dériver `spec.owner` depuis @ensure_owner et JAMAIS depuis le corps : un champ
+      `owner` dans le JSON d'entrée doit rester sans effet (structure sans
+      `deny_unknown_fields`).
+  - Déplacer les champs du corps dans @ProjectSpec sans aucune transformation (ni trim,
+      ni repli, ni valeur par défaut inventée par CE fichier) ; `egress` absent → @Vec
+      vide ; le seul champ posé par l'app est `owner`.
+  - Répondre @(201 Created) avec la CR retournée par kube sur création, @(204 No Content)
+      sans corps sur suppression, @200 @Json sinon — statuts codés en dur comme ici.
+  - Vérifier l'appartenance AVANT toute suppression : @get_project d'abord, comparaison
+      d'owner ensuite, @delete_project ensuite — ne jamais supprimer sans cette lecture.
+  - Remonter toute erreur par @AppError (`?` / @From), sans inventer de statut dans CE
+      fichier : pas de `let _ =`, pas de repli sur un statut vide, pas de retry.
+  - Atteindre le cluster exclusivement via @crate::k8s::client puis
+      @VnlK8sClient::{list,get,create,delete}_project (`../k8s.sdd`,
+      `../../../lib/src/k8s.sdd`) — jamais de `kube::Api` direct ici.
+  - Rester silencieux : aucun `tracing` dans le fichier aujourd'hui, a fortiori aucun
+      `println!`/`eprintln!`/`dbg!` (harnais `../../../tooling.sdd`).
+
+Must not:
+  - Valider, normaliser ou sanitizer `name`, `repoUrl` ou un autre champ du corps avant
+    kube (aucune validation n'existe aujourd'hui ; en ajouter une serait un changement de
+    contrat à décider via Tasks `[!]`/`[?]`).
+  - Retourner @Forbidden sur @list_projects quand l'Owner est absent : `[]` est le
+    contrat rendu au HomeDashboard.
+  - Appeler @ensure_owner depuis une route de lecture ou de suppression (le lazy
+    provisioning est restreint au POST — décision `./owners.sdd`).
+  - Exposer quoi que ce soit du @AuthUser brut (subject, email de claim, id_token) dans
+    les réponses ou un log — la CR retournée ne contient que `spec.owner`, pas
+    l'identité brute.
+  - Mettre en cache, paginer, trier ou tronquer la liste des projets (aucun ListParams,
+    aucun label-selector ici).
+  - Publier @CreateProjectBody comme type de sortie (pas de @Serialize) ni le faire
+    évoluer vers un @Serialize sans contrat frontend conjoint.
+  - Supprimer le get de vérification dans @delete_project au profit d'un delete direct
+    (ou d'un by-owner kube-side) sans évolution écrite de cette spec : l'ordre
+    get → contrôle → delete est le contrat actuel avec ses 403/404.
+  - Introduire une route (le montage est `./mod.rs`), une couche d'auth, ou un format
+    d'erreur local distinct de l'enveloppe `{"error"}` de `../error.rs`.
+
+Depends on:
+  @axum 0.8 — @Json (extraction + rendu, rejets 422 natifs), @extract::{@State, @Path},
+    @http::@StatusCode ; @tower dans les tests (@ServiceExt::@oneshot).
+  @serde::@Deserialize (derive de @CreateProjectBody, `rename_all = "camelCase"`).
+  miryad-core 0.1 (crate externe, source hors dépôt) — @miryad_core::auth::@AuthUser
+    (extraction + refus 401), @miryad_core::users::@resolve_user (id `miryad_users`,
+    sémantique d'écriture hors contrat, Tasks `[?]`).
+  @vanyline_crds — @Project, @ProjectSpec, @PvcRef, @EgressRule
+    (`../../../crds/src/lib.rs`) : la forme camelCase observée par le frontend EST ce
+    contrat crds, CE fichier ne fait que le transporter.
+  ../../../lib/src/k8s.sdd — @VnlK8sClient::{list_projects, get_project, create_project,
+    delete_project}, @VnyError::K8sApiError.
+  ../k8s.sdd — @crate::k8s::client (502 `VNL-K8S-001`, cache dans `AppState::k8s`).
+  ./owners.sdd — @resolve_owner_name, @ensure_owner (et par ricochet toute la pile
+    migration `vanyline_owner_links` + `../error.rs`).
+  ../error.rs — @AppError (variantes effectivement atteignables ici : @Forbidden,
+    @InternalError, @K8sConfigError, @K8sApiError, @K8sNotFound) et @IntoResponse.
+  ../main.rs (@AppState), ../config.rs (jamais lu ici directement), ../auth/mod.rs et
+    ../db/test_support.sdd (harnais de test @test_auth_state / @real_db).
+  Contrat frontend (appelants littéraux, même origine) :
+    `../../../frontend/src/components/dashboards/HomeDashboard.vue` (liste via
+    `useCrudResource<Project>("/api/projects")`, création `{name, repoUrl,
+    defaultBranch?}`, suppression par nom), `../../../frontend/src/components/dashboards/ProjectDashboard.vue`
+    (`GET /api/projects/{name}` pour l'écran projet). Tout renommage de chemin ou de
+    champ sans ces appelants est un contrat frontend brisé.
+  Héritage : `../../../vanyline.sdd` (racine), `../../../tooling.sdd` (harnais lints).
+
+Tasks:
+  [!] Mappage des erreurs kube non-NotFound en @500 : nom de projet invalide (RFC1123),
+    projet déjà existant (@409 côté kube, message `already exists`), RBAC refusé — tous
+    sortent en @500 `VNL-K8S-002`. Le frontend affiche alors le message kube brut dans sa
+    modale de création (`creationError`). Faut-il traduire en @400 (nom invalide) /
+    @409 (doublon) — par enrichissement de `../error.rs` ou par pré-validation dans CE
+    fichier ? À trancher avec Sébastien.
+  [!] Détection NotFound par sniffing de chaîne (`404`/`NotFound`/`not found` dans
+    @From<@VnyError> de `../error.rs`) : fragile selon le @Display kube (le message
+    standard `… "x" not found` contient bien `not found`, mais un futur changement de
+    format de kube ferait basculer les 404 en @500 sans test pour le détecter). Fermer
+    par les Scenarios 404 ci-dessous ; envisager un @VnyError::K8sNotFound typé côté
+    lib ? Réplique du `[?]` de `../../../lib/src/k8s.sdd`.
+  [!] Collision de noms entre utilisateurs : (a) les Project sont namespacées au
+    namespace unique de l'app — deux utilisateurs ne peuvent pas créer le même `name`,
+    le second reçoit un @500 `already exists` sur un projet QUI EST À QUELQUUN D'AUTRE
+    (aucune vérification d'owner avant création ici) ; (b) collision de noms d'Owner
+    sanitisés (`./owners.sdd` `[!]`) : deux users dont l'Owner converge voient leurs
+    projets MUTUELLEMENT dans la liste et peuvent les get/delete. Les deux viennent du
+    nom sans préfixe/suffrage ; trancher avec Sébastien (préfixage par id, unicité par
+    owner, ou assumé).
+  [!] Oracle d'existence : get/delete d'un projet d'autrui → @403 vs inexistant → @404 —
+    un attaquant authentifié peut énumérer l'existence des noms de projet d'autres
+    utilisateurs. Ramener un @404 uniforme pour « n'est pas à toi ou n'existe pas » ?
+  [!] `@GET` pas pur : @resolve_user (présent dans les 4 handlers) crée/écrit
+    vraisemblablement la ligne `miryad_users` au premier passage (`./me.sdd` `[!]`,
+    sémantique miryad-core hors dépôt). Reprendre le tranchage commun aux trois specs.
+  [!] Couverture de test du fichier : 2 tests (401 sur les 2 GET uniquement) ; le router
+    de test ne monte NI `POST /projects` NI `DELETE /projects/{name}` ; AUCUN test
+    n'existe sur create/delete/list-filtré/get-403/404, aucun test DB (@real_db) ni
+    cluster. Les 14 Scenarios sans test ci-dessous sont la dette à éponger en TTD.
+  [?] Corps des rejets axum (422 de @Json sur POST, 401 de miryad-core) : ni l'un ni
+    l'autre dans l'enveloppe `{"error"}` de `../error.rs` — trois formats de réponse
+    d'erreur coexistent selon l'étage qui refuse. Unifier (rejet @Json custom →
+    enveloppe) ou assumer ? Corps exacts à figer par test une fois tranchés.
+  [?] Liste vide vs pas d'Owner indistinguables (200 `[]` dans les deux cas, et AUCUN
+    appel k8s dans le cas « pas d'Owner » — même un cluster sain ne change rien) : état
+    voulu pour le HomeDashboard, ou signal distinct à exposer (ex. inspiration du champ
+    `k8s_owner_name` de `/api/me`) ?
+  [?] `gitSecret` : champ DÉPRÉCIÉ côté crds (non consommé par le controller,
+    cf. commentaire `../../../crds/src/lib.rs`) mais toujours accepté et recopié dans la
+    CR par @create_project. Le retirer de @CreateProjectBody (et à terme du CRD) ou le
+    maintenir pour la migration ?
+  [?] Champs avancés du corps (`existingPvc`, `storageSize`, `storageClass`,
+    `storageAccessMode`, `caches`, `fetchInterval`, `egress`) : jamais envoyés par le
+    frontend actuel (HomeDashboard n'envoie que name/repoUrl/defaultBranch) — surface
+    API effectivement morte mais typée et sans test. Les garder (API programmatique
+    future) ou les retirer jusqu'à un appelant réel ?
+  [?] @Path(`name`) non validé (un `name` d'URL avec caractères invalides part tel quel
+    vers kube → @500) : pré-valider RFC1123 en entrée (cohérent avec la décision `[!]`
+    sur les 4xx) ou assumer le message kube en 500 ?
+  [ ] Dériver chaque Scenario sans test existant en un test taggé par son titre
+    (implementer) ; Scenarios cluster = intégration manuelle assumée (convention
+    anti-mock kube de `../k8s.sdd`).
+  [ ] Rattacher cette spec dans `Depends on` de `./mod.sdd` (qui la liste « en cours de
+    rédaction ») et lever la mention équivalente.
+
+Done when:
+  Chaque Scenario est couvert par un test taggé par son titre et passe (Scenarios
+  marqués cluster au niveau intégration manuelle assumé) ; les 2 tests existants sont
+  renommés sur leurs titres de Scenario et le router de test monte désormais les 4
+  méthodes ; les `[!]` mappage 500 des erreurs kube, collision de noms et oracle
+  403/404 ont une décision écrite de Sébastien répercutée ici ou en tâches
+  d'implémentation ; la batterie workspace (check, test, build, clippy `--all-targets
+  -D warnings`, fmt) est verte.
+
+Scenario: lister les projets sans cookie retourne 401
+  Given un @Router @nest-style de test branchant @get(@list_projects) sur `/projects`
+    avec @test_auth_state et un @AppState au cache k8s `None` (constructeur `make_app`
+    existant)
+  When une requête `GET /projects` sans cookie ni bearer est adressée via
+    @tower::ServiceExt::@oneshot
+  Then la réponse a le statut @StatusCode::UNAUTHORIZED — refus @AuthUser avant tout
+    accès DB ou kube
+    # Test existant `list_projects_without_cookie_returns_401` — renommer sur ce titre.
+
+Scenario: lire un projet sans cookie retourne 401
+  Given le même router de test branchant @get(@get_project) sur `/projects/{name}`
+  When une requête `GET /projects/my-project` sans cookie est adressée via @oneshot
+  Then la réponse a le statut @StatusCode::UNAUTHORIZED
+    # Test existant `get_project_without_cookie_returns_401` — renommer sur ce titre.
+
+Scenario: créer et supprimer sans cookie retournent 401
+  Given un router de test étendu montant @post(@create_project) sur `/projects` et
+    @delete(@delete_project) sur `/projects/{name}` (le `make_app` actuel ne les monte
+    pas — prérequis du test), même @AppState hors-ligne
+  When `POST /projects` avec corps JSON valide `{"name":"p","repoUrl":"u"}` puis
+    `DELETE /projects/p` sont adressés sans cookie via @oneshot
+  Then les deux réponses ont le statut @StatusCode::UNAUTHORIZED et rien n'a été écrit
+    ni demandé au cluster (refus avant le corps des handlers)
+
+Scenario: utilisateur sans lien Owner reçoit une liste vide et aucun appel kube
+  Given une base réelle @real_db migrée SANS aucune ligne `vanyline_owner_links`, un
+    @AppState authentifié (bearer émis via le précédent `issue_token` de
+    `../auth/mod.sdd`) dont l'environnement garantit l'échec de toute découverte k8s
+    (cache `None`, ni cluster ni kubeconfig)
+  When `GET /api/projects` authentifié est adressé
+  Then la réponse est @200 avec corps JSON `[]` — pas @403, pas @502 : la branche
+    `@None` court-circuite @crate::k8s::client avant toute découverte
+
+Scenario: lire un projet sans lien Owner retourne 403
+  Given la même base réelle sans lien et le même @AppState authentifié hors-ligne
+  When `GET /api/projects/importe-importe` authentifié est adressé
+  Then la réponse est @403 avec corps `{"error":"VNL-AUTH-004: Forbidden"}` — aucune
+    requête kube n'a eu lieu
+
+Scenario: supprimer un projet sans lien Owner retourne 403
+  Given la même base réelle sans lien et le même @AppState authentifié hors-ligne
+  When `DELETE /api/projects/importe-importe` authentifié est adressé
+  Then la réponse est @403 avec le même corps `VNL-AUTH-004` — la suppression est
+    refusée avant même la lecture du projet
+
+Scenario: la liste exclut les projets des autres owners
+  # Test d'intégration cluster (convention anti-mock kube de `../k8s.sdd`).
+  Given un cluster de test avec trois Project du même namespace — `alpha` et `beta`
+    avec `spec.owner = "alice"`, `gamma` avec `spec.owner = "bob"` — et en base le lien
+    `(user_id = 1, k8s_owner_name = 'alice')`, bearer de l'utilisateur 1
+  When `GET /api/projects` authentifié est adressé
+  Then la réponse est @200 et le tableau JSON contient exactement les CR `alpha` et
+    `beta` (champs `metadata.name`), sans `gamma` — le filtrage `spec.owner ==` est la
+    seule frontière de confidentialité
+
+Scenario: lire son projet retourne la CR complète camelCase
+  # Test d'intégration cluster.
+  Given le même cluster et le même lien d'`alice`, avec le Project `alpha` créé avec
+    `spec.repoUrl = "https://github.com/org/alpha"`, `spec.defaultBranch = "main"` et
+    `spec.egress = []`
+  When `GET /api/projects/alpha` authentifié est adressé
+  Then la réponse est @200 avec l'enveloppe kube complète sérialisée : `apiVersion =
+    "vanyline.solidite.fr/v1alpha1"`, `kind = "Project"`, `metadata.name = "alpha"`, et
+    `spec` camelCase porteur de `owner`, `repoUrl`, `defaultBranch` — les clés snake_case
+    (`repo_url`) n'apparaissent nulle part
+
+Scenario: lire le projet d'un autre retourne 403
+  # Test d'intégration cluster.
+  Given le même cluster (`gamma` à `bob`) et le même lien d'`alice`
+  When `GET /api/projects/gamma` authentifié en tant qu'`alice` est adressé
+  Then la réponse est @403 `VNL-AUTH-004` — la CR a été lue côté kube (appel
+    @get_project effectif) puis refusée par la comparaison d'owner, sans fuite de contenu
+
+Scenario: lire un projet inexistant retourne 404
+  # Test d'intégration cluster.
+  Given le même cluster, lien d'`alice` posé, aucun Project nommée `fantome`
+  When `GET /api/projects/fantome` authentifié est adressé
+  Then la réponse est @404 avec corps `{"error": …}` contenant `VNL-K8S-003` — le
+    message kube du get (`… not found`) est reconnu par le sniffing de `../error.rs`
+    `[!]`
+
+Scenario: supprimer le projet d'un autre retourne 403 et le préserve
+  # Test d'intégration cluster.
+  Given le même cluster avec `gamma` à `bob`, lien d'`alice` posé
+  When `DELETE /api/projects/gamma` authentifié en tant qu'`alice` est adressé
+  Then la réponse est @403 `VNL-AUTH-004`
+  And le Project `gamma` existe toujours dans le cluster — @delete_project kube n'a pas
+    été appelé (le contrôle d'owner suit le get, précède la suppression)
+
+Scenario: supprimer son projet retourne 204 et le fait disparaître
+  # Test d'intégration cluster.
+  Given le même cluster avec `beta` à `alice`, lien d'`alice` posé
+  When `DELETE /api/projects/beta` authentifié est adressé
+  Then la réponse est @204 avec corps vide (aucun JSON, pas même `null`)
+  And un @get_project kube ultérieur sur `beta` est en NotFound
+
+Scenario: supprimer un projet inexistant retourne 404
+  # Test d'intégration cluster.
+  Given le même cluster et lien d'`alice`, aucune Project nommée `fantome`
+  When `DELETE /api/projects/fantome` authentifié est adressé
+  Then la réponse est @404 `VNL-K8S-003` — le get préalable échoue avant tout delete,
+    aucun appel @delete_project kube
+
+Scenario: création minimale retourne 201 avec l'owner dérivé du claim
+  # Test d'intégration cluster.
+  Given un cluster de test, base réelle sans lien pour l'utilisateur porté par un bearer
+    dont le claim email est `"Alice.Doe@corp.example"`, aucun Owner CR de ce user
+  When `POST /api/projects` authentifié avec corps `{"name":"mon-projet",
+    "repoUrl":"https://github.com/org/mon-projet"}` est adressé
+  Then la réponse est @201 avec la CR créée : `metadata.name = "mon-projet"`,
+    `spec.owner = "alice-doe"` (nom @ensure_owner, sans préfixe), `spec.repoUrl` repris
+    du corps, `spec.egress` sérialisé `[]` et les champs optionnels absents/`null`
+  And un Owner CR `"alice-doe"` et la ligne `vanyline_owner_links` correspondante
+    existent (lazy provisioning déclenché ici — contrat `./owners.sdd`)
+
+Scenario: tous les champs optionnels du corps se retrouvent dans le spec
+  # Test d'intégration cluster.
+  Given un cluster de test, lien d'`alice` déjà posé (`ensure_owner` en early-return)
+  When `POST /api/projects` authentifié est adressé avec corps camelCase complet :
+    `{"name":"complet","repoUrl":"https://corp/x.git","defaultBranch":"dev",
+    "existingPvc":{"name":"pvc-kydah"},"storageSize":"5Gi","storageClass":"fast-ssd",
+    "storageAccessMode":"ReadWriteMany","gitSecret":"cle","caches":["cargo","pnpm"],
+    "fetchInterval":"30m","egress":[{"description":"dns","cidr":"10.0.0.0/8",
+    "ports":[{"port":53}]}]}`
+  Then la CR retournée en @201 porte dans `spec` champ par champ les valeurs camelCase
+    envoyées (`defaultBranch "dev"`, `existingPvc.name "pvc-kydah"` avec `subPath`
+    absent/null, `caches ["cargo","pnpm"]`, `fetchInterval "30m"`, règle egress
+    `description "dns"` + `cidr` + port 53) et `owner = "alice"` — l'app ne modifie,
+    ne valide ni ne complète AUCUNE de ces valeurs
+
+Scenario: un owner fourni dans le corps est ignoré au profit du dérivé
+  Given le même dispositif que la création minimale (bearer d'email
+    `"Alice.Doe@corp.example"`, base sans lien)
+  When `POST /api/projects` authentifié est adressé avec un corps contenant en plus
+    `"owner": "victime"` (clé inconnue de @CreateProjectBody, pas de
+    `deny_unknown_fields`)
+  Then la création aboutit avec `spec.owner = "alice-doe"` — le corps du client ne peut
+    JAMAIS cibler l'Owner d'un autre, seule la clé de la dérivation compte
+
+Scenario: corps sans repoUrl est rejeté 422 avant toute écriture
+  Given le cluster et le lien d'`alice` du Scenario précédent, un compteur observant
+    qu'aucune Project `x` ne sera créée
+  When `POST /api/projects` authentifié avec corps `{"name":"x"}` (clé `repoUrl`
+    manquante — @String requis de serde) est adressé
+  Then la réponse est un rejet d'extraction axum (@422, corps texte de serde, PAS
+    l'enveloppe `{"error"}` `[?]`) — ni DB ni kube consultés pour ce projet, aucune CR
+    `x` n'existe ensuite
+
+Scenario: création hors-ligne retourne 502 sans rien écrire
+  Given une base réelle @real_db avec lien posé `(user_id = 1, k8s_owner_name =
+    'alice')` (early-return @ensure_owner) et un @AppState authentifié dont la découverte
+    k8s est impossible (cache `None`, aucun cluster ni kubeconfig)
+  When `POST /api/projects` authentifié avec corps minimal valide est adressé
+  Then la réponse est @502 avec corps `{"error": …}` contenant `VNL-K8S-001` —
+    @crate::k8s::client échoue après l'early-return, et AUCUN projet, Owner ou lien
+    supplémentaire n'a été écrit
+
+Scenario: nom de projet invalide côté kube ressort en 500 actuel
+  # Test d'intégration cluster — fige le comportement ACTUEL contesté (Tasks `[!]`
+  # mappage 500) ; si la décision passe à 400, ce Scenario est réécrit, pas supprimé.
+  Given le cluster et le lien d'`alice` posés
+  When `POST /api/projects` authentifié avec corps `{"name":"Mon Projet!",
+    "repoUrl":"https://corp/x.git"}` (nom non-RFC1123, jamais bloqué par l'app) est
+    adressé
+  Then la réponse est @500 avec corps contenant `VNL-K8S-002` — l'API server refuse le
+    nom, le message d'erreur kube n'est ni un NotFound ni traduit en @400
+
+Scenario: doublon de nom dans le namespace ressort en 500 actuel
+  # Test d'intégration cluster — même raison de figer avant tranchage `[!]`.
+  Given le cluster avec le Project `alpha` appartenant à `bob` et le lien d'`alice`
+  When `POST /api/projects` authentifié en tant qu'`alice` avec corps `{"name":"alpha",
+    "repoUrl":"https://corp/autre.git"}` est adressé
+  Then la réponse est @500 avec `VNL-K8S-002` (message kube `already exists`) et non
+    @409 — et le projet `alpha` de `bob` reste intact avec son `repoUrl` d'origine :
+    l'app ne vérifie pas l'existence ni l'appartenance du nom avant création

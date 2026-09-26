@@ -1,0 +1,639 @@
+Spec: Sandboxes API — cycle de vie des CR Sandbox, relais de ticket WS et proxy git
+
+Platform: Rust/vanyline-app/axum 0.8 + CRD Sandbox (kube via ../k8s.rs) + relais HTTP reqwest
+
+Purpose:
+  Les six handlers HTTP de la famille de routes `/api/sandboxes` (cf. ./mod.rs pour le
+  montage) : CRUD des CR `Sandbox` (`vanyline.solidite.fr/v1alpha1`) scopés par Owner —
+  @list_sandboxes, @get_sandbox, @create_sandbox, @delete_sandbox, @set_sandbox_suspended —
+  plus les deux relais qui authentifient l'app AUPRÈS de la sandbox en présentant le
+  `id_token` OIDC de l'utilisateur : @ws_ticket (minage du ticket WS court-vécu, contrat
+  clé du flux frontend→app→sandbox de `../../../docs/architecture.md` et de
+  `../../../vanyline.sdd` « le frontend ne voit jamais le JWT OIDC brut ») et @git_proxy
+  (relais REST `ANY /sandboxes/{name}/git/{*path}` vers les routes `/git/*` de la sandbox,
+  passthrough des réponses). Un seul fichier, un seul contrat (pas de regroupement) :
+  tous les handlers partagent la même chaîne de scoping (AuthUser → @resolve_user →
+  @resolve_owner_name → get_sandbox → get_project → match d'owner) et les deux relais
+  partagent la même mécanique reqwest vers l'URL interne `sandbox-{name}.{ns}.svc:3000` —
+  c'est ce faisceau commun qui fait l'unité du contrat. Le routing lui-même est ./mod.rs,
+  la table d'erreurs `VNL-*` est ../error.rs, la résolution des URL internes est
+  `../../../lib/src/k8s.rs` — tous trois en `Depends on`, pas repris ici.
+
+Owns:
+  ./sandboxes.rs
+
+Can read:
+  ./mod.rs
+  ./owners.rs
+  ./owners.sdd
+  ../error.rs
+  ../error.sdd
+  ../k8s.rs
+  ../k8s.sdd
+  ../main.rs
+  ../../../lib/src/k8s.rs
+  ../../../crds/src/lib.rs
+  ../../../sandbox/src/lib.rs
+  ../../../frontend/src/api/sandboxWs.ts
+  ../../../frontend/src/api/gitClient.ts
+  ../../../docs/architecture.md
+  ../../../vanyline.sdd
+  ../../../tooling.sdd
+
+Exposes:
+  - @CreateSandboxBody — `pub struct` Deserialize, `#[serde(rename_all = "camelCase")]`,
+    `name: @String` (nom du CR) + `#[serde(flatten)] spec: @SandboxSpec` : le JSON est
+    PLAT — `{"name": …, "project": …, "branch": …, …}`, jamais un objet imbriqué sous
+    `"spec"`. Aucun `deny_unknown_fields` : les champs inconnus sont tamponnés par le
+    flatten puis ignorés par @SandboxSpec (qui n'en refuse pas non plus).
+  - @SuspendBody — `pub struct` Deserialize SANS `rename_all` : clé JSON `suspended`
+    (identique en snake/camelCase — seul champ).
+  - @list_sandboxes — `pub async fn(@State(@AppState), @AuthUser) -> @Result<@Json<@Vec<@Sandbox>>,
+    @AppError>`. Route `GET /sandboxes` (montée `/api/sandboxes`).
+  - @get_sandbox — `pub async fn(State, AuthUser, @Path(@String)) -> @Result<@Json<@Sandbox>,
+    @AppError>`. Route `GET /sandboxes/{name}`.
+  - @create_sandbox — `pub async fn(State, AuthUser, @Json<@CreateSandboxBody>) ->
+    @Result<(@StatusCode, @Json<@Sandbox>), @AppError>`. Route `POST /sandboxes`.
+  - @delete_sandbox — `pub async fn(State, AuthUser, Path) -> @Result<@StatusCode,
+    @AppError>`. Route `DELETE /sandboxes/{name}`.
+  - @set_sandbox_suspended — `pub async fn(State, AuthUser, Path, @Json<@SuspendBody>) ->
+    @Result<@Json<@Sandbox>, @AppError>`. Route `POST /sandboxes/{name}/suspend`.
+  - @WsTicketOut — `pub struct` Serialize `#[serde(rename_all = "camelCase")]`, champs
+    `ticket: @String`, `ws_host: @String` → clés JSON `ticket` et `wsHost`.
+  - @ws_ticket — `pub async fn(State, AuthUser, Path) -> @Result<@Json<@WsTicketOut>,
+    @AppError>`. Route `POST /sandboxes/{name}/ws-ticket`. Le commentaire doc verrouille
+    le contrat : host public résolu via la chaîne owner → `spec.application_ref` →
+    `spec.host` ; ticket miné auprès de la sandbox en présentant le `id_token` OIDC
+    (Bearer) ; « le navigateur reçoit `{ ticket, wsHost }` — jamais le JWT ».
+  - @git_proxy — `pub async fn(State, AuthUser, @Path<(@String, @String)>, @Request) ->
+    @Result<(@StatusCode, @Json<@serde_json::@Value>), @AppError>`, marqué
+    @axum::debug_handler (aide à la compilation, zéro effet d'exécution). Route
+    @any `/sandboxes/{name}/git/{*path}`. Le second élément du tuple @Path (`_path`) est
+    délibérément IGNORÉ (axum décode `%2F` en `/` dans le wildcard — vérifié
+    empiriquement par l'auteur, cf. doc) ; le sous-chemin est relu sur l'URI brute.
+  - Prives mais contractuelles (observables par les handlers et testées en unité) :
+    @proxy_git_request (construction + envoi + passthrough, doc : « retourne
+    (statut, JSON) TELS QUELS — y compris les erreurs HTTP de la sandbox, pas de
+    `error_for_status` ») et @raw_git_tail (extraction/validation du sous-chemin brut,
+    doc : segments `.`/`..`/vides rejetés avant tout appel réseau).
+  - Module de test `tests` existant (état des lieux, reprise en `Tasks`) : 4 tests purs
+    de @raw_git_tail (`raw_git_tail_nominal`, `raw_git_tail_rejects_traversal`,
+    `raw_git_tail_rejects_empty_segment`,
+    `raw_git_tail_name_containing_git_is_not_ambiguous`) + 5 tests d'intégration
+    d'@oneshot sur un router @make_app construit SANS @nest et SANS la route `/suspend` :
+    `list_sandboxes_without_cookie_returns_401`, `get_sandbox_without_cookie_returns_401`,
+    `create_sandbox_without_cookie_returns_401`, `ws_ticket_without_cookie_returns_401`,
+    `git_proxy_without_cookie_returns_401`.
+
+Structure:
+  Chaîne de scoping commune (identique dans les 6 handlers, recopiée verbatim 5 fois,
+  sans helper partagé — cf. Tasks) :
+  1. @AuthUser (extracteur miryad-core, AVANT toute ligne du handler) — échec = refus
+    @401 hors contrat de CE fichier (corps produit par miryad-core).
+  2. @resolve_user(`state.auth.db`, `user.subject`, `user.email.as_deref()`) →
+    `principal_user.id` (i32, id `miryad_users`) ; @DbErr → @AppError::from →
+    @InternalError `VNL-INT-001: Internal error: VNL-DB-006: …` (500).
+  3. @resolve_owner_name(./owners.rs) → `@Some(owner)` ou @None ; @None → @403
+    @AppError::Forbidden SAUF @list_sandboxes qui retourne @200 avec liste vide
+    (commentaire `// aucun Owner -> liste vide`).
+  4. @crate::k8s::client(&state) — découverte lazy mise en cache dans `AppState::k8s`
+    (../k8s.sdd) ; échec de découverte → @K8sConfigError 502.
+  5. (5 handlers hors list) `client.get_sandbox(&name)` puis
+    `client.get_project(&sandbox.spec.project)` puis
+    `project.spec.owner != owner → @Forbidden`.
+  Ordres propres (importants pour les tests — ce qui est rejeté AVANT quoi) :
+  - @create_sandbox : contrôle `branch` NON VIDE (trim) en TOUTE PREMIÈRE position du
+    corps du handler — avant @resolve_user, avant le lookup d'owner : un utilisateur
+    authentifié sans Owner reçoit @422 (et non @403) si `branch` est vide.
+  - @git_proxy : @raw_git_tail en première position du corps — AVANT @resolve_user et
+    avant tout accès K8s : un chemin invalide rend @400 sans que ni la base ni le
+    cluster ni la sandbox ne soient touchés.
+  - @ws_ticket : scoping complète (étapes 1–5) AVANT toute lecture d'Application et
+    avant tout appel HTTP vers la sandbox — un non-owner ne fait JAMAIS émettre de
+    ticket.
+  - @git_proxy : scoping complète APRÈS @raw_git_tail et AVANT @sandbox_git_url ;
+    @ws_ticket : owner → application_ref → get_application → @format! du host →
+    @sandbox_ws_ticket_url → POST reqwest (timeout 10 s, @error_for_status) → lecture
+    de `body["ticket"]`.
+  @raw_git_tail (algorithmique contractuelle, doc du fichier) : découpage POSITIONNEL
+  sur l'URI vue par le handler (`req.uri().path()`, préfixe `/api` ôté par le @nest de
+  `../main.rs` — axum réécrit l'URI pour le router imbriqué), `trim_start_matches('/')`,
+  skip de 3 segments (`sandboxes`, `{name}`, `git`), puis chaque segment restant est
+  percent-décodé pour la SEULE validation : segment vide, `.` ou `..` (y compris
+  `%2e%2e`) → @GitPathInvalid ; retourne les segments BRUTS (encore encodés) joints par
+  `/`. Pourquoi le brut : reconstruire depuis le wildcard décodé fusionnerait un `%2F`
+  légitime d'un nom de branche (`feature/x`) avec un séparateur de segments ; pourquoi
+  le positionnel : une recherche de sous-chaîne `/git/` serait ambiguë si `name` vaut
+  `git` (test existant).
+
+Accepts:
+  - Toutes les routes : identité par @AuthUser (session cookie ou bearer, miryad-core) ;
+    sans session → @401 avant toute logique de CE fichier (les 5 tests existants le
+    verrouillent pour 5 des 6 routes — `/suspend` non testé, cf. Tasks).
+  - Chemins `{name}` : décodé par @Path — utilisé comme nom de CR, comme `{name}` de
+    @ws_host et comme base du nom de Service `sandbox-{name}` ; CE fichier ne valide
+    pas `name` (RFC1123 rejeté par l'API K8s, jamais par lui).
+  - @list_sandboxes : aucun paramètre de query, aucun corps — la requête entière ne
+    porte que l'identité.
+  - @create_sandbox : JSON plat `{"name": …, "project": …, "branch": …}` requis ;
+    optionnels (défauts serde de @SandboxSpec, ../../../crds/src/lib.rs) : `toolchains`
+    (défaut `[]`), `image` (défaut @None), `resources` (K8s @ResourceRequirements brut
+    accepté sans filtrage), `egress` (défaut `[]`), `suspended` (défaut `false`) —
+    créer une sandbox déjà suspendue est donc possible par le body, sans filtre ici.
+    Rejet JSON (syntaxe, type, clé absente, @Content-Type non `application/json`) :
+    @JsonRejection d'axum, AVANT le handler, statut hors contrat de CE fichier — jamais
+    un 2xx et le handler n'est pas entré.
+  - @set_sandbox_suspended : `{"suspended": <bool>}` exact, champ manquant ou non-bool →
+    rejet axum idem.
+  - @ws_ticket : aucun corps ; le nom de la sandbox vient du chemin uniquement.
+  - @git_proxy : TOUTES les méthodes (route @any, `OPTIONS`/`HEAD` compris), sous-chemin
+    percent-encodé conservé brut (`branches/feature%2Fx` transite tel quel), query
+    string transmise BRUTE sans filtrage ni ré-encodage, corps jusqu'à 1 MiB
+    (@to_bytes) — au-delà : erreur de lecture → @InternalError (500), pas 413 ; des
+    en-têtes d'entrée, seuls `content-type` et `accept` sont forwardés (valeur
+    non-UTF-8 → chaîne vide forwardée par `to_str().unwrap_or("")`) ; l'en-tête
+    `Authorization` du navigateur est jeté et remplacé par le Bearer de l'app.
+  - @raw_git_tail : tout URI path dont les 3 premiers segments sont supposés être
+    `sandboxes`/`{name}`/`git` (hypothèse de montage, pas une vérification — un 4e
+    segment `git` dû à un changement de vue d'URI passerait la validation, cf. Tasks).
+
+Returns:
+  - @list_sandboxes — @200 `@Json<@Vec<@Sandbox>>` : les CR complets sérialisés
+    `camelCase` (`spec.project`, `spec.branch`, `spec.toolchains[]`, `spec.suspended`,
+    `status.phase ∈ Provisioning|Running|Failed|Suspended`, `status.service`,
+    `status.conditions`, @ObjectMeta standard kube) filtrés en mémoire : sandbox retenue
+    ssi son `spec.project` est le nom d'un @Project dont `spec.owner` == owner de
+    l'utilisateur. Aucun Owner → @200 `[]`. Pas de pagination, pas de projection.
+  - @get_sandbox / @create_sandbox / @set_sandbox_suspended — CR @Sandbox complet en
+    JSON ; @create_sandbox avec @201 @CREATED, les deux autres @200. @set_sandbox_suspended
+    retourne l'objet APRÈS le patch (@set_sandbox_suspended de @VnlK8sClient est un
+    @Patch::@Merge JSON `{"spec":{"suspended":b}}` — les autres champs de la spec sont
+    conservés, contrairement à un remplacement complet).
+  - @delete_sandbox — @204 @NO_CONTENT, corps vide.
+  - @ws_ticket — @200 `@Json(@WsTicketOut)` : `{"ticket": "<opaque 32 alphanum>",
+    "wsHost": "{name}.sandboxes.{application.spec.host}"}` exactement 2 clés —
+    `expires_in_secs` (présent dans la réponse de @handle_ws_ticket de la sandbox,
+    ../../../sandbox/src/lib.rs, valeur 30) EST JETÉ par le relais ; aucun jeton,
+    aucun champ supplémentaire. Le ticket est à usage unique côté sandbox (1 rachat).
+  - @git_proxy — le COUPLE (statut, JSON) de la réponse de la sandbox TELS QUELS :
+    statut recopié via @StatusCode::from_u16 (identité sur tout statut hyper-valide ;
+    sa branche d'erreur est un @InternalError effectivement inatteignable) ; corps JSON
+    de la sandbox re-sérialisé tel quel ; corps NON JSON (texte brut d'un @404/@405
+    axum de la sandbox, cf. doc) enveloppé `{"error": "<texte UTF-8 Lossy>"}` AVEC le
+    statut d'origine — l'enveloppe ne change jamais le statut. En-têtes de la réponse
+    sandbox NON forwardés (seuls statut + corps JSON traversent).
+  - Le module de test retourne ses assertions (@401) — cf. Exposes.
+
+Raises:
+  - @401 : @AuthUser sans session valide (miryad-core, avant le handler) — verrouillé
+    par les 5 tests existants.
+  - @403 @AppError::Forbidden (`VNL-AUTH-004: Forbidden`) : aucun owner lié (sauf list),
+    ou `project.spec.owner != owner` sur le projet de la sandbox — get/delete/suspend/
+    ws_ticket/git_proxy et create (projet d'un autre owner).
+  - @422 @AppError::SandboxBranchEmpty (`VNL-SBX-002: branch must not be empty`) :
+    `spec.branch` vide ou uniquement des blancs. ATTENTION : collision de marqueur avec
+    la chaîne émise par @ws_ticket en @InternalError (cf. `Handles` et ../error.sdd, `[?]`
+    ouvert).
+  - @400 @AppError::GitPathInvalid (`VNL-SBX-003: invalid git path segment`) : segment
+    du sous-chemin vide (`//`), `.` ou `..` (dont `%2e%2e`), ou segment dont le
+    percent-décodage n'est pas de l'UTF-8 valide (`decode_utf8` en erreur).
+  - @409 @AppError::SandboxNotExposed (`VNL-SBX-001`) : @ws_ticket quand l'Owner n'a
+    pas d'`spec.applicationRef` (sandbox sans Ingress public).
+  - @404 @AppError::K8sNotFound (`VNL-K8S-003`) : sandbox, projet, owner CR ou
+    application CR absents — via l'heuristic de sous-chaînes `404`/`NotFound`/`not
+    found` du @From<@VnyError> (../error.sdd), pas via un typage dédié.
+  - @500 : @K8sApiError (`VNL-K8S-002`) pour toute erreur API K8s hors 404 (ex.
+    @AlreadyExists sur un nom de sandbox existant — pas de map 409 ici) ;
+    @InternalError (`VNL-INT-001`) pour @DbErr de @resolve_user (`VNL-DB-006` imbriqué),
+    pour le dépassement des 1 MiB du corps git (message brut de axum), et pour
+    `VNL-SBX-002: sandbox ticket response missing 'ticket'` (corps de la sandbox sans
+    clé `ticket` OU `ticket` non-chaîne — collision de marqueur avec
+    @SandboxBranchEmpty, `Tasks`).
+  - @502 : @K8sConfigError (`VNL-K8S-001`) si la découverte K8s lazy échoue ;
+    @AppError::RequestError (`VNL-REQ-001`) pour toute @reqwest::Error : échec de
+    transport des deux relais (pod sandbox injoignable, DNS `.svc` introuvable,
+    timeout — 10 s ws_ticket / 30 s git_proxy), @error_for_status de @ws_ticket (TOUT
+    4xx/5xx de la sandbox, corps perdu, URL interne comprise dans le message d'erreur),
+    et échec de `resp.json()` (corps sandbox non-JSON sur ws_ticket). @git_proxy ne
+    lève JAMAIS RequestError pour un statut : pas d'@error_for_status, passthrough.
+  - Panics : aucun chemin (harnais du workspace — `tooling.sdd` : zéro
+    unwrap/expect/panic ; les `unwrap` du module tests sont sous `#[cfg(test)]` +
+    `#![allow]` ciblé).
+
+Handles:
+  - Effets de bord K8s par handler (les SEULS du fichier) : @create_sandbox = POST du
+    CR ; @delete_sandbox = DELETE du CR (le reconciler Sandbox du controller fait le
+    reste — pods/Service/NetworkPolicy) ; @set_sandbox_suspended = JSON Merge patch de
+    `spec.suspended` (le controller supprime ou recrée le Pod ; worktree/PVC conservés).
+    Les 4 autres handlers (list/get/ws_ticket/git_proxy) ne font AUCUNE écriture K8s.
+    L'app n'écrit jamais `status` (propriété du controller).
+  - Effets de bord base : les 6 handlers appellent @resolve_user (upsert de la ligne
+    `miryad_users` selon le `[!]` de ./me.sdd — extension de ce `[!]` à CE fichier,
+    y compris les handlers de « lecture »).
+  - Chaîne de résolution du host public (@ws_ticket) : owner lié en base →
+    `get_owner(owner).spec.applicationRef` (@None → @SandboxNotExposed 409) →
+    `get_application(app_ref).spec.host` → `format!("{name}.sandboxes.{host}")` —
+    exactement le patron que le controller pose sur l'Ingress de la sandbox
+    (../../../crds/src/lib.rs, doc de `OwnerSpec.application_ref`).
+  - URL internes des deux relais (@VnlK8sClient, ../../../lib/src/k8s.rs) :
+    `http://sandbox-{name}.{namespace}.svc:3000/ws/ticket` et
+    `http://sandbox-{name}.{namespace}.svc:3000/git/{raw_path}` (@service_name +
+    @MCP_PORT = 3000) — HTTP clair in-cluster, le JWT n'y circule qu'en Bearer, jamais
+    vers le navigateur ; les deux builders rappellent `get_sandbox` en interne (le
+    handler vient déjà de le faire — GET K8s redondant, cf. Tasks).
+  - Consommation de l'identité relayée : @ws_ticket et @git_proxy lisent `user.id_token`
+    (champ @AuthUser de miryad-core, crate externe hors source dépôt) et l'envoient
+    `Bearer {token}` à la sandbox — c'est le SEUL point du crate app où le JWT sort
+    (vers la sandbox en cluster), jamais dans une réponse (conforme
+    `../../../vanyline.sdd` Must not ; cf. ./me.sdd qui interdit l'inverse).
+  - Site du marqueur en dur hors @AppError : `VNL-SBX-002: sandbox ticket response
+    missing 'ticket'` dans @AppError::@InternalError (documenté comme collision dans
+    ../error.sdd `Handles` + `Tasks` — la décision de renommage se prend LÀ-BAS, ce
+    fichier la subit).
+  - Vue d'URI sous @nest : les handlers de CE fichier ne voient JAMAIS le préfixe
+    `/api` dans `req.uri().path()` (axum réécrit l'URI pour le router imbriqué de
+    `../main.rs` ; @OriginalUri serait la vue complète — l'utiliser casserait
+    @raw_git_tail en dupliquant `/git/` dans l'URL forwardée, silencieusement).
+  - Consommateurs frontend (contrat d'appels, mêmes fichiers que ./mod.sdd) :
+    `../../../frontend/src/api/sandboxWs.ts` (`POST …/ws-ticket`, lit `{ ticket, wsHost }`
+    puis `wss://{wsHost}{path}?ticket=…`), `../../../frontend/src/api/gitClient.ts`
+    (~15 appels GET/POST/DELETE sous `/api/sandboxes/{name}/git`, nom de sandbox
+    encodé, branches en `encodeURIComponent`), les dashboards via `useCrudResource`
+    (`GET/POST /api/sandboxes`, `…/suspend`).
+  - Le fichier ne gère PAS : la table de routage (./mod.rs), le rendu HTTP des erreurs
+    (../error.rs @IntoResponse), la mécanique des tickets côté sandbox (usage unique,
+    TTL 30 s — ../../../sandbox/src/lib.rs + `./ws/ticket.rs` de ce même crate sandbox),
+    la création des Ingress/Services (controller).
+
+Must:
+  - Exiger @AuthUser dans les 6 handlers et chaîner @resolve_user PUIS
+    @resolve_owner_name sur `principal_user.id` (même ordre que ./me.sdd) — aucune
+    route de la famille ne peut être appelée en anon.
+  - Appliquer le scoping owner intégral (get_sandbox → get_project → match d'owner)
+    dans get/delete/suspend/ws_ticket/git_proxy AVANT tout effet ou appel aval : un
+    non-owner ne provoque ni suppression, ni patch, ni émission de ticket, ni requête
+    vers la sandbox.
+  - Valider `branch` (non-vide après trim) en tête de @create_sandbox et rendre
+    @SandboxBranchEmpty (422, `VNL-SBX-002`).
+  - Conserver l'asymétrie list/get : aucun owner → @200 `[]` en liste, @403 ailleurs.
+  - Construire @ws_host exactement `format!("{name}.sandboxes.{}", application.spec.host)`
+    et ne retourner QUE `{ticket, wsHost}` — jamais l'`id_token`, jamais le corps
+    sandbox complet (`expires_in_secs` inclus).
+  - Présenter `format!("Bearer {}", user.id_token)` en @AUTHORIZATION aux DEUX relais
+    (sandbox `POST /ws/ticket` sous @require_auth — ../../../sandbox/src/auth.sdd), avec
+    un client reqwest à timeout explicite : 10 s pour @ws_ticket, 30 s pour @git_proxy
+    (doc : « les opérations git réseau peuvent dépasser 10 s »).
+  - Relire le sous-chemin git sur l'URI BRUTE par découpage positionnel (@raw_git_tail),
+    rejeter tout segment décodé vide/`.`/`..` AVANT que @sandbox_git_url ou reqwest ne
+    soient atteints (la normalisation d'URL du client ne peut plus faire sortir la
+    requête du préfixe `/git/`), et forwarder les segments tels qu'encodés (le `%2F`
+    d'un nom de branche reste `%2F`).
+  - Faire du git_proxy un passthrough VRAI : statut de la sandbox inchangé, corps JSON
+    re-sérialisé à l'identique, corps non-JSON enveloppé `{"error": …}` sans changer le
+    statut ; forwarder la méthode, la query brute, le corps ≤ 1 MiB, et uniquement
+    `content-type`/`accept` comme en-têtes d'entrée.
+  - Rendre les erreurs exclusivement par @AppError (variantes et marqueurs de
+    ../error.rs) : @Forbidden, @SandboxBranchEmpty, @GitPathInvalid,
+    @SandboxNotExposed, @InternalError, @RequestError, et le `?` sur les appels K8s.
+  - Rester conforme au harnais (`../../../tooling.sdd`) : aucun
+    unwrap/expect/panic/println hors `#[cfg(test)]` ; le `#![allow(clippy::unwrap_used,
+    clippy::expect_used)]` du module tests est la seule exemption du fichier.
+  - Conserver @axum::debug_handler sur @git_proxy (les diagnostics de trait des
+    handlers axum en dépendent en revue).
+
+Must not:
+  - Rendre le JWT (`user.id_token`) visible au navigateur : ni dans un corps, ni dans
+    une erreur, ni dans @WsTicketOut (règle racine `../../../vanyline.sdd` ; seul le
+    message @VNL-REQ-001 peut contenir l'URL interne de la sandbox — pas le token).
+  - Utiliser le `_path` décodé par @Path dans @git_proxy (il a fusionné `%2F` en `/` —
+    toute reconstruction à partir de lui détruirait la distinction
+    séparateur/sous-chaîne-encodée des noms de branche).
+  - Décoder puis ré-encoder le sous-chemin git (régression documentée par
+    ../../../lib/src/k8s.rs : `sandbox_git_url` ne ré-encode PLUS, la validation est
+    faite ici en amont).
+  - Appeler `error_for_status()` dans @git_proxy : les 4xx/5xx de la sandbox sont le
+    résultat métier du frontend git (ex. conflit de merge = 200 `{conflicted:true}`
+    côté sandbox, erreurs de statut = statut d'origine côté navigateur).
+  - Modifier un CR Sandbox hors des trois voies exposées (create CR / delete CR /
+    merge patch `spec.suspended`) ; ne rien écrire dans `status`.
+  - Remplacer le @Patch::@Merge de la suspension par un remplacement complet de la
+    spec (perdrait toolchains/resources entre le GET de scoping et le PATCH).
+  - Laisser passer une requête git dont un segment décodé vaut `.`, `..` ou vide, ou
+    dont le décodage UTF-8 échoue — même encodé (`%2e%2e`), même en cascadé
+    (`branches/../../ws/ticket`).
+  - Dériver une quelconque autorisation d'autre chose que l'égalité
+    `project.spec.owner == owner_lié_à_l_utilisateur` (le champ `owner` des CR n'est
+    pas un filtre à choisir par l'appelant ; aucun query param de scope n'existe).
+
+Scenario: les_six_handlers_sans_session_retournent_401
+  Given le router @make_app des tests de ./sandboxes.rs ENRICHI de la route
+    `POST /sandboxes/{name}/suspend` (absente du harnais actuel — cf. Tasks `[!]`) avec
+    @AppState de test (config figé, @crate::auth::test_support::test_auth_state)
+  When six requêtes non authentifiées sont adressées par @oneshot : `GET /sandboxes`,
+    `GET /sandboxes/ma-sb`, `POST /sandboxes`, `POST /sandboxes/ma-sb/suspend`,
+    `POST /sandboxes/ma-sb/ws-ticket`, `GET /sandboxes/ma-sb/git/status`
+  Then les six réponses ont le statut @StatusCode::UNAUTHORIZED (le corps est le contrat
+    de miryad-core, non asserté) — les 5 tests existants sont absorbés sans régression
+
+Scenario: raw_git_tail_conserve_le_chemin_brut_encode
+  Given la fonction pure @raw_git_tail (test existant `raw_git_tail_nominal`)
+  When elle reçoit `/sandboxes/foo/git/status`, puis `/sandboxes/foo/git/branches/feature%2Fx`
+  Then elle retourne respectivement `Ok("status")` et
+    `Ok("branches/feature%2Fx")` — le `%2F` n'est PAS décodé en séparateur
+
+Scenario: raw_git_tail_rejette_toute_traversee_de_dossiers
+  Given @raw_git_tail (test existant `raw_git_tail_rejects_traversal`)
+  When elle reçoit `/sandboxes/foo/git/../mcp`, puis `/sandboxes/foo/git/%2e%2e/mcp`,
+    puis `/sandboxes/foo/git/branches/../../ws/ticket`
+  Then les trois retours sont `Err(@AppError::GitPathInvalid)` — brut, encodé ou cascadé
+
+Scenario: raw_git_tail_rejette_le_segment_vide_et_le_decodage_utf8_invalide
+  Given @raw_git_tail (test existant `raw_git_tail_rejects_empty_segment` + test À
+    AJOUTER pour l'UTF-8)
+  When elle reçoit `/sandboxes/foo/git/branches//x`, puis `/sandboxes/foo/git/%ff%fe`
+  Then les deux retours sont `Err(@AppError::GitPathInvalid)` (segment vide ; segment
+    dont `decode_utf8` échoue)
+
+Scenario: raw_git_tail_le_nom_de_sandbox_git_ne_deplace_pas_la_frontiere
+  Given @raw_git_tail (test existant `raw_git_tail_name_containing_git_is_not_ambiguous`)
+  When elle reçoit `/sandboxes/git/git/branches/x`
+  Then elle retourne `Ok("branches/x")` — le découpage est positionnel, pas une
+    recherche de sous-chaîne `/git/`
+
+Scenario: raw_git_tail_sous_chemin_totalement_absent_retourne_vide
+  Given @raw_git_tail
+  When elle reçoit `/sandboxes/foo/git` (aucun segment après le littéral `git`)
+  Then elle retourne `Ok("")` — asymétrie avec `/sandboxes/foo/git/` (segment vide →
+    `Err`) documentée telle quelle, cf. Tasks `[?]`
+
+Scenario: liste_sans_owner_retourne_200_vide_et_pas_403
+  Given une base sans `vanyline_owner_links` pour l'utilisateur authentifié
+    (@real_db de `../db/test_support.rs`)
+  When @list_sandboxes est appelé
+  Then le résultat est @Ok avec @Json(@Vec) VIDE et aucun client K8s n'est découvert
+    (le `None` court-circuite avant @k8s::client)
+
+Scenario: liste_ne_retourne_que_les_sandboxes_du_projet_de_l_owner
+  Given un cluster de test, l'owner `alice` lié en base, deux @Project (`p-alice`
+    d'owner `alice`, `p-bob` d'owner `bob`) et trois @Sandbox : `s1`→`p-alice`,
+    `s2`→`p-bob`, `s3`→`p-supprime` (projet absent)
+  When @list_sandboxes est appelé par alice
+  Then seule `s1` est retournée, en CR complet `camelCase` incluant `status.phase` —
+    les sandboxes d'un autre owner et celles pointant un projet supprimé sont
+    silencieusement exclues
+
+Scenario: get_sandbox_autorise_retourne_le_cr_complet
+  Given l'owner d'alice et sa sandbox `s1` sur `p-alice`, `status.phase` à `Running`
+  When @get_sandbox reçoit le nom `s1`
+  Then le statut est @200 et le corps le CR dont `spec.project == "p-alice"` et
+    `status.phase == "Running"` — la phase est bien remontée telle que posée par le
+    controller
+
+Scenario: get_sandbox_d_un_autre_owner_est_refuse_apres_lecture
+  Given la sandbox `s2` de bob (projet `p-bob`) et alice authentifiée owner `alice`
+  When @get_sandbox reçoit `s2`
+  Then le résultat est @Err(@AppError::Forbidden) — 403 `VNL-AUTH-004: Forbidden` ; la
+    lecture des CR a bien eu lieu (l'existence est donc différenciable d'un @404, oracle
+    documenté en Tasks `[?]`)
+
+Scenario: creation_branch_vide_ou_blanc_est_rejetee_avant_tout_acces_k8s
+  Given un utilisateur authentifié SANS owner lié en base (le test prouve que le
+    contrôle précède @resolve_owner_name)
+  When @create_sandbox reçoit `{"name":"s","project":"p","branch":""}`, puis
+    `{"name":"s","project":"p","branch":"   "}`
+  Then les deux appels sont @Err(@AppError::SandboxBranchEmpty) (422, `VNL-SBX-002:
+    branch must not be empty`) — jamais un 403, et aucun CR créé
+
+Scenario: creation_valide_retourne_201_et_le_cr_cree
+  Given alice avec owner lié, @Project `p-alice` d'owner `alice`, cluster de test sans
+    sandbox du même nom
+  When @create_sandbox reçoit le body plat minimal
+    `{"name":"s9","project":"p-alice","branch":"main","toolchains":[{"name":"rust","image":"rust:slim-trixie"}]}`
+  Then le statut est @201 @CREATED, le CR retourné a `metadata.name == "s9"`,
+    `spec.branch == "main"` et `spec.toolchains[0].image` posé, `spec.suspended` absent
+    du body vaut `false` par défaut serde
+
+Scenario: creation_sur_projet_d_autre_owner_est_refusee_sans_ecriture
+  Given le projet `p-bob` d'owner `bob` et alice authentifiée
+  When @create_sandbox reçoit `{"name":"s","project":"p-bob","branch":"main"}`
+  Then le résultat est @Err(@AppError::Forbidden) et AUCUN CR Sandbox `s` n'existe après
+    l'appel (le `get_project` de contrôle précède `create_sandbox`)
+
+Scenario: creation_sur_projet_inexistant_retombe_en_404_par_l_heuristic
+  Given alice authentifiée avec owner lié et aucun @Project `fantome`
+  When @create_sandbox reçoit `{"name":"s","project":"fantome","branch":"main"}`
+  Then l'erreur @VnyError remontée par `?`/ @From<@VnyError> rend @K8sNotFound (404,
+    `VNL-K8S-003`) — dépendance à l'heuristic de sous-chaînes de ../error.sdd
+
+Scenario: suppression_ok_rend_204_puis_introuvable
+  Given la sandbox `s1` d'alice
+  When @delete_sandbox reçoit `s1`, puis est rappelé avec `s1`
+  Then le premier appel rend @StatusCode::NO_CONTENT (204, corps vide) et le CR est
+    supprimé du cluster ; le second est @Err(@K8sNotFound) (404) sur le get_sandbox de
+    scoping
+
+Scenario: suspension_est_un_merge_patch_et_retourne_le_cr_pache
+  Given la sandbox `s1` d'alice avec `spec.toolchains` non vide et `spec.suspended` false
+  When @set_sandbox_suspended reçoit `s1` avec le corps `{"suspended":true}`
+  Then le statut est @200 et le CR retourné a `spec.suspended == true` AVEC
+    `spec.toolchains` inchangé (Merge patch JSON `{"spec":{"suspended":true}}`, pas un
+    remplacement de spec) ; l'effet pod (suppression par le controller) appartient au
+    controller, pas à CE fichier
+
+Scenario: suspension_refusee_ne_pache_rien
+  Given la sandbox `s2` de bob et alice authentifiée
+  When @set_sandbox_suspended reçoit `s2` avec `{"suspended":true}`
+  Then le résultat est @Err(@AppError::Forbidden) et le CR `s2` en cluster garde
+    `spec.suspended == false` (le patch n'est jamais émis après le refus)
+
+Scenario: ws_ticket_ok_rend_ticket_et_wsHost_sans_exposer_le_jwt
+  Given alice owner `alice`, son @Owner avec `spec.applicationRef: "app1"`, @Application
+    `app1` de `spec.host: "app.example.com"`, la sandbox `s1` sur son projet, et la
+    sandbox répondant `{"ticket":"t32…","expires_in_secs":30}` sur
+    `http://sandbox-s1.{ns}.svc:3000/ws/ticket` (transport injectable ou cluster de
+    test résolvant le DNS `.svc` — cf. Tasks `[!]`)
+  When @ws_ticket reçoit `s1` avec un @AuthUser d'`id_token` connu
+  Then le statut est @200 avec le corps EXACT `{"ticket":"t32…","wsHost":"s1.sandboxes.app.example.com"}`
+    (2 clés, `expires_in_secs` jeté, aucun jeton), et la sandbox a reçu `POST` avec
+    @AUTHORIZATION `Bearer {id_token}`
+
+Scenario: ws_ticket_sans_application_ref_retourne_409
+  Given un owner dont l'@Owner CR a `spec.applicationRef: null` et une sandbox sur son
+    projet
+  When @ws_ticket est appelé pour cette sandbox
+  Then le résultat est @Err(@AppError::SandboxNotExposed) — 409, `VNL-SBX-001: sandbox
+    has no public endpoint (owner has no application_ref)`, aucune requête vers la
+    sandbox
+
+Scenario: ws_ticket_non_owner_n_emet_aucun_ticket
+  Given la sandbox `s2` de bob et alice authentifiée
+  When @ws_ticket reçoit `s2`
+  Then le résultat est @Err(@AppError::Forbidden) et le `POST /ws/ticket` de la sandbox
+    n'est JAMAIS atteint (aucun ticket court-vécu émis pour un non-owner)
+
+Scenario: ws_ticket_reponse_sans_cle_ticket_tombe_en_500_marqueur_collision
+  Given la sandbox répondant `200` avec `{"expires_in_secs":30}` (clé `ticket` absente
+    ou non-chaîne)
+  When @ws_ticket lit la réponse
+  Then le résultat est @Err(@AppError::InternalError) (500) dont le @Display contient
+    `VNL-SBX-002: sandbox ticket response missing 'ticket'` — marqueur COLLISION avec
+    @SandboxBranchEmpty, verrouillé TEL QUEL tant que ../error.sdd n'a pas tranché
+
+Scenario: ws_ticket_statut_erreur_de_la_sandbox_degrade_en_502
+  Given la sandbox répondant `401` (id_token expiré vu par @require_auth de la sandbox)
+  When @ws_ticket appelle `error_for_status()` sur la réponse
+  Then le résultat est @Err(@AppError::RequestError) — 502 `VNL-REQ-001`, corps de la
+    sandbox perdu ; la question d'un 401 transparent est ouverte en Tasks `[?]`
+
+Scenario: ws_ticket_timeout_de_10s_en_502
+  Given une sandbox dont la réponse dépasse 10 s (timeout @reqwest posée dans le
+    handler)
+  When @ws_ticket attend la réponse
+  Then le résultat est @Err(@AppError::RequestError) (502) — le timeout couvre envoi +
+    lecture du corps
+
+Scenario: git_proxy_forward_methode_query_bearer_app_et_passthrough_statut
+  Given la sandbox `s1` d'alice répondant `409` + `{"error":"merge conflict"}` sur son
+    endpoint
+  When `POST /sandboxes/s1/git/commit?retry=1` avec body `{"message":"m"}` et
+    @CONTENT_TYPE `application/json` parvient à @git_proxy
+  Then la sandbox a reçu `POST` sur `…/git/commit?retry=1` avec @AUTHORIZATION
+    `Bearer {id_token}` (celui de l'app, pas celui du navigateur), le corps d'origine,
+    le `content-type` forwardé, et le navigateur reçoit le statut @409 AVEC le JSON
+    `{"error":"merge conflict"}` inchangé (pas d'@error_for_status)
+
+Scenario: git_proxy_preserve_le_percent_encodage_d_une_branche
+  Given la sandbox `s1` d'alice, harnais de capture de l'URL reçue par la sandbox
+  When une requête `GET /sandboxes/s1/git/branches/feature%2Fx` parvient à @git_proxy
+  Then l'URL demandée à la sandbox se termine par `/git/branches/feature%2Fx` — le
+    `%2F` n'a pas été décodé en séparateur (le wildcard décodé par @Path est ignoré)
+
+Scenario: git_proxy_enveloppe_le_corps_non_json_sans_changer_le_statut
+  Given la sandbox répondant `404` en texte brut `route not found` (route sandbox
+    inconnue)
+  When @git_proxy relaie la réponse
+  Then le navigateur reçoit le statut @404 (STATUT D'ORIGINE) et le corps JSON
+    `{"error":"route not found"}` — l'enveloppe n'altère que la forme du corps
+
+Scenario: git_proxy_traversee_rejete_400_sans_appel_aval
+  Given alice authentifiée (peu importe le reste du contexte)
+  When `GET /sandboxes/s1/git/%2e%2e/mcp` parvient à @git_proxy
+  Then le résultat est @Err(@AppError::GitPathInvalid) (400, `VNL-SBX-003`) sans
+    @resolve_user, sans lecture K8s et sans appel reqwest — @raw_git_tail est la
+    première ligne du corps du handler
+
+Scenario: git_proxy_non_owner_n_appelle_jamais_la_sandbox
+  Given la sandbox `s2` de bob et alice authentifiée
+  When `GET /sandboxes/s2/git/status` parvient à @git_proxy
+  Then le résultat est @Err(@AppError::Forbidden) et aucune requête n'atteint
+    `sandbox-s2.{ns}.svc`
+
+Scenario: git_proxy_corps_de_plus_d_un_mib_refuse_500
+  Given une requête `POST /sandboxes/s1/git/commit` dont le corps dépasse 1 048 576
+    octets (@to_bytes)
+  When @git_proxy lit le corps
+  Then le résultat est @Err(@AppError::InternalError) (500 — PAS 413, comportement
+    actuel verrouillé tel quel, cf. Tasks `[?]`) et la sandbox n'est pas appelée
+
+Depends on:
+  @axum 0.8 (../Cargo.toml) — @Json, @Path, @State, @Request, @StatusCode, @to_bytes,
+    @debug_handler ; rejets JSON d'axum (avant handler) hors contrat de CE fichier.
+  @reqwest 0.12 (rustls-tls + json) — clients à timeout 10 s / 30 s, @error_for_status
+    (ws_ticket uniquement), @reqwest::header::@AUTHORIZATION.
+  @vanyline_crds (../../../crds/src/lib.rs) — @Sandbox/@SandboxSpec (camelCase, champs
+    et défauts serde), @Owner/@Application lus par ws_ticket.
+  @miryad-core 0.1 (crates.io, source hors dépôt) — @AuthUser (`subject`,
+    `email: @Option`, `id_token`) et @resolve_user (sémantique upsert, `[?]` partagé
+    avec ./me.sdd et ./local_tools.sdd).
+  ./owners.rs (@resolve_owner_name — ./owners.sdd) et ./mod.rs + `../main.rs` (montage
+    @nest("/api") dont la RÉÉCRITURE d'URI conditionne @raw_git_tail).
+  ../k8s.rs (@client lazy — ../k8s.sdd) et @vanyline_lib::k8s::@VnlK8sClient
+    (../../../lib/src/k8s.rs : list/get/create/delete/set_sandbox_suspended,
+    @sandbox_ws_ticket_url, @sandbox_git_url, @service_name `sandbox-{name}`,
+    @MCP_PORT 3000).
+  ../error.rs (@AppError, @From<@VnyError> avec heuristic 404, @From<@DbErr> —
+    ../error.sdd) ; la collision `VNL-SBX-002` y est ouverte en `[?]`.
+  Côté sandbox (contrat aval, non testé ici) : ../../../sandbox/src/lib.rs
+    @handle_ws_ticket (`{"ticket","expires_in_secs":30}`) sous @require_auth
+    (../../../sandbox/src/auth.sdd) et routes `/git/*` (../../../sandbox/src/git.sdd).
+  Frontend : `../../../frontend/src/api/sandboxWs.ts` et `gitClient.ts` (consommateurs
+    littéraux de `wsHost`/`ticket` et du passthrough git).
+  `../../../vanyline.sdd` (Must not : JWT brut jamais au navigateur) et
+    `../../../tooling.sdd` (harnais clippy/fmt).
+
+Tasks:
+  [!] Collision interne `VNL-SBX-002` (ici ÉMETTRICE) : @SandboxBranchEmpty
+    (`422 branch must not be empty`) et @ws_ticket
+    (`500 sandbox ticket response missing 'ticket'` dans @InternalError) partagent le
+    marqueur — `../error.sdd` a ouvert le `[?]` (renommer en `VNL-SBX-004` ?) ; la
+    réponse de @ws_ticket doit se lire là-bas, ce fichier exécute la décision.
+  [!] Harnais de test insuffisant pour le contrat réel : le module tests ne connaît ni
+    la route `/suspend` (aucun test, même 401) ni @set_sandbox_suspended ni aucune
+    logique ws_ticket/git_proxy/liste — faute de transport HTTP injectable (les URL
+    `…svc:3000` sont construites en dur) et de cluster de test. Les Scenarios de cette
+    spec qui supposent « cluster de test » ou « transport injectable » en dépendent :
+    décider d'un point d'injection (paramètre de fonction, trait, ou substitution
+    d'URL en test) AVANT d'écrire les tests TTD.
+  [!] @raw_git_tail dépend de la réécriture d'URI par @nest("/api", …) de `../main.rs`
+    : les tests appellent la fonction avec un chemin PRÉ-DÉCOUPÉ et le @make_app n'a
+    PAS de nest — si la vue d'URI change (ex. passage à @OriginalUri, ou montage sans
+    nest), le découpage saute les mauvais segments et forwarde silencieusement
+    `/git/git/…`. Verrouiller par un test d'intégration monté comme en production
+    (@nest("/api") + spy sur l'URL demandée à la sandbox).
+  [?] Oracle d'existence : le scoping lit le CR AVANT de vérifier l'owner — sandbox
+    inexistante → 404, sandbox d'un autre → 403 : un attaquant distingue « existe » de
+    « n'existe pas » par le statut. Réordonner (résoudre le projet via un index/liste
+    filtrée) ou assumer (les noms de CR ne sont pas secrets) ?
+  [?] @ws_ticket + @git_proxy redoublent le GET K8s : le handler fait `get_sandbox`
+    (scoping) puis le builder d'URL le refait — 1 GET de plus par appel (latence sur
+    le chemin chaud éditeur) et micro-TOCTOU entre le check et l'appel. Garder (défense
+    en profondeur, ../../../lib/src/k8s.rs l'assume) ou exposer un builder sans check ?
+  [?] @ws_ticket et @error_for_status : un 401 de la sandbox (id_token expiré — cas
+    courant de session longue) devient 502 `VNL-REQ-001` pour le navigateur, qui ne
+    peut pas déclencher une re-auth. Propager les 4xx de la sandbox (ou au moins 401)
+    plutôt que tout dégrader en 502 ?
+  [?] Collision @AlreadyExists à la création : créer une sandbox au nom d'une sandbox
+    existante → erreur kube (pas de sous-chaîne `404`/`NotFound`) → 500 `VNL-K8S-002`.
+    Un 409 dédié (`SandboxNameTaken` ?) — et une validation de `name` (RFC1123) avant
+    le POST kube — sont-ils voulus ?
+  [?] Corps git > 1 MiB → @InternalError 500 (message brut de axum) et non 413 ; de
+    plus `proxy_git_request` envoie TOUJOURS un corps (octets vides + `Content-Length:
+    0` sur les GET/DELETE). Fixer la sémantique (413 ? corps omis quand vide ?).
+  [?] Asymétrie du wildcard vide : `/sandboxes/{name}/git` (sans slash) donne, si la
+    route matche (sémantique zéro-segment du `{*path}` matchit 0.8 à vérifier), un
+    forward vers `…/git/` (queue `/`) côté sandbox → 404 sandbox ; `/sandboxes/{name}/git/`
+    (avec slash) → 400 local (@raw_git_tail segment vide). Uniformiser ou documenter
+    comme comportement figé ?
+  [?] La chaîne de scoping (resolve_user → resolve_owner_name → get_sandbox →
+    get_project → match) est recopiée verbatim 5 fois et @AuthUser+resolve_user 6 fois :
+    extraire un extracteur/helper partagé (risque de dérive entre copies plaidé dans
+    ./error.sdd pour le `db_err` consolidé) ou assumer la répétition ?
+  [?] `expires_in_secs: 30` (réponse sandbox) jeté par le relais : le frontend
+    (`sandboxWs.ts`) mine un ticket par connexion et n'a donc pas besoin du TTL —
+    confirmer que c'est le contrat voulu (sinon l'ajouter à @WsTicketOut, ce qui casse
+    la « réponse à 2 clés » de cette spec).
+  [?] @resolve_user écrit en base dans les 6 handlers (dont les « lectures ») :
+    extension du `[!]` de ./me.sdd (« GET non-idempotent côté base ») — trancher une
+    fois pour les deux fichiers.
+  [?] Provenance et régime de `user.id_token` (miryad-core, source hors dépôt) :
+    s'assure-t-on qu'il n'est jamais vide ? un @AuthUser sans `id_token` (session sans
+    claim) ferait partir `Bearer ` (vide) vers la sandbox → 401 sandbox → 502 ici.
+    Documenter/mapper proprement ou considérer la situation impossible par construction
+    de la session ?
+  [?] `accept`/`content-type` non-UTF-8 forwardés en valeur VIDE
+    (`to_str().unwrap_or("")`) plutôt que non-forwardés ou rejetés — détail sans
+    consommateur connu, figer ou nettoyer.
+  [ ] Écrire les tests de chaque Scenario, taggés par son titre (préalables : `[!]`
+    harnais ci-dessus) ; batterie : `cargo test --workspace`,
+    `cargo clippy --workspace --all-targets -- -D warnings`, `cargo fmt --all -- --check`.
+
+Done when:
+  Chaque Scenario a un test dédié taggé par son titre et passe, y compris les 4 tests
+    purs et les 5 tests 401 existants (conservés ou absorbés, plus la route `/suspend`
+    ajoutée au harnais).
+  Les collisions et asymétries `[?]`/`[!]` ci-dessus sont tranchées par Sébastien —
+    la collision `VNL-SBX-002` en coordination avec `../error.sdd`, le `[!]` @resolve_user
+    avec ./me.sdd, le `[!]` vue d'URI avec `../main.sdd`.
+  Le contrat « jamais le JWT au navigateur » est vérifié par test (absence de
+    l'`id_token` dans tout corps de @ws_ticket/@git_proxy) conformément à
+    `../../../vanyline.sdd`.

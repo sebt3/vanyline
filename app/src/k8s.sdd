@@ -1,0 +1,219 @@
+Spec: K8s
+
+Platform: Rust/vanyline-app/tokio
+
+Purpose:
+  Point d'accès unique de l'`app` au client K8s de `vanyline-lib` : découverte lazy du
+  @vanyline_lib::k8s::VnlK8sClient à la première requête qui en a besoin — jamais au
+  démarrage — puis mise en cache dans @AppState::k8s pour tous les appels suivants. Le
+  fichier ne porte aucune logique K8s lui-même : tout le comportement réseau/API est le
+  contrat de @VnlK8sClient (cf. ../../lib/src/k8s.sdd) ; ce fichier n'est que le
+  verrouillage, le mémoïsage et le mappage d'erreur d'une découverte unique en
+  mono-instance. Contrairement au module lib homonyme, ce module n'est gated par aucune
+  feature : la dépendance de compilation est constante (`k8s` toujours activé côté app).
+  Grouper ici le cache et le mappage, plutôt que répéter `lock → check → discover →
+  map_err` dans les six modules consommateurs (api/sandboxes, api/projects,
+  api/owners::ensure_owner, api/me via owners, ws/sandbox_state, ws/chat).
+
+Owns:
+  ./k8s.rs
+
+Can read:
+  ./main.rs
+  ./config.rs
+  ./error.rs
+  ./api/sandboxes.rs
+  ./api/projects.rs
+  ./api/owners.rs
+  ./ws/sandbox_state.rs
+  ./ws/chat.rs
+  ../Cargo.toml
+  ../../lib/src/k8s.rs
+  ../../lib/src/error.rs
+
+Exposes:
+  @client — fonction `pub async` au sein du crate : le module lui-même est privé
+    (`mod k8s;` ./main.rs, sans `pub`), les appelants y accèdent par `crate::k8s::client`
+    ou `k8s::client` (imports des modules `api`/`ws`). Aucun gating `#[cfg(feature = ...)]`
+    dans le fichier ni sur le `mod k8s;` : compilé dans toutes les configurations de
+    l'app (app/Cargo.toml active la feature `k8s` de vanyline-lib en permanence).
+  Aucun autre item : pas de ré-export de @VnlK8sClient, pas de type, pas de constante.
+
+Accepts:
+  @client : `&AppState` — consomme `state.k8s` (le cache, @Arc<tokio::sync::Mutex<
+    @Option<@VnlK8sClient>>>) et `state.config.k8s_namespace` (@Option<@String> lu depuis
+    la variable d'environnement `VNL_K8S_NAMESPACE` par ./config.rs).
+
+Returns:
+  @client : @Result<@VnlK8sClient, @AppError>. Cache chaud (`state.k8s` déjà `Some`) :
+    clone du client en cache, aucune interaction avec la lib ni avec la config. Cache
+    froid : client fraichement découvert par @vanyline_lib::k8s::VnlK8sClient::discover,
+    inséré dans le cache avant le retour, puis retourné. Le type retourné est un clone
+    possédé (@VnlK8sClient est @Clone — clone du client kube interne + du namespace,
+    bon marché) ; aucune garde du mutex ne remonte à l'appelant.
+
+Raises:
+  @AppError::K8sConfigError (marqueur `"VNL-K8S-001"`, réponse HTTP 502 via
+    ./error.rs::@AppError::IntoResponse) si @vanyline_lib::k8s::VnlK8sClient::discover
+    échoue (ni cluster in-cluster, ni kubeconfig joignable). Constructeur explicite via
+    `map_err(|e| AppError::K8sConfigError(e.to_string()))`, jamais le `From<@VnyError>`
+    de ./error.rs — mais variante identique à celle que `From` aurait choisie pour
+    @VnyError::K8sConfigError. Le message `{0}` porte l'affichage complet du @VnyError
+    (donc le marqueur `"VNL-K8S-001"` en double — cf. `Tasks`).
+  @client ne produit jamais @AppError::K8sApiError ni @AppError::K8sNotFound : ces
+    variantes viennent des appels API ultérieurs faits par l'appelant sur le client
+    retourné, pas de cette fonction.
+  Jamais de panic en code de production (harnais de /tooling.sdd) : pas d'`unwrap`,
+    d'`expect`, de `panic!`, de `println!`/`eprintln!` dans le fichier.
+
+Handles:
+  Cache chaud : le test `guard.as_ref()` précède tout appel à la lib — le namespace de
+    ./config.rs n'est plus consulté après la première découverte (un changement
+    environnemental de `VNL_K8S_NAMESPACE` en cours de vie du processus est sans effet,
+    le cache vit jusqu'au prochain redémarrage du pod).
+  Cache froid : la garde du @tokio::sync::Mutex est tenue SUR TOUT l'await de `discover`
+    — les appels concurrents pendant la découverte attendent bloqués sur le verrou, puis
+    trouvent le `Some` posé par le premier et repartent avec un clone. Une seule
+    découverte par processus, jamais deux `discover` en parallèle.
+  Échec de découverte : la garde est relâchée sans rien écrire — le cache reste `None`,
+    aucune erreur négative n'est mise en cache, aucun empoisonnement ; l'appel suivant
+    retente une découverte complète (y compris avec une config réparée entre-temps).
+  Consommateur REST (api/sandboxes, api/projects, api/owners::ensure_owner,
+    ws/sandbox_state) : l'erreur remonte par `?` et devient un 502 JSON `{"error": …}`
+    au sens de ./error.rs.
+  Consommateur WS (./ws/chat.rs) : l'erreur est interceptée par un `match` —
+    `send_tool_unavailable` avec le message de l'erreur sur le canal WS, retour liste
+    vide, sans fermer la connexion ni faire échouer le tour de chat.
+  `VNL_K8S_NAMESPACE` absent : @Option `None` passé à `discover` = namespace du contexte
+    kubeconfig courant (ou du service account in-cluster), selon le contrat lib
+    ../../lib/src/k8s.sdd. `VNL_K8S_NAMESPACE` présente mais vide : voir `Tasks` (`[?]`).
+
+Must:
+  Découvrir au plus tard à la première requête ayant besoin de K8s : @AppState::k8s est
+    initialisé `Arc<tokio::sync::Mutex::new(None)>` au démarrage (./main.rs), aucun
+    appel K8s n'a lieu pendant le démarrage de l'app (le démarrage réussit sans cluster
+    joignable tant qu'aucune route K8s n'est appelée).
+  Prendre le verrou, tester le cache, ne découvrir que sur cache froid, écrire le clone
+    dans le cache AVANT de le retourner, retourner un clone (jamais la garde, jamais un
+    emprunt au cache).
+  Transmettre `state.config.k8s_namespace.clone()` tel quel à
+    @vanyline_lib::k8s::VnlK8sClient::discover : aucune normalisation, aucun défaut,
+    aucune validation du namespace ici (la résolution override-vs-contexte est le
+    contrat de la lib).
+  Mapper l'échec de découverte exclusivement sur @AppError::K8sConfigError avec le
+    `to_string()` complet de l'erreur lib (message non tronqué, non réécrit).
+  Rester sans gating de feature : `mod k8s;` inconditionnel dans ./main.rs, aucun
+    `#[cfg(...)]` dans ./k8s.rs — la feature `k8s` de vanyline-lib est activée sans
+    condition dans ../Cargo.toml (`features = ["k8s"]`).
+
+Must not:
+  Mettre en cache un échec de découverte (erreur négative) ni poser un état terminal
+    dans @AppState::k8s après erreur.
+  Appeler @vanyline_lib::k8s::VnlK8sClient::discover en parallèle de lui-même : deux
+    découvertes simultanées sont proscrites par la prise du verrou avant toute
+    interaction avec la lib.
+  Créer ici une variante d'erreur propre au fichier : seul @AppError::K8sConfigError
+    (variante existante de ./error.rs, marqueur `"VNL-K8S-001"`) est employé.
+  Exposer le module hors du crate (`pub mod`) ou exposer un moyen de vider/réinitialiser
+    le cache (aucune API d'invalidation — la re-découverte passe par le redémarrage du
+    processus).
+  Tester avec un mock d'API server kube : convention du projet (aucun mock kube, cf.
+    ../../lib/src/k8s.sdd) ; les chemins succès se testent contre un cluster réel.
+
+Depends on:
+  ../../lib/src/k8s.rs — @vanyline_lib::k8s::VnlK8sClient (@Clone) et son
+    @vanyline_lib::k8s::VnlK8sClient::discover (in-cluster puis kubeconfig, namespace
+    override optionnel) ; contrat complet dans ../../lib/src/k8s.sdd.
+  ../../lib/src/error.rs — @VnyError::K8sConfigError (`"VNL-K8S-001"`), dont le
+    `to_string()` alimente le message de @AppError::K8sConfigError.
+  ./main.rs — @AppState (champs `k8s` et `config`) et l'initialisation du cache à `None`
+    au démarrage.
+  ./config.rs — @Config::k8s_namespace : `env::var("VNL_K8S_NAMESPACE").ok()`, @Option
+    lu une seule fois au démarrage.
+  ./error.rs — @AppError::K8sConfigError et sa traduction HTTP (502).
+  `tokio` — @tokio::sync::Mutex du cache (verrou asynchrone, tenu pendant un await).
+  ../Cargo.toml — activation permanente de la feature `k8s` de vanyline-lib.
+
+Tasks:
+  [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
+    Relecture de reverse-engineering du 2026-09-26.
+  [?] Ligne 15 de ./k8s.rs, `let client = client;` : liaison identité sans effet
+    observable (reliquat probable d'un refactor, ex: suppression d'un `?`/d'un
+    logging). À supprimer, ou cache-t-elle une intention (point d'arrêt pour futur
+    code) ?
+  [?] Marqueur `"VNL-K8S-001"` dupliqué dans le message final : @AppError::K8sConfigError
+    affiche `"VNL-K8S-001: Kubernetes config error: {0}"` et `{0}` porte déjà
+    `"VNL-K8S-001: Cannot reach Kubernetes cluster: …"` (Display du @VnyError).
+    Accepté en l'état (les deux marqueurs dans les logs/502) ou il faut extraire la
+    cause interne du @VnyError pour ne garder qu'un marqueur ?
+  [?] La garde du mutex est tenue pendant tout l'await de `discover` : si
+    @kube::Config::infer bloque longtemps (découverte in-cluster hasardeuse, kubeconfig
+    sur stockage lent), TOUS les appelants K8s sont figés derrière le verrou sans délai
+    propre. Accepté (une seule découverte, rare) ou faut-il un timeout / un
+    shared-once (@tokio::sync::OnceCell) ?
+  [?] `VNL_K8S_NAMESPACE=""` (variable présente mais vide) donne `Some("")` :
+    @VnlK8sClient::discover reçoit un override non-`None` de namespace vide et
+    l'appelant obtient un client dont les opérations namespaced visent le namespace
+    `""`. Normaliser vide → `None` dans ./config.rs, ou documenter que la variable ne
+    doit jamais être posée vide (le reconciler Application du controller la pose-t-il
+    parfois vide ?)
+  [?] Aucun test n'existe aujourd'hui pour ./k8s.rs (aucun module `tests` dans le
+    fichier). Les Scenarios succès/concurrence ci-dessous exigent un cluster réel
+    (convention anti-mock). Quel niveau de couverture attend-on pour ce fichier : les
+    deux Scenarios offline suffisent-ils en CI, les Scenarios cluster restant-ils au
+    niveau intégration manuelle (comme ceux de ../../lib/src/k8s.sdd) ?
+  [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
+    (implementer), puis faire passer la synthèse du validator au vert.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre et passe (les
+    Scenarios cluster au niveau indiqué).
+  Tous les `[?]` des `Tasks` ont une décision écrite de Sébastien, répercutée ici.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur le workspace.
+
+Scenario: client_echec_decouverte_vnl_k8s_001
+  Given un @AppState de test construit sans cluster joignable (cache `k8s` à `None`,
+    `k8s_namespace` à `None`, `KUBERNETES_SERVICE_HOST` absent, `KUBECONFIG` vers un
+    fichier inexistant, `HOME` sans `.kube/config` — test d'environnement, maîtrise des
+    variables d'env process par process)
+  When @client est appelé sur cet état
+  Then le résultat est un @Err de variante @AppError::K8sConfigError
+  And son `to_string()` contient `"VNL-K8S-001"`
+  And l'emplacement @AppState::k8s contient toujours `None`
+
+Scenario: client_echec_non_cache_reteste_a_chaque_appel
+  Given le même @AppState de test sans cluster joignable que ci-dessus
+    (test d'environnement)
+  When @client est appelé deux fois de suite
+  Then les deux appels échouent chacun avec @AppError::K8sConfigError
+  And l'emplacement @AppState::k8s reste `None` après le second appel (aucune erreur
+    négative mémorisée, la seconde découverte est bien retentée)
+
+Scenario: client_cache_chaud_ignore_la_config
+  Given un client K8s découvert avec succès et placé dans le cache d'un @AppState
+    (cluster de test joignable — test d'intégration cluster)
+  When @client est rappelé sur un @AppState cloné dont `config.k8s_namespace` a été
+    modifié (ex: passé à `Some("autre-ns")`)
+  Then le client retourné est celui du cache : une écriture (@create_owner) faite avec
+    ce client atterrit dans le namespace d'origine de la découverte, pas dans `"autre-ns"`
+    (prouve que la branche cache chaud n'a pas consulté la config ni relancé `discover`)
+
+Scenario: client_namespace_override_depuis_config
+  Given un @AppState de test dont `config.k8s_namespace` vaut `Some("ns-app-test")`,
+    cache froid, sur un cluster de test où `"ns-app-test"` existe (test d'intégration
+    cluster)
+  When @client est appelé, puis qu'un @create_owner minimal est exécuté avec le client
+    retourné
+  Then l'Owner atterrit dans le namespace `"ns-app-test"`
+  And @AppState::k8s est passé à `Some` après l'appel (le client découvert a été mis en
+    cache)
+
+Scenario: client_appels_concurrents_une_seule_decouverte
+  Given un @AppState de test cache froid sur un cluster de test joignable (test
+    d'intégration cluster)
+  When deux appels à @client sont lancés simultanément (`tokio::join!`) sur le même état
+  Then les deux appels retournent @Ok
+  And @AppState::k8s vaut `Some` à la fin
+  And les clients des deux appelants opèrent sur le même namespace résolu (écritures
+    faites par l'un visibles par une lecture de l'autre dans ce namespace)

@@ -1,0 +1,327 @@
+Spec: Migration m20260825_000010_create_vanyline_owner_links
+
+Purpose:
+  Dixième et dernière migration (10/10 de la chaîne de `./mod.sdd`) de l'`app` : pose du
+  DDL de la table `vanyline_owner_links`, qui porte le lien entre un utilisateur
+  miryad-core (id de `miryad_users`) et le nom du Owner CRD Kubernetes (`k8s_owner_name`).
+  Fichier purement DDL : `up` = un seul `CREATE TABLE` (trois colonnes, FK, unicité
+  colonne-level via `.unique_key()`), `down` = un seul `DROP TABLE` ; aucune logique
+  métier, aucune DML, aucun log. Ce fichier est LE contrat SCHEMA référencé par l'entité
+  sœur `../db/entities/owner_links.sdd` (correspondance colonne par colonne contractée des
+  deux côtés) ; l'orchestration (ordre d'application, table de suivi `seaql_migrations_app`,
+  règle de régression Phase 3 sur `.index(...)`, interdit de modifier un `up` appliqué)
+  appartient à `./mod.sdd` et n'est pas dupliquée ici. Dépendance externe unique : la table
+  `miryad_users`, créée par le migrateur `miryad-core` qui doit précéder celui de l'app —
+  en dernière position de la chaîne, ce `up` est le dernier point d'échec si cet ordre
+  n'est pas respecté. Particularité vis-à-vis du patron des neuf sœurs : l'unicité est
+  portée par `@ColumnDef::unique_key()` (contrainte `UNIQUE` inline sur la colonne), et non
+  par un `@Index::create().unique(...)` inline comme dans `./m20260825_000001_create_vanyline_skills.rs`
+  — les deux formes produisent une contrainte de table valide. La règle de régression
+  Phase 3 de `./mod.sdd` (fragment `(...)` orphelin) ne vise que `.index(...)` sans
+  `.unique()` inline ; la forme `.unique_key()` de ce fichier n'est pas concernée par cette
+  régression et est contractuellement équivalente en base.
+
+Owns:
+  ./m20260825_000010_create_vanyline_owner_links.rs
+
+Can read:
+  ./mod.rs — enregistrement dans `@Migrator::migrations` (dernier élément du vec), table de
+    suivi `seaql_migrations_app`, test de régression `migrations_apply_cleanly`.
+  ../db/test_support.rs — harnais `real_db()` (SQLite en mémoire, paire de migrateurs
+    miryad-core + app) où ce DDL est réellement exécuté.
+  ../db/entities/owner_links.rs — consommateur du schéma (correspondance à maintenir, spec
+    `../db/entities/owner_links.sdd`).
+  ../api/owners.rs — consommateur comportemental : `resolve_owner_name` (lecture filtrée
+    `Column::UserId`) et `ensure_owner` (upsert `INSERT … ON CONFLICT (user_id) DO UPDATE`),
+    dont le conflit-cible repose directement sur la contrainte posée ici.
+
+Exposes:
+  @Migration — `pub struct` du module privé `migration::m20260825_000010_create_vanyline_owner_links`
+    (déclaré `mod …;` dans ./mod.rs) : atteignable depuis le module `migration` uniquement,
+    jamais hors du binaire. `#[derive(DeriveMigrationName)]` → le nom enregistré dans
+    `seaql_migrations_app` est le stem du fichier,
+    `m20260825_000010_create_vanyline_owner_links` (identité d'historique — cf. `Must`).
+  @MigrationTrait::up / @MigrationTrait::down — méthodes async (`@async_trait`), seules
+    méthodes du fichier.
+  @OwnerLink — enum privée `#[derive(DeriveIden)]` : variante `Table` avec iden littéral
+    `vanyline_owner_links` (`#[sea_orm(iden = "vanyline_owner_links")]`) ; variantes de
+    colonnes `Id`, `UserId`, `K8sOwnerName` → idens snake_case `id`, `user_id`,
+    `k8s_owner_name`.
+  @User — enum privée `#[derive(DeriveIden)]` qui re-déclare LOCALEMENT l'identifiant de la
+    table externe `miryad_users` (`#[sea_orm(iden = "miryad_users")]`) et sa colonne `Id` :
+    couplage nom-à-nom avec le schéma de miryad-core, aucune référence aux entités du crate
+    externe (cf. `Tasks`).
+  Aucun test interne : à la différence des sœurs, ce DDL n'est vérifié par AUCUNE lecture de
+    sa table dans le dépôt — le test `migrations_apply_cleanly` de ./mod.rs applique la
+    chaîne complète (donc ce `up`, dont l'échec paniquerait le harnais) mais ne requête que
+    `vanyline_skills`. Les scénarios ci-dessous sont tous à dériver (`Tasks`).
+
+Accepts:
+  @MigrationTrait::up(@sea_orm_migration::SchemaManager) — exécute le DDL compilé sur la
+    connexion du runner ; backend = PostgreSQL (binaire de prod) ou SQLite (harnais
+    `../db/test_support.rs::real_db`).
+  @MigrationTrait::down(@sea_orm_migration::SchemaManager) — même contexte.
+  Aucun paramètre, aucune configuration runtime, aucun `#[cfg(...)]`, aucune feature : le
+    même builder est compilé pour les deux backends.
+
+Returns:
+  Les deux méthodes : `@Result<(), @sea_orm::DbErr>` — `Ok(())` quand le backend a accepté
+    le DDL, valeur de résultat transmise telle quelle de l'`await` sur
+    `@SchemaManager::create_table` / `@SchemaManager::drop_table`. Rien d'autre : ni compte
+    de lignes, ni diff de schéma, ni id généré.
+
+Raises:
+  @sea_orm::DbErr propagé brut du backend, sans mapping, log ni wrap (aucun `match`/
+    `map_err` dans le fichier), vers `@MigratorTrait::up` dont l'appelant `../main.rs`
+    assume l'échec (log `VNL-DB-005` + `exit(1)` — contrat `../main.rs.sdd`).
+  Cas concrets côté `up` : table `miryad_users` absente (PostgreSQL refuse le
+    `REFERENCES` ; SQLite sans `PRAGMA foreign_keys` l'accepte silencieusement) — ce
+    fichier étant dernier de la chaîne, tout désordre miryad-core → app se materialise
+    ici ; toute autre erreur du backend — syntaxe rejetée, collision d'objet existant
+    (`IF NOT EXISTS` ne protège que la table elle-même, pas la contrainte unique ni la FK).
+  Cas concrets côté `down` : table absente → `DbErr` (pas d'`IF EXISTS`) ; en PostgreSQL,
+    dépendance entrante bloquante — il n'en existe aucune à ce jour (aucune FK des dix
+    migrations ne référence `vanyline_owner_links`).
+
+Handles:
+  Rien : aucune interception d'erreur, aucun retry, aucun fallback, aucun chemin
+    conditionnel par backend.
+
+Must:
+  Produire dans `up` exactement une instruction `CREATE TABLE IF NOT EXISTS
+    vanyline_owner_links` (`@Table::create().table(…).if_not_exists()`) et rien d'autre —
+    pas d'ALTER, pas d'index séparé, pas de DML/seed.
+  Porter les trois colonnes dans l'ordre de déclaration `id`, `user_id`,
+    `k8s_owner_name`, avec les propriétés logiques suivantes (la traduction physique en
+    tokens SQL relève de sea-query 1.0.2 — voir `Tasks`) :
+      - `id` : `integer()` NOT NULL, `auto_increment()`, clé primaire mono-colonne
+          (`.primary_key()` inline) ;
+      - `user_id` : `integer()` NOT NULL, sans défaut, porteur de la contrainte `UNIQUE`
+          par `@ColumnDef::unique_key()` inline sur la colonne ;
+      - `k8s_owner_name` : `string()` (longueur non bornée) NULLABLE (aucun `.not_null()`),
+          sans défaut → `NULL` par défaut.
+    La correspondance avec `../db/entities/owner_links.sdd` (`i32`/`i32`/
+    `Option<String>`, mêmes nullabilité et absence de défaut) est un contrat bilatéral.
+  Poser dans le `CREATE TABLE` la FK `user_id` → `miryad_users(id)` avec
+    `@ForeignKeyAction::Cascade` sur DELETE uniquement (`.on_delete(…)`) ; aucune action
+    `ON UPDATE` n'est déclarée, le défaut du backend s'applique (PostgreSQL : `NO ACTION`
+    — asymétrie à confirmer, voir `Tasks`).
+  Garantir l'unicité de `user_id` seul — c'est LA garantie exécutable du lien « un lien par
+    utilisateur » (l'attribut `#[sea_orm(unique)]` de l'entité sœur n'est qu'une métadonnée
+    déclarative sans effet en base, cf. `[!]` des `Tasks` de
+    `../db/entities/owner_links.sdd`). Cette unicité mono-colonne est un prérequis
+    fonctionnel de `ensure_owner` (`../api/owners.rs`) : son upsert cible
+    `ON CONFLICT (user_id)` — en PostgreSQL comme en SQLite, un conflit-cible mono-colonne
+    exige une contrainte ou index UNIQUE portant sur `user_id` seul ; la remplacer par une
+    unicité composite casserait l'upsert (erreur de conflit-cible introuvable), pas seulement
+    la sémantique.
+  Rester double-compatible sans condition : mêmes builders `integer()`/`string()`/
+    `unique_key()` compilés à l'identique pour PostgreSQL (prod) et SQLite (tests
+    `real_db`) ; aucun `.custom(...)` ni type propre à un backend dans ce fichier.
+  Supposer la pré-existence de `miryad_users` (migrateur miryad-core appliqué avant
+    l'app) : seule garantie de résolution de la FK en PostgreSQL ; l'ordre est contracté
+    par `./mod.sdd`, pas vérifié par ce fichier.
+  Enregistrer dans `seaql_migrations_app`, sous le nom
+    `m20260825_000010_create_vanyline_owner_links` dérivé du stem du fichier par
+    `@DeriveMigrationName`, sa position de DERNIÈRE migration de la chaîne de l'app
+    (dixième et dernier élément du vec, dernière ligne d'historique en régime stable —
+    orchestration `./mod.sdd`).
+  Implémenter `down` comme un `DROP TABLE vanyline_owner_links` nommé
+    (`@Table::drop().table(OwnerLink::Table)`, table ciblée individuellement, pas une
+    liste) — sans `IF EXISTS`, sans `CASCADE`, et rien d'autre.
+  Rester conforme au harnais clippy du workspace (`../../../tooling.sdd`) : aucun
+    `println!`/`eprintln!`/`unwrap`/`expect`/`dbg!` — le fichier actuel ne viole rien.
+
+Must not:
+  Ajouter, supprimer, renommer une colonne ni changer type, nullabilité, défaut,
+    auto-incrément, actions de FK ou unicité dans ce `up` : la migration est déjà appliquée
+    en production et l'historique `seaql_migrations_app` est identifié par nom — toute
+    évolution du schéma des liens passe par une onzième migration (règle `./mod.sdd`).
+  Retirer `.unique_key()` de `user_id` ou la remplacer par une unicité composite
+    (ex. `(user_id, k8s_owner_name)`) : l'upsert `ON CONFLICT (user_id)` de
+    `../api/owners.rs` en dépend structurellement, pas seulement sémantiquement.
+  Retirer `.not_null()` de `user_id`, ou ajouter `.not_null()` / un défaut à
+    `k8s_owner_name` sans extension préalable de cette spec ET de
+    `../db/entities/owner_links.sdd` (contrat bilatéral + `[?]` de la ligne NULL à trancher
+    d'abord).
+  Utiliser `.index(...)` sans `.unique()` dans le `@Table::create()` (régression Phase 3
+    de `./mod.sdd`) ; tout futur index non-UNIQUE passe par une instruction séparée
+    `@SchemaManager::create_index`.
+  Écrire dans une autre table, insérer des lignes (seed) ou émettre un DDL autre que le
+    `CREATE TABLE` (up) et le `DROP TABLE` (down).
+  Modifier les littéraux d'iden `vanyline_owner_links` ou `miryad_users`, ou renommer le
+    fichier / changer son préfixe temporel : le nom de fichier est l'identité d'historique
+    et le nom de table est attendu par `../db/entities/owner_links.rs`, `../api/owners.rs`
+    et, en aval cluster, la sémantique du Owner CRD.
+  Ajouter une action `ON UPDATE`, changer `CASCADE` en une autre action `ON DELETE`, ou
+    ajouter `.if_exists()` / `CASCADE` au `down` sans extension préalable de cette spec.
+  Déclarer ici une entité SeaORM, une relation ou une logique applicative (résolution de
+    nom, sanitisation RFC1123) — le domaine vit dans `../db/entities/owner_links.sdd` et
+    `../api/owners.rs`.
+
+Depends on:
+  `sea-orm-migration` 2 (`@MigrationTrait`, `@SchemaManager`, `@DeriveMigrationName`),
+    `sea-query` 1 via le prelude (`@Table`, `@ColumnDef`, `@ForeignKey`,
+    `@ForeignKeyAction`, `@DeriveIden`) et `@async_trait` — versions verrouillées 2.0.2 /
+    1.0.2 (`Cargo.lock`) ; la traduction PostgreSQL/SQLite du builder appartient à cette
+    librairie.
+  ./mod.sdd — ordre (dernier élément du vec, position 10/10), table de suivi
+    `seaql_migrations_app`, règle `.index(...)`-UNIQUE, interdit de modifier un `up`
+    appliqué, arbitrage rollback en attente.
+  `@miryad_core::migration::Migrator` (crate externe, hors dépôt) — indirect : il crée
+    `miryad_users`, cible de la FK, et doit précéder ce `up`.
+  ../db/entities/owner_links.sdd — contrat entité ↔ ce schéma (bilatéral) ;
+    ../api/owners.rs — consommateur dont l'upsert dépend de la forme exacte de la contrainte
+    unique ; ../main.rs — appelant du migrateur (échec : `VNL-DB-005`).
+  ./m20260825_000001_create_vanyline_skills.rs — sœur au patron DDL proche (même FK, même
+    auto-incrément), citée pour contraste : unicité par `@Index::create().unique(...)`
+    inline table là, par `@ColumnDef::unique_key()` inline colonne ici.
+
+Tasks:
+  [?] `k8s_owner_name` nullable : aucun chemin de code de l'app n'insère de ligne au nom
+      NULL (`ensure_owner` écrit toujours `Some(name)`), et `resolve_owner_name`
+      (`../api/owners.rs`) traite une ligne à nom NULL exactement comme l'absence de ligne
+      (`and_then`). Miroir du `[?]` de `../db/entities/owner_links.sdd` : la ligne à nom
+      NULL est-elle un état licite voulu du schéma (le Scenario « un lien sans
+      k8s_owner_name est accepté au niveau SQL et se relit NULL » en acte le contrat SQL
+      actuel), ou la colonne devrait-elle passer `NOT NULL` via une
+      onzième migration ? À trancher avec Sébastien.
+  [!] Unicité double-déclarée : `#[sea_orm(unique)]` sur l'entité sœur (métadonnée
+      déclarative, sans effet à l'exécution) et `.unique_key()` ici (contrainte réellement
+      imposée). La garantie exécutable est UNIQUEMENT celle de ce fichier ; toute
+      divergence future des deux déclarations ne se verra qu'en base. Le `[!]` de
+      `../db/entities/owner_links.sdd` et cette ligne doivent rester lus ensemble.
+  [?] Contrainte unique et FK sans `.name(...)` explicite : PostgreSQL les auto-nomme
+      (convention `vanyline_owner_links_user_id_key` / `vanyline_owner_links_user_id_fkey`),
+      SQLite émet des auto-index (`sqlite_autoindex_vanyline_owner_links_N`). Les messages
+      d'erreur de violation (remontés tels quels dans `AppError` par `../api/owners.rs`) et
+      l'introspection dépendent de ces noms backend — faut-il nommer les contraintes ?
+  [?] `ON DELETE CASCADE` sans `ON UPDATE` : asymétrie suppression (cascade, le lien
+      disparaît avec l'utilisateur miryad-core) vs mise à jour de `miryad_users.id`
+      (refusée par `NO ACTION` en PostgreSQL) — voulue ? Écho du `[?]` équivalent de
+      `./m20260825_000001_create_vanyline_skills.sdd`.
+  [!] Asymétrie de garde-fous : `up` défensif (`IF NOT EXISTS`) mais `down` sans
+      `IF EXISTS` — un second `down` sur table absente est une erreur. Volontaire ou
+      oubli ? (Lié au `[?]` de politique de rollback, ouvert dans `./mod.sdd` — les deux
+      Scenarios `down` ci-dessous n'y répondent pas, ils constatent le code actuel.)
+  [!] Aucun harnais du dépôt n'active les FK SQLite (`PRAGMA foreign_keys=ON` absent de
+      tout `app/src`) : les scénarios cascade / FK-violée / `miryad_users` absent ne sont
+      réellement vérifiables qu'en PostgreSQL, alors que `real_db()` est un SQLite sans FK.
+      De plus, AUCUN test du dépôt ne lit aujourd'hui la table `vanyline_owner_links`
+      (le test de ./mod.rs ne requête que `skills`) — contrairement aux autres tables, son
+      DDL n'est validé que par « l'application ne panique pas ». Les scénarios 2 à 6
+      ci-dessous ferment cette lacune côté SQLite ; les scénarios FK restent PostgreSQL-only.
+  [?] Couplage nom-à-nom : l'enum `@User` re-déclare `miryad_users` localement sans lien
+      typé vers miryad-core — un renommage côté miryad-core ne serait cassé qu'à
+      l'exécution PostgreSQL, EN DERNIER de la chaîne (dernière FK de l'app vers cette
+      table, avec skills/toolsets/…). Accepté, ou garde-fou (test d'application PostgreSQL,
+      constante partagée) ?
+  [?] Traduction physique par sea-query 1.0.2 non observable depuis le dépôt :
+      `integer() + auto_increment()` → `serial` ou `GENERATED … AS IDENTITY` en PostgreSQL,
+      `INTEGER PRIMARY KEY AUTOINCREMENT` en SQLite ? `string()` sans longueur → `text` ou
+      `varchar` ? Trancher si le contrat descend au niveau des tokens physiques ou s'arrête
+      aux propriétés logiques de `Must` (même question que la sœur 000001).
+  [ ] Dériver les tests des Scenario ci-dessous, taggés par leur titre — aucun test propre
+      à cette migration n'existe à ce jour. Attendre l'arbitrage rollback de `./mod.sdd`
+      avant d'écrire les tests des deux Scenario `down`.
+  [ ] Rattacher cette spec dans `Structure`/`Depends on` de ./mod.sdd (tâche ouverte côté
+      `./mod.sdd`) et lever la mention « en cours de rédaction » de
+      `../db/entities/owner_links.sdd` (Depends on de cette dernière).
+
+Done when:
+  Chaque Scenario est couvert par un test taggé vert (les deux `down` après arbitrage
+  rollback de `./mod.sdd`), la correspondance avec `../db/entities/owner_links.sdd` est
+  vérifiée des deux côtés à chaque changement, et les `[?]`/`[!]` sont tranchés avec
+  Sébastien ou reportés vers la spec propriétaire (`./mod.sdd`, miryad-core, harnais de
+  test).
+
+Scenario: la table vanyline_owner_links porte exactement trois colonnes contractuelles
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` (miryad-core
+    puis app)
+  When on lit `PRAGMA table_info(vanyline_owner_links)`
+  Then on obtient exactement les 3 colonnes `id`, `user_id`, `k8s_owner_name` dans cet
+    ordre, avec `notnull` = 1 pour `id` et `user_id` uniquement (`k8s_owner_name` avec
+    `notnull` = 0), `pk` = 1 pour `id` uniquement, et aucun `dflt_value` sur
+    `k8s_owner_name`
+
+Scenario: l'unicité de user_id est une contrainte réelle portant sur user_id seul
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on lit `PRAGMA index_list(vanyline_owner_links)` puis `PRAGMA index_info` pour
+    chaque index marqué unique
+  Then il existe au moins un index unique couvrant exactement la colonne `user_id` seule
+    (auto-index SQLite issu de la contrainte colonne-level posée par `.unique_key()`) — la
+    contrainte est bien en base, pas seulement dans la métadonnée `#[sea_orm(unique)]` de
+    l'entité — et aucun index unique ne couvre `k8s_owner_name`
+
+Scenario: un second lien pour un même utilisateur est rejeté
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` contenant
+    déjà une ligne `vanyline_owner_links (user_id = 1, k8s_owner_name = 'alice')`
+  When on insère une seconde ligne avec `user_id = 1` et `k8s_owner_name = 'alice-bis'`
+  Then l'insertion échoue sur la contrainte unique (erreur SQLite `UNIQUE constraint
+    failed` ; code PostgreSQL 23505) et la première ligne est inchangée
+
+Scenario: un lien pour un utilisateur différent est accepté
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` contenant
+    déjà une ligne `vanyline_owner_links (user_id = 1, k8s_owner_name = 'alice')`
+  When on insère une ligne `(user_id = 2, k8s_owner_name = 'bob')`
+  Then l'insertion réussit et les deux lignes coexistent — l'unicité porte sur `user_id`
+    seul, pas sur le couple `(user_id, k8s_owner_name)`
+
+Scenario: un lien sans k8s_owner_name est accepté au niveau SQL et se relit NULL
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on insère via SQL `vanyline_owner_links (user_id)` avec `user_id = 3` sans la
+    colonne `k8s_owner_name`, puis on relit la ligne
+  Then `id` est auto-attribué (non nul), `user_id` vaut 3 et `k8s_owner_name` vaut `NULL` —
+    la nullabilité contractuelle est bien celle de l'entité (`Option<String>`), l'état
+    licité de cette ligne restant à trancher (`[?]` des `Tasks`)
+
+Scenario: le conflit-cible user_id seul soutient l'upsert d'ensure_owner
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on exécute deux fois de suite l'instruction `INSERT INTO vanyline_owner_links
+    (user_id, k8s_owner_name) VALUES (4, …) ON CONFLICT (user_id) DO UPDATE SET
+    k8s_owner_name = excluded.k8s_owner_name` avec `'first'` puis `'second'`
+  Then aucune des deux instructions n'échoue (le conflit-cible mono-colonne trouve bien la
+    contrainte posée par ce DDL), il n'existe qu'une seule ligne `user_id = 4` et sa
+    colonne `k8s_owner_name` vaut `'second'` — le patron exact de `ensure_owner`
+    (`../api/owners.rs`) est soutenable par ce schéma
+
+Scenario: un second up après effacement de l'historique ne recrée rien
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`, avec une
+    ligne insérée dans `vanyline_owner_links`, et la ligne
+    `m20260825_000010_create_vanyline_owner_links` effacée de `seaql_migrations_app`
+  When `@MigratorTrait::up` de `@crate::migration::Migrator` est rappelé avec step `None`
+    (les neuf autres migrations sont toujours dans l'historique)
+  Then aucun `DbErr` n'est retourné — le `CREATE TABLE IF NOT EXISTS` absorbe le rejeu —
+    et la ligne insérée est toujours présente (la table n'a pas été recréée vidée)
+
+Scenario: down supprime la table vanyline_owner_links
+  # Test à n'écrire qu'après l'arbitrage rollback de `./mod.sdd` (voir `Tasks`).
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` avec au
+    moins une ligne dans `vanyline_owner_links`, et un `@SchemaManager` obtenu sur cette
+    connexion
+  When `@MigrationTrait::down` de cette migration est appelé sur ce manager
+  Then `PRAGMA table_info(vanyline_owner_links)` ne retourne plus aucune ligne — la table
+    a disparu avec son contenu
+
+Scenario: un second down sur table absente échoue
+  # Test à n'écrire qu'après l'arbitrage rollback de `./mod.sdd` (voir `Tasks`).
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` sur laquelle
+    le `down` de cette migration a déjà réussi une fois, et le même `@SchemaManager`
+  When `@MigrationTrait::down` est rappelé sur ce manager
+  Then le retour est un `@sea_orm::DbErr` — le `DROP TABLE` sans `IF EXISTS` ne tolère pas
+    une table absente (contrat actuel, asymétrie `[!]` des `Tasks`)
+
+Scenario: supprimer l'utilisateur emporte son lien (PostgreSQL uniquement)
+  # Sans harnais PostgreSQL dans le dépôt — voir `[!]` des `Tasks` ; un SQLite sans
+  # `PRAGMA foreign_keys=ON` n'appliquerait pas la cascade.
+  Given une base PostgreSQL réelle avec les migrateurs miryad-core puis app appliqués, un
+    utilisateur `miryad_users` et une ligne `vanyline_owner_links` avec cet `user_id`
+  When l'utilisateur est supprimé de `miryad_users`
+  Then la ligne de `vanyline_owner_links` a disparu — `ON DELETE CASCADE` appliqué par la
+    base
+
+Scenario: un user_id inconnu est rejeté (PostgreSQL uniquement)
+  Given une base PostgreSQL réelle avec les migrateurs miryad-core puis app appliqués
+  When on insère dans `vanyline_owner_links` une ligne dont l'`user_id` n'existe pas dans
+    `miryad_users`
+  Then l'insertion est refusée par la FK (code PostgreSQL 23503 `foreign_key_violation`)

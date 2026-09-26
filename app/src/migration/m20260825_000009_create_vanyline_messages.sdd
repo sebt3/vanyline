@@ -1,0 +1,376 @@
+Spec: Migration m20260825_000009_create_vanyline_messages
+
+Purpose:
+  Neuvième migration (9/10 de la chaîne de `./mod.sdd`) de l'`app` : DDL de la table
+  `vanyline_messages` — un message de conversation de chat (rôle + `payload` JSON
+  complet), rattaché à un utilisateur (`miryad_users`) et à une conversation
+  (`vanyline_conversations`), les deux FK en `ON DELETE CASCADE` — plus un index
+  composite de lecture d'historique `(conversation_id, created_at)` posé en instruction
+  séparée. Fichier purement DDL : `up` = un `CREATE TABLE` + un `CREATE INDEX`, `down` =
+  un seul `DROP TABLE` ; aucune logique métier, aucune DML, aucun log. Ce fichier est LE
+  contrat SCHEMA référencé par l'entité sœur `../db/entities/messages.sdd` (correspondance
+  colonne par colonne contractée des deux côtés) ; l'orchestration (ordre d'application,
+  table de suivi `seaql_migrations_app`, règle de régression Phase 3 sur `.index(...)`)
+  appartient à `./mod.sdd` et n'est pas dupliquée ici. L'index composite est la
+  restauration d'une perte constatée en revue Phase 3 lors de la bascule miryad-core :
+  les lecteurs d'historique filtrent par `conversation_id` ET trient par `created_at`
+  (`@get_messages` dans `../api/conversations.rs`, `@load_history` dans `../ws/chat.rs`).
+  Dépendances externes : `miryad_users` (migrateur miryad-core, doit précéder) et
+  `vanyline_conversations` (créée par `./m20260825_000008_create_vanyline_conversations.rs`,
+  immédiatement précédente dans la chaîne).
+
+Owns:
+  ./m20260825_000009_create_vanyline_messages.rs
+
+Can read:
+  ./mod.rs — enregistrement dans `@Migrator::migrations` (9ᵉ élément), table de suivi,
+    test de régression `migrations_apply_cleanly`.
+  ./m20260825_000008_create_vanyline_conversations.rs — table cible de la FK
+    `conversation_id` (littéral d'iden `vanyline_conversations` à tenir synchronisé).
+  ./m20260825_000007_create_vanyline_chat_contexts.rs — sœur au même patron
+    `create_index` séparé (commentaire de régression Phase 3 équivalent, cité dans le
+    commentaire du fichier).
+  ../db/test_support.rs — harnais `real_db()` (SQLite en mémoire, paire de migrateurs
+    miryad-core + app) où ce DDL est réellement exécuté.
+  ../db/entities/messages.rs — entité consommatrice (correspondance à maintenir, spec
+    `../db/entities/messages.sdd`).
+  ../api/conversations.rs — `@get_messages` : `filter(Column::ConversationId)` +
+    `order_by_asc(Column::CreatedAt)`, justifie l'index composite.
+  ../ws/chat.rs — `@load_history` (même filtre + tri), `@persist_message` (écriture :
+    colonne `role` ET champ `role` du `payload`, `created_at = Set(chrono::Utc::now())`).
+
+Exposes:
+  @Migration — `pub struct` du module privé
+    `migration::m20260825_000009_create_vanyline_messages` (déclaré `mod …;` dans ./mod.rs) :
+    atteignable depuis le module `migration` uniquement, jamais hors du binaire.
+    `#[derive(DeriveMigrationName)]` → le nom enregistré dans `seaql_migrations_app` est le
+    stem du fichier, `m20260825_000009_create_vanyline_messages` (identité d'historique).
+  @MigrationTrait::up / @MigrationTrait::down — méthodes async (`@async_trait`), seules
+    méthodes du fichier.
+  @Message — enum privée `#[derive(DeriveIden)]` : variante `Table` avec iden littéral
+    `vanyline_messages` (`#[sea_orm(iden = "vanyline_messages")]`) ; variantes de colonnes
+    `Id`, `OwnerId`, `ConversationId`, `Role`, `Payload`, `CreatedAt` → idens snake_case
+    `id`, `owner_id`, `conversation_id`, `role`, `payload`, `created_at`.
+  @User — enum privée `#[derive(DeriveIden)]` qui re-déclare LOCALEMENT l'identifiant de
+    la table externe `miryad_users` (`#[sea_orm(iden = "miryad_users")]`) et sa colonne
+    `Id` : couplage nom-à-nom avec le schéma miryad-core, même patron que les sœurs.
+  @Conversation — enum privée `#[derive(DeriveIden)]` qui re-déclare LOCALEMENT la table
+    interne `vanyline_conversations` et sa colonne `Id` : couplage nom-à-nom avec le
+    littéral de `./m20260825_000008_create_vanyline_conversations.rs` et le
+    `table_name` de `../db/entities/conversations.rs`.
+  Aucun test interne : le seul filet existant sur ce DDL est le test de ./mod.rs
+    (`migrations_apply_cleanly`, qui exerce l'application complète sans sonder cette table).
+
+Accepts:
+  @MigrationTrait::up(@sea_orm_migration::SchemaManager) — exécute le DDL compilé sur la
+    connexion du runner ; backend = PostgreSQL (binaire de prod) ou SQLite (harnais
+    `../db/test_support.rs::real_db`).
+  @MigrationTrait::down(@sea_orm_migration::SchemaManager) — même contexte.
+  Aucun paramètre, aucune configuration runtime, aucun `#[cfg(...)]`, aucune feature :
+    le même builder est compilé pour les deux backends.
+
+Returns:
+  Les deux méthodes : `@Result<(), @sea_orm::DbErr>`. Dans `up`, le résultat de
+    `@SchemaManager::create_table` est propagé par `?` ; la valeur retournée est celle de
+    l'`await` final sur `@SchemaManager::create_index` (expression de queue). `down`
+    retourne la valeur de l'`await` sur `@SchemaManager::drop_table`. `Ok(())` quand le
+    backend a accepté le DDL. Rien d'autre : ni compte de lignes, ni diff de schéma.
+
+Raises:
+  @sea_orm::DbErr propagé brut du backend, sans mapping, log ni wrap (aucun `match`/
+    `map_err` dans le fichier), vers `@MigratorTrait::up` dont l'appelant `../main.rs`
+    assume l'échec (log `VNL-DB-005` + `exit(1)` — contrat `../main.rs.sdd`).
+  Cas concrets côté `up` : `miryad_users` ou `vanyline_conversations` absente (PostgreSQL
+    refuse le `REFERENCES` ; SQLite sans `PRAGMA foreign_keys` l'accepte silencieusement) ;
+    échec de `create_index` APRES réussite du `create_table` (table posée, index absent,
+    migration non enregistrée dans l'historique — voir `Handles`).
+  Cas concrets côté `down` : table absente → `DbErr` (pas d'`IF EXISTS`) ; en PostgreSQL,
+    dépendance entrante bloquante — il n'en existe aucune (aucune FK des migrations
+    ne référence `vanyline_messages`, `…000010` ne la cible pas).
+
+Handles:
+  Table préexistante : `if_not_exists()` fait du `create_table` un no-op réussi si une
+    table `vanyline_messages` existe déjà, QUEL QUE SOIT SON SCHÉMA (divergence masquée).
+  Échec partiel de `up` : les deux instructions (`create_table` puis `create_index`) ne
+    sont pas dans une transaction explicite du fichier. Si `create_index` échoue, le
+    `create_table` déjà appliqué reste en base et la migration non enregistrée sera
+    rejouée — le `create_table` est alors absorbé par `IF NOT EXISTS`, le `create_index`
+    est retenté. MAIS un crash entre la création réussie de l'index et l'écriture de
+    l'historique laisse l'index orphelin et tout rejeu futur en erreur « index déjà
+    existant » : contrairement à la table, l'index n'a pas d'`if_not_exists()` (voir
+    `Tasks`).
+  `down` : `DROP TABLE` emporte implicitement l'index composite avec la table (comportement
+    PostgreSQL et SQLite), aucune instruction de drop d'index séparée n'est nécessaire.
+  Rien d'autre : aucune interception d'erreur, aucun retry, aucun chemin conditionnel par
+    backend.
+
+Must:
+  Produire dans `up` exactement deux instructions, dans cet ordre : un
+    `CREATE TABLE IF NOT EXISTS vanyline_messages` puis un `CREATE INDEX` nommé, et rien
+    d'autre — pas d'ALTER, pas de DML/seed.
+  Porter dans le `CREATE TABLE` les six colonnes dans l'ordre de déclaration `id`,
+    `owner_id`, `conversation_id`, `role`, `payload`, `created_at`, avec les propriétés
+    logiques suivantes (la traduction physique en tokens SQL relève de sea-query 1.0.2 —
+    voir `Tasks`) :
+      - `id` : `integer()` NOT NULL, `auto_increment()`, clé primaire mono-colonne
+          (`.primary_key()` inline) ;
+      - `owner_id` : `integer()` NOT NULL, sans défaut ;
+      - `conversation_id` : `integer()` NOT NULL, sans défaut ;
+      - `role` : `string()` (longueur non bornée) NOT NULL, sans défaut, AUCUN CHECK en
+          base sur le vocabulaire `user`/`assistant`/`system` ;
+      - `payload` : `.custom("JSONB")` NOT NULL, SANS défaut — le nom de type SQL est émis
+          littéralement `JSONB` sur tout backend (SQLite l'accepte comme nom de type à
+          typage dynamique, PostgreSQL y voit son jsonb natif ; patron partagé avec
+          `./m20260825_000002_create_vanyline_toolsets.rs` et
+          `./m20260825_000004_create_vanyline_mcp_servers.rs`, mais ici sans
+          `default(Expr::cust(...))`) ;
+      - `created_at` : `timestamp_with_time_zone()` NOT NULL avec
+          `default(@Expr::current_timestamp())`.
+    La correspondance avec `../db/entities/messages.sdd` (`i32`/`i32`/`i32`/`String`/
+      `serde_json::Value`/`DateTimeUtc`, mêmes nullabilité et défauts) est un contrat
+      bilatéral.
+  Poser dans le `CREATE TABLE` deux FK inline, toutes deux `@ForeignKeyAction::Cascade`
+    sur DELETE uniquement (`.on_delete(…)`, aucune action `ON UPDATE` déclarée) :
+      - `owner_id` → `miryad_users(id)` (supprimer l'utilisateur emporte ses messages) ;
+      - `conversation_id` → `vanyline_conversations(id)` (supprimer la conversation emporte
+        ses messages — voie normale de la suppression de conversation par `@delete_conversation`
+        dans `../api/conversations.rs`, qui ne purge pas les messages côté Rust).
+  Poser l'index de lecture d'historique en instruction SÉPARÉE
+    `@SchemaManager::create_index(@Index::create()…)`, nommée explicitement
+    `idx_vanyline_messages_conversation_id_created_at`, NON unique, sur exactement deux
+    colonnes dans cet ordre : `conversation_id` puis `created_at` — l'ordre colonne de
+    filtrage puis colonne de tri est ce qui sert les requêtes
+    `filter(conversation_id).order_by_asc(created_at)` de `@get_messages` et
+    `@load_history`. Jamais chaînée en `.index(...)` sur `Table::create()` : un index
+    non-UNIQUE chaîné génère un fragment orphelin syntaxiquement invalide côté sea-query
+    (Postgres et SQLite compris) — régression Phase 3 contractée par `./mod.sdd`, commentée
+    dans le fichier.
+  Ne déclarer aucune unicité (ni `unique_key()` inline, ni `.unique()` sur l'index) : la
+    table accepte des lignes par ailleurs identiques ; seul `id` les distingue.
+  Rester double-compatible sans condition : mêmes builders compilés à l'identique pour
+    PostgreSQL (prod) et SQLite (harnais `real_db`) ; le seul SQL brut du fichier est le
+    nom de type `JSONB` de `.custom(...)`.
+  Supposer la pré-existence de `miryad_users` (migrateur miryad-core avant l'app) et de
+    `vanyline_conversations` (migration `…000008` immédiatement précédente) : seules
+    garanties de résolution des FK en PostgreSQL ; l'ordre est contracté par `./mod.sdd`,
+    pas vérifié par ce fichier.
+  Enregistrer dans `seaql_migrations_app`, sous le nom
+    `m20260825_000009_create_vanyline_messages` dérivé du stem du fichier par
+    `@DeriveMigrationName`, sa position de 9ᵉ migration de la chaîne de l'app
+    (orchestration `./mod.sdd`).
+  Implémenter `down` comme un `DROP TABLE vanyline_messages` nommé
+    (`@Table::drop().table(Message::Table)`, table ciblée individuellement) — sans
+    `IF EXISTS`, sans `CASCADE`, et rien d'autre (l'index tombe avec la table).
+  Rester conforme au harnais clippy du workspace (`../../../tooling.sdd`) : aucun
+    `println!`/`eprintln!`/`unwrap`/`expect`/`dbg!` — le fichier actuel ne viole rien.
+
+Must not:
+  Ajouter, supprimer, renommer une colonne ni changer type, nullabilité, défaut,
+    auto-incrément ou actions de FK dans ce `up` : la migration est déjà appliquée en
+    production et l'historique `seaql_migrations_app` est identifié par nom — toute
+    évolution du schéma des messages passe par une onzième migration (règle `./mod.sdd`).
+  Remplacer `.custom("JSONB")` par `.json()` (ou tout autre type), ajouter un
+    `default(...)` à `payload`, ni toucher `timestamp_with_time_zone()` /
+    `default(Expr::current_timestamp())` de `created_at` : réécrire une migration appliquée.
+  Modifier le nom littéral de l'index, ses colonnes ou leur ordre (`conversation_id`,
+    `created_at`), le passer en `.unique()`, ou le chaîner en `.index(...)` dans le
+    `Table::create()` (régression Phase 3, règle `./mod.sdd`).
+  Changer `@ForeignKeyAction::Cascade` en une autre action `ON DELETE`, ajouter une action
+    `ON UPDATE`, ou ajouter une troisième FK.
+  Modifier les littéraux d'iden `vanyline_messages`, `miryad_users` ou
+    `vanyline_conversations`, ni renommer le fichier / changer son préfixe temporel : le
+    nom de fichier est l'identité d'historique ; `vanyline_messages` est attendu par le
+    `table_name` de `../db/entities/messages.rs` et la réponse de `@get_messages` ;
+    `vanyline_conversations` doit rester synchrone avec le littéral de
+    `./m20260825_000008_create_vanyline_conversations.rs`.
+  Écrire dans une autre table, insérer des lignes (seed) ou émettre un DDL autre que le
+    `CREATE TABLE` + `CREATE INDEX` (up) et le `DROP TABLE` (down) ; intervenir sur
+    `seaql_migrations_app` (c'est SeaORM qui tient l'historique, pas l'enfant).
+  Ajouter une action `IF EXISTS` / `CASCADE` au `down`, ou une clause `if_not_exists()` à
+    l'index, sans extension préalable de cette spec.
+  Déclarer ici une entité SeaORM, une relation ou une logique applicative — le domaine
+    vit dans `../db/entities/messages.sdd`, la sémantique du `payload` dans `../ws/chat.rs`.
+
+Depends on:
+  `sea-orm-migration` 2 (`@MigrationTrait`, `@SchemaManager`, `@DeriveMigrationName`),
+    `sea-query` 1 via le prelude (`@Table`, `@ColumnDef`, `@Index`, `@ForeignKey`,
+    `@ForeignKeyAction`, `@Expr`, `@DeriveIden`) et `@async_trait` — versions verrouillées
+    2.0.2 / 1.0.2 (`Cargo.lock`) ; la traduction PostgreSQL/SQLite du builder appartient à
+    cette librairie.
+  ./mod.sdd — ordre (9ᵉ élément du vec, `…000008` avant soi), table de suivi
+    `seaql_migrations_app`, règle `.index(...)`-UNIQUE, interdit de modifier un `up`
+    appliqué, politique d'irrémédiabilité `[?]`.
+  ./m20260825_000008_create_vanyline_conversations.sdd (sœur) — existence et identité de
+    `vanyline_conversations`, cible de la FK `conversation_id` ; doit précéder.
+  `@miryad_core::migration::Migrator` (crate externe, hors dépôt) — indirect : il crée
+    `miryad_users`, cible de la FK `owner_id`, et doit précéder ce `up`.
+  ../db/entities/messages.sdd — contrat entité ↔ ce schéma (bilatéral) ;
+    ../api/conversations.rs (`@get_messages`) et ../ws/chat.rs (`@load_history`,
+    `@persist_message`) — consommateurs dont les requêtes motivent l'index et écrivent les
+    lignes.
+  ../main.rs — appelant de `@MigratorTrait::up` au démarrage (échec → `VNL-DB-005` +
+    `exit(1)`).
+
+Tasks:
+  [?] `role` dupliqué entre la colonne `role` et le champ `role` du `payload` (les deux
+      écrits par `@persist_message` dans `../ws/chat.rs`) : cette DDL stocke la valeur deux
+      fois sans contrainte de cohérence. Quelle colonne est la source de vérité ? Écho du
+      `[?]` homonyme de `../db/entities/messages.sdd` — à trancher avec Sébastien, une fois
+      pour les deux specs.
+  [!] FK SQL déclarées (deux CASCADE) alors que `@Relation` de l'entité est vide
+      (`../db/entities/messages.sdd`) : la cascade vit exclusivement côté moteur, SeaORM
+      l'ignore. Convention à confirmer pour toutes les entités `entities/*` (report du
+      `[!]` de la spec entité).
+  [!] Aucun harnais du dépôt n'active les FK SQLite (`PRAGMA foreign_keys=ON` absent de
+      tout `app/src`) : les scénarios cascade conversation/owner et FK-violée ne sont
+      réellement vérifiables qu'en PostgreSQL, alors que `real_db()` est un SQLite sans FK
+      — même lacune que `./m20260825_000001_create_vanyline_skills.sdd`. Arbitrer :
+      harnais SQLite avec pragma, ou tests d'intégration PostgreSQL.
+  [?] `payload` en `.custom("JSONB")` sans défaut, jamais confronté à un vrai jsonb dans
+      le dépôt : en SQLite le nom de type est ignoré (typage dynamique, chaîne stockée),
+      l'aller-retour `serde_json::Value` ↔ colonne n'est prouvé que contre SQLite. La DDL
+      PostgreSQL rendue est-elle validée ailleurs (déploiement, `docs/release-runbook.md`) ?
+      Écho du `[?]` JSONB de `./m20260825_000004_create_vanyline_mcp_servers.sdd`.
+  [!] Index sans `if_not_exists()` contrairement à la table : un crash entre la création
+      réussie de l'index et l'écriture de l'historique rend tout rejeu de `up` impossible
+      (« index déjà existant ») sans nettoyage manuel (`Handles`). Volontaire (improbable
+      supposé) ou oubli ? Lié au `[?]` de politique de rollback de `./mod.sdd`.
+  [!] Lecture d'historique triée sur `created_at` sans tie-breaker : l'index est non
+      unique et `@get_messages` / `@load_history` trient par `created_at` seul — deux
+      messages insérés à même timestamp (résolution `chrono::Utc::now()`) peuvent être
+      rendus dans un ordre instable. Le contrat est-il « ordre strictement croissant » ou
+      « horodaté, non totalement ordonné » ? À trancher, puis éventuellement documenter
+      dans les specs des appelants.
+  [?] Traduction physique par sea-query 1.0.2 non observable depuis le dépôt :
+      `integer() + auto_increment()` → `serial` ou `GENERATED … AS IDENTITY` en PostgreSQL ;
+      `string()` → `text` ou `varchar` ; `timestamp_with_time_zone()` en SQLite (TEXT ?) ↔
+      `DateTimeUtc` de l'entité. Le contrat s'arrête-t-il aux propriétés logiques de `Must` ?
+      Même question ouverte que les sœurs.
+  [?] `ON DELETE CASCADE` sans `ON UPDATE` : asymétrie suppression (cascade) vs mise à
+      jour de `miryad_users.id` / `vanyline_conversations.id` (refusée par `NO ACTION` en
+      PostgreSQL) — voulue ? Écho des sœurs.
+  [!] Asymétrie de garde-fous : `up` défensif (`IF NOT EXISTS` sur la table) mais `down`
+      sans `IF EXISTS` et index sans clause : un second `down`, ou un rejeu après crash,
+      est une erreur. Volontaire ou oubli ? (Lié au `[?]` de politique de rollback, ouvert
+      dans `./mod.sdd`.)
+  [ ] Dériver les tests des Scenario ci-dessous, taggés par leur titre — aucun test propre
+      à cette migration n'existe à ce jour (seul `migrations_apply_cleanly` de ./mod.rs
+      l'exerce indirectement, sans sonder `vanyline_messages`). Attendre l'arbitrage
+      `./mod.sdd` sur le rollback avant d'écrire les deux Scenario `down`.
+  [ ] Rattacher cette spec dans `Structure`/`Depends on` de ./mod.sdd et vérifier la phrase
+      d'ordre « `…000008` avant `…000009` » (déjà conforme) — tâche ouverte côté `./mod.sdd`.
+
+Done when:
+  Chaque Scenario est couvert par un test taggé vert (les deux `down` après arbitrage
+  rollback de `./mod.sdd`, les trois PostgreSQL uniquement après arbitrage harnais), la
+  correspondance avec `../db/entities/messages.sdd` est vérifiée des deux côtés à chaque
+  changement, la DDL de `up` est gelée telle quelle (toute évolution = onzième migration),
+  et les `[?]`/`[!]` sont tranchés avec Sébastien ou reportés vers la spec propriétaire.
+
+Scenario: la table vanyline_messages porte exactement six colonnes contractuelles
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` (miryad-core
+    puis app)
+  When on lit `PRAGMA table_info(vanyline_messages)`
+  Then on obtient exactement les 6 colonnes `id`, `owner_id`, `conversation_id`, `role`,
+    `payload`, `created_at` dans cet ordre, toutes avec `notnull` = 1, `pk` = 1 pour `id`
+    uniquement, et un `dflt_value` non vide (`CURRENT_TIMESTAMP`) pour `created_at`
+    uniquement — aucune autre colonne n'a de défaut
+
+Scenario: l'index composite de lecture existe avec le nom et l'ordre exacts
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on lit `PRAGMA index_list(vanyline_messages)` puis `PRAGMA index_info` pour
+    l'index nommé `idx_vanyline_messages_conversation_id_created_at`
+  Then cet index existe, n'est PAS unique, et couvre exactement les colonnes
+    `conversation_id` puis `created_at` dans cet ordre — il a bien été créé par une
+    instruction séparée et non par une contrainte du `CREATE TABLE`
+
+Scenario: un insert minimal respecte le défaut SQL de created_at
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on insère via SQL dans `vanyline_messages (owner_id, conversation_id, role,
+    payload)` avec `owner_id = 1`, `conversation_id = 1`, `role = 'user'` et
+    `payload = '{"role":"user","content":"x","tool_calls":null}'`, sans `created_at`,
+    puis on relit la ligne
+  Then `id` est auto-attribué (non nul), `created_at` est non nul et posé par le défaut
+    `CURRENT_TIMESTAMP` — jamais `NULL`
+
+Scenario: un insert sans payload est rejeté faute de défaut
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on insère dans `vanyline_messages (owner_id, conversation_id, role)` avec
+    `owner_id = 1`, `conversation_id = 1`, `role = 'user'` et la colonne `payload`
+    omise (aucun défaut SQL n'existe pour elle)
+  Then l'insertion échoue sur la contrainte NOT NULL de `payload` (SQLite : « NOT NULL
+    constraint failed » ; PostgreSQL 23502) — contrairement aux colonnes JSONB des
+    sœurs `toolsets`/`mcp_servers`, `payload` n'a aucun défaut
+
+Scenario: le payload accepte n'importe quel document JSON et le restitue
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on insère un message complet via l'`@ActiveModel` de
+    `@crate::db::entities::messages` avec `payload = @serde_json::json!({"role":
+    "assistant", "content": "ok", "tool_calls": []})`, puis on relit la ligne
+  Then le `payload` relu est un objet JSON imbriqué identique (tableau `tool_calls`
+    inclus, jamais une chaîne échappée) — aller-retour `@serde_json::Value` ↔ colonne
+
+Scenario: role accepte toute chaîne faute de CHECK en base
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on insère un message dont `role` vaut `"bogus"`, le reste étant renseigné
+  Then l'insertion réussit au niveau SQL — la DDL ne porte aucun CHECK ni contrainte
+    de domaine sur `role`, le vocabulaire documentaire n'est tenu nulle part en base
+
+Scenario: aucun duplicata n'est refusé faute d'unicité
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` contenant
+    déjà un message complet (mêmes `owner_id`, `conversation_id`, `role`, `payload`,
+    `created_at`)
+  When on insère une seconde ligne strictement identique colonne par colonne (hors `id`)
+  Then l'insertion réussit et la table contient deux lignes — aucune contrainte unique
+    n'existe sur `vanyline_messages`, seul `id` distingue les lignes
+
+Scenario: un second up après effacement de l'historique ne recrée rien
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`, avec une
+    ligne insérée dans `vanyline_messages`, et la ligne
+    `m20260825_000009_create_vanyline_messages` effacée de `seaql_migrations_app`
+  When `@MigratorTrait::up` de `@crate::migration::Migrator` est rappelé avec step `None`
+    (les autres migrations sont toujours dans l'historique)
+  Then aucun `DbErr` n'est retourné — le `CREATE TABLE IF NOT EXISTS` absorbe le rejeu —
+    et la ligne insérée est toujours présente (la table n'a pas été recréée vidée)
+
+Scenario: down supprime la table vanyline_messages
+  # Test à n'écrire qu'après l'arbitrage rollback de `./mod.sdd` (voir `Tasks`).
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` avec au
+    moins une ligne dans `vanyline_messages`, et un `@SchemaManager` obtenu sur cette
+    connexion
+  When `@MigrationTrait::down` de cette migration est appelé sur ce manager
+  Then `PRAGMA table_info(vanyline_messages)` ne retourne plus aucune ligne — la table a
+    disparu avec son contenu, et `PRAGMA index_list(vanyline_messages)` est vide (l'index
+    composite est tombé avec la table, sans instruction séparée)
+
+Scenario: un second down sur table absente échoue
+  # Test à n'écrire qu'après l'arbitrage rollback de `./mod.sdd` (voir `Tasks`).
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` sur laquelle
+    le `down` de cette migration a déjà réussi une fois, et le même `@SchemaManager`
+  When `@MigrationTrait::down` est rappelé sur ce manager
+  Then le retour est un `@sea_orm::DbErr` — le `DROP TABLE` sans `IF EXISTS` ne tolère
+    pas une table absente (contrat actuel, asymétrie `[!]` des `Tasks`)
+
+Scenario: supprimer la conversation emporte ses messages (PostgreSQL uniquement)
+  # Sans harnais PostgreSQL dans le dépôt — voir `[!]` des `Tasks` ; un SQLite sans
+  # `PRAGMA foreign_keys=ON` n'appliquerait pas la cascade.
+  Given une base PostgreSQL réelle avec les migrateurs miryad-core puis app appliqués,
+    un utilisateur, une conversation et deux messages rattachés à cette conversation
+  When la conversation est supprimée de `vanyline_conversations` (comme le fait
+    `@delete_conversation` côté API, qui ne purge pas les messages elle-même)
+  Then les deux lignes de `vanyline_messages` ont disparu — `ON DELETE CASCADE` de la FK
+    `conversation_id` appliqué par la base
+
+Scenario: supprimer l'utilisateur emporte ses messages (PostgreSQL uniquement)
+  # Même lacune de harnais que le Scenario précédent.
+  Given une base PostgreSQL réelle avec les migrateurs miryad-core puis app appliqués,
+    un utilisateur `miryad_users`, une conversation et un message portant son `owner_id`
+  When l'utilisateur est supprimé de `miryad_users`
+  Then la ligne de `vanyline_messages` a disparu — `ON DELETE CASCADE` de la FK
+    `owner_id` appliqué par la base
+
+Scenario: une conversation_id inconnue est rejetée (PostgreSQL uniquement)
+  Given une base PostgreSQL réelle avec les migrateurs miryad-core puis app appliqués
+  When on insère dans `vanyline_messages` une ligne dont l'`conversation_id` n'existe pas
+    dans `vanyline_conversations`
+  Then l'insertion est refusée par la FK (code PostgreSQL 23503 `foreign_key_violation`)

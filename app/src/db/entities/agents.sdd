@@ -1,0 +1,406 @@
+Spec: Agents Entity
+
+Purpose:
+  Entité SeaORM de la table `vanyline_agents` : la ligne « agent » (nom + mode + profil
+  de modèle + toolsets + skills + prompt système), sa déclaration de ressource REST via
+  @MiryadResource de miryad-core, ET le hook @before_create qui valide le `mode` — un
+  seul contrat pour le fichier : le type de la ligne, la politique d'accès et la règle
+  métier de création sont portés par les mêmes types générés par le
+  @derive(DeriveEntityModel).
+  Ce fichier est la SEULE entité de `./mod.rs` à porter un hook @MiryadResource surchargé
+  (validation `mode`, code `VNL-AGENT-001`) et la seule à porter des tests d'intégration
+  DB réels (`../db/test_support.rs` @real_db — sqlite en mémoire, migrations miryad-core +
+  app appliquées) : sa régression Phase 3 (`@mod resource_router_regression`) est aussi
+  le test de référence du contrat « corps de création du frontend sans `id` ni
+  `owner_id` » dont les entités sœurs (`./model_profiles.rs` notamment) se revendiquent
+  sans l'avoir testé elles-mêmes.
+  Le contrat table ↔ schéma SQL (DDL, FK, index, défauts) est celui de la migration
+  ../migration/m20260825_000006_create_vanyline_agents (spec
+  `../migration/m20260825_000006_create_vanyline_agents.sdd`, en cours de rédaction) —
+  ce fichier-ci en est le miroir côté Rust ; toute divergence entre les deux est un bug
+  de l'un des deux, jamais un tiers contrat.
+  Origine historique du hook (commentaire du fichier) : la validation du `mode` était
+  perdue lors de la bascule miryad-core (CHECK en base + @AgentMode typé côté handler,
+  cf. `docs/features/miryad-core-integration.md`) ; elle est restaurée ICI, uniquement
+  sur la création — seule surface que @before_create couvre.
+  Articulation avec le domaine config (documentée ici, jamais possédée ici) :
+  le @Agent de `vanyline_cfgstore::domain` (cf. `../../../../cfgstore/src/domain.sdd`)
+  N'EST PAS ce type : ici `mode` est une @String brute et `toolsets`/`skills` du
+  @serde_json::Value non typé ; là-bas @AgentMode est un enum typé, `toolsets` un
+  @Vec<String>, `skills` un @SkillSelection et `model` porte le NOM du profil, jamais
+  son id. La traduction est le contrat de `../config_store.rs`.
+
+Owns:
+  ./agents.rs
+
+Exposes:
+  @Model — `pub struct`, derives @Clone @Debug @PartialEq @Serialize @Deserialize
+    @utoipa::ToSchema @DeriveEntityModel ; @schema(as = Agent) : schéma OpenAPI nommé
+    `Agent`, fusionné dans le document de `../main.rs` via @resource_openapi (le test
+    `openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme` exige les
+    chemins `/api/v1/agents` et `/api/v1/agents/{id}`). Aucun @serde(rename) : le JSON
+    REST est en snake_case strictement identique aux noms de champs Rust.
+  @Entity, @ActiveModel, @Column, @PrimaryKey, @Relation — générés par SeaORM ;
+    @Relation est un enum vide (aucune relation déclarée, convention de tous les enfants
+    de `./mod.rs`) : les jointures (agent → model_profile, conversations → agent) sont
+    faites en mémoire par les consommateurs, jamais par SeaORM.
+  @ActiveModelBehavior — impl vide sur @ActiveModel : aucun hook SeaORM
+    (@before_save/@before_insert) ; la seule validation du fichier passe par
+    @MiryadResource::before_create.
+  @MiryadResource for @Entity — contrat de ressource REST :
+    - @resource_name() -> `"agents"` (routes `/api/v1/agents` et `/api/v1/agents/{id}`,
+      branchées par @resource_router dans `../main.rs`)
+    - @read_policy() -> @AccessPolicy::OwnerOnly
+    - @write_policy() -> @AccessPolicy::OwnerOnly
+    - @owner_column() -> @Some(Column::OwnerId)
+    - @before_create(active, _principal) — le SEUL hook surchargé de toutes les entités
+      de `./mod.rs` : lire @active.mode (@Set(v) | @Unchanged(v) → `v.as_str()` ;
+      @NotSet → chaîne vide `""`), exiger `mode ∈ {"primary", "subagent", "all"}`,
+      sinon @HookError::with_code(`"VNL-AGENT-001"`,
+      `"mode must be 'primary', 'subagent' or 'all', got: {mode}"`). Le `_principal` est
+      ignoré (le contrôle d'accès par owner est le contrat d'@AccessPolicy, pas du hook).
+  @fn default_json_array, @fn default_auto, @fn default_mode — privées : valeurs par
+    défaut serde de `toolsets` (@serde_json::json!([]) à `[]`), `skills`
+    (@serde_json::json!("auto") à la chaîne JSON `"auto"`) et `mode` (`"primary"`).
+  @mod tests — @cfg(test) : contrat ressource + hook (cf. Tests en Tasks).
+  @mod resource_router_regression — @cfg(test) : régression Phase 3 sur vraie base
+    (cf. Tests en Tasks) ; expose aussi en usage interne de test les helpers
+    `seed_model_profile` (provider + profil seedés pour satisfaire les FK en chaîne) et
+    `bearer_for` / `json_request` (non `pub`, réutilisés en référence par les specs sœurs).
+
+Structure:
+  Champs de @Model et correspondance SQL (migration
+  ../migration/m20260825_000006_create_vanyline_agents.rs) — dans l'ordre :
+  - `id: i32` — @sea_orm(primary_key) ; SQL `INTEGER NOT NULL AUTO_INCREMENT PRIMARY
+    KEY` ; @serde(default) : clé absente du body → `0` (écrasé de toute façon par
+    `resource_router` — claim du commentaire du fichier, cf. Tasks).
+  - `owner_id: i32` — SQL `INTEGER NOT NULL`, FK → `miryad_users.id` ON DELETE CASCADE ;
+    @serde(default) : clé absente → `0` (écrasement annoncé idem).
+  - `name: String` — SQL `STRING NOT NULL` ; REQUIS à la désérialisation (pas de
+    default). Unicité `(owner_id, name)` portée par l'index UNIQUE SQL uniquement —
+    jamais vérifiée par l'entité ni par le hook.
+  - `description: Option<String>` — SQL `STRING` NULLable ; `null` ou absence → @None.
+  - `mode: String` — SQL `STRING NOT NULL DEFAULT 'primary'` ; @serde(default =
+    "default_mode") : clé absente → `"primary"`. Type : @String BRUT au niveau entité —
+    la validation des trois valeurs admises est exclusivement dans @before_create
+    (création) puis dans @agent_mode_from_str de `../config_store.rs` (lecture).
+  - `model_profile_id: i32` — SQL `INTEGER NOT NULL`, FK →
+    `vanyline_model_profiles.id` ON DELETE RESTRICT ; REQUIS à la désérialisation
+    (pas de default) — un body de création sans cette clé échoue en serde.
+  - `toolsets: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '[]'` ; @serde(default =
+    "default_json_array") : clé absente → tableau vide. Forme attendue par le
+    consommateur : tableau de noms de toolsets (`["fs", …]`) — non typé ni validé ici.
+  - `skills: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '"auto"'` ;
+    @serde(default = "default_auto") : clé absente → la chaîne JSON `"auto"`. Forme
+    attendue côté lecture : @SkillSelection de `../../../../cfgstore/src/domain.sdd`
+    (`"auto"`, `"none"` ou tableau de noms) — non typé ni validé ici.
+  - `system_prompt: String` — SQL `STRING NOT NULL DEFAULT ''` ; @serde(default) :
+    clé absente → chaîne vide.
+  Aucun champ temporel : la table ne porte ni `created_at` ni `updated_at` (déjà
+  possédée par les tables sœurs `vanyline_conversations`, pas par `vanyline_agents`).
+
+Accepts:
+  Côté lecture SQL : toute ligne de `vanyline_agents` dont les colonnes respectent les
+    nullabilités ci-dessus (les colonnes NOT NULL sont chargées en non-Option : un NULL
+    sur l'une est une erreur SQL, jamais un @None).
+  Côté désérialisation REST (body que @resource_router de miryad-core passe en @Model
+    « tel quel ») :
+  - corps de création SANS `id` ni `owner_id` (forme exacte envoyée par
+    `AgentsScreen.vue::createAgent()` du frontend) → désérialise avec `id == 0`,
+    `owner_id == 0` — c'est LE contrat qui a motivé les @serde(default) (bug Phase 3 :
+    400 « missing field » ; régression capturée dans @mod resource_router_regression) ;
+  - corps sans `mode` → `mode == "primary"` (le hook voit alors `Set("primary")`,
+    accepte) ; sans `toolsets` → `[]` ; sans `skills` → `"auto"` ; sans `system_prompt`
+    → `""` ; sans `description` → @None ;
+  - corps sans `name` ou sans `model_profile_id` → erreur serde « missing field »
+    (statut HTTP rendu par miryad-core, hors contrat de ce fichier) ;
+  - `toolsets` / `skills` : TOUT JSON accepté (chaîne, tableau, objet, nombre) — la
+    colonne est du @serde_json::Value brut, aucune validation de forme côté écriture ;
+  - clé `toolsets` ou `skills` présente et à `null` → @serde_json::Value::Null désérialisé
+    tel quel (@serde(default) ne couvre que l'ABSENCE de clé), donc stockable en JSONB
+    `null` malgré le `NOT NULL DEFAULT` SQL (le NOT NULL n'interdit pas le JSON `null`).
+  Côté hook @before_create :
+  - @ActiveValue::Set ou @ActiveValue::Unchanged avec `mode` ∈
+    {`"primary"`, `"subagent"`, `"all"`} → passe ;
+  - toute autre valeur (ex. `"bogus"`, `""`, majuscules, espaces) → refus avec
+    `VNL-AGENT-001` ;
+  - @ActiveValue::NotSet → traité comme la chaîne vide → REJETÉ (cf. Tasks `[?]` : le
+    défaut SQL `'primary'` n'est jamais atteint par ce chemin).
+  Côté tests unitaires : @Entity::owner_column() comparé par @matches! et non
+    @assert_eq! — @Column ne derive pas @PartialEq (SeaORM 2), contournement documenté
+    dans le test.
+
+Returns:
+  - @Serialize de @Model (réponses REST de `resource_router`) : objet JSON complet,
+    TOUS les 9 champs présents — y compris `id`, `owner_id`, `model_profile_id` et les
+    Json — aucun @skip_serializing_if ; c'est la forme que le frontend reçoit.
+  - @resource_name() : `&'static str` `"agents"`, exactement (assertée par le test
+    `agent_record_resource_contract` et par la liste testée de
+    `../main.rs::openapi_spec`).
+  - @read_policy() / @write_policy() : @AccessPolicy::OwnerOnly chacun.
+  - @owner_column() : @Some(@Column::OwnerId).
+  - @before_create sur succès : l'@ActiveModel reçu, inchangé (le hook ne réécrit
+    aucune valeur — il ne fait que refuser).
+  - hook sur échec : @HookError avec `code == Some("VNL-AGENT-001")` et un message
+    contenant la valeur refusée (`format!("mode must be 'primary', 'subagent' or 'all', got: {mode}")`).
+
+Raises:
+  - @HookError `VNL-AGENT-001` — seule erreur fabriquée par ce fichier, uniquement dans
+    @before_create (mode inconnu ou @NotSet).
+  - En base : violation FK (`owner_id` → `miryad_users` CASCADE, `model_profile_id` →
+    `vanyline_model_profiles` RESTRICT), NOT NULL, ou unicité `(owner_id, name)`
+    remontent en @DbErr de SeaORM vers l'appelant (`resource_router` en production,
+    `Entity::insert` dans les tests) — le statut HTTP correspondant est un comportement
+    de miryad-core, non observable depuis ce fichier.
+  - Rien de ce que le hook NE vérifie pas n'est levé ici : `toolsets`/`skills`
+    inexistants en base, `model_profile_id` d'un autre owner, `mode` invalide en
+    UPDATE — aucun de ces cas ne lève quoi que ce soit dans ce fichier (cf. Tasks).
+
+Handles:
+  - Consommation en lecture config : `../config_store.rs` @load_agent_records filtre
+    MANUELLEMENT @Column::OwnerId.eq(user_id) (le filtre owner n'est PAS délégué à
+    @MiryadResource sur ce chemin), puis @domain_agent_record : `model_profile_id`
+    résolu en NOM par @resolve_model_profile_name (orphelin → @VnyError::UnknownReference
+    `"model"`, erreur DURE), `mode` repassé par @agent_mode_from_str (inconnu →
+    @VnyError::ConfigError, erreur DURE — une ligne au `mode` invalide fait échouer TOUT
+    le `list_agents` de l'owner), `toolsets`/`skills` par
+    `serde_json::from_value(…).unwrap_or_default()` (JSON malformé → @Vec vide /
+    @SkillSelection::Auto par défaut, JAMAIS d'erreur — posture défensive assumée).
+  - Consommation REST : `../main.rs` monte @resource_router::<agents::Entity,
+    AppState>() et fusionne @resource_openapi::<agents::Entity>() dans le document
+    OpenAPI (schéma nommé `Agent`).
+  - Consommation chat WS : `../ws/chat.rs` @handle_message résout `agent_id` → nom par
+    @Entity::find_by_id SANS filtre owner (introuvable → @AppError::AgentNotFound) ;
+    la config de l'agent est ensuite relue via `PgConfigStore::new(db, user_id)` (cf.
+    Tasks `[!]`).
+  - Consommation conversations REST : `../api/conversations.rs` @to_output résout
+    `conv.agent_id` → nom (par id seul, sans filtre owner, N+1 accepté) ;
+    @resolve_agent_id recherche WHERE `owner_id = user_id AND name = agent_name`
+    (introuvable → @AppError::UnprocessableReference(@VnyError::UnknownReference
+    `"agent"`) — seul chemin d'accès qui filtre explicitement par owner).
+  - Cycle de vie FK entrant/sortant : suppression d'un utilisateur `miryad_users` →
+    CASCADE sur ces lignes ; suppression du profil référencé → RESTRICT (impossible
+    tant qu'un agent pointe dessus) ; suppression d'un agent → `vanyline_conversations.agent_id`
+    remis à NULL (FK ON DELETE SET NULL de
+    ../migration/m20260825_000008_create_vanyline_conversations.rs).
+
+Must:
+  - @sea_orm(table_name) porter exactement `"vanyline_agents"`, identique à l'@sea_orm(iden)
+    de la migration `…000006` et des migrations sœurs qui référencent la table
+    (`…000008` conversations).
+  - Porter exactement les 9 colonnes listées en Structure, mêmes noms Rust (snake_case
+    serde par défaut), mêmes nullabilités — tout ajout/retrait de champ exige d'aligner
+    la migration dans le même changement.
+  - Garder `id` et `owner_id` avec @serde(default) : les corps de création du frontend
+    n'envoient ni l'un ni l'autre — contrat éprouvé par @mod resource_router_regression
+    (deux POST successifs → 200 + ids auto-incrémentés distincts).
+  - Garder les défauts serde des colonnes JSON et de `mode` : `mode` absent →
+    `"primary"`, `toolsets` absent → `[]`, `skills` absent → `"auto"`,
+    `system_prompt` absent → `""` — alignés sur les défauts SQL de la migration.
+  - Valider en @before_create `mode ∈ {"primary", "subagent", "all"}` avec le code
+    d'erreur `VNL-AGENT-001` — les trois valeurs acceptées et toute autre valeur refusée
+    sont assertées par les tests du fichier.
+  - Déclarer @Relation vide : aucune association SeaORM vers `model_profiles` ou
+    `miryad_users`, même si les FK existent au niveau SQL — la résolution id → nom est
+    faite en mémoire par les consommateurs.
+  - Conserver les 4 valeurs du contrat @MiryadResource telles quelles : `"agents"`,
+    @AccessPolicy::OwnerOnly en lecture ET en écriture, @Some(@Column::OwnerId) — toutes
+    assertées par le test `agent_record_resource_contract`.
+  - Rester un type de LIGNE : ne jamais absorber dans @Model la sémantique du @Agent de
+    domaine config (@AgentMode typé, `toolsets` en @Vec<String>, `skills` en
+    @SkillSelection, `model` par nom) — la transformation est le contrat de
+    `../config_store.rs`.
+
+Must not:
+  - Valider en @before_create l'existence des noms référencés par `toolsets`/`skills` :
+    le hook n'a PAS d'accès DB (limite déjà actée en Phase 1 du document
+    `docs/features/miryad-core-integration.md`) — cf. Tasks `[?]`.
+  - Porter de hook `before_update`/`before_save` ou de validation du `mode` en
+    modification : la création est la seule surface couverte aujourd'hui (asymétrie
+    documentée en Tasks `[!]`, pas un contrat à étendre sans spec).
+  - Porter de timestamps (`created_at`/`updated_at`) : la table n'en a pas et @auto_time
+    n'est utilisé sur aucune entité sœur de `./mod.rs`.
+  - Supposer dans ce fichier que `resource_router` applique le filtre owner, écrase
+    `id`/`owner_id` ou traduit @HookError en statut HTTP précis : c'est le contrat de
+    miryad-core (crate externe, non auditable depuis le dépôt), documenté ici par
+    l'observation — voir Tasks `[?]`.
+  - Typer `mode`/`toolsets`/`skills` dans @Model (enum, @Vec, @SkillSelection) sans
+    repasser par la spec : le @derive(ToSchema) exposerait alors une autre forme OpenAPI
+    au frontend et casserait la tolérance « tout JSON stockable » des colonnes Json.
+
+Scenario: Contrat ressource des quatre items est asserté
+  Given le crate compilé avec ./agents.rs
+  When @Entity::resource_name, @Entity::read_policy, @Entity::write_policy et
+    @Entity::owner_column sont appelés
+  Then ils retournent respectivement `"agents"`, @AccessPolicy::OwnerOnly,
+    @AccessPolicy::OwnerOnly et @Some(@Column::OwnerId), et le test
+    `agent_record_resource_contract` passe (comparaison de @Column par @matches!,
+    @Column ne derivant pas @PartialEq)
+
+Scenario: before_create accepte les trois modes valides
+  Given trois @ActiveModel construits via le helper `sample` avec `mode` valant
+    `"primary"`, `"subagent"` puis `"all"`
+  When @Entity::before_create est appelé sur chacun avec le principal de test
+    (`subject "alice"`, source @ApiToken)
+  Then les trois appels retournent @Ok et l'@ActiveModel inchangé (test existant
+    `before_create_accepts_known_modes`)
+
+Scenario: before_create rejette un mode inconnu avec le code VNL-AGENT-001
+  Given un @ActiveModel construit via `sample` avec `mode == "bogus"`
+  When @Entity::before_create est appelé avec le principal de test
+  Then l'appel retourne @Err et l'@HookError porte `code == Some("VNL-AGENT-001")`
+    (test existant `before_create_rejects_unknown_mode`)
+
+Scenario: before_create rejette un mode NotSet malgré le défaut SQL
+  Given un @ActiveModel dont le champ `mode` vaut @ActiveValue::NotSet (insertion
+    directe hors voie REST, jamais un corps HTTP qui applique le défaut serde)
+  When @Entity::before_create est appelé avec le principal de test
+  Then l'appel retourne @Err avec `code == Some("VNL-AGENT-001")` et le message citant
+    la valeur vide (`got: `) — le @NotSet est comparé à la chaîne vide, le défaut SQL
+    `'primary'` n'est jamais consulté par le hook
+
+Scenario: Corps de création du frontend désérialise sans id ni owner_id
+  Given la chaîne JSON du corps exact envoyé par `AgentsScreen.vue::createAgent()`
+    (`{"name":"coder","mode":"primary","model_profile_id":1,"toolsets":["fs"],
+    "skills":"auto","system_prompt":"you are a coder"}`)
+  When elle est désérialisée en @Model par serde
+  Then elle réussit avec `id == 0`, `owner_id == 0` et les valeurs transmises
+    conservées telles quelles, sans erreur de champ manquant
+
+Scenario: Champs absents du corps prennent les défauts serde
+  Given la chaîne JSON `{"name":"x","model_profile_id":1}`
+  When elle est désérialisée en @Model par serde
+  Then elle produit `mode == "primary"`, `toolsets == serde_json::json!([])`,
+    `skills == serde_json::json!("auto")`, `system_prompt == ""` et
+    `description == @None`
+
+Scenario: Clé toolsets explicitement null survit telle quelle
+  Given la chaîne JSON `{"name":"x","model_profile_id":1,"toolsets":null,"skills":null}`
+  When elle est désérialisée en @Model par serde
+  Then elle réussit et `toolsets` et `skills` valent @serde_json::Value::Null —
+    @serde(default) ne couvre que l'absence de clé, pas la clé à `null`
+
+Scenario: Sérialisation REST expose la forme ligne complète
+  Given un @Model construit avec `id: 3`, `owner_id: 7`, `model_profile_id: 2`,
+    `toolsets: json!(["fs"])`, `skills: json!("auto")`, `description: @None`
+  When il est sérialisé en JSON
+  Then l'objet contient les 9 clés `id`, `owner_id`, `name`, `description` (présente
+    même à @None), `mode`, `model_profile_id`, `toolsets`, `skills`, `system_prompt`
+
+Scenario: Création via resource_router retourne 200 avec des ids distincts
+  Given une base réelle `../db/test_support.rs` @real_db (sqlite en mémoire,
+    migrations miryad-core + app appliquées), l'utilisatrice `alice` résolue, un
+    provider + un profil seedés (`seed_model_profile`), un bearer token émis et un
+    @Router @merge(@resource_router::<agents::Entity, _>())
+  When deux POST `/api/v1/agents` consécutifs avec le corps exact du frontend, le nom
+    `"coder"` puis le nom `"reviewer"` (nom différent : `(owner_id, name)` est UNIQUE,
+    collision légitime sinon)
+  Then les deux réponses ont le statut @StatusCode::OK (200, pas 201 — choix de
+    miryad-core) et leurs corps JSON portent des `id` distincts (test existant
+    `frontend_create_body_round_trips_with_distinct_ids`, régression du `#[serde(default)]`
+    manquant en Phase 3)
+
+Scenario: Deux agents homonymes chez le même owner collent en base
+  Given un agent `(owner_id = a, name = "coder")` inséré via @Entity::insert sur une
+    base réelle @real_db (avec `model_profile_id` seedé)
+  When un second insert avec le même couple `(owner_id, name)` est tenté
+  Then le second insert échoue en @DbErr (index UNIQUE `(owner_id, name)` de la
+    migration `…000006`) — ni l'entité ni le hook n'interceptent la collision avant la
+    base ; un autre owner avec le même nom passe
+
+Scenario: Les FK du schéma bornent le cycle de vie des lignes
+  Given un agent inséré via @Entity::insert avec un `model_profile_id` valide et une
+    conversation `vanyline_conversations` pointant sur cet agent
+  When l'agent est supprimé, puis séparément le profil référencé par un agent
+    survivant, puis l'utilisateur owner avec ses agents
+  Then la suppression de l'agent remet `conversations.agent_id` à NULL (SET NULL), la
+    suppression du profil référencé échoue (RESTRICT), la suppression de l'utilisateur
+    emporte les agents par CASCADE
+
+Depends on:
+  @sea_orm (@DeriveEntityModel, @ActiveModelBehavior, @ActiveValue, prelude), @serde,
+    @serde_json, @utoipa (@ToSchema), @miryad_core (@auth::AuthPrincipal,
+    @resource::{MiryadResource, AccessPolicy, HookError}) — miryad-core 0.1, crate
+    externe hors dépôt.
+  ../migration/m20260825_000006_create_vanyline_agents.rs — DDL source de vérité de la
+    table (spec propre en cours).
+  ../migration/m20260825_000008_create_vanyline_conversations.rs — FK entrante
+    `conversations.agent_id` → cette table (SET NULL).
+  ./model_profiles.rs + ./llm_providers.rs — cibles de FK et seed des tests
+    (`seed_model_profile` enchaîne les deux inserts).
+  ./mod.rs — déclaration `pub mod agents;` (cf. `./mod.sdd`, dont l'entrée
+    « ./agents.sdd — spec à venir » devient obsolète avec la présente spec).
+  Consommateurs (hors périmètre, comportements cités) : ../config_store.rs,
+    ../ws/chat.rs, ../api/conversations.rs, ../main.rs.
+  Supports de test : ../db/test_support.rs (@real_db, cf. son `../db/test_support.sdd`),
+    @crate::auth::test_support::test_auth_state_with_db de `../auth/`,
+    @miryad_core::auth::issue_token, @miryad_core::users::resolve_user,
+    @miryad_core::rest::resource_router.
+  Contrat amont/aval du frontend : `frontend` `AgentsScreen.vue::createAgent()` (forme
+    exacte du corps de création), `../../../../cfgstore/src/domain.sdd` (@Agent,
+    @AgentMode, @SkillSelection de domaine), `docs/features/miryad-core-integration.md`
+    (historique Phase 1–3 de la bascule).
+
+Tasks:
+  [!] Cartographie des tests internes (seule entité avec tests DB réels) :
+      `@mod tests` — `agent_record_resource_contract` (Scenario « Contrat ressource des
+      quatre items est asserté »), `before_create_accepts_known_modes` (Scenario
+      « before_create accepte les trois modes valides »), `before_create_rejects_unknown_mode`
+      (Scenario « before_create rejette un mode inconnu avec le code VNL-AGENT-001 ») ;
+      `@mod resource_router_regression` — `frontend_create_body_round_trips_with_distinct_ids`
+      (Scenario « Création via resource_router retourne 200 avec des ids distincts »),
+      avec seeds `seed_model_profile` et helpers `bearer_for`/`json_request`.
+      Scénarios SANS test équivalent à ce jour : « before_create rejette un mode NotSet
+      malgré le défaut SQL » (4e), « Corps de création du frontend désérialise sans id
+      ni owner_id » (5e, couvert seulement de bout en bout via HTTP), « Champs absents
+      du corps prennent les défauts serde » (6e), « Clé toolsets explicitement null
+      survit telle quelle » (7e), « Sérialisation REST expose la forme ligne complète »
+      (8e), « Deux agents homonymes chez le même owner collent en base » (10e), « Les
+      FK du schéma bornent le cycle de vie des lignes » (11e). Les écrire, ou assumer
+      que la régression HTTP unique suffit à couvrir l'entité ?
+  [!] `mode` non gardé en UPDATE : @before_create ne couvre que la création ; si
+      `resource_router` de miryad-core expose un PUT/PATCH, un `mode` invalide peut être
+      écrit en modification, puis faire ÉCHECHER DURABLEMENT tout `list_agents` de
+      l'owner (`@agent_mode_from_str` de `../config_store.rs` est en erreur dure, et
+      `list_agents` est un `collect::<Result<_>>` — une ligne poison = toute la liste
+      en @CfgStoreError::Config). Ajout d'un CHECK SQL, d'un hook de update, ou
+      assumption ? À trancher avec Sébastien.
+  [!] Résolutions d'agent SANS filtre owner sur deux chemins : `../ws/chat.rs`
+      @handle_message (@find_by_id(agent_id) seul) et `../api/conversations.rs`
+      @to_output (@find_by_id(id) seul) — un `agent_id` d'un AUTRE owner (obtenu par
+      force brute d'ids ou conversation déjà corrompue) se résout en un nom d'agent
+      étranger, et le chat tourne avec ce nom alors que la config est relue au `user_id`
+      correct (l'agent étranger n'y existe pas → erreur en aval, pas de fuite claire
+      identifiée mais non prouvée). @resolve_agent_id (nom → id) est le seul chemin qui
+      filtre par owner. Trou d'isolation ou invariant « l'appelant ne fournit que ses
+      propres ids » à contractualiser ? À trancher.
+  [?] @ActiveValue::NotSet pour `mode` : rejeté (`got: `) alors que la colonne SQL a un
+      DEFAULT `'primary'` — en voie REST le défaut serde masque toujours le NotSet, mais
+      tout insert interne futur (`ActiveModel { mode: NotSet, … }`) échoue avec
+      VNL-AGENT-001 au lieu de recevoir le défaut SQL. Voulu (le hook exige la
+      déclaration explicite du mode) ou piège à aplanir (accepter NotSet en le
+      normalisant en `Set("primary")`) ?
+  [?] `toolsets`/`skills` : noms référencés jamais validés à l'écriture (existence côté
+      `vanyline_toolsets`/`vanyline_skills`, absence de FK assumée — commentaire du
+      fichier, Phase 1 actée) ET forme jamais typée : `"skills": 42` ou un `toolsets`
+      objet passent l'écriture puis retombent silencieusement sur `[]`/@SkillSelection::Auto
+      à la lecture (`unwrap_or_default`). Le repli silencieux peut masquer une corruption
+      durable ; validation d'écriture (schéma JSON ou hook), ou assumption confirmée ?
+  [?] miryad-core (crate externe non lisible depuis le dépôt) : sémantique concrète
+      d'@AccessPolicy::OwnerOnly (WHERE sur la collection, 403 ou 404 sur l'item
+      d'autrui), écrasement annoncé de `id`/`owner_id` par `create()` (claim du
+      commentaire — la régression ne vérifie que le 200 et des ids distincts, pas que
+      le body reçu avec `owner_id` d'autrui est ignoré), statut HTTP rendu sur violation
+      de l'UNIQUE `(owner_id, name)` et sur @HookError (`422` ? `400` ?). La régression
+      existante est le seul test d'intégration ; étendre avec un test « body avec
+      owner_id d'autrui » sur @real_db, ou assumer la délégation ?
+  [?] @schema(as = Agent) : le schéma OpenAPI `Agent` (forme ligne : ids numériques,
+      Json bruts) partage son nom avec le @Agent de domaine `vanyline_cfgstore::domain`
+      (forme : mode typé, model par NOM). Si `@vanyline/protocol` ou le frontend
+      consomment le document OpenAPI, quelle des deux formes est censée les nourrir —
+      renaming du schéma REST (`RestAgent`) ou coexistence assumée ?
+  [?] Aucun CHECK SQL sur `mode` depuis la bascule miryad-core (cf. commentaire du
+      fichier et `docs/features/miryad-core-integration.md`) : la protection ne vit
+      plus que dans le hook create (voir premier `[!]`). Réintroduire le CHECK dans une
+      migration additive, ou considérer le hook comme la protection officielle (et
+      alors documenter l'absence de garde en update dans la spec migration) ?

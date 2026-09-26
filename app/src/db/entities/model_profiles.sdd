@@ -1,0 +1,267 @@
+Spec: Model Profiles Entity
+
+Purpose:
+  Entité SeaORM de la table `vanyline_model_profiles` : la ligne « profil de modèle »
+  (un modèle nommé + paramétré, rattaché à un provider) ET sa déclaration de ressource
+  REST via `MiryadResource` de miryad-core. Un seul contrat pour le fichier : le type
+  de la ligne (colonnes, sérialisation JSON) et le contrat de la ressource
+  `/api/v1/model-profiles` (nom, politiques d'accès, colonne owner) sont indissociables
+  — l'impl `@MiryadResource for @Entity` porte sur les types générés par le
+  @derive(DeriveEntityModel) du même struct.
+  Le contrat table ↔ schéma SQL (DDL, FK, index, défauts) est celui de la migration
+  ../../migration/m20260825_000005_create_vanyline_model_profiles (spec
+  `../../migration/m20260825_000005_create_vanyline_model_profiles.sdd`, en cours de
+  rédaction) — ce fichier-ci en est le miroir côté Rust ; toute divergence entre les
+  deux est un bug de l'un des deux, jamais un tiers contrat.
+  Articulation avec le domaine config (documentée ici, jamais possédée ici) : le
+  @ModelProfile de `vanyline_cfgstore::domain` (cf.
+  `../../../../cfgstore/src/domain.sdd`) N'EST PAS ce type. Trois formes distinctes
+  coexistent :
+  - la ligne DB / payload REST (CE fichier) : porte `id`, `owner_id`, `provider_id`
+    (FK entière), `max_tokens` signé (i64), `options` en @serde_json::Value ;
+  - le domaine config `vanyline_cfgstore::domain::ModelProfile` : PAS d'id, provider
+    désigné par NOM, `max_tokens` en u64, `options` en @serde_json::Map — construit
+    par @domain_model_profile de `../config_store.rs`, qui résout `provider_id` →
+    nom de provider et défèque `options` non-objet sur une map vide ;
+  - le frontend (`frontend/src/api/httpConfigRepo.ts`, hors périmètre) traduit entre
+    les deux formes (`provider_id` ↔ nom de provider, retire `id`/`owner_id` à
+    l'affichage, renvoie `provider` (nom) → `provider_id` à l'écriture).
+
+Owns:
+  ./model_profiles.rs
+
+Exposes:
+  @Model — `pub struct`, derives @Clone @Debug @PartialEq @Serialize @Deserialize
+    @utoipa::ToSchema @DeriveEntityModel ; @derive(ToSchema) enregistré sous le nom
+    OpenAPI `ModelProfile` (@schema(as = ModelProfile)) — schéma du fragment
+    @resource_openapi fusionné dans le document OpenAPI de `../../main.rs`.
+    Aucun @serde(rename) : le JSON REST est en snake_case strictement identique aux
+    noms de champs Rust.
+  @Entity, @ActiveModel, @Column, @PrimaryKey, @Relation — générés par SeaORM ;
+    @Relation est un enum vide (aucune relation déclarée, convention de tous les
+    enfants de `./mod.rs`) : les jointures sont faites en mémoire par les
+    consommateurs, jamais par SeaORM.
+  @ActiveModelBehavior — impl vide sur @ActiveModel : aucun hook SeaORM
+    (@before_save/@before_insert).
+  @MiryadResource for @Entity — contrat de ressource REST :
+    - @resource_name() -> `"model-profiles"` (routes `/api/v1/model-profiles` et
+      `/api/v1/model-profiles/{id}`, branchées par @resource_router dans `../../main.rs`)
+    - @read_policy() -> @AccessPolicy::OwnerOnly
+    - @write_policy() -> @AccessPolicy::OwnerOnly
+    - @owner_column() -> @Some(Column::OwnerId)
+    - PAS de hook `before_create`/validation : contrairement à `./llm_providers.rs`
+      (provider_type validé en hook, code `VNL-LLM-005`) et de `./agents.rs` (mode
+      validé en hook, code `VNL-AGENT-001`), aucune règle métier n'est vérifiée ici ;
+      ce qui protège cette table est exclusivement au niveau SQL (FK, index unique).
+  @fn default_json_object — privée : valeur par défaut de `options` à la
+    désérialisation (@serde_json::json!({})).
+
+Structure:
+  Champs de @Model et correspondance SQL (migration
+  `../../migration/m20260825_000005_create_vanyline_model_profiles.rs`) — dans l'ordre :
+  - `id: i32` — @sea_orm(primary_key) ; SQL `INTEGER NOT NULL AUTO_INCREMENT
+    PRIMARY KEY` ; @serde(default) absent du body → `0`.
+  - `owner_id: i32` — SQL `INTEGER NOT NULL`, FK → `miryad_users.id` ON DELETE
+    CASCADE ; @serde(default) absent du body → `0`.
+  - `name: String` — SQL `STRING NOT NULL` ; requis à la désérialisation (pas de
+    default). Contrainte d'unicité `(owner_id, name)` UNIQUE au niveau index SQL
+    uniquement — non vérifiée par l'entité.
+  - `provider_id: i32` — SQL `INTEGER NOT NULL`, FK → `vanyline_llm_providers.id`
+    ON DELETE RESTRICT ; requis à la désérialisation.
+  - `model: String` — SQL `STRING NOT NULL` ; requis à la désérialisation.
+  - `temperature: Option<f64>` — SQL `DOUBLE` NULLable ; `null` ou absence → `None`
+    (Option standard, pas d'attribut serde).
+  - `max_tokens: Option<i64>` — SQL `BIG_INTEGER` NULLable, SANS CHECK de
+    positivité ; la conversion vers le domaine (u64) est un `as u64` dans
+    @domain_model_profile de `../config_store.rs` — hors de ce fichier.
+  - `options: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '{}'` ;
+    @serde(default = "default_json_object") : clé ABSENTE → `{}`. Clé présente
+    et à `null` → @serde_json::Value::Null désérialisé tel quel (le default ne
+    couvre que l'absence de clé), donc stockable en JSONB `null` malgré le NOT NULL.
+  Aucun champ temporel : la table ne porte ni `created_at` ni `updated_at`.
+
+Accepts:
+  Côté lecture SQL : toute ligne de `vanyline_model_profiles` dont les colonnes
+    respectent les nullabilités ci-dessus (le @derive(DeriveEntityModel) charge
+    `id`/`owner_id`/`name`/`provider_id`/`model` en non-Option : une ligne avec
+    NULL sur une colonne NOT NULL est une erreur SQL, jamais un `None`).
+  Côté désérialisation REST (body que @resource_router de miryad-core passe en
+    @Model « tel quel », cf. commentaire du fichier) :
+  - payload de création sans `id` ni `owner_id` → désérialise (valeurs `0`),
+    c'est LE contrat qui a motivé les @serde(default) (bug Phase 3 :
+    400 « missing field » ; régression capturée dans @mod resource_router_regression
+    de `./agents.rs` pour l'entité sœur ; `../../main.rs` et le frontend
+    `httpConfigRepo.ts` reposent sur la même forme pour `model-profiles`) ;
+  - payload sans `options` → `options == json!({})` ;
+  - payload avec `"options": null` → `options == Value::Null` (voir Tasks `[?]`) ;
+  - payload avec `id`/`owner_id` fournis → accepte au niveau serde (les valeurs
+    sont ensuite censées être écrasées par `resource_router` — claim de commentaire,
+    miroir non vérifié dans ce fichier, voir Tasks).
+  Côté tests unitaires : @Entity::owner_column() comparé par @matches! et non
+    @assert_eq! — @Column ne derive pas @PartialEq (SeaORM 2), contournement
+    documenté dans le test.
+
+Returns:
+  - @Serialize de @Model (réponses REST de `resource_router`) : objet JSON complet,
+    TOUS les champs présents — y compris `id`, `owner_id`, `provider_id` et
+    `options` — aucun @skip_serializing_if. C'est la forme que le frontend
+    (`httpConfigRepo.ts`) reçoit et traduit.
+  - @resource_name() : `&'static str` `"model-profiles"`, exactement (assertion du
+    test du fichier et liste testée de `../../main.rs::openapi_spec`).
+  - @owner_column() : @Some(@Column::OwnerId) — la colonne qui borne la ressource
+    au propriétaire.
+
+Raises:
+  - Aucune erreur fabriquée par ce fichier hors tests : pas de hook, pas de
+    validation, pas de code d'erreur propriétaire (contrast : `VNL-LLM-005` de
+    `./llm_providers.rs`, `VNL-AGENT-001` de `./agents.rs`).
+  - En base : violation FK (`owner_id`/`provider_id`), NOT NULL ou unicité
+    `(owner_id, name)` remontent en @DbErr de SeaORM vers l'appelant
+    (`resource_router` en production, `Entity::insert` dans les tests de
+    `./agents.rs`) — le statut HTTP correspondant est un comportement de
+    miryad-core, non observable depuis ce fichier.
+
+Handles:
+  - Consommation en lecture (config) : ../config_store.rs charge les lignes via
+    @load_model_profiles — filtre MANUEL `Column::OwnerId.eq(user_id)` (le filtre
+    owner n'est PAS délégué à `MiryadResource` sur ce chemin), puis
+    @domain_model_profile (provider_id → nom de provider via la liste de
+    @load_providers, sinon @VnyError::LlmProviderNotFound ; `options` non-objet →
+    map vide, jamais d'erreur) et @resolve_model_profile_name (les agents référencent
+    les profils par id en base mais le domaine @Agent.model porte le NOM).
+  - Consommation REST : ../../main.rs monte @resource_router::<model_profiles::Entity,
+    AppState>() et fusionne @resource_openapi::<model_profiles::Entity>() dans le
+    document OpenAPI (test : les chemins `/api/v1/model-profiles` et
+    `/api/v1/model-profiles/{id}` doivent exister).
+  - Consommation en écriture indirecte : suppression d'un utilisateur `miryad_users`
+    → CASCADE sur ces lignes ; suppression du provider référencé → RESTRICT
+    (impossible tant qu'un profil pointe dessus) ; suppression d'un profil référencé
+    par un agent → RESTRICT (FK de `../../migration/m20260825_000006_create_vanyline_agents.rs`).
+
+Must:
+  - @sea_orm(table_name) porter exactement `"vanyline_model_profiles"`, identique à
+      l'@sea_orm(iden) de la migration et des migrations sœurs qui référencent la
+      table.
+  - Porter exactement les 8 colonnes listées en Structure, mêmes noms Rust
+      (snake_case serde par défaut), mêmes nullabilités — tout ajout/retrait de
+      champ exige d'aligner la migration dans le même changement.
+  - Garder `id` et `owner_id` avec @serde(default) : les corps de création du
+      frontend n'envoient ni l'un ni l'autre (contrat éprouvé par la régression
+      Phase 3 documentée dans `./agents.rs`).
+  - Garder `options` avec @serde(default = "default_json_object") : un corps de
+      création sans `options` doit désérialiser sur `{}`, pas échouer.
+  - Déclarer @Relation vide : aucune association SeaORM entre `model_profiles` et
+      `llm_providers`/`miryad_users`, même si les FK existent au niveau SQL —
+      la résolution provider_id → nom est faite en mémoire par le consommateur.
+  - Conserver les 4 valeurs du contrat @MiryadResource telles quelles :
+      `"model-profiles"`, @AccessPolicy::OwnerOnly en lecture ET en écriture,
+      @Some(@Column::OwnerId) — toutes assertées par le test
+      `model_profile_resource_contract` du fichier.
+  - Rester un type de LIGNE : ne jamais absorber dans @Model la sémantique du
+      @ModelProfile de domaine config (provider par nom, u64, options en Map) —
+      la transformation est le contrat de `../config_store.rs`.
+
+Must not:
+  - Porter de hook `before_create`/`before_update` ni de code d'erreur
+      propriétaire sans étendre cette spec et la migration (la validation SQL —
+      FK, NOT NULL, index unique — est la seule protection actuelle de la table).
+  - Porter de timestamps (`created_at`/`updated_at`) : la table n'en a pas et
+      @auto_time n'est utilisé sur aucune entité sœur de `./mod.rs`.
+  - Exposer `api_key` ou toute donnée sensible par @Serialize/ToSchema : la table
+      ne les porte pas, et les secrets de provider vivent dans
+      `vanyline_llm_providers` (entité sœur, politique d'écriture AdminOnly).
+  - Supposer dans ce fichier que `resource_router` applique le filtre owner ou
+      écrase `id`/`owner_id` : c'est le contrat de miryad-core (crate externe,
+      non auditable depuis le dépôt), documenté ici par l'observation — voir
+      Tasks `[?]`.
+
+Scenario: Contrat ressource des quatre items est asserté
+  Given le crate compilé avec ./model_profiles.rs
+  When @Entity::resource_name, @Entity::read_policy, @Entity::write_policy et
+    @Entity::owner_column sont appelés
+  Then ils retournent respectivement `"model-profiles"`, @AccessPolicy::OwnerOnly,
+    @AccessPolicy::OwnerOnly et @Some(@Column::OwnerId), et le test
+    `model_profile_resource_contract` passe (comparaison de @Column par @matches!,
+    @Column ne derivant pas @PartialEq)
+
+Scenario: Body de création sans id, owner_id ni options désérialise
+  Given la chaîne JSON `{"name":"qwen","provider_id":1,"model":"qwen2.5"}`
+  When elle est désérialisée en @Model par serde
+  Then elle produit une valeur avec `id == 0`, `owner_id == 0`,
+    `options == serde_json::json!({})` et `temperature`/`max_tokens` à @None,
+    sans erreur de champ manquant
+
+Scenario: Clé options explicitement null survit telle quelle
+  Given la chaîne JSON compacte `{"name":"qwen","provider_id":1,"model":"qwen2.5","options":null}`
+  When elle est désérialisée en @Model par serde
+  Then elle réussit et `options` vaut @serde_json::Value::Null — @serde(default)
+    ne couvre que l'absence de clé, pas la clé à `null`
+
+Scenario: Sérialisation REST expose la forme ligne complète
+  Given un @Model construit avec `id: 3`, `owner_id: 7`, `provider_id: 2`,
+    `options: json!({"top_k": 5})`
+  When il est sérialisé en JSON
+  Then l'objet contient les 8 clés `id`, `owner_id`, `name`, `provider_id`,
+    `model`, `temperature`, `max_tokens`, `options` (`temperature` et
+    `max_tokens` présents même à @None), forme que le frontend
+    `httpConfigRepo.ts` traduit vers la forme domaine
+
+Scenario: Les FK du schéma bornent le cycle de vie des lignes
+  Given une ligne de `vanyline_model_profiles` insérée via @Entity::insert avec
+    un `provider_id` valide (seed à la @mod resource_router_regression de
+    ./agents.rs)
+  When l'utilisateur `miryad_users` propriétaire est supprimé, puis séparément le
+    provider référencé
+  Then la première suppression emporte la ligne par CASCADE, la seconde échoue
+    (RESTRICT) — et supprimer le profil référencé par un agent échoue aussi
+    (RESTRICT, FK de la migration `../../migration/m20260825_000006_create_vanyline_agents.rs`)
+
+Depends on:
+  @sea_orm (@DeriveEntityModel, @ActiveModelBehavior, prelude), @serde,
+    @serde_json, @utoipa (@ToSchema), @miryad_core::resource (@MiryadResource,
+    @AccessPolicy) — crate externe miryad-core 0.1, hors dépôt.
+  ../../migration/m20260825_000005_create_vanyline_model_profiles.rs — DDL source
+    de vérité de la table (spec propre en cours).
+  ../../migration/m20260825_000006_create_vanyline_agents.rs — FK entrante
+    `agents.model_profile_id` → cette table (RESTRICT).
+  ./mod.rs — déclaration `pub mod model_profiles;` (cf. `./mod.sdd`).
+  Consommateurs (hors périmètre, comportements cités) : ../config_store.rs,
+    ../../main.rs, ./agents.rs (tests), `frontend/src/api/httpConfigRepo.ts`,
+    `../../../../cfgstore/src/domain.sdd` (contrat du @ModelProfile de domaine).
+
+Tasks:
+  [?] miryad-core (crate externe, source non lisible depuis le dépôt) : la
+      sémantique concrète de @AccessPolicy::OwnerOnly (le filtre est-il un WHERE
+      `owner_id` sur la collection ? un 403 ou un 404 sur l'item d'autrui ?),
+      l'écrasement annoncé de `id`/`owner_id` par `create()`/`update()` (claim du
+      commentaire du fichier, jamais vérifié par un test sur CETTE ressource —
+      la régression Phase 3 ne teste que `agents`), et le statut HTTP rendu sur
+      violation de l'index unique `(owner_id, name)` (500 brut ? erreur
+      structurée ?). À trancher : contractualiser par test d'intégration via
+      `../db/test_support.sdd` (`@real_db`) ou assumer la délégation à miryad-core.
+  [?] `"options": null` en body de création : accepté par serde, stocké en JSONB
+      `null` malgré le `NOT NULL DEFAULT '{}'` (le NOT NULL SQL n'interdit pas
+      JSON `null`), et avalé silencieusement en map vide par @domain_model_profile
+      côté lecture. Est-ce un contrat voulu (défense en lecture) ou une porte
+      d'entrée à fermer (rejeter `null` à l'écriture, ou normaliser en hook) ?
+  [?] `max_tokens` : colonne `BIG_INTEGER` NULLable sans CHECK ; un `max_tokens`
+      négatif en base traverse @domain_model_profile par un `as u64` et devient
+      un u64 énorme (wrap deux-le-complément, pas de panique). Ajouter un CHECK
+      en base, une validation d'écriture, ou assumer ?
+  [!] ../config_store.rs @load_providers ne filtre PAS par owner (contrairement
+      à @load_model_profiles) : la résolution `provider_id` → nom peut donc
+      résoudre vers un provider d'un AUTRE owner, et la FK `provider_id`
+      n'oblige pas le provider à appartenir au même owner qu'au profil. Un
+      profil d'alice peut ainsi référencer le provider de bob (lecture : nom
+      résolu ; écriture : accepté par `resource_router`). Intentionnel
+      (providers = ressource Public/AdminOnly, cf. `./llm_providers.rs`) ou trou
+      d'isolation ? À trancher avec Sébastien.
+  [?] Aucun test ne couvre la (dé)sérialisation de CETTE entité (les Scenarios
+      « body de création » et « options null » ci-dessus n'ont pas d'équivalent
+      `#[cfg(test)]` dans le fichier, contrairement à la régression équivalente
+      écrite pour `agents`). Ajouter les tests des Scenarios 2–4, ou considérer
+      que `../config_store.rs` (fixtures `DbModelProfile` construites à la main)
+      suffit ?
+  [?] Aucun timestamp dans la table : cohérent avec les sœurs à ce jour, mais à
+      confirmer comme choix global (et non omission) lors de la spec des
+      migrations.

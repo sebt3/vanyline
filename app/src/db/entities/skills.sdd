@@ -1,0 +1,218 @@
+Spec: Skills Entity
+
+Purpose:
+  Entité SeaORM `skills` de la couche base de données de l'`app` : déclaration du
+  modèle ligne ↔ structure Rust de la table `vanyline_skills` (compétence chargeable
+  par un agent : nom, description, corps `body`), et de son contrat de ressource
+  HTTP au travers de `miryad_core::resource` (politiques de lecture/écriture
+  `OwnerOnly`, colonne de propriété `owner_id`, nom de ressource `skills`).
+  Fichier purement déclaratif : aucun code métier propre — les requêtes sur
+  l'entité vivent dans `./../../config_store.rs` (`PgConfigStore`) et le routage
+  HTTP dans `miryad_core` instancié par `./../../main.rs`. Le domaine « skills »
+  a un second pourvoyeur, fichier cette fois : la couche YAML de
+  `vanyline-cfgstore` (`./../../../../cfgstore/src/fs_store.sdd`,
+  `./../../../../cfgstore/src/layers.sdd`) — même vocabulaire
+  `SkillMeta`/`SkillSelection` (défini dans `vanyline-lib`), stockage et sémantique
+  de chargement distincts (cohérence à trancher, voir `Tasks`). Le contrat SCHEMA
+  de la table (colonnes SQL, FK, index unique) vit dans
+  `./../migration/m20260825_000001_create_vanyline_skills.sdd` (en cours de
+  rédaction) — ce fichier-ci déclare la correspondance entité ↔ ce schéma, jamais
+  un schéma alternatif.
+
+Owns:
+  ./skills.rs
+
+Exposes:
+  @Model (struct) — 5 champs, mappés sur `vanyline_skills` par
+    `#[derive(DeriveEntityModel)]` + `#[sea_orm(table_name = "vanyline_skills")]`,
+    avec `#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, ToSchema)]` :
+      `id: i32` — clé primaire (`#[sea_orm(primary_key)]`), auto-incrémentée en
+        base ; `#[serde(default)]` → absent du JSON désérialisé vaut `0`.
+      `owner_id: i32` — propriétaire (FK SQL `miryad_users(id)` ON DELETE CASCADE,
+        portée par la migration, invisible dans l'entité) ; `#[serde(default)]` →
+        absent vaut `0`.
+      `name: String` — seul champ SANS `#[serde(default)]` : requis à la
+        désérialisation ; unique par owner (index SQL unique `(owner_id, name)`).
+      `description: String` — `#[serde(default)]` → absent vaut `""` ; défaut SQL
+        `''` côté migration.
+      `body: String` — corps du skill ; `#[serde(default)]` → absent vaut `""` ;
+        défaut SQL `''`.
+  @Entity, @ActiveModel, @Column, @PrimaryKey — types générés par
+    `DeriveEntityModel` (aucun membre ajoutable à la main).
+  @Relation — enum vide (`{}`) : aucune relation ORM déclarée, y compris pour la
+    FK SQL vers `miryad_users` (voir `Must not`).
+  `impl ActiveModelBehavior for @ActiveModel` — implémentation vide : aucun hook
+    `before_create`/`before_update` (contraste avec `./agents.rs` qui en surcharge
+    un).
+  `impl MiryadResource for @Entity` — contrat de ressource :
+      @resource_name() = `"skills"`
+      @read_policy() = `@AccessPolicy::OwnerOnly`
+      @write_policy() = `@AccessPolicy::OwnerOnly`
+      @owner_column() = `Some(@Column::OwnerId)`
+  Surface HTTP (dérivée, non codée ici) : `./../../main.rs` fusionne
+    `resource_router::<skills::Entity, AppState>()` et
+    `resource_openapi::<skills::Entity>()` — routes `/api/v1/skills` et
+    `/api/v1/skills/{id}`, schéma OpenAPI nommé `Skill` (`#[schema(as = Skill)]`).
+  Tests internes : `skill_resource_contract` — vérifie les quatre valeurs de
+    `MiryadResource` (`owner_column` via `matches!`, `Column` ne dérivant pas
+    `PartialEq` sous SeaORM 2).
+
+Accepts:
+  Payloads JSON de création/mise à jour désérialisés en @Model par
+    `resource_router` : `name` obligatoire (string) ; `id`, `owner_id`,
+    `description`, `body` optionnels aux défauts serde `0`, `0`, `""`, `""`.
+  En lecture `PgConfigStore` : aucune entrée — l'entité est requêtée par
+    `Column::OwnerId` (et `Column::Name` pour `load_skill`) depuis
+    `./../../config_store.rs`, jamais par ce fichier.
+
+Returns:
+  @Model sérialisé : objet JSON aux clés exactes `id`, `owner_id`, `name`,
+    `description`, `body` (toutes sérialisées, `serde(default)` n'affecte que la
+    désérialisation).
+  Pour le domaine (via `./../../config_store.rs`) : `domain_skill_meta` n'expose
+    jamais `body` — index léger `SkillMeta { name, description }` ; `body` chargé
+    séparément par `load_skill(name)`.
+
+Raises:
+  Erreur serde « missing field name » — à la désérialisation d'un payload sans
+    `name` (seule erreur de désérialisation possible sur les 5 champs, les quatre
+    autres étant defaultés).
+  Erreurs SQL propagées par SeaORM aux consommateurs (le fichier lui-même ne lève
+    rien) : violation de l'index unique `(owner_id, name)`, violation de FK sur
+    `owner_id` — surfacées en `CfgStoreError::Config` côté `config_store.rs`, en
+    statut HTTP géré par `miryad_core` côté REST (statut exact non observable dans
+    ce dépôt, voir `Tasks`).
+
+Handles:
+  Rien en propre : aucune I/O, aucun async, aucun handler dans ./skills.rs. Le
+    traitement des requêtes HTTP est la propriété de `resource_router`
+    (`miryad_core`, instancié `./../../main.rs`) ; les requêtes de lecture sont la
+    propriété de `./../../config_store.rs`.
+
+Must:
+  - Mapper la table `vanyline_skills` exactement (nom littéral dans
+      `#[sea_orm(table_name = "…")]`), sans dépendre d'un nom de table dérivé du
+      module.
+  - Maintenir la correspondance colonne par colonne avec
+      `./../migration/m20260825_000001_create_vanyline_skills.rs` : `id` ↔
+      `INTEGER NOT NULL AUTO_INCREMENT PRIMARY KEY` ; `owner_id` ↔
+      `INTEGER NOT NULL` (FK `miryad_users(id)`, `ON DELETE CASCADE`) ; `name` ↔
+      `STRING NOT NULL` ; `description` ↔ `STRING NOT NULL DEFAULT ''` ;
+      `body` ↔ `STRING NOT NULL DEFAULT ''` — types Rust `i32`/`i32`/`String`/
+      `String`/`String` dans cet ordre de déclaration.
+  - Porter `#[serde(default)]` sur `id`, `owner_id`, `description`, `body` —
+      justification observée (commentaire dupliqué de `./model_profiles.rs`) :
+      `resource_router` désérialise le body en @Model tel quel et le frontend
+      n'envoie ni `id` ni `owner_id` à la création ; sans default ce serait un
+      400 « missing field ».
+  - Exposer le schéma OpenAPI sous le nom `Skill` (`#[schema(as = Skill)]`).
+  - Répondre aux quatre valeurs du contrat `MiryadResource` telles qu'exposées
+      (`"skills"`, `OwnerOnly` en lecture ET écriture, `Some(@Column::OwnerId)`) —
+      test `skill_resource_contract`.
+  - Rester requêtable après application de la migration : un `@Entity::find()`
+      sur une base fraîchement migrée réussit (scénario porté par
+      `./../migration/mod.sdd`, migration `m20260825_000001` appliquée en premier).
+
+Must not:
+  - Déclarer une variante dans @Relation (même pour la FK `owner_id` ou pour les
+      références de `agents.skills`/`SkillSelection` vers `name`) : la structure
+      d'enum vide est le contrat actuel ; toute relation ajoutée exige d'étendre
+      cette spec.
+  - Surcharger un hook dans `ActiveModelBehavior` : l'impl vide est le contrat
+      (aucune validation ni normalisation serveur au niveau ORM — `before_create`
+      existe ailleurs, pas ici).
+  - Ajouter `#[serde(default)]` à `name` : le nom est la clé logique du skill
+      (unique par owner, ciblé par `load_skill`) et son absence en création doit
+      rester une erreur.
+  - Contenir logic métier, fonction utilitaire, constante ou `impl` autre que les
+      deux `impl` exposés — tout dépassement du déclaratif exige d'étendre la
+      spec (règle `mod.rs`/entités de ./mod.sdd).
+  - Écrire sur stdout/stderr (`println!`/`eprintln!`) — harnais clippy du
+      workspace (./../../../../tooling.sdd), exempts uniquement sous
+      `#[cfg(test)]`.
+
+Depends on:
+  ./../migration/m20260825_000001_create_vanyline_skills.rs — contrat SCHEMA de la
+    table (spec ./../migration/m20260825_000001_create_vanyline_skills.sdd en
+    cours) ; ./../migration/mod.sdd — ordre d'application et scénario `find` post-
+    migration.
+  ./mod.sdd — registre des entités et règle un-fichier-une-spec ; ./../mod.sdd et
+    ./../test_support.sdd — couche db et harnais de tests Postgres.
+  ./../../config_store.rs — consommateur lecteur : `load_skills` (filter
+    `Column::OwnerId`), `list_skills` (`SkillMeta` sans `body`), `load_skill`
+    (filter `OwnerId` + `Name`, renvoie `row.body`, `UnknownReference("skill", …)`
+    si absent).
+  ./../../main.rs — consommateur HTTP : `resource_router::<skills::Entity, _>` et
+    `resource_openapi::<skills::Entity>` fusionnés, test OpenAPI sur
+    `/api/v1/skills` et `/api/v1/skills/{id}`.
+  sea_orm (`entity::prelude`), serde, utoipa, et miryad_core — crate externe pour
+    `resource::AccessPolicy` et `resource::MiryadResource`.
+  ./../../../../cfgstore/src/fs_store.sdd et
+    ./../../../../cfgstore/src/layers.sdd — sœurs du domaine skills (stockage
+    fichiers) ; vanyline-lib `domain::{SkillMeta, SkillSelection}` (specs à venir).
+
+Scenario: skill_resource_contract
+  Given l'entité `skills::Entity` compilée dans `vanyline-app`
+  When les quatre méthodes de @MiryadResource sont appelées
+  Then @resource_name() vaut exactement `"skills"`, @read_policy() et
+    @write_policy() valent tous deux `@AccessPolicy::OwnerOnly`, et
+    @owner_column() est `Some(@Column::OwnerId)` (test existant
+    `skill_resource_contract`, assertion `matches!` faute de `PartialEq` sur
+    `@Column`)
+
+Scenario: skill_payload_minimal_deserialise_avec_defauts
+  Given le payload JSON `{"name": "pdf"}`, tel qu'envoyé par le frontend à la
+    création (ni `id` ni `owner_id`)
+  When il est désérialisé en `skills::@Model`
+  Then la désérialisation réussit avec `name` = `"pdf"`, `id` = `0`,
+    `owner_id` = `0`, `description` = `""` et `body` = `""`
+
+Scenario: skill_payload_sans_name_rejete
+  Given le payload JSON `{"description": "x", "body": "y"}`, sans clé `name`
+  When il est désérialisé en `skills::@Model`
+  Then la désérialisation échoue avec une erreur serde `missing field` sur `name`
+
+Scenario: skill_round_trip_serialisation_fidele
+  Given un `skills::@Model` aux cinq champs renseignés (valeurs non triviales)
+  When il est sérialisé en JSON puis redésérialisé en `skills::@Model`
+  Then le modèle obtenu est `==` à l'original (`PartialEq`) et l'objet JSON porte
+    exactement les clés `id`, `owner_id`, `name`, `description`, `body`
+
+Tasks:
+  [ ] Écrire les tests des trois Scenario suivants, taggés par leur titre — seul
+      `skill_resource_contract` existe à ce jour :
+      `skill_payload_minimal_deserialise_avec_defauts`,
+      `skill_payload_sans_name_rejete`, `skill_round_trip_serialisation_fidele`.
+  [?] `name` est le seul champ sans `#[serde(default)]` : requis implicite à la
+      création. Le commentaire du fichier justifie les defaults mais jamais
+      l'exception `name` — confirmer avec Sébastien que « nom obligatoire » est un
+      contrat voulu (et son pendant : un `name` dupliqué pour un même owner
+      n'est traité nulle part dans ce dépôt, l'index unique SQL seul s'en charge,
+      cf. `Raises`).
+  [?] « `id`/`owner_id` écrasés de toute façon par `resource_router` » :
+      affirmation du commentaire, non vérifiable dans ce dépôt (miryad_core est un
+      crate externe, code de test `main.rs` silencieux là-dessus) — à confirmer
+      lors de la spec de `./../../main.rs` ou d'un test d'intégration.
+  [?] Sémantique exacte de `@AccessPolicy::OwnerOnly` (filtrage du list sur
+      `owner_column`, statut en cross-owner) : propriété de miryad_core, aucune
+      spec `.sdd` du dépôt ne la couvre à ce jour — trancher qui la contractue.
+  [?] `#[serde(default)]` sur `description`/`body` couplé à un mécanisme de mise
+      à jour full-@Model dans miryad_core pourrait vider ces champs si un patch
+      ne les renvoie pas. Mécanisme d'update de `resource_router` non observable
+      ici : à vérifier (risque de perte de données silencieuse) avant de figer ce
+      comportement comme sûr.
+  [?] Cohérence des deux pourvoyeurs du domaine skills : `cfgstore` fs_store
+      `load_skill` retourne un corps TRIMÉ, `PgConfigStore::load_skill`
+      (`./../../config_store.rs`) retourne `row.body` brut sans trim. Lequel est le
+      contrat du consommateur (sandbox/agents) ? À arbitrer avec les specs sœurs.
+  [!] Suppression d'un owner : la cascade `ON DELETE CASCADE` sur `owner_id` est
+      portée par la seule base SQL, invisible côté entité (Relation vide) et
+      jamais testée dans ce dépôt — comportement réel (et son parallèle pour
+      `agents.skills` qui référence des `name` de skills sans FK) à documenter
+      dans la spec migration ou un test dédié.
+
+Done when:
+  Les quatre Scenario ont un test taggé vert, les `[?]`/`[!]` sont tranchés avec
+  Sébastien ou reportés dans la spec propriétaire (miryad-core, migration,
+  cfgstore), et la correspondance entité ↔ migration reste vérifiée à chaque
+  changement des deux côtés.

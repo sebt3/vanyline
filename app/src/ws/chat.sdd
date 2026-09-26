@@ -1,0 +1,728 @@
+Spec: Chat WebSocket
+
+Platform: Rust/vanyline-app/axum-ws/tokio/sea-orm/rig-core
+
+Purpose:
+  WebSocket de chat de l'`app` : `GET /api/ws/chat/{conversation_id}` (route montée par
+  `../main.rs`, hors des `api_router`/`api_v1_router`), transport d'un tour de chat LLM
+  entre le frontend (`frontend/src/api/chatWs.ts` + `chatTransport.ts`, une connexion WS
+  par tour) et le moteur de session de `vanyline-lib`. Couvre d'un bout à l'autre :
+  handshake et auth (cookie de session miryad-core — pas de ticket, contrairement aux
+  WS de la sandbox), vérification du propriétaire de la conversation, protocole des
+  messages entrants (un seul type traité : `{"type":"message","content":…}`), diffusion
+  sortante des @ChatEvent de `../../../lib/src/event.sdd` (cohérence de tags/champs
+  obligatoire avec cette spec — ce fichier ne fabrique lui-même que @ChatEvent::Error et
+  @ChatEvent::ToolUnavailable), verrou busy par conversation (`VNL-WS-001`, pattern
+  répliqué du RPC du CLI, sémantique identique mais code distinct), streaming réel
+  (@ChannelSink → canal mpsc → une tâche @forward_events par connexion, jamais de buffer
+  du tour entier), persistance R9 (message user AVANT le tour, assistant seulement après
+  un tour réussi — sémantique de référence partagée avec le RPC du CLI), rejeu de
+  l'historique texte-only, résolution dynamique de `extra_mcp` sandbox avec scoping IDOR
+  (`resolve_extra_mcp` — première version sans scoping corrigée en revue Phase 3, cf.
+  `../../../docs/architecture.md`), et persistance `todo` entre tours. L'état par session
+  se limite au canal d'événements de la connexion et au verrou busy global du processus
+  (@AppState::busy) — aucun autre état par connexion.
+  Le brief de mission rattachait à ce fichier un `configured_extra_mcp`/`VNL-MCP-004`
+  (SSE) et l'export workspace-only cité par `../../../cfgstore/src/layers.sdd` : après
+  vérification, `configured_extra_mcp` n'existe nulle part dans le dépôt, la mention de
+  `layers.sdd` vise `../../../cli/src/chat.rs` (autre fichier), et le repli SSE
+  `VNL-MCP-004` est le contrat de `../../../lib/src/prefixed_mcp.sdd` en aval des
+  toolsets — voir la tâche `[?]` correspondante. Un seul fichier, un seul contrat.
+
+Owns:
+  ./chat.rs
+
+Can read:
+  ../../../lib/src/event.sdd — @ChatEvent (12 variantes, tag `"type"` snake_case),
+    @EventSink, @ToolCallRecord : ce fichier est un producteur de @Error/@ToolUnavailable
+    et un transporteur des autres variantes ; toute dérive de forme casse le frontend.
+  ../../../lib/src/session.sdd — @SessionContext (7 champs consommés ici) et
+    @run_agent_turn (entrée hôte, profondeur 0, émission @Done/@Error et repli
+    @ToolUnavailable des toolsets).
+  ../../../lib/src/types.sdd — @vanyline_lib::Message et @vanyline_lib::ToolCall : la
+    forme du `payload` persisté et relu par @load_history/@persist_message.
+  ../../../lib/src/prefixed_mcp.sdd — repli `VNL-MCP-004` (SSE) des serveurs MCP des
+    toolsets, en aval de @run_agent_turn (ce fichier n'en câble aucun lui-même).
+  ../../../lib/src/k8s.sdd — @VnlK8sClient::get_sandbox / @get_project /
+    @sandbox_mcp_url (URL ClusterIP interne `http://{service}.{ns}.svc:{port}/mcp`).
+  ../main.rs — montage de la route `GET /api/ws/chat/{conversation_id}` (au niveau
+    racine, avant `with_state`), @AppState (champs `auth.db`, `busy`, `k8s`).
+  ../error.sdd — @AppError et le chemin WS « log-only » (@IntoResponse jamais appelée).
+  ../db/entities/conversations.sdd — @Model (`agent_id`, `context_id`, `todo`,
+    `updated_at`) que ce fichier lit et met à jour.
+  ../db/entities/messages.sdd — @load_history/@persist_message cités comme consommateurs
+    ; les `[?]` « rôle dupliqué » et « rôles inconnus écartés » de cette spec prennent
+    source ICI (voir `Tasks`).
+  ../db/entities/chat_contexts.sdd — `resolve_extra_mcp` et `VNL-DB-007` cités comme
+    consommateurs.
+  ../db/entities/agents.sdd — résolution `agent_id` → nom SANS filtre owner (`[!]`
+    ouvert là-bas, miroir dans `Tasks` ici).
+  ../api/owners.sdd — @resolve_owner_name (lecture seule du lien K8s, contrat d'appelant
+    WS listé là-bas).
+  ../k8s.sdd — @crate::k8s::client (découverte lazy, @AppError::K8sConfigError ;
+    consommation WS : erreur interceptée en @ToolUnavailable, jamais en 502).
+  ../config_store.sdd — @PgConfigStore::new(db, user_id) : store de config lié à UN
+    utilisateur, écritures en @VNL-CFG-009 (défaut ReadOnly).
+  ../../../frontend/src/api/chatWs.ts — URL construite
+    `{ws|wss}://{host}/api/ws/chat/${conversationId}`.
+  ../../../frontend/src/api/chatTransport.ts — envoie `{"type":"message","content"}` ;
+    `stop()` = fermeture du WS (aucun message d'annulation).
+  ../../../docs/architecture.md — sections « Backend web — vanyline-app » (WS chat,
+    concurrence chat/send, persistance R9) et « Chat — contexte de conversation »
+    (scoping IDOR trouvé en revue Phase 3).
+
+Exposes:
+  @ws_chat_handler — seul item `pub` du fichier (le module `chat` est déclaré `pub` par
+    `./mod.rs` ; rien d'autre n'est atteignable hors du fichier). Handler axum branché
+    par `../main.rs` sur `GET /api/ws/chat/{conversation_id}` ; extracteurs :
+    @State(@AppState), @AuthUser (miryad-core — session cookie OIDC same-origin ; son
+    rejet d'handshake non authentifié est le contrat de miryad-core, externalité non
+    specée, cf. `../auth/mod.sdd` `[!]`), @Path::<@i32>(conversation_id),
+    @WebSocketUpgrade. Corps : `ws.on_upgrade(handle_socket)` — l'upgrade a lieu AVANT
+    tout accès DB.
+  @handle_socket — privé : enveloppe non-async qui consomme le @Result de @run_socket
+    par `if let Err(e)` → @tracing::error au format exact `"ws chat error: {e}"` ;
+    aucune réponse, aucun frame, aucune fermeture explicite (le drop de la socket
+    terminate la connexion). Contrat partagé avec ../error.sdd (« chemin WS log-only »).
+  @run_socket — privé : corps de la connexion (auth utilisateur, contrôle conversation,
+    boucle de lecture, see @Handles). Retourne @Result<(), @AppError>.
+  @try_acquire_busy — privé, `#[allow(clippy::unwrap_used)]` justifié (mutex empoisonné
+    = état corrompu, panic assumé) : `true` si l'id était absent (@HashSet::insert
+    inséré), `false` s'il était présent ; extrait de @run_socket pour être testable sans
+    WS/DB (note R4 du commentaire source).
+  @BusyGuard — privé : @Arc<@Mutex<@HashSet<@i32>>> + id ; @Drop retire l'id au
+    drop (synchrone par design — `std::sync::Mutex` et non tokio, commentaire source),
+    donc nettoie aussi si la tâche de tour panique. `#[allow(clippy::unwrap_used)]`
+    sur @Drop::drop (Drop ne peut pas retourner de @Result).
+  @ChannelSink — privé : implémente @EventSink ; @emit pousse sur un @mpsc::canal
+    unbounded avec `let _ = self.tx.send(event)` — perte silencieuse si le récepteur
+    est mort ; ne bloque jamais l'émetteur du tour. Remplace l'ancien @CollectingSink
+    (commentaire source : l'ancien bufferisait un tour entier avant le premier octet).
+  @ClientMessage — privé @Deserialize { r#type: @String, content: @String } : les DEUX
+    champs sont requis (aucun `#[serde(default)]`), les champs inconnus sont ignorés
+    (serde par défaut, aucun attribut).
+  @forward_events — privé : draine le @UnboundedReceiver, @serde_json::to_string(&event)
+    `.unwrap_or_default()`, @Message::Text sur le socket ; rupture à la première erreur
+    d'écriture ; se termine quand tous les senders du canal sont dropped.
+  @send_error / @send_tool_unavailable — privés : fabriquent @ChatEvent::Error { code,
+    message } / @ChatEvent::ToolUnavailable { server, reason } et les poussent sur le
+    canal (`let _ =`, jamais d'erreur remontée).
+  @resolve_extra_mcp — privé : résolution `extra_mcp` depuis @chat_contexts (branches
+    exhaustives en @Handles).
+  @handle_message — privé : un tour complet (agent, historique, persistance user,
+    @SessionContext, @run_agent_turn, persistance assistant, todo) ; porte
+    `#[allow(clippy::unwrap_used)]` pour le `todo_state.lock().unwrap()` final.
+  @tool_calls_for_persistence — privé pur : @[ToolCallRecord] →
+    @vanyline_lib::ToolCall en DROPPANT le champ `id` (la persistance `messages.payload`
+    ignore la corrélation ToolCall/ToolResult du flux vivant — commentaire source).
+  @todo_to_persist — privé pur : @Some(final) seulement si l'état courant est @Some ET
+    diffère du seed initial ; @None sinon — un état antérieur n'est jamais nullé.
+  @load_history — privé : recharge l'historique de la conversation (filtrage/trie/
+    élagage en @Handles), retourne Vec<rig_core::message::Message>.
+  @persist_message — privé : insert d'une ligne `vanyline_messages` + rafraîchissement
+    manuel de `conversations.updated_at` ; retourne l'id inséré (`last_insert_id as
+    i32`) — valeur jamais lue par les deux call-sites de CE fichier.
+  Module @tests — `#[cfg(test)]` avec `#![allow(clippy::unwrap_used,
+    clippy::expect_used)]` : 9 tests, tous sur les fonctions pures —
+    @tool_calls_for_persistence_drops_id_keeps_rest,
+    @tool_calls_for_persistence_empty,
+    @try_acquire_busy_first_call_succeeds_second_fails,
+    @try_acquire_busy_different_conversations_independent,
+    @busy_guard_removes_conversation_on_drop,
+    @todo_to_persist_changed_some_from_none_returns_some,
+    @todo_to_persist_unchanged_returns_none,
+    @todo_to_persist_changed_to_none_does_not_null_previous,
+    @todo_to_persist_unchanged_none_is_none.
+    Aucune couverture de test pour @run_socket, @forward_events, @resolve_extra_mcp,
+    @load_history, @persist_message, @handle_message (dette en `Tasks`).
+
+Accepts:
+  Handshake : `GET /api/ws/chat/{conversation_id}` avec la cookie de session miryad-core
+    (same-origin ; le frontend ne présente jamais le JWT brut ici) ; @conversation_id =
+    entier i32 au sens d'axum (non-numeric → rejet HTTP avant upgrade, statut au contrat
+    axum — la spec frontend utilise des id numériques).
+  Messages entrants (seuls frames @Message::Text traités) :
+    - JSON valide avec `"type"` == `"message"` ET `"content"` chaîne → tour.
+    - `"type"` != `"message"` (tout autre valeur, y compris un futur `stop`/`cancel` qui
+      n'existe pas) → ignoré SILENCIEUSEMENT (aucun événement en retour).
+    - JSON invalide, ou objet sans `"content"`, ou `"content"` non-chaîne → ignoré
+      SILENCIEUSEMENT (échec serde → `continue`).
+    - @Message::Binary → ignoré ; @Message::Ping/@Message::Pong reçus comme frames →
+      ignorés (aucune réponse Pong fabriquée ici — voir `Tasks`).
+    - @Message::Close → fin de la boucle de lecture.
+    - Erreur de transport (@Some(@Err)) sur le stream → fin de boucle silencieuse
+      (`while let Some(Ok(msg))` avale l'@Err sans log).
+  Aucun message d'annulation de tour n'existe : l'arrêt côté client = fermer le socket
+    (ce que fait `stop()` du frontend) — @run_agent_turn ne prend aucun token
+    d'annulation (limite contractée par `../../../docs/architecture.md` « Limites
+    connues »).
+  @handle_message accepte ce que posent les appelants internes : un @agent_id déjà lu
+    sur la conversation (aucune entrée extérieure pour un autre id), un @user_id résolu,
+    le contenu brut du client (aucune validation de longueur, de charset, de vide — un
+    `content: ""` déclenche un tour avec message user vide).
+
+Returns:
+  @run_socket : @Ok(()) quand la boucle de lecture se termine normalement (Close ou
+    épuisement du stream) APRÈS avoir `drop(tx)` local puis attendu @forward_handle —
+    cet await s'étend jusqu'à la FIN du tour en cours si une tâche de tour détient
+    encore un clone du sender (le socket n'est réellement libéré qu'à la fin du tour).
+  Sortie du socket : chaque @ChatEvent sérialisé en UN frame texte JSON (tag `"type"`,
+    champs snake_case — format défini par `../../../lib/src/event.sdd`, miroir ts-rs
+    `packages/protocol/src/generated/chat-event.ts` que le frontend consomme).
+    Émis directement par CE fichier :
+      @ChatEvent::Error { code: "VNL-AGT-001", message: "No agent assigned to
+      conversation" } — conversation sans agent.
+      @ChatEvent::Error { code: "VNL-WS-001", message: "A turn is already in progress
+      for this conversation" } — verrou busy occupé.
+      @ChatEvent::Error { code: "VNL-LLM-001", message: <@Display complet de l'@AppError
+      du tour> } — toute erreur retournée par @handle_message (voir `Raises`).
+      @ChatEvent::ToolUnavailable { server, reason } — 8 sites d'émission dans
+      @resolve_extra_mcp (@Handles).
+    Transitent par le même canal sans être fabriqués ici : @Token, @ReasoningDelta,
+    @ToolCall, @ToolResult, @Usage, @Done, @SkillLoaded, @SubagentStart/@SubagentEvent/
+    @SubagentEnd, et les @Error/@ToolUnavailable émis par la lib
+    (`../../../lib/src/event.sdd`, `../../../lib/src/session.sdd`).
+  @try_acquire_busy : booléen d'acquisition. @todo_to_persist : @Option<@String> selon
+    la matrice (@Some si changé-et-non-NULL, @None sinon — les 4 combinaisons sont
+    testées). @tool_calls_for_persistence : même ordre, même contenu sans `id`, vide →
+    vide. @persist_message : id i32 inséré (non consommé). @load_history : Vec dans
+    l'ordre @created_at ASC, éléments élagués exclus.
+  @resolve_extra_mcp @Ok : @Vec de paires @(@McpServer, @McpSelection) de 0 ou 1 élément ;
+    succès = @McpServer { name: `"sandbox"`, transport: @McpTransport::HttpStreamable,
+    url interne ClusterIP `http://{service}.{namespace}.svc:{MCP_PORT}/mcp` (construit
+    par la lib), headers vides } + @McpSelection { server: `"sandbox"`, tools: vec![] }
+    — `tools` vide = sélection de TOUS les tools (contrat @McpSelection de
+    `../../../cfgstore/src/domain.rs`, doc « Vide = tous ("*") »).
+
+Raises:
+  @run_socket → @AppError (consommé en log seul, socket terminée sans AUCUN événement
+    envoyé au client — le client ne voit qu'une fermeture, voir `Tasks` `[!]`) :
+    @AppError::from(@sea_orm::DbErr) sur @resolve_user (« VNL-INT-001 … VNL-DB-006 … ») ;
+    @AppError::ConversationNotFound (`"VNL-CNV-001"`) si la conversation n'existe pas ;
+    @AppError::ConversationAccessDenied (`"VNL-CNV-002"`) si `conv.owner_id != user_id`.
+  @handle_message → @AppError, converti par la tâche de tour en UN unique
+    @ChatEvent::Error de code `"VNL-LLM-001"` et message = @Display complet — TOUTES les
+    erreurs du tour sont donc libellées LLM, y compris les non-LLM :
+    @AppError::AgentNotFound (`"VNL-AGT-001"` en message, code rendu `VNL-LLM-001`),
+    @AppError::InternalError(`"VNL-DB-007: context not found"`) (contexte absent —
+    bloque le tour malgré le commentaire « non bloquant », voir `Tasks`),
+    @VnyError::AgentNotFound remonté par @run_agent_turn (converti par le
+    @From<@VnyError> de ../error.sdd), toute @sea_orm::DbErr de @load_history,
+    @persist_message ou des updates @todo.
+  Chevauchement de codes : quand la lib @stream_agent_events échoue, elle a ÉMIS son
+    propre @Error `"VNL-LLM-001"` (contrat `../../../lib/src/event.sdd`) PUIS @handle_message
+    retourne @Err → le client reçoit DEUX @Error `"VNL-LLM-001"` dont le second porte le
+    double marqueur @From (`"VNL-INT-001: Internal error: VNL-LLM-001: …"`) —
+    voir `Tasks`.
+  @forward_events : @serde_json::to_string `.unwrap_or_default()` — une erreur de
+    sérialisation (théorique, @ChatEvent est totalement sérialisable) enverrait un frame
+    texte VIDE au client plutôt que de rompre (`Tasks` `[?]`).
+  @ChannelSink::emit et @send_* : aucune erreur (pertes `let _ =`). Panics possibles
+    sous le harnais : @try_acquire_busy/@BusyGuard::drop/@handle_message verrouillent
+    des @Mutex @std avec `.unwrap()` sous `#[allow(clippy::unwrap_used)]` justifié —
+    un mutex empoisonné (panique antérieure) propage la panique ; c'est le seul chemin
+    de panic du fichier hors `#[cfg(test)]`.
+
+Handles:
+  Ordre exact de @run_socket : (1) @resolve_user(db, subject, email) — contrat
+    miryad-core (externalité) ; (2) chargement de la conversation par id, absence →
+    @ConversationNotFound ; (3) `conv.owner_id != user_id` → @ConversationAccessDenied ;
+    (4) @socket.split + canal mpsc unbounded + spawn de @forward_events (UNE tâche par
+    connexion, pas par tour) ; (5) boucle de lecture ; (6) drop(tx) + await forward.
+    L'upgrade WS a déjà eu lieu aux étapes 1–3 : leurs échecs ne produisent AUCUNE
+    réponse HTTP ni AUCUN frame d'erreur.
+  Un tour de message, dans la boucle :
+    a. @ClientMessage parsé ; `"type"` != `"message"` → @continue.
+    b. @conv.agent_id absent (@Option @None, ex. agent supprimé — FK `ON DELETE
+      SET NULL`) → @send_error `"VNL-AGT-001"` + @continue (aucun tour lancé ; le
+      message user n'est PAS persisté — il est perdu).
+    c. @try_acquire_busy sur @state.busy — @false → @send_error `"VNL-WS-001"` +
+      @continue (pas de spawn, message user perdu aussi). @state.busy est le @HashSet
+      d'@AppState : verrou PAR CONVERSATION mais GLOBAL au processus, partagé entre
+      toutes les connexions WS — deux onglets sur la même conversation se
+      sérialisent, deux conversations différentes tournent en parallèle réel.
+    d. Spawn d'une tâche de tour (le lecteur du socket n'est PAS bloqué — Close reste
+      honoré pendant un tour, R4) : @BusyGuard pris en premier (nettoyage @Drop même
+      sur panique), @handle_message, puis `if let Err(e)` → @send_error `"VNL-LLM-001"`
+      avec `e.to_string()` (les marqueurs internes @AppError — `VNL-DB-006`,
+      `VNL-INT-001`, `VNL-K8S-*`… — sortent donc TELS QUELS vers le client).
+    e. La boucle passe immédiatement au frame suivant : deux `"message"` collés sans
+      attente → le second reçoit `VNL-WS-001` si le premier tour n'a pas encore rendu
+      son guard.
+  Séquence exacte de @handle_message (sémantique R9 verrouillée par commentaire source
+    et docs/architecture.md, alignée séparément sur le RPC du CLI) :
+    1. nom d'agent : @agents::Entity::find_by_id(agent_id), ABSENCE de filtre owner
+      (voir `Tasks` `[!]`) ; introuvable → @AppError::AgentNotFound.
+    2. @load_history AVANT la persistance du message courant (l'historique envoyé au
+      moteur n'inclut donc pas le message en cours — il est passé séparément).
+    3. @persist_message(user) — persisté AVANT @run_agent_turn : le message user reste
+      en base quelle que soit l'issue du tour.
+    4. relecture de @conversations.todo → seed @todo_initial.
+    5. @resolve_extra_mcp (branchu par `?` : seule l'absence de ligne de contexte est
+      bloquante ici, voir plus bas).
+    6. @SessionContext construit POUR CE TOUR (pas pour la connexion) :
+      store = @PgConfigStore::new(db, user_id) (lecture seule — les écritures du trait
+      retombent @VNL-CFG-009, contrat ../config_store.sdd) ; sink = @ChannelSink
+      (clone du sender) ; local_tools = @HashMap vide (l'app n'est pas sur le chemin
+      chaud éditeur — les 8 tools locaux ne sont pas câblés ici) ;
+      subagent_depth_max = 1 ; extra_mcp = résultat de l'étape 5 ;
+      model_override = @None (jamais de override côté app) ;
+      todo_state = @Arc<@Mutex<Option<@String>>> semé de @todo_initial.
+    7. @run_agent_turn(&ctx, &agent_name, history, user_msg, @None) — dernier argument
+      = workspace_context @None. Échec → `?` : l'étape 8 n'est JAMAIS atteinte
+      (aucune persistance assistant sur tour raté).
+    8. @tool_calls_for_persistence (drop des `id`) puis @persist_message(assistant,
+      response_text, tool_calls @None si liste vide) — APRÈS réussite seulement.
+    9. relecture de @ctx.todo_state (`.lock().unwrap()`) → @todo_to_persist(final,
+      initial) → si @Some : relecture de la conversation (absence →
+      @ConversationNotFound, tour en échec APRÈS persistance du message assistant —
+      voir `Tasks`) puis update de la colonne `todo`. Si @None : aucun update — l'état
+      antérieur n'est jamais nullé.
+  @resolve_extra_mcp, branches exhaustives (toutes les branches non finales sauf
+    @Ok/absence de contexte émettent @ChatEvent::ToolUnavailable puis rendent @Ok(vec![])
+    — le tour CONTINUE sans tools, ce n'est pas une panne ; commentaire source) :
+    - contexte (@chat_contexts::find_by_id(conv.context_id)) absent → @Err
+      @AppError::InternalError(`"VNL-DB-007: context not found"`) — bloque le tour
+      (incohérence de données normalement empêchée par la FK RESTRICT ; écart avec le
+      commentaire « non bloquant », `Tasks` `[?]` ; le 500-vs-404 est déjà `[?]` dans
+      ../db/entities/chat_contexts.sdd).
+    - @context.kind != `"sandbox"` → @Ok(vec![]) SILENCIEUX (aucun ToolUnavailable :
+      « pas encore implémenté », pas une panne — commentaire source ; seul kind réel
+      aujourd'hui).
+    - @context.data["sandbox_name"] absent ou non-chaîne → @ToolUnavailable { server:
+      `"sandbox"` (littéral), reason: `"contexte sandbox invalide (sandbox_name
+      absent)"` } → @Ok(vec![]).
+    - @resolve_owner_name → @Ok(@None) → @ToolUnavailable { server: sandbox_name,
+      reason: `"aucun owner K8s associé à cet utilisateur"` } → @Ok(vec![]) ; @Err →
+      @ToolUnavailable avec `e.to_string()` brut.
+    - @crate::k8s::client (découverte lazy, ../k8s.sdd) en @Err → @ToolUnavailable avec
+      message brut (l'équivalent WS du 502 REST).
+    - @client.get_sandbox(sandbox_name) en @Err → @ToolUnavailable idem.
+    - @client.get_project(sandbox.spec.project) en @Err → @ToolUnavailable idem.
+    - @project.spec.owner != owner de l'utilisateur → @ToolUnavailable { server:
+      sandbox_name, reason: `"sandbox hors du périmètre de cet utilisateur"` } — garde
+      IDOR obligatoire, même vérification que `api::sandboxes::get_sandbox` (commentaire
+      source : sans elle, tout utilisateur authentifié ferait résoudre les tools MCP
+      d'une sandbox d'autrui en la nommant dans @ChatContextInput à la création).
+    - @client.sandbox_mcp_url en @Err → @ToolUnavailable idem.
+    - Succès → paire unique @("sandbox", HttpStreamable, url interne) + sélection tools
+      vides (= tous les tools).
+  @load_history : filtre @messages::Column::ConversationId, trie @CreatedAt ASC ;
+    chaque `payload` est désérialisé en @vanyline_lib::Message ; payload JSON malformé
+    → ligne SILENCIEUSEMENT écartée (`.ok()`) ; @Message.role ni `"user"` ni
+    `"assistant"` → ligne SILENCIEUSEMENT écartée (dont `"system"` — jamais envoyé au
+    LLM, `[?]` repris de ../db/entities/messages.sdd, la source du comportement est
+    ICI) ; seuls role+content sont rejoués — les `tool_calls` du payload sont ignorés
+    au rejeu (historique appauvri, limite contractée par docs/architecture.md).
+  @persist_message : @payload = `json!({"role", "content", "tool_calls"})` — @None rend
+    la clé `"tool_calls": null` explicite ; la COLONNE `role` porte la même valeur que
+    `payload.role` (duplication `[?]` de messages.sdd, produite ici) ; insert avec
+    `id: NotSet`, `owner_id` = user_id du tour, `created_at` = @chrono::Utc::now() ;
+    puis relecture de la conversation + update de @updated_at (aucun hook — contrat
+    conversations.sdd). Le retour (id inséré) n'est lu par personne ici.
+  Déconnexion et fin de connexion : @Message::Close ou erreur de transport → rupture de
+    boucle → @drop(tx) local → await @forward_handle : si un tour est en vol (sender
+    cloné vivant), l'attente dure jusqu'à sa fin — le tour va à son TERME côté serveur
+    (le LLM n'est jamais annulé), ses événements finaux sont jetés (send sur socket
+    morte → rupture de @forward_events) et le verrou busy ne se libère qu'au @Drop du
+    guard de tâche. Un client déconnecté en plein tour bloque donc les nouveaux tours de
+    CETTE conversation jusqu'à la fin du tour fantôme.
+  @forward_events côté écriture : erreur d'@send (client parti, socket refermée) →
+    break → drop du récepteur → les @send ultérieurs des tâches de tour échouent en
+    `let _ =` (événements perdus sans log). Canal unbounded : un client très lent
+    accumule les événements en mémoire sans limite (backlog non borné, `Tasks` `[?]`).
+
+Must:
+  - Monter la route exactement sur `GET /api/ws/chat/{conversation_id}` avec @Path<i32>,
+      via @ws_chat_handler dans `../main.rs` (le frontend construit ce chemin).
+  - Exiger @AuthUser avant tout traitement : sans session valide le handshake est rejeté
+      en HTTP (contrat miryad-core), @run_socket n'est jamais atteint.
+  - Vérifier `conv.owner_id == user_id` APRÈS résolution de @resolve_user et AVANT toute
+      lecture/écriture : @ConversationAccessDenied sinon ; conversation inexistante :
+      @ConversationNotFound. Ces deux erreurs sont log-only (`"ws chat error: …"`),
+      jamais rendues en HTTP.
+  - Maintenir la sémantique R9 de persistance : message user inséré AVANT
+      @run_agent_turn, message assistant inséré UNIQUEMENT après un tour @Ok ;
+      l'opérateur `?` sur @run_agent_turn est ce qui garantit l'absence de persistance assistant
+      sur échec. Cette sémantique EST la référence partagée avec le RPC du CLI.
+  - Garder @ChannelSink non bloquant (un send par événement, perte silencieuse) et
+      @forward_events au fil de l'eau : le premier delta @Token doit partir dès son
+      émission — tout retour à un buffer « tour entier » (ancien @CollectingSink) est
+      une régression.
+  - Verrou busy PAR CONVERSATION avec acquisition atomique testable
+      (@try_acquire_busy) et libération par @Drop (@BusyGuard), y compris sur panique
+      de la tâche de tour ; message reçu pendant un tour actif → @Error `"VNL-WS-001"`
+      sans spawn ni file d'attente.
+  - Traiter `project.spec.owner == owner` de l'utilisateur dans @resolve_extra_mcp
+      avant toute URL MCP (garde IDOR — revue Phase 3) ; ne jamais résoudre ni exposer
+      l'URL d'une sandbox hors périmètre.
+  - Rendre non bloquants pour le tour les pannes de résolution sandbox (owner absent,
+      K8s injoignable, sandbox/projet absents, URL en échec) : @ToolUnavailable +
+      @Ok(vec![]), jamais @Err — seule l'absence de ligne de contexte est bloquante
+      (état actuel, à confirmer `Tasks`).
+  - Persister le `todo` selon @todo_to_persist : update uniquement sur changement vers
+      une valeur non-NULL ; jamais de NULL systématique écrasant l'état antérieur.
+  - Trier @load_history par @created_at ASC et ne rejouer que les rôles `"user"` /
+      `"assistant"` avec le seul `content` ; écarter sans erreur les payloads
+      malformés et les rôles hors vocabulaire.
+  - Écrire `payload` à la forme `{"role", "content", "tool_calls"}` (clé présente même
+      à null) et la colonne `role` en miroir — les deux lus par messages.sdd /
+      `api::conversations.rs`.
+  - Toucher `conversations.updated_at` (`Set(chrono::Utc::now())`) à chaque
+      @persist_message (aucun hook dans l'entité — c'est ici que ça se passe).
+  - Retenir les codes/marqueurs verbatim : `"VNL-AGT-001"` (deux usages distincts — code
+      de l'Error « No agent assigned » ET marqueur dans le message d'un @AgentNotFound
+      relabelisé), `"VNL-WS-001"`, `"VNL-LLM-001"`, `"VNL-DB-007: context not found"` —
+      famille des marqueurs de ../error.sdd ; toute renomination passe par la spec.
+  - Garder la forme @ChatEvent du flux sortant identique au contrat
+      `../../../lib/src/event.sdd` (tag `"type"` snake_case) — le miroir ts-rs du
+      frontend en dépend ; ne jamais inventer de frame JSON hors @ChatEvent.
+  - Construire @SessionContext avec : store scotché à l'utilisateur authentifié
+      (@PgConfigStore::new(db, user_id)), `local_tools` vides,
+      `subagent_depth_max = 1`, `model_override = @None`, todo semé depuis la colonne.
+  - Rester sans `println!`/`eprintln!`/`dbg!` ; les seuls `unwrap` de production sont
+      les 3 verrous @Mutex sous les 2 `#[allow(clippy::unwrap_used)]` commentés
+      (harnais `../../../tooling.sdd` : exemption justifiée citant la cause) ; le
+      module de tests garde son `#![allow]` confiné sous `#[cfg(test)]`.
+
+Must not:
+  - Exposer hors du fichier quoi que ce soit d'autre que @ws_chat_handler (rendre
+      @handle_message/@resolve_extra_mcp/etc. `pub` ou `pub(crate)` exige d'étendre
+      cette spec).
+  - Répondre en HTTP (@IntoResponse) pour une erreur de conversation ou de tour : le
+      chemin WS est log-only + @ChatEvent (contrat ../error.sdd).
+  - Ajouter un type de message entrant (`cancel`, `stop`, `ping` applicatif…) sans
+      décision de spec — aujourd'hui seul `"message"` existe et tout le reste est
+      ignoré en silence ; l'annulation réelle reste une limite connue (aucun token
+      d'annulation dans @run_agent_turn).
+  - Persister le message assistant (ou son todo) quand @run_agent_turn échoue, ni
+      persister le message user APRÈS le tour.
+  - Nuller `conversations.todo` par un update inconditionnel, ni poser @updated_at
+      ailleurs que dans @persist_message.
+  - Résoudre un agent, un contexte ou une sandbox sans passer par les id de la
+      conversation (aucune substitution par un agent/contexte fourni par le client en
+      cours de conversation — les entrées du WS sont limitées à `content`).
+  - Sauter la vérification `project.spec.owner` au prétexte que le contexte a été posé
+      à la création par un chemin lui-même scopé.
+  - Interpoler un champ de base ou un nom de sandbox dans une commande shell ou une URL
+      construite à la main hors @VnlK8sClient (l'URL MCP vient de @sandbox_mcp_url,
+      seule fabrique contractée).
+  - Bufferiser un tour avant le premier octet, bloquer le lecteur du socket pendant un
+      tour, ou garder busy au-delà de la fin de la tâche de tour.
+  - Mettre à jour `vanyline_chat_contexts`, `vanyline_agents` ou `miryad_users` depuis
+      ce fichier : seules `vanyline_messages` (insert) et `vanyline_conversations`
+      (`updated_at`, `todo`) sont écrites ici.
+
+Scenario: verrou busy premier appel gagne second appel echoue
+  Given un @Mutex<@HashSet<@i32>> vide et une conversation `1`
+  When @try_acquire_busy est appelé deux fois de suite avec `1`
+  Then le premier appel rend `true` (id inséré) et le second `false`
+    # test existant `try_acquire_busy_first_call_succeeds_second_fails`
+
+Scenario: verrou busy independant entre conversations
+  Given un @Mutex<@HashSet<@i32>> vide
+  When @try_acquire_busy est appelé avec `1` puis avec `2`
+  Then les deux appels rendent `true` — le verrou est par conversation, pas global
+    # test existant `try_acquire_busy_different_conversations_independent`
+
+Scenario: le guard busy libere la conversation a son drop
+  Given un @HashSet déjà porteur de la conversation `1`
+  When un @BusyGuard sur cette conversation est créé puis quitté (drop de portée)
+  Then pendant la portée l'id est présent, après le drop il est absent — la libération
+    est synchrone au @Drop (chemin panique inclus)
+    # test existant `busy_guard_removes_conversation_on_drop`
+
+Scenario: la persistance des tool calls droppe l id et garde le reste
+  Given deux @ToolCallRecord (id `"call-1"`/`"call-2"`, noms `"search"`/`"read_file"`,
+    args JSON, `result` @Some/@None)
+  When @tool_calls_for_persistence les traduit
+  Then deux @vanyline_lib::ToolCall en ordre, mêmes name/arguments/result, sans `id`
+    # test existant `tool_calls_for_persistence_drops_id_keeps_rest`
+
+Scenario: liste vide de tool calls traduit en liste vide
+  Given un slice vide de @ToolCallRecord
+  When @tool_calls_for_persistence le traduit
+  Then le résultat est un @Vec vide — et @handle_message le rend @None dans le payload
+    # test existant `tool_calls_for_persistence_empty`
+
+Scenario: todo modifie vers une valeur non nulle est persiste
+  Given un seed initial @None et un état final @Some(`"new todo"`)
+  When @todo_to_persist compare les deux
+  Then @Some(`"new todo"`) est rendu — l'update de @conversations.todo aura lieu
+    # test existant `todo_to_persist_changed_some_from_none_returns_some`
+
+Scenario: todo inchange nest jamais re-ecrit
+  Given un seed @Some(`"x"`) et un état final @Some(`"x"`) identiques
+  When @todo_to_persist compare les deux
+  Then @None est rendu — aucun UPDATE n'est émis
+    # test existant `todo_to_persist_unchanged_returns_none`
+
+Scenario: un todo ramene a null ne null jamais letat anterieur
+  Given un seed @Some(`"old"`) et un état final @None
+  When @todo_to_persist compare les deux
+  Then @None est rendu — la valeur en base reste `"old"`
+    # test existant `todo_to_persist_changed_to_none_does_not_null_previous`
+
+Scenario: todo absent de bout en bout ne declenche rien
+  Given un seed @None et un état final @None
+  When @todo_to_persist compare les deux
+  Then @None est rendu
+    # test existant `todo_to_persist_unchanged_none_is_none`
+
+Scenario: message entrant de type inconnu est ignore sans reponse
+  Given une connexion WS authentifiée sur une conversation avec agent, verrou libre
+  When le client envoie `{"type":"stop","content":"x"}` puis un JSON invalide, puis
+    `{"type":"message"}` (sans `content`)
+  Then AUCUN événement n'est rendu sur le socket, AUCUN message n'est persisté, aucun
+    tour n'est lancé, et la connexion reste ouverte — les trois frames sont ignorés en
+    silence (test d'intégration WS)
+
+Scenario: conversation sans agent rejoue une erreur VNL-AGT-001
+  Given une conversation dont `agent_id` est @None (agent supprimé, FK SET NULL) et un
+    client authentifié
+  When le client envoie `{"type":"message","content":"salut"}`
+  Then un @ChatEvent::Error de code `"VNL-AGT-001"` et message `"No agent assigned to
+    conversation"` est reçu, et AUCUN message (user ni assistant) n'est inséré dans
+    `vanyline_messages` (test d'intégration WS + @real_db)
+
+Scenario: tour deja en cours repond VNL-WS-001 sans second spawn
+  Given une conversation avec un tour actif (verrou busy retenu)
+  When un second @{"type":"message"} parvient (même connexion ou seconde connexion sur
+    la même conversation)
+  Then un @ChatEvent::Error de code `"VNL-WS-001"` est reçu immédiatement, sans
+    persistance ni tour, tandis qu'une AUTRE conversation n'est pas affectée (le même
+    message y démarre normalement) (test d'intégration WS)
+
+Scenario: conversation inexistante ou hors owner ferme la socket sans evenement
+  Given un client authentifié user A
+  When le handshake vise une conversation inexistante, puis une conversation du user B
+  Then le socket est monté puis immédiatement terminée, avec aux logs `"ws chat
+    error: VNL-CNV-001: Conversation not found"` / `"ws chat error: VNL-CNV-002: Access
+    denied to conversation"` (couche @tracing capturée) — AUCUN frame @ChatEvent n'est
+    émis avant fermeture (comportement actuel verrouillé tel quel, `[!]` en `Tasks`)
+
+Scenario: erreur de tour remontee en VNL-LLM-001 avec le message brut
+  Given une conversation dont l'agent référencé a été supprimé entre la création et le
+    tour (@agents::find_by_id en @None)
+  When le client envoie `{"type":"message","content":"salut"}` et que @handle_message
+    échoue en @AppError::AgentNotFound
+  Then le client reçoit @ChatEvent::Error { code: `"VNL-LLM-001"`, message:
+    `"VNL-AGT-001: Agent not found"` } — code LLM plaqué sur une erreur agent, message =
+    @Display brut de l'@AppError (test d'intégration WS)
+
+Scenario: message user persiste avant le tour assistant seulement apres
+  Given une conversation avec agent et un tour dont le LLM échoue (@run_agent_turn en
+    @Err simulé par chaîne provider cassée)
+  When le client envoie un message
+  Then une ligne `role="user"` existe dans `vanyline_messages` (payload
+    `{"role":"user","content":…,"tool_calls":null}`) et AUCUNE ligne `role="assistant"` ;
+    si le tour réussit en revanche, la ligne assistant suit avec `tool_calls` @None (liste
+    vide) ou la liste des appels SANS le champ `id` ; et `conversations.updated_at` a été
+    rajeuni par chaque @persist_message (test d'intégration @real_db)
+
+Scenario: historique rejoue en ordre et ecarte les lignes hors vocabulaire
+  Given une conversation avec des messages insérés dans le désordre de `created_at`,
+    dont un `payload` JSON malformé, un `payload.role = "system"` et un `payload.role =
+    "outil"`
+  When @load_history est appelé pour cette conversation
+  Then seuls les rôles `"user"`/`"assistant"` au format valide reviennent, triés
+    @created_at ASC, contenu seul (les `tool_calls` du payload sont absents des messages
+    rig) — les lignes invalides et hors vocabulaire sont écartées sans erreur ni log
+    (test d'intégration @real_db)
+
+Scenario: contexte hors sandbox donne zero tool sans signal
+  Given une conversation dont @chat_contexts.kind vaut `"settings"` (kind non câblé)
+  When @resolve_extra_mcp résout pour un tour
+  Then @Ok(vec![]) est rendu et AUCUN @ChatEvent::ToolUnavailable n'est émis — le tour
+    part sans tools, silencieusement (test d'intégration @real_db, K8s jamais appelé)
+
+Scenario: contexte sandbox sans sandbox_name signale ToolUnavailable server sandbox
+  Given un contexte @kind=`"sandbox"` dont @data ne porte pas la clé `"sandbox_name"`
+    (ou la porte non-chaîne)
+  When @resolve_extra_mcp résout
+  Then un @ChatEvent::ToolUnavailable { server: `"sandbox"`, reason: `"contexte sandbox
+    invalide (sandbox_name absent)"` } est émis et @Ok(vec![]) rendu — le tour continue
+    sans tools (test d'intégration @real_db)
+
+Scenario: sandbox nommee hors du perimetre de l utilisateur est refusee
+  Given un contexte @kind=`"sandbox"` nommant une sandbox dont le @Project.spec.owner
+    diffère de l'owner de l'utilisateur (cluster de test, ou fixture respectant la
+    convention anti-mock kube de ../k8s.sdd)
+  When @resolve_extra_mcp résout
+  Then @ToolUnavailable { server: sandbox_name, reason: `"sandbox hors du périmètre de
+    cet utilisateur"` } est émis, @Ok(vec![]) rendu, et AUCUNE url MCP de cette sandbox
+    n'est produite — la garde IDOR ne peut pas être court-circuitée par un contexte
+    pointant une sandbox d'autrui
+
+Scenario: contexte sandbox valide produit le serveur MCP sandbox tous tools
+  Given un contexte @kind=`"sandbox"` nommant une sandbox de l'owner de l'utilisateur,
+    owner K8s résolu, cluster joignable (intégration manuelle — convention anti-mock
+    kube)
+  When @resolve_extra_mcp résout
+  Then la liste rendue a exactement une paire : @McpServer { name: `"sandbox"`,
+    transport: @McpTransport::HttpStreamable, url interne `…/mcp` issue de
+    @sandbox_mcp_url, headers vides } et @McpSelection { server: `"sandbox"`, tools:
+    `[]` } — tools vides = sélection de tous les tools ; aucun @ToolUnavailable
+
+Scenario: ligne de contexte absente bloque le tour en VNL-DB-007
+  Given une conversation orpheline de contexte (ligne `vanyline_chat_contexts` supprimée
+    par SQL brut malgré la FK RESTRICT)
+  When un message déclenche @handle_message
+  Then le tour s'arrête avant @run_agent_turn sur @AppError::InternalError et le client
+    reçoit @ChatEvent::Error { code: `"VNL-LLM-001"`, message portant
+    `"VNL-DB-007: context not found"` } — le message user a quand même été persisté
+    (persistance antérieure), aucun assistant (test d'intégration @real_db ; consigne le
+    `[?]` « commentaire non bloquant vs `?` » de `Tasks`)
+
+Scenario: ToolUnavailable reste non terminal et le tour se poursuit
+  Given un contexte sandbox dont @resolve_owner_name rend @None (aucun lien K8s)
+  When un message déclenche un tour (LLM simulé fonctionnel)
+  Then le client reçoit @ToolUnavailable { reason: `"aucun owner K8s associé à cet
+    utilisateur"` } AVANT les événements du tour, puis @Token…/@Done normaux —
+    l'événement n'interrompt pas le stream (contrairement à @Error) (intégration avec
+    faux LLM)
+
+Scenario: close honorable pendant un tour actif
+  Given un tour en vol (LLM simulé long) sur une connexion WS
+  When le client envoie @Message::Close
+  Then la boucle de lecture de @run_socket se termine immédiatement (le Close est
+    honoré — R4), mais le tour court jusqu'à son terme côté serveur (aucune annulation
+    de @run_agent_turn), le verrou busy n'est libéré qu'au drop du @BusyGuard de tâche,
+    et les événements émis après la fermeture sont perdus silencieusement
+    (intégration chronométrée)
+
+Scenario: handshake non authentifie nest pas upgrade
+  Given une requête `GET /api/ws/chat/1` sans cookie de session valide
+  When elle atteint la route montée par ../main.rs
+  Then la réponse est un rejet HTTP de miryad-core (statut au contrat miryad-core —
+    externalité) et AUCUN upgrade WebSocket n'a lieu ; @run_socket n'est jamais appelé
+    (intégration HTTP ; le détail miryad-core reste le `[!]` de ../auth/mod.sdd)
+
+Scenario: todo ecrit par le tour est persiste une fois
+  Given une conversation avec `todo = NULL` et un tour où le builtin @todowrite écrit
+    @Some("[]") dans @ctx.todo_state (LLM simulé appelant todowrite)
+  When @handle_message termine
+  Then @conversations.todo vaut `"[]"` en base ; un second tour identique (état
+    inchangé) ne relance AUCUN UPDATE (test d'intégration @real_db avec tool simulé)
+
+Depends on:
+  @axum (features `ws`, `macros`) — @WebSocketUpgrade, @Message, @Path, @State,
+    @IntoResponse (utilisé uniquement pour le retour du handler).
+  @futures (@SplitSink, @SinkExt, @StreamExt, @split) et @tokio::sync::mpsc (canal
+    unbounded) + @tokio::spawn — découpage socket et tâches.
+  @serde / @serde_json — @ClientMessage (entrée) et sérialisation des @ChatEvent.
+  @async_trait — impl @EventSink de @ChannelSink.
+  @sea_orm + @chrono — entités conversations/messages/agents/chat_contexts,
+    @Set/@NotSet, @Utc::now.
+  @tracing — unique observable des erreurs de socket (`"ws chat error: {e}"`).
+  @vanyline_lib — @event (@ChatEvent, @EventSink, @ToolCallRecord : contrat
+    `../../../lib/src/event.sdd`), @session (@SessionContext, @run_agent_turn : contrat
+    `../../../lib/src/session.sdd`), @domain (@McpServer, @McpSelection, @McpTransport),
+    @vanyline_lib::Message/@ToolCall (`../../../lib/src/types.sdd`).
+  @rig_core — type de retour de @load_history (@rig_core::message::Message) — seul
+    usage direct du fichier, la construction des agents reste dans la lib.
+  @miryad_core — @AuthUser (handshake), @resolve_user (externalité non specée, cf.
+    `../auth/mod.sdd`).
+  ../main.rs — @AppState : `auth.db`, `busy` (@Arc<@Mutex<@HashSet<@i32>>>, initialisé
+    vide au démarrage), `k8s` (via ../k8s.sdd) ; @FromRef vers @MiryadAuthState.
+  ../error.sdd — @AppError + @From<@sea_orm::DbErr>/@From<@VnyError> (double marqueur
+    visible dans les messages sortants).
+  ../config_store.sdd — @PgConfigStore ; ../k8s.sdd — @client ; ../api/owners.sdd —
+    @resolve_owner_name ; ../db/entities/* — lectures/écritures (specs sœurs citées en
+    `Can read`, cohérence bilatérale sur `VNL-DB-007`, `load_history`/`persist_message`,
+    la résolution d'agent sans filtre owner).
+  ./mod.rs — déclaration `pub mod chat;` (spec `./mod.sdd`).
+  Hérite de `../../../vanyline.sdd` (règle un-fichier-une-spec, identifiants d'erreur)
+    et du harnais `../../../tooling.sdd` (unwrap/allow, pas de print).
+
+Tasks:
+  [!] Erreurs de conversation invisibles au client : @ConversationNotFound /
+    @ConversationAccessDenied / @resolve_user en échec surviennent APRÈS l'upgrade et ne
+    produisent qu'une fermeture de socket + log serveur — le frontend ne peut pas
+    distinguer « conversation supprimée », « pas à moi » ou « panne BDD ». Émettre un
+    @ChatEvent::Error avant fermeture ? À trancher avec Sébastien (le frontend ne
+    réagit aujourd'hui qu'au close).
+  [!] Libellé `VNL-LLM-001` plaqué sur TOUTES les erreurs de tour (agent introuvable,
+    contexte absent `VNL-DB-007`, pannes BDD, erreurs config) : le code annoncé au
+    client est LLM quel que soit le domaine, et le message expose le @Display interne
+    complet (marqueurs `VNL-DB-006`, `VNL-K8S-*`…). Faut-il une table code→variante
+    (comme le barème HTTP de ../error.sdd) et un message écran-sanitisé ? De plus, sur
+    échec de stream, le client reçoit DEUX @Error `"VNL-LLM-001"` (celui de
+    @stream_agent_events, puis celui de la tâche de tour avec double marqueur @From) —
+    le `[?]` de `../../../lib/src/event.sdd` sur le code dupliqué doit être tranché ICI
+    en cohérence.
+  [!] Résolution d'agent SANS filtre owner (@agents::find_by_id(agent_id) par id seul) :
+    miroir du `[!]` ouvert dans ../db/entities/agents.sdd (chemin WS + conversations).
+    Exploitable aujourd'hui ? Non — l'id vient de la conversation, elle-même créée avec
+    @resolve_agent_id filtré owner — mais toute brèche d'un autre chemin d'écriture de
+    `conv.agent_id` (CRUD généré sur conversations ? non exposé ici) devient
+    exploitable PAR CE CHEMIN. Trancher UNE fois : ajouter le filtre owner ici ou
+    assumer (et le décider dans la spec agents, répercuté ici).
+  [?] Rôle dupliqué et rôles inconnus (source du `[?]` de ../db/entities/messages.sdd) :
+    @persist_message écrit `role` dans la colonne ET dans `payload` (source de vérité ?),
+    et @load_history écarte SILENCIEUSEMENT tout payload.role hors `user`/`assistant`
+    (`system` inclus — jamais envoyé au LLM) sans log ni test. Documenter le vocabulaire
+    comme contrat ici, et décider si l'écart silencieux est voulu ou doit logger.
+  [?] @resolve_extra_mcp : le commentaire source promet « un échec de résolution non
+    bloquant pour le tour », mais l'absence de ligne de contexte (@VNL-DB-007) sort par
+    `?` et ABORT le tour. Aligner commentaire et code (le remonter explicitement comme
+    bloquant, ou le replier en @ToolUnavailable + liste vide) — et arbitrer le 500-vs-404
+    déjà `[?]` dans ../db/entities/chat_contexts.sdd.
+  [?] Champ `server` de @ToolUnavailable incohérent entre deux branches voisines :
+    `"sandbox"` littéral quand sandbox_name est absent, nom de la sandbox partout
+    ailleurs. Standardiser (toujours le nom, ou `unknown`) ?
+  [?] `forward_events` : @serde_json::to_string `.unwrap_or_default()` enverrait un
+    frame texte VIDE sur échec de sérialisation (théorique). Préférer un log + saut de
+    l'événement ? Le frontend consommerait aujourd'hui `""` comme une erreur JSON côté
+    client.
+  [?] Erreurs de transport entrantes (`Some(Err)` sur le stream WS) : rupture de boucle
+    sans AUCUN log (contrairement aux erreurs de @run_socket qui loggent). Un log @tracing
+    est-il attendu pour le diagnostic ?
+  [?] Le verrou busy est local au PROCESS (@Mutex d'@AppState) : avec N répliques de
+    l'app derrière l'Ingress, deux tours simultanés sur une même conversation depuis des
+    pods différents ne se voient pas (double persistance assistant possible). Accepté
+    (mono-réplique aujourd'hui) ou verrou à remonter en base/redis ?
+  [?] Client déconnecté en plein tour : le tour va à son terme (aucune annulation —
+    limite connue de @run_agent_turn), le verrou busy reste pris jusque-là et @run_socket
+    attend la fin du tour avant de rendre la socket. Accepté (coût LLM payé, état
+    cohérent) ou watchdog de déconnexion ?
+  [?] @Message::Ping reçus sont ignorés (aucun Pong fabriqué, aucun keepalive
+    configuré) : vérifier que c'est sans effet en pratique (proxys/ingress qui coupent
+    les connexions silencieuses) ou poser une politique de keepalive.
+  [?] Canal mpsc unbounded : un client qui lit lentement fait croître le backlog
+    d'événements sans limite mémoire. Bounded + perte policy, ou assumé (volume de
+    tokens faible) ?
+  [?] @persist_message retourne un id que ses deux call-sites ignorent ; @load_history
+    recharge TOUT l'historique à chaque tour (coût/token non borné, pas de pagination ni
+    de fenêtre) — les deux sont-ils voulus tels quels ou dette à planifier ?
+  [?] Cas limite non testé : conversation supprimée entre l'insert du message assistant
+    et l'update de `todo`/@updated_at (@ConversationNotFound levé APRÈS l'insert) —
+    message persisté puis erreur affichée. À verrouiller par test ou à ignorer (FK
+    CASCADE purgerait le message de toute façon) ?
+  [?] Clarification du brief : `configured_extra_mcp` n'existe nulle part dans le dépôt
+    (grep) ; l'export « workspace-only » de `../../../cfgstore/src/layers.sdd` cite
+    `../../../cli/src/chat.rs`, PAS ce fichier ; le repli SSE `VNL-MCP-004` des serveurs
+    MCP configurés est câblé en AVAL par `../../../lib/src/session.sdd` (toolsets) →
+    `../../../lib/src/prefixed_mcp.sdd` et ne passe jamais par ici — @resolve_extra_mcp
+    ne produit que la paire sandbox. Confirmer qu'aucun branchement `configured_extra_mcp`
+    n'était attendu dans ce fichier.
+  [ ] Dériver en tests taggés chaque `Scenario` sans test existant (marqués
+    intégration/@real_db/manuels kube ci-dessus) ; les 9 tests présents verrouillent
+    déjà les 9 premiers Scenarios (à renommer sur leurs titres en TTD).
+  [ ] Noter dans `./mod.sdd` que `./chat.sdd` est rédigée (elle y est listée comme
+    sous-contrat « en attente » de fait).
+
+Done when:
+  Chaque `Scenario` a un test taggé par son titre et passe (les Scenarios marqués
+    intégration @real_db / cluster manuel assumés le sont au niveau déclaré, convention
+    anti-mock kube de ../k8s.sdd) ; les 9 tests existants sont conservés ou renommés sur
+    leurs titres sans régression.
+  Les cohérences bilatérales sont vérifiées dans les deux sens avec
+    `../../../lib/src/event.sdd` (formes @ChatEvent transportées),
+    `../../../lib/src/session.sdd` (champs de @SessionContext consommés),
+    ../db/entities/messages.sdd (payload + rôles — les `[?]` communs tranchés ICI),
+    ../db/entities/chat_contexts.sdd (`VNL-DB-007`), ../db/entities/agents.sdd
+    (résolution par id) et ../error.sdd (chemin WS log-only, marqueurs).
+  Sébastien a tranché les `[!]` et `[?]` de `Tasks` ; la batterie workspace (check,
+    test, build, clippy `--all-targets -D warnings`, fmt) est verte ; aucun `[?]`
+    résolu n'est resté en suspens dans une spec voisine.

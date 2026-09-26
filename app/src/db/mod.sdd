@@ -1,0 +1,41 @@
+Spec: Db
+
+Purpose:
+  Module `db` de l'app : façade d'accès aux entités SeaORM et au support de test
+  pour la base (PostgreSQL en production, sqlite en mémoire en test). Le fichier
+  ./mod.rs ne fait que déclarer ses deux sous-modules — aucun comportement propre,
+  aucune ré-exportation, aucune fonction utilitaire : le contrat vit dans les specs
+  des sous-modules (règle `mod.rs` de `/vanyline.sdd` et
+  `.specdd/bootstrap.project.md`).
+
+Owns:
+  ./mod.rs
+
+Structure:
+  ./mod.rs — déclarations `pub mod entities;` et
+    `#[cfg(test)] pub(crate) mod test_support;`, rien d'autre.
+  ./entities/ — 10 modules d'entités SeaORM déclarés dans
+    ./entities/mod.rs dans l'ordre alphabétique : `agents`, `chat_contexts`,
+    `conversations`, `llm_providers`, `mcp_servers`, `messages`,
+    `model_profiles`, `owner_links`, `skills`, `toolsets`. Chaque fichier
+    ./entities/<nom>.rs aura sa spec ./entities/<nom>.sdd (aucune n'existe
+    encore) ; c'est là que vit le contrat des modèles, colonnes et relations.
+  ./test_support.rs — module `pub(crate)` réservé aux tests (`#[cfg(test)]`
+    au niveau du module comme du fichier), exposant une seule fonction
+    `@real_db()` : connexion sqlite en mémoire avec les migrations
+    `miryad_core::migration::Migrator` puis `crate::migration::Migrator`
+    appliquées intégralement — même paire de migrations que `main.rs` au
+    démarrage, d'où son usage pour les tests d'aller-retour réel en base
+    (cf. régression `id: Set(0)` documentée dans le fichier). Consommé par
+    les tests de `../config_store.rs`, `../api/*.rs`, `./entities/*.rs`
+    et `../migration/mod.rs`. Sa spec détaillée (éventuelle, en plus du
+    commentaire du fichier) relève d'un fichier dédié si le module grossit.
+
+Depends on:
+  ./entities/mod.rs — déclarations des sous-modules d'entités.
+  ./test_support.rs — `@real_db()` (tests uniquement).
+
+Done when:
+  ./mod.rs continue de ne porter que les deux déclarations ; toute fonction,
+    constante, `pub use` ou `impl` ajouté dans ./mod.rs exige d'étendre cette
+    spec en conséquence.

@@ -1,0 +1,506 @@
+Spec: Owners Toolbox
+
+Platform: Rust/vanyline-app/tokio
+
+Purpose:
+  Boîte à outils interne du crate `vanyline-app` pour le lien utilisateur ↔ Owner CRD
+  Kubernetes : sanitisation du nom RFC1123 (@sanitize_owner_name), lecture du lien
+  (@resolve_owner_name) et création à la demande de l'Owner CR + persistance du lien
+  (@ensure_owner). CE fichier ne monte AUCUNE route — c'est le fait déjà relevé par
+  `./mod.sdd` : `pub mod owners;` y est déclaré sans aucun handler branché, le module est
+  atteint par `crate::api::owners` depuis `./me.rs`, `./projects.rs`, `./sandboxes.rs`,
+  `../ws/chat.rs` et `../ws/sandbox_state.rs`. Un seul contrat pour CE fichier : la
+  résolution/création paresseuse du Owner, dont le déclencheur d'écriture unique est
+  @create_project (`./projects.rs`, décision développeur « lazy provisioning restreint »
+  commentée dans le fichier) ; toutes les autres surfaces n'appellent que @resolve_owner_name
+  (lecture seule). Le schéma de la table `vanyline_owner_links` est le contrat de la
+  migration `../migration/m20260825_000010_create_vanyline_owner_links.sdd` — dont
+  l'unicité mono-colonne de `user_id` est le PREREQUIS structurel de l'upsert
+  `ON CONFLICT (user_id)` de @ensure_owner (un conflit-cible mono-colonne exige la
+  contrainte posée là-bas, pas la métadonnée `#[sea_orm(unique)]` de l'entité). L'accès
+  K8s passe exclusivement par `../k8s.rs` (découverte lazy + mappage 502) puis
+  @vanyline_lib::k8s::VnlK8sClient (`../../../lib/src/k8s.rs`).
+
+Owns:
+  ./owners.rs
+
+Can read:
+  ./mod.rs — déclaration `pub mod owners;` sans route montée.
+  ./me.rs, ./projects.rs, ./sandboxes.rs — appelants REST de @resolve_owner_name ;
+    @create_project (`./projects.rs`) est l'appelant exclusif de @ensure_owner.
+  ../ws/chat.rs, ../ws/sandbox_state.rs — appelants WS de @resolve_owner_name.
+  ../k8s.rs — @crate::k8s::client (cache de découverte, @AppError::K8sConfigError → 502).
+  ../error.rs — @AppError et ses @From (@sea_orm::DbErr → `VNL-DB-006`, @VnyError).
+  ../main.rs — @AppState (champs `auth.db`, `config`, `k8s`).
+  ../config.rs — @Config : `application_name`, `default_home_storage_class`,
+    `default_home_access_mode`, `default_project_storage_class`, `default_project_access_mode`.
+  ../db/entities/owner_links.rs — @Entity / @ActiveModel / @Column de `vanyline_owner_links`.
+  ../migration/m20260825_000010_create_vanyline_owner_links.rs — contrainte UNIQUE
+    mono-colonne `user_id` ciblée par l'upsert.
+  ../../crds/src/lib.rs — @OwnerSpec, @ProjectDefaults (structure subie, jamais produite
+    par d'autres voies ici).
+  ../../../lib/src/k8s.rs — @VnlK8sClient::get_owner / @VnlK8sClient::create_owner.
+  ../../../Cargo.toml — harnais `[workspace.lints]` (`../../../tooling.sdd`).
+
+Exposes:
+  - @sanitize_owner_name — `pub fn(&str) -> @String` : fonction pure, totale, sans await.
+    Détecte d'un raw (email complet ou `subject` OIDC) une étiquette DNS RFC1123. Appelée
+    par @ensure_owner ; jamais appelée hors de CE fichier à ce jour (cf. Tasks `[?]` sur sa
+    visibilité `pub`).
+  - @resolve_owner_name — `pub async fn(&@AppState, i32) -> @Result<@Option<@String>,
+    @AppError>` : lecture unique de `vanyline_owner_links.k8s_owner_name` filtrée sur
+    @Column::UserId. `Some(nom)` si lien résolu, `None` si aucun lien OU ligne dont la
+    colonne est `NULL` (via `@Option::and_then`).
+  - @ensure_owner — `pub async fn(&@AppState, i32, &@AuthUser) -> @Result<@String,
+    @AppError>` : retourne le nom d'Owner de l'utilisateur, en le créant si absent
+    (Owner CR k8s + ligne de lien). Réservé à `POST /api/projects`.
+  - `#[cfg(test)] mod tests` : 4 tests unitaires, tous sur @sanitize_owner_name uniquement
+    (`sanitize_prefixed_email_local_part`, `sanitize_owner_empty_local_falls_back`,
+    `sanitize_owner_truncates_to_63`, `sanitize_owner_truncation_never_ends_in_hyphen`) —
+    aucune couverture pour @resolve_owner_name et @ensure_owner (Tasks `[!]`).
+  - Aucun type, aucune constante, aucune route, aucun `#[cfg(feature = ...)]`.
+
+Structure:
+  Algorithme exact de @sanitize_owner_name, dans l'ordre :
+  1. `local` = partie du `raw` avant le PREMIER `@` (`@str::split('@').next()` — sans `@`,
+        la totalité de la chaîne ; pour `"a@b@c"`, seul `"a"`).
+  2. Pour chaque caractère de `local.to_lowercase()` (indice `i`) : caractère conservé si
+        `is_ascii_lowercase() || is_ascii_digit() || == '-'`, sinon remplacé par `'-'` ;
+        À l'indice 0 uniquement, si le caractère résultant n'est ni minuscule ni chiffre
+        (autrement dit `'-'`), pousser `'a'` À LA PLACE du caractère (le caractère invalide
+        est remplacé, pas préfixé) — ex. `"_alice"` → `"aalice"`, `"-bob-"` → `"abob"`.
+  3. Trim des deux côtés sur `'-'` (`trim_matches('-')`).
+  4. Coupe aux 63 premiers `char`s.
+  5. Trim de bout en `'-'` uniquement (`trim_end_matches('-')`) : la coupe à 63 peut
+        retomber exactement sur un `'-'` (position 62 d'un local-part plus long) et RFC1123
+        exige fin alphanumérique.
+  6. Si le résultat est vide → littéral `"owner"`.
+  Invariant de sortie (toutes branches confondues) : chaîne non vide, longueur ≤ 63,
+  caractères ⊂ `[a-z0-9-]`, premier et dernier caractère alphanumériques `[a-z0-9]`.
+  NOM DU OWNER CR = sortie de @sanitize_owner_name, SANS AUCUN PRÉFIXE — vérifié : aucun
+  préfixe de type `vny-` n'existe dans le dépôt (grep `vny-` : unique occurrence sans
+  rapport, `../../tools/src/filesystem.rs`).
+  Règle de choix du `raw` dans @ensure_owner : `local` = partie avant `@` de
+  `principal.email` (`""` si email absent) ; si `local.trim()` est vide → `raw =
+  principal.subject.as_str()` ; sinon → `raw = principal.email` entier. Le premier caractère
+  de @sanitize_owner_name est redondant sur le split (le `raw` email est resplitté à
+  l'intérieur) ; c'est le test de vide par `trim()` qui décide email vs subject.
+  Ordre des effets dans @ensure_owner : (1) early-return si lien déjà résolu ; (2) calcul
+  du nom ; (3) @crate::k8s::client ; (4) @VnlK8sClient::get_owner — création @OwnerSpec
+  seulement si get_owner est en `Err` (TOUTE erreur, y compris non-404, traitée comme
+  « absent » — cf. Tasks `[!]`) ; (5) upsert INSERT…ON CONFLICT (user_id) DO UPDATE SET
+  k8s_owner_name ; (6) retour du nom. L'écriture DB vient APRÈS le CR (pas l'inverse).
+  @OwnerSpec produit (aucun autre champ d'@ProjectDefaults rempli) :
+  - `existing_pvc: None`, `home_size: None`, `egress: Vec::new()` — toujours.
+  - `home_storage_class` / `home_access_mode` ← `config.default_home_storage_class` /
+    `config.default_home_access_mode` (tels quels, `Option` clonés).
+  - `application_ref` ← `config.application_name` (`Option` telle quelle).
+  - `project_defaults` = `@Some(@ProjectDefaults { storage_size: @None,
+    storage_class: config.default_project_storage_class, storage_access_mode:
+    config.default_project_access_mode })` si AU MOINS UN des deux config projet est
+    `Some` ; `@None` sinon (les deux `None` → pas d'objet vide). `storage_size` n'est
+    JAMAIS renseigné par CE fichier.
+  Upsert : @ActiveModel { id: @NotSet (auto-incrément géré par la base), user_id: @Set,
+    k8s_owner_name: @Set(@Some(nom)) } sur @OnConflict::column(@Column::UserId)
+    .update_column(@Column::K8sOwnerName) — remplace le find-then-insert précédent dont la
+    fenêtre de course percutait la contrainte unique (500 brut au lieu d'idempotence),
+    commentaire du fichier. Ne peut jamais écrire de `NULL` ni de second lien.
+
+Accepts:
+  - @sanitize_owner_name : tout `&str` — aucune contrainte sur la longueur, le charset ou
+    la présence d'`@` ; chaînes vides, binaires-valides-UTF8, uniquement `'-'`, non-ASCII
+    comprises. Pas de `Result`, pas d'`Option`.
+  - @resolve_owner_name : `user_id: i32` = id `miryad_users` déjà résolu par l'appelant
+    (via `resolve_user` sur `@AuthUser`) ; CE fichier ne vérifie pas que l'utilisateur
+    existe (id inconnu → simplement aucun lien → `Ok(@None)`).
+  - @ensure_owner : `user_id` + `principal: @AuthUser` (miryad-core) — seuls les champs
+    `email: @Option` et `subject` du principal sont lus. CE fichier ne vérifie AUCUNE
+    cohérence entre `user_id` et `principal` : c'est l'appelant qui les apparie (Tasks
+    `[?]`).
+  - @ensure_owner est appelé par un POST authentifié (@AuthUser exigé en amont par
+    `./projects.rs`) ; les deux autres fonctions n'exigent rien côté transport (aucune
+    route ici).
+
+Returns:
+  - @sanitize_owner_name : @String vérifiant l'invariant de Structure (jamais vide, ≤ 63,
+    bornes alphanumériques). Cas documentés : `"John.Doe@example.com"` → `"john-doe"` ;
+    `"@example.com"` → `"owner"` ; 70×`a` → 63×`a` ; 62×`a`+`-`+10×`b` → 62×`a`.
+  - @resolve_owner_name : `Ok(@Some(nom))` quand la ligne existe avec un nom non NULL ;
+    `Ok(@None)` quand aucune ligne OU ligne à `k8s_owner_name = NULL` — les routes de
+    lecture interprètent `None` comme « aucun Owner » (le statut HTTP rendu est le contrat
+    de chaque appelant, pas de CE fichier).
+  - @ensure_owner : `@Ok(@String)` = nom d'Owner — soit celui du lien existant
+    (early-return, sans aucun appel k8s ni écriture), soit le nom fraichement calculé ;
+    dans les deux cas une ligne `vanyline_owner_links (user_id, k8s_owner_name = Some(nom))`
+    existe et est seule pour ce `user_id` après réussite.
+
+Raises:
+  - @sanitize_owner_name : jamais — fonction totale, aucun chemin d'erreur, aucune panic
+    (le `unwrap_or_default()` sur `@split::next()` est inatteignable : `split` renvoie
+    toujours au moins un élément — code mort cosmétique, cf. Tasks `[?]`).
+  - @resolve_owner_name : tout @sea_orm::DbErr de la requête SELECT → @AppError::from →
+    @AppError::InternalError affichant `"VNL-DB-006: …"` (HTTP 500 par `../error.rs`).
+    Aucun appel k8s — ne peut jamais produire d'erreur K8s.
+  - @ensure_owner, par ordre d'apparition des branches :
+    - erreur de @resolve_owner_name (ci-dessus) propagée par `?` ;
+    - échec de découverte k8s (@crate::k8s::client) → @AppError::K8sConfigError
+      (`"VNL-K8S-001"`, HTTP 502) — contrat `../k8s.sdd`, aucune erreur négative mise en
+      cache, rien d'écrit en base ;
+    - échec de @VnlK8sClient::create_owner → mappage @From<@VnyError> de `../error.rs` :
+      K8sApiError → @AppError::K8sApiError (`"VNL-K8S-002"`, HTTP 500) — cas pratique :
+      AlreadyExists sur course k8s ; message contenant 404/NotFound → @AppError::K8sNotFound
+      (HTTP 404, pathologique pour une création) ; aucune ligne écrite dans ce cas ;
+    - échec de l'upsert (@sea_orm::DbErr) → @AppError::InternalError `"VNL-DB-006"`
+      (HTTP 500) — CR k8s alors existant sans lien (auto-réparé au nouvel appel, cf.
+      Handles).
+  - @ensure_owner ne produit JAMAIS @AppError::K8sNotFound via get_owner : l'erreur de
+    get_owner est consommée par `is_err()` et ne remonte pas (cf. Tasks `[!]`).
+  - Jamais de panic / `unwrap` / `expect` / `println!` hors `cfg(test)` (harnais
+    `../../../tooling.sdd`).
+
+Handles:
+  - Aucun montage de route : le module est `pub` uniquement pour être atteint par
+    `crate::api::owners` (appelants listés en Can read) — contrat consigné par `./mod.sdd`.
+  - Consommateurs de @resolve_owner_name et interprétation de `@None` (contrat de chaque
+    appelant, listé pour traçabilité) : `./me.rs` (champ `k8s_owner_name: @Option` de la
+    réponse `/api/me`), `./projects.rs` (3 lectures), `./sandboxes.rs` (7 lectures),
+    `../ws/chat.rs`, `../ws/sandbox_state.rs`.
+  - Idempotence en trois couches : (1) early-return sur lien existant (zéro k8s, zéro DB) ;
+    (2) get_owner avant create (Owner déjà présent côté cluster, ex. lien perdu, → pas de
+    recréation, l'upsert vient raccrocher le lien) ; (3) upsert ON CONFLICT (user_id) — la
+    course DB entre deux appels concurrents passant tous les deux le resolve en tête est
+    éliminée (la seconde écriture DO UPDATE pose la même valeur, le nom étant déterministe
+    pour un même principal : `email`/`subject` ne dépendent pas de la config).
+  - Fenêtre de course côté CR : get_owner + create_owner ne sont PAS atomiques — deux
+    premiers appels concurrents peuvent voir l'absence tous les deux, le second create
+    retournant AlreadyExists → 500 sur POST /api/projects (retry idempotent au coup
+    suivant). Lacune documentée, pas corrigée (Tasks `[!]`).
+  - Ordre CR-puis-lien : si l'upsert échoue après création réussie du CR, un Owner orphelin
+    (sans ligne de lien) reste dans le cluster ; le prochain @ensure_owner du même user
+    le retrouve par get_owner (Ok) → saute la création → pose le lien. Aucun nettoyage,
+    aucune compensation, aucun log dans CE fichier (aucun usage de `tracing` ici).
+  - Ligne existante à `k8s_owner_name = NULL` : @resolve_owner_name la traite comme
+    absente ; @ensure_owner la traverse donc jusqu'à l'upsert, qui la convertit en
+    `Some(nom)` via DO UPDATE — c'est le seul chemin qui « répare » un NULL (état licite
+    du schéma, cf. Tasks `[?]`).
+  - Fait à confirmer comme règle définitive : le nom du CR ne porte AUCUN préfixe de
+    namespace ou de produit (aucun `vny-`) — deux utilisateurs dont les emails partagent la
+    même partie locale SANITISÉE convergent vers le même nom et donc le même Owner CR
+    (get_owner Ok → pas de création → second lien posé sur le CR du premier). Danger
+    documenté en Tasks `[!]`, comportement actuel non corrigé ici.
+
+Must:
+  - Dériver le nom d'Owner EXCLUSIVEMENT de @sanitize_owner_name, sans préfixe ni suffixe
+    ajouté, avec l'algorithme de Structure caractère par caractère (dont : remplacement —
+    et non préfixage — du premier caractère invalide par `'a'`, double trim avant/après la
+    coupe, repli `"owner"` sur vide).
+  - Garantir l'invariant de sortie RFC1123 pour TOUTE entrée : non vide, ≤ 63 caractères,
+    `[a-z0-9-]`, premier et dernier alphanumériques.
+  - Lire le lien par filtre @Column::UserId seul, et traiter indifféremment absence de
+    ligne et ligne à nom `NULL` comme `Ok(@None)` (via `and_then`).
+  - Dans @ensure_owner : early-return sur @resolve_owner_name `Some` AVANT tout accès k8s
+    ou DB en écriture ; choix `subject` (et non email) quand la partie locale de l'email
+    est vide ou uniquement whitespace (`trim()`).
+  - Ne créer le CR que si @VnlK8sClient::get_owner est en erreur (comportement actuel :
+    toute erreur vaut « absent ») ; ne jamais appeler create_owner deux fois pour un même
+    lien déjà posé.
+  - Écrire le lien par upsert `INSERT … @ON CONFLICT (@Column::UserId) DO UPDATE SET
+    @Column::K8sOwnerName` — jamais un find-then-insert, jamais une cible de conflit
+    composite (la contrainte mono-colonne de
+    `../migration/m20260825_000010_create_vanyline_owner_links.rs` serait introuvable en
+    cible : l'upsert casserait structurellement, pas seulement sémantiquement).
+  - Écrire le lien APRÈS la tentative de création du CR (ordre actuel : pas de lien pointant
+    vers un CR dont la création n'a pas été tentée).
+  - Renseigner @OwnerSpec exactement comme Structure : jamais `existing_pvc`, `home_size`,
+    `project_defaults.storage_size` ni `egress` non vide ; propager `application_name`,
+    `default_home_storage_class`, `default_home_access_mode` tels quels ; n'émettre
+    `project_defaults` que si au moins un des deux défauts projet de config est `Some`.
+  - Persister `k8s_owner_name` sous forme `@Some(nom)` — aucun chemin d'écriture du fichier
+    n'insère `NULL`.
+  - Rester une boîte à outils sans route : ne rien brancher sur @api_router ni
+    @api_v1_router depuis CE fichier (la table de routage est `./mod.sdd`).
+  - Revenir sur `../k8s.rs` pour toute atteinte au cluster (jamais d'appel direct à
+    kube ou à @VnlK8sClient::discover ici).
+
+Must not:
+  - Ajouter un préfixe (ex. `vny-`) ou toute transformation post-sanitisation au nom du CR
+    sans décision écrite + évolution de cette spec : les Owner CR existants du cluster sont
+    nommés par la règle actuelle.
+  - Changer la cible de l'upsert, retirer le DO UPDATE, ou introduire une unicité
+    composite — dépendance structurelle de la migration 000010 (sa spec `Must not` est
+    bilatérale).
+  - Traiter une erreur de @resolve_owner_name, de client(), de create_owner ou de l'upsert
+    comme non avenue : pas de `let _ =`, pas de swallow, pas de retry ici — la remontée en
+    AppError (502/500) est le contrat.
+  - Écrire dans `vanyline_owner_links` depuis un autre appelant que @ensure_owner, ou lire
+    la table sans passer par @resolve_owner_name (consommateurs actuels vérifiés par grep).
+  - Déclarer une relation SeaORM, une jointure ou un `find_related` vers `miryad_users`
+    (contrat `../db/entities/owner_links.sdd` : filtres explicites uniquement).
+  - Vérifier, autoriser ou normaliser l'identité ici : @AuthUser et `resolve_user` vivent
+    chez les appelants ; CE fichier ne connaît que `(user_id, principal)` fournis.
+  - Loguer (`tracing`), mesurer ou mettre en cache quoi que ce soit dans CE fichier ;
+    aucun `println!`/`eprintln!`/`dbg!` (harnais `../../../tooling.sdd`).
+  - Modifier un Owner CR existant : @ensure_owner ne fait que get puis create-if-absent —
+    aucun update/patch de spec (un Owner dont la spec divergerait de la config courante
+    n'est jamais ressynchronisé ici).
+
+Depends on:
+  @sea_orm — @EntityTrait::find/@insert, @QueryFilter, @ActiveValue (@NotSet/@Set),
+    @sea_query::@OnConflict (version verrouillée `Cargo.lock`, mêmes que la migration).
+  @miryad_core::auth::@AuthUser (crate externe) — champs `email: @Option<@String>` et
+    `subject` ; contrat d'auth hors dépôt.
+  @vanyline_crds — @OwnerSpec, @ProjectDefaults (`../../../crds/src/lib.rs`) : la création
+    d'un Owner par CE fichier doit rester constructible avec la CRD v1alpha1.
+  ../k8s.sdd — @crate::k8s::client (502 `VNL-K8S-001` sur échec de découverte).
+  ../../../lib/src/k8s.sdd — @VnlK8sClient::get_owner / create_owner et @VnyError.
+  ../error.rs — @From<@sea_orm::DbErr> (`VNL-DB-006` → 500) et @From<@VnyError> ; la
+    traduction HTTP observée par `POST /api/projects` est ce contrat.
+  ../db/entities/owner_links.sdd + ../migration/m20260825_000010_create_vanyline_owner_links.sdd
+    — schéma, nullabilité et contrainte UNIQUE mono-colonne `user_id` (cible du conflit).
+  ../main.rs (@AppState), ../config.rs (les 5 champs `Option<@String>` consommés).
+  ../db/test_support.sdd — harnais `real_db()` (SQLite en mémoire) pour les Scenarios DB
+    sans cluster ; convention anti-mock kube (`../k8s.sdd`) pour les Scenarios cluster.
+  RFC 1123 (norme externe) : sémantique de l'étiquette DNS visée par @sanitize_owner_name.
+  Consommateurs (visibilité `pub`) : ./mod.sdd, ./me.rs, ./projects.rs, ./sandboxes.rs,
+    ../ws/chat.rs, ../ws/sandbox_state.rs.
+  Hérite de `../../../vanyline.sdd` et du harnais `../../../tooling.sdd`.
+
+Tasks:
+  [!] Collision de noms d'Owner — le plus grave du fichier : @sanitize_owner_name n'est
+    pas injective (`alice@x.com` et `alice@y.com` → `"alice"` ; `jean-pierre@x` et
+    `jean_pierre@y` → `"jean-pierre"`). Deux utilisateurs distincts convergent vers le même
+    nom : get_owner trouve le CR du premier → pas de création → le second pose un lien sur
+    LE MÊME Owner CR → home PVC, quotas et projects partagés entre comptes, sans erreur.
+    Comportement actuel documenté, non jugé. Faut-il une composante d'unicité (suffixe
+    dérivé du subject, hash court, contre-partie : noms illisibles) ? À trancher avec
+    Sébastien — c'est un choix produit, pas une correction obvious.
+  [!] get_owner errors swallowed : `if k8s.get_owner(&name).await.is_err()` confond 404,
+    interdiction RBAC, timeout réseau et Owner existant. Conséquence observable : Owner
+    existant + erreur transitoire du get → create_owner → AlreadyExists → @AppError::K8sApiError
+    (500) sur POST /api/projects. Faut-il distinguer @AppError::K8sNotFound (mappage
+    `../error.rs` existe) et ne créer que sur NotFound vrai, en remontant les autres
+    erreurs ?
+  [!] Course k8s résiduelle : l'upsert a supprimé la course DB (commentaire du fichier)
+    mais get-owner-then-create n'est pas atomique ; deux premiers appels concurrents du
+    même user peuvent produire le 500 AlreadyExists ci-dessus (retry idempotent). Accepté
+    (rare, sans effet durable) ou retry/catch AlreadyExists ?
+  [!] @resolve_owner_name et @ensure_owner n'ont AUCUN test (les 4 tests du fichier ne
+    couvrent que @sanitize_owner_name) ; de plus aucun test du dépôt ne lit la table
+    `vanyline_owner_links` (écho du `[!]` de la migration 000010). Les Scenarios DB
+    (real_db, offline) ferment la moitié de la lacune sans cluster ; les Scenarios cluster
+    restent de l'intégration manuelle (convention anti-mock kube). Les 4 tests existants
+    correspondent aux 4 premiers Scenarios — à renommer/tagger par leurs titres en TTD.
+  [?] Préfixe du nom : confirmé par grep qu'AUCUN préfixe (`vny-` ou autre) n'est appliqué
+    — le nom du CR est la sortie brute de @sanitize_owner_name. Cette règle est-elle la
+    règle définitive (les Owner CR en production en dépendent), ou un préfixe de produit
+    était-il prévu un temps ? À figer ici.
+  [?] Ligne à `k8s_owner_name = NULL` : réplique des `[?]` de la migration 000010 et de
+    l'entité — @resolve_owner_name la traite comme absente, @ensure_owner la répare par
+    l'upsert, aucun chemin n'en écrit. Comportement cohérent mais jamais testé (Scenario
+    « ensure_owner répare un lien au nom NULL » à dériver, cluster). État licite voulu ou
+    colonne à passer NOT NULL ?
+  [?] @sanitize_owner_name est `pub` sans appelant hors du fichier (grep) : `mod.sdd` liste
+    son nom parmi les atteignables mais seul @ensure_owner l'appelle. Ramener en privé,
+    `pub(crate)`, ou assumer un usage futur (ex. validation de noms côté autres modules) ?
+  [?] `unwrap_or_default()` sur `@split('@').next()` (deux occurrences : @sanitize_owner_name
+    et @ensure_owner) : inatteignable (`split` renvoie toujours au moins un élément) — code
+    mort cosmétique sans effet observable. À simplifier au prochain passage ou intouchable ?
+  [?] Couple (user_id, principal) : @ensure_owner fait confiance à l'appelant pour
+    l'appariement (il écrit le nom calculé depuis `principal` sous la clé `user_id`). Un
+    appelant défaillant pourrait lier le nom d'un principal A à l'id d'un user B. Garder
+    la confiance (un seul appelant aujourd'hui) ou vérifier en interne ?
+  [?] Whitespace et ponctuation seules dans la partie locale : `" . @x.com"` a un
+    local-part non vide au `trim()` (contient points et espaces) → l'email est retenu →
+    sanitisation → `"a"` (tous les caractères deviennent `-`, tout est retrimmé sauf le
+    `"a"` de tête). Ces dérivés ne sont couverts par AUCUN test existant — à sceller par
+    les Scenarios « premier caractère invalide est remplacé par la lettre a » et « chaine
+    vide et tout-tirets aux cas limites » avant toute retouche de l'algo.
+  [ ] Dériver chaque Scenario sans test existant en un test taggé par son titre
+    (implementer) ; Scenarios cluster listés comme intégration manuelle faute de harnais
+    kube (même convention que `../k8s.sdd`).
+  [ ] Rattacher cette spec dans `Depends on` de `./mod.sdd` (qui la liste « en cours de
+    rédaction ») et lever la mention équivalente dans `./mod.sdd`.
+
+Done when:
+  Chaque Scenario est couvert par un test taggé par son titre et passe (les Scenarios
+  marqués cluster au niveau intégration manuelle assumé) ; les 4 tests existants sont
+  renommés sur leurs titres de Scenario ; les `[!]` de collision de noms, get_owner
+  swallowed et course CR ont une décision écrite de Sébastien répercutée ici ou en Tasks
+  d'implémentation ; la batterie workspace (check, test, build, clippy `--all-targets
+  -D warnings`, fmt) est verte.
+
+Scenario: local-part d'email est assaini en étiquette minuscule
+  Given la fonction pure @sanitize_owner_name
+  When elle reçoit `"John.Doe@example.com"` puis `"valid-owner@host"`
+  Then le premier appel retourne `"john-doe"` (majuscules minorées, point → `-`, local-part
+    seul conservé) et le second `"valid-owner"` (déjà valide, inchangé)
+    # Test existant `sanitize_prefixed_email_local_part` — renommer sur ce titre en TTD.
+
+Scenario: email à local-part vide retombe sur le repli owner
+  Given @sanitize_owner_name
+  When elle reçoit `"@example.com"`
+  Then elle retourne le littéral `"owner"` — local-part vide → sortie vide → repli
+    # Test existant `sanitize_owner_empty_local_falls_back`.
+
+Scenario: local-part plus long que 63 caractères est coupé à 63
+  Given @sanitize_owner_name
+  When elle reçoit 70 fois `"a"` suivi de `"@x"`
+  Then elle retourne exactement 63 fois `"a"` — la coupe porte sur 63 chars, la borne est
+    incluse
+    # Test existant `sanitize_owner_truncates_to_63`.
+
+Scenario: la coupe à 63 caractères ne finit jamais par un tiret
+  Given @sanitize_owner_name
+  When elle reçoit 62 fois `"a"`, un `"-"`, 10 fois `"b"`, puis `"@x"` (le `-` tombe
+    exactement sur la coupe à 63)
+  Then le retour ne finit pas par `"-"` et vaut exactement 62 fois `"a"` — retrim de bout
+    après la coupe, fin alphanumérique RFC1123 préservée
+    # Test existant `sanitize_owner_truncation_never_ends_in_hyphen`.
+
+Scenario: premier caractère invalide est remplacé par la lettre a
+  Given @sanitize_owner_name
+  When elle reçoit `"_alice@x"` puis `"-bob-"`
+  Then le premier appel retourne `"aalice"` (le `_` est remplacé par `"a"`, non préfixé :
+    pas `"a-alice"`) et le second `"abob"` (premier `-` → `"a"`, dernier `-` retrimmé)
+
+Scenario: chaîne sans arobase passe au filtre caractère par caractère
+  Given @sanitize_owner_name appliquée à un subject OIDC sans `@`
+  When elle reçoit `"sub-42"` puis `"keycloak|abc.1"`
+  Then le premier retourne `"sub-42"` (chiffres, lettres et `-` conservés) et le second
+    `"keycloak-abc-1"` (`|` et `.` deviennent `-`, jamais supprimés en plein milieu)
+
+Scenario: seule la partie avant le premier arobase est conservée
+  Given @sanitize_owner_name
+  When elle reçoit `"a@b@c"`
+  Then elle retourne `"a"` — le split s'arrête au PREMIER `@`, la suite est ignorée
+
+Scenario: caractères non ASCII deviennent des séparateurs découpés
+  Given @sanitize_owner_name
+  When elle reçoit `"josé@x"`
+  Then elle retourne `"jos"` — `é` (non ASCII même minoré) devient `-` en position 4, puis
+    le trim de bout le supprime
+
+Scenario: chaine vide et tout-tirets aux cas limites
+  Given @sanitize_owner_name
+  When elle reçoit `""` puis `"----"`
+  Then le premier appel retourne le littéral `"owner"` (entrée vide → sortie vide → repli)
+    et le second `"a"` (le premier `-` devient `"a"`, les trois `-` restants sont retrimmés
+    — jamais `"owner"` ici car la sortie n'est pas vide)
+
+Scenario: resolve_owner_name retourne None pour un utilisateur sans lien
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` et un
+    @AppState branché dessus, sans aucune ligne dans `vanyline_owner_links`
+  When @resolve_owner_name est appelé avec un `user_id` entier valide quel qu'il soit
+  Then le résultat est `Ok(@None)` — aucun appel k8s n'a lieu (l'état peut être entièrement
+    hors-ligne : cache k8s `None`, environnement sans cluster)
+
+Scenario: resolve_owner_name retourne le nom stocké dans le lien
+  Given la même base réelle contenant une ligne `vanyline_owner_links (user_id = 1,
+    k8s_owner_name = 'alice')`
+  When @resolve_owner_name est appelé avec `user_id = 1`
+  Then le résultat est `Ok(@Some("alice".to_string()))` — et un appel avec `user_id = 2`
+    (absente) retourne `Ok(@None)` dans la même base (isolation par filtre UserId)
+
+Scenario: lien au nom NULL est traité comme un lien absent
+  Given la même base réelle contenant une ligne `vanyline_owner_links (user_id = 3,
+    k8s_owner_name = NULL)` insérée par SQL brut
+  When @resolve_owner_name est appelé avec `user_id = 3`
+  Then le résultat est `Ok(@None)` — `and_then` confond absence de ligne et colonne NULL
+    (état licite `[?]`, contrat du comportement actuel)
+
+Scenario: ensure_owner renvoie le nom existant sans toucher Kubernetes
+  Given la même base réelle avec un lien `(user_id = 1, k8s_owner_name = 'alice')` et un
+    @AppState dont l'environnement garantit qu'AUCUNE découverte k8s ne réussirait (cache
+    `None`, ni cluster ni kubeconfig)
+  When @ensure_owner est appelé avec ce `user_id` et un @AuthUser quelconque (email
+    différent, y compris absent)
+  Then le résultat est `@Ok("alice")` — le nom du lien stocké, pas un nouveau nom calqué
+    sur le principal — et aucune erreur K8s n'est produite (la branche early-return ne
+    consulte jamais `../k8s.rs`) ; la ligne est inchangée
+
+Scenario: ensure_owner hors-ligne n'écrit rien en base
+  Given la même base réelle SANS lien pour `user_id = 5` et le même @AppState hors-ligne
+    (découverte k8s impossible)
+  When @ensure_owner est appelé avec `user_id = 5` et un @AuthUser d'email
+    `"alice@example.com"`
+  Then le résultat est un @Err de variante @AppError::K8sConfigError dont `to_string()`
+    contient `"VNL-K8S-001"` (HTTP 502 une fois rendu par `../error.rs`)
+  And `vanyline_owner_links` ne contient toujours AUCUNE ligne pour `user_id = 5` —
+    l'écriture DB est conditionnée à la réussite du chemin k8s (ordre CR-puis-lien)
+
+Scenario: ensure_owner crée un Owner nommé d'après la partie locale de l'email
+  # Test d'intégration cluster (convention anti-mock kube de `../k8s.sdd`) — non
+  # exécutable en CI sans cluster de test.
+  Given un cluster de test joignable avec un @AppState dont `config` a tous les défauts
+    home/project à `@None` et `application_name` à `@None`, base réelle sans lien pour
+    `user_id = 1`, @AuthUser d'email `"Alice.Doe@corp.example"`
+  When @ensure_owner est appelé une première fois
+  Then le résultat est `@Ok("alice-doe")` — sans aucun préfixe type `vny-`
+  And un Owner CR nommé exactement `"alice-doe"` existe dans le namespace du client
+  And le CR porte `spec.project_defaults` ABSENT (les deux défauts projet sont `@None`),
+    `application_ref` absent, `home_size` absent et `egress` vide
+  And une unique ligne `vanyline_owner_links (user_id = 1, k8s_owner_name = 'alice-doe')`
+    existe en base
+
+Scenario: ensure_owner retombe sur le subject quand la partie locale est vide
+  # Test d'intégration cluster.
+  Given le même dispositif de cluster, base sans lien pour `user_id = 2`, @AuthUser dont
+    `email` vaut `"@corp.example"` (local-part vide) et `subject` vaut `"sub-42"`
+  When @ensure_owner est appelé
+  Then le résultat est `@Ok("sub-42")` et l'Owner CR créé porte ce nom — le calcul est
+    calqué sur `subject`, jamais sur l'email vide ni sur le repli `"owner"`
+
+Scenario: ensure_owner est idempotent au second appel
+  # Test d'intégration cluster.
+  Given le cluster et le lien de `user_id = 1` posant `'alice-doe'` (issus du Scenario
+    précédent)
+  When @ensure_owner est rappelé avec le même `user_id` et le même @AuthUser
+  Then le résultat est à nouveau `@Ok("alice-doe")`
+  And il n'existe qu'un seul Owner CR `"alice-doe"` (le get_owner réussi saute create) et
+    qu'une seule ligne de lien pour `user_id = 1` (l'upsert n'est même pas atteint,
+    early-return)
+
+Scenario: ensure_owner répare un lien au nom NULL
+  # Test d'intégration cluster.
+  Given un cluster de test, un Owner CR `"alice-doe"` déjà présent, et en base une ligne
+    `vanyline_owner_links (user_id = 7, k8s_owner_name = NULL)` insérée par SQL brut
+  When @ensure_owner est appelé avec `user_id = 7` et un @AuthUser d'email
+    `"alice-doe@corp.example"`
+  Then le résultat est `@Ok("alice-doe")` et la ligne de `user_id = 7` porte désormais
+    `k8s_owner_name = 'alice-doe'` — resolve l'a traitée comme absente, le get_owner réussi
+    a sauté la création, l'upsert DO UPDATE a posé le nom (aucune seconde ligne créée)
+
+Scenario: la spec de l'Owner CR reflète la config de l'app champ par champ
+  # Test d'intégration cluster.
+  Given un cluster de test et un @AppState de config `application_name = Some("vnl-app")`,
+    `default_home_storage_class = Some("cephfs")`, `default_home_access_mode =
+    Some("ReadWriteMany")`, défauts projet à `@None`, base sans lien pour `user_id = 8`
+  When @ensure_owner est appelé avec un @AuthUser d'email `"carol@corp.example"`
+  Then l'Owner CR `"carol"` porte `spec.application_ref = Some("vnl-app")`,
+    `spec.home_storage_class = Some("cephfs")`, `spec.home_access_mode =
+    Some("ReadWriteMany")`, `spec.existing_pvc` et `spec.home_size` absents, `spec.egress`
+    vide et `spec.project_defaults` ABSENT (les deux défauts projet sont `@None` — pas
+    d'objet vide)
+
+Scenario: project_defaults n'apparait dans le CR qu'avec au moins un défaut projet
+  # Test d'intégration cluster.
+  Given un cluster de test et un @AppState de config `default_project_storage_class =
+    Some("fast-ssd")` et `default_project_access_mode = @None`, base sans lien pour
+    `user_id = 9`
+  When @ensure_owner est appelé avec un @AuthUser d'email `"dave@corp.example"`
+  Then l'Owner CR `"dave"` porte `spec.project_defaults = Some` avec `storage_class =
+    Some("fast-ssd")`, `storage_access_mode = @None` et `storage_size` ABSENT (jamais
+    renseigné par CE fichier, même partiel)
+
+Scenario: appels simultanés pour un même utilisateur ne laissent qu'un lien
+  # Test d'intégration cluster ; la fenêtre de course CR-side (AlreadyExists du second
+  # remontant en 500 — [!] ouvert dans Tasks) n'est pas assertée ici : ce test n'asserte
+  # que l'invariant DB garanti par l'upsert, quelle que soit l'issue k8s de chaque appel.
+  Given un cluster de test, base sans lien pour `user_id = 10`, @AuthUser d'email
+    `"erin@corp.example"`
+  When deux appels à @ensure_owner sont lancés simultanément (`tokio::join!`) sur le même
+    @AppState
+  Then chaque appel retourne `@Ok("erin")` ou une erreur k8s bornée `[!]`, jamais une
+    erreur de contrainte unique remontée en 500 `VNL-DB-006`
+  And à la fin il n'existe AU PLUS UNE ligne `vanyline_owner_links` pour `user_id = 10`,
+    au nom `"erin"` — l'upsert ON CONFLICT (user_id) remplace la fenêtre find-then-insert

@@ -1,0 +1,537 @@
+Spec: Main — démarrage du binaire et assemblage du router racine
+
+Platform: Rust/vanyline-app/bin — axum 0.8, tokio (runtime multi-thread par @tokio::main), SeaORM/Postgres, miryad-core
+
+Purpose:
+  ./main.rs est à la fois la racine du crate `vanyline-app` (le seul endroit déclarant les
+  modules `api`, `auth`, `config`, `config_store`, `db`, `error`, `k8s`, `migration`, `ws`)
+  et le point d'entrée du binaire `vanyline-app` (table `[[bin]]` de ../Cargo.toml,
+  `path = src/main.rs`). Son contrat propre tient en quatre blocs :
+  (1) la SÉQUENCE de démarrage ordonnée et ses sorties fatales (fournisseur crypto rustls,
+  tracing, config, adresse d'écoute, clé de cookie, pool DB, migrateurs — l'ordre
+  miryad-core PUIS app est un contrat, cf. ./migration/mod.sdd —, client OIDC, état,
+  bind, serve) ; (2) la construction de @AppState et son `impl @FromRef` vers
+  @MiryadAuthState ; (3) l'assemblage du router racine (health, auth_router miryad-core,
+  6 @resource_router mergés en chemins complets, swagger, @nest `/api` et `/api/v1`,
+  routes WS, @with_state, @fallback_service statique SPA) — la frontière avec
+  ./api/mod.sdd est celle-là : les préfixes `/api` et `/api/v1` sont la propriété
+  EXCLUSIVE des @nest d'ici ; (4) @openapi_spec, la fusion des six fragments OpenAPI.
+  Le serveur est en HTTP PLAIN (@tokio::net::TcpListener sans TLS) : le TLS est terminé
+  en amont (Ingress de l'Application — cf. ../../docs/architecture.md). Les comportements
+  internes des modules (handlers, WS, migrations enfants, config par variable, mapping
+  d'erreurs HTTP) sont les contrats de ./api/mod.sdd, ./ws/mod.sdd, ./migration/mod.sdd,
+  ./config.rs, ./error.rs — cette spec ne contracte ici que ce ./main.rs observable :
+  séquence, identifiants d'erreur fatale, codes de sortie, table de montage du router.
+
+Owns:
+  ./main.rs
+
+Can read:
+  ./config.rs
+  ./error.rs
+  ./k8s.rs
+  ./migration/mod.rs
+  ./api/mod.rs
+  ./ws/mod.rs
+  ./db/entities/mod.rs
+  ../Cargo.toml
+  ./migration/mod.sdd
+  ./api/mod.sdd
+  ./auth/mod.sdd
+  ./k8s.sdd
+  ./ws/mod.sdd
+  ../../docs/architecture.md
+  ../../tooling.sdd
+  ../../vanyline.sdd
+
+Structure:
+  Ligne 1 : exemption harnais `#![cfg_attr(test, allow(clippy::unwrap_used,
+    clippy::expect_used))]` — seule ligne de ./main.rs que ../../tooling.sdd autorise à
+    modifier dans ce fichier ; aucune autre exemption dans le corps.
+  Déclarations de modules (9, toutes privées, sans `pub`) : `mod api; mod auth;
+  mod config; mod config_store; mod db; mod error; mod k8s; mod migration; mod ws;` —
+  tout module du crate doit être déclaré ici pour exister.
+  @AppState — struct `#[derive(Clone)] pub` à 6 champs (table en Exposes).
+  impl @FromRef<@AppState> for @MiryadAuthState — clone du champ `auth`.
+  @main — `#[tokio::main] async fn main() -> ()`, sans arguments ni parser CLI, séquence
+  contractuelle (voir Returns/Handles), chaque étape fatale = exactement une ligne
+  @tracing::error! avec identifiant `VNL-*` puis @std::process::exit(1).
+  @health — fonction privée `async fn health() -> &'static str`, corps littéral `"ok"`.
+  @openapi_spec — fonction privée (documentée par le commentaire de code) : six fragments
+  @resource_openapi fusionnés par @OpenApi::merge, `info` posé une seule fois sur le
+  document final.
+  @mod tests (cfg(test)) — un seul test,
+  `openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme` ; c'est le
+  SEUL test du fichier ; tout le reste de ./main.rs (séquence, assemblage, codes de
+  sortie) n'est testé par aucun test du dépôt (cf. Tasks).
+  Ordre de merge des 6 ressources dans le router : `llm_providers`, `mcp_servers`,
+  `skills`, `toolsets`, `model_profiles`, `agents` ; ordre de fusion dans @openapi_spec :
+  `llm_providers`, `mcp_servers`, `model_profiles`, `toolsets`, `skills`, `agents` — les
+  deux listes diffèrent par l'ordre des 4 dernières (mêmes ensembles, routes disjointes,
+  résultat équivalent — cf. Tasks).
+
+Exposes:
+  @main — fonction `#[tokio::main] async fn main()`, point d'entrée du binaire
+    `vanyline-app`.
+    Retourne `()` ; ne retourne jamais de @Result (les fatalités sortent par
+    @process::exit(1), pas par le type de retour).
+  @AppState — struct `pub` + @Clone (visibilité limitée au crate : binaire, aucun
+    consommateur externe) :
+  - `config: @Config` — @./config.rs::@Config (clone propre par champ).
+  - `cookie_key: @cookie::Key` — dérivé de `COOKIE_SECRET` selon le contrat de Returns
+    (64 premiers octets) ; en production, seul consommateur observé : le clone injecté
+    dans @MiryadAuthState au démarrage (cf. Tasks `[?]`).
+  - `busy: @Arc<@std::sync::Mutex<@HashSet<i32>>>` — initialisé vide ; les vrais
+    consommateurs sont ./ws/chat.rs (@try_acquire_busy + garde de @Drop) : verrou de tour
+    de chat par `conversation_id` (i32 = PK des conversations).
+  - `k8s: @Arc<@tokio::sync::Mutex<@Option<@VnlK8sClient>>>` — initialisé `None` ;
+    découverte lazy à la première requête, jamais au démarrage (contrat ./k8s.sdd).
+  - `auth: @MiryadAuthState` — état miryad-core construit au démarrage (champs en
+    Returns) ; c'est LE porteur de la connexion DB (@db y est mové) : @AppState n'a pas de
+    champ `db` distinct.
+  - `shared_sandbox_state: @ws::sandbox_state::SharedState` — via @SharedState::new()
+    (hub de push des phases de sandbox, contrat ./ws/).
+  impl @FromRef<@AppState> for @MiryadAuthState — @from_ref retourne `state.auth.clone()`
+    ; c'est ce qui permet aux handlers montés (auth_router, resource_router, extracteur
+    @AuthUser de miryad-core) d'extraire @MiryadAuthState du @AppState global.
+  @health — fonction privée, montée uniquement sur `GET /health`.
+  @openapi_spec — fonction privée, appelée une seule fois (argument de
+    @swagger_ui_router) ; documentée par les tests du module.
+  Déclarations `mod` (9) — la visibilité de tout le crate part d'ici : tous privés
+    (aucun `pub mod`), conformes à un binaire.
+
+Accepts:
+  Aucun argument de ligne de commande (aucun parser CLI dans le fichier).
+  Environnement (consommation ; le contrat variable-par-variable est porté par ./config.rs) :
+  - requises : `OIDC_ISSUER_URL`, `OIDC_CLIENT_ID`, `OIDC_CLIENT_SECRET`,
+    `OIDC_REDIRECT_URL`, `COOKIE_SECRET`, `DATABASE_URL` — l'absence de l'une au moins
+    produit le log d'erreur de ./config.rs (identifiants `VNL-CFG-001` à `VNL-CFG-006`)
+    puis exit(1).
+  - optionnelles avec défauts (lus par ./config.rs) : `OIDC_SCOPES`, `OIDC_CA_CERT`,
+    `LISTEN_ADDR` (défaut `"0.0.0.0:8080"`), `STATIC_DIR` (défaut `"./static"`),
+    `VNL_K8S_NAMESPACE`, `VNL_APPLICATION_NAME`, `VNL_DEFAULT_*` (4).
+  - `RUST_LOG` : filtre @tracing_subscriber::EnvFilter ; en l'absence de la variable,
+    filtre par défaut `"vanyline_app=debug,tower_http=debug"` + layer @fmt (sortie
+    stdout).
+  - `COOKIE_SECRET` : d'abord interprété comme base64 STANDARD ; si le décodage échoue,
+    les OCTETS BRUTS de la chaîne servent de matière de clé (les deux formats sont
+    acceptés ; le controller génère du base64 de 64 octets aléatoires — cf.
+    ../../docs/architecture.md section Application).
+  En tant que serveur : requêtes HTTP en plain-text sur `LISTEN_ADDR` ; aucune auth
+  exigée par @health ; l'authentification des autres routes appartient aux handlers et à
+  miryad-core (@AuthUser), pas à une couche posée ici (aucune @layer dans ./main.rs).
+
+Returns:
+  Séquence de démarrage (ordre contractuel, chaque flèche = une étape qui ne s'exécute
+  qu'après le succès de la précédente) :
+  1. @rustls::crypto::ring::default_provider().@install_default() — erreur IGNORÉE par
+    `.ok()` (si un provider est déjà installé, on continue). Doit précéder tout premier
+    client TLS : `reqwest` (rustls via ring) et `kube` (aws-lc-rs) coexistent dans le
+    même binaire par unification de features Cargo ; sans provider global explicite, le
+    client K8s panique à sa construction (constat documenté par le commentaire de
+    code, jamais observé sur le client OIDC/reqwest).
+  2. Initialisation tracing (registry + EnvFilter + fmt) — AVANT toute lecture de config,
+    donc les erreurs de démarrage sont loggées et non perdues.
+  3. @Config::from_env() — échec : log `VNL-CFG-001..006` (message porté par ./config.rs,
+    affiché tel quel par `tracing::error!("{}", e)`) + exit(1).
+  4. Parse de `config.listen_addr` en @SocketAddr — échec : log
+    `"VNL-CFG-008: invalid LISTEN_ADDR: {valeur}"` + exit(1). Parse @SocketAddr complet
+    (IPv4 et IPv6 ; port `0` autorisé = port éphémère).
+  5. Dérivation de la clé de cookie : base64 STANDARD de `COOKIE_SECRET`, repli sur les
+    octets bruts au cas où le décodage base64 échoue ; si la matière obtenue fait moins de 64 octets :
+    log `"VNL-CFG-005: COOKIE_SECRET must be at least 64 bytes"` + exit(1) ; sinon
+    @cookie::Key::from des 64 PREMIERS octets (au-delà de 64 octets : tronqué sans
+    avertissement).
+  6. Connexion DB @sea_orm::Database::connect(`database_url`) — échec : log
+    `"VNL-DB-003: cannot connect to database (sea-orm): {e}"` + exit(1).
+  7. @miryad_core::migration::Migrator::up(&db, `None`) — échec : log
+    `"VNL-DB-004: miryad-core migrations failed: {e}"` + exit(1).
+  8. @migration::Migrator::up(&db, `None`) — échec : log
+    `"VNL-DB-005: app migrations failed: {e}"` + exit(1). L'ordre 7→8 est imposé par
+    les FK des dix migrations app vers `miryad_users` (./migration/mod.sdd).
+  9. @OidcClient::new(&config.oidc_config()) (await — miryad-core peut contacter
+    l'issuer, comportement interne non lisible, cf. Tasks `[!]`) — échec : log
+    `"VNL-AUTH-004: cannot build miryad-core OIDC client: {e}"` + exit(1).
+  10. Construction @MiryadAuthState { oidc_client: @Arc::new(client), cookie_key: clone,
+    post_login_redirect: `"/#/"`, post_logout_redirect: `"/#/"` (valeurs FIGÉES en dur
+    ici, en plus de celles déjà portées par ./config.rs::oidc_config — cf. Tasks), db }
+    puis @AppState (champs en Exposes, `busy` vide, `k8s` à `None`).
+  11. Assemblage du router racine (table ci-dessous, sans I/O).
+  12. @tokio::net::TcpListener::bind(listen_addr) — échec : log
+    `"VNL-NET-001: failed to bind {addr}: {e}"` + exit(1).
+  13. Log @tracing::info! `"listening on {addr}"` puis @axum::serve(listener, app).
+  En service : @axum::serve boucle tant que le listener vit ; `main` ne retourne jamais
+  de son vivant. Si @serve retournait @Ok (boucle terminée normalement — cas jamais
+  observé, aucun shutdown gracieux n'est branché), le processus s'arrêterait avec le
+  code de sortie 0. En service normal (pod K8s), le processus meurt par signal
+  (SIGTERM/SIGKILL) : aucun @with_graceful_shutdown, aucun handler de signal — cf.
+  Handles et Tasks.
+  Table de montage du router racine (ordre d'écriture dans le code ; pour
+  `merge`/`nest`/`route`, c'est la spécificité matchit qui résout à l'exécution,
+  l'ordre d'écriture n'affectant que la lecture et les messages de panic) :
+  - @route(`"/health"`, @get(@health)) — 200, corps `"ok"`, `text/plain`, sans état
+    extrait ni auth.
+  - @merge(@miryad_core::auth::auth_router()) — routes OIDC de miryad-core (chemins
+    hors dépôt, non contractés ici — la documentation architecture mentionne le callback
+    `/auth/callback` ; frontière, cf. Tasks `[!]`).
+  - 6 @merge(@resource_router::<@Entity, @AppState>()) (ordre : llm_providers,
+    mcp_servers, skills, toolsets, model_profiles, agents) — CRUD monté en CHEMINS
+    COMPLETS `/api/v1/{resource-kebab}` et `/api/v1/{resource-kebab}/{id}` (chemins
+    attestés par le test de @openapi_spec, le frontend les appelle littéralement).
+  - @merge(@swagger_ui_router::<@AppState>(@openapi_spec())) — sert
+    `GET /api/swagger-ui` et `/api/openapi.json` (feature Cargo `swagger-ui` de
+    miryad-core activée dans ../Cargo.toml ; routes affirmées par le commentaire de
+    code, hors source lisible).
+  - @nest(`"/api/v1"`, @api::api_v1_router()) puis @nest(`"/api"`, @api::api_router()) —
+    les deux préfixes externes sont écrits ICI, jamais dans ./api/mod.rs
+    (./api/mod.sdd, section Must).
+  - @route(`"/api/ws/chat/{conversation_id}"`, @get(@ws::chat::ws_chat_handler)) et
+    @route(`"/api/ws/sandbox-state"`, @get(@ws::sandbox_state::ws_sandbox_state_handler))
+    — à la RACINE, déclarées APRÈS les nest (priorité matchit des segments littéraux sur
+    le wildcard interne du nest — mécanisme jamais asserté par un test, cf.
+    ./api/mod.sdd Tasks `[?]`) ; GET uniquement (le handshake WebSocket passe par GET).
+  - @with_state(state) — ferme l'état du router complet (les routers d'./api et le CRUD
+    attendaient @AppState).
+  - @fallback_service(@ServeDir::new(static_dir).fallback(@ServeFile::new("{static_dir}/index.html")))
+    — SPA : fichier statique sous `STATIC_DIR`, sinon `index.html`. Le @fallback_service
+    est branché APRÈS @with_state ; `static_dir` est cloné avant le move de `config` dans
+    l'état.
+  @openapi_spec() : document @utoipa OpenAPI — pour chacune des 6 ressources (noms
+    kebab-case `llm-providers`, `mcp-servers`, `model-profiles`, `toolsets`, `skills`,
+    `agents`) un chemin collection `/api/v1/{resource}` et un chemin item
+    `/api/v1/{resource}/{id}` ; `info.title` = `"vanyline"`, `info.version` =
+    `env!("CARGO_PKG_VERSION")` (posés sur le document FINAL, les fragments ne portent
+    pas d'`info`) ; exactement UN @security_schemes (le schéma Bearer commun, dédoublonné
+    par @OpenApi::merge) et UNE entrée de sécurité globale.
+  Codes de sortie : `1` pour toute fatalité listée ci-dessus (après une ligne d'erreur
+  unique avec identifiant `VNL-*`) ; `0` théorique si @serve revenait @Ok ; `101` en cas
+    de panic (non listé en fatalité, cf. Raises).
+
+Raises:
+  Pas de propagation d'erreur au plus haut niveau : @main retourne `()` ; TOUTES les
+  fatalités sont converties en une ligne @tracing::error! + @std::process::exit(1).
+  Identifiants émis par CE fichier, dans l'ordre d'exécution : `VNL-CFG-008`
+  (LISTEN_ADDR invalide — la numérotation des variables vient de ./config.rs),
+  `VNL-CFG-005` (COOKIE_SECRET < 64 octets après décodage — même identifiant que le
+  « COOKIE_SECRET is required » de ./config.rs, cf. Tasks `[?]`), `VNL-DB-003` (pool DB),
+  `VNL-DB-004` (migrations miryad-core), `VNL-DB-005` (migrations app), `VNL-AUTH-004`
+  (client OIDC — même identifiant que la variante @AppError::Forbidden de ./error.rs,
+  cf. Tasks `[?]`), `VNL-NET-001` (bind), `VNL-NET-002` (`axum::serve` en erreur —
+  log `"VNL-NET-002: server error: {e}"` + exit(1)).
+  Panique possible (exit 101, sans log `VNL-*`) : collision de patterns matchit à
+  l'assemblage (deux @merge/@nest/@route produisant le même pattern complet avec la même
+  méthode, ex. une route `/api/…` de @api_router qui dupliquerait un chemin complet du
+  @resource_router) — panique AU DÉMARRAGE, jamais une 404 silencieuse ; aucun test ne
+  couvre cette collision (cf. ./api/mod.sdd Tasks `[?]`).
+  Aucun @unwrap/@expect/@panic! dans le chemin de production (harnais
+  ../../tooling.sdd — exemptions confinées à la ligne 1 sous `cfg(test)`).
+  En dehors de @openapi_spec (total, testé) et de @health (sans effet), rien de ce que
+  l'assemblage appelle ne peut échouer autrement que par la panic de construction ou les
+  @process::exit listés.
+
+Handles:
+  Coexistence de deux providers rustls compilés dans le même binaire (ring par reqwest,
+    aws-lc-rs par kube via unification de features) : le provider `ring` est installé en
+    global AVANT toute construction de client ; l'erreur d'installation (déjà installé)
+    est délibérément avalée par `.ok()`.
+  Erreurs de démarrage loggées : l'initialisation tracing précède la lecture de la
+    config, donc même un `VNL-CFG-001` est visible dans la sortie (fmt layer, stdout).
+  Base partagée avec miryad-core : les migrateurs s'appliquent dans l'ordre miryad-core
+    → app sur la MÊME connexion, avec tables de suivi séparées (`seaql_migrations_app`
+    côté app — ./migration/mod.sdd) ; un redémarrage rejoue @up de façon idempotente
+    (les deux migrateurs sont des `up` complets step `None`, sans rollback — aucun `down`
+    n'est appelé ici).
+  Démarrage sans cluster K8s : @AppState::k8s démarre `None`, AUCUN appel K8s n'a lieu
+    au démarrage ; le binaire démarre et sert sans cluster (découverte lazy au premier
+    appel de ./k8s.rs::@client). Inverse : @OidcClient::new est, lui, sur le chemin de
+    démarrage — un IdP injoignable peut empêcher le démarrage (comportement miryad-core,
+    frontière non lisible).
+  HTTP plain uniquement : aucun rustls server, aucun cert/key lus ; le HTTPS public est
+    l'affaire de l'Ingress de l'Application (../../docs/architecture.md). CORS : aucune
+    couche CORS n'est posée (même origine via Ingress ; la feature `cors` de tower-http
+    est compilée sans usage visible dans ce fichier).
+  Fallback SPA : chemin inconnu (hors routes montées) → fichier sous `STATIC_DIR`, à
+    défaut `index.html` avec le statut servi par @ServeFile. Conséquence du @nest et du
+    fallthrough axum : un chemin inconnu SOUS `/api` ou `/api/v1` (raté interne au
+    router niché) tombe AUSSI dans ce fallback et reçoit le shell SPA (200 HTML), pas un
+    404 JSON — à contracter ou à corriger ? (Tasks `[?]`). Une méthode non enregistrée sur un
+    CHEMIN connu (`PUT /health` p. ex.) répond en revanche 405 (le @MethodRouter répond
+    avant tout fallback).
+  Pas de shutdown gracieux : ni @with_graceful_shutdown, ni @tokio::signal — SIGTERM
+    termine le processus par l'action par défaut (requêtes en vol abandonnées, pas de
+    drain pour les mises à jour rolling) ; à contracter ou corriger (Tasks `[?]`).
+  `STATIC_DIR` inexistant au démarrage : aucune vérification anticipée, le démarrage
+    réussit et la première requête ne trouve ni fichier ni `index.html` (404 du
+    fallback) — la configuration cassée n'est visible qu'en service (Tasks `[?]`).
+  Consommateurs externes de la table de montage : probes liveness/readiness du
+    déploiement K8s sur `GET /health` (`../../deploy/web/deployment.yaml`, port de
+    `LISTEN_ADDR` du configmap `0.0.0.0:8080`) ; le frontend (mêmes chemins que
+    ./api/mod.sdd + `/api/openapi.json` réservé à l'outillage).
+
+Must:
+  Garder l'ordre exact de la séquence de Returns (points 1→13) : provider rustls avant
+    tout client TLS ; tracing avant la config ; config avant parse d'adresse ; parse
+    d'adresse et clé de cookie avant toute connexion ; connexion DB avant les
+    migrateurs ; migrateur miryad-core AVANT le migrateur app (FK `miryad_users` —
+    ./migration/mod.sdd) ; client OIDC avant @AppState ; assemblage avant bind ; bind
+    avant serve.
+  Pour chacune des 9 étapes fatales : exactement une ligne @tracing::error! portant
+    l'identifiant contractuel listé en Raises, puis @std::process::exit(1) — jamais de
+    panic, jamais de loop-retry au démarrage.
+  Dériver la clé de cookie des 64 premiers octets de la matière (base64 décodé, ou
+    octets bruts si le décodage échoue), et refuser moins de 64 octets par `VNL-CFG-005`.
+  Écrire `GET` uniquement sur les deux routes WS racine (le handshake WS est un GET).
+  Écrire les préfixes externes `/api` et `/api/v1` UNIQUEMENT dans les deux @nest d'ici
+    (contrat croisé de ./api/mod.sdd).
+  Brancher le @fallback_service APRÈS @with_state, avec @ServeDir racine `STATIC_DIR` et
+    @ServeFile de repli `{STATIC_DIR}/index.html` (SPA routing sans configuration
+    serveur supplémentaire).
+  Poser l'`info` OpenAPI une seule fois, sur le document fusionné final (les fragments
+    @resource_openapi ne le portent pas), avec `title` `"vanyline"` et `version` la
+    version du crate.
+  Exposer la connexion DB via @MiryadAuthState.db uniquement (le `db` est mové dans
+    l'état d'auth ; pas de second champ DB dans @AppState).
+  Conserver @health sans extraction d'état ni authentification (les probes K8s n'ont pas
+    de cookie).
+  Garder l'exemption harnais confinée à la ligne 1 `#![cfg_attr(test, allow(...))]`
+    (../../tooling.sdd) ; en production : aucun @unwrap/@expect/@panic/@println/@eprintln,
+    erreurs loggées via @tracing.
+  Initialiser `busy` vide et `k8s` à `None` au démarrage (les consommateurs
+    ./ws/chat.rs et ./k8s.rs possèdent leur comportement).
+
+Must not:
+  Implémenter ici de logique métier : aucune route d'API, aucun extracteur, aucun SQL,
+    aucune ligne de migration — ./main.rs ne fait qu'appeler @MigratorTrait::up (step
+    `None`) et assembler.
+  Poser une couche d'authentification, de session ou de CORS globale sur le router :
+    l'identité est exigée handler par handler (@AuthUser de miryad-core) — ./api/mod.sdd.
+  Terminer le TLS dans ce binaire (server rustls, certs en arg ou en env).
+  Déplacer les routes `/api/ws/chat/{conversation_id}` et `/api/ws/sandbox-state` dans
+    @api::api_router : elles sont racine par contrat (montage ./api/mod.sdd Handles).
+  Appeler un migrateur avec un step autre que `None`, ou appeler `down`/`fresh` au
+    démarrage.
+  Changer le mécanisme de sortie fatale (@exit(1) après log) ou les identifiants `VNL-*`
+    listés sans passer cette spec par le flux spec → test → implémentation.
+  Régénérer des sessions en régénérant quoi que ce soit depuis ./main.rs : la clé de
+    cookie est DÉRIVÉE de `COOKIE_SECRET`, jamais générée (le Secret K8s est créé par le
+    reconciler Application — ../../docs/architecture.md).
+  Ajouter un @nest ou un @merge utilisant un préfixe déjà monté avec des patterns
+    potentiellement concurrents (llm-providers, mcp-servers, skills, toolsets,
+    model-profiles, agents sous `/api/v1`) sans inventaire préalable des routes.
+
+Depends on:
+  ./config.rs (@Config::from_env, @Config::oidc_config — spec ./config.sdd à écrire),
+    ./error.rs (surface d'erreurs des modules, non consommé par ./main.rs qui log des
+    `String`/`Display` directs — spec ./error.sdd à écrire).
+  ./migration/mod.sdd — @migration::Migrator (10 enfants, table `seaql_migrations_app`,
+    ordre miryad-core→app imposé depuis ici).
+  ./api/mod.sdd — @api::api_router / @api::api_v1_router (routers à état ouvert, montés
+    par les @nest d'ici).
+  ./ws/mod.sdd (+ ./ws/chat.rs, ./ws/sandbox_state.rs) — @ws_chat_handler,
+    @ws_sandbox_state_handler, @SharedState ; @AppState::busy consommé par ./ws/chat.rs.
+  ./k8s.sdd — @AppState::k8s lu par ./k8s.rs::@client (découverte lazy) ; type
+    @vanyline_lib::k8s::@VnlK8sClient importé ici.
+  ./auth/mod.sdd — harnais de test du @MiryadAuthState (précédent pour les Scenarios
+    exigeant un état de test).
+  ./db/entities (6 entités mergées : `llm_providers`, `mcp_servers`, `skills`,
+    `toolsets`, `model_profiles`, `agents`) — specs enfants ./db/entities/*.sdd.
+  Crate externe `miryad-core` v0.1 (hors workspace, source absente du dépôt) —
+    @MiryadAuthState, @OidcClient, @auth_router, @resource_router, @resource_openapi,
+    @swagger_ui_router, @miryad_core::migration::Migrator : surface subie, non specée
+    (même lacune que le `[!]` de ./auth/mod.sdd — cf. Tasks).
+  ../Cargo.toml — nom du binaire `vanyline-app`, features structurantes : `swagger-ui`
+    de miryad-core, feature `k8s` de vanyline-lib, `rustls`/`ring`, tower-http `fs`.
+  ../../docs/architecture.md — sections « Backend web » (montée miryad-core, tables,
+    RBAC) et Application (génération du Secret cookie base64 64 octets consommé par la
+    dérivation d'ici).
+  ../../tooling.sdd (exemption ligne 1, interdiction unwrap/print), ../../vanyline.sdd
+    (règle un-fichier-une-spec, ticket WS jamais de JWT brut au navigateur — porté par
+    ./api/sandboxes.rs, pas par ici).
+  ../../deploy/web/deployment.yaml + ../../deploy/web/configmap.yaml — consommateurs
+    opérationnels de `GET /health`, `LISTEN_ADDR`, `STATIC_DIR`.
+
+Tasks:
+  [!] Frontière miryad-core : routes réelles d'@auth_router (hors le callback
+    `/auth/callback` mentionné par la doc), chemins/enveloppes exacts de @resource_router,
+    modes d'échec de @OidcClient::new (contact issuer au démarrage ?), routes et payload
+    de @swagger_ui_router (`/api/swagger-ui`, `/api/openapi.json` affirmés par le seul
+    commentaire de code) : crate hors dépôt, AUCUN de ces contenus n'est vérifié ici.
+    Même lacune que le `[!]` de ./auth/mod.sdd — trancher avec Sébastien (contrat miroir
+    ou spec amont).
+  [?] Identifiant `VNL-AUTH-004` émis deux fois pour deux choses distinctes : échec de
+    construction du client OIDC au démarrage (ici) et @AppError::Forbidden → HTTP 403
+    (./error.rs). Dédupliquer — AGENTS.md exige un identifiant unique par erreur ?
+  [?] `VNL-CFG-005` sert à deux diagnostics (« COOKIE_SECRET is required » de
+    ./config.rs et « must be at least 64 bytes » d'ici) et le numéro `VNL-CFG-007`
+    n'est émis nulle part (saut 006→008). Renuméroter avec une table d'IDs pour le crate,
+    ou accepter la réutilisation ?
+  [?] Le filtre par défaut mentionne `tower_http=debug` alors qu'AUCUNE @TraceLayer
+    n'est posée nulle part dans l'app : aucun span tower_http n'existera jamais — les
+    logs de requêtes HTTP n'existent pas en pratique. Ajouter @TraceLayer::new_for_http
+    (et alors loggera quoi, sur quelles routes ?) ou retirer `tower_http=debug` du défaut ?
+  [?] Aucun shutdown gracieux (ni @with_graceful_shutdown ni @tokio::signal) : SIGTERM
+    tue le processus sans drain (sessions WS de chat/sandbox-state coupées nettes à
+    chaque rollout). Contracter « arrêt brutal, drain à la charge de K8s
+    (terminationGracePeriod) » ou brancher un shutdown propre (et alors : délai,
+    fermeture des WS) ?
+  [?] @AppState::cookie_key n'est consommé en production que par le clone injecté dans
+    @MiryadAuthState au démarrage (grep : aucun autre lecteur) — champ à supprimer (la
+    clé ne vivrait que dans l'état d'auth) ou intention documentée (usage futur de
+    chiffrement maison) ?
+  [?] Redirects `"/#/"` écrits en DUR à DEUX endroits (./config.rs::oidc_config ET la
+    construction de @MiryadAuthState d'ici) : deux sources de vérité pour la même valeur.
+    Dériver l'état d'auth des valeurs de @config.oidc_config(), ou assumer le doublon
+    (le champ du @OidcConfig et celui de @MiryadAuthState sont-ils tous deux lus par
+    miryad-core ? hors dépôt, inconnu) ?
+  [?] Fallthrough du @nest vers le @fallback_service racine : `GET /api/inconnu` (et
+    `/api/v1/inconnu`) répond le shell SPA 200 HTML, pas un 404 JSON — un typo d'appel
+    API côté frontend reçoit du HTML. Est-ce le contrat voulu (le scenario de
+    ./api/mod.sdd « 404 » n'est vrai qu'en montage isolé) ? Si non : limiter le fallback
+    aux chemins hors `/api` (fallback explicite renvoyant un 404 JSON sous `/api`).
+  [?] `COOKIE_SECRET` asymétrique : 64 caractères de base64 valide décodant en 48 octets
+    → rejeté (`VNL-CFG-005`), alors que 64 caractères de non-base64 → acceptés bruts.
+    Contracté tel quel, ou repli sur les octets bruts quand le décodage base64 donne
+    < 64 octets (au lieu de rejeter) ?
+  [?] Pas de garde-fou sur `STATIC_DIR` absent/non-lisible au démarrage : la misconfig
+    n'apparaît qu'en 404 au premier GET. Pré-test au démarrage (exit fatal) ou assumé
+    (le déploiement embarque `/app/static` dans l'image) ?
+  [?] Ordres de merge différents (router : skills/toolsets avant model_profiles ;
+    openapi_spec : model_profiles avant toolsets/skills) : sans effet observable (routes
+    disjointes, merge ensembliste) mais source de lecture trompeuse. Aligner les deux
+    listes ?
+  [ ] Aucun test n'existe pour la séquence de démarrage, les codes de sortie ni
+    l'assemblage : seul @openapi_spec est testé (`openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme`).
+    Les Scenarios process (exit 1 + ID `VNL-*`) demandent un harnais d'intégration lançant
+    le binaire avec env contrôlés ; les Scenarios « Port d'écoute déjà occupé »,
+    « Démarrage sans cluster Kubernetes » et « Démarrage sur base vide »
+    exigent de plus une Postgres réelle (binaire compilé sans driver sqlite — le
+    `sqlite::memory:` des tests unitaires n'est PAS utilisable par le binaire) et, pour
+    ces trois-là, un IdP joignable (étape 9 de la séquence, sur le chemin critique) —
+    arbitrer avec Sébastien
+    le niveau d'harnais (issuer de test, Postgres éphémère, tags d'intégration).
+  [ ] Rattacher ./config.sdd et ./error.sdd (non écrites à ce jour) dans `Depends on`
+    quand elles existeront ; la table des identifiants `VNL-CFG-*` du crate devrait vivre
+    dans l'une des deux.
+
+Done when:
+  ./main.rs continue de ne porter que : déclarations de modules, @AppState (+ @Clone +
+    @FromRef), la séquence de démarrage de `Returns`, @health, @openapi_spec. Chaque
+    Scenario a un test taggé par son titre (les Scenarios process sous harnais
+    d'intégration accepté par Sébastien) et passe ; tout `[?]`/`[!]` ci-dessus a une
+    décision écrite répercutée ici ; la batterie complète (check, test, build, clippy
+    `--all-targets -D warnings`, fmt) est verte.
+
+Scenario: GET /health retourne le corps littéral ok
+  Given un @Router::new() monté uniquement avec @route(`"/health"`, @get(@health)) en
+    reproduisant l'appel dans le module de test de ./main.rs (la fonction est privée,
+    donc testable depuis ./main.rs)
+  When une requête `GET /health` est adressée via @tower::ServiceExt::oneshot
+  Then la réponse a le statut @StatusCode::OK
+    And le corps est exactement le texte `"ok"` (aucune extraction d'état, aucune auth)
+
+Scenario: Méthode non GET sur /health répond 405 sans rejoindre le fallback SPA
+  Given @Router::new() avec @route(`"/health"`, @get(@health)) suivi d'un
+    @fallback_service(@ServeDir::new(dossier_temporaire_contenant_un_index_html)) —
+    reproduction minimale du montage de ./main.rs, sans @AppState
+  When une requête `PUT /health` est adressée via @oneshot
+  Then la réponse a le statut @StatusCode::METHOD_NOT_ALLOWED — le @MethodRouter répond
+    sur chemin connu, le fallback (qui retournerait index.html) n'est pas consulté
+
+Scenario: Variable OIDC_ISSUER_URL absente avorte le démarrage avec code 1
+  Given le binaire `vanyline-app` lancé en process de test avec un environnement complet
+    SAUF `OIDC_ISSUER_URL` retirée (Postgres et IdP non requis : l'échec survient avant)
+  When le processus s'arrête
+  Then le code de sortie est `1`
+    And la sortie de logging porte l'identifiant `"VNL-CFG-001"`
+
+Scenario: LISTEN_ADDR invalide avorte le démarrage avec VNL-CFG-008
+  Given le binaire lancé avec un environnement par ailleurs valide et
+    `LISTEN_ADDR="pas_une_adresse"`
+  When le processus s'arrête
+  Then le code de sortie est `1`
+    And la sortie de logging porte `"VNL-CFG-008: invalid LISTEN_ADDR: pas_une_adresse"`
+
+Scenario: COOKIE_SECRET base64 décodant en moins de 64 octets avorte avec VNL-CFG-005
+  Given le binaire lancé avec `COOKIE_SECRET` égal au base64 STANDARD de 48 octets
+    (64 caractères asci, mais matière décodée insuffisante)
+  When le processus s'arrête
+  Then le code de sortie est `1`
+    And la sortie de logging porte `"VNL-CFG-005"`
+    And la sortie ne porte PAS `"VNL-DB-003"` (l'échec survient avant la connexion DB)
+
+Scenario: COOKIE_SECRET brut non-base64 de 64 caractères ou plus est accepté
+  Given le binaire lancé avec `COOKIE_SECRET` égal à une chaîne de 64 caractères ASCII
+    non décodables en base64 (ex. contenant `'!'`) et `DATABASE_URL` vers un port local
+    fermé (injoignable)
+  When le processus s'arrête
+  Then la sortie de logging porte `"VNL-DB-003"` (le démarrage a franchi la dérivation
+    de clé par repli sur les octets bruts)
+    And la sortie ne porte PAS `"VNL-CFG-005"`
+
+Scenario: Postgres injoignable avorte le démarrage avec VNL-DB-003
+  Given le binaire lancé avec un environnement valide et `DATABASE_URL` pointant vers un
+    port TCP local fermé
+  When le processus s'arrête
+  Then le code de sortie est `1`
+    And la sortie de logging porte `"VNL-DB-003"`
+
+Scenario: Port d'écoute déjà occupé avorte le démarrage avec VNL-NET-001
+  Given (intégration, harnais à arbitrer) un @tokio::net::TcpListener déjà branché sur
+    l'adresse visée, une Postgres de test joignable avec migrations possibles, un IdP
+    joignable, et le binaire lancé avec `LISTEN_ADDR` réglé sur cette adresse occupée
+  When le processus tente le bind (étape 12, après migrations et client OIDC)
+  Then le code de sortie est `1`
+    And la sortie de logging porte `"VNL-NET-001: failed to bind"`
+
+Scenario: Démarrage sans cluster Kubernetes sert /health
+  Given (intégration) Postgres et IdP de test joignables, aucun cluster K8s joignable
+    (`KUBERNETES_SERVICE_HOST` absent, `KUBECONFIG` vers fichier inexistant), `VNL_K8S_NAMESPACE`
+    non mis, et le binaire lancé avec `LISTEN_ADDR` sur un port libre
+  When le log `"listening on"` apparaît et que `GET {addr}/health` est adressé
+  Then la réponse est 200 `"ok"`
+    And la sortie de logging ne porte AUCUN identifiant `"VNL-K8S-"` (aucune tentative de
+    découverte K8s au démarrage — @AppState::k8s reste `None`, ./k8s.sdd)
+
+Scenario: RUST_LOG=off silence les traces de démarrage
+  Given le binaire lancé avec un environnement volontairement invalide sur
+    `LISTEN_ADDR` (fatal `VNL-CFG-008` garanti) et `RUST_LOG=off`
+  When le processus s'arrête avec le code `1`
+  Then la sortie standard de logging ne contient PAS la ligne `"VNL-CFG-008"` (le filtre
+    EnvFilter issu de `RUST_LOG` prime sur le défaut `"vanyline_app=debug,…"`)
+
+Scenario: openapi_spec fusionne six ressources avec un seul schéma de sécurité
+  Given un appel direct à @openapi_spec() dans le module de test de ./main.rs (test
+    existant `openapi_spec_exposes_all_six_resources_without_duplicate_security_scheme`)
+  When le document est inspecté
+  Then les chemins `/api/v1/{resource}` et `/api/v1/{resource}/{id}` existent pour
+    `llm-providers`, `mcp-servers`, `model-profiles`, `toolsets`, `skills`, `agents`
+    And `info.title` vaut `"vanyline"` et `info.version` la version du crate
+    And `components.security_schemes` compte exactement 1 entrée (Bearer dédoublonné)
+    And la sécurité globale du document compte exactement 1 entrée
+
+Scenario: Chemin frontend inconnu reçoit le shell SPA
+  Given un dossier temporaire servant de `STATIC_DIR` contenant `index.html` (contenu
+    marqueur) et `assets/app.js`, et le @fallback_service reproduit tel qu'assemblé
+    (@ServeDir::new(dossier).fallback(@ServeFile::new("{dossier}/index.html")))
+  When une requête `GET /route/spa/inconnue` est adressée via @oneshot
+  Then la réponse est 200 avec le contenu marqueur de `index.html` — le routage SPA
+    fonctionne sans configuration serveur supplémentaire
+
+Scenario: Chemin API inconnu sous le préfixe monté est servi par le shell SPA
+  Given @Router::new().@nest("/api", un router minimal de test avec un chemin connu)
+    .@with_state(état_de_test) puis le @fallback_service sur un `STATIC_DIR` temporaire
+    contenant `index.html` — reproduction du mécanisme de fallthrough du @nest (le vrai
+    @api_router n'est pas requis)
+  When une requête `GET /api/inconnu` est adressée via @oneshot
+  Then la réponse N'EST PAS un 404 JSON : le raté interne du router niché retombe sur le
+    fallback racine et sert `index.html` (comportement ACTUEL à confirmer ou corriger —
+    cf. Tasks `[?]`)
+
+Scenario: Démarrage sur base vide applique les migrations miryad-core avant celles de l'app
+  Given (intégration Postgres, harnais à arbitrer) une base PostgreSQL vide, un IdP de
+    test joignable, le binaire lancé jusqu'au log `"listening on"` puis arrêté
+  When les tables d'historique sont inspectées
+  Then `seaql_migrations_app` contient exactement les dix lignes de ./migration/mod.sdd
+    And les tables miryad-core (dont `miryad_users`) existent — le succès sur Postgres
+    (FK actives) PROUVE l'ordre miryad-core→app : l'inverse aurait produit
+    `"VNL-DB-005"` et le code de sortie `1`

@@ -1,0 +1,194 @@
+Spec: Toolsets Entity
+
+Purpose:
+  Entité SeaORM `toolsets` de l'`app` : représentation ORM de la table
+    `vanyline_toolsets` — un toolset = ensemble nommé d'outils (liste de noms
+    d'outils locaux `local_tools`, sélection de serveurs MCP `mcp`, plus
+    `prompt` et `description` optionnels), propriété d'un utilisateur miryad
+    (`owner_id` → `miryad_users.id`). Le fichier est purement déclaratif :
+    `@Model` + types générés par SeaORM (`@Entity`, `@ActiveModel`, `@Column`,
+    `@PrimaryKey`), impl. `@MiryadResource` qui branche l'entité sur le CRUD
+    générique de `miryad-core`, et défauts serde qui rendent les payloads de
+    création du frontend acceptables sans `id`/`owner_id`.
+  Limites du contrat : le schéma SQL exact (colonnes, types SQL dont `JSONB`
+    pour `local_tools`/`mcp`, FK, index unique `(owner_id, name)`) est
+    contracté par `../migration/m20260825_000002_create_vanyline_toolsets.sdd`
+    (en cours de rédaction) — cette spec ne le duplique pas, elle ne contracte
+    que la correspondance colonne↔champ vue côté Rust. La surface REST
+    `/api/v1/toolsets` appartient à `miryad_core::resource` (crate externe),
+    montée par `../../main.rs`. La projection vers le type de domaine
+    `@Toolset` (avec repli défensif sur JSON invalide) appartient à
+    `../../config_store.rs` (`@domain_toolset`, `@PgConfigStore::load_toolsets`).
+  Notion de miroir (sans partage de code) : côté cli, `FsConfigStore` de
+    `../../../../cfgstore/src/fs_store.sdd` stocke le même concept de domaine
+    sous forme de fichiers `<dir>/toolsets/*.yaml`. Deux backends, un seul
+    contrat amont : `@ConfigStore::list_toolsets`.
+
+Owns:
+  ./toolsets.rs
+
+Can read:
+  ../migration/m20260825_000002_create_vanyline_toolsets.rs — seule source du
+    schéma SQL, pour vérifier la correspondance table/colonnes/champs.
+  ../../config_store.rs — consommation observée (filtre `owner_id`, projection
+    domaine) pour documenter les appelants.
+  ../../main.rs — montage `@resource_router` / `@resource_openapi`.
+  ./model_profiles.rs — entité sœur dont le commentaire sur `#[serde(default)]`
+    est repris ici (même motif, mêmes raisons).
+
+Exposes:
+  @Model — struct sérialisable/désérialisable (serde, `snake_case` — aucun
+    `rename_all`), `utoipa::ToSchema` enregistré sous le nom OpenAPI `Toolset`
+    (`#[schema(as = Toolset)]`), mappé sur la table `vanyline_toolsets`
+    (`#[sea_orm(table_name = "vanyline_toolsets")]`). Champs, dans l'ordre :
+    `id: i32` (clé primaire, `#[sea_orm(primary_key)]`, `#[serde(default)]` →
+      absent côté client ⇒ `0`, de toute façon écrasé côté serveur),
+    `owner_id: i32` (`#[serde(default)]` → absent ⇒ `0`, injecté/écrasé
+      serveur, jamais accepté du client — cf. `docs/architecture.md`),
+    `name: String` (seule clé strictement requise d'un body de création),
+    `description: Option<String>` (clé absente ou `null` ⇒ `None`),
+    `prompt: Option<String>` (idem),
+    `local_tools: serde_json::Value` (`#[serde(default)]` pointant vers
+      `@default_json_array` ⇒ absent ⇒ `json!([])`) — côté SQL
+      `JSONB NOT NULL DEFAULT '[]'`, correspondance contractée par la spec
+      migration,
+    `mcp: serde_json::Value` (mêmes défauts serde et SQL que `local_tools`).
+  @Entity, @ActiveModel, @Column, @PrimaryKey — types générés par
+    `DeriveEntityModel`, consommés par `@crate::config_store` et `../../main.rs`.
+  @Relation — enum vide (`DeriveRelation`, `EnumIter`) : aucune relation
+    SeaORM déclarée, y compris vers `miryad_users` (la FK n'existe qu'en base).
+  @ActiveModelBehavior — impl. vide : aucun `before_create`/`before_save`,
+    contrairement aux sœurs `agents`, `llm_providers`, `mcp_servers`.
+  `@MiryadResource for Entity` : `resource_name()` → `"toolsets"` (colonne
+    vertébrale des routes `/api/v1/toolsets` et `/api/v1/toolsets/{id}`),
+    `read_policy()` → `@AccessPolicy::OwnerOnly`, `write_policy()` →
+    `@AccessPolicy::OwnerOnly`, `owner_column()` → `Some(@Column::OwnerId)`.
+  @default_json_array — fonction privée (non `pub`) : retourne `json!([])`.
+
+Accepts:
+  Body JSON (snake_case) désérialisé en `@Model` par le CRUD `miryad-core` :
+    tout champ sauf `name` peut être absent grâce aux défauts serde ; les
+    payloads du frontend n'envoient ni `id` ni `owner_id` (d'où les
+    `#[serde(default)]`, motif partagé avec `./model_profiles.rs`).
+  Aucune validation de forme sur `local_tools`/`mcp` à l'écriture : tout
+    `serde_json::Value` passe (tableau, objet, scalaire) — le repli n'existe
+    qu'à la lecture, dans `@domain_toolset` côté `config_store`.
+
+Returns:
+  Accès statiques (`resource_name`/`read_policy`/`write_policy`/
+    `owner_column`) sur `@Entity`, tels qu'exactement listés dans `Exposes`.
+  Une valeur `@Model` fraîchement désérialisée avec les défauts serde appliqués.
+
+Raises:
+  Rien depuis ./toolsets.rs lui-même (aucune fonction fallible). Les erreurs
+    possibles sur la ressource (400 « missing field `name` », conflit sur
+    l'index unique `(owner_id, name)`, refus RBAC OwnerOnly) sont émises en
+    amont par `miryad-core` et la base, pas ici.
+
+Handles:
+  Payload de création sans `id`/`owner_id` → désérialisation réussit avec
+    `0`/`0`, valeurs ensuite écrasées par `resource_router` (PK auto-incrémentée,
+    owner injecté serveur).
+  Payload sans `local_tools`/`mcp` → colonnes alimentées avec l'array JSON
+    vide, cohérent avec le `DEFAULT '[]'` SQL.
+  Colonnes jamais NULL en base (`NOT NULL DEFAULT '[]'`) — la lecture de rows
+    dont le JSON ne matche pas la forme attendue est gérée par le consommateur
+    (`unwrap_or_default` dans `@domain_toolset`), pas par cette entité.
+
+Must:
+  - Mapper exactement la table `vanyline_toolsets` et ses sept colonnes, en
+      correspondance un-à-un avec la migration
+      `../migration/m20260825_000002_create_vanyline_toolsets.rs` (tout
+      écart colonne/champ est une régression).
+  - Conserver `resource_name()` = `"toolsets"` : `../../main.rs::openapi_spec`
+      et son test attendent les chemins `/api/v1/toolsets` et
+      `/api/v1/toolsets/{id}` ; le schéma OpenAPI s'appelle `Toolset`.
+  - Exposer `read_policy`/`write_policy` en `@AccessPolicy::OwnerOnly` et
+      `owner_column()` en `Some(@Column::OwnerId)` : l'isolation par
+      propriétaire est le seul RBAC de la ressource.
+  - Maintenir les défauts serde `id`/`owner_id` (⇒ `0`) et `local_tools`/`mcp`
+      (⇒ `json!([])`) : leur suppression provoquerait des 400 « missing field »
+      sur les body de création du frontend.
+  - Rester filtrable par `@Column::OwnerId` : `@PgConfigStore::load_toolsets`
+      (`../../config_store.rs`) construit son `Entity::find().filter(...)` sur
+      cette colonne.
+
+Must not:
+  - Porter de requête, de handler HTTP ou de logique métier : le fichier reste
+      déclaratif (loi `entities/*.sdd`, cf. `../entities/mod.sdd`).
+  - Déclarer une relation SeaORM (vers `miryad_users` ou autre) sans extension
+      de cette spec — l'enum `@Relation` vide est l'état contractuel actuel.
+  - Ajouter un `before_create`/`before_save` à `@ActiveModelBehavior` sans le
+      contracter ici d'abord (les sœurs en ont, celle-ci n'en a pas — voir
+      Tasks).
+  - Exposer l'`owner_id` fourni par le client comme faisant foi : la valeur
+      serde n'est qu'un placeholder écrasé serveur (cf. docs architecture).
+
+Depends on:
+  `sea_orm` (macros `DeriveEntityModel`/`DeriveRelation`, prelude), `serde` +
+    `serde_json` (défauts custom), `utoipa` (`ToSchema`),
+    `miryad_core::resource` (`@MiryadResource`, `@AccessPolicy`) — crate
+    externe crates.io v0.1.
+  `../migration/m20260825_000002_create_vanyline_toolsets.sdd` — contrat du
+    schéma SQL (en cours de rédaction) : cette entité n'est valide que si la
+    table qu'il décrit lui correspond.
+  Consommateurs (aval, ne conditionnent pas la compilation) :
+    `../../config_store.rs` (`@DbToolset`, `@domain_toolset`,
+    `@PgConfigStore::load_toolsets`), `../../main.rs` (montages
+    `@resource_router` et `@resource_openapi` sur cette entité).
+
+Scenario: toolset_resource_contract
+  Given l'entité `@Entity` de ./toolsets.rs
+  When on interroge `@MiryadResource` (`resource_name`, `read_policy`,
+    `write_policy`, `owner_column`)
+  Then `resource_name()` vaut `"toolsets"`
+  And `read_policy()` et `write_policy()` valent tous deux
+    `@AccessPolicy::OwnerOnly`
+  And `owner_column()` est `Some(@Column::OwnerId)`
+  # Test existant `toolset_resource_contract` dans ./toolsets.rs.
+
+Scenario: minimal_creation_payload_deserializes_with_defaults
+  Given un body JSON `{"name":"fs"}` (forme exacte envoyée par le frontend)
+  When on le désérialise en `@Model` via `serde_json::from_str`
+  Then `id` et `owner_id` valent `0`
+  And `description` et `prompt` valent `None`
+  And `local_tools` et `mcp` valent `json!([])`
+  # À couvrir par un futur test taggé du même titre.
+
+Scenario: model_serializes_with_exact_snake_case_keys
+  Given une valeur `@Model` entièrement initialisée
+  When on la sérialise en JSON
+  Then les clés sont exactement `id`, `owner_id`, `name`, `description`,
+    `prompt`, `local_tools`, `mcp` (aucun `rename_all`, aucun champ omis)
+
+Scenario: entity_declares_no_relations
+  Given l'enum `@Relation` dérivé `EnumIter`
+  When on l'itère (`Relation::iter()`)
+  Then il ne contient aucune variante — aucune jointure SeaORM n'est
+    disponible pour cette entité
+
+Tasks:
+  [ ] Écrire les tests des Scenario sans test actuel
+      (`minimal_creation_payload_deserializes_with_defaults`,
+      `model_serializes_with_exact_snake_case_keys`,
+      `entity_declares_no_relations`).
+  [?] `@ActiveModelBehavior` est vide ici alors que les sœurs `agents`,
+      `llm_providers`, `mcp_servers` valident en `before_create` : faut-il
+      valider à l'écriture la forme de `local_tools` (array de chaînes) et de
+      `mcp` (array d'objets `McpSelection`) ? Actuellement tout JSON non-array
+      est accepté en base et retombe silencieusement sur liste vide à la
+      lecture (`@domain_toolset`). À trancher avec Sébastien.
+  [?] Conflit sur l'index unique `(owner_id, name)` (creation/update d'un
+      toolset déjà nommé pour le même owner) : quelle erreur HTTP remonte par
+      `resource_router` de `miryad-core` (500 brut depuis la DB ?) ? Un 409
+      argumenté est-il attendu ? Comportement hors du champ de ce fichier.
+  [!] `#[serde(default)]` sur `owner_id` : le commentaire et
+      `docs/architecture.md` affirment que `resource_router` écrase `id` et
+      `owner_id` avant écriture (« injectée serveur-side, jamais acceptée du
+      client ») — vérification impossible depuis ./toolsets.rs seul (crate
+      externe). À confirmer par lecture de `miryad-core` ou test d'intégration
+      avant de considérer l'écrasement comme un contrat.
+  [?] `@Relation` vide malgré la FK SQL `owner_id` → `miryad_users` : cohérent
+      avec toutes les entités sœurs — convention globale « pas de relation
+      SeaORM déclarée, FK seulement en base » à confirmer ou infirmer dans
+      `../entities/mod.sdd` / `/vanyline.sdd`.

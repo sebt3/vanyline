@@ -1,0 +1,470 @@
+Spec: Migration m20260825_000006_create_vanyline_agents
+
+Purpose:
+  Sixième migration (6/10 de la chaîne de `./mod.sdd`) de l'`app` : pose du DDL de la
+    table `vanyline_agents` — un « agent » (nom, mode, profil de modèle, toolsets,
+    skills, prompt système), propriété d'un utilisateur miryad (`owner_id` →
+    `miryad_users.id`). Le fichier est purement DDL : `up` = une seule instruction
+    `CREATE TABLE` (9 colonnes, 2 FK, contrainte `UNIQUE` inline), `down` = un seul
+    `DROP TABLE` ; aucune logique métier, aucune DML, aucun log.
+  Contrat central : la DDL EXACTE (colonnes, types, NULL/DEFAULT dont deux colonnes
+    `JSONB`, FK `owner_id` CASCADE + `model_profile_id` RESTRICT, unicité
+    `(owner_id, name)`). L'entité sœur `../db/entities/agents.sdd` est le miroir Rust
+    de cette DDL (correspondance colonne par colonne bilatérale) ; l'orchestration
+    (ordre d'application, table de suivi `seaql_migrations_app`, règle de régression
+    Phase 3 sur `.index(...)`) appartient à `./mod.sdd` et n'est pas dupliquée ici.
+  Place dans la chaîne (`./mod.sdd`) : position 6 dans `@Migrator::migrations`,
+    immédiatement après `./m20260825_000005_create_vanyline_model_profiles.rs` (sa FK
+    cible `vanyline_model_profiles`) et après le migrateur `miryad-core` (FK cible
+    `miryad_users`) ; aucune autre dépendance interne à la chaîne, et doit précéder
+    `…000008` (`vanyline_conversations`, dont la FK entrante `agent_id` → cette table
+    est `ON DELETE SET NULL`).
+  Lieu de naissance historique de la régression Phase 3 (cf. commentaire de ./mod.rs
+    et `./mod.sdd`) : ce DDL a d'abord chaîné un `.index(...)` non-UNIQUE dans le
+    `@Table::create()`, ce qui fait générer à sea-query un fragment `(...)` orphelin,
+    syntaxiquement invalide sur PostgreSQL ET SQLite. La forme actuelle — un seul
+    `.index(...)` avec `.unique()`, aucune instruction d'index séparée — est la forme
+    corrigée et contractée ; le filet est le test
+    `migrations_apply_cleanly::full_migration_set_applies_against_a_real_schema` de
+    ./mod.rs, pas un test de ce fichier (qui n'en porte aucun).
+
+Owns:
+  ./m20260825_000006_create_vanyline_agents.rs
+
+Can read:
+  ./mod.rs — enregistrement de cette migration en position 6, table de suivi
+    `seaql_migrations_app`, test de paire complète (filet unique du DDL de ce fichier).
+  ./m20260825_000005_create_vanyline_model_profiles.rs — table cible de la FK
+    `model_profile_id` (amont, doit précéder).
+  ./m20260825_000008_create_vanyline_conversations.rs — FK entrante
+    `conversations.agent_id` → `vanyline_agents.id` `SET NULL` (aval, doit suivre).
+  ../db/entities/agents.rs — consommateur direct : les neuf champs de
+    `@crate::db::entities::agents::Model` en correspondance un-à-un, défauts serde
+    alignés sur les défauts SQL.
+  ../db/test_support.rs — harnais `@real_db` (SQLite en mémoire, FK non appliquées —
+    cf. Tasks).
+  ../main.rs — démarrage production : connexion `database_url`, migrateur miryad-core
+    puis `@crate::migration::Migrator::up`.
+
+Exposes:
+  @Migration — `pub struct` local au module privé
+    `migration::m20260825_000006_create_vanyline_agents` (déclaré `mod …;` dans
+    ./mod.rs, jamais atteignable hors du binaire) ; `#[derive(DeriveMigrationName)]` →
+    `@MigrationTrait::migration_name()` retourne le stem du fichier,
+    `"m20260825_000006_create_vanyline_agents"` — identité d'historique dans
+    `seaql_migrations_app`.
+  @MigrationTrait::up — `async fn up(&self, manager: &@sea_orm_migration::SchemaManager)
+    -> Result<(), @sea_orm::DbErr>` (`@async_trait`) : une seule instruction
+    `manager.create_table(...)`, table `vanyline_agents` via
+    `@sea_orm::sea_query::Table::create()` avec `if_not_exists()`
+    (`CREATE TABLE IF NOT EXISTS`). DDL contractuelle, dans l'ordre de déclaration des
+    `.col` :
+    `id` — `@ColumnDef::integer().not_null().auto_increment().primary_key()` : clé
+      primaire entière auto-incrémentée mono-colonne (sémantique `i32` côté entité ;
+      traduction physique SERIAL/IDENTITY en PostgreSQL, `INTEGER PRIMARY KEY
+      AUTOINCREMENT` en SQLite — relève de sea-query, non contractée).
+    `owner_id` — `integer().not_null()`, sans DEFAULT.
+    `name` — `string()` sans longueur, `.not_null()`.
+    `description` — `string()` sans longueur, NULLABLE (ni `.not_null()` ni DEFAULT) —
+      contrairement à la sœur `./m20260825_000001_create_vanyline_skills.rs`
+      (`description NOT NULL DEFAULT ''`) ; correspond à l'`@Option<String>` de
+      l'entité.
+    `mode` — `string().not_null().default("primary")` : défaut émis quoté par sea-query
+      (`DEFAULT 'primary'`).
+    `model_profile_id` — `integer().not_null()`, sans DEFAULT.
+    `toolsets` — `custom("JSONB").not_null().default(@sea_orm::sea_query::Expr::cust("'[]'"))` :
+      type émis littéralement `JSONB` (JSONB natif en PostgreSQL ; cf. Tasks `[!]` pour
+      SQLite), NOT NULL, défaut la chaîne SQL littérale `'[]'` — fragment `cust` passé
+      BRUT, sans quoting supplémentaire, d'où les apostrophes incluses dans le littéral
+      (contrairement à `mode`).
+    `skills` — `custom("JSONB").not_null().default(Expr::cust("'\"auto\"'"))` : identique
+      à `toolsets`, défaut la chaîne SQL littérale `'"auto"'` — le SCALAIRE JSON
+      `"auto"` (chaîne), pas un tableau ni un objet.
+    `system_prompt` — `string().not_null().default("")` : défaut émis `DEFAULT ''`.
+    Contrainte de table `UNIQUE (owner_id, name)` — posée par
+      `@Index::create().unique().col(owner_id).col(name)` passé à `.index(...)` dans le
+      `Table::create()`, contrainte sans nom explicite : l'unicité porte sur le COUPLE
+      (deux owners peuvent avoir un agent du même nom ; un même owner ne peut pas
+      dupliquer un nom). C'est la forme `.unique()` autorisée par la règle de régression
+      Phase 3 de `./mod.sdd` ; le `.unique()` ne doit JAMAIS être retiré.
+    FK `owner_id` → `miryad_users.id` — `@ForeignKey::create()` anonyme,
+      `.on_delete(@ForeignKeyAction::Cascade)` ; `on_update` non spécifié ⇒ défaut du
+      backend (`NO ACTION` côté PostgreSQL).
+    FK `model_profile_id` → `vanyline_model_profiles.id` — `@ForeignKey::create()`
+      anonyme, `.on_delete(@ForeignKeyAction::Restrict)` ; `on_update` non spécifié
+      (`NO ACTION` côté PostgreSQL).
+    Aucune autre instruction : pas de `.create_index(...)` séparé dans ce `up`
+      (contraste avec ./m20260825_000008_create_vanyline_conversations.rs qui en
+      émet deux), pas d'ALTER, pas de DML.
+  @MigrationTrait::down — une seule instruction `drop_table` :
+    `DROP TABLE "vanyline_agents"` (`@Table::drop().table(Agent::Table)`, sans
+    `if_exists`, sans `CASCADE`) ; emporte avec la table la contrainte `UNIQUE` et les
+    deux FK portées. Ne touche aucune autre table.
+  @Agent — enum privée `#[derive(DeriveIden)]` : variante `Table` avec iden littéral
+    `vanyline_agents` (`#[sea_orm(iden = "vanyline_agents")]`) ; variantes de colonnes
+    `Id`, `OwnerId`, `Name`, `Description`, `Mode`, `ModelProfileId`, `Toolsets`,
+    `Skills`, `SystemPrompt` → idens snake_case `id`, `owner_id`, `name`,
+    `description`, `mode`, `model_profile_id`, `toolsets`, `skills`, `system_prompt`.
+  @User — enum privée `#[derive(DeriveIden)]` qui re-déclare LOCALEMENT l'identifiant
+    de la table externe `miryad_users` (`#[sea_orm(iden = "miryad_users")]`) et sa
+    colonne `Id` : sert uniquement de cible à la FK, jamais de DDL sur cette table.
+  @ModelProfile — enum privée `#[derive(DeriveIden)]` : cible de la FK
+    `vanyline_model_profiles` (`#[sea_orm(iden = "vanyline_model_profiles")]`) et sa
+    colonne `Id` ; idem, aucune DDL émise sur cette table.
+  Aucun test interne : les seuls filets existants sur ce DDL sont le test de ./mod.rs
+    (paire complète contre base réelle) et les tests de
+    ../db/entities/agents.rs (`@mod tests`, `@mod resource_router_regression`) qui
+    l'exercent indirectement.
+
+Accepts:
+  Un `@sea_orm_migration::SchemaManager` branché sur une connexion réelle :
+    PostgreSQL en production (`../main.rs`, `database_url`), SQLite en mémoire dans les
+    tests (`@crate::db::test_support::real_db`). Aucun autre paramètre, aucune lecture
+    de config ou d'environnement, aucun `#[cfg(...)]`, aucune feature : le même builder
+    est compilé pour les deux backends.
+  Préconditions (hors de ce fichier, contractées par `./mod.sdd`, non vérifiées par ce
+    code) : `@miryad_core::migration::Migrator::up` déjà appliqué (`miryad_users`
+    existe) ; la migration `…000005` déjà appliquée (`vanyline_model_profiles` existe) ;
+    position 6 respectée dans `@Migrator::migrations`.
+  En écriture (contrat subi, pas émis) : lignes insérées par le CRUD miryad-core
+    (`/api/v1/agents`), `../db/entities/agents.rs` et les seeds de tests.
+
+Returns:
+  Les deux méthodes : `@Result<(), @sea_orm::DbErr>` — `Ok(())` quand le backend a
+    accepté le DDL, valeur transmise telle quelle de l'`await` sur
+    `@SchemaManager::create_table` / `@SchemaManager::drop_table`. `up` retourne aussi
+    `Ok(())` en no-op si la table existe déjà (`IF NOT EXISTS`). Rien d'autre : ni
+    compte de lignes, ni diff de schéma, ni id généré.
+
+Raises:
+  @sea_orm::DbErr propagé brut, sans mapping, log, wrap ni retry (aucun `match`/
+    `map_err` dans le fichier), vers `@MigratorTrait::up` dont l'appelant `../main.rs`
+    assume l'échec (log `VNL-DB-005` + `exit(1)` — contrat `../main.rs.sdd`).
+  Cas concrets côté `up` : `miryad_users` ou `vanyline_model_profiles` absente
+    (PostgreSQL refuse le `REFERENCES` — la relation référencée est inconnue ; SQLite
+    sans `PRAGMA foreign_keys` l'accepte silencieusement) ; toute autre erreur du
+    backend —
+    collision d'objet existant : `IF NOT EXISTS` ne protège que la table elle-même, pas
+    la contrainte `UNIQUE` ni les FK ; table existante en forme incompatible :
+    `IF NOT EXISTS` saute la création sans comparer le schéma, sans erreur.
+  Cas concrets côté `down` : table absente → `DbErr` (pas d'`IF EXISTS`) ; en
+    PostgreSQL, la FK entrante `vanyline_conversations.agent_id` (SET NULL, posée par
+    ./m20260825_000008_create_vanyline_conversations.rs) BLOQUE le drop tant que la
+    table `vanyline_conversations` existe — un rollback complet ordonné par SeaORM
+    (ordre inverse) la dépose avant, mais un `down` isolé de cette seule migration
+    échoue en PostgreSQL ; SQLite sans FK applique le drop sans se soucier de la FK
+    entrante.
+  Les violations de contrainte en écriture (NOT NULL, `UNIQUE (owner_id, name)`, FK)
+    ne sont pas levées par ce fichier : il pose les contraintes, l'erreur remonte de la
+    base au CRUD miryad-core ou aux tests.
+
+Handles:
+  Rejeu de `up` sur un schéma où la table existe déjà → `CREATE TABLE IF NOT EXISTS`
+    rend l'instruction idempotente (chemin de toute façon raréfié par la table de
+    suivi `seaql_migrations_app`, qui saute une migration déjà enregistrée).
+  INSERT sans `mode` / `toolsets` / `skills` / `system_prompt` → défauts SQL effectifs
+    `'primary'` / `'[]'` / `'"auto"'` / `''` — alignés sur les défauts serde de
+    `../db/entities/agents.rs` (`default_mode`, `default_json_array`, `default_auto`,
+    `@serde(default)`) ; aucune de ces colonnes ne peut être SQL `NULL`.
+  INSERT sans `description` → NULL stocké, projeté `@None` côté entité.
+  Colonne JSON à la valeur JSON `null` → stockable malgré `NOT NULL DEFAULT` : le
+    `NOT NULL` SQL interdit le SQL `NULL`, pas le littéral JSON `null` (ou `'null'` en
+    SQLite) — posture observée et référencée par `../db/entities/agents.sdd` (clé
+    présente et à `null` → `@serde_json::Value::Null`).
+  Suppression d'un owner (`miryad_users`) → agents emportés par `ON DELETE CASCADE`
+    (effectif en PostgreSQL ; le harnais `@real_db` n'active pas les FK — cf. Tasks).
+  Suppression du profil de modèle référencé → refusée par `RESTRICT` tant qu'un agent
+    pointe dessus (seule des deux FK de la table à être bloquante en suppression).
+  Suppression d'un agent → `vanyline_conversations.agent_id` remis à NULL — FK définie
+    dans ./m20260825_000008_create_vanyline_conversations.rs, citée ici pour le cycle
+    de vie seulement, pas contractée par ce fichier.
+  Deux lignes `(owner_id, name)` identiques → refusées par la contrainte `UNIQUE`
+    (`23505` PostgreSQL / `SQLITE_CONSTRAINT_UNIQUE` SQLite) ; même `name` pour deux
+    `owner_id` distincts → accepté.
+
+Must:
+  - Poser dans `up` exactement une instruction `CREATE TABLE IF NOT EXISTS
+      vanyline_agents` et rien d'autre : pas d'`ALTER`, pas de
+      `@SchemaManager::create_index` séparé, pas de DML/seed, pas de log.
+  - Porter les neuf colonnes dans l'ordre `id`, `owner_id`, `name`, `description`,
+      `mode`, `model_profile_id`, `toolsets`, `skills`, `system_prompt`, avec les
+      propriétés de `Exposes` (types logiques, nullabilités, défauts, auto-incrément) ;
+      la traduction physique en tokens SQL relève de sea-query 1.0.2, pas de ce contrat.
+  - Maintenir la correspondance bilatérale avec les neuf champs de
+      `@crate::db::entities::agents::Model` (`../db/entities/agents.sdd`) : `id`/`owner_id`/
+      `model_profile_id` ↔ integer NOT NULL, `name` ↔ string NOT NULL sans défaut,
+      `description` ↔ nullable, `mode` ↔ NOT NULL défaut `'primary'`, `toolsets` ↔
+      JSONB NOT NULL défaut `'[]'`, `skills` ↔ JSONB NOT NULL défaut `'"auto"'`,
+      `system_prompt` ↔ NOT NULL défaut `''` ; tout écart entre les deux fichiers est un
+      bug de l'un des deux, jamais un tiers contrat.
+  - Poser la FK `owner_id` → `miryad_users.id` avec `@ForeignKeyAction::Cascade` sur
+      DELETE uniquement, et la FK `model_profile_id` → `vanyline_model_profiles.id`
+      avec `@ForeignKeyAction::Restrict` sur DELETE uniquement ; aucune action
+      `ON UPDATE` déclarée (défaut du backend).
+  - Porter l'unicité `(owner_id, name)` par `@Index::create().unique().col(OwnerId).col(Name)`
+      inline dans `Table::create()` — contrainte de table sans nom explicite, jamais un
+      `CREATE UNIQUE INDEX` séparé. Le `.unique()` ne doit JAMAIS être retiré : c'est
+      l'application de la règle régression Phase 3 de `./mod.sdd` (la régression est née
+      dans ce fichier ; un `.index(...)` non-UNIQUE y produit un fragment `(...)`
+      orphelin invalide sur les deux backends).
+  - Rester double-compatible sans condition : le même builder compilé pour PostgreSQL
+      (prod) et SQLite (harnais `@real_db`), sans `#[cfg(...)]` ni branche par backend —
+      couvert par le test de paire complète de ./mod.rs.
+  - Supposer la pré-existence de `miryad_users` et de `vanyline_model_profiles`
+      (migrateurs amont appliqués) : seule garantie de résolution des FK en PostgreSQL ;
+      l'ordre est contracté par `./mod.sdd`, pas vérifié ici.
+  - Être enregistrée dans `seaql_migrations_app` sous le nom
+      `m20260825_000006_create_vanyline_agents` (stem du fichier via
+      `@DeriveMigrationName`), en sixième position de la chaîne de ./mod.rs.
+  - Implémenter `down` comme un `DROP TABLE vanyline_agents` nommé (table ciblée
+      individuellement), sans `IF EXISTS`, sans `CASCADE`, et rien d'autre.
+  - Rester conforme au harnais clippy du workspace (`../../../tooling.sdd`) : aucun
+      `println!`/`eprintln!`/`unwrap`/`expect`/`dbg!` — le fichier actuel ne viole rien.
+
+Must not:
+  - Ajouter, supprimer, renommer une colonne ni changer type, nullabilité, défaut,
+      auto-incrément, actions de FK ou unicité dans ce `up` : la migration est déjà
+      appliquée en production et verrouillée par son nom dans `seaql_migrations_app`
+      (règle `./mod.sdd`) ; toute évolution du schéma des agents passe par une
+      onzième migration postérieure à `m20260825_000010`.
+  - Utiliser `.index(...)` sans `.unique()` dans le `@Table::create()` (régression
+      Phase 3, née dans ce fichier) ; tout futur index non-UNIQUE (ex. sur
+      `model_profile_id`) passe par une instruction séparée
+      `@SchemaManager::create_index` dans une NOUVELLE migration, jamais en
+      réécriture de celle-ci.
+  - Introduire un CHECK SQL sur `mode` ou sur la forme JSON de `toolsets`/`skills`, ni
+      une FK de `toolsets`/`skills` vers `vanyline_toolsets`/`vanyline_skills` :
+      l'absence de garde en base est l'état contracté aujourd'hui (validation `mode`
+      déléguée au hook `@before_create` de `../db/entities/agents.rs`, validation de
+      forme jamais implémentée — sujets ouverts en Tasks et dans
+      `../db/entities/agents.sdd`).
+  - Poser une colonne temporelle (`created_at`/`updated_at`) : la table n'en a pas
+      (contrairement à `vanyline_conversations`), et l'entité sœur n'en porte pas.
+  - Émettre du DDL sur `miryad_users`, `vanyline_model_profiles` ou
+      `vanyline_conversations` (les enums `@User`/`@ModelProfile` ne servent qu'à nommer
+      les cibles de FK), ni insérer/modifier/supprimer des lignes dans `up` ou `down`.
+  - Modifier les littéraux d'iden `vanyline_agents`, `miryad_users`,
+      `vanyline_model_profiles`, renommer le fichier ou changer son préfixe temporel :
+      le nom de fichier est l'identité d'historique et le nom de table est attendu par
+      `../db/entities/agents.rs`, par ./m20260825_000008_create_vanyline_conversations.rs
+      et par les consommateurs HTTP.
+  - Ajouter une action `ON UPDATE`, changer `CASCADE`/`RESTRICT` en une autre action,
+      ou ajouter `.if_exists()` / `CASCADE` au `down` sans extension préalable de cette
+      spec.
+  - Déclarer ici une entité SeaORM, une relation, un hook ou toute logique applicative
+      — le domaine vit dans `../db/entities/agents.sdd`, `../config_store.rs` et
+      `../ws/chat.rs`.
+
+Depends on:
+  `sea-orm-migration` 2 (`@MigrationTrait`, `@SchemaManager`, macros
+    `@DeriveMigrationName`/`@DeriveIden`, prelude), `sea-query` 1 via le prelude
+    (`@Table`, `@ColumnDef`, `@Index`, `@ForeignKey`, `@ForeignKeyAction`, `@Expr`) et
+    `@async_trait` ; `@sea_orm::DbErr` — versions verrouillées par `Cargo.lock` ; la
+    traduction PostgreSQL/SQLite du builder appartient à ces librairies.
+  ./mod.sdd — chaîne d'application (position 6, ordre vs `…000005` et `…000008`), table
+    de suivi `seaql_migrations_app`, règle Phase 3, interdit de modifier un `up`
+    appliqué.
+  `@miryad_core::migration::Migrator` (crate externe, hors dépôt) — indirect : crée
+    `miryad_users`, cible de la FK, doit précéder (séquence `../main.rs`).
+  ./m20260825_000005_create_vanyline_model_profiles.rs — cible de la FK
+    `model_profile_id` (amont obligatoire, contractée par `./mod.sdd`).
+  ./m20260825_000008_create_vanyline_conversations.rs — aval : FK entrante
+    `agent_id` `SET NULL` vers cette table (contrainte d'ordre + blocage du `down` en
+    PostgreSQL).
+  ../db/entities/agents.sdd — miroir Rust bilatéral de cette DDL (correspondance des
+    neuf colonnes et des défauts).
+  Consommateurs d'aval (ne conditionnent pas ce fichier) : ../config_store.rs
+    (`@load_agent_records`), ../ws/chat.rs (`@handle_message`),
+    ../api/conversations.rs (`@resolve_agent_id`, `@to_output`), ../main.rs
+    (`/api/v1/agents` via `resource_router`).
+  ../db/test_support.rs — harnais `@real_db` où ce DDL est réellement exécuté ;
+    ./mod.rs — enregistrement et test de paire complète.
+
+Tasks:
+  [!] Double compatibilité SQLite de `custom("JSONB")` (toolsets et skills) : SQLite
+      accepte tout nom de type et « JSONB » ne contient aucun mot-clé d'affinité
+      (INT/CHAR/CLOB/TEXT/BLOB/REAL/FLOA/DOUB) → affinité NUMERIC, où le texte JSON
+      (non numérique) reste stocké tel quel. Ça fonctionne, mais par permissivité de
+      SQLite, pas par mappage délibéré — ne pas présenter ça comme un contrat voulu.
+      Même question que le `[!]` de
+      `./m20260825_000002_create_vanyline_toolsets.sdd` ; alternative :
+      `@ColumnDef::json_binary()`. À trancher une fois pour les deux fichiers, avec
+      Sébastien.
+  [!] Aucun CHECK SQL sur `mode` : les trois valeurs admises (`primary`/`subagent`/
+      `all`) ne sont gardées que par le hook `@before_create` de
+      `../db/entities/agents.rs` (création seule). Si un CHECK doit exister, sa place
+      est dans une onzième migration ADDITIVE (jamais dans ce `up` verrouillé) —
+      écho direct du `[!]`/`[?]` de `../db/entities/agents.sdd`. Décision attendue.
+  [?] `skills` par défaut = scalaire JSON `'"auto"'` (la chaîne `"auto"`), jamais un
+      tableau ni un objet, sans CHECK de forme : le consommateur
+      (`@SkillSelection` de `vanyline_cfgstore::domain`, repli `unwrap_or_default` de
+      `../config_store.rs`) tolère n'importe quelle forme et retombe en silence.
+      L'absence de garde de forme en base est-elle assumée durablement (comme pour
+      `toolsets`) ou un CHECK/une validation d'écriture est-elle prévue ?
+  [?] FK et contrainte `UNIQUE` sans `.name(...)` explicite : PostgreSQL auto-nomme
+      (`vanyline_agents_owner_id_fkey`, `vanyline_agents_owner_id_name_key`, …), SQLite
+      émet des auto-index ; les messages de violation et l'introspection dépendent de
+      ces noms. Faut-il nommer les contraintes (dans une migration future) ?
+  [?] `on_update` non spécifié sur les deux FK → `NO ACTION` (PostgreSQL) : suffisant
+      (PK de `miryad_users`/`vanyline_model_profiles` jamais mutées ?) à confirmer.
+  [!] Asymétrie de garde-fous : `up` défensif (`IF NOT EXISTS`) mais `down` sans
+      `IF EXISTS` — second `down` = erreur ; de plus en PostgreSQL le `down` est bloqué
+      par la FK entrante de `vanyline_conversations` (cf. `Raises`). Lié au `[?]` de
+      politique de rollback de `./mod.sdd` : ne rien changer ici avant l'arbitrage.
+  [?] Application des FK côté tests : `@real_db` (SQLite) n'active pas
+      `PRAGMA foreign_keys` → CASCADE (`owner_id`), RESTRICT (`model_profile_id`) et FK
+      violée ne sont vérifiables qu'en PostgreSQL, qu'aucun harnais du dépôt
+      n'apporte. Les trois Scenarios « PostgreSQL uniquement » restent sans test
+      exécutable : harnais PG (CI ou `#[ignore]`) ou acceptation explicite ?
+  [?] Couplage nom-à-nom : les enums `@User` et `@ModelProfile` re-déclarent
+      `miryad_users` / `vanyline_model_profiles` localement, sans lien typé vers
+      miryad-core ni vers la migration `…000005` — un renommage ne casserait qu'à
+      l'exécution PostgreSQL. Accepté, ou garde-fou (constante partagée, test
+      d'application PG) ?
+  [ ] Dériver les tests des Scenario ci-dessous, taggés par leur titre — aucun test
+      propre à ce fichier n'existe à ce jour ; filets indirects actuels : le test de
+      paire complète de ./mod.rs et les tests de ../db/entities/agents.rs (niveau
+      ORM/HTTP, pas DDL). Distinguer les niveaux : « Deux agents homonymes chez le
+      même owner collent en base » et « Création via resource_router retourne 200
+      avec des ids distincts » (dans `../db/entities/agents.sdd`) testent l'entité ;
+      « un agent homonyme pour un même owner est rejeté » et les Scenario PRAGMA/SQL
+      brut ci-dessous testent la contrainte directement en base — les deux niveaux
+      sont complémentaires, pas redondants.
+  [ ] Rattacher cette spec dans `Structure`/`Depends on` de ./mod.sdd (tâche ouverte
+      côté `./mod.sdd`) et supprimer la mention « en cours de rédaction » dans
+      `../db/entities/agents.sdd` et ./mod.sdd.
+
+Done when:
+  ./m20260825_000006_create_vanyline_agents.rs continue de ne porter que la DDL
+  contractée ici (un `CREATE TABLE`, un `DROP TABLE`, trois enums d'identifiants) ;
+  chaque Scenario est couvert par un test taggé vert (les deux `down` et les trois
+  PostgreSQL après arbitrages) ; la correspondance avec `../db/entities/agents.sdd` est
+  vérifiée des deux côtés à chaque changement ; les `[?]`/`[!]` sont tranchés avec
+  Sébastien ou reportés vers la spec propriétaire (`./mod.sdd`,
+  `../db/entities/agents.sdd`, harnais de test).
+
+Scenario: le nom de migration enregistré est le stem du fichier
+  Given `@Migration` de ./m20260825_000006_create_vanyline_agents.rs
+  When on appelle `@MigrationTrait::migration_name()`
+  Then le nom retourné est exactement `"m20260825_000006_create_vanyline_agents"` —
+    nom sous lequel la migration figure dans `seaql_migrations_app`, jamais modifiable
+    après application
+  # Test unitaire sans base ; à dériver (aucun test actuel dans ce fichier).
+
+Scenario: la table vanyline_agents porte exactement neuf colonnes contractuelles
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+    (migrateurs miryad-core puis app appliqués)
+  When on lit `PRAGMA table_info(vanyline_agents)`
+  Then on obtient exactement les 9 colonnes `id`, `owner_id`, `name`, `description`,
+    `mode`, `model_profile_id`, `toolsets`, `skills`, `system_prompt` dans cet ordre,
+    avec `notnull` = 1 pour toutes sauf `description`, `pk` = 1 pour `id` uniquement,
+    et un `dflt_value` citant `'primary'` pour `mode`, `'[]'` pour `toolsets`,
+    `'"auto"'` pour `skills`, `''` pour `system_prompt` — aucun défaut pour `id`,
+    `owner_id`, `name`, `description`, `model_profile_id`
+
+Scenario: l'unicité owner_id-name est une contrainte de table présente en base
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on lit `PRAGMA index_list(vanyline_agents)` puis `PRAGMA index_info` pour
+    l'index concerné
+  Then il existe un seul index marqué unique couvrant exactement les colonnes
+    `owner_id` puis `name` dans cet ordre — la contrainte est passée par le
+    `CREATE TABLE` (forme `.unique()` de la règle Phase 3), pas par un index séparé
+
+Scenario: un insert minimal respecte les valeurs par défaut SQL
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on insère via SQL `vanyline_agents (owner_id, name, model_profile_id)` avec
+    `(1, 'coder', 1)` sans autres colonnes, puis on relit la ligne
+  Then `id` est auto-attribué (non nul), `owner_id` vaut 1, `mode` vaut `'primary'`,
+    `toolsets` vaut `'[]'`, `skills` vaut `'"auto"'`, `system_prompt` vaut la chaîne
+    vide et `description` vaut NULL — jamais d'erreur NOT NULL grâce aux défauts
+  # Les FK n'étant pas appliquées en SQLite, aucune ligne parente n'est nécessaire.
+
+Scenario: une colonne NOT NULL refusée explicitement à NULL ne passe pas
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When un `INSERT` explicite passe `NULL` pour `mode`, puis un second passe `NULL`
+    pour `toolsets`
+  Then les deux inserts sont rejetés (erreur NOT NULL, aucune ligne insérée) — le
+    DEFAULT ne s'applique qu'à une colonne absente de la liste des colonnes, pas à une
+    valeur NULL explicite
+  # Un seul test couvrant les deux inserts.
+
+Scenario: un agent homonyme pour un même owner est rejeté
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+    contenant déjà une ligne `vanyline_agents (owner_id = 1, name = 'coder',
+    model_profile_id = 1)`
+  When on insère une seconde ligne avec ce même couple `(owner_id = 1, name = 'coder')`
+  Then l'insertion échoue sur la contrainte unique (SQLite `UNIQUE constraint failed` ;
+    code PostgreSQL 23505) et la première ligne est inchangée
+
+Scenario: le même nom d'agent pour un owner différent est accepté
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+    contenant déjà une ligne `vanyline_agents (owner_id = 1, name = 'coder',
+    model_profile_id = 1)`
+  When on insère une ligne `(owner_id = 2, name = 'coder', model_profile_id = 2)`
+  Then l'insertion réussit — l'unicité porte sur le couple `(owner_id, name)`, pas sur
+    `name` seul
+
+Scenario: une colonne JSON accepte la valeur JSON null malgré le NOT NULL
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`
+  When on insère une ligne `vanyline_agents (owner_id = 1, name = 'nul',
+    model_profile_id = 1, toolsets = 'null')` puis on relit `toolsets`
+  Then l'insertion réussit et `toolsets` contient le littéral JSON `null` — le
+    `NOT NULL` SQL interdit le SQL `NULL`, pas la valeur JSON `null` (posture référencée
+    par `../db/entities/agents.sdd`, tolérance de lecture côté `../config_store.rs`)
+
+Scenario: un second up après effacement de l'historique ne recrée rien
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db`, avec une
+    ligne insérée dans `vanyline_agents`, et la ligne
+    `m20260825_000006_create_vanyline_agents` effacée de `seaql_migrations_app`
+  When `@MigratorTrait::up` de `@crate::migration::Migrator` est rappelé avec step
+    `None` (les autres migrations sont toujours dans l'historique)
+  Then aucun `DbErr` n'est retourné — le `CREATE TABLE IF NOT EXISTS` absorbe le
+    rejeu — et la ligne insérée est toujours présente (la table n'a pas été recréée
+    vidée)
+
+Scenario: down supprime uniquement la table vanyline_agents
+  # Test à n'écrire qu'après l'arbitrage rollback de `./mod.sdd` (voir `Tasks`).
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` avec au
+    moins une ligne dans `vanyline_agents`, et un `@SchemaManager` obtenu sur cette
+    connexion
+  When `@MigrationTrait::down` de cette migration est appelé sur ce manager
+  Then `PRAGMA table_info(vanyline_agents)` ne retourne plus aucune ligne — la table a
+    disparu avec son contenu, sa contrainte `UNIQUE` et ses deux FK
+  And `vanyline_skills`, `vanyline_model_profiles` et `miryad_users` sont toujours
+    présentes — le `down` ne touche que sa propre table
+  # En SQLite sans FK le drop réussit malgré la FK entrante de vanyline_conversations ;
+  # en PostgreSQL ce même appel isolé échouerait (cf. `Raises`).
+
+Scenario: un second down sur table absente échoue
+  # Test à n'écrire qu'après l'arbitrage rollback de `./mod.sdd` (voir `Tasks`).
+  Given une base SQLite réelle migrée par `@crate::db::test_support::real_db` sur
+    laquelle le `down` de cette migration a déjà réussi une fois, et le même
+    `@SchemaManager`
+  When `@MigrationTrait::down` est rappelé sur ce manager
+  Then le retour est un `@sea_orm::DbErr` — le `DROP TABLE` sans `IF EXISTS` ne tolère
+    pas une table absente (contrat actuel, asymétrie `[!]` des `Tasks`)
+
+Scenario: supprimer l'owner emporte ses agents (PostgreSQL uniquement)
+  # Sans harnais PostgreSQL dans le dépôt — voir `[?]` des `Tasks` ; un SQLite sans
+  # `PRAGMA foreign_keys=ON` n'appliquerait pas la cascade.
+  Given une base PostgreSQL réelle avec les migrateurs miryad-core puis app appliqués,
+    un utilisateur `miryad_users`, un profil de modèle et un agent insérés avec cet
+    `owner_id`
+  When l'utilisateur est supprimé de `miryad_users`
+  Then la ligne de `vanyline_agents` a disparu — `ON DELETE CASCADE` appliqué par la
+    base
+
+Scenario: supprimer un profil de modèle référencé est refusé (PostgreSQL uniquement)
+  Given une base PostgreSQL réelle avec les migrateurs appliqués et un agent pointant
+    sur un profil `vanyline_model_profiles`
+  When la ligne du profil référencé est supprimée de `vanyline_model_profiles`
+  Then la suppression est refusée (`RESTRICT`, code PostgreSQL 23503) et l'agent est
+    inchangé — tant qu'un agent pointe sur le profil, celui-ci est impossible à
+    supprimer
+
+Scenario: un model_profile_id inconnu est rejeté (PostgreSQL uniquement)
+  Given une base PostgreSQL réelle avec les migrateurs miryad-core puis app appliqués
+  When on insère dans `vanyline_agents` une ligne dont le `model_profile_id`
+    n'existe pas dans `vanyline_model_profiles`
+  Then l'insertion est refusée par la FK (code PostgreSQL 23503
+    `foreign_key_violation`)

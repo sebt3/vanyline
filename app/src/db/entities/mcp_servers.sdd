@@ -1,0 +1,351 @@
+Spec: MCP Servers Entity
+
+Purpose:
+  Entité SeaORM de la table `vanyline_mcp_servers` : la ligne « déclaration de serveur
+  MCP » (nom, type de transport, URL, en-têtes d'accès, outils découverts) ET sa
+  déclaration de ressource REST via `MiryadResource` de miryad-core. Un seul contrat
+  pour le fichier : le type de la ligne (colonnes, sérialisation JSON) et le contrat de
+  la ressource `/api/v1/mcp-servers` (nom, politiques d'accès, absence d'owner) sont
+  indissociables — l'impl `@MiryadResource for @Entity` porte sur les types générés par
+  le @derive(DeriveEntityModel) du même struct.
+  Ressource PARTAGÉE : seule entité de `./mod.rs` sans colonne `owner_id` ni colonne
+  owner au sens de @MiryadResource::owner_column — lecture @AccessPolicy::Public,
+  écriture @AccessPolicy::AdminOnly.
+  Le contrat table ↔ schéma SQL (DDL, unicité, défauts) est celui de la migration
+  ../../migration/m20260825_000004_create_vanyline_mcp_servers (spec
+  `../../migration/m20260825_000004_create_vanyline_mcp_servers.sdd`, en cours de
+  rédaction) — ce fichier-ci en est le miroir côté Rust ; toute divergence entre les
+  deux est un bug de l'un des deux, jamais un tiers contrat.
+  Articulation avec le domaine config (documentée ici, jamais possédée ici) : le
+  @McpServer de `vanyline_cfgstore::domain` (cf.
+  `../../../../cfgstore/src/domain.sdd`) N'EST PAS ce type. Deux formes coexistent :
+  - la ligne DB / payload REST (CE fichier) : porte `id` et `available_tools`,
+    `server_type` en chaîne libre, `headers` en @serde_json::Value ;
+  - le domaine config `vanyline_cfgstore::domain::McpServer` : pas d'id, pas
+    d'available_tools, `transport` en @McpTransport (renommé `type` sur le wire),
+    `headers` en @BTreeMap(String, String) — le domaine référence les serveurs par
+    NOM (@McpSelection.server), ce qui fait de l'unicité globale de `name` la clé de
+    résolution cluster-wide.
+  La traduction ligne → domaine vit chez les consommateurs : @domain_mcp_server de
+  `../../config_store.rs` (`server_type` inconnu → @None, warning à l'appelant) et
+  @build_domain_server de `../../api/mcp_servers.rs` (`server_type` inconnu →
+  @AppError::McpError `"VNL-MCP-003"`). Le schéma OpenAPI enregistré sous le nom
+  `McpServer` (@schema(as = McpServer)) est la forme ligne, distincte du wire config
+  du même nom.
+
+Owns:
+  ./mcp_servers.rs
+
+Exposes:
+  @Model — `pub struct`, derives @Clone @Debug @PartialEq @Serialize @Deserialize
+    @utoipa::ToSchema @DeriveEntityModel ; @derive(ToSchema) enregistré sous le nom
+    OpenAPI `McpServer` (@schema(as = McpServer)) — schéma du fragment
+    @resource_openapi fusionné dans le document OpenAPI de `../../main.rs`.
+    Aucun @serde(rename) : le JSON REST est en snake_case strictement identique aux
+    noms de champs Rust (`server_type`, jamais le `type` du wire config).
+  @Entity, @ActiveModel, @Column, @PrimaryKey, @Relation — générés par SeaORM ;
+    @Relation est un enum vide (aucune relation déclarée, convention de tous les
+    enfants de `./mod.rs`) : les jointures sont faites en mémoire par les
+    consommateurs, jamais par SeaORM — la table ne porte d'ailleurs aucune FK.
+  @ActiveModelBehavior — impl vide sur @ActiveModel : aucun hook SeaORM
+    (@before_save/@before_insert). La seule validation du fichier est
+    @MiryadResource::before_create, hook appelé par miryad-core (`resource_router`),
+    pas par SeaORM.
+  @MiryadResource for @Entity — contrat de ressource REST :
+    - @resource_name() -> `"mcp-servers"` (routes `/api/v1/mcp-servers` et
+      `/api/v1/mcp-servers/{id}`, branchées par @resource_router dans `../../main.rs`)
+    - @read_policy() -> @AccessPolicy::Public (config globale, lisible par tous)
+    - @write_policy() -> @AccessPolicy::AdminOnly
+    - @owner_column() -> @None — aucune colonne owner : ressource partagée, seule de
+      ce cas parmi les sœurs de `./mod.rs`
+    - @before_create(@ActiveModel, @AuthPrincipal) -> @Result(@ActiveModel,
+      @HookError) — validation à la création : `server_type` doit valoir exactement
+      `"sse"` ou `"http-streamable"`, sinon @HookError::with_code(`"VNL-MCP-003"`).
+      Valeur non posée (@ActiveValue::NotSet) traitée comme `""` donc rejetée. Le
+      @AuthPrincipal est ignoré. Le commentaire du fichier explique le contexte :
+      restauration d'une règle perdue à la bascule miryad-core (CHECK en base +
+      `validate_server_type` sur chaque create/update, cf.
+      `docs/features/miryad-core-integration.md`) — la restauration ne couvre que la
+      création, et le CHECK SQL n'existe plus dans la migration.
+  @fn default_json_object — privée : valeur par défaut de `headers` à la
+    désérialisation (@serde_json::json!({})).
+  @fn default_json_array — privée : valeur par défaut de `available_tools` à la
+    désérialisation (@serde_json::json!([])).
+
+Structure:
+  Champs de @Model et correspondance SQL (migration
+  `../../migration/m20260825_000004_create_vanyline_mcp_servers.rs`) — dans l'ordre :
+  - `id: i32` — @sea_orm(primary_key) ; SQL `INTEGER NOT NULL AUTO_INCREMENT
+    PRIMARY KEY` ; @serde(default) absent du body → `0` (commentaire du fichier :
+    `id` est « écrasé de toute façon par `resource_router` » — claim non vérifié,
+    voir Tasks).
+  - `name: String` — SQL `STRING NOT NULL` + `UNIQUE` (unique_key au niveau
+    colonne) : nom UNIQUE globalement, pas par owner (contrast : index
+    `(owner_id, name)` de `./model_profiles.rs` et `./toolsets.rs`). Requis à la
+    désérialisation (pas de default) ; l'unicité n'est vérifiée ni par l'entité ni
+    par le hook — une violation remonte en @DbErr.
+  - `server_type: String` — SQL `STRING NOT NULL`, SANS CHECK dans la migration
+    (le CHECK d'avant la bascule miryad-core, cité en commentaire, n'y figure pas) ;
+    la règle métier (`"sse"` | `"http-streamable"`) est portée exclusivement par
+    @before_create, donc par la seule création via `resource_router`.
+  - `url: String` — SQL `STRING NOT NULL` ; requis à la désérialisation ; aucune
+    validation de format URL (chaîne vide ou non-URL acceptées).
+  - `headers: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '{}'` ;
+    @serde(default = "default_json_object") : clé ABSENTE → `{}`. Clé présente et à
+    `null` → @serde_json::Value::Null désérialisé tel quel (le default ne couvre que
+    l'absence de clé), donc stockable en JSONB `null` malgré le NOT NULL. Aucune
+    validation de forme : valeurs non-string, objet imbriqué, tableau passent.
+  - `available_tools: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '[]'` ;
+    @serde(default = "default_json_array") : clé ABSENTE → `[]` (cas `null` comme
+    pour `headers`). Ce champ n'est pas une entrée utilisateur dans le flux normal :
+    @test_server de `../../api/mcp_servers.rs` le réécrit avec la liste des outils
+    découverts à chaque `POST /mcp-servers/{id}/test` ; hors ce chemin il est
+    obsolète (ou au défaut `[]`).
+  Aucun champ temporel (ni `created_at` ni `updated_at`), aucun `owner_id`.
+
+Accepts:
+  Côté lecture SQL : toute ligne de `vanyline_mcp_servers` dont les colonnes
+    respectent les nullabilités ci-dessus (le @derive(DeriveEntityModel) charge
+    `id`/`name`/`server_type`/`url` en non-Option : une ligne avec NULL sur une
+    colonne NOT NULL est une erreur SQL, jamais un @None).
+  Côté désérialisation REST (body que @resource_router de miryad-core passe en
+    @Model « tel quel ») :
+  - payload de création sans `id` → désérialise avec `id == 0` — c'est le rôle du
+    @serde(default) (même motif Phase 3 que `./model_profiles.rs` : le frontend
+    n'envoie pas `id`) ;
+  - payload sans `headers` → `headers == json!({})` ; sans `available_tools` →
+    `available_tools == json!([])` ;
+  - payload avec `"headers": null` ou `"available_tools": null` → accepte,
+    @serde_json::Value::Null stocké (voir Tasks `[?]`) ;
+  - payload avec `headers`/`available_tools` de forme inattendue (entier, tableau,
+    objet à valeurs non-string…) → accepte, aucune validation de forme ;
+  - payload avec `id` fourni → accepte au niveau serde, valeur ensuite censée être
+    écrasée par `resource_router` (claim de commentaire, aucun test sur CETTE
+    ressource — voir Tasks).
+  Côté @before_create : `server_type` lu depuis @ActiveValue::Set ou
+    @ActiveValue::Unchanged ; @ActiveValue::NotSet traité comme `""`, donc rejeté.
+
+Returns:
+  - @Serialize de @Model (réponses REST de `resource_router`) : objet JSON complet,
+    les 6 clés présentes — y compris `id` et `available_tools` — aucun
+    @skip_serializing_if. `headers` est renvoyé BRUT, sans masque : voir Tasks `[!]`.
+  - @resource_name() : `&'static str` `"mcp-servers"`, exactement (assertion du test
+    du fichier et liste testée de `../../main.rs::openapi_spec`).
+  - @owner_column() : @None.
+  - @before_create : l'@ActiveModel reçu TEL QUEL quand `server_type` est valide —
+    le hook ne réécrit aucun champ.
+
+Raises:
+  - @HookError avec code @Some(`"VNL-MCP-003"`) et message `server_type must be 'sse'
+    or 'http-streamable', got: {server_type}` (suite vide pour NotSet) — à la
+    création uniquement, quand `server_type` est inconnu ou non posé. Le statut HTTP
+    qui traduit cette erreur est un comportement de miryad-core, non observable
+    depuis ce fichier.
+  - Aucune autre erreur fabriquée par ce fichier : pas de before_update, pas de
+    @before_save, pas de validation de `url`/`name`/formes JSON.
+  - En base : violation d'unicité `name`, violation NOT NULL remontent en @DbErr de
+    SeaORM vers l'appelant (`resource_router` en production, @McpServerEntity::update
+    dans `../../api/mcp_servers.rs`) — le statut HTTP correspondant est un
+    comportement de miryad-core.
+
+Handles:
+  - Création via `resource_router` : @before_create s'exécute avant l'insertion ;
+    un payload au `server_type` invalide est rejeté sans toucher la base.
+  - Mise à jour via `resource_router` : AUCUN hook n'est appelé, `server_type` n'est
+    jamais re-validé après la création — une ligne saine peut devenir invalide par
+    update ; les consommateurs en aval encaissent : @list_mcp_servers
+    (`../../config_store.rs`) saute la ligne avec un `tracing::warn!`,
+    @build_domain_server (`../../api/mcp_servers.rs`) remonte `"VNL-MCP-003"`.
+  - Consommation config (lecture) : @list_mcp_servers de `../../config_store.rs`
+    fait @Entity::find().all() SANS filtre owner (cohérent avec
+    @AccessPolicy::Public et l'absence de colonne owner), puis @domain_mcp_server
+    par ligne ; `server_type` inconnu → ligne ignorée + `tracing::warn!`, jamais
+    d'erreur ; `headers` filtré en @BTreeMap(String, String) par @headers_from_json
+    (valeurs non-string et non-objet tombent sur une map vide) ; `"sse"` mappe sur
+    @McpTransport::Sse côté config, la connexion réelle y oppose `"VNL-MCP-004"`
+    (`../../../../lib/src/prefixed_mcp.sdd`).
+  - Câblage REST : `../../main.rs` monte @resource_router::<mcp_servers::Entity,
+    AppState>() et fusionne @resource_openapi::<mcp_servers::Entity>() dans le
+    document OpenAPI (test : les chemins `/api/v1/mcp-servers` et
+    `/api/v1/mcp-servers/{id}` doivent exister).
+  - Endpoint de test : `POST /api/v1/mcp-servers/{id}/test` (@api_v1_router de
+    `../../api/mod.rs`, handler @test_server de `../../api/mcp_servers.rs`) —
+    @can_write::<McpServerEntity> (RBAC selon la write policy AdminOnly), découverte
+    des outils, puis réécriture de `available_tools` via @McpServerEntity::update sur
+    un @ActiveModel : ce chemin SeaORM n'invoque AUCUN hook @MiryadResource (il
+    n'existe pas de before_update).
+
+Must:
+  - @sea_orm(table_name) porter exactement `"vanyline_mcp_servers"`, identique à
+      l'@sea_orm(iden) de la migration.
+  - Porter exactement les 6 colonnes listées en Structure, mêmes noms Rust
+      (snake_case serde par défaut), mêmes nullabilités — tout ajout/retrait de
+      champ exige d'aligner la migration dans le même changement.
+  - Garder `id` avec @serde(default) : les corps de création du frontend n'envoient
+      pas `id` (motif éprouvé sur `./model_profiles.rs`).
+  - Garder `headers` avec @serde(default = "default_json_object") et
+      `available_tools` avec @serde(default = "default_json_array") : un corps de
+      création sans ces clés doit désérialiser sur `{}` et `[]`, pas échouer.
+  - @before_create n'accepter que `"sse"` et `"http-streamable"`, rejeter tout le
+      reste (NotSet inclus) avec le code `"VNL-MCP-003"`, et retourner l'@ActiveModel
+      inchangé en cas de succès.
+  - Déclarer @Relation vide : aucune association SeaORM (aucune FK SQL non plus).
+  - Conserver les 4 valeurs du contrat @MiryadResource telles quelles :
+      `"mcp-servers"`, @AccessPolicy::Public en lecture, @AccessPolicy::AdminOnly en
+      écriture, @None en owner_column — assertées par le test
+      `mcp_server_resource_contract` du fichier.
+  - Rester un type de LIGNE : ne jamais absorber dans @Model la sémantique du
+      @McpServer de domaine config (@McpTransport enum, headers en
+      @BTreeMap(String, String), wire `type`) — la transformation est le contrat de
+      `../../config_store.rs` et `../../api/mcp_servers.rs`.
+
+Must not:
+  - Porter de hook @before_update ou @before_save sans étendre cette spec et la
+      migration : en l'état, `server_type` n'est validé qu'à la création (état
+      documenté, pas un état voulu — voir Tasks `[!]`).
+  - Valider `url`, `name` ou la forme de `headers`/`available_tools` à l'écriture :
+      aucune règle n'existe aujourd'hui ; toute règle nouvelle exige migration +
+      extension de cette spec.
+  - Porter de timestamps (`created_at`/`updated_at`) : la table n'en a pas et
+      @auto_time n'est utilisé sur aucune entité sœur de `./mod.rs`.
+  - Porter une colonne `owner_id` ni un filtre owner sans repenser les politiques
+      Public/AdminOnly : la ressource est partagée par conception aujourd'hui.
+  - Supposer dans ce fichier que `resource_router` écrase `id` ou appelle
+      @before_create sur les updates : ce sont des contrats de miryad-core (crate
+      externe, non auditable depuis le dépôt) — voir Tasks.
+  - Laisser entendre que `available_tools` reflète la réalité : seul l'endpoint de
+      test le rafraîchit, il est sinon obsolète ou au défaut `[]`.
+
+Scenario: Contrat ressource des quatre items est asserté
+  Given le crate compilé avec ./mcp_servers.rs
+  When @Entity::resource_name, @Entity::read_policy, @Entity::write_policy et
+    @Entity::owner_column sont appelés
+  Then ils retournent respectivement `"mcp-servers"`, @AccessPolicy::Public,
+    @AccessPolicy::AdminOnly et @None, et le test `mcp_server_resource_contract`
+    passe
+
+Scenario: before_create accepte les deux types de serveur valides
+  Given deux @ActiveModel construits depuis @Model avec `server_type` posé à
+    `"sse"` puis à `"http-streamable"` (helper `sample` du fichier)
+  When @Entity::before_create est appelé sur chacun avec un @AuthPrincipal de test
+  Then les deux appels retournent @Ok et l'@ActiveModel transmis passe inchangé
+    (test `before_create_accepts_known_server_types`)
+
+Scenario: before_create rejette un type de serveur inconnu avec VNL-MCP-003
+  Given un @ActiveModel avec `server_type` posé à `"bogus"`
+  When @Entity::before_create est appelé avec un @AuthPrincipal de test
+  Then il retourne @Err et le @HookError porte le code @Some(`"VNL-MCP-003"`) et un
+    message citant le type reçu (test `before_create_rejects_unknown_server_type`)
+
+Scenario: before_create rejette un server_type non posé
+  Given un @ActiveModel dont `server_type` vaut @ActiveValue::NotSet
+  When @Entity::before_create est appelé
+  Then il retourne @Err avec le code `"VNL-MCP-003"` et un message terminant par
+    `got: ` (chaîne vide) — NotSet est traité comme invalide, le hook ne laisse
+    jamais passer une valeur non posée
+
+Scenario: Body de création sans id, headers ni available_tools désérialise avec les défauts
+  Given la chaîne JSON `{"name":"svc","server_type":"sse","url":"http://localhost:3000/mcp"}`
+  When elle est désérialisée en @Model par serde
+  Then elle produit une valeur avec `id == 0`, `headers == serde_json::json!({})`,
+    `available_tools == serde_json::json!([])`, sans erreur de champ manquant
+
+Scenario: Clés headers et available_tools explicitement null survivent telles quelles
+  Given la chaîne JSON compacte `{"name":"svc","server_type":"sse","url":"http://x","headers":null,"available_tools":null}`
+  When elle est désérialisée en @Model par serde
+  Then elle réussit et `headers` comme `available_tools` valent
+    @serde_json::Value::Null — @serde(default) ne couvre que l'absence de clé, pas
+    la clé à `null`
+
+Scenario: Sérialisation REST expose la forme ligne complète
+  Given un @Model construit avec `id: 4`, `headers: json!({"Authorization": "Bearer t"})`
+    et `available_tools: json!(["fs.read"])`
+  When il est sérialisé en JSON
+  Then l'objet contient exactement les 6 clés `id`, `name`, `server_type`, `url`,
+    `headers`, `available_tools`, valeurs passe-through (`server_type` reste
+    `server_type`, jamais renommé `type`), `headers` en clair
+
+Scenario: Valeurs de headers non string survivent dans le Model
+  Given un @Model avec `headers` posé à `json!({"A": 123, "B": {"k": 1}})`
+  When il est sérialisé puis redésérialisé en @Model
+  Then `headers` reste inchangé (valeurs non-string conservées) — aucun filtre de
+    forme n'existe dans ce fichier, le filtrage string-only vit dans
+    `../../config_store.rs` (@headers_from_json) et `../../api/mcp_servers.rs`
+    (@build_domain_server)
+
+Scenario: Aucun hook n'intercepte la mise à jour de server_type
+  Given une ligne valide (`server_type: "sse"`) insérée via @Entity::insert sur la
+    base réelle (`../test_support.sdd`, `@real_db`), puis un @ActiveModel qui pose
+    `server_type` à `"bogus"`
+  When @McpServerEntity::update est exécuté
+  Then la mise à jour réussit (aucun @before_update, pas de CHECK SQL) et
+    @build_domain_server de `../../api/mcp_servers.rs` retourne l'erreur
+    `"VNL-MCP-003"` sur la ligne résultante — ce Scenario capture le trou documenté
+    en Tasks `[!]`, pas un état voulu
+
+Depends on:
+  @sea_orm (@DeriveEntityModel, @ActiveModelBehavior, prelude), @serde,
+    @serde_json, @utoipa (@ToSchema), @miryad_core (@auth::AuthPrincipal,
+    @resource::{@AccessPolicy, @HookError, @MiryadResource}) — miryad-core est un
+    crate externe 0.1, hors dépôt.
+  ../../migration/m20260825_000004_create_vanyline_mcp_servers.rs — DDL source de
+    vérité de la table (sa spec propre est en cours).
+  ./mod.rs — déclaration `pub mod mcp_servers;` (cf. `./mod.sdd`).
+  Consommateurs (hors périmètre, comportements cités) : ../../config_store.rs
+    (@domain_mcp_server, @headers_from_json, @list_mcp_servers),
+    ../../api/mcp_servers.rs (@build_domain_server, @test_server) et
+    ../../api/mod.rs (route `/mcp-servers/{id}/test`), ../../main.rs
+    (@resource_router, @resource_openapi, test `openapi_spec_exposes_all_six_resources...`),
+    ../test_support.sdd (base réelle pour le Scenario update).
+  Contrats voisins articulés (jamais fusionnés) :
+    `../../../../cfgstore/src/domain.sdd` (@McpServer/@McpTransport du domaine
+    config), `../../../../lib/src/prefixed_mcp.sdd` (@VnyError::SseNotImplemented,
+    marqueur `"VNL-MCP-004"`).
+
+Tasks:
+  [!] `headers` exposé en clair en lecture : @read_policy est @AccessPolicy::Public
+      et @Serialize renvoie tout (aucun masque), or `headers` est exactement là où
+      vit l'en-tête `Authorization` des serveurs MCP (cf. tests de
+      `../../api/mcp_servers.rs`, usage du domaine config). Tout lecteur autorisé
+      (selon la sémantique réelle de Public dans miryad-core) peut donc lire les
+      secrets saisis par les admins via `GET /api/v1/mcp-servers`. Contrat voulu,
+      ou politique à changer (lecture AdminOnly, ou masque à la sérialisation) ? À
+      trancher avec Sébastien.
+  [!] `server_type` non validé à la mise à jour : le CHECK SQL d'origine (cité en
+      commentaire du fichier, cf. `docs/features/miryad-core-integration.md`)
+      n'existe pas dans la migration et @before_create ne couvre que la création ;
+      un PUT via `resource_router` (ou tout @McpServerEntity::update) peut mettre un
+      type quelconque dans une ligne saine, après quoi `../../config_store.rs` saute
+      la ligne en silence (warn) et `../../api/mcp_servers.rs` échoue en
+      `"VNL-MCP-003"`. Options à trancher : ajouter un hook `before_update` (si
+      miryad-core en expose un), rétablir un CHECK dans une migration, ou assumer.
+      La spec sœur `./toolsets.sdd` (Tasks) signale le même écart depuis l'autre
+      côté (validation en `before_create` ailleurs que partout).
+  [?] miryad-core (crate externe, source non lisible depuis le dépôt) : sémantique
+      réelle de @AccessPolicy::Public (tous utilisateurs authentifiés ? anonymes
+      admis ?), de @AccessPolicy::AdminOnly (rôle, api token ?), statut HTTP rendu
+      sur @HookError `"VNL-MCP-003"` (400 ? 422 ?) et sur la violation d'unicité
+      `name` (500 brut depuis la base ? 409 argumenté ?), et confirmation que
+      @before_create n'est appelé que sur create. À trancher : contractualiser par
+      test d'intégration via `../test_support.sdd` (`@real_db`) ou assumer la
+      délégation à miryad-core.
+  [?] Claim d'écrasement de `id` par `resource_router` (commentaire du fichier, même
+      claim que `./model_profiles.rs` et `./toolsets.rs`) : jamais vérifié par un
+      test sur CETTE ressource. Test d'intégration ou hypothèse à officialiser ?
+  [?] `"headers": null` / `"available_tools": null` en body : acceptés par serde,
+      stockés en JSONB `null` malgré le `NOT NULL DEFAULT` (le NOT NULL SQL
+      n'interdit pas JSON `null`) ; côté config, @headers_from_json avale `null` en
+      map vide, mais `available_tools: null` traverse tel quel les réponses REST et
+      n'est effacé qu'au prochain test réussi. Fermer la porte (rejeter `null` ou le
+      normaliser en hook) ou assumer ?
+  [?] `name` unique GLOBALEMENT (unicité colonne, contrast index `(owner_id, name)`
+      des sœurs) : cohérent avec une ressource partagée dont le domaine config
+      référence les serveurs par nom (@McpSelection.server), mais jamais confirmé
+      comme choix délibéré ni testé (aucun test d'unicité). Confirmer le choix et
+      le statut HTTP attendu sur conflit.
+  [?] Aucun test de (dé)sérialisation dans ce fichier : les Scenarios « body de
+      création sans defaults », « clés à null », « sérialisation 6 clés » et
+      « valeurs non-string » n'ont pas d'équivalent `#[cfg(test)]` (les tests
+      existants ne couvrent que le contrat @MiryadResource et le hook). Les écrire,
+      ou considérer que les fixtures `DbMcpServer` construites à la main dans
+      `../../config_store.rs` suffisent ?

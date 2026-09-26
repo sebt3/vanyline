@@ -1,0 +1,19 @@
+Spec: Ws
+
+Purpose:
+  Module `ws` de l'`app` : point d'entrée des WebSocket côté backend (chat, push de
+  l'état des sandboxes). Le fichier ./mod.rs ne fait que déclarer les deux sous-modules —
+  aucun comportement propre : le contrat vit dans les specs des sous-modules (règle
+  `mod.rs` de `/vanyline.sdd` et `.specdd/bootstrap.project.md`).
+
+Owns:
+  ./mod.rs
+
+Structure:
+  ./mod.rs — déclarations `pub mod chat;`, `pub mod sandbox_state;`, rien d'autre.
+  ./chat.sdd — WebSocket chat de l'app (transport des échanges LLM vers le frontend).
+  ./sandbox_state.sdd — WebSocket `/api/ws/sandbox-state` (push des phases de sandbox).
+
+Done when:
+  ./mod.rs continue de ne porter que les deux déclarations ; toute fonction, constante,
+    type ou impl ajouté dans ./mod.rs exige d'étendre cette spec en conséquence.
