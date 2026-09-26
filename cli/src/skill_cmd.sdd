@@ -1,0 +1,95 @@
+Spec: Skill command
+
+Platform: Rust/vanyline-cli/clap Subcommand
+
+Purpose:
+  Déclaration clap de la sous-commande `skills` du CLI `vanyline`. Le fichier ./skill_cmd.rs est
+  purement déclaratif : il ne porte que l'@Commands enum à variante unique @Commands::List, sans
+  aucune logique. Le comportement derrière `List` (listing des skills depuis le store de config)
+  vit dans @run_skills de ./main.rs — contrat de ./main.rs, pas de ce fichier. Spécification
+  minimale sur le modèle de `/lib/src/builtin/mod.sdd` (fichier déclaratif), complétée par le
+  contrat de parsing clap réellement observable par l'utilisateur. Pas de groupage avec les
+  fichiers frères de même forme (`./toolset_cmd.rs`, `./mcp_cmd.rs`, etc.) : chaque fichier est
+  une sous-commande distincte, donc un contrat distinct.
+
+Owns:
+  ./skill_cmd.rs
+
+Can read:
+  ./main.rs
+
+Exposes:
+  @Commands — `pub enum Commands`, unique item public du fichier, dérivé @clap::Subcommand.
+    Variante unique @Commands::List — variante unité (aucun champ, aucun flag, aucun argument),
+    doc comment `/// List configured skills` affichée dans `vanyline skills --help`.
+
+Handles:
+  Montage dans l'arbre CLI (./main.rs, hors de ce fichier) : variante
+    `Skills(skill_cmd::Commands)` de @Commands local à ./main.rs, doc `/// Manage skills` —
+    nom de sous-commande rendu par clap en kebab-case : `skills`, puis `list` pour la variante.
+  Parsing : `list` ne prend strictement aucun argument ni flag ; toute sous-commande inconnue
+    sous `skills` et l'absence de sous-commande (`vanyline skills` seul) sont rejetées par clap
+    (le sous-enum est requis — défaut clap, jamais désactivé ici).
+  Dispatch (./main.rs) : `Some(Commands::Skills(cmd)) => run_skills(cmd)` — l'unique variante
+    `List` est déchargée intégralement par @run_skills (match exhaustif ; toute variante
+    ajoutée ici rend ./main.rs non compilable tant que le match n'est pas étendu).
+
+Must:
+  Rester l'unique source de la forme de la sous-commande `skills` (variants, doc comments) ;
+    le help et l'acceptation des arguments en découlent directement via clap.
+  Garder la doc comment `/// List configured skills` cohérente avec le comportement réel de
+    @run_skills (liste les skills du store fusionné, jamais n'en écrit).
+
+Must not:
+  Porter du comportement : aucune fonction, aucun import autre que @clap::Subcommand —
+    aucun code hors déclaration d'enum dans ce fichier.
+  Exposer une variante d'écriture (create/update/delete) sans étendre cette spec au préalable —
+    aujourd'hui l'écriture des skills n'existe que via RPC (`config/skills/create|update|delete`
+    dans ./rpc/handlers.rs), pas dans le CLI.
+  Être monté ailleurs que sous `skills` (le nom vient de la variante du @Commands de ./main.rs,
+    pas de ce fichier).
+
+Depends on:
+  @clap::Subcommand — derive unique utilisé.
+  ./main.rs — montage `Skills(skill_cmd::Commands)` et dispatch @run_skills ( listing effectif,
+    format d'affichage, codes de sortie applicatifs : sous contrat ./main.rs ).
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat (reverse du 2026-09-26).
+  [?] Asymétrie CLI/RPC en écriture : le CLI est en lecture seule sur les skills alors que
+    l'extension VS Code crée/modifie/supprime via RPC. Choix délibéré (le CLI reste un outil de
+    debug) ou manque à combler (`skills create/delete` côté CLI) ?
+  [?] `vanyline skills` sans sous-commande : comportement clap par défaut (message d'usage,
+    code de sortie 2) jamais testé ni décidé explicitement. Le garder ou afficher le help à la
+    place ?
+  [ ] Aucun test ne couvre aujourd'hui `skills list` (les tests de ./main.rs ne testent que
+    `run`). Dériver un test par Scenario ci-dessous, taggé par son titre, via
+    @Cli::try_parse_from dans ./main.rs (le @Cli y est privé, pas de test possible depuis ce
+    module sans ré-export).
+
+Done when:
+  Chaque Scenario dispose d'un test taggé par son titre et passe.
+  Les questions `[?]` sont tranchées par Sébastien.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est verte
+    sur `vanyline-cli`.
+
+Scenario: skills_list_parse
+  Given le CLI @Cli de ./main.rs
+  When on parse `["vanyline", "skills", "list"]`
+  Then le parse réussit et `command` vaut `Some(Commands::Skills(skill_cmd::Commands::List))`,
+    variante unité sans champ
+
+Scenario: skills_sans_sous_commande_rejete
+  Given le CLI @Cli de ./main.rs
+  When on parse `["vanyline", "skills"]`
+  Then @Cli::try_parse_from retourne `Err` (sous-commande requise, défaut clap)
+
+Scenario: skills_sous_commande_inconnue_rejetee
+  Given le CLI @Cli de ./main.rs
+  When on parse `["vanyline", "skills", "show"]`
+  Then @Cli::try_parse_from retourne `Err` (sous-commande inconnue de @Commands de ce fichier)
+
+Scenario: skills_list_refuse_arguments
+  Given le CLI @Cli de ./main.rs
+  When on parse `["vanyline", "skills", "list", "extra"]`
+  Then @Cli::try_parse_from retourne `Err` (@Commands::List n'accepte aucun argument)

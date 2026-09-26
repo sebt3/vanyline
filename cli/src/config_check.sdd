@@ -1,0 +1,339 @@
+Spec: Config check (vanyline config check)
+
+Platform: Rust/vanyline-cli/async-trait/tokio
+
+Purpose:
+  Moteur du diagnostic `vanyline config check` : @check_config explore EXHAUSTIVEMENT la config
+    exposée par @ConfigStore (couches global + workspace fusionnées) et collecte TOUS les problèmes —
+    erreurs de lecture, noms dupliqués, références croisées inconnues — sans jamais s'arrêter au
+    premier incident : un outil de diagnostic rapporte tout, pas de fail-fast. Le fichier retourne des
+    valeurs @VnyError ; c'est le côté appelant (@run_config de ./main.rs) qui les rend ligne par ligne
+    sur stdout et décide du code de sortie — le contrat de l'outil de diagnostic couvre les deux
+    moitiés, celle du rendu restant sous tutelle ./main.rs.
+  Lectures : les seules données lues sont les sept lectures de @ConfigStore. Jamais le cluster, les
+    CRDs, kubeconfig, la racine sandbox, ni la moindre connectivité provider/MCP — analyse statique de
+    noms uniquement (le crate cli dépend de `kube`/`vanyline-crds` pour d'autres commandes, config_check
+    n'en utilise rien).
+  Un fichier, un contrat : @check_config et son helper privé @check_duplicate_names ne forment qu'une
+    seule sémantique de vérification ; la chaîne complète `config check` (parsing clap + rendu + code de
+    sortie) vit dans ./main.rs et y aura sa propre spec, pas de groupage ici.
+
+Owns:
+  ./config_check.rs
+
+Can read:
+  ./main.rs
+  ./config.rs
+  /cfgstore/src/store.rs
+  /cfgstore/src/error.rs
+  /cfgstore/src/layers.rs
+  /cfgstore/src/fs_store.rs
+  /lib/src/error.rs
+
+Exposes:
+  @check_config — `pub async fn check_config(store: &dyn ConfigStore) -> Vec<VnyError>`, unique item
+    public du fichier ; trois phases d'ordre fixe (détail de l'ordre en `Returns`, vérifications en
+    `Must`).
+  @check_duplicate_names — `fn` privé générique
+    `check_duplicate_names<T>(items: &[T], kind: &'static str, name_of: impl Fn(&T) -> &str,
+    problems: &mut Vec<VnyError>)` : @std::collections::HashSet des noms déjà vus,
+    @VnyError::DuplicateName poussé sur chaque occurrence SUPPLÉMENTAIRE (la 2ᵉ, puis la 3ᵉ, etc.),
+    jamais sur la première. Appelée six fois, une par sorte, avec les littéraux de `Must`.
+
+Accepts:
+  `&dyn ConfigStore` (objet @async_trait) — @check_config n'impose aucun backend ; le CLI lui passe un
+    @FsConfigStore construit par @discover_fs_store (./main.rs) sur @discover_layers (./config.rs) :
+    couche globale `$XDG_CONFIG_HOME/vanyline` (repli sur le littéral `~/.config/vanyline`) + couche
+    workspace = répertoire le plus proche de cwd contenant `.vanyline/` ou `.git`, dossier `.vanyline/`
+    à l'intérieur.
+  Sept lectures, chacune appelée exactement une fois : @ConfigStore::list_providers, @list_models,
+    @list_mcp_servers, @list_toolsets, @list_agents, @list_skills, @default_agent. @load_skill et les
+    méthodes d'écriture du trait ne sont jamais appelées.
+  Correspondance de noms : égalité octet à octet, casse exacte, sans trim ni normalisation.
+  L'ordre des problèmes rendus suit l'ordre de retour des listes par le store (@FsConfigStore sert des
+    @BTreeMap donc un ordre alphabétique par nom ; @InMemoryConfigStore préserve l'ordre des @Vec).
+
+Returns:
+  @Vec<@VnyError> — vecteur vide = config saine (l'appelant rend alors exactement
+    `Config OK — no problems found.`). Non vide, ordre déterministe en trois phases :
+  Phase 1 — erreurs de lecture, dans l'ordre d'appel des sept lectures : providers, models,
+    mcp_servers, toolsets, agents, skills, default_agent.
+  Phase 2 — doublons, dans l'ordre des littéraux de sorte : `provider`, `model`, `mcp_server`,
+    `toolset`, `agent`, `skill` ; à l'intérieur d'une sorte, dans l'ordre de la liste du store.
+  Phase 3 — références croisées, dans l'ordre : chaque model -> provider (ordre des models), chaque
+    toolset -> mcp_server (ordre des @McpSelection), chaque agent -> model puis toolsets (ordre de
+    declaration) puis skills nommés (ordre de declaration), et en tout dernier defaults.agent.
+
+Raises:
+  Rien : @check_config ne retourne pas de @Result, ne propage aucune erreur du store et ne panique sur
+    aucun état du store (aucun `unwrap`/`expect`/`panic!` dans le chemin de production du fichier) ;
+    toute défaillance remonte comme élément @VnyError du vecteur retourné, jamais comme exception ni
+    comme erreur de type @Result.
+
+Handles:
+  Conversion des erreurs de lecture : chaque @Err de @list_x/@default_agent passe par `e.into()`
+    (@From<@CfgStoreError> de /lib/src/error.rs) : @CfgStoreError::Config -> @VnyError::ConfigError,
+    @CfgStoreError::DuplicateName/@CfgStoreError::UnknownReference passent telles quelles, et TOUTES les
+    autres variantes (@Io, @InvalidName, @NotFound, @NameConflict, @WriteError, @ReadOnly, @Validation)
+    tombent dans @VnyError::ConfigError avec le @Display complet de la source incrusté dans la chaîne
+    (`other.to_string()`) — rendu imbriqué visible, ex. `VNL-CFG-001: Configuration error:
+    VNL-CFG-004: I/O error: …`.
+  Lecture en erreur traitée comme liste vide : @Vec::new (ou @None pour @default_agent) remplace la
+    donnée absente et les phases 2-3 continuent sur ce vide — source de faux positifs en cascade,
+    contractisés tels quels en `Scenario` et questionnés en `Tasks`.
+  Câblage CLI (./main.rs, hors tutelle de ce fichier) : @Commands::Config(@config_cmd::Commands) du
+    @Cli, module @config_cmd à variante unique @Check (doc `/// Validate configuration (both layers)`),
+    noms clap kebab : `config` puis `check`. @run_config appelle @discover_fs_store puis @check_config
+    et rend sur stdout :
+  Sain -> une ligne exactement `Config OK — no problems found.` (tiret long inclus), code de sortie 0
+    implicite (aucun appel @std::process::exit).
+  Avec problèmes -> une ligne par problème, format `  {p}` : deux espaces de préfixe + @Display du
+    @VnyError, dans l'ordre du vecteur ; puis @std::process::exit(1). @Display concernés :
+    @VnyError::ConfigError -> `VNL-CFG-001: Configuration error: {0}` ; @VnyError::DuplicateName ->
+    `VNL-CFG-002: Duplicate name '{1}' for {0}` (champs inversés : nom puis sorte) ;
+    @VnyError::UnknownReference -> `VNL-CFG-003: Unknown {0} reference: '{1}'` (le 2ᵉ champ porte
+    nom manquant + référent dans les mêmes guillemets, voir Tasks `[?]`).
+  Le @tracing_subscriber initialisé dans @main n'écrit que sur stderr : aucune pollution du stdout
+    contractisé ci-dessus.
+
+Must:
+  Tenter les sept lectures indépendamment et ne jamais interrompre le ratissage : chaque @Err est poussé
+    dans les problèmes puis remplacé par la valeur vide (motif @unwrap_or_else, aucun `?` ni early
+    return).
+  Détecter les doublons de noms intra-sorte via @check_duplicate_names avec exactement les littéraux de
+    sorte `provider`, `model`, `mcp_server`, `toolset`, `agent`, `skill` ; un nom présent N fois produit
+    N-1 @VnyError::DuplicateName (un par occurrence supplémentaire, pas un par nom).
+  Détecter model -> provider : pour chaque model dont @ModelProfile::provider n'égale aucun nom de
+    provider, @VnyError::UnknownReference(`"provider"`,
+    `"{provider} (referenced by model '{nom du model}')"`) — rendu complet, ex.
+    `VNL-CFG-003: Unknown provider reference: 'ghost (referenced by model 'qwen2.5')'`.
+  Détecter toolset -> mcp_server : chaque @McpSelection::server absent des serveurs ->
+    @VnyError::UnknownReference(`"mcp_server"`,
+    `"{serveur} (referenced by toolset '{nom du toolset}')"`) — littéral à
+    underscore `mcp_server`, jamais `mcp-server`.
+  Détecter agent -> model : @Agent::model absent des models ->
+    @VnyError::UnknownReference(`"model"`,
+    `"{model} (referenced by agent '{nom de l'agent}')"`) ; agent -> toolsets :
+    chaque élément de @Agent::toolsets absent des toolsets ->
+    @VnyError::UnknownReference(`"toolset"`,
+    `"{toolset} (referenced by agent '{nom de l'agent}')"`) ; agent -> skills :
+    seulement sous @SkillSelection::Named, chaque nom absent des skills ->
+    @VnyError::UnknownReference(`"skill"`,
+    `"{skill} (referenced by agent '{nom de l'agent}')"`) — les trois dans cet ordre,
+    l'ordre de déclaration des listes @Agent::toolsets et des noms @Named étant préservé.
+  Accepter @SkillSelection::Auto et @SkillSelection::None sans jamais produire le moindre problème de
+    sorte `skill`.
+  Détecter defaults.agent en dernière position : @default_agent -> @Some(nom) absent des agents ->
+    @VnyError::UnknownReference(`"agent"`, `"{nom} (defaults.agent)"`) — seul message hors convention
+    `… (referenced by …)` ; @None ne produit jamais rien.
+  Respecter la convention du 2ᵉ champ de @VnyError::UnknownReference :
+    `"<nom manquant> (referenced by <sorte du référent> '<nom du référent>')"`, sans jamais de chemin de
+    fichier source (les entités du domaine ne portent pas leur chemin — seul de quoi identifier le
+    référent).
+  Rester muet sur config vide ou absente : deux répertoires vides -> listes vides, @default_agent ->
+    @None, vecteur retourné vide (un `config.yaml` absent n'est pas une erreur pour @load_config_layer
+    de /cfgstore/src/layers.rs).
+  Pousser les problèmes dans l'ordre exact des trois phases de `Returns` — cet ordre est le rendu stdout
+    visible de l'outil, donc contractuel.
+
+Must not:
+  S'arrêter au premier problème (aucun fail-fast) ni dédupliquer : le même message peut apparaître en
+    plusieurs exemplaires — un `config.yaml` invalide fait échouer quatre lectures (@load_merged_config
+    est appelé par providers, models, mcp_servers et default_agent) -> quatre lignes identiques au
+    rendu ; une @list_skills en erreur fait signaler en faux positifs tous les skills existants
+    référencés en @Named ; une @list_agents en erreur fait signaler le defaults.agent pourtant valide.
+  Toucher Kubernetes, les CRDs, kubeconfig, ni la racine sandbox : config_check ne référence ni @kube
+    ni @vanyline_crds, et aucune de ses lectures ne dépasse le @ConfigStore.
+  Tester une connectivité quelconque : aucun appel réseau vers les @Provider::endpoint ou
+    @McpServer::url, aucune existence de binaire local vérifiée — seuls les noms sont croisés.
+  Appeler @ConfigStore::load_skill, une méthode d'écriture du trait (@create_*/@update_*/@delete_*/
+    @set_default_agent), ni écrire le moindre octet sur disque.
+  Signaler une collision de noms entre sortes différentes (un model et un toolset nommés identiquement
+    est sain) ni valider un champ non-référence : @Provider::endpoint, @ModelProfile::temperature ou
+    @max_tokens, @Toolset::local_tools, @McpServer::headers, @AgentMode, system_prompt, etc. sont hors
+    périmètre.
+  Retourner un @Result, paniquer sur store corrompu, ou émettre un avis sur la PORTÉE d'une entité
+    (seule l'existence des références est jugée).
+
+Depends on:
+  @vanyline_lib::store::ConfigStore — trait source des données (re-export de @vanyline_cfgstore::store
+    par /lib/src/lib.rs) ; seule entrée de @check_config.
+  @vanyline_lib::VnyError (/lib/src/error.rs) — type de retour ; variantes émises : @ConfigError,
+    @DuplicateName, @UnknownReference ; @From<@CfgStoreError> porte la règle de conversion de `Handles`.
+  @vanyline_cfgstore::CfgStoreError (/cfgstore/src/error.rs) — type d'erreur réel des lectures, marqueurs
+    `VNL-CFG-001..010` ; dépendance indirecte via le trait, visible dans les Scenario d'erreur.
+  @vanyline_lib::domain::SkillSelection — @Named/@Auto/@None : le match qui gate la validation des
+    références de skills.
+  @std::collections::HashSet — infrastructure de @check_duplicate_names.
+  ./main.rs — unique consommateur : @run_config (parsing `config check`, @discover_fs_store, rendu
+    stdout, @std::process::exit) — sous la future ./main.sdd, pas de ce fichier.
+  ./config.rs — @discover_layers (sémantique des deux couches lues), consommée via @discover_fs_store de
+    ./main.rs.
+
+Tasks:
+  [ ] Relecture complète par Sébastien requise avant usage comme contrat (reverse du 2026-09-26).
+  [?] Cascades de lectures en erreur : la liste en erreur traitée comme vide produit des faux positifs
+    (skills existants référencés en @Named signalés @UnknownReference quand @list_skills échoue ;
+    defaults.agent valide signalé quand @list_agents échoue). Garde-t-on ce bruit (« tout est signalé
+    ») ou supprime-t-on les références vers une sorte dont la lecture a échoué ?
+  [?] Déduplication des doublons : trois agents nommés `dup` -> DEUX @VnyError::DuplicateName rendus
+    à l'identique. Contrat voulu, ou un seul problème par nom dupliqué (éventuellement avec un compte) ?
+  [?] `config.yaml` corrompu : la MÊME erreur de parse apparaît quatre fois au rendu (providers, models,
+    mcp_servers, default_agent partagent @load_merged_config). Fusionner en une ligne, ou le quadrillage
+    est-il un signal utile (les quatre lectures sont aveugles) ?
+  [?] Guillemets imbriqués de @VnyError::UnknownReference : `Unknown provider reference: 'ghost
+    (referenced by model 'qwen2.5')'` — nom manquant et référent partagent la même paire de quotes
+    simples (gabarit de /lib/src/error.rs, asymétrie déjà portée par /lib/src/error.sdd). Rendu figé tel
+    quel ou à corriger (deux champs distincts, crochets) ?
+  [ ] Les tests existants de ce fichier ne vérifient les messages que par @str::contains ; les Scenario
+    `*_message_exact` ci-dessous figurent le @Display complet. À confirmer avec Sébastien : ces chaînes
+    deviennent un contrat de rendu (casser le gabarit /lib/src/error.rs = breaking change CLI).
+  [?] Le test existant @default_agent_none_is_fine ne vérifie qu'un `missing_none <= missing_default`
+    (vrai même si les deux compteurs sont à zéro) : le remplacer par le Scenario
+    `default_agent_absent_ou_valide_jamais_signale` (assertion forte « aucun problème de sorte agent ») ?
+  [?] Les Scenario de rendu exigent un test d'intégration (cli/tests/, `env!("CARGO_BIN_EXE_vanyline")`,
+    pas d'assert_cmd en dev-dependencies) avec HOME + XDG_CONFIG_HOME pointés vers des tempdirs vides,
+    sinon la config globale du développeur (~/.config/vanyline) pollue les assertions. Approche acceptée
+    ou harnais dédié ?
+  [ ] Les douze tests de @mod tests dans ce fichier préexistent à la spec ; les aligner sur les titres
+    de Scenario (un test par Scenario, taggué par son titre) est à la charge de l'implementer.
+
+Done when:
+  Chaque Scenario dispose d'un test taggué par son titre et passe (unitaires dans ./config_check.rs,
+    d'intégration dans cli/tests/ pour les deux de rendu).
+  Les questions `[?]` sont tranchées par Sébastien et la spec ajustée en conséquence.
+  La batterie complète (check, test, build, clippy `--all-targets -D warnings`, fmt) est verte sur
+    `vanyline-cli`.
+
+Scenario: config_saine_retourne_un_rapport_vide
+  Given @InMemoryConfigStore cohérent (provider `ollama`, model `qwen2.5` -> `ollama`, serveur `fs`,
+    toolset `default` -> `fs`, agent `build` -> `qwen2.5` + `default` + @SkillSelection::Auto,
+    skill `pdf`, @default_agent @Some(`build`))
+  When @check_config est appelé
+  Then le vecteur retourné est vide
+
+Scenario: erreur_de_lecture_collectee_sans_bloquer_les_autres
+  Given un store dont @list_skills retourne @Err(@CfgStoreError::Config("boom")) et dont les six autres
+    lectures réussissent, avec un model `ghost-model` référençant un provider `ghost` absent
+  When @check_config est appelé
+  Then les problèmes contiennent un @VnyError::ConfigError dont le @Display est exactement
+    `VNL-CFG-001: Configuration error: boom` ET un @VnyError::UnknownReference de sorte `model`
+
+Scenario: lecture_en_erreur_traitee_comme_vide_et_cascade_signalee
+  Given un store dont @list_skills échoue, un agent `build` sinon cohérent déclarant
+    @SkillSelection::Named avec pour seul skill `pdf`, et `pdf` bien présent dans les données réelles du
+    store (invisibles car la lecture a échoué)
+  When @check_config est appelé
+  Then les problèmes contiennent un @VnyError::UnknownReference de sorte `skill` dont le second champ
+    est exactement `pdf (referenced by agent 'build')` (faux positif de cascade — comportement actuel,
+    cf. Tasks `[?]`)
+
+Scenario: config_yaml_corrompu_produit_quatre_erreurs_identiques
+  Given un @FsConfigStore dont la couche globale porte un `config.yaml` syntaxiquement invalide, sans
+    sous-répertoires agents/toolsets/skills
+  When @check_config est appelé
+  Then les problèmes sont exactement quatre entrées, toutes @VnyError::ConfigError dont le @Display
+    commence par `VNL-CFG-001: Configuration error: Failed to parse` (quatre lectures via
+    @load_merged_config), sans aucun @UnknownReference ni @DuplicateName
+
+Scenario: config_totalement_absente_est_saine
+  Given un @FsConfigStore dont les deux couches pointent vers des répertoires vides (aucun `config.yaml`,
+    aucun `agents/`, `toolsets/`, `skills/`)
+  When @check_config est appelé
+  Then le vecteur retourné est vide
+
+Scenario: doublon_signale_par_occurrence_supplementaire
+  Given un store contenant trois @Agent tous nommés `dup` et rien d'autre de contraignant
+  When @check_config est appelé
+  Then les problèmes contiennent exactement deux @VnyError::DuplicateName(`"agent"`, `"dup"`)
+
+Scenario: les_six_sortes_de_doublon_detectees_dans_l_ordre
+  Given un store sans @default_agent contenant par sorte exactement un nom `x` en double exemplaire :
+    deux providers, deux models nommés `x` référençant le provider `x`, deux mcp_servers `x`, deux
+    toolsets `x` référençant le serveur `x`, deux agents `x` référençant le model et le toolset `x` en
+    @SkillSelection::Auto, deux skills `x`
+  When @check_config est appelé
+  Then les problèmes sont exactement six @VnyError::DuplicateName, dans l'ordre des sortes `provider`,
+    `model`, `mcp_server`, `toolset`, `agent`, `skill`
+
+Scenario: provider_inconnu_de_model_message_exact
+  Given un store cohérent dont l'unique model `qwen2.5` voit son provider passer à `ghost`
+  When @check_config est appelé
+  Then les problèmes sont une unique entrée dont le @Display est exactement `VNL-CFG-003: Unknown
+    provider reference: 'ghost (referenced by model 'qwen2.5')'`
+
+Scenario: mcp_server_inconnu_de_toolset_message_exact
+  Given un store cohérent dont l'unique toolset `default` voit son seul @McpSelection::server passer à
+    `ghost`
+  When @check_config est appelé
+  Then les problèmes sont une unique entrée dont le @Display est exactement `VNL-CFG-003: Unknown
+    mcp_server reference: 'ghost (referenced by toolset 'default')'`
+
+Scenario: agent_problemes_dans_l_ordre_model_puis_toolsets_puis_skill
+  Given un store sans providers/models/mcp_servers/toolsets/skills et sans @default_agent, avec un unique
+    agent `build` déclarant model `ghost-model`, toolsets `["t1", "t2"]` et
+    @SkillSelection::Named(`["s1"]`)
+  When @check_config est appelé
+  Then les problèmes sont exactement quatre @VnyError::UnknownReference dans l'ordre des sortes `model`,
+    `toolset` (`t1`), `toolset` (`t2`), `skill` (`s1`), chacun avec le suffixe
+    `(referenced by agent 'build')`
+
+Scenario: skills_auto_et_none_jamais_signales
+  Given un store avec un provider et un model valides, zéro skill déclaré, et deux agents sans toolset :
+    l'un en @SkillSelection::Auto, l'autre en @SkillSelection::None, sans @default_agent
+  When @check_config est appelé
+  Then le vecteur retourné est vide
+
+Scenario: defaults_agent_inconnu_message_exact
+  Given un store sans aucun agent dont @default_agent retourne @Some(`ghost`)
+  When @check_config est appelé
+  Then les problèmes sont une unique entrée dont le @Display est exactement `VNL-CFG-003: Unknown
+    agent reference: 'ghost (defaults.agent)'`
+
+Scenario: default_agent_absent_ou_valide_jamais_signale
+  Given un store cohérent d'agent `build` avec @default_agent @Some(`build`), puis le même store avec
+    @default_agent @None
+  When @check_config est appelé sur chacun
+  Then aucun des deux vecteurs ne contient le moindre problème de sorte `agent` (les deux sont vides)
+
+Scenario: ordre_global_lecture_puis_doublon_puis_reference
+  Given un store dont @list_providers retourne @Err(@CfgStoreError::Config("read-fail")) alors que la
+    liste des models est vide par ailleurs, avec deux agents `dup` référençant tous deux le model
+    `ghost-model` absent
+  When @check_config est appelé
+  Then les problèmes sont dans cet ordre exact : @VnyError::ConfigError("read-fail"), puis
+    @VnyError::DuplicateName(`"agent"`, `"dup"`), puis les @VnyError::UnknownReference de sorte `model`
+
+Scenario: check_config_n_appelle_jamais_load_skill_ni_une_ecriture
+  Given un store espion dont les sept lectures réussissent (config vide saine) et dont @load_skill ainsi
+    que chaque méthode d'écriture du trait @ConfigStore appelle `panic!`
+  When @check_config est appelé
+  Then l'appel se termine sans paniquer et retourne un vecteur vide
+
+Scenario: noms_identiques_entre_sortes_non_signales
+  Given un store avec provider `ollama`, un model nommé `x` référençant `ollama`, un toolset nommé `x`
+    sans sélection MCP, zéro agent, zéro skill, sans @default_agent
+  When @check_config est appelé
+  Then le vecteur retourné est vide
+
+Scenario: fs_store_bout_en_bout_signale_un_model_inexistant
+  Given un @FsConfigStore sur une couche workspace contenant `agents/build.md` au frontmatter
+    `model: does-not-exist`, sans model ni provider déclarés, couche globale vide
+  When @check_config est appelé
+  Then les problèmes contiennent un @VnyError::UnknownReference de sorte `model` dont le second champ
+    contient `does-not-exist` et `build`
+
+Scenario: rendu_stdout_config_ok_et_code_sortie_0
+  Given le binaire `vanyline` lancé depuis un cwd tempdir vide, HOME et XDG_CONFIG_HOME pointés vers des
+    tempdirs vides (isolement de la config globale)
+  When la commande `vanyline config check` s'exécute
+  Then stdout est exactement la ligne `Config OK — no problems found.` suivie d'un saut de ligne et le
+    code de sortie est 0
+
+Scenario: rendu_stdout_problemes_puis_code_sortie_1
+  Given le binaire `vanyline` lancé depuis un tempdir contenant `.vanyline/agents/build.md` au frontmatter
+    `model: does-not-exist`, HOME et XDG_CONFIG_HOME pointés vers des tempdirs vides
+  When la commande `vanyline config check` s'exécute
+  Then stdout contient la ligne exacte `  VNL-CFG-003: Unknown model reference: 'does-not-exist
+    (referenced by agent 'build')'`, ne contient pas `Config OK — no problems found.`, et le code de
+    sortie est 1

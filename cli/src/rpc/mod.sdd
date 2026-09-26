@@ -1,0 +1,363 @@
+Spec: RPC stdio — boucle de transport (module rpc)
+
+Platform: Rust/vanyline-cli/tokio
+
+Purpose:
+  Racine du module `rpc` du CLI et transport du serveur JSON-RPC 2.0 de
+  `vanyline serve --stdio` : déclarations des deux modules enfants (`handlers`,
+  `protocol`, tous deux privés au crate) et @run_stdio_server — la boucle ndjson
+  qui lit stdin ligne à ligne, délègue le dispatch à ./handlers.rs (@handle_line)
+  et écrit toutes les trames de sortie sur stdout via UNE seule tâche d'écriture
+  branchée sur un canal mpsc. Ce fichier ne connaît ni les méthodes, ni les
+  enveloppes, ni les codes `VNL-RPC-*` : son contrat est le cadrage (une trame
+  JSON compacte par ligne, `\n` final ajouté uniquement par le writer),
+  l'ordonnancement (ordre FIFO du canal = ordre d'arrivée des réponses,
+  notifications `chat/event` et réponses asynchrones de `chat/send` comprises,
+  jamais d'entrelacement d'octets au milieu d'une trame), et le cycle de vie de
+  bout de ligne (le process sort après avoir répondu à `shutdown`, ou à EOF sur
+  stdin — docs/rpc-protocol.md section « Transport », verbatim de la doc
+  commentaire du fichier). Contrat distinct de celui de ./protocol.rs (formes
+  des messages) et de ./handlers.rs (dispatch et méthodes) : un fichier, un
+  contrat, pas de regroupement.
+
+Owns:
+  ./mod.rs
+
+Can read:
+  ./protocol.rs
+  ./handlers.rs
+  ../main.rs
+  ../../tests/rpc_stdio_smoke.rs
+  ../../../docs/rpc-protocol.md
+
+References:
+  ../../../vanyline.sdd
+  ../../../tooling.sdd
+
+Depends on:
+  @tokio::io (@tokio::io::stdin/stdout, @tokio::io::AsyncBufReadExt,
+    @tokio::io::AsyncWriteExt, @tokio::io::BufReader) — lecture `lines()` sur
+    stdin (capacité interne `BufReader` par défaut, mais les lignes longues
+    s'accumulent sans limite documentée ; le terminateur `\n` et `\r\n` sont
+    retirés par `lines()`) et écriture brute sur stdout. Requiert le runtime
+    multithread lancé par @tokio::main dans ../main.rs (`#[tokio::main]`) :
+    @tokio::spawn n'a de sens que dans ce contexte.
+  @tokio::sync::mpsc::unbounded_channel — le canal réponse→writer, sans
+    backpressure (voir `[?]` dans `Tasks`).
+  ./handlers.rs :: @handle_line — `pub async fn handle_line(state: &mut
+    ServerState, line: &str) -> Option<String>` : retourne la ligne de réponse
+    déjà sérialisée en JSON compact SANS le `\n` final (c'est l'appelant —
+    cette boucle — qui l'ajoute), ou `None` quand la méthode `chat/send` a
+    spawné son tour (la réponse finale et les notifications `chat/event`
+    partiront plus tard sur le canal, via le clone de `tx` détenu par la tâche
+    spawnée — ./handlers.rs :: @handle_chat_send).
+  ./handlers.rs :: @ServerState — construit ici par @ServerState::new(tx.clone())
+    ; le champ `tx` (clone du sender) est celui que les tâches de tour
+    `chat/send` clonent pour écrire leurs trames ; le champ booléen
+    `shutdown_requested` est posé par le bras `shutdown` du dispatch (et remis
+    à `false` par `handle_initialize`) — c'est le seul signal de sortie
+    déclenché depuis les handlers.
+  ../main.rs :: branche `Some(Commands::Serve { stdio: true })` — unique
+    call-site de @run_stdio_server (`rpc::run_stdio_server().await`), donc
+    unique chemin d'accès (crate binaire : `pub` ici = pub au crate, rien
+    d'accessible hors binaire). `serve` sans `--stdio` ne passe jamais par ici
+    (message stderr + `exit(1)` dans ../main.rs, à contracter dans sa spec).
+  @tracing (initialisé dans ../main.rs) — ce fichier n'émet aucun log ;
+    l'invariant « logs sur stderr, jamais sur stdout » vient du fmt layer de
+    ../main.rs et est verrouillé ici comme contrainte à ne jamais percer.
+
+Exposes:
+  @run_stdio_server — `pub async fn run_stdio_server()` : aucun paramètre,
+    retourne `()`, aucune signature d'erreur. Seul item `pub` du fichier.
+    Séquence interne (contractuelle, dans cet ordre) :
+      1. création du canal `@tokio::sync::mpsc::unbounded_channel::<String>()`
+      2. @tokio::spawn de la tâche writer AVANT toute lecture stdin — elle
+        boucle `while let Some(line) = rx.recv().await`, écrit les octets de
+        la ligne puis les octets `b"\n"` — deux @tokio::io::AsyncWriteExt::write_all distincts
+        par trame ; puis @tokio::io::AsyncWriteExt::flush (erreur ignorée),
+        et sort de sa boucle à la première erreur d'écriture
+      3. @ServerState::new(tx.clone()) puis lecture `lines()` de stdin
+      4. par ligne : saut si `line.trim().is_empty()` (la ligne BRUTE, non
+        trimée, est passée à @handle_line sinon) ; envoi sur `tx` de toute
+        réponse `Some` ; break si @handle_line n'a pas répondu ET que
+        `tx.send` a échoué ; vérification de `state.shutdown_requested`
+        APRÈS chaque ligne traitée, réponse produite ou non
+      5. sortie de boucle (shutdown, EOF `Ok(None)`, erreur de lecture
+        `Err(_)`, ou mort du writer) puis protocole de drop : `drop(state)`
+        (libère le clone de `tx` détenu par @ServerState), `drop(tx)` (libère
+        le sender local), `let _ = writer.await` — l'attente ne se termine
+        que quand tous les senders ont disparu et que la file du canal est
+        vidée, ce qui garantit le drain complet des trames en attente avant la
+        fermeture de stdout
+  Déclarations de module `mod handlers;` et `mod protocol;` — privées au crate,
+    aucun re-export depuis `rpc` (../main.rs n'accède qu'à @run_stdio_server).
+  Aucun gating `#[cfg(...)]`, aucune feature, aucun module de test dans le
+    fichier : les tests du contrat vivent en test d'intégration process
+    (../../tests/rpc_stdio_smoke.rs, qui spawn le binaire réel).
+
+Accepts:
+  Rien en entrée d'API (aucun paramètre, aucune variable d'environnement lue
+    ici, aucune config) — tout le comportement dépend du flux d'octets reçu sur
+    stdin et de la santé de stdout.
+  stdin — flux d'octets censé être de l'UTF-8 ndjson : une trame JSON par
+    ligne, terminaisons LF ou CRLF (le `\r` final est retiré par `lines()`),
+    lignes de longueur quelconque (aucune limite de taille de trame — voir
+    `Tasks`), flux vide (EOF immédiat). Des octets non-UTF-8 font échouer
+    `next_line()` → sortie immédiate de la boucle (voir `Handles`).
+  Lignes vides ou composées uniquement de blanc Unicode (espace, tabulation,
+    `\r` résiduel en milieu de ligne) — sautées sans dispatch ni réponse.
+
+Returns:
+  `()` — aucune valeur de retour observable. L'effet terminal est le retour de
+    @run_stdio_server dans ../main.rs, donc la fin de @main et le code de
+    sortie 0 du process sur TOUS les chemins (shutdown, EOF, erreur de lecture,
+    mort du writer) — aucun appel à @std::process::exit ici.
+  Sur stdout, via la tâche writer uniquement : une ligne JSON par réponse
+    émise par ./handlers.rs (+ les notifications `chat/event` et les réponses
+    asynchrones de `chat/send` émises par les tâches de tour sur leurs clones
+    de `tx`), chacune terminée par `\n`.
+
+Raises:
+  Aucune — pas de type d'erreur, pas de panic à l'état nominal, pas de
+    propagation. Les trois modes de défaillance (erreur de lecture stdin,
+    erreur d'écriture stdout, @std::result::Result::Err du @tokio::task::JoinHandle
+    du writer) sont consommés silencieusement : `Err(_) => break`,
+    `is_err() → break`, `let _ = writer.await`.
+
+Handles:
+  Écrivain unique de stdout — la tâche spawnée à l'étape 2 est le seul acteur
+    qui écrit sur stdout dans le process ; toute trame (réponse synchrone,
+    réponse asynchrone de `chat/send`, notification `chat/event`) transite par
+    le canal et y arrive dans l'ordre d'émission (FIFO mpsc). Conséquences
+    contractuelles : pas d'entrelacement de deux trames dans le flux, et une
+    trame est intégralement visible entre deux `\n`.
+  Réponse à `shutdown` garantie d'émission — @handle_line pose
+    `shutdown_requested` et RETOURNE la réponse ; la boucle envoie cette
+    réponse sur `tx` AVANT de tester `shutdown_requested` et de break ; le
+    protocole de drop + `writer.await` draine la file. Le client reçoit donc
+    toujours `{"jsonrpc":"2.0","id":…,"result":null}` avant la fermeture de
+    stdout (docs/rpc-protocol.md : « Le process sort après avoir répondu à
+    `shutdown` »).
+  Ordre de drop critique (commentaire in-file, verrouillé) — @ServerState
+    détient un clone de `tx` : sans `drop(state)` suivi de `drop(tx)` avant
+    `writer.await`, `rx.recv()` ne retourne jamais `None` et le process ne
+    sort jamais après `shutdown`/EOF. Corollaire : toute tâche tokio encore
+    vivace détenant un clone de `state.tx` (un tour `chat/send` en cours)
+    retarde d'autant la fin de `writer.await` — le process attend la fin du
+    tour et émet sa réponse tardive AVANT la fermeture de stdout, même après
+    `shutdown` (contrat de fait, à confirmer — voir `[?]` dans `Tasks`).
+  Lignes blanches — `line.trim().is_empty()` → `continue` : ni dispatch, ni
+    réponse, ni effet sur l'état (une ligne `   ` avant `initialize` ne déclenche
+    donc pas `VNL-RPC-001`). La ligne non trimée est sinon passée telle quelle
+    à @handle_line (les blancs de bord d'une trame JSON sont absorbés par
+    serde_json côté handlers, ce fichier ne normalise rien).
+  Échec d'envoi sur le canal (`tx.send(…).is_err()`) — le writer est mort
+    (stdout cassé, ou panic de la tâche) : break immédiat de la boucle de
+    lecture, même si stdin reste ouvert et des requêtes arrivaient.
+  EOF stdin (`Ok(None)`) et erreur de lecture (`Err(_)` — octets non-UTF-8,
+    erreur d'entrée système) : break dans les deux cas, sans log, sans trame
+    d'erreur, sans code de sortie distinct.
+  Erreur d'écriture du writer (@write_all des octets de ligne OU des octets
+    `b"\n"`) — break de sa boucle : la ligne en cours et toutes les trames
+    encore en file sont perdues sans trace ; les `tx.send` suivants échoueront
+    et briseront la boucle stdin au prochain envoi. Erreur de @flush ignorée
+    (`let _ =`) : une perte de données tamponnées est possible sans signe
+    visible (voir `Tasks`).
+  @std::result::Result::Err du @tokio::task::JoinHandle (panic de la tâche
+    writer) — avalé par `let _ = writer.await` : stdout meurt sans trace et la
+    boucle stdin peut rester bloquée sur `next_line()` jusqu'à EOF sans plus
+    jamais rien répondre (voir `[!]` dans `Tasks`).
+  Couverture de test existante — ../../tests/rpc_stdio_smoke.rs spawn le
+    binaire réel et couvre déjà de bout en bout : cycle `initialize`→`shutdown` + code de
+    sortie success (l'assertion `status.success()` de `initialize_then_shutdown_end_to_end`
+    et du helper `Client::shutdown` verrouille de fait le code 0 après
+    shutdown et l'émission de la réponse avant EOF). Les autres arêtes de la
+    boucle (EOF sans shutdown, lignes blanches, stdin non-UTF-8, stdout
+    refermé, ordre FIFO, drain d'un tour en cours) n'ont pas de test dédié.
+
+Must:
+  Réserver stdout aux seules trames du protocole, émises par la tâche writer :
+    le fichier ne contient et ne doit contenir aucun `println!`, `print!`,
+    écriture directe de stdout ni log (harnais `print_stdout`/`print_stderr`
+    de ../../../tooling.sdd + docs/rpc-protocol.md « stdout est réservé au
+    protocole »).
+  Spawner la tâche writer avant la première lecture de stdin (sinon une
+    réponse émise avant le spawn resterait en file sans lecteur — inoffensif
+    en pratique mais hors séquence contractuelle).
+  Ajouter le `\n` final uniquement dans le writer, et n'y transmettre que des
+    lignes complètes sans `\n` (convention @handle_line) : la framing est
+    l'affaire exclusive de ce fichier, les handlers ne voient que du JSON nu.
+  Conserver l'ordre : envoi de la réponse sur `tx` avant test de
+    `shutdown_requested` — la réponse `shutdown` doit passer AVANT la sortie
+    de boucle.
+  Conserver le protocole de drop `drop(state)` → `drop(tx)` → `writer.await` :
+    les deux senders locaux doivent être libérés avant l'attente, sous peine
+    de hang permanent du process après `shutdown`/EOF.
+  Tester `state.shutdown_requested` après CHAQUE ligne traitée, y compris
+    quand @handle_line retourne `None` (une future méthode qui poserait le
+    flag sans réponse doit quand même sortir).
+  Rendre @run_stdio_server total : retourne `()` sur tous les chemins, code de
+    sortie 0, jamais @std::process::exit ni `Result`.
+  Rester propre sous le harnais clippy (../../../tooling.sdd) : consommer les
+    erreurs par `is_err()`/`let _` comme aujourd'hui, sans jamais introduire
+    `unwrap`/`expect`/`panic!`.
+
+Must not:
+  Écrire sur stdout hors de la tâche writer — ni ici, ni en laissant un
+    handler ou une tâche de tour écrire autre chose que via un clone du canal
+    (le writer est le point de sérialisation unique du flux).
+  Relire, valider, normaliser, réordonner ou re-sérialiser une ligne de
+    réponse : pass-through strict des octets de @handle_line au flux, `\n`
+    ajouté excepté.
+  Introduire un autre framing (`Content-Length` type LSP, préfixes,
+    multi-lignes) ou une taille maximale de trame sans décision de spec.
+  Utiliser l'io bloquant @std::io sur stdin/stdout (le fichier doit rester
+    dans le runtime @tokio, sous peine de figer le tour asynchrone de
+    `chat/send`).
+  Remplacer `mpsc::unbounded_channel` par un canal borné sans arbitrer la
+    backpressure (`Tasks`) : un `send` bloquant ou `Err` sur saturation
+    casserait la garantie d'émission de la réponse `shutdown`.
+  Logger sur stdout, ou instrumenter ce fichier d'un log qui n'aurait pas son
+    équivalent contracté (les silences actuels sont contractuels tant que les
+    `[?]` de `Tasks` ne sont pas tranchés).
+  Modifier la signature `pub async fn run_stdio_server()` (le call-site
+    ../main.rs attend `()` en `.await`).
+
+Tasks:
+  [ ] Dériver les Scenario non couverts en tests d'intégration dans
+    ../../tests/rpc_stdio_smoke.rs (harness `Client` existant, process réel),
+    taggés par leur titre : EOF sans shutdown, stdin fermé immédiatement,
+    lignes blanches, trame invalide puis boucle vivante, ordre FIFO, stdin
+    non-UTF-8, stdout refermée, drain du tour `chat/send` en cours.
+  [?] Erreur de lecture stdin (`Err(_) => break`) : sortie silencieuse — des
+    octets non-UTF-8 tuent le serveur sans aucun log stderr. Faut-il un
+    `tracing::error!` (stderr, hors protocole) avant le break ?
+  [?] Erreurs d'écriture du writer : break silencieux, trames en file perdues
+    sans trace, et erreur de @flush ignorée (`let _`) — une réponse peut
+    disparaître sans aucun signe observable. Accepté (client mort = plus
+    personne à qui se plaindre) ou à logguer sur stderr ?
+  [?] Code de sortie universellement 0, y compris sortie anormale (erreur io,
+    writer mort) : faut-il distinguer (code ≠ 0 + message stderr) ou la
+    normalisation 0 est-elle le contrat côté extension VS Code (ext/src/rpc.ts
+    ne regarde-t-il que la fermeture du flux) ?
+  [?] Sortie avec un tour `chat/send` en vol : le `writer.await` attend la fin
+    de toute tâche de tour (clone de `tx` vivant), la réponse finale du
+    `chat/send` part APRÈS la réponse `shutdown`, et le process ne sort
+    qu'une fois le tour terminé. Contrat voulu (« tout drainer ») ou `shutdown`
+    doit-il interrompre les tours (sachant que `chat/cancel` est un no-op en
+    v1) ? docs/rpc-protocol.md ne le dit pas — arbitrer et documenter là-bas.
+  [?] Canal `unbounded_channel` sans backpressure : un client qui ne lit pas
+    stdout laisse grossir la file sans limite (notifications `chat/event`
+    d'un long tour inclus). Accepté pour l'usage stdio local, ou canal borné
+    avec stratégie de drop à arbitrer ?
+  [!] @std::result::Result::Err du @tokio::task::JoinHandle avalé (`let _ = writer.await`) :
+    si la tâche writer panicait (aucun chemin réaliste identifié aujourd'hui,
+    mais `stdout` peut panic sur certaines plateformes en écriture), stdout
+    mourrait sans trace et la boucle stdin pourrait rester bloquée sur
+    `next_line()` jusqu'à EOF sans plus jamais répondre. Faut-il logguer le
+    JoinError (stderr) — voire sortir immédiatement ?
+  [?] Aucune taille maximale de trame : `lines()` accumule une ligne de
+    longueur quelconque en mémoire. Un serveur JSON-RPC expose souvent un cap
+    (plusieurs Mo) ; en imposer un ici (et répondre `VNL-RPC-000` au-delà) est
+    une décision de spec à prendre avec Sébastien, pas un détail d'impl.
+  [?] La branche `serve` sans `--stdio` (message stderr + `exit(1)`,
+    ../main.rs) est hors de ce contrat : confirmer qu'elle sera contractée dans
+    la spec de ../main.rs, pas rajoutée ici.
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre (intégration process
+    dans ../../tests/rpc_stdio_smoke.rs, pattern `Client`) et passe.
+  Les tests existants `initialize_then_shutdown_end_to_end` et les `shutdown`
+    de fin de smoke restent verts sans modification (ils verrouillent déjà la
+    réponse `shutdown` avant EOF et le code de sortie 0).
+  Le harnais clippy (../../../tooling.sdd) passe sur le fichier sans
+    exemption.
+  Sébastien a tranché tous les `[?]` et `[!]` de `Tasks` — la spec relue fait
+    foi du contrat (notamment drain des tours en cours, silence sur erreurs
+    io, taille de trame).
+
+Scenario: eof_stdin_clot_le_processus_apres_drain
+  Given `vanyline serve --stdio` lancé avec stdio pipés et une requête
+    `initialize` (id 0) dont la réponse a été lue sur stdout
+  When le client ferme stdin sans envoyer `shutdown` (EOF), stdout restant
+    ouvert en lecture
+  Then stdout atteint EOF (fermeture, plus aucune trame) immédiatement après
+    l'EOF stdin — aucune trame parasite de fin — et le process rend un code de
+    sortie 0
+
+Scenario: stdin_ferme_immediatement_aucune_trame_sur_stdout
+  Given `vanyline serve --stdio` lancé avec stdio pipés et stdin fermé
+    aussitôt, sans aucune requête envoyée
+  When le client lit stdout jusqu'à EOF puis attend le process
+  Then stdout est vide (EOF sans aucune trame) et le code de sortie est 0
+
+Scenario: lignes_blanches_sautees_sans_reponse_ni_erreur
+  Given `vanyline serve --stdio` lancé, stdin non initialisé, et le client
+    écrivant dans l'ordre : une ligne vide, une ligne de blancs seuls
+    (espaces et tabulation), `initialize` (id 0), une ligne de blancs seuls,
+    `shutdown` (id 1)
+  When le client ferme stdin, puis lit stdout jusqu'à EOF et attend le process
+  Then stdout contient exactement deux trames dans l'ordre — la réponse
+    `initialize` (result, pas d'error) puis `{"jsonrpc":"2.0","id":1,"result":null}`
+    — aucune trame pour les lignes blanches, aucun `VNL-RPC-001`, code de
+    sortie 0
+
+Scenario: trame_invalide_repond_vnl_rpc_000_puis_boucle_vivante
+  Given `vanyline serve --stdio` lancé, stdin non initialisé, et le client
+    écrivant une ligne `pas du json` puis `initialize` (id 0)
+  When le client lit les deux réponses puis fait `shutdown`
+  Then la première trame est une erreur avec `id:null`, `error.code:-32700` et
+    `error.data.code:"VNL-RPC-000"` ; la seconde est la réponse `initialize` —
+    la boucle continue de lire après une trame d'erreur — et `shutdown` est
+    répondu `result:null` avec code de sortie 0
+
+Scenario: reponses_dans_lordre_des_requetes_sur_un_flux_ndjson
+  Given un serveur initialisé (via le harnais `Client`, tmpdirs XDG isolés)
+    avec un workspace marqué `.vanyline/`
+  When le client envoie d'un coup (pipelining, sans lire entre) `config/agents`
+    (id 2), `config/toolsets` (id 3) puis `shutdown` (id 4), puis lit stdout
+    jusqu'à EOF
+  Then chaque ligne de stdout se parse comme un objet JSON unique (stdout ne
+    contient que du ndjson) et les trames arrivent dans l'ordre des ids
+    croissants 2, 3, 4, prouvant le writer unique FIFO, et le process sort en 0
+
+Scenario: stdin_non_utf8_arrete_la_boucle_silencieusement_meme_stdin_ouvert
+  Given `vanyline serve --stdio` lancé et `initialize` (id 0) répondu, puis le
+    client écrit des octets non-UTF-8 (par ex. `0xFF 0xFE`) sur stdin SANS
+    jamais le refermer
+  When le client lit stdout et attend le process (timeout généreux, stdin
+    reste ouvert côté client)
+  Then aucune nouvelle trame n'est émise sur stdout, stdout finit par fermer,
+    et le process rend le code de sortie 0 (contrat de fait : `Err(_) => break`
+    silencieux, à confirmer en `Tasks`)
+
+Scenario: stdout_refermee_le_processus_sort_sans_panique
+  Given `vanyline serve --stdio` lancé, `initialize` (id 0) répondu, puis le
+    client referme l'extrémité de lecture de stdout (pipe cassé) avant
+    d'envoyer une requête `config/agents` sur stdin
+  When le client attend le process
+  Then le process s'achève (le writer meurt sur erreur d'écriture, la boucle
+    stdin break au `send` en échec) avec code de sortie 0 et sans panic dans
+    stderr (`panic`/`RUST_BACKTRACE` absents du stderr capturé)
+
+Scenario: shutdown_clot_le_processus_meme_quand_stdin_reste_ouvert
+  Given `vanyline serve --stdio` lancé avec stdin jamais refermé par le client
+    (poignée stdin toujours vivante) et `initialize` (id 0) répondu
+  When le client envoie `shutdown` (id 1), lit la réponse, puis attend le
+    process sans toucher à stdin
+  Then la réponse `{"jsonrpc":"2.0","id":1,"result":null}` est reçue avant
+    toute fermeture de stdout et le process rend le code de sortie 0 sans
+    avoir eu besoin d'un EOF sur stdin
+
+Scenario: chat_send_en_cours_draine_sa_reponse_avant_fermeture_stdout
+  Given un serveur initialisé avec un provider `ollama` dont l'`endpoint` est
+    un port TCP fermé garanti, un modèle et un agent qui l'utilisent, une
+    conversation créée, puis un `chat/send` (id 5) accepté (aucune réponse
+    immédiate attendue — tour spawné) et presque aussitôt `shutdown` (id 6)
+    envoyé
+  When le client lit stdout jusqu'à EOF puis attend le process
+  Then exactement deux trames sont émises avant EOF : la réponse `result:null`
+    de `shutdown` et la réponse tardive d'id 5 (erreur `VNL-RPC-009`, provider
+    injoignable), dans un ordre qui dépend de la vitesse du tour, et le
+    process ne sort qu'après les avoir toutes écrites, code de sortie 0 —
+    comportement de drain actuel, à confirmer comme contrat (`[?]` in `Tasks`)

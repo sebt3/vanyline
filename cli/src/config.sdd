@@ -1,0 +1,339 @@
+Spec: Cli config
+
+Platform: Rust/vanyline-cli (binaire `vanyline`)
+
+Purpose:
+  Résolution de tout ce qui, dans le binaire `vanyline`, touche au domicile de
+  l'utilisateur et à la découverte du workspace : @config_dir et @data_dir
+  (répertoire plateforme + sous-répertoire `vanyline`), @ensure_config_dir et
+  @ensure_data_dir (création des répertoires requis, erreur fatale sinon),
+  @discover_workspace_root (remonter l'arborescence jusqu'au marqueur
+  `.vanyline` ou `.git`), @discover_layers (construction du @Layers du
+  config-store à partir de cette racine) et @configured_namespace /
+  @configured_toolbox (clés `defaults.namespace` / `defaults.toolbox` de la
+  config fusionnée). Le fichier ne lit AUCUNE variable d'environnement en propre
+  et ne déclare AUCUN flag : `XDG_CONFIG_HOME` / `XDG_DATA_HOME` / `HOME` sont
+  consommés indirectement par le crate `dirs`, les flags `--namespace` et
+  `--toolbox` se résolvent dans ./main.rs, et le kubeconfig est du ressort
+  exclusif de @VnlK8sClient::discover (`vanyline-lib`, dernier recours de la
+  précédence des trois sources de namespace). Un seul fichier, un seul contrat.
+
+Structure:
+  ./config.rs — sept fonctions `pub` (répertoires : @config_dir, @data_dir,
+    @ensure_config_dir, @ensure_data_dir ; découverte : @discover_workspace_root,
+    @discover_layers ; défauts : @configured_namespace, @configured_toolbox) et
+    un `mod tests` (`cfg(test)`) de cinq tests qui ne couvrent que
+    @discover_workspace_root.
+  Consommateurs (lecture seule pour cette spec) : ./main.rs — @discover_fs_store
+    (construit le store sur @discover_layers du cwd), @discover_k8s_client
+    (précédence `--namespace` > @configured_namespace > kubeconfig par
+    @VnlK8sClient::discover), @resolve_toolbox_mcp_url (`--toolbox` >
+    @configured_toolbox, aucun appel K8s si aucun des deux) ; ./chat.rs — @run
+    appelle @ensure_config_dir à chaque lancement de chat, @print_git_diff_stat
+    utilise @discover_workspace_root ; ./store.rs — persistance des
+    conversations (`conversations/{id}.json`, `active-conversation.json`) sous
+    @data_dir ; ./rpc/handlers.rs — @resolve_layers passe par @discover_layers
+    (racine donnée par `initialize`, fallback cwd) et @ensure_k8s_client par
+    @configured_namespace, sans flag `--namespace` disponible côté RPC.
+
+Owns:
+  ./config.rs
+
+Can read:
+  ./main.rs
+  ./chat.rs
+  ./store.rs
+  ./rpc/handlers.rs
+  ../Cargo.toml
+  ../../cfgstore/src/layers.rs
+  ../../lib/src/k8s.rs
+
+References:
+  ../../vanyline.sdd
+  /tooling.sdd
+
+Must:
+  @config_dir renvoie `<répertoire plateforme de config>/vanyline` et
+    @data_dir `<répertoire plateforme de données>/vanyline`, le suffixe
+    `vanyline` étant ajouté exactement une fois.
+  Les répertoires plateforme sont ceux résolus par @dirs::config_dir et
+    @dirs::data_dir (Linux : `XDG_CONFIG_HOME` sinon `$HOME/.config` ;
+    `XDG_DATA_HOME` sinon `$HOME/.local/share`) — ce fichier ne lit pas
+    lu-même ces variables, la lecture est déléguée au crate `dirs`, à chaque
+    appel.
+  En cas d'échec de la résolution plateforme (`None`), @config_dir et
+    @data_dir produisent le repli littéral `~/.config/vanyline` /
+    `~/.local/share/vanyline`, sans substitution de `~` (chemin relatif dont le
+    premier composant est le littéral `~`) — contrat actuel, voir `Tasks` `[?]`.
+  @ensure_config_dir crée @config_dir avec @std::fs::create_dir_all ; aucune
+    erreur ni affichage si le répertoire existe déjà.
+  @ensure_data_dir crée `<@data_dir>/conversations` (le sous-répertoire
+    `conversations`, pas le seul répertoire de données) avec
+    @std::fs::create_dir_all ; idempotent.
+  @discover_workspace_root examine `start` lui-même d'abord, puis chaque
+    ancêtre dans l'ordre montant, et s'arrête à la racine du système de
+    fichiers ; le premier répertoire trouvé portant `.vanyline` (répertoire
+    obligatoire) ou `.git` (toute entité existante, `exists()` vrai) gagne,
+    quel que soit le type de marqueur.
+  @discover_workspace_root ne canonise pas, ne développe rien, ne suit aucun
+    lien symbolique et ne crée rien sur disque.
+  @discover_layers met @Layers.global_dir à @config_dir() sans condition
+    (même si ce répertoire n'existe pas) et @Layers.workspace_dir à
+    `Some(<racine>/.vanyline)` dès que @discover_workspace_root trouve une
+    racine — y compris quand le chemin `.vanyline` découvert n'existe pas
+    (racine trouvée via `.git` seul) : la lecture cfgstore tolère l'absence.
+  @configured_namespace et @configured_toolbox lisent @RawConfigFile.defaults
+    via @Layers.load_merged_config — fusion clé par clé de chaque carte nommée
+    (@merge_config_layers), l'entrée workspace remplaçant intégralement
+    l'entrée globale à clé égale — sous les clés `namespace` et `toolbox`
+    respectivement.
+  Ces deux fonctions ne retournent une valeur que si elle est une chaîne YAML
+    (`as_str`) ; clé absente des deux couches, erreur de lecture/parse de la
+    config fusionnée ou valeur non textuelle (nombre, booléen, null, mapping,
+    séquence) donnent `None`.
+  Aucune de ces fonctions ne consulte le kubeconfig, l'API K8s ou le réseau :
+    le contexte courant du kubeconfig est le dernier recours de
+    @VnlK8sClient::discover, en aval de `--namespace` et de
+    `defaults.namespace`.
+
+Must not:
+  Lire une variable d'environnement en propre dans ce fichier (surcharge type
+    `VANYLINE_CONFIG_DIR` de @config_dir par exemple) sans que cette spec la
+    contractualise d'abord — le contrat actuel est `dirs` exclusivement.
+  Interpréter une valeur non textuelle de `defaults.namespace` ou
+    `defaults.toolbox` (ex : nombre `1234`, booléen) comme un défaut exploitable.
+  Faire remonter une erreur de lecture de `config.yaml` depuis
+    @configured_namespace / @configured_toolbox — le contrat actuel est `None`
+    silencieux, l'affichage des configs invalides appartenant à
+    `vanyline config check` (voir `Tasks` `[?]`).
+  Développer `~` dans les replis, ni créer le moindre répertoire sur le chemin
+    de découverte (@discover_layers ne crée pas un `.vanyline` découvert
+    inexistant).
+  Rendre la main à l'appelant de @ensure_config_dir / @ensure_data_dir après un
+    échec de création : le contrat observable est la terminaison immédiate du
+    processus avec le code `1`.
+  Contacter le kubeconfig ou l'API Kubernetes depuis ce module.
+
+Forbids:
+  Une réimplémentation côté `cli` de la résolution kubeconfig appartenant à
+    @VnlK8sClient::discover dans ../../lib/src/k8s.rs.
+
+Depends on:
+  `dirs` v5 — @dirs::config_dir, @dirs::data_dir (résolution des répertoires
+    plateforme).
+  `vanyline-cfgstore` — @Layers, @Layers.load_merged_config, @RawConfigFile,
+    @merge_config_layers (fusion des couches).
+  std — @std::fs::create_dir_all, @std::path::Path::parent,
+    @std::process::exit (uniquement chemin fatal des `ensure_*`).
+
+Exposes:
+  @config_dir — `pub fn() -> PathBuf` : répertoire de configuration vanyline.
+  @data_dir — `pub fn() -> PathBuf` : répertoire de données vanyline (socle de
+    la persistance conversations de ./store.rs).
+  @ensure_config_dir — `pub fn()` : garantit l'existence de @config_dir, sinon
+    exit fatal.
+  @ensure_data_dir — `pub fn()` : garantit l'existence de
+    `<@data_dir>/conversations`, sinon exit fatal.
+  @discover_workspace_root — `pub fn(start: &std::path::Path) -> Option<PathBuf>`,
+    marqué `#[allow(dead_code)]` alors que la fonction est consommée (./chat.rs,
+    @discover_layers) — voir `Tasks` `[?]`.
+  @discover_layers — `pub fn(start: &std::path::Path) -> vanyline_cfgstore::layers::Layers`.
+  @configured_namespace — `pub fn(layers: &Layers) -> Option<String>` : clé
+    `defaults.namespace` fusionnée ; ne consulte jamais le kubeconfig.
+  @configured_toolbox — `pub fn(layers: &Layers) -> Option<String>` : clé
+    `defaults.toolbox` fusionnée, même mécanique.
+
+Accepts:
+  Rien d'autre que des chemins et des références @Layers : pas de flag clap ici
+    (`--namespace`, `--toolbox` vivent dans ./main.rs ; aucun flag
+    `--no-interactive` n'existe dans ce crate), pas de variable lue nommément.
+  @discover_workspace_root / @discover_layers : chemin de départ ; la doc
+    exige un chemin absolu mais rien ne le vérifie — un chemin relatif
+    n'explore que `start` lui-même (`Path::parent` s'épuise), et ./rpc/handlers.rs
+    passe `.` en fallback cwd (voir `Tasks` `[?]`). L'existence du chemin n'est
+    pas requise : les tests `exists()`/`is_dir()` valident simplement faux.
+  @configured_namespace / @configured_toolbox : référence @Layers en lecture
+    seule ; aucune écriture, aucune création sur disque.
+  Environnement indirect (via `dirs`, relu à chaque appel) : `XDG_CONFIG_HOME`,
+    `XDG_DATA_HOME`, `HOME`.
+
+Returns:
+  @config_dir / @data_dir : @PathBuf terminé par `vanyline` — existence non
+    garantie, c'est le rôle des `ensure_*`.
+  @ensure_config_dir / @ensure_data_dir : `()` — soit le répertoire existe,
+    soit le processus est terminé (code `1`).
+  @discover_workspace_root : `Some(...)` du plus proche ancêtre porteur de
+    marqueur, ou `None` si aucun jusqu'à la racine du système de fichiers.
+  @discover_layers : un @Layers toujours construit ; seul @Layers.workspace_dir
+    est optionnel.
+  @configured_namespace / @configured_toolbox : `Some(String)` possédé ou `None`.
+
+Raises:
+  Jamais de `Result`, de panic ni d'erreur propagée : toute la signalisation
+    d'échec du fichier est soit `None` (découverte, défauts), soit la
+    terminaison du processus (@ensure_*, code `1`).
+  @ensure_config_dir en échec de création (occupé, permissions) : une ligne
+    stderr commençant par `Failed to create config dir: ` suivie de l'erreur
+    d'I/O, puis @std::process::exit(1).
+  @ensure_data_dir en échec : même motif avec le préfixe `Failed to create data dir: `.
+  @configured_namespace / @configured_toolbox n'exposent jamais l'@CfgStoreError
+    de @Layers.load_merged_config (`.ok()` l'efface).
+
+Handles:
+  Échec de @dirs::config_dir / @dirs::data_dir : repli littéral `~/.config` /
+    `~/.local/share` sans substitution (`Tasks` `[?]`).
+  Fin de chaîne d'ancêtres : @Path::parent retournant `None` à la racine du
+    système de fichiers termine la boucle sur `None`.
+  Entité `.vanyline` de type fichier : non retenue comme marqueur (seul un
+    répertoire compte), l'ancêtre est ignoré et la remontée continue.
+  Entité `.git` de type fichier (worktree git) : retenue comme marqueur.
+  Erreur de lecture ou de parse de la config fusionnée (YAML invalide dans
+    l'une des couches, même globale valide par ailleurs) : `None` sans aucun
+    avertissement.
+
+Tasks:
+  [ ] Compléter les tests depuis les Scenario de cette spec : `mod tests`
+    existant ne couvre que @discover_workspace_root (5 tests) — la résolution
+    des répertoires, les `ensure_*`, @discover_layers et les `configured_*`
+    sont sans test.
+  [?] Le repli littéral `~/.config/vanyline` / `~/.local/share/vanyline` est
+    un chemin RELATIF (`~` n'est jamais développé par @PathBuf) : si la
+    résolution `dirs` échoue, @ensure_config_dir / @ensure_data_dir créeraient
+    un répertoire littéralement nommé `~` dans le cwd. Sur Linux, `dirs` ne
+    retourne `None` que si `HOME` est aussi absente. Trancher : conserver,
+    développer `~`, ou refuser explicitement — arbitrage Sébastien.
+  [?] @ensure_config_dir / @ensure_data_dir utilisent `eprintln!` plus
+    @std::process::exit : contraires à la famille stricte du harnais
+    (`print_stderr`) et à la règle projet (tracing + propagation d'erreur).
+    Dette `cli` non mesurée à ce jour (bloquée par les feuilles, cf.
+    /tooling.sdd) : à intégrer à la purge du harnais pour ce fichier, et sous
+    quelle forme (le code de sortie `1` doit-il survivre) ?
+  [?] `#[allow(dead_code)]` sur @discover_workspace_root : la fonction est
+    réellement consommée (./chat.rs et @discover_layers) — attribut encore
+    justifié ou vestige à retirer ?
+  [?] Marqueurs asymétriques par dessein : `.vanyline` exige un répertoire
+    alors que `.git` accepte toute entité existante. Confirmer l'intention pour
+    un fichier nommé `.vanyline` (actuellement ignoré silencieusement) et pour
+    d'autres entités exotiques (fifo, lien cassé sur `.git` : `exists()` faux).
+  [?] @configured_namespace / @configured_toolbox avalent l'erreur de lecture
+    (`ok()`) : un `config.yaml` workspace invalide masque même un
+    `defaults.namespace` global valide, sans avertissement. L'affichage par
+    `vanyline config check` est-il jugé suffisant, ou faut-il tracer ?
+  [?] Une valeur `defaults.namespace` vide (`""`) produit un `Some` d'une chaîne
+    vide transmise à @VnlK8sClient::discover — la vider comme absente ou la
+    propager ?
+  [?] Chemin de départ relatif : la doc exige « doit être un chemin absolu »
+    mais ./rpc/handlers.rs (@resolve_layers) passe `.` en fallback cwd, ce qui
+    borne la découverte à `.`. Trancher : vérifier, tolérer ou contracter ce
+    comportement.
+
+Scenario: config_dir ajoute le sous-repertoire vanyline a XDG_CONFIG_HOME
+  Given `XDG_CONFIG_HOME` pointant sur un répertoire temporaire (test sous verrou d'environnement, comme ./rpc/handlers.rs)
+  When @config_dir est appelée
+  Then le résultat vaut exactement `<XDG_CONFIG_HOME>/vanyline`
+
+Scenario: data_dir ajoute le sous-repertoire vanyline a XDG_DATA_HOME
+  Given `XDG_DATA_HOME` pointant sur un répertoire temporaire (test sous verrou d'environnement)
+  When @data_dir est appelée
+  Then le résultat vaut exactement `<XDG_DATA_HOME>/vanyline`
+
+Scenario: ensure_config_dir cree le repli et reste idempotent
+  Given `XDG_CONFIG_HOME` pointant sur un répertoire temporaire dépourvu du sous-répertoire `vanyline`
+  When @ensure_config_dir est appelée deux fois de suite
+  Then `<XDG_CONFIG_HOME>/vanyline` existe après le premier appel
+  And le second appel retourne normalement sans message sur stderr
+
+Scenario: ensure_config_dir quitte en erreur si le chemin est occupe
+  Given `XDG_CONFIG_HOME` pointant sur un répertoire contenant un fichier régulier nommé `vanyline`
+  When @ensure_config_dir est exécutée dans un processus enfant
+  Then le processus enfant sort avec le code `1`
+  And stderr commence par `Failed to create config dir: `
+
+Scenario: ensure_data_dir cree le sous-repertoire conversations
+  Given `XDG_DATA_HOME` pointant sur un répertoire temporaire vide
+  When @ensure_data_dir est appelée
+  Then `<XDG_DATA_HOME>/vanyline/conversations` existe
+
+Scenario: ensure_data_dir quitte en erreur si le chemin est occupe
+  Given `XDG_DATA_HOME` pointant sur un répertoire contenant un fichier régulier nommé `vanyline`
+  When @ensure_data_dir est exécutée dans un processus enfant
+  Then le processus enfant sort avec le code `1`
+  And stderr commence par `Failed to create data dir: `
+
+Scenario: discover_workspace_root remonte jusqu au repertoire .vanyline
+  Given une arborescence temporaire dont la racine porte `.vanyline/` et un chemin `sub/deep/`
+  When @discover_workspace_root est appelée sur `<racine>/sub/deep`
+  Then le résultat vaut `Some(<racine>)`
+
+Scenario: discover_workspace_root reconnait un depot git par son repertoire .git
+  Given une arborescence temporaire dont la racine porte `.git/` et `sub/`, sans `.vanyline`
+  When @discover_workspace_root est appelée sur `<racine>/sub`
+  Then le résultat vaut `Some(<racine>)`
+
+Scenario: discover_workspace_root reconnait un worktree git par son fichier .git
+  Given un répertoire temporaire contenant uniquement un fichier `.git` de contenu `gitdir: /elsewhere`
+  When @discover_workspace_root est appelée sur ce répertoire
+  Then le résultat vaut `Some(ce répertoire)`
+
+Scenario: le marqueur le plus proche gagne quel que soit son type
+  Given une arborescence temporaire dont la racine porte `.git/` et dont `sub/` porte `.vanyline/` plus `sub/deep/`
+  When @discover_workspace_root est appelée sur `<racine>/sub/deep`
+  Then le résultat vaut `Some(<racine>/sub)` et non `Some(<racine>)`
+
+Scenario: discover_workspace_root remonte jusqu a la racine du systeme sans marqueur
+  Given une hiérarchie `/tmp/<tmp>/a/b/c` sans aucun marqueur sur toute la chaîne jusqu'à `/`
+  When @discover_workspace_root est appelée sur `<tmp>/a/b/c`
+  Then le résultat vaut `None`
+
+Scenario: un fichier nomme .vanyline ne compte pas comme marqueur
+  Given un répertoire temporaire sous `/tmp` portant un fichier régulier `.vanyline` et aucun `.git`, sans marqueur plus haut
+  When @discover_workspace_root est appelée sur ce répertoire
+  Then le résultat vaut `None`
+
+Scenario: discover_layers resout les deux couches dans un workspace
+  Given une racine temporaire portant `.vanyline/` et l'environnement XDG sous verrou
+  When @discover_layers est appelée sur la racine
+  Then @Layers.global_dir vaut @config_dir()
+  And @Layers.workspace_dir vaut `Some(<racine>/.vanyline)`
+
+Scenario: discover_layers hors workspace ne resout que la couche globale
+  Given une hiérarchie temporaire sous `/tmp` sans aucun marqueur jusqu'à `/`
+  When @discover_layers est appelée sur cette hiérarchie
+  Then @Layers.workspace_dir vaut `None`
+  And @Layers.global_dir vaut @config_dir() sans que ce répertoire ait été créé
+
+Scenario: discover_layers resout workspace meme sans repertoire .vanyline
+  Given une racine temporaire portant uniquement `.git/`
+  When @discover_layers est appelée sur la racine
+  Then @Layers.workspace_dir vaut `Some(<racine>/.vanyline)` alors que ce chemin n'existe pas
+
+Scenario: configured_namespace lit la valeur de la couche globale
+  Given des @Layers sans couche workspace dont le `config.yaml` global porte `defaults` avec `namespace: prod`
+  When @configured_namespace est appelée sur ces couches
+  Then le résultat vaut `Some("prod")`
+
+Scenario: la couche workspace ecrase defaults.namespace
+  Given une couche globale avec `defaults.namespace: prod` et une couche workspace avec `defaults.namespace: dev`
+  When @configured_namespace est appelée sur ces couches
+  Then le résultat vaut `Some("dev")`
+
+Scenario: configured_namespace ignore une valeur non textuelle
+  Given des @Layers dont le `config.yaml` fusionné porte `defaults.namespace: 3`
+  When @configured_namespace est appelée sur ces couches
+  Then le résultat vaut `None`
+
+Scenario: configured_namespace retourne None si une couche est invalide
+  Given une couche globale valide avec `defaults.namespace: prod` et un `config.yaml` workspace illisible comme YAML
+  When @configured_namespace est appelée sur ces couches
+  Then le résultat vaut `None` sans message d'avertissement
+
+Scenario: configured_toolbox applique la meme fusion que configured_namespace
+  Given une couche globale avec `defaults.toolbox: base` et une couche workspace avec `defaults.toolbox: labs`
+  When @configured_toolbox est appelée sur ces couches avec workspace
+  Then le résultat vaut `Some("labs")`
+  And @configured_toolbox appelée sans la couche workspace vaut `Some("base")`
+
+Scenario: defaults absents de toute couche donnent None
+  Given des @Layers dont aucune couche ne porte de fichier `config.yaml`
+  When @configured_namespace et @configured_toolbox sont appelées sur ces couches
+  Then chacune retourne `None`

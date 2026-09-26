@@ -1,0 +1,431 @@
+Spec: Sandbox cmd
+
+Platform: Rust/vanyline-cli/clap-derive
+
+Purpose:
+  Définition clap des sous-commandes K8s « sandbox » du binaire `vanyline` : un seul
+  @Commands (`pub enum`, derive unique @clap::Subcommand) à six variants — @Commands::List,
+  @Commands::Show, @Commands::Create, @Commands::Delete, @Commands::Stop, @Commands::Start —
+  plus une fonction privée @parse_toolchain, `value_parser` du flag `--toolchain` de
+  @Commands::Create. @parse_toolchain est incluse dans ce même contrat (pas de spec séparée)
+  parce qu'elle n'existe que pour ce flag : sa sémantique de découpage `NAME=IMAGE` et ses
+  trois cas d'erreur sont la définition exacte de ce que le flag accepte. Le contrat propre
+  du fichier est la FORME de la surface de commande (mots de commande, flags longs,
+  obligatoires/facultés, doc comments ⇒ texte d'aide) et le contrat de parse de
+  `NAME=IMAGE`. Toute exécution (client K8s, appels API, stdout, codes de sortie) vit dans
+  le dispatch @run_sandbox_k8s de ./main.rs ; ce contrat est documenté ici sous `Handles`
+  parce qu'il est la seule signification observable des flags pour l'utilisateur. Ne pas
+  confondre avec le chemin RPC `sandboxes/list|get|create|delete|stop|start` de
+  ./rpc/handlers.rs : il atteint les mêmes méthodes de @VnlK8sClient avec un
+  @vanyline_crds::SandboxSpec camelCase complet (@SandboxCreateParams de ./rpc/protocol.rs,
+  `spec` aplati), sans jamais passer par @Commands — la voie RPC atteint `resources`,
+  `egress`, `suspended`, `env` et `lsp` par toolchain, inatteignables par le CLI. Même
+  divergence que ./owner_cmd.rs et ./project_cmd.rs (pattern constaté sur les trois
+  familles). Un seul fichier, un seul contrat.
+
+Owns:
+  ./sandbox_cmd.rs
+
+Can read:
+  ./main.rs
+  ./owner_cmd.sdd
+  ./project_cmd.rs
+  ./rpc/handlers.rs
+  ./rpc/protocol.rs
+  ../Cargo.toml
+  ../../crds/src/lib.rs
+  ../../crds/src/lib.sdd
+  ../../controller/src/sandbox.rs
+  ../../lib/src/k8s.rs
+
+Exposes:
+  @Commands — `pub enum` avec comme seule derive @clap::Subcommand (`use clap::Subcommand`).
+    Ni `Debug`, ni `Clone`, ni `PartialEq`, ni serde/ts-rs : le type ne sort du crate que
+    matché par ./main.rs. Pas de `#[allow(clippy::large_enum_variant)]` contrairement à
+    ./project_cmd.rs (voir `[!]` dans `Tasks`). Gating de feature : aucun.
+    Nom d'utilisateur : ./main.rs renomme le variant parent en
+    `#[command(name = "sandbox", subcommand)]` (`K8sSandbox` en Rust) — la surface
+    observable est `vanyline sandbox <sous-commande>`, jamais `k8s-sandbox`.
+  @Commands::List — variant d'unité, mot `list`, aide `List K8s Sandboxes`, zéro flag.
+  @Commands::Show — mot `show`, aide `Show a single Sandbox`. Un positionnel requis
+    `name: String`.
+  @Commands::Delete — mot `delete`, aide `Delete a Sandbox`. Un positionnel requis
+    `name: String`.
+  @Commands::Stop — mot `stop`, aide `Stop a Sandbox (suspend the pod without deleting the
+    resource)`. Un positionnel requis `name: String`.
+  @Commands::Start — mot `start`, aide `Start a previously stopped Sandbox`. Un positionnel
+    requis `name: String`.
+  @Commands::Create — mot `create`, aide `Create a Sandbox`. Un positionnel requis
+    `name: String` suivi de quatre flags longs :
+      `--project` (champ `project: String`, `#[arg(long)]`) — REQUIS (type `String` sans
+        @Option, aucune aide propre).
+      `--branch` (champ `branch: String`, `#[arg(long)]`) — REQUIS, aucune aide propre.
+      `--toolchain` (champ `toolchains: Vec<@vanyline_crds::Toolchain>`,
+        `#[arg(long = "toolchain", value_parser = parse_toolchain)]`) — FACULTATIF répétable,
+        zéro occurrence ⇒ @Vec vide ; aide : `Repetable : --toolchain rust=rust:slim-trixie
+        --toolchain node=node:trixie-slim` (faute d'accent « Repetable » verbatim). Le long
+        explicite est au SINGULIER `--toolchain` alors que le champ est pluriel
+        `toolchains` : `--toolchains` n'existe pas.
+      `--image` (champ `image: Option<String>`, `#[arg(long)]`) — facultatif, absent ⇒
+        @None ; aide : `Image du serveur sandbox. Omis: defaut du controller (env
+        "SANDBOX_IMAGE").` — le doc comment entoure `SANDBOX_IMAGE` de backticks et écrit
+        « defaut » sans accent, verbatim (voir `[?]` dans `Tasks` sur cette référence d'env).
+  @parse_toolchain — fonction PRIVÉE (`fn`, pas `pub`), signature
+    `fn(&str) -> Result<@vanyline_crds::Toolchain, String>` ; unique consommateur : le
+    `value_parser` de `--toolchain` (même fichier). Contrat :
+      découpe au PREMIER `=` (@str::split_once) — `rust=b=c` ⇒ nom `rust`, image `b=c` ;
+      erreur @Err(String) au message EXACT `invalid --toolchain '{s}', expected NAME=IMAGE`
+        (où `{s}` est la valeur brute telle qu'écrite) dans les trois cas : pas de `=`,
+        nom vide (`=rust:slim`), image vide (`rust=`) ;
+      succès ⇒ @Ok(@vanyline_crds::Toolchain) avec `name` et `image` transplantés verbatim
+        (pas de trim, pas de minuscule, pas de validation) et `env: Default::default()`
+        (@BTreeMap vide) + `lsp: None`.
+    Le `env` vide et le `lsp` @None sont le comportement VOULU, pas un oubli : le
+    controller applique ses presets name-keyed quand `env` est vide / `lsp` est @None
+    (@resolve_toolchain_env et @resolve_toolchain_lsp de ../../controller/src/sandbox.rs,
+    presets existant pour `rust`, `node`, `docker`, `python`).
+  Aide générée — `vanyline sandbox --help` et `vanyline sandbox create --help` rendent les
+    mots, aides et placeholders ci-dessus (doc comments verbatim).
+  Module `#[cfg(test)]` — quatre tests unitaires sur @parse_toolchain uniquement :
+    `parse_toolchain_valid`, `parse_toolchain_missing_equals_errors`,
+    `parse_toolchain_empty_name_errors`, `parse_toolchain_empty_image_errors`. Aucun test
+    de parse des variants du enum dans le fichier (ils vivraient dans ./main.rs via @Cli).
+
+Accepts:
+  Parse seule — le fichier ne déclare pas de struct @clap::Parser : les tests de surface
+    passent par ./main.rs (@Cli::try_parse_from, méthode des tests existants de ./main.rs)
+    ou par @clap::Subcommand::command puis `try_get_matches_from` préfixé du mot `"sandbox"`.
+  `name` (Show/Delete/Stop/Start/Create) — toute @string, y compris vide : aucun
+    `value_parser`, aucune validation DNS-1123 ; un positionnel de trop est refusé par clap.
+  `--project` et `--branch` — obligatoires à la parse (valeur manquante ⇒ erreur clap) ;
+    toute @string transplantée verbatim : `--project` peut désigner un @Project inexistant,
+    `--branch` n'est validé comme nom de branche git nulle part ici (le contrôleur et
+    l'apiserver sont la seule validation en aval).
+  `--toolchain NAME=IMAGE` — valeur soumise à @parse_toolchain ; un @Err(String) est rendu
+    par clap comme erreur de valeur (le message est repris verbatim dans la sortie clap).
+    Plusieurs occurrences s'accumulent dans l'ordre du argv, doublons admis (deux
+    `--toolchain rust=…` = deux entrées dans le @Vec, voir `[?]` dans `Tasks`).
+    `--toolchain ""` échoue (pas de `=`). `--toolchains` (pluriel) est un flag inconnu.
+  `--image` — toute @string, y compris la chaîne vide qui produit @Some("") (distinct de
+    l'absence qui produit @None — voir `[?]` dans `Tasks`).
+  Flags longs kebab-case uniquement, aucun flag court ; les globaux `-n/--namespace`,
+    `-a/--agent`, `--toolbox` appartiennent au @Cli de ./main.rs, pas à ce fichier.
+  Absence de flag ⇒ aucun défaut matérialisé ici : l'image par défaut du serveur sandbox
+    est résolue par le controller (paire d'env `SANDBOX_IMAGE_REPO` + `SANDBOX_IMAGE_TAG`,
+    pas la variable `SANDBOX_IMAGE` citée par l'aide — voir `Tasks`), les presets d'env et
+    LSP des toolchains aussi.
+
+Returns:
+  Le fichier ne retourne rien d'exécutable : la derive produit
+    @clap::Subcommand::augment_args / `command` / `update_from_arg_matches`.
+  Valeurs parsées — @Commands::Create porte les @Some des flags présents (valeur brute),
+    `toolchains: Vec` VIDE (jamais @None) quand aucun `--toolchain` n'est passé,
+    `image: @None` sans `--image`. @parse_toolchain retourne un @Toolchain dont
+    `env` est toujours la @BTreeMap vide et `lsp` toujours @None — le CLI ne peut pas
+    produire autre chose.
+
+Raises:
+  @parse_toolchain — @Err(String) aux trois cas et au message exact de `Exposes` ; c'est la
+    seule erreur Rust émise dans le fichier, propagée à clap par le contrat `value_parser`
+    `Fn(&str) -> Result<T, E: Display>`.
+  Rien d'autre : pas de panic dans le fichier. Les erreurs de parse clap (sous-commande
+    inconnue, nom manquant, `--project`/`--branch` absents, flag inconnu, valeur
+    `--toolchain` refusée, positionnel surnuméraire) sont produites par clap dans ./main.rs
+    — aide/erreur sur stderr, exit 2 pour usage.
+
+Handles:
+  Consommation exclusive — ./main.rs :: @run_sandbox_k8s (seul consommateur, via le variant
+    @Commands::K8sSandbox du enum racine) : @Commands::List → @VnlK8sClient::list_sandboxes,
+    Show → get_sandbox, Create → create_sandbox, Delete → delete_sandbox,
+    Stop → set_sandbox_suspended(&name, true), Start → set_sandbox_suspended(&name, false).
+    Avant dispatch, @discover_k8s_client est appelé pour les SIX variants : namespace résolu
+    `--namespace` > `defaults.namespace` (config fusionnée) > contexte kubeconfig ; aucun
+    cluster/kubeconfig joignable ⇒ message d'erreur (famille `VNL-K8S-001`) sur stderr et
+    `exit(1)` — même pour un simple `list`.
+  Rendus stdout du consumer (dette println!/eprintln! tracée dans ../../tooling.sdd) —
+      List : `"No sandboxes found."` si vide, sinon par Sandbox une ligne
+        `"  {name} | project={spec.project} | branch={spec.branch} | phase={phase|-}"`
+        (`phase` lu dans status, dash si status/phase absents) ;
+      Show : bloc `Sandbox:` (`name`, `project`, `branch`, `image` ou `-`,
+        `toolchains: -` si vide sinon par toolchain `"    - {name} = {image}"` — sans
+        `env` ni `lsp`) puis bloc `Status:` (`phase`, `service` ou `-`, `conditions` ligne
+        par ligne `- {type} status={status} message={message}`, ou `conditions: -`, ou
+        `(not yet reconciled)` si status absent) ;
+      Create : `"Created sandbox: {name}"` après succès ;
+      Delete : `"Deleted sandbox: {name}"` ; Stop : `"Stopped sandbox: {name}"` ;
+      Start : `"Started sandbox: {name}"`.
+    Toute erreur d'API sur les six variants : `eprintln!("{e}")` puis `exit(1)`.
+  Construction de @vanyline_crds::SandboxSpec (Create, dans ./main.rs) — `project`,
+    `branch`, `toolchains`, `image` viennent bruts de l'enum ; trois champs sont CODÉS EN
+    DUR et non réglables par le CLI : `resources: None`, `egress: vec![]`,
+    `suspended: false`. En sérialisation kube (convention de ../../crds/src/lib.rs) :
+    `resources: null`, `egress: []`, `suspended: false`, et `toolchains: []` quand aucun
+    flag n'est passé — le controller dérive alors les toolchains de la détection de
+    langages du Project et applique les presets env/LSP (cf. ../../controller/src/sandbox.sdd).
+  Sémantique Stop/Start (contrat aval, ../../controller/src/sandbox.rs) — `suspended: true`
+    ⇒ le reconciler supprime le Pod en conservant worktree, PVC, Service et NetworkPolicies,
+    `status.phase` devient `"Suspended"` ; `suspended: false` ⇒ recréation du Pod. Les deux
+    variants CLI ne touchent que ce champ via set_sandbox_suspended.
+  Parallelisme RPC (hors ce contrat, ratissé pour démarcation) — ./rpc/handlers.rs
+    `sandboxes/list|get|create|delete|stop|start` : mêmes méthodes @VnlK8sClient (stop/start
+    via le même set_sandbox_suspended(true/false)) ; `sandboxes/create` prend
+    @SandboxCreateParams (`name` + @SandboxSpec aplati `#[serde(flatten)]` camelCase) et
+    peut donc porter `resources`, `egress`, `suspended`, `toolchains[].env` et
+    `toolchains[].lsp` — cinq choses que @Commands ne sait pas exprimer ; params malformés
+    ⇒ PARSE_ERROR/MALFORMED_REQUEST (tests existants de ./rpc/handlers.rs).
+
+Must:
+  Garder les six mots de commande `list`, `show`, `create`, `delete`, `stop`, `start` sous
+    la commande `sandbox`, le renommage du variant parent en `sandbox` par ./main.rs étant
+    verrouillé, et les quatre longs de Create (`--project`, `--branch`, `--toolchain`,
+    `--image`).
+  Garder `--toolchain` au long explicite SINGULIER alors que le champ est `toolchains` :
+    `--toolchains` doit rester un flag inconnu.
+  Garder `--project` et `--branch` obligatoires (champ `String` sans @Option) : une sandbox
+    sans Project ni branche cible n'a pas de sens.
+  Garder @parse_toolchain au découpage premier `=`, au message d'erreur exact
+    `invalid --toolchain '{s}', expected NAME=IMAGE` (commun aux trois cas), et à la
+    transposition verbatim de `name`/`image` (pas de trim).
+  Laisser `env` vide (@Default::default()) et `lsp` @None sur chaque @Toolchain produit :
+    le controller et ses presets name-keyed restent le seul lieu de résolution de l'env et
+    du LSP.
+  Garder les doc comments comme texte d'aide verbatim (y compris la faute « Repetable »)
+    tant qu'aucune décision de spec ne les corrige.
+  Rester consommé par un dispatch exhaustif à six branches dans @run_sandbox_k8s : tout
+    nouveau variant ici impose sa branche (match sans joker).
+
+Must not:
+  Valider le contenu des valeurs — nom de Sandbox/Project/branche conformes à une grammaire
+    quelconque, référence d'image Docker, nom de toolchain — ni restreindre par
+    `value_parser`/`possible_values` sans décision de spec : l'apiserver et le controller
+    sont la validation.
+  Injecter un défaut d'image, une toolchain implicite ou un `env`/`lsp` pré-rempli : sans
+    flag, @None et @Vec vide, le controller replie.
+  Sérialiser @Commands (serde, ts-rs) ni lui ajouter `Clone`/`Debug`/`PartialEq` : type de
+    parse interne au bin.
+  Introduire un septième mot de commande sans ajouter la branche et le contrat de rendu
+    dans ./main.rs (les voisins owner/project n'ont pas stop/start : pas de reprise par
+    copié-collé non plus dans l'autre sens).
+  Renommer un champ sans `#[arg(long = ...)]` explicite : le nom du champ EST le nom du
+    flag (kebab-case implicite clap) ; seul `toolchains` échappe à la règle grâce à son
+    long explicite singulier.
+
+Depends on:
+  clap — derive @clap::Subcommand ; contrat `value_parser` acceptant
+    `Fn(&str) -> Result<T, String>` et action Append pour une cible @Vec.
+  ../../crds/src/lib.rs (spec ../../crds/src/lib.sdd) — @vanyline_crds::Toolchain :
+    `name`/`image` requis, `env` @BTreeMap (défaut vide) et `lsp: @Option<@LspSpec>` ;
+    @vanyline_crds::SandboxSpec pour le mapping aval documenté en `Handles`.
+  ./main.rs — @Cli (globaux `-n/--namespace`, `--toolbox`), rename `sandbox`,
+    @run_sandbox_k8s, @discover_k8s_client.
+  ../../controller/src/sandbox.rs (spec ../../controller/src/sandbox.sdd) —
+    @resolve_toolchain_env, @resolve_toolchain_lsp, @toolchain_preset : la raison pour
+    laquelle `env` vide / `lsp` @None sont le comportement voulu et non une lacune.
+
+Tasks:
+  [ ] Étendre le module de tests de ./sandbox_cmd.rs (les quatre tests existants ne
+    couvrent que @parse_toolchain) : parse de surface via @Cli de ./main.rs, un test par
+    Scenario taggé par son titre.
+  [?] L'aide de `--image` cite l'env `SANDBOX_IMAGE` alors que le controller lit la paire
+    `SANDBOX_IMAGE_REPO` + `SANDBOX_IMAGE_TAG` (../../controller/src/main.sdd a déjà un
+    `[?]` homologue pour ./project.rs) : corriger le doc comment ici dans le même mouvement ?
+  [?] Le doc comment de @parse_toolchain limite les presets d'env aux noms « rust/node »
+    alors que @toolchain_preset en couvre quatre (`rust`, `node`, `docker`, `python`) :
+    corriger ici et vérifier ../../crds/src/lib.rs qui dit aussi « rust et node » ?
+  [?] `--image ""` (flag présent, valeur vide) produit `Some("")` : le controller reçoit la
+    chaîne vide au lieu de @None et ne retombe donc pas sur l'image par défaut — comportement
+    assumé, ou `""` à refuser / traiter comme absence ? Trancher puis écrire le Scenario.
+  [?] @Toolchain.env et @Toolchain.lsp sont inatteignables par le CLI (codés
+    `Default::default()` / @None) : réservés à la voie RPC `sandboxes/create` et à l'UI, ou
+    faut-il des flags (`--toolchain-env`, `--lsp-image`, …) ?
+  [?] @SandboxSpec.resources, .egress et .suspended sont codés `None` / `vec![]` / `false`
+    au Create de ./main.rs (même pattern que `application_ref`/`egress` d'owner, déjà `[?]`
+    dans ./owner_cmd.sdd) : réserver ces champs à l'app/UI ou exposer des flags CLI ?
+  [?] @Commands::Show n'affiche jamais `spec.suspended`, `resources` ni `egress` (seul
+    `phase: Suspended` rend le stop visible) : lacune d'affichage ou minimalisme assumé ?
+  [?] Toolchains en doublon (`--toolchain rust=a --toolchain rust=b`) : le CLI accepte deux
+    entrées de même nom ; comportement du mount `/toolchains/rust` côté controller non
+    vérifié. Vérifier le contrat controller puis décider (rejet CLI, ou contrat controller à
+    documenter).
+  [?] Répétition d'un flag singleton (`--image a --image b`) : comportement clap 4 supposé
+    « erreur : cannot be used multiple times » (Action Set), jamais vérifié ; le rendu exact
+    est à vérifier puis verrouiller par le Scenario `sandbox_flag_image_repete_refuse`
+    (même `[?]` ouvert que dans ./owner_cmd.sdd pour `--home-size`).
+  [?] `name` et les noms de toolchain non validés (`/` ou espace passent verbatim alors que
+    le controller en fait des chemins de mount `/toolchains/<name>`) : validation serveur
+    suffisante ou garde-fou CLI ?
+  [!] ./project_cmd.rs porte un `#[allow(clippy::large_enum_variant)]` que ce enum n'a pas :
+    l'écart de taille Create vs variantes feuille est sous le seuil du lint aujourd'hui ;
+    si Create grossit (flags `[?]` ci-dessus), le harnais deviendra rouge — note pour éviter
+    l'effet de surprise, pas un contrat.
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les Scenario d'intégration (CR @Sandbox produite, bascule `suspended`, rendus stdout,
+    erreur sans kubeconfig) sont couverts (cluster d'essai ou harnais équivalent) ou
+    explicitement renvoyés vers la spec de ./main.rs par décision de Sébastien.
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: sandbox_sous_commande_nue_refusee
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox"])`
+  Then le parse échoue (une sous-commande parmi list/show/create/delete/stop/start est
+    requise, clap rend l'erreur d'usage) : `sandbox` seul ne sélectionne aucune opération
+
+Scenario: sandbox_list_se_parse_avec_zero_argument
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "list"])`
+  Then le parse réussit et rend `Some(Commands::K8sSandbox(sandbox_cmd::Commands::List))`
+
+Scenario: sandbox_renommage_utilisateur_verrouille
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "list"])` puis
+    `Cli::try_parse_from(["vanyline", "k8s-sandbox", "list"])`
+  Then le premier réussit et le second échoue : seul le nom `sandbox` (rename du variant
+    `K8sSandbox`) est exposé aux utilisateurs
+
+Scenario: show_delete_stop_start_exigent_un_nom
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "show"])`, puis `"delete"`, puis
+    `"stop"`, puis `"start"` sans positionnel, puis `["vanyline", "sandbox", "show", "sb1"]`
+  Then les quatre premières parses échouent (le positionnel `<NAME>` est requis) et la
+    cinquième réussit avec `Show { name: "sb1" }`
+
+Scenario: create_exige_project_et_branch
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "create", "sb1"])` puis
+    `Cli::try_parse_from(["vanyline", "sandbox", "create", "sb1", "--project", "app",
+    "--branch", "main"])`
+  Then la première échoue (flags requis manquants) et la seconde réussit avec
+    `project: "app"`, `branch: "main"`, `toolchains` vide et `image: None`
+
+Scenario: toolchain_flag_au_long_singulier_verrouille
+  Given le @Cli de ./main.rs
+  When la parse avec `--toolchain rust=rust:slim-trixie` puis la parse avec
+    `--toolchains rust=rust:slim-trixie`
+  Then la première réussit et la seconde échoue en flag inconnu : seul le long explicite
+    singulier `--toolchain` existe, le pluriel implicite du champ `toolchains` n'est pas un
+    alias
+
+Scenario: parse_toolchain_valide_donne_env_vide_et_lsp_none
+  Given @parse_toolchain de ./sandbox_cmd.rs
+  When `parse_toolchain("rust=rust:slim-trixie")`
+  Then le résultat est @Ok avec `name: "rust"`, `image: "rust:slim-trixie"`, `env` vide et
+    `lsp: None` — env vide et lsp absent sont le contrat qui active les presets du
+    controller (test existant `parse_toolchain_valid`)
+
+Scenario: parse_toolchain_sans_signe_egale_refuse
+  Given @parse_toolchain de ./sandbox_cmd.rs
+  When `parse_toolchain("rust")`
+  Then le résultat est @Err dont le message contient `invalid --toolchain` et cite la
+    valeur brute (test existant `parse_toolchain_missing_equals_errors`)
+
+Scenario: parse_toolchain_nom_vide_refuse
+  Given @parse_toolchain de ./sandbox_cmd.rs
+  When `parse_toolchain("=rust:slim")`
+  Then le résultat est @Err avec le message exact `invalid --toolchain '=rust:slim',
+    expected NAME=IMAGE` (test existant `parse_toolchain_empty_name_errors`)
+
+Scenario: parse_toolchain_image_vide_refuse
+  Given @parse_toolchain de ./sandbox_cmd.rs
+  When `parse_toolchain("rust=")`
+  Then le résultat est @Err avec le message exact `invalid --toolchain 'rust=', expected
+    NAME=IMAGE` (test existant `parse_toolchain_empty_image_errors`)
+
+Scenario: parse_toolchain_ne_garde_que_le_premier_signe_egale
+  Given @parse_toolchain de ./sandbox_cmd.rs
+  When `parse_toolchain("rust=b=c")`
+  Then le résultat est @Ok avec `name: "rust"` et `image: "b=c"` : le découpage s'arrête au
+    premier `=` et le reste (y compris d'autres `=`) est l'image verbatim
+
+Scenario: parse_toolchain_accepte_les_espaces_sans_trim
+  Given @parse_toolchain de ./sandbox_cmd.rs
+  When `parse_toolchain(" rust = img ")`
+  Then le résultat est @Ok avec `name: " rust "` et `image: " img "` verbatim : aucun trim
+    n'est effectué, seule la vacuité stricte est refusée
+
+Scenario: toolchain_repete_accumule_dans_lordre_du_argv
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "create", "sb1", "--project", "app",
+    "--branch", "main", "--toolchain", "rust=rust:slim-trixie", "--toolchain",
+    "node=node:trixie-slim"])`
+  Then le parse réussit avec `toolchains` de longueur 2, dans l'ordre du argv
+    (`rust` puis `node`), chaque entrée à `env` vide et `lsp: None`
+
+Scenario: toolchain_valeur_invalide_fait_echouer_la_parse
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "create", "sb1", "--project", "app",
+    "--branch", "main", "--toolchain", "nope"])`
+  Then la parse échoue (l'@Err(String) de @parse_toolchain est rendu par clap comme valeur
+    invalide, exit d'usage 2) : aucune Commande n'est produite
+
+Scenario: create_ne_valide_aucune_valeur
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "create", "sb 1!", "--project", "",
+    "--branch", "??", "--image", "banane"])`
+  Then la parse réussit et transplante chaque valeur verbatim (`image: Some("banane")`
+    notamment) : ni nom de Sandbox, ni Project, ni branche, ni référence d'image ne sont
+    validés à la parse
+
+Scenario: sandbox_flag_image_repete_refuse
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "sandbox", "create", "sb1", "--project", "app",
+    "--branch", "main", "--image", "a", "--image", "b"])`
+  Then le parse échoue (erreur clap « cannot be used multiple times » — rendu exact à
+    vérifier puis verrouiller, voir `Tasks` `[?]`) : un flag `Option<String>` unique
+    n'accepte pas deux occurrences
+
+Scenario: aide_sandbox_documente_variants_et_flags
+  Given la commande générée `sandbox_cmd::Commands::command()` (nommée `sandbox` par ./main.rs)
+  When son aide intégrée est rendue (`--help` en test)
+  Then les six aides de variants (`List K8s Sandboxes`, `Show a single Sandbox`,
+    `Create a Sandbox`, `Delete a Sandbox`, `Stop a Sandbox (suspend the pod without
+    deleting the resource)`, `Start a previously stopped Sandbox`) y figurent, ainsi que
+    les longs `--project`, `--branch`, `--toolchain`, `--image` avec leurs doc comments
+    verbatim (dont `Repetable : --toolchain rust=rust:slim-trixie
+    --toolchain node=node:trixie-slim`)
+
+Scenario: sandbox_create_produit_la_cr_attendue
+  Given un cluster K8s joignable et un namespace d'essai (test d'intégration, chemin
+    ./main.rs @run_sandbox_k8s)
+  When `vanyline sandbox create sb1 --project app --branch main --toolchain
+    rust=rust:slim-trixie`
+  Then stdout rend `Created sandbox: sb1` et la CR @Sandbox porte
+    `spec.project: "app"`, `spec.branch: "main"`, `spec.toolchains: [{name: "rust",
+    image: "rust:slim-trixie", env: {}, lsp: null}]`, `spec.resources: null`,
+    `spec.egress: []`, `spec.suspended: false` — aucun de ces trois derniers champs
+    n'est réglable par le CLI
+
+Scenario: sandbox_create_sans_toolchain_laisse_le_controller_deriver
+  Given un cluster K8s joignable, un @Project réconcilié et un namespace d'essai (test
+    d'intégration)
+  When `vanyline sandbox create sb2 --project app --branch main`
+  Then la CR porte `spec.toolchains: []` et `spec.image: null` : le @Vec vide (jamais omis
+    ni @None côté CLI) est la valeur qui déclenche la dérivation des toolchains par le
+    controller (cf. ../../controller/src/sandbox.sdd), et l'image par défaut vient de ses
+    env, pas du CLI
+
+Scenario: sandbox_stop_puis_start_basculent_le_champ_suspended
+  Given un cluster d'essai avec une @Sandbox réconciliée `Running` (pod existant) — test
+    d'intégration
+  When `vanyline sandbox stop sb3` puis, le pod disparu, `vanyline sandbox start sb3`
+  Then stdout rend respectivement `Stopped sandbox: sb3` puis `Started sandbox: sb3`, la CR
+    porte `spec.suspended: true` entre les deux avec `status.phase: "Suspended"` et pod
+    supprimé (PVC/Service/NetworkPolicies conservés), puis `spec.suspended: false` avec
+    pod recréé après le start
+
+Scenario: sandbox_list_sans_cluster_joignable_quit_en_erreur
+  Given un environnement sans kubeconfig ni cluster joignable (KUBECONFIG pointé vers un
+    fichier mort, test d'intégration du binaire)
+  When `vanyline sandbox list`
+  Then le processus quitte avec un code de sortie non nul et un message d'erreur sur stderr
+    (marqueur famille `VNL-K8S-001` émis par @discover_k8s_client via ./main.rs) — aucune
+    ligne de liste sur stdout, et le reste du CLI (chat, config) reste fonctionnel
+
+Scenario: sandbox_list_rend_une_ligne_par_sandbox
+  Given un cluster d'essai dont le namespace cible contient deux @Sandbox (une avec
+    `status.phase` posé, une sans status) — test d'intégration
+  When `vanyline sandbox list`
+  Then stdout compte deux lignes `"  {nom} | project={p} | branch={b} | phase={ph}"` avec
+    `phase=-` pour celle sans status, et sur namespace vide le message exact
+    `No sandboxes found.`

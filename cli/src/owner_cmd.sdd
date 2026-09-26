@@ -1,0 +1,306 @@
+Spec: Owner cmd
+
+Platform: Rust/vanyline-cli/clap-derive
+
+Purpose:
+  Définition clap des sous-commandes K8s « owner » du binaire `vanyline` : un seul
+  @Commands (`pub enum`, derive unique @clap::Subcommand) à quatre variants — @Commands::List,
+  @Commands::Show, @Commands::Create, @Commands::Delete — et rien d'autre : aucune fonction,
+  aucun test, aucun code applicatif dans ./owner_cmd.rs. Le contrat propre du fichier est la
+  FORME de la surface de commande (noms de variants → mots de commande, noms de champs →
+  flags longs kebab-case, `Option<String>` ⇒ optionnels sans défaut, doc comments ⇒ texte
+  d'aide). Toute exécution (client K8s, appels API, stdout, codes de sortie) vit dans le
+  dispatch @run_owner_k8s de ./main.rs ; ce contrat est documenté ici sous `Handles` parce
+  qu'il est la seule signification observable des flags pour l'utilisateur, et que changer
+  ./owner_cmd.rs sans le connaître casserait ce chemin. Ne pas confondre avec le chemin RPC
+  `owners/list|get|create|delete` de ./rpc/handlers.rs : il atteint les mêmes méthodes de
+  @VnlK8sClient mais avec un @vanyline_crds::OwnerSpec camelCase aplati
+  (@OwnerCreateParams de ./rpc/protocol.rs), sans jamais passer par @Commands — la sémantique
+  des flags kebab et de l'agrégation `project_defaults` est propre au CLI. Un seul fichier,
+  un seul contrat (mêmes formes que ./project_cmd.rs et ./sandbox_cmd.rs, contrats séparés).
+
+Owns:
+  ./owner_cmd.rs
+
+Can read:
+  ./main.rs
+  ./project_cmd.rs
+  ./sandbox_cmd.rs
+  ./rpc/handlers.rs
+  ./rpc/protocol.rs
+  ../Cargo.toml
+  ../../crds/src/lib.rs
+  ../../lib/src/k8s.rs
+  ../../controller/src/owner.rs
+
+Exposes:
+  @Commands — `pub enum` avec comme seule derive @clap::Subcommand (`use clap::Subcommand`).
+    Ni `Debug`, ni `Clone`, ni `PartialEq`, ni serde/ts-rs : le type ne se stringify pas, ne
+    se compare pas, ne sort du crate que matché par ./main.rs. Gating de feature : aucun.
+    Nom d'utilisateur de la commande : l'appelant ./main.rs renomme le variant parent en
+    `#[command(name = "owner", subcommand)]` (`K8sOwner` en Rust) — la surface observable est
+    `vanyline owner <sous-commande>`, jamais `k8s-owner`.
+  @Commands::List — variant d'unité, mot de commande `list`, aide `List K8s Owners`, zéro
+    flag, zéro positionnel.
+  @Commands::Show — mot `show`, aide `Show a single Owner`. Un unique positionnel requis
+    `name: String` (placeholder d'aide `<NAME>`).
+  @Commands::Delete — mot `delete`, aide `Delete an Owner`. Un unique positionnel requis
+    `name: String`.
+  @Commands::Create — mot `create`, aide `Create an Owner`. Positionnel requis `name: String`
+    suivi de sept flags longs optionnels (`#[arg(long)]`, type `Option<String>`, absent ⇒
+    `None`) dont le nom clap est le snake_case du champ converti en kebab-case :
+      `--existing-pvc` (champ `existing_pvc`) — aide : `PVC home existant (ex. celui de
+        code-server). Omis: PVC créé par le controller.`
+      `--home-size` (champ `home_size`) — aucun doc comment, pas d'aide propre.
+      `--home-storage-class` (champ `home_storage_class`) — aucun doc comment.
+      `--home-access-mode` (champ `home_access_mode`) — aide : `Mode d'accès du PVC home.
+        Omis: "`ReadWriteMany`" (défaut historique).`
+      `--project-default-storage-size` (champ `project_default_storage_size`) — aide :
+        `Taille par défaut appliquée aux futurs Projects de cet Owner.`
+      `--project-default-storage-class` (champ `project_default_storage_class`) — aucun doc
+        comment.
+      `--project-default-storage-access-mode` (champ `project_default_storage_access_mode`) —
+        aucun doc comment.
+  Aide générée — `vanyline owner --help` et `vanyline owner create --help` rendent exactement
+    les mots, aides et placeholders ci-dessus (doc comments = texte d'aide clap, verbatim).
+  Aucun module de test dans le fichier (ratissé : 32 lignes, enum seul).
+
+Accepts:
+  Parse seul — le test unitaire du fichier ne peut pas passer par @clap::Parser (le fichier
+    ne déclare pas de struct `Parser`) : il passe par @clap::Subcommand::command puis
+    `try_get_matches_from` sur un argv préfixé du mot `"owner"`, ou par le @Cli de ./main.rs
+    (`Cli::try_parse_from(["vanyline", "owner", …])`, méthode des tests existants de
+    ./main.rs).
+  `name` (Show/Create/Delete) — toute @string, y compris vide : aucun `value_parser`, aucune
+    validation DNS-1123, aucune longueur (un `name: String` positionnel est requis mais
+    `""` est une valeur clap valide) ; un positionnel de trop est refusé par clap.
+  Valeurs de flags de Create — toute @string transplantée verbatim : `--home-size` n'est pas
+    parsé en @Quantity, `--home-access-mode` n'est pas contraint aux quatre modes K8s,
+    `--existing-pvc` n'est pas vérifié existant. Les sept flags sont mutuellement
+    indépendants et combinables avec n'importe quel sous-ensemble.
+  Flags longs uniquement — les noms existent en kebab-case seulement : `--home-size` accepte,
+    `--home_size` est un argument inconnu ; aucun flag court (pas de `-x` sur ces flags,
+    distinctement des globaux `-n/--namespace` portés par le @Cli de ./main.rs).
+  Absence de flag ⇒ @None — @Commands ne matérialise AUCUN défaut : `"1Gi"` et
+    `"ReadWriteMany"` documentés dans les aides sont appliqués au reconcile par le
+    controller (@DEFAULT_HOME_SIZE, @DEFAULT_HOME_ACCESS_MODE de
+    ../../controller/src/owner.rs), jamais par le CLI.
+
+Returns:
+  Le fichier ne retourne rien d'exécutable : la derive produit
+    @clap::Subcommand::augment_args / `command` / `update_from_arg_matches`.
+  Valeurs parsées — @Commands::Create porte exactement les @Some des flags présents (valeur
+    brute telle qu'écrite) et @None ailleurs ; @Commands::Show/Delete portent
+    `name: String` nu, non transformé.
+
+Raises:
+  Aucune erreur Rust ici : le fichier ne définit ni @Result ni panic. Les erreurs de parse
+    (sous-commande inconnue, nom manquant, flag inconnu ou répété, positionnel surnuméraire)
+    sont produites par clap sur `try_parse_from`/`parse` dans ./main.rs — rendu aide/erreur
+    sur stderr et issue non nulle gérés par clap lui-même (exit 2 pour usage).
+
+Handles:
+  Consommation exclusive — ./main.rs :: @run_owner_k8s (seul utilisateur hors du fichier,
+    grep : 4 occurrences de `owner_cmd`) ; @Commands::List → @VnlK8sClient::list_owners,
+    @Commands::Show → @VnlK8sClient::get_owner, @Commands::Create → @VnlK8sClient::create_owner,
+    @Commands::Delete → @VnlK8sClient::delete_owner. Avant dispatch, @discover_k8s_client est
+    appelé pour les QUATRE variants : namespace résolu `--namespace` > `defaults.namespace`
+    (config fusionnée) > contexte kubeconfig ; aucun cluster/kubeconfig joignable ⇒ message
+    d'erreur (famille `VNL-K8S-001`) sur stderr et `exit(1)` — même pour un simple `list`.
+  Rendus stdout du consumer (contrat humain, dette println!/eprintln! tracée dans
+    ../../tooling.sdd) —
+      List : `"No owners found."` si vide, sinon par Owner une ligne
+        `"  {name} | {status.pvcName|-} | {status.serviceAccount|-}"` ;
+      Show : bloc `Owner:` (`name`, `existingPvc`, `homeSize`, `homeStorageClass`,
+        `projectDefaults.storageSize`/`.storageClass` ou `projectDefaults: -`) puis bloc
+        `Status:` (`pvcName`, `serviceAccount`, `conditions` ligne par ligne
+        `- {type} status={status} message={message}`, ou `conditions: -`, ou
+        `(not yet reconciled)` si status absent) ;
+      Create : `"Created owner: {name}"` après succès ;
+      Delete : `"Deleted owner: {name}"` après succès.
+    Toute erreur d'API sur les quatre variants : `eprintln!("{e}")` puis `exit(1)`.
+  Agrégation project_defaults (Create, dans ./main.rs) — un @vanyline_crds::ProjectDefaults
+    n'est construit (`Some`) que si AU MOINS UN des trois flags `--project-default-*` est
+    présent ; les deux autres champs partent @None. Sans aucun des trois :
+    `project_defaults: None`. Le @vanyline_crds::OwnerSpec envoyé porte de plus
+    `application_ref: None` et `egress: vec![]` codés en dur — non réglables par le CLI.
+    En sérialisation kube, un champ @None d'@OwnerSpec voyage sous `"clé": null` (convention
+    de ../../crds/src/lib.rs), pas de clé absente.
+  Parallelisme RPC (hors ce contrat, ratissé pour démarcation) — ./rpc/handlers.rs
+    `owners/list|get|create|delete` : mêmes méthodes @VnlK8sClient, params JSON camelCase
+    (`NameParams`, @OwnerCreateParams à spec aplatie `#[serde(flatten)]`), sans les flags
+    kebab ni l'agrégation ci-dessus ; params malformés ⇒ PARSE_ERROR/MALFORMED_REQUEST
+    (tests existants de ./rpc/handlers.rs).
+
+Must:
+  Garder les quatre mots de commande `list`, `show`, `create`, `delete` sous la commande
+    `owner` et les sept longs kebab-case de `Create` (`--existing-pvc`, `--home-size`,
+    `--home-storage-class`, `--home-access-mode`, `--project-default-storage-size`,
+    `--project-default-storage-class`, `--project-default-storage-access-mode`) : ce sont les
+    noms que tapent les humains et les scripts ; le renommage du variant parent en `owner`
+    par ./main.rs est verrouillé.
+  Laisser chaque flag de Create en `Option<String>` sans `default_value` ni
+    `value_parser` restrictif : l'absence doit produire @None et le controller reste le seul
+    lieu d'application des défauts métier (`"1Gi"`, `"ReadWriteMany"`).
+  Transplanter toute valeur de flag et tout `name` verbatim, sans normalisation ni
+    validation dans ce fichier.
+  Garder les doc comments comme texte d'aide (les trois aides de Create existantes et les
+    quatre aides de variants sont le contenu de `--help`).
+  Rester consommé par un dispatch exhaustif à quatre branches dans ./main.rs : tout nouveau
+    variant ici impose sa branche dans @run_owner_k8s (match sans joker).
+
+Must not:
+  Valider le contenu des valeurs (`Quantity`, modes d'accès parmi `ReadWriteOnce`/
+    `ReadWriteMany`/…, nom de PVC, nom d'Owner conforme DNS-1123) ni restreindre les valeurs
+    par `value_parser`/`possible_values` sans décision de spec.
+  Injecter un défaut (`"1Gi"`, `"ReadWriteMany"`, taille de project) ni un champ implicite :
+    le CLI envoie @None et le controller replie.
+  Sérialiser @Commands (serde, ts-rs) ni lui ajouter `Clone`/`Debug`/`PartialEq` : type de
+    parse interne au bin, seul le comportement CLI compte.
+  Introduire un cinquième mot de commande sans ajouter la branche et le contrat de rendu
+    correspondant dans ./main.rs (les patterns voisins ./project_cmd.rs et
+    ./sandbox_cmd.rs incluent stop/start, `owner` ne doit pas en hériter par copié-collé).
+  Renommer les champs sans `#[arg(long = ...)]` explicite : le nom du champ EST le nom du
+    flag (kebab-case implicite clap), renommer un champ renomme le flag.
+
+Tasks:
+  [ ] Créer le module de tests de ./owner_cmd.rs (aucun aujourd'hui) : parse via le @Cli de
+    ./main.rs ou @clap::Subcommand::command, un test par Scenario taggé par son titre.
+  [?] `Show` n'affiche JAMAIS `homeAccessMode` ni `projectDefaults.storageAccessMode` alors
+    que `Create` les accepte en flags : omission d'affichage (le propriétaire ne retrouve pas
+    ce qu'il a posé) ou choix délibéré ? Trancher avec Sébastien — si omission, ajouter les
+    deux lignes au rendu de @run_owner_k8s et le scenario associé.
+  [?] `Create` code en dur `application_ref: None` et `egress: vec![]` : la CR @Owner
+    supporte les deux (../../crds/src/lib.rs, et `app` pose `applicationRef` pour
+    l'Ingress). Volonté de réserver ces champs à l'app/UI, ou flags CLI (`--application-ref`,
+    règles egress) à ajouter ?
+  [?] Répétition d'un flag (`--home-size 1Gi --home-size 2Gi`) : comportement clap 4
+    supposé « erreur : cannot be used multiple times » (Action Set), jamais vérifié par test.
+    Vérifier le rendu exact et le verrouiller par le Scenario
+    `owner_flag_repete_en_home_size_refuse` ; si clap acceptait le dernier wins, la spec doit
+    le dire — ne pas trancher à l'aveugle.
+  [?] `name` vide : `vanyline owner show ""` passe @Some("")/chaîne vide jusqu'à l'apiserver
+    (erreur K8s puis exit 1, pas de validation CLI). Contrat assumé (le serveur est la
+    validation) ou garde-fou à ajouter ?
+  [?] Agrégation « Some si ≥1 flag `--project-default-*` » : `--project-default-storage-size
+    5Gi` seul crée un ProjectDefaults partiel dont les champs absents laissent le controller
+    replier sur ses propres défauts. Règle voulue (et alors à verrouiller par test
+    d'intégration) ou faut-il exiger les trois ensemble / refuser un partiel ambigu ?
+  [?] Les quatre flags de stockage sans aide (`--home-size`, `--home-storage-class`,
+    `--project-default-storage-class`, `--project-default-storage-access-mode`) : dette de
+    doc comments à combler ou omission assumée ?
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre et passe.
+  Les Scenario d'intégration (agrégation `project_defaults`, rendu stdout, erreur sans
+    kubeconfig) sont couverts (test d'intégration cluster ou harnais équivalent) ou
+    explicitement renvoyés vers la spec de ./main.rs par décision de Sébastien.
+  Sébastien a tranché tous les `[?]` de `Tasks` — la spec relue fait foi du contrat.
+
+Scenario: owner_list_se_parse_avec_zero_argument
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner", "list"])`
+  Then le parse réussit et rend `Some(Commands::K8sOwner(owner_cmd::Commands::List))`
+
+Scenario: owner_sous_commande_nue_refusee
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner"])`
+  Then le parse échoue (une sous-commande parmi list/show/create/delete est requise, clap
+    exit d'usage) — `owner` seul ne sélectionne aucune opération
+
+Scenario: show_et_delete_exigent_un_nom
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner", "show"])` puis
+    `Cli::try_parse_from(["vanyline", "owner", "delete"])`
+  Then chacun échoue en erreur clap (le positionnel `<NAME>` est requis) alors que
+    `["vanyline", "owner", "show", "alice"]` réussit et rend `Show { name: "alice" }`
+
+Scenario: owner_renommage_utilisateur_verrouille
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner", "list"])` puis
+    `Cli::try_parse_from(["vanyline", "k8s-owner", "list"])`
+  Then le premier réussit et le second échoue : seul le nom `owner` (rename du variant
+    `K8sOwner`) est exposé aux utilisateurs
+
+Scenario: create_sans_flag_donne_tous_options_none
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner", "create", "alice"])`
+  Then le parse réussit avec `Create { name: "alice" }` et les sept champs
+    `existing_pvc`, `home_size`, `home_storage_class`, `home_access_mode`,
+    `project_default_storage_size`, `project_default_storage_class`,
+    `project_default_storage_access_mode` tous à @None — aucun défaut `"1Gi"` ni
+    `"ReadWriteMany"` n'est matérialisé à la parse
+
+Scenario: create_accepte_les_sept_flags_kebab_case
+  Given le @Cli de ./main.rs
+  When la commande `vanyline owner create alice --existing-pvc cs-home --home-size 2Gi
+    --home-storage-class cephfs --home-access-mode ReadWriteOnce
+    --project-default-storage-size 5Gi --project-default-storage-class local-path
+    --project-default-storage-access-mode ReadWriteOnce`
+  Then le parse réussit et chaque champ porte exactement la valeur de son flag kebab-case
+    (mapping champ snake_case ↔ flag kebab verrouillé, sept @Some distincts)
+
+Scenario: create_rejette_les_flags_underscore
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner", "create", "alice", "--home_size", "2Gi"])`
+  Then le parse échoue en argument inconnu : seul `--home-size` (kebab-case) existe, la
+    forme snake_case n'est pas un alias
+
+Scenario: create_transplante_les_valeurs_sans_validation
+  Given le @Cli de ./main.rs
+  When `["vanyline", "owner", "create", "alice", "--home-size", "banane",
+    "--home-access-mode", "PasUnMode", "--existing-pvc", ""]`
+  Then le parse réussit et rend les trois @Some verbatim (`"banane"`, `"PasUnMode"`,
+    chaîne vide) : ni @Quantity, ni mode d'accès connu, ni nom de PVC ne sont validés ici
+
+Scenario: positionnel_supplementaire_refuse
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner", "show", "alice", "bob"])`
+  Then le parse échoue : `show` n'accepte qu'un unique positionnel
+
+Scenario: aide_owner_documente_variants_et_flags
+  Given la commande générée `owner_cmd::Commands::command()` (nommée `owner` par ./main.rs)
+  When son aide intégrée est rendue (`--help` en test)
+  Then les quatre aides `List K8s Owners`, `Show a single Owner`, `Create an Owner`,
+    `Delete an Owner` y figurent, ainsi que les longs `--existing-pvc`, `--home-access-mode`
+    et `--project-default-storage-size` avec leurs doc comments verbatim
+
+Scenario: owner_flag_repete_en_home_size_refuse
+  Given le @Cli de ./main.rs
+  When `Cli::try_parse_from(["vanyline", "owner", "create", "alice", "--home-size", "1Gi",
+    "--home-size", "2Gi"])`
+  Then le parse échoue (erreur clap « cannot be used multiple times » — rendu exact à
+    vérifier puis verrouiller, voir `Tasks` `[?]`) : un flag `Option<String>` unique
+    n'accepte pas deux occurrences
+
+Scenario: owner_create_avec_un_seul_project_default_flag_agrege_partiel
+  Given un cluster K8s joignable et un namespace d'essai vide (test d'intégration, chemin
+    ./main.rs @run_owner_k8s)
+  When `vanyline owner create alice --project-default-storage-size 5Gi`
+  Then la stdout rend `Created owner: alice` et la CR @Owner créée porte
+    `spec.projectDefaults = { storageSize: "5Gi", storageClass: null,
+    storageAccessMode: null }` (agrégation Some au premier flag présent, autres champs
+    null), `spec.applicationRef: null`, `spec.egress: []`, `spec.homeSize: null` — le
+    défaut `"1Gi"` n'apparaît pas dans la CR, il est appliqué au reconcile côté controller
+
+Scenario: owner_create_sans_flag_project_default_omet_le_bloc
+  Given un cluster K8s joignable et un namespace d'essai vide
+  When `vanyline owner create bob`
+  Then la stdout rend `Created owner: bob` et la CR porte `spec.projectDefaults: null`
+    (aucun objet partiel créé quand aucun des trois flags `--project-default-*` n'est présent)
+
+Scenario: owner_list_sans_cluster_joignable_quit_en_erreur
+  Given un environnement sans kubeconfig ni cluster joignable (KUBECONFIG pointé vers un
+    fichier mort, test d'intégration du binaire)
+  When `vanyline owner list`
+  Then le processus quitte avec un code de sortie non nul et un message d'erreur sur stderr
+    (marqueur famille `VNL-K8S-001` émis par @discover_k8s_client via ./main.rs) — aucune
+    ligne de liste sur stdout, et le reste du CLI (chat, config) reste fonctionnel
+
+Scenario: owner_list_rend_une_ligne_par_owner
+  Given un cluster d'essai dont le namespace cible contient deux @Owner réconciliés (un avec
+    status `pvcName`/`serviceAccount` posés, un sans status) — test d'intégration
+  When `vanyline owner list`
+  Then stdout compte deux lignes `"  {nom} | {pvcName|-} | {serviceAccount|-}"` (dash pour
+    les champs de status absents), et sur namespace vide le message exact
+    `No owners found.`

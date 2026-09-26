@@ -1,0 +1,343 @@
+Spec: Store
+
+Platform: Rust/vanyline-cli/std_fs/serde_json
+
+Purpose:
+  Persistance sur disque des conversations et du pointeur « conversation active » du CLI
+  `vanyline` : un fichier JSON par @vanyline_lib::Conversation dans `conversations/` du
+  répertoire de données, plus un fichier pointeur `active-conversation.json` à la racine de
+  ce répertoire. Ce fichier sert l'historique de chat, pas la configuration : le
+  @vanyline_cfgstore::fs_store::FsConfigStore (agents, providers, modèles…) est construit
+  ailleurs (@discover_fs_store dans ./main.rs, contrat de
+  ../../cfgstore/src/fs_store.sdd) ; ici il n'est jamais question de couches
+  global/workspace, de `--workspace` ou de @crate::config::discover_layers — le stockage des
+  conversations est strictement global (un seul répertoire, @data_dir de ./config.rs). Le
+  fichier est consommé par trois appelants : les sous-commandes CLI `conversations
+  list|new|show|delete|set` (@run_conversation, ./main.rs), la reprise `--continue` du flux
+  `chat`/`run` (./chat.rs) et les méthodes RPC `conversations/*` (./rpc/handlers.rs). Lui-
+  même ne porte ni affichage, ni codes VNL-*, ni enveloppe JSON-RPC : ce sont des contrats
+  d'appelants. Il expose aussi le solveur pur @resolve_conversation_reference (index 1-based
+  ou préfixe d'UUID), utilisé par les sous-commandes CLI.
+
+Owns:
+  ./store.rs
+
+Can read:
+  ./config.rs
+  ./main.rs
+  ./chat.rs
+  ./rpc/handlers.rs
+  ../../../lib/src/types.rs
+
+Structure:
+  ./store.rs — six fonctions publiques sans état structuré, plus deux aides privées
+    génériques : @load_json (lecture @std::fs::read_to_string puis désérialisation
+    @serde_json::from_str, erreur serde convertie en @std::io::Error de kind
+    @std::io::ErrorKind::InvalidData portant le message serde) et @save_json (sérialisation
+    @serde_json::to_string_pretty, erreur convertie de même, puis @std::fs::write qui
+    tronque le fichier existant et ne crée pas le répertoire parent). Aucune struct, aucun
+    cache, aucune lock : chaque appel relit le système de fichiers. Le module `store` est
+    privé (`mod store;` ./main.rs — crate binaire, la surface publique ci-dessous vaut
+    pour le crate seulement).
+
+Exposes:
+  @list_conversations() -> @Result<Vec<@vanyline_lib::Conversation>, @std::io::Error> —
+    lecture de `conversations/`, un seul appel, trié par @Uuid croissant.
+  @get_conversation(id: &@Uuid) -> @Result<@vanyline_lib::Conversation, @std::io::Error> —
+    lecture directe de `conversations/{id}.json`, sans lister ni résoudre quoi que ce soit.
+  @save_conversation(conv: &@vanyline_lib::Conversation) -> @Result<(), @std::io::Error> —
+    création du répertoire (@ensure_data_dir ./config.rs) puis écriture pretty JSON dans
+    `conversations/{conv.id}.json` (écrasement du fichier de même nom).
+  @delete_conversation(id: &@Uuid) -> @Result<(), @std::io::Error> — suppression de
+    `conversations/{id}.json`, idempotente (succès silencieux si absent).
+  @set_active_conversation(id: &@Uuid) -> @Result<(), @std::io::Error> — écriture du
+    @Uuid sérialisé (chaîne JSON entre guillemets, pretty) dans `active-conversation.json`.
+  @get_active_conversation() -> @Option<@Uuid> — lecture du fichier pointeur ; @None si
+    absent, illisible ou de contenu non parsable (ne lève jamais d'erreur).
+  @resolve_conversation_reference(convs: &[@vanyline_lib::Conversation], reference: &str) ->
+    @Result<@Uuid, @String> — fonction pure, zéro accès disque, résout une référence CLI.
+  @load_json / @save_json — aides privées, structure interne, pas surface exposée.
+
+Accepts:
+  Implantation sur disque : @data_dir()/conversations/{id}.json avec `{id}` =
+    @Uuid::to_string (canonical minuscule avec tirets — @uuid est en feature `serde`, la
+    représentation est donc chaîne canonique) en pretty JSON de @vanyline_lib::Conversation
+    — le format de stockage lui-même (clés optionnelles `agent`/`title`/`todo`, `messages`
+    requis, tolérance à la clé absente) est contractualisé ../../../lib/src/types.rs.
+  Second fichier : @data_dir()/active-conversation.json, contenu = chaîne JSON pretty du
+    @Uuid (ex. `"6b9c1e32-…"` avec les guillemets, fichier mono-ligne).
+  Résolution de chemin du répertoire racine via @data_dir/./config.rs :
+    `dirs::data_dir()/vanyline`, avec repli `~/.local/share/vanyline` littéral (tilde NON
+    développé) quand `dirs` retourne @None — voir Tasks `[?]`.
+  @resolve_conversation_reference accepte en `reference` : soit un entier décimal `propre`
+    (non vide, uniquement des chiffres ASCII, sans zéro initial — `0` est un décimal propre
+    de valeur nulle, `01` ne l'est pas), interprété comme index 1-based dans le slice
+    `convs` tel que passé par l'appelant ; soit toute autre chaîne, comparée
+    insensiblement à la casse (minusculation de l'entrée) comme préfixe de la forme
+    canonique de @Conversation::id.
+
+Returns:
+  @list_conversations — @Ok d'un @Vec vide quand `conversations/` est absent ou vide ;
+    sinon les conversations dont le fichier se désérialise, triées par id croissant (ordre
+    @Uuid = ordre lexicographique des chaînes canoniques).
+  @get_conversation — @Ok de la @Conversation complète désérialisée du fichier.
+  @get_active_conversation — @Some de l'id pointé quand le fichier est lisible et parse en
+    @Uuid ; @None dans tous les autres cas.
+  @resolve_conversation_reference — @Ok de l'id résolu : index 1-based dans la tranche, ou
+    unique correspondance de préfixe.
+  @save_conversation / @delete_conversation / @set_active_conversation — @Ok(()) en succès.
+
+Raises:
+  @std::io::Error de kind @std::io::ErrorKind::NotFound — @get_conversation sur un id sans
+    fichier (source du mapping `VNL-RPC-005` côté ./rpc/handlers.rs, pas ici).
+  @std::io::Error de kind @std::io::ErrorKind::InvalidData — contenu JSON invalide ou non
+    conforme au type via @load_json (message = message serde), ou échec de sérialisation
+    dans @save_json (quasi inatteignable avec le type courant).
+  Tout autre kind io (PermissionDenied, erreur @std::fs::read_dir ou d'itération d'entrée
+    dans @list_conversations, échec @std::fs::write dans @save_json) — propagé tel quel.
+  @String dans @resolve_conversation_reference, sans code VNL-* : `No conversation at index
+    {i} (have {n})`, `No conversation matches '{r}'`, `Ambiguous reference '{r}': matches
+    {n} conversations` — l'affichage (stderr + `exit(1)`, ./main.rs) et le mapping RPC
+    (./rpc/handlers.rs) appartiennent aux appelants.
+
+Handles:
+  Chemin de terminaison du processus, pas une erreur : @save_conversation et
+    @set_active_conversation appellent @ensure_data_dir (./config.rs) qui, en cas d'échec de
+    @std::fs::create_dir_all, fait `eprintln!` + @std::process::exit(1) — ces deux fonctions
+    peuvent donc tuer le processus sans jamais retourner d'@Err (dette de harnais tracée
+    ../../tooling.sdd, voir Tasks `[?]`).
+  Tolérance silencieuse en lecture : @list_conversations ignore les entrées dont l'extension
+    n'est pas exactement `.json` (comparaison sensible à la casse : `.JSON` est ignorée) et
+    les fichiers `.json` qui échouent à se désérialiser — une conversation corrompue
+    disparaît silencieusement de la liste et décale d'autant les index affichés par
+    ./main.rs (voir Tasks `[?]`).
+  @get_active_conversation convertit en @None toute erreur de lecture ET tout contenu non
+    parseable (chaîne `.ok()` sur @load_json) : un pointeur corrompu est indistinguable d'un
+    pointeur absent.
+  Pointeur périmé : @delete_conversation ne touche jamais `active-conversation.json` —
+    supprimer la conversation active laisse @get_active_conversation retourner un id sans
+    fichier ; c'est @resolve_context (./chat.rs) qui absorbe ensuite l'@Err de
+    @get_conversation par `.ok()` et repart sur une conversation neuve.
+  Appelants CLI (@run_conversation ./main.rs) : `list` avale l'erreur io par
+    `unwrap_or_default` (affiche `No conversations.`) ; `show`/`delete`/`set` résolvent
+    d'abord la référence contre la liste courante via @resolve_conversation_reference puis
+    opèrent ; `set` vérifie l'existence de la conversation par un @get_conversation
+    intercalaire avant @set_active_conversation.
+  Appelants chat (./chat.rs) : `--continue` lit @get_active_conversation puis
+    @get_conversation ; chaque tour de chat est persisté par @save_conversation avec erreur
+    ignorée (`.ok()`).
+  Appelants RPC (./rpc/handlers.rs) : `conversations/list` (summaries, erreur io →
+    `VNL-RPC-007`), `conversations/get` (NotFound → `VNL-RPC-005`, autre io →
+    `VNL-RPC-007`), `conversations/create` (@save_conversation), `conversations/delete`
+    (compte explicitement sur l'idempotence du store : un id inconnu réussit). Le RPC ne
+    touche jamais le pointeur actif — notion réservée au CLI.
+
+Must:
+  Nommer les fichiers de conversation d'après la forme canonique minuscule de l'id
+    (@Uuid::to_string) et les écrire en pretty JSON (@serde_json::to_string_pretty).
+  Trier la sortie de @list_conversations par @Conversation::id (ordre @Uuid, soit
+    l'ordre lexicographique des chaînes canoniques) : c'est LE seul ordre sur lequel les
+    index de @resolve_conversation_reference ont un sens, et l'appelant doit résoudre sur
+    le même vec que celui affiché (@run_conversation énumère la sortie de @list_conversations).
+  Retourner @Ok d'un @Vec vide depuis @list_conversations quand `conversations/` est absent,
+    sans erreur et sans le créer.
+  Rendre @delete_conversation idempotente : chemin inexistant (@Path::exists faux) →
+    @Ok(()) sans tentative de suppression.
+  Garder les chemins de lecture strictement sans effet de bord disque : @list_conversations,
+    @get_conversation et @get_active_conversation ne créent ni répertoire ni fichier.
+  Résoudre une référence dans l'ordre strict : décimal propre parseable en @usize et dans
+    `1..=convs.len()` → position correspondante (court-circuit : une référence numérique
+    dans la plage n'est JAMAIS interprétée comme préfixe, même si un id commence par ces
+    chiffres) ; décimal propre hors plage → @Err `No conversation at index {i} (have {n})`
+    SANS repli sur le matching préfixe ; tout le reste (non numérique, zéros initiaux comme
+    `01`, ou valeur dépassant @usize::MAX) → matching préfixe insensible à la casse, 0 ou
+    ≥2 correspondances donnant les erreurs respectives.
+  Faire opérer @resolve_conversation_reference uniquement sur la tranche `convs` reçue : la
+    fonction ne lit ni n'écrit rien (c'est l'appelant qui charge via @list_conversations,
+    doc comment du code).
+
+Must not:
+  Émettre des codes VNL-*, une enveloppe JSON-RPC ou le moindre affichage : le module ne
+    retourne que @std::io::Error, @Option et des @String en anglais ; l'identification
+    d'erreur unique est le fait des appelants (`VNL-RPC-005`/`VNL-RPC-007` sont définis et
+    appliqués dans ./rpc/handlers.rs, pas ici).
+  Consulter les couches de configuration (config_dir, couches global/workspace, flag RPC
+    `--workspace`, @crate::config::discover_layers) : l'emplacement des conversations ne
+    dépend ni du CWD ni d'aucune découverte de workspace.
+  Promettre la sécurité en écriture concurrente : aucune lock, aucune écriture atomique
+    (pas de tmp+rename) — CLI et serveur RPC (extension VS Code) peuvent écrire le même
+    `{id}.json` en même temps (voir Tasks `[?]`).
+  Garantir la cohérence du pointeur actif : @set_active_conversation ne vérifie pas
+    l'existence de la conversation (c'est ./main.rs qui fait le @get_conversation
+    vérificatoire pour `conversations set`), et @delete_conversation ne nettoie jamais le
+    pointeur.
+  Utiliser @unwrap/@expect/@panic/@println/@eprintln dans le code de production de ./store.rs
+    (la propagation @Result/@Option est la seule voie d'erreur du fichier ; le `eprintln!`
+    + `exit` hérité de @ensure_data_dir est un comportement de ./config.rs, pas d'ici).
+
+Scenario: list_conversations_rend_un_vec_vide_quand_le_repertoire_conversations_est_absent
+  Given un repertoire de donnees ne contenant pas `conversations/`
+  When @list_conversations est appele
+  Then le resultat est @Ok d'un @Vec vide et le repertoire `conversations/` n'a pas ete cree
+
+Scenario: list_conversations_ignore_les_fichiers_non_json_et_les_json_corrompus
+  Given `conversations/` contenant une conversation valide `a.json`, un fichier `notes.txt`, un fichier `BROKEN.JSON` en majuscules et un fichier `bad.json` de contenu `pas du json`
+  When @list_conversations est appele
+  Then le resultat est @Ok ne contenant que la conversation de `a.json`, sans erreur
+
+Scenario: list_conversations_trie_les_conversations_par_id_croissant
+  Given deux conversations enregistrees dont l'id canonique de `b` est superieur a celui de `a`, ecrites dans l'ordre b puis a
+  When @list_conversations est appele
+  Then le vec retourne est dans l'ordre [a, b] (ordre des chaines canoniques)
+
+Scenario: save_conversation_puis_get_conversation_font_la_roundtrip_d_une_conversation
+  Given une conversation avec un id genere, un agent et deux messages
+  When @save_conversation est appelee puis @get_conversation sur le meme id
+  Then @get_conversation retourne la meme conversation (id, agent, messages) et le fichier `conversations/{id}.json` existe en JSON multiligne (pretty)
+
+Scenario: save_conversation_ecrase_le_fichier_du_meme_id_a_la_re_enregistrement
+  Given une conversation enregistree avec un message
+  When sa version modifiee (deux messages, meme id) est enregistree par @save_conversation
+  Then @get_conversation retourne la version a deux messages et `conversations/` ne contient qu'un seul fichier pour cet id
+
+Scenario: get_conversation_rend_notfound_sur_un_id_inconnu
+  Given un repertoire `conversations/` sans fichier pour l'id demande
+  When @get_conversation est appelee sur cet id
+  Then le resultat est @Err dont @std::io::Error::kind est @std::io::ErrorKind::NotFound
+
+Scenario: get_conversation_rend_invaliddata_sur_un_contenu_json_malforme
+  Given un fichier `conversations/{id}.json` existant contenant du texte qui n'est pas du json
+  When @get_conversation est appelee sur cet id
+  Then le resultat est @Err dont @std::io::Error::kind est @std::io::ErrorKind::InvalidData
+
+Scenario: delete_conversation_est_idempotente
+  Given une conversation enregistree
+  When @delete_conversation est appelee une premiere fois sur son id, puis une seconde fois
+  Then le premier appel est @Ok et supprime le fichier, le second appel est @Ok sans erreur ni fichier a supprimer
+
+Scenario: le_pointeur_de_conversation_active_fait_la_roundtrip_d_un_uuid
+  Given aucune exigence prealable sur les conversations existantes
+  When @set_active_conversation est appelee avec un id puis @get_active_conversation
+  Then @get_active_conversation retourne @Some de ce meme id et le fichier `active-conversation.json` contient la chaine JSON guilloetee de l'id
+
+Scenario: get_active_conversation_rend_none_avec_un_pointeur_absent_ou_corrompu
+  Given @get_active_conversation appelee alors qu'`active-conversation.json` n'existe pas
+  When le contenu de ce fichier est ensuite remplace par du texte non parseable en uuid puis @get_active_conversation rappelee
+  Then les deux appels retournent @None (jamais d'erreur)
+
+Scenario: resolve_conversation_reference_resout_un_index_1_based_dans_la_plage
+  Given trois conversations chargees dans l'ordre affiche
+  When @resolve_conversation_reference est appelee avec la reference `2`
+  Then le resultat est @Ok de l'id de la deuxieme conversation de la tranche
+
+Scenario: resolve_conversation_reference_refuse_l_index_0_comme_hors_plage
+  Given au moins une conversation chargee
+  When @resolve_conversation_reference est appelee avec la reference `0`
+  Then le resultat est @Err contenant `No conversation at index 0`
+
+Scenario: resolve_conversation_reference_indique_la_taille_connue_sur_index_hors_plage
+  Given deux conversations chargees
+  When @resolve_conversation_reference est appelee avec la reference `5`
+  Then le resultat est @Err contenant `have 2`
+
+Scenario: un_index_numerique_hors_plage_ne_retombe_pas_sur_le_matching_prefixe
+  Given une seule conversation dont l'id canonique commence par `9`
+  When @resolve_conversation_reference est appelee avec la reference `9`
+  Then le resultat est @Err contenant `No conversation at index 9 (have 1)` — l'interprétation préfixe, qui aurait trouvé, n'est pas tentée
+
+Scenario: un_index_numerique_dans_la_plage_prend_le_pas_sur_l_interpretation_prefixe
+  Given trois conversations chargees dont aucun id ne commence par `2` et dont la deuxieme porte un id quelconque
+  When @resolve_conversation_reference est appelee avec la reference `2`
+  Then le resultat est @Ok de l'id de la deuxieme conversation (court-circuit index, alors que le matching prefixe n'aurait rien trouve)
+
+Scenario: resolve_conversation_reference_resout_un_prefixe_d_uuid_insensible_a_la_casse
+  Given deux conversations d'ids distincts commençant par `aaaaaaaa` et `bbbbbbbb`
+  When @resolve_conversation_reference est appelee avec la reference `AAAAAAAA` en majuscules
+  Then le resultat est @Ok de l'id de la premiere conversation
+
+Scenario: resolve_conversation_reference_resout_un_uuid_complet
+  Given une conversation chargee
+  When @resolve_conversation_reference est appelee avec sa chaine uuid canonique integrale
+  Then le resultat est @Ok de son id
+
+Scenario: un_prefixe_a_zero_initial_echappe_a_l_interpretation_index
+  Given deux conversations chargees dont la premiere a un id canonique commencant par `01`
+  When @resolve_conversation_reference est appelee avec la reference `01`
+  Then le resultat est @Ok de l'id de la premiere conversation (matching prefixe, `01` n'etant pas un decimal propre)
+
+Scenario: resolve_conversation_reference_refuse_une_reference_sans_correspondance
+  Given au moins une conversation chargee
+  When @resolve_conversation_reference est appelee avec la reference `zzz`
+  Then le resultat est @Err contenant `No conversation matches 'zzz'`
+
+Scenario: resolve_conversation_reference_refuse_un_prefixe_ambigu
+  Given deux conversations d'ids commencant toutes deux par `00000000`
+  When @resolve_conversation_reference est appelee avec la reference `00000000`
+  Then le resultat est @Err contenant `Ambiguous reference` et `matches 2`
+
+Depends on:
+  ./config.rs — @data_dir (résolution `dirs::data_dir()/vanyline` et repli tilde littéral)
+    et @ensure_data_dir (création de `conversations/`, avec `eprintln!` + `exit(1)` en cas
+    d'échec — chemin de terminaison hérité par save/set).
+  ../../../lib/src/types.rs — @vanyline_lib::Conversation et sa représentation serde (clé
+    `todo` optionnelle tolérante à l'absence, roundtrip fiable) : la spec
+    ../../../lib/src/types.sdd est la source de vérité du format persisté, ce fichier en
+    est un des gardiens d'écriture, ./chat.rs et ./rpc/handlers.rs en étant les producteurs.
+  @uuid (feature `serde`) — @Uuid::to_string pour les noms de fichiers et le matching
+    préfixe, ordre @Ord pour le tri de @list_conversations, représentation serde (chaîne
+    canonique) pour le contenu de `active-conversation.json`.
+  @serde_json — @from_str/@to_string_pretty via les aides privées @load_json/@save_json.
+  @std::fs — @read_dir, @read_to_string, @write, @remove_file, @create_dir_all (via ./config.rs).
+
+Tasks:
+  [?] Périmètre : ./store.rs ne couvre que la persistance des conversations dans le
+    répertoire de données global — il n'a aucun lien avec la découverte du FsConfigStore
+    (@discover_fs_store, ./main.rs, contrat ../../cfgstore/src/fs_store.sdd) ni avec la
+    couche workspace (`--workspace`). Confirmer avec Sebastien qu'aucun rattachement
+    workspace des conversations n'est prevu.
+  [?] Aucune fonction disque (@list_conversations, @get_conversation, @save_conversation,
+    @delete_conversation, @set_active_conversation, @get_active_conversation) n'a de test :
+    elles rappellent @data_dir en dur, sans seam d'injection, donc les scenarios ci-dessus
+    exigent une decision de testabilite (recabler @data_dir via variable d'environnement,
+    parametrer les fonctions sur un chemin, ou extraire un seam) — trancher avec Sebastien
+    avant d'ecrire les tests.
+  [?] @ensure_data_dir (./config.rs) fait `eprintln!` + `exit(1)` depuis @save_conversation
+    et @set_active_conversation : terminaison de processus au lieu d'un @Err propage, en
+    tension avec la regle de harnais « propager l'erreur du crate » — la purge de cette
+    dette (../../tooling.sdd) doit-elle transformer ces chemins en propagation io::Error ?
+  [?] ./chat.rs ne fait jamais @set_active_conversation pour la conversation qu'il crée :
+    `vanyline run -c` sans `vanyline conversations set` préalable ne retrouve donc
+    jamais de conversation (« No active conversation found »). Intention ou manque à
+    contractualiser (côté ./chat.rs, pas ici) ?
+  [?] @list_conversations fait disparaitre silencieusement une conversation corrompue du
+    listing (et donc de la numerotation affichee) : meriterait un signal visible (tracing
+    warn) plutot que la tolerance muette — decider et ajuster le `Handles` en consequence.
+  [?] @get_active_conversation rend @None y compris sur erreur io (fichier illisible) :
+    distinguer pointeur absent vs corrompu (ex. avertissement) est-il voulu ?
+  [?] La reference vide `""` passe en matching prefixe et `starts_with("")` est vrai pour
+    tout : avec exactement UNE conversation chargee, elle se resout sur cette conversation ;
+    avec deux ou plus, erreur ambigue. Ce cas limite est-il un contrat ou une entree a
+    refuser explicitemement par resolve ?
+  [?] Pas d'écriture atomique (tmp+rename) ni de lock : le CLI et le serveur RPC de
+    l'extension peuvent écrire le même `{id}.json` en concurrence (dernier écriveur gagne,
+    et un lecteur peut lire une écriture partielle — alors silencieusement ignorée par le
+    listing). Contractualiser l'atomicité, ou assumer le comportement actuel ?
+  [?] Repli de @data_dir quand `dirs::data_dir()` rend @None : chemin `~/.local/share/vanyline`
+    littéral (tilde non développé, donc répertoire `~` relatif au CWD) — un @Err ou un
+    fallback plus sûr mérite-t-il décision ? (appartient au contrat de ./config.rs,
+    signalé ici car traverse ce fichier.)
+  [ ] La branche « erreur @std::fs::read_dir » de @list_conversations (permissions) n'est
+    couverte par aucun test existant : prevoir une fixture de permissions si les scenarios
+    disque sont ecrits.
+  [ ] Les sept tests existants de @resolve_conversation_reference (resolves_by_one_based_index,
+    index_zero_errors, index_out_of_range_errors, resolves_by_uuid_prefix,
+    resolves_by_full_uuid, unknown_reference_errors, ambiguous_prefix_errors) couvrent deja
+    les scenarios de resolution correspondants ; les scenarios « no-fallback », « index vs
+    prefixe », « prefixe majuscule » et « zero initial » sont les extensions a evaluer.
+
+Done when:
+  ./store.rs continue de n'exposer que les six fonctions de persistance plus le solveur pur,
+    sans codes VNL-*, sans affichage et sans dependance aux couches de config ; tout
+    changement de nommage des fichiers, d'ordre de tri, de priorite index/prefixe ou de
+    tolérance aux erreurs exige de mettre à jour cette spec (et celles de ./main.rs,
+    ./chat.rs et ./rpc/handlers.rs qui en dépendent) avant implémentation.

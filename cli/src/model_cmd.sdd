@@ -1,0 +1,67 @@
+Spec: ModelCmd
+
+Platform: Rust/vanyline-cli/clap
+
+Purpose:
+  Sous-commande `models` du CLI `vanyline` : déclaration clap pure de la commande qui liste
+  les profils de modèles configurés. Le fichier ne porte aucun comportement propre — une
+  seule variante @Commands::List sans champ ni flag, le dérivé @clap::Subcommand produisant
+  tout le comportement observable (parsing, aide, rejet) ; l'exécution réelle (listage via
+  le store, affichage, erreurs) vit dans @run_models (./main.rs, à contractualiser dans la
+  spec de ./main.rs). Le contrat du fichier se réduit donc à : `vanyline models list` est
+  la seule forme acceptée sous `models`, et les doc comments sont le texte d'aide. La liste
+  côté RPC (`config/models`, ./rpc/handlers.rs) est un contrat séparé qui ne réutilise pas
+  ce module.
+
+Owns:
+  ./model_cmd.rs
+
+Can read:
+  ./main.rs
+  ./rpc/handlers.rs
+
+Depends on:
+  @clap::Subcommand — seul import et seul derive du fichier ; parsing, `--help` et rejet des
+    entrées invalides sont produits par le derive, aucune implémentation manuelle.
+  ./main.rs — unique consommateur : `mod model_cmd;` (ligne 11), variante d'attache
+    `Commands::Models(model_cmd::Commands)` doc `"Manage model profiles"` portant
+    `#[command(subcommand)]`, et dispatch @run_models (lignes 466–486 : store via
+    @discover_fs_store, @List → `store.list_models()`, source d'entrée via
+    `config_entry_source`, sinon `eprintln!` + `exit(1)`).
+
+Structure:
+  ./model_cmd.rs — @pub enum @Commands (derives @clap::Subcommand), surface publique
+    limitée à @Commands et @Commands::List :
+      @Commands::List — variante unitaire (aucun argument, aucun flag), doc comment
+        `"List configured model profiles"`.
+    Nommage clap (kebab-case par défaut) : le champ `Models` dans ./main.rs donne la
+    commande parente `models`, la variante @Commands::List donne la sous-commande `list` —
+    forme complète `vanyline models list`.
+
+Must:
+  Accepter `vanyline models list` (aucun argument requis) et le parser en
+    `Commands::Models(model_cmd::Commands::List)`, dispatché vers @run_models (./main.rs).
+  Rendre `vanyline models --help` et `vanyline models list --help` légaux, avec les doc
+    comments ci-dessus comme texte d'aide.
+
+Must not:
+  Porter de logique d'exécution dans ./model_cmd.rs : ni fonction, ni affichage, ni accès
+    au store — l'exécution appartient à @run_models (./main.rs).
+  Accepter une autre sous-commande sous `models` (ex: `vanyline models get x`) ou `models`
+    sans sous-commande (le `#[command(subcommand)]` de ./main.rs la rend obligatoire) :
+    rejet par clap, comme le reste du CLI.
+
+Tasks:
+  [?] Aucun test de parsing ne couvre `models list` (les tests de ./main.rs ne couvrent que
+    `run`) : trancher avec Sébastien si le contrat de parsing (`vanyline models list` →
+    `Commands::Models(List)`, rejet de `models` nu et de sous-commandes inconnues) doit
+    être couvert par des tests taggés depuis cette spec ou rattaché à la spec de ./main.rs.
+  [?] @run_models (./main.rs) liste les mêmes modèles que le RPC `config/models`
+    (./rpc/handlers.rs) sans passer par ./model_cmd.rs, avec un formatage propre à la CLI :
+    ./model_cmd.rs est-il appelé à rester le chemin CLI seul, ou bien la liste des modèles
+    sera-t-elle factorisée à terme entre CLI et RPC ?
+
+Done when:
+  ./model_cmd.rs continue de ne porter que la déclaration @Commands avec l'unique variante
+    @Commands::List ; toute variante, flag ou logique ajouté dans ./model_cmd.rs exige
+    d'étendre cette spec (et celle de ./main.rs) en conséquence.

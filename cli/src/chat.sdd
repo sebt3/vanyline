@@ -1,0 +1,595 @@
+Spec: Chat
+
+Platform: Rust/vanyline-cli (binaire `vanyline`, modes REPL sans sous-commande et `run`)
+
+Purpose:
+  Boucle de chat agent local du CLI : construit la session (config-store à couches
+  découvertes depuis le cwd, agent résolu par précédence, conversation neuve ou
+  reprise `-c/--continue`), déroule les tours via @vanyline_lib::session::run_agent_turn
+  et rend les @ChatEvent soit en texte lisible (@StdoutSink), soit en JSONL une ligne
+  par événement (@JsonSink, mode `--json` de `run`). Gère les deux modes — REPL
+  interactif sur stdin (prompt `> `, sortie Ctrl-D) et one-shot (`run <message>`,
+  avec `-m/--model` et `-t/--timeout` qui n'existent que là) — la persistance du
+  tour réussi dans ./store.rs, le résumé « sources workspace » d'ouverture, le
+  `git diff --stat` de clôture, et le seed/restitution de l'état todo entre tours et
+  entre sessions. Un seul fichier, un seul contrat « boucle de chat du CLI » : le
+  mapping des 7 arguments d'entrée et la grammaire clap appartiennent à ./main.sdd ;
+  l'assemblage du prompt, le peuplement des tools et les connexions MCP d'un tour
+  appartiennent à ../../lib/src/session.sdd ; le format serde des événements à
+  ../../lib/src/event.sdd. Ce fichier ne fait que l'hébergement hôte : choix du sink,
+  des tools (locaux ou toolbox MCP), du contexte workspace, et politique de
+  terminaison (codes de sortie, stdout/stderr).
+
+Owns:
+  ./chat.rs
+
+Can read:
+  ./main.rs
+  ./config.rs
+  ./store.rs
+  ./tools.rs
+  ../../lib/src/session.rs
+  ../../lib/src/event.rs
+  ../../lib/src/types.rs
+  ../../cfgstore/src/layers.rs
+  ../../cfgstore/src/fs_store.rs
+
+Structure:
+  ./chat.rs — un point d'entrée @run (`pub`) et quatorze items privés contractuels :
+    @StdoutSink (struct unitaire + impl @EventSink), @run_one_shot, @run_repl,
+    @read_todo_state, @build_session_context, @JsonSink (struct unitaire + impl
+    @EventSink), @read_workspace_context, @process_turn, @result_to_assistant_message,
+    @workspace_source_summary, @print_workspace_sources, @git_diff_stat,
+    @print_git_diff_stat, @resolve_context ; puis @mod tests (`cfg(test)`, 16 tests,
+    cartographiés en Tasks). Aucune struct d'état, aucune variable globale : l'état
+    d'une session tient dans la @Conversation, le @SessionContext et la boucle locale.
+    Le module est privé (`mod chat;` ./main.rs — crate binaire).
+
+Exposes:
+  @run — `pub async fn(message: Option<String>, agent: Option<String>,
+    continue_active: bool, toolbox_mcp_url: Option<String>, timeout_secs: Option<u64>,
+    json: bool, model: Option<String>)` : seul item public, appelé par ./main.rs pour
+    le mode REPL (aucune sous-commande) et `run`. Ne retourne jamais de valeur ni de
+    @Result — toute défaillance se matérialise par @std::process::exit(1) ou par la
+    fin normale du processus (code 0).
+  @StdoutSink — sink texte : @Token rendu nu (streaming), @ToolCall rendu
+    `\n[tool] {name}({args})\n`, @Done rendu par une ligne vide, @Error rendu
+    `[{code}] {message}` sur stderr ; toutes les autres variantes silencieusement
+    jetées (bras @_ => {}).
+  @JsonSink — sink JSONL : @Error sur stderr `[{code}] {message}` (jamais en JSON),
+    toute autre variante sérialisée @serde_json::to_string puis rendue sur stdout
+    suivie d'un saut de ligne ; échec de sérialisation = événement perdu sans bruit.
+  @build_session_context — construit le @SessionContext de la session : sink choisi
+    par @json, store = @crate::discover_fs_store(), @subagent_depth_max figé à `1`,
+    @model_override propagé, @todo_state = @Arc de @Mutex initialisé au @todo_seed.
+    Avec toolbox : `local_tools` vide + @extra_mcp à une paire (serveur @McpServer
+    nommé `toolbox`, transport @McpTransport::HttpStreamable, url fournie, headers
+    vides ; @McpSelection de serveur `toolbox` et tools vides = sélection totale),
+    hors config (le serveur n'a pas besoin d'exister dans le store). Sans toolbox :
+    `local_tools` = @crate::tools::local_tools_map(), @extra_mcp vide.
+  @resolve_context — résout (conversation, nom d'agent, nouveauté) : agent par
+    précédence argument `-a` > `defaults.agent` fusionné > agent unique du store ;
+    conversation reprise (pointeur actif) si @continue_active et trouvable, sinon
+    neuve (@Uuid::new_v4, `agent` = nom résolu, `title` @None, `messages` vide,
+    `todo` @None).
+  @process_turn — projette l'historique persisté en @rig_core::message::Message
+    (rôles `user`/`assistant` uniquement) et appelle @run_agent_turn avec le message
+    utilisateur et le contexte workspace.
+  @result_to_assistant_message — @ChatTurnResult -> @vanyline_lib::Message rôle
+    `assistant` : `content` = `response_text`, `tool_calls` = enregistrements
+    {name, arguments, result} SANS `id` (@None si la liste est vide).
+  @read_todo_state — lecture du @Mutex du todo avec récupération sur poison
+    (@PoisonError::into_inner) : un panic de tool call ne fait pas perdre l'état posé
+    avant le panic.
+  @workspace_source_summary / @print_workspace_sources — liste (testable sans stdout)
+    puis affichage des entrées dont la source de couche est `workspace`, par kind.
+  @git_diff_stat / @print_git_diff_stat — sortie de `git diff --stat` à la racine
+    workspace (testable sans stdout pour la première).
+  @read_workspace_context — contenu de `AGENTS.md` lu depuis le cwd du processus,
+    @None sinon.
+
+Accepts:
+  Sept arguments de @run (mapping et grammaire : ./main.sdd) : @message @Some →
+    one-shot, @None → REPL ; @agent = valeur `-a/--agent` ; @continue_active =
+    `-c/--continue` ; @toolbox_mcp_url = url MCP déjà résolue par
+    @resolve_toolbox_mcp_url (@None = aucun K8s demandé) ; @timeout_secs = `-t`
+    (one-shot seulement) ; @json = `-j` (one-shot seulement — le REPL appelle
+    @build_session_context avec @false, @None modèle et aucun timeout codés en dur,
+    indépendamment des flags) ; @model = `-m` (one-shot seulement).
+  Disque en lecture : couches de config via @crate::discover_fs_store() (cwd absolu,
+    @config::discover_layers — ./config.sdd ; cwd illisible → message
+    `Failed to read current directory: {e}` + exit 1, hérité de ./main.rs) ;
+    `AGENTS.md` relatif au cwd du processus ; conversations et pointeur actif via
+    ./store.rs ; `config.yaml` fusionné pour `defaults.agent` ; sortie de @git en
+    sous-processus.
+  Disque en écriture : @config::ensure_config_dir (à chaque @run, fatal en échec —
+    ./config.sdd) et @store::save_conversation après chaque tour réussi.
+  Stdin : lignes entières du terminal en mode canonique (lecture bloquante
+    synchrone dans la boucle REPL, sans task dédiée).
+  Environnement : aucune variable lue en propre par ce fichier (les variables XDG/HOME
+    sont consommées indirectement via ./config.rs ; `git` est cherché dans le `PATH`).
+
+Returns:
+  Aucune valeur — le contrat observable est la combinaison {contenu stdout, contenu
+    stderr, code de sortie} :
+  Code 0 : REPL terminé par EOF stdin (après un dernier @println!() nu) ou par
+    erreur de tour (divergence d'avec le one-shot, voir Tasks `[?]`) ; one-shot dont
+    le tour réussit.
+  Code 1 : timeout (one-shot), tour en @Err (one-shot), agent irrésolu
+    (@resolve_context), et chemins hérités (@ensure_config_dir, @discover_fs_store).
+    Un one-shot qui échoue ne sort jamais 0.
+  Rendu one-shot lisible (@json @false) : éventuelle ligne `Session: {uuid}` quand la
+    conversation est neuve, puis le rendu live des événements, puis, uniquement après
+    sauvegarde du tour réussi, la sortie de @git_diff_stat si non vide.
+  Rendu one-shot @json : sur stdout UNIQUEMENT des lignes JSONL d'événements (pas de
+    `Session:`, pas d'en-tête sources) ; @Error d'événement sur stderr en texte
+    `[{code}] {message}` — une exception : le message `No active conversation
+    found, starting a new one.` (reprise `-c` sans pointeur) est un @println!() nu
+    dans @resolve_context, émis sur stdout même en mode @json (voir Tasks `[?]`).
+  Rendu REPL : bannière exacte — `vanyline REPL (Ctrl-D to exit)`, `Agent:
+    {agent_name}`, `Conversation: {title} ({id})` si @title @Some sinon
+    `Conversation: {id}`, ligne vide — puis boucle de prompt `> ` (flushé avant
+    chaque lecture).
+  @workspace_source_summary : une ligne par kind non vide, dans l'ordre fixe
+    `agents`, `toolsets`, `skills`, `mcp`, `models`, `providers`, format
+    `  {kind}: {nom1}, {nom2}, …` (noms dans l'ordre de @list_*, rejointos par
+    `", `) ; @print_workspace_sources préfixe de `Sources workspace
+    ({racine}):` et ne rend RIEN (en-tête compris) si la couche workspace est
+    absente ou si aucune ligne.
+  @git_diff_stat : @Some du stdout de `git diff --stat` trimé, @None si `root` ne
+    porte pas `.git`, si @git échoue (non-zero ou absent), ou si la sortie trimée est
+    vide.
+  @process_turn, succès : @Ok(@ChatTurnResult) ; @Err(@VnyError) propagé sans
+    transformation.
+
+Raises:
+  Aucun @Result public, aucune panic contractuelle (hors `cfg(test)`) : la
+    signalisation d'échec est le code de sortie plus stderr.
+  Timeout (one-shot, @Some(secs) avec secs > 0 atteint) : stderr exact
+    `[VNL-CLI-001] run timed out after {secs} seconds` puis exit(1). La future du
+    tour est abandonnée en cours de stream (aucune annulation MCP gracieuse côté
+    lib, jamais de @Done émis), RIEN n'est persisté pour ce tour.
+  Tour en @Err : one-shot → exit(1) SANS afficher l'@VnyError (le bras @Err(_)
+    jette l'objet erreur) ; seul un préfixe rendu par le sink reste visible — les
+    erreurs de stream @ChatEvent::Error (`VNL-LLM-001`) passent par le sink et
+    s'affichent, les erreurs de résolution config (`VNL-CFG-003`, jamais émises sur
+    le sink, cf. ../../lib/src/session.sdd Scenario `agent_inconnu_tour_sans_evenement`)
+    rendent la défaillance TOTALEMENT silencieuse hors code de sortie (Tasks `[?]`).
+    REPL → @break de la boucle, fin de processus code 0, même invisibilité.
+  @resolve_context : agent résolu absent du @list_agents → stderr exact
+    `Agent not found: {agent_name}` + exit(1) ; ni argument, ni défaut, ni agent
+    unique → stderr `No agent specified. Use --agent or set a default agent.` puis
+    `Available agents:` puis les noms des agents sur STDOUT (une ligne `  {name}`
+    chacun — mélange stdout/stderr, Tasks `[?]`) + exit(1).
+  Erreurs du config-store AVALÉES et invisibles : @list_agents/@list_* en échec →
+    @unwrap_or_default (liste vide, messages ci-dessus alors trompeurs) ;
+    @default_agent en échec (ex. `defaults.agent` non-textuel → `VNL-CFG-001`) →
+    `.ok().flatten()` = absent ; @get_conversation sur le pointeur actif en échec →
+    `.ok()` = conversation introuvable.
+  @config::ensure_config_dir et @crate::discover_fs_store : terminaisons exit(1)
+    héritées (./config.sdd, ./main.sdd), atteignables au premier @run.
+  @git_diff_stat ne propage rien : absence de @git, dépôt corrompu, permissions →
+    @None silencieux.
+
+Handles:
+  @run, ordre fixe : @config::ensure_config_dir() d'abord ; puis @print_workspace_sources
+    si @json @false (le mode @json garde stdout purement JSONL, en-tête exclu) ; puis
+    dispatch exclusif @message @Some → @run_one_shot, @None → @run_repl. La
+    combinaison @json @true + @message @None est inatteignable par ./main.rs (le REPL
+    n'est mappé qu'avec @json @false) ; si elle survenait, l'en-tête sources serait
+    supprimé mais le REPL rendrait en texte (Tasks `[?]`).
+  Timeout : @timeout_secs @None ou @Some(0) = AUCUNE limite — le garde `secs > 0`
+    confirme le contrat de l'aide clap `--timeout 0` = « aucune limite » attendu par
+    ./main.sdd Tasks. @Some(secs ≥ 1) borne uniquement l'await de la future @turn
+    (les autres étapes — résolution de contexte, sauvegarde — sont hors borne).
+  REPL, fin de stdin : @read_line retourne 0 → @break (Ctrl-D sur ligne vide). Un
+    Ctrl-D en milieu de ligne flush la ligne partielle, traitée comme une entrée
+    normale, et le prochain read rend 0. Une erreur io de @read_line est convertie en
+    0 par @unwrap_or(0) — terminaison indiscernable d'un EOF, code 0 (Tasks `[?]`).
+  Ctrl-C : AUCUN gestionnaire de signal dans ce fichier — comportement terminal par
+    défaut (SIGINT tue le processus, shell rend 130), sans flush ni sauvegarde du
+    tour en cours ; la seule fenêtre de perte est le tour non encore sauvegardé
+    (persistance uniquement APRÈS tour réussi).
+  Entrée vide ou uniquement blancs : trimée, @continue sans tour ni persistance.
+  Après chaque tour réussi (les deux modes) : push du @Message user (contenu brut,
+    `tool_calls` @None), push de @result_to_assistant_message, @conv.todo =
+    @read_todo_state (donc le todo de la session est re-persisté à chaque tour),
+    @store::save_conversation avec erreur ignorée `.ok()` (turn perdu en silence si
+    le disque refuse — Tasks `[?]`). Le push du message user est POSTÉRIEUR à
+    l'exécution du tour : un tour qui meurt ne laisse aucune trace.
+  Historique envoyé à @run_agent_turn : reconstruit à chaque tour depuis
+    @conv.messages — rôles autres que `user`/`assistant` écartés ; un message
+    assistant est renvoyé comme texte SEUL, ses @ToolCall persistés ne sont jamais
+    rejoués dans l'historique rig (Tasks `[?]`). Pas de troncature : tout
+    l'historique repart à chaque tour.
+  Reprise `-c` : @get_active_conversation puis @get_conversation ; pointeur absent,
+    corrompu, ou fichier introuvable/corrompu → stdout `No active conversation
+    found, starting a new one.` et conversation neuve (jamais d'erreur). Conversation
+    retrouvée : @messages et @todo conservés, @conv.title conservé (bannière REPL),
+    @todo alimente le @todo_state de la session. Le @conv.agent conservé N'EST PAS
+    utilisé : le tour tourne avec l'agent résolu par @resolve_context (flag ou
+    défaut courant), et `conv.agent` n'est ni relu ni réécrit — reprise possible
+    sous un agent différent de celui de l'historique (Tasks `[?]`). Ce fichier
+    n'appelle JAMAIS @set_active_conversation : une conversation créée ici n'est
+    jamais pointée (cf. ./store.sdd Tasks — `run -c` sans `conversations set`
+    préalable ne retrouve rien).
+  Contexte workspace : lu UNE fois par processus (@read_workspace_context, avant la
+    boucle REPL), depuis `AGENTS.md` RELATIF AU CWD du processus — pas à la racine
+    workspace découverte (asymétrie avec @print_git_diff_stat qui, lui, utilise
+    @config::discover_workspace_root ; un `vnl run` lancé d'un sous-répertoire ne
+    voit pas l'`AGENTS.md` de la racine — Tasks `[?]`). Fichier absent, illisible ou
+    non UTF-8 → @None ; une modification du fichier pendant le REPL n'est jamais relue.
+  Rendu @StdoutSink : @Token → `print!` nu + flush (streaming mot à mot) ;
+    @ToolCall → nouvelle ligne, `[tool] {name}({args})` (args = @Display de
+    @serde_json::Value, JSON compact), nouvelle ligne, flush ; @Done → ligne vide
+    (clôt le flux de tokens) ; @Error → `[{code}] {message}` stderr.
+    @ReasoningDelta, @ToolResult, @Usage, @SkillLoaded, @SubagentStart/@Event/@End,
+    @ToolUnavailable : jetés sans rendu — en REPL l'utilisateur ne voit jamais le
+    résultat d'un tool call ni un serveur MCP injoignable (Tasks `[?]`).
+  Rendu @JsonSink : exactement ce que produit le serde de @ChatEvent
+    (`#[serde(tag = "type", rename_all = "snake_case")]`, cf.
+    ../../lib/src/event.sdd) — dont `{"type":"done"}` nu pour @Done ; événements
+    émis dans l'ordre du sink, aucune ligne de transport supplémentaire.
+  @print_git_diff_stat : one-shot non-@json uniquement, uniquement sur chemin de tour
+    réussi APRÈS la sauvegarde ; @None = aucun affichage. La commande exacte est
+    `git diff --stat` — fichiers untracked et changements uniquement stagés
+    n'apparaissent donc jamais (contrat de la commande git elle-même).
+  @workspace_source_summary : le filtre `== "workspace"` repose sur
+    @file_entry_source (`agents`/`md`), @skill_entry_source, @config_entry_source
+    (sections `mcp`, `models`, `providers`) de ../../cfgstore/src/layers.sdd — c'est
+    LA consommation citée par cette spec comme « filtres workspace uniquement » ;
+    une erreur de chaque @list_* est avalée par @unwrap_or_default (le kind
+    disparaît alors de l'affichage, indiscernable d'une absence réelle).
+  @todo_state et poison : @read_todo_state verrouille avec
+    @unwrap_or_else(@PoisonError::into_inner) — même logique que
+    `lib/src/builtin/todo.rs` (commentaire source) ; le @Mutex est l'@Arc du
+    @SessionContext, partagé entre tours d'une même session et les builtins todowrite/todoread.
+
+Must:
+  Appeler @config::ensure_config_dir() au tout début de @run, avant toute lecture de
+    couche ou de conversation.
+  Réserver tout rendu non JSONL sur stdout au cas @json @false : en mode @json, la
+    seule sortie stdout attendue est la suite de lignes JSONL d'événements (hors
+    exception documentée du message de reprise, voir Handles et Tasks).
+  N'imposer le timeout que pour @Some(secs) avec `secs > 0` ; @None et @Some(0)
+    laissent le tour sans limite (contrat de l'aide clap, réclamé par ./main.sdd).
+  Rendre exactement les littéraux : `\n[tool] {name}({args})\n`,
+    `[{code}] {message}` (stderr, deux sinks), `Session: {id}` (uniquement si
+    conversation neuve ET non @json), la bannière REPL en quatre lignes, le prompt
+    `> ` flushé avant lecture, `No active conversation found, starting a new one.`,
+    `Agent not found: {agent_name}`, `No agent specified. Use --agent or set a
+    default agent.`, `Available agents:`, `[VNL-CLI-001] run timed out after {secs}
+    seconds`, `Sources workspace ({racine}):` et les lignes `  {kind}: {noms}`.
+  Résoudre l'agent dans l'ordre strict : argument @agent, sinon `defaults.agent` de
+    la config fusionnée (fusion deux couches, ./cfgstore layers), sinon l'agent unique
+    si @list_agents en retourne exactement un ; le nom retenu (quelle que soit la
+    source) est ensuite validé contre @list_agents, `Agent not found` + exit(1) sinon.
+  Construire @SessionContext avec : @subagent_depth_max = `1` ; @store =
+    @crate::discover_fs_store() (couches globales + workspace du cwd) ; en mode
+    toolbox `local_tools` VIDE et une seule entrée @extra_mcp {serveur `toolbox`,
+    @HttpStreamable, headers vides, sélection tools vide = tous les tools}, les tools
+    locaux du CLI étant alors absents du tour ; sinon @crate::tools::local_tools_map()
+    et @extra_mcp vide ; @todo_state initialisé depuis @conv.todo.
+  Après un tour réussi uniquement, dans l'ordre : message user, message assistant
+    converti, refresh @conv.todo depuis @read_todo_state, sauvegarde ; ne jamais
+    persister un tour en échec ni un tour avorté par timeout.
+  Convertir @ChatTurnResult en message persisté SANS le champ `id` des tool calls
+    (abandonné à la persistance, @vanyline_lib::ToolCall ne le porte pas) et avec
+    `tool_calls: @None` quand la liste est vide.
+  Reconstruire l'historique de chaque tour en ne conservant que les rôles `user` et
+    `assistant`, convertis en @rig_core::message::Message::user/@assistant texte.
+  Lire l'état todo avec récupération sur mutex empoisonné (valeur d'avant-panic
+    conservée).
+  Trier l'affichage des sources workspace dans l'ordre `agents`, `toolsets`,
+    `skills`, `mcp`, `models`, `providers`, n'émettre un kind que s'il compte au
+    moins une entrée workspace-sourcée, et supprimer l'en-tête entier quand aucune
+    ligne ni quand @Layers.workspace_dir est @None.
+  Sortir avec le code 1 sur : timeout atteint, tour @Err en one-shot, agent
+    irrésolu ou inconnu ; sortir avec le code 0 sur la fin normale du REPL (EOF ou
+    erreur de tour — divergence figée ici tant que Tasks `[?]` n'est pas tranché).
+
+Must not:
+  Appeler @store::set_active_conversation, @delete_conversation ou toute écriture du
+    config-store : l'écriture disque de ce fichier se limite à @save_conversation (et
+    aux répertoires créés par @ensure_config_dir).
+  Écrire sur stdout, en mode @json, autre chose que des lignes JSONL d'événements
+    (hors l'exception citée en Handles) — ni `Session:`, ni en-tête sources,
+    ni résumé git (le @print_git_diff_stat est gardé par @json @false).
+  Afficher ou propager un @Err(@VnyError) de tour : le comportement actuel jette
+    l'objet erreur (bras @Err(_)) ; toute correction passe d'abord par cette spec
+    (Tasks `[?]`), pas par l'implémentation.
+  Utiliser @unwrap/@expect/@panic!/@todo! hors `cfg(test)` (harnais
+    ../../tooling.sdd) — le fichier n'en contient aucun à ce jour ; la dette
+    résiduelle est la famille `print_*` + @std::process::exit (cf. Tasks `[!]`).
+  Interpréter @conv.agent d'une conversation reprise comme un choix d'agent, ni
+    réécrire le titre ou l'agent d'une conversation existante.
+  Relancer @git quand @root ne porte pas `.git`, ni échouer sur un @git en échec
+    (@None suffit, silencieux).
+  Lire `AGENTS.md` ailleurs que relativement au cwd du processus (le contrat actuel
+    est celui-là ; le changer — racine découverte — est d'abord une décision de
+    cette spec).
+
+Scenario: stdout_sink_rend_token_nu_et_flush
+  Given un @StdoutSink
+  When @emit reçoit @ChatEvent::Token de contenu `"Hel"` puis `"lo"`
+  Then stdout vaut exactement `"Hello"` sans saut de ligne ajouté ni autre décor
+
+Scenario: stdout_sink_rend_tool_call_sur_ligne_dediee
+  Given un @StdoutSink et un @ChatEvent::ToolCall de nom `"read_file"`, d'args `{"path":"f.txt"}`
+  When @emit s'exécute
+  Then stdout vaut exactement `"\n[tool] read_file({\"path\":\"f.txt\"})\n"` (JSON compact)
+
+Scenario: stdout_sink_done_est_une_ligne_vide
+  Given un @StdoutSink après un flux de tokens
+  When @emit reçoit @ChatEvent::Done
+  Then stdout se termine par un saut de ligne supplémentaire et rien d'autre
+
+Scenario: stdout_sink_error_va_sur_stderr
+  Given un @StdoutSink
+  When @emit reçoit @ChatEvent::Error de code `"VNL-LLM-001"` et message `"boom"`
+  Then stderr vaut exactement `[VNL-LLM-001] boom` suivi d'un saut de ligne et stdout ne reçoit rien
+
+Scenario: stdout_sink_jette_les_variantes_non_affichees
+  Given un @StdoutSink
+  When @emit reçoit tour à tour @ReasoningDelta, @ToolResult, @Usage, @ToolUnavailable, @SkillLoaded, @SubagentStart, @SubagentEvent, @SubagentEnd
+  Then ni stdout ni stderr ne reçoivent le moindre octet
+
+Scenario: json_sink_emet_une_ligne_json_par_evenement
+  Given un @JsonSink
+  When @emit reçoit un @Token `"x"`, un @ToolCall puis @Done
+  Then stdout contient trois lignes JSON valides dont la première est exactement
+    `{"type":"token","content":"x"}` et la dernière exactement `{"type":"done"}`
+
+Scenario: json_sink_error_stderr_jamais_json
+  Given un @JsonSink
+  When @emit reçoit @ChatEvent::Error de code `"VNL-LLM-001"` et message `"boom"`
+  Then stderr porte `[VNL-LLM-001] boom` et stdout ne porte aucune ligne JSON pour cet événement
+
+Scenario: timeout_zero_desactive_la_limite
+  Given un one-shot lancé avec @timeout_secs @Some(0) et un tour de modèle simulé durant plus d'une seconde
+  When @run_one_shot s'exécute
+  Then le tour va à son terme (aucun `[VNL-CLI-001]`, code de sortie 0) — contrat de l'aide clap confirmé par le garde `secs > 0`
+
+Scenario: one_shot_timeout_tue_et_sort_en_1
+  Given un one-shot avec @timeout_secs @Some(1) et un tour de modèle simulé qui ne termine jamais
+  When @run_one_shot s'exécute (processus enfant)
+  Then stderr contient exactement `[VNL-CLI-001] run timed out after 1 seconds`, le code de sortie est 1, et aucune conversation n'est persistée pour ce tour
+
+Scenario: one_shot_ligne_session_saufen_json
+  Given une config valide avec un agent par défaut et un data dir isolé
+  When `vanyline run bonjour` puis, sur un data dir vierge, `vanyline run --json bonjour`
+  Then le premier stdout commence par `Session: {uuid}` (uuid v4) ; le second ne contient AUCUNE ligne `Session:` et ne commence que par des lignes JSONL
+
+Scenario: repl_banniere_exacte_puis_prompt
+  Given un REPL lancé avec un agent résolu `a1` et une conversation neuve (sans titre)
+  When la bannière est rendue puis stdin fermé immédiatement (EOF)
+  Then stdout est exactement, dans l'ordre : `vanyline REPL (Ctrl-D to exit)`, `Agent: a1`,
+    `Conversation: {uuid}`, une ligne vide, `> `, puis un dernier saut de ligne, et le code de sortie est 0
+
+Scenario: repl_entree_vide_reprompte_sans_tour
+  Given un REPL démarré (config minimale, aucun tour ne doit être exécuté)
+  When stdin reçoit deux lignes vides puis EOF
+  Then trois invites `> ` successives apparaissent et aucun appel de modèle n'a lieu
+
+Scenario: repl_erreur_de_tour_sort_en_code_0
+  Given un REPL dont le premier tour échoue en résolution config (agent valide mais modèle `VNL-CFG-003`, sink enregistrable)
+  When une entrée non vide est saisie
+  Then la boucle s'arrête et le processus sort avec le code 0 — divergence d'avec le one-shot (code 1), figée telle quelle, voir Tasks `[?]`
+
+Scenario: agent_inconnu_sort_en_1_avec_message
+  Given un data/config dir isolé avec au moins un agent configuré et aucun `defaults.agent`
+  When l'exécution de `vanyline run bonjour --agent absent`
+  Then stderr est exactement `Agent not found: absent` et le code de sortie est 1
+
+Scenario: agent_unique_suffit_sans_flag_ni_defaut
+  Given une config avec EXACTEMENT un agent `seul`, aucun `defaults.agent`, sans flag `-a`
+  When l'exécution de `vanyline run bonjour` (modèle simulé ou échec ultérieur indifférent)
+  Then l'agent `seul` est retenu (le message `No agent specified` n'apparaît pas)
+
+Scenario: zero_ou_plusieurs_agents_sans_choix_liste_et_sort
+  Given une config sans `defaults.agent` et portant deux agents `a1` et `a2`, sans flag `-a`
+  When l'exécution de `vanyline run bonjour`
+  Then stderr contient `No agent specified. Use --agent or set a default agent.` et `Available agents:`, stdout contient les lignes `  a1` et `  a2`, et le code de sortie est 1
+
+Scenario: reprise_sans_pointeur_repart_sur_du_neuf
+  Given un data dir sans `active-conversation.json`
+  When l'exécution de `vanyline run -c bonjour`
+  Then stdout contient `No active conversation found, starting a new one.` et une conversation neuve est utilisée (comportement identique en `--json`, où ce message pollue stdout — voir Tasks `[?]`)
+
+Scenario: reprise_sur_fichier_conversation_inaccessible
+  Given un `active-conversation.json` pointant sur un id sans fichier valide (absent ou JSON corrompu)
+  When @resolve_context est appelée avec @continue_active @true
+  Then le message `No active conversation found...` est rendu et la conversation retournée est neuve, sans erreur ni panic
+
+Scenario: reprise_seede_le_todo_de_la_conversation
+  Given une conversation persistée dont @todo vaut `Some("[{\"content\":\"x\"}]")` et pointée comme active
+  When @resolve_context puis @build_session_context avec @conv.todo
+  Then @SessionContext::todo_state lu sous lock vaut @Some de cette chaîne
+
+Scenario: tour_reussi_persiste_deux_messages_et_le_todo
+  Given une conversation neuve, un tour simulé réussi (response_text `"ok"`, un tool call sans résultat)
+  When @run_one_shot termine son tour
+  Then le fichier de conversation porte [user(user_msg), assistant("ok", tool_calls d'un enregistrement)] et @todo égal à l'état lu dans @todo_state
+
+Scenario: tool_calls_persistes_sans_id_et_absents_si_vides
+  Given un @ChatTurnResult avec deux @ToolCallRecord (id, name, arguments, result)
+  When @result_to_assistant_message s'exécute
+  Then chaque @vanyline_lib::ToolCall persisté porte name/arguments/result mais AUCUN `id`, et avec zéro tool call le champ persisté est @None
+
+Scenario: historique_filtre_roles_et_perd_les_tool_calls
+  Given une @Conversation contenant un message rôle `system`, un `user` et un `assistant` avec tool_calls
+  When @process_turn construit l'historique
+  Then seul le couple user/assistant est transmis et le message assistant est un texte seul (tool_calls non rejoués)
+
+Scenario: mode_toolbox_remplace_les_tools_locaux
+  Given @build_session_context appelé avec `toolbox_mcp_url = Some("http://sbx:3000/mcp")`
+  When le @SessionContext est inspecté
+  Then `local_tools` est vide, `extra_mcp` compte une paire {serveur `toolbox` @HttpStreamable url fournie headers vides, sélection serveur `toolbox` tools vides}, `subagent_depth_max` vaut 1 et `model_override`/`todo_state` reflètent les arguments
+
+Scenario: mode_local_installe_huit_tools_et_aucun_mcp
+  Given @build_session_context appelé avec `toolbox_mcp_url = @None` et `json` indifférent
+  When le @SessionContext est inspecté
+  Then `local_tools` contient `read_file` (map complète de ./tools.rs), `extra_mcp` est vide
+
+Scenario: todo_state_seede_ou_none
+  Given @build_session_context appelé avec `todo_seed = Some("[]")` puis avec @None
+  When @todo_state est lu sous lock dans chaque cas
+  Then le premier rend @Some("[]") et le second @None
+
+Scenario: lecture_todo_sur_mutex_empoisonne_garde_la_valeur
+  Given un @Mutex de todo verrouillé puis empoisonné par un panic interne (harnais de test)
+  When @read_todo_state s'exécute
+  Then la valeur posée avant le panic est rendue (aucun panic propagé)
+
+Scenario: sources_workspace_en_tete_et_ordre_des_kinds
+  Given des couches avec workspace_dir portant un agent `build`, un toolset `grafana`, un mcp `internal` (config.yaml workspace) et rien d'autre
+  When @workspace_source_summary s'exécute
+  Then les lignes rendues sont dans l'ordre `  agents: build`, `  toolsets: grafana`, `  mcp: internal` et AUCUNE ligne skills/models/providers
+
+Scenario: sources_workspace_absentes_nrendent_rien
+  Given des couches sans workspace_dir, puis avec workspace_dir sans aucune entrée workspace-sourcée
+  When @workspace_source_summary s'exécute dans les deux cas
+  Then le résultat est un @Vec vide dans les deux cas (@print_workspace_sources ne rend alors même pas l'en-tête)
+
+Scenario: sources_workspace_supprimees_en_mode_json
+  Given un workspace portant des entrées workspace-sourcées et un data/config dir isolé
+  When l'exécution de `vanyline run --json bonjour`
+  Then stdout ne contient pas `Sources workspace` (le mode @json saute @print_workspace_sources)
+
+Scenario: contexte_workspace_vient_du_cwd_et_saute_si_absent
+  Given deux répertoires : racine portant `AGENTS.md` contenu `"RACINE"` et un sous-répertoire `sub/` sans `AGENTS.md`
+  When @read_workspace_context est appelée avec le cwd posé sur la racine puis sur `sub/` (test sérialisé)
+  Then le premier rend @Some("RACINE"…) et le second rend @None — la racine workspace n'est PAS remontée pour AGENTS.md (comportement actuel, voir Tasks `[?]`)
+
+Scenario: git_diff_stat_rend_le_stat_des_modifications
+  Given un dépôt git temporaire avec un commit et une modification non stagée de `a.txt`
+  When @git_diff_stat est appelée sur la racine
+  Then le résultat est @Some d'un texte trimé contenant `a.txt`
+
+Scenario: git_diff_stat_silentieux_hors_depot_et_repo_propre
+  Given un répertoire sans `.git`, puis un dépôt git sans modification
+  When @git_diff_stat est appelée dans les deux cas
+  Then les deux résultats sont @None (aucun appel git dans le premier cas, diff vide rendu @None dans le second)
+
+Depends on:
+  ./main.sdd — @chat::run (mapping des 7 arguments, mode REPL = aucun sous-commande),
+    @crate::discover_fs_store (cwd + @config::discover_layers, message d'échec cwd).
+  ./config.sdd — @ensure_config_dir (fatal à chaque @run), @discover_workspace_root
+    (racine du @git_diff_stat).
+  ./store.sdd — @get_active_conversation, @get_conversation, @save_conversation
+    (erreur avalée `.ok()` ici) ; JAMAIS @set_active_conversation.
+  ./tools.sdd — @crate::tools::local_tools_map (8 tools locaux, absents du mode toolbox).
+  ../../lib/src/session.sdd — @run_agent_turn, @SessionContext (champs et invariants,
+    profondeur 1, extra_mcp « toolbox » hors config, todo_state partagé, erreurs
+    `VNL-CFG-003` sans événement sink).
+  ../../lib/src/event.sdd — @ChatEvent (tag serde `type` snake_case = forme des lignes
+    JSONL), @EventSink (infaillible), @ChatTurnResult/@ToolCallRecord (source des
+    `id` abandonnés à la persistance).
+  ../../lib/src/types.rs — @Conversation (champs id/agent/title/messages/todo),
+    @Message, @vanyline_lib::ToolCall (sans `id`) ; spec ../../lib/src/types.sdd non
+    encore rédigée (le format persisté est celui de ./store.sdd).
+  ../../cfgstore/src/layers.sdd — @file_entry_source/@skill_entry_source/@config_entry_source
+    (filtres « workspace uniquement », citation croisée de ce fichier).
+  ../../cfgstore/src/fs_store.sdd — @list_agents/@default_agent/@list_toolsets/@list_skills/@list_mcp_servers/@list_models/@list_providers (tous consommés en `.unwrap_or_default()` ou `.ok().flatten()`).
+  `tokio` (@tokio::time::timeout), `uuid` (@Uuid::new_v4), `serde_json` (ligne JSONL),
+    `rig_core` (@Message::user/@assistant), `async_trait`, @std::process::Command (git),
+    `vanyline_lib::domain` (@McpServer/@McpTransport::HttpStreamable/@McpSelection).
+  ../../vanyline.sdd — position du crate `cli` ; ../../tooling.sdd — harnais
+    (dette `print_*`/exit tracée en Tasks).
+
+Tasks:
+  [?] Erreurs de tour invisibles : le bras @Err(_) du one-shot et le @break du REPL
+    jettent l'@VnyError sans l'afficher. Un échec de résolution config
+    (`VNL-CFG-003` — modèle/provider/toolset inconnu) ne produit AUCUNE sortie, seul
+    le code de sortie (1 en one-shot, 0 en REPL) signale la défaillance. Corriger
+    (afficher le Display de l'erreur sur stderr avant exit) ou assumer ? Arbitrage
+    Sébastien, puis mise à jour des deux Scenario concernés.
+  [?] Divergence de code de sortie sur erreur de tour : one-shot exit(1), REPL sort
+    en 0 (fin normale de boucle). Converger les deux vers 1, ou distinguer
+    explicitement « l'opérateur humain du REPL n'a pas besoin d'un code » ?
+  [?] Reprise sous agent différent : @conv.agent d'une conversation restaurée est
+    ignoré (l'agent vient du flag ou du défaut courant) et jamais réécrit — on peut
+    donc continuer un historique créé par l'agent A avec l'agent B, et la conversation
+    persistée garde `agent: A`. Utiliser @conv.agent en priorité, réécrire le champ,
+    ou assumption voulue ?
+  [?] Ce fichier ne pointe jamais ses conversations (@set_active_conversation jamais
+    appelé) : `vanyline run -c` / REPL avec `-c` ne retrouve rien sans un
+    `vanyline conversations set` manuel — ./store.sdd porte le même `[?]` côté
+    store. Poser le pointeur à la création de la session ? Décision à prendre des
+    deux côtés à la fois.
+  [?] `AGENTS.md` lu depuis le cwd du processus alors que @print_git_diff_stat et les
+    couches de config utilisent la racine découverte (@discover_workspace_root) :
+    lancé depuis un sous-répertoire, le chat perd le contexte workspace de la
+    racine. Aligner sur la racine découverte, ou documenter cwd comme voulu ?
+    (Le Scenario `contexte_workspace_vient_du_cwd_et_saute_si_absent` épingle le
+    comportement actuel.)
+  [?] @read_line().unwrap_or(0) : une erreur io de stdin (ex. terminal déconnecté) se
+    confond avec un EOF et le REPL sort en code 0. Distinguer (message + code 1) ?
+  [?] @StdoutSink ignore @ToolResult, @ToolUnavailable, @Usage, @ReasoningDelta et
+    les événements subagent : en REPL on voit `[tool] x(...)` sans jamais le
+    résultat, et un serveur MCP injoignable (@ToolUnavailable, cf.
+    ../../lib/src/session.sdd) est invisible. Lequel mérite un rendu minimal ?
+  [?] `No agent specified.` : l'en-tête est sur stderr mais la liste `  {name}` des
+    agents disponibles est sur stdout — mélange de flux sur un chemin d'erreur
+    (exit 1). Tout stderr, ou tout stdout ?
+  [?] Erreurs de store systématiquement avalées (@unwrap_or_default, `.ok()`,
+    `.ok().flatten()`) : un listing d'agents en échec io se rend comme « No agent
+    specified » ou « Agent not found » trompeurs ; @save_conversation en échec fait
+    perdre le tour sans un bruit de tracing. Dévoration assumée (idem ./main.sdd
+    pour `list_conversations`) ou avertissement tracing ?
+  [?] `run --json -c` sans pointeur actif : `No active conversation found, starting
+    a new one.` (println! nu de @resolve_context, non gardé par @json) pollue le
+    flux JSONL sur stdout. Garder le message en mode json (le déplacer sur stderr)
+    ou le supprimer ? Le Scenario `reprise_sans_pointeur_repart_sur_du_neuf` note
+    le fait sans le bénir.
+  [?] Combinaison @json @true + @message @None (REPL en json) inatteignable par
+    ./main.rs mais possible en appel direct : l'en-tête sources est supprimé alors
+    que le rendu reste texte. Faut-il un garde (debug_assert ou forçage) ?
+  [?] @run accepterait un message vide (`vanyline run ""`) : il part tel quel vers
+    le modèle. Refuser explicitement ?
+  [?] Tool calls persistés sans rejou : l'historique renvoyé à rig est texte seul ;
+    un tour repris ne « sait » plus que les tool calls du tour précédent ont eu lieu
+    (le contenu des résultats est même perdu puisque @Message persiste tool_calls
+    sans que @process_turn ne les re-injecte). Simplification assumée (les résultats
+    sont déjà résumés dans `response_text`) ou dette de fidélité de reprise ?
+  [!] Dette harnais print/exit : ./chat.rs est saturé de @println!/@print!/@eprintln!
+    et cinq @std::process::exit(1) sans aucun `#[allow]`, alors que
+    `print_stdout`/`print_stderr` sont deny au workspace (../../tooling.sdd,
+    exemption `cfg(test)` seulement, même `[?]` ouvert que ./main.sdd). Le rendu
+    stdout EST le produit de ce fichier : exemption ciblée justifiée, writer dédié,
+    ou bascule tracing + exit centralisé ? À trancher avec ./main.sdd en même temps.
+  [!] Pollution stdout en mode @json : ./main.rs monte le fmt layer tracing SANS
+    writer stderr (./main.sdd Tasks `[!]`) ; tout @tracing::warn! de
+    ../../lib/src/session.rs pendant le tour (ex. « local tool not found ») se
+    mélangerait aux lignes JSONL sur stdout. Le présent contrat « stdout = JSONL pur »
+    n'est tenable qu'avec la correction du writer — dépendance directe de ce `[!]`.
+  [ ] Couverture de test existante (16 tests `cfg(test)` de ./chat.rs) :
+    @workspace_source_summary (5 : `no_workspace_layer_yields_empty_summary`,
+    `workspace_layer_with_no_overrides_yields_empty_summary`,
+    `workspace_agent_reported`, `workspace_toolset_and_mcp_reported`,
+    `multiple_workspace_agents_joined_on_one_line`), @build_session_context (6 :
+    none/toolbox × texte/json + `seeds_todo_from_conversation` +
+    `no_seed_when_none`), @git_diff_stat (3 : non_repo/clean/dirty),
+    @read_todo_state (2). NON COUVERT à ce jour, Scenarios ci-dessus à convertir :
+    @run et les deux modes entiers, @resolve_context, @run_one_shot (timeout,
+    `Session:`, persistance), @run_repl (bannière, prompt, EOF, erreur de tour),
+    @StdoutSink/@JsonSink, @process_turn, @result_to_assistant_message,
+    @read_workspace_context, @print_workspace_sources/@print_git_diff_stat
+    (en-têtes et gardes `json`).
+  [ ] Réponse au `[?]` de ./main.sdd « `run --timeout 0` » : OUI, le contrat est
+    repris ici (Must + Scenario `timeout_zero_desactive_la_limite`) — l'aide clap
+    mentait faute de reprise, elle est maintenant couverte par ce fichier.
+
+Done when:
+  Chaque littéral de Returns/Raises a un Scenario couvert par un test taggé de son
+    titre ; les sinks, @resolve_context, @run_one_shot (timeout, session,
+    persistance) et @run_repl (bannière, EOF, erreur) sont testés — la liste `[ ]`
+    de Tasks est soldée.
+  Les `[?]` arbitrés (erreurs invisibles, codes de sortie, pointeur actif, origine
+    d'AGENTS.md, rendu stdout des variantes non rendues) sont reflétés dans Must/
+    Handles/Scenario par les décisions de Sébastien.
+  Le `[!]` writer tracing est clos (sinon le contrat JSONL de ce fichier reste
+    inatteignable), et la purge harnais `print_*` de ./chat.rs suit la décision
+    commune avec ./main.sdd (../../tooling.sdd).
+  La batterie (check, test, build, clippy `--all-targets -D warnings`, fmt) est
+    verte sur le crate `cli`.

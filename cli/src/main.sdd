@@ -1,0 +1,591 @@
+Spec: Main
+
+Purpose:
+  Racine du binaire `vanyline` (crate `cli`, package cargo `vanyline`) : point
+  d'entrée du processus, grammaire clap complète (flags globaux + arborescence des
+  sous-commandes), quatre sous-grammaires déclarées en modules inline
+  (@conversation, @agent, @provider, @config_cmd), et les HANDLERS `run_*` qui
+  rendent la sortie stdout/stderr et fixent les codes de sortie de la quasi-totalité
+  des commandes de lecture (conversations, agents, providers, models, toolsets,
+  skills, mcp, config check) et de la famille K8s en écriture (owner, project,
+  sandbox). Les modules `*_cmd.rs` ne sont que déclaratifs (grammaire) — câblage et
+  rendu vivent ICI, ce fichier est donc le contrat de rendu du CLI. Les commandes
+  `chat` (aucun sous-commande), `run`, `serve --stdio` délèguent respectivement vers
+  ./chat.rs et ./rpc/mod.rs (specs sœurs) : ce fichier contracte le câblage, le
+  préambule K8s/toolbox et le mapping des arguments, pas le rendu interne de ces
+  deux modules. Regroupement : un seul fichier, un seul contrat « entrée du
+  processus et ses handlers ».
+
+Owns:
+  ./main.rs
+
+Exposes:
+  @Cli — @clap::Parser racine, attribut `#[command(name = "vanyline", version,
+    about = "CLI for vanyline LLM chat")]`. Flags globaux (`global = true`, acceptés avant
+    comme après n'importe quelle sous-commande) : `-a/--agent <String>` (nom
+    d'agent, chemin chat uniquement), `-c/--continue` (bool, champ
+    @continue_active, reprise de la conversation active, chemin chat uniquement),
+    `-n/--namespace <String>` (cible K8s owner/project/sandbox + toolbox),
+    `--toolbox <String>` (sandbox utilisée comme toolbox d'inférence, remplace
+    `local_tools` par les tools MCP de la sandbox, chemin chat uniquement).
+    `command` est @Option : aucune sous-commande = mode REPL chat.
+  @Commands — @clap::Subcommand à 12 variants, dont le nom CLI (ou son `#[command(name
+    = …)]`) détermine le dispatch :
+    `run <message> [-m/--model] [-t/--timeout <u64>] [-j/--json]` → @Commands::Run ;
+    `conversations …` → @Commands::Conversations(@conversation::Commands) ;
+    `agents …` → @Commands::Agents(@agent::Commands) ;
+    `providers …` → @Commands::Providers(@provider::Commands) ;
+    `models …` → @Commands::Models — grammaire dans ./model_cmd.sdd ;
+    `toolsets …` → @Commands::Toolsets — grammaire dans ./toolset_cmd.sdd ;
+    `skills …` → @Commands::Skills — grammaire dans ./skill_cmd.sdd ;
+    `mcp …` → @Commands::Mcp — grammaire dans ./mcp_cmd.sdd ;
+    `owner …` (variant @K8sOwner, nom CLI explicite `owner`) — grammaire dans
+    ./owner_cmd.sdd ;
+    `project …` (variant @K8sProject, nom CLI `project`) — grammaire dans
+    ./project_cmd.sdd ;
+    `sandbox …` (variant @K8sSandbox, nom CLI `sandbox`) — grammaire dans
+    ./sandbox_cmd.sdd (en cours) ;
+    `config …` → @Commands::Config(@config_cmd::Commands) ;
+    `serve [--stdio]` → @Commands::Serve.
+  @conversation::Commands (module inline, grammaire-owned par ce fichier) : @List
+    (unitaire) ; @New { @agent: Option<String> (`-a/--agent`, LOCAL au variant —
+    voir Tasks `[?]` collision avec le flag global), @title: Option<String>
+    (`-t/--title`) } ; @Show { reference: String } ; @Delete { reference: String } ;
+    @Set { reference: String }.
+  @agent::Commands (module inline) : @List ; @SetDefault { name: String } ;
+    @Show { name: String }.
+  @provider::Commands (module inline) : @List (variante unique).
+  @config_cmd::Commands (module inline) : @Check (variante unique, aide
+    `Validate configuration (both layers)`).
+  @discover_fs_store — `pub(crate) fn() -> vanyline_cfgstore::fs_store::FsConfigStore` :
+    helper de tous les handlers de config ; unique item `pub(crate)` du fichier,
+    consommé par ./chat.rs et ./rpc/handlers.rs.
+  Handlers privés de rendu/dispatch (contrat de ce fichier) : @run_conversation,
+    @run_agent, @run_provider, @run_config, @run_models, @run_toolsets, @run_skills,
+    @run_mcp, @discover_k8s_client, @resolve_toolbox_mcp_url, @run_owner_k8s,
+    @run_project_k8s, @run_sandbox_k8s.
+  @main — @tokio::main (runtime multi-thread par défaut), ne retourne rien : toute
+    erreur se matérialise par message + @std::process::exit, ou par panic (voir
+    Raises).
+
+Accepts:
+  @main : rien depuis l'extérieur — binaire. En entrée : argv (parsé par
+    @Cli::parse), variable d'environnement `RUST_LOG` (filtre tracing, défaut
+    `vanyline=debug`), `HOME`/`XDG_CONFIG_HOME`/`XDG_DATA_HOME` (via `dirs` pour
+    ./config.rs), kubeconfig (via @VnlK8sClient::discover, dernier recours de
+    namespace), cwd courant (découverte des couches de config).
+  @run_conversation : références de conversation résolues par
+    @store::resolve_conversation_reference — index 1-based sur l'ordre de
+    @store::list_conversations (tri par UUID croissant) ou préfixe d'UUID insensible
+    à la casse ; erreur sur index hors plage, aucune correspondance, ou préfixe
+    ambigu.
+  @discover_fs_store : cwd absolu du processus ; couches = `config_dir()` global +
+    éventuel `<racine workspace>/.vanyline` (remontée `.vanyline`/`.git`, ./config.rs).
+  @run_owner_k8s/@run_project_k8s/@run_sandbox_k8s : un @VnlK8sClient joignable ;
+    les flags denses des variants `Create`/`Stop`/`Start` sont contractés par les
+    specs `*_cmd.sdd`, la construction du `spec` (@OwnerSpec/@ProjectSpec/@SandboxSpec)
+    à partir de ces flags par ce fichier.
+  Chemin chat (`main` sans sous-commande, et `run`) : @chat::run(message, agent,
+    continue_active, toolbox_mcp_url, timeout_secs, json, model) — mapping exact en
+    Handles ; la sémantique de ces 7 arguments appartient à ./chat.rs (spec en cours).
+
+Returns:
+  @main : aucune valeur. Code de sortie 0 sur succès (y compris listing vide,
+    `serve --stdio` qui retourne normalement, `--help`/`--version` rendus par clap).
+  Handlers de config (conversation/agent/provider/models/toolsets/skills/mcp/config) :
+    sortie texte uniquement sur stdout (hors erreurs), ex. `Created conversation:
+    {uuid}`, `Deleted conversation: {uuid}`, `Active conversation: {uuid}`,
+    `Default agent set to: {name}`, `Config OK — no problems found.`.
+  Handlers K8s : succès d'écriture sur stdout par `Created owner: {name}`,
+    `Deleted owner: {name}`, `Created project: {name}`, `Deleted project: {name}`,
+    `Created sandbox: {name}`, `Deleted sandbox: {name}`, `Stopped sandbox: {name}`,
+    `Started sandbox: {name}`.
+  @discover_fs_store : un @FsConfigStore branché sur les couches découvertes.
+  @discover_k8s_client : un @VnlK8sClient (ne retourne jamais `Err` — meurt par
+    exit).
+  @resolve_toolbox_mcp_url : @Some(url MCP de la sandbox) si une toolbox est nommée
+    (flag ou config), @None sinon — dans ce cas AUCUN appel K8s n'est émis.
+
+Raises:
+  Code 2 (défaut clap, jamais épinglé par un test — voir Tasks) : sous-commande ou
+    argument manquant, flag inconnu (couvert pour `run` par le test interne
+    `run_rejects_unknown_flag`), commande inconnue.
+  Code 1, sur stderr, message = @Display de l'erreur (aucun reformatage local) :
+    erreur store sur `agents/providers/models/toolsets/skills/mcp list`,
+    `agents list`, `agents show`, `agents set-default` (écriture) ;
+    `agent not found: {name}` pour @SetDefault d'un agent inexistant ;
+    `Failed to read current directory: {e}` dans @discover_fs_store ;
+    référence de conversation irrésolue (message de
+    @store::resolve_conversation_reference : `No conversation at index {i} (have {n})`,
+    `No conversation matches '{r}'`, `Ambiguous reference '{r}': matches {n}
+    conversations`) sur `conversations show/delete/set` ;
+    @config check avec au moins un problème (problèmes rendus sur stdout PUIS exit 1,
+    voir Must) ;
+    `discover_k8s_client` et `sandbox_mcp_url` en échec (ex. cluster injoignable →
+    marqueur `VNL-K8S-001` porté par @VnyError, cf. ../../lib/src/error.sdd) — tuent
+    owner/project/sandbox quel que soit le verbe, et `run`/chat avec toolbox demandée ;
+    `vanyline serve` sans `--stdio` → message exact en Handles ;
+    timeout du `run` (`VNL-CLI-001`, émis par ./chat.rs, pas par ce fichier).
+  Code 101 (panic par @expect — divergence documentée, jamais nettoyée) :
+    @expect(`failed to save conversation`) sur `conversations new` en erreur d'io ;
+    @expect(`conversation not found`) sur `conversations show/set` si le fichier a
+    disparu entre le listing et le rechargement (course) ; @expect(`failed to delete
+    conversation`) et @expect(`failed to set active conversation`) sur erreur d'io.
+  Aucune erreur propre au module de grammaire : @conversation/@agent/@provider/
+    @config_cmd ne font que déclarer.
+
+Handles:
+  Ordre de @main : init tracing AVANT le parsing — @registry + @EnvFilter
+    (`RUST_LOG`, repli `vanyline=debug`) + @fmt::layer (AUCUN writer configuré :
+    destination par défaut = stdout, voir Tasks `[!]`) ; puis @Cli::parse ; puis
+    dispatch exclusif vers le handler du variant choisi, sans logique partagée.
+  Dispatch et mapping des arguments (contrat de câblage de ce fichier) :
+    aucun sous-commande → @resolve_toolbox_mcp_url(cli.toolbox, cli.namespace) puis
+    @chat::run(None, cli.agent, cli.continue_active, toolbox_mcp_url, None, false,
+    None) — mode REPL ;
+    `run` → @resolve_toolbox_mcp_url puis @chat::run(Some(message), cli.agent,
+    cli.continue_active, toolbox_mcp_url, timeout, json, model) ;
+    `conversations|agents|providers|models|toolsets|skills|mcp|config` → handler
+    correspondant — les flags globaux sont acceptés au parsing mais IGNORÉS par ces
+    handlers (`namespace` n'est jamais lu, `agent`/`continue`/`toolbox` non plus) ;
+    `owner|project|sandbox` → handler K8s avec `cli.namespace` propagé ;
+    `serve --stdio` → @rpc::run_stdio_server() (contrat ./rpc/mod.sdd) ; `serve` nu →
+    stderr `vanyline serve: only --stdio is currently supported` + exit 1.
+  @discover_k8s_client(namespace_flag) : construit les couches via
+    @discover_fs_store, namespace résolu par précédence `--namespace` >
+    `defaults.namespace` du config.yaml fusionné (@config::configured_namespace) >
+    contexte kubeconfig courant (laissé à @VnlK8sClient::discover quand les deux
+    premiers sont absents) ; échec de discover → stderr + exit 1. Appelée AVANT le
+    match du verbe : toute commande owner/project/sandbox meurt avant tout rendu si
+    le cluster est injoignable.
+  @resolve_toolbox_mcp_url : nom résolu par précédence `--toolbox` >
+    `defaults.toolbox` (@config::configured_toolbox) ; les deux absents → @None sans
+    instancier aucun client K8s (le chat fonctionne sans cluster) ; sinon
+    @discover_k8s_client puis @client.sandbox_mcp_url(&name) — échec → stderr + exit 1.
+  Rendu `conversations list` (ordre = tri UUID du store) : store vide → ligne unique
+    `No conversations.` ; sinon par conversation `  [{i}] {uuid} | {title} | {n}
+    messages | {agent}` avec i 1-based, `(untitled)` si title absent, `(none)` si
+    agent absent. Erreur de lecture du store avalée par `unwrap_or_default` → rendue
+    comme un store vide (voir Tasks `[?]`).
+  Rendu `conversations show` : une ligne par message `[role] content` ; conversation
+    sans message → aucune sortie, exit 0.
+  Rendu `agents list` : vide → `No agents configured.` ; sinon `  {name} | {source} |
+    {summary}` (summary = description ou `-`, source =
+    @file_entry_source(layers, `agents`, `md`, name) de ./cfgstore), et suffixe
+    ` (default)` sur l'agent égal à @default_agent (erreur de @default_agent avalée
+    silencieusement par `.ok().flatten()` → aucun marqueur).
+  Rendu `agents show {name}` : bloc exact — `Agent: {name}`, `  Source: {source}`,
+    `  Description: {desc}` UNIQUEMENT si présente, `  Mode: {Debug de agent.mode}`,
+    puis chaîne modèle : `  Model: {model.name} -> provider '{provider.name}'
+    ({Debug provider_type}, {endpoint}), model '{model.model}'` si modèle ET provider
+    résolus ; `  Model: {model.name} -> provider '{model.provider}' (unknown)` si le
+    provider manque ; `  Model: {agent.model} (unknown)` si le modèle manque. Puis
+    `  Skills: {Debug de agent.skills}`, puis toolsets : `  Toolsets: (none)` si
+    liste vide, sinon en-tête `  Toolsets:` puis par toolset résolu `    - {name} :
+    local=[{local}], mcp=[{mcp}]` (local = local_tools jointes par `, ` ou `-` ;
+    mcp = entrées `{server}: {tools}` jointes par `; `, tools = `*` si la sélection
+    est vide, `-` si aucun serveur mcp) ou `    - {ts_name} (unknown)` si inconnu.
+    Puis `  System prompt:` et chaque ligne du prompt préfixée de 4 espaces via
+    @str::lines (les lignes intérieures vides rendent un préfixe d'espaces nu ; le
+    dernier saut de ligne est perdu par @str::lines, jamais rendu).
+  Rendu `providers list` : vide → `No LLM providers configured.` ; sinon `  {name} |
+    {source} | {Debug provider_type}`, source = @config_entry_source sur la section
+    `providers`.
+  Rendu `models list` : vide → `No models configured.` ; sinon `  {name} | {source} |
+    {provider} / {model}` (source = section `models`).
+  Rendu `toolsets list` : vide → `No toolsets configured.` ; sinon `  {name} |
+    {source} | {description ou -}`, source = @file_entry_source(layers, `toolsets`,
+    `yaml`, name).
+  Rendu `skills list` : vide → `No skills configured.` ; sinon `  {name} | {source} |
+    {description}`, source = @skill_entry_source.
+  Rendu `mcp list` : vide → `No MCP servers configured.` ; sinon `  {name} | {source}
+    | {Debug transport} {url}` (source = section `mcp`).
+  Rendu `config check` : zéro problème → stdout unique `Config OK — no problems
+    found.` exit 0 ; sinon CHAQUE problème @Display rendu sur STDOUT par `  {p}`,
+    puis exit 1 (aucune sortie sur stderr — voir Tasks `[?]`).
+  Rendu `owner list` : vide → `No owners found.` ; sinon `  {name} | {status.pvc_name
+    ou -} | {status.service_account ou -}` (name via @kube::ResourceExt::name_any).
+  Rendu `owner show {name}` : `Owner: {name}`, puis `  existingPvc: {… ou -}`,
+    `  homeSize: {… ou -}`, `  homeStorageClass: {… ou -}` ; projectDefaults : bloc
+    `  projectDefaults:` + `    storageSize: {… ou -}` + `    storageClass: {… ou -}`
+    si présent, sinon ligne `  projectDefaults: -` ; puis `Status:` : soit `  (not yet
+    reconciled)` si status absent, soit `  pvcName:`/`  serviceAccount:` + conditions
+    (`  conditions: -` si vide, sinon en-tête + par condition `    - {type_}
+    status={status} message={message}`).
+  Construction `owner create` : @OwnerSpec { existing_pvc, home_size,
+    home_storage_class, home_access_mode, project_defaults, application_ref: @None,
+    egress: @Vec::new() } ; project_defaults = @Some(@ProjectDefaults des trois flags
+    `--project-default-storage-*`) SI au moins UN des trois est présent, sinon @None
+    (les flags partiels sont acceptés tels quels, les absents restent @None).
+  Rendu `project list` : vide → `No projects found.` ; sinon `  {name} |
+    owner={spec.owner} | {repo_url} | cloned={bool}` (cloned = status.cloned, faux si
+    status absent).
+  Rendu `project show {name}` : `Project: {name}` ; `  owner:`, `  repoUrl:`,
+    `  defaultBranch: {… ou -}` ; `  existingPvc: -` ou `  existingPvc: {name}
+    (subPath={… ou -})` ; `  storageSize:`, `  storageClass:`, `  gitSecret:` (ou `-`) ;
+    `  caches: {joins par , }` si non vide sinon `  caches: -` (vide ET absent rendent
+    identiquement `  caches: -`) ; `  fetchInterval: {… ou -}` ; puis bloc `Status:`
+    (`  (not yet reconciled)` ou `  pvcName:`, `  cloned: {bool}`, `  worktrees: -` /
+    `  worktrees: {joins}`, conditions comme owner).
+  Construction `project create` : @ProjectSpec { owner, repo_url, default_branch,
+    existing_pvc = @Some(@PvcRef{ name, sub_path }) si `--existing-pvc-name` présent
+    (`--existing-pvc-subpath` seul n'a AUCUN effet), storage_*, git_secret,
+    caches = @None si le vec répétable `--cache` est vide sinon @Some(vec),
+    fetch_interval, egress: @Vec::new() }.
+  Rendu `sandbox list` : vide → `No sandboxes found.` ; sinon `  {name} |
+    project={spec.project} | branch={spec.branch} | phase={status.phase ou -}`.
+  Rendu `sandbox show {name}` : `Sandbox: {name}`, `  project:`, `  branch:`,
+    `  image: {… ou -}` ; toolchains : `  toolchains: -` si vide, sinon en-tête + par
+    toolchain `    - {name} = {image}` ; puis `Status:` (`  (not yet reconciled)` ou
+    `  phase:`/`  service:` + conditions comme owner).
+  Construction `sandbox create` : @SandboxSpec { project, branch, toolchains (vec
+    répétable `--toolchain NAME=IMAGE`, parse ./sandbox_cmd.rs), image, resources:
+    @None, egress: @Vec::new(), suspended: false }. `stop` =
+    @set_sandbox_suspended(name, true) ; `start` = @set_sandbox_suspended(name, false) ;
+    `delete` = suppression de la CR (comportement en cascade = controller, hors contrat
+    de ce fichier).
+  Chemin `serve --stdio` : délégation totale à @rpc::run_stdio_server (sortie sur
+    stdin EOF ou `shutdown` traité, code 0) ; ce fichier ne touche pas stdout/stdin.
+
+Must:
+  Initialiser le tracing subscriber (registry + EnvFilter défaut `vanyline=debug` +
+    fmt layer) AVANT @Cli::parse, sans jamais toucher aux couches de config ni à K8s
+    pour les commandes qui n'en ont pas besoin (le store n'est découvert que par
+    l'appel @discover_fs_store du handler concerné).
+  Respecter les précédences documentées : namespace = `--namespace` >
+    `defaults.namespace` > contexte kubeconfig ; toolbox = `--toolbox` >
+    `defaults.toolbox` ; sans toolbox nommée, aucun appel K8s sur le chemin chat.
+  Rendre EXACTEMENT les littéraux de Handles (texte du cas vide, colonnes ` | `,
+    messages de succès `{Verbe} {ressource}: {name}`) — ils sont l'interface stable
+    des scripts qui boursent le CLI, et le contrat d'affichage auquel se référencent
+    ./mcp_cmd.sdd, ./model_cmd.sdd, ./skill_cmd.sdd, ./toolset_cmd.sdd,
+    ./owner_cmd.sdd, ./project_cmd.sdd.
+  Résoudre les références de conversation avec @store::resolve_conversation_reference
+    sur le MÊME ordre que `conversations list` (tri UUID du store), pour que l'index
+    affiché soit utilisable tel quel dans `show/delete/set`.
+  Écrire le default agent dans la couche @vanyline_cfgstore::store::Layer::Global
+    (@set_default_agent), jamais dans la couche workspace.
+  Construire les CRs K8s avec les champs non exposés en CLI figés : application_ref
+    et egress @None/vide (owner/project), resources @None et suspended false (sandbox),
+    caches @None quand le vec CLI est vide, project_defaults @None quand aucun des
+    trois flags `--project-default-*` n'est fourni.
+  Sortir avec le code 2 de clap sur toute erreur de parsing, le code 1 sur toutes les
+    branches d'erreur gérées listées en Raises (message sur stderr, une seule ligne,
+    @Display de l'erreur sans préfixe ajouté par ce fichier — l'identifiant
+    `VNL-K8S-001` vient de @VnyError, pas d'un formatage local).
+  Garder la ligne `#![cfg_attr(test, allow(clippy::unwrap_used,
+    clippy::expect_used, unsafe_code))]` limitée à `cfg(test)` (harnais
+    ../../tooling.sdd).
+
+Must not:
+  Écrire sur stdout autre chose que le rendu contracté (pas de log, pas de prompt)
+    — et jamais sur stderr un succès ou un diagnostic de `config check` (telle
+    qu'implémentée, cette commande rend ses problèmes sur stdout).
+  Propager une erreur de @store::list_conversations, de @default_agent, ou d'un
+    @expect en code de sortie propre (le comportement actuel — dévoration silencieuse
+    ou panic 101 — est un fait documenté, pas un contrat à étendre : aucune nouvelle
+    branch ne doit ajouter de `expect`/`unwrap` hors `cfg(test)`).
+  Interroger le cluster K8s pour les commandes de config purs (agents, providers,
+    models, toolsets, skills, mcp, conversations, config check) — la découverte K8s
+    n'est atteignable que par les verbes owner/project/sandbox et par le chemin
+    chat/run AVEC toolbox nommée.
+  Lire `cli.agent`, `cli.continue_active`, `cli.toolbox` ailleurs que dans les deux
+    branches chat (`None` et `Run`) ; `cli.namespace` ailleurs que dans les trois
+    handlers K8s et @resolve_toolbox_mcp_url.
+  Déplacer du rendu ou de la construction de CR dans les modules `*_cmd.rs`
+    (purement déclaratifs, cf. leurs specs) ou dans @Cli/@Commands.
+  Ajouter une variante à @Commands, @conversation/@agent/@provider/@config_cmd sans
+    que le dispatch @main et ce contrat de rendu soient étendus d'abord.
+
+Structure:
+  ./main.rs — de haut en bas : cfg_attr test ; @mod des 13 modules siblings
+    (./chat.rs, ./config.rs, ./config_check.rs, ./store.rs, ./tools.rs, ./rpc/,
+    les 7 `*_cmd.rs`) ; @Cli + @Commands + les 4 modules inline de grammaire ;
+    @main ; les handlers `run_*` ; @discover_fs_store / @discover_k8s_client /
+    @resolve_toolbox_mcp_url ; @mod tests (5 tests de parsing de `run`, cartographiés
+    en Tasks).
+  Specs sœurs citées sans duplication : ./chat.rs (REPL/one-shot/json/timeout, spec
+    en cours), ./rpc/mod.sdd (serveur stdio), ./mcp_cmd.sdd, ./model_cmd.sdd,
+    ./skill_cmd.sdd, ./toolset_cmd.sdd, ./owner_cmd.sdd, ./project_cmd.sdd,
+    ./sandbox_cmd.sdd (en cours) ; ./config.rs, ./store.rs, ./config_check.rs,
+    ./tools.rs (specs à écrire — leurs fonctions n'apparaissent ici qu'en frontière).
+
+Depends on:
+  `clap` (derive Parser/Subcommand, exit code 2 standard), `tokio` (runtime @main),
+    `tracing-subscriber` (registry + env-filter + fmt), `uuid` (v4 pour @conversations
+    new), `kube` (trait @ResourceExt pour `name_any`), `vanyline-lib` (trait
+    @ConfigStore, @Conversation/@Message, @k8s::VnlK8sClient — feature `k8s`),
+    `vanyline-crds` (@OwnerSpec, @ProjectSpec, @SandboxSpec, @ProjectDefaults,
+    @PvcRef), `vanyline-cfgstore` (@fs_store::FsConfigStore, @store::Layer,
+    @layers::{config_entry_source, file_entry_source, skill_entry_source}).
+  ./config.rs — @discover_layers, @configured_namespace, @configured_toolbox.
+  ./store.rs — @list_conversations, @get_conversation, @save_conversation,
+    @delete_conversation, @set_active_conversation, @resolve_conversation_reference.
+  ./config_check.rs — @check_config (contenu des problèmes, pas leur rendu).
+  ./chat.rs — @chat::run (frontière des 7 arguments, mapping en Handles).
+  ./rpc/mod.sdd — @rpc::run_stdio_server.
+  ./mcp_cmd.sdd · ./model_cmd.sdd · ./skill_cmd.sdd · ./toolset_cmd.sdd ·
+    ./owner_cmd.sdd · ./project_cmd.sdd · ./sandbox_cmd.sdd (grammaires montées).
+  ../../lib/src/error.sdd — @VnyError et marqueur `VNL-K8S-001` (contenu exact des
+    messages rendus sur stderr par les handlers K8s).
+  ../../tooling.sdd — harnais `print_stdout`/`print_stderr`/`expect_used` (dette
+    tracée en Tasks) ; ../../vanyline.sdd — position du crate `cli` dans le workspace.
+
+Scenario: CLI sans sous-commande produit command None et globaux par défaut
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from(["vanyline"])`
+  Then le parsing réussit avec `command` None, `agent` None, `continue_active` false,
+    `namespace` None et `toolbox` None
+
+Scenario: les variantes K8s s'exposent sous le nom des ressources
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from` sur `["vanyline", "owner", "list"]`,
+    `["vanyline", "project", "show", "p"]` et `["vanyline", "sandbox", "delete", "s"]`
+  Then les trois parsent respectivement en `K8sOwner(List)`, `K8sProject(Show { name:
+    "p" })` et `K8sSandbox(Delete { name: "s" })` — jamais `k8s-owner` ni `k8sowner`
+
+Scenario: la grammaire inline de conversations se parse
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from(["vanyline", "conversations", "set", "3"])` puis
+    `["vanyline", "conversations", "new", "-a", "ag1", "-t", "titre"]`
+  Then le premier parse en `Conversations(Set { reference: "3" })`, le second en
+    `New { agent: Some("ag1"), title: Some("titre") }`
+
+Scenario: les familles à sous-commande unique se parsent
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from` sur `providers list`, `config check`, `serve` et
+    `serve --stdio`
+  Then les trois premières parsent en `Providers(List)`, `Config(Check)`,
+    `Serve { stdio: false }` et la dernière en `Serve { stdio: true }`
+
+Scenario: le flag global namespace s'accepte avant comme après la sous-commande
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from(["vanyline", "-n", "ns1", "owner", "list"])` puis
+    `["vanyline", "owner", "list", "--namespace", "ns2"]`
+  Then les deux parsent avec `namespace` valant respectivement `Some("ns1")` et
+    `Some("ns2")`
+
+Scenario: une commande inconnue est rejetée avec le code de clap
+  Given le binaire `vanyline` compilé
+  When l'exécution de `vanyline nope`
+  Then le processus sort avec le code 2 et le message d'erreur de clap sur stderr
+
+Scenario: conversations list rend l'état vide
+  Given un XDG_DATA_HOME isolé sans répertoire conversations
+  When l'exécution de `vanyline conversations list`
+  Then stdout contient exactement la ligne `No conversations.` et le code de sortie
+    est 0
+
+Scenario: conversations new puis list rendent l'identifiant créé
+  Given un XDG_DATA_HOME isolé
+  When l'exécution de `vanyline conversations new` puis `vanyline conversations list`
+  Then le premier stdout est `Created conversation: {uuid}` (UUID v4) ; le second est
+    une ligne `  [1] {uuid} | (untitled) | 0 messages | (none)` avec le même uuid
+
+Scenario: conversations show sur référence inconnue sort en erreur
+  Given un XDG_DATA_HOME isolé contenant zéro conversation
+  When l'exécution de `vanyline conversations show zzz`
+  Then stderr contient `No conversation matches 'zzz'` et le code de sortie est 1,
+    stdout est vide
+
+Scenario: conversations set active la conversation désignée par index
+  Given un XDG_DATA_HOME isolé contenant au moins une conversation (via `conversations
+    new`)
+  When l'exécution de `vanyline conversations set 1`
+  Then stdout est `Active conversation: {uuid}` de la première conversation triée et
+    le fichier active-conversation.json du data dir porte cet uuid
+
+Scenario: conversations delete retire le fichier de la conversation
+  Given un XDG_DATA_HOME isolé contenant au moins une conversation
+  When l'exécution de `vanyline conversations delete 1`
+  Then stdout est `Deleted conversation: {uuid}` et le fichier `{uuid}.json` n'existe
+    plus du data dir
+
+Scenario: new panique quand le data dir est inaccessible
+  Given un XDG_DATA_HOME pointant sur un emplacement non inscriptible (hors session
+    root)
+  When l'exécution de `vanyline conversations new`
+  Then le processus panique (code 101) avec `failed to save conversation` dans
+    stderr — divergence d'exit code documentée, voir Tasks `[?]`
+
+Scenario: agents list rend l'état vide et les cas vides des familles de lecture
+  Given une HOME/XDG isolée sans aucune config
+  When l'exécution successive de `vanyline agents list`, `providers list`,
+    `models list`, `toolsets list`, `skills list` et `mcp list`
+  Then chaque stdout est exactement dans l'ordre `No agents configured.`, `No LLM
+    providers configured.`, `No models configured.`, `No toolsets configured.`, `No
+    skills configured.`, `No MCP servers configured.`, code de sortie 0 à chaque fois
+
+Scenario: agents list marque l'agent par défaut
+  Given une HOME/XDG isolée avec un agent `a1` (agents/a1.md) et un agent `a2`, et
+    `default_agent` pointant sur `a2`
+  When l'exécution de `vanyline agents list`
+  Then la ligne de `a2` est `  a2 | {source} | - (default)` et celle de `a1` ne porte
+    pas le marqueur
+
+Scenario: agents set-default valide l'existence avant d'écrire
+  Given une HOME/XDG isolée avec au moins un agent configuré nommé `a1`
+  When l'exécution de `vanyline agents set-default nope` puis
+    `vanyline agents set-default a1`
+  Then le premier rend `agent not found: nope` sur stderr avec code 1 ; le second
+    rend `Default agent set to: a1` sur stdout, code 0, et la couche globale porte le
+    nouveau défaut
+
+Scenario: agents show dégrade proprement la chaîne modèle inconnue
+  Given une HOME/XDG isolée avec un agent `a1` référençant un modèle `m-inconnu`
+    absent de la config
+  When l'exécution de `vanyline agents show a1`
+  Then stdout contient la ligne `  Model: m-inconnu (unknown)` et le bloc complet
+    `Agent:`/`  Source:`/`  Mode:`/`  Skills:`/`  Toolsets: (none)`/`  System prompt:`,
+    code de sortie 0
+
+Scenario: models list rend la paire provider et modèle
+  Given une HOME/XDG isolée avec un provider `p1` et un modèle `m1` de provider
+    `p1` de modèle sous-jacent `gpt-x`
+  When l'exécution de `vanyline models list`
+  Then stdout contient la ligne `  m1 | {source} | p1 / gpt-x`
+
+Scenario: config check valide une config saine avec le message exact
+  Given une HOME/XDG isolée dont toutes les références croisées de config sont
+    résolues
+  When l'exécution de `vanyline config check`
+  Then stdout est exactement `Config OK — no problems found.` et le code de sortie 0
+
+Scenario: config check liste les problèmes sur stdout puis sort en erreur
+  Given une HOME/XDG isolée avec un modèle référençant un provider inexistant
+  When l'exécution de `vanyline config check`
+  Then stdout contient au moins une ligne `  {problème}` (Display VnyError, contenant
+    `referenced by model`) et le code de sortie est 1, stderr ne porte AUCUN problème
+
+Scenario: serve sans stdio refuse poliment
+  Given le binaire `vanyline` compilé
+  When l'exécution de `vanyline serve`
+  Then stderr est exactement `vanyline serve: only --stdio is currently supported` et
+    le code de sortie est 1
+
+Scenario: serve stdio s'arrête proprement après shutdown
+  Given le binaire `vanyline` compilé lancé en `serve --stdio` (pipes stdin/stdout)
+  When le client envoie `initialize` puis `shutdown` et attend le processus
+    (scénario réalisateur du smoke test ../tests/rpc_stdio_smoke.rs, détail
+    protocolaire dans ./rpc/mod.sdd)
+  Then les deux trames sont reçues sur stdout et le processus sort avec le code 0
+
+Scenario: owner list sans cluster joignable échoue sur VNL-K8S-001
+  Given un KUBECONFIG pointant sur une adresse inactive et une HOME/XDG isolée
+  When l'exécution de `vanyline owner list`
+  Then stderr contient `VNL-K8S-001` et le code de sortie est 1, stdout est vide —
+    même résultat pour `project list` et `sandbox list` (un test par ressource)
+
+Scenario: run avec toolbox nommée dépend du cluster avant tout message
+  Given un KUBECONFIG pointant sur une adresse inactive, une HOME/XDG isolée et un
+    agent par défaut correctement configuré
+  When l'exécution de `vanyline run bonjour --toolbox sb1`
+  Then stderr contient `VNL-K8S-001`, le code de sortie est 1 et aucun jet de modèle
+    n'a eu lieu (aucune sortie sur stdout)
+
+Scenario: sans toolbox demandée le chemin chat ignore totalement K8s
+  Given un KUBECONFIG inexistant/inactif, une HOME/XDG isolée sans `defaults.toolbox`
+  When l'exécution de `vanyline run bonjour`
+  Then stderr ne contient jamais `VNL-K8S-001` (l'échec éventuel vient de la config
+    d'agent, jamais de la découverte K8s)
+
+Scenario: owner create omet project_defaults sans aucun flag project-default
+  Given un apiserver K8s stub (kubeconfig pointant sur http local) qui enregistre les
+    CRs créés
+  When l'exécution de `vanyline owner create alice --home-size 1Gi` puis
+    `vanyline owner create bob --home-size 1Gi --project-default-storage-size 2Gi`
+  Then le premier POST porte `spec.project_defaults` absent/null et le second un objet
+    `{ storage_size: "2Gi", storage_class: null, storage_access_mode: null }` ; chaque
+    stdout est `Created owner: {nom}`
+
+Scenario: project create normalise les caches vides en absence
+  Given un apiserver K8s stub qui enregistre les CRs créés
+  When l'exécution de `vanyline project create p1 --owner alice --repo-url URL` sans
+    aucun `--cache`
+  Then le POST porte `spec.caches` absent (null) — jamais la liste vide — et stdout
+    est `Created project: p1`
+
+Scenario: sandbox show rend le statut absent par le texte dédié
+  Given un apiserver K8s stub servant une Sandbox CR sans champ status
+  When l'exécution de `vanyline sandbox show s1`
+  Then stdout contient les lignes `Sandbox: s1`, `  project:`, `  branch:`,
+    `  image: -`, `  toolchains: -`, `Status:` et `  (not yet reconciled)`, code 0
+
+Scenario: version et help rendent les valeurs clap et sortent 0
+  Given le binaire `vanyline` compilé
+  When l'exécution de `vanyline --version` puis `vanyline --help`
+  Then `--version` stdout contient `vanyline` suivi de la version cargo du package,
+    et `--help` stdout contient `CLI for vanyline LLM chat`, les deux avec code 0
+
+Tasks:
+  [!] Destination des logs : `tracing_subscriber::fmt::layer()` est monté SANS
+    `with_writer` — son writer par défaut est STDOUT, alors que ./rpc/mod.sdd énonce
+    l'invariant « logs sur stderr, jamais sur stdout » et que `lib/src/session.rs`
+    émet des `tracing::warn!` sur le chemin chat. Conséquence potentielle : lignes de
+    log entremêlées aux trames ndjson de `serve --stdio` et aux événements JSON de
+    `run --json` (jamais déclenché en test à ce jour car la batterie verte ne force
+    aucun warn sur ces chemins). À trancher avec Sébastien : ajouter
+    `.with_writer(std::io::stderr)` (corrige ./rpc/mod.sdd) ou assumer stdout.
+  [?] Dette harnais print : ./main.rs est saturé de `println!`/`eprintln!`/`print!`
+    (indirectes) sans aucun `#[allow]` local, alors que `print_stdout`/`print_stderr`
+    sont deny au workspace (../../tooling.sdd) — même `[?]` ouvert que pour
+    ../../sandbox/src/bin/maint.sdd. Le rendu STDOUT EST le produit de ce fichier :
+    exemption ciblée justifiée, petit writer dédié, ou bascule ? À trancher avec les
+    deux specs en même temps.
+  [?] Stratégie d'erreur incohérente : exit(1) sur stderr partout sauf dans
+    `conversations new/show/set/delete` où les `expect` produisent des panics code
+    101 avec message de debug. Faut-il converger tous les `expect` vers le motif
+    `unwrap_or_else(|e| { eprintln!("{e}"); exit(1) }` (scenario dédié déjà écrit) ?
+  [?] `config check` rend ses problèmes sur STDOUT puis exit 1 — diagnostiques sur
+    stdout est inhabituel (tout le reste des erreurs va sur stderr). Volonté de
+    garder stdout pour les scripts, ou correction ?
+  [?] @store::list_conversations en échec d'io (read_dir) est avalée par
+    `unwrap_or_default` sur les 4 verbes conversations qui l'utilisent : un data dir
+    illisible se rend comme « No conversations. », indiscernable du vide (idem pour
+    `agents set-default` dont le `unwrap_or_default` transforme une panne de listing
+    en `agent not found: {name}` trompeur). Erreur propagée, ou dévoration assumée ?
+  [?] Collision d'id `agent` : le flag GLOBAL `-a/--agent` de @Cli et le flag LOCAL
+    `-a/--agent` de `conversations new` portent le même id ; le comportement clap
+    exact (le local gagne-t-il, que vaut `cli.agent` au niveau parent) n'est couvert
+    par AUCUN test. Écrire le test de parsing avant d'y toucher.
+  [?] Champs de CR inatteignables depuis le CLI : `owner create` fige
+    `application_ref: None`/`egress: []`, `project create` fige `egress: []`,
+    `sandbox create` fige `resources: None`/`egress: []`/`suspended: false` ; de plus
+    les access modes (`--home-access-mode`, `--storage-access-mode`,
+    `--project-default-storage-access-mode`) sont écrits dans la CR mais jamais
+    rendus par les `show`. Exposition CLI complète, ou volonté de garde minimaliste ?
+  [?] `defaults.toolbox` dans config.yaml rend TOUT chat/run dépendant du cluster
+    (exit 1 sur `VNL-K8S-001` avant le premier message) : piège de config ou design
+    assumé (précédence documentée mais jamais testée en process à ce jour) ?
+  [?] Codes de sortie non épinglés : le 2 de clap (parsing) et le 101 des panics ne
+    sont couverts par aucun test existant (même lacune `[?]` que la spec de
+    `vanyline-maint`) ; les scenarios « commande inconnue » et « new panique » ci-
+    dessus sont là pour les épingler — valider que le 2/101 figés conviennent.
+  [?] `agents show` expose le format `{:?}` (Debug instable par contrat Rust) de
+    `mode`/`skills`/`provider_type` et `mcp list` du Debug de `transport` comme
+    interface de rendu : stabiliser par Display, ou accepter (le contrat d'affichage
+    est déjà référencé par ./mcp_cmd.sdd) ?
+  [!] Scenarios K8s de cette spec (owner/project/sandbox create/show/stub) exigent un
+    harnais d'apiserver stub (kubeconfig http local) inexistant à ce jour ; les
+    scenarios VNL-K8S-001 (kubeconfig inactive) sont eux directement exécutables.
+    Décider avec Sébastien du coût du stub avant d'implémenter les tests.
+  [!] Tests internes existants de ./main.rs (5, `cfg(test)`, uniquement le parsing de
+    `run`) : `run_timeout_parses`, `run_json_flag_parses`, `run_defaults_no_flags`,
+    `run_rejects_unknown_flag`, `run_model_flag_parses` — couvrent positionnel
+    `message`, `-t/--timeout`, `-j/--json`, `-m/--model`, rejet flag inconnu. ZÉRO
+    test pour : les 4 grammaires inline, le nommage owner/project/sandbox, les flags
+    globaux, `serve`, tout rendu/exit code des handlers (la batterie de rendu listée
+    en Handles n'est testée nulle part dans le crate hors ./tests/rpc_stdio_smoke.rs
+    pour `serve --stdio`). Tests voisins non-owned : ./store.rs (6, résolution de
+    références), ./config.rs (5, découverte workspace), ./config_check.rs (contenu
+    des problèmes), ./sandbox_cmd.rs (parse `NAME=IMAGE`).
+  [?] `vanyline run --timeout 0` : 0 = « aucune limite » d'après l'aide clap, mais le
+    branchement réel (`secs > 0`) vit dans ./chat.rs — confirmer que ./chat.rs.sdd
+    reprendra ce contrat depuis l'aide de ce fichier, sinon l'aide ment.
+
+Done when:
+  Chaque littéral de Handles a un scenario ou un test existant qui l'épingle ; les
+    `[!]`/`[?]` des Tasks sont tranchés par Sébastien et reflétés (fmt layer writer,
+    dette print_stdout, stratégie exit/expect) ; toute nouvelle variante de
+    @Commands ou des modules inline arrive avec sa ligne de rendu, son code de
+    sortie, son scenario, et le dispatch @main étendu dans la même PR.

@@ -1,0 +1,1064 @@
+Spec: RPC stdio — dispatch et handlers de méthodes
+
+Platform: Rust/vanyline-cli/tokio
+
+Purpose:
+  Dispatch complet du serveur JSON-RPC 2.0 de `vanyline serve --stdio` :
+  @ServerState (état de session : initialisation, store config, conversations
+  occupées, compteurs `seq`, client K8s paresseux), @handle_line — la fonction
+  qui traite UNE ligne ndjson et produit la réponse — et les 50 méthodes
+  connues (`initialize`/`shutdown`, 8 lectures config + `skills/get` +
+  `localTools`, 2 actions `test`, 18 écritures config, 4 `conversations/*`,
+  2 `chat/*`, 4 `owners/*`, 4 `projects/*`, 6 `sandboxes/*`), plus
+  @RpcEventSink qui traduit les @ChatEvent d'un tour en notifications
+  `chat/event`. Ce fichier est le SEUL lieu du mapping d'erreurs métier :
+  @vanyline_cfgstore::CfgStoreError → codes `VNL-RPC-*` (table finalisée en
+  `Handles`, l'esquisse de ../../../cfgstore/src/error.sdd s'en remet à cette
+  spec, cf. ./protocol.sdd section `Depends on`), @vanyline_lib::VnyError →
+  `VNL-RPC-010`, erreurs io de conversations → `VNL-RPC-005`/`VNL-RPC-007`,
+  échec de tour LLM → `VNL-RPC-009`. Contrat distinct de ./mod.rs (framing,
+  writer unique, cycle de vie — ./mod.sdd) et de ./protocol.rs (formes JSON,
+  registre @vnl_code — ./protocol.sdd) : la grammaire des types N'EST PAS
+  redite ici, seule la façon dont chaque méthode les consomme et les produit
+  est contractée. Un fichier, un contrat : pas de regroupement.
+
+Owns:
+  ./handlers.rs
+
+Can read:
+  ./protocol.rs
+  ./protocol.sdd
+  ./mod.rs
+  ./mod.sdd
+  ../config.rs
+  ../config.sdd
+  ../store.rs
+  ../store.sdd
+  ../tools.rs
+  ../tools.sdd
+  ../chat.rs
+  ../main.rs
+  ../../tests/rpc_stdio_smoke.rs
+  ../../../docs/rpc-protocol.md
+
+References:
+  ../../../vanyline.sdd
+  ../../../tooling.sdd
+  ../../../cfgstore/src/error.sdd
+  ../../../cfgstore/src/store.sdd
+  ../../../cfgstore/src/fs_store.sdd
+  ../../../cfgstore/src/layers.sdd
+  ../../../cfgstore/src/domain.sdd
+  ../../../lib/src/k8s.sdd
+  ../../../lib/src/error.sdd
+  ../../../lib/src/event.sdd
+  ../../../lib/src/session.sdd
+  ../../../lib/src/types.sdd
+  ../../../lib/src/prefixed_mcp.sdd
+  ../../../crds/src/lib.sdd
+  ../owner_cmd.sdd
+  ../project_cmd.sdd
+  ../sandbox_cmd.sdd
+
+Depends on:
+  ./protocol.rs (./protocol.sdd) — @JsonRpcRequest/@JsonRpcResponse/
+    @JsonRpcNotification, @jsonrpc_code, @vnl_code, @PROTOCOL_VERSION et tous
+    les types de params/résultat ; ce fichier les désérialise/serialize, la
+    grammaire interne (camelCase, requis/défaut, flatten des specs CRD) est le
+    contrat de ./protocol.sdd et n'est pas re-décidée ici.
+  ./mod.rs (./mod.sdd) — appel de @handle_line par ligne, sémantique `None` =
+    « réponse émise plus tard sur le canal », writer unique FIFO pour toute
+    trame produite par ce fichier (réponses synchrones, réponse asynchrone de
+    `chat/send`, notifications `chat/event` via le clone de `tx` détenu par
+    @ServerState/@RpcEventSink).
+  @vanyline_cfgstore::fs_store::FsConfigStore (../../../cfgstore/src/
+    fs_store.sdd) — store de config branché à `initialize` : lectures fusionnées
+    `list_x`, écritures `create_x`/`update_x`/`delete_x` par couche,
+    `default_agent` (défauts.agent de la config fusionnée), validation
+    anti-traversal des noms et sémantique des patchs JAMAIS répliquées ici.
+  @vanyline_cfgstore::layers (../../../cfgstore/src/layers.sdd) — @Layers
+    (global_dir/workspace_dir), @config_entry_source, @file_entry_source,
+    @skill_entry_source : la clé additive `"source"` des lectures et de
+    `skills/get`.
+  @vanyline_cfgstore::CfgStoreError (../../../cfgstore/src/error.sdd) — type
+    d'erreur de toutes les opérations config ; son @Display complet (marqueur
+    `VNL-CFG-NNN` inclus) EST le `error.message` des réponses config de ce
+    fichier, sans réécriture.
+  @crate::config::discover_layers/@configured_namespace (../config.sdd) —
+    résolution des couches depuis le `workspace` d'`initialize` (fallback cwd)
+    et namespace K8s `defaults.namespace` de la config fusionnée.
+  @crate::store (../store.sdd) — persistance des conversations sous
+    `data_dir()/conversations/<uuid>.json` (list/get/save/delete) ;
+    `save_conversation` appelle `ensure_data_dir` (../config.sdd) dont le
+    chemin d'échec est `std::process::exit(1)` — voir `Raises`.
+  @vanyline_lib::k8s::VnlK8sClient (../../../lib/src/k8s.sdd, sous feature
+    `k8s`) — @VnlK8sClient::discover + les 14 méthodes owner/project/sandbox ;
+    la réponse sérialisée est l'objet K8s complet (../../../crds/src/lib.sdd).
+  @vanyline_lib::session::run_agent_turn/@SessionContext et
+    @vanyline_lib::event::{@ChatEvent,@ChatTurnResult,@EventSink}
+    (../../../lib/src/session.sdd, ../../../lib/src/event.sdd) — le tour LLM
+    de `chat/send` et ses événements ; la sémantique des 12 variantes de
+    @ChatEvent est contractée là-bas.
+  @vanyline_lib::prefixed_mcp::list_mcp_server_tools (../../../lib/src/
+    prefixed_mcp.sdd) — sondage `config/mcpServers/test` (timeout imposé par
+    ce fichier, pas par lui).
+  @crate::tools::local_tools_map (../tools.sdd) — tools locaux injectés dans
+    le @SessionContext de `chat/send`.
+  @vanyline_tools::mcp::{filesystem_tools,search_tools,command_tools} —
+    registre statique servi par `config/localTools` (descripteurs MCP
+    verbatim, aucune transformation).
+  @reqwest — client HTTP de `discover_provider_models` (timeout 10 s au
+    builder), @rig_core::message::Message — conversion d'historique,
+    @tokio (@tokio::spawn, @tokio::time::timeout, @tokio::sync::mpsc),
+    @uuid::Uuid (@Uuid::parse_str/@Uuid::new_v4), @async_trait pour
+    @RpcEventSink, @serde_json.
+  @vanyline_lib::VnyError (../../../lib/src/error.sdd) — son @Display
+    (`VNL-K8S-*`, `VNL-MCP-*`, `VNL-LLM-*`) est le `error.message` des
+    réponses `VNL-RPC-010`/des actions `test`.
+
+Exposes:
+  Aucun item gated par @cfg de feature ; seul @RpcEventSink est `pub`
+    (pub au crate, binaire), le reste est privé au module ; un unique module
+    `#[cfg(test)] mod tests` (73 tests, cf. `Handles` — dette de couverture
+    tracée en `Tasks`).
+  @ServerState — struct d'état de session, 7 champs `pub` :
+    `initialized` (@bool — posé uniquement par @handle_initialize en succès),
+    `shutdown_requested` (@bool — posé par la branche `shutdown`, remis à
+    @false par @handle_initialize, seul signal de sortie lu par ./mod.rs),
+    `store` (@Option<@std::sync::Arc<@FsConfigStore>> — @Some exactement quand
+    `initialized`), `tx` (@tokio::sync::mpsc::UnboundedSender<@String> — clone
+    du sender du writer ./mod.rs), `busy` (@Arc<@std::sync::Mutex<@std::collections::HashSet<@uuid::Uuid>>> —
+    conversations à tour actif), `seq` (@Arc<@std::sync::Mutex<@std::collections::HashMap<@uuid::Uuid, @u64>>> —
+    compteur de notifications par conversation), `k8s_client`
+    (@Option<@Arc<@VnlK8sClient>> — construit paresseusement, reset à `None` à
+    chaque `initialize`).
+    @ServerState::new(@tokio::sync::mpsc::UnboundedSender<@String>) — construit
+    l'état tout vide (`initialized=false`, tout le reste @None/vide), seul
+    constructeur.
+  @handle_line — `pub async fn handle_line(state: &mut @ServerState, line:
+    &@str) -> @Option<@String>` : LA surface du fichier. Contrat d'ordre de
+    validation (STRICT, séquence commentée in-file, verrouillée) :
+      1. @serde_json::from_str::<@JsonRpcRequest>(line) échoue → erreur
+          `VNL-RPC-000`/`PARSE_ERROR` avec `id: @serde_json::Value::Null` (id
+          non extractable), réponse produite, aucune lecture d'état.
+      2. `method == "initialize"` → @handle_initialize, TOUJOURS autorisé
+          (même déjà initialisé — réinitialiser écrase l'état, pas une erreur).
+      3. sinon si `!state.initialized` → `VNL-RPC-001`/`SERVER_ERROR`, message
+          `"Server not initialized — call initialize first"`.
+      4. sinon match sur `request.method.as_str()` (sensibilité à la casse,
+          aucune normalisation) sur les 50 méthodes ci-dessous ; inconnue →
+          `VNL-RPC-004`/`METHOD_NOT_FOUND`, message
+          `"Method not found: {method}"`.
+    Avant le match, `state.store.as_ref().expect("initialized implies store =
+    Some")` — invariant : `initialized == true` implique `store = Some` (posés
+    ensemble par @handle_initialize, jamais dissociés).
+    Retour : @Some(ligne JSON compacte SANS `\n`) pour toute méthode SAUF
+    `chat/send` validée (cf. @handle_chat_send) qui retourne @None après
+    spawn. La ligne `shutdown` lève `shutdown_requested = true` PUIS retourne
+    la réponse `result: null` (l'ordre est ce qui garantit à ./mod.sdd
+    d'émettre la réponse avant la sortie). Après `shutdown`, `initialized`
+    reste `true` : @handle_line continuerait de servir les méthodes si
+    ./mod.rs ne breakait pas (état de fait, `[?]` in `Tasks`).
+  Table de dispatch (50 méthodes, par famille — params/résultats/erreurs en
+    `Accepts`/`Returns`) :
+      cycle de vie : `initialize`, `shutdown`.
+      lectures config (sans params) : `config/agents`, `config/models`,
+        `config/providers`, `config/mcpServers`, `config/toolsets`,
+        `config/skills`, `config/localTools`.
+      lecture paramétrée : `config/skills/get` (@ConfigGetSkillParams).
+      actions réseau : `config/providers/test`, `config/mcpServers/test`
+        (@ConfigTestParams).
+      écritures config (18 = 6 domaines × create/update/delete) :
+        `config/{providers,models,mcpServers,toolsets,agents}/create|update|
+        delete` (@ConfigCreateParams/@ConfigUpdateParams/@ConfigDeleteParams),
+        `config/skills/create` (@ConfigCreateSkillParams),
+        `config/skills/update|delete` (types config standards).
+      conversations : `conversations/list`, `conversations/get`,
+        `conversations/create`, `conversations/delete`.
+      chat : `chat/send` (@ChatSendParams, seul chemin asynchrone),
+        `chat/cancel` (@ChatCancelParams, no-op).
+      K8s (14) : `owners/list|get|create|delete`,
+        `projects/list|get|create|delete`,
+        `sandboxes/list|get|create|delete|stop|start`.
+  Helpers privés contractuels (rôles résumés, comportement détaillé en
+    `Handles`) : @resolve_layers (racine = `workspace` d'`initialize`, fallback
+    `@std::env::current_dir`, dernier recours `"."`), @config_error_response
+    (lecture → `VNL-RPC-006` systématique), @resolve_layer (couche cible des
+    écritures), @config_write_response (table de mapping des écritures),
+    @malformed_params_response (`VNL-RPC-000`/`PARSE_ERROR`, `id` conservé —
+    utilisé par les bras d'écriture, de `test` et `skills/get` ; les bras
+    conversations/chat gardent leur pattern en ligne équivalent),
+    @config_list_sourced_response (lecture de liste + clé additive `source`),
+    @discover_provider_models (probe Ollama/OpenAI-compatible),
+    @handle_initialize, @shutdown_response, @handle_conversations_list/get/
+    create/delete, @handle_chat_cancel, @handle_chat_send, @BusyGuard (struct
+    privé dont le @Drop retire `conv_id` de `busy`, garanti même en panique),
+    @read_workspace_context (AGENTS.md de `workspace_dir`),
+    @conversation_history_to_messages et @chat_turn_result_to_message
+    (doublons assumés de ../chat.rs, cf. commentaires in-file — ne PAS
+    factoriser sans arbitrage, `[?]` in `Tasks`), @handle_owners_*/
+    @handle_projects_*/@handle_sandboxes_*, @ensure_k8s_client (cache paresseux),
+    @k8s_client_error, @k8s_result_response (`VnyError` → `VNL-RPC-010`).
+  @RpcEventSink — `pub struct { conversation_id: @uuid::Uuid, seq, tx }`,
+    impl @vanyline_lib::event::EventSink via @async_trait : @emit lit-incrémente
+    le compteur de SA conversation (verrou @std::sync::Mutex tenu uniquement
+    sur le lire-incrémenter-écrire, JAMAIS à travers un `.await`), construit
+    @JsonRpcNotification::<@ChatEventNotificationParams> { "2.0", "chat/event",
+    {conversationId: uuid.to_string(), seq, event} } et l'envoie sur `tx` ;
+    échec de `send` (writer mort) silencieusement ignoré ; notification sans
+    clé `id` (contrat ./protocol.sdd).
+
+Accepts:
+  @handle_line — n'importe quelle @str (ligne brute non trimée venant de
+    ./mod.rs) ; JSON invalide ou non-conforme @JsonRpcRequest est une entrée
+    légale qui produit `VNL-RPC-000`, pas un panic.
+  `initialize` — @InitializeParams : `protocolVersion` @u32 requis, `workspace`
+    @Option<@String> (chemin de dossier, non vérifié existant — voir
+    @resolve_layers) ; params absents/`null`/mal typés → `VNL-RPC-000` (JAMAIS
+    `VNL-RPC-003`, réservé aux `@u32` valides ≠ @PROTOCOL_VERSION).
+  `shutdown` — aucun paramètre ; `params` est ignoré sans désérialisation (une
+    valeur aberrante est avalée).
+  Lectures config (les 7 sans params) et `config/localTools` — aucun paramètre ;
+    `params` ignoré sans désérialisation : même un `params` aberrant répond en
+    succès (`[?]` in `Tasks`).
+  `config/skills/get` — `{name}` (@ConfigGetSkillParams) ; enveloppe mal
+    formée → `VNL-RPC-000` via @malformed_params_response.
+  `config/providers/test` / `config/mcpServers/test` — `{name}` requis
+    (@ConfigTestParams, pas de `layer` : on sonde l'entrée FUSIONNÉE résolue
+    par le store, pas une couche) ; enveloppe mal formée → `VNL-RPC-000` avant
+    tout accès store.
+  Écritures config — @ConfigCreateParams `{layer?, item}` (update :
+    @ConfigUpdateParams `{layer?, name, patch}`, delete :
+    @ConfigDeleteParams `{layer?, name}` ; `skills/create` :
+    @ConfigCreateSkillParams `{layer?, item, body}`). `layer` ∈ `"global"` /
+    `"workspace"` / absent → @resolve_layer : @None → Workspace si la session
+    a un `workspace_dir` résolu, sinon Global (aligné sur la sémantique CLI,
+    ../config.sdd). Validation du `name` (anti-traversal) et du contenu du
+    patch : exclusivement dans le store (../../../cfgstore/src/fs_store.sdd),
+    JAMAIS rejouées ici.
+  `conversations/list` — aucun param. `conversations/get`/`delete` —
+    @ConversationIdParams `{id}` puis @uuid::Uuid::parse_str (UUID mal formé →
+    `VNL-RPC-000`, message `"Invalid UUID in id: {id}"`).
+    `conversations/create` — @ConversationCreateParams `{agent?, title?}`
+    (défauts @None, types `#[serde(default)]`).
+  `chat/send` — @ChatSendParams `{conversationId, message, agent?}` ;
+    `chat/cancel` — @ChatCancelParams `{conversationId}` ; mêmes validations
+    UUID (@None `conversationId` absent → erreur @serde → `VNL-RPC-000`).
+  `owners/get|delete`, `projects/get|delete`, `sandboxes/get|delete|stop|
+  start` — @NameParams `{name}` (chaîne unique, AUCUNE validation de nom côté
+    handler : la grammaire DNS K8s est vérifiée par l'API server, l'échec
+    remonte en `VNL-RPC-010`).
+  `owners/create` / `projects/create` / `sandboxes/create` — @OwnerCreateParams/
+    @ProjectCreateParams/@SandboxCreateParams : `name` requis + spec CRD
+    camelCase APLATIE en racine (grammaire et piège de la clé `spec` imbriquée
+    chez ./protocol.sdd, verrouillés par ses scenarios) ; le contenu de la spec
+    est transmis tel quel à @VnlK8sClient::create_x, aucune révalidation ici.
+  Entrées d'environnement et disque lues indirectement : cwd + variables XDG
+    (fallback `workspace` absent, chemins config/data du store et des
+    conversations), `AGENTS.md` à la racine du workspace (à CHAQUE `chat/send`
+    validé), config relue à chaque appel (pas de cache — ../../../
+    docs/rpc-protocol.md « Rechargement de config »).
+
+Returns:
+  Cycle de vie — `initialize` succès : @InitializeResult
+    `{protocolVersion: 1, serverVersion: env!("CARGO_PKG_VERSION"),
+    workspaceRoot?, defaultAgent?}` où `workspaceRoot` =
+    `layers.workspace_dir.display()` (absent si aucun marqueur
+    `.vanyline`/`.git`) et `defaultAgent` = `store.default_agent()`
+    (`Ok(Some)` → @Some, `Ok(None)` et `Err` → @None : l'erreur NE fait PAS
+    échouer `initialize`, elle resurgira au premier `config/*`). `shutdown` :
+    `{"jsonrpc":"2.0","id":…,"result":null}` (clé PRÉSENTE).
+  Lectures de liste config (`config/agents|models|providers|mcpServers|
+    toolsets|skills`) — tableau dont CHAQUE entrée = l'objet domaine natif
+    sérialisé (serde snake_case de ../../../cfgstore/src/domain.sdd, p. ex.
+    `type`/`api_key`/`local_tools`) PLUS la clé additive `"source":
+    "workspace" | "global"` (@config_list_sourced_response ; source = couche
+    gagnante de la fusion, fonctions de ../../../cfgstore/src/layers.rs,
+    tolérantes : toute erreur de lecture de la couche workspace rend
+    `"global"`). Listes fusionnées par le store (workspace écrase global en
+    collision). Erreur store → `VNL-RPC-006` (message = @Display complet).
+  `config/skills/get` — succès : objet @SkillMeta `{name, description}` +
+    `"body"` (contenu SKILL.md déjà trimé par le store, jamais re-trimé) +
+    `"source"` (calculé UNIQUEMENT après résolution réussie). Erreur (nom
+    inconnu `UnknownReference` ou io) → `VNL-RPC-006`.
+  `config/localTools` — tableau des 8 descripteurs MCP statiques
+    (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`,
+    `find_files`, `search`, `execute_command`), verbatim de @vanyline_tools::mcp
+    (clés `name`/`description`/`inputSchema` camelCase du schéma MCP — pas une
+    entité de domaine) ; aucune erreur possible.
+  Écritures config — succès : `"result":null` (sur le fil, clé présente —
+    @JsonRpcResponse::success(id, @serde_json::Value::Null)) ; effet de bord :
+    écriture dans la couche ciblée (`config.yaml` pour providers/models/
+    mcpServers, fichiers `agents/<name>.md`, `toolsets/<name>.yaml`,
+    `skills/<name>/SKILL.md`). Échec : table de mapping de `Handles`.
+  Actions `test` — `config/providers/test` succès : @ProviderTestResult
+    `{"models":[…]}` (@Vec<@String> toujours rendu, `[]` si le JSON sondé n'a
+    pas la clé ou pas de tableau) ; `config/mcpServers/test` succès :
+    @McpTestResult `{"tools":[…]}` (noms d'outils du serveur distant).
+  Conversations — `list` : tableau de @ConversationSummary (`{id, agent?,
+    title?, messageCount}`, jamais de `messages`). `get` : la @Conversation
+    COMPLÈTE de ../../../lib/src/types.sdd (snake_case, `messages`, `todo`
+    skip-if-none). `create` : le @ConversationSummary de la conversation
+    créée (`id` = @Uuid::new_v4 frais, `messages: []`). `delete` : `null`.
+  `chat/cancel` — `result: null` (no-op M3 v1 : seul le format UUID est
+    validé ; la conversation peut être inexistante et sans tour en cours).
+  `chat/send` — réponse ASYNCHRONE (seule méthode @None en retour synchrone) :
+    succès @ChatSendResult `{text, toolCalls:[…]}` (clé toujours présente),
+    échec `VNL-RPC-009`/`SERVER_ERROR` avec @Display de @VnyError en message ;
+    réponse émise sur `tx` avec le MÊME `id` que la requête, précédée pendant
+    le tour des notifications `chat/event` (@RpcEventSink, `seq` par
+    conversation à partir de 0).
+  K8s — `list` : tableau des objets CRD complets (manifestes sérialisés,
+    `apiVersion`/`kind`/`metadata`/`spec`/`status`, ../../../crds/src/lib.sdd)
+    du namespace résolu ; `get` : un objet complet ; `create` : l'objet créé
+    retourné par l'API ; `delete` : `null` ; `stop`/`start` : le @Sandbox
+    patché (`spec.suspended = true`/`false`, merge patch — ../../../lib/src/
+    k8s.sdd). Erreur (cluster injoignable, API, nom refusé) : `VNL-RPC-010`/
+    `SERVER_ERROR`, message = @Display @VnyError (`VNL-K8S-001` découverte,
+    `VNL-K8S-002` API).
+
+Raises:
+  Aucune signature de `Result` ni d'erreur hors bande : @handle_line est total
+    en condition nominale, toute erreur métier devient une réponse JSON-RPC.
+  Surfaces de panic assumées (harnais ../../../tooling.sdd, dette comptée là-
+    bas) : ~90 `serde_json::to_string(&…).expect("serialize …")`/`to_value(…).
+    expect(...)` sur des types censés sérialiser sans échec ; `.expect(
+    "initialized implies store = Some")` (invariant posé par @handle_initialize,
+    non atteignable par le fil) ; @std::sync::Mutex::lock().unwrap() sur
+    `busy`/`seq` (empoisonnement si une tâche de tour panicait EN détenant le
+    verrou — fenêtre non identifiée, le @Drop de @BusyGuard ne fait que retirer
+    l'id).
+  Mort processuelle NON-RPC : @crate::store::save_conversation appelle
+    @crate::config::ensure_data_dir qui, si le répertoire de données est
+    impossible à créer, fait `eprintln!` sur stderr + @std::process::exit(1) —
+    atteint par `conversations/create` et par le tour de `chat/send`
+    (`save_conversation` best-effort, pas par `chat/send` synchrone qui ne
+    sauvegarde pas) : le serveur MEURT sans réponse RPC. Signalé `[!]` in
+    `Tasks`.
+  Panique de la tâche tokio d'un tour `chat/send` : @BusyGuard::drop libère
+    `busy`, mais AUCUNE réponse finale n'est émise pour cet `id` (le client
+    attend indéfiniment cette requête) — état de fait, `[?]` in `Tasks`.
+
+Handles:
+  Ordre de validation par méthode (contractuel, chaque bras avant tout effet
+    de bord) : enveloppe params → identifiant (UUID/nom) → accès store/cluster
+    → verrou `busy` → résolution agent → spawn. Notamment : les 11 méthodes
+    K8s paramétrées (8 à @NameParams + 3 `create`) désérialisent `params`
+    AVANT de toucher @ensure_k8s_client (les 3 `list` n'ont pas de params) —
+    un nom absent répond `VNL-RPC-000` même cluster injoignable (tests
+    existants) ; les `test` config font de même avant tout accès store.
+  `initialize` : mismatch de version → @ServerState inchangé (pas initialisé)
+    + `VNL-RPC-003` avec message `"Unknown protocol version: got {x}, expected
+    1"`. Succès : re-construit @Layers/@FsConfigStore, pose `initialized`,
+    remet à zéro `shutdown_requested`, `busy`, `seq` et `k8s_client` (le
+    namespace résolu dépend du workspace — deux `initialize` sur des
+    workspaces différents ne partagent pas le client). Un `initialize` pendant
+    un tour en cours laisse la tâche du tour vivace avec ses anciens
+    `busy`/`seq` partagés (`[?]`).
+  Résolution workspace (@resolve_layers) : `workspace: Some(p)` →
+    @std::path::PathBuf::from(p) (AUCUN développement `~`, AUCUNE vérification
+    d'existence ; la remontée s'arrête au 1er marqueur `.vanyline`/`.git`, cf.
+    ../config.sdd `discover_workspace_root` qui documente « doit être absolu »
+    — un chemin RELATIF ne remonte pas au-delà de lui-même, `[?]` in `Tasks`) ;
+    `None` → cwd du process (usage CLI direct/tests, design : « c'est
+    l'extension qui la connaît, pas le cwd »).
+  Client K8s paresseux (@ensure_k8s_client) : construit au 1er appel
+    owners/projects/sandboxes d'une session JAMAIS à `initialize` (un cluster
+    injoignable ne doit pas empêcher `chat/send`/`config/*` — commentaire
+    in-file, verrouillé) ; namespace = @crate::config::configured_namespace
+    (`defaults.namespace` de la config fusionnée) sinon kubeconfig ; DIVERGENCE
+    assumée avec la CLI : la voie RPC n'a pas d'équivalent au global
+    `--namespace` (précédence CLI `--namespace` > config > kubeconfig vs RPC
+    config > kubeconfig) — documentée par les specs sœurs ../owner_cmd.sdd,
+    ../project_cmd.sdd, ../sandbox_cmd.sdd ; les `create` RPC acceptent la
+    spec CRD complète là où le CLI n'expose qu'un sous-ensemble de flags
+    (../sandbox_cmd.sdd).
+  TABLE FINALE de mapping @vanyline_cfgstore::CfgStoreError → `VNL-RPC-*`
+    (ce fichier en est la source de vérité ; l'esquisse ../../../cfgstore/src/
+    error.sdd `Handles` s'y range). Le `error.message` est TOUJOURS le
+    @Display complet de @CfgStoreError (marqueur `VNL-CFG-NNN` inclus),
+    `error.code` JSON-RPC = `SERVER_ERROR` sauf enveloppe (`PARSE_ERROR`) :
+      lecture (les 6 listes + `skills/get`, via @config_error_response) :
+        TOUTE variante → `VNL-RPC-006` (pas de distinction 011–015 en
+        lecture, `VNL-RPC-012` reste réservé aux écritures).
+      écritures (via @config_write_response) : @CfgStoreError::WriteError
+        (`VNL-CFG-008`) et @CfgStoreError::Io (`VNL-CFG-004`) →
+        `VNL-RPC-011` ; @CfgStoreError::NotFound (`VNL-CFG-006`) →
+        `VNL-RPC-012` ; @CfgStoreError::NameConflict (`VNL-CFG-007`) →
+        `VNL-RPC-013` ; @CfgStoreError::InvalidName (`VNL-CFG-005`) →
+        `VNL-RPC-014` ; @CfgStoreError::Validation (`VNL-CFG-010`) →
+        `VNL-RPC-015` ; les autres (@CfgStoreError::Config `VNL-CFG-001`,
+        @DuplicateName `VNL-CFG-002`, @UnknownReference `VNL-CFG-003`,
+        @ReadOnly `VNL-CFG-009`) → repli `VNL-RPC-006`.
+      chemin hors-store des `create` : `params.item` non désérialisable dans
+        le type domaine (serde error) → `VNL-RPC-015` avec message
+        `"Invalid item: {erreur serde}"` (PAS de marqueur `VNL-CFG-*` — c'est
+        @serde_json::Error qui parle).
+      actions `test` : erreur store du `get_x` (dont `UnknownReference`) →
+        @config_write_response → repli `VNL-RPC-006` (même code que 012 par
+        le jeu des variantes non listées — intention commentée in-file, `[?]`
+        in `Tasks`).
+      `layer: "workspace"` explicite sans workspace résolu → @CfgStoreError::
+        Config("no workspace layer configured") du store → repli
+        `VNL-RPC-006`, message `VNL-CFG-001: …` (test
+        `config_workspace_layer_without_workspace_returns_006`).
+  Écritures SANS verrou global : la sérialisation des écritures config vient
+    de la boucle ./mod.rs (une ligne à la fois, `handle_line` attendu en
+    série), pas d'un mutex du store ; deux process (CLI concurrent, deux
+    serveurs sur le même workspace) se marchent dessus en read-modify-write
+    (../../../cfgstore/src/fs_store.sdd) — `[?]` in `Tasks`.
+  `config/providers/test` (@discover_provider_models, commentaire in-file «
+    MÊME logique que app/src/api/llm_providers.rs::discover_models ») :
+    Ollama → `GET {endpoint}/api/tags` → `models[].name` ; OpenaiCompatible →
+    `GET {endpoint}/v1/models` + header `Authorization: Bearer {api_key}`
+    SEULEMENT si `api_key` présente → `data[].id` ; `endpoint` tronqué de ses
+    `/` finaux. Timeout 10 s via @reqwest::ClientBuilder::timeout. Erreurs :
+    client impossible à construire → `"VNL-LLM-003: {e}"`, requête ou parse
+    JSON en échec → `"VNL-LLM-004: {e}"` — les deux répondant `VNL-RPC-006`.
+    Clé `models`/`data` absente ou non-tableau → liste VIDE en succès
+    (fallback `unwrap_or(&vec![])` — `[?]` in `Tasks`). SSRF assumé par le
+    design : la cible réseau vient de la config locale de l'utilisateur.
+  `config/mcpServers/test` : sonde @prefixed_mcp::list_mcp_server_tools sous
+    @tokio::time::timeout de 10 s COMMENTÉ OBLIGATOIRE (le dispatch est série :
+    une URL qui accepte la connexion sans répondre gèlerait tout le serveur).
+    Timeout expiré → message SYNTHÉTISÉ ici (pas un @VnyError) `"VNL-MCP-005:
+    Cannot connect to {name}: timed out after 10s"`, gabarit aligné sur celui
+    de ../../../lib/src/error.sdd. Transport SSE → @VnyError::SseNotImplemented
+    (`VNL-MCP-004`, ../../../lib/src/prefixed_mcp.sdd) → `VNL-RPC-006`. Les
+    10 s de timeout des deux méthodes `test` BLOQUENT la boucle de dispatch :
+    aucune autre requête (y compris `shutdown`) n'est servie pendant ce temps,
+    seul `chat/send` lui-même échappe au blocage (`[?]` in `Tasks`).
+  `conversations/list` : mapping io → `VNL-RPC-007` ; le tri (id croissant) et
+    l'occultation silencieuse des fichiers illisables viennent de @crate::store
+    (../store.sdd) ; `list` ne retourne QUE @ConversationSummary.
+    `conversations/get` : `NotFound` io → `VNL-RPC-005` (message
+    `"Conversation not found: {id}"`), toute AUTRE io (dont InvalidData d'un
+    JSON corrompu) → `VNL-RPC-007`. `create` : NULLE validation que `agent`
+    référence un agent existant (aligné CLI `conversations new`, commentaire
+    in-file « ne pas introduire une vérification que la CLI ne fait pas ») ;
+    sauvegarde immédiate puis summary. `delete` : IDEMPOTENT (id inconnu →
+    succès `null`, JAMAIS `VNL-RPC-005` — même contrat que la CLI) et purger
+    `seq`/`busy` de la conversation APRÈS succès — MAIS ne peut pas arrêter un
+    tour en cours (aucune annulation réelle) : le tour qui survit réécrit le
+    fichier supprimé à sa fin (résurrection, `[!]` in `Tasks`).
+  `chat/send` — séquence contractuelle (6 étapes commentées in-file, chaque
+    étape peut retourner l'erreur AVANT tout spawn) : 1 params → `VNL-RPC-000` ;
+    2 UUID → `VNL-RPC-000` ; 3 chargement conversation (`NotFound` →
+    `VNL-RPC-005`, autre io → `VNL-RPC-007`) ; 4 verrou `busy` : présent →
+    `VNL-RPC-002` SANS rien d'autre, absent → insertion sous le même verrou
+    (court, synchrone) ; 5 résolution de NOM d'agent : `params.agent` →
+    `conv.agent` → `store.default_agent()` (`Err`/@None avalés) → toujours
+    rien : RETIRER `conv_id` de `busy` PUIS `VNL-RPC-008` (le rollback est
+    contractuel — sans lui la conversation serait verrouillée à jamais) ;
+    6 spawn @tokio::spawn + retour @None. Dans la tâche : push du message user
+    + `save_conversation` best-effort (`.ok()` — un échec de persistance est
+    SILENCIEUX et l'échec d'`ensure_data_dir` tue le process, cf. `Raises`),
+    @BusyGuard vivant jusqu'à la fin (drop = libération `busy`, même en
+    panique), @SessionContext { store (Arc<dyn @ConfigStore>), sink:
+    @RpcEventSink de CETTE conversation, local_tools:
+    @crate::tools::local_tools_map(), subagent_depth_max: 1, extra_mcp: vide,
+    model_override: @None, todo_state: neuf } — la voie RPC N'EXPOSE donc ni
+    override de modèle ni MCP supplémentaire, @run_agent_turn avec l'historique
+    converti (rôles autres que `user`/`assistant` FILTRÉS ; `tool_calls`
+    persistés perdent leur `id` à la re-persistance, doublement assumé de
+    ../chat.rs), persistance best-effort du message assistant, puis réponse
+    finale (`ChatSendResult` ou `VNL-RPC-009`) sur `tx` avec l'id d'origine.
+    `AGENTS.md` du workspace lu AVANT le spawn (@read_workspace_context),
+    @None si workspace non résolu ou fichier absent.
+  `chat/event` : @RpcEventSink numérote à partir de 0 par conversation ; le
+    compteur survit à la fin d'un tour (purge seulement sur
+    `conversations/delete` réussi ou `initialize`) ; les notifications de
+    plusieurs conversations en parallèle sont entrecoupées sur le flux, à
+    démultiplexer par `conversationId` (../../../docs/rpc-protocol.md
+    « Concurrence ») ; une conversation SUPPRIMÉE en cours de tour continue
+    d'émettre sur sa clé `seq` (carte rouverte à 0, `[?]` in `Tasks`).
+  `chat/cancel` : no-op v1 documenté (« accepté et no-op ») — valide
+    uniquement l'UUID (`VNL-RPC-000` sinon), ne vérifie ni existence de la
+    conversation ni tour en cours, répond `null` ; la vraie annulation
+    n'existe pas côté lib.
+  K8s : @ensure_k8s_client en échec (aucun kubeconfig, pas de cluster) →
+    `VNL-RPC-010` message `VNL-K8S-001: …` ; résultat d'appel →
+    @k8s_result_response (`Ok` → objet sérialisé, `Err` → idem `VNL-RPC-010`).
+    `sandboxes/stop`/`start` sont `set_sandbox_suspended(name, true/false)` —
+    réponses = @Sandbox patché, PAS `null`. Aucun nom K8s n'est validé
+    localement avant create/get/delete (`[?]` in `Tasks`).
+  Couverture de test existante (module `#[cfg(test)]`, 73 tests, tag
+    `#![allow(clippy::await_holding_lock)]` justifié par les locks
+    `isolated_config_dir`/`isolated_data_dir`) : cycle de vie complet, gating
+    pré-initialisation, dispatch, `id` conservé, workspace root, lectures
+    agents/models/toolsets/skills, round-trips d'écriture des 6 domaines avec
+    codes 012/013/014/015, couche globale explicite et défaut-global-sans-
+    workspace, `layer:workspace` sans workspace → 006, `skills/create` sans
+    `body` → 000, localTools = 8 builtins avec `inputSchema.type=="object"`,
+    méthodes `test` (params 000, noms inconnus 006, happy paths ollama/
+    openai-compatible via stubs localhost, injoignables 006), conversations
+    (create/list/get/delete, idempotence delete, purge seq+busy, gating),
+    `chat/cancel` (000/`null`/gating), `chat/send` (000 params et UUID, 005,
+    002, 008, spawn→`None`→009 avec id d'origine, libération `busy`, message
+    user persisté malgré l'échec), reset `busy`/`seq` à la re-initialisation,
+    @RpcEventSink (seq croissant, pas de `id`). NON couvert à ce jour : la
+    clé `"source"` des listes (jamais assertée en Rust), `providers/test`
+    timeout/hors-tableau, toutes les réponses K8s nominales (aucun test ne
+    demande un cluster — seuls les 11 bras `VNL-RPC-000` params le sont),
+    `VNL-RPC-011` (aucun test en disque non-secouable), `skills/get` happy
+    path/assertion `source`, et la branche panique du tour.
+  Dette lisibilité signalée : le commentaire de doc du test
+    `chat_send_malformed_params` affirme que `conversationId`/`message` sont
+    `#[serde(default)]` — FAUX (champs requis, cf. ./protocol.sdd) : le test
+    passe pour une autre raison (`params: {}` échoue à la désérialisation →
+    `VNL-RPC-000`), commentaire trompeur `[!]`.
+
+Must:
+  Maintenir la table de dispatch à 50 méthodes nommées EXACTEMENT telles
+    qu'aujourd'hui (le nom de méthode est un contrat public pour `ext/` et
+    l'extension VS Code) et l'ordre de validation d'@handle_line : parse →
+    initialize-toujours → gate `VNL-RPC-001` → match → `VNL-RPC-004`.
+  Mapper les erreurs config EXACTEMENT selon la table de `Handles` : lecture
+    tout-`VNL-RPC-006`, écritures 011–015 + repli 006, `Invalid item` → 015 ;
+    `error.message` = @Display intégral de @CfgStoreError sans retranchement
+    (le marqueur `VNL-CFG-NNN` dans le message est un identifiant voulu, règle
+    AGENTS.md).
+  Valider les params de chaque méthode AVANT tout effet de bord (disque,
+    cluster, réseau, `busy`) — invariant « une réponse `VNL-RPC-000` n'a rien
+    écrit nulle part ».
+  Conserver @resolve_layer : `layer` absent → Workspace si `workspace_dir`
+    résolu, sinon Global — et ne JAMAIS valider un nom de couche ou d'entrée
+    dans ce fichier (le store est l'autorité anti-traversal).
+  Construire le client K8s à la demande et le cacher dans @ServerState ; le
+    re-mettre à @None à chaque `initialize` réussi (le namespace suit le
+    workspace).
+  Gérer `chat/send` comme seule méthode asynchrone : `busy` vérifié+inséré
+    atomiquement avant spawn, rollback sur l'unique chemin d'échec post-insersion
+    (agent non résolu), libération garantie par @BusyGuard, réponse finale
+    avec l'id d'origine sur `tx`, retour @None.
+  Conserver `chat/cancel` comme no-op : réponse `null` sur UUID valide,
+    sans rien vérifier d'autre.
+  Imposer le timeout de 10 s aux DEUX actions `test` (builder @reqwest d'une
+    part, @tokio::time::timeout d'autre part) — sans eux le dispatch série
+    gèle.
+  Numéroter `seq` par conversation à partir de 0, verrou @std::sync::Mutex
+    jamais tenu à travers un `.await`, notification sans clé `id`, échec de
+    `tx.send` ignoré silencieusement (client parti = plus personne à qui
+    écrire).
+  Relire config et conversations depuis le disque À CHAQUE appel (aucun cache
+    propre au handler) et lire `AGENTS.md` à chaque tour.
+  Rester dans le registre @vnl_code (../../../docs/rpc-protocol.md) : aucun
+    nouveau code `VNL-RPC-*` sans ajout à ./protocol.rs ET à ./protocol.sdd.
+  Garder stdout réservé au protocole : aucune écriture directe, aucun log
+    dans ce fichier (le fmt layer de ../main.rs écrit sur stderr ; le harnais
+    `print_stdout`/`print_stderr` de ../../../tooling.sdd l'interdit).
+  Consommer le module de tests par les locks `isolated_config_dir`/
+    `isolated_data_dir` (pattern `set_var` sous verrou, tooling.sdd) et
+    n'utiliser `unsafe` QUE pour ce `set_var` sous verrou.
+
+Must not:
+  Valider dans ce fichier un nom d'entrée config, un nom K8s, un patch, un
+    `item` de create au-delà de la désérialisation du type domaine : recopier
+    @validate_name ou la grammaire DNS créerait deux sources de vérité
+    (../../../cfgstore/src/fs_store.sdd, ../../../crds/src/lib.sdd font foi).
+  Introduire un verrou global d'écriture config « pour sécuriser » sans
+    décision de spec (`Tasks`) : la sérialisation actuelle vient du dispatch
+    série de ./mod.rs, pas de ce fichier.
+  Injecter un champ de contrôle dans les objets persistés ou traversants :
+    la SEULE clé additive autorisée est `"source"` (lecture, ajoutée sur la
+    réponse, jamais sur le disque) ; `params.patch`/`params.item` sont
+    transmis tels quels au store — l'injection éventuelle de champs de domaine
+    est tranchée par la validation du store, pas édulcorée ici.
+  Accepter des params sur les méthodes qui n'en ont pas (`config/*` lectures,
+    `localTools`, `shutdown`) en les désérialisant « pour vérifier » : ils
+    sont ignorés, point. (`[?]` in `Tasks` pour un éventuel durcissement.)
+  Réordonner les étapes de @handle_chat_send (notamment vérifier `busy` APRÈS
+    le chargement de conversation et AVANT la résolution d'agent ; rollback
+    `busy` sur l'échec d'agent), ni transformer une de ses erreurs
+    synchrones en réponse tardive.
+  Faire de `chat/cancel` une vraie annulation sans spec lib/session, ni de
+    `chat/send` une méthode synchrone (le blocage de la boucle de lecture est
+    exactement ce que ./mod.sdd interdit).
+  Réécrire, tronquer ou localiser un message d'erreur : @Display de
+    @CfgStoreError/@VnyError et texte serde `Invalid item:` voyagent verbatim
+    dans `error.message`.
+  Supprimer les `.expect("serialize …")` existants par des silences
+    (`let _ =`) : une réponse qui ne peut pas être sérialisée doit panic
+    bruyamment (dette harnais tracée tooling.sdd), pas disparaître.
+  Écrire sur stdout, logger, ou introduire `println!`/`eprintln!` ici
+    (../../../tooling.sdd) — y compris dans le module de tests.
+  Modifier la signature `pub async fn handle_line(state: &mut @ServerState,
+    line: &@str) -> @Option<@String>` (./mod.rs l'appelle mot pour mot).
+
+Tasks:
+  [ ] Dériver les Scenario non couverts en tests taggés par leur titre :
+    assertion de la clé `"source"` (listes + `skills/get`), `skills/get` happy
+    path, timeout 10 s de `config/mcpServers/test`, réponses nominales K8s
+    (nécessitent un cluster d'essai — décider si testable en CI ou réservé
+    `#[ignore]`), `VNL-RPC-011` (répertoire de config en lecture seule), et
+    le cas « résurrection » de la conversation supprimée en cours de tour
+    (documenter le gagnant, pas laisser le comportement latent).
+  [!] @crate::config::ensure_data_dir (../config.rs) fait `eprintln!` sur
+    stderr + @std::process::exit(1) si le répertoire de données est
+    incréable — `conversations/create` et la sauvegarde du tour de
+    `chat/send` peuvent donc TUER le
+    serveur sans réponse RPC. Faut-il convertir en `VNL-RPC-007` côté
+    @crate::store (../store.sdd) ? Trancher avec Sébastien, la spec du
+    handler suivra.
+  [!] Un tour `chat/send` en cours survit à `conversations/delete` (la purge
+    `busy`/`seq` n'arrête rien) et réécrit `conversations/<id>.json` à sa fin
+    : la conversation réapparaît. Voulu (« delete = suppression du moment »)
+    ou le delete doit-il marquer pour que la sauvegarde finale saute ?
+  [!] Commentaire de doc du test `chat_send_malformed_params` faux (prétend
+    `conversationId`/`message` `#[serde(default)]` alors qu'ils sont requis —
+    ./protocol.rs) ; le test reste valide, seule la phrase ment. Corriger à la
+    prochaine main.
+  [?] `workspace` relatif : `discover_workspace_root` (../config.rs) documente
+    « doit être un chemin absolu » et remonte depuis un relatif sans le
+    canoniser (un relatif sans marqueur = Global pur). La voie RPC reçoit ce
+    chemin de l'extension (toujours absolu en pratique VS Code) : refuser les
+    relatifs (`VNL-RPC-000`) ou assumer ?
+  [?] Fallback `initialize` SANS `workspace` sur le cwd du process : voulu
+    pour CLI/tests, mais si l'extension omet le champ, le serveur
+    s'initialise silencieusement sur le cwd du process node qui l'a lancée.
+    Un signe dans le résultat (ex. `workspaceRoot` documenté comme issu du
+    cwd), ou imposer le champ (`VNL-RPC-000`) ?
+  [?] `initialize` répété pendant un tour : la tâche de tour conserve ses
+    clones d'`Arc<Mutex<..>>` de `busy`/`seq` purgés — le `seq` de sa
+    conversation peut reprendre à 0 et un NOUVEAU `chat/send` sur cette même
+    conversation ne sera plus rejeté `VNL-RPC-002` alors que l'ancien tour
+    tourne encore (deux tours concurrents). Accepté (rallonge de session
+    rare) ou verrouiller la réinitialisation pendant un tour ?
+  [?] Suppression de conversation pendant un tour : le sink continue d'émettre
+    des notifications `chat/event` pour un `conversationId` mort (compteur
+    rouvert à 0). Doit-on au moins logguer/ignorer côté sink, ou le client
+    filtre-t-il de fait ?
+  [?] Après `shutdown`, `initialized` reste `true` et @handle_line servirait
+    encore les méthodes ; ./mod.rs break rend le cas invisible en pratique.
+    Figer « une ligne arrivée entre le `shutdown` et le break de la boucle
+    est répondue normalement » ou poser une porte fermée ?
+  [?] `layer: "workspace"` explicite sans workspace résolu → `VNL-RPC-006`
+    avec message `VNL-CFG-001: Configuration error: no workspace layer
+    configured` : code non parlant pour un usage d'UI (l'extension ne peut
+    pas connaître la résolution). Code dédié (nouveau `VNL-RPC-*`) ou message
+    suffisant ?
+  [?] Actions `test` sur nom inconnu → `VNL-RPC-006` (repli UnknownReference)
+    : la table 012 est réservée aux écritures, mais 006 pour « provider
+    inexistant » est ambigu avec une vraie panne de lecture. Code dédié ou
+    assumer (le commentaire in-file dit « variante non listée ») ?
+  [?] `discover_provider_models` : réponse 200 sans `models`/`data` (ou non-
+    tableau) → succès avec liste VIDE. Un endpoint renvoyant un JSON non
+    conforme (proxy captif, page d'erreur en 200) devient un « provider sain,
+    0 modèle ». Erreur dédiée ou assumé ?
+  [?] Blocage du dispatch pendant les 10 s des méthodes `test` (dont
+    `shutdown` différé) : accepté (usage local mono-client) ou déplacer les
+    sondes en tâche spawnée (comme `chat/send`) avec réponse tardive ?
+  [?] SSRF : les deux actions `test` sondent une URL stockée dans la config
+    locale (note « surface assumée par le design » commentée in-file). Sur un
+    poste développeur c'est l'utilisateur qui se sonde lui-même ; re-confirmer
+    qu'aucun durcissement (loopback only ?) n'est attendu.
+  [?] Écritures config sans verrou : deux clients RPC sur deux process, ou
+    CLI + serveur, font un read-modify-write concurrent sur `config.yaml`
+    (../../../cfgstore/src/fs_store.sdd, pas de lock-file). À arbitrer au
+    niveau cfgstore, mais la réponse « pas de verrou » doit être ACTÉE ici
+    comme contrat de la voie RPC.
+  [?] Les lectures config et `localTools` ignorent `params` entièrement :
+    `{..., "params": {"name": "x"}}` sur `config/models` répond la liste
+    complète. Tolérance assumée ou `VNL-RPC-000` sur params non vide ?
+  [?] Aucun nom K8s validé côté handler (`owners/create` avec `"Bad Name"`
+    part à l'API et revient `VNL-RPC-010` avec le verbiage kube-rs) : message
+    cru acceptable, ou pré-validation DNS (`VNL-RPC-000`) pour un code
+    d'erreur plus net ?
+  [?] La clé `"source"` des listes n'est assertée par AUCUN test Rust (seuls
+    les tests TS de l'extension la consomment) : ajouter les asserts manquant
+    au lieu de déléguer la vérification au TS.
+  [?] ~90 `.expect("serialize …")` + `.lock().unwrap()` : passés au travers
+    du harnais expect_used/unwrap_used ? (tooling.sdd tient la dette — vérifier
+    que ce fichier y est bien compté, et ne pas en ajouter.)
+  [?] Les helpers @conversation_history_to_messages/@chat_turn_result_to_
+    message/@read_workspace_context sont des doublons assumés de ../chat.rs
+    (commentaires in-file « DUPLIQUE intentionnellement ») : factoriser
+    ../chat.rs et ce fichier dans un module partagé, ou maintenir les deux
+    copies visibles ?
+
+Done when:
+  Chaque Scenario a son test dédié taggé par son titre (module `#[cfg(test)]`
+    de ./handlers.rs pour le dispatch sans cluster, stubs localhost pour les
+    `test`, ../../tests/rpc_stdio_smoke.rs pour le fil complet, cluster
+    d'essai ou `#[ignore]` explicite pour le nominal K8s) et passe.
+  Les 73 tests existants restent verts sans modification (ils verrouillent
+    mapping 012/013/014/015, gating, spawn `chat/send`, localTools à 8 et les
+    happy paths des `test` sur stubs).
+  Le harnais clippy (../../../tooling.sdd) ne compte AUCUNE dette nouvelle
+    dans ce fichier (pas d'`unwrap`/`expect`/`panic!`/log ajouté hors le
+    module de tests).
+  Sébastien a tranché tous les `[?]` et `[!]` de `Tasks` — la spec relue fait
+    foi du contrat (notamment exit(1) de `ensure_data_dir`, résurrection de
+    conversation, timeout bloquants et verrou d'écriture).
+
+Scenario: initialize_version_inconnue_laisse_le_serveur_non_initialise
+  Given un @ServerState neuf et une ligne `initialize` (id 2) dont params
+    contient `"protocolVersion": 99`
+  When @handle_line traite la ligne
+  Then la réponse porte `error.data.code == "VNL-RPC-003"`, un message citant
+    `got 99, expected 1`, et `state.initialized` reste `false` — une méthode
+    `config/agents` envoyée immédiatement après répond encore `VNL-RPC-001`
+
+Scenario: initialize_params_malformees_repondent_000_jamais_003
+  Given un @ServerState neuf et les lignes `initialize` (ids distincts) avec
+    params `{}`, sans champ `params` du tout, et `{"protocolVersion":"1"}`
+  When chacune est traitée par @handle_line
+  Then les trois réponses portent `error.data.code == "VNL-RPC-000"` avec
+    `error.code == -32700` et `state.initialized` reste `false` (le cas
+    `VNL-RPC-003` est réservé aux `@u32` valides ≠ 1)
+
+Scenario: reinitialize_reinitialise_busy_seq_et_drapeau
+  Given un serveur initialisé (id 95) dont `busy` et `seq` contiennent chacun
+    une entrée injectée par écriture directe des champs (`pub` au crate) et
+    `shutdown_requested` posé à `true` (testable en affectant le champ, sans
+    appeler `shutdown`)
+  When une seconde ligne `initialize` (id 96, `protocolVersion: 1`) est traitée
+  Then la réponse est un succès et `busy`/`seq` sont vides et
+    `shutdown_requested` est `false` — le store est reconstruit sur le
+    workspace des nouveaux params (observable par `workspaceRoot` du résultat)
+
+Scenario: shutdown_repond_result_null_et_pose_le_drapeau
+  Given un serveur initialisé (id 7)
+  When la ligne `shutdown` (id 8) est traitée
+  Then la ligne de réponse brute contient exactement `"result":null` (clé
+    PRÉSENTE, vérifiée sur la chaîne car @Option<@serde_json::Value> effondre
+    `null` en @None en test), `resp.error` est @None, et
+    `state.shutdown_requested == true`
+
+Scenario: methode_envoyee_avant_initialize_repond_001
+  Given un @ServerState neuf (aucune initialisation)
+  When les lignes `shutdown`, `config/agents`, `chat/send` et
+    `sandboxes/list` (ids 4, 12, 443, 900, params valides par ailleurs) sont
+    traitées
+  Then les quatre réponses portent `error.data.code == "VNL-RPC-001"`,
+    `error.code == -32000` et le message `"Server not initialized — call
+    initialize first"`, sans effet de bord (aucun fichier conversation écrit,
+    aucun `busy` peuplé)
+
+Scenario: methode_inconnue_apres_initialize_repond_004_avec_nom
+  Given un serveur initialisé (id 5)
+  When la ligne `chat/history` (id 6, sans params) est traitée
+  Then la réponse porte `error.data.code == "VNL-RPC-004"`, `error.code ==
+    -32601` et le message exact `"Method not found: chat/history"`
+
+Scenario: table_de_dispatch_complete_des_cinquante_methodes
+  Given le contenu de ./handlers.rs lu par `include_str!` dans un test
+  When les littéraux de méthode du `match request.method.as_str()` sont extraits
+    (bras `"…" =>` non-test)
+  Then l'ensemble compte exactement 50 noms distincts : `initialize`,
+    `shutdown`, les 7 lectures `config/{agents,models,providers,mcpServers,
+    toolsets,skills,localTools}`, `config/skills/get`, les 2 `config/
+    {providers,mcpServers}/test`, les 18 écritures
+    `config/{providers,models,mcpServers,toolsets,agents,skills}/
+    {create,update,delete}`, les 4 `conversations/*`, `chat/send`,
+    `chat/cancel`, les 4 `owners/*`, les 4 `projects/*` et les 6
+    `sandboxes/{list,get,create,delete,stop,start}` — et aucun de ces noms ne
+    dispatche vers `VNL-RPC-004`
+
+Scenario: lecture_config_injecte_source_workspace_ou_global
+  Given un workspace initialisé dont la couche workspace définit un agent
+    `build` et un provider `prov-w`, et la couche globale (XDG isolé) un
+    provider `prov-g`
+  When `config/agents`, `config/providers` sont appelées
+  Then chaque entrée du tableau porte ses clés natives snake_case ET une clé
+    additive `"source"` : `"workspace"` pour `build` et `prov-w`, `"global"`
+    pour `prov-g` — une collision de nom est résolue workspace avec
+    `"source":"workspace"` (clé jamais écrite sur le disque)
+
+Scenario: erreur_de_lecture_config_repond_006_avec_display_complet
+  Given un serveur initialisé dont la couche workspace contient un
+    `config.yaml` YAML syntaxiquement invalide
+  When `config/providers` est appelée
+  Then la réponse porte `error.data.code == "VNL-RPC-006"` et un
+    `error.message` commençant par `VNL-CFG-001: ` (le @Display complet de
+    @vanyline_cfgstore::CfgStoreError::Config, chemin du fichier inclus),
+    `error.code == -32000`, et aucune clé `result`
+
+Scenario: skills_get_repond_meta_body_source
+  Given un serveur initialisé avec un skill workspace `pdf` (dossier
+    `skills/pdf/SKILL.md` avec frontmatter description et corps à espaces
+    de bord)
+  When `config/skills/get` avec params `{"name":"pdf"}` est appelé
+  Then le résultat est un objet avec `name == "pdf"`, `description` de la
+    meta, `"body"` = le corps TRIMÉ par le store (pas re-trimé), et
+    `"source" == "workspace"` — et avec `{"name":"absent"}` la réponse est
+    `VNL-RPC-006` (message `VNL-CFG-003`) SANS clé `source` calculée
+    (le bras d'erreur court-circuite)
+
+Scenario: localTools_liste_les_huit_descripteurs_statiques_sans_params
+  Given un serveur initialisé
+  When `config/localTools` est appelée avec `params` ABSENT puis avec
+    `params: {"nom_importe_quoi": 42}`
+  Then les deux réponses sont des succès identiques (params ignorés) dont le
+    tableau contient exactement 8 entrées, dont l'ensemble des `name` est
+    `read_file|write_file|edit_file|delete_file|list_directory|find_files|
+    search|execute_command`, chacune avec `inputSchema` objet de
+    `"type":"object"` — descripteurs verbatim de @vanyline_tools::mcp, aucun
+    accès store ni disque
+
+Scenario: ecriture_ok_repond_result_null_en_couche_workspace_par_defaut
+  Given un serveur initialisé sur un workspace marqué `.vanyline/` (couche
+    workspace résolue)
+  When `config/providers/create` avec `{"item":{"name":"prov-a","type":
+    "ollama","endpoint":"http://localhost:11434"}}` (sans `layer`) est appelé
+  Then la réponse brute contient `"result":null` et le provider est écrit
+    dans le `config.yaml` de la COUCHE WORKSPACE ; `config/providers` le liste
+    avec `"source":"workspace"`
+
+Scenario: ecriture_nom_absent_en_update_repond_012_avec_layer
+  Given un serveur initialisé sur workspace résolu, sans provider `inconnu`
+  When `config/providers/update` avec `{"name":"inconnu","patch":
+    {"endpoint":"http://x"}}` est appelé
+  Then la réponse porte `error.data.code == "VNL-RPC-012"` et un message
+    exactement `VNL-CFG-006: provider 'inconnu' not found in Workspace layer`
+    (couche rendue en Debug, ./error.sdd de cfgstore) — `delete` sur le même
+    nom répond idem 012
+
+Scenario: ecriture_create_conflit_repond_013
+  Given un serveur initialisé sur workspace résolu avec un provider `dup`
+    déjà présent dans la couche workspace
+  When `config/providers/create` avec `item.name == "dup"` est appelé
+  Then la réponse porte `error.data.code == "VNL-RPC-013"` et le message
+    `VNL-CFG-007: provider 'dup' already exists in Workspace layer`, et le
+    contenu du `config.yaml` est inchangé
+
+Scenario: ecriture_nom_illegal_repond_014_sans_toucher_le_disque
+  Given un serveur initialisé sur workspace résolu
+  When `config/agents/create` (ou `config/skills/delete`) avec le nom
+    `"../evil"` est appelé
+  Then la réponse porte `error.data.code == "VNL-RPC-014"` (message
+    `VNL-CFG-005: Invalid name: ../evil`) et AUCUN fichier ou dossier hors
+    couche n'a été créé ni touché (la validation anti-traversal du store tient
+    lieu de seule barrière)
+
+Scenario: ecriture_item_non_deserialisable_repond_015_invalid_item
+  Given un serveur initialisé sur workspace résolu
+  When `config/providers/create` avec un `item` dont `"type":"mistral"` (hors
+    enum @ProviderType) est appelé, puis séparément avec un `item` chaîne
+    `"pas-un-objet"`
+  Then les deux réponses portent `error.data.code == "VNL-RPC-015"` et un
+    message démarrant par `Invalid item: ` (texte serde verbatim, SANS
+    marqueur `VNL-CFG-*`), et rien n'est écrit sur le disque
+
+Scenario: ecriture_layer_workspace_sans_workspace_resolu_repond_006
+  Given un serveur initialisé sur un tempdir SANS marqueur `.vanyline`/`.git`
+    (workspace non résolu)
+  When `config/providers/create` avec `"layer":"workspace"` est appelé
+  Then la réponse porte `error.data.code == "VNL-RPC-006"` et un message
+    `VNL-CFG-001: Configuration error: no workspace layer configured` — et
+    le même create SANS `layer` réussit en couche globale (`"result":null`)
+    sans créer de `.vanyline/` sous le tempdir
+
+Scenario: ecriture_layer_global_ecrit_la_couche_globale
+  Given un serveur initialisé sur workspace résolu (XDG_CONFIG_HOME isolé)
+  When `config/models/create` avec `"layer":"global"` est appelé
+  Then `"result":null` est répondu, le modèle apparaît dans le `config.yaml`
+    pointé par XDG_CONFIG_HOME, et `config/models` le liste avec
+    `"source":"global"`
+
+Scenario: test_provider_ollama_liste_les_modeles_sans_autorisation
+  Given un serveur initialisé avec un provider workspace de `type: ollama`
+    dont l'`endpoint` est un stub localhost renvoyant `{"models":[{"name":
+    "qwen2.5"},{"autre":1}]}`
+  When `config/providers/test` avec son `name` est appelé
+  Then le succès est exactement `{"models":["qwen2.5"]}` (entrée sans `name`
+    filtrée, pas d'erreur) et aucune requête du stub ne porte de header
+    `Authorization`
+
+Scenario: test_provider_openai_ajoute_bearer_quand_api_key_presente
+  Given un stub localhost enregistrant ses requêtes et renvoyant `{"data":
+    [{"id":"model-x"}]}`, et deux providers `openai-compatible` initialisés,
+    l'un avec `api_key: "k"`, l'autre sans
+  When `config/providers/test` est appelé pour chacun
+  Then les deux répondent `{"models":["model-x"]}` (clé `models` dans la
+    réponse RPC bien que la source lise `data[].id`), la requête du premier
+    porte `Authorization: Bearer k` sur le `/v1/models`, la seconde aucun
+
+Scenario: test_provider_injoignable_repond_006_vnl_llm_004
+  Given un serveur initialisé avec un provider `openai-compatible` dont
+    l'`endpoint` est `http://127.0.0.1:1` (port refusé garanti)
+  When `config/providers/test` avec son `name` est appelé
+  Then la réponse porte `error.data.code == "VNL-RPC-006"` et un
+    `error.message` commençant par `VNL-LLM-004: ` — et avec un `name`
+    absent du store fusionné, `VNL-RPC-006` encore (repli
+    @CfgStoreError::UnknownReference, message `VNL-CFG-003`)
+
+Scenario: test_mcp_serveur_sse_repond_006_vnl_mcp_004
+  Given un serveur initialisé avec un serveur MCP configuré `type: sse`
+  When `config/mcpServers/test` avec son `name` est appelé
+  Then la réponse porte `error.data.code == "VNL-RPC-006"` et le message
+    exactement `VNL-MCP-004: SSE transport not yet implemented` (aucune
+    connexion tentée — @prefixed_mcp::list_mcp_server_tools refuse en amont)
+
+Scenario: test_mcp_sans_reponse_repond_timeout_apres_dix_secondes
+  Given un serveur initialisé avec un serveur MCP `http-streamable` pointant
+    un listener localhost qui accepte la connexion SANS jamais répondre
+    (stub « trou noir »)
+  When `config/mcpServers/test` est appelé, le test borné par un délai
+    côté harnais à ~10 s + marge
+  Then la réponse porte `error.data.code == "VNL-RPC-006"` et le message
+    exactement `VNL-MCP-005: Cannot connect to {name}: timed out after 10s`,
+    après environ 10 s (timeout imposé par @tokio::time::timeout dans le
+    handler, pas par le client MCP), la boucle de dispatch étant restée
+    bloquée jusque-là
+
+Scenario: conversations_list_repond_uniquement_des_summaries
+  Given un data-dir isolé avec une conversation persistée contenant 2
+    messages et un `todo`
+  When `conversations/list` est appelée
+  Then le résultat est un tableau d'objets `{id, agent?, title?, messageCount:
+    2}` sans AUCUNE clé `messages` ni `todo` (le @ConversationSummary de
+    ./protocol.rs, tri id croissant hérité de @crate::store)
+
+Scenario: conversations_get_distingue_pas_trouve_et_corrompu
+  Given un data-dir isolé vide, puis une conversation au JSON interne
+    corrompu
+  When `conversations/get` est appelée avec un UUID valide jamais créé, puis
+    avec l'id du fichier corrompu, puis avec `{"id":"not-a-uuid"}`
+  Then le premier répond `VNL-RPC-005` (message `Conversation not found:
+    {id}`), le second `VNL-RPC-007` (io InvalidData, pas NotFound), le
+    troisième `VNL-RPC-000` avec `error.code == -32700`
+
+Scenario: conversations_create_ne_verifie_pas_l_agent
+  Given un data-dir isolé et un store sans aucun agent défini
+  When `conversations/create` avec `{"agent":"agent-fantome","title":"T"}`
+    est appelé
+  Then le succès est un @ConversationSummary (id UUID v4 frais, `agent:
+    "agent-fantome"`, `messageCount: 0`) et le fichier `<id>.json` existe
+    avec `messages: []` — l'absence de l'agent dans le store n'est PAS une
+    erreur (aligné CLI `conversations new`)
+
+Scenario: conversations_delete_id_inconnu_reussit_et_purge_seq_busy
+  Given un data-dir isolé, une conversation créée via RPC, puis ses entrées
+    `busy` et `seq` injectées à la main dans @ServerState
+  When `conversations/delete` de CETTE conversation est appelé (succès), puis
+    `conversations/delete` d'un UUID valide jamais créé
+  Then le premier répond `"result":null` et vide les entrées `busy`/`seq` ;
+    le second répond aussi `"result":null` — JAMAIS `VNL-RPC-005`
+    (idempotence du store, aucune vérification d'existence ajoutée)
+
+Scenario: chat_cancel_est_un_noop_qui_valide_seulement_l_uuid
+  Given un serveur initialisé (aucune conversation créée)
+  When `chat/cancel` avec un UUID valide (conversation inexistante, aucun
+    tour), puis avec `"conversationId": "pas-un-uuid"`
+  Then le premier répond `"result":null` sans rien vérifier d'autre, le
+    second `VNL-RPC-000` avec le message citant `Invalid UUID in
+    conversationId`
+
+Scenario: chat_send_repond_002_sans_spawn_sur_conversation_occupee
+  Given un data-dir isolé, une conversation créée via RPC, puis son UUID
+    inséré directement dans `state.busy`
+  When `chat/send` valide sur cette conversation (id 132) est traité
+  Then la réponse synchrone porte `error.data.code == "VNL-RPC-002"`
+    (`"Conversation busy: a turn is already in progress"`), @handle_line
+    retourne @Some (pas de spawn), et l'entrée reste dans `busy` (aucun
+    nettoyage sur ce chemin)
+
+Scenario: chat_send_sans_agent_resolu_repond_008_et_libere_busy
+  Given un data-dir isolé, une conversation `agent: @None` créée via RPC, un
+    store SANS `defaults.agent`, et un `chat/send` sans `agent` en params
+  When il est traité
+  Then la réponse porte `error.data.code == "VNL-RPC-008"` (message citant
+    « no default agent configured ») et l'UUID de la conversation a été
+    RETIRÉ de `busy` (rollback de l'insertion d'étape 4 — sinon verrou
+    éternel), et @handle_line a retourné @Some
+
+Scenario: chat_send_valide_spawn_retourne_none_et_repond_plus_tard
+  Given un data-dir isolé, un workspace avec provider `openai-compatible` sur
+    `http://127.0.0.1:1` (refus garanti), modèle + agent `build` référençants
+    et `defaults.agent: build`, une conversation créée, puis un `chat/send`
+    (id 151) accepté
+  When @handle_line traite la ligne, puis le canal `rx` est épuré des
+    notifications `chat/event` (elles n'ont pas de clé `id`) jusqu'à la
+    réponse
+  Then @handle_line retourne @None IMMÉDIATEMENT et `busy` contient la
+    conversation ; la réponse tardive porte l'id 151 et
+    `error.data.code == "VNL-RPC-009"` ; `busy` est ensuite vidé (@BusyGuard)
+    et le message user PERSISTÉ dans `<id>.json` malgré l'échec du tour
+    (`messages.len() == 1`)
+
+Scenario: chat_event_sont_numerotees_par_conversation_sans_id
+  Given un @RpcEventSink { conversation_id: uuid fixé, seq partagé vide, tx
+    de test }
+  When deux @ChatEvent::Token sont émis via @emit sur ce sink, puis un
+    second @RpcEventSink (autre uuid, MÊME carte `seq` partagée) émet un
+    premier événement
+  Then les deux notifications du premier sink portent `"method":
+    "chat/event"`, AUCUNE clé `id`, `params.conversationId` = l'uuid en
+    chaîne minuscules, `params.seq` 0 puis 1, `params.event` verbatim serde de
+    @ChatEvent (`{"type":"token","content":…}`) ; la notification du second
+    sink porte `params.seq == 0` — compteurs indépendants par conversation
+
+Scenario: k8s_params_sans_name_repondent_000_avant_tout_contact_cluster
+  Given un serveur initialisé sur une machine SANS kubeconfig joignable
+    (aucun cluster)
+  When les 11 méthodes K8s paramétrées (les 8 à @NameParams et les 3
+    `create`) sont
+    invoquées SANS la clé `name` dans params (et pour les create sans les
+    champs requis de la spec aplatie : `{"name":"sb"}` seul sur
+    `sandboxes/create`)
+  Then TOUTES répondent `error.data.code == "VNL-RPC-000"` /
+    `error.code == -32700` — la désérialisation des params précède
+    @ensure_k8s_client, aucun `VNL-K8S-001` n'est atteignable par ce chemin
+
+Scenario: k8s_cluster_absent_repond_010_vnl_k8s_001
+  Given un serveur initialisé (avec un `name` valide `{"name":"alice"}`) sur
+    un environnement sans kubeconfig ni cluster (config d'essai forcée par
+    variable d'env kube, ou test `#[ignore]` sur poste sans cluster)
+  When `owners/list` puis `owners/get` avec params valides sont appelées
+  Then les deux réponses portent `error.data.code == "VNL-RPC-010"`,
+    `error.code == -32000` et un message démarrant par `VNL-K8S-001: `
+    (@Display @VnyError::K8sConfigError) — sans qu'un client K8s ne soit
+    resté caché dans l'état (l'échec de `discover` ne peuple pas `k8s_client`)
+
+Scenario: k8s_absent_n_bloque_pas_les_methodes_locales
+  Given un serveur initialisé sur un environnement sans cluster joignable
+  When `config/agents`, `conversations/list` et `config/localTools` sont
+    appelées après une tentative `sandboxes/list` en échec (`VNL-RPC-010`)
+  Then les trois répondent des succès normaux — la construction paresseuse du
+    client K8s (commentaire in-file : un cluster injoignable ne doit PAS
+    empêcher `chat/send`/`config/*`) est un invariant, pas un accident
+
+Scenario: sandboxes_stop_et_start_sont_le_meme_patch_aux_booleens_opposes
+  Given un @Sandbox existant `suspended: false` dans le namespace d'essai
+    (test d'intégration sur cluster, `#[ignore]` sans cluster — cf.
+    ../../../lib/src/k8s.sdd)
+  When `sandboxes/stop` avec `{"name":"sb"}` est appelé, puis
+    `sandboxes/start`
+  Then stop répond le manifeste @Sandbox avec `spec.suspended == true`, start
+    avec `spec.suspended == false` — les DEUX en `result` objet (le @Sandbox
+    patché), PAS `null` : seul verbe d'état de la famille à retourner l'objet
+    (même appel @VnlK8sClient::set_sandbox_suspended avec booléen opposé ;
+    ../sandbox_cmd.sdd documente la parité CLI/RPC)
+
+Scenario: conversations_get_repond_la_conversation_complete
+  Given un data-dir isolé avec une conversation créée via RPC puis un tour
+    échoué (message user persisté, cf. scenario `chat/send`), et un `todo`
+    posé à la main dans le fichier
+  When `conversations/get` de son UUID est appelé
+  Then le résultat est l'objet @vanyline_lib::Conversation COMPLET en
+    snake_case natif (`id`, `agent`, `title`, `messages[] {role, content,
+    tool_calls}` avec `tool_calls` absent quand @None, `todo` présent) — pas
+    un résumé, pas de recase camelCase (../../../lib/src/types.sdd fait foi)
+
+Scenario: conversation_supprimee_en_cours_de_tour_resuscite
+  Given un data-dir isolé, un agent/provider « trou noir » (port refusé), une
+    conversation avec un `chat/send` spawné et non encore terminé (tour
+    attente de connexion), le test tenant le canal ouvert
+  When `conversations/delete` de cette conversation réussit (`"result":null`,
+    `busy` purgé) pendant que le tour tourne, puis la réponse tardive arrive
+  Then l'état de fait est documenté, pas béni : le fichier `<id>.json`
+    réapparaît (sauvegarde finale best-effort du tour) et les notifications
+    `chat/event` ont continué — l'arbitrage `[!]` de `Tasks` tranche avant de
+    verrouiller ce scenario en contrat ou en correctif
+
+Scenario: workspace_relatif_ne_monte_pas_plus_haut_que_lui_meme
+  Given un serveur non initialisé et `initialize` avec
+    `"workspace":"sous-dossier-relative"` inexistant ou sans marqueur (cwd de
+    test garanti hors dépôt git)
+  When la ligne est traitée
+  Then `initialize` réussit avec `workspaceRoot` ABSENT (aucun marqueur trouvé
+    en remontant depuis le relatif — @discover_workspace_root s'arrête quand
+    `parent()` est @None) et les écritures sans `layer` ciblent Global ;
+    comportement de fait `[?]` (la doc de ../config.rs exige un absolu),
+    l'arbitrage de `Tasks` décide du maintien ou du rejet `VNL-RPC-000`

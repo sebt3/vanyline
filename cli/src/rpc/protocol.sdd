@@ -1,0 +1,651 @@
+Spec: RPC stdio — grammaire des types du protocole (protocol)
+
+Platform: Rust/vanyline-cli/serde
+
+Purpose:
+  Grammaire des types du fil du serveur JSON-RPC 2.0 de `vanyline serve --stdio` :
+  enveloppes entrantes/sortantes (@JsonRpcRequest, @JsonRpcResponse,
+  @JsonRpcErrorObj, @JsonRpcErrorData, @JsonRpcNotification), constante de
+  protocole @PROTOCOL_VERSION, registres de codes d'erreur (@jsonrpc_code,
+  @vnl_code), et types de params/résultat de toutes les méthodes (`initialize`,
+  `shutdown` côté enveloppe, `config/*`, `conversations/*`, `chat/*`,
+  `owners/projects/sandboxes/*`). Ce fichier ne dit rien du dispatch, du cycle
+  de vie ni de la production des erreurs (./handlers.rs :: @handle_line et ses
+  handlers) ni du framing/transport (./mod.rs :: @run_stdio_server, spec
+  ./mod.sdd) : son contrat est la forme exacte du JSON — clés de sérialisation
+  (camelCase pour les enveloppes RPC, snake_case natif pour les objets de
+  domaine traversants), champs requis/défauts/optionnels (absents vs `null`),
+  et sémantique du namespace `VNL-RPC-*`. Le document
+  ../../../docs/rpc-protocol.md est la doc humaine de référence ; la doc
+  commentaire du fichier s'en dit « reflète l'implémentation réelle » et les
+  écarts découverts au ratissage sont signalés en `Tasks`, jamais présentés
+  comme contrat. Un fichier, un contrat : pas de regroupement.
+
+Owns:
+  ./protocol.rs
+
+Can read:
+  ./handlers.rs
+  ./mod.rs
+  ./mod.sdd
+  ../../../docs/rpc-protocol.md
+  ../../../lib/src/types.rs
+  ../../../lib/src/event.rs
+  ../../../crds/src/lib.rs
+  ../../tests/rpc_stdio_smoke.rs
+
+References:
+  ../../../vanyline.sdd
+  ../../../tooling.sdd
+  ../../../lib/src/types.sdd
+  ../../../lib/src/event.sdd
+  ../../../crds/src/lib.sdd
+  ../../../cfgstore/src/error.sdd
+
+Depends on:
+  @serde (derive @serde::Serialize / @serde::Deserialize, attributs
+    `#[serde(rename_all = …)]`, `#[serde(default)]`,
+    `#[serde(skip_serializing_if = …)]`, `#[serde(flatten)]`) + @serde_json
+    (@serde_json::Value comme payloads bruts) — aucun autre framework ; les
+    désérialisations effectives (@serde_json::from_str, @serde_json::from_value)
+    ont lieu chez le consommateur ./handlers.rs, ce fichier ne fournit que les
+    impls @serde::Deserialize.
+  @vanyline_lib::Conversation (../../../lib/src/types.rs) — source du @From
+    manual @From<&vanyline_lib::Conversation> pour @ConversationSummary ; sa
+    représentation serde (snake_case natif, `todo` skip-if-none) est contractée
+    par ../../../lib/src/types.sdd, pas ici.
+  @vanyline_lib::event::ChatEvent + @vanyline_lib::event::ToolCallRecord
+    (../../../lib/src/event.rs) — embarqués sans re-conversion dans
+    @ChatEventNotificationParams.event et @ChatSendResult.tool_calls ; leur
+    représentation serde (tag interne `"type"`, snake_case, 12 variantes de
+    @ChatEvent dont `reasoning_delta` et `tool_unavailable` que la table de
+    ../../../docs/rpc-protocol.md ne liste pas — voir `[?]` in `Tasks`) est
+    contractée par ../../../lib/src/event.sdd.
+  @vanyline_crds::OwnerSpec / @vanyline_crds::ProjectSpec /
+    @vanyline_crds::SandboxSpec (../../../crds/src/lib.rs, spec
+    ../../../crds/src/lib.sdd) — aplatis par `#[serde(flatten)]` dans les 3
+    types de `create` K8s ; camelCase, absence de
+    @serde::deny_unknown_fields et champs requis (`ProjectSpec.owner`/`repoUrl`,
+    `SandboxSpec.project`/`branch`, `Toolchain.name`/`image`) viennent d'eux,
+    pas de ce fichier.
+  ./handlers.rs — unique consommateur des types (dispatch @handle_line,
+    constructions @JsonRpcResponse::success/::error, mappages d'erreurs
+    @config_write_response / @config_error_response / @k8s_result_response). La
+    table d'affectation variante @vanyline_cfgstore::CfgStoreError → code
+    `VNL-RPC-*` est le contrat de ./handlers.rs (esquissée dans
+    ../../../cfgstore/src/error.sdd) : ce fichier n'en expose que le registre
+    des constantes @vnl_code.
+  ./mod.sdd — spec sœur (transport/framing) : la garantie « une trame par ligne
+    `\n` » appartient à ./mod.rs ; la forme interne de chaque trame appartient
+    ici.
+
+Exposes:
+  Aucun item n'est gated par `#[cfg(…)]`, aucun ne dérive ts-rs (uniquement
+    @serde), aucun module de test dans le fichier (la couverture actuelle est
+    le module `#[cfg(test)]` de ./handlers.rs et ../../tests/rpc_stdio_smoke.rs).
+  @PROTOCOL_VERSION — `pub const @PROTOCOL_VERSION: u32 = 1` : seule version de
+    protocole acceptée ; la comparaison (mismatch → `VNL-RPC-003`) et le rendu
+    dans @InitializeResult sont l'affaire de ./handlers.rs.
+  @JsonRpcRequest — enveloppe entrante, derives `Debug` + @serde::Deserialize
+    seulement (jamais sérialisée côté serveur). 4 champs, tous sans
+    @serde::deny_unknown_fields (clés inconnues ignorées) :
+      `jsonrpc` — @String REQUIS (clé absente ou non-chaîne → erreur
+        @serde::Deserialize), `#[allow(dead_code)]` : la valeur n'est JAMAIS
+        lue ni comparée à `"2.0"` (voir `[?]` in `Tasks`).
+      `id` — @Option<@serde_json::Value> avec `#[serde(default)]` : clé absente
+        OU `null` donnent tous deux @None (indistinguables) ; toute valeur JSON
+        est acceptée (nombre, chaîne, objet, tableau, booléen). `@None` =
+        notification client→serveur — le handler la traite de façon permissive
+        comme id `null` (commentaire in-file : « le design ne définit pas ce cas
+        explicitement »).
+      `method` — @String requis.
+      `params` — @serde_json::Value avec `#[serde(default)]` : absent →
+        @serde_json::Value::Null ; chaque méthode désérialise elle-même depuis
+        ce `Value` (aucune validation ici).
+  @JsonRpcResponse — enveloppe sortante, derives `Debug` + @serde::Serialize +
+    @serde::Deserialize (le second n'est consommé que par les tests de
+    ./handlers.rs ; voir `[?]` in `Tasks`). Sérialise toujours `jsonrpc` et
+    `id` ; `result` et `error` sont `#[serde(skip_serializing_if =
+    "Option::is_none")]` (clé absente du JSON si @None — jamais de clé à `null`
+    pour ces deux champs via les constructeurs). L'invariant « succès XOR
+    erreur — jamais les deux, jamais aucun » est porté par les deux
+    constructeurs, PAS par le type (commentaire in-file verbatim : ne pas
+    construire la struct à la main hors ces fonctions) :
+      @JsonRpcResponse::success(@serde_json::Value, @serde_json::Value) —
+        `jsonrpc:"2.0"`, `result: Some(…)` (un @serde_json::Value::Null en
+        payload garde la clé `"result":null` sur le fil — pattern `shutdown`),
+        `error: None`.
+      @JsonRpcResponse::error(id, `code: i64`, `message: impl Into<@String>`,
+        `vnl_code: &'static @str`) — `result: None`, `error: Some` d'un
+        @JsonRpcErrorObj dont le @JsonRpcErrorData porte `vnl_code.to_string()`.
+        Le paramètre `vnl_code` n'est contraint que par la durée de vie
+        `'static` : rien n'oblige typographiquement à passer une constante
+        @vnl_code (voir `[?]` in `Tasks`).
+  @JsonRpcErrorObj — `code: @i64`, `message: @String`, `data:
+    @JsonRpcErrorData` — derives `Debug` + S + D, clés natives, `data` NON
+    optionnel : toute réponse d'erreur porte `error.data` sur le fil.
+  @JsonRpcErrorData — `code: @String` : identifiant unique `VNL-RPC-*` (règle
+    AGENTS.md « messages d'erreur avec identifiant unique ») ; selon
+    ../../../docs/rpc-protocol.md c'est LUI que le client doit tester,
+    `error.code` ne faisant que catégoriser.
+  @jsonrpc_code — module `pub` de 3 constantes @i64 dans la plage réservée
+    JSON-RPC 2.0 `-32768..-32000` : @jsonrpc_code::PARSE_ERROR `-32700`,
+    @jsonrpc_code::METHOD_NOT_FOUND `-32601`, @jsonrpc_code::SERVER_ERROR
+    `-32000`. Les codes standard -32600 (invalid request) et -32602 (invalid
+    params) sont volontairement absents de ce serveur (toute erreur d'enveloppe
+    passe par `-32700` + `VNL-RPC-000`).
+  @vnl_code — module `pub`, registre complet des 16 codes `VNL-RPC-*` du
+    protocole (`&'static @str`) ; ce fichier ne les émet pas, il en fixe les
+    valeurs et le sens (table de ../../../docs/rpc-protocol.md) :
+      @vnl_code::MALFORMED_REQUEST `VNL-RPC-000` — JSON invalide, clé requise
+        absente/mal typée, UUID invalide.
+      @vnl_code::NOT_INITIALIZED `VNL-RPC-001` — méthode avant `initialize`.
+      @vnl_code::BUSY `VNL-RPC-002` — `chat/send` sur conversation à tour en
+        cours (le commentaire de module « pas utilisé ici » est périmé — voir
+        `[!]` in `Tasks`).
+      @vnl_code::UNKNOWN_PROTOCOL_VERSION `VNL-RPC-003` — `protocolVersion`
+        inconnu dans `initialize`.
+      @vnl_code::METHOD_NOT_FOUND `VNL-RPC-004` — méthode inconnue.
+      @vnl_code::CONVERSATION_NOT_FOUND `VNL-RPC-005` — conversation
+        inexistante.
+      @vnl_code::CONFIG_ERROR `VNL-RPC-006` — erreur config non typée (lecture,
+        action `test`, ou variantes du store hors 011–015).
+      @vnl_code::CONVERSATION_STORAGE_ERROR `VNL-RPC-007` — erreur I/O de
+        stockage des conversations.
+      @vnl_code::NO_AGENT_RESOLVED `VNL-RPC-008` — aucun agent résolvable pour
+        `chat/send`.
+      @vnl_code::TURN_EXECUTION_ERROR `VNL-RPC-009` — échec du tour LLM.
+      @vnl_code::K8S_ERROR `VNL-RPC-010` — erreur client/appel K8s.
+      @vnl_code::CONFIG_WRITE_ERROR `VNL-RPC-011` — échec écriture disque ou
+        sérialisation (`@vanyline_cfgstore::CfgStoreError::WriteError`/`Io`).
+      @vnl_code::CONFIG_NOT_FOUND `VNL-RPC-012` — `update`/`delete` sur nom
+        absent de la couche ciblée.
+      @vnl_code::CONFIG_NAME_CONFLICT `VNL-RPC-013` — `create` sur nom déjà
+        présent dans la couche ciblée.
+      @vnl_code::CONFIG_INVALID_NAME `VNL-RPC-014` — nom violant la contrainte
+        anti-traversal (validée dans le store, jamais ici).
+      @vnl_code::CONFIG_VALIDATION `VNL-RPC-015` — valeur énumérée invalide ou
+        `item` non désérialisable.
+  @InitializeParams — Deserialize, `rename_all = "camelCase"` :
+    `protocolVersion` (@u32 REQUIS — absent/mal typé/négatif/flottant → erreur
+    @serde, donc `VNL-RPC-000` côté handler, JAMAIS `VNL-RPC-003` qui est
+    réservé aux `u32` valides ≠ @PROTOCOL_VERSION) ; `workspace`
+    (@Option<@String>, `#[serde(default)]`, `#[allow(dead_code)]` au
+    commentaire périmé — le champ est consommé par ./handlers.rs ::
+    @resolve_layers, voir `[!]` in `Tasks`).
+  @InitializeResult — Serialize seulement, camelCase : `protocol_version`
+    (`"protocolVersion"`, toujours rendu), `server_version`
+    (`"serverVersion"`, toujours rendu, valeur posée par ./handlers.rs =
+    `env!("CARGO_PKG_VERSION")`), `workspace_root` et `default_agent`
+    (@Option<@String> `skip_serializing_if = "Option::is_none"` → ABSENTS du
+    JSON si @None, jamais `null` — contrat ../../../docs/rpc-protocol.md «
+    champs optionnels au sens JSON usuel »).
+  @ConversationSummary — Serialize seulement, camelCase : `id` (@String, rendu
+    du @uuid::Uuid en minuscules hyphené), `agent`/`title` (@Option<@String>,
+    skip-if-none → absents si @None), `message_count` (`"messageCount"`, @usize,
+    toujours rendu). Pas de Deserialize, pas de `messages`.
+    @From<&@vanyline_lib::Conversation> — manual, infaillible :
+    `id = c.id.to_string()`, `agent`/`title` clonés,
+    `message_count = c.messages.len()` ; le champ `todo` de @Conversation
+    n'entre JAMAIS dans la vue (et `conversations/get` renvoie la @Conversation
+    complète de la lib, pas ce type — le choix du type est du dispatch
+    ./handlers.rs).
+  @ConversationIdParams — Deserialize, clé unique `id` (@String REQUIS, pas de
+    `rename_all`). Aucune validation d'UUID au niveau du type : `"not-a-uuid"`
+    est accepté ici, c'est ./handlers.rs qui le rejette en `VNL-RPC-000` via
+    @uuid::Uuid::parse_str.
+  @ConversationCreateParams — Deserialize : `agent`, `title` (@Option<@String>
+    `#[serde(default)]`, absents → @None) ; l'échec de désérialisation ne vient
+    que d'un type incorrect (ex. `agent: 42`).
+  @JsonRpcNotification<T> — Serialize seulement, générique sur `T:
+    @serde::Serialize` (réutilisable au-delà de `chat/event`) : `jsonrpc:
+    &'static @str`, `method: &'static @str` (le forçage `'static` impose des
+    littéraux au call-site — ./handlers.rs :: @RpcEventSink passe `"2.0"` /
+    `"chat/event"`), `params: T`. PAS de champ `id` — distinction
+    notification/réponse sur le flux (spec JSON-RPC 2.0,
+    ../../../docs/rpc-protocol.md).
+  @ChatEventNotificationParams — Serialize, camelCase : `conversation_id`
+    (`"conversationId"`, @String), `seq` (@u64, compteur par conversation posé
+    par ./handlers.rs), `event` (@vanyline_lib::event::ChatEvent embarqué tel
+    quel — tag `"type"`, snake_case, représentation verrouillée par
+    ../../../lib/src/event.sdd).
+  @ChatSendParams — Deserialize, camelCase : `conversation_id`
+    (`"conversationId"`, @String REQUIS), `message` (@String REQUIS), `agent`
+    (@Option<@String> `#[serde(default)]`).
+  @ChatSendResult — Serialize, camelCase : `text` (@String, toujours),
+    `tool_calls` (`"toolCalls"`, @Vec<@vanyline_lib::event::ToolCallRecord>,
+    TOUJOURS rendu — `[]` si vide, pas d'attribut serde sur le champ). Chaque
+    enregistrement est la forme native de la lib (`id`, `name`, `arguments`,
+    `result` — `result` rendu à `null` si @None, sans skip).
+  @ChatCancelParams — Deserialize, camelCase : `conversation_id`
+    (`"conversationId"`, @String REQUIS, validation UUID par ./handlers.rs
+    uniquement).
+  @NameParams — Deserialize, sans `rename_all` : clé unique `name` (@String
+    REQUIS). Partagé par `owners/get`/`delete`, `projects/get`/`delete`,
+    `sandboxes/get`/`delete` (et `sandboxes/stop`/`start`).
+  @OwnerCreateParams / @ProjectCreateParams / @SandboxCreateParams —
+    Deserialize, sans `rename_all` sur l'enveloppe : `name` (@String REQUIS,
+    « missing field » si absent) + `#[serde(flatten)]` du spec CRD
+    (@vanyline_crds::OwnerSpec, @vanyline_crds::ProjectSpec,
+    @vanyline_crds::SandboxSpec) dont les clés camelCase sont attendues AU
+    NIVEAU RACINE des params (`{"name":"alice","homeSize":"2Gi"}`, PAS
+    `{"name":"alice","spec":{…}}` — la clé `spec` imbriquée serait une clé
+    inconnue avalée sans erreur, voir Scenario et `[?]`). Aucun des trois specs
+    n'expose de clé racine `name` (les `name` de @vanyline_crds::PvcRef et
+    @vanyline_crds::Toolchain sont imbriqués et n'entrent pas en collision).
+    Champs requis venant des specs : `ProjectSpec.owner` +
+    `ProjectSpec.repoUrl`, `SandboxSpec.project` + `SandboxSpec.branch` —
+    absents → erreur @serde du flatten → `VNL-RPC-000` ; @OwnerSpec est
+    entièrement optionnel (defaults + `egress` `#[serde(default)]`).
+  @ConfigLayer — enum Deserialize (`Debug`, `Clone`, `Copy`),
+    `rename_all = "lowercase"` : seules les chaînes `"global"` et `"workspace"`
+    (sensibles à la casse) désérialisent ; toute autre valeur → erreur @serde →
+    enveloppe malformée → `VNL-RPC-000` (../../../docs/rpc-protocol.md et le
+    commentaire in-file sont alignés).
+  @ConfigCreateParams — Deserialize, camelCase (no-op sur des champs
+    monocas) : `layer` (@Option<@ConfigLayer> `#[serde(default)]`), `item`
+    (@serde_json::Value REQUIS — clé absente → `VNL-RPC-000` ; clé présente à
+    `null` ou contenu invalide est accepté par l'enveloppe et rejeté plus tard
+    par ./handlers.rs en `VNL-RPC-015` `Invalid item: …`). Contenu non inspecté
+    ici.
+  @ConfigUpdateParams — camelCase : `layer` (défaut @None), `name` (@String
+    REQUIS), `patch` (@serde_json::Value REQUIS, transmis au store sans
+    inspection — clé absente = inchangée, présente = remplacée, `null` =
+    effacement : sémantique du store ../../../cfgstore/src/store.sdd, pas du
+    type).
+  @ConfigDeleteParams — camelCase : `layer` (défaut @None), `name` (@String
+    REQUIS).
+  @ConfigCreateSkillParams — camelCase : `layer` (défaut @None), `item`
+    (@serde_json::Value REQUIS = @vanyline_cfgstore::domain::SkillMeta `{name,
+    description}` snake_case), `body` (@String REQUIS — absent, `null` ou mal
+    typé → erreur @serde → `VNL-RPC-000`, c'est l'enveloppe qui échoue, pas
+    l'item ; ../../../docs/rpc-protocol.md aligné).
+  @ConfigGetSkillParams — camelCase : `name` (@String REQUIS) ; AUCUN champ
+    `layer` (résolution dans le store fusionné, comme les actions `test`).
+  @ConfigTestParams — camelCase : `name` (@String REQUIS), aucun `layer` —
+    params de `config/providers/test` et `config/mcpServers/test`.
+  @ProviderTestResult — Serialize, camelCase : `models` (@Vec<@String>,
+    toujours rendu) → `{"models":[…]}`.
+  @McpTestResult — Serialize, camelCase : `tools` (@Vec<@String>, toujours
+    rendu) → `{"tools":[…]}`.
+
+Accepts:
+  Côté entrée (impls @serde::Deserialize seulement — la lecture effective des
+    trames est ./mod.rs, le dispatch ./handlers.rs) :
+    Enveloppe de requête : tout objet JSON portant au moins `jsonrpc` (chaîne,
+      valeur non regardée) et `method` (chaîne) ; `id` et `params` facultatifs
+      (voir @JsonRpcRequest). Clés supplémentaires ignorées.
+    Params de chaque méthode : la forme décrite en `Exposes` — la règle
+      générale est « clés camelCase de l'enveloppe, défauts @None/@Null pour
+      tout champ marqué @serde(default), erreur @serde pour tout champ requis
+      absent ou de mauvais type, clés inconnues ignorées silencieusement (aucun
+      @serde::deny_unknown_fields dans tout le fichier), et pour les 3 types de
+      `create` K8s, toutes les clés racines hors `name` absorbées par le
+      flatten du spec CRD ».
+    Les chaînes d'identifiants (`id`, `name`, `conversationId`) sont acceptées
+      sans aucune validation de grammaire (UUID, anti-traversal) au niveau du
+      type.
+  Côté sortie : rien — aucun type sortant de ce fichier n'est conçu pour
+    être désérialisé depuis le fil, hors convenance de test (@JsonRpcResponse).
+
+Returns:
+  Les formes JSON exactes produites par @serde::Serialize :
+    Réponse : `{"jsonrpc":"2.0","id":…,"result":…}` (sans clé `error`) OU
+      `{"jsonrpc":"2.0","id":…,"error":{"code":…,"message":…,"data":{"code":
+      "VNL-RPC-NNN"}}}` (sans clé `result`) — l'une des deux seulement via les
+      constructeurs. `id` est rendu tel quel (y compris `null` pour les
+      notifications/requêtes sans id).
+    Notification : `{"jsonrpc":"2.0","method":"chat/event","params":
+      {"conversationId":…,"seq":…,"event":{…}}}` — jamais de clé `id`.
+    @InitializeResult, @ConversationSummary, @ChatSendResult,
+      @ProviderTestResult, @McpTestResult : formes de `Exposes`, avec
+      absences-de-clé (skip-if-none) ou présences-toujours comme indiqué.
+  Les @serde_json::Value de payload (`params`, `result`, `id` de la requête)
+    sont renvoyés verbatim par les handlers — ce fichier ne normalise, re-case
+    ou valide aucune donnée de domaine.
+
+Raises:
+  Rien directement — ce fichier ne contient ni fonction faillible, ni `panic!`,
+    ni `unwrap`/`expect`, ni log (tous les `.expect` de sérialisation sont dans
+    ./handlers.rs). Les erreurs relèvent uniquement des impls @serde::Deserialize :
+    elles remontent en @Result<@serde_json::Error> au call-site
+    (./handlers.rs), qui les mappe lui-même (`VNL-RPC-000` + @jsonrpc_code) —
+    aucune de ces erreurs n'est construite ici. @JsonRpcResponse::success,
+    ::error et @From<&@vanyline_lib::Conversation> sont infaillibles.
+
+Handles:
+  Invariant succès XOR erreur — porté par la discipline des constructeurs,
+    pas par le typage : la struct admettrait les deux à la fois ou aucun ; le
+    commentaire in-file de @JsonRpcResponse (« ne pas construire la struct à la
+    main ailleurs que dans ces deux fonctions ») est le contrat, verrouillé en
+    `Must not`.
+  Requêtes sans `id` (notifications client→serveur) — le type rend @None ; la
+    politique « permissive : répondre quand même avec id `null` » est exercée
+    par ./handlers.rs (`request.id.unwrap_or(Value::Null)`) et documentée par
+    le commentaire in-file comme cas que « le design ne définit pas » — tracé
+    en `[?]`, pas présenté comme intention arrêtée.
+  Frontière camelCase/snake_case — les enveloppes RPC sont camelCase ; les
+    objets de domaine embarqués passent par @serde_json::Value (params
+    `item`/`patch`) ou par des types dont la serde est définie ailleurs
+    (@Conversation, @ChatEvent, @ToolCallRecord, specs CRD) et gardent leur
+    représentation native. Le fichier respecte la règle « la conversion ne
+    s'applique jamais au contenu porté par l'enveloppe » de
+    ../../../docs/rpc-protocol.md ; les deux dérives documentées (table
+    `chat/event` incomplète, exemple `sandboxes` `ociImage`) sont en `[?]`.
+  Validation différée — aucune chaîne d'identifiant, aucun `layer`, aucun
+    contenu de `item`/`patch` n'est validé ici : UUID par ./handlers.rs
+    (@uuid::Uuid::parse_str), noms anti-traversal et cohérence de patch par
+    @vanyline_cfgstore (@vnl_code::CONFIG_INVALID_NAME `VNL-RPC-014` et
+    consorts), comparaison de version de protocole par ./handlers.rs
+    (@handle_initialize). Les types ne font que rejeter « clé requise absente
+    ou mauvais type ».
+  Mapping variante @vanyline_cfgstore::CfgStoreError → code `VNL-RPC-*` —
+    exercé hors de ce fichier par ./handlers.rs :: @config_write_response
+    (`WriteError`/`Io` → 011, `NotFound` → 012, `NameConflict` → 013,
+    `InvalidName` → 014, `Validation` → 015, autres → 006, @Display complet en
+    `error.message`) ; la table détaillée vit dans la spec de ./handlers.rs
+    (esquisse : ../../../cfgstore/src/error.sdd, section `Handles`). Ce fichier
+    n'en fournit que les constantes @vnl_code.
+  Couverture de test existante — le module `#[cfg(test)]` de ./handlers.rs
+    parse les enveloppes en dur (`initialize`, `shutdown`,
+    `conversations/*`, malformed, id préservé — dont l'assertion
+    `contains("\"result\":null")` brute sur la ligne `shutdown`, seule façon
+    de distinguer `result:null` de l'absence vu l'effondrement `null`→@None de
+    @Option<@serde_json::Value> en désérialisation) ;
+    ../../tests/rpc_stdio_smoke.rs couvre le fil de bout en bout. Aucun test
+    unitaire propre au fichier.
+
+Must:
+  Conserver la forme exacte des clés publiées sur le fil : camelCase pour
+    `protocolVersion`, `serverVersion`, `workspaceRoot`, `defaultAgent`,
+    `conversationId`, `messageCount`, `toolCalls`, `seq`, `layer`, `name`,
+    `patch`, `item`, `body`, `models`, `tools`, et les clés racines K8s `name`
+    + spec aplati ; snake_case natif pour `id`, `method`, `params`, `jsonrpc`,
+    `result`, `error`, `code`, `message`, `data` et tout objet de domaine
+    embarqué. Un renommage est un changement de protocole, pas un refactor.
+  Garantir que TOUTE réponse d'erreur produite par @JsonRpcResponse::error
+    porte `error.data.code` (clé jamais omise) et qu'une constante @vnl_code y
+    transite — règle AGENTS.md « identifiant unique », reprise en
+    ../../../docs/rpc-protocol.md (« `error.data.code` est l'identifiant
+    faisant foi »).
+  Garder les trois valeurs @jsonrpc_code dans la plage réservée JSON-RPC 2.0
+    (`-32768..-32000`) et distinctes.
+  Garder les marqueurs `VNL-RPC-000` à `VNL-RPC-015` uniques dans @vnl_code et
+    stables une fois publiés ; tout nouveau code se fait par ajout d'une
+    constante documentée ici (sens + méthode émettrice chez ./handlers.rs),
+    jamais par réutilisation/recyclage d'un code existant.
+  Rendre les optionnels « absents, pas `null` » exactement là où la doc
+    l'exige : @InitializeResult.workspace_root/default_agent,
+    @ConversationSummary.agent/title (skip-if-none) ; et le `result: null` de
+    `shutdown` via @JsonRpcResponse::success(id, @serde_json::Value::Null)
+    (clé PRÉSENTE — skip-if-none ne porte que sur l'@Option, pas sur le
+    @serde_json::Value qu'elle contient).
+  Distinguer au niveau du type `protocolVersion` mal typé/absent (erreur
+    @serde → `VNL-RPC-000` exercée ailleurs) de `protocolVersion` valide ≠ 1
+    (@u32 accepté par le type, rejet `VNL-RPC-003` exercé par ./handlers.rs) :
+    ne jamais ajouter de `#[serde(default)]` sur `protocol_version` (il
+    masquerait les deux cas).
+  Rester un fichier de purs types : aucun accès store/réseau/disques/env,
+    aucune logique asynchrone, aucun log, aucun `unwrap`/`expect`/`panic!`
+    (harnais ../../../tooling.sdd, zéro exemption nécessaire à ce jour).
+  Dériver uniquement @serde (pas ts-rs) : les miroirs TS de ce protocole vivent
+    dans `@vanyline/protocol`/l'extension et sont contractualisés par leurs
+    specs propres ; `packages/protocol/src/generated/` n'est généré que depuis
+    `vanyline-lib`.
+
+Must not:
+  Construire un @JsonRpcResponse par littéral de struct hors
+    @JsonRpcResponse::success / ::error (commentaire in-file verbatim — le
+    type seul n'interdit ni les deux champs à la fois ni leur absence).
+  Valider quoi que ce soit d'autre que la grammaire d'enveloppe dans les types
+    : pas d'UUID, pas de noms anti-traversal, pas de comparaison de version,
+    pas de contrôle de `layer` sur les méthodes qui n'en ont pas, pas
+    d'inspection de `item`/`patch` — ces validations appartiennent à
+    ./handlers.rs et @vanyline_cfgstore, et les dupliquer ici créerait deux
+    sources de vérité.
+  Convertir en camelCase un contenu de domaine (`item`, `patch`, `event`,
+    `Conversation`, specs CRD, `ToolCallRecord`) — la conversion ne porte que
+    sur les enveloppes de ce fichier.
+  Ajouter un @serde::deny_unknown_fields (ou un `#[serde(tag)]`, ou un
+    `flatten` supplémentaire) sans décision de spec actée : la tolérance aux
+    clés inconnues et l'avalement silencieux par le flatten sont l'état
+    verrouillé actuel (scenarios + `[?]`).
+  Rendre @JsonRpcErrorData.optionnel, ou émettre une erreur sans code
+    `VNL-RPC-*`, ou émettre un code `VNL-RPC-*` non déclaré dans @vnl_code.
+  Faire de @PROTOCOL_VERSION autre chose que `1` sans retoucher
+    ../../../docs/rpc-protocol.md et les clients (`ext/`) — le gate est
+    exactement `!= PROTOCOL_VERSION` dans ./handlers.rs.
+  Introduire `println!`/`eprintln!`/logs ou un `cfg(test)` de logique ici
+    (harnais ../../../tooling.sdd ; les silences actuels sont contractuels).
+
+Tasks:
+  [ ] Dériver les Scenario non couverts en tests unitaires serde (module
+    `#[cfg(test)]` de ./protocol.rs ou fichier de tests dédié — pas de store,
+    pas de réseau), taggés par leur titre ; aujourd'hui seule une moitié des
+    formes est verrouillée indirectement via ./handlers.rs.
+  [?] `jsonrpc` est requis comme CLÉ mais sa valeur n'est jamais vérifiée :
+    `{"jsonrpc":"1.0",…}` est accepté (et même echoïquement ignoré). Refuser
+    toute valeur ≠ `"2.0"` (code standard `-32600`, absent du registre
+    @jsonrpc_code, + nouveau `VNL-RPC-*`) ou assumer la tolérance et le
+    documenter dans ../../../docs/rpc-protocol.md ?
+  [?] `id` accepte n'importe quelle valeur JSON (objet, tableau, booléen) et
+    `null` est indistinguable de l'absence (les deux → réponse avec `"id":null`)
+    — ../../../docs/rpc-protocol.md ne promet que « nombre ou chaîne ». Figer
+    la tolérance (id opaque, écho verbatim) comme contrat pour
+    l'extension/ext/src/rpc.ts, ou restreindre à `number | string` ?
+  [?] ../../../docs/rpc-protocol.md, table des variantes de `chat/event`, omet
+    `reasoning_delta` et `tool_unavailable` (12 variantes réelles dans
+    ../../../lib/src/event.rs, la table en liste 10) — mettre la doc à jour ou
+    retirer les variantes de la lib ? Le fil, lui, les émet déjà.
+  [?] ../../../docs/rpc-protocol.md, exemple `sandboxes/list` : toolchains
+    sous forme `{"ociImage":…,"env":…}` alors que @vanyline_crds::Toolchain est
+    `{name, image, env, lsp}` (les deux requis). Dérive de doc (exemples
+    jamais rejoués) à corriger là-bas — la CRD fait foi.
+  [!] Deux annotations devenues fausses : `#[allow(dead_code)]` de
+    @InitializeParams.workspace (« consommé par la tâche 2 » — il est consommé
+    DEPUIS des mois par ./handlers.rs :: @resolve_layers) et le commentaire de
+    @vnl_code « BUSY = VNL-RPC-002 … pas utilisé ici » (utilisé par
+    @handle_chat_send). Les retirer/corriger ne change rien au fil — à faire
+    à la prochaine main sur le fichier, avec l'accord de Sébastien.
+  [?] Clés inconnues et `spec` imbriqué : `{"name":"a","spec":{…},"inconnu":1}`
+    est ACCEPTÉ sur `owners/create` (le `spec` imbriqué et l'inconnu sont
+    avalés par le flatten, la spec aplatie reste à ses défauts) — doc dit
+    « pas d'objet spec imbriqué » sans dire ce qui se passe. Ajouter
+    @serde::deny_unknown_fields aux 3 @…CreateParams (et aux enveloppes
+    `config/*` ?) pour refuser explicitement, ou assumer le silent swallow ?
+  [?] Même question, plus petite : `config/providers/test` avec
+    `{"name":"x","layer":"global"}` — la doc dit « pas de `layer` » mais le
+    type ignore `layer` silencieusement au lieu de le refuser. Accepté ou
+    rejeté (`VNL-RPC-000`) ?
+  [?] @JsonRpcResponse dérive @serde::Deserialize uniquement pour les tests de
+    ./handlers.rs, avec l'effondrement connu `result:null` → @None (d'où les
+    assertions en chaîne brute dans `shutdown_after_initialize`). Garder
+    l'impl public ou le réserver au `cfg(test)` (un type de test séparé) ?
+  [?] Casse de @ConfigLayer : `"Global"`/`"WORKSPACE"` → erreur →
+    `VNL-RPC-000`. Confirmer le contrat sensible à la casse (la doc n'affiche
+    que les minuscules) ou accepter l'insensible ?
+  [?] @JsonRpcResponse::error prend un `&'static @str` libre pour le code
+    VNL : rien au compilateur n'oblige à passer une constante @vnl_code.
+    Introduire un newtype (ex. enum @VnlCode avec @as_str) pour rendre
+    l'erreur typographiquement impossible, ou la convention suffit-elle ?
+
+Done when:
+  Chaque Scenario a son test unitaire serde dédié taggé par son titre et
+    passe ; les tests existants de ./handlers.rs et
+    ../../tests/rpc_stdio_smoke.rs restent verts sans modification.
+  Aucun `unwrap`/`expect`/log n'apparaît dans ./protocol.rs et le harnais
+    clippy (../../../tooling.sdd) passe sur le fichier sans exemption.
+  Les écarts doc ↔ code signalés (`[?]` chat/event, `ociImage`) sont tranchés
+    avec Sébastien et corrigés dans ../../../docs/rpc-protocol.md (ou la lib),
+    et les `[?]`/`[!]` de cette spec clos — la spec relue fait foi du contrat.
+
+Scenario: enveloppe_requete_champs_requis_et_defauts
+  Given les lignes JSON `{"jsonrpc":"2.0","id":7,"method":"m","params":{"a":1}}`,
+    `{"jsonrpc":"2.0","method":"m"}`, `{"jsonrpc":"2.0","id":7,"method":"m"}`,
+    `{"id":7,"method":"m"}` et `{"jsonrpc":"2.0","id":7}`
+  When chacune est désérialisée en @JsonRpcRequest par @serde_json::from_str
+  Then les deux premières réussissent (clé `params` absente →
+    @serde_json::Value::Null sur la deuxième, `id` absent → @None) ; la
+    troisième réussit avec `id: Some(7)` et `params: Null` ; les deux dernières
+    échouent (`missing field jsonrpc`, `missing field method`)
+
+Scenario: enveloppe_requete_ne_valide_ni_la_valeur_de_jsonrpc_ni_la_forme_de_id
+  Given la ligne `{"jsonrpc":"1.0","id":{"a":[1]},"method":"m"}` (jsonrpc faux
+    et id objet)
+  When elle est désérialisée en @JsonRpcRequest
+  Then la désérialisation réussit sans erreur, `jsonrpc` vaut la chaîne
+    `"1.0"` telle quelle et `id: Some(objet)` ; @JsonRpcResponse::success avec
+    ce `id` rend `"id":{"a":[1]}` verbatim sur le fil — contrat de fait,
+    arbitré en `Tasks`
+
+Scenario: enveloppe_reponse_success_xor_error_et_result_null_sur_le_fil
+  Given @JsonRpcResponse::success(@serde_json::json!(1),
+    @serde_json::json!({"ok":true})), @JsonRpcResponse::success(@serde_json::json!(3),
+    @serde_json::Value::Null) et @JsonRpcResponse::error(@serde_json::json!(2),
+    @jsonrpc_code::SERVER_ERROR, "boom", @vnl_code::CONFIG_ERROR)
+  When chacun est sérialisé par @serde_json::to_string
+  Then le premier contient exactement les clés `jsonrpc`/`id`/`result` (aucune
+    clé `error`), le second la clé `"result":null` PRÉSENTE (pattern
+    `shutdown`), le troisième `error` sans aucune clé `result` — et les trois
+    portent `"jsonrpc":"2.0"` avec leur `id` d'origine
+
+Scenario: objet_erreur_porte_toujours_data_code_et_codes_jsonrpc_reserves
+  Given @JsonRpcResponse::error appellée avec chacune des constantes
+    @jsonrpc_code::PARSE_ERROR, @jsonrpc_code::METHOD_NOT_FOUND et
+    @jsonrpc_code::SERVER_ERROR, et chacune des 16 constantes @vnl_code
+  When les réponses sont sérialisées
+  Then `error.code` vaut exactement `-32700`, `-32601`, `-32000` selon le cas,
+    la clé `error.data` et la clé `error.data.code` sont TOUJOURS présentes, et
+    `error.data.code` rend le littéral `VNL-RPC-000` … `VNL-RPC-015` passé en
+    paramètre
+
+Scenario: initialize_params_version_requise_workspace_optionnel
+  Given les JSON `{"protocolVersion":1}`,
+    `{"protocolVersion":1,"workspace":"/home/dev/projet"}`, `{}`,
+    `{"protocolVersion":"1"}`, `{"protocolVersion":-1}` et
+    `{"protocolVersion":1,"workspace":42}`
+  When chacun est désérialisé en @InitializeParams
+  Then les deux premiers réussissent (`workspace: @None` puis @Some(chaîne)),
+    et les quatre derniers échouent (clé absente, chaîne/nombre au lieu de
+    @u32, négatif, workspace mal typé) — donc relèguent `VNL-RPC-000`, jamais
+    `VNL-RPC-003`, côté handler
+
+Scenario: initialize_result_omet_les_optionnels_none
+  Given @InitializeResult { protocol_version: 1, server_version: "0.0.1",
+    workspace_root: @None, default_agent: @Some("build") }, puis la même
+    structure avec `workspace_root: @Some("/tmp/ws")` et `default_agent: @None`
+  When chacun est sérialisé
+  Then les clés `protocolVersion` et `serverVersion` sont toujours présentes,
+    `defaultAgent` apparaît avec `"build"`, et `workspaceRoot` est ABSENTE du
+    JSON (clé inexistante, jamais `"workspaceRoot":null`) quand @None —
+    inversement présente côté @Some
+
+Scenario: conversation_summary_depuis_conversation
+  Given une @vanyline_lib::Conversation d'@uuid::Uuid nil fixé,
+    `agent: @None`, `title: @Some("Refactor auth")`, 2 messages et
+    `todo: @Some(…)`
+  When elle est convertie par @From<&vanyline_lib::Conversation> puis sérialisée
+  Then `id` est la chaîne UUID minuscules hyphenée, `messageCount` vaut 2,
+    `title` vaut `"Refactor auth"`, la clé `agent` est ABSENTE (skip-if-none),
+    aucune clé `todo` ni `messages` n'apparaît — la vue allégée n'expose
+    jamais le todo de @Conversation
+
+Scenario: notification_chat_event_sans_id_et_params_camelcase
+  Given @JsonRpcNotification { jsonrpc: "2.0", method: "chat/event", params:
+    @ChatEventNotificationParams { conversation_id: "c1…", seq: 0, event:
+    @vanyline_lib::event::ChatEvent::Token { content: "Bon" } } }
+  When il est sérialisé
+  Then les clés racine sont exactement `jsonrpc`, `method`, `params` — aucune
+    clé `id` — et params = `{"conversationId":"c1…","seq":0,"event":{"type":
+    "token","content":"Bon"}}`, l'événement étant le rendu serde natif de
+    @vanyline_lib::event::ChatEvent (pas de recase côté enveloppe)
+
+Scenario: chat_send_params_agent_defaut_et_result_toolcalls_toujours_present
+  Given les JSON `{"conversationId":"c1","message":"hi"}`,
+    `{"conversationId":"c1","message":"hi","agent":"build"}`,
+    `{"message":"hi"}` pour @ChatSendParams, et @ChatSendResult { text: "t",
+    tool_calls: @Vec::new() } à sérialiser
+  When désérialisations et sérialisation
+  Then les deux premiers parsent (agent @None puis @Some), le troisième échoue
+    (`missing field conversationId` → `VNL-RPC-000`), et le résultat rend
+    exactement `{"text":"t","toolCalls":[]}` — la clé `toolCalls` est présente
+    même vide
+
+Scenario: params_identifiant_et_nom_une_seule_cle_requise_non_validee
+  Given pour chacun de @ConversationIdParams, @NameParams,
+    @ConfigGetSkillParams et @ConfigTestParams : le JSON `{"id":"not-a-uuid"}`
+    ou `{"name":"x"}` selon le type, le même avec la clé retirée, et le même
+    avec une clé surnuméraire (`{"name":"x","layer":"global"}` sur
+    @ConfigTestParams)
+  When désérialisation
+  Then la version complète parse (y compris l'UUID malformé — la validation
+    @uuid::Uuid::parse_str est de ./handlers.rs, pas du type ; et la clé
+    surnuméraire `layer` est silencieusement ignorée — arbitre `[?]`), la
+    version sans la clé requise échoue (`missing field` → `VNL-RPC-000`)
+
+Scenario: create_params_k8s_spec_aplatie_camelcase_et_champs_requis
+  Given les params `{"name":"alice","homeSize":"2Gi"}` pour
+    @OwnerCreateParams, `{"name":"demo","owner":"alice","repoUrl":"https://x"}`
+    pour @ProjectCreateParams, le même projet sans `owner`,
+    `{"project":"demo","branch":"main"}` pour @SandboxCreateParams, et
+    `{"name":"sb","project":"demo","branch":"main"}` pour @SandboxCreateParams
+  When chacun est désérialisé
+  Then le premier parse avec `spec.home_size: @Some("2Gi")` (OwnerSpec tout
+    optionnel, aplati en camelCase racine), le deuxième parse, le troisième
+    ÉCHOUE (`missing field owner` propagé par le flatten → `VNL-RPC-000`), le
+    quatrième échoue (`missing field name`), le cinquième parse avec
+    `toolchains` vide et `suspended: false` par défauts
+
+Scenario: create_params_cle_spec_imbriquee_silencieusement_ignoree
+  Given les params `{"name":"a","spec":{"homeSize":"2Gi"},"inconnu":42}` pour
+    @OwnerCreateParams
+  When il est désérialisé
+  Then la désérialisation RÉUSSIT et la spec aplatie reste à ses défauts
+    (`home_size: @None`) : la clé `spec` imbriquée et la clé inconnue sont
+    avalées par @serde(flatten) sans erreur ni signal — état verrouillé en
+    attendant l'arbitrage `[?]` deny_unknown_fields
+
+Scenario: config_layer_accepte_uniquement_les_litteraux_minuscules
+  Given les valeurs de `layer` `"global"`, `"workspace"`, `"Global"`,
+    `"WORKSPACE"`, `""` et `null` dans `{"layer":…,"name":"x"}` pour
+    @ConfigDeleteParams
+  When désérialisation
+  Then `"global"` et `"workspace"` (et `null` → @None, l'@Option absorbant le
+    `null`) parsent ; `"Global"`, `"WORKSPACE"` et `""` échouent — donc
+    l'enveloppe entière tombe en `VNL-RPC-000`, pas un retour @None
+
+Scenario: config_params_layer_defaut_contenus_requis_non_inspectes
+  Given `{"item":{"name":"p"}}`, `{"name":"n","patch":{"endpoint":"http://x"}}`,
+    `{"name":"n"}` (create sans `item`), `{"patch":{}}` (update sans `name`),
+    `{"layer":"global","item":null}` et `{"layer":"inexistant","item":{}}` pour
+    les enveloppes @ConfigCreateParams/@ConfigUpdateParams
+  When désérialisation
+  Then les deux premiers parsent avec `layer: @None` et `item`/`patch`
+    conservés bruts en @serde_json::Value ; `item` ou `name` manquant échoue
+    (`VNL-RPC-000`) ; `item: null` parse au niveau enveloppe (le rejet
+    `VNL-RPC-015` est du handler qui désérialise le domaine ensuite) ;
+    `layer:"inexistant"` échoue via @ConfigLayer (`VNL-RPC-000`)
+
+Scenario: config_skills_create_body_requis
+  Given `{"item":{"name":"pdf","description":"d"},"body":"# corps"}` et la
+    même structure SANS `body`, et `{"body":"x"}` sans `item`, pour
+    @ConfigCreateSkillParams
+  When désérialisation
+  Then le premier parse (item et body distincts, tous deux requis) ; sans
+    `body` ou sans `item` la désérialisation échoue → `VNL-RPC-000` (c'est
+    l'enveloppe qui échoue, pas l'item — ../../../docs/rpc-protocol.md aligné)
+
+Scenario: resultats_test_formes_fixes
+  Given @ProviderTestResult { models: @Vec::new() } et @McpTestResult { tools:
+    @Vec::new() }
+  When sérialisation
+  Then les rendus sont exactement `{"models":[]}` et `{"tools":[]}` — clés
+    camelCase uniques, toujours présentes, même vides
+
+Scenario: seize_codes_vnl_rpc_uniques_dans_le_registre
+  Given le contenu de ./protocol.rs lu par `include_str!` dans un test
+  When chaque littéral `VNL-RPC-000` … `VNL-RPC-015` y est dénombré hors du
+    module de tests, et les `pub const` du module @vnl_code comptés
+  Then chacun des 16 marqueurs apparaît exactement une fois, le module en
+    déclare exactement 16, aucun littéral `VNL-RPC-16` et plus n'existe, et les
+    3 constantes @jsonrpc_code valident `-32768 <= code <= -32000`

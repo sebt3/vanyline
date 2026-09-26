@@ -1,0 +1,306 @@
+Spec: Tools
+
+Purpose:
+  Adaptateur rig du CLI `vanyline` : emballe les 8 tools intégrés de
+  `vanyline-tools` (filesystem, search, command — exécutés **en local, dans le
+  processus du CLI, au bénéfice du harnais d'agent `vnl run` / `chat`) derrière le
+  trait `@rig_core::tool::ToolDyn`, et les expose dans une map indexée par nom
+  (@local_tools_map). Un seul contrat pour un seul fichier : « les tools locaux
+  du harnais CLI ». Le fichier ne contient ni schéma (source unique :
+  `@vanyline_tools::mcp`, cf. `../../tools/src/mcp.sdd`), ni exécution
+  (modules frères de `vanyline-tools`), ni sélection des tools par l'agent
+  (toolsets, cf. `../../lib/src/session.sdd`) — il ne fait que désérialiser
+  les arguments JSON du LLM vers les options de `vanyline-tools`, appeler, et
+  enrober les erreurs en `@ToolError::ToolCallError`. Contrairement à la
+  sandbox, il n'y a **aucun confinement** ici : le CLI tourne sur la machine de
+  l'utilisateur, les chemins relatifs et `cwd` vides se résolvent au cwd du
+  processus (cf. `Must not` et `Tasks` `[!]`).
+
+Owns:
+  ./tools.rs
+
+References:
+  ../../tools/src/mcp.rs — @filesystem_tools / @search_tools / @command_tools : source unique des `ToolDefinition` via @tool_definition, lookup par nom
+  ../../tools/src/filesystem.rs — implémentation de read_file/write_file/edit_file/delete_file/list_directory (sentinelles `limit == 0` → 200 lignes, `depth == 0` → 1 niveau ; option `raw` forcée à `false` par le CLI)
+  ../../tools/src/search.rs — implémentation de find_files/search (`path` vide → cwd du processus)
+  ../../tools/src/command.rs — @execute (@ExecuteCommandOptions : `timeout_secs == 0` = pas de timeout, `cwd` vide = cwd hérité, `envs` jamais injecté par le CLI)
+  ../../tools/src/error.rs — @ToolsError, messages remontés dans @ToolError::ToolCallError
+  ../../tools/src/mcp.sdd — registre des 8 descripteurs ; `[?]` « timeout_secs : le CLI applique 30 (`unwrap_or(30)`) » — vérifié, confirmé par ./tools.rs:277
+  ../../tools/src/command.sdd — « le harnais cli force `timeout_secs` à 30 quand absent »
+  ../../lib/src/session.rs — @SessionContext::local_tools (consommateur de @local_tools_map), @select_local_tools et @dedupe_local_tool_names (sélection par toolset)
+  ./chat.rs — @build_session_context : installe @local_tools_map quand aucune toolbox n'est résolue ; `local_tools` vide dans le mode toolbox (`--toolbox`)
+  ./rpc/handlers.rs — méthode RPC `config/localTools` : relit `vanyline_tools::mcp` en concaténation directe, **ne passe pas par** @local_tools_map
+  ../../tooling.sdd — harnais clippy (famille panic/unwrap deny hors `cfg(test)`)
+
+Exposes:
+  @ReadFileTool, @WriteFileTool, @EditFileTool, @DeleteFileTool,
+    @ListDirectoryTool, @FindFilesTool, @SearchTool, @ExecuteCommandTool —
+    8 structs unitaires `pub`, chacun `impl @ToolDyn` avec un `name()` littéral
+    (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`,
+    `find_files`, `search`, `execute_command`).
+  @local_tools_map — map `HashMap<String, Arc<dyn @ToolDyn>>` des 8 tools,
+    reconstruite à chaque appel (nouvelles `Arc`), clés = les 8 noms.
+  Prives mais contractuelles : @tool_definition (lookup d'un schéma MCP par nom)
+    et les structs `*Args` de désérialisation (@ReadFileArgs, @WriteFileArgs,
+    @EditFileArgs, @DeleteFileArgs, @ListDirectoryArgs, @FindFilesArgs,
+    @SearchArgs, @ExecuteCommandArgs).
+
+Handles:
+  Schéma d'un tool — @tool_definition concatène `mcp::filesystem_tools()` puis
+    `mcp::search_tools()` puis `mcp::command_tools()`, trouve le descripteur dont
+    `name` égale l'argument, et projette `description` en description et
+    `inputSchema` **entier** (avec `type`/`properties`/`required`) en
+    `@ToolDefinition::parameters` — jamais `properties` seul.
+  Argument `prompt` de @ToolDyn::definition — ignoré (`_prompt`) : la définition
+    rendue est indépendante du prompt, régénérée intégralement à chaque appel
+    (aucune cache, les 8 descripteurs sont recréés puis parcourus linéairement).
+  Paramètres JSON d'un appel d'outil — désérialisation `serde_json` stricte sur
+    les requis, tolérante par défaut sur les inconnus (pas de
+    `deny_unknown_fields`) ; champs absents traités par `#[serde(default)]` :
+    `offset`/`limit`/`depth` → `0` (sentinelles « défaut » côté filesystem),
+    `replace_all` → `false`, `path` (find_files/search) et `cwd` → `""`
+    (« répertoire courant »), `timeout_secs` → `None`.
+  Timeout absent — @ExecuteCommandArgs::timeout_secs est `Option<u64>` avec
+    repli `unwrap_or(30)` : absent **ou** explicite `null` → 30 secondes. Une
+    valeur explicite (y compris `0` = pas de timeout, ou une valeur très
+    grande) est transmise telle quelle, sans plafond côté CLI.
+  `envs` d'@ExecuteCommandOptions — toujours `Vec::new()` côté CLI (commentaire
+    source : l'activation `.venv` est propre au sandbox) ; le champ est de toute
+    façon `#[serde(skip)]` et inaccessible au LLM.
+  `raw` de @ReadFileOptions — toujours `false` : la lecture CLI est le mode
+    numéroté + borné (200 lignes par défaut), jamais la lecture brute éditeur.
+  Erreurs d'exécution (`@ToolsError`) et de désérialisation (`serde_json::Error`)
+    — toutes enrobées en `@ToolError::ToolCallError(Box::new(e))` ; le message
+    `Display` de l'erreur (ex: `VNL-TLS-006`, `VNL-TLS-007`) part en contenu
+    d'outil vers le LLM.
+
+Returns:
+  @tool_definition — @ToolDefinition { name, description, parameters = clone de
+    `inputSchema` entier }.
+  @WriteFileTool::call — après succès, chaîne `wrote {len} bytes to {path}` où
+    `len` est `content.len()` en **octets** de la chaîne reçue (pas le nombre
+    d'octets effectivement écrits, pas vérifié disque).
+  @DeleteFileTool::call — après succès, chaîne `deleted {path}` (chemin rendu
+    tel que reçu, non canonarisé).
+  @ReadFileTool / @EditFileTool / @ListDirectoryTool / @FindFilesTool /
+    @SearchTool / @ExecuteCommandTool::call — succès = chaîne brute rendue par
+    le module `vanyline-tools` correspondant (sortie déjà bornée/numérotée par
+    ./filesystem.rs, ./search.rs, ./command.rs).
+  @local_tools_map — exactement 8 entrées, nouvelles `Arc` à chaque appel (deux
+    appels ne partagent pas les mêmes allocations).
+
+Raises:
+  @tool_definition — `panic!` (`no schema found for tool '{name}' …`) si aucun
+    descripteur ne porte le nom demandé, et `unwrap` sur `as_str()` si `name` ou
+    `description` n'est pas une chaîne : documentés comme erreurs de
+    programmation (nom mal orthographié), jamais atteints avec les 8 noms
+    actuels — mais chemin panic en production, cf. dette harnais en `Tasks`.
+  @ToolError::ToolCallError — pour toute erreur de désérialisation des
+    arguments (JSON malformé, manque un requis comme `path`, entier négatif sur
+    un champ `u64`/`usize`) et pour toute `@ToolsError` remontée par le module
+    appelé.
+  Ne remonte jamais une erreur en `Result` de programme : le CLI ne plante pas
+    sur un appel d'outil raté (hors chemin @tool_definition ci-dessus).
+
+Must:
+  Les 8 clés de @local_tools_map, les 8 valeurs de `name()` et les 8 `name` du
+    registre `vanyline_tools::mcp` sont les mêmes littéraux, maintenus en
+    triplication explicite (map, `name()`, argument de @tool_definition).
+  Chaque `definition()` rend le descripteur MCP du même nom, `inputSchema`
+    entier en `parameters` — le LLM du CLI voit donc exactement les schémas vus
+    par la sandbox et par `config/localTools`.
+  Chaque `call()` désérialise ses arguments, délègue au module `vanyline-tools`
+    homonyme, et n'ajoute aucune logique métier propre (pas de validation de
+    chemin, pas de plafond de timeout, pas de filtre de commande).
+  @ExecuteCommandTool applique `timeout_secs.unwrap_or(30)` : sans le paramètre
+    (ou `null`), la commande est tuée (groupe de processus, SIGKILL) après 30 s
+    — comportement cohérent avec `tools/src/mcp.sdd` et `command.sdd` qui
+    documentent ce point.
+  Les structs `*Args` à champs optionnels portent `#[serde(default)]` sur ces
+    champs : un appel sans ces champs se désérialise sans erreur.
+  @local_tools_map est sans état : aucun champ, aucune configuration, aucune
+    variable d'environnement lue par le fichier.
+
+Must not:
+  Confiner les chemins : `path`, `pattern` et `cwd` sont passés tels quels —
+    un chemin absolu ou `../` sort du répertoire courant (à la différence du
+    sandbox qui confine dans `sandbox_root`) ; c'est le contrat actuel, mais
+    l'absence de garde est un écart de sécurité à trancher, cf. `Tasks` `[!]`.
+  Restreindre les commandes exécutées : `command` part dans `sh -c` sans
+    allowlist, confirmation ni dry-run (même écart `[!]`).
+  Plafonner `timeout_secs` fourni par le LLM : `0` (illimité) et les valeurs
+    démesurées sont acceptés tels quels (`Tasks` `[?]`).
+  Exposer l'option `raw` de read_file au LLM : jamais demandée, forcée `false`.
+  Dériver la liste des tools depuis `vanyline_tools::mcp` dynamiquement : la
+    map et les `name()` sont écrits à la main (dérive possible, `Tasks` `[?]`).
+  Servir la RPC `config/localTools` : le handler de ./rpc/handlers.rs concatène
+    les trois fonctions `mcp` en direct, sans passer par cette map ni ces
+    structs.
+
+Depends on:
+  `rig_core` 0.38 — @ToolDyn, @ToolDefinition, @ToolError, @WasmBoxedFuture
+    (le CLI est le seul consommateur de ce contrat rig, la sandbox parle MCP brut)
+  `vanyline_tools` — @mcp (schémas), @filesystem, @search, @command (exécution)
+  `serde_json` — désérialisation des arguments, @Deserialize sur les structs `*Args`
+  ./chat.rs — seul lieu d'installation de @local_tools_map (absent du mode toolbox)
+
+Scenario: local_tools_map_expose_exactement_huit_tools
+  Given un appel à @local_tools_map
+  When les clés de la map sont collectées
+  Then la map contient exactement 8 entrées
+  And les clés sont exactement {read_file, write_file, edit_file, delete_file,
+    list_directory, find_files, search, execute_command}
+  And pour chaque entrée, la clé égale `name()` du tool associé
+
+Scenario: definition_ignorer_le_prompt_et_rendre_le_schema_mcp
+  Given @ReadFileTool
+  When `definition` est appelée avec deux prompts différents
+  Then les deux @ToolDefinition rendus sont égaux
+  And leur `name` vaut `read_file`
+  And leurs `parameters` sont égaux à l'`inputSchema` entier du descripteur
+    `read_file` de `vanyline_tools::mcp::filesystem_tools()`
+
+Scenario: tool_definition_inconnu_panique
+  Given un nom de tool absent du registre `vanyline_tools::mcp`, par exemple `create_directory`
+  When @tool_definition est appelée avec ce nom
+  Then le thread panique avec un message contenant `no schema found for tool`
+
+Scenario: lecture_de_fichier_inexistant_enrobe_file_not_found
+  Given un `call` de @ReadFileTool avec `{"path": "/defier/inexistant.txt"}`
+  When l'appel est exécuté
+  Then il retourne `Err` de type `@ToolError::ToolCallError`
+  And le message interne évoque le chemin demandé (hint `FileNotFound` de vanyline-tools)
+
+Scenario: timeout_absent_vaut_trente_secondes
+  Given un `call` de @ExecuteCommandTool avec `{"command": "sleep 5"}` et un harnais de test horodaté
+  When l'appel est exécuté
+  Then il retourne `Err` (`CommandTimeout`) en environ 30 s — pas 5 s de succès,
+    pas attente illimitée
+  And (variante rapide à arbitrer avec Sébastien) le test peut compresser la
+    durée via une commande dont le succès dépend d'un délai court
+
+Scenario: timeout_null_vaut_trente_secondes
+  Given un `call` de @ExecuteCommandTool avec `{"command": "true", "timeout_secs": null}`
+  When la désérialisation @ExecuteCommandArgs est exercée
+  Then `timeout_secs` désérialisé vaut `None`
+  And l'option transmise à @command::execute porte 30
+
+Scenario: timeout_zero_explicite_transmis_tel_quel
+  Given un `call` de @ExecuteCommandTool avec `{"command": "echo ok", "timeout_secs": 0}`
+  When l'appel est exécuté
+  Then il réussit et la sortie contient `exit code: 0`
+  And aucune limite de 30 s n'est appliquée (0 = pas de timeout, transmis nu)
+
+Scenario: timeout_explicite_superieur_a_trente_non_rabote
+  Given un `call` de @ExecuteCommandTool avec `{"command": "sleep 25 && echo fait", "timeout_secs": 60}`
+  When l'appel est exécuté
+  Then il réussit avec `exit code: 0` après environ 25 s
+  And une valeur explicite supérieure à 30 n'est jamais rabotée par le CLI
+
+Scenario: json_malforme_en_retourne_tool_call_error
+  Given un `call` de @ReadFileTool avec la chaîne `pas du json`
+  When l'appel est exécuté
+  Then il retourne `@ToolError::ToolCallError` porté par une erreur `serde_json`
+  And aucun fichier n'est touché et aucun panic n'a lieu
+
+Scenario: requis_manquant_en_retourne_tool_call_error
+  Given un `call` de @WriteFileTool avec `{"path": "/tmp/x"}` (champ `content` absent)
+  When l'appel est exécuté
+  Then il retourne `@ToolError::ToolCallError` (erreur serde « missing field `content` »)
+  And aucun fichier n'est créé
+
+Scenario: champs_inconnus_silencieusement_ignores
+  Given un `call` de @EditFileTool avec `{"path": …, "old_string": …, "new_string": …, "replaceAll": true}` (faute de frappe sur `replace_all`)
+  When l'appel est exécuté sur un fichier contenant deux occurrences de `old_string`
+  Then l'appel échoue en ambiguïté (`VNL-TLS-007`) — `replaceAll` n'a pas été pris en compte
+  And aucun avertissement n'est émis sur le champ inconnu
+
+Scenario: offset_negatif_en_retourne_tool_call_error
+  Given un `call` de @ReadFileTool avec `{"path": "f.txt", "offset": -1}`
+  When l'appel est exécuté
+  Then il retourne `@ToolError::ToolCallError` (désérialisation `usize` impossible)
+
+Scenario: limite_zero_vaut_defaut_deux_cents
+  Given un fichier de 250 lignes et un `call` de @ReadFileTool avec `{"path": …, "limit": 0}`
+  When l'appel est exécuté
+  Then la sortie est bornée à 200 lignes (sentinelle de ./filesystem.rs), pas à 0
+
+Scenario: write_file_confirme_en_octets
+  Given un `call` de @WriteFileTool avec `content` de 5 octets ASCII vers un chemin de répertoire temporaire
+  When l'appel réussit
+  Then la sortie vaut exactement `wrote 5 bytes to {path}` avec le chemin tel que reçu
+  And le fichier existe avec ces 5 octets
+
+Scenario: delete_file_confirme_le_chemin_reçu
+  Given un fichier temporaire créé au préalable
+  When un `call` de @DeleteFileTool avec son chemin réussit
+  Then la sortie vaut exactement `deleted {path}`
+  And le fichier a disparu
+
+Scenario: cwd_vide_hérite_du_répertoire_courant_du_processus
+  Given un `call` de @ExecuteCommandTool avec `{"command": "pwd", "cwd": ""}` et le cwd du processus déplacé dans un répertoire temporaire (test sérialisé)
+  When l'appel réussit
+  Then la section stdout rend ce répertoire temporaire (aucun confinement, aucun `sandbox_root`)
+
+Scenario: aucun_chemin_est_confiné_au_répertoire_courant
+  Given un `call` de @ListDirectoryTool avec `{"path": "/tmp"}` (absolu, hors du cwd)
+  When l'appel est exécuté
+  Then il réussit et liste `/tmp` — preuve que le CLI n'applique aucun périmètre
+    de chemins (comportement actuel, à confirmer comme voulu, cf. `Tasks` `[!]`)
+
+Scenario: local_tools_absent_du_mode_toolbox
+  Given @build_session_context appelé avec `toolbox_mcp_url = Some(url)`
+  When le @SessionContext est construit
+  Then son `local_tools` est une map vide
+  And les tools locaux du CLI ne sont pas joints au tour (la toolbox MCP les remplace)
+
+Tasks:
+  [!] Aucun confinement côté CLI : @ExecuteCommandTool exécute toute commande
+    dans `sh -c` au bénéfice du processus utilisateur, et read/write/delete
+    acceptent tout chemin absolu ou `../` (preuve : Scenario
+    `aucun_chemin_est_confiné_au_répertoire_courant`). La sandbox confine dans
+    `sandbox_root`, le CLI ne confine rien et ne demande aucune confirmation.
+    Trancher avec Sébastien : assumption assumée « le CLI tourne sur la machine
+    du développeur, qui fait ses propres choix » à contractualiser noir sur
+    blanc, ou garde à poser (périmètre de chemins, confirmation avant
+    `execute_command`) ?
+  [!] Panics et unwraps en chemin de production dans @tool_definition
+    (`panic!` + deux `as_str().unwrap()`) : contraires au harnais de
+    `../../tooling.sdd` (famille panic/unwrap deny hors `cfg(test)`). Dette
+    préexistante du crate cli non encore purgée — convertir en erreur
+    (`ToolError::InvalidArguments` ?) ou assumer et documenter l'exemption ?
+  [?] `timeout_secs: null` explicite vaut 30 (comme l'absence, à cause de
+    `Option` + `unwrap_or(30)`), alors que `0` explicite vaut « illimité » et
+    qu'aucun plafond n'est appliqué aux valeurs fournies : un LLM peut demander
+    une exécution illimitée. Cohérent avec `tools/src/mcp.sdd` (`[?]` timeout,
+    où il est bien dit que le CLI applique 30 — vérifié ./tools.rs:277) ;
+    imposer un plafond côté CLI ou laisser le choix au modèle ?
+  [?] Champs inconnus silencieusement ignorés (pas de `deny_unknown_fields`) :
+    une faute de frappe (`replaceAll`) change le sens de l'appel sans bruit.
+    Durcir ou accepter (compatibilité des modèles qui ajoutent des champs) ?
+  [?] Triplication des 8 noms (clés de @local_tools_map, `name()`, argument de
+    @tool_definition) plus une quatrième liste indépendante dans
+    ./rpc/handlers.rs (`config/localTools`) et dans les toolsets : risque de
+    dérive sans test d'alignement. Ajouter un test d'égalité des quatre listes,
+    ou agréger via une fonction unique (cf. `[?]` « pas de @all_tools » de
+    `tools/src/mcp.sdd`) ?
+  [?] Le message `wrote {len} bytes` compte `content.len()` (octets de la
+    chaîne reçue) sans vérifier l'écriture disque ; `deleted {path}` rend le
+    chemin non canonarisé. Accepté comme simple accusé de réception destiné au
+    LLM ?
+  [ ] Convertir en tests taggés par leur titre les Scenarios ci-dessus :
+    ./tools.rs ne porte **aucun** `mod tests` ; la couverture actuelle est
+    indirecte (`smoke_local_tools_returns_eight` de ../tests/rpc_stdio_smoke.rs,
+    qui teste le handler RPC — pas cette map ni ces ToolDyn).
+  [ ] Cette spec `./tools.sdd` manquait alors que quatre specs voisines
+    (`tools/src/mcp.sdd`, `command.sdd`, `search.sdd`, `lib.sdd`) pointent déjà
+    vers ./tools.rs : les références croisées (`Can read`/`Owns` des specs
+    parentes) restent à compléter dans ces fichiers — hors périmètre d'ici.
+
+Done when:
+  Chaque Scenario est couvert par au moins un test taggé par son titre.
+  Les écarts `[!]` (confinement, panics du chemin @tool_definition) sont
+    tranchés par Sébastien et reflétés soit en `Must`, soit en correction.
+  La batterie complète (`cargo check/test/build`, clippy `--all-targets
+    -D warnings`, fmt) est verte sur le crate `cli` sans que ./tools.rs fasse
+    grossir la dette du harnais.

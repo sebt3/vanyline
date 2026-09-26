@@ -1,0 +1,208 @@
+Spec: project_cmd
+
+Platform: Rust (`vanyline-cli`, derive `clap::Subcommand`, edition 2024)
+
+Purpose:
+  Définir le parseur pur — types de flags uniquement, zéro I/O, zéro logique — des
+  sous-commandes `vanyline project` (gestion des CRDs `Project`
+  `vanyline.solidite.fr/v1alpha1`) : `list`, `show`, `create`, `delete`. Le fichier ne
+  contient que la déclaration clap ; l'interprétation (mapping `Create` →
+  @vanyline_crds::ProjectSpec, appels K8s, formatage stdout, codes de sortie runtime)
+  vit dans @run_project_k8s (`./main.rs`), seul consommateur. Spécifié seul car
+  contrat autonome : ce que le fichier garantit tient entièrement au parsage.
+
+Owns:
+  ./project_cmd.rs
+
+Can read:
+  ./main.rs
+  ../../crds/src/lib.rs
+  ../../tooling.sdd
+
+Exposes:
+  @Commands — `pub enum` dérivant @clap::Subcommand, monté par `./main.rs` sous le nom
+    `project` (`#[command(name = "project", subcommand)]` sur @Commands::K8sProject).
+    Quatre variants, noms de sous-commande kebab-case dérivés :
+    - @Commands::List — `vanyline project list`, aucun argument.
+    - @Commands::Show — `vanyline project show <name>`, positionnel `name: String`.
+    - @Commands::Create — `vanyline project create <name> --owner <o> --repo-url <r> [...]`,
+      positionnel `name` + deux options requises + neuf options optionnelles (voir `Accepts`).
+    - @Commands::Delete — `vanyline project delete <name>`, positionnel `name: String`.
+  # L'enum porte `#[allow(clippy::large_enum_variant)]` : le variant `Create`
+  # (11 champs texte) écrase la taille du variant `List` (0 champ) ; l'exemption
+  # est exigée par le harnais (`cargo` en deny, groupe parent de `perf`), sans
+  # box qui alourdirait le destructuring de `./main.rs`.
+
+Accepts:
+  Pour @Commands::Create, flags longs (le nom champ est kebab-casé automatiquement par
+  clap sauf mention contraire) :
+  - `name` — positionnel requis, @String, aucun schéma de nom validé.
+  - `--owner <owner>` — requis (@String non Option ⇒ clap impose sa présence).
+  - `--repo-url <repo_url>` — requis, nom long explicite `#[arg(long = "repo-url")]`
+    (identique au kebab par défaut du champ — le nom explicite est verrouillé, une
+    réécriture en `--repo_url` ou `--repoUrl` casserait les usages documentés).
+  - `--default-branch` — optionnel.
+  - `--existing-pvc-name` — optionnel ; doc : nom du PVC existant (cas kydah-code).
+  - `--existing-pvc-subpath` — optionnel ; doc : sans `--existing-pvc-name`, sans effet.
+  - `--storage-size` — optionnel, @String translucide (ex. `10Gi`, jamais parsé ici).
+  - `--storage-class` — optionnel.
+  - `--storage-access-mode` — optionnel (ex. `ReadWriteOnce`, jamais validé ici).
+  - `--git-secret` — optionnel ; le champ CRD correspondant est marqué DÉPRÉCIÉ dans
+    `../../crds/src/lib.rs` (plus consommé par le controller).
+  - `--cache` (`#[arg(long = "cache")]`, champ pluriel @caches: Vec<String>) — répétable,
+    ordre d'apparition préservé, défaut : @Vec vide.
+  - `--fetch-interval` — optionnel (ex. `1h`, jamais validé ici).
+  Flags globaux du CLI racine (`--namespace`, etc.) : hors contrat de ce fichier,
+    consommés par `./main.rs` (précédence `--namespace` > `defaults.namespace` > contexte kube).
+
+Returns:
+  Une valeur de @Commands construite, sans aucun effet de bord : le fichier n'exécute
+  rien, ne se connecte à aucun cluster, n'imprime rien. Toute valeur optionnelle absente
+  est @None ; `--cache` absent produit un @Vec::new() vide (la conversion vide → @None
+  du champ CRD est faite par `./main.rs`, pas ici).
+
+Raises:
+  Aucune erreur au sens Rust — les erreurs de syntaxe (sous-commande inconnue, positionnel
+  manquant, `--owner`/`--repo-url` absents, flag méconnu, flag en underscores) remontent
+  par le Err(@clap::Error) de @Cli::parse dans `./main.rs`, qui sort en code `2` avec le
+  message d'usage de clap sur stderr.
+
+Handles:
+  Rien à l'exécution : pas de canal, pas d'appel réseau, pas de temps. Les événements
+  runtime (réponses K8s, erreurs API, stdout) sont du contrat de @run_project_k8s.
+
+Must:
+  Exposer exactement quatre sous-commandes : `list`, `show`, `create`, `delete` — noms
+    kebab-case dérivés des variants, aucun alias supplémentaire.
+  Exiger sur `create` : le positionnel `name`, `--owner` et `--repo-url` (le refus est
+    produit par clap avant toute exécution).
+  Rendre facultatives les neuf autres options de `create` (@Option/@Vec, jamais exigées).
+  Accepter `--cache` en répétition (`--cache cargo --cache pnpm`) et préserver l'ordre
+    et le littéral des valeurs dans @caches.
+  Traiter `--storage-size`, `--storage-access-mode`, `--fetch-interval` comme des
+    @String opaques : aucune validation de format, d'unité ou de valeur permise ici.
+  Garder l'exemption `#[allow(clippy::large_enum_variant)]` tant que `Create` n'est pas
+    boxé, et la justifier par une ligne citant la présente spec (dette actuelle, voir
+    `Tasks`).
+
+Must not:
+  Appeler Kubernetes, lire kubeconfig ou le filesystem, imprimer sur stdout/stderr —
+    le fichier ne dépend que de `clap`.
+  Introduire une valeur par défaut de taille, classe, mode d'accès, caches ou intervalle
+    dans le CLI : les replis (owner `project_defaults`, caches `["cargo","pnpm","pip"]`,
+    `fetch_interval` `"1h"`) sont résolution controller, pas CLI.
+  Valider la cohérence `--existing-pvc-subpath` sans `--existing-pvc-name` par autre
+    chose que la doc actuelle (voir `[?]` en `Tasks` avant d'ajouter un `requires` clap).
+  Exposer un flag `egress` : le champ @ProjectSpec::egress est figé à @Vec::new() côté
+    `./main.rs` (l'exposer élargirait le contrat sans décision de Sébastien).
+
+Depends on:
+  ./main.rs — seul consommateur : enregistrement sous `project`, mapping `Create` →
+    @vanyline_crds::ProjectSpec (dont `existing_pvc = existing_pvc_name.map(...)` —
+    subpath orpheline silencieusement ignorée — et `caches` vide → @None), appels
+    @VnlK8sClient et rendu.
+  ../../crds/src/lib.rs — cible sémantique de `Create` (@ProjectSpec, @PvcRef), couplage
+    par les noms de champs, sans import de ce fichier ici.
+
+Scenario: `project list` se parse sans argument
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "list"])`
+  Then la sous-commande est `K8sProject(Commands::List)` sans aucun champ
+
+Scenario: `project show` parse le positionnel name
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "show", "mon-projet"])`
+  Then le variant est `Commands::Show` avec `name == "mon-projet"`
+
+Scenario: `project show` sans name est rejeté
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "show"])`
+  Then le parse retourne un Err clap (positionnel manquant)
+
+Scenario: `project` seul est rejeté
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project"])`
+  Then le parse retourne un Err clap (sous-commande requise, `list` n'est pas implicite)
+
+Scenario: `project create` minimal avec les deux options requises
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "alice", "--repo-url", "https://example.invalid/depot.git"])`
+  Then le variant est `Commands::Create` avec `name == "depot"`, `owner == "alice"`,
+    `repo_url == "https://example.invalid/depot.git"`, toutes les options optionnelles à
+    @None et `caches` à @Vec vide
+
+Scenario: `project create` sans `--owner` est rejeté
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--repo-url", "r"])`
+  Then le parse retourne un Err clap (`--owner` requis)
+
+Scenario: `project create` sans `--repo-url` est rejeté
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "alice"])`
+  Then le parse retourne un Err clap (`--repo-url` requis)
+
+Scenario: le flag de repo est `--repo-url` et pas `--repo_url`
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "alice", "--repo_url", "r"])`
+  Then le parse retourne un Err clap (nom en underscores inconnu)
+
+Scenario: `project create` accepte la totalité des flags
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "alice",
+    "--repo-url", "r", "--default-branch", "main", "--existing-pvc-name", "pvc-kydah",
+    "--existing-pvc-subpath", "work/depot", "--storage-size", "10Gi", "--storage-class",
+    "fast", "--storage-access-mode", "ReadWriteMany", "--git-secret", "deploy-key",
+    "--fetch-interval", "30m"])`
+  Then chaque champ de `Commands::Create` porte la valeur fournie, `caches` étant @Vec vide
+
+Scenario: `--cache` est répétable et préserve l'ordre
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "a",
+    "--repo-url", "r", "--cache", "cargo", "--cache", "pnpm"])`
+  Then `caches == ["cargo", "pnpm"]` dans cet ordre
+
+Scenario: `--existing-pvc-subpath` sans `--existing-pvc-name` se parse quand même
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "a",
+    "--repo-url", "r", "--existing-pvc-subpath", "work"])`
+  Then le parse réussit avec `existing_pvc_name == None` et `existing_pvc_subpath == Some("work")`
+    (l'ignore en aval est le contrat de `./main.rs`, voir Tasks)
+
+Scenario: `--storage-size` ne valide pas la valeur
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "a",
+    "--repo-url", "r", "--storage-size", "pas-une-taille"])`
+  Then le parse réussit avec `storage_size == Some("pas-une-taille")` (rejet reporté à l'API K8s)
+
+Scenario: `project delete` parse le positionnel name
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "delete", "mon-projet"])`
+  Then le variant est `Commands::Delete` avec `name == "mon-projet"`
+
+Scenario: une sous-commande inconnue est rejetée
+  Given le CLI racine @Cli
+  When `try_parse_from(["vanyline", "project", "get-all"])`
+  Then le parse retourne un Err clap (aucune suggestion de substitution implicite vers `list`)
+
+Tasks:
+  [?] `#[allow(clippy::large_enum_variant)]` sans commentaire de justification d'une
+    ligne citant la spec : `tooling.sdd` (`Must not`) l'exige — trancher : ajouter la
+    ligne de justification ou boxer `Create` avec Sébastien.
+  [?] `--existing-pvc-subpath` sans `--existing-pvc-name` est accepté au parsage puis
+    silencieusement ignoré par le mapping de `./main.rs` (`existing_pvc_name.map(...)`).
+    La dépendance n'est documentée que par un commentaire de doc. Décision à trancher :
+    ajouter `requires = "existing-pvc-name"` côté clap (rejet précoce) ou statuer que
+    l'ignore silencieux est le comportement voulu.
+  [?] `--git-secret` : le flag CLI est vivant alors que @ProjectSpec::git_secret est
+    marqué DÉPRÉCIÉ et non consommé par le controller. Faut-il marquer le flag
+    `#[arg(..., hide = true)]` / déprécié, ou le supprimer (breaking) ?
+  [?] Le CLI ne peut pas poser `egress` (figé @Vec::new() dans `./main.rs`) alors que la
+    voie RPC `projects/create` (params aplatis sur @ProjectSpec,
+    `./rpc/protocol.rs`) l'accepte. Divergence CLI/RPC à arbitrer : aligner ou assumer.
+  [ ] Tests de parsage dérivés des Scenario ci-dessus (via @Cli::try_parse_from dans
+    `./main.rs`, comme la série `run_*` existante), écrits avant toute modification du
+    fichier.
+
+Done when:
+  Les Scenario ci-dessus sont couverts par des tests verts et le fichier ne bouge plus
+  sans passage par la boucle spec → test → implémentation.

@@ -1,0 +1,77 @@
+Spec: ToolsetCmd
+
+Purpose:
+  Déclaration clap de la sous-commande `toolsets` du CLI `vanyline` : un énuméré
+  `Subcommand` à un seul variant, purement déclaratif — aucun comportement propre dans
+  ./toolset_cmd.rs. Le contrat d'exécution (listing des toolsets depuis le store de
+  config) vit dans `@run_toolsets` de ./main.rs ; les méthodes RPC `config/toolsets*`
+  (lecture + écriture) sont un contrat distinct de `./rpc/handlers.rs`, sans lien avec ce
+  fichier. Spec minimale sur le modèle `lib/src/builtin/mod.sdd` (règle fichier déclaratif
+  de `../../vanyline.sdd`).
+
+Owns:
+  ./toolset_cmd.rs
+
+Can read:
+  ./main.rs
+
+Structure:
+  ./toolset_cmd.rs — `use clap::Subcommand;` puis `@Commands` (`pub enum`, derive
+  `Subcommand`) avec l'unique variant unitaire `List`, doc comment `/// List configured
+  toolsets`. Rien d'autre.
+  ./main.rs — consomme ce type : variant `Commands::Toolsets(#[command(subcommand)]
+  toolset_cmd::Commands)` (nom de commande clap dérivé : `toolsets`) et dispatch
+  `Some(Commands::Toolsets(cmd)) => run_toolsets(cmd)` vers `@run_toolsets`, qui résout
+  les couches de config (`discover_fs_store`), liste via
+  `ConfigStore::list_toolsets` et imprime une ligne `nom | source | description` par
+  toolset (`-` si description absente), ou `No toolsets configured.` si vide.
+
+Exposes:
+  @Commands — énuméré `pub` d'un seul variant unitaire `List` ; monté dans l'arborescence
+  clap de ./main.rs sous `vanyline toolsets list`.
+
+Handles:
+  `vanyline toolsets list` — parse uniquement ici ; exécution déléguée à `@run_toolsets`
+  (./main.rs).
+  `vanyline toolsets --help` / `vanyline toolsets` sans sous-commande — texte généré par
+  clap depuis la doc comment du variant `List`.
+
+Must:
+  Exposer exactement un variant `List`, sans argument ni option propre.
+  Conserver le nom de variant `List` : c'est lui qui définit le segment CLI `list`
+  (aucun attribut `#[command(name = ...)]` ne le renomme).
+
+Must not:
+  Porter de logique d'exécution (accès store, affichage, code de sortie) : tout reste
+  dans ./main.rs et la suite RPC dans ./rpc/handlers.rs.
+  Exposer une sous-commande d'écriture (create/update/delete) : seule la lecture existe
+  côté CLI à ce jour, l'écriture n'existe que via RPC (`config/toolsets/create` etc.).
+
+Scenario: vanyline_toolsets_list_se_parse_en_commands_toolsets_list
+  Given l'arborescence clap de ./main.rs
+  When `Cli::try_parse_from` reçoit `["vanyline", "toolsets", "list"]`
+  Then le parse réussit et la commande est `Commands::Toolsets(toolset_cmd::Commands::List)`
+
+Scenario: une_sous_commande_inconnue_de_toolsets_est_rejetee
+  Given l'arborescence clap de ./main.rs
+  When `Cli::try_parse_from` reçoit `["vanyline", "toolsets", "supprimer"]`
+  Then le parse échoue (sous-commande inexistante, aucun variant ne la porte)
+
+Depends on:
+  `clap::Subcommand` — derive générant le parseur et l'aide.
+  ./main.rs — seul consommateur du type (branchement `Commands::Toolsets`).
+
+Tasks:
+  [?] Le doc comment dit « List configured toolsets » alors que `@run_toolsets` affiche
+    aussi la source de couche et la description — trancher avec Sébastien : le texte de
+    l'aide clap est-il suffisant ou doit-il décrire la sortie ?
+  [?] Asymétrie CLI/RPC : le CLI n'expose que `list` alors que ./rpc/handlers.rs offre
+    create/update/delete sur le même domaine — confirmer que c'est voulu (la spec CLI ne
+    doit pas les ajouter sans décision de Sébastien).
+  [ ] Si un variant est ajouté (ex: `Show { name }`), étendre cette spec (Structure,
+    Exposes, Scenario de parse) AVANT toute implémentation, et mettre à jour le match de
+    `@run_toolsets` en conséquence.
+
+Done when:
+  ./toolset_cmd.rs continue de ne porter que l'énuméré `@Commands` à un variant `List` ;
+  tout variant ou option ajouté exige d'étendre cette spec en conséquence.

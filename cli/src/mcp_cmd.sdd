@@ -1,0 +1,111 @@
+Spec: McpCmd
+
+Purpose:
+  Module `mcp_cmd` de `vanyline-cli` : la déclaration clap des sous-commandes de
+  `vanyline mcp …`, la famille qui inspecte les serveurs MCP configurés (section `mcp`
+  du config-store). Le fichier ./mcp_cmd.rs est purement déclaratif — un seul enum
+  `clap::Subcommand`, zéro comportement propre : listing et affichage vivent dans le
+  handler `run_mcp` de ./main.rs, et la surface RPC parallèle sur la même source de
+  données (`config/mcpServers*`) dans ./rpc/handlers.rs. Le contrat de ce fichier est
+  donc uniquement la grammaire de parsing de la sous-famille `mcp`.
+
+Owns:
+  ./mcp_cmd.rs
+
+Exposes:
+  @Commands — `pub enum` dérivant `clap::Subcommand` : l'ensemble des sous-commandes de
+    `vanyline mcp …`, monté dans ./main.rs par le variant `Commands::Mcp(mcp_cmd::Commands)`.
+  @Commands::List — variante unique, unitaire (aucun champ, aucun flag propre) ; le
+    commentaire doc `/// List configured MCP servers` sert d'aide clap ; nom CLI `list`
+    (kebab-case par défaut de clap, aucun `#[command(name = …)]`).
+
+Accepts:
+  Rien au niveau du code : @Commands::List ne déclare ni argument positionnel ni flag
+    local.
+  Au niveau CLI, la grammaire acceptée est `vanyline mcp list` uniquement. Les flags
+    globaux du `Cli` racine (`--agent`, `--continue`, `--namespace`, `--toolbox`)
+    restent acceptés au parsing par clap mais sont ignorés par le handler `run_mcp`
+    (./main.rs) : aucune valeur n'est transmise à ce module.
+
+Returns:
+  Aucune fonction : le module ne calcule rien. Le parsing produit une valeur
+    @Commands::List, consommée par ./main.rs via le dispatch
+    `Some(Commands::Mcp(cmd)) => run_mcp(cmd)`.
+
+Raises:
+  Aucune erreur propre : uniquement les erreurs clap standard, matérialisées par
+    `Cli::parse()` de ./main.rs (statut de sortie 2, défaut clap) — sous-commande
+    absente après `vanyline mcp`, argument ou flag inconnu après `list`.
+
+Handles:
+  Rien — ./mcp_cmd.rs n'exécute aucun code : pas d'appel store, pas d'I/O, pas de
+    tracing, pas de `std::process::exit`.
+
+Must:
+  Exposer exactement une variante @Commands::List, unitaire, comme seule sous-commande
+    de `vanyline mcp`.
+  Porter sur @Commands::List le commentaire doc `List configured MCP servers`, qui est
+    le texte d'aide rendu par `vanyline mcp list --help`.
+  Rester un `pub enum` dérivé `clap::Subcommand` (visibilité `pub` exigée par le
+    montage depuis ./main.rs, module sibling du binaire).
+
+Must not:
+  Contenir de logique d'exécution : appels cfgstore, `println!`/`eprintln!`, tracing,
+    `std::process::exit` — le handler est `run_mcp` dans ./main.rs, jamais ici.
+  Déclarer une variante supplémentaire sans que cette spec et un test de parsing ne
+    soient étendus d'abord : chaque variante est une sous-commande observable
+    `vanyline mcp <nom>`.
+
+Structure:
+  ./mcp_cmd.rs — import `clap::Subcommand`, derive, `pub enum Commands` et sa variante
+    `List` : rien d'autre (7 lignes).
+  ./main.rs (spec à venir) — point de montage `Commands::Mcp` (aide de sous-famille
+    `Manage MCP servers` portée par le variant côté ./main.rs) et handler `run_mcp` :
+    listing `store.list_mcp_servers()`, lignes `  nom | source | transport url`, cas
+    vide `No MCP servers configured.`, erreur store → message + `exit(1)`.
+  ./rpc/handlers.rs (spec sœur en cours) — méthodes RPC `config/mcpServers` (lecture)
+    et `config/mcpServers/{create,update,delete,test}` : même source de données
+    (config-store `mcp`), contrat distinct de celui-ci.
+
+Depends on:
+  `clap` — derive `Subcommand` (mapping variante → sous-commande kebab-case, aide).
+  ./main.rs — seul consommateur : montage dans `Commands::Mcp` et dispatch vers `run_mcp`.
+
+Scenario: mcp list se parse en Commands::List
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from(["vanyline", "mcp", "list"])`
+  Then le parsing réussit et `command` vaut `Some(Commands::Mcp(mcp_cmd::Commands::List))`
+
+Scenario: mcp sans sous-commande est rejeté
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from(["vanyline", "mcp"])`
+  Then le parsing échoue car la sous-commande `list` est requise
+
+Scenario: mcp list refuse tout argument supplémentaire
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from(["vanyline", "mcp", "list", "extra"])`
+  Then le parsing échoue sur l'argument inconnu `extra`
+
+Scenario: l'aide de mcp list affiche la description déclarée
+  Given le CLI `vanyline` compilé
+  When `Cli::try_parse_from(["vanyline", "mcp", "list", "--help"])`
+  Then le parsing échoue avec l'aide rendue, contenant `List configured MCP servers`
+
+Tasks:
+  [!] Les quatre `Scenario` ci-dessus ne sont couverts par aucun test existant : les
+    tests de parsing de ./main.rs ne couvrent que la sous-famille `run`. À écrire via
+    `Cli::try_parse_from` avant de considérer ce contrat verrouillé.
+  [?] `vanyline mcp` ne propose que `list` : créer/modifier/supprimer un serveur MCP
+    n'est possible que via les méthodes RPC `config/mcpServers/*` (./rpc/handlers.rs)
+    ou en éditant `config.yaml` à la main. Consolidation voulue vers l'extension VS
+    Code, ou manque à combler côté CLI (ex: `mcp show`, `mcp create`) ? À trancher avec
+    Sébastien.
+  [?] Le contrat d'affichage effectif de `mcp list` (format `  nom | source | transport
+    url`, texte du cas vide, `exit(1)` sur erreur store) vit dans `run_mcp` de
+    ./main.rs et sera specé dans la spec de ./main.rs — confirmer avec Sébastien s'il
+    est durable en l'état ou doit converger vers une sortie structurée.
+
+Done when:
+  ./mcp_cmd.rs continue de ne porter que l'enum @Commands et sa variante `List` ; toute
+    variante ajoutée ou tout comportement glissé dans ce fichier exige d'étendre cette
+    spec (et les tests de parsing associés) au préalable.
