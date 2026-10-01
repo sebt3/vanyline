@@ -46,7 +46,7 @@ metrics-exporter-prometheus = { version = "0.18", default-features = false, feat
 # Observability — OpenTelemetry (optional, non-blocking)
 opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "grpc-tonic"] }
+opentelemetry-otlp = { version = "0.33", default-features = false, features = ["trace", "grpc-tonic"] }
 tracing-opentelemetry = { version = "0.33", default-features = false }
 
 vanyline-tools = { path = "../tools" }
