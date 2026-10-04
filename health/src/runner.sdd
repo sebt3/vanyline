@@ -1,0 +1,222 @@
+Spec: Runner
+
+Platform: Rust/vanyline-health/tokio
+
+Purpose:
+  Seule I/O du crate : exécute une liste de @Check dans un répertoire de dépôt, parse leurs
+  sorties avec les modules purs, restreint au code neuf si une référence de base est fournie, et
+  assemble le @HealthReport. C'est ce code qui garantit « même vert partout » : sandbox locale,
+  cli et service central l'appellent avec les mêmes presets. Fichier neuf, conception.
+
+Owns:
+  ./runner.rs
+
+Can read:
+  ./checks.sdd
+  ./report.sdd
+  ./lcov.sdd
+  ./cargo_messages.sdd
+  ./diff.sdd
+  ./error.sdd
+  ../../tools/src/command.sdd
+  ../../sandbox/src/git.sdd
+
+Exposes:
+  @RunOptions { root: PathBuf, out_dir: PathBuf, base: Option<String>, env: Vec<(String, String)>,
+    check_timeout: Duration, tail_bytes: usize, unchecked_languages: Vec<String>,
+    max_parallel: usize, preliminary_issues: Vec<Issue>, niceness: Option<i32> }
+    — `unchecked_languages` est recopié tel quel dans le rapport (l'appelant l'obtient de
+    @checks::unchecked_languages).
+    — `tail_bytes` : 4096 par défaut (@DEFAULT_TAIL_BYTES). `env` : paires ADDITIVES (jamais
+    de vidage de l'environnement hérité) appliquées avant chaque spawn, dernière gagnante.
+  @run_checks(options: &RunOptions, checks: &[Check]) -> Result<HealthReport, HealthError>
+    (async, tokio).
+
+Handles:
+  « Catch all the failures », pas fail-fast (décision 2026-10-04) : TOUTES les vérifications
+  s'exécutent et sont rapportées, quel que soit le résultat des autres. Elles tournent en
+  PARALLÈLE avec un plafond de concurrence (`max_parallel`, 2 par défaut) ; deux vérifications
+  qui écrivent dans le même répertoire de build ne s'exécutent jamais ensemble (groupes de
+  sérialisation déclarés par @Check, voir ./checks.sdd : par défaut, un groupe par
+  programme+cwd ; les `rust-*` sont des groupes distincts parce que `cargo llvm-cov` utilise son
+  propre répertoire de build). Une vérification qui en a pour préalable une autre
+  (`ts-coverage-provider` avant `ts-coverage`) n'est lancée qu'après elle. L'ordre du rapport
+  est celui des vérifications reçues, pas celui de fin d'exécution.
+  Niveau de priorité : si `niceness` est `Some(n)` (défaut `Some(10)`), chaque commande est
+  lancée sous `nice -n <n>` (argv `["nice", "-n", n, programme, …]`, jamais un shell), pour ne
+  pas affamer l'éditeur ni rust-analyzer du même pod ; `None` = priorité normale.
+  Diagnostics préliminaires : l'appelant (la sandbox) peut fournir, AVANT le lancement des
+  commandes, des diagnostics déjà connus de ses serveurs LSP (@RunOptions::preliminary_issues,
+  `Vec<Issue>`) ; le runner les verse au rapport sous un @CheckResult `lsp` (kind `lint`,
+  `failed` s'il y a au moins une issue `error`, sinon `passed`, durée 0). Ils sont collectés en
+  amont pour que rust-analyzer ait fini son passage cargo avant que les commandes ne
+  démarrent (pas de verrou concurrent), sans bloquer ni retarder ces commandes.
+  Expansion (avant exécution) : une vérification portant `expand: NpmWorkspaces` est remplacée
+  par une vérification par workspace — lecture du champ `workspaces` du `package.json` de
+  `root`+`cwd` (chemins littéraux et globs `dir/*`, développés sur les répertoires
+  existants), jetons `{workspace}`/`{workspace_slug}` substitués dans l'argv et dans le
+  chemin `Lcov`, `id` devenu `<id>:<workspace>` ; sans `workspaces`, une seule vérification
+  de workspace `.` dont l'argument `--workspace={workspace}` est retiré. `expand: Files`
+  remplace l'élément d'argv `{files}` par les fichiers de `git ls-files` correspondant aux
+  globs ; aucun fichier ⇒ vérification `skipped` sans exécution. `package.json` illisible
+  ou `git ls-files` en échec ⇒ vérification `errored`.
+  Chaque vérification : @validate ; remplacement de @OUT_DIR_TOKEN dans l'argv par `out_dir` ;
+  spawn direct de l'argv (jamais `sh -c`), cwd = `root` + `check.cwd` ; stdout et stderr
+  redirigés VERS DES FICHIERS de `out_dir` (`<id>.stdout`, `<id>.stderr`), jamais bornés à
+  l'écriture : un JSON clippy fait des mégaoctets ; groupe de processus dédié ; timeout
+  `check_timeout` qui tue le GROUPE entier (régression R8 de tools/command.sdd : tuer le seul
+  parent laisse des descendants).
+  Statut : code 0 → `passed` ; code ≠ 0 → `failed` ; spawn impossible, timeout, sortie
+  exploitable absente ou illisible → `errored`. Une vérification `errored` n'interrompt pas les
+  suivantes (une commande cassée ne doit pas masquer les autres résultats).
+  `output_tail` : fin du stderr (UTF-8 lossy) bornée à `tail_bytes` ; pour une vérification
+  sans sortie structurée et stderr vide, la fin du stdout.
+  Sorties structurées : `CargoMessages`/`TscText`/`RuffJson`/`HadolintJson` → le parseur du
+  module correspondant sur le stdout (le préfixe de workspace est passé à `tsc_text`), issues
+  ajoutées au rapport, une sortie `RuffJson`/`HadolintJson` illisible rendant la vérification
+  `errored` ; `Lcov` → @parse_lcov sur le fichier (préfixe = cwd de la vérification) ; couverture exigée non produite ou
+  vide alors que la vérification est `passed` → `errored` (jamais « 0 % » ni « rien »).
+  Plusieurs vérifications `Lcov` : rapports fusionnés (même règle que ./lcov.sdd).
+  Code neuf : si `base` est fourni, après les vérifications, `git merge-base <base> HEAD` puis
+  `git -c core.quotepath=off diff -U0 --no-color --no-ext-diff <merge-base> --` exécuté sur
+  `root` (argv) — l'ÉTAT DU WORKTREE contre le merge-base, modifications non commitées incluses
+  (vue locale d'un développeur) ; sur un checkout propre d'un SHA (service central) c'est
+  identique à `<base>...HEAD`. Puis
+  @parse_changed_lines et restriction de la couverture et des issues → `new_code`. Un échec de
+  cette étape ajoute un @CheckResult `new-code` (kind `new_code`) `errored` et laisse `new_code`
+  à `None`. `base` est validée AVANT usage : vide, commençant par `-`, contenant espace, NUL ou
+  retour ligne → @HealthError::InvalidRef (protection contre l'injection de drapeau git).
+  Révision : `git rev-parse HEAD` best-effort ; échec → `revision: None`.
+  Un code de sortie non nul d'une vérification dont la sortie structurée est PRODUITE
+  (ruff, hadolint, tsc rendent ≠ 0 quand ils trouvent des défauts) reste `failed` : les issues
+  parsées s'ajoutent au rapport ET la vérification est `failed`, jamais `errored`.
+
+Raises:
+  @HealthError::ReportIo — `out_dir` impossible à créer ou fichier de sortie illisible hors
+  d'un cas géré ci-dessus. @HealthError::InvalidRef — `base` invalide (avant toute exécution).
+  Tout le reste est rapporté PAR vérification, pas comme erreur de la fonction.
+
+Must:
+  Ne jamais invoquer un shell.
+  Garder l'environnement hérité (additif seulement) : les toolchains injectées dans le PATH de
+    la sandbox doivent rester visibles.
+  Rendre un rapport même quand toutes les vérifications échouent : l'échec est la donnée.
+  Ne pas écrire dans `root` (les sorties vont dans `out_dir`, un worktree propre doit le
+    rester ; `git status` de la sandbox ne doit pas être sali par un run de santé).
+
+Must not:
+  Interpréter le rapport (seuil, gate) : cf. ./report.sdd.
+  Dépendre de `vanyline-tools` (feuille) : le spawn est réimplémenté ici parce que la sortie
+    n'est pas bornée.
+
+Tasks:
+  [?] Une sortie stdout de gigaoctets (clippy très bruyant) remplit `out_dir` : plafond de
+    taille du fichier à décider.
+  [?] Isolation des artefacts (`CARGO_TARGET_DIR`, caches) : passe par `env` ; la stratégie de
+    cache (sccache, `target/` partagé) est un sujet séparé, à valider par mesure sur le
+    workspace vanyline avant spec.
+
+Scenario: tout_vert
+  Given deux checks dont les commandes sortent en 0 (fixtures sans cargo)
+  When @run_checks
+  Then les deux `passed`, `status()` `passed`
+
+Scenario: echec_nest_pas_erreur
+  Given une commande qui sort en 1
+  When @run_checks
+  Then ce check est `failed` avec `exit_code` 1, et le rapport est `Ok`
+
+Scenario: spawn_impossible
+  Given un programme inexistant
+  When @run_checks
+  Then ce check est `errored`, les suivants s'exécutent
+
+Scenario: timeout_tue_le_groupe
+  Given une commande qui lance un descendant d'arrière-plan et dépasse `check_timeout`
+  When @run_checks
+  Then le check est `errored` et plus aucun processus du groupe ne survit
+
+Scenario: sortie_dans_out_dir_pas_dans_root
+  Given un run complet
+  When il se termine
+  Then `root` est inchangé (aucun fichier créé) et les sorties sont dans `out_dir`
+
+Scenario: lcov_vide_sur_succes_est_erreur
+  Given une vérification `Lcov` qui sort en 0 sans rien écrire
+  When @run_checks
+  Then ce check est `errored`, `coverage` est `None`
+
+Scenario: issues_recuperees
+  Given une vérification `CargoMessages` dont le stdout contient un warning clippy
+  When @run_checks
+  Then le rapport contient l'issue, `check_id` du check
+
+Scenario: tail_borne
+  Given un stderr de 100 Kio et `tail_bytes` 4096
+  When @run_checks
+  Then `output_tail` fait au plus 4096 octets et se termine par la fin du stderr
+
+Scenario: base_invalide_refusee
+  Given `base` valant `--output=x`
+  When @run_checks
+  Then @InvalidRef avant toute exécution de commande
+
+Scenario: code_neuf
+  Given un dépôt git de test avec une base et un commit ajoutant des lignes, et un lcov couvrant partiellement
+  When @run_checks avec `base`
+  Then `new_code.coverage` ne contient que les lignes ajoutées
+
+Scenario: echec_du_diff
+  Given une `base` inexistante dans le dépôt
+  When @run_checks
+  Then un check `new-code` `errored` est ajouté, `new_code` est `None`, les autres résultats sont intacts
+
+Scenario: environnement_additif
+  Given `env` posant `FOO=bar` et `PATH` hérité non vide
+  When une commande affiche son environnement
+  Then `FOO=bar` est présent et `PATH` hérité aussi
+
+Scenario: expansion_par_workspace_npm
+  Given un `package.json` racine avec `workspaces: ["frontend", "packages/*"]` et `packages/ui`, `packages/protocol` existants
+  When @run_checks avec le preset `ts-check`
+  Then trois vérifications `ts-check:frontend`, `ts-check:packages/ui`, `ts-check:packages/protocol`, argv `--workspace=<chemin>`
+
+Scenario: projet_sans_workspaces
+  Given un `package.json` sans champ `workspaces`
+  When @run_checks avec `ts-check`
+  Then une seule vérification dont l'argv ne contient plus `--workspace`
+
+Scenario: aucun_dockerfile_suivi
+  Given un dépôt sans Dockerfile suivi par git
+  When @run_checks avec `docker-hadolint`
+  Then la vérification est `skipped`, aucune commande lancée, `status()` du rapport inchangé
+
+Scenario: defauts_trouves_par_ruff_sont_failed_pas_errored
+  Given une commande qui écrit un JSON ruff valide avec un diagnostic et sort en 1
+  When @run_checks
+  Then la vérification est `failed`, l'issue est dans le rapport
+
+Scenario: langages_non_verifies_recopies
+  Given `unchecked_languages = ["go"]`
+  When @run_checks
+  Then `report.unchecked_languages == ["go"]`
+
+Scenario: toutes_les_verifications_sont_rapportees_malgre_un_echec
+  Given trois vérifications dont la première sort en 1
+  When @run_checks
+  Then les trois s'exécutent et figurent au rapport dans l'ordre reçu ; `status()` vaut `failed`
+
+Scenario: parallelisme_borne
+  Given quatre vérifications indépendantes d'une seconde et `max_parallel = 2`
+  When @run_checks
+  Then jamais plus de deux ne s'exécutent simultanément, et la durée totale est proche de deux secondes
+
+Scenario: meme_repertoire_de_build_jamais_en_parallele
+  Given deux vérifications du même groupe de sérialisation
+  When @run_checks avec `max_parallel = 4`
+  Then leurs exécutions ne se chevauchent pas
+
+Scenario: diagnostics_lsp_preliminaires
+  Given `preliminary_issues` contenant une issue `error`
+  When @run_checks
+  Then le rapport contient un CheckResult `lsp` `failed` et l'issue, avant l'exécution des commandes

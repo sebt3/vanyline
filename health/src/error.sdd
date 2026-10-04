@@ -1,0 +1,43 @@
+Spec: Error
+
+Platform: Rust/vanyline-health/thiserror
+
+Purpose:
+  Enum d'erreurs unique de `vanyline-health` (@HealthError), domaine `HLT` de la convention
+  « messages d'erreur avec identifiant unique » d'AGENTS.md (même famille que `VNL-TLS-*`,
+  `VNL-CFG-*`). Le @Display est la seule forme visible au fil : les consommateurs le
+  stringifient. Fichier neuf, conception.
+
+Owns:
+  ./error.rs
+
+Can read:
+  ./lib.rs
+  ../../tools/src/error.sdd
+
+Exposes:
+  @HealthError — `pub enum`, derives `Debug` + @thiserror::Error, aucun `#[from]`.
+    Le @Display commence par le marqueur suivi de `": "` :
+      @InvalidLcov { line: usize, reason: String } — `VNL-HLT-001: invalid lcov at line {line}: {reason}`
+      @InvalidDiff { reason: String } — `VNL-HLT-002: invalid diff: {reason}`
+      @InvalidCheck { id: String, reason: String } — `VNL-HLT-003: invalid check '{id}': {reason}`
+      @Spawn { id: String, source: std::io::Error } — `VNL-HLT-004: cannot start check '{id}': {source}`
+      @Timeout { id: String, secs: u64 } — `VNL-HLT-005: check '{id}' timed out after {secs}s`
+      @ReportIo { path: String, source: std::io::Error } — `VNL-HLT-006: report I/O error on {path}: {source}`
+      @InvalidRef { value: String } — `VNL-HLT-007: invalid git ref: {value}`
+      @Git { reason: String } — `VNL-HLT-008: git failed: {reason}`
+
+Must:
+  Garder les identifiants `VNL-HLT-001..008` stables : un identifiant n'est jamais réutilisé
+    pour un autre sens.
+  Chaîner l'erreur I/O sous-jacente via `#[source]` pour @Spawn et @ReportIo.
+
+Scenario: display_porte_le_marqueur
+  Given chaque variante construite avec des champs d'exemple
+  When son @Display est rendu
+  Then la chaîne commence par son `VNL-HLT-NNN: ` exact
+
+Scenario: erreur_io_chainee
+  Given un @HealthError::Spawn construit autour d'une `std::io::Error`
+  When `std::error::Error::source()` est appelée
+  Then elle retourne l'erreur I/O d'origine

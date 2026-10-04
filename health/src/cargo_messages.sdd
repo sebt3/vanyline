@@ -1,0 +1,90 @@
+Spec: Cargo messages
+
+Platform: Rust/vanyline-health/serde_json
+
+Purpose:
+  Parseur pur des diagnostics JSON de cargo (`--message-format=json`, utilisé par
+  `cargo clippy` et `cargo check`) vers une liste d'@Issue. C'est la partie « analyse statique »
+  du rapport : les règles viennent du projet analysé (`[workspace.lints]`), ce fichier ne fait
+  que normaliser leur sortie. Fichier neuf, conception.
+
+Owns:
+  ./cargo_messages.rs
+
+Can read:
+  ./report.sdd
+  /tooling.sdd
+
+Exposes:
+  @parse_cargo_messages(stdout: &str, root: &Path, check_id: &str) -> Vec<Issue> — pure,
+  infaillible.
+
+Accepts:
+  `stdout` : une ligne JSON par message cargo. Seuls les objets `reason == "compiler-message"`
+  sont lus. `root` : racine du dépôt (relativisation et exclusion des dépendances).
+
+Returns:
+  Une @Issue par diagnostic de niveau `error` ou `warning` portant au moins un span primaire :
+  `path` = `file_name` du span primaire relativisé à `root` (séparateur `/`), `line`/`column` =
+  `line_start`/`column_start`, `code` = `message.code.code` (ex. `clippy::unwrap_used`) quand il
+  existe, `message` = `message.message`, `check_id` = paramètre. Triées par (path, line, column,
+  code) et DÉDOUBLONNÉES sur (path, line, column, code, message).
+
+Handles:
+  Les lignes non JSON, les objets d'une autre `reason` et les JSON de forme inattendue sont
+  ignorés sans erreur (cargo mêle des formes ; une ligne illisible ne doit pas masquer les
+  autres). Les niveaux `note`/`help`/`failure-note` sont ignorés. Les diagnostics sans span
+  primaire (résumés « N warnings emitted », « aborting due to … ») sont ignorés : c'est le code
+  de sortie de la vérification qui porte l'échec global. Les spans hors de `root` (sources de
+  dépendances) sont ignorés.
+
+Must:
+  Dédoublonner : avec `--all-targets`, cargo émet le même diagnostic une fois par cible
+    (lib + tests) — le rapport ne doit compter qu'une occurrence.
+  Rester déterministe (tri total).
+  Ne jamais paniquer sur une entrée arbitraire (fuzz-friendly : tout `&str` est acceptable).
+
+Must not:
+  Interpréter la sévérité d'un lint ni la reclasser (un `warning` rapporté par cargo reste
+    `warning`, même sous `-D warnings` : la promotion en erreur apparaît déjà comme `error`
+    dans le JSON de cargo).
+
+Scenario: warning_clippy_simple
+  Given une ligne compiler-message level `warning`, code `clippy::unwrap_used`, span primaire `src/a.rs` 12:5
+  When @parse_cargo_messages
+  Then une Issue {path "src/a.rs", line 12, column 5, severity warning, code Some("clippy::unwrap_used")}
+
+Scenario: erreur_sous_deny
+  Given un diagnostic level `error` code `clippy::unwrap_used`
+  When @parse_cargo_messages
+  Then severity `error`
+
+Scenario: doublon_par_cible
+  Given le même diagnostic émis deux fois (cibles lib et test)
+  When @parse_cargo_messages
+  Then une seule Issue
+
+Scenario: note_et_help_ignores
+  Given des diagnostics level `note` et `help`
+  When @parse_cargo_messages
+  Then aucune Issue
+
+Scenario: resume_sans_span
+  Given « aborting due to 3 previous errors » (level `error`, spans vides)
+  When @parse_cargo_messages
+  Then aucune Issue
+
+Scenario: dependance_ignoree
+  Given un span primaire dans `/home/u/.cargo/registry/…` et root `/repo`
+  When @parse_cargo_messages
+  Then aucune Issue
+
+Scenario: ligne_non_json
+  Given une ligne `warning: unused` (texte humain) entre deux lignes JSON valides
+  When @parse_cargo_messages
+  Then les deux messages valides sont rapportés, pas de panique
+
+Scenario: chemin_absolu_dans_racine
+  Given un span `file_name` `/repo/src/b.rs` et root `/repo`
+  When @parse_cargo_messages
+  Then path `src/b.rs`

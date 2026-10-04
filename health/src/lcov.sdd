@@ -1,0 +1,108 @@
+Spec: Lcov
+
+Platform: Rust/vanyline-health
+
+Purpose:
+  Parseur pur du format lcov (sortie de `cargo llvm-cov --lcov`, et d'autres outils : c8,
+  coverage.py) vers @CoverageReport. Seule la couverture de LIGNES est retenue (fonctions et
+  branches ignorées en v1). Fichier neuf, conception.
+
+Owns:
+  ./lcov.rs
+
+Can read:
+  ./report.sdd
+  ./error.sdd
+
+Exposes:
+  @parse_lcov(input: &str, root: &Path, prefix: &str) -> Result<CoverageReport, HealthError> —
+  fonction pure.
+
+Accepts:
+  `input` : texte lcov. Enregistrements : `SF:<chemin>` ouvre, `DA:<ligne>,<passages>[,<checksum>]`
+  une ligne instrumentée, `end_of_record` ferme. Les autres balises (`TN`, `FN`, `FNDA`, `FNF`,
+  `FNH`, `BRDA`, `BRF`, `BRH`, `LF`, `LH`) sont ignorées. `root` : racine du dépôt, utilisée
+  pour relativiser les chemins absolus. `prefix` : chemin, relatif à `root`, du répertoire dans
+  lequel l'outil de couverture s'est exécuté (`""` pour la racine) ; un `SF` RELATIF (vitest,
+  coverage.py) est interprété relativement à ce répertoire.
+
+Returns:
+  @CoverageReport normalisé : un @FileCoverage par fichier, trié par `path`. `lines_found` et
+  `lines_hit` sont RECALCULÉS depuis les `DA` (jamais depuis `LF`/`LH`, qui peuvent mentir).
+  Les chemins sont relatifs à `root`, séparateur `/` (un `SF` relatif devient `prefix/SF`,
+  normalisé, sans `./`). Un fichier cité dans plusieurs
+  enregistrements est fusionné : passages additionnés ligne à ligne. Un fichier hors de `root`
+  (dépendances, registre cargo) est exclu du rapport.
+
+Raises:
+  @HealthError::InvalidLcov { line, reason } — numéro de ligne 1-indexé du texte, pour :
+    `DA` avant tout `SF` ; `DA` mal formé (champ manquant, non numérique, ligne 0) ;
+    `SF` répété sans `end_of_record` intermédiaire ; enregistrement non terminé en fin
+    d'entrée (rapport tronqué).
+
+Must:
+  Rejeter un rapport tronqué plutôt que le rendre partiel : une couverture incomplète ne doit
+    jamais passer pour une couverture saine.
+  Rendre un @CoverageReport vide (`files` vide) pour une entrée vide : c'est l'appelant
+    (@runner) qui décide qu'un rapport vide d'une vérification de couverture est `errored`.
+  Rester déterministe : même entrée, même sortie (tri des fichiers, `uncovered` normalisé).
+
+Must not:
+  Lire le système de fichiers ni résoudre de symlink : relativisation par préfixe textuel
+    de `root` uniquement.
+  Faire confiance à `LF`/`LH`.
+
+Scenario: fichier_simple
+  Given `SF:/repo/src/a.rs`, `DA:1,1`, `DA:2,0`, `DA:3,0`, `DA:4,5`, `end_of_record`, root `/repo`, prefix `""`
+  When @parse_lcov
+  Then un fichier `src/a.rs`, lines_found 4, lines_hit 2, uncovered [2..3]
+
+Scenario: lf_lh_ignores
+  Given un enregistrement dont `LF:99`/`LH:99` contredisent les `DA`
+  When @parse_lcov
+  Then les totaux reflètent les `DA`
+
+Scenario: fusion_de_deux_enregistrements
+  Given deux enregistrements pour `/repo/src/a.rs` : `DA:1,0` puis `DA:1,2`
+  When @parse_lcov
+  Then une seule entrée, ligne 1 à 2 passages (couverte)
+
+Scenario: fichier_hors_racine_exclu
+  Given un enregistrement `SF:/home/u/.cargo/registry/x/lib.rs` et root `/repo`
+  When @parse_lcov
+  Then ce fichier est absent du rapport
+
+Scenario: da_avant_sf
+  Given l'entrée `DA:1,1`
+  When @parse_lcov
+  Then @InvalidLcov avec line 1
+
+Scenario: da_mal_forme
+  Given `SF:/repo/a.rs` puis `DA:abc,1`
+  When @parse_lcov
+  Then @InvalidLcov avec line 2
+
+Scenario: rapport_tronque
+  Given un enregistrement sans `end_of_record` final
+  When @parse_lcov
+  Then @InvalidLcov (jamais un rapport partiel)
+
+Scenario: entree_vide
+  Given une entrée vide
+  When @parse_lcov
+  Then `Ok` avec `files` vide
+
+Scenario: tri_deterministe
+  Given `SF:b.rs` puis `SF:a.rs`
+  When @parse_lcov
+  Then `files` est trié `a.rs`, `b.rs`
+
+Scenario: chemin_relatif_avec_prefixe
+  Given `SF:src/a.ts`, `DA:1,1`, `end_of_record`, root `/repo`, prefix `frontend`
+  When @parse_lcov
+  Then un fichier `frontend/src/a.ts`
+
+Scenario: chemin_relatif_sans_prefixe
+  Given `SF:src/a.rs` et prefix `""`
+  When @parse_lcov
+  Then un fichier `src/a.rs`

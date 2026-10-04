@@ -1,0 +1,102 @@
+Spec: Diff
+
+Platform: Rust/vanyline-health
+
+Purpose:
+  Calcule le périmètre « code neuf » d'une MR : extrait les lignes ajoutées ou modifiées d'un
+  `git diff -U0`, puis restreint couverture et issues à ces lignes. C'est la vue du relecteur
+  (« mon changement est-il couvert, introduit-il des défauts ? ») par opposition à la santé
+  globale du dépôt. Pur : le diff arrive en texte, c'est ./runner.rs qui lance git.
+  Fichier neuf, conception.
+
+Owns:
+  ./diff.rs
+
+Can read:
+  ./report.sdd
+  ./error.sdd
+  ../../sandbox/src/git.sdd
+
+Exposes:
+  @ChangedLines — `BTreeMap<String, Vec<LineRange>>` : chemin relatif → plages de lignes du côté
+    NOUVEAU (ajoutées/modifiées), normalisées (triées, disjointes, fusionnées).
+  @parse_changed_lines(diff: &str) -> Result<ChangedLines, HealthError>
+  @restrict_coverage(report: &CoverageReport, changed: &ChangedLines) -> CoverageReport
+  @restrict_issues(issues: &[Issue], changed: &ChangedLines) -> Vec<Issue>
+
+Accepts:
+  `diff` : sortie de `git -c core.quotepath=off diff -U0 --no-color --no-ext-diff <merge-base>`
+  (worktree contre merge-base, contrat posé par ./runner.sdd). Lus : `+++ b/<chemin>` (fichier cible) et en-têtes de hunk
+  `@@ -a[,b] +c[,d] @@`. `d` absent vaut 1 ; `d == 0` (suppression pure) n'ajoute aucune ligne.
+
+Returns:
+  @parse_changed_lines : un fichier supprimé (`+++ /dev/null`) et un fichier binaire sont
+  absents du résultat. @restrict_coverage : ne garde que les fichiers présents dans `changed`
+  et, pour chacun, que les lignes instrumentées comprises dans les plages modifiées ;
+  `lines_found`/`lines_hit`/`uncovered` sont recalculés sur ce sous-ensemble ; un fichier
+  modifié dont AUCUNE ligne modifiée n'est instrumentée est omis (rien à couvrir).
+  @restrict_issues : ne garde que les issues dont (path, line) tombe dans une plage modifiée.
+
+Raises:
+  @HealthError::InvalidDiff { reason } : hunk mal formé (nombres non numériques) ; hunk avant
+  tout `+++` ; nom de fichier entre guillemets (git cite les chemins à caractères spéciaux) —
+  refusé plutôt qu'ignoré, car ignorer un fichier ferait paraître le code neuf plus sain
+  qu'il n'est.
+
+Must:
+  Refuser plutôt qu'omettre en silence tout ce qui pourrait réduire le périmètre contrôlé.
+  Rester pur et déterministe.
+
+Must not:
+  Interpréter les lignes de contexte : en `-U0` il n'y en a pas, et un diff avec contexte est
+    hors contrat (les lignes de contexte ne sont pas « modifiées »).
+
+Scenario: ajout_simple
+  Given `+++ b/src/a.rs` puis `@@ -0,0 +1,3 @@`
+  When @parse_changed_lines
+  Then `src/a.rs` -> [1..3]
+
+Scenario: modification_une_ligne
+  Given `@@ -10 +10 @@` (compte omis)
+  When @parse_changed_lines
+  Then plage [10..10]
+
+Scenario: suppression_pure
+  Given `@@ -5,2 +4,0 @@`
+  When @parse_changed_lines
+  Then aucune ligne ajoutée pour ce hunk
+
+Scenario: fichier_supprime
+  Given `+++ /dev/null`
+  When @parse_changed_lines
+  Then ce fichier est absent
+
+Scenario: plusieurs_hunks_fusionnes
+  Given deux hunks `+1,2` et `+3,1` du même fichier
+  When @parse_changed_lines
+  Then une seule plage [1..3]
+
+Scenario: nom_cite_refuse
+  Given `+++ "b/src/\303\251.rs"`
+  When @parse_changed_lines
+  Then @InvalidDiff
+
+Scenario: hunk_mal_forme
+  Given `@@ -1 +x @@`
+  When @parse_changed_lines
+  Then @InvalidDiff
+
+Scenario: couverture_sur_le_diff
+  Given un rapport où `src/a.rs` a les lignes 1..4 instrumentées (2..3 non couvertes) et changed {src/a.rs: [3..4]}
+  When @restrict_coverage
+  Then `src/a.rs`: lines_found 2, lines_hit 1, uncovered [3..3]
+
+Scenario: fichier_non_modifie_exclu
+  Given un rapport contenant `src/b.rs` absent de changed
+  When @restrict_coverage
+  Then `src/b.rs` n'apparaît pas
+
+Scenario: issues_dans_le_diff_seulement
+  Given deux issues, lignes 3 et 30, changed [1..5]
+  When @restrict_issues
+  Then seule celle de la ligne 3 reste

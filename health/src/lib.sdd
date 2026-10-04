@@ -1,0 +1,90 @@
+Spec: Lib
+
+Platform: Rust/vanyline-health
+
+Purpose:
+  Racine du crate `vanyline-health` : la "santé du code" d'un dépôt, calculée par UN SEUL code
+  qui s'exécute à l'identique en local (sandbox du développeur, cli) et au central (service de
+  revue de MR). Un relecteur de code produit par des LLMs doit voir la même synthèse verte/rouge
+  que l'auteur ; l'invariant visé est « même commande, mêmes versions d'outils, même rapport ».
+  Aujourd'hui la batterie de vérification vit à trois endroits qui dérivent (prose d'AGENTS.md,
+  `.github/workflows/test.yml`, agent `validator` — cf. la leçon F2/cfgstore d'AGENTS.md :
+  « unwraps de test verts en local, rouges en CI »). Ce crate devient la source unique des
+  INVOCATIONS ; les règles elles-mêmes (lints clippy, tests, seuils) restent dans le projet
+  analysé (`[workspace.lints]`, config clippy, tests) — il ne déclare aucune règle.
+  Crate feuille, comme `vanyline-tools` et `vanyline-cfgstore` : aucune dépendance interne,
+  aucun rig/rmcp/kube, consommable par la sandbox, le cli et un futur service central sans
+  tirer le harnais LLM. Il existe séparément de `vanyline-tools` parce que (1) ce dernier est
+  consacré aux outils LLM bornés (sorties 8 KiB), alors que la santé exige des sorties
+  complètes parsées, et (2) ses types sont exportés en TypeScript (ts-rs) vers
+  `@vanyline/protocol`, ce que `vanyline-tools` n'a pas vocation à porter.
+  Fichier neuf, conception.
+
+Owns:
+  ./lib.rs
+
+Can modify:
+  ../Cargo.toml
+
+Can read:
+  /tooling.sdd
+  /vanyline.sdd
+  /.github/workflows/test.yml
+  /docs/architecture.md
+
+Structure:
+  vanyline_health:: — onze modules publics, aucun re-export plat
+    ├── error — ./error.sdd : @HealthError (`VNL-HLT-NNN`)
+    ├── report — ./report.sdd : modèle de rapport sérialisable (@HealthReport et ses parties),
+    │   source des types TypeScript
+    ├── lcov — ./lcov.sdd : parseur de couverture lcov
+    ├── cargo_messages — ./cargo_messages.sdd : parseur des diagnostics JSON de cargo/clippy
+    ├── tsc_text — ./tsc_text.sdd : parseur de la sortie texte de tsc/vue-tsc
+    ├── ruff_json — ./ruff_json.sdd : parseur de `ruff check --output-format json`
+    ├── hadolint_json — ./hadolint_json.sdd : parseur de `hadolint --format json`
+    ├── diff — ./diff.sdd : lignes modifiées d'un diff, restriction du rapport à ce périmètre
+    ├── checks — ./checks.sdd : presets de vérifications par langage (argv, jamais shell)
+    └── runner — ./runner.sdd : exécution des vérifications et assemblage du rapport
+
+Exposes:
+  Les onze `pub mod` ci-dessus ; feature cargo `ts-rs` (optionnelle, désactivée par défaut)
+  qui dérive `ts_rs::TS` sur les types de ./report.rs et active leur export vers
+  `/packages/protocol/src/generated/`.
+
+Must:
+  Rester sans dépendance interne au workspace et sans `rig-core`/`rmcp`/`kube`.
+  Garder tout le contenu des modules `lcov`, `cargo_messages`, `diff`, `checks` et `report`
+    pur (aucune I/O, aucun réseau, aucune horloge) ; la seule I/O du crate vit dans ./runner.rs.
+  Ne jamais invoquer un shell : toute commande lancée par le crate est un argv
+    (règle transverse de /vanyline.sdd, « Must not » sur l'interpolation en shell).
+  Porter l'exemption `cfg(test)` de la famille `unwrap`/`expect` en racine, comme les autres
+    crates (/tooling.sdd).
+
+Must not:
+  Définir une règle de qualité propre (seuil de couverture, liste de lints, gate pass/fail) :
+    le crate rapporte ; l'interprétation (gate de MR) appartient aux consommateurs.
+  Dépendre de `vanyline-lib` ou de `vanyline-tools` (feuille).
+
+Depends on:
+  serde, serde_json, thiserror, tokio (process, fs, time, io-util — runner seulement),
+  tracing, ts-rs (optionnel).
+
+Tasks:
+  [ ] Ajouter `health` aux membres de /Cargo.toml (workspace UNIQUE, `lints.workspace = true`,
+    jamais de table `[lints]` locale) et à /vanyline.sdd, /AGENTS.md (liste des crates).
+  [ ] Décider où s'exporte ts-rs : /vanyline.sdd dit « généré par vanyline-lib » ; ce crate
+    génère ses propres types, il faut amender cette règle et le job CI `tsrs` de
+    /.github/workflows/test.yml (`cargo test -p vanyline-health --features ts-rs` en plus).
+  [?] Nom du crate (`vanyline-health`) : « health » dit mieux la vision (synthèse pour un
+    relecteur) que « quality » ou « checks » — à confirmer.
+  [ ] Rédiger puis implémenter les specs enfants, dans l'ordre : error, report, lcov,
+    cargo_messages, tsc_text, ruff_json, hadolint_json, diff, checks, runner.
+
+Done when:
+  Les dix specs enfants sont revues, leurs Scenario passent, et la batterie complète
+  (check, test, build, clippy `--all-targets -D warnings`, fmt, `tsrs`) est verte.
+
+Scenario: crate_feuille_sans_harnais_llm
+  Given `health/Cargo.toml` avec les dépendances de `Depends on`
+  When `cargo tree -p vanyline-health` est examiné
+  Then aucun crate `vanyline-*`, `rig-core`, `rmcp` ni `kube` n'y figure

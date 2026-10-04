@@ -1,0 +1,57 @@
+Spec: Ruff json
+
+Platform: Rust/vanyline-health/serde_json
+
+Purpose:
+  Parseur pur de `ruff check --output-format json` vers une liste d'@Issue : l'analyse statique
+  Python. Les règles viennent de la configuration `ruff` du projet ; ce fichier ne fait que
+  normaliser leur sortie. Fichier neuf, conception.
+
+Owns:
+  ./ruff_json.rs
+
+Can read:
+  ./report.sdd
+  ./cargo_messages.sdd
+
+Exposes:
+  @parse_ruff_json(stdout: &str, root: &Path, check_id: &str) -> Result<Vec<Issue>, HealthError>
+
+Accepts:
+  `stdout` : un tableau JSON de diagnostics ruff, chacun portant `code`, `message`,
+  `filename`, `location { row, column }`. `root` : racine du dépôt (relativisation).
+
+Returns:
+  Une @Issue par diagnostic : `path` = `filename` relativisé à `root` (séparateur `/`), `line` =
+  `location.row`, `column` = `location.column`, `code` = `code` (ex. `F401`, absent si `null`),
+  `severity` = `error` (ruff ne distingue pas : tout diagnostic est une erreur de lint),
+  `message`. Triées par (path, line, column, code), dédoublonnées. Un fichier hors de `root`
+  est ignoré. Sortie vide (aucun diagnostic) : `[]` JSON ou chaîne vide → liste vide.
+
+Raises:
+  Une sortie non vide qui n'est pas un tableau JSON valide rend @HealthError::InvalidCheck { id: check_id, reason } — c'est la vérification qui
+  est « inexploitable » (le runner la marque `errored`), pas un vert.
+
+Must:
+  Distinguer « aucun diagnostic » de « sortie illisible » : la seconde n'est jamais un vert.
+  Rester déterministe.
+
+Scenario: diagnostic_simple
+  Given `[{"code":"F401","message":"x imported but unused","filename":"/repo/a.py","location":{"row":3,"column":1}}]`, root `/repo`
+  When @parse_ruff_json
+  Then une Issue {path "a.py", line 3, column 1, code Some("F401")}
+
+Scenario: aucun_diagnostic
+  Given `[]`, puis une chaîne vide
+  When @parse_ruff_json
+  Then `Ok(vec![])` dans les deux cas
+
+Scenario: sortie_illisible
+  Given `ruff: command not found`
+  When @parse_ruff_json
+  Then `Err` @InvalidCheck
+
+Scenario: fichier_hors_racine
+  Given un diagnostic dont `filename` est hors de root
+  When @parse_ruff_json
+  Then aucune Issue

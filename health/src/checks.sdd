@@ -1,0 +1,191 @@
+Spec: Checks
+
+Platform: Rust/vanyline-health
+
+Purpose:
+  Presets de vérifications par langage : la liste des INVOCATIONS (argv) que lancent la
+  sandbox, le cli, l'agent `validator` et le service central. C'est la source unique de ce qui
+  était réparti entre AGENTS.md, `test.yml` et le validator. Même patron que
+  `toolchain_preset` du controller (recette d'env par toolchain) : la connaissance « comment
+  vérifier un projet Rust » vit dans le code, le projet analysé ne déclare rien. Les règles
+  (lints, tests) viennent de ce projet ; ce fichier ne choisit que les commandes et leurs
+  drapeaux. Pur. Fichier neuf, conception.
+
+Owns:
+  ./checks.rs
+
+Can read:
+  ./report.sdd
+  ./error.sdd
+  /AGENTS.md
+  /.github/workflows/test.yml
+  /controller/src/sandbox.sdd
+  /sandbox/src/maint.sdd
+
+Exposes:
+  @OutputKind — enum : `None`, `Lcov { path: String }` (fichier écrit par la commande, chemin
+    relatif à `out_dir`, jetons admis), `CargoMessages`, `TscText`, `RuffJson`, `HadolintJson`
+    (sorties sur stdout, parsées par les modules `cargo_messages`, `tsc_text`, `ruff_json`,
+    `hadolint_json`).
+  @Expand — enum décrivant comment le runner multiplie UNE déclaration en plusieurs
+    vérifications avant exécution : `NpmWorkspaces` (une vérification par entrée du champ
+    `workspaces` du `package.json` situé à `cwd` ; jetons `{workspace}` = chemin du workspace,
+    `{workspace_slug}` = ce chemin avec `/` remplacé par `-`) ; `Files { globs: Vec<String> }`
+    (une seule vérification dont l'élément d'argv exactement égal à `{files}` est remplacé par
+    la liste des fichiers SUIVIS par git qui correspondent aux globs ; aucun fichier ⇒ la
+    vérification est `skipped`).
+  @Check { id: String, kind: CheckKind, argv: Vec<String>, cwd: String, output: OutputKind,
+    expand: Option<Expand>, serial_group: Option<String>, after: Option<String> } —
+    `serial_group` : deux vérifications du même groupe ne s'exécutent jamais ensemble (absent ⇒
+    groupe implicite `argv[0]`+`cwd`) ; `after` : id d'une vérification à terminer d'abord — `cwd` relatif à la racine du dépôt (`""` = racine). `argv[0]`
+    est le programme. Après expansion NpmWorkspaces, l'`id` devient `<id>:<workspace>`.
+  @preset_checks(language: &str) -> Vec<Check> — preset d'UN langage, `[]` si inconnu.
+  @checks_for_languages(languages: &[String]) -> Vec<Check> — concaténation dans l'ordre fixe
+    `rust`, `js-ts`/`vue`, `python`, `dockerfile`, sans doublon d'id (`js-ts` et `vue` ensemble
+    ne produisent qu'un jeu) ; les noms de langages sont ceux de
+    `vanyline-maint detect` (/sandbox/src/maint.sdd).
+  @OUT_DIR_TOKEN — constante `"{out_dir}"` : sous-chaîne d'un élément d'argv remplacée par le
+    runner par le répertoire de sortie du run.
+  @unchecked_languages(languages: &[String]) -> Vec<String> — les langages reçus pour lesquels
+    @preset_checks rend `[]` : ils sont rapportés comme « non vérifiés » plutôt que passés sous
+    silence (un langage détecté sans vérification ne doit pas faire croire à un vert complet).
+  @validate(check: &Check) -> Result<(), HealthError> — `InvalidCheck` si `id` vide, `argv` vide,
+    `argv[0]` vide, ou `cwd` absolu / contenant `..`.
+
+Returns:
+  Preset `rust` (v1), dans cet ordre :
+    1. `rust-fmt` (kind `format`) : `cargo fmt --all -- --check`
+    2. `rust-clippy` (kind `lint`, output `CargoMessages`) :
+        `cargo clippy --workspace --all-targets --message-format=json -- -D warnings`
+    3. `rust-coverage` (kind `coverage`, output `Lcov`) :
+        `cargo llvm-cov --workspace --lcov --output-path {out_dir}/rust.lcov`
+        — une seule exécution des tests produit à la fois le verdict des tests (code de sortie)
+        et la couverture ; il n'y a pas de vérification `tests` séparée en v1.
+  Groupes de sérialisation et préalables : `rust-fmt` (groupe `fmt`), `rust-clippy` (groupe
+  `cargo-debug`), `rust-coverage` (groupe `cargo-llvm-cov`, répertoire de build propre à
+  llvm-cov) — les trois peuvent donc s'exécuter en parallèle ; `ts-coverage` a pour `after`
+  `ts-coverage-provider` ; `py-coverage` a pour `after` `py-tests`.
+  Preset `js-ts` et `vue` (même preset, un seul jeu de vérifications si les deux sont détectés ;
+    expand `NpmWorkspaces`, cwd racine ; workspaces indépendants, sans ordre requis) :
+    4. `ts-check` (kind `lint`, output `TscText`) :
+        `npm run check --workspace={workspace} --if-present` — le script `check` du projet
+        (`vue-tsc`/`tsc`) ; ce sont les règles du projet, pas celles du crate
+    4b. `ts-coverage-provider` (kind `tests`, préalable de `ts-coverage`, un par workspace) :
+        `npm install --no-save --no-audit --no-fund @vitest/coverage-v8@{vitest_version}` — le
+        runner substitue `{vitest_version}` par la version lue dans `node_modules` du workspace
+        (absente ⇒ la vérification est `errored`, `ts-coverage` n'est pas lancée).
+    5. `ts-coverage` (kind `coverage`, output `Lcov { path: ts-cov/{workspace_slug}/lcov.info }`) :
+        `npm run test --workspace={workspace} --if-present -- --coverage
+        --coverage.reporter=lcov --coverage.reportsDirectory={out_dir}/ts-cov/{workspace_slug}`
+        (vitest ; une seule exécution donne verdict des tests et couverture, comme pour Rust).
+    Un projet sans `workspaces` est traité comme un unique workspace `.` et l'argument
+    `--workspace={workspace}` est alors retiré de l'argv (règle appliquée par le runner).
+  Preset `python` :
+    6. `py-ruff` (kind `lint`, output `RuffJson`) : `ruff check --output-format json .`
+    7. `py-tests` (kind `tests`) : `coverage run -m pytest`
+    8. `py-coverage` (kind `coverage`, output `Lcov { path: py.lcov }`) :
+        `coverage lcov -o {out_dir}/py.lcov` — consomme les données de `py-tests` (même run,
+        même cwd) ; si `py-tests` a échoué, cette vérification s'exécute quand même et ne
+        produit une couverture que si des données existent (sinon `errored`).
+  Preset `dockerfile` :
+    9. `docker-hadolint` (kind `lint`, output `HadolintJson`, expand `Files` sur
+        `Dockerfile`, `**/Dockerfile`, `**/Dockerfile.*`, `**/*.Dockerfile`, `**/Containerfile`) :
+        `hadolint --format json {files}`.
+  L'outil de chaque vérification (`cargo-llvm-cov`, `vue-tsc`/`vitest` via les dépendances du
+  projet, `ruff`, `coverage`/`pytest` via l'environnement Python du projet, `hadolint`) doit
+  être présent dans l'environnement du run ; son absence est un échec visible de CETTE
+  vérification (`errored` ou `failed`, jamais un vert).
+
+Must:
+  Utiliser les MÊMES drapeaux que /.github/workflows/test.yml et /AGENTS.md pour les commandes
+    qui y figurent (`--workspace`, `--all-targets`, `-D warnings`) : leur absence a déjà causé
+    une dérive local/CI (F2). Seul `--message-format=json` s'ajoute, pour la sortie
+    structurée.
+  Ne produire que des argv, jamais de chaîne shell, et aucun `sh -c`.
+  Garder des `id` stables (clés des rapports stockés).
+
+Must not:
+  Lire le dépôt analysé ni choisir en fonction de sa configuration : la décision par langage
+    vient de l'appelant (détection).
+  Déclarer une règle de qualité (liste de lints, seuil).
+
+Tasks:
+  [-] TRANCHÉ (2026-10-04) : l'ordre n'est PAS un fail-fast. On vise « catch all the failures » :
+    toutes les vérifications s'exécutent et toutes sont rapportées, en parallèle quand rien ne les
+    en empêche (./runner.sdd). Les diagnostics des serveurs LSP (rust-analyzer…) sont collectés
+    AVANT les commandes (ils travaillent déjà dans le pod), ce qui évite des verrous cargo
+    concurrents. `cargo check`/`cargo build` restent absents du preset (impliqués par clippy
+    et par les tests).
+  [?] `cargo llvm-cov` exige `llvm-tools` et le binaire `cargo-llvm-cov` dans le toolchain
+    `rust` : l'image `/toolchains/rust/Dockerfile` (volume en lecture seule, rien
+    d'installable au runtime) doit les embarquer — à spécifier avec la spec `toolchains/`.
+  [-] TRANCHÉ (2026-10-04) : les workspaces npm sont supposés INDÉPENDANTS (aucun ordre) ; si un
+    ordre devient nécessaire il se déclarera dans le projet, pas dans ce crate.
+  [-] TRANCHÉ (2026-10-04) : `vitest --coverage` sans fournisseur de couverture ne produit pas de
+    lcov ; on installe donc le fournisseur de façon INCONDITIONNELLE pour obtenir le lcov même
+    s'il n'est pas dans les dépendances du projet. Mécanisme : une vérification préalable
+    `ts-coverage-provider` (`npm install --no-save --no-audit --no-fund
+    @vitest/coverage-v8@<version de vitest du projet>`, version lue par le runner dans
+    `node_modules/vitest/package.json`) avant `ts-coverage` ; `--no-save` : ni `package.json`
+    ni lockfile ne sont modifiés (seul `node_modules`, ignoré par git, change).
+  [?] Une installation globale dans l'image toolchain `node` ne conviendrait pas : le module de
+    couverture doit se résoudre depuis le projet et sa version doit correspondre à celle de
+    vitest ; d'où l'installation `--no-save` par run. À valider par un essai réel sur
+    `frontend/` (réseau sortant requis vers le registre npm : à ouvrir dans l'egress de la
+    sandbox).
+  [?] Présence de `ruff`, `hadolint`, `coverage`, `pytest` dans les images toolchain
+    (`/toolchains/python`, `/toolchains/docker`) : `ruff` et `hadolint` sont déjà embarqués
+    pour les LSP (`vnl-ruff-lsp`, `vnl-hadolint-lsp`) mais leur présence sur le PATH du shell
+    est à vérifier.
+  [ ] Test de non-dérive : un test lit `/.github/workflows/test.yml` et vérifie que les
+    commandes du preset `rust` y figurent (hors `--message-format=json`).
+
+Scenario: preset_rust_complet
+  Given le langage `rust`
+  When @preset_checks("rust")
+  Then trois checks d'id `rust-fmt`, `rust-clippy`, `rust-coverage`, dans cet ordre, kinds `format`, `lint`, `coverage`
+
+Scenario: clippy_memes_drapeaux_que_la_ci
+  Given le preset `rust-clippy`
+  When son argv est comparé au pas clippy de /.github/workflows/test.yml
+  Then `--workspace`, `--all-targets` et `-D warnings` sont présents des deux côtés
+
+Scenario: langage_inconnu
+  Given le langage `cobol`
+  When @preset_checks("cobol")
+  Then `[]`
+
+Scenario: ordre_et_unicite
+  Given `["rust", "rust"]`
+  When @checks_for_languages
+  Then un seul jeu de trois checks
+
+Scenario: preset_ts_par_workspace
+  Given les langages `js-ts` et `vue`
+  When @checks_for_languages
+  Then un seul jeu de trois vérifications `ts-check`, `ts-coverage-provider` et `ts-coverage`, chacune avec `expand: NpmWorkspaces`
+
+Scenario: preset_python_et_dockerfile
+  Given les langages `python` et `dockerfile`
+  When @checks_for_languages
+  Then `py-ruff`, `py-tests`, `py-coverage` puis `docker-hadolint` (expand `Files`), dans cet ordre
+
+Scenario: langages_non_verifies
+  Given les langages `rust`, `go`, `terraform`
+  When @unchecked_languages
+  Then `["go", "terraform"]`
+
+Scenario: argv_sans_shell
+  Given tous les presets
+  When leurs argv sont inspectés
+  Then aucun `argv[0]` n'est `sh`/`bash` et aucun élément n'est un `-c` suivi d'une chaîne composée
+
+Scenario: validate_rejette_cwd_evade
+  Given un @Check dont `cwd` vaut `../x` ou `/etc`
+  When @validate
+  Then @InvalidCheck
+
+Scenario: validate_rejette_argv_vide
+  Given un @Check à `argv` vide
+  When @validate
+  Then @InvalidCheck

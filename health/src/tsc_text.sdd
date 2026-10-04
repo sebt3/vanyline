@@ -1,0 +1,69 @@
+Spec: Tsc text
+
+Platform: Rust/vanyline-health
+
+Purpose:
+  Parseur pur de la sortie TEXTE de `tsc`/`vue-tsc` (lancés par le script `check` du projet) vers
+  une liste d'@Issue. Ces outils n'ont pas de format JSON stable : le format ligne
+  `chemin(ligne,col): error TSnnnn: message` est le contrat, le seul sur lequel on s'appuie.
+  Fichier neuf, conception.
+
+Owns:
+  ./tsc_text.rs
+
+Can read:
+  ./report.sdd
+  ./cargo_messages.sdd
+
+Exposes:
+  @parse_tsc_text(stdout: &str, prefix: &str, check_id: &str) -> Vec<Issue> — pure,
+  infaillible.
+
+Accepts:
+  `stdout` : sortie combinée de la commande ; `prefix` : chemin du workspace relatif à la racine
+  du dépôt (`""` pour la racine), préfixé aux chemins rapportés.
+
+Returns:
+  Une @Issue par ligne de la forme `<chemin>(<ligne>,<colonne>): error|warning TS<n>: <message>`
+  (et la variante `-pretty false` de tsc) : `path` = `prefix/chemin` normalisé (séparateur `/`,
+  sans `./`), `line`/`column` numériques, `code` = `TS<n>`, `severity` = `error`/`warning`,
+  `message` = le texte après `TS<n>: ` (les lignes de continuation indentées qui suivent
+  sont ajoutées au message, séparées par un espace). Triées par (path, line, column, code) et
+  DÉDOUBLONNÉES sur (path, line, column, code, message).
+
+Handles:
+  Les lignes qui ne correspondent pas (bannières npm, `Found N errors`, séquences ANSI de
+  couleur) sont ignorées ; les séquences ANSI sont retirées avant l'analyse. Un chemin
+  absolu hors du dépôt est ignoré.
+
+Must:
+  Ne jamais paniquer sur une entrée arbitraire.
+  Rester déterministe (tri total).
+
+Must not:
+  Reclasser la sévérité d'un diagnostic ni ignorer un `error`.
+
+Scenario: erreur_simple
+  Given `src/a.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'.`, prefix `frontend`
+  When @parse_tsc_text
+  Then une Issue {path "frontend/src/a.ts", line 12, column 5, severity error, code Some("TS2322")}
+
+Scenario: ligne_de_continuation
+  Given une erreur suivie d'une ligne indentée de détail
+  When @parse_tsc_text
+  Then le détail est ajouté au `message`
+
+Scenario: bruit_ignore
+  Given une bannière npm, `Found 2 errors in 1 file.` et des séquences ANSI
+  When @parse_tsc_text
+  Then seules les lignes de diagnostic donnent des Issue
+
+Scenario: doublon
+  Given deux fois la même ligne
+  When @parse_tsc_text
+  Then une seule Issue
+
+Scenario: racine_sans_prefixe
+  Given `a.ts(1,1): error TS1005: x` et prefix `""`
+  When @parse_tsc_text
+  Then path `a.ts`

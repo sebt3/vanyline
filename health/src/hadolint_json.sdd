@@ -1,0 +1,55 @@
+Spec: Hadolint json
+
+Platform: Rust/vanyline-health/serde_json
+
+Purpose:
+  Parseur pur de `hadolint --format json` vers une liste d'@Issue : l'analyse statique des
+  Dockerfile. Les règles viennent de la configuration `hadolint` du projet. Fichier neuf,
+  conception.
+
+Owns:
+  ./hadolint_json.rs
+
+Can read:
+  ./report.sdd
+  ./ruff_json.sdd
+
+Exposes:
+  @parse_hadolint_json(stdout: &str, root: &Path, check_id: &str) -> Result<Vec<Issue>, HealthError>
+
+Accepts:
+  `stdout` : un tableau JSON de diagnostics, chacun portant `code` (ex. `DL3008`), `message`,
+  `file`, `line`, `column`, `level` (`error`, `warning`, `info`, `style`). `root` : racine du dépôt.
+
+Returns:
+  Une @Issue par diagnostic de niveau `error` ou `warning` : `path` = `file` relativisé à `root`,
+  `severity` = `error`/`warning`, `code`, `message`. Les niveaux `info` et `style` sont
+  ignorés (bruit sans conséquence sur la santé). Tri et dédoublonnage comme ./ruff_json.sdd.
+  Sortie vide : liste vide.
+
+Raises:
+  Sortie non vide qui n'est pas un tableau JSON valide : @HealthError::InvalidCheck.
+
+Must:
+  Distinguer « aucun diagnostic » de « sortie illisible » (jamais un vert).
+  Rester déterministe.
+
+Scenario: warning_et_error_retenus
+  Given deux diagnostics de niveau `warning` et `error`
+  When @parse_hadolint_json
+  Then deux Issue avec les sévérités correspondantes
+
+Scenario: info_et_style_ignores
+  Given des diagnostics de niveau `info` et `style`
+  When @parse_hadolint_json
+  Then aucune Issue
+
+Scenario: sortie_illisible
+  Given `hadolint: not found`
+  When @parse_hadolint_json
+  Then `Err` @InvalidCheck
+
+Scenario: chemin_relatif_a_la_racine
+  Given `file` valant `/repo/deploy/Dockerfile` et root `/repo`
+  When @parse_hadolint_json
+  Then path `deploy/Dockerfile`

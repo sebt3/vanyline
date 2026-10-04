@@ -1,0 +1,108 @@
+Spec: Report
+
+Platform: Rust/vanyline-health/serde/ts-rs
+
+Purpose:
+  Modèle unique, sérialisable, du rapport de santé : ce que la sandbox renvoie, ce que le cli et
+  l'IDE vanyline affichent, ce que le service central stocke et pose en commentaire de MR. Les
+  consommateurs ne parsent JAMAIS de sortie brute (lcov, JSON clippy) : ils lisent ces types
+  (même patron que @ChatEvent de `vanyline-lib`/event.sdd : type Rust, export ts-rs vers
+  `@vanyline/protocol`). Types purs, sans I/O. Fichier neuf, conception.
+
+Owns:
+  ./report.rs
+
+Can modify:
+  /packages/protocol/src/generated/health-report.ts
+
+Can read:
+  ./lib.rs
+  ../../lib/src/event.sdd
+  /.cargo/config.toml
+
+Exposes:
+  Tous les types : derives `Debug Clone PartialEq Serialize Deserialize`, plus `ts_rs::TS`
+  sous la feature `ts-rs` ; les `u64` s'exportent en `number` (`TS_RS_LARGE_INT = "number"`
+  de `.cargo/config.toml`). Chemins : TOUJOURS relatifs à la racine du dépôt, séparateur `/`.
+  @LineRange { start: u32, end: u32 } — plage de lignes inclusive, `start <= end`, base 1.
+  @CheckKind — enum `snake_case` : `format`, `lint`, `tests`, `coverage`, `new_code`.
+  @CheckStatus — enum `snake_case` : `passed` (code 0), `failed` (code ≠ 0, la vérification a
+    parlé), `errored` (n'a pas pu s'exécuter ou sa sortie est inexploitable), `skipped` (rien
+    à vérifier : par ex. aucun Dockerfile suivi ; n'altère pas `status()`).
+  @CheckResult { id: String, kind: CheckKind, status: CheckStatus, exit_code: Option<i32>,
+    duration_ms: u64, output_tail: String } — `exit_code` absent si non démarrée ou tuée par
+    signal ; `output_tail` borné par @runner (voir ./runner.sdd).
+  @Severity — enum `snake_case` : `error`, `warning`.
+  @Issue { check_id: String, path: String, line: u32, column: u32, severity: Severity,
+    code: Option<String>, message: String }
+  @FileCoverage { path: String, lines_found: u32, lines_hit: u32, uncovered: Vec<LineRange> } —
+    `uncovered` = plages de lignes instrumentées à 0 passage, triées, disjointes, fusionnées
+    si contiguës.
+  @CoverageTotals { lines_found: u32, lines_hit: u32 } ; `percent()` retourne `f64` en [0,100],
+    `100.0` quand `lines_found == 0` (rien à couvrir n'est pas un défaut).
+  @CoverageReport { files: Vec<FileCoverage> } triés par `path` ; `totals()` somme les fichiers.
+  @NewCode { base: String, coverage: CoverageReport, issues: Vec<Issue> } — le rapport
+    restreint aux lignes modifiées par rapport à `base` (vue du relecteur de MR).
+  @HealthReport { revision: Option<String>, checks: Vec<CheckResult>, coverage:
+    Option<CoverageReport>, issues: Vec<Issue>, new_code: Option<NewCode>,
+    unchecked_languages: Vec<String> } — `unchecked_languages` : langages détectés sans
+    aucune vérification (aucun preset) ; information pour le relecteur, SANS effet sur
+    `status()` (qui ne juge que ce qui a été exécuté), mais jamais omise : un vert qui ignore
+    un langage doit le dire.
+    Méthode `status(&self) -> CheckStatus` de @HealthReport : `failed` si au moins une vérification est `failed` ;
+    sinon `errored` si au moins une est `errored` ; sinon `passed`. Un rapport sans aucune
+    vérification est `passed`.
+
+Must:
+  Faire de `status()` la seule définition du "vert" : aucun consommateur ne la recalcule.
+  Rendre `uncovered` normalisé (trié, disjoint, fusionné) pour que deux calculs du même état
+    soient `==`.
+  Garder `coverage` à `None` (jamais un rapport vide) quand aucune vérification de couverture
+    n'a produit de données : "pas de mesure" ≠ "0 %".
+  Exporter les types TypeScript dans `health-report.ts` sous la feature `ts-rs`, sans
+    modification manuelle du fichier généré.
+
+Must not:
+  Contenir un seuil, un gate ou un verdict autre que `status()` (interprétation = consommateur).
+  Porter un chemin absolu ou propre à une machine (le rapport doit être comparable entre
+    machines — c'est la raison d'être du crate).
+
+Scenario: status_failed_prime_sur_errored
+  Given un rapport avec une vérification `errored` et une `failed`
+  When `status()` est appelé
+  Then le résultat est `failed`
+
+Scenario: status_errored_sans_failed
+  Given un rapport avec une vérification `passed` et une `errored`
+  When `status()` est appelé
+  Then le résultat est `errored`
+
+Scenario: langage_non_verifie_visible_sans_changer_le_statut
+  Given un rapport `passed` dont `unchecked_languages` vaut `["go"]`
+  When `status()` est appelé, puis le rapport est sérialisé
+  Then `passed`, et le JSON contient `"unchecked_languages":["go"]`
+
+Scenario: rapport_vide_est_passed
+  Given un rapport sans vérification
+  When `status()` est appelé
+  Then le résultat est `passed`
+
+Scenario: percent_sans_ligne_instrumentee
+  Given un @CoverageTotals { lines_found: 0, lines_hit: 0 }
+  When `percent()` est appelé
+  Then le résultat est `100.0`
+
+Scenario: percent_normal
+  Given un @CoverageTotals { lines_found: 8, lines_hit: 6 }
+  When `percent()` est appelé
+  Then le résultat est `75.0`
+
+Scenario: roundtrip_json_stable
+  Given un @HealthReport complet
+  When il est sérialisé en JSON puis désérialisé
+  Then le résultat est `==` à l'original, et les enums apparaissent en `snake_case`
+
+Scenario: export_typescript
+  Given la feature `ts-rs` activée
+  When `cargo test -p vanyline-health --features ts-rs` s'exécute
+  Then `packages/protocol/src/generated/health-report.ts` existe et `git diff --exit-code` y est propre
