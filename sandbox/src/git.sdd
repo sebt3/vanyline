@@ -12,10 +12,9 @@ Purpose:
   des stderr de push, et l'enveloppe HTTP des erreurs (@GitError → @IntoResponse : corps
   JSON `{"error": <Display>}` avec identifiant `VNL-SBX-0XX`). Chaque commande git
   s'exécute dans une tâche @tokio::task::spawn_blocking, jamais sur l'executor asynchrone.
-  Le fichier ne câble aucune route (c'est ./lib.rs), n'applique AUCUN contrôle de niveau
-  d'accès (voir `Handles` — cohérent avec le `[?]`/`[!]` de ./lib.sdd et ./auth.sdd :
-  @AccessLevel::Read n'est branché nulle part, un JWT Read peut commit/push/merge), et
-  ne pose AUCUNE variable d'environnement `GIT_*` (les sous-processus héritent de l'env
+  Le fichier ne câble aucune route (c'est ./lib.rs), n'applique AUCUN contrôle d'accès
+  (voir `Handles` : la garde est le jeton de l'Owner posé par ./auth.sdd, aucun niveau
+  d'accès n'existe — tout appelant authentifié EST l'Owner), et ne pose AUCUNE variable d'environnement `GIT_*` (les sous-processus héritent de l'env
   du serveur, `HOME` inclus). Un seul fichier, un seul contrat : pas de regroupement.
 
 Owns:
@@ -305,18 +304,18 @@ Handles:
     la publique sans régénérer ; si `.pub` est illisible dans cet état → VNL-SBX-016).
     Les permissions POSIX laissées sont celles d'@fs::create_dir_all (0o755 + umask) pour
     `.ssh` et de ssh-keygen pour la privée — aucun chmod explicite ici, `[?]` `Tasks`.
-  Absence de garde par niveau : ce fichier ne lit jamais @AccessLevel — un JWT `Read`
-    (./auth.rs) passe commit/push/merge/checkout/ssh-key création, comme l'annonce le
-    `[?]` de ./lib.sdd et l'`[!]` de ./auth.sdd. Ce n'est PAS béni ici : même question
-    ouverte, même arbitrage attendu (voir `Tasks`).
+  Absence de garde par niveau : ce fichier ne lit jamais d'identité ni de niveau — tout
+    appelant qui a passé @require_auth (jeton du ServiceAccount de l'Owner, ./auth.sdd) est
+    l'Owner et peut commit/push/merge/checkout/créer la clé SSH. C'est le contrat voulu
+    (décision 2026-10-04), plus une question ouverte.
   Échec de spawn `ssh-keygen` (binaire absent) : VNL-SBX-016 avec le message de l'@io::Error
     dans `stderr` (format `"could not execute ssh-keygen: {e}"`).
   @run_git est un doublon assumé de la logique inline de @run_status (commentaire source :
     ne pas refactorer @run_status, code mergé et testé) — la duplication est un fait du
     fichier actuel, pas un contrat à perpétuer (`Tasks` `[?]`).
-  Modes bypath d'auth (`no_auth`/`static_token`, ./auth.sdd) : toutes les routes git
-    deviennent accessibles avec respectivement aucun header ou le Bearer exact ; le
-    comportement de CE fichier est alors inchangé (il ne voit jamais le mode).
+  Auth : il n'existe aucun mode de contournement (./auth.sdd) ; les tests de ce fichier
+    présentent un jeton d'Owner de test (`auth::test_support`) ; le comportement de CE
+    fichier ne dépend jamais de l'identité.
 
 Must:
   Exposer exactement les seize handlers de la table de ./lib.sdd, chacun sur sa route et
@@ -369,9 +368,9 @@ Must:
     sortie inattendue (toujours @ParseFailed avec `line_no` et la ligne fautive).
 
 Must not:
-  Appliquer un niveau @AccessLevel, lire @AuthInfo ou différencier Read/Admin — ce fichier
-    ne fait PAS de RBAC (le `[!]` de ./auth.sdd reste ouvert ; introduire ici un garde
-    sans arbitrage de Sébastien est hors contrat).
+  Appliquer un niveau d'accès, lire @AuthInfo ou différencier des appelants — ce fichier
+    ne fait PAS de RBAC : la sandbox n'a pas de niveaux (./auth.sdd), introduire ici un
+    garde serait un second mécanisme d'autorisation.
   Poser une variable d'environnement `GIT_*`, désactiver les prompts, poser un timeout ou
     brider la taille des sorties — le code actuel ne le fait pas ; le documenter comme
     dette `[?]`/`[!]`, pas comme propriété à pérenniser silencieusement.
@@ -400,7 +399,7 @@ Depends on:
   ./tools_impl.rs — @confine_path (règles de confinement : canonicalisation de l'ancêtre
     existant le plus profond, évasion → erreur, racine devant exister).
   ./auth.rs — indirection par le middleware de ./lib.sdd uniquement (ce fichier ne l'appelle
-    pas) ; @AccessLevel jamais importé ici.
+    pas) ; aucune notion de niveau n'existe.
   ./maint.rs et `vanyline-maint` (controller) — convention partagée du repli `"main"` de
     @resolve_default_branch (../../docs/architecture.md, section `vanyline-maint`).
   `git` (binaire du pod, image sandbox) et `ssh-keygen` — exécutables externes, hors
@@ -466,9 +465,9 @@ Tasks:
     intégralement en RAM/réponse ; `limit + 1` sur `u32::MAX` fait `--max-count=0` en
     release (= illimité, pas d'erreur). Bordure à borner (clamp `limit`, plafond d'octets)
     ou assumée (client = éditeur authentifié) ?
-  [?] RBAC : aucune route ne branche @AccessLevel::Read (cohérent ./lib.sdd `Tasks [?]`
-    et ./auth.sdd `Tasks [!]`) — décision globale Read-décoratif vs gating écritures
-    (commit/push/merge/checkout/ssh-key création) à prendre une fois, répercutée ici.
+  [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 : la question « RBAC Read/Admin » est
+    TRANCHÉE (pas de niveaux, ./auth.sdd). Les Scenario `no_auth` ci-dessous deviennent
+    « avec un jeton d'Owner de test valide » (migration mécanique, voir ./lib.sdd).
   [?] Permissions des fichiers SSH : `.ssh` créé à 0o755+umask (pas 0o700 explicite) et
     privé à 0o600 par ssh-keygen seulement — ssh refuse un `known_hosts`/clés dans un
     `.ssh` trop ouvert selon les versions ; poser un chmod explicite 0o700 ?
@@ -480,7 +479,7 @@ Tasks:
 
 Done when:
   Chaque Scenario a un test dédié taggé par son titre, compilé, exécuté, vert (unitaires
-    purs pour les parses/argv ; intégrations `no_auth` sur repo git réel pour les routes).
+    purs pour les parses/argv ; intégrations avec jeton d'Owner de test sur repo git réel pour les routes).
   Les douze routes sans couverture HTTP actuelle ont chacune au moins un test de route
     nominal + un test d'enveloppe d'erreur.
   Les `[?]`/`[!]` sont tranchés par Sébastien (notamment cible du push, timeouts, et
@@ -528,14 +527,14 @@ Scenario: parse_status_tete_detachee_passee_litteralement
   Then le résultat est `Ok` avec `branch == "(detached)"` (aucune erreur dédiée ici)
 
 Scenario: status_route_sortie_valide_de_vrai_depot
-  Given un @AppState en `no_auth` dont `sandbox_root` pointe sur un dépôt git réel avec un
+  Given un @AppState avec un jeton d'Owner de test valide dont `sandbox_root` pointe sur un dépôt git réel avec un
     fichier modifié non stagé (../tests/http.rs, pattern existant)
   When `GET /git/status` traverse l'app
   Then la réponse est `200` et le JSON porte la branche du dépôt et un @FileEntry
     `modified`/`staged:false`, `clean:false`
 
 Scenario: status_route_sur_repertoire_sans_depot_renvoie_500_vnl_sbx_004
-  Given un @AppState en `no_auth` dont `sandbox_root` est un répertoire vide sans `.git`
+  Given un @AppState avec un jeton d'Owner de test valide dont `sandbox_root` est un répertoire vide sans `.git`
   When `GET /git/status` traverse l'app
   Then la réponse est `500` et le corps JSON `{"error": …}` commence par
     `"VNL-SBX-004:"` et contient le stderr git « not a git repository »
@@ -543,7 +542,7 @@ Scenario: status_route_sur_repertoire_sans_depot_renvoie_500_vnl_sbx_004
 Scenario: unpushed_delta_calcule_sur_upstream_origin
   Given un dépôt réel avec remote `origin`, la branche courante ayant
     `refs/remotes/origin/<branche>` et 2 commits locaux d'avance
-  When `GET /git/unpushed` traverse l'app (no_auth)
+  When `GET /git/unpushed` traverse l'app (jeton d'Owner de test)
   Then la réponse `200` porte `upstream == "origin/<branche>"`, 2 @CommitEntry dont le
     `sha` a exactement 7 caractères, et `truncated == false`
 
@@ -567,7 +566,7 @@ Scenario: unpushed_tronque_a_deux_cents_commits_avec_drapeau
 
 Scenario: diff_rend_le_patch_brut_et_le_chemin_utilisateur
   Given un dépôt réel dont `a/b.txt` est modifié en working tree et `sandbox_root` confiné
-  When `GET /git/diff?path=a/b.txt` traverse l'app (no_auth)
+  When `GET /git/diff?path=a/b.txt` traverse l'app (jeton d'Owner de test)
   Then la réponse `200` porte `path == "a/b.txt"` (chaîne brute de la query) et `diff`
     égal au stdout de `git diff -- a/b.txt` (patch unifié non vide)
 
@@ -579,19 +578,19 @@ Scenario: diff_staged_true_utilise_l_index
     la seconde uniquement le patch du working tree
 
 Scenario: diff_chemin_evadant_renvoie_500_vnl_sbx_015
-  Given un @AppState en `no_auth` avec un dépôt réel sous `sandbox_root`
+  Given un @AppState avec un jeton d'Owner de test valide avec un dépôt réel sous `sandbox_root`
   When `GET /git/diff?path=../../etc/passwd` traverse l'app
   Then la réponse est `500` avec le message `"VNL-SBX-015: path escapes sandbox root:
     ../../etc/passwd"` (chemin utilisateur d'origine, pas le chemin résolu)
 
 Scenario: diff_query_path_absente_rejetee_par_axum
-  Given un @AppState en `no_auth`
+  Given un @AppState avec un jeton d'Owner de test valide
   When `GET /git/diff` sans paramètre `path` traverse l'app
   Then la réponse est une erreur de validation axum (400/422) avec corps non-@GitError,
     et aucun processus git n'est lancé
 
 Scenario: stage_liste_vide_est_un_no_op_ok_sans_git
-  Given un @AppState en `no_auth` sur un dépôt réel
+  Given un @AppState avec un jeton d'Owner de test valide sur un dépôt réel
   When `POST /git/stage` avec corps `{"paths":[]}` traverse l'app
   Then la réponse est `200` `{"ok":true}` et l'index du dépôt est inchangé (aucun
     `git add` exécuté)
@@ -605,7 +604,7 @@ Scenario: stage_et_unstage_deplacent_les_chemins_dans_l_index
     n.txt` et `restore --staged -- s.txt`
 
 Scenario: stage_chemin_evadant_rejette_vnl_sbx_015
-  Given un @AppState en `no_auth` avec un dépôt réel
+  Given un @AppState avec un jeton d'Owner de test valide avec un dépôt réel
   When `POST /git/stage` avec `{"paths":["../outside.txt"]}` traverse l'app
   Then la réponse est `500` `"VNL-SBX-015: path escapes sandbox root: ../outside.txt"`
     et aucun fichier hors de la racine n'est touché
@@ -648,7 +647,7 @@ Scenario: creation_branche_acceptee_depuis_from_ou_head
     `branch feat/b main`
 
 Scenario: refs_avec_tiret_initial_renvoient_400_vnl_sbx_014
-  Given un @AppState en `no_auth` sur un dépôt réel en merge conflictuel
+  Given un @AppState avec un jeton d'Owner de test valide sur un dépôt réel en merge conflictuel
   When les requêtes suivantes traversent l'app : `POST /git/branches` avec
     `{"name":"--help"}`, `POST /git/checkout` avec `{"branch":"-f"}`, `DELETE
     /git/branches/--abort`, `POST /git/merge` avec `{"branch":"--abort"}`, `POST
@@ -743,7 +742,7 @@ Scenario: parse_log_ligne_malformee_et_sortie_vide
 
 Scenario: ssh_key_status_lorsqu_absente_rend_false_sans_erreur
   Given un @ssh_home temporaire (via env HOME du test) ne contenant aucun `.ssh`
-  When `GET /git/ssh-key` traverse l'app (no_auth)
+  When `GET /git/ssh-key` traverse l'app (jeton d'Owner de test)
   Then la réponse est `200` `{"exists":false,"public_key":null}` — l'absence de clé est
     un état normal, jamais une erreur
 
@@ -789,20 +788,18 @@ Scenario: merge_abort_annule_la_fusion_engagee
 
 Scenario: toute_erreur_git_est_enveloppee_en_json_error
   Given n'importe quelle route git déclenchée en erreur (dépôt absent pour status,
-    chemin évadant pour diff, `--abort` pour checkout…) sur l'app en `no_auth`
+    chemin évadant pour diff, `--abort` pour checkout…) sur l'app avec un jeton d'Owner de test
   When le corps des réponses est lu
   Then chaque réponse a un `content-type` JSON, un statut `400` (seul InvalidRef) ou
     `500` (toutes les autres variantes), et un corps exact `{"error":"VNL-SBX-0XX: …"}`
     — jamais un corps texte ou un statut 4xx inventé par ce module
 
-Scenario: routes_git_sous_require_auth_decorees_par_auth_sdd
-  Given un @AppState en mode JWT (ni `no_auth` ni `static_token`)
-  When les seize routes `/git/*` sont appelées sans `Authorization` puis avec un JWT
-    portant le groupe @AccessLevel::Read uniquement
-  Then sans jeton chacune répond `401` (garde ./auth.rs, jamais exécutée par ce module)
-    et avec le jeton Read chacune est ACCEPTÉE (commit/push inclus — le module ne branche
-    aucun niveau ; comportement acté comme `[?]`/`[!]` dans ./lib.sdd, ./auth.sdd et les
-    `Tasks` de cette spec, non comme une bénédiction)
+Scenario: routes_git_sous_require_auth
+  Given un @AppState dont l'Owner est alice
+  When les seize routes `/git/*` sont appelées sans `Authorization`, puis avec le jeton valide
+    d'un autre Owner, puis avec le jeton d'alice
+  Then `401` (garde ./auth.rs, jamais exécutée par ce module), `403`, puis chacune ACCEPTÉE
+    (commit/push inclus — le module ne branche aucun niveau : l'Owner a tous les droits)
 
 Example: enveloppes JSON observables
   `GET /git/status` → `{"branch":"main","files":[{"path":"src/lib.rs","state":"modified",

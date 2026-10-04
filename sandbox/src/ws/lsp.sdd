@@ -154,9 +154,8 @@ Exposes:
 Accepts:
   Handshake — toute requête `GET` parvenue à l'handler, c'est-à-dire dont le ticket a
     déjà été racheté (et donc consommé) par la garde : ce fichier ne relit ni query,
-    ni header, ni identité (les @TicketClaims sont jetés en amont, ./ticket.sdd — un
-    @AccessLevel::Read ouvre donc le LSP complet comme un Admin, même `[?]` que
-    ../lib.sdd, non rouvert ici). Sans headers d'upgrade valides, l'extracteur
+    ni header, ni identité (les @TicketClaims sont jetés en amont, ./ticket.sdd — le ticket
+    est une simple capability, aucun niveau d'accès n'existe, ../auth.sdd). Sans headers d'upgrade valides, l'extracteur
     @WebSocketUpgrade rejette (`426`, extension `OnUpgrade` absente en test `oneshot`)
     APRÈS consommation du ticket.
   Segment `{toolchain}` — toute valeur de chemin (percent-décodée) : inconnue ->
@@ -416,7 +415,7 @@ Done when:
     nouveau `unwrap`/`expect` hors `cfg(test)`.
 
 Scenario: ticket_manquant_refuse_le_handshake
-  Given un @build_app avec un @TicketStore vide (configuration `static_token`)
+  Given un @build_app avec un @TicketStore vide (avec un jeton d'Owner de test)
   When `GET /ws/lsp/rust` sans query puis `GET /ws/lsp/rust?ticket=unknown` (avec en-têtes d'upgrade)
   Then les deux réponses sont `401` (corps `VNL-SBX-WS-001` puis `VNL-SBX-WS-002`, mécanique ./ticket.sdd) et aucun process LSP n'est lancé
 

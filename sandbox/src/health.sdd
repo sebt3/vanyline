@@ -1,0 +1,233 @@
+Spec: Health
+
+Platform: Rust/vanyline-sandbox/axum/tokio
+
+Purpose:
+  État de santé du code du pod sandbox, TOUJOURS disponible. Contrat posé par Sébastien le
+  2026-10-04 : une sandbox démarrée doit pouvoir, à tout moment, répondre sur l'état du code.
+  Elle prépare cette information au démarrage ; quand une demande de modification arrive (outil
+  MCP, endpoint de l'éditeur, opération git qui change l'arbre), l'état est recalculé après un
+  délai de calme configurable (`health_cooldown_secs`, 30 s par défaut). Ce fichier porte le
+  cycle de vie de cet état (démarrage, déclenchement, calcul en tâche de fond, fraîcheur) et
+  ses interfaces : routes HTTP `/code-health/*` (IDE vanyline, cli, service central de revue de
+  MR) et outil MCP `code_health` (agents LLM, kydah-code). Tous lisent le MÊME état, calculé par
+  le MÊME code (`vanyline_health::runner`), donc le même vert partout. Aucune logique de
+  vérification ici (presets, parsing, restriction au diff : crate `vanyline-health`) — seulement :
+  quand recalculer, avec quoi, et comment exposer le résultat.
+  Les routes s'appellent `/code-health` et NON `/health` : `/health` est la sonde de liveness du
+  port d'exploitation, sans authentification (./lib.sdd). Fichier neuf, conception.
+
+Owns:
+  ./health.rs
+
+Can modify:
+  ./lib.rs
+  ./config.rs
+  ./tools_impl.rs
+  ./mcp.rs
+
+Can read:
+  ./auth.sdd
+  ./git.sdd
+  ./maint.sdd
+  ./lsp.sdd
+  ./venv.sdd
+  ./config.sdd
+  ../../health/src/runner.sdd
+  ../../health/src/checks.sdd
+  ../../health/src/report.sdd
+
+Exposes:
+  @CodeHealth — état partagé du pod (`Arc`, dans @AppState), handle unique de ce module :
+    @CodeHealth::notify_modified() — appelé par les points de modification (voir `Handles`),
+    @CodeHealth::snapshot() -> @HealthState, @CodeHealth::refresh(base) — recalcul forcé.
+  @HealthState — `{ phase: "computing" | "fresh" | "stale", report: Option<HealthReport>,
+    computed_at: Option<timestamp>, stale_since: Option<timestamp>, base: Option<String> }` :
+    `computing` (un calcul est en cours ; `report` est le dernier terminé, `null` pendant le
+    tout premier), `fresh` (aucune modification depuis le dernier calcul terminé), `stale`
+    (modifications survenues depuis, nouveau calcul planifié ou en cours).
+  Routes (routeur protégé de ./lib.rs, jeton de l'Owner, comme `/git/*` et `/mcp`) :
+    `GET /code-health` — 200 + @HealthState, TOUJOURS (jamais 404, y compris pendant le tout
+      premier calcul : `phase: "computing"`, `report: null`).
+    `POST /code-health/refresh` — corps optionnel `{ "base": <ref git>?, "languages": [<nom>]? }` ;
+      202, recalcul immédiat sans attendre le délai de calme ; `base`, si fourni, devient la
+      base STICKY des recalculs suivants (vue « code neuf » d'une MR) ; 400 si `base` est
+      invalide (@HealthError::InvalidRef). Si un calcul est déjà en cours : 202 et il est
+      replanifié derrière lui (jamais deux calculs concurrents).
+  Outil MCP `code_health` (famille de dispatch du sandbox, déclaré avec les outils LSP,
+    ./tools_impl.rs) : arguments `{ "detail"?: "summary" | "issues" | "coverage", "path"?: string,
+    "limit"?: integer }` ; lecture seule ; rend du TEXTE BORNÉ (même plafond que les autres
+    outils, `vanyline_tools::output`) : par défaut `summary` = phase, statut global, une ligne par
+    vérification, totaux de couverture, langages non vérifiés, les 20 premières issues ; `issues`
+    et `coverage` détaillent, filtrables par `path` (préfixe) et `limit`.
+
+Handles:
+  Démarrage : une tâche de fond lance le premier calcul dès que le worktree existe, sans bloquer
+  le démarrage du serveur ni les sondes de santé. Langages : ceux détectés dans le worktree
+  (fonction pure « chemins → langages » partagée avec `vanyline-maint detect`,
+  ./maint.sdd) sauf `languages` fourni à `/refresh` ; vérifications = presets des langages
+  (@checks_for_languages), langages sans preset rapportés dans `unchecked_languages`.
+  Déclencheurs de modification (@CodeHealth::notify_modified) : outils MCP qui écrivent
+  (`write_file`, `edit_file`, `delete_file`, `mkdir`, `rename_file`, `edit_and_check`), opérations
+  d'écriture de `/ws/fs`, endpoints git qui changent l'arbre (`checkout`, `merge`, `merge/abort`).
+  Les lectures et opérations git de pure lecture n'en sont pas.
+  Délai de calme (debounce) : chaque notification (re)lance un minuteur de `health_cooldown_secs` ;
+  le calcul démarre quand il s'écoule sans nouvelle notification (`0` = immédiat). Avant de
+  calculer, l'EMPREINTE du worktree (`HEAD` + contenu du `git diff HEAD` + liste des fichiers
+  non suivis) est comparée à celle du dernier calcul terminé : identique ⇒ aucun recalcul, la phase
+  repasse à `fresh` (un `execute_command` ou un terminal qui n'a rien changé ne coûte rien).
+  Modification pendant un calcul : le calcul en cours N'EST PAS annulé (pas de famine sous
+  édition continue) ; la phase passe à `stale`, un nouveau cycle (délai de calme puis calcul)
+  suit sa fin. Les résultats d'un calcul portent l'empreinte qu'il a vue.
+  Sondage : toutes les `health_poll_secs`, l'empreinte du worktree est recalculée ; si elle diffère
+  de celle du dernier calcul, l'état passe à `stale` et le cycle (délai de calme puis calcul)
+  démarre comme pour une notification.
+  Un seul calcul à la fois par pod. Racine d'exécution = `config.sandbox_root` ; `out_dir` =
+  `<tmp>/vanyline-health/<n>` HORS du worktree (un calcul ne doit jamais salir `git status`) ;
+  environnement du calcul = environnement hérité + overlay `.venv` (./venv.sdd) : les toolchains
+  injectées au démarrage du pod restent visibles. Les diagnostics déjà connus des serveurs LSP du
+  pod (./lsp.sdd) sont collectés AVANT les commandes et transmis comme `preliminary_issues`.
+  Vue « code neuf » : calculée seulement si une `base` est connue (sticky via `/refresh`, ou la
+  branche par défaut du Project quand elle est fournie par le controller) ; le diff est pris entre
+  le merge-base de `base` et l'ÉTAT DU WORKTREE (modifications non commitées incluses), pas
+  seulement `HEAD`.
+  État en mémoire seulement : perdu au redémarrage du pod, où le démarrage recalcule.
+
+Must:
+  Répondre à `GET /code-health` et à l'outil `code_health` à tout instant, sans jamais attendre
+    la fin d'un calcul.
+  Protéger toutes les routes par @auth::require_auth (jeton de l'Owner) : aucune route
+    publique ; l'outil MCP est sous la même protection que `/mcp`.
+  Ne jamais exécuter de shell ni accepter de commande du client : seuls `base` (validée) et des
+    noms de langages sélectionnent les presets de `vanyline-health`.
+  Calculer au plus un état à la fois et ne jamais annuler un calcul pour un autre.
+  Rapporter honnêtement la fraîcheur : `phase` et `stale_since` disent si le rapport reflète le
+    code actuel ; un rapport périmé n'est jamais présenté comme `fresh`.
+  Renvoyer le @HealthReport tel que produit par le crate, sans réinterprétation.
+  Borner la sortie de l'outil MCP (aucun rapport complet non borné dans le contexte d'un LLM).
+
+Must not:
+  Dupliquer la connaissance des presets, du parsing ou du calcul du code neuf.
+  Écrire dans le worktree, ni déclencher un calcul depuis une lecture.
+  Lancer un calcul pendant qu'un autre tourne.
+
+Tasks:
+  [ ] Câbler `notify_modified` dans les dispatchs d'écriture de ./tools_impl.rs, les opérations
+    d'écriture de ./ws/fs.rs et les handlers git concernés ; déclarer l'outil `code_health` dans
+    ./tools_impl.rs et ./mcp.rs (amender ces specs).
+  [ ] Extraire de `vanyline-maint` la fonction pure « chemins → langages » (décision
+    2026-10-04) et la réutiliser ici.
+  [-] TRANCHÉ (2026-10-04) : sondage périodique de l'empreinte du worktree (`health_poll_secs`,
+    défaut 60, `0` = désactivé) : une modification faite hors des outils (terminal, éditeur
+    externe) fait passer l'état à `stale` au sondage suivant, puis suit le délai de calme.
+  [-] TRANCHÉ (2026-10-04) : les commandes de vérification s'exécutent à priorité réduite
+    (`nice -n 10`, ./runner.sdd `niveau de priorité`).
+  [-] TRANCHÉ (2026-10-04) : le rapport n'est publié qu'à la fin d'un calcul en v1 ; la
+    publication vérification par vérification est une évolution ultérieure.
+  [?] `AppState` est construit à une vingtaine d'endroits : y ajouter `health: Arc<CodeHealth>`
+    les touche tous. Décision d'implémentation (champ, ou registre statique paresseux).
+  [ ] Sandbox sur une RÉFÉRENCE (SHA/ref) et non une branche : prérequis du mode central, porté
+    par `/controller/src/sandbox.sdd` et `/crds/src/lib.sdd` (`SandboxSpec.branch`).
+  [ ] Images toolchain (`/toolchains/*`) : outils de vérification présents et versions
+    épinglées (spec `toolchains/` à écrire) ; egress vers le registre npm pour
+    `ts-coverage-provider`.
+
+Scenario: etat_toujours_disponible_des_le_demarrage
+  Given un pod qui vient de démarrer, premier calcul en cours
+  When `GET /code-health`
+  Then 200 avec `phase: "computing"` et `report: null`, jamais 404
+
+Scenario: calcul_au_demarrage_puis_fresh
+  Given un worktree de test avec un preset factice rapide
+  When le premier calcul se termine
+  Then `GET /code-health` rend `phase: "fresh"`, un `report` et `computed_at`
+
+Scenario: modification_declenche_apres_le_delai_de_calme
+  Given un état `fresh` et `health_cooldown_secs = 30` (horloge de test)
+  When une modification est notifiée, puis 29 s s'écoulent, puis 2 s de plus
+  Then la phase est `stale` à 29 s sans calcul démarré, puis un calcul démarre après 30 s
+
+Scenario: rafale_de_modifications_un_seul_calcul
+  Given `health_cooldown_secs = 30`
+  When dix modifications arrivent espacées de 10 s
+  Then aucun calcul n'a lieu pendant la rafale, un seul démarre 30 s après la dernière
+
+Scenario: cooldown_zero_recalcul_immediat
+  Given `health_cooldown_secs = 0`
+  When une modification est notifiée
+  Then le calcul démarre sans attente
+
+Scenario: empreinte_identique_aucun_recalcul
+  Given un état `fresh` et une modification notifiée qui n'a rien changé au worktree
+  When le délai de calme s'écoule
+  Then aucun calcul n'est lancé et la phase redevient `fresh`
+
+Scenario: edition_au_terminal_detectee_par_sondage
+  Given un état `fresh`, `health_poll_secs = 60`, et un fichier modifié hors des outils
+  When 60 s s'écoulent
+  Then l'état passe à `stale` puis un calcul suit après le délai de calme
+
+Scenario: modification_pendant_un_calcul
+  Given un calcul en cours
+  When une modification est notifiée
+  Then le calcul n'est pas annulé, la phase est `stale`, et un nouveau cycle suit sa fin
+
+Scenario: un_seul_calcul_a_la_fois
+  Given un calcul en cours
+  When `POST /code-health/refresh`
+  Then 202, aucun second calcul concurrent, un recalcul est replanifié derrière le premier
+
+Scenario: refresh_force_ignore_le_delai
+  Given un état `fresh` et un délai de 30 s
+  When `POST /code-health/refresh`
+  Then le calcul démarre immédiatement
+
+Scenario: base_invalide_refusee
+  Given un corps `{"base": "--output=x"}`
+  When `POST /code-health/refresh`
+  Then 400 et la base sticky n'est pas modifiée
+
+Scenario: base_sticky_pour_les_recalculs
+  Given `POST /code-health/refresh {"base": "origin/main"}` puis une modification
+  When le recalcul automatique s'exécute
+  Then il produit une vue `new_code` relative à `origin/main`
+
+Scenario: code_neuf_inclut_le_worktree_non_commite
+  Given une base `origin/main`, un commit puis une modification non commitée d'une autre ligne
+  When le calcul se termine
+  Then la vue `new_code` couvre les lignes du commit ET celles de la modification non commitée
+
+Scenario: outil_mcp_rend_un_resume_borne
+  Given un rapport comptant des milliers d'issues
+  When l'outil `code_health` est appelé sans argument
+  Then le texte rendu est borné, contient la phase, le statut, une ligne par vérification et au plus 20 issues
+
+Scenario: outil_mcp_filtre_par_chemin
+  Given un rapport avec des issues sous `src/` et `tests/`
+  When `code_health` est appelé avec `detail: "issues"`, `path: "src/"`
+  Then seules les issues sous `src/` sont rendues
+
+Scenario: auth_exigee
+  Given aucune en-tête d'autorisation
+  When `GET /code-health`, `POST /code-health/refresh` ou l'outil MCP sont appelés
+  Then 401 ; avec le jeton valide d'un autre Owner : 403
+
+Scenario: langage_sans_preset_rapporte
+  Given un worktree dont les langages détectés incluent `go`
+  When le calcul se termine
+  Then `report.unchecked_languages` contient `go`
+
+Scenario: worktree_propre_apres_calcul
+  Given un calcul terminé sur un worktree propre
+  When `git status --porcelain` est lancé
+  Then la sortie est vide
+
+Scenario: ne_pas_confondre_avec_la_sonde
+  Given un @build_app et le routeur d'exploitation
+  When `GET /health` est appelé sur le port principal puis sur le port d'exploitation
+  Then 404 sur le port principal (l'état du code est sous `/code-health`), 200 sur le port d'exploitation
+
+Scenario: diagnostics_lsp_transmis_au_calcul
+  Given un serveur LSP du pod portant des diagnostics connus
+  When un calcul démarre
+  Then ils sont fournis au runner comme `preliminary_issues` avant le lancement des commandes

@@ -12,9 +12,9 @@ Purpose:
   (vérifié par grep : seuls @terminal_session et le module de test les appellent).
   L'authentification n'est PAS ce contrat : la garde @ws_auth_middleware (./ticket.sdd) a
   validé et consommé le ticket AVANT l'upgrade ; le handler ne voit aucune identité.
-  Contrat de sécurité documenté en `Handles` et `Tasks` `[!]` : le PTY est un shell de
-  commande du pod — @AccessLevel::Read l'obtient comme Admin (../auth.sdd `[!]`, claims
-  jetés par la garde ./ticket.sdd). Héritage racine : `../../vanyline.sdd` (jamais de JWT
+  Contrat de sécurité documenté en `Handles` : le PTY est un shell de commande du pod,
+  accessible uniquement à l'Owner (qui seul peut obtenir un ticket, ../auth.sdd — il n'existe
+  aucun niveau d'accès). Héritage racine : `../../vanyline.sdd` (jamais de JWT
   brut au navigateur — ici seul le ticket compte), sémantique détaillée dans
   `../../docs/architecture.md` section « WebSocket éditeur — /ws/terminal ».
 
@@ -182,15 +182,12 @@ Handles:
     déconnecté sans Close (TCP sans FIN) : AUCUN timeout de session ni idle n'existe — le
     shell vit tant que le socket tient (keepalive TCP/ingress seul recours, hors contrat —
     `Tasks` `[?]`). N connexions = N shells, sans aucun quota (`Tasks` `[?]`).
-  Sécurité — le fichier ne fait AUCUNE contrôle d'accès lui-même (la garde en amont est
-    le contrat ./ticket.sdd) et ne peut pas en faire : les @TicketClaims sont jetés par la
-    garde, aucune identité n'atteint @terminal_session. Conséquences contractuelles :
-    [!] un ticket @AccessLevel::Read ouvre le PTY complet comme un Admin (../auth.sdd
-    `[!]`, RBAC décoratif, arbitrage à rendre là-haut) ; les modes `no_auth`/`static_token`
-    (../ticket.sdd `[!]`) fabriquent un Admin et donc un terminal de pod pour quiconque
-    joint l'ingress ; le terminal EST une exécution de commande dans le pod — seuls le
-    ticket court-vécu, la NetworkPolicy et l'ingress (hors contrat) le bornent. En
-    retour : le contenu des frames binaires est du texte de terminal, jamais filtré — pas
+  Sécurité — le fichier ne fait AUCUN contrôle d'accès lui-même : la garde en amont
+    (./ticket.sdd) a consommé un ticket émis à l'Owner authentifié par son jeton de
+    ServiceAccount (../auth.sdd), et aucun niveau d'accès n'existe. Il n'y a aucun mode de
+    contournement. Le terminal EST une exécution de commande dans le pod — seuls le ticket
+    court-vécu, la NetworkPolicy et l'ingress (hors contrat) le bornent. En retour : le
+    contenu des frames binaires est du texte de terminal, jamais filtré — pas
     d'injection hors sémantique du shell, et aucun champ client n'entre dans un chemin
     (`cwd` = config, jamais de confinement à faire ici).
   Enfant jamais wait() — @terminal_session ne réclame pas le statut de l'enfant ; le sort
@@ -243,8 +240,8 @@ Must not:
     `flush` ou échec de `resize` (ces deux derniers : warn et poursuite).
   Tuer les jobs explicitement détachés du shell — « réparer » leur survie casserait le
     cas d'usage service de dev exposé par Service/Ingress.
-  Connaître ou propager une identité : le fichier ne lit aucun claim, ne logge aucun
-    utilisateur (la garde en amont jette les claims — ./ticket.sdd).
+  Propager une identité en aval du PTY, ni logger `subject`, ni introduire un niveau
+    d'accès : le ticket est une capability (./ticket.sdd), le shell n'en sait rien.
   Envelopper la sortie PTY en JSON/texte, ni mélanger trames de contrôle et données sur
     un même canal (binaire = données, texte = contrôle, jamais l'inverse).
   Introduire un nouveau `unwrap`/`expect`/`panic!` hors `cfg(test)`, ni un second
@@ -260,7 +257,7 @@ Depends on:
   ./venv.rs — @venv_overlay : appliqué par @spawn_shell à chaque spawn, contrat en
     ../venv.sdd (marqueur `.venv/pyvenv.cfg`, jamais appliqué au LSP — le shell PTY est
     un process séparé du LSP).
-  ../auth.sdd — contexte `[!]` uniquement (Read = Admin, modes bypass) : ce fichier
+  ../auth.sdd — contexte uniquement (jeton d'Owner, aucun niveau) : ce fichier
     n'appelle aucun code d'auth.
   @portable_pty — @native_pty_system, @PtySize, @CommandBuilder, @MasterPty
     (@try_clone_reader, @take_writer, @resize), @Child (@process_id).
@@ -273,14 +270,9 @@ Tasks:
   [ ] Relecture complète par Sébastien (reverse du 2026-09-26) — aucun comportement
     accidentel ci-dessus ne devient contrat avant cette relecture
     (.specdd/bootstrap.project.md) ; priorité aux `[!]`/`[?]`.
-  [!] Sécurité du terminal : un ticket @AccessLevel::Read ouvre le PTY complet (shell du
-    pod) exactement comme un Admin — la garde jette les claims (./ticket.sdd), ce fichier
-    ne PEUT pas discriminer sans changement d'abord en amont (../auth.sdd `[!]`,
-    ../lib.sdd `[?]`). Le contrat « Read = décoratif » ou le gating réel se décide là-haut,
-    pas ici ; en attendant cette spec documente le trou sans l'approuver.
-  [!] Modes `no_auth`/`static_token` : ticket Admin sans identité réelle -> terminal
-    public pour quiconque joint l'ingress (dérive de ../ticket.sdd `[!]`) — la décision
-    (refus au démarrage vs NetworkPolicy) est là-bas, l'exposition PTY est ici.
+  [ ] Décisions du 2026-09-27 CADUQUES (refus d'un ticket Read, modes `no_auth`/`static_token`
+    « dev/debug ») : la sandbox n'a plus de niveaux ni de modes de contournement (décision
+    2026-10-04, ../auth.sdd). Rien à implémenter ici ; retirer les tests correspondants.
   [?] `SHELL` posé mais VIDNE (chaîne vide) : @std::env::var rend @Ok("") ->
     @CommandBuilder::new("") -> spawn en erreur -> fermeture silencieuse du terminal. Le
     vide devrait-il compter comme « non posé » (défaut `/bin/bash`) ?
@@ -352,7 +344,7 @@ Done when:
     -D warnings`, fmt, aucun nouveau `unwrap`/`expect`/`unsafe` non justifié.
 
 Scenario: ticket_absent_ou_inconnu_rejete_401
-  Given un @build_app en configuration JWT sans ticket émis
+  Given un @build_app sans ticket émis
   When `GET /ws/terminal` sans paramètre `ticket`, puis avec `?ticket=inconnu`
   Then les deux réponses sont `401` et aucun upgrade WebSocket n'a lieu, aucun PTY n'est
     ouvert (test existant `terminal_ticket_required`)

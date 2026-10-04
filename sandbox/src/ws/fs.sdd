@@ -103,9 +103,9 @@ Exposes:
 
 Accepts:
   Handshake : toute requête `GET /ws/fs` arrivée vivante après la garde (ticket valide
-    consommé). Ce handler ne relit ni query, ni header, ni cookie ; @AccessLevel des
-    claims étant jetés (./ticket.sdd), un accès `Read` obtient TOUTES les ops, écritures
-    et suppressions comprises (cf. `Tasks` `[?]`).
+    consommé). Ce handler ne relit ni query, ni header, ni cookie ; le ticket est une simple
+    capability (./ticket.sdd) : l'Owner a TOUTES les ops, écritures et suppressions
+    comprises — aucun niveau d'accès n'existe (../auth.sdd).
   Frames texte : une requête JSON par frame ; forme `{"op": <string>, ...params}`, `id`
     optionnel (number ou string, copié verbatim, peut être `null` → `"id":null` recopié).
     Le serveur répond dans l'ordre de réception ; la sérialisation des appels en vol est
@@ -302,8 +302,7 @@ Must not:
   Introduire un identifiant, un champ ou un verbe de protocole nouveau sans que cette
     spec (et le client `SandboxFsClient` en face) ne le contracte d'abord.
   Authentifier, autoriser ou auditer quoi que ce soit dans ce fichier (la garde est en
-    amont ; l'`access` est jeté) — tout durcissement de niveau (`Read` vs `Admin`) passe
-    par ./ticket.sdd d'abord.
+    amont ; aucun niveau d'accès n'existe, ../auth.sdd).
 
 Tasks:
   [ ] Relecture par Sébastien — spec issue de reverse-engineering ; aucun comportement
@@ -356,10 +355,6 @@ Tasks:
   [?] Tailles max de trame/message WS jamais configurées (@WebSocketUpgrade nu) : vérifier
     les défauts effectifs d'axum 0.8 et les épingler par un test (une requête `write`
     géante au-delà du plafond tue la session par @Err — comportement jamais observé).
-  [?] Aucun contrôle d'@AccessLevel : un ticket `Read` (lecture seule côté app/auth)
-    obtient `write`/`edit`/`delete`/`rename`/`mkdir` (claims jetés par la garde,
-    ./ticket.sdd `[?]`, ../lib.sdd `[?]`) — la décision de câbler un garde de niveau
-    appartient à ./ticket.sdd, ce fichier n'expose alors que le consommateur.
   [?] Aucune limite de débit/taille de payload applicative (un client peut streamer des
     `write` de la taille max de trame en boucle) : assumé (réseau interne + NetworkPolicy)
     ou garde à poser ?

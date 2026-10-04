@@ -1,0 +1,183 @@
+Spec: Jobs
+
+Platform: Rust/vanyline-sandbox/axum/tokio
+
+Purpose:
+  API de JOBS de la sandbox : exécuter un script shell de longue durée dans le pod, de façon
+  durable du point de vue du moteur de workflow (Restate). `execute_command` (MCP) est un appel
+  synchrone borné par un timeout ; un nœud shell de workflow peut durer de plusieurs minutes à
+  plusieurs heures, ce qu'un appel bloquant dans un step Restate ne supporte pas. Le contrat
+  est donc : démarrer (idempotent), interroger, lire les logs, annuler. Le nœud shell du
+  workflow démarre le job puis l'INTERROGE (`GET /jobs/{id}`) ; l'idempotence sur `job_id`
+  (clé déterministe dérivée de l'invocation et du step) rend sûr tout rejeu du step. En
+  OPTION, à la fin du job, la sandbox peut RÉSOUDRE un awakeable Restate fourni par l'appelant
+  pour le réveiller sans sondage : ce mode exige un step ayant accès au `Context` Restate
+  (créer l'awakeable, l'attendre), ce que `MiryadWorkflowStep::run` de miryad-core 0.1.4 n'offre
+  pas (le step s'exécute dans un `ctx.run()`, sans contexte) — il reste donc inutilisé tant
+  qu'un kind « durable » n'existe pas dans miryad-core (voir `Tasks`). La sandbox n'a besoin
+  que de l'URL d'ingress de Restate pour ce mode (appel sortant). Pas de port dédié : les routes
+  sont sur le port principal, sous le jeton de l'Owner comme `/git/*` et `/mcp`. Un script shell
+  est autorisé ici PAR CONCEPTION (la sandbox est un shell : un workflow de sandbox y est
+  équivalent à un terminal). Fichier neuf, conception (décision du 2026-10-04).
+
+Owns:
+  ./jobs.rs
+
+Can modify:
+  ./lib.rs
+  ./config.rs
+
+Can read:
+  ./auth.sdd
+  ./config.sdd
+  ./venv.sdd
+  ./tools_impl.sdd
+  ../../tools/src/command.sdd
+
+Exposes:
+  Routes (routeur protégé de ./lib.rs, jeton de l'Owner) :
+    `POST /jobs` — corps JSON `{ "job_id": <string>, "script": <string>, "cwd"?: <chemin relatif>,
+      "env"?: { <nom>: <valeur> }, "timeout_secs"?: <entier>, "callback"?: { "awakeable_id": <string> } }`.
+      201 + @JobStatus pour un nouveau job ; 200 + @JobStatus pour un `job_id` déjà connu
+      (IDEMPOTENT : un rejeu après crash du worker ne lance jamais un second processus) ; 400
+      si `script` vide, `cwd` hors confinement, `job_id` invalide ; 429 si le plafond de jobs
+      simultanés est atteint.
+    `GET /jobs/{job_id}` — 200 + @JobStatus ; 404 si inconnu (jamais lancé, évincé, ou perdu à un
+      redémarrage du pod).
+    `GET /jobs/{job_id}/logs?offset=<octets>&limit=<octets>` — 200, texte (stdout et stderr
+      entrelacés, UTF-8 lossy) à partir de `offset`, au plus `limit` octets (défaut et plafond
+      64 KiB) ; l'en-tête `X-Log-Size` donne la taille totale pour la lecture incrémentale.
+    `DELETE /jobs?prefix=<préfixe>` — annule tous les jobs `running` dont l'identifiant commence par
+      le préfixe (annulation d'un run de workflow : `<run_id>:`) ; 200 + la liste des @JobStatus
+      annulés ; un préfixe vide est refusé (400).
+    `DELETE /jobs/{job_id}` — annule : le GROUPE de processus est tué (SIGTERM puis SIGKILL après
+      5 s) ; 200 + @JobStatus (`cancelled`) ; idempotent sur un job déjà terminé.
+  @JobStatus — `{ job_id, state: "running" | "succeeded" | "failed" | "timed_out" | "cancelled",
+    exit_code: Option<i32>, started_at, ended_at: Option<…>, log_size: u64, log_tail: String }`,
+    `log_tail` borné à 4 KiB. `succeeded` = code de sortie 0 ; `failed` = code ≠ 0 ou mort par
+    signal.
+  @Jobs — registre en mémoire du pod, dans @AppState (comme @CodeHealth, ./health.sdd).
+
+Handles:
+  Exécution : `sh -c <script>` dans un groupe de processus dédié, `cwd` = `sandbox_root` ou le
+  sous-répertoire demandé confiné par `confine` (./tools_impl.sdd), environnement = hérité + overlay
+  `.venv` (./venv.sdd) + `env` du corps (additif, dernière valeur gagnante). stdout et stderr vont
+  dans UN fichier de log sous `<tmp>/vanyline-jobs/<job_id>.log`, jamais bornés à l'écriture.
+  `timeout_secs` absent = 3 600 s (plafond configurable à 24 h) : à l'échéance le groupe est tué
+  (SIGTERM puis SIGKILL) et l'état est `timed_out`.
+  Plafonds : au plus 4 jobs `running` simultanés ; les 20 derniers jobs terminés sont conservés
+  (le plus ancien est évincé avec son fichier de log). L'état est EN MÉMOIRE seulement : un
+  redémarrage du pod tue de toute façon les processus ; le worker voit alors un 404 et fait
+  échouer le nœud.
+  Callback : si `callback.awakeable_id` est fourni ET que `config.restate_ingress_url` est configuré,
+  à l'état terminal la sandbox appelle `POST {restate_ingress_url}/restate/awakeables/{awakeable_id}/resolve`
+  avec le @JobStatus en JSON, avec relances (backoff exponentiel, plafonné à 30 s, pendant au plus
+  10 minutes) jusqu'à un 2xx ; un échec définitif est journalisé, le worker retombe sur
+  l'interrogation de `GET /jobs/{job_id}`. `callback` sans `restate_ingress_url` configuré :
+  400. La destination du callback n'est JAMAIS fournie par le client : seule l'URL configurée
+  est utilisée.
+  Aucun lien avec la santé du code : un job n'alimente ni ne déclenche `/code-health` (le
+  worktree qu'il modifie est détecté par l'empreinte, ./health.sdd).
+
+Must:
+  Protéger toutes les routes par @auth::require_auth (jeton de l'Owner).
+  Rendre `POST /jobs` idempotent sur `job_id` : un second appel ne lance jamais un second processus.
+  N'appeler que `config.restate_ingress_url` pour le callback ; refuser toute autre destination.
+  Tuer le GROUPE de processus à l'annulation et au timeout (régression R8 de
+    ../../tools/src/command.sdd : tuer le seul `sh` laisse des descendants).
+  Confiner `cwd` sous `sandbox_root` ; jamais de chemin absolu ni de `..`.
+  Borner la lecture des logs (`limit` ≤ 64 KiB) et le `log_tail` (4 KiB).
+  Ne jamais journaliser le contenu du script, de `env` ni des logs du job.
+
+Must not:
+  Exposer le contenu de `env` (peut porter des secrets de workflow) dans un @JobStatus ou une erreur.
+  Accepter une URL de callback du client, ou suivre une redirection vers un autre hôte.
+  Écrire dans le worktree de façon autre que ce que fait le script lui-même (les logs vont sous `<tmp>`).
+  Lancer plus que le plafond de jobs simultanés.
+
+Tasks:
+  [ ] `Config::restate_ingress_url` (`--restate-ingress-url` / `VNL_RESTATE_INGRESS_URL`, absent par
+    défaut) : posée par le controller quand l'Application porte `spec.restate`
+    (/controller/src/sandbox.sdd) ; règle d'egress de la sandbox vers le Service Restate
+    (/controller/src/application.sdd).
+  [ ] Callback d'awakeable : prérequis amont — un kind de step durable avec accès au `Context`
+    Restate dans miryad-core (même besoin que le sous-workflow, issue sebt3/miryad-core#26). D'ici
+    là le worker interroge `GET /jobs/{job_id}` à intervalle régulier dans le step, et les
+    délais Restate du service `StepDispatcher` (`inactivity_timeout`, `abort_timeout`) sont
+    relevés à l'enregistrement pour couvrir la durée maximale d'un job (24 h).
+  [?] Persistance de l'état des jobs au redémarrage du pod : sans objet (les processus meurent
+    avec le pod) ; le 404 → échec du nœud est le comportement voulu. À reconsidérer seulement
+    si des jobs détachés du pod deviennent un besoin.
+  [?] Plafonds (4 simultanés, 20 conservés, 3 600 s, 24 h) : valeurs de départ, à ajuster à
+    l'usage ; les rendre configurables seulement si un besoin réel apparaît.
+  [ ] Convertir chaque Scenario en test taggé par son titre.
+
+Scenario: demarrage_puis_lecture_de_l_etat
+  Given une sandbox de test et `POST /jobs` avec `{"job_id": "j1", "script": "echo hi; exit 0"}`
+  When le job se termine et `GET /jobs/j1` est lu
+  Then 201 au démarrage, puis `state: "succeeded"`, `exit_code: 0`, `log_tail` contenant `hi`
+
+Scenario: code_de_sortie_non_nul_est_failed
+  Given un job `exit 3`
+  When il se termine
+  Then `state: "failed"`, `exit_code: 3`
+
+Scenario: idempotence_sur_job_id
+  Given un job `j1` déjà démarré (ou terminé)
+  When `POST /jobs` est rappelé avec le même `job_id`
+  Then 200 avec le même @JobStatus, et aucun second processus n'est lancé
+
+Scenario: timeout_tue_le_groupe
+  Given un job qui lance un descendant d'arrière-plan et `timeout_secs = 1`
+  When l'échéance passe
+  Then `state: "timed_out"` et plus aucun processus du groupe ne survit
+
+Scenario: annulation
+  Given un job long en cours
+  When `DELETE /jobs/j1`
+  Then `state: "cancelled"`, le groupe de processus est tué, un second `DELETE` est sans effet
+
+Scenario: annulation_par_prefixe
+  Given trois jobs `r1:a`, `r1:b`, `r2:a` en cours
+  When `DELETE /jobs?prefix=r1:`
+  Then `r1:a` et `r1:b` sont annulés, `r2:a` continue, un préfixe vide rend 400
+
+Scenario: plafond_de_jobs_simultanes
+  Given quatre jobs `running`
+  When un cinquième `POST /jobs`
+  Then 429
+
+Scenario: logs_incrementaux_bornes
+  Given un job dont la sortie dépasse 100 KiB
+  When `GET /jobs/j1/logs?offset=0&limit=1000000`, puis avec `offset` croissant
+  Then chaque réponse fait au plus 64 KiB, `X-Log-Size` donne la taille totale, la concaténation redonne les logs
+
+Scenario: callback_vers_restate_configure
+  Given `restate_ingress_url` pointant un faux serveur et `callback.awakeable_id = "a1"`
+  When le job se termine
+  Then le faux serveur reçoit `POST /restate/awakeables/a1/resolve` avec le @JobStatus, et rien n'est envoyé ailleurs
+
+Scenario: callback_relance_jusqu_au_succes
+  Given un faux Restate qui répond 503 deux fois puis 200
+  When le job se termine
+  Then trois tentatives espacées par backoff, la dernière acquittée
+
+Scenario: callback_sans_url_configuree
+  Given aucune `restate_ingress_url`
+  When `POST /jobs` avec un `callback`
+  Then 400 et aucun job n'est créé
+
+Scenario: cwd_hors_confinement
+  Given `cwd = "../etc"` puis un chemin absolu
+  When `POST /jobs`
+  Then 400 dans les deux cas
+
+Scenario: job_perdu_apres_redemarrage
+  Given un `job_id` jamais connu de ce processus
+  When `GET /jobs/j1`
+  Then 404
+
+Scenario: auth_exigee
+  Given aucune en-tête d'autorisation
+  When n'importe laquelle des quatre routes est appelée
+  Then 401 ; avec le jeton d'un autre Owner : 403

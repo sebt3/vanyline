@@ -11,7 +11,7 @@ Purpose:
   subscriber par défaut @tracing — ; les deux @std::sync::OnceLock statiques garantissent
   une installation unique. Côté consommateur : ./main.rs appelle @init au démarrage (avant
   @crate::config::Config::validate) puis @shutdown_otel en sortie propre ; ./lib.rs rend
-  @render_metrics sur `GET /metrics` (port séparé `config.metrics_listen`) et alimente les
+  @render_metrics sur `GET /metrics` (port d'exploitation séparé `config.ops_listen`) et alimente les
   compteurs via @track_metrics. L'en-tête du fichier documente des non-réalisions
   explicites (auth de `/metrics`, métriques métier, propagation W3C `traceparent`,
   attributs de ressource supplémentaires, export de métriques OTLP) : ce sont des frontières
@@ -53,7 +53,7 @@ Depends on:
     @track_metrics alimente `http_requests_total` et `http_request_duration_seconds` via
     les macros @metrics dès que le recorder est posé.
   ./config.rs — source de @crate::config::Config::otel_endpoint (`--otel-endpoint` /
-    `OTEL_EXPORTER_OTLP_ENDPOINT`) et de @crate::config::Config::metrics_listen ; ./main.rs
+    `OTEL_EXPORTER_OTLP_ENDPOINT`) et de @crate::config::Config::ops_listen ; ./main.rs
     impose l'ordre @init → @crate::config::Config::validate pour que les avertissements
     `tracing` de la validation soient rendus.
 
@@ -187,7 +187,7 @@ Must not:
     raison OTel.
   Installer un point d'écoute HTTP depuis l'exporteur Prometheus : le rendu passe
     exclusivement par @render_metrics et le routeur de ./lib.rs, sur le port séparé
-    `config.metrics_listen`.
+    `config.ops_listen`.
   Authentifier `/metrics` ni porter l'authentification dans l'application — protection
     assumée au niveau réseau (NetworkPolicy, reverse-proxy), frontière documentée.
   Propagateur W3C `traceparent`, export de métriques par OTLP, attributs de ressource
