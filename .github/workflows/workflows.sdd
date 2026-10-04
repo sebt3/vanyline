@@ -18,8 +18,7 @@ Must:
   Contenir les jobs : `test` (`cargo test --workspace`), `fmt` (`cargo fmt --all --check`),
   `clippy` (`cargo clippy --workspace --all-targets -- -D warnings`), `frontend`
   (check+test `@vanyline/protocol`, check+test `@vanyline/ui`, build+check+test `frontend`),
-  `ext` (check+test des packages partagés puis check+test+build du package `vanyline` de
-  `ext/`), `tsrs` (`cargo test -p vanyline-lib --features ts-rs` puis
+  `tsrs` (`cargo test -p vanyline-lib --features ts-rs` puis
   `git diff --exit-code -- packages/protocol/src/generated/`), et `coverage`
   (mesure de baseline, sans seuil, push sur `main` seulement).
   Executer les commandes strictement identiques à la batterie d'AGENTS.md — toute
@@ -50,6 +49,8 @@ Scenario: ci pendant la purge de dette
   And le `validator` évalue la tâche sur le delta de dette, pas sur le rouge global
 
 Tasks:
+  [ ] Retirer le job `ext` de `test.yml` (extension VS Code supprimée, 2026-10-04) ; ajouter à
+    `tsrs` la génération de `vanyline-health` (`cargo test -p vanyline-health --features ts-rs`).
   [ ] Documenter dans la spec de la release (`docs/release-runbook.md`, agent `release`)
     l'interaction entre CI rouge (dette) et tag de release — un tag ne part que sur CI
     verte, donc après purge des crates concernées.

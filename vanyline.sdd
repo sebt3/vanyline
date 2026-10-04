@@ -1,13 +1,14 @@
 Spec: vanyline
 
-Platform: Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, cfgstore, edition 2024) + TypeScript/Vue 3 (workspace npm : frontend, packages/*, ext)
+Platform: Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, cfgstore, health, edition 2024) + TypeScript/Vue 3 (workspace npm : frontend, packages/*)
 
 Purpose:
   Environnement de développement cloud-native, multi-utilisateur, piloté par l'IA pour
   Kubernetes : shell IDE web (Vue 3), backend d'auth/config/LLM (`app`), servers dans les
   pods de travail (`sandbox` : WS éditeur + MCP), opérateur Kubernetes (`controller` :
   CRDs Owner/Project/Sandbox/Application) et packages partagés (`@vanyline/protocol`,
-  `@vanyline/ui`, extension VS Code). Détail architectural : `docs/architecture.md` et la
+  `@vanyline/ui`). L'extension VS Code (`ext/`) est SUPPRIMÉE (décision du 2026-10-04 : « construis
+  ta cible », pas d'étape intermédiaire). Détail architectural : `docs/architecture.md` et la
   mémoire projet `.claude/MEMORY.md`.
 
 Owns:
@@ -33,8 +34,15 @@ Must:
   le comportement observable du fichier.
   Exiger la batterie complète de vérification (AGENTS.md, et `test.yml` pour la CI) avant
   qu'une `Tasks` passe à `[x]`.
-  Garder `packages/protocol/src/generated/` généré par `vanyline-lib` (feature `ts-rs`) :
-  jamais de modification manuelle des types générés.
+  Garder `packages/protocol/src/generated/` généré par `vanyline-lib` et `vanyline-health`
+  (feature `ts-rs` de chacun) : jamais de modification manuelle des types générés.
+  Authentifier tout accès HTTP/WebSocket à une sandbox par le SEUL jeton JWT émis par
+  l'apiserver Kubernetes pour le ServiceAccount de son Owner (API TokenRequest, audience
+  `vanyline-sandbox`) : la sandbox appartient à un Owner, l'accès est tout ou rien, sans
+  niveaux (décision du 2026-10-04, contrat dans `sandbox/src/auth.sdd`). Qui peut obtenir ce
+  jeton est décidé en amont (`app` vérifie le lien utilisateur↔Owner ; RBAC Kubernetes pour un
+  opérateur) ; le port d'exploitation de la sandbox (`/health`, `/metrics`) est un port
+  distinct, jamais publié, sans authentification.
   Maintenir le harnais `[workspace.lints]` du workspace cargo UNIQUE comme source de
   vérité des lints (`./tooling.sdd`) ; ne jamais introduire de sous-workspace cargo
   séparé qui échapperait au harnais.
@@ -43,25 +51,57 @@ Must not:
   Interpoler un champ de CRD dans une commande shell du controller : toute maintenance des
   workspaces passe par `vanyline-maint` en argv (règle architectural — cf. AGENTS.md,
   section controller).
-  Exposer le JWT OIDC brut au navigateur : le frontend ne voit que des tickets WS court-vécus
-  à usage unique minés par l'app.
+  Exposer le JWT OIDC brut, ou le jeton du ServiceAccount d'un Owner, au navigateur : le
+  frontend ne voit que des tickets WS court-vécus à usage unique minés par l'app.
+  Introduire un mode d'authentification alternatif sur une sandbox (jeton statique, drapeau
+  sans authentification, niveaux d'accès Admin/Read, groupes OIDC) ni attacher le moindre
+  droit RBAC au ServiceAccount d'un Owner.
   Écrire dans `deploy/`, `toolchains/` ou `docs/` sans que la spec concernée (ou une
   demande explicite de Sébastien) l'autorise.
 
 Tasks:
+  [ ] SUPPRESSION DE L'EXTENSION VS CODE (2026-10-04) : retirer `ext/` (code, `package.json`,
+    `cli-version.txt`), son entrée du workspace npm racine, le job `ext` de
+    `.github/workflows/test.yml` et de `workflows.sdd`, les lignes `ext` de la batterie
+    d'AGENTS.md (« Frontend + packages + extension »), `docs/ext-install.md`, et la section
+    « Extension VS Code » de `docs/architecture.md`. Le cas `kydah-code` (PVC partagé) disparaît
+    avec elle.
   [x] Migration de la méthode vers SpecDD + TTD : `.specdd/` (bootstrap 1.5), AGENTS.md,
     agents `spec-dd`/`spec-reverse`/`implementer`/`validator`, suppression de la méthode
     llm-template (agents `cadence`/`implement`/`diagnose`, `.claude/config.md`, tâches
     `.tasks/`).
   [x] Harnais `[workspace.lints]` posé (deny immédiat, dette tracée dans ./tooling.sdd).
+  [ ] Serveur RPC stdio (`vanyline serve --stdio`, `cli/src/rpc/`, `docs/rpc-protocol.md`, `RpcConnection`
+    de `@vanyline/protocol`) : CONSERVÉ (décision du 2026-10-04) alors que son premier consommateur,
+    l'extension VS Code, disparaît ; il reste une interface d'intégration pour d'autres clients.
   [ ] Reverse-engineering des specs par fichier, crate par crate, avec relecture attentive par
     Sébastien sur les incertitudes `[?]` — ordre : `vanyline-lib`, `vanyline-crds`,
     `vanyline-tools`, `vanyline-cfgstore`, `controller`, `sandbox`, `app`, `cli`.
   [ ] Purger la dette harnais crate par crate (backlog dans ./tooling.sdd).
-  [ ] Specs TS/Vue au fil de l'eau : tout fichier `frontend/`, `packages/`, `ext/` touché
+  [ ] Specs TS/Vue au fil de l'eau : tout fichier `frontend/`, `packages/` touché
     par une tâche est specé avant modification.
   [ ] Spec du déploiement (`deploy/`) et des images (`toolchains/`) quand la migration
     atteint ces zones.
+  [ ] Chantier « auth Owner-SA seule » (décision 2026-10-04) : implémenter `sandbox/src/auth.sdd`,
+    `config.sdd`, `lib.sdd`, `main.sdd`, `mcp.sdd`, `ws/ticket.sdd`, `controller/src/sandbox.sdd`,
+    `lib/src/k8s.sdd` (`owner_token`), `app/src/api/sandboxes.sdd` ; RBAC `serviceaccounts/token`
+    pour l'app (`deploy/`) ; mettre à jour AGENTS.md et `docs/architecture.md` (section
+    « Serveur MCP », diagramme, tableau des clients) qui décrivent encore OIDC/groupes.
+  [ ] Santé du code (`health/`) : ajouter le crate `vanyline-health` aux membres de
+    /Cargo.toml, à /AGENTS.md et à /docs/architecture.md ; ajouter son export ts-rs au job
+    `tsrs` de /.github/workflows/test.yml (`cargo test -p vanyline-health --features ts-rs`) et
+    à ./.github/workflows/workflows.sdd.
+  [ ] Un Owner = un namespace (décision 2026-10-04) : `controller/src/namespace.sdd` et les specs
+    amendées (crds, controller, lib/k8s, app) ; AGENTS.md et docs/architecture.md décrivent encore un
+    namespace unique.
+  [ ] Couche workflow (2026-10-04) : `app/src/workflow/`, entités `project_workflows` et
+    `workflow_runs`, API `app/src/api/workflows.sdd`, MCP de domaine `app/src/mcp_domain.sdd`, API de
+    jobs `sandbox/src/jobs.sdd` ; prérequis amont : sebt3/miryad-core#26 (kinds durables, non
+    bloquant) et #27 (`RhaiStep::with_setup`, bloquant pour le kind `rhai`) ; Restate comme
+    sous-ressource de l'Application (`controller/src/application.sdd`).
+  [ ] Agents système (`app/src/system_agents.sdd`) et écrans (`frontend/frontend.sdd` et specs liées).
+  [ ] Autonomie des agents (`lib/src/autonomous.sdd`) et, sur décision, extraction de la
+    config LLM (`llm-config/src/lib.sdd`, membre `llm-config` à ajouter au workspace).
 
 Done when:
   Chaque fichier `*.rs` du workspace est couvert par une spec revue, le harnais est à
