@@ -353,10 +353,11 @@ Done when:
     est verte sur `vanyline-sandbox`, et `cargo run -p vanyline-sandbox -- --help`
     énumère les seize drapeaux avec les défauts contractés.
 
-Notation des Scenario de démarrage : `<AUTH>` désigne les drapeaux d'identité de test
-`--owner-subject system:serviceaccount:ns:owner-test --token-issuer https://k8s.test
---jwks-file <F>` (<F> : JWKS de test produit par `auth::test_support`, ./auth.sdd) ;
-`<OPS>` désigne `--ops-listen <P2>`. Il n'existe aucun drapeau de contournement.
+Example: notation des Scenario de démarrage
+  `<AUTH>` désigne les drapeaux d'identité de test `--owner-subject
+    system:serviceaccount:ns:owner-test --token-issuer https://k8s.test --jwks-file <F>` (<F> : JWKS
+    de test produit par `auth::test_support`, ./auth.sdd) ; `<OPS>` désigne `--ops-listen <P2>`.
+    Il n'existe aucun drapeau de contournement.
 
 Scenario: clap_help_liste_seize_drapeaux
   Given le binaire `vanyline-sandbox`
