@@ -1,0 +1,203 @@
+Spec: Namespace
+
+Platform: Rust/vanyline-controller/kube-runtime/k8s-openapi
+
+Purpose:
+  Cycle de vie du NAMESPACE d'un Owner. Contrat posé par Sébastien le 2026-10-04 : un Owner =
+  un namespace. L'application (`app`) vit dans son namespace (« namespace d'application »,
+  `<app-ns>`), y crée la CR @Owner (`seb`), et le controller crée le namespace
+  `<app-ns>-seb` — le namespace de l'Owner — qui contient le ServiceAccount de l'Owner, son PVC
+  home, ses Projects, ses Sandboxes et tout ce que ceux-ci produisent (Pods, Jobs, Services,
+  Ingress, NetworkPolicies, PVC workspace). La ségrégation par namespace est la frontière
+  d'isolation : un jeton de SA, un RoleBinding ou une NetworkPolicy ne dépasse jamais le
+  namespace d'un seul Owner, et supprimer le namespace supprime tout l'Owner d'un coup.
+  Ce fichier porte : le nommage (fonction pure de `vanyline-crds`), la construction et
+  l'application du Namespace et des RoleBindings qui y délèguent à `app` ses droits, la
+  protection contre l'adoption d'un namespace étranger, et le nettoyage par finalizer à la
+  suppression de l'Owner. Il est appelé par ./owner.rs (qui n'en garde que l'orchestration).
+  Fichier neuf, conception.
+
+Owns:
+  ./namespace.rs
+
+Can read:
+  ./owner.sdd
+  ./application.sdd
+  ./error.sdd
+  ../../crds/src/lib.sdd
+  ../../deploy/controller/controller.yaml
+  ../../docs/architecture.md
+
+Exposes:
+  Constantes : @OWNER_LABEL = `vanyline.solidite.fr/owner` ; @APP_NAMESPACE_LABEL =
+    `vanyline.solidite.fr/app-namespace` ; @OWNER_FINALIZER = `vanyline.solidite.fr/owner-namespace` ;
+    @APP_SCOPE_CLUSTER_ROLE = `vanyline-app-owner-scope` (nom du ClusterRole fourni par le
+    déploiement, ./../../deploy/controller/controller.yaml).
+  @owner_namespace_name(app_namespace: &str, owner: &str) -> Result<String, ControllerError> —
+    définie dans `vanyline-crds` (fonction pure partagée avec `app`, comme `service_name`) et
+    ré-exportée ; valeur `"{app_namespace}-{owner}"`.
+  @build_owner_namespace(owner: &Owner, app_namespace: &str) -> Result<Namespace, ControllerError>
+    — pur : `metadata.name` = @owner_namespace_name, labels @OWNER_LABEL = nom de l'Owner,
+    @APP_NAMESPACE_LABEL = `app_namespace`, `app.kubernetes.io/managed-by` =
+    `vanyline-controller` ; AUCUNE ownerReference (un objet namespacé ne peut pas posséder un
+    objet cluster-scopé).
+  @build_app_role_binding(owner_namespace: &str, app_service_account: &str, app_namespace: &str) ->
+    RoleBinding — pur : nom `vanyline-app`, dans le namespace de l'Owner, `roleRef` =
+    ClusterRole @APP_SCOPE_CLUSTER_ROLE, un seul sujet `ServiceAccount` `app_service_account` du
+    namespace `app_namespace`.
+  @app_namespace_of(client, namespace: &str) -> Result<String, ControllerError> (async) — le
+    namespace d'application d'un namespace d'Owner : la valeur du label @APP_NAMESPACE_LABEL du
+    Namespace `namespace` (mise en cache) ; utilisée par ./project.rs et ./sandbox.rs, dont les CR
+    vivent dans le namespace de l'Owner, pour retrouver la CR @Owner et l'@Application, qui
+    vivent dans le namespace d'application. Namespace sans ce label ⇒ erreur
+    `NamespaceNotManaged` (`VNL-CTL-010`).
+  @ensure_namespace(client, owner, app_namespace) -> Result<(), ControllerError> (async) et
+  @cleanup_namespace(client, owner, app_namespace) -> Result<Cleanup, ControllerError> (async),
+    `Cleanup` ∈ `Done` | `Pending`.
+
+Accepts:
+  `app_namespace` : le namespace de la CR @Owner (`owner.namespace()`), donc de l'Application
+  qui la sert (`spec.application_ref`, même namespace).
+
+Returns:
+  @ensure_namespace : le Namespace et, si l'Owner référence une Application, le RoleBinding de
+  l'app existent, par server-side apply (@FIELD_MANAGER). @cleanup_namespace : `Done` quand le
+  Namespace n'existe plus ; `Pending` tant qu'il est en `Terminating`.
+
+Raises:
+  @ControllerError (variantes de ./error.sdd) :
+    `InvalidNamespaceName` (`VNL-CTL-007`) — le nom `"{app_namespace}-{owner}"` n'est pas un
+      label DNS-1123 valide ou dépasse 63 caractères ;
+    `NamespaceCollision` (`VNL-CTL-008`) — un namespace de ce nom existe déjà mais ne porte pas
+      les labels @OWNER_LABEL et @APP_NAMESPACE_LABEL aux valeurs attendues : il n'appartient pas
+      à cet Owner ;
+    `NamespaceNotManaged` (`VNL-CTL-010`) — @app_namespace_of sur un namespace dépourvu des labels
+      de ce controller (une CR Project/Sandbox posée hors d'un namespace d'Owner) ;
+    `NamespaceTerminating` (`VNL-CTL-009`) — le namespace est en suppression : @ensure_namespace
+      ne peut pas le (re)créer, l'Owner est requeué.
+
+Handles:
+  Ordre dans @reconcile d'./owner.rs : (0) finalizer posé ; (1) @ensure_namespace ; (2) tout ce
+  qui vit dans le namespace (PVC home, SA — ./owner.sdd) ; (3) status (`namespace`, `pvcName`,
+  `serviceAccount`) ; (4) bump egress. Un Owner sans namespace créé n'est jamais `Ready`.
+  RoleBinding de l'app : créé seulement si `spec.application_ref` résout une Application (le
+  nom du SA de l'app est celui de l'Application, ./application.sdd) ; sans Application aucun
+  droit n'est délégué (Owner géré hors app, par exemple au cli).
+  Suppression : la CR Owner porte @OWNER_FINALIZER ; à `deletionTimestamp`, @cleanup_namespace
+  supprime le Namespace — seulement s'il porte les labels de cet Owner — puis rend `Pending` tant
+  qu'il existe (requeue) ; le finalizer n'est retiré qu'à `Done`. Le namespace d'un autre
+  propriétaire n'est jamais supprimé.
+  Rien dans le namespace n'est coiffé d'une ownerReference vers la CR Owner (ownerReference
+  inter-namespaces interdite) : la suppression du namespace est le seul nettoyage.
+
+Must:
+  Nommer le namespace d'Owner `{app_namespace}-{owner}` et rien d'autre, par la fonction
+    partagée de `vanyline-crds` : `app` et le controller doivent calculer la même valeur sans
+    se parler.
+  Refuser (VNL-CTL-008) d'adopter, de modifier ou de supprimer un namespace qui ne porte pas les
+    labels de l'Owner : un Owner nommé de façon à viser `kube-system` ou le namespace d'un autre
+    Owner ne doit jamais pouvoir en prendre le contrôle.
+  Poser le finalizer AVANT de créer le namespace, et ne le retirer qu'une fois le namespace
+    réellement disparu.
+  Valider le nom avant tout appel à l'apiserver (VNL-CTL-007).
+  Créer les RoleBindings dans le namespace de l'Owner, jamais ailleurs, et ne déléguer à `app`
+    QUE le ClusterRole @APP_SCOPE_CLUSTER_ROLE (jamais `cluster-admin`, jamais un ClusterRole
+    plus large).
+
+Must not:
+  Attacher au SA `owner-<nom>` le moindre droit RBAC (./owner.sdd) : seul `app` reçoit un
+    RoleBinding dans le namespace.
+  Créer plus d'un namespace par Owner, ou faire partager un namespace à deux Owners.
+  Supprimer un Namespace sans avoir vérifié ses labels.
+  Appliquer une ResourceQuota, une LimitRange ou une NetworkPolicy « par défaut » depuis ce
+    fichier : les NetworkPolicies de sandbox restent celles de ./sandbox.rs.
+
+Tasks:
+  [ ] `vanyline-crds` : `owner_namespace_name`, `OwnerStatus.namespace` (/crds/src/lib.sdd).
+  [ ] Droits du controller (`/deploy/controller/controller.yaml`) : `namespaces`
+    (get, list, watch, create, patch, delete), `rolebindings` (déjà), et le droit de lier
+    @APP_SCOPE_CLUSTER_ROLE (`bind` sur ce ClusterRole, ou détenir ses droits) ; créer le
+    ClusterRole @APP_SCOPE_CLUSTER_ROLE (projects, sandboxes : get, list, watch, create, delete,
+    patch ; `serviceaccounts` get ; `serviceaccounts/token` create ; `pods`, `services`,
+    `events` : get, list, watch selon besoin de l'app).
+  [ ] `ControllerError` : variantes `VNL-CTL-007..010` (./error.sdd).
+  [-] TRANCHÉ (2026-10-04) : `existing_pvc` est RETIRÉ de @OwnerSpec (un PVC ne se monte pas d'un
+    namespace à un autre) ; le home de l'Owner est toujours créé par le controller dans son
+    namespace (./owner.sdd). Si code-server doit partager ce home, il se déploie dans le namespace
+    de l'Owner.
+  [?] `get` sur les namespaces pour `app` : `app` adresse un namespace par son nom (calculé) et n'a
+    besoin d'aucun appel `namespaces` ; si un besoin apparaît, un ClusterRole `get` avec
+    `resourceNames` maintenus par le controller (liste des namespaces servis par l'Application)
+    — `list`/`watch` ne se restreignent PAS par `resourceNames`, `get` seul est possible.
+  [ ] Convertir chaque Scenario en test taggé par son titre.
+
+Done when:
+  Chaque Scenario est couvert par un test vert ; la batterie complète est verte ; un Owner créé
+  puis supprimé sur un cluster de test laisse le cluster sans namespace résiduel.
+
+Scenario: nom_du_namespace
+  Given `app_namespace = "media-test"` et l'Owner `seb`
+  When @owner_namespace_name
+  Then `"media-test-seb"`
+
+Scenario: nom_trop_long
+  Given un Owner dont le nom porte le total au-delà de 63 caractères
+  When @owner_namespace_name
+  Then `InvalidNamespaceName` (`VNL-CTL-007`), aucun appel à l'apiserver
+
+Scenario: nom_invalide
+  Given un Owner dont le nom contient une majuscule ou `_`
+  When @owner_namespace_name
+  Then `InvalidNamespaceName`
+
+Scenario: namespace_construit_avec_labels_sans_owner_reference
+  Given l'Owner `seb` dans `media-test`
+  When @build_owner_namespace
+  Then `metadata.name = "media-test-seb"`, les labels `owner=seb`, `app-namespace=media-test`,
+    `managed-by=vanyline-controller`, et `ownerReferences` absent
+
+Scenario: role_binding_de_l_app
+  Given le namespace `media-test-seb` et le SA d'application `application-vanyline-test` de `media-test`
+  When @build_app_role_binding
+  Then un RoleBinding `vanyline-app` dans `media-test-seb`, roleRef ClusterRole `vanyline-app-owner-scope`,
+    un seul sujet ServiceAccount `application-vanyline-test` / `media-test`
+
+Scenario: pas_de_role_binding_sans_application
+  Given un Owner sans `application_ref`
+  When @ensure_namespace
+  Then le Namespace est créé et aucun RoleBinding
+
+Scenario: collision_avec_un_namespace_etranger
+  Given un namespace `media-test-seb` existant SANS les labels de l'Owner
+  When @ensure_namespace
+  Then `NamespaceCollision` (`VNL-CTL-008`), le namespace existant est intact (aucun patch)
+
+Scenario: adoption_d_un_namespace_a_nous
+  Given un namespace `media-test-seb` portant les bons labels
+  When @ensure_namespace
+  Then `Ok`, idempotent
+
+Scenario: suppression_par_finalizer
+  Given une CR Owner avec `deletionTimestamp` et son namespace présent
+  When @cleanup_namespace s'exécute
+  Then le Namespace est supprimé, `Pending` est rendu tant qu'il existe, le finalizer est retiré seulement à `Done`
+
+Scenario: suppression_ne_touche_pas_un_namespace_etranger
+  Given une CR Owner supprimée dont le namespace homonyme ne porte pas ses labels
+  When @cleanup_namespace
+  Then aucune suppression n'est émise, l'erreur `VNL-CTL-008` est rendue
+
+Scenario: namespace_en_terminating
+  Given le namespace de l'Owner en `Terminating` et l'Owner non supprimé
+  When @ensure_namespace
+  Then `NamespaceTerminating` (`VNL-CTL-009`), l'Owner est requeué sans erreur fatale
+
+Scenario: app_namespace_depuis_le_label
+  Given le namespace `media-test-seb` portant `app-namespace=media-test`
+  When @app_namespace_of("media-test-seb")
+  Then `"media-test"`
+
+Scenario: namespace_non_gere
+  Given un namespace `default` sans les labels du controller
+  When @app_namespace_of("default")
+  Then `NamespaceNotManaged` (`VNL-CTL-010`) — une CR Project posée là n'est pas réconciliée

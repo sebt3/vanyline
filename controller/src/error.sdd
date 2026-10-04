@@ -218,6 +218,9 @@ Must not:
     appartient aux @error_policy (via @tracing) des fichiers appelants.
 
 Tasks:
+  [ ] Variantes pour ./namespace.sdd (2026-10-04) : `InvalidNamespaceName` `VNL-CTL-007`, `NamespaceCollision`
+    `VNL-CTL-008`, `NamespaceTerminating` `VNL-CTL-009`, `NamespaceNotManaged` `VNL-CTL-010`, avec
+    leurs @Display `VNL-CTL-NNN: …` et la contrainte « six marqueurs » de cette spec étendue à dix.
   [ ] Ajouter un module `#[cfg(test)]` à ./error.rs (aucun test n'existe pour ce fichier) :
     un test par Scenario, taggé par son titre. Scénarios unitaires = @Display exacts,
     @From/@source, et appels directs des quatre @error_policy (fonctions pures, testables

@@ -3,14 +3,16 @@ Spec: Owner
 Platform: Rust/vanyline-controller/kube-runtime/k8s-openapi
 
 Purpose:
-  Reconciler de la CRD @Owner (`vanyline.solidite.fr/v1alpha1`, namespaced) — le premier
-  maillon de la chaîne Owner → Project → Sandbox du controller. Ce fichier garantit, par
-  server-side apply idempotent (`Patch::Apply` + @FIELD_MANAGER + `force`), deux enfants
-  K8s : le PVC home (`owner-<name>-home`, créé seulement si `spec.existing_pvc` est absent —
-  un PVC référencé n'est jamais créé ni touché) et le @ServiceAccount `owner-<name>`
-  (toujours, créé ou référencé), tous deux coiffés d'un @OwnerReference contrôleur pour la
-  GC en cascade. Pas de finalizer : la suppression de l'Owner laisse la GC K8s nettoyer.
-  Il écrit ensuite le @OwnerStatus (`pvcName`, `serviceAccount`, condition unique
+  Reconciler de la CRD @Owner (`vanyline.solidite.fr/v1alpha1`, namespaced dans le namespace
+  de l'application) — le premier maillon de la chaîne Owner → Project → Sandbox du controller.
+  UN OWNER = UN NAMESPACE (décision 2026-10-04, ./namespace.sdd) : la CR @Owner vit dans le
+  namespace de l'application (`<app-ns>`) ; ce reconciler fait créer par ./namespace.rs le
+  namespace `<app-ns>-<owner>` et garantit, par server-side apply idempotent (`Patch::Apply` +
+  @FIELD_MANAGER + `force`), deux enfants K8s DANS CE NAMESPACE : le PVC home
+  (`owner-<name>-home`) et le @ServiceAccount `owner-<name>`. Ces enfants ne portent AUCUNE
+  ownerReference (inter-namespaces interdite) : leur durée de vie est celle du namespace. La
+  CR Owner porte un finalizer qui supprime le namespace à sa suppression (./namespace.sdd).
+  Il écrit ensuite le @OwnerStatus (`namespace`, `pvcName`, `serviceAccount`, condition unique
   `Ready: True` — sensée signifier « apply accepté », PAS « PVC Bound », cf. `[?]`) en
   `Patch::Merge` sur le sous-ressource status, puis propage un bump d'annotation
   (`vanyline.solidite.fr/egress-bump`, timestamp) sur les Sandboxes des Projects de l'Owner
@@ -66,40 +68,46 @@ Must:
   Exposer @HOME_MOUNT_PATH = `"/home/vanyline"` : contrat de montage du PVC home, consommé
     par `./project.rs` (Jobs git) et `./sandbox.rs` (pod Sandbox) — toute divergence casse
     la clé SSH `/home/vanyline/.ssh/id_ed25519` documentée dans /docs/architecture.md.
+  Orchestrer ./namespace.rs avant tout enfant : finalizer, puis namespace de l'Owner
+    (`{app_namespace}-{owner}`, VNL-CTL-007/008/009 de ./error.sdd), puis les enfants ci-dessous
+    DANS ce namespace — jamais dans celui de la CR Owner.
   Appliquer les défauts métier dans ce fichier (jamais dans `vanyline-crds`, cf.
     ../../crds/src/lib.sdd) : @home_size absent ⇒ `"1Gi"`, @home_access_mode absent ⇒
     `"ReadWriteMany"` (choix architectural : le home est RWX, read-mostly, sans filewatchers
     — /docs/architecture.md « Répartition du stockage »).
   Implémenter @home_pvc_name = `format!("owner-{owner_name}-home")` et @service_account_name
-    = `format!("owner-{owner_name}")`, @effective_pvc_name = `existing_pvc` si fourni sinon
-    @home_pvc_name(owner.name_any()) — ces trois formes sont le contrat de nommage lu aussi
-    par `./sandbox.rs` (fixtures de test `"owner-alice-home"`) et l'app.
-  Retourner @None depuis @build_home_pvc dès que `spec.existing_pvc` est @Some : un PVC
-    référencé n'est jamais construit, patché, ni coiffé d'@OwnerReference par ce reconciler.
+    = `format!("owner-{owner_name}")` — ces deux formes sont le contrat de nommage lu aussi par
+    `./sandbox.rs` (fixtures de test `"owner-alice-home"`) et l'app. Le PVC home est TOUJOURS
+    créé par ce reconciler dans le namespace de l'Owner : `existing_pvc` est retiré de
+    @OwnerSpec (décision du 2026-10-04 — un PVC ne se monte pas d'un namespace à un autre, et le
+    namespace de l'Owner n'existe qu'après la création de l'Owner).
   Construire le PVC home champ par champ : @ObjectMeta { name: @home_pvc_name, namespace:
-    owner.namespace(), owner_references: [controller ref], ni labels, ni annotations, ni
-    finalizers } ; @PersistentVolumeClaimSpec { access_modes: [home_access_mode ou défaut]
+    le namespace de l'Owner (@owner_namespace_name), AUCUNE owner_reference, ni labels, ni
+    annotations, ni finalizers } ; @PersistentVolumeClaimSpec { access_modes: [home_access_mode ou défaut]
     (vecteur d'un seul élément), storage_class_name: copie de `home_storage_class`
     (@None ⇒ clé absente ⇒ StorageClass par défaut du cluster), resources.requests =
     {`"storage"`: @Quantity(taille ou `"1Gi"`)} sans @limits, ni selector, ni dataSource,
     ni volumeName, ni volumeMode }.
   Construire le @ServiceAccount champ par champ : @ObjectMeta { name: @service_account_name,
-    namespace, owner_references: [controller ref] } et spec entièrement par défaut (aucun
-    `secrets`, `imagePullSecrets`, `automountServiceAccountToken`) — toujours créé, même en
-    mode `existing_pvc` (vérifié par le test existant `build_service_account_always_created`).
-  Fabriquer la référence de contrôleur par @owner.controller_owner_ref(&()) (kube-rs) :
-    apiVersion `vanyline.solidite.fr/v1alpha1`, kind `Owner`, name, uid, `controller:
-    Some(true)`, `blockOwnerDeletion: Some(false)` (sémantique kube-rs à verrouiller par le
-    Scenario `build_home_pvc_owner_ref_contenu_complet`), sous `#[allow(clippy::expect_used)]`
-    justifié d'une ligne.
-  Écrire @OwnerStatus { pvcName: @effective_pvc_name, serviceAccount: @service_account_name,
+    namespace de l'Owner (@owner_namespace_name), AUCUNE owner_reference } et spec entièrement par défaut (aucun
+    `secrets`, `imagePullSecrets`, `automountServiceAccountToken`) — toujours créé
+    (vérifié par le test existant `build_service_account_always_created`).
+    Ce SA est l'IDENTITÉ D'AUTHENTIFICATION de l'Owner auprès de sa sandbox : le jeton émis
+    pour lui par l'API TokenRequest (audience `vanyline-sandbox`, par `app`, le service
+    central ou un opérateur) est le SEUL moyen d'entrer dans les sandboxes de l'Owner
+    (../../sandbox/src/auth.sdd, `sub` = `system:serviceaccount:<namespace de l'Owner>:owner-<nom>`).
+  Ne fabriquer AUCUNE référence de contrôleur vers la CR Owner pour les enfants du namespace
+    (ownerReference inter-namespaces interdite par K8s) : la fonction `owner_reference` et son
+    `expect` disparaissent avec l'ownerReference.
+  Écrire @OwnerStatus { namespace: @owner_namespace_name, pvcName: @effective_pvc_name, serviceAccount: @service_account_name,
     conditions: [unique @Condition type `"Ready"`, status `"True"`, reason `"Reconciled"`,
     message `"PVC home et ServiceAccount en place"`, lastTransitionTime: maintenant,
     observedGeneration: @generation de la CR observée] } via @compute_status, puis
     `patch_status` en @Patch::Merge de `{"status": ...}` avec @PatchParams::default() sur le
     sous-ressource status.
-  Ordonner @reconcile exactement : (1) apply du PVC home si @build_home_pvc rend @Some,
-    (2) apply du @ServiceAccount, (3) patch du status, (4) bump egress, (5) @Ok(@Action::requeue)
+  Ordonner @reconcile exactement : (0) finalizer et namespace (./namespace.sdd), (1) apply du
+    PVC home si @build_home_pvc rend @Some, (2) apply du @ServiceAccount, (3) patch du status,
+    (4) bump egress, (5) @Ok(@Action::requeue)
     à `Duration::from_mins(5)` (300 s). Toute erreur aux étapes 1–3 abandonne les suivantes
     (aucune transaction ni rollback).
   Patcher à CHAQUE reconcile réussi (détection de changement délibérément absente — choix
@@ -107,11 +115,14 @@ Must:
     l'annotation `vanyline.solidite.fr/egress-bump` = @jiff::Timestamp::now() (RFC 3339,
     ≤ 63 caractères, valide comme valeur d'annotation) en @Patch::Merge sur chaque @Sandbox
     du namespace dont `spec.project` appartient à l'ensemble (listé puis filtré
-    `p.spec.owner == owner.name_any()`) des @Project du namespace appartenant à l'Owner ;
+    `p.spec.owner == owner.name_any()`) des @Project DU NAMESPACE DE L'OWNER appartenant à l'Owner
+    (listés dans ce namespace, plus dans celui de la CR) ;
     le scan des Sandboxes n'est exécuté que si cet ensemble est non vide.
   Résoudre le namespace par `owner.namespace().unwrap_or("default")` pour tous les
-    @Api::namespaced du reconcile (filet défensif — la CRD étant namespaced, le watcher
-    fournit toujours un namespace ; cf. `[?]` des `Tasks`).
+    @Api::namespaced portant sur la CR Owner elle-même (status, finalizer) — le namespace
+    d'application ; les enfants et les Projects/Sandboxes du bump utilisent le namespace de
+    l'Owner. (filet défensif — la CRD étant namespaced, le watcher fournit toujours un
+    namespace ; cf. `[?]` des `Tasks`).
   Répondre dans @error_policy, pour TOUTE erreur sans distinction transitoire/fatale (v1) :
     `tracing::warn!(%error, "owner reconcile error, requeue in 30s")` puis
     @Action::requeue(`Duration::from_secs(30)`) — pas de backoff exponentiel en v1 (le
@@ -124,11 +135,8 @@ Must:
     @Context sans doc comment (dette — cf. `Tasks`).
 
 Must not:
-  Créer, patcher, supprimer, vérifier l'existence ou coiffer d'@OwnerReference un PVC
-    référencé par `existing_pvc` : ni `get` de vérification, ni GC sur ce PVC (un
-    `existing_pvc` fantôme est accepté et publié tel quel dans `status.pvcName` —
-    comportement actuel, divergence avec /docs/architecture.md « référence `existing_pvc`
-    vérifiée », arbitrée en `Tasks`).
+  Référencer un PVC préexistant comme home : le home est toujours celui que ce reconciler crée
+    (`owner-<nom>-home`) dans le namespace de l'Owner.
   Consommer ou propager autre chose que le bump : `application_ref` (aucune lecture ici,
     validation et usage vivent dans `./sandbox.rs`), `egress` (aucune netpol produite ici),
     `project_defaults` (aucune application ici) ; aucune CR @Application n'est lue ni écrite
@@ -137,12 +145,17 @@ Must not:
     `Failed` : @compute_status ne produit que `Ready: True` — une erreur de reconcile
     n'écrit AUCUN status (le status antérieur, voire vide, persiste pendant toute la boucle
     de requeue 30 s).
-  Poser un finalizer, réagir à `deletionTimestamp` ou nettoyer autre chose que par la GC
-    K8s : la suppression de l'Owner supprime par ownerReferences le SA et le PVC créé (si
-    créé), jamais un PVC référencé (cf. Scenario `gc_cascade_supprime_pvc_cree_et_sa_preserve_pvc_reference`).
+  Nettoyer autre chose que par le finalizer de ./namespace.sdd : la suppression de l'Owner
+    supprime SON namespace (donc SA, PVC, Projects, Sandboxes) et rien d'autre ; aucun enfant
+    n'est supprimé individuellement ni coiffé d'une ownerReference vers la CR Owner.
+  Attacher au SA `owner-<nom>` le MOINDRE droit RBAC (aucun Role/RoleBinding/ClusterRole ne
+    le désigne, nulle part dans le dépôt) : il doit rester une pure identité. Son jeton est
+    la clé de la sandbox de l'Owner ; s'il portait des droits Kubernetes, quiconque obtient
+    ce jeton (ou le lit depuis le token monté dans le pod) gagnerait ces droits.
   Gérer des quotas, des limits, un RBAC au-delà du SA, ou un quelconque Role/RoleBinding :
-    le RBAC machine-à-machine des Jobs vit dans `./project.rs` (`project-<name>-maint`),
-    celui du controller (ClusterRole) dans `deploy/` — hors périmètre.
+    le RoleBinding de l'app dans le namespace vit dans ./namespace.sdd, le RBAC
+    machine-à-machine des Jobs dans `./project.rs` (`project-<name>-maint`), celui du
+    controller (ClusterRole) dans `deploy/` — hors périmètre.
   Employer `unwrap`/`panic!`/`println!`/`eprintln!` en dehors de l'`expect` motivé
     d'@owner_reference (`#[allow(clippy::expect_used)]` + justification, /tooling.sdd) et
     des exemptions `cfg(test)` du module de tests ; logger uniquement via `tracing` (le
@@ -187,9 +200,7 @@ Exposes:
   @Context — `pub struct { pub client: Client }`, contexte unique du reconciler Owner.
   @home_pvc_name, @service_account_name — `pub fn(&str) -> String` : conventions
     `owner-<name>-home` et `owner-<name>`.
-  @effective_pvc_name — `pub fn(&@Owner) -> String` : PVC effectif (référencé ou généré).
-  @build_home_pvc — `pub fn(&@Owner) -> @Option<@PersistentVolumeClaim>` (pur ; @None en
-    mode `existing_pvc`).
+  @build_home_pvc — `pub fn(&@Owner) -> @PersistentVolumeClaim` (pur, toujours construit).
   @build_service_account — `pub fn(&@Owner) -> @ServiceAccount` (pur, toujours construit).
   @compute_status — `pub fn(&@Owner) -> @OwnerStatus` (pur, inclut un horodatage `now`).
   @reconcile — `pub async fn(Arc<@Owner>, Arc<@Context>) -> @Result<@Action, @ControllerError>`
@@ -220,15 +231,14 @@ Accepts:
 
 Returns:
   @reconcile (succès) — @Ok(@Action::requeue(300 s)), APRÈS les quatre effets côté
-    apiserver : PVC (apply/adopté ou rien en mode `existing_pvc`), SA (apply/adopté),
+    apiserver : PVC (apply/adopté), SA (apply/adopté),
     status fusionné (`pvcName` + `serviceAccount` + `conditions` intégralement REMPLACÉ —
     un merge patch remplace les tableaux entiers), annotation de bump sur chaque Sandbox
     concernée (valeur nouvelle à chaque passage).
   @error_policy — @Action dont le champ public `requeue` vaut @Some(`30 s`), quelle que
     soit l'entrée.
   @build_home_pvc — PVC dont SEULS name/namespace/ownerReferences/accessModes/
-    storageClassName/requests.storage sont renseignés (tout le reste @Default) ; @None si
-    `existing_pvc` posé.
+    storageClassName/requests.storage sont renseignés (tout le reste @Default).
   @compute_status — status à trois champs, condition unique, @observed_generation copié de
     la CR observée, @last_transition_time fraîche à chaque appel (deux appels ⇒ deux
     horodatages différents ⇒ le patch status réécrit l'objet à chaque reconcile — cf.
@@ -259,10 +269,8 @@ Handles:
   Champ détenu par un autre field manager (kubectl manuel) : `force()` reprend la
     possession des champs DÉCLARÉS par le controller (et eux seuls ; les champs non déclarés
     d'autrui — labels d'un opérateur par ex. — sont conservés).
-  Conflit d'@OwnerReference : deux Owners du même namespace ne peuvent pas porter le même
-    nom (unicité apiserver) ; en revanche un Owner peut référencer en `existing_pvc` le PVC
-    généré d'un AUTRE Owner — il n'en prend pas la GC, et la suppression du premier emporte
-    le PVC en cascade sous les pieds du second (aucune garde ici — `[?]`).
+  Unicité : deux Owners du même namespace d'application ne peuvent pas porter le même nom
+    (unicité apiserver), donc jamais le même namespace d'Owner.
   PVC grossi hors bande : la taille est un champ déclaré immuable à la baisse côté apiserver
     — le prochain apply (qui redéclare `home_size` ou `"1Gi"`) est rejeté en erreur
     permanente (requeue 30 s à l'infini) tant que la CR ne grossit pas `home_size` pareil.
@@ -282,13 +290,18 @@ Handles:
     part d'ici.
 
 Tasks:
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, ./namespace.sdd) : PVC home et SA
+    créés dans `<app-ns>-<owner>` sans ownerReference ; finalizer et namespace via
+    ./namespace.rs ; `OwnerStatus.namespace` ; les Scenario d'intégration (`reconcile_*`,
+    `bump_*`) sont à rejouer avec le namespace d'Owner ; les passages de `Handles` qui
+    décrivent encore les ownerReferences de l'Owner (conflit d'ownerReference, GC, `owner_reference` et son `expect`) sont à
+    purger à l'implémentation.
+  [ ] RETRAIT DE `existing_pvc` (décision 2026-10-04) : supprimer le champ de @OwnerSpec
+    (/crds/src/lib.sdd), `effective_pvc_name`, la branche `@None` de @build_home_pvc et tous les
+    Scenario qui s'y rapportent (retirés de cette spec) ; /docs/architecture.md ne promet plus
+    de « référence `existing_pvc` vérifiée » pour l'Owner.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]` ;
     relecture de reverse-engineering du 2026-09-25.
-  [?] `existing_pvc` JAMAIS vérifié : /docs/architecture.md (table des reconcilers) promet
-    « référence `existing_pvc` vérifiée » mais @reconcile ne fait aucun `get` du PVC — un
-    PVC fantôme donne `Ready: True` + `pvcName` fantôme, et l'erreur ne surgit qu'au
-    montage des pods en aval. Corriger le doc (contrat actuel : faire confiance) ou ajouter
-    la vérification (et alors : quel status si absent — `Ready: False` ?) ?
   [?] Bump egress peut-être INERTE : ./sandbox.rs comme ./owner.rs construisent leur
     @Controller SANS `reconciler_trigger`, et kube-runtime (depuis 0.88) ne réveille par
     défaut un reconcile que sur changement de `metadata.generation` ou de suppression —
@@ -315,9 +328,6 @@ Tasks:
     le patch status (à chaque reconcile, donc au minimum toutes les 300 s) n'est jamais un
     no-op ; les écritures d'apiserver et les événements de watch s'accumulent par Owner.
     Accepté, ou horodatage conservé quand le contenu (hors timestamp) ne change pas ?
-  [?] Deux Owners partageant un même PVC en `existing_pvc` (dont le PVC généré d'une autre
-    Owner) : aucune garde, GC asymétrique (cf. `Handles`). Interdire (admission/validation
-    ailleurs) ou accepter (le cas code-server « PVC partagé » est le cas d'usage nommé) ?
   [?] `home_storage_class = Some("")` : chaîne vide transplantée (sémantique K8s
     « désactive le provisioning dynamique ») — validation à poser ou pass-through assumé ?
     Même question pour `home_size` mal formé (rejet apiserver à l'usage, erreur 30 s en
@@ -335,7 +345,7 @@ Tasks:
   [ ] Écrire les Scenarios unitaires sans test : `build_home_pvc_metadata_champs_nus`,
     `build_home_pvc_owner_ref_contenu_complet`, `build_service_account_champs_nus`,
     `compute_status_observed_generation_reprise`,
-    `compute_status_pvc_name_sur_existing_pvc`, `compute_status_serialisation_merge_patch`,
+    `compute_status_serialisation_merge_patch`,
     `error_policy_requeue_trente_secondes` (construire un @Client hors connexion via
     @Config::new d'une URI morte + @Client::try_from, jamais de requête émise ; à défaut
     rebasculer en intégration — tranché par l'implementer), `owner_reference_sans_uid_panique`
@@ -343,12 +353,10 @@ Tasks:
     justification d'`expect` doit être tranchée d'abord).
   [ ] Écrire les Scenarios d'intégration (convention projet : cluster réel non mocké, tag
     intégration) : `reconcile_nominal_cree_pvc_sa_et_status_requeue_300s`,
-    `reconcile_existing_pvc_ne_cree_aucun_pvc_genere`,
     `reconcile_double_pass_idempotent_sans_duplication`,
     `reconcile_ready_true_meme_si_pvc_non_bound`,
     `reconcile_pvc_preexistant_adopte_par_apply_force`,
     `reconcile_pvc_grossi_hors_bande_bloque_le_reconcile`,
-    `reconcile_existing_pvc_inexistant_status_pvc_name_quand_meme`,
     `reconcile_bump_annotation_sur_sandboxes_des_projects`,
     `reconcile_bump_inerte_sans_project`,
     `bump_annotation_declenche_effectivement_reconcile_sandbox`,
@@ -360,8 +368,7 @@ Done when:
   Chaque Scenario a son test taggé par son titre (unitaires en `cargo test -p
     vanyline-controller`, intégration sur cluster réel) et passe.
   Tous les `[?]` de `Tasks` ont une décision écrite de Sébastien, répercutée dans la spec
-    et (si le code change) dans /docs/architecture.md — notamment la promesse « existing_pvc
-    vérifiée » et le mécanisme de bump.
+    et (si le code change) dans /docs/architecture.md — notamment le mécanisme de bump.
   Le harnais (/tooling.sdd) est vert sur ./owner.rs avec ses seules exemptions motivées
     (expect d'@owner_reference, `cfg(test)`), et `build_home_pvc_owner_ref_contenu_complet`
     verrouille le contenu exact de l'@OwnerReference posé sur les enfants.
@@ -372,26 +379,8 @@ Scenario: home_pvc_name_and_sa_name
   Then elles retournent exactement `"owner-alice-home"` et `"owner-alice"` (test existant
     `home_pvc_name_and_sa_name`)
 
-Scenario: effective_pvc_name_generated
-  Given une @Owner `"alice"` sans `existing_pvc`
-  When @effective_pvc_name est appelée
-  Then le retour est `"owner-alice-home"` — le nom généré est dérivé du nom de l'Owner
-    (test existant `effective_pvc_name_generated`)
-
-Scenario: effective_pvc_name_existing
-  Given une @Owner `"alice"` avec `existing_pvc = Some("code-server-home")`
-  When @effective_pvc_name est appelée
-  Then le retour est `"code-server-home"` — le nom référencé masque le nom généré, sans
-    aucune vérification d'existence (test existant `effective_pvc_name_existing`)
-
-Scenario: build_home_pvc_none_when_existing
-  Given une @Owner `"alice"` avec `existing_pvc = Some("code-server-home")`
-  When @build_home_pvc est appelée
-  Then @None est retourné : le controller ne construit jamais le PVC qu'il doit référencer
-    (test existant `build_home_pvc_none_when_existing`)
-
 Scenario: build_home_pvc_default_size
-  Given une @Owner `"alice"` sans `existing_pvc`, `home_size` ni `home_access_mode`
+  Given une @Owner `"alice"` , `home_size` ni `home_access_mode`
   When @build_home_pvc est appelée
   Then `requests["storage"]` vaut @Quantity(`"1Gi"`) et `access_modes` vaut
     `[ReadWriteMany]` — les deux défauts métier du fichier (@DEFAULT_HOME_SIZE,
@@ -412,45 +401,35 @@ Scenario: build_home_pvc_custom_size_and_class
   Then `requests["storage"]` vaut @Quantity(`"5Gi"`) et `storage_class_name` vaut `"cephfs"`
     (test existant `build_home_pvc_custom_size_and_class`)
 
-Scenario: build_home_pvc_owner_reference
-  Given une @Owner `"alice"` sans `existing_pvc`
+Scenario: build_home_pvc_sans_owner_reference
+  Given une @Owner `"alice"`
   When @build_home_pvc est appelée et que ses `ownerReferences` sont lues
-  Then il y a exactement UNE référence, de `name = "alice"` et `kind = "Owner"` — la GC en
-    cascade du PVC est attachée à l'Owner (test existant `build_home_pvc_owner_reference`)
+  Then il n'y en a AUCUNE — le PVC vit dans le namespace de l'Owner et disparaît avec lui
 
 Scenario: build_home_pvc_metadata_champs_nus
-  Given une @Owner `"alice"` (namespace `"ns"`, aucun `home_storage_class`)
+  Given une @Owner `"alice"` (namespace d'application `"ns"`, aucun `home_storage_class`)
   When @build_home_pvc est appelée
-  Then le PVC porte `metadata.name = "owner-alice-home"`, `metadata.namespace = Some("ns")`,
+  Then le PVC porte `metadata.name = "owner-alice-home"`, `metadata.namespace = Some("ns-alice")`,
     AUCUN labels/annotations/finalizers, et son spec ne pose que `accessModes`, l'absence
     de `storageClassName` (⇒ StorageClass par défaut du cluster) et `requests` (pas de
     `limits`, pas de `selector`, `dataSource`, `volumeName` ni `volumeMode`) — le contrat
     du constructeur, verrouillé champ par champ
 
-Scenario: build_home_pvc_owner_ref_contenu_complet
-  Given une @Owner `"alice"` (uid `"test-uid-alice"`) sans `existing_pvc`
-  When @build_home_pvc est appelée et que l'unique @OwnerReference est décomposée
-  Then les six champs sont : `apiVersion = "vanyline.solidite.fr/v1alpha1"`,
-    `kind = "Owner"`, `name = "alice"`, `uid = "test-uid-alice"`, `controller = Some(true)`,
-    `blockOwnerDeletion = Some(false)` — verrou de la sémantique kube-rs
-    `controller_owner_ref` posée sur les DEUX enfants (le SA porte la même)
-
 Scenario: build_service_account_always_created
-  Given une @Owner `"alice"`, avec puis sans `existing_pvc = Some("x")`
-  When @build_service_account est appelée sur les deux
-  Then les deux @ServiceAccount portent `metadata.name = Some("owner-alice")` : le SA est
-    fabriqué dans les deux modes (test existant `build_service_account_always_created`)
+  Given une @Owner `"alice"`
+  When @build_service_account est appelée
+  Then le @ServiceAccount porte `metadata.name = Some("owner-alice")` (test existant
+    `build_service_account_always_created`)
 
 Scenario: build_service_account_champs_nus
-  Given une @Owner `"alice"` (namespace `"ns"`, uid posé)
+  Given une @Owner `"alice"` (namespace d'application `"ns"`)
   When @build_service_account est appelée
-  Then le SA ne porte QUE `name`, `namespace` et un unique `ownerReferences` (celui de
-    @build_home_pvc_owner_ref_contenu_complet) — spec par défaut : pas de `secrets`,
+  Then le SA ne porte QUE `name` et `namespace = "ns-alice"`, sans `ownerReferences` — spec par défaut : pas de `secrets`,
     `imagePullSecrets` ni `automountServiceAccountToken` ; les champs immutables d'un SA
     existant ne seront jamais repris en main par le controller
 
 Scenario: compute_status_ready
-  Given une @Owner `"alice"` sans `existing_pvc`
+  Given une @Owner `"alice"`
   When @compute_status est appelée
   Then `pvc_name = Some("owner-alice-home")`, `service_account = Some("owner-alice")` et
     une condition unique `type = "Ready"`, `status = "True"` (test existant
@@ -462,13 +441,6 @@ Scenario: compute_status_observed_generation_reprise
   Then la condition `Ready` porte `observedGeneration = Some(7)` et un
     `lastTransitionTime` horodaté à l'appel — le status témoigne bien de la génération
     observée, et l'horodatage est frais (deux appels ⇒ deux horodatages, cf. `[?]` churn)
-
-Scenario: compute_status_pvc_name_sur_existing_pvc
-  Given une @Owner `"alice"` avec `existing_pvc = Some("code-server-home")`
-  When @compute_status est appelée
-  Then `pvc_name = Some("code-server-home")` et `service_account = Some("owner-alice")` —
-    les printcolumns `PVC`/`SA` de la CRD (../../crds/src/lib.sdd) affichent le PVC
-    référencé, jamais le nom généré
 
 Scenario: compute_status_serialisation_merge_patch
   Given le @OwnerStatus produit par @compute_status sur une @Owner `"alice"`
@@ -494,21 +466,13 @@ Scenario: owner_reference_sans_uid_panique
     l'arbitrage `[?]` de la justification d'`expect`
 
 Scenario: reconcile_nominal_cree_pvc_sa_et_status_requeue_300s
-  Given (intégration — cluster réel non mocké) une CR @Owner `"alice"` créée sans
-    `existing_pvc`, sans PVC ni SA préexistants dans son namespace
+  Given (intégration — cluster réel non mocké) une CR @Owner `"alice"` créée, sans
+    namespace d'Owner, PVC ni SA préexistants
   When @reconcile est exécutée sur la CR servie par le watcher
   Then le PVC `owner-alice-home` existe (requests.storage de la CR ou `1Gi`, accessModes,
     ownerRef contrôleur vers l'Owner), le SA `owner-alice` existe avec le même ownerRef,
     `status.pvcName`/`status.serviceAccount` sont posés avec la condition `Ready: True`
     d'observedGeneration courante, et l'@Action rendu a `requeue = Some(300 s)`
-
-Scenario: reconcile_existing_pvc_ne_cree_aucun_pvc_genere
-  Given (intégration) une CR @Owner `"alice"` avec `existing_pvc` pointant un PVC préexistant
-    sans ownerReferences
-  When @reconcile est exécutée
-  Then AUCUN PVC `owner-alice-home` n'est créé, le PVC référencé reste SANS ownerReference
-    du controller (et ne portera jamais la GC), le SA `owner-alice` est créé, et
-    `status.pvcName` vaut le nom référencé
 
 Scenario: reconcile_double_pass_idempotent_sans_duplication
   Given (intégration) une CR @Owner `"alice"` déjà réconciliée une fois (PVC + SA + status
@@ -529,13 +493,12 @@ Scenario: reconcile_ready_true_meme_si_pvc_non_bound
 
 Scenario: reconcile_pvc_preexistant_adopte_par_apply_force
   Given (intégration) un PVC `owner-alice-home` préexistant créé hors du controller (aucun
-    ownerReferences, autres labels libres d'un opérateur) et une CR @Owner `"alice"` sans
-    `existing_pvc`
+    ownerReferences, autres labels libres d'un opérateur) et une CR @Owner `"alice"`
   When @reconcile est exécutée
-  Then l'apply SSA `force` adopte l'objet : l'ownerReference contrôleur est posé sur le PVC
-    existant, les champs déclarés (accessModes, requests.storage) sont ramenés à la CR, et
+  Then l'apply SSA `force` adopte l'objet : les champs déclarés (accessModes, requests.storage) sont ramenés à la CR, et
     les champs non déclarés d'autres field managers (labels libres) survivent — adoption
     sans `AlreadyExists` (cf. `[?]` adoption voulue ?)
+
 Scenario: reconcile_pvc_grossi_hors_bande_bloque_le_reconcile
   Given (intégration) une CR @Owner `"alice"` réconciliée (PVC à `1Gi`) dont le PVC a ensuite
     été grossi hors bande à `2Gi` (expansion autorisée par l'apiserver)
@@ -545,16 +508,6 @@ Scenario: reconcile_pvc_grossi_hors_bande_bloque_le_reconcile
     l'infini tant que `homeSize` de la CR n'est pas relevé d'autant — comportement de
     blocage permanent
     figé par ce test, arbitré en `Tasks`
-
-Scenario: reconcile_existing_pvc_inexistant_status_pvc_name_quand_meme
-  Given (intégration) une CR @Owner `"alice"` avec `existing_pvc = "pvc-fantome"` (aucun PVC
-    de ce nom dans le namespace)
-  When @reconcile est exécutée
-  Then elle réussit (aucune vérification d'existence n'existe dans le code malgré la doc
-    « existing_pvc vérifiée » de /docs/architecture.md) : `status.pvcName = "pvc-fantome"`
-    avec `Ready: True`, SA créé normalement — verrou du comportement ACTUEL en attendant
-    l'arbitrage `[?]` : les consommateurs en aval (./project.rs, ./sandbox.rs) monteront un
-    PVC absent et échoueront eux
 
 Scenario: reconcile_bump_annotation_sur_sandboxes_des_projects
   Given (intégration) une CR @Owner `"alice"` réconciliée, deux @Project du namespace dont
@@ -587,11 +540,14 @@ Scenario: bump_annotation_declenche_effectivement_reconcile_sandbox
     propagation réelle est bornée au requeue 300 s du reconciler Sandbox — question `[?]`
     à trancher, test d'arbitrage
 
-Scenario: gc_cascade_supprime_pvc_cree_et_sa_preserve_pvc_reference
-  Given (intégration) deux Owners réconciliés : `"alice"` sans `existing_pvc` (PVC
-    `owner-alice-home` créé par le controller) et `"bob"` avec `existing_pvc =
-    "pvc-partage"` préexistant ; aucun pod ne monte ces PVC (pas de blocage pvc-protection)
-  When les deux CR @Owner sont supprimées et que la GC a terminé
-  Then le PVC `owner-alice-home` et les SA `owner-alice` ET `owner-bob` ont disparu en
-    cascade (ownerReferences), et le PVC `pvc-partage` référencé par bob SURVIT (jamais
-    coiffé d'une référence — cf. `Must not`)
+Scenario: suppression_de_l_owner_supprime_son_namespace
+  Given (intégration) un Owner `"alice"` réconcilié, avec un Project et une Sandbox dans `<app-ns>-alice`
+  When la CR Owner est supprimée
+  Then le namespace `<app-ns>-alice` et tout son contenu disparaissent, le finalizer est retiré, et le
+    namespace d'un autre Owner est intact
+
+Scenario: sa_owner_sans_aucun_droit_rbac
+  Given l'ensemble des manifests et specs de `deploy/` et des reconcilers du controller
+  When on cherche un Role, ClusterRole, RoleBinding ou ClusterRoleBinding dont un sujet est un SA
+    `owner-<nom>`
+  Then aucun n'existe : le SA de l'Owner est une pure identité (son jeton est la clé de la sandbox)

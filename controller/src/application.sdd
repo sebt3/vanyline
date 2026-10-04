@@ -45,6 +45,15 @@ Structure:
     purs, sans cluster ni mock de l'API K8s — convention du crate).
 
 Must:
+  Moteur de workflow (2026-10-04) : si `spec.restate` est présent, construire comme sous-ressources
+    de l'Application, dans son namespace et coiffées de son ownerReference : un StatefulSet
+    `<application>-restate` à UN réplica (image `spec.restate.image` sinon le défaut du
+    controller, flag `--restate-image` / `RESTATE_IMAGE`), un `volumeClaimTemplate` de données
+    (`spec.restate.storage_size`, défaut `5Gi`, `storage_class` optionnelle), et un Service
+    `<application>-restate` exposant l'ingress (8080), l'admin (9070) et le port de nœud (5122) ;
+    l'env du Deployment `app` reçoit `VNL_RESTATE_ADMIN_URL` et `VNL_RESTATE_INGRESS_URL`
+    (URL internes du Service). Sans `spec.restate`, aucune de ces ressources n'existe et l'app
+    démarre sans moteur de workflow. Le Service Restate n'est jamais exposé par un Ingress.
   Exposer @APP_PORT comme `pub const APP_PORT: i32 = 8080` — port HTTP du pod `app`, écho du
     défaut `LISTEN_ADDR` de `app/src/config.rs` (`0.0.0.0:8080`) ; un seul contrat de port
     pour le ContainerPort, le Service, la sonde et le backend d'Ingress.
@@ -73,14 +82,14 @@ Must:
   Construire @build_application_service_account : un ServiceAccount namespaced nommé
     @application_name, sans secret ni automount personnalisé — sans lui `app` tourne avec le
     `default` du namespace et ses appels CRDs échouent en `VNL-K8S-002: ... is forbidden`.
-  Construire @build_application_role comme un @Role NAMESPACED (jamais un ClusterRole — `app`
-    ne gère que les CRs de son namespace) à trois @PolicyRule, toutes sur l'unique apiGroup
-    `vanyline.solidite.fr` : (`owners`, `projects`) => verbes `get`,`list`,`create`,`delete`
-    exactement (pas de patch, pas de watch) ; (`sandboxes`) => `get`,`list`,`watch`,`create`,
-    `delete`,`patch` (`watch` = hub WS `/api/ws/sandbox-state`, `patch` = suspension) ;
-    (`applications`) => `get` seul (`app` ne modifie jamais sa propre CR). Les verbes
-    reproduisent exactement ceux de `vanyline_lib::k8s::VnlK8sClient` — toute évolution du
-    client K8s de l'app impose de toucher cette règle.
+  Construire @build_application_role comme un @Role NAMESPACED (jamais un ClusterRole) dans le
+    namespace d'application, à DEUX @PolicyRule sur l'unique apiGroup `vanyline.solidite.fr` :
+    (`owners`) => `get`,`list`,`create`,`delete` ; (`applications`) => `get` seul (`app` ne
+    modifie jamais sa propre CR). Les droits sur `projects`, `sandboxes` et
+    `serviceaccounts/token` ne sont PLUS ici : ils vivent dans les namespaces d'Owner, par le
+    RoleBinding `vanyline-app` que le controller y crée (../controller/src/namespace.sdd, ClusterRole
+    `vanyline-app-owner-scope`), donc limités aux Owners que l'app sert (UN OWNER = UN NAMESPACE,
+    décision 2026-10-04). Les verbes reproduisent ceux de `vanyline_lib::k8s::VnlK8sClient`.
   Construire @build_application_role_binding liant (rôle RBAC `rbac.authorization.k8s.io`,
     kind `Role`, même nom @application_name) au ServiceAccount éponyme (unique @Subject,
     kind `ServiceAccount`, namespace de la CR) — les trois objets RBAC partagent le même nom.
@@ -311,6 +320,14 @@ Handles:
     tard, les SSA étant idempotents et le cookie « create-if-absent ».
 
 Tasks:
+  [ ] `ApplicationSpec.restate: Option<RestateSpec { image, storage_size, storage_class }>`
+    (/crds/src/lib.sdd) ; builders `build_restate_statefulset`/`build_restate_service` ; test du
+    Role à DEUX règles (l'ancien Scenario à trois règles est remplacé) ; NetworkPolicy du
+    namespace d'application : l'ingress et l'admin de Restate sont joignables par le Deployment
+    `app` ET par les pods de sandbox des namespaces d'Owner (callback d'awakeable, voir
+    /sandbox/src/jobs.sdd) — règle d'egress de la sandbox vers le Service Restate à prévoir.
+  [?] Restate en StatefulSet mono-nœud sans réplication : suffisant pour un cluster de
+    développement/homelab ; la haute disponibilité (cluster Restate) est hors périmètre.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
   [?] @deployment_phase filtre reasons `"Failed"`/`"ProgressDeadlineExceeded"` sur la

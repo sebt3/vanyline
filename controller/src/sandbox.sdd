@@ -41,7 +41,7 @@ Structure:
     @toolchain_root, @BASE_PATH, @FINALIZER, @SERVICE_PORT_NAME, plus @checkout_job_name,
     @worktree_remove_job_name, @netpol_name, @netpol_egress_name, @ingress_name ;
     (2) env toolchain — @toolchain_preset, @resolve_toolchain_env,
-    @aggregate_toolchain_env, @effective_toolchains, @cache_env_var, @combine_sub_path ;
+    @aggregate_toolchain_env, @effective_toolchains, @cache_env_var ;
     (3) LSP — @resolve_toolchain_lsp, @node_lsp_composite, @docker_lsp_composite,
     @python_lsp_composite ; (4) structures de contexte — @SandboxPodContext (builders
     purs), @Context (reconciler) ; (5) builders d'enfants — @build_sandbox_pod,
@@ -54,6 +54,14 @@ Structure:
     le crate n'a pas de harnais cluster, cf. `Tasks`).
 
 Must:
+  UN OWNER = UN NAMESPACE (2026-10-04, ./namespace.sdd) : la CR @Sandbox vit dans le namespace
+    de l'Owner avec son @Project ; Pod, Service, Ingress, NetworkPolicies, Jobs y vivent aussi. La CR
+    @Owner et l'@Application (via `application_ref`) vivent dans le namespace d'application :
+    les lire par `namespace::app_namespace_of` puis `Api::namespaced` sur ce namespace.
+    `VNL_OWNER_SUBJECT` = `system:serviceaccount:<namespace de l'Owner>:owner-<nom>`. Si
+    l'Application de l'Owner porte `spec.restate`, le pod reçoit `VNL_RESTATE_INGRESS_URL` (URL
+    interne du Service Restate, /controller/src/application.sdd) et sa NetworkPolicy d'egress
+    autorise ce seul Service ; sinon cette variable est absente.
   Traiter le contrat en un seul fichier : builders purs (aucun appel réseau — le
     contexte est résolu par l'appelant) et boucle reconcile cohabitent, les Scenario
     unitaires portent les manifests, les Scenario `_cluster` portent la boucle (tests
@@ -119,23 +127,30 @@ Must:
     d'erreur remontée).
   Monter les caches du Project (@effective_caches, défaut `["cargo", "pnpm", "pip"]`) :
     un @VolumeMount du volume `workspace` par cache en `/project-cache/<cache_dir_name>`
-    avec `sub_path` = @combine_sub_path(`cache/<cache_dir_name>`) ; les noms connus
+    avec `sub_path` = `cache/<cache_dir_name>` (chemin relatif au PVC workspace) ; les noms connus
     portent leur convention d'env (@cache_env_var) : `cargo` → `CARGO_HOME`, `pnpm` →
     `npm_config_store_dir`, `pip` → `PIP_CACHE_DIR`, valeur `/project-cache/<dir>` ;
     tout autre nom ⇒ montage seul, aucune env.
-  Combiner les sous-chemins (@combine_sub_path) : @effective_sub_path du Project
-    `Some(base)` ⇒ préfixe `base/<chemin-relatif>` ; `None` (PVC créé par le controller
-    ou `existing_pvc` sans `sub_path`) ⇒ chemin relatif nu.
+  Utiliser des sous-chemins RELATIFS au PVC workspace, sans préfixe de projet : le PVC est
+    toujours celui que le controller crée pour le Project (`existingPvc`/`subPath` n'existent
+    plus, décision 2026-10-04) ; @combine_sub_path disparaît.
   Construire le Pod (@build_sandbox_pod) : nom @pod_name (`sandbox-<sandbox>`), namespace
     de la CR, labels `vanyline.solidite.fr/owner` (= Owner du Project), `.../project`,
     `.../sandbox`, une seule @ownerReference (controller) vers la Sandbox (GC en cascade) ;
-    `service_account_name` = @SandboxPodContext.owner_service_account (SA de l'Owner —
-    identité sans RBAC attaché) ; un seul container `sandbox` : image
-    `spec.image` sinon @Context.default_image, `args` = `["--no-auth"]` (jamais de
-    `command`), port nommé `mcp` = @MCP_PORT, `env`, `volume_mounts`, `resources` =
-    `spec.resources` clone (passe-plat, `None` compris), sondes readiness ET liveness
-    identiques : HTTP GET `/health` sur @MCP_PORT, `initial_delay_seconds: 5`,
-    `period_seconds: 10` ; `security_context` = @project::sandbox_security_context
+    `service_account_name` = @SandboxPodContext.owner_service_account (SA de l'Owner,
+    token monté par défaut : le pod s'en sert pour LIRE le JWKS de l'apiserver et vérifier
+    les jetons entrants, ../../sandbox/src/auth.sdd) ; un seul container `sandbox` : image
+    `spec.image` sinon @Context.default_image, AUCUN `args` d'authentification (jamais de
+    `command`, jamais `--no-auth` : ce drapeau n'existe plus), env d'identité
+    `VNL_OWNER_SUBJECT` = `system:serviceaccount:<namespace de la CR>:<owner_service_account>`
+    et `VNL_TOKEN_ISSUER` = @SandboxPodContext.token_issuer (flag controller `--sa-issuer` /
+    `SA_ISSUER`) — ils définissent le SEUL jeton accepté par la sandbox (celui du SA de
+    l'Owner, audience `vanyline-sandbox`) ; ports nommés `mcp` = @MCP_PORT et `ops` =
+    @OPS_PORT (9090, port d'exploitation `/health` + `/metrics` sans authentification,
+    JAMAIS dans le Service, ni l'Ingress, ni la règle de NetworkPolicy), `env`,
+    `volume_mounts`, `resources` = `spec.resources` clone (passe-plat, `None` compris),
+    sondes readiness ET liveness identiques : HTTP GET `/health` sur le port `ops`,
+    `initial_delay_seconds: 5`, `period_seconds: 10` ; `security_context` = @project::sandbox_security_context
     (uid/gid 1000, non-root, fsGroup 1000).
   Monter dans le Pod, dans cet ordre : `home` = PVC home de l'Owner au complet en
     @HOME_MOUNT_PATH (`/home/vanyline`, sans subPath, écriture) ; `workspace` = PVC
@@ -172,10 +187,12 @@ Must:
   Construire la NetworkPolicy ingress (@build_sandbox_netpol), TOUJOURS produite : nom
     @netpol_name (`sandbox-<n>`), `podSelector` = label sandbox, `policyTypes`
     `[Ingress]`, une règle ingress restreinte au port @MCP_PORT/TCP, `from` =
-    (1) pods du MÊME namespace portant `.../owner: <owner>` (code-server, autres
-    sandboxes du même Owner — incluant donc le pod lui-même), (2) pods du même namespace
-    portant la clé `APP_LABEL` par `matchExpressions` `Exists` (valeur non contrainte —
-    relais `POST /ws/ticket` de l'app), (3) UNIQUEMENT si
+    (1) tout pod du MÊME namespace (le namespace de l'Owner : code-server, autres sandboxes de
+    l'Owner — incluant donc le pod lui-même ; un namespace = un Owner, plus de label d'Owner à
+    filtrer), (2) les pods portant la clé `APP_LABEL` (`matchExpressions` `Exists`) du
+    NAMESPACE D'APPLICATION (`namespaceSelector` `kubernetes.io/metadata.name: <app-ns>` combiné
+    sur le même peer — relais `POST /ws/ticket` et `/git/*`, `/code-health` de l'app, qui ne
+    vit plus dans le namespace de la sandbox), (3) UNIQUEMENT si
     `application.spec.ingress_controller` est `Some` : `namespaceSelector`
     `kubernetes.io/metadata.name: <ns>` + `podSelector` `pod_labels` combinés sur le même
     peer ; ownerReference Sandbox.
@@ -266,8 +283,19 @@ Must:
     (/vanyline.sdd « Must not »).
   Supposer à l'exécution : K8s ≥ v1.31 (volumes `image:`, GA v1.36) pour les toolchains,
     cert-manager + un IngressClass pour l'Ingress, DNS wildcard `*.sandboxes.{host}`
-    provisionné hors repo, image sandbox écoutant @MCP_PORT avec `/health` et acceptant
-    `--no-auth`.
+    provisionné hors repo, image sandbox écoutant @MCP_PORT (authentifié par le jeton du SA de
+    l'Owner) et @OPS_PORT (`/health`, `/metrics`), configurée uniquement par
+    `VNL_OWNER_SUBJECT`/`VNL_TOKEN_ISSUER` (`../../sandbox/src/config.sdd`) ; un apiserver
+    dont le JWKS de SA est lisible par les pods (`system:service-account-issuer-discovery`).
+  Exiger `token_issuer` : une Sandbox ne se réconcilie pas sans la valeur `--sa-issuer`
+    du controller (erreur utilisateur explicite, jamais un pod démarré sans vérification).
+  Ne JAMAIS poser `args: ["--no-auth"]`, un jeton statique, ni rendre l'authentification de la
+    sandbox conditionnelle à l'Application de l'Owner : que l'Ingress soit public ou non,
+    la sandbox n'accepte que le jeton de SA de son Owner.
+  Ne JAMAIS publier @OPS_PORT (ni Service, ni Ingress) ; la NetworkPolicy l'ouvre au cluster
+    (nœuds inclus) par une règle dédiée, optionnellement restreinte par `VNL_OPS_ALLOWED_NAMESPACES`.
+  Laisser le token du SA monté dans le pod (pas d'`automountServiceAccountToken: false`) : la
+    sandbox en a besoin pour lire le JWKS ; ce SA ne porte aucun droit RBAC (./owner.sdd).
 
 Must not:
   Modifier un Pod, un Job, un Service ou une NetworkPolicy existants par autre chose que
@@ -307,8 +335,8 @@ Depends on:
     consommé ici.
   ./owner.rs — @FIELD_MANAGER (`vanyline-controller`), @HOME_MOUNT_PATH
     (`/home/vanyline`) ; statuses `pvcName`/`serviceAccount` produits par ./owner.rs.
-  ./project.rs — @WORKSPACE_MOUNT_PATH (`/workspace`), @effective_pvc_name,
-    @effective_sub_path, @worktree_path, @bare_repo_path, @cache_dir_name, @cache_path,
+  ./project.rs — @WORKSPACE_MOUNT_PATH (`/workspace`), @project_pvc_name,
+    @worktree_path, @bare_repo_path, @cache_dir_name, @cache_path,
     @effective_caches, @git_pod_template, @sandbox_security_context/@SANDBOX_UID,
     @ProjectJobContext ; layout PVC posé par ./project.rs.
   ./application.rs — @APP_LABEL, @cert_manager_annotation_key, @tls_secret_name (mêmes
@@ -318,7 +346,7 @@ Depends on:
   `serde_json` (env `VNL_LSP_TOOLCHAINS`, merge patch de status), `tracing` (logs).
   /tooling.sdd (harnais), /vanyline.sdd (règle argv vs shell), /docs/architecture.md
     (sections « Opérateur Kubernetes », WS-13, WS-10, « Ingress par Sandbox »).
-  Exécution (hors repo) : image sandbox (--no-auth, /health, MCP_LISTEN=3000,
+  Exécution (hors repo) : image sandbox (jeton d'Owner, /health sur le port d'exploitation, MCP_LISTEN=3000,
     `vanyline-maint` checkout/remove), cert-manager, IngressClass, DNS wildcard,
     feature gate `volumes[].image`, annotation de bump posée par ./owner.rs et ./project.rs.
 
@@ -336,7 +364,7 @@ Exposes:
     @build_sandbox_egress_netpol, @compute_status.
   Privés : @BASE_PATH, @FINALIZER, @SERVICE_PORT_NAME, @toolchain_preset,
     @resolve_toolchain_env, @resolve_toolchain_lsp, @node_lsp_composite,
-    @docker_lsp_composite, @python_lsp_composite, @cache_env_var, @combine_sub_path,
+    @docker_lsp_composite, @python_lsp_composite, @cache_env_var,
     @egress_rule_to_peer, @egress_ports_to_netpol_ports, @dns_egress_rule,
     @fetch_project, @fetch_owner, @fetch_application, @apply, @cleanup — contrat
     observable uniquement via les fonctions pub ci-dessus et les enfants produits.
@@ -383,8 +411,6 @@ Handles:
     `Owner.status` absent sans pvcName/serviceAccount ⇒ VNL-CTL-002 ; `languages` vide
     ou absent ⇒ dérivation vide ⇒ aucun volume toolchain, `PATH` = @BASE_PATH seul, pas
     de `LD_LIBRARY_PATH`, pas de `VNL_LSP_TOOLCHAINS`.
-  `existing_pvc` sans `sub_path` ⇒ @combine_sub_path nu (le PVC n'appartient qu'au
-    Project) ; avec `sub_path` ⇒ préfixe sur worktree, repo.git et caches (kydah-code).
   `project.spec.default_branch = Some("")` ⇒ traité comme absent (pas de
     `--default-branch` dans l'argv du Job checkout).
   `toolchain.env` explicite posant les mêmes clés que les conventions de cache
@@ -407,9 +433,38 @@ Handles:
     (suppression de la CR jamais bloquée éternellement par un prérequis manquant).
 
 Tasks:
+  [ ] RETRAIT DE `existing_pvc` du Project (2026-10-04) : supprimer @combine_sub_path et les
+    `subPath` de projet des montages (worktree, repo.git, caches) ; renommer/retirer les tests
+    `*_with_existing_pvc_subpath` et `*_no_existing_pvc`.
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04) : lecture de l'Owner et de l'Application
+    cross-namespace, peers de NetworkPolicy ci-dessus, Scenario `netpol_*` et `pod_*` à rejouer
+    avec deux namespaces (application / Owner).
   [ ] Trancher chaque entrée `[?]`/`[!]` ci-dessous avec Sébastien avant toute tâche
     `[x]`. Relecture de reverse-engineering du 2026-09-26 (aucune spec préexistante
     dans ./).
+  [ ] FAILLE DE SÉCURITÉ À CORRIGER (constat du 2026-09-27, correction redéfinie le
+    2026-10-04) : @build_sandbox_pod pose aujourd'hui INCONDITIONNELLEMENT
+    `args = ["--no-auth"]` — AUCUNE sandbox ne valide de jeton ; l'Ingress d'une sandbox est
+    public dès que l'Owner référence une Application, et son hostname n'est pas un secret
+    (Certificate Transparency) : n'importe qui peut obtenir un ticket puis un terminal. La
+    correction n'est PLUS « OIDC réel quand une Application est résolue » (décision du
+    2026-09-27, caduque) mais le modèle unique de ../../sandbox/src/auth.sdd : jeton du SA de
+    l'Owner, dans TOUS les cas, Application ou non. Implémenter : supprimer `--no-auth`, poser
+    `VNL_OWNER_SUBJECT`/`VNL_TOKEN_ISSUER`, ports `mcp`/`ops`, sondes sur `ops`, flag controller
+    `--sa-issuer`/`SA_ISSUER` dans la configuration du controller (spec ./main.sdd) ; `OPS_PORT` (9090) défini dans `/crds/src/lib.rs` à côté de `MCP_PORT`.
+  [ ] `token_issuer` : le controller le DÉDUIT par défaut de la découverte de l'apiserver
+    (`GET /.well-known/openid-configuration`, champ `issuer`, une fois au démarrage ; vérifié :
+    `https://kubernetes.default.svc.cluster.local`), le flag `--sa-issuer` / `SA_ISSUER` n'étant
+    qu'une SURCHARGE explicite (décision 2026-10-04). Échec de découverte sans flag ⇒ les
+    Sandbox ne se réconcilient pas (erreur explicite).
+  [ ] Port d'exploitation et NetworkPolicy (décision 2026-10-04) : @OPS_PORT doit être joignable
+    depuis le cluster, nœuds inclus (sondes kubelet). La NetworkPolicy ingress de la Sandbox
+    porte donc une SECONDE règle, sur @OPS_PORT seul : par défaut aucun `from` (toute source
+    interne au cluster) ; si le paramètre d'environnement du controller
+    `VNL_OPS_ALLOWED_NAMESPACES` (liste de namespaces séparés par des virgules, flag
+    `--ops-allowed-namespaces`) est posé, la règle est restreinte à ces namespaces. Le trafic
+    nœud → pod (kubelet) reste autorisé par le CNI du cluster (Cilium : entité `host`) ; sur un
+    autre CNI, ajouter les CIDR des nœuds. Le Service et l'Ingress ne publient JAMAIS @OPS_PORT.
   [!] Atteignabilité des branches dédiées d'@error_policy : ./reconcile enveloppe TOUTE
     erreur du `finalizer()` (y compris `Error::UserError` qui porte les erreurs
     utilisateur de @apply/@cleanup) dans @ControllerError::Finalizer(String) par
@@ -697,18 +752,45 @@ Scenario: pod_image_de_la_spec_sinon_defaut
   Then `spec.image` du container vaut `ctx.default_image` dans le premier cas,
     `"custom:tag"` dans le second (test existant `image_default_vs_spec`)
 
-Scenario: pod_arg_unique_no_auth
-  Given n'importe quelle Sandbox
-  When @build_sandbox_pod construit
-  Then `args` = exactement `["--no-auth"]` et `command` non posé (test existant
-    `no_auth_arg`)
+Scenario: pod_sans_aucun_contournement_d_auth
+  Given une Sandbox dont l'Owner référence une Application, puis une dont il n'en référence aucune
+  When @build_sandbox_pod construit les deux
+  Then dans les deux cas `args` ne contient ni `--no-auth` ni aucun drapeau d'authentification,
+    et l'env porte `VNL_OWNER_SUBJECT` = `system:serviceaccount:<ns>:owner-<nom>` et
+    `VNL_TOKEN_ISSUER` = la valeur du controller — la sandbox n'est jamais ouverte
 
-Scenario: pod_port_mcp_et_sondes_health_identiques
+Scenario: pod_identite_de_l_owner_dans_l_env
+  Given l'Owner `alice` (SA `owner-alice`) dans le namespace `ns-1` et `token_issuer = https://k8s.example`
+  When @build_sandbox_pod construit
+  Then `VNL_OWNER_SUBJECT` vaut exactement `system:serviceaccount:ns-1:owner-alice`, `VNL_TOKEN_ISSUER`
+    vaut `https://k8s.example`, et `spec.serviceAccountName` vaut `owner-alice`
+
+Scenario: sandbox_non_reconciliable_sans_issuer
+  Given un controller démarré sans `--sa-issuer`
+  When une Sandbox est réconciliée
+  Then une erreur utilisateur explicite est rendue et aucun Pod n'est créé
+
+Scenario: pod_ports_mcp_et_ops_et_sondes_sur_ops
   Given n'importe quelle Sandbox
   When @build_sandbox_pod construit
-  Then un unique port conteneur `mcp`/@MCP_PORT, readiness ET liveness = HTTP GET
-    `/health` sur @MCP_PORT (test existant `mcp_port_and_probes`) — `initialDelay 5`,
-    `period 10` contractés par le code (à asseoir dans l'extension du test, cf. `Tasks`)
+  Then deux ports conteneur `mcp`/@MCP_PORT et `ops`/@OPS_PORT, readiness ET liveness = HTTP
+    GET `/health` sur le port `ops` (test existant `mcp_port_and_probes`, à adapter) —
+    `initialDelay 5`, `period 10` ; le Service ne publie que `mcp`
+
+Scenario: netpol_port_ops_ouvert_au_cluster_par_defaut
+  Given un controller sans `VNL_OPS_ALLOWED_NAMESPACES`
+  When @build_sandbox_netpol construit
+  Then une règle ingress distincte porte uniquement @OPS_PORT/TCP sans `from`, en plus de la règle @MCP_PORT inchangée
+
+Scenario: netpol_port_ops_restreinte_par_env
+  Given `VNL_OPS_ALLOWED_NAMESPACES=monitoring,kydah-core`
+  When @build_sandbox_netpol construit
+  Then la règle @OPS_PORT n'autorise que les namespaces `monitoring` et `kydah-core`
+
+Scenario: port_ops_jamais_publie
+  Given une Sandbox dont l'Owner référence une Application (Service, Ingress et NetworkPolicy construits)
+  When @build_sandbox_service et @build_sandbox_ingress construisent
+  Then ni le Service ni l'Ingress ne mentionnent @OPS_PORT ni le port 9090 (seule la NetworkPolicy porte la règle dédiée)
 
 Scenario: pod_env_racine_sandbox
   Given @HOME_MOUNT_PATH = `/home/vanyline`
@@ -717,24 +799,16 @@ Scenario: pod_env_racine_sandbox
     `vnl_sandbox_root_env`)
 
 Scenario: pod_montage_worktree_sous_chemin_worktrees
-  Given un Project sans `existing_pvc` et la Sandbox `demo-branch`
+  Given un Project et la Sandbox `demo-branch`
   When @build_sandbox_pod construit
   Then le montage `workspace` est en `/home/vanyline/workspace` avec `subPath`
     `worktrees/demo-branch` (test existant `worktree_mount_no_existing_pvc`)
 
-Scenario: pod_montage_worktree_prefixe_sub_path_du_project
-  Given un Project dont `existing_pvc.subPath` = `demo`
-  When @build_sandbox_pod construit
-  Then `subPath` du montage worktree = `demo/worktrees/demo-branch` (test existant
-    `worktree_mount_with_existing_pvc_subpath`)
-
 Scenario: pod_second_montage_repo_bare_sur_chemin_gitdir
-  Given un Project sans `existing_pvc`, puis avec `subPath: "demo"`
-  When @build_sandbox_pod construit les deux
-  Then un montage `workspace` en `/workspace/repo.git`, `subPath` `repo.git` dans le
-    premier cas, `demo/repo.git` dans le second (test existants
-    `bare_repo_mount_present_no_existing_pvc` et
-    `bare_repo_mount_present_with_existing_pvc_subpath`)
+  Given un Project
+  When @build_sandbox_pod construit
+  Then un montage `workspace` en `/workspace/repo.git`, `subPath` `repo.git` (test existant
+    `bare_repo_mount_present_no_existing_pvc`, à renommer)
 
 Scenario: pod_montage_repo_bare_non_lecture_seule
   Given n'importe quel Project

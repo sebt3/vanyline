@@ -38,7 +38,7 @@ Can read:
 Structure:
   ./lib.rs — quatre blocs @CustomResource (Owner, Project, Sandbox, Application), types
     partagés entre specs (@EgressRule, @EgressPort), types d'appui par spec
-    (@ProjectDefaults, @IngressControllerRef, @PvcRef, @Toolchain, @LspSpec,
+    (@ProjectDefaults, @IngressControllerRef, @Toolchain, @LspSpec,
     @ApplicationStorageDefaults), quatre structs de status, deux items d'interface publique
     hors types (@crd_manifests, @MCP_PORT + @service_name), et le module `#[cfg(test)]`.
     Ordre physique : Owner (avec ses types annexes) → Project → Sandbox → Application →
@@ -50,6 +50,13 @@ Structure:
     maintenance `maint.rs` — aucun usage de @service_name/@MCP_PORT/@crd_manifests trouvé).
 
 Must:
+  Porter `OwnerStatus.namespace: Option<String>` (le namespace de l'Owner, camelCase `namespace`)
+    et la fonction pure `owner_namespace_name(app_namespace: &str, owner: &str) -> Result<String,
+    String>` = `"{app_namespace}-{owner}"`, valide seulement si c'est un label DNS-1123 (minuscules,
+    chiffres, `-`, commence et finit par un alphanumérique) d'au plus 63 caractères ; l'erreur
+    porte la raison. Cette fonction est partagée par le controller (./../controller/src/namespace.sdd)
+    et `app` (qui calcule le namespace d'un Owner sans interroger le cluster) — elles ne
+    doivent jamais diverger (UN OWNER = UN NAMESPACE, décision 2026-10-04).
   Exempter uniquement le profil test via `#![cfg_attr(test, allow(clippy::unwrap_used,
     clippy::expect_used))]` : en production le harnais de /tooling.sdd garde ces lints en
     deny (cette ligne est la dette tranchée de /tooling.sdd pour ./lib.rs).
@@ -73,14 +80,14 @@ Must:
     `spec.scope` = `Namespaced`, `spec.versions[0].name` = `v1alpha1`, et la version déclare
     le sous-ressource `status` (attribut `status = "..."`).
   Appliquer `#[serde(rename_all = "camelCase")]` à TOUTES les structs sérialisables du
-    fichier : les quatre Spec, les quatre Status, et les huit types d'appui (@ProjectDefaults,
-    @IngressControllerRef, @EgressRule, @EgressPort, @PvcRef, @Toolchain, @LspSpec,
+    fichier : les quatre Spec, les quatre Status, et les sept types d'appui (@ProjectDefaults,
+    @IngressControllerRef, @EgressRule, @EgressPort, @Toolchain, @LspSpec,
     @ApplicationStorageDefaults). Les clés JSON sont donc camelCase (`repoUrl`,
     `applicationRef`, `podSelector`, `oidcSecretRef`, `detectedAt`, …), jamais snake_case.
   Appliquer @JsonSchema (schemars 1) à toutes ces structs, consommé par kube pour générer le
     schéma structural de chaque CRD ; les champs `Option` et ceux marqués `default` ne sont
     pas requis au sens du schéma, les autres le sont.
-  Rendre @OwnerSpec entièrement optionnelle : `existingPvc`, `homeSize`, `homeStorageClass`,
+  Rendre @OwnerSpec entièrement optionnelle (le champ `existingPvc` n'existe plus — décision du 2026-10-04, un PVC ne se monte pas entre namespaces) : `homeSize`, `homeStorageClass`,
     `homeAccessMode`, `projectDefaults`, `applicationRef` sont `Option` (absent ⇒ `None` par
     serde) et `egress` porte `#[serde(default)]` (absent ⇒ vec vide) — un `spec: {}` est
     valide et produit l'@OwnerSpec par défaut. Les défauts métier downstream
@@ -103,7 +110,7 @@ Must:
   Définir @OwnerStatus avec @Default : `pvcName` / `serviceAccount` optionnels, `conditions`
     à `#[serde(default)]` (absent ⇒ vec vide).
   Rendre @ProjectSpec : `owner` et `repoUrl` REQUIS (absents ⇒ erreur de désérialisation, et
-    requis dans le schéma CRD) ; `defaultBranch`, `existingPvc`, `storageSize`,
+    requis dans le schéma CRD) ; `defaultBranch`, `storageSize`,
     `storageClass`, `storageAccessMode`, `gitSecret`, `caches`, `fetchInterval` optionnels
     (absents ⇒ `None`) ; `egress` à `#[serde(default)]`. Les replis (`caches` ⇒
     `["cargo", "pnpm", "pip"]` via `controller/src/project.rs::effective_caches`,
@@ -111,7 +118,8 @@ Must:
     controller. Le champ `gitSecret` est DÉPRÉCIÉ : conservé pour la migration, plus consommé
     par le controller depuis git-integration (la clé SSH vit dans le PVC Owner) — il continue
     de se sérialiser/désérialiser (`gitSecret`) comme avant.
-  Définir @PvcRef avec `name` requis et `subPath` optionnel.
+  Ne définir NI @PvcRef NI champ `existingPvc` : retirés (décision du 2026-10-04 — un PVC ne se
+    monte pas d'un namespace à un autre ; un Owner = un namespace).
   Définir @ProjectStatus avec @Default et le couple d'attributs suivant, qui EST le contrat
     anti-écrasement du merge-patch : `cloned: bool` avec `#[serde(default)]` (absent ⇒
     `false`, sérialisé même à `false`), `pvcName` / `lastFetch` optionnels, `worktrees` et
@@ -219,7 +227,7 @@ Exposes:
   Types racine de CRD générés par @CustomResource : @Owner, @Project, @Sandbox, @Application
     (champs `spec`/`status`, `crd()` via @CustomResourceExt).
   @OwnerSpec, @ProjectDefaults, @IngressControllerRef, @EgressRule, @EgressPort, @OwnerStatus.
-  @ProjectSpec, @PvcRef, @ProjectStatus.
+  @ProjectSpec, @ProjectStatus.
   @SandboxSpec, @LspSpec, @Toolchain, @SandboxStatus.
   @ApplicationSpec, @ApplicationStorageDefaults, @ApplicationStatus.
   @crd_manifests — `pub fn () -> String`, @must_use.
@@ -257,7 +265,7 @@ Raises:
   @service_name, @MCP_PORT : aucune erreur possible (fonctions totales).
   Désérialisation d'un document invalide (clé requise absente — `owner`/`repoUrl` de
     @ProjectSpec, `project`/`branch` de @SandboxSpec, les cinq requis d'@ApplicationSpec,
-    `name` de @PvcRef, `description` de @EgressRule, `name`/`image` de @Toolchain,
+    `description` de @EgressRule, `name`/`image` de @Toolchain,
     `image`/`bin` de @LspSpec, `namespace`/`podLabels` de @IngressControllerRef, `port`
     d'@EgressPort — ou type de champ non conforme) : erreur serde remontée à l'appelant,
     jamais interceptée, paniquée ni loggée ici.
@@ -338,7 +346,7 @@ Tasks:
     `crd_printcolumns_et_absence_shortnames`, `owner_spec_deserialise_depuis_objet_vide`,
     `project_spec_champs_requis`, `sandbox_spec_champs_requis`, `application_spec_champs_requis`,
     `project_status_autres_champs_optionnels_en_null`, `lsp_spec_complet_roundtrip`,
-    `egress_rule_minimale_defauts`, `pvc_ref_name_requis_subpath_optionnel`,
+    `egress_rule_minimale_defauts`,
     `service_name_prefixe_sandbox`, `mcp_port_vaut_3000`,
     `status_structures_defaut_deserialisables` — puis faire passer la synthèse du validator
     au vert.
@@ -483,7 +491,7 @@ Scenario: application_spec_champs_requis
 Scenario: owner_schema_fields
   Given @Owner::crd et son schéma OpenAPI `spec`
   When on liste les propriétés de `spec`
-  Then `existingPvc`, `projectDefaults`, `egress` et `applicationRef` en font partie (test
+  Then `projectDefaults`, `egress` et `applicationRef` en font partie, `existingPvc` n'y figure plus (test
     existant `owner_schema_fields`)
 
 Scenario: sandbox_schema_fields_suspended
@@ -547,12 +555,10 @@ Scenario: egress_rule_minimale_defauts
   Then `cidr`, `podSelector` et `namespaceSelector` sont `None` et `ports` est vide — aucune
     validation d'exclusivité ni de contenu n'est exercée à la désérialisation
 
-Scenario: pvc_ref_name_requis_subpath_optionnel
-  Given @PvcRef visé par `serde_json`
-  When `{"name":"home"}` puis `{}` sont désérialisés
-  Then le premier réussit avec `sub_path` = `None`, le second échoue (clé `name` requise) —
-    et une @ProjectSpec avec `existingPvc = {"name":"hc","subPath":"repo"}` fait transiter les
-    deux clés camelCase au roundtrip
+Scenario: existing_pvc_n_existe_plus
+  Given @OwnerSpec et @ProjectSpec
+  When un document porte la clé `existingPvc`
+  Then la désérialisation l'ignore (clé inconnue) ou la rejette selon le mode serde du fichier, et aucun type @PvcRef n'existe
 
 Scenario: service_name_prefixe_sandbox
   Given @service_name
