@@ -1,0 +1,119 @@
+Spec: Frontend — carte des écrans, routes, responsivité et chat contextuel
+
+Platform: TypeScript/Vue 3/vue-router/Nuxt UI/Tailwind/Reka UI/dockview-vue
+
+Purpose:
+  Contrat transverse du frontend vanyline (2026-10-04) : la carte des écrans et leurs routes, la
+  règle de RESPONSIVITÉ, le chat contextuel avec un agent, et les interdits qui s'appliquent à
+  tous les écrans. Règle de responsivité : TOUS les écrans sont responsives (mobile, tablette,
+  bureau) à l'exception d'un seul, l'écran de sandbox avec éditeur, terminal et panneaux (l'IDE),
+  réservé aux ordinateurs ; un écran de sandbox responsive distinct (sans shell ni éditeur)
+  affiche la santé du code, l'état des tests et des formateurs, les workflows et un chat avec un
+  agent. Cette règle remplace, pour les écrans hors IDE, le principe « UI desktop, pas
+  mobile-first » du 2026-08-09. Les contrats détaillés par écran sont dans les specs liées.
+  Fichier neuf, conception ; les fichiers TS/Vue existants gardent leur spec « au fil de
+  l'eau » (/.specdd/bootstrap.project.md) ; ce fichier et ses voisines décrivent l'état final.
+
+Owns:
+  ./router.ts
+
+Can read:
+  ./components/dashboards/dashboards.sdd
+  ./components/sandbox/sandbox-overview.sdd
+  ./components/SettingsView.sdd
+  ./components/workflows/workflows.sdd
+  ./components/ide.sdd
+  ./api/workflowsClient.sdd
+  /packages/protocol/src/workflow-domain.sdd
+  /app/src/system_agents.sdd
+
+Exposes:
+  Routes (état final) :
+    `/` — accueil (HomeDashboard), responsive.
+    `/p/:projectName` — projet (ProjectDashboard), responsive : sandboxes, workflows, runs.
+    `/p/:projectName/s/:sandboxName` — IDE (IdeShell), BUREAU SEULEMENT (accessible aussi bien que
+      la vue d'ensemble depuis la liste des sandboxes).
+    `/p/:projectName/s/:sandboxName/overview` — vue de sandbox responsive (SandboxOverview).
+    `/p/:projectName/runs/:runId` — détail d'un run (RunDetail), responsive.
+    `/settings` — paramètres (SettingsView) avec l'assistant de configuration, responsive.
+  Garde de route : l'accès à l'IDE sur une fenêtre plus étroite que `lg` (1024 px) redirige vers
+    `/overview` de la même sandbox ; l'écran `/overview` propose le lien vers l'IDE (désactivé,
+    avec explication, sous `lg`).
+  Chat contextuel : un composant unique, `ContextChat`, prend un type de contexte (`settings`,
+    `home`, `project`, `sandbox`) et ses données, crée/réutilise la conversation correspondante
+    (POST `/api/conversations` avec ce contexte) et affiche le chat de l'agent système associé
+    (/app/src/system_agents.sdd). Contexte `settings` : l'agent de configuration est imposé et
+    l'en-tête ne permet que de choisir son MODÈLE (profils de l'utilisateur, `PUT` du
+    `model_profile_id` de l'agent système). Contextes `home`, `project`, `sandbox` : l'agent
+    système du contexte est le défaut et l'utilisateur peut choisir un de SES agents ordinaires
+    (sélecteur d'agent dans l'en-tête) ; quel que soit l'agent, il reçoit les outils de
+    l'application du contexte (`context_tools`).
+  Accès aux deux écrans de sandbox : chaque sandbox d'une liste porte DEUX actions, « IDE » et
+    « Vue d'ensemble » ; l'action IDE est désactivée, avec explication, sous `lg`.
+
+Must:
+  Rendre chaque écran, sauf l'IDE, utilisable à 360 px de large : aucun défilement horizontal de
+    page, cibles tactiles d'au moins 44 px, tableaux rendus en cartes sous `md`, dialogues en plein
+    écran sous `md`, navigation repliable.
+  Garder l'IDE non responsive : disposition dockview à largeur minimale `lg`, jamais adaptée au
+    mobile.
+  Ne jamais appeler la sandbox directement en HTTP depuis le navigateur : la santé du code, les
+    jobs et le git passent par les relais de l'app ; seuls les WebSocket de l'éditeur utilisent un
+    ticket à usage unique (règle racine : le navigateur ne voit jamais le jeton de l'Owner).
+  Ne jamais afficher ni stocker un secret (clé d'API, jeton) dans l'interface, y compris dans le
+    chat (l'agent ne les révèle pas, ./components/SettingsView.sdd).
+  Utiliser le logger du projet, jamais `console.log`.
+  Ne jamais permettre de modifier prompt, outils ou nom d'un agent système depuis le chat
+    contextuel : seul son modèle est configurable (contexte `settings` : seul choix offert ;
+    autres contextes : le sélecteur d'agent change d'agent, pas son contenu).
+
+Must not:
+  Dupliquer la logique de l'API dans les composants (tout passe par `./api/`).
+  Introduire un écran non responsive autre que l'IDE.
+
+Tasks:
+  [?] Seuil de l'IDE : `lg` (1024 px). Une tablette en paysage passe-t-elle ? À confirmer à l'usage.
+  [?] Rafraîchissement de la vue mobile (santé du code) : interrogation périodique (10 s pendant un
+    calcul, 30 s sinon) ou poussée par le WebSocket d'états de sandbox existant (`/api/ws/sandbox-state`) ?
+    Recommandation : interrogation en v1.
+  [ ] Mettre à jour `docs/architecture.md`, section « Frontend — shell IDE Vue » (écrans, responsivité).
+
+Scenario: ide_redirige_sous_lg
+  Given une fenêtre de 800 px de large
+  When la route `/p/demo/s/s1` est visitée
+  Then redirection vers `/p/demo/s/s1/overview`
+
+Scenario: ide_disponible_a_partir_de_lg
+  Given une fenêtre de 1280 px
+  When la route `/p/demo/s/s1` est visitée
+  Then l'IDE s'affiche, sans redirection
+
+Scenario: aucun_ecran_hors_ide_ne_deborde
+  Given une fenêtre de 360 px
+  When chacun des écrans responsives est rendu
+  Then la largeur de défilement du document ne dépasse pas la fenêtre
+
+Scenario: chat_contextuel_choisit_le_bon_agent
+  Given un contexte `project` pour `demo`
+  When `ContextChat` s'ouvre
+  Then la conversation est créée avec le contexte `project`/`{project_name: "demo"}` et l'agent système `project`
+
+Scenario: seul_le_modele_est_modifiable
+  Given l'en-tête du chat de configuration (contexte `settings`)
+  When l'utilisateur ouvre ses réglages
+  Then il ne peut choisir qu'un profil de modèle ; aucun champ de prompt, d'outil ni d'agent n'est proposé
+
+Scenario: agent_ordinaire_dans_un_chat_de_projet
+  Given le chat du contexte `project` et deux agents ordinaires de l'utilisateur
+  When l'utilisateur choisit l'un d'eux dans le sélecteur
+  Then la conversation utilise cet agent, avec les outils du contexte
+
+Scenario: deux_actions_par_sandbox
+  Given une liste de sandboxes sur une fenêtre de 1280 px, puis de 800 px
+  When elle s'affiche
+  Then deux actions par sandbox, « IDE » et « Vue d'ensemble » ; « IDE » est désactivée avec explication à 800 px
+
+Scenario: aucun_appel_direct_a_la_sandbox
+  Given les clients de `./api/`
+  When les URL qu'ils appellent sont examinées
+  Then aucune ne cible l'hôte d'une sandbox en HTTP (les WebSocket d'éditeur sont hors cette règle)

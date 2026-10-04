@@ -1,0 +1,63 @@
+Spec: workflow-domain — types de l'API des workflows côté TypeScript
+
+Platform: TypeScript pur
+
+Purpose:
+  Types partagés (frontend) de l'API des workflows et de la santé du code :
+  workflows, steps par kind, runs, statuts, et miroir TypeScript du rapport de santé. Deux
+  provenances : (1) la santé du code est GÉNÉRÉE par ts-rs depuis `vanyline-health`
+  (`generated/health-report.ts`, jamais modifiée à la main) et réutilisée ici ; (2) les types de
+  l'API des workflows (app, sans ts-rs) sont écrits à la main comme `config-domain.ts` (miroir
+  de types Rust), avec un test de conformité contre les fixtures de l'API. Zéro dépendance UI.
+  Fichier neuf, conception.
+
+Owns:
+  ./workflow-domain.ts
+
+Can read:
+  ./generated/health-report.ts
+  ./config-domain.ts
+  /app/src/api/workflows.sdd
+  /app/src/workflow/status.sdd
+  /app/src/workflow/steps/mod.sdd
+  /sandbox/src/health.sdd
+
+Exposes:
+  WorkflowScope = 'project' | 'sandbox'.
+  StepDefinition = { id: string; kind: 'agent' | 'rhai' | 'shell' | 'gate'; depends_on: string[];
+    config: Record<string, unknown> } ; types de configuration par kind (`AgentStepConfig`,
+    `RhaiStepConfig`, `ShellStepConfig`, `GateStepConfig`) reflétant ./workflow/steps/*.sdd (champs
+    optionnels explicites ; `null` désactive un seuil de gate).
+  WorkflowSummary = { id: number; name: string; scope: WorkflowScope; description?: string;
+    kinds: string[]; steps_count: number } ; Workflow = WorkflowSummary & { steps: StepDefinition[] }.
+  RunState = 'Pending' | 'Running' | 'Suspended' | 'BackingOff' | 'Succeeded' | 'Failed' |
+    'Cancelled' | 'Unknown'.
+  StepStatus, RunStatus, RunSummary = { run_id: string; workflow: string; scope: WorkflowScope;
+    sandbox?: string; triggered_by: string; started_at: string; status: RunStatus }, RunDetail.
+  HealthState = { phase: 'computing' | 'fresh' | 'stale'; report: HealthReport | null;
+    computed_at?: string; stale_since?: string; base?: string } — `HealthReport` vient de
+    `generated/health-report`.
+  Ré-exports depuis l'index du package.
+
+Must:
+  Rester pur TypeScript (aucune dépendance Vue ni UI).
+  Refléter exactement les champs de l'API (noms en `snake_case` comme le JSON de l'app).
+  Ne jamais redéfinir à la main un type généré par ts-rs : l'importer.
+
+Must not:
+  Contenir de logique (types et constantes seulement).
+
+Scenario: conformite_aux_fixtures
+  Given des fixtures JSON de l'API (liste de workflows, run, état de santé)
+  When elles sont vérifiées contre les types (test de conformité, comme `config-domain.conformance.spec.ts`)
+  Then toutes les clés requises sont présentes avec les bons types
+
+Scenario: sante_importee_du_genere
+  Given `HealthState`
+  When son champ `report` est inspecté
+  Then son type est celui de `generated/health-report.ts`
+
+Scenario: kinds_fermes
+  Given `StepDefinition['kind']`
+  When les valeurs possibles sont énumérées
+  Then exactement `agent`, `rhai`, `shell`, `gate`

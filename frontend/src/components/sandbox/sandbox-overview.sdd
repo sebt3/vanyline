@@ -1,0 +1,112 @@
+Spec: Sandbox overview — vue de sandbox responsive
+
+Platform: TypeScript/Vue 3/Nuxt UI
+
+Purpose:
+  Écran de sandbox RESPONSIVE (route `/p/:projectName/s/:sandboxName/overview`) : l'équivalent
+  mobile de l'IDE, SANS shell ni éditeur. Il montre la santé du code de la sandbox — couverture,
+  état des tests, des formateurs et des analyseurs, issues, langages non vérifiés, fraîcheur —
+  permet de lancer les workflows de portée sandbox, donne accès aux runs liés à cette sandbox, et
+  offre un chat avec un agent (contexte `sandbox`, agent système `sandbox` par défaut). Les
+  données viennent de l'app, qui relaie `GET /code-health` de la sandbox
+  (/app/src/api/sandboxes.sdd) : le navigateur n'appelle jamais la sandbox. Fichier neuf,
+  conception.
+
+Owns:
+  ./SandboxOverview.vue
+
+Can read:
+  ../workflows/workflows.sdd
+  ../../api/workflowsClient.sdd
+  ../../frontend.sdd
+  /sandbox/src/health.sdd
+  /health/src/report.sdd
+  /packages/protocol/src/workflow-domain.sdd
+
+Exposes:
+  SandboxOverview — pour `projectName` + `sandboxName` : (1) en-tête : phase de la sandbox (WebSocket
+    d'états), branche, action suspendre/reprendre ; (2) carte SANTÉ : statut global (`passed`,
+    `failed`, `errored`), fraîcheur (`fresh`/`stale`/`computing`, heure du calcul), une ligne par
+    vérification (format, lint, tests/couverture) avec son statut, couverture totale en
+    pourcentage et par fichier (les moins couverts d'abord), issues par sévérité avec chemin et
+    ligne, vue « code neuf » quand une base est connue, langages non vérifiés ; bouton
+    « recalculer » (`POST …/code-health/refresh`) ; (3) carte WORKFLOWS : workflows de portée
+    sandbox du projet, lancement sur CETTE sandbox ; (4) carte RUNS : runs de cette sandbox (14
+    jours, 50 au plus) ; (5) assistant (`ContextChat`, contexte `sandbox` : l'agent système `sandbox` est le défaut et
+    l'utilisateur peut choisir un de SES agents ordinaires, comme dans l'IDE).
+
+Must:
+  Interroger la santé par l'API de l'app (10 s pendant `computing`/`stale`, 30 s sinon, arrêt quand
+    l'onglet est masqué) ; montrer la fraîcheur de façon visible : un rapport `stale` ou
+    `computing` n'est jamais présenté comme à jour.
+  Rendre le rapport lisible à 360 px : cartes empilées, listes d'issues repliables, chemins
+    tronqués au milieu avec le nom de fichier visible.
+  Afficher les langages non vérifiés et les vérifications `errored` comme des avertissements
+    (jamais un vert qui masque une mesure manquante).
+  Désactiver le lancement d'un workflow quand la sandbox n'est pas `Running` (explication visible).
+  Proposer un lien vers l'IDE seulement sur une fenêtre ≥ `lg`.
+
+Must not:
+  Contenir un éditeur, un terminal ou un explorateur de fichiers.
+  Appeler la sandbox directement.
+  Interpréter le rapport : statut et pourcentages viennent de l'API.
+
+Scenario: sante_complete
+  Given un rapport `passed` avec couverture 82 % et trois vérifications
+  When SandboxOverview s'affiche
+  Then statut `passed`, 82 %, trois lignes de vérification, heure du calcul
+
+Scenario: rapport_perime
+  Given une phase `stale`
+  When SandboxOverview s'affiche
+  Then un indicateur « périmé » est visible à côté du statut
+
+Scenario: calcul_en_cours
+  Given une phase `computing` et un rapport précédent
+  When SandboxOverview s'affiche
+  Then l'indicateur « calcul en cours » et le dernier rapport sont montrés
+
+Scenario: premier_calcul
+  Given `report: null` et `phase: computing`
+  When SandboxOverview s'affiche
+  Then un état de chargement explicite, pas de statut inventé
+
+Scenario: verification_en_erreur
+  Given une vérification `errored`
+  When SandboxOverview s'affiche
+  Then elle apparaît comme avertissement, le statut global n'est pas vert
+
+Scenario: langages_non_verifies
+  Given `unchecked_languages = ["go"]`
+  When SandboxOverview s'affiche
+  Then un avertissement « go non vérifié »
+
+Scenario: recalcul_force
+  Given l'écran affiché
+  When l'utilisateur appuie sur « recalculer »
+  Then `POST` du relais de rafraîchissement est émis et l'indicateur passe à « calcul en cours »
+
+Scenario: lancement_sur_cette_sandbox
+  Given un workflow de portée sandbox et la sandbox `Running`
+  When l'utilisateur le lance
+  Then la requête porte `sandbox = <cette sandbox>`
+
+Scenario: runs_de_la_sandbox
+  Given des runs de deux sandboxes
+  When la carte runs s'affiche
+  Then seuls ceux de cette sandbox, via `GET /api/sandboxes/{sandbox}/runs`
+
+Scenario: mise_en_page_360px
+  Given une fenêtre de 360 px
+  When SandboxOverview s'affiche
+  Then aucun défilement horizontal, cartes empilées, issues repliables
+
+Scenario: lien_ide_selon_la_largeur
+  Given une fenêtre de 800 px, puis de 1280 px
+  When SandboxOverview s'affiche
+  Then le lien vers l'IDE est désactivé avec explication, puis actif
+
+Scenario: aucun_appel_direct
+  Given l'écran en fonctionnement
+  When les requêtes réseau sont examinées
+  Then toutes ciblent l'API de l'app, aucune l'hôte de la sandbox

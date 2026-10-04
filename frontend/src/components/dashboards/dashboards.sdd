@@ -1,0 +1,97 @@
+Spec: Dashboards — accueil et projet
+
+Platform: TypeScript/Vue 3/Nuxt UI
+
+Purpose:
+  Les deux tableaux de bord : l'ACCUEIL (`HomeDashboard`) et la vue d'un PROJET
+  (`ProjectDashboard`). Tous deux sont responsives (./../../frontend.sdd) et offrent la possibilité
+  d'agir par un agent : un chat contextuel (`ContextChat`) avec l'agent système `home` ou `project`,
+  qui sait lister et créer projets et sandboxes, gérer les workflows et lancer ou annuler des runs
+  (outils de domaine, /app/src/mcp_domain.sdd). La vue projet liste, en plus des sandboxes, les
+  WORKFLOWS disponibles (de portée projet et de portée sandbox) et les RUNS des deux dernières
+  semaines (50 au plus). Fichier neuf, conception (les composants existent ; cette spec décrit
+  l'état final).
+
+Owns:
+  ./HomeDashboard.vue
+  ./ProjectDashboard.vue
+
+Can read:
+  ../workflows/workflows.sdd
+  ../../api/workflowsClient.sdd
+  ../../frontend.sdd
+
+Exposes:
+  HomeDashboard — liste des projets de l'utilisateur (nom, état de clonage, nombre de sandboxes),
+    création d'un projet, accès à l'assistant d'accueil (`ContextChat`, contexte `home`).
+  ProjectDashboard — pour `projectName` : (1) en-tête et état du projet ; (2) section SANDBOXES
+    (existante : création, phase en direct par le WebSocket d'états, suspension, et DEUX
+    actions d'ouverture par sandbox : « IDE » (désactivée avec explication sous `lg`) et « Vue
+    d'ensemble » (`/overview`, toujours disponible)) ; (3) section WORKFLOWS : liste
+    (`WorkflowList`, ../workflows/workflows.sdd) avec portée, création, édition, suppression, et
+    lancement (un workflow de portée sandbox demande de choisir une sandbox `Running` du projet) ;
+    (4) section RUNS : les runs du projet des 14 derniers jours, 50 au plus, avec statut ; un run
+    mène à `/p/:projectName/runs/:runId` ; (5) assistant de projet (`ContextChat`, contexte
+    `project` ; l'agent système du contexte est le défaut, l'utilisateur peut choisir un de ses
+    agents ordinaires).
+
+Must:
+  Se disposer en une colonne sous `md` (sections empilées, assistant en feuille plein écran) et en
+    grille à partir de `md`.
+  Rafraîchir les phases de sandbox en direct (WebSocket existant) et les statuts de runs par
+    interrogation (10 s tant qu'un run est en cours, sinon aucune).
+  Proposer le lancement d'un workflow de sandbox seulement quand le projet a une sandbox `Running`,
+    et n'offrir que les sandboxes `Running` du projet.
+  Afficher un état vide explicite (« aucun workflow », « aucun run ») et une erreur lisible quand
+    le moteur de workflow n'est pas configuré (503 de l'API : message dédié, pas une erreur brute).
+  Rendre l'assistant utilisable sans connaître l'API : le chat est la seconde voie pour toute
+    action des sections.
+
+Must not:
+  Calculer un statut de run côté client : il vient de l'API.
+  Afficher un jeton, un secret ou le contenu d'un script de workflow dans une liste.
+
+Scenario: accueil_liste_les_projets
+  Given trois projets
+  When HomeDashboard s'affiche
+  Then trois entrées avec nom et état, et le bouton de création
+
+Scenario: projet_liste_workflows_et_runs
+  Given un projet avec deux workflows et trois runs récents
+  When ProjectDashboard s'affiche
+  Then deux entrées de workflow avec leur portée et trois runs avec statut, du plus récent au plus ancien
+
+Scenario: lancement_workflow_de_sandbox
+  Given un workflow de portée sandbox et deux sandboxes dont une `Running`
+  When l'utilisateur lance le workflow
+  Then seule la sandbox `Running` est proposée, puis la requête de lancement est émise
+
+Scenario: deux_actions_d_ouverture_par_sandbox
+  Given une sandbox listée sur une fenêtre de 1280 px, puis de 800 px
+  When la liste s'affiche
+  Then « IDE » et « Vue d'ensemble » sont présentes ; « IDE » est désactivée avec explication à 800 px
+
+Scenario: lancement_workflow_de_projet
+  Given un workflow de portée projet
+  When l'utilisateur le lance
+  Then aucune sandbox n'est demandée
+
+Scenario: aucune_sandbox_demarree
+  Given un workflow de sandbox et aucune sandbox `Running`
+  When l'utilisateur ouvre le lancement
+  Then l'action est désactivée avec une explication
+
+Scenario: moteur_non_configure
+  Given une API qui répond 503 pour les workflows
+  When ProjectDashboard s'affiche
+  Then la section workflows montre un message « moteur de workflow non configuré », le reste fonctionne
+
+Scenario: mise_en_page_mobile
+  Given une fenêtre de 360 px
+  When ProjectDashboard s'affiche
+  Then sections empilées, tableaux en cartes, aucun défilement horizontal
+
+Scenario: assistant_projet
+  Given l'écran du projet `demo`
+  When l'utilisateur ouvre l'assistant
+  Then un `ContextChat` de contexte `project` / `demo` s'ouvre (feuille plein écran sous `md`)

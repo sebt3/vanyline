@@ -1,0 +1,115 @@
+Spec: Workflows — composants de liste, édition et runs
+
+Platform: TypeScript/Vue 3/Nuxt UI/CodeMirror 6
+
+Purpose:
+  Les composants des WORKFLOWS, partagés par la vue projet, la vue de sandbox responsive et
+  l'IDE : liste des workflows (`WorkflowList`), éditeur (`WorkflowEditor`), dialogue de lancement
+  (`LaunchDialog`), liste des runs (`RunList`) et détail d'un run (`RunDetail`). Ils parlent à
+  l'API de l'app (../../api/workflowsClient.sdd) et affichent le statut tel que l'app le rend. Tous
+  sont responsives, l'éditeur compris (un workflow se consulte et se corrige depuis un
+  téléphone). Fichier neuf, conception.
+
+Owns:
+  ./WorkflowList.vue
+  ./WorkflowEditor.vue
+  ./LaunchDialog.vue
+  ./RunList.vue
+  ./RunDetail.vue
+
+Can read:
+  ../../frontend.sdd
+  ../../api/workflowsClient.sdd
+  /packages/protocol/src/workflow-domain.sdd
+  /app/src/api/workflows.sdd
+  ../panels/langRhai.ts
+  ../panels/langHandlebars.ts
+
+Exposes:
+  WorkflowList — workflows d'un projet : nom, portée (`projet`/`sandbox`), kinds utilisés, nombre
+    de steps ; actions créer, éditer, supprimer (confirmation), lancer ; filtre par portée.
+  WorkflowEditor — édition d'un workflow : nom, description, portée (non modifiable après
+    création) et le DAG. Le DAG s'édite en mode structuré (liste de steps : `id`, `kind`,
+    `depends_on`, `config` en formulaire par kind) et en mode source (JSON). Contrats par kind :
+    `agent` (agent, prompt avec coloration Handlebars, délai, option JSON), `rhai` (script avec
+    coloration Rhai), `shell` (script, répertoire, variables d'environnement, délai, tolérance
+    d'échec — kind PROPOSÉ SEULEMENT pour la portée sandbox), `gate` (seuils de couverture et de
+    nouveau code désactivables, base, nombre d'erreurs max, vérifications ignorées, mode
+    observation — PROPOSÉ SEULEMENT pour la portée sandbox). La validation d'un DAG (cycles,
+    dépendances, kinds interdits pour la portée) est affichée au fil de la saisie à partir des
+    erreurs de l'API (422), jamais recalculée côté client. Un éditeur graphique du DAG est une
+    évolution ultérieure.
+  LaunchDialog — lancement : pour la portée sandbox, choix d'une sandbox `Running` du projet (ou
+    sandbox imposée par la vue appelante) ; pour la portée projet, confirmation seule.
+  RunList — runs (14 jours, 50 au plus) : workflow, déclencheur (`ui`/`agent`/`api`), heure,
+    statut ; tableau à partir de `md`, cartes en dessous ; interrogation toutes les 10 s tant
+    qu'un run est en cours.
+  RunDetail — un run : statut global, steps avec statut et erreur, sortie ; bouton annuler tant
+    que le run est actif ; statut `Unknown` expliqué (« purgé du moteur »).
+
+Must:
+  Ne proposer `shell` et `gate` que pour la portée sandbox, et rendre l'erreur 422 de l'API quand
+    elle survient quand même.
+  Désactiver les seuils de gate quand leur champ est vide ; un champ vide n'envoie pas de seuil.
+  Demander confirmation avant toute suppression de workflow et avant l'annulation d'un run.
+  Ne jamais afficher les valeurs de `env` d'un step shell dans une liste ni dans RunDetail.
+  Rester utilisable à 360 px (formulaires en une colonne, dialogues plein écran).
+
+Must not:
+  Calculer un statut ou valider un DAG côté client.
+  Permettre de changer la portée d'un workflow existant.
+
+Scenario: kinds_proposes_selon_la_portee
+  Given l'éditeur d'un workflow de portée projet, puis de portée sandbox
+  When l'utilisateur ajoute un step
+  Then `agent` et `rhai` dans les deux cas ; `shell` et `gate` seulement pour la portée sandbox
+
+Scenario: erreur_de_validation_affichee
+  Given l'API qui répond 422 « kind shell interdit »
+  When l'utilisateur enregistre
+  Then le message est affiché sur le step concerné
+
+Scenario: seuil_de_couverture_desactive
+  Given une gate dont le champ « couverture minimale » est vide
+  When le workflow est enregistré
+  Then `min_coverage` est absent ou `null` dans le step envoyé
+
+Scenario: mode_source
+  Given un workflow édité en mode structuré
+  When l'utilisateur passe en mode source
+  Then le JSON affiché est le DAG, et un JSON invalide est signalé avant l'envoi
+
+Scenario: lancement_portee_sandbox
+  Given la portée sandbox et deux sandboxes dont une `Running`
+  When LaunchDialog s'ouvre
+  Then seule la sandbox `Running` est proposée
+
+Scenario: run_en_cours
+  Given un run `Running`
+  When RunList s'affiche
+  Then interrogation toutes les 10 s, arrêt dès qu'aucun run n'est actif
+
+Scenario: detail_d_un_run
+  Given un run dont le step `b` a échoué
+  When RunDetail s'affiche
+  Then le step `b` montre son erreur, le statut global est en échec
+
+Scenario: run_purge
+  Given un run au statut `Unknown`
+  When RunDetail s'affiche
+  Then le message « purgé du moteur » et aucune action d'annulation
+
+Scenario: annulation_confirmee
+  Given un run actif
+  When l'utilisateur appuie sur annuler
+  Then une confirmation est demandée avant `POST /runs/{id}/cancel`
+
+Scenario: env_masque
+  Given un step shell avec `env: {TOKEN: "x"}`
+  When WorkflowList, RunList et RunDetail s'affichent
+  Then la valeur `x` n'apparaît nulle part
+
+Scenario: cartes_sous_md
+  Given une fenêtre de 360 px
+  When RunList s'affiche
+  Then les runs sont rendus en cartes

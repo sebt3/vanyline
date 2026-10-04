@@ -1,0 +1,69 @@
+Spec: workflowsClient — client de l'API des workflows et de la santé du code
+
+Platform: TypeScript
+
+Purpose:
+  Client typé de l'API de l'app pour les workflows, les runs et la santé du code (relayée), dans
+  le style des clients existants (`client.ts`, `gitClient.ts` : fonction fabrique, erreurs typées).
+  C'est le SEUL point par lequel les composants de workflows et de santé parlent au serveur ; il
+  n'appelle jamais la sandbox directement (relais de l'app). Les types viennent de
+  `@vanyline/protocol` (workflow-domain). Fichier neuf, conception.
+
+Owns:
+  ./workflowsClient.ts
+
+Can read:
+  ./client.sdd
+  /packages/protocol/src/workflow-domain.sdd
+  /app/src/api/workflows.sdd
+  /app/src/api/sandboxes.sdd
+
+Exposes:
+  createWorkflowsClient(client) -> {
+    listWorkflows(project), getWorkflow(project, id), createWorkflow(project, body),
+    updateWorkflow(project, id, body), deleteWorkflow(project, id),
+    launchWorkflow(project, id, { sandbox? }) -> { run_id, invocation_id },
+    listProjectRuns(project, { limit?, since? }), listSandboxRuns(sandbox, { limit?, since? }),
+    getRun(runId), cancelRun(runId),
+    getCodeHealth(sandbox) -> HealthState, refreshCodeHealth(sandbox, { base? })
+  }
+  Erreurs : les 4xx/5xx de l'API sont traduits en `ApiError` typées par statut ; `503` est exposé
+    comme `EngineUnavailable` (le moteur de workflow n'est pas configuré ou Restate est
+    injoignable), pour que les écrans le traitent sans confondre avec une erreur brute.
+
+Must:
+  Cibler uniquement les routes `/api/…` de l'app (`/api/projects/{p}/workflows…`,
+    `/api/projects/{p}/runs`, `/api/sandboxes/{s}/runs`, `/api/runs/{id}`,
+    `/api/sandboxes/{s}/code-health[/refresh]`).
+  Passer les paramètres de fenêtre (`limit` ≤ 50, `since`) tels quels ; ne pas inventer de défaut
+    local différent de celui de l'API.
+  Ne jamais journaliser les corps de workflows (ils peuvent contenir des prompts ou des scripts).
+
+Must not:
+  Appeler l'hôte d'une sandbox.
+  Interpréter ou recalculer un statut.
+
+Scenario: lancer_un_workflow
+  Given un client sur un faux serveur
+  When `launchWorkflow("demo", 3, { sandbox: "s1" })`
+  Then `POST /api/projects/demo/workflows/3/runs` avec `{"sandbox":"s1"}`, résultat `{run_id, invocation_id}`
+
+Scenario: sante_relayee
+  Given un faux serveur
+  When `getCodeHealth("s1")`
+  Then `GET /api/sandboxes/s1/code-health`, résultat typé `HealthState`
+
+Scenario: moteur_indisponible
+  Given une réponse 503
+  When n'importe quel appel de workflow
+  Then `EngineUnavailable`
+
+Scenario: fenetre_des_runs
+  Given `listProjectRuns("demo", { limit: 50, since: "2026-09-20" })`
+  When la requête part
+  Then la query contient `limit=50` et `since=…`
+
+Scenario: aucun_appel_direct
+  Given l'ensemble des URL construites
+  When elles sont examinées
+  Then toutes commencent par `/api/`

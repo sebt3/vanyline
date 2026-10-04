@@ -1,0 +1,91 @@
+Spec: SettingsView — paramètres et assistant de configuration
+
+Platform: TypeScript/Vue 3/@vanyline/ui
+
+Purpose:
+  La vue « paramètres » (`/settings`) : les écrans de configuration existants (`ConfigShell` de
+  `@vanyline/ui` : fournisseurs LLM, profils de modèle, serveurs MCP, toolsets, agents, skills,
+  compte) PLUS un chat avec l'AGENT DE CONFIGURATION (agent système `config`,
+  /app/src/system_agents.sdd) qui dispose d'outils pour gérer toute la configuration : l'utilisateur
+  peut lui demander de faire les configurations dont il a besoin. L'agent est préconfiguré : seul
+  son modèle est configurable. La vue est responsive (./../frontend.sdd). Fichier neuf, conception
+  (le composant existe ; cette spec décrit l'état final).
+
+Owns:
+  ./SettingsView.vue
+
+Can read:
+  ../frontend.sdd
+  /app/src/system_agents.sdd
+  /app/src/mcp_domain.sdd
+
+Exposes:
+  SettingsView — la coque de configuration (navigation par groupes ; en dessous de `md`, la
+    navigation devient un menu repliable et un écran à la fois) et, à côté (grand écran : panneau
+    latéral repliable ; petit écran : onglet « Assistant » plein écran), un `ContextChat` de
+    contexte `settings`. L'en-tête du chat expose le choix du MODÈLE de l'agent de configuration
+    (profils de l'utilisateur) et rien d'autre.
+  Amorçage : tant que l'utilisateur n'a AUCUN profil de modèle, l'assistant n'est pas utilisable
+    (`NoModelProfile`) ; l'écran met en avant la création d'un fournisseur et d'un profil par les
+    formulaires, puis active l'assistant.
+  Réglages globaux : un groupe « Global » n'apparaît QUE pour les administrateurs (groupes du
+    principal courant, `GET /api/v1/me` de miryad-core) ; il édite les réglages de
+    `app-settings` (/app/src/db/entities/app_settings.sdd), en v1 le MODÈLE PAR DÉFAUT
+    (`default_model` : fournisseur global, nom du modèle, options) qui amorce les agents système
+    des nouveaux utilisateurs. Les mêmes réglages sont configurables par l'API avec un jeton
+    d'administrateur.
+  Cohérence : une configuration modifiée par l'agent (outil MCP) rafraîchit les écrans de
+    configuration affichés (les listes sont rechargées à la fin du tour).
+
+Must:
+  Ne jamais afficher de secret (clé d'API de fournisseur) dans le chat ni dans les écrans : les
+    champs secrets restent masqués ; l'agent ne les restitue pas.
+  Ne permettre de changer, pour l'agent de configuration, que le profil de modèle.
+  Recharger les écrans de configuration ouverts quand un tour de l'agent se termine.
+  Afficher clairement les actions de l'agent (appels d'outils) dans la conversation, pour que
+    l'utilisateur voie ce qui a été modifié.
+  Être utilisable à 360 px (assistant en plein écran, navigation repliable).
+
+Must not:
+  Proposer d'éditer le prompt, les outils ou le nom de l'agent de configuration.
+  Contourner les droits de l'utilisateur : l'agent agit avec ses droits (côté serveur).
+
+Scenario: configuration_par_l_assistant
+  Given un utilisateur avec un profil de modèle
+  When il demande « ajoute le serveur MCP grafana » et que l'agent crée le serveur
+  Then l'appel d'outil est visible dans le chat et la liste « Serveurs MCPs » est rechargée avec le nouveau serveur
+
+Scenario: premier_demarrage_sans_profil
+  Given un utilisateur sans profil de modèle
+  When SettingsView s'affiche
+  Then l'assistant est désactivé avec l'explication, les formulaires fournisseur et profil sont mis en avant
+
+Scenario: reglages_globaux_pour_les_admins
+  Given un administrateur, puis un utilisateur ordinaire
+  When SettingsView s'affiche
+  Then le groupe « Global » (modèle par défaut) n'est présent que pour l'administrateur
+
+Scenario: modele_par_defaut
+  Given l'écran « Global » d'un administrateur
+  When il enregistre un fournisseur, un modèle et des options
+  Then `PUT`/`POST` de `app-settings` avec la clé `default_model` et cette valeur
+
+Scenario: choix_du_modele
+  Given deux profils de modèle
+  When l'utilisateur change le modèle de l'assistant
+  Then `model_profile_id` de l'agent système `config` est mis à jour, aucun autre champ
+
+Scenario: secret_jamais_affiche
+  Given un fournisseur dont la clé d'API est définie
+  When la vue et le chat s'affichent
+  Then la clé n'apparaît ni dans les écrans (champ masqué) ni dans les messages affichés
+
+Scenario: mise_en_page_mobile
+  Given une fenêtre de 360 px
+  When SettingsView s'affiche
+  Then navigation repliable, assistant en onglet plein écran, aucun défilement horizontal
+
+Scenario: erreur_de_l_agent
+  Given un tour qui échoue (fournisseur injoignable)
+  When l'erreur arrive
+  Then un message d'erreur lisible dans le chat, la vue reste utilisable

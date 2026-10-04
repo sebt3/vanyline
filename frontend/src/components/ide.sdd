@@ -1,0 +1,70 @@
+Spec: IDE — écran de sandbox pour ordinateur
+
+Platform: TypeScript/Vue 3/dockview-vue
+
+Purpose:
+  Contrat de l'IDE (`IdeShell`, route `/p/:projectName/s/:sandboxName`) dans son état final :
+  coquille dockable (explorateur, éditeur, terminal, git, chat) réservée aux ORDINATEURS —
+  l'unique écran non responsive de vanyline (./../frontend.sdd). Il gagne deux choses : la
+  possibilité de lancer les workflows de portée sandbox et d'accéder aux runs liés à CETTE
+  sandbox (panneau « Workflows », qui remplace la maquette statique actuelle), et un indicateur
+  de santé du code dans la barre d'état. Le reste de l'IDE est inchangé. Fichier neuf,
+  conception.
+
+Owns:
+  ./IdeShell.vue
+  ./StatusBar.vue
+  ./panels/Workflow.vue
+
+Can read:
+  ../frontend.sdd
+  ./workflows/workflows.sdd
+  ./sandbox/sandbox-overview.sdd
+  ../api/workflowsClient.sdd
+
+Exposes:
+  Panneau « Workflows » (`panels/Workflow.vue`) : (1) workflows de portée sandbox du projet,
+    lancement sur la sandbox courante (`LaunchDialog`, sandbox imposée) ; (2) runs de cette
+    sandbox (`RunList`, 14 jours, 50 au plus) avec accès au détail (`RunDetail`) ; la maquette
+    statique actuelle (nœuds codés en dur) disparaît.
+  Barre d'état : indicateur de santé du code de la sandbox — statut (`passed`/`failed`/`errored`),
+    couverture, et fraîcheur (`fresh`/`stale`/`computing`) ; un clic ouvre le détail de santé (la
+    carte de ../sandbox/sandbox-overview.sdd en panneau). Données par l'API de l'app.
+  Garde : largeur minimale `lg` ; en dessous, la route redirige vers `/overview`. Un lien vers la
+    vue d'ensemble de la même sandbox est toujours disponible depuis l'IDE (les deux écrans
+    restent accessibles l'un depuis l'autre).
+
+Must:
+  Ne pas être adapté au mobile : disposition dockview, aucune règle responsive.
+  Montrer la fraîcheur de la santé du code dans l'indicateur (un rapport périmé n'est jamais
+    présenté comme à jour).
+  Passer par l'API de l'app pour la santé et les runs (aucun appel direct à la sandbox en HTTP).
+  Conserver la persistance de disposition existante (`ideLayoutPersistence`).
+
+Must not:
+  Calculer le statut de santé côté client.
+
+Scenario: panneau_workflows
+  Given l'IDE d'une sandbox `Running` et deux workflows de portée sandbox
+  When le panneau « Workflows » s'ouvre
+  Then les deux workflows sont listés, le lancement cible la sandbox courante
+
+Scenario: runs_de_la_sandbox_courante
+  Given des runs de plusieurs sandboxes
+  When le panneau s'ouvre
+  Then seuls les runs de la sandbox courante
+
+Scenario: indicateur_de_sante
+  Given une santé `failed`, couverture 61 %, phase `computing`
+  When la barre d'état s'affiche
+  Then « échec », « 61 % » et l'indicateur « calcul en cours »
+
+Scenario: clic_sur_l_indicateur
+  Given l'indicateur affiché
+  When l'utilisateur clique
+  Then le détail de santé s'ouvre
+
+Scenario: pas_de_maquette
+  Given l'IDE affiché
+  When le panneau « Workflows » s'ouvre
+  Then aucun nœud codé en dur (`fetch-metadata`, `transcode`…) n'est rendu
