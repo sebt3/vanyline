@@ -6,8 +6,10 @@ Purpose:
   Les six handlers HTTP de la famille de routes `/api/sandboxes` (cf. ./mod.rs pour le
   montage) : CRUD des CR `Sandbox` (`vanyline.solidite.fr/v1alpha1`) scopés par Owner —
   @list_sandboxes, @get_sandbox, @create_sandbox, @delete_sandbox, @set_sandbox_suspended —
-  plus les deux relais qui authentifient l'app AUPRÈS de la sandbox en présentant le
-  `id_token` OIDC de l'utilisateur : @ws_ticket (minage du ticket WS court-vécu, contrat
+  plus les deux relais qui authentifient l'app AUPRÈS de la sandbox en présentant le jeton du
+  ServiceAccount de l'Owner (obtenu par TokenRequest, `VnlK8sClient::owner_token`,
+  ../../../lib/src/k8s.sdd — décision 2026-10-04 : plus jamais l'`id_token` de l'utilisateur) :
+  @ws_ticket (minage du ticket WS court-vécu, contrat
   clé du flux frontend→app→sandbox de `../../../docs/architecture.md` et de
   `../../../vanyline.sdd` « le frontend ne voit jamais le JWT OIDC brut ») et @git_proxy
   (relais REST `ANY /sandboxes/{name}/git/{*path}` vers les routes `/git/*` de la sandbox,
@@ -63,8 +65,8 @@ Exposes:
   - @ws_ticket — `pub async fn(State, AuthUser, Path) -> @Result<@Json<@WsTicketOut>,
     @AppError>`. Route `POST /sandboxes/{name}/ws-ticket`. Le commentaire doc verrouille
     le contrat : host public résolu via la chaîne owner → `spec.application_ref` →
-    `spec.host` ; ticket miné auprès de la sandbox en présentant le `id_token` OIDC
-    (Bearer) ; « le navigateur reçoit `{ ticket, wsHost }` — jamais le JWT ».
+    `spec.host` ; ticket miné auprès de la sandbox en présentant le jeton du SA de
+    l'Owner (Bearer) ; « le navigateur reçoit `{ ticket, wsHost }` — jamais le JWT ».
   - @git_proxy — `pub async fn(State, AuthUser, @Path<(@String, @String)>, @Request) ->
     @Result<(@StatusCode, @Json<@serde_json::@Value>), @AppError>`, marqué
     @axum::debug_handler (aide à la compilation, zéro effet d'exécution). Route
@@ -241,11 +243,13 @@ Handles:
     @MCP_PORT = 3000) — HTTP clair in-cluster, le JWT n'y circule qu'en Bearer, jamais
     vers le navigateur ; les deux builders rappellent `get_sandbox` en interne (le
     handler vient déjà de le faire — GET K8s redondant, cf. Tasks).
-  - Consommation de l'identité relayée : @ws_ticket et @git_proxy lisent `user.id_token`
-    (champ @AuthUser de miryad-core, crate externe hors source dépôt) et l'envoient
-    `Bearer {token}` à la sandbox — c'est le SEUL point du crate app où le JWT sort
-    (vers la sandbox en cluster), jamais dans une réponse (conforme
-    `../../../vanyline.sdd` Must not ; cf. ./me.sdd qui interdit l'inverse).
+  - Identité présentée à la sandbox : @ws_ticket et @git_proxy obtiennent le jeton de l'Owner
+    par `VnlK8sClient::owner_token(owner)` (cache par Owner, marge de 120 s, voir
+    ../../../lib/src/k8s.sdd) et l'envoient `Bearer {jeton}` — c'est le SEUL point du crate
+    app où ce jeton sort (vers la sandbox en cluster), jamais dans une réponse (conforme
+    `../../../vanyline.sdd` Must not ; cf. ./me.sdd qui interdit l'inverse). L'`id_token` de
+    l'utilisateur (@AuthUser) ne sert plus qu'à l'authentifier auprès d'`app` : il n'est PLUS
+    transmis à la sandbox.
   - Site du marqueur en dur hors @AppError : `VNL-SBX-002: sandbox ticket response
     missing 'ticket'` dans @AppError::@InternalError (documenté comme collision dans
     ../error.sdd `Handles` + `Tasks` — la décision de renommage se prend LÀ-BAS, ce
@@ -266,6 +270,13 @@ Handles:
     la création des Ingress/Services (controller).
 
 Must:
+  UN OWNER = UN NAMESPACE (2026-10-04) : toutes les opérations sur @Sandbox et @Project
+    (CRUD, suspension, relais de ticket et proxy git, relais `/code-health`) ciblent le namespace
+    de l'Owner de l'utilisateur ; les URL internes de la sandbox sont
+    `http://sandbox-{name}.{namespace de l'Owner}.svc:3000/…` (/lib/src/k8s.sdd). Un relais
+    `GET /api/sandboxes/{name}/code-health` (et son `POST …/refresh`) suit le patron de
+    @git_proxy : scoping par Owner, jeton d'Owner présenté à la sandbox, réponse transmise
+    telle quelle ; le navigateur ne présente jamais le jeton lui-même.
   - Exiger @AuthUser dans les 6 handlers et chaîner @resolve_user PUIS
     @resolve_owner_name sur `principal_user.id` (même ordre que ./me.sdd) — aucune
     route de la famille ne peut être appelée en anon.
@@ -279,7 +290,11 @@ Must:
   - Construire @ws_host exactement `format!("{name}.sandboxes.{}", application.spec.host)`
     et ne retourner QUE `{ticket, wsHost}` — jamais l'`id_token`, jamais le corps
     sandbox complet (`expires_in_secs` inclus).
-  - Présenter `format!("Bearer {}", user.id_token)` en @AUTHORIZATION aux DEUX relais
+  - Ne demander le jeton de l'Owner (`owner_token`) QU'APRÈS la chaîne de scoping complète
+    (AuthUser → @resolve_user → @resolve_owner_name → sandbox → projet → match d'owner) :
+    un utilisateur qui n'est pas l'Owner de la sandbox n'obtient jamais de jeton, et la
+    sandbox n'est pas contactée.
+  - Présenter `format!("Bearer {}", owner_token.token)` en @AUTHORIZATION aux DEUX relais
     (sandbox `POST /ws/ticket` sous @require_auth — ../../../sandbox/src/auth.sdd), avec
     un client reqwest à timeout explicite : 10 s pour @ws_ticket, 30 s pour @git_proxy
     (doc : « les opérations git réseau peuvent dépasser 10 s »).
@@ -302,9 +317,12 @@ Must:
     handlers axum en dépendent en revue).
 
 Must not:
-  - Rendre le JWT (`user.id_token`) visible au navigateur : ni dans un corps, ni dans
-    une erreur, ni dans @WsTicketOut (règle racine `../../../vanyline.sdd` ; seul le
-    message @VNL-REQ-001 peut contenir l'URL interne de la sandbox — pas le token).
+  - Rendre le jeton de l'Owner ou l'`id_token` de l'utilisateur visible au navigateur : ni
+    dans un corps, ni dans une erreur, ni dans @WsTicketOut, ni dans un log (règle racine
+    `../../../vanyline.sdd` ; seul le message @VNL-REQ-001 peut contenir l'URL interne de la
+    sandbox — pas le token).
+  - Transmettre l'`id_token` de l'utilisateur à la sandbox : la sandbox n'accepte que le jeton
+    du SA de son Owner.
   - Utiliser le `_path` décodé par @Path dans @git_proxy (il a fusionné `%2F` en `/` —
     toute reconstruction à partir de lui détruirait la distinction
     séparateur/sous-chaîne-encodée des noms de branche).
@@ -455,7 +473,7 @@ Scenario: ws_ticket_ok_rend_ticket_et_wsHost_sans_exposer_le_jwt
   When @ws_ticket reçoit `s1` avec un @AuthUser d'`id_token` connu
   Then le statut est @200 avec le corps EXACT `{"ticket":"t32…","wsHost":"s1.sandboxes.app.example.com"}`
     (2 clés, `expires_in_secs` jeté, aucun jeton), et la sandbox a reçu `POST` avec
-    @AUTHORIZATION `Bearer {id_token}`
+    @AUTHORIZATION `Bearer {jeton du SA owner-alice}` — jamais l'`id_token` de l'utilisateur
 
 Scenario: ws_ticket_sans_application_ref_retourne_409
   Given un owner dont l'@Owner CR a `spec.applicationRef: null` et une sandbox sur son
@@ -468,8 +486,9 @@ Scenario: ws_ticket_sans_application_ref_retourne_409
 Scenario: ws_ticket_non_owner_n_emet_aucun_ticket
   Given la sandbox `s2` de bob et alice authentifiée
   When @ws_ticket reçoit `s2`
-  Then le résultat est @Err(@AppError::Forbidden) et le `POST /ws/ticket` de la sandbox
-    n'est JAMAIS atteint (aucun ticket court-vécu émis pour un non-owner)
+  Then le résultat est @Err(@AppError::Forbidden), le `POST /ws/ticket` de la sandbox
+    n'est JAMAIS atteint (aucun ticket court-vécu émis pour un non-owner) et AUCUN jeton
+    n'est demandé à l'apiserver pour l'Owner de bob
 
 Scenario: ws_ticket_reponse_sans_cle_ticket_tombe_en_500_marqueur_collision
   Given la sandbox répondant `200` avec `{"expires_in_secs":30}` (clé `ticket` absente
@@ -480,7 +499,7 @@ Scenario: ws_ticket_reponse_sans_cle_ticket_tombe_en_500_marqueur_collision
     @SandboxBranchEmpty, verrouillé TEL QUEL tant que ../error.sdd n'a pas tranché
 
 Scenario: ws_ticket_statut_erreur_de_la_sandbox_degrade_en_502
-  Given la sandbox répondant `401` (id_token expiré vu par @require_auth de la sandbox)
+  Given la sandbox répondant `401` ou `403` (jeton d'Owner refusé par @require_auth de la sandbox)
   When @ws_ticket appelle `error_for_status()` sur la réponse
   Then le résultat est @Err(@AppError::RequestError) — 502 `VNL-REQ-001`, corps de la
     sandbox perdu ; la question d'un 401 transparent est ouverte en Tasks `[?]`
@@ -492,13 +511,14 @@ Scenario: ws_ticket_timeout_de_10s_en_502
   Then le résultat est @Err(@AppError::RequestError) (502) — le timeout couvre envoi +
     lecture du corps
 
-Scenario: git_proxy_forward_methode_query_bearer_app_et_passthrough_statut
+Scenario: git_proxy_forward_methode_query_bearer_owner_et_passthrough_statut
   Given la sandbox `s1` d'alice répondant `409` + `{"error":"merge conflict"}` sur son
     endpoint
   When `POST /sandboxes/s1/git/commit?retry=1` avec body `{"message":"m"}` et
     @CONTENT_TYPE `application/json` parvient à @git_proxy
   Then la sandbox a reçu `POST` sur `…/git/commit?retry=1` avec @AUTHORIZATION
-    `Bearer {id_token}` (celui de l'app, pas celui du navigateur), le corps d'origine,
+    `Bearer {jeton du SA owner-alice}` (obtenu par l'app, jamais un jeton du navigateur ni
+    l'`id_token`), le corps d'origine,
     le `content-type` forwardé, et le navigateur reçoit le statut @409 AVEC le JSON
     `{"error":"merge conflict"}` inchangé (pas d'@error_for_status)
 
@@ -562,6 +582,12 @@ Depends on:
     `../../../tooling.sdd` (harnais clippy/fmt).
 
 Tasks:
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
+  [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 (../../../sandbox/src/auth.sdd) : remplacer
+    `user.id_token` par `VnlK8sClient::owner_token` dans @ws_ticket et @git_proxy ; donner au SA
+    de l'app le droit `create` sur `serviceaccounts/token` (déploiement `/deploy/`, hors de ce
+    fichier) ; retirer de ces handlers toute dépendance à l'`id_token` hors authentification
+    d'`app`.
   [!] Collision interne `VNL-SBX-002` (ici ÉMETTRICE) : @SandboxBranchEmpty
     (`422 branch must not be empty`) et @ws_ticket
     (`500 sandbox ticket response missing 'ticket'` dans @InternalError) partagent le
@@ -588,8 +614,8 @@ Tasks:
     (scoping) puis le builder d'URL le refait — 1 GET de plus par appel (latence sur
     le chemin chaud éditeur) et micro-TOCTOU entre le check et l'appel. Garder (défense
     en profondeur, ../../../lib/src/k8s.rs l'assume) ou exposer un builder sans check ?
-  [?] @ws_ticket et @error_for_status : un 401 de la sandbox (id_token expiré — cas
-    courant de session longue) devient 502 `VNL-REQ-001` pour le navigateur, qui ne
+  [?] @ws_ticket et @error_for_status : un 401/403 de la sandbox (jeton d'Owner refusé — ne
+    devrait plus arriver sauf mauvaise configuration d'issuer/audience) devient 502 `VNL-REQ-001` pour le navigateur, qui ne
     peut pas déclencher une re-auth. Propager les 4xx de la sandbox (ou au moins 401)
     plutôt que tout dégrader en 502 ?
   [?] Collision @AlreadyExists à la création : créer une sandbox au nom d'une sandbox
@@ -615,11 +641,8 @@ Tasks:
   [?] @resolve_user écrit en base dans les 6 handlers (dont les « lectures ») :
     extension du `[!]` de ./me.sdd (« GET non-idempotent côté base ») — trancher une
     fois pour les deux fichiers.
-  [?] Provenance et régime de `user.id_token` (miryad-core, source hors dépôt) :
-    s'assure-t-on qu'il n'est jamais vide ? un @AuthUser sans `id_token` (session sans
-    claim) ferait partir `Bearer ` (vide) vers la sandbox → 401 sandbox → 502 ici.
-    Documenter/mapper proprement ou considérer la situation impossible par construction
-    de la session ?
+  [-] CADUC (décision 2026-10-04) : le régime de `user.id_token` ne concerne plus la sandbox ;
+    `id_token` n'est plus relayé. L'absence de session reste couverte par l'extracteur AuthUser.
   [?] `accept`/`content-type` non-UTF-8 forwardés en valeur VIDE
     (`to_str().unwrap_or("")`) plutôt que non-forwardés ou rejetés — détail sans
     consommateur connu, figer ou nettoyer.
@@ -634,6 +657,16 @@ Done when:
   Les collisions et asymétries `[?]`/`[!]` ci-dessus sont tranchées par Sébastien —
     la collision `VNL-SBX-002` en coordination avec `../error.sdd`, le `[!]` @resolve_user
     avec ./me.sdd, le `[!]` vue d'URI avec `../main.sdd`.
-  Le contrat « jamais le JWT au navigateur » est vérifié par test (absence de
-    l'`id_token` dans tout corps de @ws_ticket/@git_proxy) conformément à
+  Le contrat « jamais le jeton ni le JWT au navigateur » est vérifié par test (absence de
+    l'`id_token` et du jeton d'Owner dans tout corps de @ws_ticket/@git_proxy) conformément à
     `../../../vanyline.sdd`.
+
+Scenario: id_token_utilisateur_jamais_transmis_a_la_sandbox
+  Given alice authentifiée avec un `id_token` connu et la sandbox `s1` qui capture ses en-têtes
+  When @ws_ticket puis @git_proxy relaient vers `s1`
+  Then aucune des deux requêtes sortantes ne contient l'`id_token` d'alice, seulement le jeton du SA de l'Owner
+
+Scenario: echec_de_demande_de_jeton_degrade_en_erreur_sans_fuite
+  Given l'apiserver refusant la demande de jeton (droit `serviceaccounts/token` manquant)
+  When @ws_ticket est appelé par l'owner légitime
+  Then une @AppError de classe K8s est rendue (sans jeton ni détail interne) et la sandbox n'est pas contactée

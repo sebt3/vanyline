@@ -170,14 +170,17 @@ Handles:
     AppState>() et fusionne @resource_openapi::<agents::Entity>() dans le document
     OpenAPI (schéma nommé `Agent`).
   - Consommation chat WS : `../ws/chat.rs` @handle_message résout `agent_id` → nom par
-    @Entity::find_by_id SANS filtre owner (introuvable → @AppError::AgentNotFound) ;
-    la config de l'agent est ensuite relue via `PgConfigStore::new(db, user_id)` (cf.
-    Tasks `[!]`).
+    @Entity::find_by_id SANS filtre owner (introuvable → @AppError::AgentNotFound).
+    FAILLE DE SÉCURITÉ CONFIRMÉE (Sébastien, 2026-09-27) — voir `Tasks` : cette
+    résolution DOIT filtrer par owner, un `agent_id` d'un autre owner doit être traité
+    comme introuvable.
   - Consommation conversations REST : `../api/conversations.rs` @to_output résout
-    `conv.agent_id` → nom (par id seul, sans filtre owner, N+1 accepté) ;
+    `conv.agent_id` → nom (par id seul, sans filtre owner, N+1 accepté) — même faille,
+    même correction requise (cf. `../api/conversations.sdd`) ;
     @resolve_agent_id recherche WHERE `owner_id = user_id AND name = agent_name`
     (introuvable → @AppError::UnprocessableReference(@VnyError::UnknownReference
-    `"agent"`) — seul chemin d'accès qui filtre explicitement par owner).
+    `"agent"`) — seul chemin d'accès qui filtre déjà explicitement par owner, le
+    modèle à suivre pour les deux résolutions ci-dessus.
   - Cycle de vie FK entrant/sortant : suppression d'un utilisateur `miryad_users` →
     CASCADE sur ces lignes ; suppression du profil référencé → RESTRICT (impossible
     tant qu'un agent pointe dessus) ; suppression d'un agent → `vanyline_conversations.agent_id`
@@ -185,6 +188,13 @@ Handles:
     ../migration/m20260825_000008_create_vanyline_conversations.rs).
 
 Must:
+  AGENTS SYSTÈME (2026-10-04, ../../system_agents.sdd) : @Model porte `system_key: Option<String>` et
+    `system_version: Option<i32>` (colonnes de la migration `m20261005_000003`) ; le hook
+    `before_update` refuse (`VNL-AGENT-002`, 422) tout changement d'une ligne portant `system_key`
+    autre que `model_profile_id` ; `before_delete` refuse la suppression d'une telle ligne
+    (`VNL-AGENT-003`) ; `before_create` refuse un corps client portant `system_key` ou
+    `system_version` (`VNL-AGENT-004`). Les lignes système sont créées et mises à jour par le
+    serveur directement en base (hors hooks).
   - @sea_orm(table_name) porter exactement `"vanyline_agents"`, identique à l'@sea_orm(iden)
     de la migration `…000006` et des migrations sœurs qui référencent la table
     (`…000008` conversations).
@@ -210,6 +220,12 @@ Must:
     domaine config (@AgentMode typé, `toolsets` en @Vec<String>, `skills` en
     @SkillSelection, `model` par nom) — la transformation est le contrat de
     `../config_store.rs`.
+  - Toute résolution d'un `agent_id` vers une ligne agent (hors REST `resource_router`,
+    qui applique déjà @AccessPolicy::OwnerOnly) DOIT filtrer par owner — décision
+    Sébastien, 2026-09-27, en réponse à la faille documentée en `Handles` et `Tasks` :
+    concrètement `../ws/chat.rs` @handle_message et `../api/conversations.rs`
+    @to_output doivent ajouter `owner_id = user_id` à leur `find_by_id`, sur le modèle
+    de @resolve_agent_id.
 
 Must not:
   - Valider en @before_create l'existence des noms référencés par `toolsets`/`skills` :
@@ -365,15 +381,12 @@ Tasks:
       `list_agents` est un `collect::<Result<_>>` — une ligne poison = toute la liste
       en @CfgStoreError::Config). Ajout d'un CHECK SQL, d'un hook de update, ou
       assumption ? À trancher avec Sébastien.
-  [!] Résolutions d'agent SANS filtre owner sur deux chemins : `../ws/chat.rs`
-      @handle_message (@find_by_id(agent_id) seul) et `../api/conversations.rs`
-      @to_output (@find_by_id(id) seul) — un `agent_id` d'un AUTRE owner (obtenu par
-      force brute d'ids ou conversation déjà corrompue) se résout en un nom d'agent
-      étranger, et le chat tourne avec ce nom alors que la config est relue au `user_id`
-      correct (l'agent étranger n'y existe pas → erreur en aval, pas de fuite claire
-      identifiée mais non prouvée). @resolve_agent_id (nom → id) est le seul chemin qui
-      filtre par owner. Trou d'isolation ou invariant « l'appelant ne fournit que ses
-      propres ids » à contractualiser ? À trancher.
+  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : résolutions d'agent SANS
+      filtre owner sur deux chemins — `../ws/chat.rs` @handle_message
+      (@find_by_id(agent_id) seul) et `../api/conversations.rs` @to_output
+      (@find_by_id(id) seul). Ajouter `owner_id = user_id` aux deux résolutions, sur le
+      modèle de @resolve_agent_id (seul chemin qui filtre déjà par owner) : un
+      `agent_id` d'un autre owner doit se comporter comme un agent introuvable.
   [?] @ActiveValue::NotSet pour `mode` : rejeté (`got: `) alors que la colonne SQL a un
       DEFAULT `'primary'` — en voie REST le défaut serde masque toujours le NotSet, mais
       tout insert interne futur (`ActiveModel { mode: NotSet, … }`) échoue avec

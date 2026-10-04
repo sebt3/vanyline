@@ -91,7 +91,7 @@ Structure:
   « absent » — cf. Tasks `[!]`) ; (5) upsert INSERT…ON CONFLICT (user_id) DO UPDATE SET
   k8s_owner_name ; (6) retour du nom. L'écriture DB vient APRÈS le CR (pas l'inverse).
   @OwnerSpec produit (aucun autre champ d'@ProjectDefaults rempli) :
-  - `existing_pvc: None`, `home_size: None`, `egress: Vec::new()` — toujours.
+  - `home_size: None`, `egress: Vec::new()` — toujours (`existing_pvc` n'existe plus).
   - `home_storage_class` / `home_access_mode` ← `config.default_home_storage_class` /
     `config.default_home_access_mode` (tels quels, `Option` clonés).
   - `application_ref` ← `config.application_name` (`Option` telle quelle).
@@ -190,6 +190,13 @@ Handles:
     documenté en Tasks `[!]`, comportement actuel non corrigé ici.
 
 Must:
+  UN OWNER = UN NAMESPACE (2026-10-04, /controller/src/namespace.sdd) : @ensure_owner crée la CR
+    @Owner dans le namespace d'application ; le namespace de l'Owner (`<app-ns>-<owner>`) est
+    créé ensuite, de façon asynchrone, par le controller. @ensure_owner n'attend pas : la
+    disponibilité (`status.namespace`, condition `Ready`) est vérifiée par l'appelant qui
+    veut agir dans ce namespace (voir ./projects.sdd). Le nom d'Owner dérivé de l'identité doit
+    produire un nom de namespace valide (`vanyline_crds::owner_namespace_name`) : sinon
+    l'erreur est rendue AVANT toute création de CR.
   - Dériver le nom d'Owner EXCLUSIVEMENT de @sanitize_owner_name, sans préfixe ni suffixe
     ajouté, avec l'algorithme de Structure caractère par caractère (dont : remplacement —
     et non préfixage — du premier caractère invalide par `'a'`, double trim avant/après la
@@ -211,7 +218,7 @@ Must:
     cible : l'upsert casserait structurellement, pas seulement sémantiquement).
   - Écrire le lien APRÈS la tentative de création du CR (ordre actuel : pas de lien pointant
     vers un CR dont la création n'a pas été tentée).
-  - Renseigner @OwnerSpec exactement comme Structure : jamais `existing_pvc`, `home_size`,
+  - Renseigner @OwnerSpec exactement comme Structure : jamais `home_size`,
     `project_defaults.storage_size` ni `egress` non vide ; propager `application_name`,
     `default_home_storage_class`, `default_home_access_mode` tels quels ; n'émettre
     `project_defaults` que si au moins un des deux défauts projet de config est `Some`.
@@ -266,6 +273,7 @@ Depends on:
   Hérite de `../../../vanyline.sdd` et du harnais `../../../tooling.sdd`.
 
 Tasks:
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
   [!] Collision de noms d'Owner — le plus grave du fichier : @sanitize_owner_name n'est
     pas injective (`alice@x.com` et `alice@y.com` → `"alice"` ; `jean-pierre@x` et
     `jean_pierre@y` → `"jean-pierre"`). Deux utilisateurs distincts convergent vers le même
@@ -478,7 +486,7 @@ Scenario: la spec de l'Owner CR reflète la config de l'app champ par champ
   When @ensure_owner est appelé avec un @AuthUser d'email `"carol@corp.example"`
   Then l'Owner CR `"carol"` porte `spec.application_ref = Some("vnl-app")`,
     `spec.home_storage_class = Some("cephfs")`, `spec.home_access_mode =
-    Some("ReadWriteMany")`, `spec.existing_pvc` et `spec.home_size` absents, `spec.egress`
+    Some("ReadWriteMany")`, `spec.home_size` absent, `spec.egress`
     vide et `spec.project_defaults` ABSENT (les deux défauts projet sont `@None` — pas
     d'objet vide)
 

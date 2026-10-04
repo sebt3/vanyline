@@ -1,0 +1,59 @@
+Spec: Project Workflows Entity
+
+Platform: Rust/vanyline-app/sea-orm/miryad-core
+
+Purpose:
+  Entité SeaORM de la table `vanyline_project_workflows` : le RATTACHEMENT d'une définition de
+  workflow (`miryad_workflow_definitions`, miryad-core) à un projet, avec sa portée. Un projet
+  peut définir des workflows de deux portées : `project` (liés au seul projet, non rattachés à une
+  sandbox) et `sandbox` (lancés sur une sandbox du projet, seuls autorisés à utiliser les kinds
+  `shell` et `gate`). Les projets étant des CR Kubernetes et non des lignes de base, la clé du
+  projet est son NOM dans le namespace de l'Owner. Le DAG lui-même reste dans la définition
+  (miryad-core) ; cette entité ne porte que le lien, la portée et un libellé. Fichier neuf,
+  conception.
+
+Owns:
+  ./project_workflows.rs
+
+Can read:
+  ../../migration/m20261005_000001_create_vanyline_project_workflows.sdd
+  ../../api/workflows.sdd
+  ../../workflow/run_context.sdd
+  ./toolsets.sdd
+
+Exposes:
+  @Model — `Serialize`/`Deserialize`/`utoipa::ToSchema` (nom OpenAPI `ProjectWorkflow`), table
+    `vanyline_project_workflows`, champs : `id: i32` (clé, `#[serde(default)]`), `owner_id: i32`
+    (utilisateur ; `#[serde(default)]`, injecté serveur), `project_name: String`, `definition_id: i32`
+    (la définition miryad-core), `scope: String` (`"project"` | `"sandbox"`), `description:
+    Option<String>`.
+  `impl MiryadResource` : `resource_name() == "project-workflows"`, lecture et écriture
+    `AccessPolicy::OwnerOnly`, `owner_column() == Some(Column::OwnerId)`, hook `before_create` :
+    `scope` hors de `{project, sandbox}` ⇒ `HookError` (422) ; le hook ne charge pas la définition
+    (il est synchrone et sans base) — la validation des kinds contre la portée est faite au
+    rattachement par ../../api/workflows.sdd et refaite à chaque lancement
+    (../../workflow/run_context.sdd).
+
+Must:
+  Garder `scope` dans `{project, sandbox}`.
+  Limiter l'accès au propriétaire (lecture et écriture) : un utilisateur ne voit ni ne rattache
+    les workflows d'un autre.
+  Porter `owner_id` côté serveur, jamais accepté du client.
+
+Must not:
+  Dupliquer le DAG, le nom ou le statut d'un run : seules les références sont stockées.
+
+Scenario: contrat_de_ressource
+  Given l'entité
+  When ses métadonnées de ressource sont lues
+  Then `project-workflows`, `OwnerOnly` en lecture et en écriture, `owner_column == OwnerId`
+
+Scenario: scope_invalide
+  Given un corps de création avec `scope = "global"`
+  When `before_create`
+  Then `HookError` (422)
+
+Scenario: payload_du_frontend_sans_id_ni_owner
+  Given un corps `{project_name, definition_id, scope}`
+  When il est désérialisé
+  Then `id == 0` et `owner_id == 0` (écrasés par le serveur)

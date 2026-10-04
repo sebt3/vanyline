@@ -1,0 +1,82 @@
+Spec: Step shell
+
+Platform: Rust/vanyline-app/reqwest
+
+Purpose:
+  Kind `shell` : exécute un script shell DANS la sandbox du run, par l'API de jobs de la sandbox
+  (/sandbox/src/jobs.sdd). Réservé aux workflows de sandbox (./../run_context.sdd refuse ce kind
+  dans un workflow de projet). Le step démarre un job idempotent puis l'INTERROGE jusqu'à son
+  terme ; l'idempotence sur `job_id` rend sûr tout rejeu par Restate, et les délais du service
+  `StepDispatcher` relevés à 25 h (./../runtime.sdd) couvrent un script de 24 h. Le callback
+  d'awakeable de l'API de jobs n'est pas utilisé tant que miryad-core n'offre pas de step durable
+  (issue sebt3/miryad-core#26). Fichier neuf, conception.
+
+Owns:
+  ./shell.rs
+
+Can read:
+  ./mod.sdd
+  /sandbox/src/jobs.sdd
+
+Exposes:
+  @ShellStep — `impl MiryadWorkflowStep`, `kind() == "shell"`.
+  Config : `{ "script": <texte>, "cwd"?: <chemin relatif>, "env"?: { nom: valeur },
+    "timeout_secs"?: <entier ≤ 86400>, "allow_failure"?: <bool>, "_run": … }`.
+
+Returns:
+  `{ "state": "succeeded"|"failed"|"timed_out"|"cancelled", "exit_code": <entier|null>,
+  "log_tail": <texte ≤ 4 KiB>, "duration_ms": <entier> }`.
+
+Raises:
+  @StepError : `retryable: false` — script vide, sandbox non démarrée, job refusé par la sandbox
+  (400), job perdu (404 après démarrage : la sandbox a redémarré), et état terminal autre que
+  `succeeded` quand `allow_failure` est faux (le message porte l'état, le code de sortie et la
+  fin du log) ; `retryable: true` — panne de transport transitoire pendant le démarrage.
+
+Handles:
+  `job_id` = `{_run.run_id}:{step_id}` : déterministe, donc stable au rejeu ; le step le
+  retrouve par `POST /jobs` idempotent (200 pour un job déjà connu). Interrogation de
+  `GET /jobs/{job_id}` à intervalle croissant (2 s, puis jusqu'à 10 s) jusqu'à un état terminal.
+  `timeout_secs` est transmis tel quel à la sandbox (défaut 3 600 s). `allow_failure: true` rend
+  la sortie sans erreur quel que soit l'état terminal : un step suivant ou une gate en décide.
+  Un 404 pendant l'interrogation signifie que la sandbox a perdu le job : erreur non retryable.
+  Annulation : l'annulation d'un run (../status.sdd) demande `DELETE /jobs?prefix={run_id}:`.
+
+Must:
+  Utiliser un `job_id` déterministe pour que le rejeu ne relance jamais le script.
+  Ne jamais journaliser le script ni `env` (secrets de workflow possibles).
+  Refuser de s'exécuter sans `_run.sandbox`.
+
+Must not:
+  Transmettre une URL de callback à la sandbox (inutilisé en v1).
+  Exposer `env` dans la sortie ni dans les erreurs.
+
+Scenario: succes
+  Given une sandbox de test et un script `echo hi`
+  When le step s'exécute
+  Then `state == "succeeded"`, `exit_code == 0`, `log_tail` contient `hi`
+
+Scenario: echec_est_une_erreur
+  Given un script `exit 2` et `allow_failure` absent
+  When le step s'exécute
+  Then erreur non retryable portant `failed`, le code 2 et la fin du log
+
+Scenario: echec_toleré
+  Given un script `exit 2` et `allow_failure: true`
+  When le step s'exécute
+  Then succès avec `state == "failed"` et `exit_code == 2`
+
+Scenario: rejeu_sans_double_execution
+  Given un step déjà démarré (job `r1:build` connu de la sandbox)
+  When le step est rejoué
+  Then `POST /jobs` rend 200 et aucun second processus n'est lancé
+
+Scenario: job_perdu
+  Given une sandbox qui répond 404 au job pendant l'interrogation
+  When le step interroge
+  Then erreur non retryable « job perdu »
+
+Scenario: refuse_sans_sandbox
+  Given un contexte sans `sandbox`
+  When le step s'exécute
+  Then erreur non retryable

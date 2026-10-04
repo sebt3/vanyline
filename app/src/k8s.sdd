@@ -89,6 +89,10 @@ Handles:
     ../../lib/src/k8s.sdd. `VNL_K8S_NAMESPACE` présente mais vide : voir `Tasks` (`[?]`).
 
 Must:
+  UN OWNER = UN NAMESPACE (2026-10-04) : `VNL_K8S_NAMESPACE` désigne désormais le namespace
+    d'APPLICATION (CR @Owner, @Application), pas celui des Projects et Sandboxes : le client de
+    la lib en déduit le namespace de chaque Owner (`<app-ns>-<owner>`, /lib/src/k8s.sdd).
+    Aucune autre configuration de namespace n'existe côté app.
   Découvrir au plus tard à la première requête ayant besoin de K8s : @AppState::k8s est
     initialisé `Arc<tokio::sync::Mutex::new(None)>` au démarrage (./main.rs), aucun
     appel K8s n'a lieu pendant le démarrage de l'app (le démarrage réussit sans cluster
@@ -135,6 +139,7 @@ Depends on:
   ../Cargo.toml — activation permanente de la feature `k8s` de vanyline-lib.
 
 Tasks:
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-26.
   [?] Ligne 15 de ./k8s.rs, `let client = client;` : liaison identité sans effet

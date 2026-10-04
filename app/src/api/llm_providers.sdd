@@ -15,8 +15,10 @@ Purpose:
   `../db/entities/llm_providers.rs` (validation à la création) : même code, deux surfaces,
   deux messages distincts (cf. Tasks `[?]`, l'entité pointe déjà vers ici).
   C'est aussi le SEUL endroit du crate où `api_key` sort du périmètre de la base : il est
-  envoyé comme `Authorization: Bearer` au provider openai-compatible configuré — à lire
-  avec le `[!]` d'exposition en clair déjà ouvert dans `../db/entities/llm_providers.sdd`.
+  envoyé comme `Authorization: Bearer` au provider openai-compatible configuré — sortie
+  réseau serveur-à-serveur, distincte de la sérialisation REST vers le navigateur
+  (devenue écriture seule, décision Sébastien 2026-09-27, `../db/entities/llm_providers.sdd`),
+  et non affectée par elle.
   Contexte d'assemblage : les deux routes sont déclarées dans `./mod.rs`
   (@api_v1_router) puis nichées sous `/api/v1` par `../main.rs` ; méthodes et chemins
   complets sont le contrat de `./mod.sdd`, CE fichier n'en possède que les handlers.
@@ -85,7 +87,8 @@ Accepts:
 
 Returns:
   - @set_default_provider sur succès : @Json(provider) avec @200 — le @LlmProviderModel
-    (7 clés, `api_key` en clair — contrat de sérialisation de `../db/entities/llm_providers.rs`)
+    (6 clés visibles, `api_key` écriture seule et omise — contrat de sérialisation de
+    `../db/entities/llm_providers.rs`, décision Sébastien 2026-09-27)
     lu par @find_by_id AVANT les UPDATE, avec `is_default` écrasé à @true EN MÉMOIRE
     (`let mut result = provider; result.is_default = true`), jamais re-fetché (choix
     assumé du commentaire « revue Phase 3 »). Corollaire : si un concurrent modifie une
@@ -382,12 +385,12 @@ Tasks:
       propre au statut) ? Trancher avec Sébastien ; le Scenario
       « réponse d'erreur JSON du provider est un succès vide de 200 » capture l'état
       actuel et devra être retourné si la vérification est adoptée.
-  [!] Cohérence `api_key` avec le `[!]` ouvert de `../db/entities/llm_providers.sdd` :
-      ici la clé est LUE depuis la base et envoyée en Bearer à l'endpoint stocké (seule
-      sortie réseau du secret) ; si l'arbitrage global du masque aboutit à une valeur
-      sentinelle ou un champ écriture-seule, @discover_models doit lire la clé réelle
-      sinon tout test openai-compatible échouera avec la sentinelle. Les deux `[!]`
-      doivent être tranchés ensemble.
+  [-] TRANCHÉ (Sébastien, 2026-09-27), voir `../db/entities/llm_providers.sdd` : `api_key`
+      devient écriture seule côté SÉRIALISATION REST uniquement — @discover_models
+      continue de lire `model.api_key` directement sur la ligne chargée depuis la base
+      (accès Rust natif, pas via la réponse HTTP sérialisée), donc AUCUN changement
+      requis ici : la clé réelle reste disponible en interne, seule la sortie HTTP vers
+      le NAVIGATEUR est concernée par le masquage.
   [?] Bascule `is_default` non transactionnelle : fenêtre sans défaut entre les deux
       @update_many, et absence DÉFINITIVE de défaut si le second UPDATE échoue (le @500
       ne revient pas le premier). Miroir du `[?]` de `../db/entities/llm_providers.sdd` :

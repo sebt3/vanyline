@@ -14,12 +14,11 @@ Purpose:
   (@Model de `../db/entities/model_profiles.rs`, spec rédigée
   `../db/entities/model_profiles.sdd`) doit être identique — toute divergence est
   un bug de l'un des deux, jamais un tiers contrat.
-  À lire avec `../db/entities/model_profiles.sdd` et son `[!]` « provider_id non
-  borné à l'owner » : la FK `provider_id` cible la table GLOBALE de `…000003`
-  (aucune colonne `owner_id` là-bas), donc AUCUNE contrainte SQL n'exige que le
-  provider appartienne au même owner que le profil — la DDL ne peut pas
-  l'exprimer ici ; le caractère voulu de cette ouverture se tranche là-bas, pas
-  ici (Tasks `[!]`).
+  La FK `provider_id` cible la table GLOBALE de `…000003` (aucune colonne
+  `owner_id` là-bas), donc AUCUNE contrainte SQL n'exige que le provider
+  appartienne au même owner que le profil. TRANCHÉ (Sébastien, 2026-09-27, voir
+  `Tasks` et `../db/entities/model_profiles.sdd`) : c'est le contrat voulu — les
+  providers sont un référentiel global administré, pas une ressource par owner.
   Place dans la chaîne (contrat d'ordre possédé par ./mod.sdd, rappelé ici sans
     être dupliqué) : appliquée en 5ᵉ position ; amonts requis : migrateur
     miryad-core (FK `miryad_users`) et `…000003` (cible `provider_id`, dont la
@@ -261,16 +260,12 @@ Depends on:
   ../../../vanyline.sdd et ../../../tooling.sdd — harnais clippy/fmt.
 
 Tasks:
-  [!] `provider_id` non borné à l'owner : la FK cible la table GLOBALE
-      `vanyline_llm_providers` (aucune colonne owner, cf. `[!]` modèle GLOBAL de
-      ./m20260825_000003_create_vanyline_llm_providers.sdd) — un profil d'alice
-      peut référencer le provider de bob, la DDL ne peut pas l'en empêcher en
-      l'état. Déjà ouvert dans `../db/entities/model_profiles.sdd` (`[!]`
-      « provider_id non borné à l'owner ») et dans `…000003.sdd` : la réponse
-      (référentiel partagé voulu vs trou d'isolation) se tranche avec Sébastien
-      dans ces deux specs ; si la réponse est « isolation », la fermeture passe
-      par une nouvelle migration (owner_id sur providers + FK composites), JAMAIS
-      par une retouche de celle-ci.
+  [-] TRANCHÉ (Sébastien, 2026-09-27) : `provider_id` non borné à l'owner — la FK
+      cible la table GLOBALE `vanyline_llm_providers` (aucune colonne owner, cf.
+      ./m20260825_000003_create_vanyline_llm_providers.sdd), un profil d'alice peut
+      référencer le provider de bob. C'EST LE CONTRAT VOULU (référentiel partagé
+      administré par un admin, pas un trou d'isolation) — aucune migration
+      corrective (`owner_id` sur providers, FK composites) à prévoir.
   [!] @down n'est appelé nulle part (runtime et tests) et il est doublement
       fragilisé en Postgres réel : (i) DROP bloqué par la FK entrante de
       `vanyline_agents` (objet dépendant, même table vide), (ii) la chaîne de

@@ -251,8 +251,10 @@ Handles:
       son guard.
   Séquence exacte de @handle_message (sémantique R9 verrouillée par commentaire source
     et docs/architecture.md, alignée séparément sur le RPC du CLI) :
-    1. nom d'agent : @agents::Entity::find_by_id(agent_id), ABSENCE de filtre owner
-      (voir `Tasks` `[!]`) ; introuvable → @AppError::AgentNotFound.
+    1. nom d'agent : @agents::Entity::find_by_id(agent_id), ABSENCE de filtre owner —
+      FAILLE DE SÉCURITÉ CONFIRMÉE (Sébastien, 2026-09-27, voir `Tasks`) : DOIT filtrer
+      `owner_id = user_id` ; introuvable (y compris agent d'un autre owner) →
+      @AppError::AgentNotFound.
     2. @load_history AVANT la persistance du message courant (l'historique envoyé au
       moteur n'inclut donc pas le message en cours — il est passé séparément).
     3. @persist_message(user) — persisté AVANT @run_agent_turn : le message user reste
@@ -333,6 +335,13 @@ Handles:
     accumule les événements en mémoire sans limite (backlog non borné, `Tasks` `[?]`).
 
 Must:
+  Outils des agents système (2026-10-04, ../system_agents.sdd) : pour une conversation d'un contexte
+    `settings`, `home`, `project` ou `sandbox` — quel que soit l'agent, système ou ordinaire —
+    résoudre `extra_mcp` par `context_tools` (serveurs MCP de l'app elle-même avec un jeton d'API
+    jetable de l'utilisateur, + serveur de la sandbox du contexte pour `sandbox`) au lieu de la seule
+    résolution du contexte sandbox ; révoquer le jeton à la fin
+    du tour, succès ou erreur ; ne jamais émettre ni persister ce jeton. `@resolve_extra_mcp`
+    conserve son scoping par propriétaire pour la sandbox.
   - Monter la route exactement sur `GET /api/ws/chat/{conversation_id}` avec @Path<i32>,
       via @ws_chat_handler dans `../main.rs` (le frontend construit ce chemin).
   - Exiger @AuthUser avant tout traitement : sans session valide le handshake est rejeté
@@ -341,6 +350,9 @@ Must:
       lecture/écriture : @ConversationAccessDenied sinon ; conversation inexistante :
       @ConversationNotFound. Ces deux erreurs sont log-only (`"ws chat error: …"`),
       jamais rendues en HTTP.
+  - Filtrer la résolution de nom d'agent (étape 1 de @handle_message) par
+      `owner_id = user_id`, jamais par id seul (décision Sébastien, 2026-09-27) :
+      un `agent_id` d'un autre owner doit produire @AppError::AgentNotFound.
   - Maintenir la sémantique R9 de persistance : message user inséré AVANT
       @run_agent_turn, message assistant inséré UNIQUEMENT après un tour @Ok ;
       l'opérateur `?` sur @run_agent_turn est ce qui garantit l'absence de persistance assistant
@@ -636,6 +648,9 @@ Depends on:
     et du harnais `../../../tooling.sdd` (unwrap/allow, pas de print).
 
 Tasks:
+  [ ] Contextes `settings`/`home`/`project` et agents système (2026-10-04) : les Scenario « contexte
+    hors sandbox donne zéro tool » sont à réécrire (ces contextes donnent désormais les outils de
+    leur agent système) ; ajouter les Scenario de révocation de jeton et de non-fuite.
   [!] Erreurs de conversation invisibles au client : @ConversationNotFound /
     @ConversationAccessDenied / @resolve_user en échec surviennent APRÈS l'upgrade et ne
     produisent qu'une fermeture de socket + log serveur — le frontend ne peut pas
@@ -651,13 +666,11 @@ Tasks:
     @stream_agent_events, puis celui de la tâche de tour avec double marqueur @From) —
     le `[?]` de `../../../lib/src/event.sdd` sur le code dupliqué doit être tranché ICI
     en cohérence.
-  [!] Résolution d'agent SANS filtre owner (@agents::find_by_id(agent_id) par id seul) :
-    miroir du `[!]` ouvert dans ../db/entities/agents.sdd (chemin WS + conversations).
-    Exploitable aujourd'hui ? Non — l'id vient de la conversation, elle-même créée avec
-    @resolve_agent_id filtré owner — mais toute brèche d'un autre chemin d'écriture de
-    `conv.agent_id` (CRUD généré sur conversations ? non exposé ici) devient
-    exploitable PAR CE CHEMIN. Trancher UNE fois : ajouter le filtre owner ici ou
-    assumer (et le décider dans la spec agents, répercuté ici).
+  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : résolution d'agent SANS filtre
+    owner (@agents::find_by_id(agent_id) par id seul) — miroir de la même correction
+    dans ../db/entities/agents.sdd et ../api/conversations.sdd. Ajouter
+    `owner_id = user_id` à cette résolution ; agent d'un autre owner → traité comme
+    @AppError::AgentNotFound.
   [?] Rôle dupliqué et rôles inconnus (source du `[?]` de ../db/entities/messages.sdd) :
     @persist_message écrit `role` dans la colonne ET dans `payload` (source de vérité ?),
     et @load_history écarte SILENCIEUSEMENT tout payload.role hors `user`/`assistant`

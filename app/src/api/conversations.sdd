@@ -183,6 +183,9 @@ Raises:
     @delete_conversation quand le @delete_many affecte 0 ligne.
   - @AppError::@ConversationAccessDenied → @403, `VNL-CNV-002: Access denied to
     conversation` : les trois routes à `{id}` quand `conv.owner_id != principal_user.id`.
+    RISQUE ACCEPTÉ (Sébastien, 2026-09-27) : la distinction @403/@404 permet à un
+    attaquant authentifié de discriminer l'existence d'une conversation d'autrui —
+    dette documentée, pas de correction prévue.
   - @AppError::@UnprocessableReference(@VnyError::@UnknownReference(`"agent"`, nom))
     → @422 sur @create_conversation (agent demandé introuvable POUR CET OWNER —
     un agent du même nom appartenant à autrui produit le même 422, sans fuite
@@ -212,13 +215,12 @@ Handles:
       `conv.owner_id != principal_user.id` → @403, plus (delete) re-filtre SQL
       id+owner_id sur le @delete_many — EFFECTIF.
     - À l'intérieur de @to_output : la résolution d'agent (@find_by_id sur `agent_id`)
-      n'a AUCUN filtre owner, et la requête messages de @get_messages n'a pas de
-      filtre owner propre (délégué au contrôle sur la conversation). Le seul chemin
-      d'exposition théorique est un `agent_id` de conversation pointant l'agent d'un
-      autre owner — que le schéma n'empêche pas (la FK vérifie l'existence, pas la
-      concorde d'owner) et que le chemin REST de création ne peut pas produire
-      (résolution owner-scopée), mais que `../ws/chat.rs` pourrait écrire. `Tasks`
-      `[!]`, déjà ouvert.
+      n'a AUCUN filtre owner. FAILLE DE SÉCURITÉ CONFIRMÉE (Sébastien, 2026-09-27) :
+      un `agent_id` de conversation pointant l'agent d'un autre owner (le schéma ne
+      l'empêche pas — la FK vérifie l'existence, pas la concordance d'owner ; le
+      chemin REST de création ne peut pas le produire, mais `../ws/chat.rs` le peut)
+      fait fuiter le NOM de cet agent dans `ConversationOut.agent_name`. @to_output
+      DOIT filtrer par owner, symétriquement à @resolve_agent_id — voir `Tasks`.
   - `agent_id` pointant une ligne agent absente (FK `ON DELETE SET NULL` rend le cas
     rare, inatteignable tant que la FK est appliquée) : @to_output rend
     `agent_name: null` SANS erreur ni marqueur — asymétrie avec le contexte absent
@@ -249,6 +251,14 @@ Handles:
   - Aucun @tracing, aucun @println dans le fichier (harnais `../../../tooling.sdd`).
 
 Must:
+  Contextes et agents système (2026-10-04, ../system_agents.sdd) : une conversation de contexte
+    `settings` utilise l'AGENT SYSTÈME `config` et le client ne peut pas lui en substituer un
+    autre ; pour `home`, `project` et `sandbox`, l'agent système du contexte (créé au besoin par
+    `ensure_system_agents`) est le DÉFAUT et le client peut choisir un de SES agents ordinaires
+    (comportement existant de la vue sandbox, étendu). Le contexte `project` exige un projet de
+    l'utilisateur, `sandbox` une sandbox de l'utilisateur (même scoping qu'aujourd'hui). Un
+    utilisateur sans profil de modèle reçoit une erreur explicite (`NoModelProfile`), pas une
+    conversation sans agent.
   - Exiger @AuthUser dans la signature des CINQ handlers et appeler @resolve_user
     AVANT toute requête métier, en chaînant sur l'@id résolu (jamais sur le
     `subject` brut) : c'est la seule source de l'owner utilisé par tous les filtres.
@@ -263,6 +273,10 @@ Must:
   - Résoudre l'agent à la création EXCLUSIVEMENT par @resolve_agent_id (filtre
     `owner_id` + `name`), lever le @422 @UnprocessableReference construit à la main
     si absent, et le lever AVANT toute insertion (aucune écriture sur ce chemin).
+  - Résoudre l'agent en SORTIE (@to_output, `agent_id` → nom) avec un filtre owner,
+    symétrique à @resolve_agent_id : un `agent_id` n'appartenant pas à l'owner de la
+    conversation doit se comporter comme un agent absent (`agent_name: null`), jamais
+    exposer le nom d'un agent étranger (décision Sébastien, 2026-09-27).
   - Créer le contexte PUIS la conversation (ordre et `NotSet` sur les deux `id` —
     régression Phase 3 verrouillée), horodater les deux lignes et la conversation
     (`created_at == updated_at`) d'un même @chrono::@Utc::@now, avec `title`/`todo`
@@ -297,9 +311,9 @@ Must not:
   - Exposer le JWT (@id_token), le `subject` ou un claim dans un corps, un message
     d'erreur ou un log ; exposer @MessageModel dans un sens d'entrée (le Model n'est
     qu'une sortie).
-  - Retirer le filtre owner de @resolve_agent_id ou ajouter un filtre owner à la
-    résolution d'agent de @to_output sans arbitrage préalable (`Tasks` `[!]`) — le
-    second changerait le comportement observable documenté ici.
+  - Retirer le filtre owner de @resolve_agent_id, ni résoudre un `agent_id` en sortie
+    sans filtre owner dans @to_output (décision Sébastien, 2026-09-27 — voir `Must`
+    et `Tasks` : c'est désormais une exigence, plus une question ouverte).
   - Introduire une transaction, un hook ou un update de `updated_at` implicite dans
     ce fichier sans extension de spec (la création actuelle est en deux temps sans
     transaction ; aucune route de mise à jour n'existe).
@@ -489,12 +503,12 @@ Depends on:
     lints, exemptions `cfg(test)`), conventions `AGENTS.md` (identifiants VNL-*).
 
 Tasks:
-  [!] @to_output résout l'agent par @find_by_id SANS filtre owner : si une
-      conversation référence l'agent d'un autre owner (possible en écriture directe
-      ou via `../ws/chat.rs` — la FK ne vérifie que l'existence), son NOM fuit dans
-      `ConversationOut.agent_name`. Déjà ouvert ; trancher avec Sébastien : ajouter
-      le filtre `owner_id` à la résolution de sortie (alignement sur
-      @resolve_agent_id) ou consigner le risque comme acceptable.
+  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : @to_output résout l'agent
+      par @find_by_id SANS filtre owner — si une conversation référence l'agent d'un
+      autre owner (possible via `../ws/chat.rs`, la FK ne vérifie que l'existence),
+      son NOM fuit dans `ConversationOut.agent_name`. Ajouter le filtre `owner_id` à
+      la résolution de sortie, alignée sur @resolve_agent_id (agent étranger → traité
+      comme absent, `agent_name: null`, sans erreur).
   [!] @create_conversation n'est pas atomique : insert du @ChatContext PUIS de la
       @Conversation sans transaction — un échec du second insert laisse un contexte
       orphelin, jamais repris ni nettoyé. Décider : transaction (@TransactionTrait,
@@ -510,10 +524,6 @@ Tasks:
       `title`/`todo`/agent : tout l'écriture-suite du chat passe par `../ws/chat.rs`.
       Confirmé comme contrat (le frontend ne fait que liste/messages/création, cf.
       `httpChatBackend.ts`) ou trou de fonctionnalité à documenter comme dette ?
-  [!] Distinction @404/@403 sur `/conversations/{id}` : un attaquant authentifié
-      peut discriminer l'existence d'une conversation d'autrui par le statut
-      (@403 vs @404). Uniformiser en @404 ou assumer — arbitrage de Sébastien, puis
-      verrouiller par test (le Scenario `lecture_unitaire…` verrouille l'actuel).
   [!] @resolve_user appelé aussi sur les trois @GET : effet d'écriture en base
       possible sur une lecture (sémantique miryad-core hors dépôt) — même `[!]` que
       `./me.sdd`, à trancher une fois pour les deux fichiers.

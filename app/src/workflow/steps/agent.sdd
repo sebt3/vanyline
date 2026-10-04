@@ -1,0 +1,108 @@
+Spec: Step agent
+
+Platform: Rust/vanyline-app/vanyline-lib
+
+Purpose:
+  Kind `agent` : exécute un agent configuré avec un prompt défini, sans humain, par
+  `vanyline_lib::autonomous::run_agent_task` (/lib/src/autonomous.sdd) — la même gestion des
+  agents, profils, toolsets et serveurs MCP que le chat. Disponible dans les workflows de
+  projet ET de sandbox ; dans un workflow de sandbox, la sandbox est ajoutée comme serveur MCP
+  forcé (`extra_mcp`). Fichier neuf, conception.
+
+Owns:
+  ./agent.rs
+
+Can read:
+  ./mod.sdd
+  /lib/src/autonomous.sdd
+  ../../config_store.sdd
+
+Exposes:
+  @AgentStep — `impl MiryadWorkflowStep`, `kind() == "agent"`.
+  Config : `{ "agent": <nom>, "prompt": <gabarit>, "timeout_secs"?: <entier>, "json"?: <bool>,
+    "max_steps"?: <entier>, "_run": … }`.
+
+Accepts:
+  `prompt` : gabarit Handlebars en mode strict ; variables `inputs.<step_id>.<chemin>` (sorties
+  des dépendances) et `run.<champ>` (le @RunInfo) ; une variable inconnue est une erreur (pas une
+  chaîne vide).
+
+Returns:
+  `{ "text": <dernier message>, "json": <valeur>|null, "tool_calls": <n>, "usage": {
+  "input_tokens", "output_tokens" }, "stop": "completed"|"timed_out"|"step_limit",
+  "unavailable_servers": [..] }`. `json` n'est renseigné que si `json: true` ET que
+  @extract_json trouve du JSON dans le dernier message ; sinon `null` (l'analyse JSON est PERMISE,
+  jamais imposée).
+
+Raises:
+  @StepError : `retryable: false` — agent introuvable (dans la configuration de l'UTILISATEUR du
+  run, pas d'un autre), gabarit invalide, `json: true` sans JSON exploitable ; `retryable: true` —
+  panne du fournisseur de modèle ou d'un serveur MCP. Un `stop` autre que `completed` n'est PAS une
+  erreur : il est dans la sortie, et un step suivant ou une gate en décide.
+
+Handles:
+  Identité : l'agent est résolu dans la configuration de l'utilisateur déclencheur
+  (`_run.user_id`, `PgConfigStore` borné à cet utilisateur) — un workflow ne donne jamais accès
+  aux agents ou clés d'un autre utilisateur.
+  Sandbox : si `_run.sandbox` est présent, un serveur MCP forcé `sandbox` (URL interne
+  `…/mcp`, en-tête `Authorization: Bearer <jeton de l'Owner>`, tous les outils) est ajouté
+  (`extra_mcp`). Le jeton de l'Owner vit au plus 15 minutes : `timeout_secs` est PLAFONNÉ à
+  780 s quand la sandbox est injectée (3 600 s sinon), pour qu'aucun appel d'outil de la
+  sandbox ne se fasse avec un jeton expiré. Défaut 600 s.
+  Les limites par défaut viennent de `TaskLimits` ; `max_steps` le surcharge.
+
+Must:
+  Résoudre l'agent par NOM dans la configuration de l'utilisateur du run.
+  Ne passer la sandbox à l'agent que pour un run de portée sandbox.
+  Renvoyer l'usage et les serveurs indisponibles dans la sortie (un verdict obtenu sans ses outils
+    ne doit pas passer pour informé).
+  Ne jamais exposer le jeton de l'Owner dans la sortie ni les erreurs.
+
+Must not:
+  Imposer un format de sortie : le JSON est optionnel et demandé par la config.
+  Appliquer un budget de tokens (hors v1, modèles locaux).
+
+Scenario: sortie_texte
+  Given un agent de test qui répond « ok » et un prompt sans variable
+  When le step s'exécute
+  Then `text == "ok"`, `stop == "completed"`, `json == null`
+
+Scenario: json_permis
+  Given `json: true` et un dernier message contenant ```json {"notify":true}```
+  When le step s'exécute
+  Then `json == {"notify": true}`
+
+Scenario: json_demande_mais_absent
+  Given `json: true` et un message sans JSON
+  When le step s'exécute
+  Then erreur non retryable
+
+Scenario: variables_du_gabarit
+  Given un prompt `Analyse {{inputs.fetch.text}} pour {{run.project}}`
+  When le step s'exécute avec `inputs.fetch.text = "X"` et le projet `demo`
+  Then l'agent reçoit « Analyse X pour demo »
+
+Scenario: variable_inconnue
+  Given un prompt avec `{{inputs.absent.x}}`
+  When le step s'exécute
+  Then erreur non retryable, l'agent n'est pas appelé
+
+Scenario: agent_d_un_autre_utilisateur
+  Given un agent `a` qui appartient à un autre utilisateur que `_run.user_id`
+  When le step s'exécute
+  Then erreur « agent introuvable » non retryable
+
+Scenario: sandbox_injectee_seulement_en_portee_sandbox
+  Given deux runs, l'un avec `_run.sandbox`, l'autre sans
+  When les steps préparent la tâche
+  Then le serveur MCP `sandbox` n'est présent que dans le premier
+
+Scenario: timeout_plafonne_avec_sandbox
+  Given `timeout_secs = 3000` et une sandbox injectée
+  When le step prépare les limites
+  Then le timeout effectif vaut 780 s
+
+Scenario: arret_non_complete_n_est_pas_une_erreur
+  Given un agent qui atteint le timeout
+  When le step se termine
+  Then `stop == "timed_out"` et le step réussit

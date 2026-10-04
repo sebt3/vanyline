@@ -95,6 +95,9 @@ Handles:
     `project.spec.owner == owner` de l'utilisateur appelant.
 
 Must:
+  Types de contexte (2026-10-04) : `sandbox` (`data` : `{project_name, sandbox_name}`), `settings`
+    (`data` : `{}`), `home` (`data` : `{}`) et `project` (`data` : `{project_name}`) ; chaque type
+    désigne un agent système par défaut (../../system_agents.sdd). `data` ne porte jamais de secret.
   - Cibler la table `vanyline_chat_contexts` (`#[sea_orm(table_name = "vanyline_chat_contexts")]`),
     même identité que `@ChatContext::Table` des migrations `…000007` et `…000008`.
   - Maintenir la bijection exacte des 4 champs avec les 4 colonnes de la migration

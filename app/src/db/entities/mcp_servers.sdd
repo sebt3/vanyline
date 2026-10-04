@@ -91,10 +91,14 @@ Structure:
   - `url: String` — SQL `STRING NOT NULL` ; requis à la désérialisation ; aucune
     validation de format URL (chaîne vide ou non-URL acceptées).
   - `headers: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '{}'` ;
-    @serde(default = "default_json_object") : clé ABSENTE → `{}`. Clé présente et à
-    `null` → @serde_json::Value::Null désérialisé tel quel (le default ne couvre que
-    l'absence de clé), donc stockable en JSONB `null` malgré le NOT NULL. Aucune
-    validation de forme : valeurs non-string, objet imbriqué, tableau passent.
+    @serde(default = "default_json_object") : clé ABSENTE → `{}` à la désérialisation
+    (écriture). Clé présente et à `null` → @serde_json::Value::Null désérialisé tel
+    quel (le default ne couvre que l'absence de clé), donc stockable en JSONB `null`
+    malgré le NOT NULL. Aucune validation de forme : valeurs non-string, objet
+    imbriqué, tableau passent. BUG DE SÉCURITÉ CONFIRMÉ, CORRIGÉ PAR DÉCISION
+    (Sébastien, 2026-09-27, voir `Tasks`) : porte souvent `Authorization` — ne doit
+    JAMAIS être sérialisé en sortie (écriture seule), aujourd'hui il l'est encore en
+    clair.
   - `available_tools: serde_json::Value` — SQL `JSONB NOT NULL DEFAULT '[]'` ;
     @serde(default = "default_json_array") : clé ABSENTE → `[]` (cas `null` comme
     pour `headers`). Ce champ n'est pas une entrée utilisateur dans le flux normal :
@@ -126,9 +130,11 @@ Accepts:
     @ActiveValue::Unchanged ; @ActiveValue::NotSet traité comme `""`, donc rejeté.
 
 Returns:
-  - @Serialize de @Model (réponses REST de `resource_router`) : objet JSON complet,
-    les 6 clés présentes — y compris `id` et `available_tools` — aucun
-    @skip_serializing_if. `headers` est renvoyé BRUT, sans masque : voir Tasks `[!]`.
+  - @Serialize de @Model (réponses REST de `resource_router`) : AUJOURD'HUI objet JSON
+    complet à 6 clés, `headers` renvoyé BRUT — CORRECTION REQUISE (Sébastien,
+    2026-09-27, voir `Tasks`) : `headers` doit devenir écriture seule, omis du JSON de
+    sortie (`#[serde(skip_serializing)]` ou équivalent), désérialisation en entrée
+    inchangée. Les 5 autres clés (dont `id` et `available_tools`) restent lisibles.
   - @resource_name() : `&'static str` `"mcp-servers"`, exactement (assertion du test
     du fichier et liste testée de `../../main.rs::openapi_spec`).
   - @owner_column() : @None.
@@ -198,6 +204,9 @@ Must:
       @McpServer de domaine config (@McpTransport enum, headers en
       @BTreeMap(String, String), wire `type`) — la transformation est le contrat de
       `../../config_store.rs` et `../../api/mcp_servers.rs`.
+  - Rendre `headers` écriture seule : ne JAMAIS le sérialiser dans une réponse REST
+      (omis du JSON), désérialisation en entrée inchangée pour create/update
+      (décision Sébastien, 2026-09-27).
 
 Must not:
   - Porter de hook @before_update ou @before_save sans étendre cette spec et la
@@ -257,21 +266,32 @@ Scenario: Clés headers et available_tools explicitement null survivent telles q
     @serde_json::Value::Null — @serde(default) ne couvre que l'absence de clé, pas
     la clé à `null`
 
-Scenario: Sérialisation REST expose la forme ligne complète
+Scenario: Sérialisation REST omet headers, expose le reste de la forme ligne
   Given un @Model construit avec `id: 4`, `headers: json!({"Authorization": "Bearer t"})`
     et `available_tools: json!(["fs.read"])`
   When il est sérialisé en JSON
-  Then l'objet contient exactement les 6 clés `id`, `name`, `server_type`, `url`,
-    `headers`, `available_tools`, valeurs passe-through (`server_type` reste
-    `server_type`, jamais renommé `type`), `headers` en clair
+  Then l'objet contient exactement les 5 clés `id`, `name`, `server_type`, `url`,
+    `available_tools` (`server_type` reste `server_type`, jamais renommé `type`) ;
+    `headers` est ABSENTE du JSON (écriture seule, décision Sébastien 2026-09-27 —
+    remplace l'ancien comportement où `headers` apparaissait en clair)
 
-Scenario: Valeurs de headers non string survivent dans le Model
-  Given un @Model avec `headers` posé à `json!({"A": 123, "B": {"k": 1}})`
-  When il est sérialisé puis redésérialisé en @Model
-  Then `headers` reste inchangé (valeurs non-string conservées) — aucun filtre de
-    forme n'existe dans ce fichier, le filtrage string-only vit dans
-    `../../config_store.rs` (@headers_from_json) et `../../api/mcp_servers.rs`
-    (@build_domain_server)
+Scenario: Désérialisation accepte toujours headers en entrée
+  Given le corps de création `{"name":"svc","server_type":"sse",
+    "url":"http://x","headers":{"Authorization":"Bearer t"}}`
+  When il est désérialisé en @Model par serde
+  Then `headers == json!({"Authorization":"Bearer t"})` — seule la SORTIE est
+    écriture seule, l'entrée n'est pas affectée
+
+Scenario: Valeurs de headers non string sont acceptées sans filtre à la désérialisation
+  Given le corps `{"name":"svc","server_type":"sse","url":"http://x",
+    "headers":{"A": 123, "B": {"k": 1}}}`
+  When il est désérialisé en @Model par serde
+  Then `headers == json!({"A": 123, "B": {"k": 1}})` inchangé (valeurs non-string
+    conservées) — aucun filtre de forme n'existe dans ce fichier, le filtrage
+    string-only vit dans `../../config_store.rs` (@headers_from_json) et
+    `../../api/mcp_servers.rs` (@build_domain_server). Un aller-retour par la
+    SÉRIALISATION, lui, perd `headers` (écriture seule, décision 2026-09-27) — ce
+    Scenario teste la désérialisation seule, pas un round-trip.
 
 Scenario: Aucun hook n'intercepte la mise à jour de server_type
   Given une ligne valide (`server_type: "sse"`) insérée via @Entity::insert sur la
@@ -303,14 +323,13 @@ Depends on:
     marqueur `"VNL-MCP-004"`).
 
 Tasks:
-  [!] `headers` exposé en clair en lecture : @read_policy est @AccessPolicy::Public
-      et @Serialize renvoie tout (aucun masque), or `headers` est exactement là où
-      vit l'en-tête `Authorization` des serveurs MCP (cf. tests de
-      `../../api/mcp_servers.rs`, usage du domaine config). Tout lecteur autorisé
-      (selon la sémantique réelle de Public dans miryad-core) peut donc lire les
-      secrets saisis par les admins via `GET /api/v1/mcp-servers`. Contrat voulu,
-      ou politique à changer (lecture AdminOnly, ou masque à la sérialisation) ? À
-      trancher avec Sébastien.
+  [ ] BUG DE SÉCURITÉ CONFIRMÉ (Sébastien, 2026-09-27) : `headers` (dont
+      `Authorization` des serveurs MCP) est exposé en clair en lecture Public.
+      DÉCISION : `headers` devient écriture seule — jamais sérialisé dans une réponse
+      REST (`#[serde(skip_serializing)]` ou équivalent), désérialisation en entrée
+      inchangée. Répercuter dans `../../api/mcp_servers.sdd` (cohérence
+      @build_domain_server, qui doit continuer à lire `headers` en interne depuis la
+      ligne chargée, pas depuis une réponse HTTP).
   [!] `server_type` non validé à la mise à jour : le CHECK SQL d'origine (cité en
       commentaire du fichier, cf. `docs/features/miryad-core-integration.md`)
       n'existe pas dans la migration et @before_create ne couvre que la création ;

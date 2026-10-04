@@ -98,6 +98,12 @@ Raises:
     `VNL-DB-005`, `exit(1)`) appartient à `../main.rs`.
 
 Tasks:
+  [ ] Ajouter à la chaîne `Migrator::migrations`, APRÈS les dix migrations existantes et dans cet
+    ordre : `m20261005_000001_create_vanyline_project_workflows`,
+    `m20261005_000002_create_vanyline_workflow_runs`, `m20261005_000003_alter_vanyline_agents_system`,
+    `m20261005_000004_create_vanyline_app_settings` (14 migrations au total) ; les tables `miryad_workflow_definitions` (feature `workflow` de
+    miryad-core) doivent exister avant : le migrateur miryad-core reste appliqué en premier
+    (2026-10-04).
   [?] Politique d'irrémédiabilité : les dix enfants implémentent chacun un `down()` =
       `drop_table`, mais ni `down`, ni `down_to`, ni `fresh` ne sont appelés nulle part
       dans l'app (ni runtime, ni tests). Le `down` nominal est-il le contrat voulu, ou

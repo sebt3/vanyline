@@ -1,0 +1,50 @@
+Spec: Create Vanyline Project Workflows Migration
+
+Purpose:
+  Migration qui pose la table `vanyline_project_workflows` (rattachement définition ↔ projet,
+  voir ../db/entities/project_workflows.sdd, qui n'en reprend que la correspondance
+  colonne↔champ). DDL EXACTE, applicable à l'identique sur PostgreSQL (production) et sur SQLite
+  en mémoire (tests). Dépend de `miryad_users` (migrateur miryad-core) ET de
+  `miryad_workflow_definitions` (feature `workflow` de miryad-core) : les deux sont appliqués
+  AVANT les migrations de l'app. Fichier neuf, conception.
+
+Owns:
+  ./m20261005_000001_create_vanyline_project_workflows.rs
+
+Can read:
+  ./mod.sdd
+  ../db/entities/project_workflows.sdd
+
+Handles:
+  Colonnes : `id` entier auto-incrémenté, clé primaire ; `owner_id` entier NOT NULL, clé étrangère
+  `miryad_users.id` ON DELETE CASCADE ; `project_name` chaîne NOT NULL ; `definition_id` entier
+  NOT NULL, clé étrangère `miryad_workflow_definitions.id` ON DELETE CASCADE (supprimer une
+  définition supprime ses rattachements) ; `scope` chaîne NOT NULL ; `description` texte NULL.
+  Contraintes : UNIQUE `(owner_id, project_name, definition_id)` ; index
+  `idx_vanyline_project_workflows_owner_project` sur `(owner_id, project_name)`.
+  `down` : `DROP TABLE`.
+
+Must:
+  Appliquer le même DDL sur PostgreSQL et SQLite.
+  Poser les deux clés étrangères avec suppression en cascade.
+  Rester rejouable par la chaîne (`seaql_migrations_app`, jamais la table de miryad-core).
+
+Scenario: ddl_applique_sur_une_vraie_base
+  Given la chaîne complète appliquée sur une base de test
+  When la table est inspectée
+  Then colonnes, unicité `(owner_id, project_name, definition_id)` et index existent
+
+Scenario: cascade_a_la_suppression_de_la_definition
+  Given un rattachement et sa définition
+  When la définition est supprimée
+  Then le rattachement disparaît
+
+Scenario: unicite_du_rattachement
+  Given deux rattachements identiques
+  When le second est inséré
+  Then violation d'unicité
+
+Scenario: down_supprime_la_table
+  Given la migration appliquée
+  When `down`
+  Then la table n'existe plus

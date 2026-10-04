@@ -204,8 +204,13 @@ Raises:
       un profil dont le @provider_id est absent de la table (chemin @list_models,
       structurement inatteignable en base — FK RESTRICT + table non filtrée —, atteignable
       seulement par fixtures) -> `… VNL-LLM-002: LLM provider not found` ;
-      un agent au @model_profile_id orphelin ou hors owner (chemin @list_agents,
-      @get_agent) -> `… VNL-CFG-003: Unknown model reference: '{id}'` ;
+      un agent au @model_profile_id orphelin ou hors owner : DEPUIS la décision
+      Sébastien du 2026-09-27 (voir `Handles`/`Tasks`), @list_agents saute cette ligne
+      (+ @tracing::warn) au lieu de propager l'erreur — @VnyError::UnknownReference
+      (`"model"`) devient donc inatteignable en pratique depuis @list_agents ET
+      @get_agent (qui délègue à @list_agents) ; ce format `VNL-CFG-003: Unknown model
+      reference: '{id}'` ne reste observable que si @resolve_model_profile_name est
+      appelée hors de cette boucle ;
       un agent au @mode inconnu -> le payload porte lui-même le marqueur 001, rendu à
       préfixe répété deux fois : `VNL-CFG-001: Configuration error: VNL-CFG-001:
       Configuration error: unknown agent mode: {v}`.
@@ -243,8 +248,9 @@ Handles:
     profil appartienne au même owner (./db/entities/agents.sdd `[!]`) ; comme
     @load_model_profiles filtre sur l'owner, un agent d'alice pointant sur un profil de
     bob rend @UnknownReference("model") et fait échouer TOUT le @list_agents d'alice —
-    une ligne cross-owner empoisonne toutes les lectures d'agents de l'owner (documenté,
-    jamais béni, voir `Tasks`).
+    une ligne cross-owner empoisonne toutes les lectures d'agents de l'owner. BUG
+    CONFIRMÉ (Sébastien, 2026-09-27, voir `Tasks`) : cette ligne doit être sautée +
+    @tracing::warn, jamais faire échouer toute la liste.
   Repli silencieux sur JSON malformé : @toolsets/@skills (agents), @local_tools/@mcp
     (toolsets), @options (profils), @headers (MCP) ne font JAMAIS échouer une liste —
     @unwrap_or_default/map vide — posture défensive assumée par les commentaires du
@@ -310,8 +316,10 @@ Must not:
     les valeurs de @options ou le contenu des listes d'outils — le store ne connaît que
     la forme des clés qu'il convertit.
   Faire échouer @list_mcp_servers, @list_toolsets ou @list_skills pour une ligne au JSON
-    ou au type inattendu (seul @list_providers, @list_models et @list_agents sont
-    tout-ou-rien, et uniquement sur leurs erreurs dures listées en `Raises`).
+    ou au type inattendu (seul @list_providers, @list_models et @list_agents restent
+    tout-ou-rien sur leurs erreurs dures listées en `Raises` — À L'EXCEPTION, depuis le
+    2026-09-27, d'un `model_profile_id` non résolu dans @list_agents, sauté + warn
+    comme MCP, voir `Handles`/`Tasks`).
   Révéler l'existence d'un skill d'un autre owner autrement que par le @UnknownReference
     standard de @load_skill (aucun message distinct).
   Exposer @available_models, @is_default (providers) ou @available_tools (MCP) dans le
@@ -353,12 +361,20 @@ Tasks:
   [?] Corps de @load_skill brut vs corps TRIMÉ de fs_store (./db/entities/skills.sdd
     `[?]`) : lequel consomme le sandbox/les agents — arbitrer ET aligner les deux
     implémentations dans la même tâche.
-  [!] Empoisonnement cross-owner de @list_agents : FK `model_profile_id` sans contrôle
-    d'owner + @load_model_profiles filtré => un agent pointant sur le profil d'un autre
-    owner (écrit par un insert cross-owner que miryad-core n'interdit pas, cf.
-    ./db/entities/agents.sdd `[!]`) rend TOUT list_agents d'alice en VNL-CFG-001 — déni
-    de service par une seule ligne. Trou à refermer (résolution tous propriétaires ?
-    filtre dur ? validation d'écriture ?) ou posture assumée ? Arbitrage Sébastien.
+  [ ] BUG CONFIRMÉ (Sébastien, 2026-09-27) : empoisonnement cross-owner de @list_agents —
+    FK `model_profile_id` sans contrôle d'owner + @load_model_profiles filtré => un
+    agent dont `model_profile_id` est absent du jeu de profils filtré owner (profil
+    d'un autre owner, ou réellement orphelin — @resolve_model_profile_name ne peut pas
+    distinguer les deux cas, elle ne voit que le jeu déjà filtré) rend TOUT
+    `list_agents` d'alice en VNL-CFG-001 (déni de service par une seule ligne).
+    Correction retenue : sur CETTE erreur précise (@VnyError::UnknownReference("model"))
+    uniquement, sauter la ligne + @tracing::warn (nommant l'agent), sur le modèle de
+    `@list_mcp_servers` — pas d'erreur dure tout-ou-rien pour ce cas. Choix fait côté
+    lecture (pas d'écriture) car une garde à l'écriture dans `./db/entities/agents.rs`
+    demanderait un accès DB au hook `@before_create`, explicitement exclu par le
+    `Must not` de cette spec (limite actée Phase 1 miryad-core) — à revisiter séparément
+    si cette limite doit sauter. Ne préjuge PAS de la posture générale sur les AUTRES
+    poisons (`mode`/`provider_type` invalides), qui reste `[!]` ci-dessous, non tranchée.
   [!] Posture « tout-ou-rien » des lignes poison : @mode inconnu ou @provider_type
     inconnu (deux champs dont les gardes n'ont pas de couverture update, cf. specs
     entités `[!]`) font échouer toute liste ET tout @get_x du domaine — là où MCP saute
@@ -393,10 +409,11 @@ Done when:
   Chaque Scenario a un test taggé par son titre et passe (les 25 tests de fonctions pures
     existent déjà ; les 22 Scenario sans test s'écrivent, dont 20 sur @real_db), batterie
     workspace verte.
-  Les `[?]`/`[!]` d'arbitrage (trim du corps, empoisonnement cross-owner, posture lignes
-    poison, max_tokens) sont tranchés par Sébastien et répercutés ici et dans les specs
-    entités/miroirs concernées (./db/entities/skills.sdd, ./db/entities/agents.sdd,
-    ../../cfgstore/src/fs_store.sdd).
+  Les `[?]`/`[!]` d'arbitrage restants (trim du corps, posture lignes poison sur
+    mode/provider_type, max_tokens — l'empoisonnement cross-owner de @list_agents est
+    tranché, cf. `Tasks` 2026-09-27) sont tranchés par Sébastien et répercutés ici et
+    dans les specs entités/miroirs concernées (./db/entities/skills.sdd,
+    ./db/entities/agents.sdd, ../../cfgstore/src/fs_store.sdd).
   ../../cfgstore/src/store.sdd et ./db/entities/*.sdd restent cohérents avec cette spec
     (leur attente « écritures ReadOnly + default_agent None constant » y est vérifiée).
 
@@ -640,13 +657,14 @@ Scenario: list_agents_mode_invalide_fait_echouer_toute_la_liste
   Then @Err(@CfgStoreError::Config) est rendue sans élément partiel, @Display contenant
     le marqueur `VNL-CFG-001` répété deux fois et `unknown agent mode: bogus`
 
-Scenario: list_agents_profil_dun_autre_owner_fait_echouer_toute_la_liste
-  Given un profil appartenant à bob et un agent d'alice dont `model_profile_id` pointe
-    sur ce profil bob (FK valide, cross-owner non interdit — ./db/entities/agents.sdd `[!]`)
+Scenario: list_agents_profil_dun_autre_owner_est_saute_sans_empoisonner_la_liste
+  Given un profil appartenant à bob, un agent VALIDE d'alice, et un second agent
+    d'alice dont `model_profile_id` pointe sur le profil de bob (FK valide, cross-owner
+    non interdit à l'écriture — ./db/entities/agents.sdd `[!]`)
   When @list_agents est appelée sur le store d'alice
-  Then @Err(@CfgStoreError::Config) est rendue, @Display contenant `VNL-CFG-003: Unknown
-    model reference:` suivi de l'id stringifié — l'agent cross-owner empoisonne toute la
-    liste (comportement constaté, arbitré en `Tasks`, jamais béni)
+  Then @Ok est rendu ne contenant QUE l'agent valide (l'agent au profil cross-owner est
+    sauté, un @tracing::warn le nomme) — décision Sébastien 2026-09-27, remplace l'ancien
+    comportement tout-ou-rien
 
 Scenario: list_agents_skill_selection_auto_none_named
   Given trois agents d'alice avec `skills` en base valant `"auto"`, `"none"`, puis

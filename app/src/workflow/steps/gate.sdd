@@ -1,0 +1,116 @@
+Spec: Step gate
+
+Platform: Rust/vanyline-app/reqwest/vanyline-health
+
+Purpose:
+  Kind `gate` : gate de validation fondée sur la santé du code de la sandbox
+  (/sandbox/src/health.sdd, crate `vanyline-health`). Le step demande un recalcul frais de l'état
+  du code, attend qu'il soit terminé, puis évalue le rapport contre des seuils configurables —
+  désactivables un par un. Réservé aux workflows de sandbox (la santé du code se calcule dans une
+  sandbox ; décision du 2026-10-04). Un échec de gate fait échouer le workflow, sauf si la gate
+  est en simple mode d'observation. Fichier neuf, conception.
+
+Owns:
+  ./gate.rs
+
+Can read:
+  ./mod.sdd
+  /sandbox/src/health.sdd
+  /health/src/report.sdd
+
+Exposes:
+  @GateStep — `impl MiryadWorkflowStep`, `kind() == "gate"`.
+  Config : `{ "min_coverage"?: <pourcentage 0..100|null>, "min_new_code_coverage"?: <pourcentage|null>,
+    "base"?: <ref git>, "max_errors"?: <entier|null>, "ignore_checks"?: [<id>], "fail_on_unchecked"?: <bool>,
+    "enforce"?: <bool>, "wait_timeout_secs"?: <entier>, "_run": … }`.
+  Valeurs par défaut : `min_coverage = null` et `min_new_code_coverage = null` (seuils de
+  couverture DÉSACTIVÉS tant qu'ils ne sont pas configurés), `max_errors = 0`,
+  `ignore_checks = []`, `fail_on_unchecked = false`, `enforce = true`, `wait_timeout_secs = 900`.
+
+Returns:
+  `{ "passed": <bool>, "reasons": [<texte>], "status": "passed"|"failed"|"errored",
+  "coverage_percent": <nombre|null>, "new_code_percent": <nombre|null>, "issues": { "error": <n>,
+  "warning": <n> }, "unchecked_languages": [..], "checks": [{ "id", "status" }] }`.
+
+Raises:
+  @StepError `retryable: false` quand la gate échoue et `enforce` est vrai (le message liste les
+  `reasons`), quand la sandbox n'est pas démarrée, ou quand l'état n'est pas devenu frais avant
+  `wait_timeout_secs` ; `retryable: true` pour une panne de transport transitoire.
+
+Handles:
+  Séquence : `POST /code-health/refresh` (avec `base` si fourni) ; interrogation de
+  `GET /code-health` jusqu'à `phase == "fresh"` ET `computed_at` postérieur à la demande ;
+  évaluation. Évaluation : (1) `status` du rapport, calculé SANS les vérifications de
+  `ignore_checks`, doit valoir `passed` ; (2) `coverage_percent` ≥ `min_coverage` si défini ;
+  (3) `new_code_percent` ≥ `min_new_code_coverage` si défini (exige `base` : sans `base`, une
+  gate qui définit ce seuil est une erreur de configuration non retryable) ; (4) nombre d'issues
+  de sévérité `error` ≤ `max_errors` si défini ; (5) `fail_on_unchecked` vrai ⇒ aucun langage
+  non vérifié. Une vérification `errored` (outil manquant, sortie illisible) rend la gate
+  non passante : un vert ne repose jamais sur une mesure absente. Un seuil de couverture défini
+  alors que le rapport n'a AUCUNE couverture est un échec de gate (jamais « 0 % » ni « ok »).
+  `enforce: false` : la sortie est rendue avec `passed: false` mais le step réussit.
+
+Must:
+  Exiger un état FRAIS postérieur à la demande : jamais un rapport périmé.
+  Désactiver un seuil quand sa valeur est `null` ou absente ; un seuil défini est toujours appliqué.
+  Considérer l'absence de mesure comme un échec quand un seuil existe.
+  Refuser de s'exécuter sans `_run.sandbox`.
+
+Must not:
+  Réinterpréter ou recalculer le rapport : les pourcentages et le `status` viennent de
+    `vanyline-health` (`CoverageTotals::percent`, `HealthReport::status`).
+
+Scenario: gate_passante
+  Given un rapport `passed`, couverture 85 % et `min_coverage = 80`
+  When le step s'exécute
+  Then `passed == true`
+
+Scenario: couverture_insuffisante
+  Given une couverture de 70 % et `min_coverage = 80`
+  When le step s'exécute
+  Then erreur non retryable dont les `reasons` mentionnent 70 et 80
+
+Scenario: seuil_desactive
+  Given `min_coverage` absent et une couverture de 10 %
+  When le step s'exécute
+  Then la couverture n'est pas évaluée, `passed` dépend des autres critères
+
+Scenario: mesure_absente_avec_seuil
+  Given `min_coverage = 50` et un rapport sans couverture
+  When le step s'exécute
+  Then échec de gate (« couverture non mesurée »)
+
+Scenario: nouveau_code_sans_base
+  Given `min_new_code_coverage = 80` et aucune `base`
+  When le step s'exécute
+  Then erreur de configuration non retryable
+
+Scenario: etat_frais_exige
+  Given un état déjà `fresh` mais calculé AVANT la demande
+  When le step s'exécute
+  Then il attend un état dont `computed_at` est postérieur à la demande
+
+Scenario: delai_depasse
+  Given un état qui reste `computing` au-delà de `wait_timeout_secs`
+  When le step attend
+  Then erreur non retryable
+
+Scenario: verification_ignoree
+  Given une vérification `ts-coverage` en échec et `ignore_checks = ["ts-coverage"]`
+  When le step s'exécute
+  Then son échec n'entre pas dans le `status` évalué
+
+Scenario: observation_seulement
+  Given une gate non passante et `enforce: false`
+  When le step s'exécute
+  Then le step réussit avec `passed == false`
+
+Scenario: langage_non_verifie
+  Given `fail_on_unchecked = true` et `unchecked_languages = ["go"]`
+  When le step s'exécute
+  Then la gate échoue
+
+Scenario: refuse_sans_sandbox
+  Given un contexte sans `sandbox`
+  When le step s'exécute
+  Then erreur non retryable

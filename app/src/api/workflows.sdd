@@ -1,0 +1,173 @@
+Spec: Workflows API — workflows de projet, lancement et runs
+
+Platform: Rust/vanyline-app/axum 0.8/miryad-core
+
+Purpose:
+  Routes REST (sous `/api`) des WORKFLOWS d'un projet et de leurs RUNS. Un projet définit des
+  workflows de deux portées : `project` (non rattachés à une sandbox) et `sandbox` (lancés sur une
+  sandbox du projet ; seuls autorisés à utiliser les kinds `shell` et `gate`). Une définition est
+  une `WorkflowDefinition` de miryad-core (le DAG) rattachée au projet par
+  `vanyline_project_workflows` (../db/entities/project_workflows.sdd) ; un lancement fabrique le DAG
+  du run avec son contexte (../workflow/run_context.sdd), le confie à Restate, et inscrit une ligne
+  d'index (../db/entities/workflow_runs.sdd). La vue d'un projet liste ses workflows et les runs
+  des deux dernières semaines (50 au plus) ; les vues de sandbox listent les runs liés à la
+  sandbox et permettent de lancer les workflows de portée sandbox. Le statut d'un run est lu dans
+  Restate (../workflow/status.sdd), jamais copié en base. Toute route répond `503` explicite si
+  le moteur n'est pas configuré. Fichier neuf, conception.
+
+Owns:
+  ./workflows.rs
+
+Can read:
+  ./mod.sdd
+  ./projects.sdd
+  ./sandboxes.sdd
+  ./owners.sdd
+  ../workflow/mod.sdd
+  ../workflow/run_context.sdd
+  ../workflow/status.sdd
+  ../db/entities/project_workflows.sdd
+  ../db/entities/workflow_runs.sdd
+  ../error.sdd
+
+Exposes:
+  Routes (auth `AuthUser` de miryad-core ; chemins relatifs à `/api`) :
+    `GET /projects/{project}/workflows` — liste : `[{ id, name, scope, description, kinds: [..],
+      steps_count }]`.
+    `POST /projects/{project}/workflows` — corps `{ name, scope, description?, steps }` ; crée la
+      définition (nom stocké `{owner}/{project}/{name}`) ET le rattachement dans UNE transaction ;
+      201.
+    `GET /projects/{project}/workflows/{id}` — détail avec `steps`.
+    `PUT /projects/{project}/workflows/{id}` — `{ description?, steps? }` ; revalide ; la portée
+      n'est pas modifiable (créer un nouveau workflow).
+    `DELETE /projects/{project}/workflows/{id}` — supprime rattachement et définition ; les runs
+      déjà lancés gardent leur ligne d'index (`definition_id` NULL).
+    `POST /projects/{project}/workflows/{id}/runs` — corps `{ sandbox? }` ; 202 `{ run_id,
+      invocation_id }`.
+    `GET /projects/{project}/runs` — runs du projet.
+    `GET /sandboxes/{sandbox}/runs` — runs de cette sandbox.
+      Les deux listes : paramètres `limit` (≤ 50, défaut 50) et `since` (défaut : 14 jours, au plus
+      14 jours) ; `[{ run_id, workflow: definition_name, scope, sandbox?, triggered_by, started_at,
+      status: RunStatus (sans le détail des steps) }]`, du plus récent au plus ancien.
+    `GET /runs/{run_id}` — détail avec le statut des steps.
+    `POST /runs/{run_id}/cancel` — 202.
+  @launch_workflow(state, user, project, workflow_id, sandbox: Option<String>, triggered_by) ->
+    Result<RunLaunch, AppError> — fonction de service commune à la route et au MCP de domaine
+    (../mcp_domain.sdd) ; de même @create_workflow, @list_runs.
+
+Raises:
+  400 — `steps` invalide (`validate_dag` de miryad-core, `MRD-WORKFLOW-004`), portée inconnue,
+    `sandbox` fourni pour un workflow de projet ; 422 — kind non autorisé pour la portée
+    (`allowed_kinds`, ../workflow/run_context.sdd) ; 404 — projet, workflow, sandbox ou run
+    inexistant OU appartenant à un autre utilisateur (aucune distinction) ; 409 — workflow de
+    sandbox lancé sans `sandbox`, sandbox hors du projet, sandbox non démarrée (phase ≠
+    `Running`), nom de workflow déjà pris dans le projet ; 503 — moteur non configuré ou Restate
+    indisponible.
+
+Handles:
+  Propriété : toute route résout l'Owner de l'utilisateur et vérifie que le projet, le
+  rattachement, la sandbox et le run lui appartiennent AVANT toute action (même scoping que
+  ./sandboxes.rs) ; la définition ne doit pas pouvoir être référencée depuis le projet d'un autre.
+  Lancement : (1) charger rattachement + définition ; (2) vérifier portée/sandbox (409/400) ;
+  (3) générer `run_id` (UUID v4) ; (4) `materialize` (../workflow/run_context.sdd) ; (5) `trigger` ;
+  (6) insérer la ligne d'index ; si (6) échoue, annuler l'invocation et répondre 500 (jamais un run
+  sans index). `triggered_by` = `ui` pour la route REST, valeur fournie par l'appelant pour le MCP.
+  Nom de définition : miryad-core impose l'unicité GLOBALE du `name` d'une définition ; le préfixe
+  `{owner}/{project}/` garantit l'unicité entre utilisateurs et projets (l'utilisateur ne voit que
+  la partie `{name}`).
+  Listes de runs : lecture de l'index (fenêtre et limite), puis UNE lecture groupée des statuts
+  (../workflow/status.sdd) ; un run absent de Restate rend `status.state == "Unknown"`.
+  Annulation : annule l'invocation, puis les jobs shell du run (best-effort,
+  `DELETE /jobs?prefix={run_id}:` sur la sandbox du run si elle existe).
+
+Must:
+  Valider portée et kinds à la création ET à chaque lancement (une définition éditée par un autre
+    chemin ne contourne pas la règle).
+  Ne jamais lancer sans index ni indexer sans lancement.
+  Borner les listes (50 lignes, 14 jours).
+  Rendre 404 identique pour « inexistant » et « à un autre » (aucune fuite d'existence).
+
+Must not:
+  Stocker un statut de run en base.
+  Permettre de changer la portée d'un workflow existant.
+  Exécuter quoi que ce soit si le moteur n'est pas configuré.
+
+Tasks:
+  [ ] Déclarer le module dans ./mod.sdd et monter les routes (table de routage).
+  [ ] Unicité du `name` global côté miryad-core : le préfixe `{owner}/{project}/` est un contournement ;
+    la demande d'unicité par propriétaire est l'issue sebt3/miryad-core#28 — une fois résolue, le
+    préfixe pourra être réduit à `{project}/` (nom unique par propriétaire).
+  [?] Édition d'un workflow pendant qu'un de ses runs tourne : les runs gardent le DAG copié à leur
+    lancement (aucun impact) ; confirmer que l'interface le dit.
+  [ ] Convertir chaque Scenario en test taggé par son titre.
+
+Scenario: creation_atomique
+  Given un corps valide de portée `sandbox`
+  When `POST /projects/demo/workflows`
+  Then 201, une définition `alice/demo/ci` ET son rattachement existent ; si le rattachement
+    échoue, la définition n'existe pas
+
+Scenario: kind_interdit_pour_la_portee
+  Given un DAG avec un step `shell` et `scope = "project"`
+  When `POST /projects/demo/workflows`
+  Then 422 et rien n'est créé
+
+Scenario: lancement_de_projet
+  Given un workflow de portée projet
+  When `POST …/runs` sans sandbox
+  Then 202, une ligne d'index sans `sandbox_name`, un run Restate lancé avec `_run.sandbox` absent
+
+Scenario: lancement_de_sandbox
+  Given un workflow de portée sandbox et une sandbox `Running` du projet
+  When `POST …/runs {"sandbox": "s1"}`
+  Then 202 et `_run.sandbox == "s1"` dans la config de chaque step
+
+Scenario: sandbox_non_demarree
+  Given une sandbox en `Provisioning`
+  When lancement d'un workflow de sandbox sur elle
+  Then 409, aucun run
+
+Scenario: sandbox_pour_un_workflow_de_projet
+  Given un workflow de projet
+  When `POST …/runs {"sandbox": "s1"}`
+  Then 400
+
+Scenario: workflow_d_un_autre_utilisateur
+  Given le workflow de bob
+  When alice tente de le lancer, de le lire ou de le supprimer
+  Then 404 dans les trois cas, aucune action
+
+Scenario: definition_editee_par_un_autre_chemin
+  Given un workflow de projet dont la définition a reçu un step `shell` hors de cette API
+  When il est lancé
+  Then 422 (la validation est refaite au lancement)
+
+Scenario: liste_des_runs_fenetree
+  Given 60 runs dont certains vieux de 20 jours
+  When `GET /projects/demo/runs`
+  Then au plus 50 runs, aucun de plus de 14 jours, du plus récent au plus ancien, statuts lus en une seule lecture groupée
+
+Scenario: run_purge_par_restate
+  Given une ligne d'index dont Restate ne connaît plus l'invocation
+  When la liste est lue
+  Then `status.state == "Unknown"`
+
+Scenario: runs_d_une_sandbox
+  Given des runs de deux sandboxes
+  When `GET /sandboxes/s1/runs`
+  Then seuls les runs de `s1`
+
+Scenario: annulation
+  Given un run de sandbox en cours avec un job shell
+  When `POST /runs/{run_id}/cancel`
+  Then l'invocation est annulée et `DELETE /jobs?prefix={run_id}:` est émis sur la sandbox
+
+Scenario: moteur_non_configure
+  Given une app sans moteur
+  When n'importe quelle route de ce fichier
+  Then 503
+
+Scenario: suppression_garde_l_historique
+  Given un workflow qui a des runs
+  When `DELETE /projects/demo/workflows/{id}`
+  Then rattachement et définition supprimés, les lignes de runs existent avec `definition_id` NULL

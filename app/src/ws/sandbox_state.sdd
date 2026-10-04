@@ -234,6 +234,12 @@ Handles:
     aucun état partagé entre eux (@SharedState n'est consommé que par CE fichier).
 
 Must:
+  UN OWNER = UN NAMESPACE (2026-10-04) : le hub suit les Sandboxes par NAMESPACE D'OWNER — un
+    flux de watch par Owner suivi (créé à la première connexion d'un abonné de cet Owner, arrêté
+    quand il n'en reste plus), jamais un watch cluster-wide ni du namespace d'application :
+    l'app n'a de droits que dans les namespaces de ses Owners (RoleBinding
+    `vanyline-app`, /controller/src/namespace.sdd), et un watch cluster-wide lui donnerait la lecture
+    des sandboxes de tout le cluster.
   - Extraire @AuthUser AVANT tout upgrade (401 sans effet de bord pour une requête non
     authentifiée) et n'accepter que GET (montage `../main.rs`).
   - Chaîner @resolve_user PUIS @resolve_owner_name sur `principal_user.id` (même paire
@@ -310,6 +316,7 @@ Depends on:
     ici : auth cookie app, jamais de ticket) et du harnais `../../../tooling.sdd`.
 
 Tasks:
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-26.
   [!] Fuite d'abonné sur échec de @ensure_watch_loop : l'inscription (point 5) précède le

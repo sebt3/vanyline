@@ -1,0 +1,49 @@
+Spec: Alter Vanyline Agents — agents système
+
+Purpose:
+  Migration qui ajoute à `vanyline_agents` les colonnes des AGENTS SYSTÈME (voir
+  ../system_agents.sdd) : `system_key` (clé stable d'un agent préconfiguré, NULL pour un agent
+  ordinaire) et `system_version` (version du prompt système embarqué dans le code, NULL pour un
+  agent ordinaire). Un agent système est une vraie ligne d'agent (donc lisible partout :
+  ConfigStore, listes, conversations), mais son contenu est piloté par le code et seul son modèle
+  est modifiable par l'utilisateur. DDL EXACTE, identique sur PostgreSQL et SQLite. Fichier neuf,
+  conception.
+
+Owns:
+  ./m20261005_000003_alter_vanyline_agents_system.rs
+
+Can read:
+  ./mod.sdd
+  ./m20260825_000006_create_vanyline_agents.sdd
+  ../db/entities/agents.sdd
+
+Handles:
+  `up` : `ALTER TABLE vanyline_agents ADD COLUMN system_key` chaîne NULL, `ADD COLUMN
+  system_version` entier NULL ; index UNIQUE partiel/composite `(owner_id, system_key)` (les
+  valeurs NULL n'entrent pas en conflit : un utilisateur a au plus un agent par `system_key`,
+  autant d'agents ordinaires qu'il veut). `down` : suppression de l'index puis des deux colonnes.
+
+Must:
+  Laisser les agents existants intacts (colonnes NULL).
+  Garantir l'unicité `(owner_id, system_key)` sans empêcher plusieurs agents ordinaires.
+  Être réversible.
+
+Scenario: agents_existants_intacts
+  Given des agents créés avant la migration
+  When elle est appliquée
+  Then `system_key` et `system_version` sont NULL pour tous
+
+Scenario: unicite_de_la_cle_systeme
+  Given un agent `system_key = "config"` pour l'utilisateur 1
+  When un second agent `config` est inséré pour l'utilisateur 1, puis pour l'utilisateur 2
+  Then violation pour le premier cas, succès pour le second
+
+Scenario: plusieurs_agents_ordinaires
+  Given deux agents sans `system_key` pour le même utilisateur
+  When ils sont insérés
+  Then aucun conflit
+
+Scenario: down_restaure_le_schema
+  Given la migration appliquée
+  When `down`
+  Then les deux colonnes et l'index n'existent plus

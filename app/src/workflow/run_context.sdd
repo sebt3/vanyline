@@ -1,0 +1,79 @@
+Spec: Run context — fabrication du DAG d'un run
+
+Platform: Rust/vanyline-app/miryad-core
+
+Purpose:
+  Fabrique le DAG exécuté par UN run à partir d'une définition stockée. `MiryadWorkflowStep::run`
+  ne reçoit que `config` et `inputs` : ni identifiant de run, ni Owner, ni sandbox. Comme
+  `trigger_run` envoie le DAG dans le corps de l'invocation, l'app le « matérialise » à chaque
+  lancement : elle injecte un objet `_run` dans la `config` de CHAQUE step et valide la portée
+  du workflow (projet ou sandbox) contre les kinds utilisés. C'est le seul endroit qui connaît
+  le contexte d'un run. Fichier neuf, conception.
+
+Owns:
+  ./run_context.rs
+
+Can read:
+  ./mod.sdd
+  ./steps/mod.sdd
+  ../db/entities/project_workflows.sdd
+
+Exposes:
+  @RunScope — enum `Project` | `Sandbox`.
+  @RunContext — `{ run_id: String (UUID v4 généré par l'app), user: String (subject OIDC du
+    déclencheur), user_id: i32, owner: String (nom de l'Owner K8s), project: String,
+    sandbox: Option<String>, triggered_by: String ("ui" | "agent:<nom>" | "api"),
+    definition: String }`.
+  @materialize(definition: &DagSteps, scope: RunScope, ctx: &RunContext) ->
+    Result<DagSteps, WorkflowError> — pure : copie le DAG et pose `config._run = ctx` (sérialisé) à
+    chaque step ; une clé `_run` déjà présente dans la config d'un step est ÉCRASÉE (un auteur de
+    workflow ne peut pas usurper un contexte).
+  @allowed_kinds(scope: RunScope) -> &'static [&'static str] — `Project` : `agent`, `rhai` ;
+    `Sandbox` : `agent`, `rhai`, `shell`, `gate`.
+
+Raises:
+  @WorkflowError::InvalidDag (`MRD-WORKFLOW-004`, 422) — step dont le `kind` n'est pas autorisé
+  pour la portée (par ex. `shell` ou `gate` dans un workflow de projet), avec le message
+  nommant le step et le kind ; `scope = Sandbox` sans `ctx.sandbox`, ou `scope = Project` AVEC
+  `ctx.sandbox`.
+
+Must:
+  Valider la portée AVANT tout appel à Restate : un workflow de projet ne doit jamais atteindre un
+    kind qui exige une sandbox (décision 2026-10-04).
+  Écraser toute clé `_run` fournie par la définition.
+  Ne jamais inclure de secret dans `_run` (identifiants seulement : l'identité d'accès à la
+    sandbox est obtenue par chaque step via le jeton de l'Owner, ./steps/mod.sdd).
+  Rester pur et déterministe (hors génération du `run_id`, faite par l'appelant).
+
+Must not:
+  Modifier la définition stockée : la copie est faite pour le run.
+
+Scenario: injection_du_contexte
+  Given une définition de deux steps et un RunContext
+  When @materialize
+  Then chaque step porte `config._run` égal au contexte, les autres champs de `config` intacts
+
+Scenario: cle_run_usurpee_ecrasee
+  Given un step dont la config contient déjà `_run: {"owner": "autrui"}`
+  When @materialize
+  Then `_run.owner` vaut l'Owner du RunContext
+
+Scenario: shell_refuse_dans_un_workflow_de_projet
+  Given un DAG contenant un step `shell` et la portée `Project`
+  When @materialize
+  Then `InvalidDag` nommant le step et le kind `shell`
+
+Scenario: gate_refuse_dans_un_workflow_de_projet
+  Given un step `gate` et la portée `Project`
+  When @materialize
+  Then `InvalidDag`
+
+Scenario: portee_sandbox_exige_une_sandbox
+  Given la portée `Sandbox` et `ctx.sandbox = None`
+  When @materialize
+  Then erreur de contexte
+
+Scenario: kinds_de_la_portee_sandbox
+  Given la portée `Sandbox`
+  When @allowed_kinds
+  Then `agent`, `rhai`, `shell`, `gate`

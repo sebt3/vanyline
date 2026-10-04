@@ -1,0 +1,51 @@
+Spec: Create Vanyline Workflow Runs Migration
+
+Purpose:
+  Migration qui pose la table `vanyline_workflow_runs` (index des runs, voir
+  ../db/entities/workflow_runs.sdd). DDL EXACTE, applicable à l'identique sur PostgreSQL et sur
+  SQLite en mémoire. Dépend de `miryad_users` et de `miryad_workflow_definitions`. Fichier neuf,
+  conception.
+
+Owns:
+  ./m20261005_000002_create_vanyline_workflow_runs.rs
+
+Can read:
+  ./mod.sdd
+  ../db/entities/workflow_runs.sdd
+
+Handles:
+  Colonnes : `id` entier auto-incrémenté, clé primaire ; `owner_id` entier NOT NULL, clé étrangère
+  `miryad_users.id` ON DELETE CASCADE ; `project_name` chaîne NOT NULL ; `sandbox_name` chaîne NULL ;
+  `definition_id` entier NULL, clé étrangère `miryad_workflow_definitions.id` ON DELETE SET NULL ;
+  `definition_name` chaîne NOT NULL ; `run_id` chaîne NOT NULL UNIQUE ; `run_key` chaîne NOT NULL ;
+  `invocation_id` chaîne NOT NULL UNIQUE ; `scope` chaîne NOT NULL ; `triggered_by` chaîne NOT NULL ;
+  `started_at` horodatage avec fuseau NOT NULL.
+  Index : `idx_vanyline_workflow_runs_project` sur `(owner_id, project_name, started_at)` et
+  `idx_vanyline_workflow_runs_sandbox` sur `(owner_id, sandbox_name, started_at)`.
+  `down` : `DROP TABLE`.
+
+Must:
+  Appliquer le même DDL sur PostgreSQL et SQLite.
+  Mettre `definition_id` à NULL (jamais supprimer le run) quand sa définition disparaît : l'historique
+    d'un run survit à la définition.
+  Garder `run_id` et `invocation_id` UNIQUE.
+
+Scenario: ddl_applique_sur_une_vraie_base
+  Given la chaîne complète appliquée
+  When la table est inspectée
+  Then colonnes, unicités et deux index existent
+
+Scenario: definition_supprimee_garde_le_run
+  Given un run et sa définition
+  When la définition est supprimée
+  Then le run existe avec `definition_id` NULL et `definition_name` intact
+
+Scenario: utilisateur_supprime_supprime_ses_runs
+  Given un run
+  When son utilisateur est supprimé
+  Then le run disparaît
+
+Scenario: down_supprime_la_table
+  Given la migration appliquée
+  When `down`
+  Then la table n'existe plus

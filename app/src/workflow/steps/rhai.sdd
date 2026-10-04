@@ -1,0 +1,92 @@
+Spec: Step rhai
+
+Platform: Rust/vanyline-app/miryad-core/vynil-core
+
+Purpose:
+  Kind `rhai` : script Rhai évalué par le kind natif de miryad-core (`RhaiStep`, vynil-core
+  `Script`), enrichi de fonctions fournies par vanyline pour utiliser TOUS les serveurs MCP
+  disponibles : lister leurs outils et en lancer l'exécution. PRÉREQUIS AMONT : le point
+  d'extension `RhaiStep::with_setup` demandé par l'issue sebt3/miryad-core#27 (livraison
+  attendue en 0.1.5) ; cette spec ne peut être implémentée qu'une fois #27 résolue. Disponible
+  dans les workflows de projet et de sandbox. Fichier neuf, conception.
+
+Owns:
+  ./rhai.rs
+
+Can read:
+  ./mod.sdd
+  ../run_context.sdd
+  /lib/src/prefixed_mcp.sdd
+  /app/src/db/entities/mcp_servers.sdd
+
+Exposes:
+  @rhai_step(env: StepEnv) -> RhaiStep — le `RhaiStep` de miryad-core (kind `rhai`, `config.script`)
+    construit avec `with_setup`, qui enregistre sur le moteur, par exécution :
+    - `mcp_servers() -> Array` — noms des serveurs MCP utilisables par ce run ;
+    - `mcp_list_tools(server: String) -> Array` — pour chaque outil, une map `{ name, description,
+      input_schema }` ;
+    - `mcp_call_tool(server: String, tool: String, arguments: Map) -> Dynamic` — exécute l'outil et
+      rend son résultat (texte, ou JSON converti en maps/arrays) ; une erreur d'outil lève une
+      erreur Rhai (le script peut l'attraper).
+
+Handles:
+  Serveurs disponibles : les `McpServer` configurés (ressources globales de l'app) que
+  l'utilisateur déclencheur peut utiliser, plus, pour un run de portée SANDBOX seulement, le
+  serveur `sandbox` (URL interne de la sandbox du run, jeton de l'Owner). Un workflow de projet
+  n'a jamais le serveur `sandbox` : il n'a pas de sandbox (aucune règle supplémentaire
+  nécessaire ; un script de sandbox qui lance du shell via ce serveur est équivalent à un
+  nœud `shell`, ce qui est voulu).
+  Pont sync/async : les fonctions Rhai sont synchrones ; elles s'exécutent dans le thread
+  bloquant du kind et appellent les clients MCP asynchrones par `Handle::block_on` sur le
+  runtime capturé. Chaque appel MCP est borné à 60 s ; un script ne peut faire plus de 200
+  appels MCP. Les garde-fous de `RhaiStep` (`MAX_OPERATIONS`) s'appliquent.
+  Un nom de serveur inconnu ou non autorisé lève une erreur Rhai (« serveur MCP inconnu »), sans
+  distinguer « n'existe pas » de « interdit ».
+
+Must:
+  Ne donner accès qu'aux serveurs MCP de l'utilisateur du run.
+  Borner chaque appel MCP (60 s) et leur nombre (200 par exécution).
+  Ne jamais exposer le jeton de l'Owner ni les en-têtes MCP au script.
+  Créer un client MCP par exécution (aucun état partagé entre exécutions de scripts).
+
+Must not:
+  Réimplémenter le kind `rhai` : s'appuyer sur `RhaiStep` + `with_setup` (issue #27).
+  Donner le serveur `sandbox` à un run de portée projet.
+
+Tasks:
+  [ ] BLOQUÉ par sebt3/miryad-core#27 (`RhaiStep::with_setup`, 0.1.5).
+
+Scenario: lister_les_serveurs
+  Given deux serveurs MCP configurés pour l'utilisateur
+  When un script appelle `mcp_servers()`
+  Then un array de ces deux noms (et `sandbox` seulement en portée sandbox)
+
+Scenario: lister_les_outils
+  Given un serveur de test exposant `ping`
+  When un script appelle `mcp_list_tools("test")`
+  Then un array contenant une map `name == "ping"` avec `description` et `input_schema`
+
+Scenario: appeler_un_outil
+  Given un serveur de test dont `echo` renvoie son argument
+  When un script appelle `mcp_call_tool("test", "echo", #{ text: "hi" })`
+  Then le résultat contient `hi`
+
+Scenario: erreur_d_outil_attrapable
+  Given un outil qui échoue
+  When un script l'appelle dans un `try … catch`
+  Then l'erreur est attrapée par le script, le step peut réussir
+
+Scenario: serveur_inconnu
+  Given un nom de serveur absent de la liste de l'utilisateur
+  When un script l'appelle
+  Then une erreur Rhai « serveur MCP inconnu »
+
+Scenario: plafond_d_appels
+  Given un script qui appelle un outil 201 fois
+  When le step s'exécute
+  Then erreur au 201e appel
+
+Scenario: pas_de_sandbox_en_portee_projet
+  Given un run de portée projet
+  When un script appelle `mcp_servers()`
+  Then `sandbox` n'y figure pas

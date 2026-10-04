@@ -432,12 +432,12 @@ Tasks:
       reste en spinner). Options : @tokio::time::timeout de 10 s ici (alignement CLI), ou
       délai porté par rmcp/@reqwest (config @StreamableHttpClientTransportConfig), ou
       assumption explicite. Le Scenario « pair silencieuse » est écrit pour trancher.
-  [!] `headers` (dont `Authorization`) est ici recopié puis envoyé sur le fil vers une
-      `url` saisie par un admin, pendant que la spec sœur ouvre le `[!]` de sa lecture en
-      clair (@AccessPolicy::Public). Cohérence obligatoire : si le masque à la
-      sérialisation est retenu, @build_domain_server doit continuer de lire la ligne BRUTE
-      (sinon la découverte casse silencieusement sur tous les serveurs authentifiés). À
-      lier à la décision de `../db/entities/mcp_servers.sdd`.
+  [-] TRANCHÉ (Sébastien, 2026-09-27), voir `../db/entities/mcp_servers.sdd` : `headers`
+      devient écriture seule côté SÉRIALISATION REST uniquement — @build_domain_server
+      continue de lire `server.headers` directement sur la ligne chargée depuis la base
+      (accès Rust natif, pas via une réponse HTTP sérialisée), donc AUCUN changement
+      requis ici : la découverte MCP continue de fonctionner pour tous les serveurs
+      authentifiés.
   [?] Commentaire de doc de @build_domain_server auto-contradictoire : « `server_type:
       "sse"` -> erreur claire » puis « `server_type: "sse"` mappe sur @McpTransport::Sse —
       accepté ». Le code ACCEPTE le SSE et c'est @list_mcp_server_tools qui rend

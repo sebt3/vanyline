@@ -129,6 +129,12 @@ Handles:
     @load_providers, sinon @VnyError::LlmProviderNotFound ; `options` non-objet →
     map vide, jamais d'erreur) et @resolve_model_profile_name (les agents référencent
     les profils par id en base mais le domaine @Agent.model porte le NOM).
+    @load_providers ne filtre PAS par owner et la FK `provider_id` n'oblige pas le
+    provider à appartenir au même owner que le profil : un profil d'alice peut
+    référencer le provider de bob. TRANCHÉ (Sébastien, 2026-09-27) : c'est le contrat
+    voulu — les providers sont un référentiel GLOBAL, configurable uniquement par un
+    admin (écriture AdminOnly, cf. `./llm_providers.sdd`), pas une ressource par owner ;
+    ce n'est PAS un trou d'isolation, aucune correction à prévoir.
   - Consommation REST : ../../main.rs monte @resource_router::<model_profiles::Entity,
     AppState>() et fusionne @resource_openapi::<model_profiles::Entity>() dans le
     document OpenAPI (test : les chemins `/api/v1/model-profiles` et
@@ -248,14 +254,6 @@ Tasks:
       négatif en base traverse @domain_model_profile par un `as u64` et devient
       un u64 énorme (wrap deux-le-complément, pas de panique). Ajouter un CHECK
       en base, une validation d'écriture, ou assumer ?
-  [!] ../config_store.rs @load_providers ne filtre PAS par owner (contrairement
-      à @load_model_profiles) : la résolution `provider_id` → nom peut donc
-      résoudre vers un provider d'un AUTRE owner, et la FK `provider_id`
-      n'oblige pas le provider à appartenir au même owner qu'au profil. Un
-      profil d'alice peut ainsi référencer le provider de bob (lecture : nom
-      résolu ; écriture : accepté par `resource_router`). Intentionnel
-      (providers = ressource Public/AdminOnly, cf. `./llm_providers.rs`) ou trou
-      d'isolation ? À trancher avec Sébastien.
   [?] Aucun test ne couvre la (dé)sérialisation de CETTE entité (les Scenarios
       « body de création » et « options null » ci-dessus n'ont pas d'équivalent
       `#[cfg(test)]` dans le fichier, contrairement à la régression équivalente

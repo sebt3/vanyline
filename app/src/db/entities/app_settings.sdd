@@ -1,0 +1,71 @@
+Spec: App Settings Entity
+
+Platform: Rust/vanyline-app/sea-orm/miryad-core
+
+Purpose:
+  Entité SeaORM de la table `vanyline_app_settings` : les RÉGLAGES GLOBAUX de l'application, par
+  clé (clé/valeur JSON). Contrat posé le 2026-10-04 : ils sont configurables par l'API avec un
+  jeton d'administrateur et par l'interface si l'utilisateur en a les droits. Le premier réglage
+  est `default_model` : le modèle par défaut utilisé pour amorcer les agents système d'un
+  utilisateur qui n'a encore AUCUN profil de modèle (../../system_agents.sdd). Lecture
+  ouverte à tout utilisateur authentifié (les valeurs ne sont pas secrètes : un identifiant de
+  fournisseur global et un nom de modèle), écriture réservée aux administrateurs. Fichier neuf,
+  conception.
+
+Owns:
+  ./app_settings.rs
+
+Can read:
+  ../../migration/m20261005_000004_create_vanyline_app_settings.sdd
+  ../../system_agents.sdd
+  ./llm_providers.sdd
+
+Exposes:
+  @Model — `utoipa::ToSchema` (nom `AppSetting`), table `vanyline_app_settings`, champs : `id: i32`
+    (clé, `#[serde(default)]`), `key: String` (unique), `value: serde_json::Value`.
+  `impl MiryadResource` : `resource_name() == "app-settings"`, lecture `AccessPolicy::Public`,
+    écriture `AccessPolicy::AdminOnly`, aucune colonne propriétaire. Hooks `before_create` et
+    `before_update` : la clé doit être connue (`default_model` en v1) et la valeur valide pour sa
+    clé, sinon `HookError` (422) :
+    - `default_model` : `{ "provider_id": <entier>, "model": <chaîne non vide>, "options"?: <objet> }`
+      où `provider_id` désigne un fournisseur LLM existant ; `options` sont les paramètres du
+      profil (température, etc.).
+
+Handles:
+  La création de la ligne `default_model` est faite par l'administrateur (API ou interface) ; une
+  clé absente signifie « pas de modèle par défaut » (comportement `NoModelProfile` de
+  ../../system_agents.sdd).
+
+Must:
+  Réserver l'écriture aux administrateurs ; garder la lecture ouverte aux utilisateurs authentifiés.
+  Rejeter toute clé inconnue et toute valeur mal formée pour sa clé.
+  Ne jamais stocker de secret (clé d'API) dans une valeur de réglage.
+
+Must not:
+  Servir de fourre-tout de configuration par utilisateur : les réglages utilisateur restent
+    dans leurs entités (profils, agents).
+
+Scenario: contrat_de_ressource
+  Given l'entité
+  When ses métadonnées sont lues
+  Then `app-settings`, lecture `Public`, écriture `AdminOnly`
+
+Scenario: cle_inconnue
+  Given un corps `{key: "autre", value: {}}`
+  When `before_create`
+  Then `HookError` (422)
+
+Scenario: default_model_valide
+  Given `{key: "default_model", value: {provider_id: 1, model: "qwen3.6:35b-a3b"}}`
+  When `before_create`
+  Then accepté
+
+Scenario: default_model_invalide
+  Given une valeur sans `model`, puis avec `provider_id` non numérique
+  When `before_create`
+  Then `HookError` dans les deux cas
+
+Scenario: ecriture_reservee_aux_admins
+  Given un utilisateur ordinaire
+  When il tente `POST`/`PUT`/`DELETE` sur `app-settings`
+  Then 403 ; la lecture réussit

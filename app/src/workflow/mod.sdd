@@ -1,0 +1,64 @@
+Spec: Workflow — module et câblage
+
+Platform: Rust/vanyline-app/miryad-core (feature `workflow`)
+
+Purpose:
+  Module `workflow` de `vanyline-app` : la couche d'application du moteur de workflow de
+  miryad-core (≥ 0.1.4, Restate). miryad-core fournit le moteur (interpréteur de DAG, dispatcher
+  de steps par `kind`, entité `WorkflowDefinition`) ; ce module fournit ce qui est propre à
+  vanyline : l'endpoint Restate embarqué dans l'app (./runtime.sdd), la fabrication du DAG d'un
+  run avec son contexte (./run_context.sdd), la lecture du statut des runs (./status.sdd) et les
+  kinds de steps (./steps/). Décision du 2026-10-04 : pas de composant « worker » séparé — l'app
+  sert l'endpoint Restate sur un port interne distinct ; la scission en composant dédié reste
+  possible plus tard si l'usage l'exige (le module n'a besoin que de l'état de l'app, il ne
+  touche ni routes ni sessions). Le module est compilé et démarré seulement si l'app est
+  configurée pour un moteur (variables `VNL_RESTATE_*`) ; sinon l'app tourne sans workflows,
+  et toute route de workflow répond `503` explicite. Fichier neuf, conception.
+
+Owns:
+  ./mod.rs
+
+Can read:
+  ./runtime.sdd
+  ./run_context.sdd
+  ./status.sdd
+  ./steps/mod.sdd
+  ../main.sdd
+  ../config.sdd
+  ../../Cargo.toml
+
+Structure:
+  ./runtime.rs — endpoint Restate, enregistrement, options de service
+  ./run_context.rs — fabrication du DAG d'un run (injection du contexte, validation de portée)
+  ./status.rs — lecture du statut des runs et annulation, côté Restate
+  ./steps/ — un fichier par kind (`agent`, `rhai`, `shell`, `gate`) et le constructeur du registre
+
+Exposes:
+  Les quatre sous-modules et @WorkflowRuntime (voir ./runtime.sdd), consommés par ../main.rs
+  (démarrage), ../api/workflows.rs (lancement, runs) et le MCP de domaine (../mcp_domain.sdd).
+
+Must:
+  Dépendre de miryad-core avec les features `workflow` et `mcp` (Cargo.toml de l'app, version
+    ≥ 0.1.4 ; ≥ 0.1.5 une fois levé le prérequis de l'issue sebt3/miryad-core#27, voir
+    ./steps/rhai.sdd).
+  Rester sans effet quand le moteur n'est pas configuré : aucun port ouvert, aucune requête
+    sortante vers Restate, aucune route de workflow active.
+  Ne jamais dupliquer le statut d'un run en base (décision miryad-core, reprise ici) : le statut
+    vient de Restate (./status.sdd).
+
+Must not:
+  Contenir de logique de step ou de contexte : elle vit dans les sous-modules.
+
+Tasks:
+  [ ] Cargo.toml de l'app : `miryad-core = { version = "0.1", features = ["swagger-ui", "workflow", "mcp"] }` ;
+    mettre à jour `Cargo.lock` vers ≥ 0.1.4.
+  [ ] Mettre à jour /docs/architecture.md (section « Backend web ») : moteur de workflow, endpoint
+    embarqué, Restate comme sous-ressource de l'Application.
+
+Done when:
+  Les sous-modules sont spécifiés, implémentés, et la batterie complète est verte.
+
+Scenario: moteur_non_configure
+  Given une app démarrée sans `VNL_RESTATE_ADMIN_URL`
+  When elle sert des requêtes
+  Then aucun port d'endpoint Restate n'est ouvert et les routes de workflow répondent `503`

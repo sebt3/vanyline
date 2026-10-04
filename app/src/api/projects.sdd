@@ -38,7 +38,7 @@ Can read:
     `k8s` (cache client), `config` (jamais lu directement par CE fichier — l'usage de la
     config passe par @ensure_owner dans `./owners.rs`).
   ../../../crds/src/lib.rs — @Project (derive @CustomResource : enveloppe `apiVersion`/
-    `kind`/`metadata`/`spec`/`status`), @ProjectSpec, @PvcRef, @EgressRule (structure des
+    `kind`/`metadata`/`spec`/`status`), @ProjectSpec, @EgressRule (structure des
     corps JSON entrée/sortie, subie et non redéfinie ici).
   ../../../lib/src/k8s.rs (spec `../../../lib/src/k8s.sdd`) — @VnlK8sClient::list_projects
     / @get_project / @create_project / @delete_project et @VnyError::K8sApiError.
@@ -52,7 +52,7 @@ Exposes:
       d'entrée), `#[serde(rename_all = "camelCase")]`. Champs et clés JSON :
       `name` (@String, requis), `repoUrl` (@String, requis — nomme le CR, ne va PAS dans
       le spec… cf. Structure : il EST aussi `spec.repo_url`), `defaultBranch`,
-      `existingPvc` (@Option<@PvcRef>), `storageSize`, `storageClass`,
+      `storageSize`, `storageClass`,
       `storageAccessMode`, `gitSecret`, `caches` (@Option<Vec<@String>>),
       `fetchInterval` — tous @Option avec `serde(default)` ; `egress` : @Vec<@EgressRule>
       avec `serde(default)` (absent → `@Vec::new()`, jamais `@Option`). Pas de
@@ -93,7 +93,7 @@ Structure:
       → comparaison `project.spec.owner != owner` → @Forbidden ; sinon @Json(project).
   - @create_project : @ensure_owner (peut créer le CR Owner + le lien DB — contrat
       `./owners.sdd`) → construction @ProjectSpec { owner: owner.clone(), repo_url:
-      body.repo_url, default_branch, existing_pvc, storage_size, storage_class,
+      body.repo_url, default_branch, storage_size, storage_class,
       storage_access_mode, git_secret, caches, fetch_interval, egress } — chaque champ du
       corps est déplacé TEL QUEL, sans validation, normalisation ni repli (le seul champ
       non issu du corps est `owner`, dérivé) → client →
@@ -110,7 +110,7 @@ Structure:
   Enveloppe JSON des réponses (sortie @Json<@Project>, hors CE fichier, définie par le
   derive @CustomResource + `#[serde(rename_all = "camelCase")]` de @ProjectSpec) :
   `apiVersion`, `kind`, `metadata.name`, `spec` camelCase (`repoUrl`, `defaultBranch`,
-  `existingPvc: {name, subPath}`, `storageSize`, `storageClass`, `storageAccessMode`,
+  `storageSize`, `storageClass`, `storageAccessMode`,
   `gitSecret`, `caches`, `fetchInterval`, `owner`), `egress` absent du CR créé sans règle
   mais sérialisé `[]` (pas de `skip_serializing_if` sur ce champ côté crds).
 
@@ -120,9 +120,8 @@ Accepts:
       pattern `{name}`) ; toute valeur licite en URL, décodée, NON validée.
   - `POST /api/projects` : corps JSON @CreateProjectBody en camelCase ; requis : `name`
       et `repoUrl` (une clé manquante ou un type non-@String = rejet d'extraction @Json
-      par axum, pas un @AppError) ; optionnels par défaut serde : les 9 autres champs ;
-      dans `existingPvc`, `subPath` est Option (absent → `null` licite, le derive serde
-      default-ise les @Option imbriqués) ; dans chaque `egress[]`, seuls `description` et
+      par axum, pas un @AppError) ; optionnels par défaut serde : les 8 autres champs ;
+      dans chaque `egress[]`, seuls `description` et
       `ports` se comportent selon le contrat crds (`ports` a `serde(default)`, les
       @Option `cidr`/`podSelector`/`namespaceSelector` sont default-isés par le derive).
       Clés inconnues ignorées (`owner` fourni par le client est ignoré, c'est LA décision
@@ -199,7 +198,8 @@ Handles:
       Jobs) est le contrat du controller.
   - Oracle d'existence pour un projet d'autrui : get/delete d'un nom existant mais
       appartenant à un autre → @403, nom inexistant → @404 — un client peut distinguer
-      « existe et n'est pas à moi » de « n'existe pas » (Tasks `[!]`).
+      « existe et n'est pas à moi » de « n'existe pas ». RISQUE ACCEPTÉ (Sébastien,
+      2026-09-27) : dette documentée, pas de correction prévue.
   - Le corps de @POST traverse sans validation : `name` vide ou non-RFC1123, `repoUrl`
       vide, `storageSize` non-quantitatif, `fetchInterval` non-CronJob → acceptés par
       l'app, c'est l'API server / le controller qui tranchent (et leurs 4xx ressortent en
@@ -212,6 +212,13 @@ Handles:
       (convention anti-mock de `../k8s.sdd`).
 
 Must:
+  UN OWNER = UN NAMESPACE (2026-10-04) : @create_project crée la CR @Project dans le namespace de
+    l'Owner (`vanyline_crds::owner_namespace_name`), seulement quand l'Owner est `Ready` ; un
+    Owner tout juste créé n'a pas encore son namespace : attendre `Ready` pendant au plus 30 s
+    (interrogation périodique), sinon erreur `503` explicite « Owner en cours de provisionnement »
+    (jamais une création dans un namespace inexistant ni une CR créée dans le namespace
+    d'application). Les lectures (`list`, `get`, `delete`) s'exécutent dans le namespace de
+    l'Owner de l'utilisateur.
   - Exiger @AuthUser sur les 4 handlers (paramètre du handler, jamais de couche) puis
       chaîner @resolve_user → résolution Owner sur `principal_user.id` (jamais le
       `subject` brut comme clé de lien).
@@ -269,7 +276,7 @@ Depends on:
   miryad-core 0.1 (crate externe, source hors dépôt) — @miryad_core::auth::@AuthUser
     (extraction + refus 401), @miryad_core::users::@resolve_user (id `miryad_users`,
     sémantique d'écriture hors contrat, Tasks `[?]`).
-  @vanyline_crds — @Project, @ProjectSpec, @PvcRef, @EgressRule
+  @vanyline_crds — @Project, @ProjectSpec, @EgressRule
     (`../../../crds/src/lib.rs`) : la forme camelCase observée par le frontend EST ce
     contrat crds, CE fichier ne fait que le transporter.
   ../../../lib/src/k8s.sdd — @VnlK8sClient::{list_projects, get_project, create_project,
@@ -290,6 +297,7 @@ Depends on:
   Héritage : `../../../vanyline.sdd` (racine), `../../../tooling.sdd` (harnais lints).
 
 Tasks:
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
   [!] Mappage des erreurs kube non-NotFound en @500 : nom de projet invalide (RFC1123),
     projet déjà existant (@409 côté kube, message `already exists`), RBAC refusé — tous
     sortent en @500 `VNL-K8S-002`. Le frontend affiche alors le message kube brut dans sa
@@ -310,9 +318,10 @@ Tasks:
     projets MUTUELLEMENT dans la liste et peuvent les get/delete. Les deux viennent du
     nom sans préfixe/suffrage ; trancher avec Sébastien (préfixage par id, unicité par
     owner, ou assumé).
-  [!] Oracle d'existence : get/delete d'un projet d'autrui → @403 vs inexistant → @404 —
-    un attaquant authentifié peut énumérer l'existence des noms de projet d'autres
-    utilisateurs. Ramener un @404 uniforme pour « n'est pas à toi ou n'existe pas » ?
+  [-] RISQUE ACCEPTÉ (Sébastien, 2026-09-27) : oracle d'existence — get/delete d'un
+    projet d'autrui → @403 vs inexistant → @404, un attaquant authentifié peut énumérer
+    l'existence des noms de projet d'autres utilisateurs. Dette documentée, pas de
+    correction prévue.
   [!] `@GET` pas pur : @resolve_user (présent dans les 4 handlers) crée/écrit
     vraisemblablement la ligne `miryad_users` au premier passage (`./me.sdd` `[!]`,
     sémantique miryad-core hors dépôt). Reprendre le tranchage commun aux trois specs.
@@ -332,7 +341,7 @@ Tasks:
     cf. commentaire `../../../crds/src/lib.rs`) mais toujours accepté et recopié dans la
     CR par @create_project. Le retirer de @CreateProjectBody (et à terme du CRD) ou le
     maintenir pour la migration ?
-  [?] Champs avancés du corps (`existingPvc`, `storageSize`, `storageClass`,
+  [?] Champs avancés du corps (`storageSize`, `storageClass`,
     `storageAccessMode`, `caches`, `fetchInterval`, `egress`) : jamais envoyés par le
     frontend actuel (HomeDashboard n'envoie que name/repoUrl/defaultBranch) — surface
     API effectivement morte mais typée et sans test. Les garder (API programmatique
@@ -476,13 +485,12 @@ Scenario: tous les champs optionnels du corps se retrouvent dans le spec
   Given un cluster de test, lien d'`alice` déjà posé (`ensure_owner` en early-return)
   When `POST /api/projects` authentifié est adressé avec corps camelCase complet :
     `{"name":"complet","repoUrl":"https://corp/x.git","defaultBranch":"dev",
-    "existingPvc":{"name":"pvc-kydah"},"storageSize":"5Gi","storageClass":"fast-ssd",
+    "storageSize":"5Gi","storageClass":"fast-ssd",
     "storageAccessMode":"ReadWriteMany","gitSecret":"cle","caches":["cargo","pnpm"],
     "fetchInterval":"30m","egress":[{"description":"dns","cidr":"10.0.0.0/8",
     "ports":[{"port":53}]}]}`
   Then la CR retournée en @201 porte dans `spec` champ par champ les valeurs camelCase
-    envoyées (`defaultBranch "dev"`, `existingPvc.name "pvc-kydah"` avec `subPath`
-    absent/null, `caches ["cargo","pnpm"]`, `fetchInterval "30m"`, règle egress
+    envoyées (`defaultBranch "dev"`, `caches ["cargo","pnpm"]`, `fetchInterval "30m"`, règle egress
     `description "dns"` + `cidr` + port 53) et `owner = "alice"` — l'app ne modifie,
     ne valide ni ne complète AUCUNE de ces valeurs
 

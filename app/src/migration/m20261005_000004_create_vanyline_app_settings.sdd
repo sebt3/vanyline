@@ -1,0 +1,37 @@
+Spec: Create Vanyline App Settings Migration
+
+Purpose:
+  Migration qui pose la table `vanyline_app_settings` (réglages globaux clé/valeur, voir
+  ../db/entities/app_settings.sdd). DDL EXACTE, identique sur PostgreSQL et SQLite en mémoire.
+  Aucune dépendance de clé étrangère (la validité du `provider_id` d'un réglage est contrôlée par
+  le hook de l'entité, la valeur étant du JSON). Fichier neuf, conception.
+
+Owns:
+  ./m20261005_000004_create_vanyline_app_settings.rs
+
+Can read:
+  ./mod.sdd
+  ../db/entities/app_settings.sdd
+
+Handles:
+  Colonnes : `id` entier auto-incrémenté, clé primaire ; `key` chaîne NOT NULL UNIQUE ; `value`
+  JSON (`JSONB` sur PostgreSQL) NOT NULL. `down` : `DROP TABLE`.
+
+Must:
+  Appliquer le même DDL sur PostgreSQL et SQLite.
+  Garantir l'unicité de `key`.
+
+Scenario: ddl_applique_sur_une_vraie_base
+  Given la chaîne complète appliquée
+  When la table est inspectée
+  Then colonnes et unicité de `key` existent
+
+Scenario: cle_unique
+  Given une ligne `default_model`
+  When une seconde ligne de même clé est insérée
+  Then violation d'unicité
+
+Scenario: down_supprime_la_table
+  Given la migration appliquée
+  When `down`
+  Then la table n'existe plus

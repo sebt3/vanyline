@@ -1,0 +1,103 @@
+Spec: MCP de domaine
+
+Platform: Rust/vanyline-app/axum/miryad-core
+
+Purpose:
+  Serveur MCP (HTTP streamable, JSON-RPC 2.0, POST seul) `POST /mcp/domain` de l'app : les outils
+  qui pilotent les objets de domaine vanyline qui ne sont PAS des ressources SQL génériques —
+  projets, sandboxes (CR Kubernetes), santé du code, workflows et runs. Le CRUD de la
+  configuration relève du MCP générique de miryad-core (`POST /mcp`). Les deux sont consommés par
+  les agents système (../system_agents.sdd) avec un jeton d'API de l'utilisateur, et sont
+  utilisables par tout client MCP autorisé. Chaque outil agit au nom de l'utilisateur
+  authentifié, dans le namespace de son Owner, par les MÊMES fonctions que les routes REST
+  (aucune seconde implémentation de la logique ni de l'autorisation). Fichier neuf, conception.
+
+Owns:
+  ./mcp_domain.rs
+
+Can read:
+  ./api/projects.sdd
+  ./api/sandboxes.sdd
+  ./api/workflows.sdd
+  ./api/owners.sdd
+  ./workflow/status.sdd
+  /sandbox/src/mcp.sdd
+
+Exposes:
+  @mcp_domain_router() -> Router<AppState> — une route `POST /mcp/domain` ; méthodes JSON-RPC
+    `initialize`, `tools/list`, `tools/call` (même forme que le MCP de la sandbox) ; auth par
+    l'extracteur `AuthUser` de miryad-core (cookie OU jeton d'API).
+  Outils (noms, arguments → effet) :
+    projets — `list_projects()` ; `get_project(name)` ; `create_project(name, repo_url,
+      default_branch?)` ; `delete_project(name)` (destructif).
+    sandboxes — `list_sandboxes(project?)` ; `get_sandbox(name)` ; `create_sandbox(project, branch,
+      toolchains?)` ; `delete_sandbox(name)` (destructif) ; `suspend_sandbox(name)` ;
+      `resume_sandbox(name)`.
+    santé du code — `code_health(sandbox, detail?, path?, limit?)` (relais de `GET /code-health`
+      de la sandbox, texte borné comme l'outil de la sandbox) ; `refresh_code_health(sandbox,
+      base?)` (relais de `POST /code-health/refresh`).
+    workflows — `list_workflows(project)` ; `get_workflow(project, workflow)` ;
+      `create_workflow(project, name, scope, steps, description?)` ;
+      `update_workflow(project, workflow, steps?, description?)` ; `delete_workflow(project,
+      workflow)` (destructif) ; `launch_workflow(project, workflow, sandbox?)` ;
+      `list_runs(project?, sandbox?, limit?)` ; `get_run(run_id)` ; `cancel_run(run_id)`.
+
+Handles:
+  Toute opération part de l'identité de l'appelant : Owner résolu par `resolve_owner_name`
+  (jamais fourni par le client), namespace de l'Owner calculé, existence et propriété vérifiées
+  avant l'action (aucun accès à l'objet d'un autre). `launch_workflow` enregistre
+  `triggered_by = "agent:<nom>"` quand l'appel vient d'un agent système (nom transmis par
+  l'en-tête `X-Vnl-Agent` posé par l'app dans la configuration du serveur MCP forcé), `"api"`
+  sinon. Les sorties sont du texte ou du JSON BORNÉ (au plus 8 KiB) : une liste longue est tronquée
+  avec un marqueur, jamais rendue entière. Les outils destructifs portent la mention
+  « destructif » dans leur description, à titre d'information : aucune confirmation n'est exigée
+  (mode « yolo », ./system_agents.sdd). Une erreur d'outil rend un résultat
+  `isError: true` avec un message, jamais un code JSON-RPC (même convention que la sandbox).
+
+Must:
+  Appeler les mêmes fonctions de service que les routes REST.
+  Vérifier la propriété avant toute action sur un objet nommé par le client.
+  Borner toutes les sorties.
+  Ne jamais rendre de jeton, de secret ni de contenu de configuration sensible.
+
+Must not:
+  Exposer un outil qui contourne le scoping par Owner ou l'autorisation REST.
+  Accepter un nom d'Owner ou de namespace du client.
+
+Tasks:
+  [ ] Convertir chaque Scenario en test taggé par son titre.
+
+Scenario: tools_list
+  Given un client authentifié
+  When `tools/list`
+  Then les outils de `Exposes` avec leurs schémas
+
+Scenario: liste_de_ses_projets_seulement
+  Given alice et bob avec chacun un projet
+  When alice appelle `list_projects`
+  Then seul son projet est rendu
+
+Scenario: objet_d_autrui
+  Given une sandbox de bob
+  When alice appelle `get_sandbox` ou `delete_sandbox` dessus
+  Then `isError: true`, aucune action, aucune distinction entre « inexistant » et « interdit »
+
+Scenario: lancement_trace_par_agent
+  Given un appel portant `X-Vnl-Agent: project`
+  When `launch_workflow`
+  Then la ligne d'index porte `triggered_by = "agent:project"`
+
+Scenario: sortie_bornee
+  Given 500 runs
+  When `list_runs`
+  Then le texte rendu fait au plus 8 KiB avec un marqueur de troncature
+
+Scenario: authentification_exigee
+  Given aucune authentification
+  When n'importe quel appel
+  Then 401
+
+Scenario: meme_logique_que_rest
+  Given `create_project` par MCP et par REST avec les mêmes arguments
+  When les deux s'exécutent
+  Then mêmes validations, mêmes erreurs et même CR créée

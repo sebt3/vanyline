@@ -283,6 +283,9 @@ Depends on:
     `../../../tooling.sdd` (aucun `println!`/log ici — fichier sans corps d'exécution).
 
 Tasks:
+  [ ] Workflows (2026-10-04) : déclarer `pub mod workflows` et monter, dans @api_router, les neuf
+    routes de ./workflows.sdd ; le MCP de domaine (`POST /mcp/domain`, ../mcp_domain.sdd) est monté
+    par ../main.rs à côté du MCP générique de miryad-core, pas ici.
   [!] ./mod.rs ne contient AUCUN test (pas de `@mod tests`) et aucun test du dépôt ne
       passe par @api_router() / @api_v1_router() (grep : les deux fonctions ne sont
       appelées que par `../main.rs`) — la table de routage n'est vérifiée aujourd'hui

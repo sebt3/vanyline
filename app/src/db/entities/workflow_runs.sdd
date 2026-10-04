@@ -1,0 +1,67 @@
+Spec: Workflow Runs Entity
+
+Platform: Rust/vanyline-app/sea-orm/miryad-core
+
+Purpose:
+  Entité SeaORM de la table `vanyline_workflow_runs` : l'INDEX des runs lancés par l'app.
+  miryad-core ne tient pas de liste de runs et ne lit pas leur statut ; pour afficher « les runs
+  des deux dernières semaines / les 50 derniers » d'un projet ou d'une sandbox il faut savoir
+  QUI a lancé QUOI, quand et sur quoi. Cette table garde ces métadonnées de lancement,
+  immuables ; le STATUT n'y est jamais copié : il est lu dans Restate (../../workflow/status.sdd).
+  Une ligne est écrite par l'app au lancement (jamais par le client). Fichier neuf, conception.
+
+Owns:
+  ./workflow_runs.rs
+
+Can read:
+  ../../migration/m20261005_000002_create_vanyline_workflow_runs.sdd
+  ../../api/workflows.sdd
+  ../../workflow/status.sdd
+
+Exposes:
+  @Model — table `vanyline_workflow_runs`, `utoipa::ToSchema` (nom `WorkflowRun`), champs :
+    `id: i32` ; `owner_id: i32` ; `project_name: String` ; `sandbox_name: Option<String>` (absent
+    pour un run de portée projet) ; `definition_id: Option<i32>` (NULL si la définition a été
+    supprimée depuis) ; `definition_name: String` (instantané du nom au lancement) ; `run_id:
+    String` (UUID de l'app, unique, sert aux `job_id` des steps shell) ; `run_key: String` (clé du
+    workflow Restate) ; `invocation_id: String` (unique) ; `scope: String` ;
+    `triggered_by: String` (`ui` | `agent:<nom>` | `api`) ; `started_at: timestamp UTC`.
+  `impl MiryadResource` : `resource_name() == "workflow-runs"`, LECTURE `OwnerOnly`, ÉCRITURE
+    `AdminOnly` (aucun client ne crée, modifie ni supprime une ligne par le CRUD générique),
+    `owner_column() == Some(Column::OwnerId)`.
+  @purge_older_than(db, days: i64) -> Result<u64, DbErr> — supprime les lignes dont `started_at`
+    dépasse `days` jours (défaut d'usage : 30) et rend le nombre supprimé.
+
+Handles:
+  Fenêtre d'affichage (voir ../../api/workflows.sdd) : les 14 derniers jours ET au plus 50 lignes
+  par projet ou par sandbox ; l'index garde plus longtemps (30 jours) que l'affichage, pour que
+  la fenêtre ne dépende pas d'une purge fine. La purge est planifiée par le runtime
+  (../../workflow/runtime.sdd, une fois par jour).
+
+Must:
+  Ne jamais stocker de statut, de sortie ou de contenu de workflow.
+  Rendre la lecture propriétaire seul et l'écriture impossible par le CRUD générique.
+  Garder `invocation_id` et `run_id` uniques.
+
+Must not:
+  Être écrite par un autre chemin que le lancement d'un run.
+
+Scenario: contrat_de_ressource
+  Given l'entité
+  When ses métadonnées sont lues
+  Then `workflow-runs`, lecture `OwnerOnly`, écriture `AdminOnly`
+
+Scenario: aucune_ecriture_cliente
+  Given un utilisateur ordinaire
+  When il tente `POST`/`PUT`/`DELETE` sur `workflow-runs` par le CRUD générique
+  Then 403
+
+Scenario: unicite
+  Given une ligne `run_id = r1`
+  When une seconde ligne de même `run_id` ou `invocation_id` est insérée
+  Then violation d'unicité
+
+Scenario: purge
+  Given des lignes de 5, 20 et 40 jours
+  When @purge_older_than(db, 30)
+  Then seule la ligne de 40 jours est supprimée, rend 1

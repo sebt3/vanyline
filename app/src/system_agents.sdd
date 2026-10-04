@@ -1,0 +1,169 @@
+Spec: System agents — agents préconfigurés
+
+Platform: Rust/vanyline-app/vanyline-lib/miryad-core
+
+Purpose:
+  Les AGENTS SYSTÈME de vanyline : des agents préconfigurés, un par contexte d'écran, dont le
+  prompt et les outils sont pilotés par le code et dont SEUL le modèle est configurable par
+  l'utilisateur. Ils permettent de « demander à l'agent » ce qu'on ferait à la main : l'agent de
+  configuration (écran des paramètres) gère toute la configuration (fournisseurs, serveurs MCP,
+  profils de modèle, toolsets, skills, agents, définitions de workflows) ; les agents racine,
+  projet et sandbox pilotent projets, sandboxes, workflows et runs. Un agent système est une VRAIE
+  ligne de `vanyline_agents` (donc visible par le ConfigStore, les listes et les conversations),
+  marquée par `system_key`/`system_version` (../migration/m20261005_000003_alter_vanyline_agents_system.sdd),
+  et dont le contenu est réécrit par le code quand sa version change. Les outils d'un agent
+  système passent par le MCP de miryad-core (CRUD de la configuration) et le MCP de domaine
+  (../mcp_domain.sdd), appelés avec l'identité de l'utilisateur : l'agent ne peut jamais excéder
+  ses droits. Fichier neuf, conception.
+
+Owns:
+  ./system_agents.rs
+
+Can read:
+  ./mcp_domain.sdd
+  ./db/entities/agents.sdd
+  ./ws/chat.sdd
+  ./api/conversations.sdd
+  ./config_store.sdd
+  /lib/src/session.sdd
+
+Exposes:
+  @SYSTEM_VERSION — entier, version du jeu de prompts système embarqué (à incrémenter à chaque
+    changement de prompt ou de politique d'outils).
+  @SystemAgentKey — `Config` | `Home` | `Project` | `Sandbox` ; clés stables `"config"`, `"home"`,
+    `"project"`, `"sandbox"` ; contexte de conversation associé (../db/entities/chat_contexts.sdd) :
+    `settings`, `home`, `project`, `sandbox`.
+  @ensure_system_agents(db, user_id) -> Result<Vec<AgentRecord>, AppError> (async) — crée les
+    quatre lignes absentes et réécrit celles dont `system_version < SYSTEM_VERSION` (prompt,
+    `mode = primary`, `toolsets = []`, `skills` vides, description), sans toucher à
+    `model_profile_id` d'une ligne existante.
+  @system_agent_for(kind: &str) -> Option<SystemAgentKey> — l'agent d'un type de contexte.
+  @context_tools(state, user, kind, context, agent_name) -> Result<ContextTools, AppError> (async) —
+    les serveurs MCP forcés (`extra_mcp`) donnés pour CE tour à l'agent qui tourne dans un
+    contexte — agent système OU agent ordinaire de l'utilisateur — et le jeton jetable à
+    révoquer : `vanyline-config` (MCP CRUD de miryad-core de l'app, pour `settings`, `home`,
+    `project`), `vanyline-domain` (MCP de domaine, pour `home`, `project`, `sandbox`) et `sandbox`
+    (MCP de la sandbox du contexte, jeton de l'Owner, pour `sandbox`). Les outils sont ceux du
+    CONTEXTE, pas de l'agent : un agent ordinaire choisi dans une vue de projet ou de sandbox
+    dispose des mêmes outils de l'application que l'agent système.
+  Garde de l'entité agent (hooks de ./db/entities/agents.sdd) : sur une ligne portant
+    `system_key`, un `update` ne peut changer QUE `model_profile_id` ; un `delete` est refusé ;
+    un `create` client portant `system_key`/`system_version` est refusé.
+
+Handles:
+  Jeton jetable : pour un tour, un jeton d'API miryad-core (`issue_token`, sujet = celui de
+  l'utilisateur, nom `system-agent`, expiration 1 h, poivre de l'app) est émis, injecté en
+  `Authorization: Bearer` des serveurs MCP forcés qui pointent vers l'app elle-même
+  (`http://127.0.0.1:<port de l'API>/mcp` et `/mcp/domain`, ce dernier avec l'en-tête
+  `X-Vnl-Agent: <clé de l'agent>` pour la traçabilité des lancements), puis RÉVOQUÉ (`revoke_token`) à la fin
+  du tour, y compris sur erreur. Le jeton n'est jamais journalisé, jamais persisté dans une
+  conversation, jamais renvoyé au navigateur.
+  Amorçage : la colonne `model_profile_id` est obligatoire. Pour un utilisateur sans AUCUN profil
+  de modèle, @ensure_system_agents crée, s'il existe, un profil `default` à son nom à partir du
+  réglage global `default_model` (../db/entities/app_settings.sdd : fournisseur global, modèle,
+  options) et y rattache ses agents système ; l'utilisateur peut ensuite le changer librement.
+  Sans réglage `default_model`, @ensure_system_agents rend `NoModelProfile` et l'écran des
+  paramètres propose les formulaires de base (fournisseur, profil) avant l'agent.
+  Politique commune des prompts (contrat de comportement, texte dans le code) : agir au nom de
+  l'utilisateur dans ses seuls droits ; AGIR DIRECTEMENT, sans demander de confirmation, y
+  compris pour des suppressions ou des écrasements (vanyline est en mode « yolo » assumé : les
+  modèles utilisés sont réputés fiables, le code est dans git donc révertable, la configuration
+  est en base sauvegardée — décision du 2026-10-04) ; ne jamais afficher de secret (clés d'API,
+  jetons) ; expliquer ce qui a été fait.
+
+Must:
+  Faire de `model_profile_id` le SEUL champ qu'un utilisateur puisse changer sur un agent système.
+  Émettre un jeton par tour, borné à 1 h, et le révoquer en fin de tour.
+  Donner à tout agent qui tourne dans un contexte (système ou ordinaire) les serveurs MCP de CE
+    contexte, et seulement eux (table de `Exposes`) ; le contexte `settings` n'admet que l'agent
+    système `config`.
+  Réécrire le contenu d'une ligne système quand `system_version` est dépassée, sans perdre le
+    modèle choisi.
+  Ne rendre jamais le jeton au client.
+
+Must not:
+  Laisser un agent système agir avec d'autres droits que ceux de l'utilisateur (aucune identité
+    de service).
+  Stocker le jeton dans la base de conversations ou les logs.
+  Permettre la suppression ou la modification du prompt d'un agent système par le CRUD générique.
+
+Tasks:
+  [-] TRANCHÉ (2026-10-04) : modèle par défaut global = réglage `default_model`, configurable par
+    l'API avec un jeton d'administrateur et par l'interface pour les utilisateurs qui en ont les
+    droits (../db/entities/app_settings.sdd).
+  [-] TRANCHÉ (2026-10-04) : aucune confirmation des actions destructrices (mode « yolo »).
+  [-] TRANCHÉ (2026-10-04) : dans les vues d'accueil, de projet et de sandbox, l'utilisateur peut
+    utiliser SES agents ordinaires (comme dans l'IDE aujourd'hui), l'agent système du contexte
+    étant le défaut ; seul le contexte des paramètres impose l'agent système `config`.
+  [ ] Rédiger les quatre prompts système (texte versionné dans le code, relu avec le
+    développeur principal).
+
+Scenario: creation_des_quatre_agents
+  Given un utilisateur avec un profil de modèle
+  When @ensure_system_agents
+  Then quatre lignes `config`, `home`, `project`, `sandbox`, `model_profile_id` = le profil
+
+Scenario: idempotence
+  Given les quatre agents déjà créés à la version courante
+  When @ensure_system_agents
+  Then aucun changement
+
+Scenario: mise_a_jour_de_version_garde_le_modele
+  Given un agent de version précédente dont l'utilisateur a changé le modèle
+  When @ensure_system_agents
+  Then prompt et version réécrits, `model_profile_id` inchangé
+
+Scenario: sans_profil_de_modele
+  Given un utilisateur sans profil
+  When @ensure_system_agents
+  Then `NoModelProfile`, aucune ligne créée
+
+Scenario: seul_le_modele_est_modifiable
+  Given un agent système
+  When un `update` change `system_prompt`, puis un autre ne change que `model_profile_id`
+  Then 422 pour le premier, succès pour le second
+
+Scenario: suppression_refusee
+  Given un agent système
+  When `delete` par le CRUD générique
+  Then refusé
+
+Scenario: creation_client_avec_cle_systeme
+  Given un corps de création portant `system_key = "config"`
+  When `create` par le CRUD générique
+  Then refusé
+
+Scenario: outils_par_contexte
+  Given les quatre types de contexte
+  When @context_tools est appelé pour chacun
+  Then `settings` : config ; `home` et `project` : config + domain ; `sandbox` : domain + sandbox
+
+Scenario: agent_ordinaire_dans_un_contexte
+  Given un agent ordinaire de l'utilisateur dans une conversation de contexte `project`
+  When un tour démarre
+  Then il reçoit les serveurs MCP du contexte `project` (config + domain), comme l'agent système
+
+Scenario: parametres_exige_l_agent_systeme
+  Given une conversation de contexte `settings` avec un agent ordinaire demandé
+  When elle est créée
+  Then l'agent système `config` est imposé
+
+Scenario: amorcage_par_le_modele_par_defaut
+  Given un utilisateur sans profil et un réglage `default_model` valide
+  When @ensure_system_agents
+  Then un profil `default` est créé à son nom et les quatre agents y sont rattachés
+
+Scenario: amorcage_sans_reglage
+  Given un utilisateur sans profil et aucun réglage `default_model`
+  When @ensure_system_agents
+  Then `NoModelProfile`
+
+Scenario: jeton_revoque_en_fin_de_tour
+  Given un tour qui se termine, puis un autre qui échoue
+  When les tours finissent
+  Then le jeton émis est révoqué dans les deux cas
+
+Scenario: droits_de_l_utilisateur_seulement
+  Given l'agent de configuration d'alice
+  When il tente de lire les profils de bob par le MCP de configuration
+  Then rien n'est visible (politique propriétaire seul de miryad-core)

@@ -141,8 +141,10 @@ Must:
   - Conserver le nom de migration dérivé (dernier segment du module = nom du
       fichier) : l'historique `seaql_migrations_app` l'identifie ; renommer le
       fichier ou re-définir le nom équivaudrait à une migration fantôme.
-  - Rester SANS `owner_id`, SANS `foreign_key(...)`, SANS `created_at`/`updated_at`
-      tant que le modèle global des providers n'est pas remis à plat (Tasks `[!]`).
+  - Rester SANS `owner_id`, SANS `foreign_key(...)`, SANS `created_at`/`updated_at` :
+      le modèle global de providers (référentiel partagé, administré) est le contrat
+      voulu, tranché par Sébastien le 2026-09-27 (voir `Tasks`) — pas une omission
+      provisoire.
 
 Must not:
   - Modifier le `up` déjà appliqué en production (une colonne en plus, un défaut
@@ -176,14 +178,12 @@ Depends on:
     `unwrap`/`expect`/`println!`, aucun `#[allow]` nécessaire).
 
 Tasks:
-  [!] Modèle GLOBAL des providers : pas d'`owner_id`, `name` UNIQUE à l'échelle de la
-      table, lecture Public / écriture AdminOnly. Conséquence documentée dans
-      `../db/entities/model_profiles.sdd` (`[!]` : la FK `provider_id` ne borne pas
-      le provider à l'owner du profil ; un profil d'alice peut référencer un provider
-      créé par un autre). Est-ce l'intention (référentiel partagé administré) ou un
-      trou d'isolation à fermer (ajouter `owner_id`, passer l'UNIQUE en
-      `(owner_id, name)` — ce qui serait une migration nouvelle, pas une retouche de
-      celle-ci) ? À trancher avec Sébastien.
+  [-] TRANCHÉ (Sébastien, 2026-09-27) : modèle GLOBAL des providers — pas d'`owner_id`,
+      `name` UNIQUE à l'échelle de la table, lecture Public / écriture AdminOnly. C'EST
+      L'INTENTION (référentiel partagé, administré) : les providers ne sont
+      configurables que par un admin, donc la FK `provider_id` non bornée à l'owner du
+      profil (`../db/entities/model_profiles.sdd`) n'est pas un trou d'isolation. Aucune
+      migration corrective à prévoir.
   [!] Commentaire de `../db/entities/llm_providers.rs` : « CHECK en base +
       `validate_provider_type` sur chaque create/update » — cette DDL ne pose AUCUN
       CHECK sur `provider_type` et le hook @before_create ne couvre que la création.

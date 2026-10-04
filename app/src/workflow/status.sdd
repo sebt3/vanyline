@@ -1,0 +1,81 @@
+Spec: Status — statut et annulation des runs
+
+Platform: Rust/vanyline-app/reqwest
+
+Purpose:
+  Lit le statut des runs dans Restate et les annule. miryad-core ne fournit pas de lecture de
+  statut (décision : pas de duplication d'état) ; ce module la fournit côté app. Le statut n'est
+  JAMAIS copié en base : l'index de runs (../db/entities/workflow_runs.sdd) ne garde que les
+  métadonnées de lancement. La rétention des runs terminés suit les règles de Restate
+  (décision 2026-10-04) ; si une purge de Restate devient un problème, on avisera. Fichier neuf,
+  conception.
+
+Owns:
+  ./status.rs
+
+Can read:
+  ./runtime.sdd
+  ../db/entities/workflow_runs.sdd
+
+Exposes:
+  @RunState — enum `Pending` | `Running` | `Suspended` | `BackingOff` | `Succeeded` | `Failed` |
+    `Cancelled` | `Unknown` (`Unknown` quand Restate ne connaît plus l'invocation : purgée).
+  @RunStatus — `{ invocation_id, state: RunState, started_at: Option<…>, ended_at: Option<…>,
+    error: Option<String> (message du step en échec), steps: Vec<StepStatus> }`, `StepStatus`
+    `{ step_id, state, started_at, ended_at, error }` quand Restate expose le journal.
+  @fetch_statuses(runtime, invocation_ids: &[String]) -> Result<HashMap<String, RunStatus>,
+    WorkflowError> (async) — UNE requête groupée pour tous les ids (au plus 50 par appel), jamais
+    une requête par run.
+  @fetch_status(runtime, invocation_id) -> Result<RunStatus, WorkflowError> (async) — avec le
+    détail des steps.
+  @cancel(runtime, invocation_id) -> Result<(), WorkflowError> (async).
+
+Handles:
+  Source : l'API d'introspection SQL de l'admin Restate (tables d'invocations et de journal),
+  filtrée par identifiants ; l'annulation passe par l'API d'annulation d'invocation de
+  l'admin. Un id absent de Restate rend `Unknown` (pas une erreur). Une indisponibilité de
+  Restate est une erreur (`503` côté API), jamais « aucun run ».
+  Annulation : l'invocation est annulée dans Restate ; l'appelant (../api/workflows.sdd) annule
+  ensuite les jobs shell du run (`DELETE /jobs?prefix=<run_id>:`, /sandbox/src/jobs.sdd) —
+  best-effort, un échec est journalisé sans faire échouer l'annulation.
+
+Must:
+  Grouper les lectures (une requête pour la liste, pas N).
+  Rendre `Unknown` pour une invocation purgée, jamais une erreur ni un faux succès.
+  Ne jamais écrire le statut en base.
+  Borner le délai des appels à l'admin Restate (5 s) ; au-delà, erreur de disponibilité.
+
+Must not:
+  Interpréter la sortie d'un run : `output` éventuel est transmis tel quel.
+
+Tasks:
+  [?] Formes exactes des endpoints d'introspection et d'annulation de l'admin Restate sur la
+    version déployée : à vérifier contre le Restate réel (aucun n'est déployé sur le cluster
+    aujourd'hui) avant d'implémenter ; la spec porte le contrat, pas les URL.
+  [?] Rétention : durée de conservation des invocations terminées côté Restate à configurer pour
+    couvrir l'affichage (2 semaines / 50 derniers) ; `Unknown` est l'effet d'une purge.
+
+Scenario: liste_groupee
+  Given 50 identifiants d'invocation et un faux admin Restate
+  When @fetch_statuses
+  Then une seule requête est émise et 50 statuts sont rendus
+
+Scenario: invocation_purgee
+  Given un identifiant que Restate ne connaît plus
+  When @fetch_statuses
+  Then `Unknown` pour cet identifiant, sans erreur
+
+Scenario: restate_indisponible
+  Given un admin Restate qui répond 503 ou ne répond pas
+  When @fetch_statuses
+  Then une erreur de disponibilité, pas une liste vide
+
+Scenario: detail_avec_steps
+  Given un run en cours dont le step `b` est en cours
+  When @fetch_status
+  Then `state: Running` et un `StepStatus` par step connu
+
+Scenario: annulation
+  Given un run en cours
+  When @cancel
+  Then l'appel d'annulation est émis sur l'invocation

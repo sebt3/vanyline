@@ -1,0 +1,88 @@
+Spec: Runtime — endpoint Restate embarqué
+
+Platform: Rust/vanyline-app/miryad-core/restate-sdk/tokio
+
+Purpose:
+  Démarre et enregistre, dans le processus de l'app, les deux services Restate de miryad-core :
+  `DagInterpreter` (marche du DAG) et `StepDispatcher` (exécution d'un step par `kind`). Le
+  `StepDispatcher` reçoit le @StepRegistry construit par ./steps/mod.rs. L'endpoint est un
+  serveur HTTP/2 sur un port interne distinct de celui de l'API (`VNL_WORKFLOW_LISTEN`, défaut
+  `0.0.0.0:9080`), jamais exposé par l'Ingress. Au démarrage l'app appelle
+  `register_deployment` (miryad-core) pour que Restate découvre les services ; chaque rollout
+  ré-enregistre avec `force: true` (comportement de miryad-core). Porte aussi la
+  `WorkflowPolicy` d'accès aux définitions (propriétaire seul) et les OPTIONS de service qui
+  rendent possibles des steps de longue durée. Fichier neuf, conception.
+
+Owns:
+  ./runtime.rs
+
+Can read:
+  ./mod.sdd
+  ./steps/mod.sdd
+  ../config.sdd
+  ../main.sdd
+  /controller/src/application.sdd
+
+Exposes:
+  @WorkflowConfigApp — configuration lue de l'environnement : `VNL_RESTATE_ADMIN_URL` et
+    `VNL_RESTATE_INGRESS_URL` (posées par le controller sur le Deployment de l'app quand
+    l'Application porte `spec.restate`, /controller/src/application.sdd), `VNL_WORKFLOW_LISTEN`
+    (défaut `0.0.0.0:9080`), `VNL_WORKFLOW_DEPLOYMENT_URL` (URL sous laquelle Restate joint cet
+    endpoint : le Service Kubernetes de l'app + port d'endpoint ; défaut dérivé du nom de
+    l'Application) ; absentes ⇒ moteur non configuré.
+  @WorkflowRuntime — handle `Clone` dans @AppState : `trigger(dag) -> RunHandle` (délègue à
+    `miryad_core::workflow::client::trigger_run`), l'URL d'admin et d'ingress (pour ./status.sdd),
+    le client HTTP partagé.
+  @start_runtime(state, config) -> Result<WorkflowRuntime, AppError> (async) — séquence : valider
+    la config (`WorkflowConfig::validate` de miryad-core), poser la `WorkflowPolicy`, construire le
+    registre, lier `DagInterpreter` + `StepDispatcher` à l'`Endpoint`, démarrer le serveur en
+    tâche de fond, puis enregistrer le déploiement ; un échec d'enregistrement est loggé et
+    RÉESSAYÉ en arrière-plan (backoff plafonné à 30 s) sans empêcher l'app de démarrer.
+
+Handles:
+  Politique d'accès : `WorkflowPolicy` posée une fois au démarrage pour que les définitions soient
+  `OwnerOnly` en lecture et écriture (miryad-core `configure_policy`) — chaque utilisateur ne voit
+  que ses workflows. Le contrôle fin (portée projet/sandbox) est dans les entités de ../db/entities/.
+  Options de service Restate : le service `StepDispatcher` est enregistré avec
+  `inactivity_timeout` et `abort_timeout` RELEVÉS à 25 h (couvrent un step shell de 24 h,
+  ./steps/shell.sdd) ; pas de politique de retry permanent (relancer un run bloqué est une action
+  manuelle, décision miryad-core du 2026-09-23) — la politique de retry bornée de miryad-core est
+  laissée à son défaut.
+  Isolation : une panique dans un step n'interrompt pas l'endpoint (miryad-core la traduit en
+  erreur de step).
+
+Must:
+  Ne servir l'endpoint que sur le port interne configuré, jamais sur le port de l'API.
+  Ne démarrer qu'avec une config valide ; sinon n'ouvrir aucun port.
+  Poser la politique `OwnerOnly` AVANT d'accepter le moindre trafic.
+  Réessayer l'enregistrement du déploiement sans bloquer le démarrage de l'app.
+
+Must not:
+  Journaliser les `config`/`inputs` d'un step (ils peuvent porter des prompts et des secrets de workflow).
+
+Tasks:
+  [?] Les valeurs de timeout (25 h) : à ajuster si Restate expose des plafonds par service plus
+    fins (vérifier les options exactes du SDK `restate-sdk` à l'implémentation).
+  [?] Plusieurs réplicas de l'app : Restate répartit les invocations sur l'URL de déploiement
+    (Service) — vérifier qu'un step déjà journalisé reprend correctement sur un autre réplica
+    (garanti par Restate), et que `register_deployment` concurrent est idempotent.
+
+Scenario: demarrage_complet
+  Given une config valide et un faux Restate (admin + ingress)
+  When @start_runtime
+  Then l'endpoint écoute sur `VNL_WORKFLOW_LISTEN`, la politique est posée, le déploiement est enregistré avec `force: true`
+
+Scenario: config_invalide
+  Given `VNL_RESTATE_ADMIN_URL` non absolue
+  When @start_runtime
+  Then erreur de configuration et aucun port ouvert
+
+Scenario: enregistrement_reessaye
+  Given un Restate qui refuse l'enregistrement puis l'accepte
+  When @start_runtime
+  Then l'app est démarrée, l'enregistrement est réessayé en arrière-plan jusqu'au succès
+
+Scenario: politique_proprietaire_seul
+  Given deux utilisateurs
+  When le premier crée une définition
+  Then le second ne la voit pas (liste et lecture)

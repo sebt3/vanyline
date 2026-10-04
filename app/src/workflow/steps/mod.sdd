@@ -1,0 +1,67 @@
+Spec: Steps — registre des kinds et accès commun
+
+Platform: Rust/vanyline-app/miryad-core
+
+Purpose:
+  Construit le @StepRegistry du `StepDispatcher` (./../runtime.sdd) avec les quatre kinds de
+  vanyline — `agent`, `rhai`, `shell`, `gate` — et porte ce qu'ils partagent : l'environnement
+  d'exécution (@StepEnv), la lecture du contexte de run injecté (`config._run`, voir
+  ../run_context.sdd) et l'accès authentifié à la sandbox d'un run. Chaque kind a sa spec ; ce
+  fichier ne contient aucune logique de kind. Fichier neuf, conception.
+
+Owns:
+  ./mod.rs
+
+Can read:
+  ../run_context.sdd
+  ./agent.sdd
+  ./rhai.sdd
+  ./shell.sdd
+  ./gate.sdd
+  ../../../lib/src/k8s.sdd
+  /sandbox/src/auth.sdd
+
+Exposes:
+  @StepEnv — `Clone`, `{ db, k8s: VnlK8sClient, http: reqwest::Client, config: Arc<Config> }` : tout
+    ce dont un step a besoin, sans passer par l'état HTTP de l'app.
+  @RunInfo — lecture typée de `config._run` (@RunContext de ../run_context.sdd) :
+    @RunInfo::from_config(&Value) -> Result<RunInfo, StepError> (`retryable: false` si `_run`
+    est absent ou mal formé — un step lancé sans contexte est une erreur de fabrication du DAG).
+  @SandboxAccess — accès à la sandbox d'un run : @SandboxAccess::open(env, &RunInfo) -> Result<_,
+    StepError> vérifie que `sandbox` est présent, que la Sandbox existe dans le namespace de
+    l'Owner et que sa phase est `Running` (sinon erreur non retryable « sandbox non démarrée »),
+    puis obtient le jeton de l'Owner par `VnlK8sClient::owner_token`. Méthodes `get_json`,
+    `post_json`, `delete` vers `http://sandbox-{name}.{ns}.svc:3000{chemin}` avec
+    `Authorization: Bearer <jeton>` et un timeout de 10 s ; le jeton n'apparaît dans aucune erreur.
+  @build_registry(env: StepEnv) -> StepRegistry — enregistre exactement `agent`, `rhai`, `shell`,
+    `gate` (jamais d'autre kind, jamais deux fois le même).
+
+Must:
+  Redemander le jeton de l'Owner à chaque utilisation de @SandboxAccess (le cache de
+    `owner_token` le rafraîchit à 120 s de l'expiration) : un step long ne garde pas un jeton périmé.
+  Ne jamais journaliser le jeton, ni `config`/`inputs` d'un step.
+  Rendre des @StepError `retryable: false` pour toute erreur de configuration ou de contexte, et
+    `retryable: true` seulement pour les pannes de transport transitoires.
+
+Must not:
+  Accepter un `kind` hors de la liste : un kind inconnu est une erreur du DAG (404, miryad-core).
+
+Scenario: registre_exact
+  Given @build_registry
+  When les kinds enregistrés sont énumérés
+  Then exactement `agent`, `rhai`, `shell`, `gate`
+
+Scenario: contexte_absent
+  Given une config sans `_run`
+  When @RunInfo::from_config
+  Then erreur non retryable
+
+Scenario: sandbox_non_demarree
+  Given une Sandbox en phase `Provisioning`
+  When @SandboxAccess::open
+  Then erreur non retryable « sandbox non démarrée », aucun appel HTTP
+
+Scenario: jeton_jamais_dans_les_erreurs
+  Given une sandbox qui répond 401
+  When un appel de @SandboxAccess échoue
+  Then le message d'erreur ne contient pas le jeton

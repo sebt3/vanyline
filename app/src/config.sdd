@@ -217,6 +217,10 @@ Depends on:
     `[!]` dans `Tasks`).
 
 Tasks:
+  [ ] Variables du moteur de workflow (2026-10-04) : `VNL_RESTATE_ADMIN_URL`,
+    `VNL_RESTATE_INGRESS_URL`, `VNL_WORKFLOW_LISTEN` (défaut `0.0.0.0:9080`),
+    `VNL_WORKFLOW_DEPLOYMENT_URL` — toutes optionnelles ; absentes ⇒ moteur non configuré
+    (../workflow/runtime.sdd). Le controller les pose quand l'Application porte `spec.restate`.
   [!] Collision d'espace de noms `"VNL-CFG-*"` avec vanyline-cfgstore — cohérence avec
     le `[?]` de ../../cfgstore/src/error.sdd : ./config.rs (001–006) et ./main.rs (005
     bis, 008) émettent EN DUR les mêmes marqueurs que @CfgStoreError::001…010 pour des

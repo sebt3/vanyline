@@ -351,6 +351,14 @@ Depends on:
     opérationnels de `GET /health`, `LISTEN_ADDR`, `STATIC_DIR`.
 
 Tasks:
+  [ ] Moteur de workflow et MCP (2026-10-04) : démarrer `workflow::start_runtime` après les
+    migrations quand `VNL_RESTATE_ADMIN_URL` est posée (../workflow/runtime.sdd) ; monter
+    `miryad_core::mcp::mcp_router` (`POST /mcp`, CRUD de la configuration + définitions de
+    workflow + rattachements, lecture seule des runs) ET `mcp_domain_router` (`POST /mcp/domain`) ;
+    ajouter les entités `project_workflows`, `workflow_runs` et `app_settings` au `resource_router` (CRUD
+    générique) et les trois migrations (../migration/mod.sdd) ; appeler `ensure_system_agents` à la
+    première connexion d'un utilisateur ; planifier `workflow_runs::purge_older_than(30)` une fois
+    par jour.
   [!] Frontière miryad-core : routes réelles d'@auth_router (hors le callback
     `/auth/callback` mentionné par la doc), chemins/enveloppes exacts de @resource_router,
     modes d'échec de @OidcClient::new (contact issuer au démarrage ?), routes et payload
