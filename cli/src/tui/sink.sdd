@@ -1,0 +1,51 @@
+Spec: TUI sink — pont entre l'agent et la boucle
+
+Platform: Rust/vanyline-cli/tokio
+
+Purpose:
+  `TuiSink` : l'@EventSink (`vanyline_lib::event`) du chat interactif. Il transmet chaque
+  @ChatEvent émis par `run_agent_turn` à la boucle de ./mod.sdd par un canal `tokio::sync::mpsc`,
+  sans jamais bloquer le tour. Il remplace @StdoutSink pour le mode interactif ; le one-shot garde
+  @StdoutSink et @JsonSink. Fichier neuf, conception.
+
+Owns:
+  ./sink.rs
+
+Can read:
+  ./mod.sdd
+  ./state.sdd
+  /lib/src/event.sdd
+
+Exposes:
+  @TuiSink — `impl EventSink` ; @TuiSink::channel() -> (TuiSink, UnboundedReceiver<ChatEvent>).
+  @TuiEvent n'existe pas : le canal transporte directement les @ChatEvent (même vocabulaire que la
+    sandbox, le RPC et le one-shot JSONL).
+
+Handles:
+  `emit` envoie sur un canal NON BORNÉ (les jetons sont petits ; un récepteur lent ne doit jamais
+  ralentir le modèle) ; l'envoi vers un récepteur fermé (TUI quittée) est ignoré silencieusement.
+  Aucune transformation des événements : l'ordre émis est l'ordre reçu.
+
+Must:
+  Ne jamais bloquer ni paniquer dans `emit`.
+  Préserver l'ordre et l'intégralité des événements.
+  Ne rien écrire sur stdout/stderr.
+
+Must not:
+  Filtrer des événements : la décision d'affichage appartient à ./state.sdd (contrairement à
+    @StdoutSink qui jetait ReasoningDelta, ToolResult, Usage, SubagentEvent, ToolUnavailable).
+
+Scenario: ordre_preserve
+  Given mille événements émis dans l'ordre
+  When le récepteur les lit
+  Then même ordre, aucun perdu
+
+Scenario: recepteur_ferme
+  Given le récepteur supprimé
+  When `emit` est appelé
+  Then aucun plantage, aucun blocage
+
+Scenario: tous_les_evenements_transmis
+  Given un `ReasoningDelta`, un `ToolResult`, un `Usage` et un `ToolUnavailable`
+  When ils sont émis
+  Then les quatre arrivent (aucun filtrage)

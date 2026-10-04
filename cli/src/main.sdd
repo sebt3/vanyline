@@ -205,14 +205,13 @@ Handles:
     puis exit 1 (aucune sortie sur stderr — voir Tasks `[?]`).
   Rendu `owner list` : vide → `No owners found.` ; sinon `  {name} | {status.pvc_name
     ou -} | {status.service_account ou -}` (name via @kube::ResourceExt::name_any).
-  Rendu `owner show {name}` : `Owner: {name}`, puis `  existingPvc: {… ou -}`,
-    `  homeSize: {… ou -}`, `  homeStorageClass: {… ou -}` ; projectDefaults : bloc
+  Rendu `owner show {name}` : `Owner: {name}`, puis `  homeSize: {… ou -}`, `  homeStorageClass: {… ou -}` ; projectDefaults : bloc
     `  projectDefaults:` + `    storageSize: {… ou -}` + `    storageClass: {… ou -}`
     si présent, sinon ligne `  projectDefaults: -` ; puis `Status:` : soit `  (not yet
     reconciled)` si status absent, soit `  pvcName:`/`  serviceAccount:` + conditions
     (`  conditions: -` si vide, sinon en-tête + par condition `    - {type_}
     status={status} message={message}`).
-  Construction `owner create` : @OwnerSpec { existing_pvc, home_size,
+  Construction `owner create` : @OwnerSpec { home_size,
     home_storage_class, home_access_mode, project_defaults, application_ref: @None,
     egress: @Vec::new() } ; project_defaults = @Some(@ProjectDefaults des trois flags
     `--project-default-storage-*`) SI au moins UN des trois est présent, sinon @None
@@ -221,15 +220,13 @@ Handles:
     owner={spec.owner} | {repo_url} | cloned={bool}` (cloned = status.cloned, faux si
     status absent).
   Rendu `project show {name}` : `Project: {name}` ; `  owner:`, `  repoUrl:`,
-    `  defaultBranch: {… ou -}` ; `  existingPvc: -` ou `  existingPvc: {name}
-    (subPath={… ou -})` ; `  storageSize:`, `  storageClass:`, `  gitSecret:` (ou `-`) ;
+    `  defaultBranch: {… ou -}` ; `  storageSize:`, `  storageClass:`, `  gitSecret:` (ou `-`) ;
     `  caches: {joins par , }` si non vide sinon `  caches: -` (vide ET absent rendent
     identiquement `  caches: -`) ; `  fetchInterval: {… ou -}` ; puis bloc `Status:`
     (`  (not yet reconciled)` ou `  pvcName:`, `  cloned: {bool}`, `  worktrees: -` /
     `  worktrees: {joins}`, conditions comme owner).
   Construction `project create` : @ProjectSpec { owner, repo_url, default_branch,
-    existing_pvc = @Some(@PvcRef{ name, sub_path }) si `--existing-pvc-name` présent
-    (`--existing-pvc-subpath` seul n'a AUCUN effet), storage_*, git_secret,
+    storage_*, git_secret,
     caches = @None si le vec répétable `--cache` est vide sinon @Some(vec),
     fetch_interval, egress: @Vec::new() }.
   Rendu `sandbox list` : vide → `No sandboxes found.` ; sinon `  {name} |
@@ -316,7 +313,7 @@ Depends on:
     new), `kube` (trait @ResourceExt pour `name_any`), `vanyline-lib` (trait
     @ConfigStore, @Conversation/@Message, @k8s::VnlK8sClient — feature `k8s`),
     `vanyline-crds` (@OwnerSpec, @ProjectSpec, @SandboxSpec, @ProjectDefaults,
-    @PvcRef), `vanyline-cfgstore` (@fs_store::FsConfigStore, @store::Layer,
+    @ProjectSpec), `vanyline-cfgstore` (@fs_store::FsConfigStore, @store::Layer,
     @layers::{config_entry_source, file_entry_source, skill_entry_source}).
   ./config.rs — @discover_layers, @configured_namespace, @configured_toolbox.
   ./store.rs — @list_conversations, @get_conversation, @save_conversation,
@@ -518,6 +515,10 @@ Scenario: version et help rendent les valeurs clap et sortent 0
     et `--help` stdout contient `CLI for vanyline LLM chat`, les deux avec code 0
 
 Tasks:
+  [ ] Mode sans sous-commande = chat TUI (2026-10-04, ./tui/mod.sdd) : l'aide clap décrit le chat
+    interactif plein écran et son exigence de terminal ; `-c/--continue` s'applique à la reprise de
+    conversation dans le TUI.
+  [ ] `owner`/`project` : flags `--existing-pvc*` retirés (voir ./owner_cmd.sdd et ./project_cmd.sdd).
   [!] Destination des logs : `tracing_subscriber::fmt::layer()` est monté SANS
     `with_writer` — son writer par défaut est STDOUT, alors que ./rpc/mod.sdd énonce
     l'invariant « logs sur stderr, jamais sur stdout » et que `lib/src/session.rs`

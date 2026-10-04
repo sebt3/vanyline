@@ -26,7 +26,7 @@ Exposes:
     - @Commands::List — `vanyline project list`, aucun argument.
     - @Commands::Show — `vanyline project show <name>`, positionnel `name: String`.
     - @Commands::Create — `vanyline project create <name> --owner <o> --repo-url <r> [...]`,
-      positionnel `name` + deux options requises + neuf options optionnelles (voir `Accepts`).
+      positionnel `name` + deux options requises + sept options optionnelles (voir `Accepts`).
     - @Commands::Delete — `vanyline project delete <name>`, positionnel `name: String`.
   # L'enum porte `#[allow(clippy::large_enum_variant)]` : le variant `Create`
   # (11 champs texte) écrase la taille du variant `List` (0 champ) ; l'exemption
@@ -42,8 +42,6 @@ Accepts:
     (identique au kebab par défaut du champ — le nom explicite est verrouillé, une
     réécriture en `--repo_url` ou `--repoUrl` casserait les usages documentés).
   - `--default-branch` — optionnel.
-  - `--existing-pvc-name` — optionnel ; doc : nom du PVC existant (cas kydah-code).
-  - `--existing-pvc-subpath` — optionnel ; doc : sans `--existing-pvc-name`, sans effet.
   - `--storage-size` — optionnel, @String translucide (ex. `10Gi`, jamais parsé ici).
   - `--storage-class` — optionnel.
   - `--storage-access-mode` — optionnel (ex. `ReadWriteOnce`, jamais validé ici).
@@ -76,7 +74,7 @@ Must:
     kebab-case dérivés des variants, aucun alias supplémentaire.
   Exiger sur `create` : le positionnel `name`, `--owner` et `--repo-url` (le refus est
     produit par clap avant toute exécution).
-  Rendre facultatives les neuf autres options de `create` (@Option/@Vec, jamais exigées).
+  Rendre facultatives les sept autres options de `create` (@Option/@Vec, jamais exigées).
   Accepter `--cache` en répétition (`--cache cargo --cache pnpm`) et préserver l'ordre
     et le littéral des valeurs dans @caches.
   Traiter `--storage-size`, `--storage-access-mode`, `--fetch-interval` comme des
@@ -91,17 +89,16 @@ Must not:
   Introduire une valeur par défaut de taille, classe, mode d'accès, caches ou intervalle
     dans le CLI : les replis (owner `project_defaults`, caches `["cargo","pnpm","pip"]`,
     `fetch_interval` `"1h"`) sont résolution controller, pas CLI.
-  Valider la cohérence `--existing-pvc-subpath` sans `--existing-pvc-name` par autre
-    chose que la doc actuelle (voir `[?]` en `Tasks` avant d'ajouter un `requires` clap).
+  Exposer `--existing-pvc-name` ou `--existing-pvc-subpath` : retirés (décision 2026-10-04, le
+    PVC workspace est toujours créé par le controller dans le namespace de l'Owner).
   Exposer un flag `egress` : le champ @ProjectSpec::egress est figé à @Vec::new() côté
     `./main.rs` (l'exposer élargirait le contrat sans décision de Sébastien).
 
 Depends on:
   ./main.rs — seul consommateur : enregistrement sous `project`, mapping `Create` →
-    @vanyline_crds::ProjectSpec (dont `existing_pvc = existing_pvc_name.map(...)` —
-    subpath orpheline silencieusement ignorée — et `caches` vide → @None), appels
+    @vanyline_crds::ProjectSpec (dont `caches` vide → @None), appels
     @VnlK8sClient et rendu.
-  ../../crds/src/lib.rs — cible sémantique de `Create` (@ProjectSpec, @PvcRef), couplage
+  ../../crds/src/lib.rs — cible sémantique de `Create` (@ProjectSpec), couplage
     par les noms de champs, sans import de ce fichier ici.
 
 Scenario: `project list` se parse sans argument
@@ -149,8 +146,7 @@ Scenario: le flag de repo est `--repo-url` et pas `--repo_url`
 Scenario: `project create` accepte la totalité des flags
   Given le CLI racine @Cli
   When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "alice",
-    "--repo-url", "r", "--default-branch", "main", "--existing-pvc-name", "pvc-kydah",
-    "--existing-pvc-subpath", "work/depot", "--storage-size", "10Gi", "--storage-class",
+    "--repo-url", "r", "--default-branch", "main", "--storage-size", "10Gi", "--storage-class",
     "fast", "--storage-access-mode", "ReadWriteMany", "--git-secret", "deploy-key",
     "--fetch-interval", "30m"])`
   Then chaque champ de `Commands::Create` porte la valeur fournie, `caches` étant @Vec vide
@@ -161,12 +157,11 @@ Scenario: `--cache` est répétable et préserve l'ordre
     "--repo-url", "r", "--cache", "cargo", "--cache", "pnpm"])`
   Then `caches == ["cargo", "pnpm"]` dans cet ordre
 
-Scenario: `--existing-pvc-subpath` sans `--existing-pvc-name` se parse quand même
+Scenario: `--existing-pvc-name` n'existe plus
   Given le CLI racine @Cli
   When `try_parse_from(["vanyline", "project", "create", "depot", "--owner", "a",
-    "--repo-url", "r", "--existing-pvc-subpath", "work"])`
-  Then le parse réussit avec `existing_pvc_name == None` et `existing_pvc_subpath == Some("work")`
-    (l'ignore en aval est le contrat de `./main.rs`, voir Tasks)
+    "--repo-url", "r", "--existing-pvc-name", "x"])`
+  Then le parse échoue : argument inconnu
 
 Scenario: `--storage-size` ne valide pas la valeur
   Given le CLI racine @Cli
@@ -188,11 +183,6 @@ Tasks:
   [?] `#[allow(clippy::large_enum_variant)]` sans commentaire de justification d'une
     ligne citant la spec : `tooling.sdd` (`Must not`) l'exige — trancher : ajouter la
     ligne de justification ou boxer `Create` avec Sébastien.
-  [?] `--existing-pvc-subpath` sans `--existing-pvc-name` est accepté au parsage puis
-    silencieusement ignoré par le mapping de `./main.rs` (`existing_pvc_name.map(...)`).
-    La dépendance n'est documentée que par un commentaire de doc. Décision à trancher :
-    ajouter `requires = "existing-pvc-name"` côté clap (rejet précoce) ou statuer que
-    l'ignore silencieux est le comportement voulu.
   [?] `--git-secret` : le flag CLI est vivant alors que @ProjectSpec::git_secret est
     marqué DÉPRÉCIÉ et non consommé par le controller. Faut-il marquer le flag
     `#[arg(..., hide = true)]` / déprécié, ou le supprimer (breaking) ?

@@ -246,6 +246,15 @@ Handles:
     @SessionContext, partagé entre tours d'une même session et les builtins todowrite/todoread.
 
 Must:
+  REPL INTERACTIF = TUI ratatui (décision du 2026-10-04, ./tui/mod.sdd) : le mode sans sous-commande
+    lance `tui::run_tui` au lieu de la boucle de lecture de lignes ; l'ancien REPL (prompt `> `,
+    bannière texte, @StdoutSink interactif, sortie Ctrl-D sur ligne) disparaît. Le mode interactif
+    exige que stdin ET stdout soient des terminaux : sinon sortie `exit(2)` avec le message
+    `vanyline: interactive chat needs a terminal; use `vanyline run <message>` for scripts` (le one-shot
+    reste le mode scriptable). Le résumé des sources du workspace, l'agent résolu et la conversation
+    sont passés au TUI (en-tête et première `Notice` de la transcription) ; le `git diff` de
+    clôture devient le résumé de la barre d'état, après chaque tour réussi. Le one-shot (`run`)
+    est inchangé. Les erreurs de tour, jadis silencieuses en REPL, sont visibles dans la transcription.
   Appeler @config::ensure_config_dir() au tout début de @run, avant toute lecture de
     couche ou de conversation.
   Réserver tout rendu non JSONL sur stdout au cas @json @false : en mode @json, la
@@ -498,6 +507,11 @@ Depends on:
     (dette `print_*`/exit tracée en Tasks).
 
 Tasks:
+  [ ] ALIGNEMENT TUI (2026-10-04) : remplacer @run_repl par l'appel à `tui::run_tui` (./tui/mod.sdd) ;
+    supprimer la bannière REPL, @print_workspace_sources en mode interactif (reporté dans le TUI),
+    la gestion de Ctrl-C par défaut du terminal (le TUI la gère, annulation du tour) et les
+    Scenario du prompt `> `/EOF ; ajouter la vérification de TTY. Les `[?]` du REPL (erreurs
+    silencieuses, `-c` sans pointeur, `AGENTS.md` relatif au cwd) restent ouverts pour le one-shot.
   [?] Erreurs de tour invisibles : le bras @Err(_) du one-shot et le @break du REPL
     jettent l'@VnyError sans l'afficher. Un échec de résolution config
     (`VNL-CFG-003` — modèle/provider/toolset inconnu) ne produit AUCUNE sortie, seul

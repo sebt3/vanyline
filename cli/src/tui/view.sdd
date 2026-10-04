@@ -1,0 +1,94 @@
+Spec: TUI view — rendu ratatui
+
+Platform: Rust/vanyline-cli/ratatui
+
+Purpose:
+  Rendu pur de l'état du chat (./state.sdd) dans un tampon ratatui : `render(frame, state)`. Aucune
+  I/O, aucune horloge (l'animation d'attente vient de l'état). Testable avec `TestBackend`.
+  Disposition : en-tête (agent, conversation, état), transcription défilante, panneau de tâches
+  (repliable, à droite sur terminal large, au-dessus de la saisie sinon), zone de saisie
+  multi-lignes (hauteur adaptative, de 1 à 8 lignes), barre d'état (touches utiles, jetons,
+  résumé git, indice d'état). Fichier neuf, conception.
+
+Owns:
+  ./view.rs
+
+Can read:
+  ./state.sdd
+  ./editor.sdd
+  ./markdown.sdd
+
+Exposes:
+  @render(frame: &mut Frame, state: &AppState) — dessine tout ; place le curseur terminal dans la
+    saisie (@editor::display_cursor).
+  @Theme et @detect_theme() — thème clair/sombre (variable `COLORFGBG` ou sombre par défaut) ;
+    couleurs sobres et lisibles à 16 couleurs, jamais de dépendance à une police spéciale.
+
+Handles:
+  Transcription : éléments dans l'ordre ; `User` préfixé d'un marqueur ; `Assistant` rendu par
+  ./markdown.sdd ; `Reasoning` replié en une ligne `▸ raisonnement (N lignes)`, déplié en
+  style atténué ; `ToolCall` en une ligne `▸ nom(args tronqués)` avec statut (`…` en cours, `✓`, `✗`),
+  déplié : arguments et résultat, bornés à 40 lignes avec marqueur de troncature ; `Subagent` indenté
+  avec son agent ; `Notice` colorée par niveau ; `Interrupted` en gras atténué. Défilement :
+  décalage tiré de l'état, indicateur « ↓ nouveau » quand l'utilisateur a remonté et que du contenu
+  arrive. Sélection (Tab) surlignée. Barre d'état : animation d'attente (un caractère tournant
+  d'après `Tick`), jetons entrée/sortie, résumé git, rappel `Ctrl-D quitter · /help`. Terminal
+  plus petit que 40×10 : message « terminal trop petit ».
+
+Must:
+  Ne jamais paniquer, quelle que soit la taille (y compris 0×0 et 1×1).
+  Ne rien écrire hors de la zone allouée ; tronquer plutôt que déborder.
+  Rester lisible sans couleur (aucune information portée par la couleur seule : les statuts ont
+    un symbole).
+  Utiliser des opérations vérifiées/saturantes pour tout calcul de coordonnée (harnais clippy).
+  Ne jamais afficher de séquence de contrôle issue du contenu (voir ./markdown.sdd).
+
+Must not:
+  Lire autre chose que l'état passé en paramètre.
+  Allouer proportionnellement à l'historique complet à chaque image : seules les lignes visibles
+    (plus une marge) sont stylées ; les lignes de la transcription sont mises en cache par largeur.
+
+Scenario: disposition_nominale
+  Given un état avec trois éléments de transcription, taille 100×30
+  When @render sur un `TestBackend`
+  Then en-tête sur la première ligne, saisie en bas, barre d'état sur la dernière ligne, transcription entre les deux
+
+Scenario: panneau_des_taches_large
+  Given 140 colonnes et `todo_visible`
+  When @render
+  Then le panneau est à droite ; à 80 colonnes il est au-dessus de la saisie
+
+Scenario: appel_d_outil_replie_et_deplie
+  Given un `ToolCall` replié, puis déplié
+  When @render
+  Then une ligne `▸ nom(args…)` puis arguments et résultat bornés
+
+Scenario: resultat_tronque
+  Given un résultat de 500 lignes déplié
+  When @render
+  Then au plus 40 lignes et un marqueur de troncature
+
+Scenario: terminal_minuscule
+  Given des tailles 0×0, 1×1, 20×5
+  When @render
+  Then aucun plantage ; « terminal trop petit » quand applicable
+
+Scenario: statut_sans_couleur
+  Given un rendu en noir et blanc
+  When un appel d'outil réussit puis un autre échoue
+  Then `✓` et `✗` les distinguent
+
+Scenario: indicateur_nouveau_contenu
+  Given l'utilisateur remonté dans la transcription et un jeton qui arrive
+  When @render
+  Then « ↓ nouveau » est visible
+
+Scenario: curseur_dans_la_saisie
+  Given une saisie de deux lignes avec du texte Unicode large
+  When @render
+  Then le curseur terminal est positionné sur la colonne d'affichage correcte
+
+Scenario: saisie_adaptative
+  Given une saisie de 12 lignes
+  When @render
+  Then la zone de saisie occupe 8 lignes au plus et fait défiler son contenu

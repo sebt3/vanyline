@@ -47,10 +47,8 @@ Exposes:
   @Commands::Delete — mot `delete`, aide `Delete an Owner`. Un unique positionnel requis
     `name: String`.
   @Commands::Create — mot `create`, aide `Create an Owner`. Positionnel requis `name: String`
-    suivi de sept flags longs optionnels (`#[arg(long)]`, type `Option<String>`, absent ⇒
+    suivi de six flags longs optionnels (`#[arg(long)]`, type `Option<String>`, absent ⇒
     `None`) dont le nom clap est le snake_case du champ converti en kebab-case :
-      `--existing-pvc` (champ `existing_pvc`) — aide : `PVC home existant (ex. celui de
-        code-server). Omis: PVC créé par le controller.`
       `--home-size` (champ `home_size`) — aucun doc comment, pas d'aide propre.
       `--home-storage-class` (champ `home_storage_class`) — aucun doc comment.
       `--home-access-mode` (champ `home_access_mode`) — aide : `Mode d'accès du PVC home.
@@ -76,7 +74,7 @@ Accepts:
     `""` est une valeur clap valide) ; un positionnel de trop est refusé par clap.
   Valeurs de flags de Create — toute @string transplantée verbatim : `--home-size` n'est pas
     parsé en @Quantity, `--home-access-mode` n'est pas contraint aux quatre modes K8s,
-    `--existing-pvc` n'est pas vérifié existant. Les sept flags sont mutuellement
+    (`--existing-pvc` n'existe plus : le home est toujours créé par le controller). Les six flags sont mutuellement
     indépendants et combinables avec n'importe quel sous-ensemble.
   Flags longs uniquement — les noms existent en kebab-case seulement : `--home-size` accepte,
     `--home_size` est un argument inconnu ; aucun flag court (pas de `-x` sur ces flags,
@@ -111,7 +109,7 @@ Handles:
     ../../tooling.sdd) —
       List : `"No owners found."` si vide, sinon par Owner une ligne
         `"  {name} | {status.pvcName|-} | {status.serviceAccount|-}"` ;
-      Show : bloc `Owner:` (`name`, `existingPvc`, `homeSize`, `homeStorageClass`,
+      Show : bloc `Owner:` (`name`, `homeSize`, `homeStorageClass`,
         `projectDefaults.storageSize`/`.storageClass` ou `projectDefaults: -`) puis bloc
         `Status:` (`pvcName`, `serviceAccount`, `conditions` ligne par ligne
         `- {type} status={status} message={message}`, ou `conditions: -`, ou
@@ -134,7 +132,7 @@ Handles:
 
 Must:
   Garder les quatre mots de commande `list`, `show`, `create`, `delete` sous la commande
-    `owner` et les sept longs kebab-case de `Create` (`--existing-pvc`, `--home-size`,
+    `owner` et les six longs kebab-case de `Create` (`--home-size`,
     `--home-storage-class`, `--home-access-mode`, `--project-default-storage-size`,
     `--project-default-storage-class`, `--project-default-storage-access-mode`) : ce sont les
     noms que tapent les humains et les scripts ; le renommage du variant parent en `owner`
@@ -225,20 +223,20 @@ Scenario: owner_renommage_utilisateur_verrouille
 Scenario: create_sans_flag_donne_tous_options_none
   Given le @Cli de ./main.rs
   When `Cli::try_parse_from(["vanyline", "owner", "create", "alice"])`
-  Then le parse réussit avec `Create { name: "alice" }` et les sept champs
-    `existing_pvc`, `home_size`, `home_storage_class`, `home_access_mode`,
+  Then le parse réussit avec `Create { name: "alice" }` et les six champs
+    `home_size`, `home_storage_class`, `home_access_mode`,
     `project_default_storage_size`, `project_default_storage_class`,
     `project_default_storage_access_mode` tous à @None — aucun défaut `"1Gi"` ni
     `"ReadWriteMany"` n'est matérialisé à la parse
 
-Scenario: create_accepte_les_sept_flags_kebab_case
+Scenario: create_accepte_les_six_flags_kebab_case
   Given le @Cli de ./main.rs
-  When la commande `vanyline owner create alice --existing-pvc cs-home --home-size 2Gi
+  When la commande `vanyline owner create alice --home-size 2Gi
     --home-storage-class cephfs --home-access-mode ReadWriteOnce
     --project-default-storage-size 5Gi --project-default-storage-class local-path
     --project-default-storage-access-mode ReadWriteOnce`
   Then le parse réussit et chaque champ porte exactement la valeur de son flag kebab-case
-    (mapping champ snake_case ↔ flag kebab verrouillé, sept @Some distincts)
+    (mapping champ snake_case ↔ flag kebab verrouillé, six @Some distincts)
 
 Scenario: create_rejette_les_flags_underscore
   Given le @Cli de ./main.rs
@@ -249,9 +247,14 @@ Scenario: create_rejette_les_flags_underscore
 Scenario: create_transplante_les_valeurs_sans_validation
   Given le @Cli de ./main.rs
   When `["vanyline", "owner", "create", "alice", "--home-size", "banane",
-    "--home-access-mode", "PasUnMode", "--existing-pvc", ""]`
-  Then le parse réussit et rend les trois @Some verbatim (`"banane"`, `"PasUnMode"`,
-    chaîne vide) : ni @Quantity, ni mode d'accès connu, ni nom de PVC ne sont validés ici
+    "--home-access-mode", "PasUnMode"]`
+  Then le parse réussit et rend les deux @Some verbatim (`"banane"`, `"PasUnMode"`) : ni
+    @Quantity ni mode d'accès connu ne sont validés ici
+
+Scenario: existing_pvc_n_existe_plus
+  Given le @Cli de ./main.rs
+  When `["vanyline", "owner", "create", "alice", "--existing-pvc", "x"]`
+  Then le parse échoue : argument inconnu
 
 Scenario: positionnel_supplementaire_refuse
   Given le @Cli de ./main.rs
@@ -262,7 +265,7 @@ Scenario: aide_owner_documente_variants_et_flags
   Given la commande générée `owner_cmd::Commands::command()` (nommée `owner` par ./main.rs)
   When son aide intégrée est rendue (`--help` en test)
   Then les quatre aides `List K8s Owners`, `Show a single Owner`, `Create an Owner`,
-    `Delete an Owner` y figurent, ainsi que les longs `--existing-pvc`, `--home-access-mode`
+    `Delete an Owner` y figurent, ainsi que les longs `--home-access-mode`
     et `--project-default-storage-size` avec leurs doc comments verbatim
 
 Scenario: owner_flag_repete_en_home_size_refuse

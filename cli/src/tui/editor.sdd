@@ -1,0 +1,86 @@
+Spec: TUI editor — zone de saisie
+
+Platform: Rust/vanyline-cli/unicode-width
+
+Purpose:
+  Éditeur de texte multi-lignes minimal de la zone de saisie du chat : tampon, curseur, édition
+  par touches, historique des saisies précédentes. Pur (aucune I/O), sans dépendance au terminal :
+  il reçoit des commandes d'édition et rend un état affichable. Gère Unicode (clusters de
+  graphèmes, largeur d'affichage). Fichier neuf, conception.
+
+Owns:
+  ./editor.rs
+
+Can read:
+  ./state.sdd
+  ./view.sdd
+
+Exposes:
+  @EditorState — `{ lines: Vec<String>, cursor: (row, col en graphèmes), history: Vec<String>,
+    history_pos: Option<usize>, draft: Option<String> }`.
+  @EditCommand — `Insert(char)`, `InsertStr(String)`, `Newline`, `Backspace`, `Delete`, `Left`,
+    `Right`, `Up`, `Down`, `WordLeft`, `WordRight`, `Home`, `End`, `KillLine`, `KillToStart`,
+    `DeleteWord`, `Clear`, `HistoryPrev`, `HistoryNext`.
+  @apply(state, command) -> EditorState (pur) ; @text(state) -> String (lignes jointes par `\n`) ;
+  @is_blank(state) -> bool ; @push_history(state, text) -> EditorState (sans doublon consécutif,
+  borné à 500 entrées) ; @display_cursor(state, width) -> (x, y) tenant compte de la largeur Unicode
+  et du retour à la ligne.
+
+Handles:
+  Historique : `HistoryPrev` au début de la saisie rappelle l'entrée précédente en gardant le
+  brouillon courant ; `HistoryNext` à la fin le restitue. Les lignes multiples d'une entrée
+  d'historique sont conservées. Le curseur ne coupe jamais un graphème (emoji, accents combinés).
+
+Must:
+  Ne jamais paniquer, quel que soit le texte (vide, très long, Unicode, séquences de contrôle).
+  Opérer en graphèmes, jamais en octets au milieu d'un caractère.
+  Utiliser des opérations vérifiées pour tout indice.
+  Rester sous 1 ms pour une saisie de 10 000 caractères.
+
+Must not:
+  Insérer des caractères de contrôle autres que `\n` (les ignorer).
+
+Scenario: insertion_et_curseur
+  Given une saisie vide
+  When `Insert('a')`, `Insert('é')`
+  Then texte `aé`, curseur en colonne 2
+
+Scenario: nouvelle_ligne
+  Given le texte `ab` et le curseur entre `a` et `b`
+  When `Newline`
+  Then deux lignes `a` et `b`, curseur au début de la seconde
+
+Scenario: suppression_en_debut_de_ligne
+  Given deux lignes et le curseur au début de la seconde
+  When `Backspace`
+  Then une seule ligne fusionnée
+
+Scenario: graphemes_composes
+  Given le texte « 👨‍👩‍👧 » (un graphème, plusieurs points de code)
+  When `Backspace`
+  Then le graphème entier disparaît
+
+Scenario: largeur_unicode
+  Given le texte « 日本 » (largeur 2 chacun)
+  When @display_cursor est calculé en fin de saisie
+  Then x vaut 4
+
+Scenario: historique
+  Given deux entrées d'historique et un brouillon `x`
+  When `HistoryPrev`, `HistoryPrev`, `HistoryNext`, `HistoryNext`
+  Then la saisie parcourt l'entrée 2, l'entrée 1, l'entrée 2, puis restitue le brouillon `x`
+
+Scenario: historique_sans_doublon
+  Given l'entrée `a` déjà en fin d'historique
+  When @push_history(`a`)
+  Then l'historique est inchangé
+
+Scenario: entree_arbitraire
+  Given une chaîne de 100 000 caractères aléatoires avec séquences de contrôle
+  When `InsertStr`
+  Then aucun plantage, les contrôles autres que `\n` sont ignorés
+
+Scenario: suppression_de_mot
+  Given le texte `foo bar` et le curseur à la fin
+  When `DeleteWord`
+  Then texte `foo `

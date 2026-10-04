@@ -1,0 +1,149 @@
+Spec: TUI state — état et mise à jour pures
+
+Platform: Rust/vanyline-cli
+
+Purpose:
+  Le MODÈLE du chat interactif et sa fonction de mise à jour, sans aucune I/O (architecture
+  « Elm ») : `update(state, action) -> (state, Vec<Effect>)`. Il porte la transcription, l'état
+  d'attente, le défilement, le panneau de tâches, l'historique de saisie et la politique des
+  touches ; il décide des commandes slash. Tout ce qui touche au terminal, au disque et au
+  réseau est un `Effect` exécuté par ./mod.sdd. Fichier neuf, conception.
+
+Owns:
+  ./state.rs
+
+Can read:
+  ./editor.sdd
+  ./sink.sdd
+  /lib/src/event.sdd
+  ../store.sdd
+
+Exposes:
+  @TranscriptItem — `User(text)` | `Assistant { blocks }` (texte en cours ou terminé, rendu par
+    ./markdown.sdd) | `Reasoning(text)` (raisonnement du modèle, replié par défaut) |
+    `ToolCall { id, name, args, result: Option<String>, is_error, expanded }` |
+    `Subagent { id, agent, task, items, done }` | `Notice(level, text)` (info/avertissement/erreur,
+    `tool_unavailable` compris) | `Interrupted`.
+  @AppState — `{ transcript, status: Idle | Running { since }, input: EditorState, history,
+    scroll: Scroll (suit la fin par défaut), todo: Vec<TodoItem>, todo_visible, usage: {input,
+    output}, agent, conversation_id, title, git_summary: Option<String>, quit_armed: bool,
+    size: (u16,u16) }`.
+  @Action — `Key(KeyEvent)`, `Paste(String)`, `Resize(w,h)`, `Mouse(MouseEvent)`, `Tick`,
+    `Agent(ChatEvent)` (de @TuiSink), `TurnFinished(Result)`, `GitSummary(Option<String>)`.
+  @Effect — `StartTurn(String)`, `CancelTurn`, `Save`, `Quit`, `RefreshGit`, `NewConversation`,
+    `SwitchAgent(String)`.
+  @update(state, action) -> (AppState, Vec<Effect>) — totale, sans panique sur toute entrée.
+
+Handles:
+  Touches (état `Idle` ou `Running`) :
+    Entrée — envoie la saisie (non vide) : `StartTurn` ; ignorée avec un indice pendant un tour.
+    Alt+Entrée ou Ctrl+J — nouvelle ligne dans la saisie.
+    Ctrl+C — pendant un tour : `CancelTurn` (la transcription reçoit `Interrupted`) ; au repos : vide
+      la saisie ; deux Ctrl+C consécutifs au repos sur saisie vide : `Quit` (`quit_armed`).
+    Ctrl+D — saisie vide : `Quit` ; sinon supprime le caractère sous le curseur.
+    Haut/Bas — historique de saisie (curseur en première/dernière ligne) ; PgUp/PgDn et molette —
+      défilement de la transcription ; Fin — retour au suivi de la fin ; Ctrl+L — rafraîchit.
+    Tab / Maj+Tab — déplace la sélection entre éléments repliables de la transcription ;
+      Espace sur une sélection — replie/déplie (appels d'outils et raisonnement) ; Ctrl+R — replie ou
+      déplie tous les raisonnements ; Ctrl+T — affiche ou masque le panneau des tâches.
+  Commandes slash (une ligne commençant par `/`) : `/help`, `/new` (nouvelle conversation :
+    `NewConversation`), `/agent <nom>` (`SwitchAgent`, valable au tour suivant), `/todo`
+    (bascule du panneau), `/quit`. Une commande inconnue produit une `Notice`, jamais un tour.
+  Événements de l'agent : `Token`/`ReasoningDelta` prolongent le dernier bloc assistant/raisonnement ;
+    `ToolCall` ajoute un élément ; `ToolResult` complète l'appel de même `id` (replié) ; `Subagent*`
+    imbriquent les éléments du sous-agent ; `Usage` cumule ; `ToolUnavailable` et `Error` deviennent
+    des `Notice` ; `Done` ferme le bloc. L'état `todo` est relu après chaque `ToolCall` d'outil de
+    tâches.
+  Défilement : suit la fin tant que l'utilisateur n'a pas remonté ; remonter fige la position,
+    revenir en bas (ou Fin) reprend le suivi.
+  Tour terminé en erreur : `Notice(error, …)` visible (contrairement à l'ancien REPL, aucune
+    erreur n'est silencieuse).
+
+Must:
+  Rester pur : aucune I/O, aucune horloge (le temps entre par `Tick`), aucun aléa.
+  Être total : toute séquence d'actions, y compris des événements d'agent dans un ordre inattendu,
+    laisse un état valide.
+  Ne jamais perdre de texte : ce que l'agent a émis reste dans la transcription même si le tour
+    est annulé ou en erreur.
+  Utiliser des opérations vérifiées/saturantes pour tout indice et défilement.
+  Garder les erreurs visibles (Notice), jamais avalées.
+
+Must not:
+  Lancer un tour depuis une saisie vide ou blanche.
+  Interpréter une saisie commençant par `//` comme une commande (échappement : un message
+    commençant par `/` s'écrit `//`).
+
+Scenario: envoi_d_un_message
+  Given une saisie « bonjour » au repos
+  When Entrée
+  Then effet `StartTurn("bonjour")`, état `Running`, élément `User("bonjour")`, saisie vidée, historique mis à jour
+
+Scenario: saisie_vide_n_envoie_rien
+  Given une saisie blanche
+  When Entrée
+  Then aucun effet
+
+Scenario: entree_pendant_un_tour
+  Given l'état `Running`
+  When Entrée avec une saisie
+  Then aucun `StartTurn`, une `Notice` « tour en cours »
+
+Scenario: ctrl_c_annule_le_tour
+  Given l'état `Running`
+  When Ctrl+C
+  Then effet `CancelTurn`, élément `Interrupted`, état `Idle`
+
+Scenario: double_ctrl_c_quitte
+  Given l'état `Idle` et une saisie vide
+  When Ctrl+C deux fois de suite
+  Then effet `Quit` au second
+
+Scenario: ctrl_d_quitte_sur_saisie_vide
+  Given une saisie vide
+  When Ctrl+D
+  Then effet `Quit`
+
+Scenario: jetons_prolongent_le_dernier_bloc
+  Given un bloc assistant en cours
+  When trois `Token` arrivent
+  Then un seul bloc contient la concaténation
+
+Scenario: appel_d_outil_et_resultat
+  Given un `ToolCall` d'id `t1`
+  When le `ToolResult` d'id `t1` arrive
+  Then l'élément porte le résultat, replié
+
+Scenario: suivi_de_la_fin
+  Given une transcription plus haute que l'écran
+  When des jetons arrivent sans que l'utilisateur ait remonté
+  Then le défilement reste en bas ; après un PgUp il ne bouge plus tout seul
+
+Scenario: commande_slash_inconnue
+  Given la saisie `/inconnue`
+  When Entrée
+  Then une `Notice`, aucun tour
+
+Scenario: echappement_double_slash
+  Given la saisie `//ls`
+  When Entrée
+  Then `StartTurn("/ls")`
+
+Scenario: agent_indisponible_visible
+  Given un événement `ToolUnavailable { server: "grafana" }`
+  When il arrive
+  Then une `Notice` d'avertissement mentionnant « grafana »
+
+Scenario: erreur_de_tour_visible
+  Given `TurnFinished(Err(..))`
+  When il arrive
+  Then une `Notice` d'erreur et l'état `Idle`
+
+Scenario: sequence_inattendue
+  Given un `ToolResult` d'un `id` inconnu, puis `Done` sans bloc
+  When ils arrivent
+  Then aucun plantage, l'état reste valide
+
+Scenario: panneau_des_taches
+  Given un outil de tâches qui pose deux éléments
+  When le `ToolCall` correspondant arrive puis Ctrl+T
+  Then le panneau liste deux tâches et devient visible

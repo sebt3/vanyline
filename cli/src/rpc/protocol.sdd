@@ -231,8 +231,8 @@ Exposes:
     NIVEAU RACINE des params (`{"name":"alice","homeSize":"2Gi"}`, PAS
     `{"name":"alice","spec":{…}}` — la clé `spec` imbriquée serait une clé
     inconnue avalée sans erreur, voir Scenario et `[?]`). Aucun des trois specs
-    n'expose de clé racine `name` (les `name` de @vanyline_crds::PvcRef et
-    @vanyline_crds::Toolchain sont imbriqués et n'entrent pas en collision).
+    n'expose de clé racine `name` (le `name` de
+    @vanyline_crds::Toolchain est imbriqué et n'entrent pas en collision).
     Champs requis venant des specs : `ProjectSpec.owner` +
     `ProjectSpec.repoUrl`, `SandboxSpec.project` + `SandboxSpec.branch` —
     absents → erreur @serde du flatten → `VNL-RPC-000` ; @OwnerSpec est

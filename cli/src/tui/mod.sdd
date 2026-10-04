@@ -1,0 +1,129 @@
+Spec: TUI — chat interactif en ratatui
+
+Platform: Rust/vanyline-cli/ratatui/crossterm/tokio
+
+Purpose:
+  Le chat INTERACTIF du CLI (`vanyline` sans sous-commande) devient une interface terminale
+  plein écran en ratatui (décision du 2026-10-04) ; le mode `run <message>` (one-shot, sortie
+  texte ou JSONL) est inchangé. Ce module est l'ossature : initialisation et restauration du
+  terminal, boucle d'événements (clavier, flux d'événements de l'agent, horloge de rafraîchissement,
+  fin de tour) et branchement sur `vanyline_lib::session::run_agent_turn`. L'architecture est
+  « état pur + vue » : ./state.sdd (mise à jour pure, sans I/O), ./view.sdd (rendu pur dans un
+  tampon ratatui), ./editor.sdd (zone de saisie), ./markdown.sdd (rendu du texte de l'agent),
+  ./sink.sdd (pont entre l'agent et la boucle). Seul ce fichier fait de l'I/O terminal, ce qui
+  rend tout le reste testable avec le `TestBackend` de ratatui. Le TUI n'utilise jamais
+  `println!`/`eprintln!` (harnais clippy) : tout passe par le backend ratatui. Fichier neuf,
+  conception.
+
+Owns:
+  ./mod.rs
+
+Can read:
+  ./state.sdd
+  ./view.sdd
+  ./editor.sdd
+  ./markdown.sdd
+  ./sink.sdd
+  ../chat.sdd
+  ../store.sdd
+  /lib/src/session.sdd
+  /lib/src/event.sdd
+  /tooling.sdd
+
+Exposes:
+  @run_tui(session: TuiSession) -> Result<(), CliError> (async) — point d'entrée du mode
+    interactif, appelé par ../chat.rs. @TuiSession : `{ ctx: SessionContext (sink remplacé par
+    @TuiSink), conversation: Conversation, agent: String, workspace_context: Option<String>,
+    workspace_summary: Vec<String>, git_root: Option<PathBuf> }`.
+  @TerminalGuard — garde RAII : active le mode raw et l'écran alternatif à la création, les
+    RESTAURE dans `Drop`, y compris sur panique (un hook de panique restaure le terminal AVANT
+    d'afficher quoi que ce soit) et sur SIGTERM/SIGHUP.
+
+Handles:
+  Prérequis : stdin ET stdout sont des terminaux ; sinon @run_tui n'est pas appelé (../chat.sdd
+  rend l'erreur d'usage). Taille minimale 40×10 ; en dessous, la vue affiche « terminal trop
+  petit » sans planter.
+  Boucle : `tokio::select!` sur (1) `crossterm::event::EventStream` (touches, collage, redimension,
+  souris), (2) le récepteur d'@TuiEvent de @TuiSink (jetons, appels d'outils, erreurs, usage…),
+  (3) la fin de la tâche de tour (résultat), (4) une horloge de 100 ms (animation d'attente) ;
+  chaque événement devient une `Action` appliquée par `state::update`, qui rend des `Effect` exécutés
+  ici (lancer un tour, annuler, sauvegarder, quitter) ; le rendu (`view::render`) suit chaque
+  changement, au plus 30 fois par seconde (les jetons rapprochés sont fusionnés).
+  Tour : lancé dans une tâche `tokio` dédiée avec le @SessionContext (sink = @TuiSink) ; un seul
+  tour à la fois. Annulation : abandon de la tâche (les connexions MCP se ferment à la chute de
+  leur garde) ; un tour annulé n'est PAS persisté. Fin de tour réussie : persistance de la
+  conversation comme avant (message utilisateur, message assistant, `todo`, `store::save_conversation`),
+  puis `git diff --shortstat` dans la barre d'état.
+  Collage : les collages multi-lignes arrivent en un seul événement et entrent dans la zone de
+  saisie sans déclencher d'envoi.
+  Sortie : écran alternatif quitté, terminal restauré, puis UNE ligne finale écrite par le
+  backend (`conversation: <id>` et reprise `vanyline -c`) pour que le terminal garde une trace.
+
+Must:
+  Restaurer le terminal dans TOUS les cas de sortie (normale, erreur, panique, signal).
+  N'utiliser aucune sortie standard directe (`println!`, `print!`, `eprintln!`) : harnais clippy.
+  Garder `state::update` et `view::render` purs et testables sans terminal.
+  N'effectuer aucune arithmétique non vérifiée (`arithmetic_side_effects` en deny) : défilement,
+    largeurs et indices utilisent `saturating_*`/`checked_*` et `u16::try_from`.
+  Ne jamais bloquer la boucle : aucune lecture ou écriture disque synchrone longue, aucun appel
+    réseau dans la boucle (le tour vit dans sa tâche).
+  Persister un tour seulement après succès (même règle que ../chat.sdd).
+
+Must not:
+  Écrire sur stdout/stderr pendant que l'écran alternatif est actif, hors backend ratatui.
+  Lancer deux tours en parallèle.
+  Laisser une panique de rendu laisser le terminal en mode raw.
+
+Tasks:
+  [ ] Dépendances du crate `cli` : `ratatui`, `crossterm` (feature `event-stream`), `futures`,
+    `unicode-width`, `textwrap`, `pulldown-cmark` (rendu markdown) ; vérifier le harnais clippy sur ces
+    usages (casts de coordonnées, `arithmetic_side_effects`).
+  [?] Écran alternatif contre vue « inline » (`Viewport::Inline`) : l'écran alternatif perd le
+    défilement natif du terminal à la sortie (compensé par la ligne finale et `vanyline -c`) ; une
+    vue inline garde la sortie dans le tampon du terminal au prix d'un rendu plus délicat. Départ :
+    écran alternatif.
+  [?] Support de la souris (défilement à la molette) : activé par défaut ? La capture de la souris
+    empêche la sélection native du terminal (Maj+clic la rétablit). Départ : molette activée,
+    `--no-mouse` pour la désactiver.
+  [ ] Convertir chaque Scenario en test (`TestBackend` pour la vue, tests unitaires purs pour
+    l'état).
+
+Scenario: terminal_restaure_apres_sortie_normale
+  Given un @TerminalGuard actif et une sortie par Ctrl-D sur saisie vide
+  When la boucle se termine
+  Then raw mode et écran alternatif sont désactivés
+
+Scenario: terminal_restaure_apres_panique
+  Given un rendu qui panique (test avec un backend factice)
+  When la panique se propage
+  Then le terminal est restauré avant tout message de panique
+
+Scenario: terminal_trop_petit
+  Given une taille de 30×6
+  When la vue est rendue
+  Then un message « terminal trop petit » et aucun plantage
+
+Scenario: un_seul_tour_a_la_fois
+  Given un tour en cours
+  When l'utilisateur appuie sur Entrée avec une saisie
+  Then aucun second tour n'est lancé, un indice « tour en cours » est affiché
+
+Scenario: tour_annule_non_persiste
+  Given un tour en cours avec du texte déjà reçu
+  When l'utilisateur annule (Ctrl-C)
+  Then la tâche est abandonnée, la conversation persistée est inchangée, la transcription marque le tour « interrompu »
+
+Scenario: tour_reussi_persiste
+  Given un tour qui se termine avec succès
+  When la boucle reçoit le résultat
+  Then message utilisateur, message assistant et `todo` sont sauvegardés, la barre d'état affiche le résumé de `git diff`
+
+Scenario: collage_multiligne
+  Given un collage de trois lignes
+  When l'événement arrive
+  Then la saisie contient les trois lignes et aucun tour n'est lancé
+
+Scenario: jetons_fusionnes
+  Given 200 jetons reçus en 10 ms
+  When la boucle les traite
+  Then au plus un rendu par intervalle de rafraîchissement, aucun jeton perdu

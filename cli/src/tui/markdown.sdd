@@ -1,0 +1,80 @@
+Spec: TUI markdown — rendu du texte de l'agent
+
+Platform: Rust/vanyline-cli/pulldown-cmark/ratatui
+
+Purpose:
+  Convertit le texte (markdown) d'une réponse d'agent en lignes stylisées ratatui, déjà
+  RETOURNÉES à la largeur demandée. Sous-ensemble volontairement limité du markdown : ce que
+  les modèles produisent dans un chat — titres, listes, citations, code en ligne et en blocs
+  (avec langage affiché), gras/italique, liens (texte puis URL), règles horizontales. Pur et
+  incrémental-compatible : le texte d'un bloc grandit pendant le streaming, le rendu est
+  rejoué sur le texte courant. Fichier neuf, conception.
+
+Owns:
+  ./markdown.rs
+
+Can read:
+  ./view.sdd
+  ./state.sdd
+
+Exposes:
+  @render(text: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> — pure.
+  @Theme — styles (texte, titre, code en ligne, bloc de code, citation, lien, puce, règle) ;
+    jeu clair/sombre déduit du terminal par ./view.sdd.
+
+Handles:
+  Bloc de code non terminé (flux en cours) : rendu comme un bloc ouvert, jamais comme du texte
+  ordinaire. Ligne plus large que `width` : retour à la ligne par mots (code : coupure dure avec
+  marqueur de continuation). Éléments non pris en charge (tableaux, HTML) : rendus comme texte brut,
+  jamais perdus. Aucune coloration syntaxique en v1 (le langage du bloc est affiché).
+
+Must:
+  Ne jamais paniquer ni perdre de contenu sur un markdown mal formé, vide ou très long.
+  Respecter `width` (aucune ligne ne dépasse la largeur d'affichage Unicode).
+  Garder un coût proportionnel à la taille du texte (rejouable à chaque jeton).
+  Opérer avec des largeurs Unicode (`unicode-width`), opérations vérifiées.
+
+Must not:
+  Interpréter du HTML ni exécuter quoi que ce soit.
+  Émettre des séquences d'échappement terminal brutes présentes dans le texte (elles sont
+    neutralisées : un modèle ne doit pas pouvoir piloter le terminal).
+
+Scenario: titre_et_paragraphe
+  Given `# Titre\n\ntexte`
+  When @render à largeur 40
+  Then une ligne de titre stylée puis une ligne de texte
+
+Scenario: bloc_de_code
+  Given un bloc ```rust … ```
+  When @render
+  Then le langage `rust` est affiché et le contenu a le style de code, sans retour à la ligne par mots
+
+Scenario: bloc_non_termine
+  Given un bloc ``` ouvert sans fermeture
+  When @render
+  Then rendu comme bloc de code ouvert
+
+Scenario: liste
+  Given deux puces et une liste numérotée
+  When @render
+  Then puces `•` et numéros alignés, retour à la ligne indenté
+
+Scenario: largeur_respectee
+  Given un paragraphe de 500 caractères et un texte CJK
+  When @render à largeur 30
+  Then aucune ligne ne dépasse 30 colonnes d'affichage
+
+Scenario: sequences_de_controle_neutralisees
+  Given un texte contenant `\u{1b}[2J`
+  When @render
+  Then aucun caractère d'échappement dans la sortie
+
+Scenario: markdown_malforme
+  Given des `**`, des crochets et des backticks non appariés
+  When @render
+  Then aucun plantage et le texte reste visible
+
+Scenario: tableau_non_supporte
+  Given un tableau markdown
+  When @render
+  Then son texte apparaît en clair, rien n'est perdu
