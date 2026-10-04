@@ -22,6 +22,12 @@ References:
   @crate::builtin::task::TaskTool
 
 Must:
+  Plafond de steps par tour (2026-10-04, ./autonomous.sdd) : @SessionContext porte un champ
+    `max_turns: Option<usize>` ; `Some(n)` remplace pour CE tour la constante `DEFAULT_MAX_TURNS`
+    (100) passée à `default_max_turns` de l'agent rig, `None` (cas général, chat) conserve le
+    comportement actuel. Le dépassement du plafond reste une erreur de rig, que ./autonomous.sdd
+    traduit en `StopReason::StepLimit`. Les hôtes qui construisent un @SessionContext littéral
+    (cli, app) posent `max_turns: None`.
   Assembler le system prompt dans l'ordre fixe : prompt de l'agent, prompts des toolsets
     concaténés, index des skills, contexte workspace.
   Séparer les sections non vides par `"\n\n"` ; une section vide ne produit aucune section
@@ -170,6 +176,9 @@ Handles:
     explicite (drop), arbitrage en `Tasks`.
 
 Tasks:
+  [ ] Ajouter `max_turns` à @SessionContext (prérequis de `StepLimit`, ./autonomous.sdd) et
+    adapter les constructions littérales côté `cli` et `app` ; Scenario : un tour avec
+    `max_turns = Some(2)` s'arrête au plafond, un tour avec `None` garde 100.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
   [?] Serveur MCP référencé mais absent de la config : seul un `tracing::warn` est émis,

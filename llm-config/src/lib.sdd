@@ -1,0 +1,116 @@
+Spec: Lib
+
+Platform: Rust/vanyline-llm-config/sea-orm/miryad-core
+
+Purpose:
+  Crate de la persistance et de l'administration de la configuration LLM, partagée par toutes
+  les applications miryad-core de l'écosystème : providers, profils de modèle, agents, toolsets,
+  skills et serveurs MCP. Aujourd'hui ce code est enfermé dans `vanyline-app` ; or un second
+  service (monitoring branché sur Matrix, cf. `Purpose` de /health/src/lib.sdd pour le pendant
+  qualité) a besoin des MÊMES agents, MCP et profils, gérés au même endroit, avec la même
+  résolution par nom. Le crate livre quatre choses, déplacées d'`app/` SANS changement de
+  comportement : (1) les entités SeaORM et leurs politiques RBAC (`MiryadResource`),
+  (2) leurs migrations, avec une table de suivi PROPRE au crate, (3) `PgConfigStore`,
+  l'implémentation Postgres du trait `ConfigStore` de `vanyline-cfgstore`, (4) les handlers
+  REST de CRUD de ces ressources, montables par chaque application. Les écrans d'édition
+  côté frontend sont déjà réutilisables (`@vanyline/ui`, port `ConfigRepo` injecté).
+  Fichier neuf, conception ; chaque spec de fichier déplacé suit son fichier, contenu inchangé.
+
+Owns:
+  ./lib.rs
+
+Can modify:
+  ../Cargo.toml
+
+Can read:
+  /app/src/config_store.sdd
+  /app/src/db/entities/llm_providers.sdd
+  /app/src/db/entities/model_profiles.sdd
+  /app/src/db/entities/agents.sdd
+  /app/src/db/entities/toolsets.sdd
+  /app/src/db/entities/skills.sdd
+  /app/src/db/entities/mcp_servers.sdd
+  /app/src/api/llm_providers.sdd
+  /app/src/api/mcp_servers.sdd
+  /app/src/migration/mod.sdd
+  /docs/architecture.md
+  /cfgstore/src/lib.sdd
+
+Structure:
+  Périmètre déplacé depuis `app/` (liste de référence, à confirmer à l'implémentation) :
+    entités — `llm_providers`, `model_profiles`, `agents`, `toolsets`, `skills`, `mcp_servers` ;
+    migrations — `m20260825_000001` à `000006` (skills, toolsets, llm_providers, mcp_servers,
+      model_profiles, agents) ;
+    `PgConfigStore` (aujourd'hui `app/src/config_store.rs`) ;
+    handlers REST — `llm_providers`, `mcp_servers` et les ressources de même nature.
+  Reste dans `app/` : tout ce qui est propre au produit vanyline — `conversations`, `messages`,
+    `chat_contexts`, `owner_links`, les handlers `projects`/`sandboxes`/`owners`/`local_tools`,
+    la WS de chat, le client K8s.
+
+Exposes:
+  Une entrée d'intégration par application : migrations du crate (à lancer avec sa table de
+  suivi `seaql_migrations_llm_config`), routeur REST des ressources (à monter sous le préfixe
+  de l'app), `PgConfigStore::new(db)`. L'app consommatrice garde la main sur l'auth
+  (`AuthUser` de miryad-core) : le crate ne construit ni session, ni OIDC.
+
+Must:
+  Conserver à l'identique les noms de tables (`vanyline_*`), les politiques RBAC (`LlmProvider`
+    et `McpServer` globaux : lecture `Public`, écriture `AdminOnly` ; `ModelProfile`, `Toolset`,
+    `Skill`, `AgentRecord` : `OwnerOnly`) et la résolution par nom de `PgConfigStore` — le
+    déplacement est un refactor, pas un changement de contrat.
+  Suivre ses migrations dans une table distincte de celles de miryad-core et de l'app (même
+    discipline que `seaql_migrations_app` aujourd'hui) pour qu'une application puisse composer
+    ses migrations et celles du crate sans collision.
+  Implémenter `ConfigStore` en lecture seulement, comme aujourd'hui (les écritures passent par
+    les handlers REST, jamais par le trait).
+  Dépendre de `vanyline-cfgstore` (domaine, trait) et de miryad-core, jamais de `vanyline-app`.
+
+Must not:
+  Dépendre de `vanyline-lib`, de `kube`, de la sandbox ou du controller : ce crate persiste de
+    la configuration, il ne fait ni inférence ni orchestration Kubernetes.
+  Embarquer une migration ou une entité de chat ou de projet (frontière avec `app/`).
+
+Tasks:
+  [-] TRANCHÉ (2026-10-04) : le service de monitoring AURA besoin d'éditer la configuration des
+    agents/MCP/profils : ce crate est donc pertinent (le `FsConfigStore` sur ConfigMap reste
+    possible pour démarrer, mais n'est pas la cible). Il vit dans le workspace vanyline, SANS
+    extraction vers un dépôt dédié à court terme : on pose seulement des interfaces propres
+    (aucune dépendance à `vanyline-app`, `kube`, sandbox ou controller — cf. `Must not`) pour
+    que l'extraction/publication reste possible plus tard.
+  [?] Préfixe de tables : conserver `vanyline_*` (aucune migration de données) ou nommer
+    neutre pour un service non-vanyline ? Aucune donnée réelle à préserver aujourd'hui
+    (cf. architecture.md, « Stockage »), c'est donc le bon moment si l'on veut renommer.
+  [?] `PgConfigStore` renvoie `CfgStoreError` ; `app/src/error.rs` porte le `From` vers
+    `AppError` : confirmer que ce `From` reste dans `app/` et que le crate n'expose que
+    `CfgStoreError`.
+  [ ] Déplacer fichier par fichier, avec son `.sdd`, en gardant la batterie de tests verte à
+    chaque étape ; amender /app/src/*.sdd et /vanyline.sdd (liste des crates) au moment du
+    déplacement, pas avant.
+  [ ] État du dépôt : plusieurs specs d'`app/` visées sont modifiées localement et non
+    commitées (`config_store.sdd`, `db/entities/*.sdd`, `api/llm_providers.sdd`,
+    `api/mcp_servers.sdd`) — commiter ou arbitrer ce travail avant tout déplacement.
+
+Done when:
+  `vanyline-app` consomme le crate sans changement observable (tests et API REST identiques),
+  et un second binaire peut monter les mêmes ressources et résoudre agents/MCP via
+  `PgConfigStore`.
+
+Scenario: app_inchangee_apres_extraction
+  Given la suite de tests d'`app/` d'avant l'extraction
+  When elle est rejouée sur `app/` consommant `vanyline-llm-config`
+  Then tous les tests passent sans modification de leurs attentes
+
+Scenario: migrations_sans_collision
+  Given une base où les migrations de miryad-core et d'`app/` sont déjà appliquées
+  When les migrations de `vanyline-llm-config` s'appliquent
+  Then elles suivent leur propre table `seaql_migrations_llm_config` et ne touchent pas aux autres
+
+Scenario: resolution_par_nom_identique
+  Given les mêmes lignes en base
+  When `PgConfigStore` résout un agent par nom avant et après l'extraction
+  Then le même agent (profil, provider, toolsets) est rendu
+
+Scenario: second_consommateur
+  Given un binaire de test qui ne dépend ni de `vanyline-app` ni de `kube`
+  When il monte le routeur REST et `PgConfigStore` du crate
+  Then le CRUD d'un provider et la résolution d'un agent fonctionnent

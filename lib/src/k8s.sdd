@@ -25,6 +25,14 @@ Can read:
   /docs/architecture.md
 
 Must:
+  UN OWNER = UN NAMESPACE (2026-10-04, /controller/src/namespace.sdd) : le client retient
+    `app_namespace` (le namespace d'application : CR @Owner, @Application) et résout le namespace
+    d'un Owner par `vanyline_crds::owner_namespace_name(app_namespace, owner)` — sans appel
+    cluster. Les opérations sur @Project et @Sandbox (CRUD, patch de suspension, watch, URL
+    internes de sandbox `sandbox-{name}.{namespace de l'Owner}.svc`) prennent le NOM D'OWNER
+    en paramètre et s'exécutent dans son namespace ; les opérations @Owner et @Application
+    s'exécutent dans `app_namespace`. `watch_sandboxes` est par namespace d'Owner (un flux par
+    Owner suivi), jamais cluster-wide.
   Compiler le module entier uniquement sous la feature cargo `k8s` (gating
     `#[cfg(feature = "k8s")] pub mod k8s;` dans ./lib.rs) ; la feature active `kube`,
     `kube-runtime`, `vanyline-crds`, `k8s-openapi` (../Cargo.toml). Les variantes
@@ -74,7 +82,24 @@ Must:
   Dériver @WatchEvent de @Clone et @Debug uniquement (ni @PartialEq, ni sérialisation) et
     ne jamais laisser filtrer le type @kube_runtime::watcher::Event hors du module.
 
+  Obtenir le jeton d'un Owner par @VnlK8sClient::owner_token : lire `owner.status.serviceAccount`
+    (erreur `K8sApiError` explicite si l'Owner ou son SA n'existe pas encore, jamais un nom
+    reconstruit à la main), demander à l'apiserver un jeton par l'API TokenRequest
+    (`POST …/serviceaccounts/{sa}/token`) avec `audiences = [@OWNER_TOKEN_AUDIENCE]` et
+    `expirationSeconds = 900` (l'apiserver impose un minimum de 600), SANS `boundObjectRef`
+    (v1). Le jeton est mis en CACHE par Owner (map partagée par tous les clones du client) et
+    réutilisé tant qu'il reste plus de 120 s de validité (@OWNER_TOKEN_REFRESH_MARGIN_SECS) ;
+    sinon un nouveau jeton est demandé et remplace l'ancien. Le cache n'est jamais persisté.
+    Ce jeton est l'unique credential accepté par une sandbox (/sandbox/src/auth.sdd) ; son
+    appelant (`app`, service central de revue, cli) en est responsable : il ne le journalise
+    pas, ne le renvoie à aucun navigateur, et vérifie AVANT de le demander que son propre
+    utilisateur a le droit d'agir en tant que cet Owner.
+
 Must not:
+  Journaliser un @OwnerToken ou son contenu à quelque niveau que ce soit, l'inclure dans une
+    erreur, ou l'exposer par @Debug/@Display (le @Debug masque la valeur).
+  Demander à l'apiserver un jeton pour un SA autre que celui que `owner.status.serviceAccount`
+    désigne, ou avec une audience différente de @OWNER_TOKEN_AUDIENCE.
   Ré-encoder le `raw_path` dans @VnlK8sClient::sandbox_git_url : décoder puis ré-encoder
     perd la distinction entre un `%2F` légitime dans un segment (nom de branche contenant
     `/`) et un vrai séparateur de chemin. Le @encode_git_path de ./lib.rs n'est plus
@@ -96,7 +121,8 @@ Depends on:
   `kube` — @kube::Config::infer, @kube::Client, @kube::Api (namespaced, list/get/create/
     delete/patch), @Patch/@PatchParams/@ListParams/@PostParams/@DeleteParams, @kube::Resource.
   `kube-runtime` — @kube_runtime::watcher et ses @Event.
-  `k8s-openapi` — @NamespaceResourceScope (bound des helpers génériques).
+  `k8s-openapi` — @NamespaceResourceScope (bound des helpers génériques), @ServiceAccount et
+    @TokenRequest (`authentication.k8s.io/v1`), `chrono` — horodatage d'expiration.
   `futures` — @Stream, @StreamExt::filter_map.
   `serde` + `serde_json` — bounds de (de)sérialisation des helpers, construction du merge patch.
   ./error.rs — @VnyError::K8sConfigError (`"VNL-K8S-001"`) et @VnyError::K8sApiError
@@ -124,6 +150,13 @@ Exposes:
   @VnlK8sClient::sandbox_git_url — `pub` : URL interne du proxy git (`…/git/{raw_path}`,
     `raw_path` pré-encodé et validé par l'appelant).
   @VnlK8sClient::watch_sandboxes — `pub` : stream boxé `Send` de @WatchEvent de @Sandbox.
+  @VnlK8sClient::owner_token(owner: &str) -> `Result<@OwnerToken, VnyError>` — `pub async` :
+    jeton d'authentification de l'Owner auprès de SES sandboxes (voir `Must`).
+  @OwnerToken — `pub struct { pub token: String, pub expires_at: chrono::DateTime<Utc> }` ;
+    son @Debug MASQUE `token` (`OwnerToken { token: "<redacted>", expires_at: … }`), aucun
+    @Display, jamais sérialisé.
+  @OWNER_TOKEN_AUDIENCE — `pub const &str = "vanyline-sandbox"` (même valeur que
+    `token_audience` par défaut de /sandbox/src/config.sdd).
   @list / @get / @create / @delete — fonctions privées du module, génériques sur les
     ressources namespaced ; leur comportement est contractuel : tout le CRUD public n'est
     que leur application aux trois CRD.
@@ -189,8 +222,25 @@ Handles:
   Namespace sans aucune ressource : list_X retourne le vecteur vide — pas d'erreur.
 
 Tasks:
+  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04) : signatures `*_project`, `*_sandbox`,
+    `sandbox_*_url`, `watch_sandboxes`, `owner_token` (SA lu dans le namespace de l'Owner) ; le
+    champ `namespace` unique devient `app_namespace` ; les Scenario d'intégration passent à deux
+    namespaces ; `deploy/` : ClusterRole `vanyline-app-owner-scope` (voir namespace.sdd).
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
+  [ ] Implémenter @VnlK8sClient::owner_token (cache par Owner partagé entre clones, marge de
+    120 s). `kube-client` 4.x expose `Api::<ServiceAccount>::create_token_request` (vérifié dans
+    les sources locales, 4.0.0 et 4.2.0) : l'utiliser, pas de `create_subresource` à la main.
+  [ ] RBAC à fournir par le déploiement (hors de ce fichier, `/deploy/`) : le ServiceAccount
+    de `app` (et de tout autre appelant de @VnlK8sClient::owner_token) doit pouvoir `create`
+    la ressource `serviceaccounts/token` dans le namespace des Owners. C'est le pouvoir le plus
+    sensible de l'app : il donne accès à toutes les sandboxes du namespace ; sa compromission
+    est du même ordre qu'aujourd'hui (l'app relaie déjà les identités).
+  [ ] Le cli (`vanyline run --toolbox`) appelait la sandbox sans identité réelle (modes de
+    contournement) : il obtient désormais un jeton par @VnlK8sClient::owner_token avec le
+    contexte kubeconfig COURANT de l'utilisateur (décision 2026-10-04) ; ce contexte doit
+    pouvoir `create` `serviceaccounts/token` pour le SA de l'Owner. À reporter dans les specs
+    de `cli/`.
   [?] Le module de test de ./k8s.rs teste @encode_git_path, fonction définie dans ./lib.rs
     et indépendante de la feature `k8s` ; comme le module est gated `#[cfg(feature =
     "k8s")]`, ces tests ne s'exécutent que si la feature est activée dans le graphe de
@@ -357,3 +407,29 @@ Scenario: watch_erreur_en_item_sans_terminer_stream
   When la coupure produit une erreur interne du watcher
   Then un @WatchEvent::Error portant le message de l'erreur est émis sur le stream
   And le stream n'est pas terminé par la perte de connexion
+
+Scenario: owner_token_demande_a_l_apiserver_avec_la_bonne_audience
+  Given un Owner `alice` dont `status.serviceAccount` vaut `owner-alice` (test d'intégration cluster)
+  When @VnlK8sClient::owner_token("alice")
+  Then un jeton est rendu, son `sub` vaut `system:serviceaccount:<ns>:owner-alice`, son `aud` contient
+    `vanyline-sandbox` et son `expires_at` est postérieur d'au moins 600 s
+
+Scenario: owner_token_cache_par_owner
+  Given un jeton déjà obtenu pour `alice`, encore valide plus de 120 s
+  When @VnlK8sClient::owner_token("alice") est rappelé, y compris sur un clone du client
+  Then le MÊME jeton est rendu sans nouvel appel à l'apiserver
+
+Scenario: owner_token_renouvele_pres_de_l_expiration
+  Given un jeton en cache dont il reste moins de 120 s de validité
+  When @VnlK8sClient::owner_token("alice")
+  Then un nouveau jeton est demandé et remplace l'ancien
+
+Scenario: owner_token_owner_sans_service_account
+  Given un Owner dont `status.serviceAccount` est absent
+  When @VnlK8sClient::owner_token
+  Then `Err` @VnyError::K8sApiError explicite, aucune demande de jeton n'est émise
+
+Scenario: owner_token_debug_masque_le_jeton
+  Given un @OwnerToken portant la valeur `secret-jwt`
+  When il est formaté en @Debug
+  Then la chaîne ne contient pas `secret-jwt`

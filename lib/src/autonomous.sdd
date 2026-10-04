@@ -1,0 +1,150 @@
+Spec: Autonomous
+
+Platform: Rust/vanyline-lib/rig-core/tokio
+
+Purpose:
+  Tâche d'agent AUTONOME : exécuter un agent configuré (même résolution par nom que le chat —
+  agent → profil → provider → toolsets/MCP/skills) sur un prompt unique, SANS humain, avec des
+  bornes dures, et rendre un résultat exploitable par un programme (texte final, appels d'outils,
+  consommation, raison d'arrêt). C'est le point d'entrée headless de `vanyline-lib` : consommé
+  par le kind de step `agent_turn` du moteur de workflow (miryad-core) pour le futur service de
+  monitoring, et par tout travail de fond du même genre. Ce n'est PAS un second moteur : il
+  enveloppe @session::run_agent_turn (même assemblage de prompt, mêmes outils, mêmes builtins),
+  ce qui est la raison d'être de la réutilisation — un seul code de gestion des agents et des
+  MCP. Il ajoute ce que le chat n'a pas besoin d'avoir : un sink collecteur, un timeout, un
+  plafond de steps, une sortie structurée. Fichier neuf, conception.
+
+Owns:
+  ./autonomous.rs
+
+Can modify:
+  ./lib.rs
+
+Can read:
+  ./session.sdd
+  ./event.sdd
+  ./error.sdd
+  ./prefixed_mcp.sdd
+  ../../cfgstore/src/domain.sdd
+  ../../cfgstore/src/store.sdd
+
+Exposes:
+  @TaskLimits { timeout: Duration, max_steps: Option<usize> } — `Default` : timeout 300 s,
+    `max_steps` `None` (= défaut de session).
+  @TaskOptions { limits: TaskLimits, workspace_context: Option<String>,
+    extra_mcp: Vec<(McpServer, McpSelection)>, local_tools: HashMap<String, Arc<dyn ToolDyn>>,
+    model_override: Option<String>, subagent_depth_max: u8 } — `Default` : limites par défaut,
+    pas de contexte, ni MCP forcés ni outils locaux, pas d'override, profondeur 1 (décision
+    2026-10-04 : sans humain pour arrêter une récursion, plus strict que le chat).
+  @StopReason — enum : `Completed` (le modèle a terminé), `TimedOut` (timeout atteint),
+    `StepLimit` (plafond de steps atteint).
+  @TokenUsage { input_tokens: u64, output_tokens: u64 } — somme des événements `Usage` du tour,
+    sous-agents inclus.
+  @TaskOutcome { stop: StopReason, response_text: String, tool_calls: Vec<ToolCallRecord>,
+    usage: TokenUsage, unavailable_servers: Vec<String> } — `unavailable_servers` : serveurs
+    MCP annoncés indisponibles (événements `tool_unavailable`) pendant la tâche.
+  @run_agent_task(store: Arc<dyn ConfigStore>, agent: &str, prompt: &str, options: TaskOptions)
+    -> Result<TaskOutcome, VnyError> (async).
+  @extract_json(text: &str) -> Option<serde_json::Value> — pure.
+  @CollectingSink — implémente @EventSink : accumule les événements en mémoire (Mutex interne).
+
+Handles:
+  @run_agent_task construit un @SessionContext (store fourni, @CollectingSink, `local_tools`,
+  `extra_mcp`, `model_override`, `subagent_depth_max`, état todo vierge), appelle
+  @run_agent_turn avec un historique VIDE, enveloppé par `tokio::time::timeout`. Les événements
+  collectés alimentent le résumé (tool_calls, usage, serveurs indisponibles).
+  Timeout : à l'expiration le futur du tour est abandonné (les connexions MCP se ferment à la
+  chute de leur garde, cf. architecture « Cycle de vie des connexions MCP ») ; le résultat est
+  `Ok` avec `stop: TimedOut` et le TEXTE PARTIEL déjà collecté — jamais une erreur : la trace de
+  ce que l'agent a fait avant d'être coupé est la donnée utile.
+  Plafond de steps : si `max_steps` est `Some(n)`, il remplace le plafond de session pour CE
+  tour ; l'atteindre rend `Ok` avec `stop: StepLimit` (erreur de dépassement de tours de rig
+  traduite, pas propagée).
+  @extract_json : le premier bloc de code clôturé ```json … ``` dont le contenu est un JSON
+  valide ; à défaut, le texte entier (trim) s'il est un JSON valide ; sinon `None`.
+
+Raises:
+  Les erreurs de RÉSOLUTION et de provider remontent telles quelles de @run_agent_turn
+  (`AgentNotFound`, `UnknownReference`, `LlmError`, `McpConnectError`…) : la tâche n'a produit
+  aucun résultat exploitable, l'appelant (step de workflow) décide du rejeu.
+
+Must:
+  Passer par @run_agent_turn pour tout (jamais de seconde implémentation de la boucle d'agent,
+    d'assemblage du prompt ou de connexion MCP).
+  Toujours terminer : un timeout est exigé (`TaskLimits::default` en fournit un) — aucun mode
+    « sans borne ».
+  Rendre l'indisponibilité d'un MCP visible dans @TaskOutcome : un verdict d'agent obtenu sans
+    ses outils d'observabilité ne doit pas passer pour un verdict informé.
+  Rester déterministe en dehors du modèle : mêmes événements, même résumé.
+
+Must not:
+  Persister quoi que ce soit (conversation, historique) : l'appelant garde son propre journal
+    (le moteur de workflow journalise déjà le résultat du step).
+  Interpréter la réponse : @extract_json localise du JSON, ne le valide contre aucun schéma.
+  Supposer un humain : aucun `EventSink` interactif, aucune confirmation d'outil.
+
+Tasks:
+  [ ] Plafond de steps par tour : `DEFAULT_MAX_TURNS` (100) est une constante de ./session.rs.
+    Il faut un champ optionnel `max_turns` dans @SessionContext (spec ./session.sdd à amender,
+    touche les constructions littérales côté cli/app) — prérequis de `StepLimit`.
+  [-] TRANCHÉ (2026-10-04) : sortie structurée — le format varie d'un usage à l'autre ; la
+    bibliothèque PERMET (sans l'imposer) d'analyser le dernier message de l'agent comme du JSON
+    (@extract_json, optionnel : l'appelant décide de l'appeler et du schéma attendu). Un schéma
+    imposé au modèle (structured output du provider) est hors v1.
+  [-] TRANCHÉ (2026-10-04) : budget en tokens HORS v1 (modèles locaux uniquement pour l'instant) ;
+    `usage` reste rapporté dans @TaskOutcome, sans plafond.
+
+Scenario: sink_collecte_les_evenements
+  Given un @CollectingSink et les événements Token("a"), Token("b"), ToolCall, ToolResult, Usage{10,5}, Done
+  When le résumé est calculé
+  Then `response_text` vaut "ab", un @ToolCallRecord résolu, usage {10,5}
+
+Scenario: usage_somme_sous_agents
+  Given Usage{10,5} puis un SubagentEvent portant Usage{3,2}
+  When le résumé est calculé
+  Then usage {13,7}
+
+Scenario: serveur_indisponible_remonte
+  Given un événement ToolUnavailable{server:"grafana"}
+  When le résumé est calculé
+  Then `unavailable_servers` contient "grafana"
+
+Scenario: timeout_rend_le_partiel
+  Given un tour qui émet du texte puis ne se termine pas avant `timeout`
+  When @run_agent_task
+  Then `Ok` avec `stop: TimedOut` et le texte déjà émis
+
+Scenario: step_limit_traduit
+  Given un tour qui dépasse `max_steps`
+  When @run_agent_task
+  Then `Ok` avec `stop: StepLimit`, pas d'erreur
+
+Scenario: agent_inconnu
+  Given un store sans l'agent demandé
+  When @run_agent_task
+  Then `Err` de résolution, aucun appel réseau
+
+Scenario: historique_vierge
+  Given deux appels successifs avec le même agent
+  When le second s'exécute
+  Then il ne voit rien du premier (aucun état partagé)
+
+Scenario: extract_json_bloc_clos
+  Given le texte "Verdict :\n```json\n{\"notify\":true}\n```\nfin"
+  When @extract_json
+  Then Some({"notify":true})
+
+Scenario: extract_json_texte_entier
+  Given le texte `{"notify":false}`
+  When @extract_json
+  Then Some({"notify":false})
+
+Scenario: extract_json_absent
+  Given le texte "pas de json ici"
+  When @extract_json
+  Then None
+
+Scenario: extract_json_bloc_invalide_puis_valide
+  Given un premier bloc ```json invalide et un second valide
+  When @extract_json
+  Then la valeur du second bloc
