@@ -6,6 +6,13 @@
 #   kubectl apply --dry-run=client -f deploy/sandbox/sandbox-test.yaml   # validation schéma
 #   kubectl apply -f deploy/sandbox/sandbox-test.yaml                    # déploiement réel
 #   kubectl -n media-station port-forward svc/vanyline-sandbox-test 3000:3000
+#
+# Authentification (specs du 2026-10-04) : la sandbox n'accepte QUE le jeton du ServiceAccount de
+# son Owner. Pour ce pod de test l'« Owner » est le SA `default` de media-station
+# (VNL_OWNER_SUBJECT ci-dessous) ; obtenir un jeton d'accès :
+#   kubectl -n media-station create token default --audience vanyline-sandbox --duration 10m
+# puis `Authorization: Bearer <jeton>` sur le port 3000. Aucun mode sans authentification n'existe.
+# /health et /metrics sont sur le port d'exploitation 9090 (non publié, sondes kubelet).
 #   kubectl -n media-station logs -f deploy/vanyline-sandbox-test  (ou pod/...)
 #   kubectl -n media-station delete -f deploy/sandbox/sandbox-test.yaml
 apiVersion: v1
@@ -35,13 +42,18 @@ spec:
   containers:
     - name: sandbox
       image: ghcr.io/sebt3/vanyline-sandbox:0.1.0
-      args: ["--no-auth"]
       ports:
         - name: mcp
           containerPort: 3000
-        # Le port metrics (9090) n'est délibérément pas exposé ici, ni par le
-        # Service ci-dessous — cf. commentaire sandbox/src/config.rs.
+        # Port d'exploitation (/health, /metrics) : délibérément absent du Service ci-dessous
+        # (cf. sandbox/src/config.sdd, `ops_listen`).
+        - name: ops
+          containerPort: 9090
       env:
+        - name: VNL_OWNER_SUBJECT
+          value: "system:serviceaccount:media-station:default"
+        - name: VNL_TOKEN_ISSUER
+          value: "https://kubernetes.default.svc.cluster.local"
         - name: VNL_SANDBOX_ROOT
           value: "/workspace"
         # Toolchains via image volumes — PATH augmenté (pas remplacé),
@@ -65,13 +77,13 @@ spec:
       readinessProbe:
         httpGet:
           path: /health
-          port: 3000
+          port: ops
         initialDelaySeconds: 5
         periodSeconds: 10
       livenessProbe:
         httpGet:
           path: /health
-          port: 3000
+          port: ops
         initialDelaySeconds: 10
         periodSeconds: 30
       resources:

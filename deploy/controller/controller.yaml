@@ -8,7 +8,14 @@
 #   kubectl -n media-station logs -f deploy/vanyline-controller
 #   kubectl -n media-station delete -f deploy/controller/controller.yaml
 #
-# Le controller watche les trois CRDs (Owner/Project/Sandbox) sur TOUT le
+# État cible (specs du 2026-10-04) : un Owner = un namespace (`<app-ns>-<owner>`), créé par le
+# controller ; les droits de l'app dans ce namespace passent par un RoleBinding vers le
+# ClusterRole `vanyline-app-owner-scope` (défini plus bas) ; Restate est un StatefulSet
+# sous-ressource de l'Application. Le fichier crds.yaml est GÉNÉRÉ depuis le code : il doit être
+# régénéré (generate-crds.sh) après le retrait de `existingPvc` (Owner et Project) et l'ajout de
+# `spec.restate` / `status.namespace`.
+#
+# Le controller watche les quatre CRDs (Owner/Project/Sandbox/Application) sur TOUT le
 # cluster (Api::all dans owner.rs/project.rs/sandbox.rs) — d'où ClusterRole +
 # ClusterRoleBinding plutôt que Role/RoleBinding namespacés, même si les CRDs
 # elles-mêmes sont namespacées (une seule instance du controller pour tout le
@@ -36,6 +43,23 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "serviceaccounts", "pods", "services", "secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Namespaces d'Owner (un Owner = un namespace, controller/src/namespace.sdd) : création, labels de
+  # propriété, suppression par finalizer. Le controller ne supprime jamais un namespace qui ne porte
+  # pas les labels de l'Owner (garde applicative).
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Délégation à `app` du droit de demander des jetons de SA (TokenRequest) : K8s interdit de
+  # lier un rôle dont on ne détient pas les droits (anti-escalade), le controller doit donc
+  # lui-même pouvoir créer des jetons de ServiceAccount pour pouvoir lier le ClusterRole
+  # `vanyline-app-owner-scope`.
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
+  # Moteur de workflow : StatefulSet Restate, sous-ressource de l'Application.
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: ["apps"]
     resources: ["deployments"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
@@ -45,14 +69,38 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies", "ingresses"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Role/RoleBinding namespacés du Deployment `app` de chaque Application (accès
-  # de VnlK8sClient aux CRs owners/projects/sandboxes/applications de son propre
-  # namespace) — pas d'escalade de privilèges : le controller possède déjà, via
-  # les règles vanyline.solidite.fr ci-dessus, un sur-ensemble cluster-wide des
-  # droits qu'il délègue ici en scope namespace.
+  # Role/RoleBinding namespacés : Role de l'app dans le namespace d'application (owners,
+  # applications) et RoleBinding `vanyline-app` dans chaque namespace d'Owner. Pas d'escalade de
+  # privilèges : le controller possède déjà, via les règles ci-dessus, un sur-ensemble des droits
+  # qu'il délègue (y compris serviceaccounts/token) ; `bind` est ajouté explicitement pour le
+  # ClusterRole délégué.
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "rolebindings"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["vanyline-app-owner-scope"]
+    verbs: ["bind"]
+---
+# Droits délégués à l'app DANS le namespace d'un Owner (jamais cluster-wide) : le controller crée
+# dans chaque namespace d'Owner un RoleBinding `vanyline-app` vers ce ClusterRole
+# (controller/src/namespace.sdd). L'app ne peut ainsi demander des jetons que pour les SA de SES
+# Owners, et ne voit que les projets/sandboxes de ses Owners.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: vanyline-app-owner-scope
+rules:
+  - apiGroups: ["vanyline.solidite.fr"]
+    resources: ["projects", "sandboxes"]
+    verbs: ["get", "list", "watch", "create", "delete", "patch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get"]
+  # Jeton d'authentification de l'Owner auprès de sa sandbox (audience `vanyline-sandbox`).
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    verbs: ["create"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -94,6 +142,18 @@ spec:
               value: "v0.0.11-alpha.5"
             - name: APP_IMAGE_TAG
               value: "v0.0.11-alpha.5"
+            # Optionnels (specs du 2026-10-04), à activer à l'implémentation correspondante :
+            # - SA_ISSUER : surcharge de l'`iss` des jetons de SA ; par défaut le controller le
+            #   découvre via /.well-known/openid-configuration de l'apiserver.
+            # - VNL_OPS_ALLOWED_NAMESPACES : restreint la NetworkPolicy du port d'exploitation
+            #   (`/health`, `/metrics`) de la sandbox à ces namespaces (virgules) ; absent = tout le cluster.
+            # - RESTATE_IMAGE : image du StatefulSet Restate d'une Application qui porte `spec.restate`.
+            #- name: SA_ISSUER
+            #  value: "https://kubernetes.default.svc.cluster.local"
+            #- name: VNL_OPS_ALLOWED_NAMESPACES
+            #  value: "monitoring"
+            #- name: RESTATE_IMAGE
+            #  value: "docker.restate.dev/restatedev/restate:latest"
             - name: RUST_LOG
               value: "info,vanyline_controller=debug"
           resources:

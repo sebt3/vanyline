@@ -12,3 +12,10 @@ data:
   # OIDC_REDIRECT_URL matches the ingress hostname + /auth/callback
   OIDC_REDIRECT_URL: "https://vanyline.kydah.fr/auth/callback"
   OIDC_SCOPES: "openid,email,profile,media-station-vanyline"
+  # Moteur de workflow (optionnel, specs du 2026-10-04) : posées automatiquement par le controller
+  # sur le Deployment d'une Application qui porte `spec.restate` ; à renseigner ici seulement pour
+  # un déploiement manuel de l'app.
+  # VNL_RESTATE_ADMIN_URL: "http://vanyline-restate.media-station.svc:9070"
+  # VNL_RESTATE_INGRESS_URL: "http://vanyline-restate.media-station.svc:8080"
+  # VNL_WORKFLOW_LISTEN: "0.0.0.0:9080"
+  # VNL_WORKFLOW_DEPLOYMENT_URL: "http://vanyline.media-station.svc:9080"
