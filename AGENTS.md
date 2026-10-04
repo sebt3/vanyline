@@ -68,7 +68,15 @@ cargo fmt --all -- --check
 2026-09-02 : unwraps de test verts en local, rouges en CI). `cargo fmt --all -- --check` est
 obligatoire avant de considérer une tâche terminée.
 
-### Frontend + packages + extension
+### Specs
+
+```bash
+specdd lint        # doit rendre « 0 errors, 0 warnings » (binaire npm global : ~/.npm-global/bin/specdd)
+```
+
+Une spec créée ou modifiée doit passer `specdd lint` avant de servir de base à une implémentation.
+
+### Frontend + packages (+ extension en cours de retrait)
 
 ```bash
 # packages partagés d'abord (le frontend en dépend via alias source)
@@ -79,12 +87,15 @@ npm run build --workspace=frontend   # vue-tsc -b && vite build
 npm run test  --workspace=frontend   # vitest run
 npm run check --workspace=frontend   # vue-tsc --noEmit
 
-# extension VS Code (package `vanyline` dans ext/)
+# extension VS Code (package `vanyline` dans ext/) — SUPPRIMÉE (2026-10-04) : ces trois commandes
+# et le job CI `ext` restent tant que `ext/` existe ; à retirer ensemble (tâche de /vanyline.sdd)
 npm run check --workspace=vanyline && npm run test --workspace=vanyline && npm run build --workspace=vanyline
 ```
 
 Job CI `tsrs` (types ts-rs à jour) : `cargo test -p vanyline-lib --features ts-rs`
 puis `git diff --exit-code -- packages/protocol/src/generated/`.
+(À étendre à `cargo test -p vanyline-health --features ts-rs` quand le crate `health` existera —
+tâche de `.github/workflows/workflows.sdd`.)
 
 ## Git
 
@@ -96,68 +107,95 @@ puis `git diff --exit-code -- packages/protocol/src/generated/`.
 
 # Contexte architectural
 
+> **État cible.** Cette section décrit l'architecture visée, telle que les specs `.sdd` la
+> contractent (décisions du 2026-10-04). Là où le code diffère encore, la migration est tracée
+> dans les `Tasks` de `vanyline.sdd` et des specs concernées ; en cas de divergence, la spec fait
+> foi et le code est à aligner.
+
 ## Nature du projet
 
 Environnement de développement cloud-native, multi-utilisateur, piloté par l'IA pour
 Kubernetes. Monorepo. Langages : Rust (un seul workspace cargo racine) + TypeScript/Vue 3
-(frontend + packages partagés `@vanyline/protocol` et `@vanyline/ui` + extension VS Code).
-Licence : BSD-3.
+(frontend + packages partagés `@vanyline/protocol` et `@vanyline/ui`). L'extension VS Code
+(`ext/`) est supprimée. Licence : BSD-3.
+
+Deux piliers au-delà de l'IDE web : **la santé du code** (même vert en local et au central,
+`vanyline-health`) et **les workflows** (moteur de miryad-core sur Restate, nœuds agent / rhai /
+shell / gate de santé). Les agents (configuration, projet, sandbox) agissent par MCP avec les
+droits de l'utilisateur.
 
 ## Architecture
 
 ```
-[ vanyline frontend ]          [ kydah-code (dans code-server K8s) ]
-        │                                      │
-   HTTP REST (app)                    MCP (K8s service interne)
-    WS via ticket (sandbox)            + NetworkPolicy (SA TokenReview
-         │                               jamais implémenté, cf. note)
-         ▼                                      │
-      [ app ]◄──────ticket WS (JWT)─────────────┤
-  auth · config · K8s client                   ▼
-  relais de ticket                    [ sandbox pod ]
-                                       WS (ticket) · MCP
-                                       Rust server
-                                       + toolchains OCI image volumes
-                                       + base : cc/ld · libc-dev · make
-                                       + git · curl · pkg-config · vim
+[ navigateur : frontend ]                       [ kydah-code · cli · opérateur ]
+    │ REST + WS chat (cookie OIDC)                        │ jeton du SA de l'Owner
+    ▼                                                     │ (TokenRequest / kubeconfig)
+[ app ] — namespace d'application <app-ns>                │
+  auth OIDC · config LLM · agents · workflows             │
+  endpoint Restate embarqué · MCP (config + domaine)      │
+  relais sandbox : ticket WS, git, code-health            │
+    │ jeton du SA de l'Owner (TokenRequest)               │
+    ▼                                                     ▼
+[ sandbox pod ] — namespace de l'Owner <app-ns>-<owner>
+  port principal : /mcp · /git/* · /code-health · /jobs · POST /ws/ticket · /ws/* (ticket)
+  port d'exploitation : /health · /metrics (sans auth, jamais publié)
+  toolchains OCI image volumes · base cc/ld · libc-dev · make · git · curl · pkg-config · vim
 
-         [ controller ]
-         kube-rs · CRDs : Application, Owner, Project, Sandbox
+[ controller ]  kube-rs · CRDs Owner / Project / Sandbox / Application
+                crée le namespace de chaque Owner, ses RoleBindings, le Restate de l'Application
+[ Restate ]     StatefulSet, sous-ressource de l'Application (moteur de workflow)
 ```
 
-**Note (2026-08-12)** : ce diagramme a longtemps documenté un mécanisme SA TokenReview
-pour kydah-code/l'app qui n'a jamais été implémenté (seul JWT/JWKS existe côté
-sandbox, cf. `docs/architecture.md` section "Serveur MCP"). Corrigé ici ; kydah-code
-ne consomme toujours pas la sandbox en pratique (pas démarré).
+**Authentification de la sandbox : un seul mécanisme (2026-10-04).** La sandbox appartient à un
+Owner ; l'accès est tout ou rien, sans niveaux ni groupes. Seul le jeton JWT émis par
+l'apiserver pour le ServiceAccount de l'Owner (`owner-<nom>`, API TokenRequest, audience
+`vanyline-sandbox`) est accepté. Qui peut obtenir ce jeton est décidé en amont : `app` vérifie le
+lien utilisateur↔Owner avant de le demander ; un opérateur le demande avec son contexte kubeconfig.
+Le SA de l'Owner n'a **aucun droit RBAC** : c'est une pure identité. Détail : `sandbox/src/auth.sdd`.
 
-**L'app n'est pas sur le chemin chaud éditeur.** Le frontend et kydah-code se connectent
-directement à la sandbox. L'app gère l'auth, le LLM, la config.
+**Un Owner = un namespace.** La CR `Owner` vit dans le namespace de l'application ; le
+controller crée `<app-ns>-<owner>` qui contient le SA, le PVC home, les Projects, les
+Sandboxes et tout ce qu'ils produisent. Supprimer l'Owner supprime son namespace (finalizer).
+Détail : `controller/src/namespace.sdd`.
+
+**L'app n'est pas sur le chemin chaud éditeur** : le frontend ouvre les WebSocket éditeur
+directement sur la sandbox avec un ticket court-vécu à usage unique (miné par `app`). En
+revanche le navigateur ne voit **jamais** le jeton de l'Owner : l'HTTP vers la sandbox (git,
+santé du code) passe par des relais de l'app.
 
 ## Composants
 
 ### frontend/
-Shell IDE web : coquille dockable (Explorer/Editor/Terminal/Workflow/Chat) + vue
-Configuration. TypeScript, Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js,
-Element Plus, Reka UI. Build : Vite. Tests : Vitest. Détails complets :
-`docs/architecture.md` section "Frontend — shell IDE Vue".
-Se connecte directement à la sandbox en WebSocket, authentifié par un ticket court-vécu
-à usage unique miné via `app` (`POST /api/sandboxes/{name}/ws-ticket`) — le navigateur
-ne voit jamais le JWT OIDC brut.
+Shell web : coquille IDE dockable (Explorer/Editor/Terminal/Git/Chat/Workflows) + écrans
+projet, accueil, paramètres, vue de sandbox responsive. TypeScript, Vue 3, `vue-router`,
+dockview-vue, CodeMirror 6, xterm.js, `@nuxt/ui`/Tailwind, Reka UI. Build : Vite. Tests : Vitest.
+**Tous les écrans sont responsives sauf l'IDE** (ordinateur seulement, largeur ≥ 1024 px) ; la
+vue de sandbox responsive (`/overview`) affiche santé du code, workflows, runs et un chat.
+Chaque écran (accueil, projet, sandbox, paramètres) offre un chat avec un agent. Contrat :
+`frontend/src/frontend.sdd`. Détails d'architecture : `docs/architecture.md`.
 
 ### app/
-Backend du frontend. Authentification OIDC native, stockage PostgreSQL.
-Focus initial : interaction humain/LLM, gestion utilisateurs, API de configuration.
-Rôle MCP : client — orchestre les appels LLM et les tools exposés par la sandbox.
-**Ne proxifie pas** le WebSocket éditeur ni le MCP kydah-code.
+Backend du frontend. Authentification OIDC (miryad-core), PostgreSQL (SeaORM).
+- **Config LLM et agents** : providers, profils, toolsets, skills, serveurs MCP, agents
+  (`vanyline-lib` pour l'exécution). Des **agents système** préconfigurés (config, accueil,
+  projet, sandbox) : seul leur modèle est configurable. Réglages globaux (`app-settings`,
+  modèle par défaut) réservés aux administrateurs.
+- **Workflows** (`app/src/workflow/`) : endpoint Restate embarqué (port interne), kinds
+  `agent`, `rhai`, `shell`, `gate` ; un projet définit des workflows de portée *projet* ou
+  *sandbox* (shell et gate seulement en portée sandbox) ; runs indexés en base, statut lu dans
+  Restate.
+- **MCP** : générique de miryad-core (CRUD de la configuration) et de domaine (`/mcp/domain` :
+  projets, sandboxes, santé du code, workflows, runs), tous deux avec l'identité de l'utilisateur.
+- **Relais sandbox** : ticket WS, git, santé du code, avec le jeton de l'Owner.
+**Ne proxifie pas** les WebSocket éditeur.
 
 ### sandbox/
-Serveur Rust embarqué dans un pod Kubernetes.
-Expose deux interfaces :
-- **WebSocket** : accès éditeur (`/ws/fs` filesystem, `/ws/terminal` PTY réel) — auth
-  par ticket court-vécu à usage unique (`POST /ws/ticket`, cf. `docs/architecture.md`
-  section "Serveur MCP" pour le détail : l'API WebSocket du navigateur ne permet pas
-  de header `Authorization` sur le handshake)
-- **MCP HTTP streaming** : tools pour les LLM et pour kydah-code
+Serveur Rust embarqué dans un pod Kubernetes, dans le namespace de l'Owner. Deux ports :
+- **Principal** (authentifié par le jeton de l'Owner) : MCP HTTP streaming (`/mcp`, dont l'outil
+  `code_health`), git (`/git/*`), **santé du code** (`/code-health`, état toujours disponible,
+  recalcul après un délai de calme), **jobs** (`/jobs`, scripts shell durables pour les workflows),
+  WebSocket éditeur (`/ws/fs`, `/ws/terminal`, `/ws/lsp/*`) par ticket.
+- **Exploitation** (sans auth, jamais publié) : `/health`, `/metrics`.
 
 Image de base : Debian slim + binaire serveur + **substrat natif commun** (compilateur C
 `cc`/`ld` + binutils, `libc-dev`, make, pkg-config) + git, curl, vim. Le linker C est
@@ -177,33 +215,25 @@ devient utilisable par **injection d'env au démarrage**, jamais par magie :
 - **env spécifiques par toolchain** (ex: rust → `RUSTUP_HOME` sur le volume ;
   `CARGO_HOME` writable **hors volume**, dans le PVC du Owner car le volume est read-only)
 
+Les outils de vérification de la santé du code (`cargo-llvm-cov`, `ruff`, `hadolint`, …) doivent
+être présents dans les images toolchain, à versions épinglées.
+
 **Contrainte** : base et images toolchain doivent être sur la **même famille de distro**
 (trixie) — le loader du base résout la glibc ; un mismatch de distro est du hasard, pas du design.
 
-**Un seul mode d'authentification réellement implémenté : JWT/JWKS OIDC**
-(`sandbox/src/auth.rs`, `require_auth`). Ce fichier a longtemps documenté un second
-mode, SA TokenReview + NetworkPolicy, pour kydah-code → sandbox — **jamais construit**,
-corrigé le 2026-08-12 (découverte pendant `sandbox-ingress-wiring`). En pratique :
-- **frontend → sandbox** (`/ws/fs`, `/ws/terminal`) : ticket court-vécu à usage
-  unique, miné par `app` en présentant le JWT OIDC (`id_token`) de l'utilisateur
-  authentifié — cf. section `frontend/` ci-dessus.
-- **kydah-code → sandbox** : toujours pas câblé (pas démarré) ; NetworkPolicy par
-  sandbox déjà en place (restreint aux pods du même namespace/owner + désormais aussi
-  au pod `app` et au controller Ingress réel, cf. `docs/architecture.md`), mais aucun
-  mécanisme d'auth applicatif pour ce client précis n'existe encore.
-
 ### controller/
 Opérateur Kubernetes (kube-rs). Gère 4 CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) :
-- **Owner** : identité cluster d'un utilisateur — crée/référence un PVC (vanyline ou existant,
-  ex: PVC du pod code-server pour kydah-code) + crée un ServiceAccount + attributs quota +
-  référence optionnelle vers une Application (`application_ref`)
-- **Project** : dépôt git d'un Owner — PVC workspace, repo bare, caches, Jobs/CronJob de
-  maintenance (clone initial, fetch périodique)
-- **Sandbox** : pod de travail — référence un Project + une branche + liste de toolchains ;
-  Ingress public si son Owner référence une Application
-- **Application** (`controller-application-crd`) : instance déployée d'`app` — Deployment
-  + Service + Ingress, secrets OIDC/base de données/cookie référencés (ou cookie
-  auto-généré) via `secretRef`, jamais en clair dans la CR
+- **Owner** (namespace d'application) : identité cluster d'un utilisateur — crée son namespace
+  `<app-ns>-<owner>`, son ServiceAccount (sans droit RBAC), son PVC home, et le RoleBinding qui
+  délègue à `app` ses droits dans ce namespace ; référence optionnelle vers une Application
+  (`application_ref`). Pas de PVC préexistant (`existing_pvc` supprimé).
+- **Project** (namespace de l'Owner) : dépôt git — PVC workspace, repo bare, caches,
+  Jobs/CronJob de maintenance (clone initial, fetch périodique)
+- **Sandbox** (namespace de l'Owner) : pod de travail — référence un Project + une branche +
+  liste de toolchains ; Ingress public si son Owner référence une Application
+- **Application** (namespace d'application) : instance déployée d'`app` — Deployment + Service +
+  Ingress, secrets OIDC/base de données/cookie référencés via `secretRef`, et, si `spec.restate`
+  est présent, le StatefulSet + Service Restate (moteur de workflow)
 
 **Règle — maintenance des projets** : toute action de maintenance du controller sur les
 projets (clone, fetch, purge, worktrees, détection de langages) s'exécute dans un pod
@@ -213,72 +243,80 @@ script shell assemblé par le controller. Les arguments passent en **argv**
 commande shell. Conséquences : une seule image à maintenir, et l'outillage git/langages
 disponible au même endroit pour la maintenance ET pour les sessions LLM.
 
-**Statut : implémenté et déployé** (sorti du statut déféré depuis WS-4/`controller-bootstrap`,
-2026-07-11) — reconcilers Owner/Project/Sandbox/Application, NetworkPolicies egress
-trois niveaux, suspension manuelle, endpoints git de la sandbox (WS-11/WS-13), Ingress
-Application + Ingress par Sandbox (`controller-application-crd`/
-`sandbox-ingress-wiring`, 2026-08-12). Détails : `docs/architecture.md`
-section "Opérateur Kubernetes — `vanyline-controller`".
+Détails : `docs/architecture.md`, section "Opérateur Kubernetes — `vanyline-controller`".
+
+### health/ — santé du code
+Crate feuille `vanyline-health` : presets de vérifications par langage (rust, js-ts/vue, python,
+dockerfile), parseurs (lcov, clippy, tsc, ruff, hadolint), restriction au code modifié, exécution
+et rapport typé (exporté en TypeScript). Source unique des *invocations* de vérification : même
+résultat en local (sandbox) et au central. Les règles restent celles du projet analysé.
+
+### cli/
+Binaire `vanyline` : chat interactif en **TUI ratatui** (sans sous-commande ; exige un terminal),
+`run` (one-shot texte/JSONL), gestion de la configuration et des objets K8s, et serveur RPC
+JSON-RPC `serve --stdio` (conservé comme interface d'intégration).
 
 ## Clients de la sandbox
 
 | Client | Accès | Auth | Usage |
 |--------|-------|------|-------|
-| vanyline frontend | Ingress par sandbox (`{name}.sandboxes.{host}`) | Ticket court-vécu à usage unique (miné par `app`) | Éditeur web, terminal |
-| kydah-code (dans code-server) | Service K8s interne, même namespace | Pas encore câblé (NetworkPolicy en place, aucun mécanisme d'auth applicatif) | MCP tools pour Qwen — pas démarré |
-| app | Service K8s interne | JWT OIDC (`id_token` de l'utilisateur, pas un compte de service) | Relais de ticket WS (`/ws/ticket`) — pas d'orchestration MCP par `app` à ce jour |
+| frontend (WebSocket éditeur) | Ingress par sandbox (`{name}.sandboxes.{host}`) | Ticket court-vécu à usage unique (miné par `app`) | Éditeur web, terminal, LSP |
+| app | Service K8s interne | Jeton du SA de l'Owner (TokenRequest), après contrôle utilisateur↔Owner | Relais de ticket, git, santé du code, workflows (jobs, gate), agents (MCP) |
+| kydah-code, cli (`--toolbox`), opérateur | Service K8s interne / Ingress | Jeton du SA de l'Owner (kubeconfig de l'utilisateur) | MCP pour les LLM |
+| kubelet, supervision | Port d'exploitation | Aucune (non publié ; NetworkPolicy dédiée) | `/health`, `/metrics` |
 
 ## Interfaces inter-composants
 
 | Source | Destination | Protocole | Auth |
 |--------|-------------|-----------|------|
-| frontend | app | HTTP REST | Cookie OIDC (`HttpOnly`, stateless) |
-| frontend | app | WebSocket (chat, priorité basse — pas branché au shell IDE) | Cookie OIDC |
-| frontend | app | WebSocket (`/api/ws/sandbox-state`, push des phases de sandbox) | Cookie OIDC |
-| frontend | sandbox | WebSocket (`/ws/fs`, `/ws/terminal`) | Ticket court-vécu à usage unique |
-| app | sandbox | HTTP (`POST /ws/ticket`, relais de ticket) | JWT OIDC (`id_token` de l'utilisateur) |
-| kydah-code | sandbox | MCP HTTP streaming | Pas encore câblé — pas démarré |
+| frontend | app | HTTP REST (dont workflows, runs, relais santé/git) | Cookie OIDC (`HttpOnly`, stateless) |
+| frontend | app | WebSocket (chat contextuel ; `/api/ws/sandbox-state`) | Cookie OIDC |
+| frontend | sandbox | WebSocket (`/ws/fs`, `/ws/terminal`, `/ws/lsp/*`) | Ticket court-vécu à usage unique |
+| app | sandbox | HTTP (ticket, `/git/*`, `/code-health`, `/jobs`, MCP) | Jeton du SA de l'Owner |
+| app | app (loopback) | MCP (`/mcp`, `/mcp/domain`) pour les agents | Jeton d'API jetable de l'utilisateur |
+| app | Restate | admin (enregistrement, statut) et ingress (lancement) | Réseau interne |
+| Restate | app | endpoint de services (`DagInterpreter`, `StepDispatcher`) | Réseau interne, port dédié |
 | controller | K8s API | K8s API | Service account |
 
 ## Logging
 
 Jamais `println!`, `dbg!`, `eprintln!` côté Rust ni `console.log` côté frontend —
 logger du crate (`tracing` côté Rust, logger du projet côté frontend ; le harnais clippy
-`print_stdout`/`print_stderr` le fait respecter).
+`print_stdout`/`print_stderr` le fait respecter). Le TUI du cli écrit via le backend ratatui.
 
 ## Stack technique
 
 | Composant | Langage | Dépendances clés |
 |-----------|---------|-----------------|
-| frontend | TypeScript | Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI, `@vanyline/ui`, `@vanyline/protocol` |
-| `ext/` (extension VS Code) | TypeScript | package npm `vanyline`, dépend de `@vanyline/ui` + `@vanyline/protocol` |
-| `packages/protocol` (`@vanyline/protocol`) | TypeScript pur | types Rust↔TS (`ChatEvent` ts-rs, `config-domain.ts` miroir de `lib/src/domain.rs`), enveloppes RPC, `RpcConnection` — zéro dépendance UI |
+| frontend | TypeScript | Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, `@nuxt/ui`, Tailwind, Reka UI, `@vanyline/ui`, `@vanyline/protocol` |
+| `packages/protocol` (`@vanyline/protocol`) | TypeScript pur | types Rust↔TS (`ChatEvent`, santé du code générés par ts-rs ; `config-domain.ts`, `workflow-domain.ts` miroirs), enveloppes RPC, `RpcConnection` — zéro dépendance UI |
 | `packages/ui` (`@vanyline/ui`) | TypeScript | Vue 3, `@nuxt/ui`, `reka-ui`, `@ai-sdk/vue` — composants chat + écrans config + `ConfigShell`, agnostiques du backend (ports `ChatTransport`/`ChatBackend`/`ConfigRepo` injectés) |
-| `lib` (`vanyline-lib`) | Rust | types/événements partagés, feature `k8s`, generation ts-rs |
-| `crds` (`vanyline-crds`) | Rust | définitions des CRDs du controller |
+| `lib` (`vanyline-lib`) | Rust | types/événements, session d'agent, tâches autonomes, feature `k8s` (client, `owner_token`), ts-rs |
+| `crds` (`vanyline-crds`) | Rust | définitions des CRDs du controller, nommage du namespace d'Owner |
 | `tools` (`vanyline-tools`) | Rust | tools MCP partagés |
 | `cfgstore` (`vanyline-cfgstore`) | Rust | stockage de configuration |
-| app | Rust | axum, sqlx/PostgreSQL, `openidconnect`, `vanyline-lib` (+ feature `k8s`) |
-| sandbox | Rust | axum, `portable-pty`, `vanyline-tools` |
+| `health` (`vanyline-health`) | Rust | santé du code : presets, parseurs, runner, rapport (ts-rs) |
+| `llm-config` (`vanyline-llm-config`, à créer) | Rust | persistance et administration de la config LLM, partageable entre applications miryad-core |
+| app | Rust | axum, SeaORM/PostgreSQL, `miryad-core` (features `mcp`, `workflow`), `vanyline-lib` (+ `k8s`), restate-sdk |
+| sandbox | Rust | axum, `portable-pty`, `vanyline-tools`, `vanyline-health` |
 | controller | Rust | kube-rs, `vanyline-crds` |
-| cli | Rust | harness/CLI du projet |
+| cli | Rust | ratatui, crossterm, harness/CLI du projet |
 
 ## Structure des répertoires
 
 ```
 vanyline/
-├── Cargo.toml          # workspace Cargo UNIQUE (membres lib/app/cli/sandbox/tools/controller/crds/cfgstore) + [workspace.lints] (harnais)
-├── package.json        # workspace npm racine (workspaces: frontend, packages/*, ext)
+├── Cargo.toml          # workspace Cargo UNIQUE (membres lib/app/cli/sandbox/tools/controller/crds/cfgstore/health, + llm-config à venir) + [workspace.lints] (harnais)
+├── package.json        # workspace npm racine (workspaces: frontend, packages/*)
 ├── vanyline.sdd        # spec racine — contraintes transverses + feuille de route de migration
 ├── tooling.sdd         # spec du harnais clippy/fmt + dette tracée
 ├── .specdd/            # bootstrap SpecDD (bootstrap.md immutable, bootstrap.project.md = règles du projet)
 ├── .github/workflows/  # CI + sa spec workflows.sdd
-├── frontend/           # shell IDE Vue 3 (dépend de @vanyline/ui + @vanyline/protocol)
-├── ext/                # extension VS Code (package npm `vanyline`)
+├── frontend/           # shell web Vue 3 (dépend de @vanyline/ui + @vanyline/protocol)
 ├── packages/
 │   ├── protocol/       # @vanyline/protocol — types Rust↔TS, RPC, RpcConnection
 │   └── ui/             # @vanyline/ui — composants chat + config, agnostiques du backend
-├── lib/  app/  cli/  sandbox/  tools/  controller/  crds/  cfgstore/   # membres du workspace cargo
+├── lib/  app/  cli/  sandbox/  tools/  controller/  crds/  cfgstore/  health/   # membres du workspace cargo
 ├── deploy/             # manifests / déploiement
 ├── toolchains/         # images OCI des toolchains sandbox
 └── docs/

@@ -4,9 +4,28 @@ Ce document décrit le découpage du monorepo — crates Rust et packages TypeSc
 les **règles de dépendances** entre eux. Pour la vue système d'ensemble (composants,
 interfaces réseau, auth), voir `AGENTS.md`.
 
+## État cible (décisions du 2026-10-04)
+
+Les specs `.sdd` contractent une architecture cible ; ce document décrit l'existant et l'historique
+des choix. **Là où une section ci-dessous contredit une des décisions suivantes, la décision fait
+foi** (les sections concernées portent une note « Cible ») :
+
+| Décision | Spec de référence |
+|---|---|
+| Sandbox : un seul mécanisme d'auth, le jeton JWT du ServiceAccount de l'Owner (TokenRequest) ; plus d'OIDC, de groupes, de niveaux Admin/Read, de modes de contournement | `sandbox/src/auth.sdd`, `config.sdd` |
+| Sandbox : port d'exploitation séparé (`/health`, `/metrics`, sans auth, jamais publié) | `sandbox/src/lib.sdd`, `main.sdd` |
+| Un Owner = un namespace (`<app-ns>-<owner>`), finalizer, RoleBinding de l'app par namespace ; `existing_pvc` supprimé (Owner et Project) | `controller/src/namespace.sdd`, `owner.sdd`, `project.sdd`, `crds/src/lib.sdd` |
+| Santé du code : crate `vanyline-health`, état toujours disponible dans la sandbox (`/code-health`, outil MCP `code_health`) | `health/src/*.sdd`, `sandbox/src/health.sdd` |
+| Jobs shell durables dans la sandbox | `sandbox/src/jobs.sdd` |
+| Workflows : endpoint Restate embarqué dans l'app, kinds `agent`/`rhai`/`shell`/`gate`, index de runs, Restate sous-ressource de l'Application | `app/src/workflow/`, `app/src/api/workflows.sdd`, `controller/src/application.sdd` |
+| Agents système, MCP de domaine, réglages globaux | `app/src/system_agents.sdd`, `mcp_domain.sdd`, `db/entities/app_settings.sdd` |
+| Frontend : tout responsive sauf l'IDE ; vue de sandbox responsive ; chat par écran | `frontend/src/frontend.sdd` et specs liées |
+| CLI : chat interactif en TUI ratatui | `cli/src/tui/*.sdd` |
+| Extension VS Code supprimée ; serveur RPC stdio conservé | `vanyline.sdd` |
+
 ## Vue d'ensemble
 
-Huit crates : **quatre bibliothèques feuilles** partagées (`vanyline-tools`, `vanyline-cfgstore`,
+Neuf crates (dix avec `vanyline-llm-config`, à créer) : **cinq bibliothèques** partagées (`vanyline-tools`, `vanyline-cfgstore`, `vanyline-health`,
 `vanyline-lib`, `vanyline-crds`) et **quatre binaires** qui les consomment (`vanyline`, `vanyline-app`,
 `vanyline-sandbox`, `vanyline-controller`).
 
@@ -14,7 +33,8 @@ Huit crates : **quatre bibliothèques feuilles** partagées (`vanyline-tools`, `
 |-------|------|------|-------------|
 | `vanyline-tools` | lib feuille | Implémentations d'outils, pures et framework-agnostic, SLM-friendly (v2) | `filesystem` (read/write/edit/delete/list), `search` (find_files/search), `command` (`execute` via `sh -c`, timeout, cwd), `error` (`ToolsError`, codes `VNL-TLS-*`), `output` (bornage centralisé), `mcp` (schémas JSON — source unique consommée par `cli` et `sandbox`) |
 | `vanyline-cfgstore` | lib feuille | Couche de configuration : types de domaine + trait `ConfigStore` (lecture **et** écriture) + impl fs deux-couches YAML. Zéro dépendance harness (serde/serde_json/yaml_serde/async-trait/thiserror) — consommable par un serveur léger (sandbox) sans tirer rig/rmcp | `domain` (types name-keyed : `Provider`, `ModelProfile`, `McpServer`, `Toolset`, `Agent`, `SkillMeta`…), `store` (`ConfigStore` — `list_*`/`get_*` + `create_*`/`update_*`/`delete_*` par domaine + `set_default_agent` ; défaut `ReadOnly` sur les écritures ; `InMemoryConfigStore`), `layers` (`Layers`, `RawConfigFile`, fusion des deux couches), `fs_store` (`FsConfigStore` + `validate_name` anti-traversal), `error` (`CfgStoreError`, codes `VNL-CFG-001..010`) |
-| `vanyline-crds` | lib feuille | Types CRD Owner/Project/Sandbox/Application (spec/status/derives kube), sans runtime opérateur | `Owner`/`Project`/`Sandbox`/`Application` + specs/status, `Toolchain`/`PvcRef`/`ProjectDefaults`/`IngressControllerRef`, `crd_manifests()`, `service_name`/`MCP_PORT` (convention de nommage du Service MCP d'une sandbox, partagée avec `vanyline-lib`) — voir sections "Client K8s CLI" et "Opérateur Kubernetes" plus bas |
+| `vanyline-crds` | lib feuille | Types CRD Owner/Project/Sandbox/Application (spec/status/derives kube), sans runtime opérateur | `Owner`/`Project`/`Sandbox`/`Application` + specs/status, `Toolchain`/`ProjectDefaults`/`IngressControllerRef`, `crd_manifests()`, `service_name`/`MCP_PORT` (convention de nommage du Service MCP d'une sandbox, partagée avec `vanyline-lib`) — voir sections "Client K8s CLI" et "Opérateur Kubernetes" plus bas |
+| `vanyline-health` | lib feuille | Santé du code (cible) : presets de vérifications par langage (rust, js-ts/vue, python, dockerfile), parseurs (lcov, clippy, tsc, ruff, hadolint), restriction au code modifié, runner et rapport typé exporté en TypeScript (ts-rs). Source unique des invocations : même vert en local et au central | `checks`, `runner`, `report`, `lcov`, `cargo_messages`, `tsc_text`, `ruff_json`, `hadolint_json`, `diff`, `error` (codes `VNL-HLT-*`) — specs `health/src/*.sdd` |
 | `vanyline-lib` | lib | Cœur partagé LLM / MCP / chat — harness (agents, toolsets, skills, subagents) | dépend de `vanyline-cfgstore` et **re-exporte** `domain` + `store` (`vanyline_lib::domain::…` / `::store::ConfigStore` restent les chemins canoniques) ; `impl From<CfgStoreError> for VnyError` ; `event` (`ChatEvent`/`EventSink`), `model` (construction de modèle + params), `session` (`SessionContext`, `run_agent_turn` — point d'entrée unique), `builtin` (tools `skill`/`task`), `prefixed_mcp` (connexion MCP filtrée par toolset), `types` (`ToolCall`/`Message`/`Conversation` — formats de persistance propres à chaque binaire), `k8s` (`VnlK8sClient`, **feature Cargo optionnelle `k8s`**, désactivée par défaut — voir "Client K8s CLI" plus bas), erreurs `VNL-*` |
 | `vanyline` (bin `cli`) | binaire | CLI standalone de chat/agents | `run`/REPL, `vanyline_cfgstore::FsConfigStore` (YAML deux couches, globale + workspace — voir "Configuration CLI" plus bas), câblage hôte de la découverte de couches (`cli/src/config.rs::discover_layers` : `dirs`, remontée cwd), enveloppe les `vanyline-tools` en `ToolDyn` locaux, active la feature `k8s` de `vanyline-lib` (commandes owner/project/sandbox + toolbox) |
 | `vanyline-app` | binaire | Backend du frontend | axum (REST + WS), auth/RBAC/CRUD générique via `miryad-core` (crate publique), SeaORM/PostgreSQL, `PgConfigStore` (adapte le schéma SeaORM en `ConfigStore`), orchestration LLM via `vanyline-lib`, client `VnlK8sClient` (feature `k8s`) pour piloter Owner/Project/Sandbox/Application et relayer les tickets WS de la sandbox — voir section "Backend web" plus bas |
@@ -276,6 +296,8 @@ déplacés.
 
 ## RPC stdio — `vanyline serve --stdio` (JSON-RPC 2.0)
 
+> **Cible (2026-10-04)** : le serveur RPC stdio est CONSERVÉ comme interface d'intégration, bien que l'extension VS Code, son premier consommateur, soit supprimée.
+
 Serveur JSON-RPC 2.0 sur stdio (ndjson — une trame JSON par ligne, `\n`,
 stdout réservé au protocole, logs sur stderr), exposant tout le harness
 CLI pour l'extension VS Code (ou tout autre client programmatique) sans
@@ -375,6 +397,8 @@ connexion en plein tour ; acceptable pour v1, le process est de toute
 façon sur le point de sortir.
 
 ## Backend web — `vanyline-app`
+
+> **Cible (2026-10-04)** : l'app gagne la couche workflow (endpoint Restate embarqué sur un port interne, kinds `agent`/`rhai`/`shell`/`gate`, rattachement projet↔workflow et index de runs en base, statut des runs lu dans Restate), les agents système (config, accueil, projet, sandbox ; seul leur modèle est configurable), le MCP de domaine `/mcp/domain` à côté du MCP générique de miryad-core (agents appelés avec un jeton d'API jetable de l'utilisateur), les réglages globaux `app-settings` (modèle par défaut, administrateurs) et les relais `git` et `code-health` vers la sandbox avec le jeton de l'Owner. Elle suit les Owners par namespace (`<app-ns>-<owner>`) : un watcher de sandboxes par Owner. Voir `app/src/workflow/mod.sdd`, `api/workflows.sdd`, `system_agents.sdd`, `mcp_domain.sdd`.
 
 Backend axum du frontend. Depuis `miryad-core-integration` (2026-08-27), la couche
 auth/session/BDD/CRUD générique n'est plus maison — `app` consomme la crate publique
@@ -595,6 +619,8 @@ tour qu'un scénario de test écrit à la main.
 
 ## Serveur MCP — `vanyline-sandbox`
 
+> **Cible (2026-10-04)** : l'authentification décrite ci-dessous (OIDC/JWKS, groupes, jeton statique, `--no-auth`) est REMPLACÉE par un seul mécanisme : le jeton JWT émis par l'apiserver pour le ServiceAccount de l'Owner (API TokenRequest, audience `vanyline-sandbox`), vérifié par JWKS contre `iss`, `aud`, `exp` et `sub == owner_subject` (`sandbox/src/auth.sdd`). Plus de niveaux Admin/Read, plus de métadonnées OAuth. `/health` et `/metrics` sont sur un port d'exploitation séparé, sans authentification et non publié. Nouveaux services sur le port principal : `/code-health` (état de santé du code toujours disponible), outil MCP `code_health`, API de jobs `/jobs`. Vérifié sur le cluster de test : signature RS256, `iss` = `https://kubernetes.default.svc.cluster.local`, JWKS lisible par les pods.
+
 Fork adapté de `kydah-mcp-template` (transport MCP HTTP streamable POST-only fait
 main sur axum, JSON-RPC 2.0 dispatch `tools/list`/`tools/call` dans `mcp.rs` — pas de
 dépendance à l'API server `rmcp`, contrairement au client côté `vanyline-lib`).
@@ -717,6 +743,8 @@ POST /git/ssh-key                         → { public_key }             # idemp
 
 ### Relais `app` → `/git/*` (canal d'auth frontend → sandbox)
 
+> **Cible (2026-10-04)** : le relais présente le jeton du ServiceAccount de l'Owner (obtenu par `VnlK8sClient::owner_token`, mis en cache), plus jamais l'`id_token` de l'utilisateur ; la propriété utilisateur↔Owner est vérifiée AVANT la demande de jeton. Même mécanique pour `/code-health` et `/jobs`.
+
 `/git/*` est sous `require_auth` (JWT OIDC) côté sandbox ; le navigateur ne détient
 jamais de JWT brut (principe déjà acté plus haut). Le frontend n'appelle donc jamais
 la sandbox directement pour ces endpoints — `app` relaie (`ANY
@@ -743,6 +771,8 @@ navigateur), même scoping owner (`resolve_user` → `resolve_owner_name` →
   session).
 
 ### WebSocket éditeur — `/ws/ticket`, `/ws/fs`, `/ws/terminal` (`sandbox-ws-runtime`)
+
+> **Cible (2026-10-04)** : le ticket est une simple capability (`TicketClaims` ne porte que `subject`) émise à l'Owner authentifié par son jeton de ServiceAccount ; aucun niveau d'accès n'existe, donc aucune route WS n'en discrimine. Le scrub du paramètre `ticket` dans les logs `TraceLayer` est maintenu.
 
 Trois routes ajoutées au serveur MCP existant (même port, `MCP_PORT`) — le prérequis
 pour qu'un navigateur puisse éditer/utiliser un terminal sur une sandbox, jusque-là
@@ -1130,6 +1160,8 @@ un gain marginal.
 
 ## Opérateur Kubernetes — `vanyline-controller`
 
+> **Cible (2026-10-04)** : UN OWNER = UN NAMESPACE. La CR `Owner` vit dans le namespace de l'application ; le controller crée `<app-ns>-<owner>` (finalizer, labels de propriété, refus d'adopter un namespace étranger) qui contient le SA `owner-<nom>` (sans aucun droit RBAC), le PVC home, les Projects, les Sandboxes et tout ce qu'ils produisent, et un RoleBinding `vanyline-app` délégant à l'app le ClusterRole `vanyline-app-owner-scope` dans ce seul namespace. Aucune ownerReference entre namespaces. `existing_pvc` est supprimé (Owner et Project) : les PVC sont toujours créés par le controller. Voir `controller/src/namespace.sdd`.
+
 kube-rs, quatre CRDs namespacées (`vanyline.solidite.fr/v1alpha1`) réconciliées par un
 reconciler chacun, tournant en parallèle dans le même process (`main.rs::tokio::join!`) :
 
@@ -1430,6 +1462,8 @@ analysé venv-aware (cohérent avec le contrat « racine seulement »).
 
 ### CRD Application (`controller-application-crd`)
 
+> **Cible (2026-10-04)** : le Role de l'app dans le namespace d'application n'a plus que deux règles (`owners`, `applications`) ; les droits sur projets, sandboxes et `serviceaccounts/token` sont portés par le RoleBinding de chaque namespace d'Owner. `spec.restate` (optionnel) fait créer le StatefulSet et le Service Restate comme sous-ressources, et pose `VNL_RESTATE_*` sur le Deployment de l'app.
+
 Comble un écart doc/code : `AGENTS.md` listait "Application" comme une des CRDs du
 controller depuis le début, mais elle n'existait pas avant cette feature.
 `ApplicationSpec` référence trois `secretRef` (OIDC, base de données, cookie —
@@ -1467,6 +1501,8 @@ le hub WS `/api/ws/sandbox-state` (cf. section `vanyline-app`) — la
 donc la délégation namespacée n'est pas une escalade.
 
 ### Ingress par Sandbox (`sandbox-ingress-wiring`)
+
+> **Cible (2026-10-04)** : la sandbox n'accepte que le jeton de SA de son Owner, que l'Ingress soit public ou non (plus de `--no-auth`, plus d'OIDC conditionné à l'Application). Le port d'exploitation (`ops`, 9090) n'est jamais dans le Service ni l'Ingress ; la NetworkPolicy l'ouvre au cluster par une règle dédiée (optionnellement restreinte par `VNL_OPS_ALLOWED_NAMESPACES`).
 
 `Owner.spec.application_ref: Option<String>` (cascade, même esprit que
 `egress`/`project_defaults` déjà en place) — `None` = Sandbox reste ClusterIP-only
@@ -1540,6 +1576,8 @@ Postgres/DNS wildcard/certificat TLS wildcard par le controller (`controller-app
 créées par ce repo.
 
 ## Client K8s CLI — `vanyline-crds`, `VnlK8sClient`, toolbox
+
+> **Cible (2026-10-04)** : `VnlK8sClient` retient le namespace d'application et résout celui de chaque Owner (`vanyline_crds::owner_namespace_name`) ; ses opérations sur Project et Sandbox prennent le nom d'Owner ; nouvelle méthode `owner_token` (TokenRequest, cache par Owner). Le cli (`--toolbox`) s'authentifie auprès de la sandbox avec ce jeton, via le contexte kubeconfig courant de l'utilisateur.
 
 Rend les Owners/Projects/Sandboxes pilotables **hors du cluster-admin** —
 `kubectl`/accès direct au cluster n'est plus le seul moyen d'agir dessus.
@@ -1626,6 +1664,8 @@ derrière NetworkPolicy — le CLI dans le cluster passe si ses
 labels/namespace le permettent, cf. "Serveur MCP" plus haut).
 
 ## Frontend — shell IDE Vue (`frontend/`)
+
+> **Cible (2026-10-04)** : tous les écrans sont responsives SAUF l'IDE (ordinateur seulement, largeur ≥ 1024 px, redirigé vers la vue d'ensemble en dessous). Nouvelle vue de sandbox responsive `/overview` (santé du code, workflows, runs, chat) ; deux actions par sandbox (« IDE », « Vue d'ensemble ») ; accueil, projet, sandbox et paramètres portent chacun un chat avec un agent (agents système par défaut, agents ordinaires au choix hors paramètres) ; les paramètres exposent l'assistant de configuration et, pour les administrateurs, les réglages globaux. Le principe « UI desktop, pas mobile-first » du 2026-08-09 ne s'applique plus qu'à l'IDE. Voir `frontend/src/frontend.sdd`.
 
 Remplace intégralement l'ancien frontend Svelte 5 (`Login.svelte`/`Chat.svelte`,
 routage hash-based) — plus aucune trace de Svelte dans `frontend/`. Vue 3 +
@@ -2053,6 +2093,8 @@ non identifiée, à creuser si ça se reproduit après le passage à 262144.
 
 ## Limites connues (dette assumée, pas oubliée)
 
+> **Cible (2026-10-04)** : plusieurs limites ci-dessous (auth OIDC/groupes de la sandbox, `--no-auth`, RBAC décoratif, namespace unique, `existing_pvc`) disparaissent avec les specs du 2026-10-04 ; la dette résiduelle est tracée dans les `Tasks` des specs.
+
 - **Historique appauvri** : seul le texte user/assistant est rejoué d'un tour à l'autre
   (`cli/src/chat.rs`, `app/src/ws/chat.rs`) — pas les tool calls/résultats intermédiaires.
 - **Pas d'annulation** : `run_agent_turn` ne prend pas de token d'annulation. Le RPC
@@ -2117,14 +2159,13 @@ non identifiée, à creuser si ça se reproduit après le passage à 262144.
 ## Workspace TypeScript (npm workspaces)
 
 Le monorepo n'est pas que du Rust : le `package.json` racine fédère les packages
-TypeScript (`workspaces: ["frontend", "packages/*"]` ; `ext/` ajouté par F3).
+TypeScript (`workspaces: ["frontend", "packages/*"]` ; `ext/` supprimé le 2026-10-04).
 
 | Package | Type | Rôle | Stack |
 |---------|------|------|-------|
 | `frontend/` | app | Shell IDE web : éditeur/explorer/terminal + configuration, cliente de l'app Rust (REST + WS) — voir section "Frontend — shell IDE Vue" plus haut | Vite, Vue 3, `vue-router`, dockview-vue, CodeMirror 6, xterm.js, Element Plus, Reka UI, Vitest |
 | `packages/protocol` (`@vanyline/protocol`) | lib feuille | Types partagés Rust↔TS + client RPC | TypeScript pur, zéro dépendance UI |
 | `packages/ui` (`@vanyline/ui`) | lib | Composants chat + les 6 écrans de configuration + `ConfigShell`, **agnostiques du backend** (ports injectés) | Vue 3, `@nuxt/ui`, `reka-ui`, `@ai-sdk/vue`, `@comark/vue` |
-| `ext/` *(F3–F5)* | app | Extension VS Code : front-end graphique du CLI via JSON-RPC stdio (chat, configuration, `TreeView` ressources K8s) | Host TS + webview Vue |
 
 ### `@vanyline/protocol`
 
@@ -2174,7 +2215,7 @@ Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`
   `name↔id` **par instance**, l'id `i32` ne sort jamais du repo), champs web-augmentés,
   `get('skills')` → `GET /{id}` pour le `body`. L'API REST de `app` est **inchangée**
   (pas de migration).
-- **`rpcConfigRepo`** (`ext/webview/`, F4) : l'impl `ConfigRepo` de l'extension, un
+- **`rpcConfigRepo`** (`ext/webview/`, F4 — supprimé avec l'extension, 2026-10-04) : l'impl `ConfigRepo` de l'extension, un
   quasi pass-through sur le pont postMessage → RPC (name-keyed nativement côté CLI —
   aucune résolution `name↔id`). Seule traduction : le domaine UI `profiles` ↔ RPC
   `models` et `mcp` ↔ `mcpServers` (un seul point, testé explicitement — un bug ici
@@ -2191,107 +2232,18 @@ Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`
   `SettingsView.vue` ≈ 20 lignes : monte `ConfigShell` + `provide(CONFIG_REPO_KEY,
   httpConfigRepo())`.
 
-### Extension VS Code — `ext/` (F3, F4, F5)
+### Extension VS Code — SUPPRIMÉE (2026-10-04)
 
-Front-end graphique du CLI : sidebar de chat, panneau de configuration **et** vue
-arborescente des ressources Kubernetes (Owners › Projects › Sandboxes) dans
-VS Code / code-server, pilotant une CLI `vanyline serve --stdio` locale que
-l'extension **télécharge et met à jour seule**. Deux bundles séparés : **host**
-(esbuild, `dist/extension/index.js`, CommonJS Node) et **webview** (Vite + Vue,
-`dist/webview/` — **un seul bundle** monté en chat ou en config selon
-`<meta name="vanyline-view">`). Linux x86_64 + aarch64 uniquement.
-
-**Host** (`src/`, zéro dépendance à un backend distant) :
-
-| Module | Rôle |
-|---|---|
-| `extension.ts` | `activate`/`deactivate` : OutputChannel, status bar, enregistrement des commandes, du `ChatViewProvider` et du panel config, câblage superviseur↔(provider + panel). Relit la config à **chaque** (re)start. Diffuse `config/changed` **à toutes les webviews** après tout write config réussi (vu par `bridge.ts`) — `domain` = nom RPC brut (`models`, `mcpServers`, …), pas le nom UI. |
-| `cli-provisioning.ts` | `ensureCli` : résout le binaire. `vanyline.serverPath` défini → utilisé tel quel, **aucun** fetch/probe, auto-update off. Sinon `~/.local/bin/vanyline --version` == `EXPECTED_CLI_VERSION` (bakée par esbuild `define` depuis `ext/cli-version.txt`) ? sinon download. |
-| `rpc.ts` | `startServer` : `spawn(bin, ['serve','--stdio'], {shell:false, cwd:workspace})`, transport ndjson sur stdin/stdout, `RpcConnection` (`@vanyline/protocol`), `initialize({protocolVersion, workspace})`. stderr CLI → OutputChannel. Codes `VNL-EXT-010` (spawn) / `-011` (initialize / mismatch protocole). |
-| `supervisor.ts` | Machine à états pure du cycle de vie : backoff exponentiel plafonné (`1s×2ⁿ`, max 30s, 5 essais), fenêtre de stabilité 60s → reset compteur, `restart()` manuel repart de zéro même depuis `erreur`, `stop()` sans auto-redémarrage. `generation` invalide les timers/await en vol. |
-| `panels/chat.ts` | `WebviewViewProvider` sur `vanyline.chatView`, `retainContextWhenHidden`. Abonne `chat/event` sur le handle courant, ré-abonne au restart. |
-| `panels/config.ts` *(F4)* | Panel éditeur `vanyline.config` (`ViewColumn.Active`, `retainContextWhenHidden`) — **panel unique** réutilisé (`reveal()` si déjà ouvert). Attaché au superviseur comme le chat (relais des requêtes uniquement, aucun abonnement notification : `config/changed` naît des writes, pas d'une notification CLI). |
-| `panels/resources.ts` *(F5)* | `TreeView` native `vanyline.resources` (100 % host — **pas de webview, pas de `RELAY_WHITELIST`** : parle au `RpcConnection` du handle en direct via `resources.ts`). Colle vscode uniquement : `createTreeView`, mapping `ResourceNode`→`TreeItem` (icône par phase, `contextValue` = `kind` pour les menus), `EventEmitter` `onDidChangeTreeData` (**seul mécanisme de refresh d'une `TreeView`** — pas de `TreeView.refresh()`), titre = `Resources` / description = namespace résolu (rafraîchi après chaque `getChildren` car le namespace n'est connu qu'après la 1ʳᵉ liste RPC). `registerRun` : 6 commandes `vanyline.{project,sandbox}.*` → `run*` de `resources.ts`, puis refresh + `showInformationMessage` (succès) / `showErrorMessage` (échec, jamais sur annulation). |
-| `panels/bridge.ts` | Pont webview↔host **pur** (zéro `vscode`) : parse strict des messages webview, **whitelist de relais** (`conversations/list|get|create` + **toute la surface `config/*`** lecture/écriture/actions depuis F4 — mais **jamais** `initialize`/`shutdown`/`chat/send`/`chat/cancel`/`conversations/delete`), codes `VNL-EXT-020` (relais refusé) / `-021` (serveur non démarré). Après un write `config/<domain>/{create,update,delete}` réussi, notifie l'hôte (`onWriteSucceeded`) qui diffuse `config/changed`. Whitelist partagée par les deux webviews (le chat en hérite — surface acceptée : la CSP nonce interdit toute exécution JS dans la webview). |
-| `panels/html.ts` | `buildHtml(baseHref, cspSource, nonce, view)` pur : CSP `default-src 'none'` + nonce (aléa `node:crypto`) + `<base href>` + `<meta name="vanyline-view" content="chat\|config">`, `localResourceRoots` sur `dist/webview`. |
-
-**Webview** (`webview/src/`) : `main.ts` lit `<meta name="vanyline-view">` (une webview
-VS Code n'a pas de `location.search`) via `resolveView` (`router.ts`, repli sécuritaire
-sur `chat`) et monte soit `App.vue` (chat) soit `ConfigView.vue` (config, F4). **Chat** :
-`ChatWindow` de `@vanyline/ui`, ports `vanyline.chatBackend` (relayé en `conversations/*`
-RPC) et `vanyline.chatTransport` (`PostMessageChatTransport` : `chat/send` + notifications
-`chat/event` reconstruites en `ReadableStream<UIMessageChunk>` par `chatEventsToUIStream`,
-partagé avec le frontend web) ; le sélecteur d'agent refetch `config/agents` au mount **et
-à chaque `config/changed`** de l'hôte. **Config** (F4) : `ConfigShell` de `@vanyline/ui`
-(4 groupes CLI — pas de `account`), port `CONFIG_REPO_KEY` = `rpcConfigRepo` ; chaque
-écran refetch à son `onMounted` (pas de `<KeepAlive>`) et après ses propres writes
-(`useCrudResource`) — pas d'abonnement `config/changed` côté config. `getBridgeClient()`
-mémoïse `acquireVsCodeApi()` (appelable une seule fois) — jamais à l'import, seulement
-dans le `setup`. Build Vite : `inlineDynamicImports` (CSP sans `strict-dynamic`), CSS
-forcé en `assets/index.css`, alias source vers `packages/{ui,protocol}/src`.
-
-Le badge de couche des écrans (`SourceBadge` de `@vanyline/ui`, F4) n'apparaît que
-lorsqu'une entrée porte `source` — jamais côté frontend web (`app` n'a pas de couches),
-seulement dans le panel de l'extension.
-
-**Vue ressources K8s** (`src/resources.ts` + `panels/resources.ts`, F5) : logique pure
-(`resources.ts`, testée sans `vscode`) + colle vscode (`panels/resources.ts`). Le modèle
-(`createResourcesModel(rpc, onError?)`) n'a **aucun cache** : racine → `owners/list`,
-enfant d'un Owner → `projects/list` filtré `spec.owner`, enfant d'un Project →
-`sandboxes/list` filtré `spec.project` ; chaque `getChildren` refait l'appel RPC (v1 =
-refresh manuel, pas de watch). Toute erreur RPC devient un **nœud `error`** dans l'arbre
-(le modèle ne rejette jamais) + une ligne `VNL-EXT-025` dans l'OutputChannel ; serveur non
-démarré → nœud `info` `VNL-EXT-021`. Le namespace affiché est celui du `metadata.namespace`
-du premier objet listé (la CLI le résout une fois par session — `defaults.namespace` du
-YAML fusionné, sinon contexte kubeconfig). Commandes (`resources.ts`, pures, `PromptApi`
-injecté = `InputBox`/`QuickPick`/`showWarningMessage` modal) : `project.create` /
-`project.delete` / `sandbox.create` / `sandbox.delete` (**modale de confirmation** —
-destructif) / `sandbox.stop` / `sandbox.start` (pas de modale — transition réversible
-via `sandboxes/{stop,start}` → `spec.suspended`). Validation de **surface** avant appel
-(`validateResourceName` RFC1123, `validateRepoUrl` `https://…`|`git@…`, `validateGitRef`) →
-`VNL-EXT-026` ; la source de vérité reste le controller. Aucune interpolation shell côté
-extension ; la CLI RPC utilise le kubeconfig local de l'utilisateur (pas d'OIDC).
-
-**Sécurité du provisioning** (téléchargement + exécution d'un binaire) :
-1. **SHA256 obligatoire** : `vanyline-<target>.tar.gz.sha256` de la **même** release
-   (format GNU `sha256sum`, produit par `checksum: sha256` sur `upload-cli`). Absent
-   (404) → `VNL-EXT-005`, **refus**, aucun fallback « on fait confiance ».
-2. **HTTPS strict + allowlist d'hôte** sur l'URL **finale** après redirects
-   (`github.com`, `*.githubusercontent.com`) → `VNL-EXT-006` sinon. NB : `fetch` suit
-   les redirects seul, l'hôte final n'est validé qu'une fois le corps en main —
-   l'allowlist est un garde-fou intégrité/exfil, l'archive reste SHA256-gatée.
-3. **Install atomique** : download → tmpfile → vérif hash → extract tmpdir →
-   `chmod +x` → `copyFile` vers `~/.local/bin` → `rename`. **Jamais d'exécution avant
-   vérif.** Cible `~/.local/bin` uniquement ; `-003` target non supporté, `-004`
-   destination non inscriptible.
-
-**Packaging & CI** : `.vsix` attaché à chaque release GitHub (job `ext` de
-`release.yml`, `vsce package --no-dependencies`), pas de marketplace ;
-`npm run install:local` (racine) pour code-server. Job `ext` dans `test.yml`
-(check + test + build des packages puis de `ext`). `ext/cli-version.txt` et
-`ext/package.json` `version` = **bumps manuels** découplés du workspace Rust
-(cf. `docs/release-runbook.md` §2). Procédure d'install + checklist e2e :
-`docs/ext-install.md`.
-
-**Dette assumée** : `chat/cancel` reste un no-op côté CLI (pas d'annulation réelle
-de tour, F3). **F5** : pas de watch temps réel des phases (la CLI RPC n'a pas
-d'équivalent à `/api/ws/sandbox-state` — refresh manuel + refresh après action) ;
-namespace figé par session (changer de contexte kubeconfig impose un `Reload Window`) ;
-formulaires de spec en suite d'`InputBox` (les champs riches de `SandboxSpec` —
-toolchains, LSP — ne sont pas exposés : `sandboxes/create` envoie
-`{name, project, branch}`, les toolchains sont auto-dérivées des langages détectés) ;
-pas de création d'Owner (CLI only) ; `panels/resources.ts` (colle vscode) sans test
-unitaire, comme les autres `panels/*`. **F4** : pas de sélecteur de couche
-(les writes héritent du défaut F2 — workspace si résolu, sinon global) ; pas de
-synchro avec les `settings.json` VS Code natifs (`serverPath`/`autoUpdateCli`/
-`defaultLogLevel` restent dans Extension Settings, la config CLI vit dans son YAML
-deux-couches) ; le bouton « provider par défaut » des écrans partagés est rejeté
-(`VNL-EXT-024`, concept web-only).
+L'extension VS Code (`ext/`, F3–F5) est supprimée : « construis ta cible », pas d'étape
+intermédiaire (décision du développeur principal, relayée par le second développeur). Le cas
+d'usage `kydah-code` à PVC partagé disparaît avec elle. Le serveur RPC stdio qu'elle pilotait
+(`vanyline serve --stdio`) est conservé. Le code `ext/` et son job CI sont à retirer
+(tâche de `vanyline.sdd`).
 
 ### Règles de dépendances TypeScript
 
 1. **`packages/protocol` est une feuille** : aucune dépendance UI, consommable par
-   n'importe quel client (extension, frontend, scripts de test).
+   n'importe quel client (frontend, scripts de test, intégrations RPC).
 2. **Un seul schéma par type partagé** : `ChatEvent` (ts-rs) et `config-domain.ts`
    (miroir manuel + fixtures de conformité) sont définis en Rust d'abord. La dérive
    Rust↔TS est un bug, pas une fatalité.
@@ -2299,8 +2251,7 @@ deux-couches) ; le bouton « provider par défaut » des écrans partagés est r
    `frontend/` dépend de `@vanyline/ui` + `@vanyline/protocol` via alias source
    (`vite.config.ts` + `tsconfig.app.json`), pas de build intermédiaire.
 4. Pas de `console.log` dans les sources (logger projet), pas de code partagé par
-   copier-coller entre `frontend/` et `ext/` : ce qui doit être partagé remonte dans
-   `packages/`.
+   copier-coller entre applications : ce qui doit être partagé remonte dans `packages/`.
 5. **CI** : job « Frontend + packages » — `check` + `test` de `@vanyline/protocol` puis
    `@vanyline/ui` **avant** le build `frontend`. Job `tsrs` séparé pour la vérification
    ts-rs.
