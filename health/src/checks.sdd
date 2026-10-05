@@ -137,8 +137,11 @@ Tasks:
     (`/toolchains/python`, `/toolchains/docker`) : `ruff` et `hadolint` sont déjà embarqués
     pour les LSP (`vnl-ruff-lsp`, `vnl-hadolint-lsp`) mais leur présence sur le PATH du shell
     est à vérifier.
-  [ ] Test de non-dérive : un test lit `/.github/workflows/test.yml` et vérifie que les
-    commandes du preset `rust` y figurent (hors `--message-format=json`).
+  [x] Test de non-dérive : un test lit `/.github/workflows/test.yml` et vérifie que les
+    commandes du preset `rust` y figurent (hors `--message-format=json`). — fait
+    2026-10-05 : `clippy_memes_drapeaux_que_la_ci` + `fmt_memes_drapeaux_que_la_ci`
+    (comparaison bidirectionnelle ; `rust-coverage` hors comparat par nature : job CI
+    `--json` vs preset `--lcov`, dessein différent).
 
 Scenario: preset_rust_complet
   Given le langage `rust`

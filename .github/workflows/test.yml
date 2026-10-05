@@ -66,6 +66,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # régénère packages/protocol/src/generated/ depuis vanyline-lib
       - run: cargo test -p vanyline-lib --features ts-rs
+      # régénère packages/protocol/src/generated/ depuis vanyline-health
+      - run: cargo test -p vanyline-health --features ts-rs
       - run: git diff --exit-code -- packages/protocol/src/generated/
 
   coverage:

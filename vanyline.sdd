@@ -87,10 +87,12 @@ Tasks:
     `lib/src/k8s.sdd` (`owner_token`), `app/src/api/sandboxes.sdd` ; RBAC `serviceaccounts/token`
     pour l'app (`deploy/`) ; mettre à jour AGENTS.md et `docs/architecture.md` (section
     « Serveur MCP », diagramme, tableau des clients) qui décrivent encore OIDC/groupes.
-  [ ] Santé du code (`health/`) : ajouter le crate `vanyline-health` aux membres de
-    /Cargo.toml, à /AGENTS.md et à /docs/architecture.md ; ajouter son export ts-rs au job
-    `tsrs` de /.github/workflows/test.yml (`cargo test -p vanyline-health --features ts-rs`) et
-    à ./.github/workflows/workflows.sdd.
+  [x] Santé du code (`health/`) : crate `vanyline-health` ajouté aux membres de
+    /Cargo.toml, à /AGENTS.md et à /docs/architecture.md ; export ts-rs ajouté au job
+    `tsrs` de /.github/workflows/test.yml (`cargo test -p vanyline-health --features ts-rs`)
+    et à ./.github/workflows/workflows.sdd. — livré 2026-10-05, 96 tests (97 sous
+    `ts-rs`), sources à dette harnais zéro, batterie validator verte (clippy workspace
+    reste rouge de la dette préexistante /tooling.sdd, aucun delta health).
   [ ] Un Owner = un namespace (décision 2026-10-04) : `controller/src/namespace.sdd` et les specs
     amendées (crds, controller, lib/k8s, app) ; AGENTS.md et docs/architecture.md décrivent encore un
     namespace unique.

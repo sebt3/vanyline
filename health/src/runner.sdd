@@ -68,7 +68,11 @@ Handles:
   parent laisse des descendants).
   Statut : code 0 → `passed` ; code ≠ 0 → `failed` ; spawn impossible, timeout, sortie
   exploitable absente ou illisible → `errored`. Une vérification `errored` n'interrompt pas les
-  suivantes (une commande cassée ne doit pas masquer les autres résultats).
+  suivantes (une commande cassée ne doit pas masquer les autres résultats). Une vérification
+  dont le préalable `after` est `errored` n'est PAS lancée et devient `errored` en cascade,
+  raison consignée dans `output_tail` — `skipped` est réservé à « rien à vérifier »
+  (./report.sdd), un préalable mort n'est pas « rien à vérifier » (arbitrage Sébastien
+  2026-10-05) ; elle non plus n'interrompt pas les suivantes.
   `output_tail` : fin du stderr (UTF-8 lossy) bornée à `tail_bytes` ; pour une vérification
   sans sortie structurée et stderr vide, la fin du stdout.
   Sorties structurées : `CargoMessages`/`TscText`/`RuffJson`/`HadolintJson` → le parseur du
@@ -130,6 +134,15 @@ Scenario: spawn_impossible
   Given un programme inexistant
   When @run_checks
   Then ce check est `errored`, les suivants s'exécutent
+
+Scenario: prealable_errore_erore_le_dependant
+  Given un check A dont le spawn échoue (programme inexistant) et un check B dont `after`
+    vaut l'id d'A, plus un check C indépendant
+  When @run_checks
+  Then A est `errored`
+    And B est `errored` en cascade, jamais lancé (aucune sortie produite), raison consignée
+      dans `output_tail` — jamais `skipped` (« rien à vérifier », ./report.sdd)
+    And C est exécuté normalement (la cascade n'interrompt pas les suivantes)
 
 Scenario: timeout_tue_le_groupe
   Given une commande qui lance un descendant d'arrière-plan et dépasse `check_timeout`

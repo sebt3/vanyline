@@ -91,6 +91,15 @@ Tasks:
     (`unwrap`/`expect`/`panic`), 235 warnings dont 228 de `missing_docs`. Les crates en
     aval (`lib`, `app`, `cli`, `sandbox`, `controller`) ne sont pas mesurées tant que les
     feuilles ne compilent pas sous le harnais.
+  [ ] Re-compteur 2026-10-05 (stable 1.99.0, `cargo clippy --workspace --all-targets`,
+    mesure intégrale rendue possible par l'alignement des feuilles) — le total exact
+    dépend de la méthode de décompte (format court vs long, arêtes de workspace comptées
+    ou non) ; ce qui est sûr et à solde : ~45 diagnostics `cargo_common_metadata` de
+    niveau PACKAGE (5 par crate × 9 membres, `vanyline-health` inclus depuis son ajout :
+    description/repository/readme/keywords/categories absents, comme les 8 frères), plus
+    la famille `missing_docs`/pedantic des feuilles (`tools`, `crds`, `cfgstore`).
+    `vanyline-health` : ZÉRO dette sur ses sources (seule crate du workspace à rendre
+    `--> health/` vide sous `--all-targets -D warnings`) — ne doit jamais grossir.
   [ ] Doc `missing_docs` purgée partout, puis basculer `missing_docs = "deny"` (aval de Sébastien).
   [ ] Basculer la vérification harnais en tout-vert (compteur de dette à zéro) et retirer
     les exemptions `cfg(test)` devenues inutiles si applicable.

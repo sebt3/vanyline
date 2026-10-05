@@ -33,7 +33,9 @@ Can read:
   /docs/architecture.md
 
 Structure:
-  vanyline_health:: — onze modules publics, aucun re-export plat
+  vanyline_health:: — dix modules publics (dix .sdd enfants ; le compte « onze » des
+    premières congelations était une erreur de numérotation, corrigée 2026-10-05),
+    aucun re-export plat
     ├── error — ./error.sdd : @HealthError (`VNL-HLT-NNN`)
     ├── report — ./report.sdd : modèle de rapport sérialisable (@HealthReport et ses parties),
     │   source des types TypeScript
@@ -47,7 +49,7 @@ Structure:
     └── runner — ./runner.sdd : exécution des vérifications et assemblage du rapport
 
 Exposes:
-  Les onze `pub mod` ci-dessus ; feature cargo `ts-rs` (optionnelle, désactivée par défaut)
+  Les dix `pub mod` ci-dessus ; feature cargo `ts-rs` (optionnelle, désactivée par défaut)
   qui dérive `ts_rs::TS` sur les types de ./report.rs et active leur export vers
   `/packages/protocol/src/generated/`.
 
@@ -70,15 +72,19 @@ Depends on:
   tracing, ts-rs (optionnel).
 
 Tasks:
-  [ ] Ajouter `health` aux membres de /Cargo.toml (workspace UNIQUE, `lints.workspace = true`,
+  [x] Ajouter `health` aux membres de /Cargo.toml (workspace UNIQUE, `lints.workspace = true`,
     jamais de table `[lints]` locale) et à /vanyline.sdd, /AGENTS.md (liste des crates).
-  [ ] Décider où s'exporte ts-rs : /vanyline.sdd dit « généré par vanyline-lib » ; ce crate
-    génère ses propres types, il faut amender cette règle et le job CI `tsrs` de
-    /.github/workflows/test.yml (`cargo test -p vanyline-health --features ts-rs` en plus).
-  [?] Nom du crate (`vanyline-health`) : « health » dit mieux la vision (synthèse pour un
-    relecteur) que « quality » ou « checks » — à confirmer.
-  [ ] Rédiger puis implémenter les specs enfants, dans l'ordre : error, report, lcov,
-    cargo_messages, tsc_text, ruff_json, hadolint_json, diff, checks, runner.
+  [x] Décider où s'exporte ts-rs : la règle de /vanyline.sdd (ligne « generated par
+    vanyline-lib et vanyline-health ») est amendée, le job CI `tsrs` de
+    /.github/workflows/test.yml génère les deux crates. Validation validator 2026-10-05.
+  [x] Nom du crate (`vanyline-health`) : confirmé — le lot de specs congelé du
+    2026-10-04 (racine vanyline.sdd, AGENTS.md, docs/architecture.md, sandbox/src/health.sdd)
+    nomme le crate `vanyline-health` partout ; le `[?]` n'a plus d'objet.
+  [x] Rédiger puis implémenter les specs enfants, dans l'ordre : error, report, lcov,
+    cargo_messages, tsc_text, ruff_json, hadolint_json, diff, checks, runner. — les dix
+    specs enfants existent, leurs Scenario ont tous un test taggé et passent (96 tests,
+    97 sous `ts-rs`) ; `Done when` de cette spec reste ouvert (batterie clippy complète,
+    conditionnée à la purge de dette de /tooling.sdd — décision Sébastien 2026-10-05).
 
 Done when:
   Les dix specs enfants sont revues, leurs Scenario passent, et la batterie complète

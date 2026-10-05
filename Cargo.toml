@@ -8,6 +8,7 @@ members = [
     "controller",
     "crds",
     "cfgstore",
+    "health",
 ]
 resolver = "2"
 [workspace.package]

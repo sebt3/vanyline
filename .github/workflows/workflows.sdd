@@ -19,6 +19,7 @@ Must:
   `clippy` (`cargo clippy --workspace --all-targets -- -D warnings`), `frontend`
   (check+test `@vanyline/protocol`, check+test `@vanyline/ui`, build+check+test `frontend`),
   `tsrs` (`cargo test -p vanyline-lib --features ts-rs` puis
+  `cargo test -p vanyline-health --features ts-rs`, puis
   `git diff --exit-code -- packages/protocol/src/generated/`), et `coverage`
   (mesure de baseline, sans seuil, push sur `main` seulement).
   Executer les commandes strictement identiques à la batterie d'AGENTS.md — toute
@@ -52,8 +53,9 @@ Tasks:
   [x] Retirer le job `ext` de `test.yml` et de `release.yml` (extension VS Code supprimée,
     2026-10-04) — validé par le `validator` (batterie npm verte, plus aucune référence
     vivante à `ext/`).
-  [ ] Ajouter à `tsrs` la génération de `vanyline-health`
-    (`cargo test -p vanyline-health --features ts-rs`).
+  [x] Ajouter à `tsrs` la génération de `vanyline-health`
+    (`cargo test -p vanyline-health --features ts-rs`). — fait et corps de la spec
+    aligné sur test.yml, validation validator 2026-10-05.
   [ ] Documenter dans la spec de la release (`docs/release-runbook.md`, agent `release`)
     l'interaction entre CI rouge (dette) et tag de release — un tag ne part que sur CI
     verte, donc après purge des crates concernées.

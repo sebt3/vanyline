@@ -35,6 +35,14 @@ Returns:
   et, pour chacun, que les lignes instrumentées comprises dans les plages modifiées ;
   `lines_found`/`lines_hit`/`uncovered` sont recalculés sur ce sous-ensemble ; un fichier
   modifié dont AUCUNE ligne modifiée n'est instrumentée est omis (rien à couvrir).
+  Modèle « span » contracté (arbitrage Sébastien 2026-10-05) : @FileCoverage étant un agrégat
+  (@report.sdd — la position des lignes COUVERTES n'y figure pas, seules les non couvertes),
+  l'instrumenté est modélisé par l'intervalle `[1..span_end]` avec
+  `span_end = max(lignes_found, fin de la dernière plage non couverte)` ; sont dites couvertes
+  les lignes modifiées de cet intervalle hors des plages non couvertes. Limite connue et
+  assumée : si l'instrumentation est très discontinue, la couverture du code neuf peut être
+  surestimée ; le par-ligne exact n'est pas au contrat (y ajouter des positions de lignes
+  serait un changement rupturant des types ts-rs exposés).
   @restrict_issues : ne garde que les issues dont (path, line) tombe dans une plage modifiée.
 
 Raises:

@@ -54,7 +54,7 @@ ou `#[allow]` justifié d'une ligne citant la spec. La dette préexistante est t
 Batterie complète — identique à la CI (`test.yml`, voir sa spec `.github/workflows/workflows.sdd`),
 lancée par le `validator`. Une tâche n'est terminée que si tout passe.
 
-### Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, cfgstore)
+### Rust (workspace cargo UNIQUE : lib, app, cli, sandbox, tools, controller, crds, cfgstore, health)
 
 ```bash
 cargo check --workspace
@@ -89,9 +89,8 @@ npm run check --workspace=frontend   # vue-tsc --noEmit
 ```
 
 Job CI `tsrs` (types ts-rs à jour) : `cargo test -p vanyline-lib --features ts-rs`
+puis `cargo test -p vanyline-health --features ts-rs`,
 puis `git diff --exit-code -- packages/protocol/src/generated/`.
-(À étendre à `cargo test -p vanyline-health --features ts-rs` quand le crate `health` existera —
-tâche de `.github/workflows/workflows.sdd`.)
 
 ## Git
 

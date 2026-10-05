@@ -105,4 +105,10 @@ Scenario: roundtrip_json_stable
 Scenario: export_typescript
   Given la feature `ts-rs` activée
   When `cargo test -p vanyline-health --features ts-rs` s'exécute
-  Then `packages/protocol/src/generated/health-report.ts` existe et `git diff --exit-code` y est propre
+  Then `packages/protocol/src/generated/health-report.ts` existe et `git diff --exit-code`
+    y est propre
+  And le fichier est AUTO-SUFFISANT : aucune ligne `import` (les onze types sont dans le
+    même fichier — les `import type` émis par ts-rs par type sont retirés à la
+    concaténation), aucun identifiant déclaré deux fois
+  And il compile dans son consommateur : `npm run check --workspace=@vanyline/protocol`
+    est vert (gate réel, même contrat que `chat-event.ts` de ./lib.rs — fichier unique)
