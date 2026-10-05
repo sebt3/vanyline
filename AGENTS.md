@@ -76,7 +76,7 @@ specdd lint        # doit rendre « 0 errors, 0 warnings » (binaire npm global 
 
 Une spec créée ou modifiée doit passer `specdd lint` avant de servir de base à une implémentation.
 
-### Frontend + packages (+ extension en cours de retrait)
+### Frontend + packages
 
 ```bash
 # packages partagés d'abord (le frontend en dépend via alias source)
@@ -86,10 +86,6 @@ npm run check --workspace=@vanyline/ui       && npm run test --workspace=@vanyli
 npm run build --workspace=frontend   # vue-tsc -b && vite build
 npm run test  --workspace=frontend   # vitest run
 npm run check --workspace=frontend   # vue-tsc --noEmit
-
-# extension VS Code (package `vanyline` dans ext/) — SUPPRIMÉE (2026-10-04) : ces trois commandes
-# et le job CI `ext` restent tant que `ext/` existe ; à retirer ensemble (tâche de /vanyline.sdd)
-npm run check --workspace=vanyline && npm run test --workspace=vanyline && npm run build --workspace=vanyline
 ```
 
 Job CI `tsrs` (types ts-rs à jour) : `cargo test -p vanyline-lib --features ts-rs`

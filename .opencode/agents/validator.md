@@ -49,7 +49,6 @@ cargo fmt --all -- --check
 npm run check --workspace=@vanyline/protocol && npm run test --workspace=@vanyline/protocol
 npm run check --workspace=@vanyline/ui       && npm run test --workspace=@vanyline/ui
 npm run build --workspace=frontend && npm run test --workspace=frontend && npm run check --workspace=frontend
-npm run check --workspace=vanyline && npm run test --workspace=vanyline && npm run build --workspace=vanyline  # ext/
 ```
 
 - Chaque commande : résultat brut + exit code, jamais résumée par « ça passe ».

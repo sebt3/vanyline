@@ -60,7 +60,7 @@ Must not:
   demande explicite de Sébastien) l'autorise.
 
 Tasks:
-  [ ] SUPPRESSION DE L'EXTENSION VS CODE (2026-10-04) : retirer `ext/` (code, `package.json`,
+  [x] SUPPRESSION DE L'EXTENSION VS CODE (2026-10-04) : retirer `ext/` (code, `package.json`,
     `cli-version.txt`), son entrée du workspace npm racine, le job `ext` de
     `.github/workflows/test.yml` et de `workflows.sdd`, les lignes `ext` de la batterie
     d'AGENTS.md (« Frontend + packages + extension »), `docs/ext-install.md`, et la section

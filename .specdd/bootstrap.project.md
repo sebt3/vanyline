@@ -36,7 +36,7 @@ Sébastien, pas d'implémentation avant les tests dérivés de la spec.
 - Une spec sans fichier source correspondant est légitime pour les artefacts de
   configuration ; l'inverse (source sans spec) est interdit d'amendement direct : on crée
   la spec d'abord.
-- TypeScript/Vue (frontend, `packages/*`, extension VS Code) : même boucle SpecDD+TTD,
+- TypeScript/Vue (frontend, `packages/*`) : même boucle SpecDD+TTD,
   mais la règle un-fichier-une-spec s'y applique **au fil de l'eau**, autour des zones en
   cours de changement — pas de rétro-spécification massive planifiée. Un fichier `.ts`
   ou `.vue` touché par une tâche sans spec existante exige une spec avant modification

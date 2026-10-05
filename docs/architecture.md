@@ -2237,8 +2237,8 @@ Les composants ne connaissent aucun backend. Trois ports fournis par `provide`/`
 L'extension VS Code (`ext/`, F3–F5) est supprimée : « construis ta cible », pas d'étape
 intermédiaire (décision du développeur principal, relayée par le second développeur). Le cas
 d'usage `kydah-code` à PVC partagé disparaît avec elle. Le serveur RPC stdio qu'elle pilotait
-(`vanyline serve --stdio`) est conservé. Le code `ext/` et son job CI sont à retirer
-(tâche de `vanyline.sdd`).
+(`vanyline serve --stdio`) est conservé. Le code `ext/`, le job CI `ext` et `docs/ext-install.md`
+ont été retirés.
 
 ### Règles de dépendances TypeScript
 
