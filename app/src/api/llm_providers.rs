@@ -164,6 +164,8 @@ mod tests {
             oidc_redirect_url: "https://app.example.com/callback".to_string(),
             oidc_scopes: vec![],
             oidc_ca_cert: None,
+            oidc_connect_timeout: std::time::Duration::from_secs(5),
+            oidc_timeout: std::time::Duration::from_secs(15),
             cookie_secret: "0".repeat(64),
             database_url: "postgres://localhost/test".to_string(),
             listen_addr: "0.0.0.0:8080".to_string(),

@@ -108,6 +108,7 @@ Accepts:
     produit le log d'erreur de ./config.rs (identifiants `VNL-CFG-001` à `VNL-CFG-006`)
     puis exit(1).
   - optionnelles avec défauts (lus par ./config.rs) : `OIDC_SCOPES`, `OIDC_CA_CERT`,
+    `OIDC_CONNECT_TIMEOUT_SECS` (défaut `5` s), `OIDC_TIMEOUT_SECS` (défaut `15` s),
     `LISTEN_ADDR` (défaut `"0.0.0.0:8080"`), `STATIC_DIR` (défaut `"./static"`),
     `VNL_K8S_NAMESPACE`, `VNL_APPLICATION_NAME`, `VNL_DEFAULT_*` (4).
   - `RUST_LOG` : filtre @tracing_subscriber::EnvFilter ; en l'absence de la variable,
@@ -154,8 +155,16 @@ Returns:
     `"VNL-AUTH-004: cannot build miryad-core OIDC client: {e}"` + exit(1).
   10. Construction @MiryadAuthState { oidc_client: @Arc::new(client), cookie_key: clone,
     post_login_redirect: `"/#/"`, post_logout_redirect: `"/#/"` (valeurs FIGÉES en dur
-    ici, en plus de celles déjà portées par ./config.rs::oidc_config — cf. Tasks), db }
-    puis @AppState (champs en Exposes, `busy` vide, `k8s` à `None`).
+    ici — SEULE source de vérité depuis miryad-core 0.1.5, @OidcConfig ne les porte
+    plus), db, secure_cookies: `true` en dur (arbitrage Sébastien 2026-10-05 : l'app
+    n'est servie que derrière l'Ingress HTTPS de l'Application ; un développement local
+    hors TLS verra les cookies de session rejetés, hors `localhost`), token_pepper:
+    `config.cookie_secret.clone()` (arbitrage Sébastien 2026-10-05 : poivre HMAC des
+    empreintes de tokens API réutilisant `COOKIE_SECRET`, aucune variable d'env
+    nouvelle ; l'entropie ≥ 64 octets est contrôlée à l'étape 5 ; effet accepté par
+    Sébastien 2026-10-05 : une rotation de `COOKIE_SECRET` invalide toutes les empreintes
+    de tokens API existantes — les tokens sont à réémettre après rotation) } puis @AppState
+    (champs en Exposes, `busy` vide, `k8s` à `None`).
   11. Assemblage du router racine (table ci-dessous, sans I/O).
   12. @tokio::net::TcpListener::bind(listen_addr) — échec : log
     `"VNL-NET-001: failed to bind {addr}: {e}"` + exit(1).
@@ -335,7 +344,7 @@ Depends on:
     exigeant un état de test).
   ./db/entities (6 entités mergées : `llm_providers`, `mcp_servers`, `skills`,
     `toolsets`, `model_profiles`, `agents`) — specs enfants ./db/entities/*.sdd.
-  Crate externe `miryad-core` v0.1 (hors workspace, source absente du dépôt) —
+  Crate externe `miryad-core` v0.1.5 (hors workspace, source absente du dépôt) —
     @MiryadAuthState, @OidcClient, @auth_router, @resource_router, @resource_openapi,
     @swagger_ui_router, @miryad_core::migration::Migrator : surface subie, non specée
     (même lacune que le `[!]` de ./auth/mod.sdd — cf. Tasks).
@@ -390,7 +399,9 @@ Tasks:
     construction de @MiryadAuthState d'ici) : deux sources de vérité pour la même valeur.
     Dériver l'état d'auth des valeurs de @config.oidc_config(), ou assumer le doublon
     (le champ du @OidcConfig et celui de @MiryadAuthState sont-ils tous deux lus par
-    miryad-core ? hors dépôt, inconnu) ?
+    miryad-core ? hors dépôt, inconnu) ? — RÉSOLU 2026-10-05 par miryad-core 0.1.5 :
+    @OidcConfig ne porte plus les redirects, @MiryadAuthState (construite ici) en est la
+    seule source de vérité ; le doublon a disparu avec la dépendance.
   [?] Fallthrough du @nest vers le @fallback_service racine : `GET /api/inconnu` (et
     `/api/v1/inconnu`) répond le shell SPA 200 HTML, pas un 404 JSON — un typo d'appel
     API côté frontend reçoit du HTML. Est-ce le contrat voulu (le scenario de

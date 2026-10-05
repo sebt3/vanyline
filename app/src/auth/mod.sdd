@@ -5,7 +5,7 @@ Purpose:
   fichier ./mod.rs NE porte AUCUNE logique d'authentification en build de production :
   tout son contenu est sous `#[cfg(test)]`. L'authentification réelle (état
   @MiryadAuthState, client OIDC, routes, extracteurs) vit dans le crate EXTERNE
-  `miryad-core` (dépendance version 0.1, hors workspace cargo), consommé directement
+  `miryad-core` (dépendance version 0.1.5, hors workspace cargo), consommé directement
   par `../main.rs` (`MiryadAuthState`, `OidcClient`, `auth_router()`). Le contrat propre
   de ./mod.rs est donc uniquement un contrat de harnais de test : exposer aux tests de
   l'`app` un constructeur d'@MiryadAuthState avec un client OIDC simulé.
@@ -34,6 +34,9 @@ Exposes:
     MiryadAuthState` ; même état mais branché sur la connexion fournie (sqlite en
     mémoire avec migrations réelles, cf. `../db/test_support.rs`, quand le test exige un
     aller-retour DB réel — MockDatabase ne pose que des résultats pré-programmés).
+  @TEST_TOKEN_PEPPER — `pub(crate) const &str` = `"test-token-pepper"` : poivre partagé
+    entre l'émission (@miryad_core::auth::issue_token dans les helpers des tests, ex.
+    `bearer_for` de ../db/entities/agents.rs) et la validation par l'état construit ici.
   Symboles non exposés : @MockMiryadOidcClient est privé au module (implémente
     `miryad_core::auth::OidcClientTrait` via `#[async_trait::async_trait]`).
 
@@ -48,14 +51,23 @@ Returns:
   - `cookie_key` : @cookie::Key::from(`&[0u8; 64]`) — clé nulle, valable qu'en test.
   - `post_login_redirect` et `post_logout_redirect` : `"/"`.
   - `db` : la connexion (fournie, ou MockDatabase Sqlite pour @test_auth_state).
-  @authorization_url (mock) — tuple figé : URL `https://issuer.example.com/authorize`,
-    @CsrfToken::new(`"csrf"`), @Nonce::new(`"nonce"`).
+  - `secure_cookies` : `false` (les tests n'exercent pas l'attribut `Secure` ; la
+    production pose `true` — ./main.sdd).
+  - `token_pepper` : @TEST_TOKEN_PEPPER (`"test-token-pepper"`) — @pub(crate) const
+    exposée par le module pour que les tests qui ÉMETTENT un token API
+    (@miryad_core::auth::issue_token, ex. `bearer_for` de ../db/entities/agents.rs) et
+    ceux qui le VALIDENT via l'état partagent le même poivre HMAC (sinon chaque
+    émission échoue en empreinte divergente).
+  @authorization_url (mock) — quatuor figé (signature miryad-core 0.1.5, PKCE S256) :
+    URL `https://issuer.example.com/authorize`, @CsrfToken::new(`"csrf"`),
+    @Nonce::new(`"nonce"`), @PkceCodeVerifier::new(`"test-pkce-verifier"`).
 
 Raises:
   Aucune erreur propagée par les constructeurs eux-mêmes.
-  @exchange_code (mock) — retourne toujours une @Err(@AuthError::Oidc) de message
-    `"MRD-TEST-001: mock not used"`, quel que soit le code ou le nonce reçus (les deux
-    arguments sont ignorés) : le mock n'est jamais censé servir un échange réel.
+  @exchange_code (mock, signature miryad-core 0.1.5 : `code`, `expected_nonce`,
+  @PkceCodeVerifier) — retourne toujours une @Err(@AuthError::Oidc) de message
+  `"MRD-TEST-001: mock not used"`, quels que soient les arguments reçus (les trois
+  arguments sont ignorés) : le mock n'est jamais censé servir un échange réel.
   Panique `expect("valid test url")` uniquement si la constante d'URL codée en dur
     devient invalide (impossible tant que le littéral ne bouge pas).
 
@@ -70,7 +82,8 @@ Must:
   - @test_auth_state doit être équivalent à appeler @test_auth_state_with_db avec
     `sea_orm::MockDatabase::new(@sea_orm::DatabaseBackend::Sqlite).into_connection()`.
   - L'état construit porte exactement les valeurs figées de `Returns` (clé de cookie
-    nulle, redirect `/` / `/`, client OIDC simulé).
+    nulle, redirect `/` / `/`, client OIDC simulé, `secure_cookies: false`,
+    `token_pepper: @TEST_TOKEN_PEPPER`).
   - @authorization_url doit être déterministe : mêmes valeurs à chaque appel.
   - @exchange_code ne doit jamais retourner de succès ; l'identifiant d'erreur
     `MRD-TEST-001` préfixe le message.
@@ -95,6 +108,7 @@ Scenario: État de test avec base mock
   When l'état retourné est inspecté
   Then `post_login_redirect` et `post_logout_redirect` valent `"/"`
     And `cookie_key` est dérivé de `&[0u8; 64]`
+    And `secure_cookies` vaut `false` et `token_pepper` vaut @TEST_TOKEN_PEPPER
     And `db` est une connexion MockDatabase backend `Sqlite` acceptant des résultats
     de requête pré-programmés
 
@@ -116,9 +130,16 @@ Scenario: URL d'autorisation déterministe
   Given le client OIDC simulé d'un état de test
   When @authorization_url est appelée deux fois
   Then les deux appels retournent la même URL `https://issuer.example.com/authorize`,
-    le même @CsrfToken `"csrf"` et le même @Nonce `"nonce"`
+    le même @CsrfToken `"csrf"`, le même @Nonce `"nonce"` et le même
+    @PkceCodeVerifier `"test-pkce-verifier"` (quatuor miryad-core 0.1.5)
 
 Tasks:
+  [x] Convertir les 4 Scenario de cette spec en tests taggés (décision Sébastien
+    2026-10-05) : « État de test avec base mock », « État de test branché sur une
+    connexion réelle », « Échange de code toujours refusé », « URL d'autorisation
+    déterministe » — faits 2026-10-05 dans le module `scenario_tests` de ./mod.rs
+    (variante du libellé « module tests », validée par le validator), un test par
+    Scenario taggé par son titre, batterie validator verte.
   [?] `MRD-TEST-001` : préfixe d'identifiant d'erreur unique (format type `MRD-TEST-nnn`)
     — AGENTS.md demande un format contractualisé dans la spec concernée. Ce mock est le
     seul endroit du crate à en porter un ; trancher avec Sébastien : convention locale

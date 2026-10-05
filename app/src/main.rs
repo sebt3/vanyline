@@ -117,6 +117,13 @@ async fn main() {
         post_login_redirect: "/#/".to_string(),
         post_logout_redirect: "/#/".to_string(),
         db,
+        // L'app n'est exposée que derrière l'Ingress HTTPS de l'Application : cookies scellés
+        // `Secure` en dur. Arbitrage Sébastien 2026-10-05, cf. `main.sdd` étape 10.
+        secure_cookies: true,
+        // Poivre HMAC des empreintes de tokens API : dérivé du secret existant `COOKIE_SECRET`
+        // (longueur ≥ 64 contrôlée plus haut), aucune nouvelle variable d'env. Effet accepté :
+        // une rotation de `COOKIE_SECRET` réémet les tokens API (décision Sébastien 2026-10-05).
+        token_pepper: config.cookie_secret.clone(),
     };
 
     let static_dir = config.static_dir.clone();

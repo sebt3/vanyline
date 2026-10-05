@@ -107,6 +107,8 @@ mod tests {
         AuthPrincipal {
             subject: "alice".to_string(),
             email: None,
+            // Chemin token API : miryad-core pose `preferred_username` à `None` sur ce chemin.
+            preferred_username: None,
             source: miryad_core::auth::PrincipalSource::ApiToken { token_id: 1 },
         }
     }

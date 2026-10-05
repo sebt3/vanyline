@@ -4,7 +4,7 @@ Platform: Rust/vanyline-app/std
 
 Purpose:
   Configuration de démarrage de l'`app` : lecture unique et fail-fast des variables
-  d'environnement en @Config (16 champs @pub), plus le mapping Config →
+  d'environnement en @Config (18 champs @pub), plus le mapping Config →
   @miryad_core::auth::OidcConfig. Le fichier ne fait aucun réseau, aucune validation
   sémantique, aucun logging : il lit l'environnement et retourne soit un @Config complet,
   soit une @Err(@String) dont le message porte un marqueur en dur `"VNL-CFG-001"` …
@@ -31,14 +31,16 @@ Can read:
   ../../cfgstore/src/error.sdd
 
 Exposes:
-  @Config — @struct @pub @Clone aux 16 champs tous @pub, aucun @Default, aucun builder,
+  @Config — @struct @pub @Clone aux 18 champs tous @pub, aucun @Default, aucun builder,
     aucun accesseur : les consommateurs lisent les champs directement (state.config.x).
     Le module est privé (`mod config;` ./main.rs, sans `pub`) : @Config est en pratique
     visible du crate uniquement. Aucune variante d'@AppError (./error.rs) n'est définie
     ici — ./error.rs ne connaît d'ailleurs aucun marqueur `"VNL-CFG-*"`.
     Champs : @Config::oidc_issuer_url, @Config::oidc_client_id,
     @Config::oidc_client_secret, @Config::oidc_redirect_url, @Config::oidc_scopes
-    (@Vec<@String>), @Config::oidc_ca_cert, @Config::cookie_secret,
+    (@Vec<@String>), @Config::oidc_ca_cert, @Config::oidc_connect_timeout
+    (@std::time::@Duration), @Config::oidc_timeout (@std::time::@Duration),
+    @Config::cookie_secret,
     @Config::database_url, @Config::listen_addr, @Config::static_dir,
     @Config::k8s_namespace, @Config::application_name,
     @Config::default_home_storage_class, @Config::default_home_access_mode,
@@ -79,6 +81,17 @@ Accepts:
     `OIDC_SCOPES` (défaut `"openid,email,profile"`) → découpée sur `','`, chaque segment
       @trim()é, collecté en @Vec<@String> ; la découpe + trim s'appliquent AUSSI à la
       valeur fournie, jamais seulement au défaut.
+    `OIDC_CONNECT_TIMEOUT_SECS` (défaut `5`) → @Config::oidc_connect_timeout : @parse en
+      @u64 de secondes, converti en @std::time::@Duration::from_secs. Jamais d'échec :
+      absente, vide (`""`) ou non parseable (`"abc"`, `"12.5"`, négatif) ⇒ le défaut `5`
+      s'applique (même règle « jamais d'échec » que les autres variables à défaut, avec
+      le parse en plus — la valeur vide n'est pas conservée ici, contrairement aux
+      requis/optionnels).
+    `OIDC_TIMEOUT_SECS` (défaut `15`) → @Config::oidc_timeout, même contrat de parse et
+      de repli que `OIDC_CONNECT_TIMEOUT_SECS`, défaut `15`.
+      (Arbitrage Sébastien 2026-10-05 : timeouts du client OIDC configurables par env —
+      miryad-core 0.1.5 les impose dans @OidcConfig ; défauts = défauts applicatifs
+      recommandés par la lib, 5 s / 15 s.)
     `LISTEN_ADDR` (défaut `"0.0.0.0:8080"`) → @Config::listen_addr en @String brut :
       aucune vérification qu'il se parse en @SocketAddr ici (le parse et son échec
       `"VNL-CFG-008"` + `exit(1)` vivent dans ./main.rs).
@@ -115,13 +128,16 @@ Returns:
     `OIDC_ISSUER_URL` → `OIDC_CLIENT_ID` → `OIDC_CLIENT_SECRET` → `OIDC_REDIRECT_URL` →
     `COOKIE_SECRET` → `DATABASE_URL` (`OIDC_SCOPES` est évalué entre les deux derniers
     mais ne peut échouer). Un seul message remonté, jamais la liste des manquantes.
-  @oidc_config — @miryad_core::auth::OidcConfig dont les champs `issuer_url`,
-    `client_id`, `client_secret`, `redirect_url`, `scopes`, `ca_cert` sont des clones
-    un-à-un des champs homonymes de @Config, et `post_login_redirect` /
-    `post_logout_redirect` sont la constante `"/#/"` (hash de la SPA, comportement
-    historique `/#/` revendiqué par le commentaire du fichier) : valeur littérale
-    identique `"/#/"` pour les DEUX redirects, indépendante de `oidc_redirect_url` et
-    de toute variable d'env.
+  @oidc_config — @miryad_core::auth::OidcConfig (miryad-core 0.1.5, 8 champs) dont les
+    champs `issuer_url`, `client_id`, `redirect_url`, `scopes`, `ca_cert` sont des clones
+    un-à-un des champs homonymes de @Config, `client_secret` est @Some du clone de
+    @Config::oidc_client_secret (l'app exige `OIDC_CLIENT_SECRET` via `"VNL-CFG-003"` :
+    jamais de client public, le @None de miryad-core est réservé aux flux PKCE seul), et
+    `connect_timeout` / `timeout` sont les @Duration des champs homonymes de @Config
+    (issus de `OIDC_CONNECT_TIMEOUT_SECS` / `OIDC_TIMEOUT_SECS`, défauts 5 s / 15 s).
+    @OidcConfig ne porte PLUS `post_login_redirect` / `post_logout_redirect` (retraits de
+    miryad-core 0.1.5) : la redirection post-login/logout a @MiryadAuthState pour seule
+    source de vérité, figée `"/#/"` par ./main.rs — contrat ./main.sdd.
 
 Raises:
   @from_env ne lève jamais, ne panic pas, ne loggue pas, ne sort pas du processus :
@@ -176,9 +192,13 @@ Must:
     défaut exact est `"openid,email,profile"` (trois scopes, dans cet ordre).
   Retourner `"0.0.0.0:8080"` et `"./static"` comme défauts littéraux de
     respectivement `LISTEN_ADDR` et `STATIC_DIR`, sans jamais les valider.
-  Mapper @oidc_config champ à champ (six clones) et figer les deux redirects à
-    `"/#/"` (comportement SPA historique `/#/` — le commentaire du fichier le
-    revendique, le test `oidc_config_maps_all_fields` le verrouille déjà).
+  Mapper @oidc_config champ à champ (six clones + @Some du secret + deux @Duration de
+    timeout issus de @Config). La redirection `"/#/"` (SPA historique) n'est PAS portée
+    par @OidcConfig depuis miryad-core 0.1.5 : ./main.rs la fige dans @MiryadAuthState
+    (./main.sdd), ce fichier n'en est plus responsable.
+  Convertir `OIDC_CONNECT_TIMEOUT_SECS` / `OIDC_TIMEOUT_SECS` en @Duration par
+    @Duration::from_secs sur le @u64 parsé, avec repli silencieux sur les défauts 5 / 15
+    quand la valeur est absente, vide ou non parseable — jamais de message d'erreur.
   Dériver @Clone sur @Config : @AppState est @Clone et embarque config par valeur.
   Rester un constructeur unique sans validation sémantique : seule la PRÉSENCE
     (@env::var en @Ok) est contrôlée sur les requises.
@@ -201,8 +221,9 @@ Must not:
 
 Depends on:
   std::env — @env::var et sa sémantique (@Err sur absente ET non-Unicode, @Ok sur vide).
-  miryad-core (../Cargo.toml, `default-features = false`, feature `swagger-ui`) —
-    @miryad_core::auth::OidcConfig (8 champs) ; consommé par ./main.rs::@OidcClient::new.
+  miryad-core (../Cargo.toml, version `0.1.5`, `default-features = false`, feature
+    `swagger-ui`) — @miryad_core::auth::OidcConfig (8 champs depuis 0.1.5, redirects
+    retirés, timeouts obligatoires) ; consommé par ./main.rs::@OidcClient::new.
   ./main.rs — unique appelant de @from_env/@oidc_config au démarrage ; validations
     différées downstream (`"VNL-CFG-008"`, longueur du cookie `"VNL-CFG-005"`) et
     exit(1) ; @AppState qui clone @Config.
@@ -255,16 +276,32 @@ Tasks:
   [?] Les deux littéraux `"/#/"` de @oidc_config sont dupliqués à l'identique dans
     ./main.rs (@MiryadAuthState.post_login_redirect/post_logout_redirect construits à la
     main) : deux sources de vérité pour la même constante SPA. Les faire converger
-    (constante ou lecture depuis @oidc_config) ?
+    (constante ou lecture depuis @oidc_config) ? — RÉSOLU 2026-10-05 par miryad-core
+    0.1.5 : @OidcConfig ne porte plus les redirects, @MiryadAuthState (./main.rs) en est
+    la seule source de vérité ; ce fichier ne contient plus aucun littéral `"/#/"`.
+  [x] Timeouts OIDC configurables par env (arbitrage Sébastien 2026-10-05, miryad-core
+    0.1.5) : @Config::oidc_connect_timeout / @Config::oidc_timeout (@Duration), variables
+    `OIDC_CONNECT_TIMEOUT_SECS` (défaut 5) et `OIDC_TIMEOUT_SECS` (défaut 15) selon le
+    contrat d'@Accepts, propagés dans @oidc_config. Test existant `full_config` aligné
+    (7 s / 23 s). Scenarios porteurs, chacun avec son test taggé :
+    `from_env_defaut_timeouts`, `from_env_timeouts_fournis`,
+    `from_env_timeout_non_parseable_defaut`, `from_env_timeouts_classees_a_defaut`,
+    `oidc_config_copie_les_huit_champs` (remplace `oidc_config_maps_all_fields`).
+    Batterie validator verte 2026-10-05.
   [?] Stratégie de test de @from_env : @env::var se pilote au niveau du processus, et
     l'edition 2024 rend @env::set_var/@remove_var `unsafe` (le harnais ../../tooling.sdd
     deny `unsafe_code` — exemption `#[cfg(test)]` à justifier ligne de spec). Tests
     série/`#[serial]` sur l'env process, ou extraction d'un noyau testable
     (`from_env_with(f: impl Fn(&str) -> Result<String, …>)`) — choix d'implémentation à
-    valider avant d'écrire les tests.
+    valider avant d'écrire les tests. — VALIDÉ Sébastien 2026-10-05 : noyau privé @from_env_with(`read: impl Fn(&str) ->
+    @Result<@String, @std::env::@VarError>`), @from_env() déléguant à
+    @from_env_with(@std::env::@var) ; les Scenarios @from_env s'écrivent contre le noyau
+    (fermeture en mémoire, déterministe, parallèle-sûr, zéro `unsafe`, contrat public de
+    @from_env inchangé). Choix d'implémentation, pas de changement de contrat.
   [ ] Convertir chaque Scenario sans test existant en un test taggé par son titre
-    (implementer) ; le test existant `oidc_config_maps_all_fields` couvre le Scenario
-    `oidc_config_copie_les_six_champs`. Puis batterie du validator au vert.
+    (implementer) ; les Scenario timeout sont déjà couverts (voir tâche « Timeouts OIDC
+    configurables par env », close). Reste les ~14 Scenario `from_env_*` historiques,
+    écrivables contre le noyau @from_env_with. Puis batterie du validator au vert.
 
 Done when:
   Chaque Scenario est couvert par au moins un test taggé par son titre et passe ; les
@@ -388,22 +425,48 @@ Scenario: from_env_optionnel_vide_some_vide
   Then le champ oidc_ca_cert vaut `Some("")` et non @None — verrouille le comportement
     actuel atteint miryad-core, normalisation à trancher (`Tasks`)
 
-Scenario: oidc_config_copie_les_six_champs
+Scenario: oidc_config_copie_les_huit_champs
   Given un @Config construit par littéral (fonction `full_config` du module `tests` :
     issuer `"https://issuer.example.com"`, client_id `"client-id"`, secret
     `"client-secret"`, redirect `"https://app.example.com/auth/callback"`, scopes
-    `["openid", "email"]`, ca_cert `Some("pem")`)
+    `["openid", "email"]`, ca_cert `Some("pem")`, oidc_connect_timeout 7 s,
+    oidc_timeout 23 s — valeurs distinctes des défauts pour prouver la copie)
   When @oidc_config est appelé
-  Then les champs issuer_url, client_id, client_secret, redirect_url, scopes, ca_cert
-    de l'@OidcConfig retourné valent exactement les valeurs correspondantes du @Config
-  And post_login_redirect et post_logout_redirect valent `"/#/"` (test existant
-    `oidc_config_maps_all_fields`)
+  Then les champs issuer_url, client_id, redirect_url, scopes, ca_cert, connect_timeout,
+    timeout de l'@OidcConfig retourné valent exactement les valeurs correspondantes du
+    @Config (dont connect_timeout = 7 s et timeout = 23 s)
+  And client_secret vaut @Some(`"client-secret"`) (jamais @None : l'app exige la
+    variable, `"VNL-CFG-003"`)
 
-Scenario: oidc_config_redirects_figes
-  Given un @Config dont oidc_redirect_url vaut `"https://app.example.com/auth/callback"`
-    et ca_cert @None
-  When @oidc_config est appelé avec un oidc_redirect_url différent (ex:
-    `"https://autre.example.org/callback"`) sur un @Config sinon identique
-  Then post_login_redirect et post_logout_redirect valent tous deux EXACTEMENT `"/#/"`
-    dans les deux cas — constants, indépendants de toute variable d'env et de
-    oidc_redirect_url
+Scenario: from_env_defaut_timeouts
+  Given un environnement complet en requises, `OIDC_CONNECT_TIMEOUT_SECS` et
+    `OIDC_TIMEOUT_SECS` absentes
+  When @Config::from_env est appelé
+  Then oidc_connect_timeout vaut @Duration::from_secs(5) et oidc_timeout vaut
+    @Duration::from_secs(15) — les défauts recommandés par miryad-core 0.1.5
+
+Scenario: from_env_timeouts_fournis
+  Given un environnement complet en requises, `OIDC_CONNECT_TIMEOUT_SECS="7"` et
+    `OIDC_TIMEOUT_SECS="30"`
+  When @Config::from_env est appelé
+  Then oidc_connect_timeout vaut @Duration::from_secs(7) et oidc_timeout vaut
+    @Duration::from_secs(30), propagés tels quels dans @oidc_config.connect_timeout /
+    @oidc_config.timeout
+
+Scenario: from_env_timeout_non_parseable_defaut
+  Given un environnement complet en requises et `OIDC_TIMEOUT_SECS="abc"` (et
+    `OIDC_CONNECT_TIMEOUT_SECS=""`, posée vide)
+  When @Config::from_env est appelé
+  Then le résultat est un @Ok — aucune erreur pour une valeur de défaut non parseable
+  And oidc_timeout vaut @Duration::from_secs(15) et oidc_connect_timeout
+    @Duration::from_secs(5) (repli silencieux sur les défauts, vide comprise)
+
+Scenario: from_env_timeouts_classees_a_defaut
+  Given un environnement complet en requises et en variables à défaut, et les SEPT
+    optionnelles absentes (`OIDC_CA_CERT`, `VNL_K8S_NAMESPACE`, `VNL_APPLICATION_NAME`,
+    `VNL_DEFAULT_HOME_STORAGE_CLASS`, `VNL_DEFAULT_HOME_ACCESS_MODE`,
+    `VNL_DEFAULT_PROJECT_STORAGE_CLASS`, `VNL_DEFAULT_PROJECT_ACCESS_MODE`)
+  When @Config::from_env est appelé
+  Then les timeouts ne sont PAS @None : ce sont des variables À DÉFAUT (@Duration bruts
+    5 s / 15 s), distinctes des sept @Option — verrouille le classement des deux
+    nouvelles variables dans la famille « à défaut », jamais d'échec

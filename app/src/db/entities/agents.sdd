@@ -303,7 +303,7 @@ Scenario: Sérialisation REST expose la forme ligne complète
   Then l'objet contient les 9 clés `id`, `owner_id`, `name`, `description` (présente
     même à @None), `mode`, `model_profile_id`, `toolsets`, `skills`, `system_prompt`
 
-Scenario: Création via resource_router retourne 200 avec des ids distincts
+Scenario: Création via resource_router retourne 201 avec des ids distincts
   Given une base réelle `../db/test_support.rs` @real_db (sqlite en mémoire,
     migrations miryad-core + app appliquées), l'utilisatrice `alice` résolue, un
     provider + un profil seedés (`seed_model_profile`), un bearer token émis et un
@@ -311,8 +311,9 @@ Scenario: Création via resource_router retourne 200 avec des ids distincts
   When deux POST `/api/v1/agents` consécutifs avec le corps exact du frontend, le nom
     `"coder"` puis le nom `"reviewer"` (nom différent : `(owner_id, name)` est UNIQUE,
     collision légitime sinon)
-  Then les deux réponses ont le statut @StatusCode::OK (200, pas 201 — choix de
-    miryad-core) et leurs corps JSON portent des `id` distincts (test existant
+  Then les deux réponses ont le statut @StatusCode::CREATED (201 — contrat de
+    miryad-core 0.1.5 : création réussie rendue en 201 ; c'était 200 sous 0.1.3) et
+    leurs corps JSON portent des `id` distincts (test existant
     `frontend_create_body_round_trips_with_distinct_ids`, régression du `#[serde(default)]`
     manquant en Phase 3)
 

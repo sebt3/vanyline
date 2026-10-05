@@ -126,6 +126,8 @@ mod tests {
         AuthPrincipal {
             subject: "alice".to_string(),
             email: None,
+            // Chemin token API : miryad-core pose `preferred_username` à `None` sur ce chemin.
+            preferred_username: None,
             source: miryad_core::auth::PrincipalSource::ApiToken { token_id: 1 },
         }
     }
@@ -202,10 +204,16 @@ mod resource_router_regression {
     }
 
     async fn bearer_for(db: &DatabaseConnection, subject: &str) -> String {
-        issue_token(db, subject, "test", None)
-            .await
-            .expect("issuing succeeds")
-            .token
+        issue_token(
+            db,
+            subject,
+            "test",
+            None,
+            crate::auth::test_support::TEST_TOKEN_PEPPER,
+        )
+        .await
+        .expect("issuing succeeds")
+        .token
     }
 
     fn json_request(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
@@ -250,7 +258,7 @@ mod resource_router_regression {
             .expect("router does not fail");
         assert_eq!(
             first.status(),
-            StatusCode::OK,
+            StatusCode::CREATED,
             "create should not 400 on a missing id/owner_id"
         );
         let first_body = axum::body::to_bytes(first.into_body(), usize::MAX)
@@ -267,7 +275,7 @@ mod resource_router_regression {
             .expect("router does not fail");
         assert_eq!(
             second.status(),
-            StatusCode::OK,
+            StatusCode::CREATED,
             "second create should not collide"
         );
         let second_body = axum::body::to_bytes(second.into_body(), usize::MAX)
