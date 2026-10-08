@@ -168,10 +168,14 @@ Must not:
     la construction du header `WWW-Authenticate` ne doit plus dépendre d'une URL d'opérateur.
 
 Tasks:
-  [ ] Remplacer le code existant (modes `no_auth`/`static_token`/OIDC/groupes, @AccessLevel,
+  [x] Remplacer le code existant (modes `no_auth`/`static_token`/OIDC/groupes, @AccessLevel,
     @check_access, `oidc_*`, `public_url`, `oauth_metadata_url`) par ce contrat ; supprimer les
     décisions du 2026-09-27 qu'il remplace (RBAC Read/Admin « à rendre effectif »,
-    `/ws/terminal` refusant Read) — elles sont caduques, pas à implémenter.
+    `/ws/terminal` refusant Read) — elles sont caduques, pas à implémenter. FAIT 2026-10-08,
+    validator-vert : blacklist `no_auth`/`static_token`/`AccessLevel`/`groups`/`oidc_*` à zéro
+    occurrence dans tout le code du crate (les `.sdd` ne la nomment plus qu'en tant que blacklist
+    historique), commit `662ad6a` + suite 5B/5D ; réserve du
+    validator sur un « type AccessLevel conservé » vérifiée sans objet (zéro occurrence).
   [-] VÉRIFIÉ sur le cluster réel (2026-10-04, K8s v1.36.2, CNI Cilium) : signature RS256 (clé
     RSA, `kid` présent) ; `iss` = `https://kubernetes.default.svc.cluster.local` ; le JWKS est
     lisible à `/openid/v1/jwks` avec le jeton de SA d'un Owner (ClusterRoleBinding
@@ -185,10 +189,12 @@ Tasks:
     suppression du pod, au prix d'une demande de jeton par sandbox (UID de pod connu
     d'`app`). Non retenu en v1 ; à reconsidérer si les jetons d'un Owner circulent plus que
     prévu.
-  [ ] Convertir chaque Scenario en test taggé par son titre (`test_support` fournit clés et
+  [x] Convertir chaque Scenario en test taggé par son titre (`test_support` fournit clés et
     jetons) ; les tests des autres specs qui s'authentifiaient en `no_auth` ou `static_token`
-    présentent désormais un jeton de test valide pour l'Owner configuré.
-  [ ] Feature cargo `test` du crate sandbox (dev-dependency d'elle-même pour
+    présentent désormais un jeton de test valide pour l'Owner configuré. FAIT 2026-10-08,
+    validator-vert : 14 Scenarios de CE fichier → 14 tests dans ../tests/auth.rs, et
+    migration mécanique faite côté ./lib.sdd, ./ws/ticket.sdd, ./git.sdd.
+  [x] Feature cargo `test` du crate sandbox (dev-dependency d'elle-même pour
     `sandbox/tests/`) — nommée `test` et non `test-support` : le harnais `cargo` (deny) rend
     `clippy::redundant_feature_names` qui interdit le suffixe `-support` (diagnostic reproduit
     par validator clippy 1.99). Le module reste `test_support`.

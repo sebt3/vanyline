@@ -94,3 +94,19 @@ quand `None`/vide/whitespace après `trim()` ; EMAIL RETIRÉ de la chaîne de no
 - Restes tracés : `k8s.sdd` 4 `[?]`, gabarits Display `error.sdd` `[?]`, RPC stdio, cli TUI
   (étape 7), agents système (8), llm-config (9), crds.yaml périmé (`--crds` à régénérer),
   `docs/rpc-protocol.md` encore `existingPvc`, `session.sdd` `max_turns` en avance sur le code.
+
+## Avancée fin de session 2026-10-08 (2)
+
+- **5A validator VERT** : PASS — 14 Scenarios→14 tests, blacklist à zéro, gate workspace
+  complète 1376 tests verts, ts-rs idempotent, lint 0/0. Sa réserve (« type AccessLevel
+  conservé ») vérifiée SANS OBJET : zéro occurrence `AccessLevel` nulle part ; tâches
+  `auth.sdd` fermées `[x]` sur évidence (remplacement code, conversion Scenarios→tests,
+  feature `test`). Done-when global non clos : clippy `-D warnings` reste la dette D3.
+- **5D partiel** : 16 tests renommés aux titres exacts, `lib.sdd`/`main.sdd` scindés avec
+  evidence ; le DÉPLACEMENT ops du code n'est PAS fait — `build_metrics_app`/
+  `spawn_metrics_server` (bind warn) et `/health` sur `build_app` toujours là. Tâches
+  `[ ]` ouvertes chez elles (« Port d'exploitation complet », « Bind FATAL »). À déléguer
+  dès que le micro-batch B (même crate, `main.rs` en conflit) est rendu.
+- **5B reste valide-scopé** ; 5C (cli toolbox) en attente d'amendement specs.
+- Ordre restant : B → délégation ops-port (TDD, 4 Scenarios gelés de `lib.sdd`) →
+  validator en lot (B + ops) → commit → 5C specs → D3 purge.

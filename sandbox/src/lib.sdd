@@ -207,12 +207,16 @@ Handles:
 Tasks:
   [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
     accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
-  [ ] Cartographie couverture existante (à re-tagger par les titres de Scenario) :
-    `health_returns_200_ok` (../tests/http.rs) ; auth MCP `mcp_without_token_returns_401`,
-    `mcp_with_malformed_bearer_returns_401`, `mcp_with_valid_static_token_returns_200`,
-    `mcp_with_wrong_static_token_returns_401` ; métriques
+  [ ] Cartographie couverture existante (à re-tagger par les titres de Scenario ; noms
+    ressynchronisés le 2026-10-08 après l'étape auth 5A) : `health_returns_200_ok`
+    (../tests/http.rs — route encore servie par @build_app, port principal, cf. tâche
+    « port d'exploitation complet ») ; auth MCP `mcp_without_token_returns_401`,
+    `mcp_with_malformed_bearer_returns_401`, `mcp_with_garbage_token_returns_401`,
+    `mcp_with_valid_owner_token_returns_200`, `mcp_with_foreign_owner_token_returns_403`,
+    `aucune_decouverte_oauth` ; métriques
     `metrics_returns_200_with_prometheus_content_type`, `metrics_body_is_valid_prometheus_text`
-    ; tickets `issuance_without_auth_returns_401`, `issuance_with_static_token_returns_ticket`
+    (via @build_metrics_app) ; tickets `issuance_without_auth_returns_401`,
+    `issuance_with_owner_token_returns_ticket`
     (./ws/ticket.rs) ; gardes WS `ticket_query_required` (./ws/fs.rs),
     `terminal_ticket_required` (./ws/terminal.rs), `lsp_ticket_required_with_valid_ticket`
     (./ws/lsp.rs) ; flush `request_flush_resolved_by_ack`,
@@ -233,17 +237,30 @@ Tasks:
     fallback 404 accepte n'importe quel chemin (un client quelconque crée une série
     métrique par chemin inventé). Incohérence commentaire/code à trancher : normaliser sur
     le gabarit de route, borner par whitelist, ou assumer la protection ingress ?
-  [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 (./auth.sdd, ./config.sdd) : supprimer
-    les modes `no_auth`/`static_token`, @AccessLevel et les `access` des tickets ; déplacer
-    `/health` et `/metrics` sur le port d'exploitation (@build_ops_app, @spawn_ops_server) ;
-    retirer `/.well-known/oauth-protected-resource` ; ajouter les routes `/code-health/*`.
-    Les décisions du 2026-09-27 sur le RBAC Read/Admin sont CADUQUES (la sandbox n'a pas de
-    niveaux), pas à implémenter.
-  [ ] Migration mécanique des Scenario ci-dessous : « configuré avec `no_auth` » ou
-    « `static_token` = `s3cret` » devient « avec un jeton d'Owner de test valide »
-    (`auth::test_support`, ./auth.sdd) ; `subject` `dev-no-auth`/`static-token` devient le
-    `sub` du jeton de test ; les Scenario `/health` et `/metrics` interrogent le routeur
-    d'exploitation, pas l'app principale.
+  [x] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 (./auth.sdd, ./config.sdd) — partie
+    AUTH FAITE, validator-verte 2026-10-08 (5A) : modes `no_auth`/`static_token`,
+    @AccessLevel et `access` des tickets supprimés (blacklist grep à zéro) ;
+    `/.well-known/oauth-protected-resource` retiré (test `aucune_decouverte_oauth`) ;
+    `/metrics` servi sur le port d'exploitation (`ops_listen`). Les décisions du 2026-09-27
+    sur le RBAC Read/Admin étaient CADUQUES, rien implémenté. RESTE (parties non faites,
+    scindées ci-dessous) :
+  [ ] Port d'exploitation complet — les Scenarios gelés
+    `sante_repond_sans_autorisation_sur_le_port_d_exploitation`,
+    `sante_absente_du_port_principal`, `spawn_ops_server_sur_port_occupe_rend_erreur` et
+    `spawn_ops_server_expose_health_et_metrics_sur_port_lie` ne sont pas écrits et le code
+    est en retard : exposer `/health` sur le port d'exploitation en plus de `/metrics`,
+    bind FATAL (port occupé ⇒ erreur, pas un warn), retirer `/health` de @build_app ;
+    renommer @build_metrics_app/@spawn_metrics_server en @build_ops_app/@spawn_ops_server
+    (noms du contrat) ; écrire les tests des quatre Scenarios.
+  [ ] Ajouter les routes `/code-health/*` — prérequis : câblage de `vanyline-health` dans
+    le crate (santé du code, hors migration auth).
+  [x] Migration mécanique des Scenario d'auth — FAITE (5A, validator-verte 2026-10-08) :
+    plus aucun Scenario de CE fichier ne dit « configuré avec `no_auth` » ou
+    « `static_token` = `s3cret` » ; les tests présentent un jeton d'Owner de test valide
+    (`auth::test_support`, ./auth.sdd) et vérifient le `sub` du jeton. Le volet « /health
+    et /metrics interrogent le routeur d'exploitation » est reporté à la tâche
+    « port d'exploitation complet » (le test `health_returns_200_ok` interroge encore
+    @build_app).
   [ ] Scrub du paramètre `ticket` dans le @TraceLayer (voir `Must`).
   [?] Interaction garde d'auth × 404/405 sur le router fusionné (sémantique axum des
     `route_layers` après `merge` : `GET /mcp` sans jeton fait-il tourner @require_auth

@@ -111,7 +111,7 @@ Exposes:
   Module de test `tests` — 5 tests existants : `ticket_redeem_returns_claims`,
     `ticket_is_single_use`, `expired_ticket_redeem_none_and_removed` (injection directe
     d'une entrée expirée dans le champ privé), `issuance_without_auth_returns_401` et
-    `issuance_with_static_token_returns_ticket` (tous deux des tests de ROUTE qui testent
+    `issuance_with_owner_token_returns_ticket` (tous deux des tests de ROUTE qui testent
     @handle_ws_ticket de ../lib.rs depuis ce fichier — cf. `Tasks`).
 
 Accepts:
@@ -280,7 +280,7 @@ Tasks:
   [ ] Cartographie de la couverture existante (à re-tagger par les titres de Scenario) :
     `ticket_redeem_returns_claims`, `ticket_is_single_use`,
     `expired_ticket_redeem_none_and_removed`, `issuance_without_auth_returns_401`,
-    `issuance_with_static_token_returns_ticket` (./ticket.rs — les deux derniers testent en
+    `issuance_with_owner_token_returns_ticket` (./ticket.rs — les deux derniers testent en
     réalité @handle_ws_ticket de ../lib.rs) ; gardes de routes : `ticket_query_required`
     (./fs.rs, assertion de corps `002` non faite sur le second volet),
     `terminal_ticket_required` (./terminal.rs), `lsp_ticket_required` et
@@ -301,9 +301,10 @@ Tasks:
     (2026-09-27) : le scrub du paramètre `ticket` est contracté dans ../lib.sdd (`Must`) ; cette
     spec en documente la conséquence côté ticket (un ticket loggé non présenté reste rejouable
     30 s).
-  [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 : retirer `access`/@AccessLevel de
-    @TicketClaims et des tests ; les tests qui émettaient en `no_auth`/`static_token`
-    présentent un jeton d'Owner de test (`auth::test_support`).
+  [x] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 — FAIT (5A, validator-verte
+    2026-10-08) : `access`/@AccessLevel retirés de @TicketClaims et des tests ; les tests
+    de route présentent un jeton d'Owner de test (`auth::test_support`), le test de route
+    nominal est `issuance_with_owner_token_returns_ticket`.
   [?] Chemin d'auth WS sans métrique ni log : contrairement à @authenticate de ../auth.rs
     (compteur `mcp_auth_errors_total`), les 401 `001`/`002` ne sont comptés ni loggés
     nulle part — un brute-force de tickets ou un client cassé est invisible. Ajouter un
@@ -333,7 +334,7 @@ Tasks:
     module). Ajouter un seam `cfg(test)` (TTL ou horloge injectables) ou verrouiller le
     pattern d'injection privée comme façon officielle de tester l'expiration ?
   [?] Frontière de tests : `issuance_without_auth_returns_401` et
-    `issuance_with_static_token_returns_ticket` testent @handle_ws_ticket (../lib.rs) depuis
+    `issuance_with_owner_token_returns_ticket` testent @handle_ws_ticket (../lib.rs) depuis
     ./ticket.rs. Déplacer vers ../../tests/http.rs, ou accepter la colocalité « chemin du
     ticket » ? (../lib.sdd référence déjà ces deux tests à ce fichier — cohérence à garder
     quelle que soit la décision.)

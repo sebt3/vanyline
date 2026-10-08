@@ -287,11 +287,16 @@ Tasks:
     utile si des tests unitaires de @main voient le jour) ou retirer l'entrée de
     /tooling.sdd (la ligne serait vestigiale, comme cela a été tranché côté
     controller) ?
-  [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 : port d'exploitation (`ops_listen`)
-    remplaçant `metrics_listen`, bind fatal ; plus de modes `--no-auth`/`STATIC_TOKEN`
-    (./auth.sdd, ./config.sdd). Les Scenario de démarrage qui lançaient le binaire en
-    `--no-auth` démarrent désormais avec `--jwks-file` + `--owner-subject` + `--token-issuer`
-    de test (jetons signés par `auth::test_support`).
+  [x] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 — partie FAITE (5A, validator-verte
+    2026-10-08) : port d'exploitation `ops_listen` remplace `metrics_listen` ; les drapeaux
+    `--no-auth`/`--static-token`/`--oidc-*` n'existent plus (rejet clap, code de sortie 2 —
+    blacklist épinglée par le test `aucun_drapeau_de_contournement` de ./config.sdd) ; les
+    démarrages de test passent par `--jwks-file` + `--owner-subject` + `--token-issuer`
+    (jetons signés par `auth::test_support`). RESTE (scindé) :
+  [ ] Bind d'exploitation FATAL : @spawn_metrics_server warn et survit si le bind échoue
+    (« non-fatal bind failure ») alors que le contrat est fatal (port occupé ⇒ l'arrêt du
+    processus, ./lib.sdd `spawn_ops_server_sur_port_occupe_rend_erreur`) ; à traiter avec
+    le déplacement de `/health` sur le port d'exploitation (./lib.sdd, même batch).
   [?] @telemetry::shutdown_otel() inatteignable en pratique : @axum::serve/@serve ne
     revient `Ok` que moyennant une poignée d'arrêt gracieux jamais câblée, et la voie
     `Err` saute le flush par le `?` ; les spans OTel en batch sont donc perdues à

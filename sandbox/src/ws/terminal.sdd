@@ -270,9 +270,11 @@ Tasks:
   [ ] Relecture complète par Sébastien (reverse du 2026-09-26) — aucun comportement
     accidentel ci-dessus ne devient contrat avant cette relecture
     (.specdd/bootstrap.project.md) ; priorité aux `[!]`/`[?]`.
-  [ ] Décisions du 2026-09-27 CADUQUES (refus d'un ticket Read, modes `no_auth`/`static_token`
-    « dev/debug ») : la sandbox n'a plus de niveaux ni de modes de contournement (décision
-    2026-10-04, ../auth.sdd). Rien à implémenter ici ; retirer les tests correspondants.
+  [x] Décisions du 2026-09-27 CADUQUES (refus d'un ticket Read, modes `no_auth`/`static_token`
+    « dev/debug ») — CLOS 2026-10-08 (5A, validator-verte) : la sandbox n'a plus de niveaux
+    ni de modes de contournement (décision 2026-10-04, ../auth.sdd) ; rien implémenté, les
+    tests correspondants sont retirés — le terminal n'accepte que le ticket miné derrière
+    une garde au jeton d'Owner.
   [?] `SHELL` posé mais VIDNE (chaîne vide) : @std::env::var rend @Ok("") ->
     @CommandBuilder::new("") -> spawn en erreur -> fermeture silencieuse du terminal. Le
     vide devrait-il compter comme « non posé » (défaut `/bin/bash`) ?

@@ -465,9 +465,11 @@ Tasks:
     intégralement en RAM/réponse ; `limit + 1` sur `u32::MAX` fait `--max-count=0` en
     release (= illimité, pas d'erreur). Bordure à borner (clamp `limit`, plafond d'octets)
     ou assumée (client = éditeur authentifié) ?
-  [ ] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 : la question « RBAC Read/Admin » est
-    TRANCHÉE (pas de niveaux, ./auth.sdd). Les Scenario `no_auth` ci-dessous deviennent
-    « avec un jeton d'Owner de test valide » (migration mécanique, voir ./lib.sdd).
+  [x] ALIGNEMENT SUR LE CONTRAT D'AUTH DU 2026-10-04 — FAIT (5A, validator-verte
+    2026-10-08) : question « RBAC Read/Admin » TRANCHÉE (pas de niveaux, ./auth.sdd) ;
+    migration mécanique faite — les tests git de ../tests/http.rs présentent un jeton
+    d'Owner de test valide (`auth::test_support`) et un jeton d'un autre Owner est refusé
+    403 avant toute écriture.
   [?] Permissions des fichiers SSH : `.ssh` créé à 0o755+umask (pas 0o700 explicite) et
     privé à 0o600 par ssh-keygen seulement — ssh refuse un `known_hosts`/clés dans un
     `.ssh` trop ouvert selon les versions ; poser un chmod explicite 0o700 ?
