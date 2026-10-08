@@ -1,3 +1,7 @@
+//! Binaire `vanyline-sandbox` : amorçage du serveur du pod de travail —
+//! parsing CLI/env, telemétrie, serveur d'exploitation, TLS et bind (spec :
+//! `./main.sdd` ; le routage et ses contrats vivent dans `./lib.rs`).
+
 use std::sync::Arc;
 
 use anyhow::Result;

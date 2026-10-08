@@ -15,6 +15,7 @@ use std::path::Path;
 /// `<sandbox_root>/.venv/bin` (sur le `PATH` courant du process). Vide si le
 /// marqueur absent. `sandbox_root` : config du process, jamais une entrée
 /// utilisateur.
+#[must_use]
 pub fn venv_overlay(sandbox_root: &Path) -> Vec<(String, String)> {
     let venv = sandbox_root.join(".venv");
     if !venv.join("pyvenv.cfg").is_file() {

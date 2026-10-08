@@ -13,6 +13,7 @@ use axum::response::IntoResponse;
 /// Query-string par lequel le navigateur présente son ticket au handshake WS.
 #[derive(Debug, serde::Deserialize)]
 pub struct TicketQuery {
+    /// Ticket présenté par le client (`None` = absent → `MissingTicket`).
     #[serde(default)]
     pub ticket: Option<String>,
 }
@@ -55,7 +56,7 @@ async fn fs_session(state: AppState, mut ws: WebSocket) {
                         return;
                     }
                 }
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return,
+                Some(Ok(Message::Close(_)) | Err(_)) | None => return,
                 Some(Ok(_)) => {
                     let _ = ws
                         .send(Message::Text(
@@ -113,6 +114,11 @@ fn attach_req_id(resp: serde_json::Value, raw_request: &str) -> serde_json::Valu
 /// Parse un message JSON entrant et renvoie le JSON de réponse correspondant.
 /// Rejette les messages non JSON avec `{"ok":false,"error":"invalid JSON"}`.
 /// Une `op` inconnue → `{"ok":false,"error":"unknown op"}`.
+// tooling.sdd D3c — fs.sdd §"Table des ops" : @dispatch_fs_message est LE dispatcheur
+// contracté des 9 ops (lecture seule des params, enveloppes JSON d'erreur) — sa taille
+// suit la table spec, la scinder diluerait le contrat. Les casts u64→usize (offset,
+// limit, depth lus depuis JSON) sont sans perte sur 64 bits, cible unique du pod.
+#[allow(clippy::too_many_lines, clippy::cast_possible_truncation)]
 pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Value {
     let root = &state.config.sandbox_root;
 
@@ -145,14 +151,11 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
     // sandboxWs.spec). La réponse `{ok:true}` nue reçoit l'id du client par
     // attach_req_id dans la boucle, comme toute autre op.
     if op == "flush-ack" {
-        let ack_for = match msg["ackFor"].as_u64() {
-            Some(id) => id,
-            None => {
-                return serde_json::json!({
-                    "ok": false,
-                    "error": "flush-ack requires numeric ackFor"
-                });
-            }
+        let Some(ack_for) = msg["ackFor"].as_u64() else {
+            return serde_json::json!({
+                "ok": false,
+                "error": "flush-ack requires numeric ackFor"
+            });
         };
         state.fs_flush.handle_ack(ack_for);
         return serde_json::json!({ "ok": true });
@@ -575,7 +578,7 @@ mod tests {
         ));
     }
 
-    /// Test 9: mkdir_creates
+    /// Test 9: `mkdir_creates`
     #[tokio::test]
     async fn mkdir_creates() {
         let state = make_state("mkdir_creates");
@@ -593,7 +596,7 @@ mod tests {
         );
     }
 
-    /// Test 10: mkdir_creates_parents
+    /// Test 10: `mkdir_creates_parents`
     #[tokio::test]
     async fn mkdir_creates_parents() {
         let state = make_state("mkdir_parents");
@@ -606,7 +609,7 @@ mod tests {
         );
     }
 
-    /// Test 11: rename_moves
+    /// Test 11: `rename_moves`
     #[tokio::test]
     async fn rename_moves() {
         let state = make_state("rename_moves");
@@ -634,7 +637,7 @@ mod tests {
         assert!(content.contains("hello"));
     }
 
-    /// Test 12: rename_escape_rejected
+    /// Test 12: `rename_escape_rejected`
     #[tokio::test]
     async fn rename_escape_rejected() {
         let state = make_state("rename_escape");
@@ -651,7 +654,7 @@ mod tests {
         );
     }
 
-    /// Test 13: rename_missing_to_rejected
+    /// Test 13: `rename_missing_to_rejected`
     #[tokio::test]
     async fn rename_missing_to_rejected() {
         let state = make_state("rename_missing_to");
@@ -660,7 +663,7 @@ mod tests {
         assert_eq!(resp["error"].as_str().unwrap(), "missing to");
     }
 
-    /// Test 14: root_op_returns_canonical_root
+    /// Test 14: `root_op_returns_canonical_root`
     #[tokio::test]
     async fn root_op_returns_canonical_root() {
         let state = make_state("root");
@@ -674,7 +677,7 @@ mod tests {
         assert!(!root.is_empty(), "root must not be empty");
     }
 
-    /// Test 15: root_op_needs_no_path
+    /// Test 15: `root_op_needs_no_path`
     #[tokio::test]
     async fn root_op_needs_no_path() {
         let state = make_state("root_nopath");
@@ -686,7 +689,7 @@ mod tests {
         );
     }
 
-    /// Test 08b-1 (attach_req_id_echoes_id): requête avec `"id":7` → réponse
+    /// Test 08b-1 (`attach_req_id_echoes_id`): requête avec `"id":7` → réponse
     /// contenant `"id":7` ; requête sans id → réponse strictement inchangée ;
     /// requête non-JSON → inchangée.
     #[test]
@@ -708,7 +711,7 @@ mod tests {
         assert_eq!(out, resp, "non-JSON request → response strictly unchanged");
     }
 
-    /// Test 08b-2 (attach_req_id_preserves_error_response): réponse d'erreur
+    /// Test 08b-2 (`attach_req_id_preserves_error_response`): réponse d'erreur
     /// `{"ok":false,…}` + requête avec id string `"x1"` → id copié, `ok:false`
     /// (et l'erreur) intacts.
     #[test]
@@ -725,7 +728,7 @@ mod tests {
 
     // ── Tests 08c — aller-retour flush avant écriture (R1 sq3, cas B) ────────
 
-    /// Test 08c-1 (request_flush_resolved_by_ack): `request_flush` émet la
+    /// Test 08c-1 (`request_flush_resolved_by_ack`): `request_flush` émet la
     /// frame `flush-request` sur le broadcast (forme event/id/path assertie),
     /// l'ack `flush-ack` dispatché la résout `true`, et `attach_req_id` copie
     /// l'id de corrélation du client (99) dans la réponse `{ok:true}` — le
@@ -780,7 +783,7 @@ mod tests {
         );
     }
 
-    /// Test 08c-2 (request_flush_times_out_without_ack): aucun ack → `false`
+    /// Test 08c-2 (`request_flush_times_out_without_ack`): aucun ack → `false`
     /// après le timeout borné, waiter retiré de la map (pas de fuite).
     #[tokio::test]
     async fn request_flush_times_out_without_ack() {
@@ -806,7 +809,7 @@ mod tests {
         );
     }
 
-    /// Test 08c-3 (handle_ack_unknown_and_double_noop): id inconnu → rien ;
+    /// Test 08c-3 (`handle_ack_unknown_and_double_noop`): id inconnu → rien ;
     /// double ack → le premier gagne, le second est un no-op sans panique.
     #[tokio::test]
     async fn handle_ack_unknown_and_double_noop() {
@@ -833,7 +836,7 @@ mod tests {
         assert_eq!(state.fs_flush.waiter_count(), 0);
     }
 
-    /// Test 08c-4 (flush_ack_malformed_rejected): `ackFor` absent ou non
+    /// Test 08c-4 (`flush_ack_malformed_rejected`): `ackFor` absent ou non
     /// numérique → `{ok:false}` message exact, aucun waiter résolu. Avec
     /// `ackFor` présent et un `id` de requête normal, la réponse porte cet id
     /// (non-régression du piège de corrélation : le client solde son pending).

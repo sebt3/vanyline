@@ -15,16 +15,16 @@
 //! # What this template does NOT implement (document for fork owners)
 //!
 //! - **`/metrics` authentication** — the endpoint is public on its dedicated port.
-//!   Protect it at the network level (NetworkPolicy, reverse-proxy IP allowlist,
+//!   Protect it at the network level (`NetworkPolicy`, reverse-proxy IP allowlist,
 //!   or mTLS) rather than inside the app.
 //! - **Custom business metrics** — add them with `metrics::counter!` /
 //!   `metrics::histogram!` in your tool handlers.
 //! - **Distributed trace propagation** — wire `TraceContextPropagator` and
 //!   extract W3C `traceparent` headers from incoming MCP requests if you need
 //!   end-to-end traces across services.
-//! - **OTel resource attributes** — extend `build_resource()` below with
+//! - **`OTel` resource attributes** — extend `build_resource()` below with
 //!   `k8s.pod.name`, `deployment.environment`, etc. from your env.
-//! - **OTel metrics export** — the template only exports traces via OTLP.
+//! - **`OTel` metrics export** — the template only exports traces via OTLP.
 //!   Add `opentelemetry-otlp` metrics features + `SdkMeterProvider` if needed.
 
 use std::sync::OnceLock;
@@ -47,6 +47,12 @@ static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
 ///
 /// Safe to call multiple times (idempotent via [`OnceLock`]). Subsequent calls
 /// are no-ops and return `Ok(())`.
+///
+/// # Errors
+///
+/// `failed to install Prometheus metrics recorder` if the global recorder is
+/// already occupied by a foreign installer (not this function's own
+/// idempotent re-call).
 pub fn init_prometheus() -> Result<()> {
     if PROMETHEUS.get().is_some() {
         return Ok(());
@@ -61,7 +67,7 @@ pub fn init_prometheus() -> Result<()> {
 /// Render the current Prometheus metrics snapshot as text (exposition format
 /// 0.0.4). Returns `None` before [`init_prometheus`] has been called.
 pub fn render_metrics() -> Option<String> {
-    PROMETHEUS.get().map(|h| h.render())
+    PROMETHEUS.get().map(PrometheusHandle::render)
 }
 
 // ── OpenTelemetry ─────────────────────────────────────────────────────────────
@@ -103,7 +109,7 @@ fn try_init_otel_tracer(endpoint: &str) -> Result<opentelemetry_sdk::trace::SdkT
 // ── Combined init ─────────────────────────────────────────────────────────────
 
 /// Initialize both the Prometheus recorder and the `tracing` subscriber
-/// (structured logs + optional OTel traces).
+/// (structured logs + optional `OTel` traces).
 ///
 /// Call once at startup, before [`crate::config::Config::validate`].
 ///
@@ -112,6 +118,22 @@ fn try_init_otel_tracer(endpoint: &str) -> Result<opentelemetry_sdk::trace::SdkT
 /// If `otel_endpoint` is `Some`, the function attempts to build an OTLP gRPC
 /// exporter. Failure is **non-fatal**: a warning is printed to stderr and the
 /// server starts without trace export.
+///
+/// # Errors
+///
+/// Propagates [`init_prometheus`]'s error if the Prometheus recorder cannot be
+/// installed. `OTel` build failures are NOT returned (absorbed as a stderr
+/// warning, by contract).
+///
+/// # Panics
+///
+/// Never panics in practice: the only `unwrap` is on the compile-time-known
+/// filter literal `"vanyline_sandbox=info,tower_http=debug"`, which always
+/// parses (allow justified in-line below).
+// tooling.sdd D3c — telemetry.sdd Must/Must not : l'avertissement stderr d'échec otel
+// est le seul canal avant `.init()` (subscriber inexistant à ce stade) — choix
+// contracté ; tâche `[?]` de telemetry.sdd non tranchée pour @shutdown_otel.
+#[allow(clippy::print_stderr)]
 #[allow(clippy::unwrap_used)] // chaine litterale connue a la compilation, toujours valide
 pub fn init(otel_endpoint: Option<&str>) -> Result<()> {
     init_prometheus()?;
@@ -123,6 +145,9 @@ pub fn init(otel_endpoint: Option<&str>) -> Result<()> {
     let otel_layer = otel_endpoint.and_then(|ep| match try_init_otel_tracer(ep) {
         Ok(tracer) => Some(tracing_opentelemetry::layer().with_tracer(tracer)),
         Err(e) => {
+            // tooling.sdd D3c — telemetry.sdd Must/Must not : avertissement stderr
+            // contracté ci-dessous, le subscriber tracing n'existe pas encore
+            // avant `.init()` (allow déposé sur @init).
             eprintln!("WARN  OpenTelemetry init failed (continuing without traces): {e}");
             None
         }
@@ -137,9 +162,13 @@ pub fn init(otel_endpoint: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-/// Flush pending OTel spans on graceful shutdown.
+/// Flush pending `OTel` spans on graceful shutdown.
 ///
-/// Call before the process exits when OTel is enabled; a no-op otherwise.
+/// Call before the process exits when `OTel` is enabled; a no-op otherwise.
+// tooling.sdd D3c — telemetry.sdd Must : avertissement stderr exact contracté
+// (« WARN  OTel shutdown error ») ; basculer en tracing::warn en changerait la
+// forme — tâche `[?]` de telemetry.sdd non tranchée, exemption déposée ici.
+#[allow(clippy::print_stderr)]
 pub fn shutdown_otel() {
     if let Some(provider) = OTEL_PROVIDER.get()
         && let Err(e) = provider.shutdown()

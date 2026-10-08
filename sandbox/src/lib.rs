@@ -1,13 +1,26 @@
+//! Surface `lib` du crate `vanyline-sandbox` : le câblage HTTP du serveur principal
+//! du pod de travail — table de routage axum (MCP, git, tickets WS, WS éditeur),
+//! états partagés (`AppState`), atelier de push/flush `/ws/fs` (`FsFlushRequests`)
+//! et le serveur d'exploitation (`/health`, `/metrics`) sur port distinct
+//! (spec : `./lib.sdd`).
+
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod auth;
+/// Configuration de démarrage du binaire : surface CLI/env, validation d'amorçage,
+/// source des clés de vérification (spec : `./config.sdd`).
 pub mod config;
 pub mod git;
 pub mod lsp;
 pub mod lsp_client;
 pub mod maint;
+/// Serveur MCP HTTP de la sandbox : `POST /mcp`, JSON-RPC 2.0 sans état, dispatch
+/// des tools vers `tools_impl` (spec : `./mcp.sdd`).
 pub mod mcp;
 pub mod telemetry;
+/// Backend des 16 tools MCP de la sandbox : garde de confinement du workspace,
+/// dispatchs `filesystem`/`search`/`command`/`lsp`/`edit_and_check` (spec :
+/// `./tools_impl.sdd`).
 pub mod tools_impl;
 pub mod venv;
 pub mod ws;
@@ -34,11 +47,18 @@ use config::Config;
 pub use lsp::LspManager;
 use ws::ticket::TicketStore;
 
+/// État partagé de toutes les routes du serveur principal : configuration,
+/// authentification, magasin de tickets WS, manager LSP et atelier de push
+/// `/ws/fs` (spec `./lib.sdd`, `@AppState`).
 #[derive(Clone)]
 pub struct AppState {
+    /// Configuration validée du serveur (CLI/env), partagée par toutes les routes.
     pub config: Arc<Config>,
+    /// État d'authentification du jeton d'Owner (JWKS, identité de l'Owner).
     pub auth: Arc<AuthState>,
+    /// Magasin partagé des tickets WS à usage unique (émis par `POST /ws/ticket`).
     pub tickets: TicketStore,
+    /// Processus LSP par toolchain (spawn paresseux, sessions partagées).
     pub lsp: Arc<LspManager>,
     /// Canal de push des sessions `/ws/fs` (tâche 08b) : frames JSON toutes
     /// prêtes (ex: `{"event":"file-changed","path":…}`) diffusées à chaque
@@ -61,6 +81,7 @@ pub const FS_EVENTS_CAPACITY: usize = 64;
 /// retrouve pas dupliquée dans les vingt constructeurs d'`AppState`
 /// (main + tests http + intégrations). Les sessions `/ws/fs` s'abonnent
 /// via `subscribe` après leur upgrade WS.
+#[must_use]
 pub fn fs_events_channel() -> tokio::sync::broadcast::Sender<String> {
     tokio::sync::broadcast::channel::<String>(FS_EVENTS_CAPACITY).0
 }
@@ -77,13 +98,14 @@ pub const FS_FLUSH_TIMEOUT_SECS: u64 = 2;
 /// d'où ce helper unique plutôt que deux constructions séparées : les deux
 /// champs doivent partager le canal, et le motif reste unique dans les vingt
 /// constructeurs d'`AppState` (même esprit que [`fs_events_channel`]).
+#[must_use]
 pub fn fs_push_channels() -> (broadcast::Sender<String>, Arc<FsFlushRequests>) {
     let tx = fs_events_channel();
     (tx.clone(), Arc::new(FsFlushRequests::new(tx)))
 }
 
 /// Requêtes « flush cet URI » émises vers le(s) frontend(s) (design R1 sq3,
-/// cas B de edit_and_check — tâche 08d consommatrice).
+/// cas B de `edit_and_check` — tâche 08d consommatrice).
 pub struct FsFlushRequests {
     next_id: AtomicU64,
     tx: broadcast::Sender<String>, // clone de fs_events
@@ -91,6 +113,10 @@ pub struct FsFlushRequests {
 }
 
 impl FsFlushRequests {
+    /// Construit l'atelier en le branchant sur le canal `fs_events` fourni
+    /// (le `Sender` est cloné : les frames `flush-request` voyagent sur le
+    /// MÊME canal que celui relayé par les sessions `/ws/fs`).
+    #[must_use]
     pub fn new(tx: broadcast::Sender<String>) -> Self {
         Self {
             // Ids à partir de 1 : l'id 0 est falsy en JS — un abonné un peu
@@ -139,15 +165,14 @@ impl FsFlushRequests {
         // chemin timeout ci-dessous, rien de spécial à en faire.
         let _ = self.tx.send(frame);
 
-        match tokio::time::timeout(timeout, ack_rx).await {
+        if let Ok(Ok(())) = tokio::time::timeout(timeout, ack_rx).await {
             // Ack reçu : `handle_ack` a déjà retiré le waiter de la map.
-            Ok(Ok(())) => true,
+            true
+        } else {
             // Timeout, ou sender déposé sans valeur (cas défensif — le
             // retireur est `handle_ack`) : nettoyage ici, pas de fuite.
-            Ok(Err(_)) | Err(_) => {
-                self.waiters().remove(&id);
-                false
-            }
+            self.waiters().remove(&id);
+            false
         }
     }
 
@@ -233,7 +258,7 @@ pub fn build_app(state: AppState) -> Router {
 /// Build the internal metrics router (`GET /metrics`).
 ///
 /// Bind on `config.metrics_listen` (default `0.0.0.0:9090`). Never expose this
-/// port externally — protect it at the network/infra layer (NetworkPolicy, etc.).
+/// port externally — protect it at the network/infra layer (`NetworkPolicy`, etc.).
 pub fn build_metrics_app() -> Router {
     Router::new().route("/metrics", get(metrics_handler))
 }

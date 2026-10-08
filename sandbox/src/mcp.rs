@@ -1,3 +1,8 @@
+//! Serveur MCP HTTP de la sandbox : point d'entrée unique `POST /mcp`, JSON-RPC
+//! 2.0 « HTTP streamable » POST-only, strictement sans état ; l'exécution des
+//! tools est déléguée à `crate::tools_impl`, l'authentification au middleware
+//! `crate::auth::require_auth` (spec : `./mcp.sdd`).
+
 use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -6,30 +11,45 @@ use crate::{AppState, tools_impl};
 
 // ── JSON-RPC 2.0 types ───────────────────────────────────────────────────────
 
+/// Requête JSON-RPC 2.0 entrante (params optionnels, `id` absent = notification).
 #[derive(Deserialize)]
 pub struct JsonRpcRequest {
+    /// Version du protocole, vérifiée par le client (jamais relue ici).
     #[allow(dead_code)]
     pub jsonrpc: String,
+    /// Identifiant de la requête ; `None` = notification (réponse HTTP 202 nue).
     pub id: Option<Value>,
+    /// Méthode appelée (`initialize`, `tools/list`, `tools/call`, …).
     pub method: String,
+    /// Paramètres de la méthode (absents = `Value::Null` par défaut serde).
     #[serde(default)]
     pub params: Value,
 }
 
+/// Réponse JSON-RPC 2.0 : `result` OU `error` (les champs `None` sont exclus
+/// de la sérialisation, conformément au protocole).
 #[derive(Serialize)]
 pub struct JsonRpcResponse {
+    /// Toujours `"2.0"`.
     pub jsonrpc: &'static str,
+    /// Identifiant écho de la requête (absent en cas d'erreur d'enveloppe).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<Value>,
+    /// Résultat de la méthode, absent en cas d'erreur.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Objet d'erreur JSON-RPC, absent en cas de succès.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<RpcError>,
 }
 
+/// Objet `error` d'une réponse JSON-RPC 2.0.
 #[derive(Serialize)]
 pub struct RpcError {
+    /// Code d'erreur JSON-RPC (`-32601` méthode inconnue, `-32602` params
+    /// invalides, …).
     pub code: i32,
+    /// Message lisible de l'erreur.
     pub message: String,
 }
 
@@ -58,6 +78,9 @@ impl JsonRpcResponse {
 
 // ── MCP POST /mcp ─────────────────────────────────────────────────────────────
 
+/// Handler `POST /mcp` : notification (pas d'`id`) → HTTP 202 sans corps ;
+/// sinon dispatch de la méthode (`initialize` / `tools/list` / `tools/call`)
+/// et réponse JSON-RPC. L'authentification est en amont (`require_auth`).
 pub async fn handle(
     State(state): State<AppState>,
     Json(req): Json<JsonRpcRequest>,
@@ -84,9 +107,9 @@ pub async fn handle(
     Json(response).into_response()
 }
 
-pub(crate) fn handle_initialize(_id: Option<Value>, _params: Value) -> JsonRpcResponse {
+pub(crate) fn handle_initialize(id: Option<Value>, _params: Value) -> JsonRpcResponse {
     JsonRpcResponse::ok(
-        _id,
+        id,
         serde_json::json!({
             "protocolVersion": "2024-11-05",
             "capabilities": {
@@ -113,11 +136,8 @@ pub(crate) async fn handle_tools_call(
     params: Value,
     state: &AppState,
 ) -> JsonRpcResponse {
-    let name = match params.get("name").and_then(|v| v.as_str()) {
-        Some(n) => n,
-        None => {
-            return JsonRpcResponse::err(id, -32602, "Missing tool name in params");
-        }
+    let Some(name) = params.get("name").and_then(|v| v.as_str()) else {
+        return JsonRpcResponse::err(id, -32602, "Missing tool name in params");
     };
 
     let arguments = params.get("arguments").cloned().unwrap_or(Value::Null);

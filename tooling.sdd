@@ -109,19 +109,27 @@ Tasks:
     `--> health/` vide sous `--all-targets -D warnings`) — ne doit jamais grossir.
   [ ] Dette 2026-10-07 (état du registre, purge interleaved décidée avec Sébastien) :
     PURGÉES et vérifiées par validator : `vanyline-crds` (étape 4a), `vanyline-cfgstore`,
-    `vanyline-tools`, `cargo_common_metadata` (45 → 0, les 9 `[package]` complétés), et
+    `vanyline-tools`, `cargo_common_metadata` (45 → 0, les 9 `[package]` complétés),
     `vanyline-lib` (D2 2026-10-07 : 203 → 0, gate `-D warnings` vert aux trois sets de
     features défaut/`k8s`/`ts-rs`, tests 73/81/74 verts, assertions intactes — la régénération
     de `chat-event.ts` (+114/−3, commentaires uniquement, vérifiée identique strip-commentaires)
-    est INCLUDE au commit : c'est le contrat du gate CI `tsrs` d'`event.sdd`).
-    RESTENT (convention de comptage gelée ci-dessous) : `vanyline-sandbox` 133 (mesure fraîche
-    après D3b 2026-10-08 — PURGÉS à 0 validator-verts : `lsp.rs`+`git.rs` (D3a, 17 allows) et
-    `tools_impl.rs`/`maint.rs`/`bin/ruff_lsp.rs`/`bin/hadolint_lsp.rs` (D3b, 25 allows marqueur
-    « tooling.sdd D3b », racines des bins alignées sur la ligne canonique trois lints) ;
-    résiduel : `lsp_client.rs` 23, `ws/fs.rs` 20, `mcp.rs` 16, `lib.rs` 16, `ws/lsp.rs` 12,
-    `telemetry.rs` 12, `ws/ticket.rs` 12, `ws/terminal.rs` 8, `tests/hadolint_lsp.rs` 6,
-    `bin/maint.rs` 2, `tests/http.rs` 2, `tests/maint.rs` 2, `venv.rs` 1, `main.rs` 1),
-    `vanyline-cli` 299, `vanyline-app` 51, `vanyline-controller` 65 — purgées au fil
+    est INCLUDE au commit : c'est le contrat du gate CI `tsrs` d'`event.sdd`), et
+    `vanyline-sandbox` (D3 2026-10-08 : 839 → 0 en trois tranches validator-vertes —
+    D3a `lsp.rs`+`git.rs` (17 allows), D3b `tools_impl.rs`/`maint.rs`/`bin/ruff_lsp.rs`/
+    `bin/hadolint_lsp.rs` (25 allows, racines bins alignées trois lints), D3c les 14 fichiers
+    résiduels (15 blocs d'exemption marqueur « tooling.sdd D3c » couvrant 22 diagnostics,
+    crate-tests `tests/{maint,http,hadolint_lsp}.rs` alignés sur la ligne canonique trois
+    lints — forme `cfg_attr(test,…)` vérifiée EFFICACE sur les crates d'intégration par
+    expérimentation validator). `vanyline-sandbox` est la première crate applicative du
+    workspace à rendre `cargo clippy -p vanyline-sandbox --all-targets -- -D warnings`
+    VERT (475 tests verts, assertions intactes ; rework docs sur-promettantes
+    `tests/{http,maint}.rs` corrigé à la suite du FAIL strict du validator).
+    RESTENT (convention de comptage gelée ci-dessous) : `vanyline-cli` 299 (dont ~248 de
+    restrictions dures print/expect/panic — un purge là dedans est un arbitrage site par
+    site des specs cli (canal TUI vs stdout de chat vs tracing), PAS une purge mécanique ;
+    ~40 seulement sont de la mécanique des tranches D3), `vanyline-app` 51 (~90 % mécanique,
+    avant-goûts validator 2026-10-09), `vanyline-controller` 65 (~95 % mécanique :
+    `default_trait_access` 32 + `nonminimal_bool` 12) — purgées au fil
     des étapes de la migration qui les touchent (interleaved). Les 2 `unnecessary_wraps`
     imputables à 4a (`controller/src/{owner,project}.rs::build_*_pvc`) SOLDÉS en 4b.
     Exemptions pedantic restantes en `lib` (2, les seules) : `too_many_lines` sur

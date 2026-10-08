@@ -1,11 +1,13 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 //! Tests d'intégration bout-en-bouche du binaire `vnl-hadolint-lsp` (motif
 //! `tests/maint.rs`) : le wrapper est spawné via `CARGO_BIN_EXE_vnl-hadolint-lsp`
 //! et un FAUX `hadolint` (script shell) est posé EN TÊTE du `PATH` du fils — un
 //! hadolint réellement installé sur la machine de test n'est JAMAIS utilisé.
 //! Framing `Content-Length` via `vanyline_sandbox::lsp::FrameReader` (pub,
 //! motif des tests de `lsp.rs`).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+// tooling.sdd D3c — assertions de tests intactes : clippy::assert_is_empty (précédent
+// D3a/D3b), la forme assert!() du fichier est délibérée (message d'échec explicite).
+#![allow(clippy::assert_is_empty)]
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -59,7 +61,7 @@ fn write_fake_hadolint(root: &Path, slow: bool) {
 }
 
 /// Le process wrapper + ses pipes ; les trames stdout sont décodées avec le
-/// FrameReader de la lib (motif des tests de `lsp.rs`).
+/// `FrameReader` de la lib (motif des tests de `lsp.rs`).
 struct Harness {
     child: Child,
     stdin: ChildStdin,
@@ -174,6 +176,9 @@ impl Harness {
 
     /// Trame JSON suivante sur stdout, bornée par `timeout` (`None` = timeout
     /// ou EOF).
+    // tooling.sdd D3c — deadline d'un test (délais de quelques secondes sur Instant
+    // monotone) : tout dépassement de `now + timeout` est hors plage réaliste.
+    #[allow(clippy::arithmetic_side_effects)]
     async fn next_frame(&mut self, timeout: Duration) -> Option<Value> {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut chunk = [0_u8; 8192];
@@ -188,7 +193,7 @@ impl Harness {
                 return None;
             }
             match tokio::time::timeout(remaining, self.stdout.read(&mut chunk)).await {
-                Ok(Ok(0)) | Ok(Err(_)) | Err(_) => return None,
+                Ok(Ok(0) | Err(_)) | Err(_) => return None,
                 Ok(Ok(n)) => self.reader.push(&chunk[..n]),
             }
         }
@@ -196,6 +201,9 @@ impl Harness {
 
     /// Prochaine notification `publishDiagnostics` (les réponses aux requêtes
     /// sont consommées et ignorées) ; `None` = timeout.
+    // tooling.sdd D3c — deadline d'un test (délais de quelques secondes sur Instant
+    // monotone) : tout dépassement de `now + timeout` est hors plage réaliste.
+    #[allow(clippy::arithmetic_side_effects)]
     async fn next_publish(&mut self, timeout: Duration) -> Option<Value> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {

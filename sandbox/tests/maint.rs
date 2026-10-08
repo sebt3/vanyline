@@ -1,4 +1,10 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Tests d'intégration de `vanyline_sandbox::maint` : sémantique des
+//! opérations git (init, fetch, purge, checkout, remove) et de la détection
+//! de langages (`detect`, `detect_and_patch`) sur workspaces temporaires, et
+//! enveloppe `VNL-MAINT-004` assertée sur un repo en échec (spec :
+//! `sandbox/src/maint.sdd`). Les validations de noms de branche et de
+//! sandbox vivent dans les unitaires de `src/maint.rs`.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

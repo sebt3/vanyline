@@ -26,6 +26,7 @@ pub struct LspClient {
 impl LspClient {
     /// Abonne un client à `session` et prépare `root_uri` (URI `file://` de la racine
     /// du workspace, utilisée dans les params `initialize`).
+    #[must_use]
     pub fn new(session: Arc<LspSession>, root_uri: String) -> Self {
         let (client_id, rx) = session.subscribe();
         Self {
@@ -42,11 +43,20 @@ impl LspClient {
     /// `capabilities: {}`, `workspaceFolders: [{"uri": root_uri, "name": ""}]`), attend la
     /// réponse et rend son `result` ; puis envoie la notification `initialized`.
     /// Si déjà initialisé : rend `Value::Null` sans envoyer quoi que ce soit.
+    ///
+    /// # Errors
+    ///
+    /// `VNL-SBX-LSP-003` si le process est fermé à l'envoi (`LspSession::send`),
+    /// `VNL-SBX-LSP-004` si le process se ferme pendant l'attente de la réponse,
+    /// `VNL-SBX-LSP-005` si la réponse ne porte ni `result` ni `error`.
     pub async fn initialize(&mut self) -> anyhow::Result<Value> {
         if !self.session.try_mark_initialized() {
             return Ok(Value::Null);
         }
 
+        // tooling.sdd D3c — compteur de requêtes par client (démarre à 1) : le wrap
+        // u64→i64 exigerait 2^63 requêtes sur UNE session, impossible en pratique.
+        #[allow(clippy::cast_possible_wrap)]
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) as i64;
         let initialize = serde_json::json!({
             "jsonrpc": "2.0",
@@ -83,7 +93,7 @@ impl LspClient {
                     continue;
                 }
             };
-            if let Some(msg_id) = msg.get("id").and_then(|v| v.as_i64())
+            if let Some(msg_id) = msg.get("id").and_then(serde_json::Value::as_i64)
                 && msg_id == id
             {
                 let result = if let Some(result) = msg.get("result") {
@@ -113,6 +123,10 @@ impl LspClient {
 
     /// Envoie une notification JSON-RPC (`method` + `params`) au process. Erreur si le
     /// process est fermé (`VNL-SBX-LSP-003` depuis `LspSession::send`).
+    ///
+    /// # Errors
+    ///
+    /// `VNL-SBX-LSP-003` si le process est fermé (`LspSession::send`).
     pub async fn notify(&self, method: &str, params: Value) -> anyhow::Result<()> {
         let notif = serde_json::json!({
             "jsonrpc": "2.0",
@@ -126,6 +140,10 @@ impl LspClient {
 
     /// Envoie la notification `textDocument/didOpen` avec
     /// `{uri, languageId, version: 1, text}`.
+    ///
+    /// # Errors
+    ///
+    /// `VNL-SBX-LSP-003` si le process est fermé (`LspSession::send` via `notify`).
     pub async fn did_open(&self, uri: &str, language_id: &str, text: &str) -> anyhow::Result<()> {
         self.notify(
             "textDocument/didOpen",
@@ -152,6 +170,10 @@ impl LspClient {
     /// `typescript-language-server` désérialisent avec un `version` requis et
     /// droppent silencieusement une notification mal formée (→ aucune
     /// ré-analyse, `edit_and_check` bloqué en VNL-SBX-LSP-011).
+    ///
+    /// # Errors
+    ///
+    /// `VNL-SBX-LSP-003` si le process est fermé (`LspSession::send` via `notify`).
     pub async fn did_change(&self, uri: &str, version: i32, full_text: &str) -> anyhow::Result<()> {
         self.notify(
             "textDocument/didChange",
@@ -169,6 +191,11 @@ impl LspClient {
     /// URI déjà ouverte est une violation de protocole LSP ; observé en usage réel
     /// comme cause probable de `lsp_diagnostics` "one-shot" (chaque appel de tool MCP
     /// envoyait son propre `didOpen` sur le même fichier).
+    ///
+    /// # Errors
+    ///
+    /// `VNL-SBX-LSP-003` si le process est fermé (via `did_open` → `notify`) ;
+    /// no-op sans erreur quand l'URI était déjà ouverte.
     pub async fn ensure_open(
         &self,
         uri: &str,
@@ -185,7 +212,16 @@ impl LspClient {
     /// Saute les notifications reçues avant la réponse. Rend le `result` de la réponse.
     /// Erreurs : process fermé en attendant (`VNL-SBX-LSP-004`), réponse `error` du serveur
     /// (`VNL-SBX-LSP-005`), réponse sans `result` ni `error`.
+    ///
+    /// # Errors
+    ///
+    /// `VNL-SBX-LSP-003` si le process est fermé à l'envoi, `VNL-SBX-LSP-004` s'il
+    /// se ferme pendant l'attente, `VNL-SBX-LSP-005` si la réponse porte un `error`
+    /// ou ne porte ni `result` ni `error`.
     pub async fn request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
+        // tooling.sdd D3c — compteur de requêtes par client (démarre à 1) : le wrap
+        // u64→i64 exigerait 2^63 requêtes sur UNE session, impossible en pratique.
+        #[allow(clippy::cast_possible_wrap)]
         let id = self.next_id.fetch_add(1, Ordering::SeqCst) as i64;
         let req = serde_json::json!({
             "jsonrpc": "2.0",
@@ -211,23 +247,22 @@ impl LspClient {
                 }
             };
 
-            match msg.get("id").and_then(|v| v.as_i64()) {
-                Some(msg_id) if msg_id == id => {
-                    if let Some(error) = msg.get("error") {
-                        return Err(anyhow::anyhow!(
-                            "VNL-SBX-LSP-005: LSP server error: {}",
-                            error
-                        ));
-                    }
-                    if let Some(result) = msg.get("result") {
-                        return Ok(result.clone());
-                    }
+            if let Some(msg_id) = msg.get("id").and_then(serde_json::Value::as_i64)
+                && msg_id == id
+            {
+                if let Some(error) = msg.get("error") {
                     return Err(anyhow::anyhow!(
-                        "VNL-SBX-LSP-005: LSP response has neither 'result' nor 'error'"
+                        "VNL-SBX-LSP-005: LSP server error: {error}"
                     ));
                 }
-                _ => continue,
+                if let Some(result) = msg.get("result") {
+                    return Ok(result.clone());
+                }
+                return Err(anyhow::anyhow!(
+                    "VNL-SBX-LSP-005: LSP response has neither 'result' nor 'error'"
+                ));
             }
+            // Notification sans id (ou id d'une autre requête) — ignorée.
         }
     }
 
@@ -243,6 +278,11 @@ impl LspClient {
     /// si rien n'a jamais été publié dans le délai, distinct d'un vecteur vide
     /// (cf. doc `LspSession::wait_for_diagnostics` — un vecteur vide veut dire
     /// "propre", pas "pas encore su"). Erreur si `initialize`/`didOpen` échouent.
+    ///
+    /// # Errors
+    ///
+    /// Les erreurs de `initialize` et `ensure_open` (`VNL-SBX-LSP-003`/`004`/`005`) ;
+    /// l'attente des diagnostics elle-même ne peut pas échouer (timeout → `None`).
     pub async fn diagnostics(
         &mut self,
         uri: &str,
@@ -714,7 +754,15 @@ while True:
         pass
 "#;
 
-    /// Crée un LspManager avec un script Python factice.
+    /// Crée un `LspManager` avec un script Python factice.
+    ///
+    /// # Panics
+    ///
+    /// Si le `TempDir` ou l'écriture du script factice échouent (erreur d'E/S
+    /// sur le système de fichiers de test — jamais en usage normal).
+    // tooling.sdd D3c — helper async sans await : retirer `async` imposerait de
+    // retirer les `.await` chez tous les appelants (hors périmètre D3c).
+    #[allow(clippy::unused_async)]
     pub async fn make_manager(name: &str, script: &str) -> (LspManager, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let script_path = tmpdir.path().join(format!("fake_lsp_{name}.py"));
@@ -744,7 +792,7 @@ mod tests {
 
     // ── Tests de LspClient ──────────────────────────────────────────────────
 
-    /// Test 1: client_initialize_once — deux clients sur la même session,
+    /// Test 1: `client_initialize_once` — deux clients sur la même session,
     /// seuls le premier envoie le initialize.
     #[tokio::test]
     async fn client_initialize_once() {
@@ -762,8 +810,7 @@ mod tests {
         let result_a = client_a.initialize().await.expect("A initialize ok");
         assert!(
             result_a.is_object(),
-            "result_a should be object, got: {:?}",
-            result_a
+            "result_a should be object, got: {result_a:?}"
         );
         assert_eq!(
             result_a["initializeCount"].as_i64().unwrap(),
@@ -783,8 +830,8 @@ mod tests {
         );
     }
 
-    /// Test 2: client_request_returns_hover — didOpen émet un diagnostic push
-    /// avant la requête hover : request() doit sauter la notification.
+    /// Test 2: `client_request_returns_hover` — `didOpen` émet un diagnostic push
+    /// avant la requête hover : `request()` doit sauter la notification.
     #[tokio::test]
     async fn client_request_returns_hover() {
         let (manager, _tmpdir) = make_manager("fake", FAKE_LSP_PY).await;
@@ -822,8 +869,8 @@ mod tests {
         assert!(timeout.is_ok(), "hover test must complete within timeout");
     }
 
-    /// Test 3: client_diagnostics_captures_publish — diagnostics() collecte
-    /// la notification publishDiagnostics émise par didOpen.
+    /// Test 3: `client_diagnostics_captures_publish` — `diagnostics()` collecte
+    /// la notification `publishDiagnostics` émise par `didOpen`.
     #[tokio::test]
     async fn client_diagnostics_captures_publish() {
         let (manager, _tmpdir) = make_manager("fake", FAKE_LSP_PY).await;
@@ -914,7 +961,7 @@ mod tests {
         );
     }
 
-    /// Test 4: client_diagnostics_empty_on_no_publish — script sans publication de
+    /// Test 4: `client_diagnostics_empty_on_no_publish` — script sans publication de
     /// diags → timeout → `None`, PAS `Some(vec![])` : "jamais reçu" est distinct de
     /// "reçu un vecteur vide" (le serveur a explicitement publié "rien à signaler"),
     /// cf. doc `LspSession::wait_for_diagnostics` — un agent ne doit pas confondre

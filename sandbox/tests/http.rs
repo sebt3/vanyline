@@ -1,4 +1,10 @@
-#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+//! Tests d'intégration HTTP bout-en-bouche du serveur sandbox : routes de
+//! `build_app` (`/mcp` protégé par jeton d'Owner — authentification et tools
+//! MCP —, relais `/git/status` et `/git/unpushed`, `/health`, absence de
+//! découverte OAuth) et de `build_metrics_app` (`/metrics`) — motif
+//! une-request-une-assertion sur l'app complète. Les tickets et sessions WS
+//! ne sont pas couverts ici.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::process::Command;
 use std::sync::Arc;
@@ -1513,7 +1519,7 @@ fn run_git(dir: &std::path::Path, args: &[&str]) {
         .current_dir(dir)
         .status()
         .unwrap();
-    assert!(status.success(), "git {args:?} failed in {dir:?}");
+    assert!(status.success(), "git {args:?} failed in {}", dir.display());
 }
 
 /// Construit `<tmp>/remote` (dépôt normal, un commit initial sur `main`),

@@ -47,8 +47,7 @@ pub async fn ws_auth_middleware(
 impl IntoResponse for WsAuthError {
     fn into_response(self) -> axum::response::Response {
         let status = match self {
-            WsAuthError::MissingTicket => StatusCode::UNAUTHORIZED,
-            WsAuthError::InvalidTicket => StatusCode::UNAUTHORIZED,
+            WsAuthError::MissingTicket | WsAuthError::InvalidTicket => StatusCode::UNAUTHORIZED,
         };
         (
             status,
@@ -78,8 +77,11 @@ pub struct TicketClaims {
 /// Reused by `ws-fs` and `ws-terminal`.
 #[derive(Debug, thiserror::Error)]
 pub enum WsAuthError {
+    /// `VNL-SBX-WS-001` — requête `GET /ws/*` sans `?ticket=` (ou query sans clé
+    /// `ticket`).
     #[error("VNL-SBX-WS-001: missing or malformed ticket")]
     MissingTicket,
+    /// `VNL-SBX-WS-002` — ticket inconnu, expiré ou déjà consommé.
     #[error("VNL-SBX-WS-002: invalid or expired ticket")]
     InvalidTicket,
 }
@@ -99,6 +101,7 @@ impl Default for TicketStore {
 
 impl TicketStore {
     /// Creates an empty store.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tickets: Arc::new(Mutex::new(HashMap::new())),
@@ -106,7 +109,17 @@ impl TicketStore {
     }
 
     /// Issues an opaque ticket for `claims`, dated now, with TTL `TICKET_TTL_SECS`.
+    ///
+    /// # Panics
+    ///
+    /// Uniquement si le mutex de la map est empoisonné (panic préexistant dans une
+    /// section critique du store — bug interne, jamais un acteur externe ; l'`expect`
+    /// est exempté en ce sens).
+    // tooling.sdd D3c — ticket.sdd : TTL figé 30 s sur Instant monotone ; le dépassement
+    // de `now + ttl` exigerait un uptime de ~584 milliards d'années, hors contrat.
+    #[allow(clippy::arithmetic_side_effects)]
     #[allow(clippy::expect_used)] // poison means a bug in *our* code, not an external actor
+    #[must_use]
     pub fn issue(&self, claims: TicketClaims) -> String {
         use rand::{Rng, distributions::Alphanumeric};
 
@@ -130,7 +143,13 @@ impl TicketStore {
     /// Consumes the ticket. Removes the entry **no matter what** (valid or expired).
     /// Returns `Some(TicketClaims)` if the ticket is present and not expired;
     /// `None` otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Uniquement si le mutex de la map est empoisonné (bug interne du store —
+    /// l'`expect` est exempté en ce sens, jamais un acteur externe).
     #[allow(clippy::expect_used)] // poison means a bug in *our* code, not an external actor
+    #[must_use]
     pub fn redeem(&self, ticket: &str) -> Option<TicketClaims> {
         let mut map = self
             .tickets
@@ -152,6 +171,11 @@ impl TicketStore {
 
 /// Consomme `ticket` (retiré quoi qu'il arrive) pour produire `TicketClaims`.
 /// `None` de query → `MissingTicket` ; ticket absent/expiré → `InvalidTicket`.
+///
+/// # Errors
+///
+/// `VNL-SBX-WS-001` (`MissingTicket`) si la query ne portait aucun ticket ;
+/// `VNL-SBX-WS-002` (`InvalidTicket`) si le ticket est absent, expiré ou consommé.
 pub fn redeem_from_query(
     store: &TicketStore,
     ticket: Option<String>,
@@ -177,7 +201,7 @@ mod tests {
     use tower::ServiceExt;
 
     /// `AuthState` de test dont la config vise l'`test_support::TEST_OWNER` ;
-    /// l'AppState et le jeton d'Owner à présenter sont cohérents (pas de
+    /// l'`AppState` et le jeton d'Owner à présenter sont cohérents (pas de
     /// contournement : un vrai jeton signé par la clé de test).
     fn state_with_test_owner() -> (AppState, String) {
         let config = Arc::new(test_support::test_config(std::path::Path::new(
@@ -240,7 +264,12 @@ mod tests {
             subject: "u".into(),
         };
         // Overwrite the Arc with a new map containing an expired entry
-        let expired_instant = Instant::now() - Duration::from_secs(60);
+        // checked_sub : le test peut tourner moins de 60 s après le démarrage du
+        // process (Instant monotone) ; sur None, l'entrée posée à `now` est déjà
+        // expirée à la lecture (comparaison strictement inférieure de redeem).
+        let expired_instant = Instant::now()
+            .checked_sub(Duration::from_secs(60))
+            .unwrap_or_else(Instant::now);
         store
             .tickets
             .lock()

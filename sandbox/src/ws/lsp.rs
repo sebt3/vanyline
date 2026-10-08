@@ -129,19 +129,19 @@ fn peek_lsp_method(bytes: &[u8]) -> Option<(String, Option<String>)> {
 
     // Chercher Content-Length dans l'en-tête (insensible à la casse, même
     // sémantique que `FrameReader::next_frame`).
-    let length = header
-        .lines()
-        .filter_map(|line| {
-            let lower = line.trim().to_ascii_lowercase();
-            lower
-                .strip_prefix("content-length:")
-                .and_then(|v| v.trim().parse::<usize>().ok())
-        })
-        .next()?;
+    let length = header.lines().find_map(|line| {
+        let lower = line.trim().to_ascii_lowercase();
+        lower
+            .strip_prefix("content-length:")
+            .and_then(|v| v.trim().parse::<usize>().ok())
+    })?;
 
     // La trame doit porter le corps complet annoncé ; sinon → None (tronquée,
     // jamais "mieux que rien"). checked_add : un en-tête annoncé `usize::MAX`
     // ne doit pas déborder en debug (le parse a réussi, l'addition suivrait).
+    // tooling.sdd D3c — sep < bytes.len() (position trouvée dans la trame) :
+    // sep + 4 ne peut pas déborder sur une trame réellement en mémoire.
+    #[allow(clippy::arithmetic_side_effects)]
     let body_start = sep + 4;
     let body_end = body_start.checked_add(length)?;
     let body = bytes.get(body_start..body_end)?;
@@ -152,7 +152,7 @@ fn peek_lsp_method(bytes: &[u8]) -> Option<(String, Option<String>)> {
     let uri = msg
         .pointer("/params/textDocument/uri")
         .and_then(|u| u.as_str())
-        .map(|s| s.to_string());
+        .map(String::from);
     Some((method, uri))
 }
 
@@ -176,6 +176,10 @@ pub async fn handle_ws_lsp(
 ///   et continuer la boucle ;
 /// - frame binaire → ignorée ; Ping/Pong → ignorés (axum répond aux Ping) ;
 /// - Close/erreur/None → fin ; `unsubscribe(client_id)` avant de rendre.
+// tooling.sdd D3c — ws/lsp.sdd §Returns : @lsp_session est le bridge bidirectionnel
+// contracté (spawn, URIs, rejeu initialize, observation 08a, frames d'erreur -32600) ;
+// la taille suit le contrat, la scinder diluerait le motif unique.
+#[allow(clippy::too_many_lines)]
 async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
     // Lookup / spawn le process LSP
     let session = match state.lsp.get_or_spawn(&toolchain).await {
@@ -240,13 +244,14 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                                 }
                                 serde_json::to_string(&msg).unwrap_or_default()
                             }
-                            Err(_) => match String::from_utf8(payload) {
-                                Ok(t) => t,
-                                Err(_) => {
+                            Err(_) => {
+                                if let Ok(t) = String::from_utf8(payload) {
+                                    t
+                                } else {
                                     tracing::error!("LSP: non-UTF8 server payload, breaking");
                                     break;
                                 }
-                            },
+                            }
                         };
                         if ws.send(Message::Text(text.into())).await.is_err() {
                             break;
@@ -336,10 +341,10 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                                         // didChange du navigateur : rien à marquer,
                                         // l'URI est déjà tenue (didOpen observé avant).
                                         "textDocument/didOpen" => {
-                                            session.mark_editor_uri_open(&uri, client_id)
+                                            session.mark_editor_uri_open(&uri, client_id);
                                         }
                                         "textDocument/didClose" => {
-                                            session.mark_editor_uri_close(&uri, client_id)
+                                            session.mark_editor_uri_close(&uri, client_id);
                                         }
                                         _ => {}
                                     }
@@ -380,8 +385,8 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
                         }
                     }
                     // Binaire, Ping, Pong → ignorés
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
-                    Some(Ok(Message::Binary(_))) | Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => break,
+                    Some(Ok(Message::Binary(_) | Message::Ping(_) | Message::Pong(_))) => {}
                 }
             }
 
@@ -407,7 +412,7 @@ mod tests {
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    /// Helper : construit un AppState pour l'Owner de test de `test_support`
+    /// Helper : construit un `AppState` pour l'Owner de test de `test_support`
     /// (le jeton d'Owner à présenter est renvoyé par la config du test).
     fn make_state(test_name: &str) -> AppState {
         let tmpdir = std::env::temp_dir().join(format!("vanyline-sandbox-lsp-test/{test_name}"));
@@ -431,7 +436,7 @@ mod tests {
         }
     }
 
-    /// Test 1: lsp_ticket_required — missing → 401, unknown → 401
+    /// Test 1: `lsp_ticket_required` — missing → 401, unknown → 401
     #[tokio::test]
     async fn lsp_ticket_required() {
         let state = make_state("ticket_lsp");
@@ -474,7 +479,7 @@ mod tests {
         );
     }
 
-    /// Test 2: lsp_ticket_required_with_valid_ticket — le route est câblée et le
+    /// Test 2: `lsp_ticket_required_with_valid_ticket` — le route est câblée et le
     /// middleware ticket est traversé avec un ticket valide. La route
     /// `/ws/lsp/rust` est atteinte (ticket consommé, statut ≠ 401). Le
     /// comportement de repli (close 4004 : toolchain sans LSP configuré) est

@@ -63,6 +63,11 @@ enum Cmd {
     },
 }
 
+// tooling.sdd D3c — maint.sdd Must : discipline stdout/stderr du CLI — stdout réservée à
+// la ligne JSON de `detect` (seule sortie autorisée), erreur préfixée `vanyline-maint:
+// {e}` sur stderr + code 1 ; canal CLI contracté des Jobs du controller, jamais tracing
+// (aucun subscriber ici — le binaire rend en argv/stdout/stderr PAR CONTRAT).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();

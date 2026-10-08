@@ -133,14 +133,14 @@ async fn terminal_session(mut ws: WebSocket, state: AppState) {
                                 tracing::warn!("PTY resize error: {e}");
                             }
                     }
-                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => {
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => {
                         break;
                     }
                     // axum répond automatiquement aux Ping par un Pong ; ces
                     // frames n'appellent aucune action ici. Les traiter comme
                     // une fermeture (comme avant ce correctif) coupait le
                     // terminal au premier keepalive envoyé par un proxy/client.
-                    Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
                 }
             }
 
@@ -153,6 +153,10 @@ async fn terminal_session(mut ws: WebSocket, state: AppState) {
 
 /// Parses a text frame as JSON. Returns `Some(PtySize)` for resize frames,
 /// `None` for all other cases (including non-JSON and unknown control types).
+// tooling.sdd D3c — terminal.sdd Must (lignes cols/rows) : « les cols/rows u64 passent
+// par un cast as u16 TRONQUANT » nommément contracté (65616 → 80) — try_from changerait
+// le contrat (None au lieu du repli tronqué).
+#[allow(clippy::cast_possible_truncation)]
 fn parse_text_frame(text: &Utf8Bytes) -> Option<PtySize> {
     let map: serde_json::Value = serde_json::from_str(text).ok()?;
     let obj = map.as_object()?;
@@ -176,6 +180,11 @@ fn parse_text_frame(text: &Utf8Bytes) -> Option<PtySize> {
 /// et l'enfant (le shell, leader de session — son `process_id()` == pgid).
 ///
 /// Erreurs : ouverture PTY, spawn du shell → `anyhow::Result`.
+///
+/// # Errors
+///
+/// Toute erreur d'ouverture du PTY (`openpty`) ou de spawn du shell
+/// (`slave.spawn_command`), propagée depuis `portable-pty`.
 pub fn spawn_shell(
     cwd: &std::path::Path,
     size: PtySize,
@@ -231,6 +240,11 @@ pub fn spawn_shell(
 pub fn kill_process_group(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
     let pid = child.process_id();
     if let Some(pid) = pid {
+        // tooling.sdd D3c — kill(2) sur pgid négatif (terminal.sdd §kill_process_group,
+        // exemption SAFETY déjà portée) : négation d'un pid < INT_MAX (pid_max du pod),
+        // le wrap/neg-overflow sont hors plage réaliste ; la correction exige des
+        // branches d'erreur non contractées pour un cas impossible.
+        #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_wrap)]
         #[allow(unsafe_code)]
         // SAFETY: kill(2) sur pgid negatif — operation Unix standard, voir commentaire
         unsafe {
@@ -261,7 +275,7 @@ mod tests {
         use crate::ws::ticket::TicketStore;
 
         let tmpdir =
-            std::env::temp_dir().join(format!("vanyline-sandbox-terminal-test/{}", test_name));
+            std::env::temp_dir().join(format!("vanyline-sandbox-terminal-test/{test_name}"));
         let sandbox_root = tmpdir.join("sandbox");
 
         std::fs::create_dir_all(&sandbox_root).unwrap();
