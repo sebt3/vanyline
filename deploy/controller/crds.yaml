@@ -5,10 +5,8 @@ metadata:
 spec:
   group: vanyline.solidite.fr
   names:
-    categories: []
     kind: Owner
     plural: owners
-    shortNames: []
     singular: owner
   scope: Namespaced
   versions:
@@ -25,6 +23,11 @@ spec:
         description: Auto-generated derived type for OwnerSpec via `CustomResource`
         properties:
           spec:
+            description: |-
+              Spec de l'`Owner` (identité cluster d'un utilisateur) — entièrement
+              optionnelle : un `spec: {}` est valide et produit le `OwnerSpec` par défaut.
+              Les défauts métier (`"1Gi"`, modes d'accès) sont appliqués au reconcile,
+              jamais ici.
             properties:
               applicationRef:
                 description: |-
@@ -35,6 +38,7 @@ spec:
                 type: string
               egress:
                 default: []
+                description: White-list egress du namespace de l'Owner. Absent => vec vide.
                 items:
                   description: |-
                     Une règle d'une white-list egress. `cidr` et `pod_selector` sont
@@ -44,12 +48,16 @@ spec:
                     `NetworkPolicy` (tâche `netpol-builder`).
                   properties:
                     cidr:
+                      description: |-
+                        Bloc CIDR destinataire. Exclusif avec `pod_selector` (porté par le
+                        netpol-builder, pas par ce type).
                       nullable: true
                       type: string
                     description:
+                      description: Description humaine de la règle (non vide — NON vérifiée ici).
                       type: string
                     namespaceSelector:
-                      description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                      description: Sélecteur de namespaces, combinable avec `pod_selector`.
                       nullable: true
                       properties:
                         matchExpressions:
@@ -80,7 +88,7 @@ spec:
                           type: object
                       type: object
                     podSelector:
-                      description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                      description: Pods destinataires. Exclusif avec `cidr`.
                       nullable: true
                       properties:
                         matchExpressions:
@@ -112,9 +120,16 @@ spec:
                       type: object
                     ports:
                       default: []
+                      description: |-
+                        Ports autorisés. Absent => vec vide ; TCP-pour-`None` est une
+                        interprétation du netpol-builder, pas une valeur posée ici.
                       items:
+                        description: Port autorisé dans une [`EgressRule`].
                         properties:
                           port:
+                            description: |-
+                              Numéro de port ; aucune validation de contenu ici (c'est l'apiserver
+                              qui rejette un hors-plage à l'usage).
                             format: int32
                             type: integer
                           protocol:
@@ -129,10 +144,6 @@ spec:
                   - description
                   type: object
                 type: array
-              existingPvc:
-                description: 'PVC home existant (ex. celui de code-server). None: créé (`owner-<name>-home`).'
-                nullable: true
-                type: string
               homeAccessMode:
                 description: |-
                   Mode d'accès du PVC home. None => "`ReadWriteMany`" (défaut historique —
@@ -142,12 +153,19 @@ spec:
                 nullable: true
                 type: string
               homeSize:
+                description: |-
+                  Taille du PVC home. None => le défaut métier `"1Gi"` est appliqué au
+                  reconcile, jamais ici.
                 nullable: true
                 type: string
               homeStorageClass:
+                description: |-
+                  `StorageClass` du PVC home. None => classe par défaut du cluster
+                  (RWX recommandé, ex. `CephFS`).
                 nullable: true
                 type: string
               projectDefaults:
+                description: Replis de stockage appliqués aux Projects futurs de cet Owner.
                 nullable: true
                 properties:
                   storageAccessMode:
@@ -157,18 +175,22 @@ spec:
                     nullable: true
                     type: string
                   storageClass:
+                    description: '`StorageClass` de PVC workspace par défaut pour les Projects de l''Owner.'
                     nullable: true
                     type: string
                   storageSize:
+                    description: Taille de PVC workspace par défaut pour les Projects de l'Owner.
                     nullable: true
                     type: string
                 type: object
             type: object
           status:
+            description: Status de l'Owner, posé par son reconciler.
             nullable: true
             properties:
               conditions:
                 default: []
+                description: Conditions K8s standard. Absent => vec vide.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -200,10 +222,19 @@ spec:
                   - type
                   type: object
                 type: array
+              namespace:
+                description: |-
+                  Namespace de l'Owner (`{app_namespace}-{owner}`, calculé par
+                  [`owner_namespace_name`]) — posé par le reconciler. UN OWNER = UN NAMESPACE
+                  (décision 2026-10-04).
+                nullable: true
+                type: string
               pvcName:
+                description: Nom du PVC home de l'Owner.
                 nullable: true
                 type: string
               serviceAccount:
+                description: Nom du `ServiceAccount` de l'Owner.
                 nullable: true
                 type: string
             type: object
@@ -223,10 +254,8 @@ metadata:
 spec:
   group: vanyline.solidite.fr
   names:
-    categories: []
     kind: Project
     plural: projects
-    shortNames: []
     singular: project
   scope: Namespaced
   versions:
@@ -246,18 +275,24 @@ spec:
         description: Auto-generated derived type for ProjectSpec via `CustomResource`
         properties:
           spec:
+            description: |-
+              Spec du `Project` (dépôt git d'un Owner) : seuls `owner` et `repoUrl` sont
+              requis ; les replis (`caches`, `fetchInterval`, modes d'accès) vivent côté
+              controller.
             properties:
               caches:
-                description: Caches partagés. None => ["cargo", "pnpm"].
+                description: Caches partagés. None => `["cargo", "pnpm", "pip"]`.
                 items:
                   type: string
                 nullable: true
                 type: array
               defaultBranch:
+                description: Branche par défaut du repo.
                 nullable: true
                 type: string
               egress:
                 default: []
+                description: White-list egress du namespace du projet. Absent => vec vide.
                 items:
                   description: |-
                     Une règle d'une white-list egress. `cidr` et `pod_selector` sont
@@ -267,12 +302,16 @@ spec:
                     `NetworkPolicy` (tâche `netpol-builder`).
                   properties:
                     cidr:
+                      description: |-
+                        Bloc CIDR destinataire. Exclusif avec `pod_selector` (porté par le
+                        netpol-builder, pas par ce type).
                       nullable: true
                       type: string
                     description:
+                      description: Description humaine de la règle (non vide — NON vérifiée ici).
                       type: string
                     namespaceSelector:
-                      description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                      description: Sélecteur de namespaces, combinable avec `pod_selector`.
                       nullable: true
                       properties:
                         matchExpressions:
@@ -303,7 +342,7 @@ spec:
                           type: object
                       type: object
                     podSelector:
-                      description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                      description: Pods destinataires. Exclusif avec `cidr`.
                       nullable: true
                       properties:
                         matchExpressions:
@@ -335,9 +374,16 @@ spec:
                       type: object
                     ports:
                       default: []
+                      description: |-
+                        Ports autorisés. Absent => vec vide ; TCP-pour-`None` est une
+                        interprétation du netpol-builder, pas une valeur posée ici.
                       items:
+                        description: Port autorisé dans une [`EgressRule`].
                         properties:
                           port:
+                            description: |-
+                              Numéro de port ; aucune validation de contenu ici (c'est l'apiserver
+                              qui rejette un hors-plage à l'usage).
                             format: int32
                             type: integer
                           protocol:
@@ -352,29 +398,22 @@ spec:
                   - description
                   type: object
                 type: array
-              existingPvc:
-                description: 'Le repo vit dans un PVC existant (cas kydah-code). None: PVC créé (`project-<name>`).'
-                nullable: true
-                properties:
-                  name:
-                    type: string
-                  subPath:
-                    nullable: true
-                    type: string
-                required:
-                - name
-                type: object
               fetchInterval:
                 description: Intervalle du `CronJob` de fetch. None => "1h".
                 nullable: true
                 type: string
               gitSecret:
-                description: 'Auth git dédiée (Secret). Défaut: ~/.ssh du home Owner.'
+                description: |-
+                  DÉPRÉCIÉ — plus consommé par le controller depuis git-integration
+                  (la clé SSH vit dans le PVC Owner, cf. docs/features/git-integration.md
+                  section 0). Champ conservé pour la migration, pas supprimé.
                 nullable: true
                 type: string
               owner:
+                description: Owner (utilisateur) auquel appartient le projet. REQUIS.
                 type: string
               repoUrl:
+                description: URL du dépôt git. REQUIS.
                 type: string
               storageAccessMode:
                 description: |-
@@ -384,9 +423,13 @@ spec:
                 nullable: true
                 type: string
               storageClass:
+                description: '`StorageClass` du PVC workspace. Repli : `Owner.spec.project_defaults`.'
                 nullable: true
                 type: string
               storageSize:
+                description: |-
+                  Taille du PVC workspace. Repli : `Owner.spec.project_defaults`, puis
+                  défaut du controller.
                 nullable: true
                 type: string
             required:
@@ -394,13 +437,21 @@ spec:
             - repoUrl
             type: object
           status:
+            description: |-
+              Status du Project. Les couples `skip_serializing_if` de
+              `languages`/`detected_at` sont LE contrat anti-écrasement du merge-patch
+              de routine (ils protègent les valeurs écrites par le Job `detect`).
             nullable: true
             properties:
               cloned:
                 default: false
+                description: |-
+                  Le clone bare initial est en place. Sérialisé même à `false` :
+                  `compute_status` est la seule source de ce champ.
                 type: boolean
               conditions:
                 default: []
+                description: Conditions K8s standard. Absent => vec vide.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -441,7 +492,10 @@ spec:
                 type: string
               languages:
                 description: |-
-                  Langages détectés ("rust", "js-ts", ordre fixe — cf.
+                  Langages détectés. Valeurs possibles : "rust", "js-ts", "vue",
+                  "python", "dockerfile" (marqueur `dockerfile` : noms
+                  Dockerfile/Containerfile/variants dans l'arbre HEAD). Ordre fixe
+                  `["rust", "js-ts", "vue", "python", "dockerfile"]` filtré — cf.
                   `vanyline_sandbox::maint::detect_languages`. Écrit uniquement par le
                   Job `detect` (tâche 03) via un patch dédié — jamais par
                   `compute_status`. `skip_serializing_if` : voir note "Point
@@ -452,15 +506,17 @@ spec:
                   type: string
                 type: array
               lastFetch:
-                description: Time is a wrapper around time.Time which supports correct marshaling to YAML and JSON.  Wrappers are provided for many of the factory methods that the time package offers.
+                description: Horodatage du dernier fetch réussi.
                 format: date-time
                 nullable: true
                 type: string
               pvcName:
+                description: Nom du PVC workspace (toujours celui créé par le controller).
                 nullable: true
                 type: string
               worktrees:
                 default: []
+                description: Worktree présents dans le workspace. Absent => vec vide.
                 items:
                   type: string
                 type: array
@@ -481,10 +537,8 @@ metadata:
 spec:
   group: vanyline.solidite.fr
   names:
-    categories: []
     kind: Sandbox
     plural: sandboxes
-    shortNames: []
     singular: sandbox
   scope: Namespaced
   versions:
@@ -504,11 +558,17 @@ spec:
         description: Auto-generated derived type for SandboxSpec via `CustomResource`
         properties:
           spec:
+            description: |-
+              Spec de la `Sandbox` (pod de travail d'un Owner sur un Project) : seuls
+              `project` et `branch` sont requis ; l'image par défaut et la sémantique de
+              `suspended` sont du ressort du controller.
             properties:
               branch:
+                description: Branche checkout dans le worktree de la sandbox. REQUIS.
                 type: string
               egress:
                 default: []
+                description: White-list egress du pod. Absent => vec vide.
                 items:
                   description: |-
                     Une règle d'une white-list egress. `cidr` et `pod_selector` sont
@@ -518,12 +578,16 @@ spec:
                     `NetworkPolicy` (tâche `netpol-builder`).
                   properties:
                     cidr:
+                      description: |-
+                        Bloc CIDR destinataire. Exclusif avec `pod_selector` (porté par le
+                        netpol-builder, pas par ce type).
                       nullable: true
                       type: string
                     description:
+                      description: Description humaine de la règle (non vide — NON vérifiée ici).
                       type: string
                     namespaceSelector:
-                      description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                      description: Sélecteur de namespaces, combinable avec `pod_selector`.
                       nullable: true
                       properties:
                         matchExpressions:
@@ -554,7 +618,7 @@ spec:
                           type: object
                       type: object
                     podSelector:
-                      description: A label selector is a label query over a set of resources. The result of matchLabels and matchExpressions are ANDed. An empty label selector matches all objects. A null label selector matches no objects.
+                      description: Pods destinataires. Exclusif avec `cidr`.
                       nullable: true
                       properties:
                         matchExpressions:
@@ -586,9 +650,16 @@ spec:
                       type: object
                     ports:
                       default: []
+                      description: |-
+                        Ports autorisés. Absent => vec vide ; TCP-pour-`None` est une
+                        interprétation du netpol-builder, pas une valeur posée ici.
                       items:
+                        description: Port autorisé dans une [`EgressRule`].
                         properties:
                           port:
+                            description: |-
+                              Numéro de port ; aucune validation de contenu ici (c'est l'apiserver
+                              qui rejette un hors-plage à l'usage).
                             format: int32
                             type: integer
                           protocol:
@@ -608,9 +679,10 @@ spec:
                 nullable: true
                 type: string
               project:
+                description: Project (nom de la CR) dont le workspace est monté. REQUIS.
                 type: string
               resources:
-                description: ResourceRequirements describes the compute resource requirements.
+                description: '`ResourceRequirements` du conteneur, transmis tels quels à l''apiserver.'
                 nullable: true
                 properties:
                   claims:
@@ -655,7 +727,9 @@ spec:
                 type: boolean
               toolchains:
                 default: []
+                description: Toolchains montées via `volumes[].image`. Absent => vec vide.
                 items:
+                  description: Toolchain montée dans une sandbox via `volumes[].image`.
                   properties:
                     env:
                       additionalProperties:
@@ -664,6 +738,7 @@ spec:
                       description: Env à injecter, template `{root}` = point de montage. Vide => preset.
                       type: object
                     image:
+                      description: Image OCI de la toolchain.
                       type: string
                     lsp:
                       description: |-
@@ -674,12 +749,17 @@ spec:
                       properties:
                         args:
                           default: []
+                          description: Arguments du serveur. Absent => vec vide.
                           items:
                             type: string
                           type: array
                         bin:
+                          description: |-
+                            Binaire du serveur LSP : chemin absolu dans le pod (point de montage
+                            inclus), non validé ici.
                           type: string
                         image:
+                          description: Image OCI du serveur LSP (montée sur `/toolchains/<name>-lsp`).
                           type: string
                       required:
                       - bin
@@ -698,10 +778,12 @@ spec:
             - project
             type: object
           status:
+            description: Status de la Sandbox, posé par son reconciler.
             nullable: true
             properties:
               conditions:
                 default: []
+                description: Conditions K8s standard. Absent => vec vide.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -734,9 +816,13 @@ spec:
                   type: object
                 type: array
               phase:
+                description: |-
+                  Provisioning | Running | Failed | Suspended — chaîne libre, pas d'enum,
+                  pas de validation.
                 nullable: true
                 type: string
               service:
+                description: Nom du `Service` K8s exposant la sandbox (`sandbox-<name>`).
                 nullable: true
                 type: string
             type: object
@@ -756,10 +842,8 @@ metadata:
 spec:
   group: vanyline.solidite.fr
   names:
-    categories: []
     kind: Application
     plural: applications
-    shortNames: []
     singular: application
   scope: Namespaced
   versions:
@@ -776,6 +860,12 @@ spec:
         description: Auto-generated derived type for ApplicationSpec via `CustomResource`
         properties:
           spec:
+            description: |-
+              Spec de l'`Application` (instance déployée d'`app`) : les cinq refs
+              secrets/Ingress (`oidcSecretRef`, `databaseSecretRef`, `host`,
+              `ingressClassName`, `tlsIssuerName`) sont requises ; le dérivé
+              `redirectUrl` et les replis d'image sont du ressort du reconciler
+              `controller/src/application.rs`.
             properties:
               cookieSecretRef:
                 description: |-
@@ -811,6 +901,7 @@ spec:
                   esprit que `Toolchain.env`, pas de champ dédié par convention connue.
                 type: object
               ingressClassName:
+                description: '`IngressClass` utilisé pour l''Ingress de l''application.'
                 type: string
               ingressController:
                 description: |-
@@ -843,6 +934,7 @@ spec:
                   secret (source unique de vérité, évite un désync silencieux si `host` change).
                 type: string
               replicas:
+                description: Réplicas du Deployment `app`. None => défaut du controller.
                 format: int32
                 nullable: true
                 type: integer
@@ -857,15 +949,19 @@ spec:
                 nullable: true
                 properties:
                   homeAccessMode:
+                    description: Mode d'accès du PVC home des Owners, propagé en env à `app`.
                     nullable: true
                     type: string
                   homeStorageClass:
+                    description: '`StorageClass` du PVC home des Owners, propagée en env à `app`.'
                     nullable: true
                     type: string
                   projectAccessMode:
+                    description: Mode d'accès des PVC workspace de Projects, propagé en env à `app`.
                     nullable: true
                     type: string
                   projectStorageClass:
+                    description: '`StorageClass` des PVC workspace de Projects, propagée en env à `app`.'
                     nullable: true
                     type: string
                 type: object
@@ -889,10 +985,12 @@ spec:
             - tlsIssuerName
             type: object
           status:
+            description: Status de l'Application, posé par son reconciler.
             nullable: true
             properties:
               conditions:
                 default: []
+                description: Conditions K8s standard. Absent => vec vide.
                 items:
                   description: Condition contains details for one aspect of the current state of this API Resource.
                   properties:
@@ -925,6 +1023,9 @@ spec:
                   type: object
                 type: array
               phase:
+                description: |-
+                  Provisioning | Running | Failed — chaîne libre, mêmes valeurs
+                  documentées que `SandboxStatus::phase`, pas de validation.
                 nullable: true
                 type: string
             type: object

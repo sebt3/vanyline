@@ -548,16 +548,21 @@ interagissent avec un cluster Kubernetes via un client `VnlK8sClient` construit
 paresseusement au premier appel. Le namespace est résolu **une seule fois**,
 après `initialize`, en lisant `defaults.namespace` du `config.yaml` fusionné
 (des deux couches initialisées par `initialize`), puis en fallback sur le
-namespace du contexte kubeconfig courant.
+namespace du contexte kubeconfig courant. Ce namespace résolu est le
+**namespace d'application** : c'est là que vivent les `Owner`.
 
-**Limitation v1 — namespace par session** : le namespace est résolu une seule
-fois et appliqué à toutes les méthodes `owners/`/`projects/`/`sandboxes/` de la
-session. Il n'y a **pas de param `namespace` par appel**. La configuration CLI/RPC
-est considérée comme stable en cours de session : changer `config.yaml` entre deux
-appels a un effet immédiat sur la config (`config/*`) mais le namespace K8s n'est
-réévalué qu'après un nouvel `initialize` (qui remet le client K8s à `None`). Ceci
-est cohérent avec le modèle du serveur stdio long-vivant, mais diffère du CLI où
-chaque invocation peut recevoir un `--namespace`.
+**UN OWNER = UN NAMESPACE (2026-10-04)** : les `Project` et `Sandbox` vivent
+dans le namespace de leur Owner (`<app-namespace>-<owner>`, dérivé par le
+contrôleur). Il n'y a toujours **pas de param `namespace` par appel** — le
+namespace d'application reste résolu une seule fois par session (il n'est
+réévalué qu'après un nouvel `initialize`, qui remet le client K8s à `None`) —
+mais les méthodes ciblent le namespace d'un Owner via un param `owner` :
+`projects/list` et `sandboxes/list` exigent `{"owner"}` ; `projects/get`,
+`projects/delete`, `sandboxes/get`, `sandboxes/delete`, `sandboxes/stop` et
+`sandboxes/start` exigent `{"name", "owner"}` ; `sandboxes/create` exige le
+param `owner` de premier niveau ; pour `projects/create` l'Owner est porté par
+`spec.owner` (champ requis de `ProjectSpec`). Les méthodes `owners/*` restent
+dans le namespace d'application.
 
 ### owners/list
 
@@ -575,8 +580,8 @@ Retourne la liste des `Owner` du namespace. L'objet retourné est la
         "name":"alice",
         "namespace":"dev"
       },
-      "spec":{"existingPvc":null,"homeSize":"1Gi"},
-      "status":{"pvcName":"owner-alice-home","serviceAccount":"alice"}
+      "spec":{"homeSize":"1Gi","homeStorageClass":null,"homeAccessMode":null,"projectDefaults":null,"applicationRef":null,"egress":[]},
+      "status":{"pvcName":"owner-alice-home","serviceAccount":"alice","namespace":"dev-alice"}
     }
   ]}
 ```
@@ -591,8 +596,8 @@ Retourne un `Owner` par nom.
     "apiVersion":"vanyline.solidite.fr/v1alpha1",
     "kind":"Owner",
     "metadata":{"name":"alice","namespace":"dev"},
-    "spec":{"existingPvc":null,"homeSize":"1Gi"},
-    "status":{"pvcName":"owner-alice-home","serviceAccount":"alice"}
+    "spec":{"homeSize":"1Gi","homeStorageClass":null,"homeAccessMode":null,"projectDefaults":null,"applicationRef":null,"egress":[]},
+    "status":{"pvcName":"owner-alice-home","serviceAccount":"alice","namespace":"dev-alice"}
   }}
 ```
 
@@ -612,13 +617,15 @@ camelCase (pas d'objet `spec` imbriqué).
     "apiVersion":"vanyline.solidite.fr/v1alpha1",
     "kind":"Owner",
     "metadata":{"name":"alice","namespace":"dev","uid":"..."},
-    "spec":{"existingPvc":null,"homeSize":"2Gi"},
-    "status":{"pvcName":"owner-alice-home","serviceAccount":"alice"}
+    "spec":{"homeSize":"2Gi","homeStorageClass":null,"homeAccessMode":null,"projectDefaults":null,"applicationRef":null,"egress":[]},
+    "status":{"pvcName":"owner-alice-home","serviceAccount":"alice","namespace":"dev-alice"}
   }}
 ```
 
-`name` requis. `homeSize`, `existingPvc`, `projectDefaults` optionnels (valeurs
-par défaut appliquées par le controller).
+`name` requis. `homeSize`, `homeStorageClass`, `homeAccessMode`,
+`projectDefaults`, `applicationRef`, `egress` optionnels (valeurs par défaut
+appliquées par le controller ; les champs absents apparaissent `null` dans la
+sérialisation du spec).
 
 ### owners/delete
 
@@ -644,59 +651,63 @@ Nom malformé :
 
 ### projects/list
 
-Retourne la liste des `Project` du namespace. L'objet retourné est la
+Retourne la liste des `Project` du namespace de l'Owner (params `{"owner"}`
+requis). L'objet retourné est la
 **sérialisation directe du CRD K8s** en camelCase (le même format qu'utilise
 `kubectl get projects -o json`).
 
 ```json
-→ {"jsonrpc":"2.0","id":104,"method":"projects/list"}
+→ {"jsonrpc":"2.0","id":104,"method":"projects/list","params":{"owner":"alice"}}
 ← {"jsonrpc":"2.0","id":104,"result":[
     {
       "apiVersion":"vanyline.solidite.fr/v1alpha1",
       "kind":"Project",
       "metadata":{
         "name":"demo-project",
-        "namespace":"dev"
+        "namespace":"dev-alice"
       },
       "spec":{
         "owner":"alice",
         "repoUrl":"https://github.com/alice/demo.git",
         "defaultBranch":"main",
-        "existingPvc":null,
         "storageSize":"10Gi",
         "storageClass":"standard",
+        "storageAccessMode":null,
         "gitSecret":null,
         "caches":["cargo","pnpm"],
-        "fetchInterval":"1h"
+        "fetchInterval":"1h",
+        "egress":[]
       },
-      "status":{"pvcName":"project-demo-project","cloned":true,"lastFetch":null,"worktrees":[] }
+      "status":{"pvcName":"project-demo-project","cloned":true}
     }
   ]}
 ```
 
 ### projects/get
 
-Retourne un `Project` par nom.
+Retourne un `Project` par nom, dans le namespace de l'Owner (params
+`{"name", "owner"}` requis).
 
 ```json
-→ {"jsonrpc":"2.0","id":105,"method":"projects/get","params":{"name":"demo-project"}}
+→ {"jsonrpc":"2.0","id":105,"method":"projects/get","params":{"name":"demo-project","owner":"alice"}}
 ← {"jsonrpc":"2.0","id":105,"result":{
     "apiVersion":"vanyline.solidite.fr/v1alpha1",
     "kind":"Project",
-    "metadata":{"name":"demo-project","namespace":"dev"},
-    "spec":{"owner":"alice","repoUrl":"https://github.com/alice/demo.git","defaultBranch":"main","existingPvc":null,"storageSize":"10Gi","storageClass":"standard","gitSecret":null,"caches":["cargo","pnpm"],"fetchInterval":"1h"},
-    "status":{"pvcName":"project-demo-project","cloned":true,"lastFetch":null,"worktrees":[]}
+    "metadata":{"name":"demo-project","namespace":"dev-alice"},
+    "spec":{"owner":"alice","repoUrl":"https://github.com/alice/demo.git","defaultBranch":"main","storageSize":"10Gi","storageClass":"standard","storageAccessMode":null,"gitSecret":null,"caches":["cargo","pnpm"],"fetchInterval":"1h","egress":[]},
+    "status":{"pvcName":"project-demo-project","cloned":true}
   }}
 ```
 
-`name` requis. Si params malformé (pas de `name`) :
+`name` et `owner` requis. Si params malformé (pas de `name` ou pas d'`owner`) :
 ```json
 ← {"jsonrpc":"2.0","id":105,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
 ```
 
 ### projects/create
 
-Crée un `Project` dans le namespace. `name` + champs de `ProjectSpec` aplati
+Crée un `Project` dans le namespace de l'Owner. `name` + champs de
+`ProjectSpec` aplatis
 en camelCase (pas d'objet `spec` imbriqué).
 
 ```json
@@ -704,9 +715,9 @@ en camelCase (pas d'objet `spec` imbriqué).
 ← {"jsonrpc":"2.0","id":106,"result":{
     "apiVersion":"vanyline.solidite.fr/v1alpha1",
     "kind":"Project",
-    "metadata":{"name":"demo-project","namespace":"dev","uid":"..."},
-    "spec":{"owner":"alice","repoUrl":"https://github.com/alice/demo.git","defaultBranch":"main","existingPvc":null,"storageSize":null,"storageClass":null,"gitSecret":null,"caches":null,"fetchInterval":null},
-    "status":{"pvcName":"project-demo-project","cloned":false,"lastFetch":null,"worktrees":[]}
+    "metadata":{"name":"demo-project","namespace":"dev-alice","uid":"..."},
+    "spec":{"owner":"alice","repoUrl":"https://github.com/alice/demo.git","defaultBranch":"main","storageSize":null,"storageClass":null,"storageAccessMode":null,"gitSecret":null,"caches":null,"fetchInterval":null,"egress":[]},
+    "status":{"cloned":false}
   }}
 ```
 
@@ -721,7 +732,7 @@ contrairement à `conversations/delete` : un nom inexistant remonte l'erreur
 commande CLI `vanyline project delete`.
 
 ```json
-→ {"jsonrpc":"2.0","id":107,"method":"projects/delete","params":{"name":"demo-project"}}
+→ {"jsonrpc":"2.0","id":107,"method":"projects/delete","params":{"name":"demo-project","owner":"alice"}}
 ← {"jsonrpc":"2.0","id":107,"result":null}
 ```
 
@@ -737,72 +748,77 @@ Nom malformé :
 
 ### sandboxes/list
 
-Retourne la liste des `Sandbox` du namespace. L'objet retourné est la
+Retourne la liste des `Sandbox` du namespace de l'Owner (params `{"owner"}`
+requis). L'objet retourné est la
 **sérialisation directe du CRD K8s** en camelCase (le même format qu'utilise
 `kubectl get sandboxes -o json`).
 
 ```json
-→ {"jsonrpc":"2.0","id":108,"method":"sandboxes/list"}
+→ {"jsonrpc":"2.0","id":108,"method":"sandboxes/list","params":{"owner":"alice"}}
 ← {"jsonrpc":"2.0","id":108,"result":[
     {
       "apiVersion":"vanyline.solidite.fr/v1alpha1",
       "kind":"Sandbox",
       "metadata":{
         "name":"demo-sandbox",
-        "namespace":"dev"
+        "namespace":"dev-alice"
       },
       "spec":{
         "project":"demo-project",
         "branch":"main",
         "toolchains":[
-          {"ociImage":"rust:slim-trixie","env":{"PATH":"…/usr/local/bin","RUSTUP_HOME":"…/.rustup"}}
+          {"name":"rust","image":"rust:slim-trixie","env":{"PATH":"…/usr/local/bin","RUSTUP_HOME":"…/.rustup"},"lsp":null}
         ],
         "image":null,
-        "resources":null
+        "resources":null,
+        "egress":[],
+        "suspended":false
       },
-      "status":{"podName":"sandbox-demo-sandbox"}
+      "status":{"phase":"Running","service":"demo-sandbox"}
     }
   ]}
 ```
 
 ### sandboxes/get
 
-Retourne un `Sandbox` par nom.
+Retourne un `Sandbox` par nom, dans le namespace de l'Owner (params
+`{"name", "owner"}` requis).
 
 ```json
-→ {"jsonrpc":"2.0","id":109,"method":"sandboxes/get","params":{"name":"demo-sandbox"}}
+→ {"jsonrpc":"2.0","id":109,"method":"sandboxes/get","params":{"name":"demo-sandbox","owner":"alice"}}
 ← {"jsonrpc":"2.0","id":109,"result":{
     "apiVersion":"vanyline.solidite.fr/v1alpha1",
     "kind":"Sandbox",
-    "metadata":{"name":"demo-sandbox","namespace":"dev"},
-    "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null},
-    "status":{"podName":"sandbox-demo-sandbox"}
+    "metadata":{"name":"demo-sandbox","namespace":"dev-alice"},
+    "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null,"egress":[],"suspended":false},
+    "status":{"phase":"Running","service":"demo-sandbox"}
   }}
 ```
 
-`name` requis. Si params malformé (pas de `name`) :
+`name` et `owner` requis. Si params malformé (pas de `name` ou pas d'`owner`) :
 ```json
 ← {"jsonrpc":"2.0","id":109,"error":{"code":-32700,"message":"Malformed request: ...","data":{"code":"VNL-RPC-000"}}}
 ```
 
 ### sandboxes/create
 
-Crée un `Sandbox` dans le namespace. `name` + champs de `SandboxSpec` aplati
-en camelCase (pas d'objet `spec` imbriqué). `toolchains` et `image` sont
+Crée un `Sandbox` dans le namespace de l'Owner. `name` + `owner` (param de
+premier niveau, requis) + champs de `SandboxSpec` aplatis en camelCase (pas
+d'objet `spec` imbriqué). `toolchains` et `image` sont
 optionnels (valeurs par défaut appliquées par le controller).
 
 ```json
-→ {"jsonrpc":"2.0","id":110,"method":"sandboxes/create","params":{"name":"demo-sandbox","project":"demo-project","branch":"main"}}
+→ {"jsonrpc":"2.0","id":110,"method":"sandboxes/create","params":{"name":"demo-sandbox","owner":"alice","project":"demo-project","branch":"main"}}
 ← {"jsonrpc":"2.0","id":110,"result":{
     "apiVersion":"vanyline.solidite.fr/v1alpha1",
     "kind":"Sandbox",
-    "metadata":{"name":"demo-sandbox","namespace":"dev","uid":"..."},
-    "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null},
-    "status":{"podName":"sandbox-demo-sandbox"}
+    "metadata":{"name":"demo-sandbox","namespace":"dev-alice","uid":"..."},
+    "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null,"egress":[],"suspended":false},
+    "status":{"phase":"Provisioning"}
   }}
 ```
 
-`name` requis. `project` et `branch` requis, les autres champs sont optionnels
+`name` et `owner` requis. `project` et `branch` requis, les autres champs sont optionnels
 (valeurs par défaut appliquées par le controller).
 
 ### sandboxes/delete
@@ -813,7 +829,7 @@ contrairement à `conversations/delete` : un nom inexistant remonte l'erreur
 commande CLI `vanyline sandbox delete`.
 
 ```json
-→ {"jsonrpc":"2.0","id":111,"method":"sandboxes/delete","params":{"name":"demo-sandbox"}}
+→ {"jsonrpc":"2.0","id":111,"method":"sandboxes/delete","params":{"name":"demo-sandbox","owner":"alice"}}
 ← {"jsonrpc":"2.0","id":111,"result":null}
 ```
 
@@ -837,22 +853,22 @@ patché (même format que `sandboxes/get`), pas `null` — contrairement à
 `sandboxes/delete`, la transition d'état est ce que l'appelant veut voir.
 
 ```json
-→ {"jsonrpc":"2.0","id":112,"method":"sandboxes/stop","params":{"name":"demo-sandbox"}}
+→ {"jsonrpc":"2.0","id":112,"method":"sandboxes/stop","params":{"name":"demo-sandbox","owner":"alice"}}
 ← {"jsonrpc":"2.0","id":112,"result":{
     "apiVersion":"vanyline.solidite.fr/v1alpha1",
     "kind":"Sandbox",
-    "metadata":{"name":"demo-sandbox","namespace":"dev"},
+    "metadata":{"name":"demo-sandbox","namespace":"dev-alice"},
     "spec":{"project":"demo-project","branch":"main","toolchains":[],"image":null,"resources":null,"egress":[],"suspended":true},
-    "status":{"podName":"sandbox-demo-sandbox"}
+    "status":{"phase":"Suspended","service":"demo-sandbox"}
   }}
 ```
 
 ```json
-→ {"jsonrpc":"2.0","id":113,"method":"sandboxes/start","params":{"name":"demo-sandbox"}}
+→ {"jsonrpc":"2.0","id":113,"method":"sandboxes/start","params":{"name":"demo-sandbox","owner":"alice"}}
 ← {"jsonrpc":"2.0","id":113,"result":{"...":"...","spec":{"...":"...","suspended":false},"...":"..."}}
 ```
 
-`name` requis. Nom malformé ou échec K8s : mêmes codes que `sandboxes/get`
+`name` et `owner` requis. Nom malformé ou échec K8s : mêmes codes que `sandboxes/get`
 (`VNL-RPC-000` / `VNL-RPC-010`).
 
 ## Concurrence
