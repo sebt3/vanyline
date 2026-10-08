@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Outils MCP partagés : exécution de commandes, système de fichiers, recherche et rendu de sortie."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["mcp", "tools", "filesystem"]
+categories = ["development-tools", "asynchronous"]
 
 [dependencies]
 tokio = { version = "1", features = ["full", "process"] }

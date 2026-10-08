@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Backend de l'environnement : authentification OIDC, configuration LLM et agents, workflows Restate et relais sandbox."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["web", "oidc", "llm"]
+categories = ["web-programming", "asynchronous"]
 
 [[bin]]
 name = "vanyline-app"

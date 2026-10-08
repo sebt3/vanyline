@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Types et événements partagés, session d'agent, tâches autonomes et client Kubernetes (feature k8s), avec export de types ts-rs."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["llm", "agent", "kubernetes"]
+categories = ["api-bindings", "asynchronous"]
 
 [dependencies]
 rig-core = { version = "0.38", features = ["rmcp"] }

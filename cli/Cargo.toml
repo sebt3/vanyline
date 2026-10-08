@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "CLI vanyline : chat interactif TUI, exécution one-shot, gestion de configuration et d'objets Kubernetes, serveur RPC JSON-RPC."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["cli", "llm", "kubernetes"]
+categories = ["command-line-interface", "asynchronous"]
 
 [[bin]]
 name = "vanyline"

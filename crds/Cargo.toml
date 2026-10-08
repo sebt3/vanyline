@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Définitions des CRDs du controller vanyline (Owner, Project, Sandbox, Application) et nommage du namespace d'Owner."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["kubernetes", "crd", "operator"]
+categories = ["api-bindings", "data-structures"]
 
 [dependencies]
 kube = { version = "4", default-features = false, features = ["derive"] }

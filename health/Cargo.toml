@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Santé du code : presets de vérifications par langage, parseurs (lcov, clippy, tsc, ruff, hadolint), exécution et rapport typé exporté en TypeScript."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["code-quality", "linting", "testing"]
+categories = ["development-tools", "development-tools::testing"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

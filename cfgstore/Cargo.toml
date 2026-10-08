@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Stockage de la configuration vanyline : store fichier asynchrone, domaine typé et couches de configuration."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["config", "storage", "configuration"]
+categories = ["config", "asynchronous"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
