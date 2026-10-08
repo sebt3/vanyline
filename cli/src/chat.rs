@@ -36,7 +36,7 @@ pub async fn run(
     message: Option<String>,
     agent: Option<String>,
     continue_active: bool,
-    toolbox_mcp_url: Option<String>,
+    toolbox: Option<crate::ToolboxTarget>,
     timeout_secs: Option<u64>,
     json: bool,
     model: Option<String>,
@@ -50,7 +50,7 @@ pub async fn run(
             &msg,
             agent,
             continue_active,
-            toolbox_mcp_url,
+            toolbox,
             timeout_secs,
             json,
             model,
@@ -58,14 +58,14 @@ pub async fn run(
         .await;
         return;
     }
-    run_repl(agent, continue_active, toolbox_mcp_url).await;
+    run_repl(agent, continue_active, toolbox).await;
 }
 
 async fn run_one_shot(
     user_msg: &str,
     agent: Option<String>,
     continue_active: bool,
-    toolbox_mcp_url: Option<String>,
+    toolbox: Option<crate::ToolboxTarget>,
     timeout_secs: Option<u64>,
     json: bool,
     model: Option<String>,
@@ -75,12 +75,9 @@ async fn run_one_shot(
         println!("Session: {}", conv.id);
     }
 
-    let ctx = build_session_context(
-        toolbox_mcp_url.as_deref(),
-        json,
-        model.as_deref(),
-        conv.todo.clone(),
-    );
+    // Jeton du toolbox PAR TOUR (décision 2026-10-08) : le one-shot n'a
+    // qu'un tour, son bearer est posé ici.
+    let ctx = build_turn_context(toolbox.as_ref(), json, model.as_deref(), conv.todo.clone()).await;
     let workspace_context = read_workspace_context();
 
     let turn = process_turn(
@@ -123,7 +120,11 @@ async fn run_one_shot(
     }
 }
 
-async fn run_repl(agent: Option<String>, continue_active: bool, toolbox_mcp_url: Option<String>) {
+async fn run_repl(
+    agent: Option<String>,
+    continue_active: bool,
+    toolbox: Option<crate::ToolboxTarget>,
+) {
     let (mut conv, agent_name, _) = resolve_context(agent, continue_active).await;
     println!("vanyline REPL (Ctrl-D to exit)");
     println!("Agent: {agent_name}");
@@ -134,7 +135,6 @@ async fn run_repl(agent: Option<String>, continue_active: bool, toolbox_mcp_url:
     }
     println!();
 
-    let ctx = build_session_context(toolbox_mcp_url.as_deref(), false, None, conv.todo.clone());
     let workspace_context = read_workspace_context();
 
     loop {
@@ -148,6 +148,11 @@ async fn run_repl(agent: Option<String>, continue_active: bool, toolbox_mcp_url:
         if input.is_empty() {
             continue;
         }
+
+        // Contexte reconstruit PAR TOUR (jeton du toolbox rafraîchi à chaque
+        // message, décision 2026-10-08) ; le todo repart de l'état re-persisté
+        // au tour précédent (`conv.todo`), d'où une continuité entre tours.
+        let ctx = build_turn_context(toolbox.as_ref(), false, None, conv.todo.clone()).await;
 
         match process_turn(
             &conv,
@@ -185,16 +190,18 @@ fn read_todo_state(state: &std::sync::Mutex<Option<String>>) -> Option<String> {
         .clone()
 }
 
-/// Construit le `SessionContext` de la session CLI. `toolbox_mcp_url` :
-/// `Some(url)` -> `local_tools` vide + la sandbox injectee comme serveur
+/// Construit le `SessionContext` de la session CLI. `toolbox` :
+/// `Some((url, jeton))` -> `local_tools` vide + la sandbox injectee comme serveur
 /// MCP nomme "toolbox" dans `extra_mcp` (design "Toolbox en inference" de
-/// ws12-sandbox-clients) ; `None` -> comportement inchange (`local_tools` du
-/// CLI, `extra_mcp` vide). Le paramètre `json` choisit le sink de sortie :
+/// ws12-sandbox-clients), avec l'en-tete `authorization: Bearer {jeton}` pose
+/// sur le serveur (jamais de headers vides, decision Sebastien 2026-10-08,
+/// cf. `sandbox/src/auth.sdd`) ; `None` -> comportement inchange (`local_tools`
+/// du CLI, `extra_mcp` vide). Le paramètre `json` choisit le sink de sortie :
 /// `JsonSink` (ligne JSON par événement) ou `StdoutSink` (sortie lisible).
 /// `todo_seed` : valeur optionnelle issue de `Conversation.todo` pour le
 /// resume d'une conversation existante (`-c/--continue`).
 fn build_session_context(
-    toolbox_mcp_url: Option<&str>,
+    toolbox: Option<(&str, &str)>,
     json: bool,
     model_override: Option<&str>,
     todo_seed: Option<String>,
@@ -204,8 +211,8 @@ fn build_session_context(
     } else {
         Arc::new(StdoutSink)
     };
-    match toolbox_mcp_url {
-        Some(url) => vanyline_lib::session::SessionContext {
+    match toolbox {
+        Some((url, token)) => vanyline_lib::session::SessionContext {
             store: Arc::new(crate::discover_fs_store()),
             sink,
             local_tools: std::collections::HashMap::new(),
@@ -215,7 +222,10 @@ fn build_session_context(
                     name: "toolbox".to_string(),
                     transport: McpTransport::HttpStreamable,
                     url: url.to_string(),
-                    headers: Default::default(),
+                    headers: std::collections::BTreeMap::from([(
+                        "authorization".to_string(),
+                        format!("Bearer {token}"),
+                    )]),
                 },
                 McpSelection {
                     server: "toolbox".to_string(),
@@ -235,6 +245,132 @@ fn build_session_context(
             todo_state: Arc::new(std::sync::Mutex::new(todo_seed)),
         },
     }
+}
+
+/// Fenêtre de vie minimale (secondes) acceptée sur le jeton d'Owner présenté
+/// au toolbox pour un tour — même valeur que la marge du cache lib
+/// (`OWNER_TOKEN_REFRESH_MARGIN_SECS`, décision Sébastien 2026-10-08). Sous
+/// cette fenêtre : warn factuel puis continuation avec ce jeton — jamais un
+/// blocage de session, jamais une re-demande en boucle.
+const TOOLBOX_TOKEN_MIN_SECS: i64 = 300;
+
+/// Construit le `SessionContext` d'un tour : toolbox actif -> jeton d'Owner
+/// frais demandé à l'apiserver (cache lib, au plus un `TokenRequest` par
+/// ~10 min de session) et bearer du tour posé sur le serveur toolbox ; sans
+/// toolbox -> construction directe. Appelé par tour (le one-shot : son tour
+/// unique ; le REPL : avant chaque message traité), jamais une fois pour la
+/// session — les headers rmcp sont figés à la connexion, la fenêtre de vie se
+/// regagne donc à la reprise du contexte (décision 2026-10-08).
+async fn build_turn_context(
+    toolbox: Option<&crate::ToolboxTarget>,
+    json: bool,
+    model_override: Option<&str>,
+    todo_seed: Option<String>,
+) -> vanyline_lib::session::SessionContext {
+    match toolbox {
+        Some(target) => {
+            let token = owner_token_for_turn(target).await;
+            build_session_context(
+                Some((target.url.as_str(), token.as_str())),
+                json,
+                model_override,
+                todo_seed,
+            )
+        }
+        None => build_session_context(None, json, model_override, todo_seed),
+    }
+}
+
+/// Obtient le jeton d'Owner du tour pour la cible `target` et vérifie sa
+/// fenêtre de vie : `exp` lu dans le JWT décodé SANS vérifier la signature ;
+/// sous `TOOLBOX_TOKEN_MIN_SECS` (ou `exp` absent/illisible — traité comme
+/// expiré) un `tracing::warn!` factuel est émis puis on poursuit avec ce
+/// jeton. Le jeton et l'en-tête ne sont JAMAIS loggés. Un échec de
+/// `owner_token` (Owner sans SA, cluster injoignable) est une erreur
+/// fatale du chemin toolbox : message sur stderr puis exit(1), comme les
+/// autres terminaisons du CLI.
+async fn owner_token_for_turn(target: &crate::ToolboxTarget) -> String {
+    let jeton = target
+        .client
+        .owner_token(&target.owner)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+    match jwt_exp_remaining(&jeton.token) {
+        Some(remaining) if remaining >= TOOLBOX_TOKEN_MIN_SECS => {}
+        Some(remaining) => tracing::warn!(
+            "jeton toolbox : fenêtre de vie restante {remaining} s sous le minimum de \
+             {TOOLBOX_TOKEN_MIN_SECS} s (marge du cache contredite — dérive d'horloge ?) ; \
+             poursuite avec ce jeton"
+        ),
+        None => tracing::warn!(
+            "jeton toolbox : claim exp absent ou illisible — traité comme expiré ; \
+             poursuite avec ce jeton"
+        ),
+    }
+    jeton.token
+}
+
+/// Décode une chaîne base64url (alphabet URL, rembourrage absent ou
+/// ignoré). `None` sur tout caractère hors alphabet ou longueur de bloc
+/// finale impossible (1 caractère seul).
+fn base64url_decode(input: &str) -> Option<Vec<u8>> {
+    fn value(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c.checked_sub(b'A')?),
+            b'a'..=b'z' => Some(c.checked_sub(b'a')?.checked_add(26)?),
+            b'0'..=b'9' => Some(c.checked_sub(b'0')?.checked_add(52)?),
+            b'-' => Some(62),
+            b'_' => Some(63),
+            _ => None,
+        }
+    }
+    let input = input.trim_end_matches('=');
+    let mut out = Vec::with_capacity(input.len());
+    for chunk in input.as_bytes().chunks(4) {
+        // 1 caractère seul = longueur invalide.
+        if chunk.len() < 2 {
+            return None;
+        }
+        let mut vals = [0u8; 4];
+        for (slot, c) in vals.iter_mut().zip(chunk) {
+            *slot = value(*c)?;
+        }
+        let merged: u32 = (u32::from(vals[0]) << 18)
+            | (u32::from(vals[1]) << 12)
+            | (u32::from(vals[2]) << 6)
+            | u32::from(vals[3]);
+        // 2 caractères -> 1 octet, 3 -> 2, 4 -> 3.
+        out.push(u8::try_from((merged >> 16) & 0xFF).ok()?);
+        if chunk.len() >= 3 {
+            out.push(u8::try_from((merged >> 8) & 0xFF).ok()?);
+        }
+        if chunk.len() >= 4 {
+            out.push(u8::try_from(merged & 0xFF).ok()?);
+        }
+    }
+    Some(out)
+}
+
+/// Lit la fenêtre de vie restante (secondes avant le claim `exp`) d'un JWT
+/// d'Owner, SANS vérifier la signature — lecture d'un jeton émis par
+/// l'apiserver, jamais une vérification de credential. `None` si le jeton
+/// n'est pas un JWT à trois segments, si le segment central n'est pas du
+/// base64url JSON, ou si `exp` est absent ou non-entier. Le jeton n'est
+/// jamais loggé.
+fn jwt_exp_remaining(token: &str) -> Option<i64> {
+    let mut parts = token.split('.');
+    let (Some(_header), Some(payload), Some(_signature), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let payload = base64url_decode(payload)?;
+    let claims: serde_json::Value = serde_json::from_slice(&payload).ok()?;
+    let exp = claims.get("exp")?.as_i64()?;
+    exp.checked_sub(chrono::Utc::now().timestamp())
 }
 
 /// Sink de sortie structurée : sérialise chaque `ChatEvent` en une ligne JSON
@@ -643,9 +779,12 @@ mod tests {
         assert!(ctx.extra_mcp.is_empty());
     }
 
-    // 7. build_session_context_toolbox_empties_local_tools
+    // 7. Scenario: mode_toolbox_remplace_les_tools_locaux — local_tools vide,
+    // serveur toolbox @HttpStreamable, headers [(`authorization`,
+    // `Bearer jeton-de-test`)] (jamais vides, décision 2026-10-08), sélection
+    // totale, profondeur 1.
     #[test]
-    fn build_session_context_toolbox_empties_local_tools() {
+    fn mode_toolbox_remplace_les_tools_locaux() {
         let global_dir = tempdir().unwrap();
         let layers = Layers {
             global_dir: global_dir.path().to_path_buf(),
@@ -653,7 +792,7 @@ mod tests {
         };
         let _store = FsConfigStore::new(layers);
         let ctx = build_session_context(
-            Some("http://sandbox-demo.dev.svc:3000/mcp"),
+            Some(("http://sbx:3000/mcp", "jeton-de-test")),
             false,
             None,
             None,
@@ -662,9 +801,16 @@ mod tests {
         assert_eq!(ctx.extra_mcp.len(), 1);
         let (server, selection) = &ctx.extra_mcp[0];
         assert_eq!(server.name, "toolbox");
-        assert_eq!(server.url, "http://sandbox-demo.dev.svc:3000/mcp");
+        assert_eq!(server.url, "http://sbx:3000/mcp");
+        assert!(matches!(server.transport, McpTransport::HttpStreamable));
+        assert_eq!(
+            server.headers.get("authorization").map(String::as_str),
+            Some("Bearer jeton-de-test"),
+            "l'en-tete authorization Bearer du tour doit être posé (jamais de headers vides)"
+        );
         assert_eq!(selection.server, "toolbox");
         assert!(selection.tools.is_empty());
+        assert_eq!(ctx.subagent_depth_max, 1);
     }
 
     // 8. build_session_context_none_json
@@ -693,7 +839,7 @@ mod tests {
         };
         let _store = FsConfigStore::new(layers);
         let ctx = build_session_context(
-            Some("http://sandbox-demo.dev.svc:3000/mcp"),
+            Some(("http://sandbox-demo.dev.svc:3000/mcp", "jeton-de-test")),
             true,
             None,
             None,
@@ -703,6 +849,10 @@ mod tests {
         let (server, selection) = &ctx.extra_mcp[0];
         assert_eq!(server.name, "toolbox");
         assert_eq!(server.url, "http://sandbox-demo.dev.svc:3000/mcp");
+        assert_eq!(
+            server.headers.get("authorization").map(String::as_str),
+            Some("Bearer jeton-de-test")
+        );
         assert_eq!(selection.server, "toolbox");
         assert!(selection.tools.is_empty());
         // Même logique que le cas non-json : local_tools vides, toolbox dans extra_mcp
@@ -795,5 +945,68 @@ mod tests {
     fn read_todo_state_returns_none() {
         let m = std::sync::Mutex::new(None);
         assert_eq!(read_todo_state(&m), None);
+    }
+
+    // ── TOOLBOX BEARER par tour (2026-10-08) ──
+
+    /// Encodage base64url sans rembourrage — uniquement pour fabriquer les
+    /// JWT de test (la production ne fait que décoder).
+    fn b64url_encode(data: &[u8]) -> String {
+        const ALPHA: &[u8; 64] =
+            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        let mut out = String::new();
+        for chunk in data.chunks(3) {
+            let b0 = chunk[0];
+            let b1 = chunk.get(1).copied().unwrap_or(0);
+            let b2 = chunk.get(2).copied().unwrap_or(0);
+            let n: u32 = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+            // 1 octet → 2 caractères, 2 → 3, 3 → 4.
+            let out_len = chunk.len().saturating_add(1);
+            for &shift in [18u32, 12, 6, 0].iter().take(out_len) {
+                let idx = usize::try_from((n >> shift) & 63).unwrap();
+                out.push(char::from(ALPHA[idx]));
+            }
+        }
+        out
+    }
+
+    /// Fabrique un JWT de test dont la signature n'a aucune signification —
+    /// `jwt_exp_remaining` lit le payload SANS jamais vérifier la signature.
+    fn make_test_jwt(payload: &serde_json::Value) -> String {
+        let header = b64url_encode(br#"{"alg":"ES256","kid":"cle-de-test"}"#);
+        let body = b64url_encode(serde_json::to_vec(payload).unwrap().as_slice());
+        let sig = b64url_encode(b"signature-jamais-verifiee");
+        format!("{header}.{body}.{sig}")
+    }
+
+    /// Scenario: `fenetre_de_vie_lue_dans_le_claim_exp` — JWT fabriqué avec
+    /// `exp = now + 700` : la vie restante rendue est dans `695..=705`
+    /// (tolérance d'horloge, pas de re-vérification).
+    #[test]
+    fn fenetre_de_vie_lue_dans_le_claim_exp() {
+        let exp = chrono::Utc::now().timestamp().saturating_add(700);
+        let jwt = make_test_jwt(&serde_json::json!({ "sub": "alice", "exp": exp }));
+        let remaining = jwt_exp_remaining(&jwt).expect("un JWT avec exp doit être décodé");
+        assert!(
+            (695..=705).contains(&remaining),
+            "vie restante attendue dans 695..=705, obtenue: {remaining}"
+        );
+    }
+
+    /// Scenario: `fenetre_de_vie_lue_dans_le_claim_exp` (bras négatif) —
+    /// sans `exp`, non-JWT, payload illisible ou `exp` non-entier : `None`
+    /// (le contrat du tour le traite comme expiré : warn + continuation).
+    #[test]
+    fn fenetre_de_vie_absente_ou_illisible_rend_none() {
+        // sans claim exp
+        let jwt = make_test_jwt(&serde_json::json!({ "sub": "alice" }));
+        assert_eq!(jwt_exp_remaining(&jwt), None);
+        // non-JWT (pas trois segments)
+        assert_eq!(jwt_exp_remaining("pas-un-jwt"), None);
+        // segment central ni base64url, ni JSON
+        assert_eq!(jwt_exp_remaining("aaa.!!!pas-du-base64!!!.ccc"), None);
+        // exp non entier
+        let jwt = make_test_jwt(&serde_json::json!({ "exp": "tard" }));
+        assert_eq!(jwt_exp_remaining(&jwt), None);
     }
 }

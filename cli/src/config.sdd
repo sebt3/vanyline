@@ -27,7 +27,7 @@ Structure:
   Consommateurs (lecture seule pour cette spec) : ./main.rs — @discover_fs_store
     (construit le store sur @discover_layers du cwd), @discover_k8s_client
     (précédence `--namespace` > @configured_namespace > kubeconfig par
-    @VnlK8sClient::discover), @resolve_toolbox_mcp_url (`--toolbox` >
+    @VnlK8sClient::discover), @resolve_toolbox_target (`--toolbox` >
     @configured_toolbox, aucun appel K8s si aucun des deux) ; ./chat.rs — @run
     appelle @ensure_config_dir à chaque lancement de chat, @print_git_diff_stat
     utilise @discover_workspace_root ; ./store.rs — persistance des

@@ -249,7 +249,7 @@ Scenario: aucun_chemin_est_confiné_au_répertoire_courant
     de chemins (comportement actuel, à confirmer comme voulu, cf. `Tasks` `[!]`)
 
 Scenario: local_tools_absent_du_mode_toolbox
-  Given @build_session_context appelé avec `toolbox_mcp_url = Some(url)`
+  Given @build_session_context appelé avec la toolbox (`url`, bearer de test)
   When le @SessionContext est construit
   Then son `local_tools` est une map vide
   And les tools locaux du CLI ne sont pas joints au tour (la toolbox MCP les remplace)

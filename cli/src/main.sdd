@@ -62,7 +62,7 @@ Exposes:
     consommé par ./chat.rs et ./rpc/handlers.rs.
   Handlers privés de rendu/dispatch (contrat de ce fichier) : @run_conversation,
     @run_agent, @run_provider, @run_config, @run_models, @run_toolsets, @run_skills,
-    @run_mcp, @discover_k8s_client, @resolve_toolbox_mcp_url, @run_owner_k8s,
+    @run_mcp, @discover_k8s_client, @resolve_toolbox_target, @run_owner_k8s,
     @run_project_k8s, @run_sandbox_k8s.
   @main — @tokio::main (runtime multi-thread par défaut), ne retourne rien : toute
     erreur se matérialise par message + @std::process::exit, ou par panic (voir
@@ -86,7 +86,7 @@ Accepts:
     specs `*_cmd.sdd`, la construction du `spec` (@OwnerSpec/@ProjectSpec/@SandboxSpec)
     à partir de ces flags par ce fichier.
   Chemin chat (`main` sans sous-commande, et `run`) : @chat::run(message, agent,
-    continue_active, toolbox_mcp_url, timeout_secs, json, model) — mapping exact en
+    continue_active, toolbox, timeout_secs, json, model) — mapping exact en
     Handles ; la sémantique de ces 7 arguments appartient à ./chat.rs (spec en cours).
 
 Returns:
@@ -103,8 +103,12 @@ Returns:
   @discover_fs_store : un @FsConfigStore branché sur les couches découvertes.
   @discover_k8s_client : un @VnlK8sClient (ne retourne jamais `Err` — meurt par
     exit).
-  @resolve_toolbox_mcp_url : @Some(url MCP de la sandbox) si une toolbox est nommée
+  @resolve_toolbox_target : @Some(@ToolboxTarget) si une toolbox est nommée
     (flag ou config), @None sinon — dans ce cas AUCUN appel K8s n'est émis.
+  @ToolboxTarget — `pub struct { pub url: @String, pub owner: @String, pub client:
+    @VnlK8sClient }` : cible du chat toolbox — url MCP résolue, Owner (nom requis par
+    @require_owner) et client K8s DÉJÀ construit pour la résolution, partagé par le chat
+    pour ses @owner_token par tour (pas de seconde découverte).
 
 Raises:
   Code 2 (défaut clap, jamais épinglé par un test — voir Tasks) : sous-commande ou
@@ -140,11 +144,11 @@ Handles:
     destination par défaut = stdout, voir Tasks `[!]`) ; puis @Cli::parse ; puis
     dispatch exclusif vers le handler du variant choisi, sans logique partagée.
   Dispatch et mapping des arguments (contrat de câblage de ce fichier) :
-    aucun sous-commande → @resolve_toolbox_mcp_url(cli.toolbox, cli.namespace) puis
-    @chat::run(None, cli.agent, cli.continue_active, toolbox_mcp_url, None, false,
+    aucun sous-commande → @resolve_toolbox_target(cli.toolbox, cli.namespace, cli.owner) puis
+    @chat::run(None, cli.agent, cli.continue_active, toolbox, None, false,
     None) — mode REPL ;
-    `run` → @resolve_toolbox_mcp_url puis @chat::run(Some(message), cli.agent,
-    cli.continue_active, toolbox_mcp_url, timeout, json, model) ;
+    `run` → @resolve_toolbox_target puis @chat::run(Some(message), cli.agent,
+    cli.continue_active, toolbox, timeout, json, model) ;
     `conversations|agents|providers|models|toolsets|skills|mcp|config` → handler
     correspondant — les flags globaux sont acceptés au parsing mais IGNORÉS par ces
     handlers (`namespace` n'est jamais lu, `agent`/`continue`/`toolbox` non plus) ;
@@ -158,10 +162,13 @@ Handles:
     premiers sont absents) ; échec de discover → stderr + exit 1. Appelée AVANT le
     match du verbe : toute commande owner/project/sandbox meurt avant tout rendu si
     le cluster est injoignable.
-  @resolve_toolbox_mcp_url : nom résolu par précédence `--toolbox` >
+  @resolve_toolbox_target : nom résolu par précédence `--toolbox` >
     `defaults.toolbox` (@config::configured_toolbox) ; les deux absents → @None sans
     instancier aucun client K8s (le chat fonctionne sans cluster) ; sinon
-    @discover_k8s_client puis @client.sandbox_mcp_url(&name) — échec → stderr + exit 1.
+    @require_owner(cli.owner) — sans `--owner`, erreur + exit 1 (le jeton de toolbox se
+    demande à l'Owner, 2026-10-08) — puis @discover_k8s_client puis
+    @client.sandbox_mcp_url(&owner, &name) — échec → stderr + exit 1. Le @ToolboxTarget
+    rendu porte l'url, l'Owner et le client.
   Rendu `conversations list` (ordre = tri UUID du store) : store vide → ligne unique
     `No conversations.` ; sinon par conversation `  [{i}] {uuid} | {title} | {n}
     messages | {agent}` avec i 1-based, `(untitled)` si title absent, `(none)` si
@@ -288,7 +295,7 @@ Must not:
     chat/run AVEC toolbox nommée.
   Lire `cli.agent`, `cli.continue_active`, `cli.toolbox` ailleurs que dans les deux
     branches chat (`None` et `Run`) ; `cli.namespace` ailleurs que dans les trois
-    handlers K8s et @resolve_toolbox_mcp_url.
+    handlers K8s et @resolve_toolbox_target.
   Déplacer du rendu ou de la construction de CR dans les modules `*_cmd.rs`
     (purement déclaratifs, cf. leurs specs) ou dans @Cli/@Commands.
   Ajouter une variante à @Commands, @conversation/@agent/@provider/@config_cmd sans
@@ -299,7 +306,7 @@ Structure:
     (./chat.rs, ./config.rs, ./config_check.rs, ./store.rs, ./tools.rs, ./rpc/,
     les 7 `*_cmd.rs`) ; @Cli + @Commands + les 4 modules inline de grammaire ;
     @main ; les handlers `run_*` ; @discover_fs_store / @discover_k8s_client /
-    @resolve_toolbox_mcp_url ; @mod tests (5 tests de parsing de `run`, cartographiés
+    @resolve_toolbox_target ; @mod tests (5 tests de parsing de `run`, cartographiés
     en Tasks).
   Specs sœurs citées sans duplication : ./chat.rs (REPL/one-shot/json/timeout, spec
     en cours), ./rpc/mod.sdd (serveur stdio), ./mcp_cmd.sdd, ./model_cmd.sdd,
@@ -515,6 +522,10 @@ Scenario: version et help rendent les valeurs clap et sortent 0
     et `--help` stdout contient `CLI for vanyline LLM chat`, les deux avec code 0
 
 Tasks:
+  [x] @ToolboxTarget {url, owner, client partagé} + @resolve_toolbox_target (2026-10-08) :
+    FAIT validator-vert 2026-10-08 (résidus de noms dans cette spec corrigés le même jour) :
+    @require_owner exigé quand une toolbox est nommée (exit 1 sinon), client K8s partagé avec
+    le chat (pas de seconde découverte), dispatch du mode sans sous-commande et de `run`.
   [ ] Mode sans sous-commande = chat TUI (2026-10-04, ./tui/mod.sdd) : l'aide clap décrit le chat
     interactif plein écran et son exigence de terminal ; `-c/--continue` s'applique à la reprise de
     conversation dans le TUI.

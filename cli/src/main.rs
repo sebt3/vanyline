@@ -179,7 +179,7 @@ async fn main() {
 
     match cli.command {
         None => {
-            let toolbox_mcp_url = resolve_toolbox_mcp_url(
+            let toolbox = resolve_toolbox_target(
                 cli.toolbox.clone(),
                 cli.namespace.clone(),
                 cli.owner.clone(),
@@ -189,7 +189,7 @@ async fn main() {
                 None,
                 cli.agent,
                 cli.continue_active,
-                toolbox_mcp_url,
+                toolbox,
                 None,
                 false,
                 None,
@@ -202,7 +202,7 @@ async fn main() {
             timeout,
             json,
         }) => {
-            let toolbox_mcp_url = resolve_toolbox_mcp_url(
+            let toolbox = resolve_toolbox_target(
                 cli.toolbox.clone(),
                 cli.namespace.clone(),
                 cli.owner.clone(),
@@ -212,7 +212,7 @@ async fn main() {
                 Some(message),
                 cli.agent,
                 cli.continue_active,
-                toolbox_mcp_url,
+                toolbox,
                 timeout,
                 json,
                 model,
@@ -587,33 +587,49 @@ async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8
         })
 }
 
-/// Resout l'URL MCP de la toolbox pour ce lancement, ou `None` si aucune
-/// toolbox n'est demandee (ni `--toolbox`, ni `defaults.toolbox`) — dans
-/// ce cas, PAS d'appel K8s du tout (coherent avec "les commandes non-K8s
-/// continuent de fonctionner", meme principe que `discover_k8s_client`
-/// mais applique ici au chemin chat par defaut).
+/// Cible du chat toolbox : URL MCP résolue, Owner (nom requis par
+/// `require_owner` — le jeton de toolbox se demande à l'Owner, 2026-10-08)
+/// et client K8s DÉJÀ construit pour la résolution, partagé par le chat pour
+/// ses `owner_token` par tour (pas de seconde découverte, pas de second
+/// cache de jetons).
+pub struct ToolboxTarget {
+    /// URL MCP interne de la sandbox (`http://sandbox-{name}.{ns}.svc:3000/mcp`).
+    pub url: String,
+    /// Nom de l'Owner dont le namespace porte la sandbox — cible des
+    /// `owner_token` par tour.
+    pub owner: String,
+    /// Client K8s partagé avec la résolution (le cache de jetons est le sien).
+    pub client: vanyline_lib::k8s::VnlK8sClient,
+}
+
+/// Resout la cible toolbox du chat, ou `None` si aucune toolbox n'est
+/// demandée (ni `--toolbox`, ni `defaults.toolbox`) — dans ce cas, PAS
+/// d'appel K8s du tout (coherent avec "les commandes non-K8s continuent de
+/// fonctionner", meme principe que `discover_k8s_client` mais applique ici au
+/// chemin chat par defaut).
 ///
 /// Quand une toolbox est demandee, `--owner` est requis : l'URL MCP se resout
 /// dans le namespace de l'Owner (`<app-ns>-<owner>`, UN OWNER = UN NAMESPACE
-/// 2026-10-04). Le jeton d'Owner pour presenter a la sandbox est etape 5.
-async fn resolve_toolbox_mcp_url(
+/// 2026-10-04) et le jeton presente a la sandbox se demande a cet Owner
+/// (2026-10-08). Le client construit ici est PARTAGE dans la cible : le chat
+/// l'utilise pour ses `owner_token` par tour, sans seconde decouverte.
+async fn resolve_toolbox_target(
     toolbox_flag: Option<String>,
     namespace: Option<String>,
     owner_flag: Option<String>,
-) -> Option<String> {
+) -> Option<ToolboxTarget> {
     let store = discover_fs_store();
     let name = toolbox_flag.or_else(|| config::configured_toolbox(store.layers()))?;
     let owner = require_owner(owner_flag);
     let client = discover_k8s_client(namespace).await;
-    Some(
-        client
-            .sandbox_mcp_url(&owner, &name)
-            .await
-            .unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            }),
-    )
+    let url = client
+        .sandbox_mcp_url(&owner, &name)
+        .await
+        .unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        });
+    Some(ToolboxTarget { url, owner, client })
 }
 
 /// Nom d'Owner requis par les commandes project/sandbox et la toolbox : sans

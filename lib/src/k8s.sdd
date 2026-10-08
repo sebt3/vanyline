@@ -88,8 +88,12 @@ Must:
     (`POST …/serviceaccounts/{sa}/token`) avec `audiences = [@OWNER_TOKEN_AUDIENCE]` et
     `expirationSeconds = 900` (l'apiserver impose un minimum de 600), SANS `boundObjectRef`
     (v1). Le jeton est mis en CACHE par Owner (map partagée par tous les clones du client) et
-    réutilisé tant qu'il reste plus de 120 s de validité (@OWNER_TOKEN_REFRESH_MARGIN_SECS) ;
-    sinon un nouveau jeton est demandé et remplace l'ancien. Le cache n'est jamais persisté.
+    réutilisé tant qu'il reste plus de 300 s de validité (@OWNER_TOKEN_REFRESH_MARGIN_SECS
+    = 300, portée de 120 à 300 le 2026-10-08 — décision Sébastien : le TTL 900 s est la
+    fenêtre que le cluster impose, invariant non négociable ; le renouvellement à la demande
+    avec plancher de 5 min est la réponse, pas un TTL plus long. Tout jeton rendu a donc
+    une vie restante ≥ 600 s côté apiserver) ; sinon un nouveau jeton est demandé et
+    remplace l'ancien. Le cache n'est jamais persisté.
     Ce jeton est l'unique credential accepté par une sandbox (/sandbox/src/auth.sdd) ; son
     appelant (`app`, service central de revue, cli) en est responsable : il ne le journalise
     pas, ne le renvoie à aucun navigateur, et vérifie AVANT de le demander que son propre
@@ -261,6 +265,13 @@ Tasks:
     — fait 2026-10-06 (étape 4c), validator vert. Le partage du cache entre clones est tenu
     structurellement (le champ est un @Arc cloné par @derive(Clone), vérifié par lecture
     validator) ; les Scenarios apiserver restent à l'intégration cluster.
+  [x] Porter la marge du cache @OWNER_TOKEN_REFRESH_MARGIN_SECS de 120 s à 300 s (FAIT
+    validator-vert 2026-10-08 ; décision
+    Sébastien 2026-10-08, cli toolbox : le TTL 900 s est la fenêtre du cluster, le renouvellement
+    à la demande avec plancher 5 min est la réponse). Tout jeton rendu a une vie restante
+    ≥ 600 s. Tests des Scenario @owner_token_cache_par_owner et
+    @owner_token_renouvele_pres_de_l_expiration adaptés à la marge 300 s (bornes 901/301
+    resservis, 300/240/60/négatif renouvelés).
   [ ] RBAC à fournir par le déploiement (hors de ce fichier, `/deploy/`) : le ServiceAccount
     de `app` (et de tout autre appelant de @VnlK8sClient::owner_token) doit pouvoir `create`
     la ressource `serviceaccounts/token` dans le namespace des Owners. C'est le pouvoir le plus
@@ -445,12 +456,12 @@ Scenario: owner_token_demande_a_l_apiserver_avec_la_bonne_audience
     `vanyline-sandbox` et son `expires_at` est postérieur d'au moins 600 s
 
 Scenario: owner_token_cache_par_owner
-  Given un jeton déjà obtenu pour `alice`, encore valide plus de 120 s
+  Given un jeton déjà obtenu pour `alice`, encore valide plus de 300 s (la marge)
   When @VnlK8sClient::owner_token("alice") est rappelé, y compris sur un clone du client
   Then le MÊME jeton est rendu sans nouvel appel à l'apiserver
 
 Scenario: owner_token_renouvele_pres_de_l_expiration
-  Given un jeton en cache dont il reste moins de 120 s de validité
+  Given un jeton en cache dont il reste moins de 300 s de validité (sous la marge)
   When @VnlK8sClient::owner_token("alice")
   Then un nouveau jeton est demandé et remplace l'ancien
 

@@ -47,7 +47,7 @@ Structure:
 
 Exposes:
   @run — `pub async fn(message: Option<String>, agent: Option<String>,
-    continue_active: bool, toolbox_mcp_url: Option<String>, timeout_secs: Option<u64>,
+    continue_active: bool, toolbox: Option<crate::@ToolboxTarget>, timeout_secs: Option<u64>,
     json: bool, model: Option<String>)` : seul item public, appelé par ./main.rs pour
     le mode REPL (aucune sous-commande) et `run`. Ne retourne jamais de valeur ni de
     @Result — toute défaillance se matérialise par @std::process::exit(1) ou par la
@@ -63,8 +63,11 @@ Exposes:
     par @json, store = @crate::discover_fs_store(), @subagent_depth_max figé à `1`,
     @model_override propagé, @todo_state = @Arc de @Mutex initialisé au @todo_seed.
     Avec toolbox : `local_tools` vide + @extra_mcp à une paire (serveur @McpServer
-    nommé `toolbox`, transport @McpTransport::HttpStreamable, url fournie, headers
-    vides ; @McpSelection de serveur `toolbox` et tools vides = sélection totale),
+    nommé `toolbox`, transport @McpTransport::HttpStreamable, url fournie, headers à
+    une entrée `authorization: Bearer {jeton}` — jamais vides depuis la décision
+    Sébastien 2026-10-08, la sandbox n'accepte que le jeton de l'Owner
+    (../../../sandbox/src/auth.sdd) ; @McpSelection de serveur `toolbox` et tools
+    vides = sélection totale),
     hors config (le serveur n'a pas besoin d'exister dans le store). Sans toolbox :
     `local_tools` = @crate::tools::local_tools_map(), @extra_mcp vide.
   @resolve_context — résout (conversation, nom d'agent, nouveauté) : agent par
@@ -91,8 +94,9 @@ Exposes:
 Accepts:
   Sept arguments de @run (mapping et grammaire : ./main.sdd) : @message @Some →
     one-shot, @None → REPL ; @agent = valeur `-a/--agent` ; @continue_active =
-    `-c/--continue` ; @toolbox_mcp_url = url MCP déjà résolue par
-    @resolve_toolbox_mcp_url (@None = aucun K8s demandé) ; @timeout_secs = `-t`
+    `-c/--continue` ; @toolbox = cible toolbox résolue par
+    @resolve_toolbox_target (url + owner + client partagé ; @None = aucun K8s demandé) ;
+    @timeout_secs = `-t`
     (one-shot seulement) ; @json = `-j` (one-shot seulement — le REPL appelle
     @build_session_context avec @false, @None modèle et aucun timeout codés en dur,
     indépendamment des flags) ; @model = `-m` (one-shot seulement).
@@ -276,9 +280,23 @@ Must:
   Construire @SessionContext avec : @subagent_depth_max = `1` ; @store =
     @crate::discover_fs_store() (couches globales + workspace du cwd) ; en mode
     toolbox `local_tools` VIDE et une seule entrée @extra_mcp {serveur `toolbox`,
-    @HttpStreamable, headers vides, sélection tools vide = tous les tools}, les tools
+    @HttpStreamable, headers [(`authorization`, `Bearer {jeton` du tour})], sélection
+    tools vide = tous les tools}, les tools
     locaux du CLI étant alors absents du tour ; sinon @crate::tools::local_tools_map()
     et @extra_mcp vide ; @todo_state initialisé depuis @conv.todo.
+  JETON DU TOOLBOX PAR TOUR (décision Sébastien 2026-10-08 — les headers rmcp sont figés
+    à la connexion, la fenêtre de vie se regagne donc à la reprise du contexte, pas par
+    TTL long) : chaque tour (@run_one_shot : son tour unique ; @run_repl : avant chaque
+    message traité — le contexte est reconstruit par tour, pas une fois pour la session)
+    commence, toolbox active, par @ToolboxTarget::client.@owner_token(@ToolboxTarget::owner)
+    (cache lib, marge 300 s : au plus un TokenRequest par ~10 min de session — on ne
+    harcèle pas l'apiserver). La vie restante est lue dans le claim `exp` du jeton
+    décodé SANS vérifier la signature (@jwt_exp_remaining, lecture du segment central
+    base64url ; le jeton et le header ne sont JAMAIS loggés) : ≥ @TOOLBOX_TOKEN_MIN_SECS
+    (300) ⇒ le header du tour est `Bearer {jeton}` ; < 300 (marge du cache contredite —
+    dérive d'horloge) ⇒ @tracing::warn factuel puis on poursuit avec ce jeton (jamais un
+    blocage de session, jamais une re-demande en boucle) ; jeton non décodable ou sans
+    `exp` ⇒ traité comme expiré, même warn+continuation.
   Après un tour réussi uniquement, dans l'ordre : message user, message assistant
     converti, refresh @conv.todo depuis @read_todo_state, sauvegarde ; ne jamais
     persister un tour en échec ni un tour avorté par timeout.
@@ -431,12 +449,25 @@ Scenario: historique_filtre_roles_et_perd_les_tool_calls
   Then seul le couple user/assistant est transmis et le message assistant est un texte seul (tool_calls non rejoués)
 
 Scenario: mode_toolbox_remplace_les_tools_locaux
-  Given @build_session_context appelé avec `toolbox_mcp_url = Some("http://sbx:3000/mcp")`
+  Given @build_session_context appelé avec l'url `http://sbx:3000/mcp` et un bearer
+    `Bearer jeton-de-test` fournis
   When le @SessionContext est inspecté
-  Then `local_tools` est vide, `extra_mcp` compte une paire {serveur `toolbox` @HttpStreamable url fournie headers vides, sélection serveur `toolbox` tools vides}, `subagent_depth_max` vaut 1 et `model_override`/`todo_state` reflètent les arguments
+  Then `local_tools` est vide, `extra_mcp` compte une paire {serveur `toolbox` @HttpStreamable url fournie headers [(`authorization`, `Bearer jeton-de-test`)], sélection serveur `toolbox` tools vides}, `subagent_depth_max` vaut 1 et `model_override`/`todo_state` reflètent les arguments
+
+Scenario: fenetre_de_vie_lue_dans_le_claim_exp
+  # Helper pur @jwt_exp_remaining(jeton) -> @Option<i64> : décode le segment central
+  # base64url sans vérifier la signature (jamais une credential check — le jeton vient
+  # de l'apiserver), rend les secondes restantes avant `exp`.
+  Given un JWT fabriqué en test dont les claims portent `exp = now + 700`
+  When @jwt_exp_remaining rend la vie restante
+  Then la valeur est dans `695..=705` — tolérance d'horloge, pas de re-vérification
+  Given un jeton sans `exp`, non-JWT, ou dont le payload ne parse pas
+  When @jwt_exp_remaining s'exécute
+  Then @None est rendu — le contrat du tour le traite comme expiré (warn + continuation,
+    jamais un blocage)
 
 Scenario: mode_local_installe_huit_tools_et_aucun_mcp
-  Given @build_session_context appelé avec `toolbox_mcp_url = @None` et `json` indifférent
+  Given @build_session_context appelé sans toolbox (@None) et `json` indifférent
   When le @SessionContext est inspecté
   Then `local_tools` contient `read_file` (map complète de ./tools.rs), `extra_mcp` est vide
 
@@ -507,6 +538,15 @@ Depends on:
     (dette `print_*`/exit tracée en Tasks).
 
 Tasks:
+  [x] TOOLBOX BEARER par tour (2026-10-08) : FAIT validator-vert 2026-10-08 (scopé lib+cli : signature @run en @Option<@crate::ToolboxTarget> ;
+    @build_session_context porte le bearer du tour et pose `authorization: Bearer {jeton}` sur
+    le serveur toolbox (jamais de headers vides) ; helper pur @jwt_exp_remaining + vérification
+    de fenêtre ≥ 300 s à chaque tour (@run_one_shot : son tour ; @run_repl : contexte reconstruit
+    par tour, pas une fois pour la session) ; @ToolboxTarget::client.owner_token par tour,
+    warn + continuation si fenêtre insuffisante. Scenario :
+    @mode_toolbox_remplace_les_tools_locaux, @fenetre_de_vie_lue_dans_le_claim_exp.
+    Le déroulé complet jeton-par-tour avec un vrai cluster est un test d'intégration (non écrit,
+    convention anti-mock kube).
   [ ] ALIGNEMENT TUI (2026-10-04) : remplacer @run_repl par l'appel à `tui::run_tui` (./tui/mod.sdd) ;
     supprimer la bannière REPL, @print_workspace_sources en mode interactif (reporté dans le TUI),
     la gestion de Ctrl-C par défaut du terminal (le TUI la gère, annulation du tour) et les

@@ -22,8 +22,12 @@ const OWNER_TOKEN_EXPIRATION_SECS: i64 = 900;
 
 /// Marge de réutilisation du cache, en secondes : un jeton est réutilisé tant
 /// qu'il en reste STRICTEMENT plus que cette valeur à courir ; sinon un
-/// nouveau jeton est demandé et remplace l'ancien.
-const OWNER_TOKEN_REFRESH_MARGIN_SECS: i64 = 120;
+/// nouveau jeton est demandé et remplace l'ancien. Portée de 120 à 300 s le
+/// 2026-10-08 (décision Sébastien, cli toolbox) : le TTL 900 s est la fenêtre
+/// que le cluster impose, invariant non négociable ; le renouvellement à la
+/// demande avec plancher de 5 min est la réponse, pas un TTL plus long. Tout
+/// jeton rendu a donc une vie restante ≥ 600 s côté apiserver.
+const OWNER_TOKEN_REFRESH_MARGIN_SECS: i64 = 300;
 
 /// Event de watch kube-runtime pour un Sandbox — normalisé pour la diffusion WS.
 #[derive(Clone, Debug)]
@@ -472,7 +476,7 @@ impl VnlK8sClient {
 
     /// Lit le jeton d'authentification de l'Owner `owner` (uprès de SES
     /// sandboxes — cf. `sandbox/src/auth.sdd`) :
-    /// 1. cache partagé réutilisé s'il reste plus de 120 s de validité ;
+    /// 1. cache partagé réutilisé s'il reste plus de 300 s de validité ;
     /// 2. sinon lecture de `owner.status.serviceAccount` dans le namespace
     ///    d'application (jamais un nom reconstruit à la main) — Owner ou SA
     ///    absent = erreur explicite sans demande de jeton ;
@@ -681,20 +685,23 @@ mod tests {
     }
 
     /// Scenario: `owner_token_cache_par_owner` (décision pure de réutilisation —
-    /// le même jeton sans nouvel appel quand il reste plus de 120 s).
+    /// le même jeton sans nouvel appel quand il reste STRICTEMENT plus de 300 s
+    /// — marge portée de 120 à 300 s le 2026-10-08, décision Sébastien).
     #[test]
     fn owner_token_cache_reutilise_jeton_frais() {
         let now = Utc::now();
         assert!(token_is_fresh(now, now + Duration::seconds(900)));
-        assert!(token_is_fresh(now, now + Duration::seconds(121)));
+        assert!(token_is_fresh(now, now + Duration::seconds(301)));
     }
 
     /// Scenario: `owner_token_renouvele_pres_de_l_expiration` (décision pure —
-    /// marge de 120 s : à 120 s ou moins restants, un nouveau jeton est dû).
+    /// marge de 300 s : à 300 s ou moins restants — ex. un jeton à 240 s — un
+    /// nouveau jeton est dû, il n'est plus resservi).
     #[test]
     fn owner_token_cache_renouvelle_sous_la_marge() {
         let now = Utc::now();
-        assert!(!token_is_fresh(now, now + Duration::seconds(120)));
+        assert!(!token_is_fresh(now, now + Duration::seconds(300)));
+        assert!(!token_is_fresh(now, now + Duration::seconds(240)));
         assert!(!token_is_fresh(now, now + Duration::seconds(60)));
         assert!(!token_is_fresh(now, now - Duration::seconds(1)));
     }
