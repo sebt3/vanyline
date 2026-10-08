@@ -114,9 +114,12 @@ Tasks:
     features défaut/`k8s`/`ts-rs`, tests 73/81/74 verts, assertions intactes — la régénération
     de `chat-event.ts` (+114/−3, commentaires uniquement, vérifiée identique strip-commentaires)
     est INCLUDE au commit : c'est le contrat du gate CI `tsrs` d'`event.sdd`).
-    RESTENT (convention de comptage gelée ci-dessous) : `vanyline-sandbox` 839 (mesure fraîche
-    après 5A — la réécriture `auth.rs`/`config.rs` est à 0, le reste : `lsp.rs` 214, `git.rs`
-    209, `tools_impl.rs` 186, `maint.rs` 40…), `vanyline-cli` 299, `vanyline-app` 51, `vanyline-controller` 65 — purgées au fil
+    RESTENT (convention de comptage gelée ci-dessous) : `vanyline-sandbox` 416 (mesure fraîche
+    après D3a 2026-10-08 — `lsp.rs` 214 et `git.rs` 209 PURGÉS à 0, validator-vert, 17 allows
+    d'une ligne marqueur « tooling.sdd D3 » ; la réécriture `auth.rs`/`config.rs` est à 0 ;
+    le reste : `tools_impl.rs` 186, `maint.rs` 40, `bin/ruff_lsp.rs` 32, `bin/hadolint_lsp.rs`
+    25, `lsp_client.rs` 23, `ws/fs.rs` 20, `mcp.rs` 16, `lib.rs` 16, reste divers…),
+    `vanyline-cli` 299, `vanyline-app` 51, `vanyline-controller` 65 — purgées au fil
     des étapes de la migration qui les touchent (interleaved). Les 2 `unnecessary_wraps`
     imputables à 4a (`controller/src/{owner,project}.rs::build_*_pvc`) SOLDÉS en 4b.
     Exemptions pedantic restantes en `lib` (2, les seules) : `too_many_lines` sur

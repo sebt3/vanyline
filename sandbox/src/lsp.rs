@@ -55,8 +55,12 @@ fn aux_answers_requests(role: &str) -> bool {
 /// 2026-09-06) — seule la tâche controller en émet.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspAux {
+    /// Rôle de l'enfant : `"tsserver-forward"` ou `"diagnostics-merge"`
+    /// (rôle inconnu ⟹ enfant ignoré au spawn, jamais une erreur).
     pub role: String,
+    /// Exécutable de l'aux — chemin absolu sous les volumes toolchain montés.
     pub bin: String,
+    /// Arguments argv passés verbatim à `tokio::process::Command` (jamais de shell).
     pub args: Vec<String>,
     /// Fusionné dans `params.initializationOptions` de l'`initialize` envoyé
     /// à CET enfant (ses clés gagnent en cas de collision avec celles du
@@ -69,8 +73,11 @@ pub struct LspAux {
 /// monté. Lue depuis `VNL_LSP_TOOLCHAINS` (JSON array).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LspToolchain {
+    /// Nom de la toolchain (clé dans `LspManager` ; doublon ⟹ le dernier gagne).
     pub name: String,
+    /// Binaire primaire — chemin absolu attendu dans le volume toolchain monté.
     pub bin: String,
+    /// Arguments argv du primaire, passés verbatim (jamais de shell).
     pub args: Vec<String>,
     /// Enfant(s) auxiliaire(s) du multiplexeur. Absent/vide => session
     /// mono-process au comportement strictement actuel.
@@ -80,6 +87,12 @@ pub struct LspToolchain {
 
 /// Parse le JSON de `VNL_LSP_TOOLCHAINS` en specs. Erreur si le JSON est invalide
 /// ou malformé (`anyhow::Error` avec contexte).
+///
+/// # Errors
+///
+/// `LSP toolchain parse error: {e}` quand `json` n'est pas un tableau JSON valide
+/// de la shape `[{name,bin,args[,aux]}]` — préfixe verrouillé, lu par ./main.rs
+/// pour l'exit 1 du binaire.
 pub fn parse_lsp_toolchains(json: &str) -> anyhow::Result<Vec<LspToolchain>> {
     let specs: Vec<LspToolchain> = serde_json::from_str(json)
         .map_err(|e| anyhow::anyhow!("LSP toolchain parse error: {e}"))?;
@@ -87,6 +100,12 @@ pub fn parse_lsp_toolchains(json: &str) -> anyhow::Result<Vec<LspToolchain>> {
 }
 
 /// Lit `VNL_LSP_TOOLCHAINS` (env). Env absente → `Ok(vec![])` (aucune toolchain LSP).
+///
+/// # Errors
+///
+/// Propage l'erreur de [`parse_lsp_toolchains`] (`LSP toolchain parse error: {e}`)
+/// quand la variable est posée et son contenu invalide. Absente ou vide ⟹ jamais
+/// d'erreur.
 pub fn lsp_toolchains_from_env() -> anyhow::Result<Vec<LspToolchain>> {
     let json = std::env::var("VNL_LSP_TOOLCHAINS").unwrap_or_default();
     if json.is_empty() {
@@ -96,10 +115,11 @@ pub fn lsp_toolchains_from_env() -> anyhow::Result<Vec<LspToolchain>> {
 }
 
 /// Encode un payload JSON-RPC en trame stdio LSP : `Content-Length: N\r\n\r\n` + payload.
+#[must_use]
 pub fn encode_message(payload: &[u8]) -> Vec<u8> {
     let len = payload.len();
     let header = format!("Content-Length: {len}\r\n\r\n");
-    let mut buf = Vec::with_capacity(header.len() + len);
+    let mut buf = Vec::with_capacity(header.len().saturating_add(len));
     buf.extend_from_slice(header.as_bytes());
     buf.extend_from_slice(payload);
     buf
@@ -117,6 +137,8 @@ impl Default for FrameReader {
 }
 
 impl FrameReader {
+    /// Nouveau décodeur au buffer vide.
+    #[must_use]
     pub fn new() -> Self {
         FrameReader { buf: Vec::new() }
     }
@@ -131,32 +153,35 @@ impl FrameReader {
         // Chercher le terminateur \r\n\r\n
         let pos = self.buf.windows(4).position(|w| w == b"\r\n\r\n")?;
         let header_bytes = &self.buf[..pos];
-        let body_start = pos + 4;
+        let body_start = pos.saturating_add(4);
 
         // Décoder le header (insensible à la casse)
         let header_str = String::from_utf8_lossy(header_bytes);
 
         // Chercher content-length: dans le header (insensible à la casse)
-        let content_length = header_str
-            .lines()
-            .filter_map(|line| {
-                let lower = line.trim().to_ascii_lowercase();
-                if let Some(stripped) = lower.strip_prefix("content-length:") {
-                    stripped.trim().parse::<usize>().ok()
-                } else {
-                    None
-                }
-            })
-            .next()?;
+        let content_length = header_str.lines().find_map(|line| {
+            let lower = line.trim().to_ascii_lowercase();
+            if let Some(stripped) = lower.strip_prefix("content-length:") {
+                stripped.trim().parse::<usize>().ok()
+            } else {
+                None
+            }
+        })?;
 
-        if body_start + content_length > self.buf.len() {
+        // `checked_add` : un `content_length` qui déborde l'espace d'adresses EST
+        // un corps incomplet au sens de lsp.sdd (« corps incomplet ⇒ None, rien ne
+        // consomme ») — même issue que le branchement `>` ci-dessous.
+        let Some(frame_end) = body_start.checked_add(content_length) else {
+            return None; // pas assez de données
+        };
+        if frame_end > self.buf.len() {
             return None; // pas assez de données
         }
 
-        let payload = self.buf[body_start..body_start + content_length].to_vec();
+        let payload = self.buf[body_start..frame_end].to_vec();
 
         // Supprimer le frame lu du buffer
-        self.buf.drain(..body_start + content_length);
+        self.buf.drain(..frame_end);
 
         Some(payload)
     }
@@ -171,7 +196,7 @@ pub struct ClientId(pub u64);
 /// Implémentation interne de la session LSP : process, multiplexage, communication.
 struct LspSessionInner {
     cmd_tx: mpsc::Sender<Vec<u8>>,
-    /// session_id -> (client who sent the request, original JSON-RPC id)
+    /// `session_id` -> (client who sent the request, original JSON-RPC id)
     pending: Mutex<HashMap<u64, (ClientId, i64)>>,
     subs: Mutex<HashMap<ClientId, mpsc::UnboundedSender<Vec<u8>>>>,
     alive: AtomicBool,
@@ -208,9 +233,9 @@ struct LspSessionInner {
     /// croisent jamais les nôtres : en cas B le tool n'envoie JAMAIS didChange
     /// (design R1) — deux émetteurs actifs sur la même URI = désync, interdit.
     doc_versions: Mutex<HashMap<String, i32>>,
-    /// URIs tenues par au moins un client navigateur, par ClientId (piste R1 sq1).
+    /// URIs tenues par au moins un client navigateur, par `ClientId` (piste R1 sq1).
     /// Alimenté par le bridge ws/lsp.rs SEULEMENT (subscribe du bridge = client
-    /// navigateur ; les LspClient des tools ne s'enregistrent pas ici). Nettoyé
+    /// navigateur ; les `LspClient` des tools ne s'enregistrent pas ici). Nettoyé
     /// sur didClose navigateur et sur unsubscribe (déconnexion = plus de tenant).
     editor_uris: Mutex<HashMap<String, HashSet<ClientId>>>,
     /// Dernier `publishDiagnostics.diagnostics` connu par URI, alimenté par la tâche
@@ -254,17 +279,17 @@ struct LspSessionInner {
     /// Tâche 08 — cache de provenance des complétions SERVIS, pour
     /// `completionItem/resolve` : uri (telle que vue sur le fil de la session
     /// — mêmes clés que les notifications didChange/didClose) → ( (label,kind)
-    /// → (index_enfant, item_original) ). Écrit à la complétion de chaque
+    /// → (`index_enfant`, `item_original`) ). Écrit à la complétion de chaque
     /// barrière completion (parts consignées APRÈS dédup — uniquement les
     /// items servis), purgé sur didChange/didClose de l'URI et à la saturation
     /// de la map. CACHE BORNÉ HEURISTIQUE (cap `MAX_COMPLETION_PROVENANCE_URIS`,
-    /// éviction QUELCONQUE — ordre HashMap) : un faux fallback resolve no-op
+    /// éviction QUELCONQUE — ordre `HashMap`) : un faux fallback resolve no-op
     /// (item renvoyé tel quel) est l'échec ACCEPTABLE de ce cache, pas une
     /// erreur — l'important est qu'un resolve ne parte jamais au mauvais
     /// serveur. Jamais écrit ni consulté en mono-process (`aux` vide, les
     /// serveurs mono ont leur propre mémoire d'items — invariant 8).
     completion_provenance: Mutex<HashMap<String, CompletionProvenanceInner>>,
-    _toolchain_name: String,
+    toolchain_name: String,
 }
 
 /// Contexte d'une requête émise par la session vers un aux (ids internes —
@@ -355,6 +380,10 @@ fn spawn_stdin_writer(mut stdin: ChildStdin, mut cmd_rx: mpsc::Receiver<Vec<u8>>
 /// une fois la session Arc constituée. `index` : index d'enfant attribué par
 /// le pré-pass (position dans la liste spawnée + 1, 0 = primaire) — porté par
 /// `AuxChild` pour la fusion des diagnostics (tâche 06).
+///
+/// tooling.sdd D3 — async sans await (pré-parcours séquentiel du spawn de @spawn,
+/// contracté `async` par lsp.sdd) ; retirer `async` décontracterait `LspSession::spawn`.
+#[allow(clippy::unused_async)]
 async fn spawn_aux_startup(
     aux_spec: &LspAux,
     sandbox_root: &Path,
@@ -490,6 +519,10 @@ enum MergeRoute {
     All,
 }
 
+// tooling.sdd D3 — lsp.sdd verrouille la table fermée : les semanticTokens/* sont
+// un `Primary` EXPLICITE (deux flux de tokens non concaténables), pas un accident
+// du défaut ; fusionner les branches perdrait cette explicite contractuelle.
+#[allow(clippy::match_same_arms)]
 fn merge_route_for_method(method: &str) -> MergeRoute {
     match method {
         "textDocument/hover"
@@ -630,7 +663,7 @@ fn merge_code_actions(parts: &[Option<Value>]) -> Value {
             None | Some(Value::Null) => {}
             Some(Value::Array(items)) => merged.extend(items.iter().cloned()),
             Some(unexpected) => {
-                warn_unexpected_merge_part("textDocument/codeAction", index, unexpected)
+                warn_unexpected_merge_part("textDocument/codeAction", index, unexpected);
             }
         }
     }
@@ -778,7 +811,7 @@ fn merge_rename(parts: &[Option<Value>]) -> Value {
             Some(held) => fold_workspace_edit(held, edit),
         });
     }
-    acc.map(Value::Object).unwrap_or(Value::Null)
+    acc.map_or(Value::Null, Value::Object)
 }
 
 /// Clé de dédup ET de provenance d'un `CompletionItem` (tâche 08) :
@@ -818,8 +851,8 @@ fn merge_completion_parts(parts: &[(usize, Option<Value>)]) -> (bool, Vec<(usize
         let items: &[Value] = match part {
             None | Some(Value::Null) => continue,
             Some(Value::Array(items)) => items.as_slice(),
-            Some(Value::Object(list)) => match list.get("items").and_then(Value::as_array) {
-                Some(items) => {
+            Some(Value::Object(list)) => {
+                if let Some(items) = list.get("items").and_then(Value::as_array) {
                     any_completion_list = true;
                     if list
                         .get("isIncomplete")
@@ -829,8 +862,7 @@ fn merge_completion_parts(parts: &[(usize, Option<Value>)]) -> (bool, Vec<(usize
                         is_incomplete = true;
                     }
                     items.as_slice()
-                }
-                None => {
+                } else {
                     warn_unexpected_merge_part(
                         "textDocument/completion",
                         *index,
@@ -838,7 +870,7 @@ fn merge_completion_parts(parts: &[(usize, Option<Value>)]) -> (bool, Vec<(usize
                     );
                     continue;
                 }
-            },
+            }
             Some(unexpected) => {
                 warn_unexpected_merge_part("textDocument/completion", *index, unexpected);
                 continue;
@@ -897,7 +929,7 @@ fn merge_result_for(method: &str, parts: &[Option<Value>]) -> Value {
             );
             parts
                 .first()
-                .and_then(|part| part.clone())
+                .and_then(std::clone::Clone::clone)
                 .filter(|value| !value.is_null())
                 .unwrap_or(Value::Null)
         }
@@ -938,7 +970,7 @@ pub struct LspSession {
 impl LspSession {
     /// Spawn le process primaire (`spec.bin` + `spec.args`) avec `cwd =
     /// sandbox_root`, stdio pipé (stdin/stdout), stderr pipé et loggé via
-    /// `tracing`. Lance les tâches lectrice (stdout → FrameReader → dispatch) et
+    /// `tracing`. Lance les tâches lectrice (stdout → `FrameReader` → dispatch) et
     /// écrivaine (canal → stdin encodé). Erreur si le spawn du PRIMAIRE échoue ou
     /// si stdin/stdout/stderr sont absents.
     ///
@@ -949,6 +981,15 @@ impl LspSession {
     /// jamais une erreur de session (invariant 1). `spec.aux` vide ⟹ chemin
     /// mono-process strictement actuel (invariant 8 — tout le LSP déployé dépend
     /// de cette non-régression).
+    ///
+    /// # Errors
+    ///
+    /// - `LSP spawn error for {name}: {e}` si le primaire ne peut pas être spawné ;
+    /// - `missing stdin` / `missing stdout` / `missing stderr` si un stdio pipé
+    ///   manque. Les aux en échec ne sont JAMAIS une erreur (warn dégradé).
+    // tooling.sdd D3 — lsp.sdd contracte @spawn comme un tout (pré-pass aux, stdio
+    // pipés, écrivaines/lectrices/stderr) ; découper la fonction sortirait du périmètre.
+    #[allow(clippy::too_many_lines)]
     pub async fn spawn(spec: &LspToolchain, sandbox_root: &Path) -> anyhow::Result<Arc<Self>> {
         let mut cmd = Command::new(&spec.bin);
         cmd.args(&spec.args)
@@ -995,7 +1036,9 @@ impl LspSession {
                 );
                 continue;
             }
-            match spawn_aux_startup(aux_spec, sandbox_root, aux_startups.len() + 1).await {
+            match spawn_aux_startup(aux_spec, sandbox_root, aux_startups.len().saturating_add(1))
+                .await
+            {
                 Ok(startup) => aux_startups.push(startup),
                 Err(e) => {
                     tracing::warn!(
@@ -1032,7 +1075,7 @@ impl LspSession {
                 aux,
                 merges: Mutex::new(HashMap::new()),
                 completion_provenance: Mutex::new(HashMap::new()),
-                _toolchain_name: spec.name.clone(),
+                toolchain_name: spec.name.clone(),
             }),
         });
 
@@ -1048,28 +1091,26 @@ impl LspSession {
 
             loop {
                 let n = match stdout.read(&mut buf).await {
-                    Ok(0) => break, // EOF → process mort
+                    Ok(0) | Err(_) => break, // EOF → process mort (ou erreur de lecture)
                     Ok(n) => n,
-                    Err(_) => break,
                 };
 
                 frame_reader.push(&buf[..n]);
                 while let Some(payload) = frame_reader.next_frame() {
                     // Trame non-JSON → ignored with warn
-                    let msg: Value = match serde_json::from_slice(&payload) {
-                        Ok(msg) => msg,
-                        Err(_) => {
-                            tracing::warn!(
-                                toolchain = reader_session.inner._toolchain_name.as_str(),
-                                "LSP: non-JSON frame, ignoring"
-                            );
-                            continue;
-                        }
+                    let msg: Value = if let Ok(msg) = serde_json::from_slice(&payload) {
+                        msg
+                    } else {
+                        tracing::warn!(
+                            toolchain = reader_session.inner.toolchain_name.as_str(),
+                            "LSP: non-JSON frame, ignoring"
+                        );
+                        continue;
                     };
 
                     // Trame avec `id` → réponse : router au client d'origine
-                    if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
-                        let session_id = id as u64;
+                    if let Some(id) = msg.get("id").and_then(serde_json::Value::as_i64) {
+                        let session_id = id.cast_unsigned();
                         // Tâche 07 : une réponse du primaire sur une session
                         // id gouvernée par une barrière (`Route::All` en
                         // composite) est une PART de fusion, jamais une
@@ -1129,7 +1170,11 @@ impl LspSession {
             // est déjà morte — ce n'est pas une dégradation, c'est la mort.
             for aux in &reader_session.inner.aux {
                 aux.alive.store(false, Ordering::SeqCst);
-                if let Some(mut child) = aux.child.lock().unwrap_or_else(|e| e.into_inner()).take()
+                if let Some(mut child) = aux
+                    .child
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .take()
                 {
                     drop(child.kill());
                 }
@@ -1137,7 +1182,7 @@ impl LspSession {
         });
 
         // Stderr logger : stderr → tracing
-        let _stderr_session = Arc::clone(&session);
+        let stderr_session = Arc::clone(&session);
         tokio::spawn(async move {
             let mut stderr = stderr_handle;
             let mut buf = [0u8; 8192];
@@ -1147,7 +1192,7 @@ impl LspSession {
                 }
                 let line = String::from_utf8_lossy(&buf[..n]);
                 tracing::debug!(
-                    toolchain = _stderr_session.inner._toolchain_name.as_str(),
+                    toolchain = stderr_session.inner.toolchain_name.as_str(),
                     "LSP stderr: {}",
                     line.trim()
                 );
@@ -1184,32 +1229,30 @@ impl LspSession {
 
                 loop {
                     let n = match stdout.read(&mut buf).await {
-                        Ok(0) => break, // EOF → aux mort : dégradation, pas mort de session
+                        Ok(0) | Err(_) => break, // EOF → aux mort : dégradation, pas mort de session (ou erreur de lecture)
                         Ok(n) => n,
-                        Err(_) => break,
                     };
 
                     frame_reader.push(&buf[..n]);
                     while let Some(payload) = frame_reader.next_frame() {
-                        let msg: Value = match serde_json::from_slice(&payload) {
-                            Ok(msg) => msg,
-                            Err(_) => {
-                                tracing::warn!(
-                                    toolchain = reader_session.inner._toolchain_name.as_str(),
-                                    role = reader_aux.role.as_str(),
-                                    "LSP: non-JSON frame from aux, ignoring"
-                                );
-                                continue;
-                            }
+                        let msg: Value = if let Ok(msg) = serde_json::from_slice(&payload) {
+                            msg
+                        } else {
+                            tracing::warn!(
+                                toolchain = reader_session.inner.toolchain_name.as_str(),
+                                role = reader_aux.role.as_str(),
+                                "LSP: non-JSON frame from aux, ignoring"
+                            );
+                            continue;
                         };
 
-                        if let Some(id) = msg.get("id").and_then(|v| v.as_i64()) {
+                        if let Some(id) = msg.get("id").and_then(serde_json::Value::as_i64) {
                             let pending_entry = {
                                 let mut pending = match reader_aux.pending_internal.lock() {
                                     Ok(g) => g,
                                     Err(g) => g.into_inner(),
                                 };
-                                pending.remove(&(id as u64))
+                                pending.remove(&id.cast_unsigned())
                             };
                             match pending_entry {
                                 Some(InternalPending::Initialize) => {
@@ -1219,7 +1262,7 @@ impl LspSession {
                                     if let Some(error) = msg.get("error") {
                                         tracing::warn!(
                                             toolchain =
-                                                reader_session.inner._toolchain_name.as_str(),
+                                                reader_session.inner.toolchain_name.as_str(),
                                             role = reader_aux.role.as_str(),
                                             "LSP: aux degraded (initialize error): {error}"
                                         );
@@ -1237,7 +1280,7 @@ impl LspSession {
                                     if let Some(error) = msg.get("error") {
                                         tracing::warn!(
                                             toolchain =
-                                                reader_session.inner._toolchain_name.as_str(),
+                                                reader_session.inner.toolchain_name.as_str(),
                                             role = reader_aux.role.as_str(),
                                             "LSP: aux degraded (tsserver forward error): {error}"
                                         );
@@ -1291,7 +1334,7 @@ impl LspSession {
                                             msg.get("error").cloned().unwrap_or(Value::Null);
                                         tracing::warn!(
                                             toolchain =
-                                                reader_session.inner._toolchain_name.as_str(),
+                                                reader_session.inner.toolchain_name.as_str(),
                                             role = reader_aux.role.as_str(),
                                             "LSP: aux error on routed completionItem/resolve, serving item un-resolved (no-op fallback): {error}"
                                         );
@@ -1307,7 +1350,7 @@ impl LspSession {
                                 }
                                 None => {
                                     tracing::warn!(
-                                        toolchain = reader_session.inner._toolchain_name.as_str(),
+                                        toolchain = reader_session.inner.toolchain_name.as_str(),
                                         role = reader_aux.role.as_str(),
                                         session_id = id,
                                         "LSP: response from aux for unknown internal id, dropping"
@@ -1359,7 +1402,7 @@ impl LspSession {
                     let mut pending = reader_aux
                         .pending_internal
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner());
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
                     for entry in pending.values() {
                         match entry {
                             InternalPending::TsserverForward { vue_id } => {
@@ -1393,7 +1436,7 @@ impl LspSession {
                 // resolve est mort avec l'enfant (warn « degraded » porteur).
                 for (client, orig_id, item) in resolve_fallbacks {
                     tracing::warn!(
-                        toolchain = reader_session.inner._toolchain_name.as_str(),
+                        toolchain = reader_session.inner.toolchain_name.as_str(),
                         role = reader_aux.role.as_str(),
                         orig_id,
                         "LSP: aux died mid completionItem/resolve, serving item un-resolved (no-op fallback)"
@@ -1409,7 +1452,7 @@ impl LspSession {
                 }
                 if reader_session.inner.alive.load(Ordering::SeqCst) {
                     tracing::warn!(
-                        toolchain = reader_session.inner._toolchain_name.as_str(),
+                        toolchain = reader_session.inner.toolchain_name.as_str(),
                         role = reader_aux.role.as_str(),
                         "LSP: aux degraded (stdout EOF)"
                     );
@@ -1428,7 +1471,7 @@ impl LspSession {
                     }
                     let line = String::from_utf8_lossy(&buf[..n]);
                     tracing::debug!(
-                        toolchain = stderr_session.inner._toolchain_name.as_str(),
+                        toolchain = stderr_session.inner.toolchain_name.as_str(),
                         role = stderr_aux.role.as_str(),
                         "LSP stderr (aux): {}",
                         line.trim()
@@ -1473,7 +1516,7 @@ impl LspSession {
                     .inner
                     .diag_parts
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner());
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
                 let uri_parts = parts.entry(uri.to_string()).or_default();
                 uri_parts.insert(child_idx, diags.clone());
                 let merged = concat_diag_parts(uri_parts);
@@ -1537,12 +1580,12 @@ impl LspSession {
             .inner
             .diag_parts
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut cache = self
             .inner
             .diagnostics_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for (uri, uri_parts) in parts.iter_mut() {
             if uri_parts.remove(&child_idx).is_none() {
                 continue; // URI sans part de cet enfant : rien à recompter
@@ -1578,7 +1621,7 @@ impl LspSession {
             // aux qui verrait une réponse sans correspondance (warn parasite).
             aux.pending_internal
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .insert(internal_id, InternalPending::Initialize);
             // `try_send` (pas `send().await`) : même raison que les
             // notifications — un aux bloqué ou mort ne doit jamais bloquer ni
@@ -1590,10 +1633,10 @@ impl LspSession {
             {
                 aux.pending_internal
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&internal_id);
                 tracing::debug!(
-                    toolchain = self.inner._toolchain_name.as_str(),
+                    toolchain = self.inner.toolchain_name.as_str(),
                     role = aux.role.as_str(),
                     "LSP: aux degraded (cannot receive initialize)"
                 );
@@ -1623,15 +1666,12 @@ impl LspSession {
     /// voit sa trame INTERCEPTÉE — plus de broadcast aux clients — puis
     /// `[[id, null]]` renvoyé : nouveau comportement assumé par la tâche 05.
     fn handle_tsserver_request(&self, msg: &Value) {
-        let (vue_id, command, payload) = match parse_tsserver_request(msg) {
-            Some(parsed) => parsed,
-            None => {
-                tracing::warn!(
-                    toolchain = self.inner._toolchain_name.as_str(),
-                    "LSP: malformed tsserver/request from primary, dropping"
-                );
-                return;
-            }
+        let Some((vue_id, command, payload)) = parse_tsserver_request(msg) else {
+            tracing::warn!(
+                toolchain = self.inner.toolchain_name.as_str(),
+                "LSP: malformed tsserver/request from primary, dropping"
+            );
+            return;
         };
         let alive_aux = self
             .inner
@@ -1658,7 +1698,7 @@ impl LspSession {
         // éviter que la lectrice aux voie une réponse sans correspondance).
         aux.pending_internal
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 internal_id,
                 InternalPending::TsserverForward {
@@ -1674,7 +1714,7 @@ impl LspSession {
             // ne répondra jamais ⟹ dégradation + body null immédiat.
             aux.pending_internal
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&internal_id);
             self.send_tsserver_response(vue_id, Value::Null);
         }
@@ -1685,6 +1725,9 @@ impl LspSession {
     /// restitué TEL QUEL (numérique ou string — le primaire est seul juge de
     /// ses ids). Jamais une notification client ; `cmd_tx` fermé ⟹ primaire
     /// mort, la réponse n'a plus de destinataire : ignorée silencieusement.
+    // tooling.sdd D3 — lsp.sdd contracte ce forwarding par sa valeur (vue_id TEL QUEL) ;
+    // passer en référence serait un refactor de signature hors périmètre D3.
+    #[allow(clippy::needless_pass_by_value)]
     fn send_tsserver_response(&self, vue_id: Value, body: Value) {
         let frame = serde_json::json!({
             "jsonrpc": "2.0",
@@ -1715,7 +1758,11 @@ impl LspSession {
     /// aucune barrière (mono-process inclus) : le chemin historique
     /// s'exécute exactement comme avant (règle 8).
     fn record_primary_merge_part(&self, session_id: u64, msg: &Value) -> bool {
-        let mut merges = self.inner.merges.lock().unwrap_or_else(|e| e.into_inner());
+        let mut merges = self
+            .inner
+            .merges
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !merges.contains_key(&session_id) {
             return false;
         }
@@ -1734,7 +1781,7 @@ impl LspSession {
             // ignorées silencieusement (entrée absente).
             if let Some(pending_merge) = merges.remove(&session_id) {
                 tracing::warn!(
-                    toolchain = self.inner._toolchain_name.as_str(),
+                    toolchain = self.inner.toolchain_name.as_str(),
                     method = pending_merge.method.as_str(),
                     "LSP: primary error on merged request, failing fast: {error}"
                 );
@@ -1750,18 +1797,17 @@ impl LspSession {
             }
             return true;
         }
-        let part = match msg.get("result") {
-            Some(result) => Some(result.clone()),
-            None => {
-                // Ni `result` ni `error` (trame inattendue) : contribution
-                // vide, warn — la barrière se complétera sans le primaire.
-                tracing::warn!(
-                    toolchain = self.inner._toolchain_name.as_str(),
-                    session_id,
-                    "LSP: primary response with neither result nor error, merge part empty"
-                );
-                None
-            }
+        let part = if let Some(result) = msg.get("result") {
+            Some(result.clone())
+        } else {
+            // Ni `result` ni `error` (trame inattendue) : contribution
+            // vide, warn — la barrière se complétera sans le primaire.
+            tracing::warn!(
+                toolchain = self.inner.toolchain_name.as_str(),
+                session_id,
+                "LSP: primary response with neither result nor error, merge part empty"
+            );
+            None
         };
         let completed = {
             let Some(pending) = merges.get_mut(&session_id) else {
@@ -1787,24 +1833,21 @@ impl LspSession {
     fn record_aux_merge_part(&self, role: &str, part_index: usize, session_id: u64, msg: &Value) {
         let part = if let Some(error) = msg.get("error") {
             tracing::warn!(
-                toolchain = self.inner._toolchain_name.as_str(),
+                toolchain = self.inner.toolchain_name.as_str(),
                 role,
                 "LSP: aux error on merged client request, empty part (degraded merge): {error}"
             );
             None
+        } else if let Some(result) = msg.get("result") {
+            Some(result.clone())
         } else {
-            match msg.get("result") {
-                Some(result) => Some(result.clone()),
-                None => {
-                    tracing::warn!(
-                        toolchain = self.inner._toolchain_name.as_str(),
-                        role,
-                        session_id,
-                        "LSP: aux response with neither result nor error, merge part empty"
-                    );
-                    None
-                }
-            }
+            tracing::warn!(
+                toolchain = self.inner.toolchain_name.as_str(),
+                role,
+                session_id,
+                "LSP: aux response with neither result nor error, merge part empty"
+            );
+            None
         };
         self.insert_merge_part(part_index, session_id, part);
     }
@@ -1815,7 +1858,11 @@ impl LspSession {
     /// ignore — c'est le chemin normal des parts tardives.
     fn insert_merge_part(&self, part_index: usize, session_id: u64, part: Option<Value>) {
         let completed = {
-            let mut merges = self.inner.merges.lock().unwrap_or_else(|e| e.into_inner());
+            let mut merges = self
+                .inner
+                .merges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let Some(pending) = merges.get_mut(&session_id) else {
                 tracing::debug!(
                     session_id,
@@ -1840,7 +1887,11 @@ impl LspSession {
     /// attendue (exclusion d'un aux injoignable dans `send`).
     fn try_complete_merge(&self, session_id: u64) {
         let completed = {
-            let mut merges = self.inner.merges.lock().unwrap_or_else(|e| e.into_inner());
+            let mut merges = self
+                .inner
+                .merges
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match merges.get(&session_id) {
                 Some(pending) if pending.parts.len() >= pending.expected => {
                     merges.remove(&session_id)
@@ -1863,13 +1914,13 @@ impl LspSession {
             .inner
             .merges
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get_mut(&session_id)
         {
             pending_merge.expected = pending_merge.expected.saturating_sub(1);
         }
         tracing::debug!(
-            toolchain = self.inner._toolchain_name.as_str(),
+            toolchain = self.inner.toolchain_name.as_str(),
             role,
             session_id,
             "LSP: aux degraded (cannot receive merged request), part dropped"
@@ -1886,6 +1937,9 @@ impl LspSession {
     /// Tâche 08 : une barrière `completion` complétée écrit en plus la
     /// provenance des items SERVIS (même cœur `merge_completion_parts` que la
     /// fusion ⟹ consistance résultat/provenance par construction).
+    // tooling.sdd D3 — lsp.sdd contracte @complete_merge (barrière consommée) ; passer
+    // en référence serait un refactor de signature hors périmètre D3.
+    #[allow(clippy::needless_pass_by_value)]
     fn complete_merge(&self, pending_merge: PendingMerge) {
         let mut indexes: Vec<usize> = pending_merge.parts.keys().copied().collect();
         indexes.sort_unstable();
@@ -1925,15 +1979,15 @@ impl LspSession {
     ) {
         let Some(uri) = pending_merge.params_uri.as_deref() else {
             tracing::debug!(
-                toolchain = self.inner._toolchain_name.as_str(),
+                toolchain = self.inner.toolchain_name.as_str(),
                 session_id = pending_merge.orig_id,
                 "LSP: merged completion without params.textDocument.uri, provenance not recorded"
             );
             return;
         };
-        let indexed: Vec<(usize, Option<Value>)> =
+        let indexed_parts: Vec<(usize, Option<Value>)> =
             indexes.iter().copied().zip(parts.iter().cloned()).collect();
-        let (_, retained, _) = merge_completion_parts(&indexed);
+        let (_, retained, _) = merge_completion_parts(&indexed_parts);
         let mut inner: CompletionProvenanceInner = HashMap::new();
         for (child_index, item) in retained {
             if let Some(key) = completion_item_key(&item) {
@@ -1944,7 +1998,7 @@ impl LspSession {
             .inner
             .completion_provenance
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if !provenance.contains_key(uri) && provenance.len() >= MAX_COMPLETION_PROVENANCE_URIS {
             let evicted = provenance.keys().next().cloned();
             if let Some(evicted) = evicted {
@@ -2004,7 +2058,7 @@ impl LspSession {
                 .inner
                 .completion_provenance
                 .lock()
-                .unwrap_or_else(|e| e.into_inner());
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             for uri_entries in provenance.values() {
                 if let Some((child_index, _)) = uri_entries.get(key) {
                     owners.insert(*child_index);
@@ -2019,7 +2073,7 @@ impl LspSession {
                 // on ne devine pas — le faux enrichissement (ou l'erreur du
                 // mauvais serveur) coûte plus cher que le no-op.
                 tracing::warn!(
-                    toolchain = self.inner._toolchain_name.as_str(),
+                    toolchain = self.inner.toolchain_name.as_str(),
                     "LSP: completionItem/resolve provenance ambiguous across children, no-op fallback"
                 );
                 None
@@ -2028,7 +2082,7 @@ impl LspSession {
         let Some(child_index) = owner else {
             if owners.is_empty() {
                 tracing::debug!(
-                    toolchain = self.inner._toolchain_name.as_str(),
+                    toolchain = self.inner.toolchain_name.as_str(),
                     "LSP: completionItem/resolve without provenance, no-op fallback (item served as-is)"
                 );
             }
@@ -2043,11 +2097,17 @@ impl LspSession {
             return false;
         }
 
-        let Some(aux) = self.inner.aux.get(child_index - 1) else {
+        // `checked_sub` : `child_index` ≥ 1 est garanti par la spec (0 réservé au
+        // primaire, traité plus haut) ; un index fantôme tombe dans la même
+        // défense fallback que le `.get` hors limites.
+        let Some(aux) = child_index
+            .checked_sub(1)
+            .and_then(|idx| self.inner.aux.get(idx))
+        else {
             // Index fantôme (barrière d'une autre vie — ne peut pas arriver
             // tant que `aux` est figé au spawn ; défense = fallback).
             tracing::warn!(
-                toolchain = self.inner._toolchain_name.as_str(),
+                toolchain = self.inner.toolchain_name.as_str(),
                 child_index,
                 "LSP: completionItem/resolve provenance points to unknown child, no-op fallback"
             );
@@ -2057,7 +2117,7 @@ impl LspSession {
         if !aux.alive.load(Ordering::SeqCst) {
             // Enfant déjà mort à l'aiguillage : AUCUNE trame sur un fil mort.
             tracing::warn!(
-                toolchain = self.inner._toolchain_name.as_str(),
+                toolchain = self.inner.toolchain_name.as_str(),
                 role = aux.role.as_str(),
                 "LSP: completionItem/resolve owner already degraded, no-op fallback"
             );
@@ -2070,7 +2130,7 @@ impl LspSession {
         copy["id"] = Value::Number(serde_json::Number::from(internal_id));
         aux.pending_internal
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .insert(
                 internal_id,
                 InternalPending::ClientResolve {
@@ -2090,10 +2150,10 @@ impl LspSession {
         if unreachable {
             aux.pending_internal
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .remove(&internal_id);
             tracing::warn!(
-                toolchain = self.inner._toolchain_name.as_str(),
+                toolchain = self.inner.toolchain_name.as_str(),
                 role = aux.role.as_str(),
                 "LSP: completionItem/resolve cannot reach owner, no-op fallback"
             );
@@ -2120,6 +2180,7 @@ impl LspSession {
     /// Abonne un client. Rend `(ClientId, UnboundedReceiver<Vec<u8>>)`.
     /// Le receiver reçoit les réponses (id restauré) et notifications serveur.
     /// `None` quand le process meurt (canal fermé par la tâche lectrice).
+    #[must_use]
     pub fn subscribe(&self) -> (ClientId, mpsc::UnboundedReceiver<Vec<u8>>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let client_id = ClientId(self.inner.next_client.fetch_add(1, Ordering::SeqCst));
@@ -2153,7 +2214,7 @@ impl LspSession {
         self.inner
             .merges
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .retain(|_, pending_merge| pending_merge.client != client);
         // Retirer les resolve completion en attente de ce client (tâche 08) :
         // aucune réponse ne partira vers un client désabonné (règle 7) ; la
@@ -2162,7 +2223,7 @@ impl LspSession {
         for aux in &self.inner.aux {
             aux.pending_internal
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .retain(|_, entry| {
                     !matches!(
                         entry,
@@ -2176,7 +2237,7 @@ impl LspSession {
             .inner
             .editor_uris
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         for clients in editor_uris.values_mut() {
             clients.remove(&client);
         }
@@ -2205,10 +2266,16 @@ impl LspSession {
     /// routage n'est JAMAIS consultée, chemin mono-process strictement actuel
     /// (invariant 8).
     ///
-    /// Erreurs :
-    /// - JSON invalide → `VNL-SBX-LSP-001`
-    /// - `id` présent mais non entier → `VNL-SBX-LSP-002`
-    /// - process fermé (canal `cmd_tx` fermé) → `VNL-SBX-LSP-003`
+    ///
+    /// # Errors
+    ///
+    /// - JSON invalide → `VNL-SBX-LSP-001: invalid JSON payload`
+    /// - `id` présent mais non entier → `VNL-SBX-LSP-002: JSON-RPC id must be an
+    ///   integer, got non-integer`
+    /// - process fermé (canal `cmd_tx` fermé) → `VNL-SBX-LSP-003: LSP process is dead`
+    // tooling.sdd D3 — lsp.sdd contracte @send comme un tout (validation, routage
+    // mono/composite, barrières, provenance) ; découper la fonction sortirait du périmètre.
+    #[allow(clippy::too_many_lines)]
     pub async fn send(&self, client: ClientId, payload: Vec<u8>) -> anyhow::Result<()> {
         // Valider JSON
         let msg: Value = serde_json::from_slice(&payload)
@@ -2287,7 +2354,7 @@ impl LspSession {
                 self.inner
                     .merges
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .insert(
                         session_req_id,
                         PendingMerge {
@@ -2303,7 +2370,7 @@ impl LspSession {
                                 .and_then(|td| td.get("uri"))
                                 .and_then(Value::as_str)
                                 .map(str::to_string),
-                            expected: alive.len() + 1,
+                            expected: alive.len().saturating_add(1),
                             parts: HashMap::new(),
                         },
                     );
@@ -2322,7 +2389,7 @@ impl LspSession {
                 self.inner
                     .merges
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(&session_req_id);
             }
             sent.map_err(|_| anyhow::anyhow!("VNL-SBX-LSP-003: LSP process is dead"))?;
@@ -2346,7 +2413,7 @@ impl LspSession {
                     copy["id"] = Value::Number(serde_json::Number::from(internal_id));
                     aux.pending_internal
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or_else(std::sync::PoisonError::into_inner)
                         .insert(
                             internal_id,
                             InternalPending::ClientMerge {
@@ -2366,7 +2433,7 @@ impl LspSession {
                     if unreachable {
                         aux.pending_internal
                             .lock()
-                            .unwrap_or_else(|e| e.into_inner())
+                            .unwrap_or_else(std::sync::PoisonError::into_inner)
                             .remove(&internal_id);
                         self.abandon_merge_expectation(session_req_id, aux.role.as_str());
                     }
@@ -2407,7 +2474,7 @@ impl LspSession {
             // — ci-dessus le `return` du chemin historique (invariant 8).
             if matches!(
                 msg.get("method").and_then(|m| m.as_str()),
-                Some("textDocument/didChange") | Some("textDocument/didClose")
+                Some("textDocument/didChange" | "textDocument/didClose")
             ) && let Some(uri) = msg
                 .get("params")
                 .and_then(|p| p.get("textDocument"))
@@ -2417,7 +2484,7 @@ impl LspSession {
                 self.inner
                     .completion_provenance
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .remove(uri);
             }
             // …puis fan-out à chaque enfant aux VIVANT (invariant 2). Enfant mort
@@ -2436,6 +2503,7 @@ impl LspSession {
     }
 
     /// `true` tant que le process n'a pas rendu EOF stdout.
+    #[must_use]
     pub fn is_alive(&self) -> bool {
         self.inner.alive.load(Ordering::SeqCst)
     }
@@ -2449,7 +2517,7 @@ impl LspSession {
         self.inner
             .merges
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
 
@@ -2462,17 +2530,19 @@ impl LspSession {
         self.inner
             .completion_provenance
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .len()
     }
 
     /// `true` si le process a déjà reçu `initialize`.
+    #[must_use]
     pub fn is_initialized(&self) -> bool {
         self.inner.initialized.load(Ordering::SeqCst)
     }
 
     /// Test-and-set : rend `true` si CE client gagne le droit d'envoyer `initialize`
     /// (le flag était à `false`), `false` si un autre client l'a déjà initialisé.
+    #[must_use]
     pub fn try_mark_initialized(&self) -> bool {
         !self.inner.initialized.swap(true, Ordering::SeqCst)
     }
@@ -2534,6 +2604,7 @@ impl LspSession {
     /// protocole LSP). Ne suit pas les fermetures (`didClose`) : une URI ouverte le
     /// reste jusqu'à la mort du process — cohérent avec l'absence actuelle de
     /// `didClose` côté `LspClient` (cf. son `Drop`, qui ne fait que `unsubscribe`).
+    #[must_use]
     pub fn try_mark_uri_open(&self, uri: &str) -> bool {
         match self.inner.open_uris.lock() {
             Ok(mut open) => open.insert(uri.to_string()),
@@ -2547,6 +2618,7 @@ impl LspSession {
     /// — indépendant de l'ordre d'arrivée des publications. Mono-process
     /// (`aux: []`), contenu exactement publié par le primaire (inchangé).
     /// `None` si jamais publiés (ou invalidés) pour cette URI.
+    #[must_use]
     pub fn cached_diagnostics(&self, uri: &str) -> Option<Vec<Value>> {
         self.inner
             .diagnostics_cache
@@ -2578,6 +2650,10 @@ impl LspSession {
         if let Some(d) = self.cached_diagnostics(uri) {
             return Some(d);
         }
+        // tooling.sdd D3 — `Instant + Duration` : un débordement est irréaliste (délai
+        // d'années) et `checked_add` exigerait une branche d'erreur que lsp.sdd ne
+        // définit pas (le délai vient de l'appelant, 30 s / 2 s / ~4 s bornés).
+        #[allow(clippy::arithmetic_side_effects)]
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let notified = self.inner.diagnostics_notify.notified();
@@ -2606,13 +2682,14 @@ impl LspSession {
     /// Démarre à 2 et non à 1 : le `didOpen` émis par `ensure_open` porte la
     /// version 1, un `didChange` doit être strictement au-dessus pour que la
     /// séquence vue par le serveur reste monotone (1 → 2 → 3 …).
+    #[must_use]
     pub fn next_doc_version(&self, uri: &str) -> i32 {
         let mut versions = self
             .inner
             .doc_versions
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let next = versions.get(uri).copied().unwrap_or(1) + 1;
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next = versions.get(uri).copied().unwrap_or(1).saturating_add(1);
         versions.insert(uri.to_string(), next);
         next
     }
@@ -2620,7 +2697,7 @@ impl LspSession {
     /// Retire l'entrée `uri` du `diagnostics_cache` ET de `diag_parts` (toutes
     /// parts d'enfant). Indispensable avant une ré-analyse :
     /// `wait_for_diagnostics` retourne le cache s'il est présent — sans
-    /// invalidation, edit_and_check verrait le stale d'AVANT l'édition
+    /// invalidation, `edit_and_check` verrait le stale d'AVANT l'édition
     /// (design §7 étape 2). La purge des parts est du même coup : sans elle,
     /// une part aux stale survivrait masquée dans `diag_parts` et resurgirait
     /// dans le fondu à la première publication suivante. Aucun notify, aucun
@@ -2629,22 +2706,23 @@ impl LspSession {
         self.inner
             .diagnostics_cache
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(uri);
         self.inner
             .diag_parts
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .remove(uri);
     }
 
     /// Un éditeur navigateur tient-il cette URI (cas B, design R1) ?
+    #[must_use]
     pub fn has_editor_client(&self, uri: &str) -> bool {
         let uris = self
             .inner
             .editor_uris
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         uris.get(uri).is_some_and(|clients| !clients.is_empty())
     }
 
@@ -2656,7 +2734,7 @@ impl LspSession {
             .inner
             .editor_uris
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         uris.entry(uri.to_string()).or_default().insert(client);
     }
 
@@ -2668,7 +2746,7 @@ impl LspSession {
             .inner
             .editor_uris
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if let Some(clients) = uris.get_mut(uri) {
             clients.remove(&client);
             if clients.is_empty() {
@@ -2684,12 +2762,22 @@ impl Drop for LspSessionInner {
         // d'abord : la lectrice d'un aux tué ici ne doit pas sonner « degraded »
         // — c'est la mort du multiplexeur lui-même, pas une dégradation.
         self.alive.store(false, Ordering::SeqCst);
-        if let Some(mut child) = self.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+        if let Some(mut child) = self
+            .child
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
             drop(child.kill());
         }
         for aux in &self.aux {
             aux.alive.store(false, Ordering::SeqCst);
-            if let Some(mut child) = aux.child.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            if let Some(mut child) = aux
+                .child
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take()
+            {
                 drop(child.kill());
             }
         }
@@ -2713,7 +2801,7 @@ impl Clone for LspManager {
             sessions: Mutex::new(
                 self.sessions
                     .lock()
-                    .unwrap_or_else(|e| e.into_inner())
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
                     .clone(),
             ),
         }
@@ -2721,13 +2809,16 @@ impl Clone for LspManager {
 }
 
 impl Default for LspManager {
-    /// Aucune toolchain LSP, sandbox_root `/workspace`.
+    /// Aucune toolchain LSP, `sandbox_root` `/workspace`.
     fn default() -> Self {
         LspManager::new(vec![], PathBuf::from("/workspace"))
     }
 }
 
 impl LspManager {
+    /// Map par `name` (doublon : le dernier gagne silencieusement) ; racine des
+    /// sessions = `sandbox_root`. Aucun process n'est spawné à la construction.
+    #[must_use]
     pub fn new(specs: Vec<LspToolchain>, sandbox_root: PathBuf) -> Self {
         let mut map = HashMap::new();
         for spec in specs {
@@ -2741,6 +2832,11 @@ impl LspManager {
     }
 
     /// Construit depuis `lsp_toolchains_from_env()` et `sandbox_root`.
+    ///
+    /// # Errors
+    ///
+    /// Propage `LSP toolchain parse error: {e}` si `VNL_LSP_TOOLCHAINS` est posée
+    /// et invalide (env absente/vide ⟹ manager sans toolchain, jamais d'erreur).
     pub fn from_env(sandbox_root: PathBuf) -> anyhow::Result<Self> {
         let specs = lsp_toolchains_from_env()?;
         Ok(LspManager::new(specs, sandbox_root))
@@ -2753,6 +2849,11 @@ impl LspManager {
 
     /// Rend la session existante si vivante, sinon spawn une neuve.
     /// `Ok(None)` si aucune toolchain de ce nom n'est configurée.
+    ///
+    /// # Errors
+    ///
+    /// Propage l'erreur de [`LspSession::spawn`] (`LSP spawn error for {name}: {e}`)
+    /// quand le spawn primaire échoue — le pont WS la traduit en close code `4005`.
     pub async fn get_or_spawn(&self, toolchain: &str) -> anyhow::Result<Option<Arc<LspSession>>> {
         // Vérifier si la toolchain est configurée
         let spec = if let Some(spec) = self.specs.get(toolchain) {
@@ -2766,7 +2867,7 @@ impl LspManager {
             if let Some(session) = self
                 .sessions
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .get(toolchain)
                 && session.is_alive()
             {
@@ -2780,7 +2881,10 @@ impl LspManager {
         // Réinsérer (remplace une éventuelle ancienne entrée morte).
         // Si une autre tâche a déjà remplacé par sa session, accepter la sienne.
         {
-            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            let mut sessions = self
+                .sessions
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some(existing) = sessions.get(toolchain)
                 && existing.is_alive()
                 && !Arc::ptr_eq(existing, &new_session)
@@ -2801,6 +2905,9 @@ impl LspManager {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // tooling.sdd D3 — assertions de tests intactes : clippy::assert_is_empty
+    // imposerait assert_eq!(x.as_slice(), []) et changerait la forme d'échec.
+    #![allow(clippy::assert_is_empty)]
 
     use super::*;
     use std::time::Duration;
@@ -3080,6 +3187,9 @@ while True:
     /// Le tuple `(&role, &script, Vec<(clé, JSON)> )` des specs aux est celui
     /// imposé par la tâche 03 — d'où l'allow (signature documentée du helper).
     #[allow(clippy::type_complexity)]
+    // tooling.sdd D3 — helper de test async sans await : retirer `async`
+    // imposerait de retirer ~30 `.await` d'appels de tests, hors périmètre D3.
+    #[allow(clippy::unused_async)]
     async fn make_fake_composite(
         primary_script: &str,
         aux_scripts: &[(
@@ -3138,6 +3248,9 @@ while True:
         done: impl Fn(&[Value]) -> bool,
         timeout: Duration,
     ) -> Vec<Value> {
+        // tooling.sdd D3 — débordement `Instant + Duration` irréaliste (délai borné
+        // par l'appelant, cf. lsp.sdd) ; même motif qu'en production.
+        #[allow(clippy::arithmetic_side_effects)]
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let frames = read_recorder_frames(path);
@@ -3149,6 +3262,9 @@ while True:
     }
 
     /// Crée une toolchain LSP pointant vers un script Python factice.
+    // tooling.sdd D3 — helper de test async sans await : retirer `async`
+    // imposerait de retirer ~18 `.await` d'appels de tests, hors périmètre D3.
+    #[allow(clippy::unused_async)]
     async fn make_fake_toolchain(name: &str, script: &str) -> (LspToolchain, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let script_path = tmpdir.path().join(format!("fake_lsp_{name}.py"));
@@ -3172,7 +3288,7 @@ while True:
 
     // ── Tests unitaires (encode, FrameReader, parse) ───────────────────────
 
-    /// Test 1: encode_has_content_length_header
+    /// Test 1: `encode_has_content_length_header`
     #[test]
     fn encode_has_content_length_header() {
         let payload = b"{\"jsonrpc\":\"2.0\"}";
@@ -3189,7 +3305,7 @@ while True:
         );
     }
 
-    /// Test 2: frame_reader_reassembles_split_chunks
+    /// Test 2: `frame_reader_reassembles_split_chunks`
     #[test]
     fn frame_reader_reassembles_split_chunks() {
         let payload = b"{\"jsonrpc\":\"2.0\"}";
@@ -3197,7 +3313,7 @@ while True:
 
         let mut reader = FrameReader::new();
         // Découper en chunks de 3 octets
-        let chunks: Vec<Vec<u8>> = encoded.chunks(3).map(|c| c.to_vec()).collect();
+        let chunks: Vec<Vec<u8>> = encoded.chunks(3).map(<[u8]>::to_vec).collect();
         // Pousser un par un
         for chunk in &chunks {
             reader.push(chunk);
@@ -3214,7 +3330,7 @@ while True:
         );
     }
 
-    /// Test 3: frame_reader_reads_two_messages
+    /// Test 3: `frame_reader_reads_two_messages`
     #[test]
     fn frame_reader_reads_two_messages() {
         let p1 = encode_message(b"hello");
@@ -3231,7 +3347,7 @@ while True:
         );
     }
 
-    /// Test 4: parse_lsp_toolchains_valid_json
+    /// Test 4: `parse_lsp_toolchains_valid_json`
     #[test]
     fn parse_lsp_toolchains_valid_json() {
         let json = r#"[{"name":"rust","bin":"/toolchains/rust/bin/rust-analyzer","args":[]}]"#;
@@ -3242,14 +3358,14 @@ while True:
         assert!(specs[0].args.is_empty());
     }
 
-    /// Test 5: parse_lsp_toolchains_empty_array
+    /// Test 5: `parse_lsp_toolchains_empty_array`
     #[test]
     fn parse_lsp_toolchains_empty_array() {
         let specs = parse_lsp_toolchains("[]").expect("empty array should be valid");
         assert!(specs.is_empty(), "empty array should yield zero specs");
     }
 
-    /// Test 6: parse_lsp_toolchains_invalid_json_errors
+    /// Test 6: `parse_lsp_toolchains_invalid_json_errors`
     #[test]
     fn parse_lsp_toolchains_invalid_json_errors() {
         let result = parse_lsp_toolchains("not json");
@@ -3258,7 +3374,7 @@ while True:
 
     // ── Tests manager ──────────────────────────────────────────────────────
 
-    /// Test 7: manager_unknown_toolchain_returns_none
+    /// Test 7: `manager_unknown_toolchain_returns_none`
     #[tokio::test]
     async fn manager_unknown_toolchain_returns_none() {
         let root = PathBuf::from("/tmp/test-root");
@@ -3270,7 +3386,7 @@ while True:
         assert!(result.is_none(), "unknown toolchain should return None");
     }
 
-    /// Test 8: manager_reuses_alive_session
+    /// Test 8: `manager_reuses_alive_session`
     #[tokio::test]
     async fn manager_reuses_alive_session() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
@@ -3384,7 +3500,7 @@ while True:
 
     // ── Tests session ──────────────────────────────────────────────────────
 
-    /// Test 9: session_request_response
+    /// Test 9: `session_request_response`
     #[tokio::test]
     async fn session_request_response() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
@@ -3425,7 +3541,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 10: session_routes_same_id_to_each_client
+    /// Test 10: `session_routes_same_id_to_each_client`
     #[tokio::test]
     async fn session_routes_same_id_to_each_client() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
@@ -3454,23 +3570,23 @@ while True:
         assert!(resp_a.is_some(), "A should receive response");
         assert!(resp_b.is_some(), "B should receive response");
 
-        let r_a = serde_json::from_slice::<Value>(&resp_a.unwrap()).unwrap();
-        let r_b = serde_json::from_slice::<Value>(&resp_b.unwrap()).unwrap();
+        let reply_a = serde_json::from_slice::<Value>(&resp_a.unwrap()).unwrap();
+        let reply_b = serde_json::from_slice::<Value>(&resp_b.unwrap()).unwrap();
 
         assert_eq!(
-            r_a["id"].as_i64().unwrap(),
+            reply_a["id"].as_i64().unwrap(),
             1,
             "A's response id should be 1"
         );
         assert_eq!(
-            r_b["id"].as_i64().unwrap(),
+            reply_b["id"].as_i64().unwrap(),
             1,
             "B's response id should be 1"
         );
 
         // result DIFFÈRE → ids de session différents → pas de cross-routing
-        let result_a = r_a["result"].as_str().unwrap();
-        let result_b = r_b["result"].as_str().unwrap();
+        let result_a = reply_a["result"].as_str().unwrap();
+        let result_b = reply_b["result"].as_str().unwrap();
         assert_ne!(
             result_a, result_b,
             "results must differ for different clients"
@@ -3479,7 +3595,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 11: session_broadcasts_notifications
+    /// Test 11: `session_broadcasts_notifications`
     #[tokio::test]
     async fn session_broadcasts_notifications() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
@@ -3525,7 +3641,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 12: send_rejects_invalid_json
+    /// Test 12: `send_rejects_invalid_json`
     #[tokio::test]
     async fn send_rejects_invalid_json() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
@@ -3543,7 +3659,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 13: send_rejects_non_integer_id
+    /// Test 13: `send_rejects_non_integer_id`
     #[tokio::test]
     async fn send_rejects_non_integer_id() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
@@ -3564,7 +3680,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 13b: send_rejects_float_id — un id flottant est non-entier → VNL-SBX-LSP-002.
+    /// Test 13b: `send_rejects_float_id` — un id flottant est non-entier → VNL-SBX-LSP-002.
     #[tokio::test]
     async fn send_rejects_float_id() {
         let (spec, tmpdir) = make_fake_toolchain("fake", FAKE_LSP_PY).await;
@@ -3585,7 +3701,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 14: manager_respawns_dead_session
+    /// Test 14: `manager_respawns_dead_session`
     #[tokio::test]
     async fn manager_respawns_dead_session() {
         let (spec, tmpdir) = make_fake_toolchain("die", FAKE_LSP_EXIT_PY).await;
@@ -3624,7 +3740,7 @@ while True:
 
     // ── Tests tâche 08a : versions de doc, invalidation, didChange, suivi éditeur ──
 
-    /// Test 15: next_doc_version_increments_per_uri — un compteur par URI, démarre
+    /// Test 15: `next_doc_version_increments_per_uri` — un compteur par URI, démarre
     /// à 2 (le `didOpen` a la version 1), +1 par appel ; les URI n'interagissent
     /// pas (les compteurs navigateur sont de toute façon indépendants —
     /// `next_doc_version` ne sert qu'aux tools).
@@ -3643,7 +3759,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 16: invalidate_diagnostics_then_wait_gets_fresh — le test qui prouve
+    /// Test 16: `invalidate_diagnostics_then_wait_gets_fresh` — le test qui prouve
     /// l'utilité de l'invalidation (design §7 étape 2) : `wait_for_diagnostics`
     /// retourne le cache s'il est présent ; sans `invalidate_diagnostics` avant
     /// l'édition, `edit_and_check` reverrait le stale d'AVANT l'édition.
@@ -3719,7 +3835,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 17: did_change_frame_full_sync_shape — la notification `didChange` du
+    /// Test 17: `did_change_frame_full_sync_shape` — la notification `didChange` du
     /// client a exactement la forme full sync (design §7) : un seul
     /// `contentChanges` = `{"text": …}` sans `range`, la version passée portée
     /// PAR `textDocument.version` (`VersionedTextDocumentIdentifier` de la spec
@@ -3794,8 +3910,8 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 18: editor_uri_tracking_open_close_unsubscribe — plusieurs tenants sur
-    /// une même URI ; la déconnexion (unsubscribe) ou la fermeture (mark_close) de
+    /// Test 18: `editor_uri_tracking_open_close_unsubscribe` — plusieurs tenants sur
+    /// une même URI ; la déconnexion (unsubscribe) ou la fermeture (`mark_close`) de
     /// l'un ne libère pas l'URI tant qu'un autre la tient.
     #[tokio::test]
     async fn editor_uri_tracking_open_close_unsubscribe() {
@@ -3849,7 +3965,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 19: unsubscribe_cleans_all_editor_uris — un client qui tient 3 URI
+    /// Test 19: `unsubscribe_cleans_all_editor_uris` — un client qui tient 3 URI
     /// (sans autres tenants) : la déconnexion libère les 3, nulle part d'autre ne
     /// reste marqué tenu (nettoyage déconnexion, piste R1 sq1).
     #[tokio::test]
@@ -3882,7 +3998,7 @@ while True:
 
     // ── Tests tâche 03 (vue-lsp) : ossature multi-process ──────────────────
 
-    /// Test 20: parse_aux_roundtrip_and_default_empty — contrat de format
+    /// Test 20: `parse_aux_roundtrip_and_default_empty` — contrat de format
     /// `VNL_LSP_TOOLCHAINS` avec `aux` (interop tâche controller ultérieure) :
     /// valeurs exactes (dont `initOptions` → `init_options`), clé `aux` absente
     /// ⟹ `vec![]`, sérialisation sans aux ⟹ `"aux":[]` (additif, accepté).
@@ -3943,7 +4059,7 @@ while True:
         );
     }
 
-    /// Test 21: composite_initialize_reaches_both_injected_options_on_aux —
+    /// Test 21: `composite_initialize_reaches_both_injected_options_on_aux` —
     /// `initialize` part au primaire (chemin actuel, options du client seules)
     /// ET à chaque aux vivant en copie avec `initOptions` du spec injectés
     /// (clés spec gagnantes, options client conservées) ; la réponse de l'aux
@@ -4045,7 +4161,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 22: composite_didOpen_fanout_to_both — toute notification client
+    /// Test 22: `composite_didOpen_fanout_to_both` — toute notification client
     /// (doc-sync inclus) part telle quelle à chaque enfant vivant (invariant 2).
     /// Nom du test imposé tel quel par la tâche 03 (`didOpen` = méthode LSP).
     #[allow(non_snake_case)]
@@ -4116,7 +4232,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 23: composite_other_request_primary_only — une requête (id) dont la
+    /// Test 23: `composite_other_request_primary_only` — une requête (id) dont la
     /// méthode est hors table `MergeRoute::All` reste intégralement sur le
     /// primaire : réponse au client, l'aux ne la voit jamais. Sonde
     /// `textDocument/signatureHelp` (méthode hors table All, défaut `Primary`) —
@@ -4219,7 +4335,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 24: primary_death_kills_session — EOF stdout du PRIMAIRE = mort de
+    /// Test 24: `primary_death_kills_session` — EOF stdout du PRIMAIRE = mort de
     /// la session (invariant 6), même avec un aux durable à côté ; pattern de
     /// poll borné de `manager_respawns_dead_session`.
     #[tokio::test]
@@ -4248,7 +4364,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 25: aux_death_session_survives_degraded — EOF stdout d'un AUX =
+    /// Test 25: `aux_death_session_survives_degraded` — EOF stdout d'un AUX =
     /// dégradation, pas mort (invariant 6) : `is_alive()` (primaire) reste
     /// `true`, les requêtes primaire répondent, le fan-out ignore l'aux mort
     /// sans erreur.
@@ -4300,7 +4416,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 26: aux_spawn_failure_degrades_not_fails — un aux au binaire absent
+    /// Test 26: `aux_spawn_failure_degrades_not_fails` — un aux au binaire absent
     /// dégrade la session (`warn`) mais ne la fait jamais échouer (invariant 1) :
     /// `spawn` rend `Ok`, session vivante, primaire fonctionnel, notifications
     /// fan-out sans erreur.
@@ -4351,7 +4467,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 27: aux_unknown_role_ignored — rôle inconnu au spawn : `warn` +
+    /// Test 27: `aux_unknown_role_ignored` — rôle inconnu au spawn : `warn` +
     /// enfant ignoré (JAMAIS spawné — son recorder ne crée même pas son log),
     /// session vivante et fonctionnelle avec les aux connus (invariant 1).
     #[tokio::test]
@@ -4499,7 +4615,7 @@ while True:
     /// `body` porte `_cmd`/`_file` dérivés des `arguments` pour prouver
     /// l'appariement) ; sur `initialize`, répond `{"capabilities":{}}`.
     /// Modes via `fake_mode` : `"error"` (JSON-RPC erreur), `"null"`
-    /// (`result: null` — sentinelle NoContent), `"swap"` (le 2e reçu répond
+    /// (`result: null` — sentinelle `NoContent`), `"swap"` (le 2e reçu répond
     /// avant le 1er — corrélation en désordre), `"die"` (meurt APRÈS avoir
     /// reçu la requête, sans répondre — purge d'EOF).
     const FAKE_LSP_TLS_PY: &str = r#"
@@ -4588,11 +4704,11 @@ while True:
     /// ouvert) mais ne lit JAMAIS stdin — le pipe puis le canal de la tâche
     /// écrivaine se remplissent, `try_send` vers l'aux rend `Full` alors même
     /// que l'aux est `alive`.
-    const FAKE_LSP_SILENT_AUX_PY: &str = r#"
+    const FAKE_LSP_SILENT_AUX_PY: &str = r"
 import time
 while True:
     time.sleep(3600)
-"#;
+";
 
     /// Variante de comportement d'un fake (placeholder `@@MODE@@` de son
     /// script Python). C'est le FAKE qui a des modes — le contrat du
@@ -4664,9 +4780,9 @@ while True:
             .cloned()
     }
 
-    /// Test 28: forward_project_info_roundtrip — (a) l'aux reçoit l'
+    /// Test 28: `forward_project_info_roundtrip` — (a) l'aux reçoit l'
     /// `executeCommand` EXACT (arguments = [command, payload], pas de
-    /// ExecuteInfo), (b) le primaire reçoit `tsserver/response` avec le body
+    /// `ExecuteInfo`), (b) le primaire reçoit `tsserver/response` avec le body
     /// DÉPILÉ de l'objet tsserver complet et le vue-id restitué, (c) le client
     /// ne voit AUCUNE trame tsserver/*.
     #[tokio::test]
@@ -4727,7 +4843,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 29: forward_aux_error_null_body — erreur JSON-RPC de l'aux ⟹
+    /// Test 29: `forward_aux_error_null_body` — erreur JSON-RPC de l'aux ⟹
     /// primaire reçoit `[[id, null]]`, session vivante et fonctionnelle.
     #[tokio::test]
     async fn forward_aux_error_null_body() {
@@ -4783,8 +4899,8 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 30: forward_no_body_result_null — `result: null` (sentinelle
-    /// NoContent de TLS, pas une erreur) ⟹ primaire reçoit `[[id, null]]`.
+    /// Test 30: `forward_no_body_result_null` — `result: null` (sentinelle
+    /// `NoContent` de TLS, pas une erreur) ⟹ primaire reçoit `[[id, null]]`.
     #[tokio::test]
     async fn forward_no_body_result_null() {
         let aux_script = fake_mode(FAKE_LSP_TLS_PY, "null");
@@ -4818,7 +4934,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 31: forward_aux_dead_null_body_no_hang — l'aux meurt (EOF) APRÈS
+    /// Test 31: `forward_aux_dead_null_body_no_hang` — l'aux meurt (EOF) APRÈS
     /// avoir reçu la requête, sans jamais répondre ⟹ la purge des ids
     /// internes en attente à l'EOF doit répondre `[[id, null]]` au primaire ;
     /// session vivante, pas de pend.
@@ -4858,7 +4974,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 32: forward_no_alive_aux_null_body_immediate — aux mort avant
+    /// Test 32: `forward_no_alive_aux_null_body_immediate` — aux mort avant
     /// même l'`initialize` : à l'émission `tsserver/request` du primaire, la
     /// réponse `[[id, null]]` part IMMÉDIATEMENT (poll borné à 2s — pas de
     /// pend, `vue-language-server` ne doit jamais attendre un aux absent).
@@ -4897,10 +5013,10 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 33: forward_concurrent_correlation — deux `tsserver/request`
+    /// Test 33: `forward_concurrent_correlation` — deux `tsserver/request`
     /// (ids 1, 2 via deux didOpen), l'aux répond EN ORDRE INVERSÉ (le 2e reçu
     /// répond avant le 1er) ⟹ les deux `tsserver/response` portent les bons
-    /// vue_ids et les bons fichiers appariés (pas de croisement).
+    /// `vue_ids` et les bons fichiers appariés (pas de croisement).
     #[tokio::test]
     async fn forward_concurrent_correlation() {
         let aux_script = fake_mode(FAKE_LSP_TLS_PY, "swap");
@@ -4956,11 +5072,11 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 34: forward_malformed_params_dropped — primaire émet
+    /// Test 34: `forward_malformed_params_dropped` — primaire émet
     /// `tsserver/request` avec `params: "garbage"` puis un bon
     /// `[[3, "_vue:x", null]]` : pas de panique, aucune réponse au garbage
     /// (id non exploitable), le payload `null` passe TEL QUEL dans
-    /// `arguments`, et la réponse `[[3, null]]` (aux mode NoContent) atteint
+    /// `arguments`, et la réponse `[[3, null]]` (aux mode `NoContent`) atteint
     /// le primaire. Session OK.
     #[tokio::test]
     async fn forward_malformed_params_dropped() {
@@ -5033,7 +5149,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 34b: forward_aux_saturated_channel_null_body — aux VIVANT mais
+    /// Test 34b: `forward_aux_saturated_channel_null_body` — aux VIVANT mais
     /// qui ne lit jamais stdin : pipe puis canal saturés ⟹ `try_send` plein ⟹
     /// `[[id, null]]` immédiat au primaire (l'aux est dégradé, la requête
     /// n'aurait jamais de réponse). Couvre la branche « canal plein » du
@@ -5296,6 +5412,9 @@ while True:
         done: impl Fn(&Option<Vec<Value>>) -> bool,
         timeout: Duration,
     ) -> Option<Vec<Value>> {
+        // tooling.sdd D3 — débordement `Instant + Duration` irréaliste (délai borné
+        // par l'appelant, cf. lsp.sdd) ; même motif qu'en production.
+        #[allow(clippy::arithmetic_side_effects)]
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             let cached = session.cached_diagnostics(uri);
@@ -5338,7 +5457,7 @@ while True:
         !raw.windows(3).any(|w| w == b"\": \"")
     }
 
-    /// Test 35: diag_merge_primary_then_aux_order — didOpen unique, primaire
+    /// Test 35: `diag_merge_primary_then_aux_order` — didOpen unique, primaire
     /// publié d'abord (aux `slow`) : `cached_diagnostics` = `[P1, A1]` et le
     /// flux client porte le MÊME fondu en dernière notification (aucune part
     /// brute d'un seul enfant sur le réseau — tout est synthétisé).
@@ -5398,7 +5517,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 36: diag_merge_order_independent_of_arrival — l'AUX publie AVANT
+    /// Test 36: `diag_merge_order_independent_of_arrival` — l'AUX publie AVANT
     /// le primaire (primaire `slow`) : le fondu final reste `[P1, A1]` — ordre
     /// par index d'enfant, pas par ordre d'arrivée (et pas last-writer-wins :
     /// le flux fini n'est pas `[A1]`).
@@ -5442,7 +5561,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 37: diag_replace_per_child_not_append — le primaire republie
+    /// Test 37: `diag_replace_per_child_not_append` — le primaire republie
     /// (2e didOpen ⟹ P2) : le fondu devient `[P2, A1]` — P1 nulle part, ni
     /// dans le cache ni dans le dernier broadcast. La publication d'un enfant
     /// REMPLACE sa part, ne l'ajoute jamais.
@@ -5501,7 +5620,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 38: diag_invalidate_clears_all_parts — après `[P2, A1]`,
+    /// Test 38: `diag_invalidate_clears_all_parts` — après `[P2, A1]`,
     /// `invalidate_diagnostics` vide le cache ET les parts : la publication
     /// primaire suivante (aux `once` silencieux) produit le fondu `[P3]`
     /// EXACTEMENT — sans invalidation des parts, le stale aux survivrait
@@ -5576,7 +5695,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 39: diag_wait_resolves_on_aux_push — `wait_for_diagnostics` est
+    /// Test 39: `diag_wait_resolves_on_aux_push` — `wait_for_diagnostics` est
     /// réveillé par la publication de l'AUX seul (primaire `manual` muet au
     /// didOpen) et rend `[A1]` : le MCP ne dépend jamais du primaire pour être
     /// réveillé. Invalidation puis trigger (les DEUX enfants republient) : le
@@ -5659,7 +5778,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 40: diag_aux_eof_drops_its_parts — aux publie A1, primaire publie
+    /// Test 40: `diag_aux_eof_drops_its_parts` — aux publie A1, primaire publie
     /// P1 → `[P1, A1]` ; puis l'aux meurt (mode `die`, tué par une notification
     /// `fake/kill` que le fake attend après sa publication) : ses parts sont
     /// retirées et le cache recompté en `[P1]`, URI toujours présente (le cache
@@ -5726,7 +5845,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 41: diag_mono_process_bytes_unchanged — `aux: []` : le payload
+    /// Test 41: `diag_mono_process_bytes_unchanged` — `aux: []` : le payload
     /// broadcast reçu par le client est OCTET-IDENTIQUE à la trame publiée
     /// par le fake primaire (aucune synthèse JSON réordonnée — garde de
     /// l'invariant 8 sur CE chemin précis) ; le cache vaut le contenu publié.
@@ -6219,7 +6338,7 @@ while True:
         move |f: &Value| f.get("method").and_then(|m| m.as_str()) == Some(method)
     }
 
-    /// Test 42: merge_hover_concat_markup — un `hover` composite produit UNE
+    /// Test 42: `merge_hover_concat_markup` — un `hover` composite produit UNE
     /// réponse client (id d'origine restauré), markup concaténé primary-first
     /// avec séparateur `---` et kind du primaire ; primaire et aux ont chacun
     /// reçu le hover dans LEUR espace d'ids (session id 3 pour le primaire —
@@ -6318,7 +6437,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 43: merge_locations_definition_concat — `definition` : `[LocA]` +
+    /// Test 43: `merge_locations_definition_concat` — `definition` : `[LocA]` +
     /// `[LocB]` ⟹ `[LocA, LocB]` primary-first ; `references` avec un seul
     /// côté non-null ⟹ CE côté, jamais de tableau vide parasite.
     #[tokio::test]
@@ -6395,7 +6514,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 44: merge_location_single_object_wrapped — le primaire répond un
+    /// Test 44: `merge_location_single_object_wrapped` — le primaire répond un
     /// `Location` objet SEUL (pas en tableau), l'aux `null` ⟹ `[objet]` côté
     /// client (wrap en tableau de la forme objet unique).
     #[tokio::test]
@@ -6425,7 +6544,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 45: merge_codeaction_concat_null_is_empty — primaire `[CA1]` +
+    /// Test 45: `merge_codeaction_concat_null_is_empty` — primaire `[CA1]` +
     /// aux `null` ⟹ `[CA1]` ; primaire `null` + aux ⟹ la part de l'aux ;
     /// les deux répondent ⟹ `[CA1, CA2]` (ordre primary-first respecté quand
     /// les deux répondent — les codeActions des deux fakes portent des titres
@@ -6503,7 +6622,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 46: merge_prepare_rename_primary_wins_then_fallback — les deux
+    /// Test 46: `merge_prepare_rename_primary_wins_then_fallback` — les deux
     /// non-null ⟹ résultat du PRIMAIRE verbatim ; primaire null avec aux
     /// `{range}` ⟹ résultat de l'aux (fallback).
     #[tokio::test]
@@ -6557,7 +6676,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 46b: merge_rename_changes_concat — `changes` sur URI commune ⟹
+    /// Test 46b: `merge_rename_changes_concat` — `changes` sur URI commune ⟹
     /// edits concaténés primary-first dans le MÊME tableau, URI disjointe de
     /// l'aux ajoutée ; variantes mixtes (primaire `changes`, aux
     /// `documentChanges`) ⟹ variante du PRIMAIRE conservée intégralement,
@@ -6615,7 +6734,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 47: merge_aux_error_part_skipped — erreur de l'aux sur hover ⟹
+    /// Test 47: `merge_aux_error_part_skipped` — erreur de l'aux sur hover ⟹
     /// réponse client = hover du primaire seul (part None), PAS une erreur
     /// globale.
     #[tokio::test]
@@ -6653,7 +6772,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 48: merge_primary_error_fails_fast — erreur du PRIMAIRE ⟹ réponse
+    /// Test 48: `merge_primary_error_fails_fast` — erreur du PRIMAIRE ⟹ réponse
     /// erreur IMMÉDIATE au client (id restauré, structure `error` verbatim),
     /// barrière tuée ; l'aux (vivant, répond ensuite) ne produit RIEN de
     /// visible — aucune 2e réponse ; session saine.
@@ -6713,7 +6832,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 49: merge_aux_eof_mid_merge — l'aux meurt (mode `die`) APRÈS avoir
+    /// Test 49: `merge_aux_eof_mid_merge` — l'aux meurt (mode `die`) APRÈS avoir
     /// reçu le fan-out, avant de répondre ⟹ sa part `ClientMerge` en attente
     /// est levée en `None` à l'EOF (purge task-05 étendue) ⟹ barrière
     /// complétée, réponse primaire seule, client servi UNE fois.
@@ -6756,7 +6875,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 50: merge_concurrent_no_cross — deux `hover` simultanés (ids
+    /// Test 50: `merge_concurrent_no_cross` — deux `hover` simultanés (ids
     /// clients 1, 2 ; lignes de position 0 et 7 echoées dans les résultats),
     /// l'aux répond EN ORDRE INVERSÉ (mode `swap`) ⟹ chaque client reçoit SA
     /// fusion correcte (les payloads distincts par position ne se croisent
@@ -6808,7 +6927,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 51: merge_unsubscribe_mid_merge — souscrire → `hover` → `
+    /// Test 51: `merge_unsubscribe_mid_merge` — souscrire → `hover` → `
     /// unsubscribe` → l'aux libère alors sa réponse retenue (mode `hold`,
     /// déclenchement par `x/release` : aucune course de timing) ⟹ AUCUNE
     /// réponse émise vers le client parti, pas de panique, barrière purgée —
@@ -6895,6 +7014,9 @@ while True:
 
     /// Item attendu d'un fake en mode resolve : les `params` reçus enrichis
     /// `_from` (contrat des fakes task-08).
+    // tooling.sdd D3 — helper de test, signature non contractée ; changer de forme
+    // les appels de tests est hors périmètre D3.
+    #[allow(clippy::needless_pass_by_value)]
     fn resolved(item: Value, from: &str) -> Value {
         let mut enriched = item.as_object().unwrap().clone();
         enriched.insert("_from".to_string(), Value::String(from.to_string()));
@@ -6931,6 +7053,9 @@ while True:
 
     /// Requête `completionItem/resolve` : `params` = l'item lui-même (les
     /// éditeurs renvoient l'item servi tel quel).
+    // tooling.sdd D3 — helper de test, signature non contractée ; changer de forme
+    // les appels de tests est hors périmètre D3.
+    #[allow(clippy::needless_pass_by_value)]
     fn resolve_request(id: i64, item: Value) -> Vec<u8> {
         serde_json::json!({
             "jsonrpc": "2.0", "id": id, "method": "completionItem/resolve",
@@ -6952,7 +7077,7 @@ while True:
         .into_bytes()
     }
 
-    /// Tâche 08 test 1 : merge_completion_replaces_stays_primary_guard —
+    /// Tâche 08 test 1 : `merge_completion_replaces_stays_primary_guard` —
     /// (remplace `merge_completion_stays_primary`, garde d'AVANT cette tâche) :
     /// la completion fan-out est reçue par les DEUX enfants (session id 2 pour
     /// le primaire — initialize=1, completion=2 ; id interne 2 pour l'aux —
@@ -7019,7 +7144,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 2 : merge_completion_incomplete_or_and_array_shape —
+    /// Tâche 08 test 2 : `merge_completion_incomplete_or_and_array_shape` —
     /// primaire en TABLEAU simple, aux en `CompletionList{isIncomplete:true}`
     /// ⟹ sortie `CompletionList` (au moins une part en était un), `isIncomplete`
     /// = OR des parts = true, items concaténés-dédupés primary-first.
@@ -7053,7 +7178,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 3 : merge_completion_kind_absent_distinct — aux
+    /// Tâche 08 test 3 : `merge_completion_kind_absent_distinct` — aux
     /// `{"label":"x"}` sans kind vs primaire `{"label":"x","kind":17}` ⟹ les
     /// DEUX servis (kind absent ≠ kind présent dans la clé de dédup) ; aucune
     /// part `CompletionList` ⟹ shape tableau.
@@ -7083,7 +7208,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 4 : resolve_routes_to_aux — après la fixture : resolve de
+    /// Tâche 08 test 4 : `resolve_routes_to_aux` — après la fixture : resolve de
     /// `script(3)` (item servi par l'AUX) ⟹ l'aux reçoit la requête sous son
     /// id interne 3 (initialize=1, completion=2, resolve=3), le primaire NON,
     /// réponse client = résultat de l'AUX avec l'id d'origine, réponse unique.
@@ -7139,7 +7264,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 5 : resolve_routes_to_primary — resolve de `tmpl(14)`
+    /// Tâche 08 test 5 : `resolve_routes_to_primary` — resolve de `tmpl(14)`
     /// (item servi par le PRIMAIRE) ⟹ primaire seul sur le fil (session id 3,
     /// chemin historique intact), jamais l'aux, réponse = résultat primaire
     /// enrichi avec l'id d'origine, réponse unique.
@@ -7195,7 +7320,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 6 : resolve_unknown_item_no_wire — resolve d'un item
+    /// Tâche 08 test 6 : `resolve_unknown_item_no_wire` — resolve d'un item
     /// jamais servi (`inconnu(1)`) ⟹ réponse immédiate = item TEL QUEL (pas de
     /// `_from`, pas une erreur), AUCUNE trame resolve sur les deux fils.
     #[tokio::test]
@@ -7238,7 +7363,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 7 : resolve_didChange_purges_provenance — completion,
+    /// Tâche 08 test 7 : `resolve_didChange_purges_provenance` — completion,
     /// puis `didChange` de l'URI, puis resolve du `script` ⟹ fallback item tel
     /// quel (la purge a rendu la provenance introuvable), AUCUN fil.
     // Nom de test imposé verbatim par la tâche 08 (`didChange` = nom LSP de la
@@ -7294,7 +7419,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 8 : resolve_ambiguous_no_wire — deux completions sur deux
+    /// Tâche 08 test 8 : `resolve_ambiguous_no_wire` — deux completions sur deux
     /// URI amenant le MÊME `(label,kind)` (`ref`,17) depuis deux enfants
     /// DISTINCTS (l'aux le sert partout ; le primaire ne le sert que hors
     /// `B.vue` — fixture.URI-aware du fake) ⟹ resolve ambigü ⟹ fallback item
@@ -7360,7 +7485,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 9 : resolve_aux_error_fallback_item — l'aux (mode
+    /// Tâche 08 test 9 : `resolve_aux_error_fallback_item` — l'aux (mode
     /// `error-resolve` : completion normale, erreur sur les resolve) reçoit le
     /// resolve de SON item puis répond une erreur JSON-RPC ⟹ réponse client =
     /// item TEL QUEL (pas une erreur), session saine, réponse unique.
@@ -7402,7 +7527,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 10 : resolve_aux_eof_fallback_item — l'aux (mode
+    /// Tâche 08 test 10 : `resolve_aux_eof_fallback_item` — l'aux (mode
     /// `hold-resolve-die`) retient le resolve de SON item puis MEURT sur
     /// `fake/kill` avec la requête en attente ⟹ purge EOF = fallback item tel
     /// quel, session saine, rien ne pend.
@@ -7457,7 +7582,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 11 : resolve_unsubscribe_mid_resolve — resolve (retenu
+    /// Tâche 08 test 11 : `resolve_unsubscribe_mid_resolve` — resolve (retenu
     /// par l'aux `hold-resolve`) puis `unsubscribe` ⟹ aucune réponse vers le
     /// client parti (même quand l'aux libère sa réponse retenue sur l'id
     /// interne purgé), pas de panique, AUCUN résidu : le resolve suivant d'un
@@ -7518,7 +7643,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Tâche 08 test 12 : mono_completion_resolve_primary_unchanged —
+    /// Tâche 08 test 12 : `mono_completion_resolve_primary_unchanged` —
     /// `aux: []` : completion ET resolve suivent le chemin historique strict
     /// (session ids 2 et 3 sur le fil — jamais les ids clients 42/43 — réponse
     /// verbatim/relayée, unique), et `completion_provenance` RESTE VIDE (la
@@ -7629,7 +7754,7 @@ while True:
         drop(tmpdir);
     }
 
-    /// Test 53: mono_process_wire_bytes_unchanged — `aux: []`, hover : le fil
+    /// Test 53: `mono_process_wire_bytes_unchanged` — `aux: []`, hover : le fil
     /// primaire porte la requête avec le SESSION id (réécriture historique
     /// intacte), réponse unique et id restauré ; AUCUN état de barrière créé
     /// avant/après (garde additionnelle de l'invariant 8 — les suites
@@ -8278,6 +8403,9 @@ while True:
     /// requête du client, la barrière ne peut jamais compter une part qui
     /// n'arrivera jamais.
     #[tokio::test]
+    // tooling.sdd D3 — test verrouillant le routage semanticTokens (lsp.sdd, table
+    // MergeRoute) ; la longueur est portée par la fixture du Scenario.
+    #[allow(clippy::too_many_lines)]
     async fn dm_requests_route_to_primary_only() {
         let (spec, tmpdir) = make_fake_composite(
             FAKE_LSP_RECORDER_PY,

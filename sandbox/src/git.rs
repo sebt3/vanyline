@@ -15,54 +15,113 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 
+/// Erreurs du module git, rendues dans le corps JSON `{"error": <Display>}` avec
+/// identifiant `VNL-SBX-0XX` (mapping statut : [`GitError::into_response`] —
+/// `InvalidRef` → `400`, toutes les autres variantes → `500`, cf. git.sdd).
 #[derive(Debug, thiserror::Error)]
 pub enum GitError {
+    /// Processus `git` non lançable ou exit ≠ 0 (VNL-SBX-004, `500`).
     #[error("VNL-SBX-004: git {args:?} failed with {status}: {stderr}")]
     CommandFailed {
+        /// argv de la commande (ou message de l'`std::io::Error` en `status`,
+        /// `stderr` vide, si le binaire n'est pas lançable).
         args: Vec<String>,
+        /// Code de sortie (ou message d'io en échec de spawn).
         status: String,
+        /// Stderr git (pertes UTF-8 tolérées par `from_utf8_lossy`).
         stderr: String,
     },
 
+    /// Sortie git inattendue dans les parses purs (VNL-SBX-005, `500`) — ligne de
+    /// tag inconnu, header `# branch.head` absent (`line_no: 0`) ou non numérique.
     #[error("VNL-SBX-005: could not parse git status output at line {line_no}: {line:?}")]
-    ParseFailed { line_no: usize, line: String },
+    ParseFailed {
+        /// Numéro de ligne fautive (`0` = header absent).
+        line_no: usize,
+        /// Ligne d'origine.
+        line: String,
+    },
 
+    /// `rev-parse --abbrev-ref HEAD` rend `"HEAD"` sur unpushed/push (VNL-SBX-006, `500`).
     #[error("VNL-SBX-006: cannot determine unpushed commits: HEAD is detached")]
     DetachedHead,
 
+    /// `git diff` en exit ≠ 0 pour le chemin demandé (VNL-SBX-007, `500`) —
+    /// dépôt absent et pathspec invalide/ambigu inclus.
     #[error("VNL-SBX-007: git diff failed for {path}: {status}: {stderr}")]
     DiffFailed {
+        /// Chemin utilisateur brut de la requête.
         path: String,
+        /// Code de sortie de `git diff`.
         status: String,
+        /// Stderr git.
         stderr: String,
     },
 
+    /// `git diff --cached --quiet` sort 0 : rien de stagé (VNL-SBX-008, `500` —
+    /// erreur-utilisateur rendue en 500 par contrat, pas 4xx).
     #[error("VNL-SBX-008: nothing staged to commit")]
     EmptyCommit,
 
+    /// Checkout refusé : arbre ou index sale (VNL-SBX-011, `500`) ; les untracked
+    /// ne comptent pas.
     #[error("VNL-SBX-011: checkout refused: working tree is dirty (branch: {branch})")]
-    CheckoutRefused { branch: String },
+    CheckoutRefused {
+        /// Branche cible refusée.
+        branch: String,
+    },
 
+    /// Push dont le stderr contient `rejected` ou `non-fast-forward`
+    /// (VNL-SBX-009, `500`, classification en premier).
     #[error("VNL-SBX-009: push rejected (non fast-forward): {stderr}")]
-    PushRejected { stderr: String },
+    PushRejected {
+        /// Stderr du push.
+        stderr: String,
+    },
 
+    /// Push dont le stderr matche la heuristique d'échec d'écriture
+    /// (VNL-SBX-010, `500`) — cf. [`classify_push_stderr`].
     #[error("VNL-SBX-010: git write failed (no credentials): {stderr}")]
-    GitWriteFailed { stderr: String },
+    GitWriteFailed {
+        /// Stderr du push.
+        stderr: String,
+    },
 
+    /// [`crate::tools_impl::confine_path`] en échec sur diff/stage/unstage
+    /// (VNL-SBX-015, `500`) — message portant le chemin UTILISATEUR d'origine.
     #[error("VNL-SBX-015: path escapes sandbox root: {path}")]
-    InvalidPath { path: String },
+    InvalidPath {
+        /// Chemin utilisateur fautif.
+        path: String,
+    },
 
+    /// Provisionnement SSH en échec (VNL-SBX-016, `500`) — `.ssh` non créable,
+    /// `ssh-keygen` non lançable/failed, `.pub` absente ou illisible.
     #[error("VNL-SBX-016: ssh key provisioning failed: {stderr}")]
-    SshKeyFailed { stderr: String },
+    SshKeyFailed {
+        /// Stderr ou message d'io.
+        stderr: String,
+    },
 
+    /// `git merge` sur tout code de sortie ≠ 0 et ≠ 1 (VNL-SBX-012, `500`).
     #[error("VNL-SBX-012: merge not started: {stderr}")]
-    MergeNotStarted { stderr: String },
+    MergeNotStarted {
+        /// Stderr git.
+        stderr: String,
+    },
 
+    /// Tout échec de `git merge --abort` (VNL-SBX-013, `500`) — le `CommandFailed`
+    /// est intégralement effondré en ce message.
     #[error("VNL-SBX-013: no merge in progress to abort")]
     NoMergeInProgress,
 
+    /// Ref/nom commençant par `-` rejeté par `reject_leading_dash`
+    /// (VNL-SBX-014, seule variante en `400`).
     #[error("VNL-SBX-014: invalid ref/name {value:?}: must not start with '-'")]
-    InvalidRef { value: String },
+    InvalidRef {
+        /// Valeur rejetée.
+        value: String,
+    },
 }
 
 impl IntoResponse for GitError {
@@ -82,171 +141,248 @@ impl IntoResponse for GitError {
     }
 }
 
+/// État d'un fichier dans le statut git (sortie porcelain v2), sérialisé en `snake_case`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileState {
+    /// `M` (et `T` typechange, traité comme modifié faute d'état dédié).
     Modified,
+    /// `A`.
     Added,
+    /// `D`.
     Deleted,
+    /// `R` (et `C` copie, traitée comme renommée faute d'état dédié).
     Renamed,
+    /// Tag `?` — non suivi.
     Untracked,
+    /// Tag `u` — conflit (toujours `staged: true`, quelle que soit la combinaison).
     Conflicted,
 }
 
+/// Un fichier du statut git (entrée `files[]` de [`GitStatus`]).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FileEntry {
+    /// Chemin (relatif au dépôt ; chemin cible pour un renommage).
     pub path: String,
+    /// État mappé X sinon Y (X ≠ `.` l'emporte).
     pub state: FileState,
+    /// `true` si l'état vient de la colonne index (X), `false` de la colonne worktree (Y).
     pub staged: bool,
 }
 
+/// Réponse de `GET /git/status` (sortie de `git status --porcelain=v2 --branch`).
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct GitStatus {
+    /// Valeur de `# branch.head` — littéralement `"(detached)"` si HEAD détaché.
     pub branch: String,
+    /// Fichiers modifiés, dans l'ordre de la sortie git.
     pub files: Vec<FileEntry>,
+    /// `files` vide.
     pub clean: bool,
 }
 
 // ── Types pour /git/diff ───────────────────────────────────────────────────
 
+/// Query de `GET /git/diff`.
 #[derive(Debug, Deserialize)]
 pub struct DiffParams {
-    pub path: String, // requis ; manquant → 400 automatique par axum
+    /// Chemin requis (manquant → `400` automatique par axum).
+    pub path: String,
+    /// Absent/`false` → diff working tree ; `true` → diff index (`--staged`).
     #[serde(default)]
-    pub staged: Option<bool>, // absent/false → diff working tree ; true → diff index
+    pub staged: Option<bool>,
 }
 
+/// Réponse de `GET /git/diff`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DiffResponse {
-    pub path: String, // le chemin utilisateur brut (celui reçu dans DiffParams)
-    pub diff: String, // patch unifié texte (stdout de git diff)
+    /// Chemin utilisateur BRUT (celui reçu dans [`DiffParams`], pas le chemin confiné).
+    pub path: String,
+    /// Patch unifié texte (stdout de `git diff` — vide si aucun écart).
+    pub diff: String,
 }
 
 // ── Types pour /git/stage / /git/unstage ────────────────────────────────────
 
+/// Corps de `POST /git/stage` — liste vide → no-op succès sans exécuter git.
 #[derive(Debug, Deserialize)]
 pub struct StageRequest {
+    /// Chemins à ajouter à l'index (chacun confinement-testé par `confine_path`).
     pub paths: Vec<String>,
 }
 
+/// Corps de `POST /git/unstage` — liste vide → no-op succès sans exécuter git.
 #[derive(Debug, Deserialize)]
 pub struct UnstageRequest {
+    /// Chemins à retirer de l'index (chacun confinement-testé par `confine_path`).
     pub paths: Vec<String>,
 }
 
+/// Enveloppe succès `{"ok":true}` des routes sans corps utile.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct OkResponse {
+    /// Toujours `true` (l'échec passe par [`GitError`]).
     pub ok: bool,
 }
 
 // ── Types pour /git/commit ─────────────────────────────────────────────────
 
+/// Corps de `POST /git/commit`.
 #[derive(Debug, Deserialize)]
 pub struct CommitRequest {
+    /// Message du commit (passé en argv séparé après `-m`, jamais réinterprété
+    /// comme flag ; vide accepté).
     pub message: String,
 }
 
+/// Réponse de `POST /git/commit`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommitResponse {
-    pub sha: String,   // SHA complet (40 hex), PAS tronqué à 7
-    pub title: String, // première ligne du message
+    /// SHA complet (40 hex) du commit créé — PAS tronqué à 7.
+    pub sha: String,
+    /// Première ligne du message (`%s`).
+    pub title: String,
 }
 
 // ── Types pour /git/push ───────────────────────────────────────────────────
 
+/// Réponse de `POST /git/push`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct PushResponse {
-    pub ok: bool,    // true si succès
-    pub pushed: u32, // nombre de commits poussés par cette opération
+    /// `true` si succès (l'échec passe par [`GitError`]).
+    pub ok: bool,
+    /// Nombre de commits comptés AVANT le push (`rev-list --count`).
+    pub pushed: u32,
 }
 
-/// Classification du stderr d'un `git push` échoué.
+/// Classification du stderr d'un `git push` échoué (heuristique par sous-chaînes).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushErrorKind {
-    Rejected,   // rejet non fast-forward → PushRejected
-    AuthFailed, // pas de credentials write → GitWriteFailed
-    Other,      // tout autre échec → CommandFailed
+    /// Rejet non fast-forward → [`GitError::PushRejected`] (testé en premier).
+    Rejected,
+    /// Pas de credentials write → [`GitError::GitWriteFailed`].
+    AuthFailed,
+    /// Tout autre échec → [`GitError::CommandFailed`].
+    Other,
 }
 
+/// Query de `GET /git/log`.
 #[derive(Debug, Deserialize)]
 pub struct LogParams {
+    /// Nombre max de commits (absent → `100` ; non numérique → rejet axum).
     pub limit: Option<u32>,
+    /// `true` → `git log --all`, sinon branche courante seulement.
     pub all: Option<bool>,
 }
 
+/// Un commit de la réponse de `GET /git/log`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LogCommit {
+    /// SHA complet (40 hex).
     pub sha: String,
+    /// SHAs complets des parents (séparés par espaces ; vide si commit racine).
     pub parents: Vec<String>,
+    /// `%D` splitté sur `", "` (vide si aucune ref).
     pub refs: Vec<String>,
+    /// Sujet (`%s`).
     pub title: String,
+    /// Auteur (`%an`).
     pub author: String,
+    /// Date stricte ISO 8601 (`%aI`).
     pub date: String,
 }
 
+/// Réponse de `GET /git/log`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LogResponse {
+    /// Nom court du HEAD (détaché → `"HEAD"` sans erreur).
     pub branch: String,
+    /// Commits tronqués à `limit`.
     pub commits: Vec<LogCommit>,
+    /// `true` si davantage de commits existaient (détection via `--max-count=limit+1`).
     pub truncated: bool,
 }
 
 // ── Types pour /git/branches ───────────────────────────────────────────────
 
+/// Une branche (locale ou distante) de la réponse de `GET /git/branches`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BranchEntry {
-    pub name: String,             // nom court : "main", "origin/main", ...
-    pub is_remote: bool,          // true si ref sous refs/remotes/
-    pub upstream: Option<String>, // upstream:short ; None si pas d'upstream
+    /// Nom court : `main`, `origin/main`, …
+    pub name: String,
+    /// `true` si ref sous `refs/remotes/`.
+    pub is_remote: bool,
+    /// `upstream:short` abrégé sans préfixe `refs/…/` ; `None` si pas d'upstream.
+    pub upstream: Option<String>,
 }
 
+/// Réponse de `GET /git/branches`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct BranchesResponse {
-    pub current: String, // `git rev-parse --abbrev-ref HEAD` (brut ; "HEAD" si détaché)
-    pub merging: bool,   // présence de `.git/MERGE_HEAD`
+    /// `git rev-parse --abbrev-ref HEAD` brut (`"HEAD"` littéral si détaché, pas d'erreur ici).
+    pub current: String,
+    /// Succès de `git rev-parse --verify MERGE_HEAD` (fusion en cours).
+    pub merging: bool,
+    /// Refs sous `refs/heads` ET `refs/remotes` (distants inclus, `is_remote: true`).
     pub branches: Vec<BranchEntry>,
 }
 
+/// Corps de `POST /git/branches`.
 #[derive(Debug, Deserialize)]
 pub struct CreateBranchRequest {
+    /// Nom de la branche à créer (pas de `-` initial → 400 VNL-SBX-014).
     pub name: String,
-    pub from: Option<String>, // ref de départ (branche locale ou remote) ; None → HEAD
+    /// Ref de départ (branche locale ou remote) ; `None` → HEAD courant.
+    pub from: Option<String>,
 }
 
+/// Corps de `POST /git/checkout`.
 #[derive(Debug, Deserialize)]
 pub struct CheckoutRequest {
+    /// Branche cible (pas de `-` initial → 400 VNL-SBX-014).
     pub branch: String,
 }
 
 // ── Types pour /git/ssh-key ────────────────────────────────────────────────
 
+/// Réponse de `GET /git/ssh-key` — l'absence de clé est un état normal, jamais une erreur.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SshKeyStatus {
-    pub exists: bool,               // le fichier PRIVÉ existe
-    pub public_key: Option<String>, // contenu trimé de `<priv>.pub` si lisible, sinon None
+    /// Le fichier PRIVÉ `~/.ssh/id_ed25519` est un fichier régulier.
+    pub exists: bool,
+    /// Contenu trimé de `id_ed25519.pub` si lisible (lu même quand `exists` est
+    /// `false` — le `.pub` peut exister seul), `None` sinon.
+    pub public_key: Option<String>,
 }
 
+/// Réponse de `POST /git/ssh-key`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SshKeyResponse {
-    pub public_key: String, // contenu trimé de `<priv>.pub`
+    /// Contenu trimé de `<priv>.pub`.
+    pub public_key: String,
 }
 
 // ── Types pour /git/merge ────────────────────────────────────────────────
 
+/// Corps de `POST /git/merge`.
 #[derive(Debug, Deserialize)]
 pub struct MergeRequest {
+    /// Ref à fusionner dans la branche courante (pas de `-` initial → 400 VNL-SBX-014).
     pub branch: String,
 }
 
+/// Réponse de `POST /git/merge` — le conflit est un RÉSULTAT normal (200), jamais une erreur.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct MergeResponse {
-    pub conflicted: bool, // true = conflit (résultat normal, réponse 200)
-    pub sha: Option<String>, // SHA complet (40 hex) du merge auto-commité ;
-                          // présenté seulement si conflicted=false
+    /// `true` = conflit (exit 1).
+    pub conflicted: bool,
+    /// SHA complet (40 hex) du merge auto-commité ; présenté seulement si `conflicted: false`.
+    pub sha: Option<String>,
 }
 
 /// Chemins de la clé SSH sous `home` : (privée, publique).
 /// `home/.ssh/id_ed25519` et `home/.ssh/id_ed25519.pub`.
+#[must_use]
 pub fn ssh_key_paths(home: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
     let priv_path = home.join(".ssh").join("id_ed25519");
     let pub_path = priv_path.with_extension("pub");
@@ -256,6 +392,7 @@ pub fn ssh_key_paths(home: &std::path::Path) -> (std::path::PathBuf, std::path::
 /// HOME du pod sandbox : `std::env::var("HOME")` si défini et non vide,
 /// sinon `/home/vanyline` (repli — le pod Sandbox monte le PVC Owner à ce
 /// chemin, cf. design section "Provisioning SSH"). Dépend de l'env.
+#[must_use]
 pub fn ssh_home() -> std::path::PathBuf {
     std::env::var("HOME").map_or_else(
         |_| std::path::PathBuf::from("/home/vanyline"),
@@ -296,6 +433,12 @@ fn map_state_char(c: char) -> Option<FileState> {
 
 /// Parse la sortie de `git status --porcelain=v2 --branch`. Fonction pure,
 /// aucune I/O — testable directement sur des chaînes de fixture.
+///
+/// # Errors
+///
+/// [`GitError::ParseFailed`] (VNL-SBX-005) sur ligne de tag inconnu, ligne
+/// ordinaire/renommée/conflit mal découpée, ou header `# branch.head` absent
+/// (`line_no: 0`).
 pub fn parse_status(output: &str) -> Result<GitStatus, GitError> {
     let mut branch: Option<String> = None;
     let mut files = Vec::new();
@@ -304,7 +447,7 @@ pub fn parse_status(output: &str) -> Result<GitStatus, GitError> {
         if line.is_empty() {
             continue;
         }
-        let line_no = idx + 1;
+        let line_no = idx.saturating_add(1);
 
         if let Some(rest) = line.strip_prefix("# branch.head ") {
             branch = Some(rest.to_string());
@@ -328,7 +471,9 @@ pub fn parse_status(output: &str) -> Result<GitStatus, GitError> {
                 state: FileState::Untracked,
                 staged: false,
             }),
-            "!" => continue, // entrées ignorées — --ignored non demandé, ignoré par prudence
+            // entrées ignorées — --ignored non demandé, ignoré par prudence.
+            // (le `continue` redondant a été retiré : ce match termine le corps de boucle)
+            "!" => {}
             _ => {
                 return Err(GitError::ParseFailed {
                     line_no,
@@ -409,17 +554,14 @@ fn entry_from_xy(
     full_line: &str,
 ) -> Result<FileEntry, GitError> {
     let mut chars = xy.chars();
-    let (x, y) = match (chars.next(), chars.next()) {
-        (Some(x), Some(y)) => (x, y),
-        _ => {
-            return Err(GitError::ParseFailed {
-                line_no,
-                line: full_line.to_string(),
-            });
-        }
+    let (Some(x), Some(y)) = (chars.next(), chars.next()) else {
+        return Err(GitError::ParseFailed {
+            line_no,
+            line: full_line.to_string(),
+        });
     };
 
-    let (effective, staged) = if x != '.' { (x, true) } else { (y, false) };
+    let (effective, staged) = if x == '.' { (y, false) } else { (x, true) };
     let state = map_state_char(effective).ok_or_else(|| GitError::ParseFailed {
         line_no,
         line: full_line.to_string(),
@@ -434,6 +576,17 @@ fn entry_from_xy(
 
 /// Exécute `git -C <sandbox_root> status --porcelain=v2 --branch` et parse
 /// le résultat. Le `Command` bloquant tourne hors de l'executor tokio.
+///
+/// # Errors
+///
+/// [`GitError::CommandFailed`] (VNL-SBX-004) si git non lançable ou exit ≠ 0
+/// (répertoire sans dépôt inclus), [`GitError::ParseFailed`] (VNL-SBX-005) sur
+/// sortie inattendue.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn run_status(sandbox_root: &StdPath) -> Result<GitStatus, GitError> {
     let root = sandbox_root.to_path_buf();
@@ -473,6 +626,13 @@ pub async fn run_status(sandbox_root: &StdPath) -> Result<GitStatus, GitError> {
     .expect("run_status blocking task panicked")
 }
 
+/// `GET /git/status` — statut du dépôt de travail (branch, fichiers, clean).
+///
+/// # Errors
+///
+/// Rend [`GitError`] en `{"error": <Display>}` : [`GitError::CommandFailed`]
+/// (VNL-SBX-004, `500`) sur git en échec, [`GitError::ParseFailed`]
+/// (VNL-SBX-005, `500`) sur sortie inattendue.
 pub async fn handle_status(State(state): State<AppState>) -> Result<Json<GitStatus>, GitError> {
     run_status(&state.config.sandbox_root).await.map(Json)
 }
@@ -481,19 +641,29 @@ pub async fn handle_status(State(state): State<AppState>) -> Result<Json<GitStat
 
 const UNPUSHED_MAX_COMMITS: usize = 200;
 
+/// Un commit de la réponse de `GET /git/unpushed`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct CommitEntry {
+    /// SHA tronqué à 7 caractères (convention fixe, pas le `--abbrev` variable de git).
     pub sha: String,
+    /// Sujet (`%s`).
     pub title: String,
+    /// Auteur (`%an`).
     pub author: String,
+    /// Date ISO 8601 (`%aI`).
     pub date: String,
 }
 
+/// Réponse de `GET /git/unpushed`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct UnpushedStatus {
+    /// Nom court du HEAD (erreur [`GitError::DetachedHead`] si détaché).
     pub branch: String,
+    /// `Some("origin/<branche>")` si `refs/remotes/origin/<branche>` existe, `None` sinon.
     pub upstream: Option<String>,
+    /// Commits non poussés, plafonnés à `UNPUSHED_MAX_COMMITS` (200).
     pub commits: Vec<CommitEntry>,
+    /// `true` si la liste a été tronquée au plafond.
     pub truncated: bool,
 }
 
@@ -508,14 +678,14 @@ fn run_git(args: &[&str]) -> Result<String, GitError> {
         .args(args)
         .output()
         .map_err(|e| GitError::CommandFailed {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(std::string::ToString::to_string).collect(),
             status: e.to_string(),
             stderr: String::new(),
         })?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(GitError::CommandFailed {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(std::string::ToString::to_string).collect(),
             status: output.status.to_string(),
             stderr,
         });
@@ -534,7 +704,7 @@ fn is_dirty(root: &StdPath, staged: bool) -> Result<bool, GitError> {
         args.push("--cached".to_string());
     }
     args.push("--quiet".to_string());
-    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let refs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
 
     let output = Command::new("git")
         .args(&refs)
@@ -558,8 +728,8 @@ fn is_dirty(root: &StdPath, staged: bool) -> Result<bool, GitError> {
 /// Rejette une valeur qui commencerait par `-` avant qu'elle ne devienne un
 /// argument positionnel de commande git (branche, nom, point de départ) —
 /// sans ce garde-fou, une valeur comme `--abort` passée à `git merge`
-/// (merge_args n'a pas de séparateur `--`, comme checkout_args/
-/// create_branch_args/delete_branch_args) serait interprétée comme un flag
+/// (`merge_args` n'a pas de séparateur `--`, comme `checkout_args`/
+/// `create_branch_args/delete_branch_args`) serait interprétée comme un flag
 /// plutôt qu'une ref, avec des effets de bord (ex. annuler un merge en
 /// cours au lieu d'en démarrer un). Ajouter `--` partout ne suffit pas :
 /// `git checkout -- <x>` change le sens de `<x>` (pathspec, pas branche) —
@@ -623,7 +793,7 @@ fn parse_commits(output: &str) -> Result<Vec<CommitEntry>, GitError> {
         if line.is_empty() {
             continue;
         }
-        let line_no = idx + 1;
+        let line_no = idx.saturating_add(1);
         let fields: Vec<&str> = line.split('\u{1f}').collect();
         match fields.as_slice() {
             [sha, title, author, date] => {
@@ -647,6 +817,17 @@ fn parse_commits(output: &str) -> Result<Vec<CommitEntry>, GitError> {
 
 /// Exécute la comparaison et retourne le résultat. `sandbox_root` est un
 /// worktree normal (pas bare) — `VNL_SANDBOX_ROOT`.
+///
+/// # Errors
+///
+/// [`GitError::DetachedHead`] (VNL-SBX-006) sur HEAD détaché,
+/// [`GitError::CommandFailed`] (VNL-SBX-004) sur git en échec,
+/// [`GitError::ParseFailed`] (VNL-SBX-005) sur sortie `git log` inattendue.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn run_unpushed(sandbox_root: &StdPath) -> Result<UnpushedStatus, GitError> {
     let root = sandbox_root.to_path_buf();
@@ -670,7 +851,7 @@ pub async fn run_unpushed(sandbox_root: &StdPath) -> Result<UnpushedStatus, GitE
         };
 
         let range = format!("{compare_ref}..HEAD");
-        let max_count_arg = format!("--max-count={}", UNPUSHED_MAX_COMMITS + 1);
+        let max_count_arg = format!("--max-count={}", UNPUSHED_MAX_COMMITS.saturating_add(1));
         let log_output = run_git(&[
             "-C",
             &root_str,
@@ -695,6 +876,13 @@ pub async fn run_unpushed(sandbox_root: &StdPath) -> Result<UnpushedStatus, GitE
     .expect("run_unpushed blocking task panicked")
 }
 
+/// `GET /git/unpushed` — commits locaux non poussés (plafonnés à 200, `truncated`).
+///
+/// # Errors
+///
+/// Rend [`GitError`] en `{"error": <Display>}` : [`GitError::DetachedHead`]
+/// (VNL-SBX-006, `500`), [`GitError::CommandFailed`] (VNL-SBX-004, `500`),
+/// [`GitError::ParseFailed`] (VNL-SBX-005, `500`).
 pub async fn handle_unpushed(
     State(state): State<AppState>,
 ) -> Result<Json<UnpushedStatus>, GitError> {
@@ -749,7 +937,7 @@ fn merge_abort_args() -> Vec<String> {
 
 /// Parse la sortie de `git log -1 --pretty=format:%H%x1f%s` →
 /// `(sha_complet, titre)`. Une ligne attendue ; `\u{1f}` sépare sha et titre.
-/// Sortie vide → ParseFailed { line_no: 0, line: "empty output" }.
+/// Sortie vide → `ParseFailed` { `line_no`: 0, line: "empty output" }.
 fn parse_commit_output(output: &str) -> Result<(String, String), GitError> {
     if output.is_empty() {
         return Err(GitError::ParseFailed {
@@ -772,7 +960,19 @@ fn parse_commit_output(output: &str) -> Result<(String, String), GitError> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-/// GET /git/diff — diff working tree ou index pour un chemin.
+/// `GET /git/diff` — diff working tree ou index (`staged=true`) pour un chemin
+/// confiné ; la réponse porte le chemin UTILISATEUR brut.
+///
+/// # Errors
+///
+/// [`GitError::InvalidPath`] (VNL-SBX-015, `500`) si `confine_path` échoue,
+/// [`GitError::DiffFailed`] (VNL-SBX-007, `500`) sur tout exit ≠ 0 de `git diff`
+/// (dépôt absent, pathspec invalide/ambigu).
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_diff(
     State(state): State<AppState>,
@@ -795,13 +995,13 @@ pub async fn handle_diff(
 
     let path = params.path;
     let staged = params.staged == Some(true);
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let result = tokio::task::spawn_blocking(move || {
         let args: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
             .into_iter()
             .chain(diff_args(&rel, staged))
             .collect();
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
         run_git(&refs)
     })
     .await
@@ -822,7 +1022,17 @@ pub async fn handle_diff(
     }
 }
 
-/// POST /git/stage — ajouter des chemins à l'index.
+/// `POST /git/stage` — `git add -- <chemins confinés>` (liste vide : no-op succès).
+///
+/// # Errors
+///
+/// [`GitError::InvalidPath`] (VNL-SBX-015, `500`) sur évasion de confinement,
+/// [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_stage(
     State(state): State<AppState>,
@@ -832,7 +1042,7 @@ pub async fn handle_stage(
         return Ok(Json(OkResponse { ok: true }));
     }
 
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let confined_paths = body
         .paths
         .iter()
@@ -842,7 +1052,7 @@ pub async fn handle_stage(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let rels: Vec<String> = confined_paths
+    let rel_paths: Vec<String> = confined_paths
         .into_iter()
         .map(|p| {
             p.strip_prefix(&root)
@@ -856,9 +1066,9 @@ pub async fn handle_stage(
     tokio::task::spawn_blocking(move || {
         let args: Vec<String> = ["-C".to_string(), root_ref.to_string_lossy().into_owned()]
             .into_iter()
-            .chain(stage_args(&rels))
+            .chain(stage_args(&rel_paths))
             .collect();
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
         run_git(&refs)
     })
     .await
@@ -867,7 +1077,17 @@ pub async fn handle_stage(
     Ok(Json(OkResponse { ok: true }))
 }
 
-/// POST /git/unstage — retirer des chemins de l'index.
+/// `POST /git/unstage` — `git restore --staged -- <chemins>` (liste vide : no-op succès).
+///
+/// # Errors
+///
+/// [`GitError::InvalidPath`] (VNL-SBX-015, `500`) sur évasion de confinement,
+/// [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_unstage(
     State(state): State<AppState>,
@@ -877,7 +1097,7 @@ pub async fn handle_unstage(
         return Ok(Json(OkResponse { ok: true }));
     }
 
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let confined_paths = body
         .paths
         .iter()
@@ -887,7 +1107,7 @@ pub async fn handle_unstage(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let rels: Vec<String> = confined_paths
+    let rel_paths: Vec<String> = confined_paths
         .into_iter()
         .map(|p| {
             p.strip_prefix(&root)
@@ -901,9 +1121,9 @@ pub async fn handle_unstage(
     tokio::task::spawn_blocking(move || {
         let args: Vec<String> = ["-C".to_string(), root_ref.to_string_lossy().into_owned()]
             .into_iter()
-            .chain(unstage_args(&rels))
+            .chain(unstage_args(&rel_paths))
             .collect();
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
         run_git(&refs)
     })
     .await
@@ -912,14 +1132,26 @@ pub async fn handle_unstage(
     Ok(Json(OkResponse { ok: true }))
 }
 
-/// POST /git/commit — commit les changements stagés.
+/// `POST /git/commit` — `git commit -m <message>` des changements stagés, SHA
+/// complet relu par `git log -1`.
+///
+/// # Errors
+///
+/// [`GitError::EmptyCommit`] (VNL-SBX-008, `500`) si rien n'est stagé,
+/// [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec,
+/// [`GitError::ParseFailed`] (VNL-SBX-005, `500`) sur sortie `git log -1` inattendue.
+///
+/// # Panics
+///
+/// Si une des tâches `spawn_blocking` panique elle-même (`.expect` sur les
+/// `JoinHandle`, harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_commit(
     State(state): State<AppState>,
     Json(body): Json<CommitRequest>,
 ) -> Result<Json<CommitResponse>, GitError> {
     // Clone root (used in three separate blocking tasks).
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let message = body.message.clone();
 
     // 1. Vérifier s'il y a des changements stagés :
@@ -937,7 +1169,7 @@ pub async fn handle_commit(
         ]
         .into_iter()
         .collect();
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
         run_git(&refs)
     })
     .await
@@ -960,7 +1192,7 @@ pub async fn handle_commit(
         ]
         .into_iter()
         .collect();
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
         run_git(&refs)
     })
     .await
@@ -978,7 +1210,7 @@ pub async fn handle_commit(
         ]
         .into_iter()
         .collect();
-        let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args.iter().map(std::string::String::as_str).collect();
         run_git(&refs)
     })
     .await
@@ -1037,7 +1269,7 @@ fn parse_branches(output: &str) -> Result<Vec<BranchEntry>, GitError> {
 
     let mut branches = Vec::new();
     for (idx, line) in output.lines().enumerate() {
-        let line_no = idx + 1;
+        let line_no = idx.saturating_add(1);
         let parts: Vec<&str> = line.split('\t').collect();
         match parts.as_slice() {
             [_refname] => {
@@ -1098,12 +1330,23 @@ fn parse_branches(output: &str) -> Result<Vec<BranchEntry>, GitError> {
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
-/// GET /git/branches — liste des branches et statut de fusion.
+/// `GET /git/branches` — liste locales + distantes, branche courante, fusion en cours.
+///
+/// # Errors
+///
+/// [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec,
+/// [`GitError::ParseFailed`] (VNL-SBX-005, `500`) sur sortie `for-each-ref`
+/// inattendue. HEAD détaché N'EST pas une erreur ici (`current: "HEAD"`).
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_branches(
     State(state): State<AppState>,
 ) -> Result<Json<BranchesResponse>, GitError> {
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let result = tokio::task::spawn_blocking(move || {
         // 1. `git -C root rev-parse --abbrev-ref HEAD` → current
         let current = run_git(&[
@@ -1125,8 +1368,7 @@ pub async fn handle_branches(
                 "MERGE_HEAD",
             ])
             .output()
-            .map(|output| output.status.success())
-            .unwrap_or(false);
+            .is_ok_and(|output| output.status.success());
 
         // 3. `git for-each-ref` → parse
         let list_args = branch_list_args();
@@ -1135,7 +1377,10 @@ pub async fn handle_branches(
                 .into_iter()
                 .chain(list_args)
                 .collect();
-        let list_refs_prefixed: Vec<&str> = list_args_prefixed.iter().map(|s| s.as_str()).collect();
+        let list_refs_prefixed: Vec<&str> = list_args_prefixed
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         let output = run_git(&list_refs_prefixed)?;
         let branches = parse_branches(&output)?;
 
@@ -1152,7 +1397,17 @@ pub async fn handle_branches(
     }))
 }
 
-/// POST /git/branches — créer une nouvelle branche.
+/// `POST /git/branches` — `git branch <name> [<from>]`.
+///
+/// # Errors
+///
+/// [`GitError::InvalidRef`] (VNL-SBX-014, `400`) si `name`/`from` commence par
+/// `-`, [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_create_branch(
     State(state): State<AppState>,
@@ -1162,7 +1417,7 @@ pub async fn handle_create_branch(
     if let Some(from) = &body.from {
         reject_leading_dash(from)?;
     }
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let name = body.name.clone();
     let from = body.from.clone();
     tokio::task::spawn_blocking(move || {
@@ -1171,7 +1426,10 @@ pub async fn handle_create_branch(
             .into_iter()
             .chain(args)
             .collect();
-        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args_prefixed
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         run_git(&refs)
     })
     .await
@@ -1180,7 +1438,20 @@ pub async fn handle_create_branch(
     Ok(Json(OkResponse { ok: true }))
 }
 
-/// POST /git/checkout — changer de branche avec vérification dirty tree.
+/// `POST /git/checkout` — changement de branche après vérification arbre+index
+/// propres (les untracked ne comptent pas).
+///
+/// # Errors
+///
+/// [`GitError::InvalidRef`] (VNL-SBX-014, `400`) si `branch` commence par `-`,
+/// [`GitError::CheckoutRefused`] (VNL-SBX-011, `500`) si arbre ou index sale,
+/// [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec — un code
+/// de sortie de `git diff` autre que 0/1 est une VRAIE erreur, jamais « propre ».
+///
+/// # Panics
+///
+/// Si une des tâches `spawn_blocking` panique elle-même (`.expect` sur les
+/// `JoinHandle`, harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_checkout(
     State(state): State<AppState>,
@@ -1188,7 +1459,7 @@ pub async fn handle_checkout(
 ) -> Result<Json<OkResponse>, GitError> {
     reject_leading_dash(&body.branch)?;
     let branch = body.branch.clone();
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
 
     // 1. Vérifier si le working tree est sale (avant checkout). `git diff
     // --quiet` : code 0 = propre, code 1 = sale, tout le reste (spawn
@@ -1217,7 +1488,10 @@ pub async fn handle_checkout(
         let root_owned: String = root_ref.to_string_lossy().into();
         let mut args_prefixed: Vec<String> = vec!["-C".to_string(), root_owned];
         args_prefixed.extend(args);
-        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args_prefixed
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         run_git(&refs)
     })
     .await
@@ -1226,21 +1500,35 @@ pub async fn handle_checkout(
     result.map(|_| Json(OkResponse { ok: true }))
 }
 
-/// DELETE /git/branches/{name} — supprimer une branche (force).
+/// `DELETE /git/branches/{name}` — suppression FORCÉE (`git branch -D`), sans
+/// vérification de fusion mergée.
+///
+/// # Errors
+///
+/// [`GitError::InvalidRef`] (VNL-SBX-014, `400`) si le nom commence par `-`,
+/// [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_delete_branch(
     State(state): State<AppState>,
     Path(name): Path<String>,
 ) -> Result<Json<OkResponse>, GitError> {
     reject_leading_dash(&name)?;
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     tokio::task::spawn_blocking(move || {
         let args = delete_branch_args(&name);
         let args_prefixed: Vec<String> = ["-C".to_string(), root.to_string_lossy().into_owned()]
             .into_iter()
             .chain(args)
             .collect();
-        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args_prefixed
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         run_git(&refs)
     })
     .await
@@ -1282,6 +1570,12 @@ fn count_pushed_args(refspec: Option<&str>) -> Vec<String> {
 /// (sans `-C` — ajouté par l'appelant).
 /// Format : `%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%aI` (6 champs séparés par \u{1f}).
 /// `limit+1` pour détecter la troncature.
+///
+/// tooling.sdd D3 — `limit + 1` : git.sdd contracte l'argv `--max-count=limit+1` ;
+/// ni `saturating_add` (change le wrapping release pour `u32::MAX`) ni `checked_add`
+/// (inventerait une branche non specée) ne préservent le comportement actuel — allow.
+#[allow(clippy::arithmetic_side_effects)]
+#[must_use]
 pub fn log_args(limit: u32, all: bool) -> Vec<String> {
     let mut args = vec![
         "log".to_string(),
@@ -1303,6 +1597,10 @@ pub fn log_args(limit: u32, all: bool) -> Vec<String> {
 /// - `author` : `%an`
 /// - `date` : `%aI` (strict ISO 8601)
 ///   Moins de 6 champs → `ParseFailed { line_no, line }`.
+///
+/// # Errors
+///
+/// [`GitError::ParseFailed`] (VNL-SBX-005) si la ligne n'a pas 6 champs séparés par `\u{1f}`.
 pub fn parse_log_line(line: &str, line_no: usize, full: &str) -> Result<LogCommit, GitError> {
     let fields: Vec<&str> = line.split('\u{1f}').collect();
     match fields.as_slice() {
@@ -1313,13 +1611,15 @@ pub fn parse_log_line(line: &str, line_no: usize, full: &str) -> Result<LogCommi
                 parents
                     .split(' ')
                     .filter(|s| !s.is_empty())
-                    .map(|s| s.to_string())
+                    .map(std::string::ToString::to_string)
                     .collect()
             };
             let refs_vec: Vec<String> = if refs.is_empty() {
                 Vec::new()
             } else {
-                refs.split(", ").map(|s| s.to_string()).collect()
+                refs.split(", ")
+                    .map(std::string::ToString::to_string)
+                    .collect()
             };
             Ok(LogCommit {
                 sha: sha.to_string(),
@@ -1337,22 +1637,26 @@ pub fn parse_log_line(line: &str, line_no: usize, full: &str) -> Result<LogCommi
     }
 }
 
-/// Parse la sortie de `git log` (une ligne par commit) → Vec<LogCommit>.
+/// Parse la sortie de `git log` (une ligne par commit) → `Vec<LogCommit>`.
 /// Ligne vide → ignorée. Sortie vide → `Ok(vec![])`.
+///
+/// # Errors
+///
+/// Propage [`GitError::ParseFailed`] (VNL-SBX-005) de [`parse_log_line`].
 pub fn parse_log(output: &str) -> Result<Vec<LogCommit>, GitError> {
     let mut commits = Vec::new();
     for (idx, line) in output.lines().enumerate() {
         if line.is_empty() {
             continue;
         }
-        let line_no = idx + 1;
+        let line_no = idx.saturating_add(1);
         commits.push(parse_log_line(line, line_no, output)?);
     }
     Ok(commits)
 }
 
 /// Parse la sortie de `git rev-list --count` → u32. Trim avant parse.
-/// Entrée non numérique → ParseFailed { line_no: 1, line }.
+/// Entrée non numérique → `ParseFailed` { `line_no`: 1, line }.
 fn parse_count(output: &str) -> Result<u32, GitError> {
     let trimmed = output.trim();
     trimmed.parse::<u32>().map_err(|_| GitError::ParseFailed {
@@ -1362,6 +1666,7 @@ fn parse_count(output: &str) -> Result<u32, GitError> {
 }
 
 /// Classification du stderr d'un `git push` échoué (heuristique).
+#[must_use]
 pub fn classify_push_stderr(stderr: &str) -> PushErrorKind {
     if stderr.contains("rejected") || stderr.contains("non-fast-forward") {
         PushErrorKind::Rejected
@@ -1384,9 +1689,22 @@ pub fn classify_push_stderr(stderr: &str) -> PushErrorKind {
 ///
 /// Pattern shared avec les autres handlers du module :
 /// `tokio::task::spawn_blocking` + `run_git`/`ref_exists`.
+///
+/// # Errors
+///
+/// [`GitError::DetachedHead`] (VNL-SBX-006), [`GitError::PushRejected`]
+/// (VNL-SBX-009) sur stderr `rejected`/`non-fast-forward`, [`GitError::GitWriteFailed`]
+/// (VNL-SBX-010) sur heuristique auth (cf. [`classify_push_stderr`]),
+/// [`GitError::CommandFailed`] (VNL-SBX-004) et [`GitError::ParseFailed`]
+/// (VNL-SBX-005) pour `rev-list --count` — tous en `500`.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_push(State(state): State<AppState>) -> Result<Json<PushResponse>, GitError> {
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let result = tokio::task::spawn_blocking(move || {
         let root_str = root.to_string_lossy().into_owned();
 
@@ -1411,29 +1729,29 @@ pub async fn handle_push(State(state): State<AppState>) -> Result<Json<PushRespo
         let pushed = if ref_exists(&root_str, &origin_target_ref)? {
             let count_args = count_pushed_args(Some(&format!("origin/{target}")));
             // Build: -C <root> rev-list --count origin/<target>..HEAD
-            let full: Vec<String> = ["-C".to_string(), root_str.to_string()]
+            let full: Vec<String> = ["-C".to_string(), root_str.clone()]
                 .into_iter()
                 .chain(count_args)
                 .collect();
-            let full_refs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
+            let full_refs: Vec<&str> = full.iter().map(std::string::String::as_str).collect();
             let output = run_git(&full_refs)?;
             parse_count(&output)?
         } else {
             let count_args = count_pushed_args(None);
-            let full: Vec<String> = ["-C".to_string(), root_str.to_string()]
+            let full: Vec<String> = ["-C".to_string(), root_str.clone()]
                 .into_iter()
                 .chain(count_args)
                 .collect();
-            let full_refs: Vec<&str> = full.iter().map(|s| s.as_str()).collect();
+            let full_refs: Vec<&str> = full.iter().map(std::string::String::as_str).collect();
             let output = run_git(&full_refs)?;
             parse_count(&output)?
         };
 
         // 4. git -C root push origin <target>
         let push_args_list = push_args(&target);
-        let mut push_cmd = vec!["-C".to_string(), root_str.to_string()];
+        let mut push_cmd = vec!["-C".to_string(), root_str.clone()];
         push_cmd.extend(push_args_list);
-        let push_refs: Vec<&str> = push_cmd.iter().map(|s| s.as_str()).collect();
+        let push_refs: Vec<&str> = push_cmd.iter().map(std::string::String::as_str).collect();
         match run_git(&push_refs) {
             Ok(_) => {}
             Err(GitError::CommandFailed {
@@ -1464,13 +1782,24 @@ pub async fn handle_push(State(state): State<AppState>) -> Result<Json<PushRespo
     result.map(Json)
 }
 
-/// GET /git/log — historique de la branche courante (ou `--all`).
+/// `GET /git/log` — historique de la branche courante (ou `--all`).
+///
+/// # Errors
+///
+/// [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur git en échec,
+/// [`GitError::ParseFailed`] (VNL-SBX-005, `500`) sur ligne de log mal séparée.
+/// HEAD détaché N'EST pas une erreur ici.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_log(
     State(state): State<AppState>,
     Query(params): Query<LogParams>,
 ) -> Result<Json<LogResponse>, GitError> {
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let limit = params.limit.unwrap_or(100);
     let all = params.all == Some(true);
 
@@ -1487,7 +1816,10 @@ pub async fn handle_log(
             .into_iter()
             .chain(args)
             .collect();
-        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args_prefixed
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         let output = run_git(&refs)?;
 
         // 3. Parse : `parse_log` → Vec<LogCommit>
@@ -1512,8 +1844,13 @@ pub async fn handle_log(
 
 // ── SSH key endpoints ──────────────────────────────────────────────────────
 
-/// GET /git/ssh-key — check the SSH key status (idempotent, never errors if
-/// the key does not exist — that is a normal state).
+/// `GET /git/ssh-key` — état de la clé SSH. Ne dépend pas de `sandbox_root` mais
+/// de [`ssh_home`]. Jamais d'erreur : l'absence de clé (et même l'absence du
+/// `.pub`) est un état normal rendu par [`SshKeyStatus`].
+///
+/// # Errors
+///
+/// Jamais d'erreur par contrat (git.sdd) : l'état « pas de clé » est normal.
 pub async fn handle_ssh_key_status(
     _state: State<AppState>,
 ) -> Result<Json<SshKeyStatus>, GitError> {
@@ -1535,6 +1872,17 @@ pub async fn handle_ssh_key_status(
 ///
 /// If the private key already exists, reads and returns the public key without
 /// regenerating. Otherwise creates `~/.ssh/id_ed25519` via `ssh-keygen`.
+///
+/// # Errors
+///
+/// [`GitError::SshKeyFailed`] (VNL-SBX-016, `500`) : `.ssh` non créable,
+/// `ssh-keygen` non lançable ou en échec (stderr propagé), `.pub` absente ou
+/// illisible (y compris clé déjà présente et `.pub` illisible).
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_ssh_key_create(
     _state: State<AppState>,
@@ -1599,13 +1947,24 @@ pub async fn handle_ssh_key_create(
 /// Exit code 0 → succès auto-commité (réponse 200 avec SHA).
 /// Exit code 1 → conflit (réponse 200 avec `conflicted: true`, **pas une erreur HTTP**).
 /// Tout autre code → `MergeNotStarted` (erreur HTTP VNL-SBX-012).
+///
+/// # Errors
+///
+/// [`GitError::InvalidRef`] (VNL-SBX-014, `400`) si `branch` commence par `-`,
+/// [`GitError::MergeNotStarted`] (VNL-SBX-012, `500`) sur tout code de sortie
+/// ≠ 0 et ≠ 1, [`GitError::CommandFailed`] (VNL-SBX-004, `500`) sur échec de spawn.
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_merge(
     State(state): State<AppState>,
     Json(body): Json<MergeRequest>,
 ) -> Result<Json<MergeResponse>, GitError> {
     reject_leading_dash(&body.branch)?;
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
     let branch = body.branch.clone();
 
     #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
@@ -1618,13 +1977,16 @@ pub async fn handle_merge(
             .into_iter()
             .chain(args)
             .collect();
-        let refs: Vec<&str> = cmd_args.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = cmd_args.iter().map(std::string::String::as_str).collect();
         let output =
             Command::new("git")
                 .args(&refs)
                 .output()
                 .map_err(|e| GitError::CommandFailed {
-                    args: refs.into_iter().map(|s| s.to_string()).collect(),
+                    args: refs
+                        .into_iter()
+                        .map(std::string::ToString::to_string)
+                        .collect(),
                     status: e.to_string(),
                     stderr: String::new(),
                 })?;
@@ -1670,11 +2032,21 @@ pub async fn handle_merge(
 ///
 /// Succès → réponse 200 avec `{ ok: true }`.
 /// Échec (aucun merge en cours) → `NoMergeInProgress` (erreur HTTP VNL-SBX-013).
+///
+/// # Errors
+///
+/// [`GitError::NoMergeInProgress`] (VNL-SBX-013, `500`) sur TOUT échec de
+/// `git merge --abort` (le `CommandFailed` est intégralement effondré en ce message).
+///
+/// # Panics
+///
+/// Si la tâche `spawn_blocking` panique elle-même (`.expect` sur le `JoinHandle`,
+/// harnais tooling.sdd) — pas de panic interne connue.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
 pub async fn handle_merge_abort(
     State(state): State<AppState>,
 ) -> Result<Json<OkResponse>, GitError> {
-    let root = state.config.sandbox_root.to_path_buf();
+    let root = state.config.sandbox_root.clone();
 
     #[allow(clippy::expect_used)] // JoinError signifie un panic interne, pas une erreur git normale
     let result = tokio::task::spawn_blocking(move || {
@@ -1683,7 +2055,10 @@ pub async fn handle_merge_abort(
             .into_iter()
             .chain(args)
             .collect();
-        let refs: Vec<&str> = args_prefixed.iter().map(|s| s.as_str()).collect();
+        let refs: Vec<&str> = args_prefixed
+            .iter()
+            .map(std::string::String::as_str)
+            .collect();
         run_git(&refs)
     })
     .await
@@ -1700,6 +2075,9 @@ pub async fn handle_merge_abort(
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // tooling.sdd D3 — assertions de tests intactes : clippy::assert_is_empty
+    // imposerait assert_eq!(x.as_slice(), []) et changerait la forme d'échec.
+    #![allow(clippy::assert_is_empty)]
     use super::*;
 
     fn clean_output() -> &'static str {
@@ -1949,7 +2327,6 @@ X foo\n\
         let output = format!(
             "abcdef123456{sep}Initial commit{sep}Alice{sep}2024-01-01T10:00:00Z\n\
              fedcba987654{sep}Second commit{sep}Bob{sep}2024-01-02T14:30:00Z",
-            sep = sep,
         );
         let result = parse_commits(&output).unwrap();
         assert_eq!(result.len(), 2);
@@ -2201,7 +2578,6 @@ X foo\n\
              Initial commit{sep}\
              Alice{sep}\
              2024-01-01T10:00:00Z",
-            sep = sep,
         );
         let result = parse_log(&line).unwrap();
         assert_eq!(result.len(), 1);
@@ -2226,7 +2602,6 @@ X foo\n\
         let line = format!(
             "dce41965c9aa085042cef737c1eaa4141a055b5a{sep}{sep}\
              {sep}Initial commit{sep}Alice{sep}2024-01-01T10:00:00Z",
-            sep = sep,
         );
         let result = parse_log(&line).unwrap();
         assert_eq!(result.len(), 1);
