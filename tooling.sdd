@@ -11,6 +11,10 @@ Purpose:
 
 Can modify:
   ./Cargo.toml: seules les tables `[workspace.lints.*]` et les lignes `[lints]` des membres
+  ./{lib,app,cli,sandbox,tools,controller,crds,cfgstore,health}/Cargo.toml: seule la table
+    `[package]` (champs de metadata `cargo_common_metadata` : description, repository, readme,
+    keywords, categories, license si absents) — autorisation explicite de Sébastien du
+    2026-10-06 ; rien d'autre dans ces fichiers (pas de dépendances, pas de `[lints]` local)
   ./lib/src/lib.rs: ligne d'exemption `cfg(test)` seulement
   ./app/src/main.rs: ligne d'exemption `cfg(test)` seulement
   ./cli/src/main.rs: ligne d'exemption `cfg(test)` seulement
@@ -41,9 +45,12 @@ Must:
   Faire hériter chaque membre du workspace via une table `[lints]` avec `workspace = true`
   à la racine de son `Cargo.toml`.
   Tolérer la famille panic/unwrap uniquement sous `cfg(test)` via
-  `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]` porté par chaque
-  racine de crate (y compris les bin cibles de `sandbox` et le crate de `cli/src`) et par
-  chaque crate d'intégration sous `tests/`.
+  `#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]` porté
+  par chaque racine de crate (y compris les bin cibles de `sandbox` et le crate de
+  `cli/src`) et par chaque crate d'intégration sous `tests/` — la ligne canonique est à
+  TROIS lints depuis la ratification Sébastien du 2026-10-07 (« tolérer la FAMILLE
+  panic/unwrap » inclut `clippy::panic` ; précédents `health`, `cfgstore`, `tools` ; les
+  racines encore à deux lints s'alignent au fil de leur purge).
   Tenir à **zéro warning imputable au nouveau code** sur tout fichier touché par une tâche
   (`cargo clippy --workspace --all-targets`), la dette préexistante étant tracée en `Tasks`
   ci-dessous et ne devant jamais grossir.
@@ -100,6 +107,44 @@ Tasks:
     la famille `missing_docs`/pedantic des feuilles (`tools`, `crds`, `cfgstore`).
     `vanyline-health` : ZÉRO dette sur ses sources (seule crate du workspace à rendre
     `--> health/` vide sous `--all-targets -D warnings`) — ne doit jamais grossir.
+  [ ] Dette 2026-10-07 (état du registre, purge interleaved décidée avec Sébastien) :
+    PURGÉES et vérifiées par validator : `vanyline-crds` (étape 4a), `vanyline-cfgstore`,
+    `vanyline-tools`, `cargo_common_metadata` (45 → 0, les 9 `[package]` complétés), et
+    `vanyline-lib` (D2 2026-10-07 : 203 → 0, gate `-D warnings` vert aux trois sets de
+    features défaut/`k8s`/`ts-rs`, tests 73/81/74 verts, assertions intactes — la régénération
+    de `chat-event.ts` (+114/−3, commentaires uniquement, vérifiée identique strip-commentaires)
+    est INCLUDE au commit : c'est le contrat du gate CI `tsrs` d'`event.sdd`).
+    RESTENT (convention de comptage gelée ci-dessous) : `vanyline-sandbox` 839 (mesure fraîche
+    après 5A — la réécriture `auth.rs`/`config.rs` est à 0, le reste : `lsp.rs` 214, `git.rs`
+    209, `tools_impl.rs` 186, `maint.rs` 40…), `vanyline-cli` 299, `vanyline-app` 51, `vanyline-controller` 65 — purgées au fil
+    des étapes de la migration qui les touchent (interleaved). Les 2 `unnecessary_wraps`
+    imputables à 4a (`controller/src/{owner,project}.rs::build_*_pvc`) SOLDÉS en 4b.
+    Exemptions pedantic restantes en `lib` (2, les seules) : `too_many_lines` sur
+    `run_agent_turn_at_depth` (justifié `session.sdd`) et `double_must_use` sur
+    `trait EventSink` (`event.rs`, justification in-ligne citant CE fichier — la prescription
+    « allow uniquement justifié d'une ligne citant la spec » est la trace qui vaut ; le lint
+    lui-même n'était pas listé ici, le voici).
+  [x] Convention de comptage de la dette — RATIFIÉE le 2026-10-08 (décision Sébastien 5A).
+    Gelée le 2026-10-07 après trois chiffres divergents
+    pour une même crate (lib 203/227/246, sandbox 692/744/905, cli 0/299/461 — l'artefact
+    « cli 0 » venait d'un grep sur le nom de package `vanyline-cli` alors que la crate
+    s'appelle `vanyline`) : le chiffre de référence est le nombre de diagnostics UNIQUES
+    (crate, fichier, ligne de début, code du lint) rendus par
+    `RUSTFLAGS=--cap-lints=warn cargo clippy --workspace --all-targets --message-format=json`,
+    dédupliqués donc des rejeux multi-targets et des spans de macro. Les totaux humains
+    (`generated N warnings`, spans `-->`) ne sont plus utilisables pour confronter d'une purge
+    à l'autre. Les chiffres RESTENT ci-dessus sont des uniques sous cette convention
+    (mesure 2026-10-07, lib purgée). RATIFIÉE par Sébastien le 2026-10-08.
+  [x] Compléter les metadata `[package]` des 9 Cargo.toml membres (a éliminé les 45
+    `cargo_common_metadata`) — autorisation Sébastien 2026-10-06, cf. `Can modify`.
+    — fait et vérifié 2026-10-06, validator vert.
+  [x] Ligne d'exemption `cfg(test)` du `Must` — RATIFIÉE à trois lints le 2026-10-07
+    (décision Sébastien « A ») : `unwrap_used`, `expect_used`, `clippy::panic`. Le `Must`
+    porte la forme canonique ; les racines encore à deux lints s'alignent au fil de leur
+    purge (`lib` alignée par D2, y compris ses deux crate-tests sous `tests/`).
+  [ ] Cosmétique : `cfgstore/Cargo.toml` `categories = ["config", …]` — « config » n'est pas
+    une catégorie crates.io canonique (sans effet sur le harnais, vitrine `cargo publish`
+    seulement). Corriger à l'occasion d'une prochaine touche sur le fichier.
   [ ] Doc `missing_docs` purgée partout, puis basculer `missing_docs = "deny"` (aval de Sébastien).
   [ ] Basculer la vérification harnais en tout-vert (compteur de dette à zéro) et retirer
     les exemptions `cfg(test)` devenues inutiles si applicable.
