@@ -50,12 +50,17 @@ Structure:
   ./owner.rs — constantes publiques @FIELD_MANAGER et @HOME_MOUNT_PATH, deux constantes
     privées de défaut (@DEFAULT_HOME_SIZE, @DEFAULT_HOME_ACCESS_MODE), @Context (un seul
     champ `client`, plus dépouillé que @project::Context), trois helpers de nommage
-    (@home_pvc_name, @service_account_name, @effective_pvc_name), le constructeur privé
-    @owner_reference, deux constructeurs purs de manifests (@build_home_pvc,
-    @build_service_account), @compute_status (pur), les trois crochets du runtime
-    (@reconcile, @error_policy, @build_controller) et un module `#[cfg(test)]` de dix
-    tests (noms repris en `Tasks`, tous sur les constructeurs purs). Aucun test ne couvre
-    @reconcile, @error_policy ni @build_controller à ce jour.
+    (@home_pvc_name, @service_account_name, @effective_pvc_name — ce dernier réduit à la
+    valeur générée depuis le retrait de `existing_pvc`), deux constructeurs purs de
+    manifests (@build_home_pvc, @build_service_account — retours nus, SANS ownerReference,
+    enfants créés dans le namespace de l'Owner calculé par ./namespace.rs), @compute_status
+    (pur ; pose le `namespace` réel depuis 2026-10-06), les trois crochets du runtime
+    (@reconcile — finalizer posé avant ./namespace.rs::ensure_namespace, ressources dans le
+    namespace de l'Owner, cleanup par ./namespace.rs à la suppression ; @error_policy ;
+    @build_controller) et un module `#[cfg(test)]` de dix tests (noms repris en `Tasks`,
+    tous sur les constructeurs purs et @compute_status). Aucun test ne couvre @reconcile ni
+    @build_controller à ce jour ; @error_policy est verrouillée depuis ./error.rs (test
+    `error_policy_owner_et_application_toujours_trente_secondes`).
   Câblage (@main.rs) : `owner::build_controller(client).run(reconcile, error_policy,
     Arc<Context>)` dans le `tokio::join!` des quatre reconcilers ; une erreur du flux (fatal
     kube-runtime) n'est que `tracing::warn!` ("owner reconcile loop error") — contrat de la
@@ -156,9 +161,10 @@ Must not:
     le RoleBinding de l'app dans le namespace vit dans ./namespace.sdd, le RBAC
     machine-à-machine des Jobs dans `./project.rs` (`project-<name>-maint`), celui du
     controller (ClusterRole) dans `deploy/` — hors périmètre.
-  Employer `unwrap`/`panic!`/`println!`/`eprintln!` en dehors de l'`expect` motivé
-    d'@owner_reference (`#[allow(clippy::expect_used)]` + justification, /tooling.sdd) et
-    des exemptions `cfg(test)` du module de tests ; logger uniquement via `tracing` (le
+  Employer `unwrap`/`expect`/`panic!`/`println!`/`eprintln!` en production — aucune
+    exemption motivée dans le fichier depuis 2026-10-06 (@owner_reference et son `expect`
+    ont disparu avec le retrait des ownerReferences) ; seules les exemptions `cfg(test)`
+    du module de tests subsistent ; logger uniquement via `tracing` (le
     seul appel du fichier est le `warn!` d'@error_policy).
   Interpoler un champ de CRD dans une commande shell (règle /vanyline.sdd) : trivial
     ici — le fichier ne construit aucune commande ; les champs d'@OwnerSpec ne sortent
@@ -185,8 +191,9 @@ Depends on:
     patches Merge.
   @tracing — warn d'@error_policy.
   /tooling.sdd — harnais clippy/fmt applicable au binaire (`lints.workspace = true`,
-    ../Cargo.toml) ; exemptions du fichier : `expect_used` motivé d'@owner_reference et
-    `#![allow(clippy::unwrap_used, clippy::expect_used)]` du module `tests`.
+    ../Cargo.toml) ; exemption du fichier : `#![allow(clippy::unwrap_used,
+    clippy::expect_used)]` du module `tests` — aucune exemption de production depuis
+    2026-10-06.
   Consommateurs internes (hors dépendances, pour le contrat croisé) : ./project.rs
     (@FIELD_MANAGER, @HOME_MOUNT_PATH, status.pvcName lu sinon @ControllerError::OwnerNotReady ;
     project_defaults lus de sa main), ./sandbox.rs (@FIELD_MANAGER, @HOME_MOUNT_PATH,
@@ -200,6 +207,8 @@ Exposes:
   @Context — `pub struct { pub client: Client }`, contexte unique du reconciler Owner.
   @home_pvc_name, @service_account_name — `pub fn(&str) -> String` : conventions
     `owner-<name>-home` et `owner-<name>`.
+  @effective_pvc_name — `pub fn(&@Owner) -> String` : toujours @home_pvc_name du nom de
+    l'Owner (depuis le retrait de `existing_pvc`, ne lit plus `spec`).
   @build_home_pvc — `pub fn(&@Owner) -> @PersistentVolumeClaim` (pur, toujours construit).
   @build_service_account — `pub fn(&@Owner) -> @ServiceAccount` (pur, toujours construit).
   @compute_status — `pub fn(&@Owner) -> @OwnerStatus` (pur, inclut un horodatage `now`).
@@ -209,7 +218,7 @@ Exposes:
     30 s pour toute erreur, log `warn` ; l'argument @Context et l'@Owner sont ignorés.
   @build_controller — `pub fn(@Client) -> @Controller<@Owner>` (watch tous namespaces).
   Privé au fichier : @DEFAULT_HOME_SIZE (`"1Gi"`), @DEFAULT_HOME_ACCESS_MODE
-    (`"ReadWriteMany"`), @owner_reference, les littéraux de la condition Ready
+    (`"ReadWriteMany"`), les littéraux de la condition Ready
     (reason/message), module `tests`.
 
 Accepts:
@@ -217,8 +226,8 @@ Accepts:
     validation RFC 1123 (les noms d'@Owner arrivent déjà validés de l'apiserver ; la
     validation à la création d'Owner est côté app/CLI, `sanitize_owner_name`).
   @build_home_pvc / @build_service_account / @compute_status : une @Owner quelconque, avec
-    ou sans namespace, avec ou sans uid (uid absent ⇒ panic d'@owner_reference, cf.
-    `Raises`), `home_size`/`home_storage_class`/`home_access_mode` à volonté — @home_size et
+    ou sans namespace (l'uid est sans effet depuis 2026-10-06 : aucun enfant ne porte
+    d'ownerReference), `home_size`/`home_storage_class`/`home_access_mode` à volonté — @home_size et
     @home_access_mode sont des chaînes libres transplantées telles quelles (@Quantity ne
     valide pas `"1Go"`, c'est l'apiserver qui rejette) ; @home_storage_class = `Some("")`
     sérialise une storageClassName vide (sémantique K8s « pas de provisioning dynamique »,
@@ -257,9 +266,9 @@ Raises:
   Jamais remontées ici : @ControllerError::OwnerNotReady, @ControllerError::PurgePending,
     @ControllerError::Finalizer, @ControllerError::ProjectNotReady,
     @ControllerError::WorktreeRemovalPending (propres aux autres reconcilers).
-  Panic (chemin non testé, production) : @owner_reference `expect`e la réussite de
-    `controller_owner_ref` — l'échec réel est l'absence de uid/nom sur la CR, pas celui
-    d'apiVersion/kind cités par la justification de l'`#[allow]` (cf. `[?]` des `Tasks`).
+    En revanche les variantes namespace `VNL-CTL-007..010` sont produites ici par
+    transposition de ./namespace.rs (@reconcile appelle @ensure_namespace et
+    @cleanup_namespace) et remontent telles quelles à @error_policy (requeue 30 s).
 
 Handles:
   Aucun @AlreadyExists possible : @Patch::Apply (SSA) crée ou adopte, jamais ne conflictue
@@ -296,10 +305,12 @@ Tasks:
     `bump_*`) sont à rejouer avec le namespace d'Owner ; les passages de `Handles` qui
     décrivent encore les ownerReferences de l'Owner (conflit d'ownerReference, GC, `owner_reference` et son `expect`) sont à
     purger à l'implémentation.
-  [ ] RETRAIT DE `existing_pvc` (décision 2026-10-04) : supprimer le champ de @OwnerSpec
+  [x] RETRAIT DE `existing_pvc` (décision 2026-10-04) : supprimer le champ de @OwnerSpec
     (/crds/src/lib.sdd), `effective_pvc_name`, la branche `@None` de @build_home_pvc et tous les
     Scenario qui s'y rapportent (retirés de cette spec) ; /docs/architecture.md ne promet plus
-    de « référence `existing_pvc` vérifiée » pour l'Owner.
+    de « référence `existing_pvc` vérifiée » pour l'Owner. — fait 2026-10-06 (étapes 4a/4b :
+    crds purgé, controller aligné, spec amendée ; `effective_pvc_name` CONSERVÉE comme
+    helper de la valeur générée — la spec fige ce choix dans `Exposes`) ; validator vert.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]` ;
     relecture de reverse-engineering du 2026-09-25.
   [?] Bump egress peut-être INERTE : ./sandbox.rs comme ./owner.rs construisent leur
@@ -311,10 +322,10 @@ Tasks:
     @reconcile et de /docs/architecture.md. Vérifier sur cluster (Scenario
     `bump_annotation_declenche_effectivement_reconcile_sandbox`), puis corriger le code ou
     la doc.
-  [?] @owner_reference : la justification d'une ligne de l'`#[allow(clippy::expect_used)]`
-    cite apiVersion/kind, mais la condition d'échec réelle de `controller_owner_ref` est un
-    uid/nom absent. Panic acceptable en production (le watcher garantit uid), à réécrire la
-    justification, ou à remplacer par une propagation d'erreur (@ControllerError à ajouter) ?
+  [x] RESOLU 2026-10-06 (étape 4b) — @owner_reference SANS OBJET : la fonction et son
+    `expect` ont DISPARU avec le retrait des ownerReferences (Un Owner = un namespace,
+    ./namespace.sdd). Plus de question de justification ; le `[?]` est clos par la
+    suppression de la fonction, pas par une réécriture.
   [?] Sémantique de `Ready: True` = « les apply ont été acceptés », pas « PVC Bound » ni
     « SA servi » ; aucune écriture dégradée (jamais de `Ready: False`, aucun status écrit
     en cas d'erreur — le status reste figé sur le dernier succès). Contrat assumé (« en v1,
@@ -336,21 +347,24 @@ Tasks:
     défensif à garder (et le dire) ou erreur explicite si le namespace est absent ?
   [?] @Context sans doc comment : dette `missing_docs` (warn, /tooling.sdd) à purger ici,
     à tracer là, ou à laisser jusqu'au passage en deny ?
-  [ ] Couverture existante (./owner.rs module `tests`, 10 tests) : `home_pvc_name_and_sa_name`,
-    `effective_pvc_name_generated`, `effective_pvc_name_existing`,
-    `build_home_pvc_none_when_existing`, `build_home_pvc_default_size`,
+  [x] Couverture existante (./owner.rs module `tests`, 10 tests — ressynchronisé
+    2026-10-06 après étapes 4a/4b) : `home_pvc_name_and_sa_name`,
+    `effective_pvc_name_generated`, `build_home_pvc_default_size`,
     `build_home_pvc_custom_access_mode`, `build_home_pvc_custom_size_and_class`,
-    `build_home_pvc_owner_reference`, `build_service_account_always_created`,
-    `compute_status_ready` — ils verrouillent les Scenarios homonymes.
-  [ ] Écrire les Scenarios unitaires sans test : `build_home_pvc_metadata_champs_nus`,
-    `build_home_pvc_owner_ref_contenu_complet`, `build_service_account_champs_nus`,
+    `build_home_pvc_sans_owner_reference`, `build_home_pvc_metadata_champs_nus`,
+    `build_service_account_always_created`, `build_service_account_champs_nus`,
+    `compute_status_ready` — ils verrouillent les Scenarios homonymes (les noms d'avant
+    4a/4b — `effective_pvc_name_existing`, `build_home_pvc_none_when_existing`,
+    `build_home_pvc_owner_reference` — ont disparu avec leurs contrats).
+  [ ] Écrire les Scenarios unitaires sans test — reste 2026-10-06 :
     `compute_status_observed_generation_reprise`,
-    `compute_status_serialisation_merge_patch`,
-    `error_policy_requeue_trente_secondes` (construire un @Client hors connexion via
-    @Config::new d'une URI morte + @Client::try_from, jamais de requête émise ; à défaut
-    rebasculer en intégration — tranché par l'implementer), `owner_reference_sans_uid_panique`
-    (via @std::panic::catch_unwind — ne déverrouille rien, la question `[?]` de la
-    justification d'`expect` doit être tranchée d'abord).
+    `compute_status_serialisation_merge_patch`.
+    — faits 2026-10-06 (étape 4b) : `build_home_pvc_metadata_champs_nus`,
+    `build_service_account_champs_nus` ; `error_policy_requeue_trente_secondes` couvert
+    depuis ./error.rs (`error_policy_owner_et_application_toujours_trente_secondes`,
+    @Client hors connexion sur URI morte).
+    — SANS OBJET (retrait des ownerReferences 2026-10-04) :
+    `build_home_pvc_owner_ref_contenu_complet`, `owner_reference_sans_uid_panique`.
   [ ] Écrire les Scenarios d'intégration (convention projet : cluster réel non mocké, tag
     intégration) : `reconcile_nominal_cree_pvc_sa_et_status_requeue_300s`,
     `reconcile_double_pass_idempotent_sans_duplication`,
@@ -360,18 +374,22 @@ Tasks:
     `reconcile_bump_annotation_sur_sandboxes_des_projects`,
     `reconcile_bump_inerte_sans_project`,
     `bump_annotation_declenche_effectivement_reconcile_sandbox`,
-    `gc_cascade_supprime_pvc_cree_et_sa_preserve_pvc_reference`.
+    `suppression_de_l_owner_supprime_son_namespace`, `sa_owner_sans_aucun_droit_rbac`
+    (`gc_cascade_supprime_pvc_cree_et_sa_preserve_pvc_reference` SANS OBJET depuis le
+    retrait des ownerReferences : la cascade passe par la suppression du namespace).
   [ ] Faire passer la synthèse du validator au vert (batterie complète AGENTS.md sur
-    `vanyline-controller`) avant tout `[x]`.
+    `vanyline-controller`) avant tout `[x]`. — scoped 4b vert 2026-10-06 ; la batterie
+    workspace complète attend la purge de `vanyline-lib`.
 
 Done when:
   Chaque Scenario a son test taggé par son titre (unitaires en `cargo test -p
     vanyline-controller`, intégration sur cluster réel) et passe.
   Tous les `[?]` de `Tasks` ont une décision écrite de Sébastien, répercutée dans la spec
     et (si le code change) dans /docs/architecture.md — notamment le mécanisme de bump.
-  Le harnais (/tooling.sdd) est vert sur ./owner.rs avec ses seules exemptions motivées
-    (expect d'@owner_reference, `cfg(test)`), et `build_home_pvc_owner_ref_contenu_complet`
-    verrouille le contenu exact de l'@OwnerReference posé sur les enfants.
+  Le harnais (/tooling.sdd) est vert sur ./owner.rs avec la seule exemption `cfg(test)`
+    du module `tests`, et `build_home_pvc_sans_owner_reference` verrouille l'ABSENCE
+    d'@OwnerReference sur les enfants (la cascade de nettoyage est portée par la
+    suppression du namespace — ./namespace.sdd).
 
 Scenario: home_pvc_name_and_sa_name
   Given @home_pvc_name et @service_account_name
@@ -457,13 +475,6 @@ Scenario: error_policy_requeue_trente_secondes
   Then l'@Action retourné a son champ public `requeue` à @Some(`30 s`), sans distinction de
     l'erreur ni backoff — et l'appel journalise `warn` "owner reconcile error, requeue in
     30s"
-
-Scenario: owner_reference_sans_uid_panique
-  Given une @Owner `"alice"` fraichement construite SANS uid (hors watcher)
-  When @build_home_pvc est appelée, protectée par @std::panic::catch_unwind
-  Then le `expect` d'@owner_reference panique (message "Owner a apiVersion/kind renseignés
-    par le derive CustomResource") — comportement accidentel documenté, NON béni avant
-    l'arbitrage `[?]` de la justification d'`expect`
 
 Scenario: reconcile_nominal_cree_pvc_sa_et_status_requeue_300s
   Given (intégration — cluster réel non mocké) une CR @Owner `"alice"` créée, sans

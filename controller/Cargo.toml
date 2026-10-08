@@ -4,6 +4,11 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Opérateur Kubernetes du workspace vanyline : réconcilie les CRDs Owner, Project, Sandbox et Application."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["kubernetes", "operator", "controller"]
+categories = ["api-bindings", "asynchronous"]
 
 [[bin]]
 name = "vanyline-controller"
@@ -23,5 +28,13 @@ thiserror = "2"
 futures = "0.3"
 rand = "0.8"
 base64 = "0.22"
+
+[dev-dependencies]
+# rustls en dev-dependency : les tests du controller construisent des Client
+# TLS hors connexion ; l'auto-détection du CryptoProvider échoue car rustls
+# voit à la fois les features aws_lc_rs et ring selon les dépendances
+# (axum-server/reqwest activent aws_lc_rs, kube active ring) — même motif que
+# la dépendance régulière de sandbox/Cargo.toml.
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
 [lints]
 workspace = true

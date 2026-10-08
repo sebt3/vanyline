@@ -247,9 +247,15 @@ Must:
     AUCUN appel k8s.
   - Inscrire le @Subscriber dans `shared.subscribers` AVANT @ensure_watch_loop — l'ordre
     est un contrat (le premier abonné reçoit le replay initial).
-  - Garantir l'unicité de la tâche @watch_loop par `watch_handle` (test hors verrou,
-    client construit hors verrou, double-check sous verrou, spawn unique pour la vie du
-    process) ; ne jamais aborter, joindre ni remplacer le handle.
+  - Garantir l'unicité de la tâche @watch_loop PAR OWNER : map `watch_handles` (clé nom
+    d'Owner), test hors verrou, client construit hors verrou, double-check sous verrou,
+    un spawn unique PAR OWNER pour la vie du process) ; ne jamais aborter, joindre ni
+    remplacer un handle (amendé 2026-10-06, étape 4c : le flux est par namespace d'Owner —
+    /lib/src/k8s.sdd `watch_sandboxes(owner)` — donc un handle par Owner suivi).
+  - Quand plus aucun subscriber d'un Owner n'est connecté, la boucle de cet Owner NE SE
+    JOIN PAS : elle est en pause (sommeil ~2 s, aucun stream ouvert), prête à repartir au
+    premier abonné suivant — le « arrêté quand il n'en reste plus » se lit comme « ne
+    consomme plus rien », pas comme un abort.
   - Dispatcher par égalité STRICTE `sub.owner == owner` ; un événement ne doit jamais
     atteindre un abonné d'un autre owner.
   - Résoudre l'owner via le cache `project → owner` en mémorisant le hit COMME le miss

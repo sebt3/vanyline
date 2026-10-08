@@ -33,8 +33,16 @@ struct Cli {
     #[arg(short = 'c', long = "continue", global = true)]
     continue_active: bool,
     /// Namespace K8s target (owner/project/sandbox). Overrides `defaults.namespace`.
+    /// Désigne le NAMESPACE D'APPLICATION (CR Owner/Application) ; le namespace
+    /// de chaque Owner en est dérivé (`<app-ns>-<owner>`, UN OWNER = UN
+    /// NAMESPACE 2026-10-04).
     #[arg(short, long, global = true)]
     namespace: Option<String>,
+    /// Nom de l'Owner K8s dont le namespace (`<app-ns>-<owner>`) porte les
+    /// Projects et les Sandboxes. Requis par les commandes project/sandbox et
+    /// par `--toolbox` (UN OWNER = UN NAMESPACE, 2026-10-04).
+    #[arg(long, global = true)]
+    owner: Option<String>,
     /// Nom de la sandbox a utiliser comme toolbox d'inference (remplace les
     /// `local_tools` par les tools MCP de la sandbox). Surcharge
     /// `defaults.toolbox`.
@@ -171,8 +179,12 @@ async fn main() {
 
     match cli.command {
         None => {
-            let toolbox_mcp_url =
-                resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
+            let toolbox_mcp_url = resolve_toolbox_mcp_url(
+                cli.toolbox.clone(),
+                cli.namespace.clone(),
+                cli.owner.clone(),
+            )
+            .await;
             chat::run(
                 None,
                 cli.agent,
@@ -190,8 +202,12 @@ async fn main() {
             timeout,
             json,
         }) => {
-            let toolbox_mcp_url =
-                resolve_toolbox_mcp_url(cli.toolbox.clone(), cli.namespace.clone()).await;
+            let toolbox_mcp_url = resolve_toolbox_mcp_url(
+                cli.toolbox.clone(),
+                cli.namespace.clone(),
+                cli.owner.clone(),
+            )
+            .await;
             chat::run(
                 Some(message),
                 cli.agent,
@@ -220,8 +236,8 @@ async fn main() {
             }
         }
         Some(Commands::K8sOwner(cmd)) => run_owner_k8s(cmd, cli.namespace).await,
-        Some(Commands::K8sProject(cmd)) => run_project_k8s(cmd, cli.namespace).await,
-        Some(Commands::K8sSandbox(cmd)) => run_sandbox_k8s(cmd, cli.namespace).await,
+        Some(Commands::K8sProject(cmd)) => run_project_k8s(cmd, cli.namespace, cli.owner).await,
+        Some(Commands::K8sSandbox(cmd)) => run_sandbox_k8s(cmd, cli.namespace, cli.owner).await,
     }
 }
 
@@ -576,17 +592,41 @@ async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8
 /// ce cas, PAS d'appel K8s du tout (coherent avec "les commandes non-K8s
 /// continuent de fonctionner", meme principe que `discover_k8s_client`
 /// mais applique ici au chemin chat par defaut).
+///
+/// Quand une toolbox est demandee, `--owner` est requis : l'URL MCP se resout
+/// dans le namespace de l'Owner (`<app-ns>-<owner>`, UN OWNER = UN NAMESPACE
+/// 2026-10-04). Le jeton d'Owner pour presenter a la sandbox est etape 5.
 async fn resolve_toolbox_mcp_url(
     toolbox_flag: Option<String>,
     namespace: Option<String>,
+    owner_flag: Option<String>,
 ) -> Option<String> {
     let store = discover_fs_store();
     let name = toolbox_flag.or_else(|| config::configured_toolbox(store.layers()))?;
+    let owner = require_owner(owner_flag);
     let client = discover_k8s_client(namespace).await;
-    Some(client.sandbox_mcp_url(&name).await.unwrap_or_else(|e| {
-        eprintln!("{e}");
+    Some(
+        client
+            .sandbox_mcp_url(&owner, &name)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }),
+    )
+}
+
+/// Nom d'Owner requis par les commandes project/sandbox et la toolbox : sans
+/// `--owner`, message d'erreur clair et quit(1) (UN OWNER = UN NAMESPACE
+/// 2026-10-04 : Projects et Sandboxes vivent dans `<app-ns>-<owner>`, le nom
+/// ne peut plus etre devine).
+fn require_owner(owner_flag: Option<String>) -> String {
+    owner_flag.unwrap_or_else(|| {
+        tracing::error!(
+            "--owner est requis pour cette commande : les Projects et les Sandboxes vivent dans le namespace de l'Owner (<app-ns>-<owner>)"
+        );
         std::process::exit(1);
-    }))
+    })
 }
 
 async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
@@ -624,10 +664,6 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
                 std::process::exit(1);
             });
             println!("Owner: {}", owner.name_any());
-            println!(
-                "  existingPvc: {}",
-                owner.spec.existing_pvc.as_deref().unwrap_or("-")
-            );
             println!(
                 "  homeSize: {}",
                 owner.spec.home_size.as_deref().unwrap_or("-")
@@ -674,7 +710,6 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
         }
         Create {
             name,
-            existing_pvc,
             home_size,
             home_storage_class,
             home_access_mode,
@@ -695,7 +730,6 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
                 None
             };
             let spec = vanyline_crds::OwnerSpec {
-                existing_pvc,
                 home_size,
                 home_storage_class,
                 home_access_mode,
@@ -719,13 +753,18 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
     }
 }
 
-async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) {
+async fn run_project_k8s(
+    cmd: project_cmd::Commands,
+    namespace: Option<String>,
+    owner_flag: Option<String>,
+) {
     use kube::ResourceExt;
     use project_cmd::Commands::{Create, Delete, List, Show};
+    let owner = require_owner(owner_flag);
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {
-            let projects = client.list_projects().await.unwrap_or_else(|e| {
+            let projects = client.list_projects(&owner).await.unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1);
             });
@@ -745,7 +784,7 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
             }
         }
         Show { name } => {
-            let project = client.get_project(&name).await.unwrap_or_else(|e| {
+            let project = client.get_project(&owner, &name).await.unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1);
             });
@@ -756,14 +795,6 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                 "  defaultBranch: {}",
                 project.spec.default_branch.as_deref().unwrap_or("-")
             );
-            match &project.spec.existing_pvc {
-                Some(pvc) => println!(
-                    "  existingPvc: {} (subPath={})",
-                    pvc.name,
-                    pvc.sub_path.as_deref().unwrap_or("-")
-                ),
-                None => println!("  existingPvc: -"),
-            }
             println!(
                 "  storageSize: {}",
                 project.spec.storage_size.as_deref().unwrap_or("-")
@@ -811,11 +842,8 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
         }
         Create {
             name,
-            owner,
             repo_url,
             default_branch,
-            existing_pvc_name,
-            existing_pvc_subpath,
             storage_size,
             storage_class,
             storage_access_mode,
@@ -823,15 +851,10 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
             caches,
             fetch_interval,
         } => {
-            let existing_pvc = existing_pvc_name.map(|pvc_name| vanyline_crds::PvcRef {
-                name: pvc_name,
-                sub_path: existing_pvc_subpath,
-            });
             let spec = vanyline_crds::ProjectSpec {
-                owner,
+                owner: owner.clone(),
                 repo_url,
                 default_branch,
-                existing_pvc,
                 storage_size,
                 storage_class,
                 storage_access_mode,
@@ -845,7 +868,7 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
                 egress: Vec::new(),
             };
             client
-                .create_project(&name, spec)
+                .create_project(&owner, &name, spec)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("{e}");
@@ -854,22 +877,30 @@ async fn run_project_k8s(cmd: project_cmd::Commands, namespace: Option<String>) 
             println!("Created project: {name}");
         }
         Delete { name } => {
-            client.delete_project(&name).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            client
+                .delete_project(&owner, &name)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             println!("Deleted project: {name}");
         }
     }
 }
 
-async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) {
+async fn run_sandbox_k8s(
+    cmd: sandbox_cmd::Commands,
+    namespace: Option<String>,
+    owner_flag: Option<String>,
+) {
     use kube::ResourceExt;
     use sandbox_cmd::Commands::{Create, Delete, List, Show, Start, Stop};
+    let owner = require_owner(owner_flag);
     let client = discover_k8s_client(namespace).await;
     match cmd {
         List => {
-            let sandboxes = client.list_sandboxes().await.unwrap_or_else(|e| {
+            let sandboxes = client.list_sandboxes(&owner).await.unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1);
             });
@@ -893,7 +924,7 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
             }
         }
         Show { name } => {
-            let sandbox = client.get_sandbox(&name).await.unwrap_or_else(|e| {
+            let sandbox = client.get_sandbox(&owner, &name).await.unwrap_or_else(|e| {
                 eprintln!("{e}");
                 std::process::exit(1);
             });
@@ -946,7 +977,7 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
                 suspended: false,
             };
             client
-                .create_sandbox(&name, spec)
+                .create_sandbox(&owner, &name, spec)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("{e}");
@@ -955,15 +986,18 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
             println!("Created sandbox: {name}");
         }
         Delete { name } => {
-            client.delete_sandbox(&name).await.unwrap_or_else(|e| {
-                eprintln!("{e}");
-                std::process::exit(1);
-            });
+            client
+                .delete_sandbox(&owner, &name)
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                });
             println!("Deleted sandbox: {name}");
         }
         Stop { name } => {
             client
-                .set_sandbox_suspended(&name, true)
+                .set_sandbox_suspended(&owner, &name, true)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("{e}");
@@ -973,7 +1007,7 @@ async fn run_sandbox_k8s(cmd: sandbox_cmd::Commands, namespace: Option<String>) 
         }
         Start { name } => {
             client
-                .set_sandbox_suspended(&name, false)
+                .set_sandbox_suspended(&owner, &name, false)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("{e}");

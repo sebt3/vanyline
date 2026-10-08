@@ -18,6 +18,10 @@ pub struct TodoWriteTool {
 }
 
 impl TodoWriteTool {
+    /// Construit le tool pour UN tour, sans validation : le handle partagé est
+    /// stocké tel quel, le contenu du mutex n'est jamais inspecté à la
+    /// construction (cf. `./todo.sdd`).
+    #[must_use]
     pub fn new(state: TodoState) -> Self {
         Self { state }
     }
@@ -75,7 +79,9 @@ impl ToolDyn for TodoWriteTool {
             let json = serde_json::to_string(&parsed.todos)
                 .map_err(|e| rig_core::tool::ToolError::ToolCallError(Box::new(e)))?;
 
-            let mut guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            let mut guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             *guard = Some(json);
 
             Ok(format!("todo list updated ({} items)", parsed.todos.len()))
@@ -90,6 +96,9 @@ pub struct TodoReadTool {
 }
 
 impl TodoReadTool {
+    /// Construit le tool pour UN tour, sans validation : le handle partagé est
+    /// stocké tel quel (cf. `./todo.sdd`).
+    #[must_use]
     pub fn new(state: TodoState) -> Self {
         Self { state }
     }
@@ -124,7 +133,9 @@ impl ToolDyn for TodoReadTool {
             let _parsed: serde_json::Value = serde_json::from_str(&args)
                 .map_err(|e| rig_core::tool::ToolError::ToolCallError(Box::new(e)))?;
 
-            let guard = state.lock().unwrap_or_else(|e| e.into_inner());
+            let guard = state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             match guard.as_deref() {
                 Some(json) => Ok(json.to_string()),
                 None => Ok("no todo list yet".to_string()),
@@ -164,7 +175,7 @@ mod tests {
     #[tokio::test]
     async fn todowrite_definition_schema() {
         let t = TodoWriteTool::new(empty_state());
-        let def = t.definition("".into()).await;
+        let def = t.definition(String::new()).await;
         assert_eq!(def.name, "todowrite");
         assert_eq!(def.parameters["required"], serde_json::json!(["todos"]));
         assert_eq!(def.parameters["properties"]["todos"]["type"], "array");
@@ -174,7 +185,7 @@ mod tests {
     #[tokio::test]
     async fn todoread_definition_schema() {
         let t = TodoReadTool::new(empty_state());
-        let def = t.definition("".into()).await;
+        let def = t.definition(String::new()).await;
         assert_eq!(def.name, "todoread");
         assert_eq!(def.parameters["required"], serde_json::json!([]));
     }

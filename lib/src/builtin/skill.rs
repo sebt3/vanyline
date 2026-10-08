@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use rig_core::completion::ToolDefinition;
@@ -20,6 +21,9 @@ pub struct SkillTool {
 }
 
 impl SkillTool {
+    /// Construit le tool pour UN tour, sans validation : les trois arguments
+    /// sont stockés tels quels (aucun tri, aucune déduplication, aucune
+    /// consultation du store à la construction — cf. `./skill.sdd`).
     pub fn new(
         store: Arc<dyn ConfigStore>,
         sink: Arc<dyn EventSink>,
@@ -57,7 +61,9 @@ impl ToolDyn for SkillTool {
             let mut s = "Charge le corps complet d'un skill par son nom. Skills disponibles :\n"
                 .to_string();
             for skill in &available {
-                s.push_str(&format!("- {} : {}\n", skill.name, skill.description));
+                // fmt::Write sur String est infaillible : le let _ ignore un
+                // Result qui n'a qu'un habitant.
+                let _ = writeln!(s, "- {} : {}", skill.name, skill.description);
             }
             s
         };
@@ -154,7 +160,7 @@ mod tests {
             },
         ];
         let skill_tool = SkillTool::new(noop_store(), noop_sink(), available);
-        let def = skill_tool.definition("".into()).await;
+        let def = skill_tool.definition(String::new()).await;
 
         assert!(def.description.contains("- pdf : PDF processing"));
         assert!(def.description.contains("- web : Web search"));
@@ -167,7 +173,7 @@ mod tests {
     #[tokio::test]
     async fn definition_empty_index_placeholder() {
         let skill_tool = SkillTool::new(noop_store(), noop_sink(), Vec::new());
-        let def = skill_tool.definition("".into()).await;
+        let def = skill_tool.definition(String::new()).await;
 
         assert!(def.description.contains("Aucun skill disponible"));
         assert!(!def.description.contains("- "));
@@ -190,7 +196,7 @@ mod tests {
             sink.clone(),
             vec![SkillMeta {
                 name: "pdf".to_string(),
-                description: "".to_string(),
+                description: String::new(),
             }],
         );
 
@@ -227,7 +233,11 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(sink.events().is_empty());
+        assert!(
+            sink.events().is_empty(),
+            "attendu aucun événement, got {:?}",
+            sink.events()
+        );
     }
 
     // 5. call_unknown_skill_returns_error_no_emit
@@ -249,7 +259,11 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(sink.events().is_empty());
+        assert!(
+            sink.events().is_empty(),
+            "attendu aucun événement, got {:?}",
+            sink.events()
+        );
     }
 
     // 6. call_invalid_json_returns_error
@@ -262,6 +276,10 @@ mod tests {
         let result = skill_tool.call("not json".to_string()).await;
 
         assert!(result.is_err());
-        assert!(sink.events().is_empty());
+        assert!(
+            sink.events().is_empty(),
+            "attendu aucun événement, got {:?}",
+            sink.events()
+        );
     }
 }

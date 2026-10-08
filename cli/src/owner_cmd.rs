@@ -9,9 +9,6 @@ pub enum Commands {
     /// Create an Owner
     Create {
         name: String,
-        /// PVC home existant (ex. celui de code-server). Omis: PVC créé par le controller.
-        #[arg(long)]
-        existing_pvc: Option<String>,
         #[arg(long)]
         home_size: Option<String>,
         #[arg(long)]

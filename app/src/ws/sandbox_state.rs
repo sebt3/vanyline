@@ -34,30 +34,34 @@ struct Subscriber {
     owner: String,
 }
 
-/// Cache `project-name` → owner. `None` mémorise un miss (projet introuvable —
-/// sandbox orpheline) pour ne pas rappeler l'API K8s ni re-logger à chaque
-/// événement de watch. Un namespace peut contenir plusieurs owners
-/// (multi-tenant, cf. `sandboxes.rs`) : on ne peut pas dispatcher un événement
-/// sans résoudre `spec.project` → `project.spec.owner`.
-type OwnerCache = Arc<Mutex<std::collections::HashMap<String, Option<String>>>>;
+/// Cache `(owner, project)` → owner résolu (`spec.owner` du projet). `None`
+/// mémorise un miss (projet introuvable — sandbox orpheline) pour ne pas
+/// rappeler l'API K8s ni re-logger à chaque événement de watch. Depuis UN
+/// OWNER = UN NAMESPACE (2026-10-04), les lectures sont scopées au namespace
+/// de l'Owner ; la clé porte l'Owner pour distinguer deux namespaces.
+type OwnerCache = Arc<Mutex<std::collections::HashMap<(String, String), Option<String>>>>;
 
-/// State partagé entre toutes les connexions WS et la tâche `watch_loop`.
+/// State partagé entre toutes les connexions WS et les tâches `watch_loop`.
 #[derive(Clone)]
 pub struct SharedState {
     subscribers: Arc<Mutex<Vec<Subscriber>>>,
     project_owner: OwnerCache,
-    /// Handle de la tâche `watch_loop`. `Some` dès qu'un loop a été lancé (il
-    /// tourne alors pour la vie du process). Sert de garde d'unicité.
-    watch_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Handles des tâches `watch_loop`, une par Owner suivi (UN OWNER = UN
+    /// NAMESPACE : un flux de watch par namespace d'Owner, jamais cluster-
+    /// wide). `Some` par Owner dont un loop a été lancé (il tourne alors pour
+    /// la vie du process). Sert de garde d'unicité par Owner.
+    watch_handles: Arc<Mutex<std::collections::HashMap<String, tokio::task::JoinHandle<()>>>>,
 }
 
 impl SharedState {
+    /// Nouvelle instance vide (aucun abonné, cache vide, aucun watch lancé).
+    /// Posée dans `AppState::shared_sandbox_state` au démarrage.
     #[must_use]
     pub fn new() -> Self {
         Self {
             subscribers: Arc::new(Mutex::new(Vec::new())),
             project_owner: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            watch_handle: Arc::new(Mutex::new(None)),
+            watch_handles: Arc::new(Mutex::new(std::collections::HashMap::new())),
         }
     }
 }
@@ -68,21 +72,28 @@ impl Default for SharedState {
     }
 }
 
-/// Résout l'owner d'un Sandbox via le cache `project` → `owner`, en le peuplant
-/// depuis l'API K8s en cas de miss (hit ou miss mémorisés). `None` si le projet
-/// est introuvable (sandbox orpheline / owner supprimé) — l'événement est ignoré.
-async fn resolve_owner(client: &VnlK8sClient, cache: &OwnerCache, project: &str) -> Option<String> {
-    if let Some(cached) = cache.lock().get(project) {
+/// Résout l'owner d'un Sandbox du namespace de l'Owner `owner_hint` via le
+/// cache `(owner, project)` → `owner`, en le peuplant depuis l'API K8s en cas
+/// de miss (hit ou miss mémorisés). `None` si le projet est introuvable
+/// (sandbox orpheline / owner supprimé) — l'événement est ignoré.
+async fn resolve_owner(
+    client: &VnlK8sClient,
+    cache: &OwnerCache,
+    owner_hint: &str,
+    project: &str,
+) -> Option<String> {
+    let key = (owner_hint.to_string(), project.to_string());
+    if let Some(cached) = cache.lock().get(&key) {
         return cached.clone();
     }
-    let resolved = match client.get_project(project).await {
+    let resolved = match client.get_project(owner_hint, project).await {
         Ok(project_obj) => Some(project_obj.spec.owner),
         Err(e) => {
             tracing::warn!("sandbox-state: project '{project}' introuvable: {e}");
             None
         }
     };
-    cache.lock().insert(project.to_string(), resolved.clone());
+    cache.lock().insert(key, resolved.clone());
     resolved
 }
 
@@ -93,11 +104,13 @@ fn dispatch(owner: &str, event: &SandboxStateEvent, subs: &[Subscriber]) {
     }
 }
 
-/// Prépare + diffuse un event de sandbox pour l'owner de `spec.project`.
+/// Prépare + diffuse un event de sandbox pour l'owner de `spec.project`
+/// (résolu dans le namespace de l'Owner `owner_hint` du flux de watch).
 /// `phase` vaut `None` en suppression → le front retire l'entrée et refetch.
 async fn dispatch_sandbox(
     shared: &SharedState,
     client: &VnlK8sClient,
+    owner_hint: &str,
     s: &Sandbox,
     phase: Option<String>,
 ) {
@@ -107,7 +120,9 @@ async fn dispatch_sandbox(
     if s.spec.project.is_empty() {
         return;
     }
-    let Some(owner) = resolve_owner(client, &shared.project_owner, &s.spec.project).await else {
+    let Some(owner) =
+        resolve_owner(client, &shared.project_owner, owner_hint, &s.spec.project).await
+    else {
         return;
     };
     let event = SandboxStateEvent {
@@ -118,32 +133,38 @@ async fn dispatch_sandbox(
     dispatch(&owner, &event, &subs);
 }
 
-/// Tâche tokio : lance un watch kube-runtime sur les Sandbox, résout l'owner de
-/// chaque sandbox (cache `project` → `owner`) et diffuse les events de phase aux
-/// subscribers de cet owner. La boucle se réinitialise quand le stream se
-/// termine (timeout serveur, erreur kube, etc.).
-async fn watch_loop(client: VnlK8sClient, shared: SharedState) {
+/// Tâche tokio : lance un watch kube-runtime sur les Sandbox du namespace de
+/// l'Owner `owner`, résout l'owner de chaque sandbox (cache `(owner, project)`
+/// → `owner`) et diffuse les events de phase aux subscribers de cet owner. La
+/// boucle se réinitialise quand le stream se termine (timeout serveur, erreur
+/// kube, etc.).
+async fn watch_loop(client: VnlK8sClient, shared: SharedState, owner: String) {
     loop {
         // Ne pas tenir de watch quand aucun subscriber n'est connecté.
-        if shared.subscribers.lock().is_empty() {
+        if shared
+            .subscribers
+            .lock()
+            .iter()
+            .all(|sub| sub.owner != owner)
+        {
             tracing::trace!("sandbox-state: aucun subscriber, watch en pause");
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
 
         tracing::info!("sandbox-state watch démarré");
-        let stream = client.watch_sandboxes();
+        let stream = client.watch_sandboxes(&owner);
         futures::pin_mut!(stream);
 
         while let Some(event) = stream.next().await {
             match event {
                 WatchEvent::Added(s) | WatchEvent::Modified(s) => {
                     let phase = s.status.as_ref().and_then(|st| st.phase.clone());
-                    dispatch_sandbox(&shared, &client, &s, phase).await;
+                    dispatch_sandbox(&shared, &client, &owner, &s, phase).await;
                 }
                 WatchEvent::Deleted(s) => {
                     // phase = None → le front retire de la map + refetch.
-                    dispatch_sandbox(&shared, &client, &s, None).await;
+                    dispatch_sandbox(&shared, &client, &owner, &s, None).await;
                 }
                 WatchEvent::Error(msg) => {
                     tracing::warn!("sandbox-state watch error: {msg}, redémarrage…");
@@ -172,17 +193,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, user: AuthUser) {
     }
 }
 
-/// S'assure qu'une (et une seule) tâche `watch_loop` tourne. Le client K8s est
-/// construit hors verrou (async), puis un second contrôle sous verrou tranche
-/// la course entre deux connexions concurrentes.
-async fn ensure_watch_loop(state: &AppState, shared: &SharedState) -> Result<(), AppError> {
-    if shared.watch_handle.lock().is_some() {
+/// S'assure qu'une (et une seule) tâche `watch_loop` tourne pour l'Owner
+/// `owner` (UN OWNER = UN NAMESPACE : un flux par Owner suivi). Le client K8s
+/// est construit hors verrou (async), puis un second contrôle sous verrou
+/// tranche la course entre deux connexions concurrentes du même Owner.
+async fn ensure_watch_loop(
+    state: &AppState,
+    shared: &SharedState,
+    owner: &str,
+) -> Result<(), AppError> {
+    if shared.watch_handles.lock().contains_key(owner) {
         return Ok(());
     }
     let client = k8s::client(state).await?;
-    let mut handle = shared.watch_handle.lock();
-    if handle.is_none() {
-        *handle = Some(tokio::spawn(watch_loop(client, shared.clone())));
+    let mut handles = shared.watch_handles.lock();
+    if !handles.contains_key(owner) {
+        let handle = tokio::spawn(watch_loop(client, shared.clone(), owner.to_string()));
+        handles.insert(owner.to_string(), handle);
     }
     Ok(())
 }
@@ -209,7 +236,7 @@ async fn run_socket(socket: WebSocket, state: AppState, user: AuthUser) -> Resul
         owner: owner.clone(),
     });
 
-    ensure_watch_loop(&state, &shared).await?;
+    ensure_watch_loop(&state, &shared, &owner).await?;
 
     let (ws_sink, mut ws_stream) = socket.split();
 

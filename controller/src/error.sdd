@@ -15,7 +15,8 @@ Purpose:
   quel niveau — ce que décident les @error_policy des quatre reconcilers, consommées ici
   comme contrat (les politiques elles-mêmes seront verrouillées par les specs sœurs
   ./owner.sdd, ./project.sdd, ./sandbox.sdd, ./application.sdd, absentes à ce jour).
-  Groupement assumé en fichier unique : 24 lignes, un seul type, aucun comportement hors
+  Groupement assumé en fichier unique : 414 lignes (module `#[cfg(test)]` inclus depuis
+    2026-10-06), un seul type, aucun comportement hors
     derives. Le crate n'a qu'une cible `[[bin]]` (../Cargo.toml, aucun `lib.rs`) : le module
   est déclaré `mod error;` (privé) dans ./main.rs — @ControllerError n'est jamais une
   surface publique inter-crates, il ne sort du binaire que par ses chaînes de @Display,
@@ -60,7 +61,8 @@ Depends on:
 
 Exposes:
   @ControllerError — `pub enum` (privé au crate, cf. `Purpose`) avec derives `Debug` et
-    @thiserror::Error exactement. 6 variantes, aucun gating de feature. Le @Display de
+    @thiserror::Error exactement. 10 variantes (les six d'origine + les quatre de
+    ./namespace.sdd depuis 2026-10-06), aucun gating de feature. Le @Display de
     chaque variante commence par son marqueur `VNL-CTL-*` suivi de `": "` — les rendus
     ci-dessous sont exacts, caractère par caractère, `{owner}`/`{project}`/… désignant les
     champs nommés :
@@ -86,8 +88,27 @@ Exposes:
       @ControllerError::WorktreeRemovalPending { sandbox } —
         `"VNL-CTL-006: worktree removal job for Sandbox '{sandbox}' not finished yet"` ;
         variante de contrôle (signal de requeue du cleanup Sandbox)
+      @ControllerError::InvalidNamespaceName { name, reason } —
+        `"VNL-CTL-007: invalid Owner namespace name '{name}': {reason}"` ; deux champs
+        `String` ; variante d'anomalie (nom `{app_namespace}-{owner}` hors DNS-1123 ou
+        > 63 caractères, validé avant tout appel apiserver — ./namespace.sdd)
+      @ControllerError::NamespaceCollision { namespace, owner } —
+        `"VNL-CTL-008: namespace '{namespace}' already exists without the labels of Owner '{owner}' — refusing to adopt it"` ;
+        deux champs `String` ; variante d'anomalie (adoption/refus sur namespace étranger —
+        ./namespace.sdd)
+      @ControllerError::NamespaceTerminating { namespace } —
+        `"VNL-CTL-009: namespace '{namespace}' is terminating, cannot be created or reused"` ;
+        un champ `String` ; variante de contrôle (l'Owner est requeué, politique globale
+        owner 30 s)
+      @ControllerError::NamespaceNotManaged { namespace } —
+        `"VNL-CTL-010: namespace '{namespace}' is not a vanyline Owner namespace (missing label vanyline.solidite.fr/app-namespace)"` ;
+        un champ `String` ; variante d'anomalie (CR Project/Sandbox posée hors d'un
+        namespace d'Owner — ./namespace.sdd)
+      # Les gabarits `VNL-CTL-007..010` sont ceux choisis par l'implémentation 4b et
+      # verrouillés par le test `display_exhaustif_des_marqueurs_vnl_ctl` ; ratification
+      # Sébastien à confirmer (cf. `[?]` des `Tasks`).
   @std::error::Error — implémenté par la derive : @source() ne rend `Some` que pour
-    @ControllerError::Kube (seul `#[from]`), `None` pour les cinq autres variantes.
+    @ControllerError::Kube (seul `#[from]`), `None` pour les neuf autres variantes.
   @std::fmt::Debug — dérivé, utilisable dans les tests/inspect des quatre modules
     consommateurs.
   Contrat de consommation — les @error_policy des quatre reconcilers (définitions vivent
@@ -174,9 +195,9 @@ Handles:
 
 Must:
   Préfixer le @Display de chaque variante par son marqueur `VNL-<DOMAINE>-<NNN>` exact,
-    suivi de `": "`, marqueurs uniques dans l'enum et numérotation contiguë `001..006` —
+    suivi de `": "`, marqueurs uniques dans l'enum et numérotation contiguë `001..010` —
     contractisation AGENTS.md de l'« identifiant unique », même discipline que
-    /lib/src/error.sdd et /tools/src/error.sdd ; les six rendus de `Exposes` sont stables et
+    /lib/src/error.sdd et /tools/src/error.sdd ; les dix rendus de `Exposes` sont stables et
     verrouillables par test sur le rendu complet (pas un simple `contains`).
   Conserver @From<@kube::Error> généré par `#[from]` sur @ControllerError::Kube : les
     quatre reconcilers s'appuient massivement sur `?` pour les appels kube ; supprimer le
@@ -218,15 +239,21 @@ Must not:
     appartient aux @error_policy (via @tracing) des fichiers appelants.
 
 Tasks:
-  [ ] Variantes pour ./namespace.sdd (2026-10-04) : `InvalidNamespaceName` `VNL-CTL-007`, `NamespaceCollision`
+  [x] Variantes pour ./namespace.sdd (2026-10-04) : `InvalidNamespaceName` `VNL-CTL-007`, `NamespaceCollision`
     `VNL-CTL-008`, `NamespaceTerminating` `VNL-CTL-009`, `NamespaceNotManaged` `VNL-CTL-010`, avec
     leurs @Display `VNL-CTL-NNN: …` et la contrainte « six marqueurs » de cette spec étendue à dix.
-  [ ] Ajouter un module `#[cfg(test)]` à ./error.rs (aucun test n'existe pour ce fichier) :
+    — fait 2026-10-06 (étape 4b), validator vert ; gabarits transcrits dans `Exposes` sous `[?]`
+    de ratification.
+  [x] Ajouter un module `#[cfg(test)]` à ./error.rs (aucun test n'existe pour ce fichier) :
     un test par Scenario, taggé par son titre. Scénarios unitaires = @Display exacts,
     @From/@source, et appels directs des quatre @error_policy (fonctions pures, testables
     hors cluster) ; les effets réels du helper finalizer kube-rs sur les variantes de
     contrôle relèvent des tests d'intégration cluster non mockés du crate (conventions
-    projet), pas de tests unitaires d'ici.
+    projet), pas de tests unitaires d'ici. — fait 2026-10-06 (étape 4b), 7 tests, validator vert.
+  [?] Ratification des gabarits `VNL-CTL-007..010` (choix de l'implémentation 4b, verrouillés
+    par le test `display_exhaustif_des_marqueurs_vnl_ctl`) : les textes anglais de `Exposes`
+    deviennent-ils le contrat définitif, ou Sébastien impose-t-il d'autres formulations
+    (dans ce cas tests à revoir) ?
   [?] Comportement exact de @kube::runtime::finalizer (kube 4) sur l'erreur retournée par
     la fermeture en phase Cleanup : le code de ./project.rs et ./sandbox.rs (et leurs
     commentaires « un `Ok` retire le finalizer, donc on renvoie `Err` ») suppose une
@@ -280,11 +307,14 @@ Scenario: display_exhaustif_des_marqueurs_vnl_ctl
   Given une instance de chaque variante de @ControllerError avec des payloads fixés
     (@OwnerNotReady { owner: "alice", project: "depot" }, @PurgePending { project:
     "depot" }, @Finalizer("cause"), @ProjectNotReady { project: "depot", sandbox: "sb1" },
-    @WorktreeRemovalPending { sandbox: "sb1" }) et une @ControllerError::Kube construite
+    @WorktreeRemovalPending { sandbox: "sb1" }, @InvalidNamespaceName { name:
+    "media-test-seb", reason: "raison" }, @NamespaceCollision { namespace:
+    "media-test-seb", owner: "seb" }, @NamespaceTerminating { namespace: "media-test-seb" },
+    @NamespaceNotManaged { namespace: "default" }) et une @ControllerError::Kube construite
     depuis un @kube::Error minimal via @From
   When chacune est rendue par @Display
   Then chaque rendu est exactement le gabarit de `Exposes` avec payloads injectés,
-    commençant par son marqueur `VNL-CTL-001..006` suivi de `": "`, et les six marqueurs
+    commençant par son marqueur `VNL-CTL-001..010` suivi de `": "`, et les dix marqueurs
     sont deux à deux distincts
 
 Scenario: conversion_from_kube_error_et_source_chainee

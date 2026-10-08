@@ -17,6 +17,7 @@ use kube::runtime::finalizer::{Event, finalizer};
 use kube::{Client, Resource, ResourceExt};
 
 use crate::error::ControllerError;
+use crate::namespace;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 use vanyline_crds::Project;
@@ -30,34 +31,17 @@ const DEFAULT_WORKSPACE_SIZE: &str = "10Gi";
 #[allow(dead_code)]
 const DEFAULT_WORKSPACE_ACCESS_MODE: &str = "ReadWriteOnce";
 
-/// Nom du PVC workspace créé par le controller — utilisé seulement quand
-/// `spec.existing_pvc` est `None`.
+/// Nom du PVC workspace créé par le controller.
 #[allow(dead_code)]
 pub fn project_pvc_name(project_name: &str) -> String {
     format!("project-{project_name}")
 }
 
-/// Nom de PVC exposé au status : `existing_pvc.name` si fourni, sinon le nom généré.
+/// Nom de PVC exposé au status — toujours le PVC créé par le controller
+/// (`existing_pvc` retiré, décision 2026-10-04).
 #[allow(dead_code)]
 pub fn effective_pvc_name(project: &Project) -> String {
-    project
-        .spec
-        .existing_pvc
-        .as_ref()
-        .map_or_else(|| project_pvc_name(&project.name_any()), |r| r.name.clone())
-}
-
-/// `subPath` à utiliser lors du montage du PVC — `Some` uniquement quand le repo
-/// vit dans un sous-répertoire d'un PVC existant (cas kydah-code). `None` quand le
-/// PVC est créé par le controller (le mount utilise tout le volume) ou que
-/// `existing_pvc.sub_path` n'est pas renseigné.
-#[allow(dead_code)]
-pub fn effective_sub_path(project: &Project) -> Option<String> {
-    project
-        .spec
-        .existing_pvc
-        .as_ref()
-        .and_then(|r| r.sub_path.clone())
+    project_pvc_name(&project.name_any())
 }
 
 /// Chemin (relatif à la racine du volume, donc à `WORKSPACE_MOUNT_PATH` une fois
@@ -192,9 +176,9 @@ pub fn build_maint_role_binding(project: &Project) -> RoleBinding {
     }
 }
 
-/// Construit le PVC workspace à créer. Retourne `None` si `existing_pvc` est
-/// fourni : un PVC référencé n'est jamais créé ni géré par le controller (mêmes
-/// règles que `owner::build_home_pvc`).
+/// Construit le PVC workspace du Project — toujours créé par le controller
+/// (mêmes règles que `owner::build_home_pvc`, `existing_pvc` retiré le
+/// 2026-10-04).
 #[allow(dead_code)]
 ///
 /// `default_size`/`default_class`/`default_access_mode` sont les valeurs
@@ -210,10 +194,7 @@ pub fn build_workspace_pvc(
     default_size: Option<&str>,
     default_class: Option<&str>,
     default_access_mode: Option<&str>,
-) -> Option<PersistentVolumeClaim> {
-    if project.spec.existing_pvc.is_some() {
-        return None;
-    }
+) -> PersistentVolumeClaim {
     let size = project
         .spec
         .storage_size
@@ -235,7 +216,7 @@ pub fn build_workspace_pvc(
     let mut requests = BTreeMap::new();
     requests.insert("storage".to_string(), Quantity(size));
 
-    Some(PersistentVolumeClaim {
+    PersistentVolumeClaim {
         metadata: ObjectMeta {
             name: Some(project_pvc_name(&project.name_any())),
             namespace: project.namespace(),
@@ -252,7 +233,7 @@ pub fn build_workspace_pvc(
             ..Default::default()
         }),
         ..Default::default()
-    })
+    }
 }
 
 /// Context nécessaire pour les builders de Jobs git. Résolu par l'appelant (le reconciler Project
@@ -347,7 +328,7 @@ pub fn git_pod_template(
         VolumeMount {
             name: "workspace".to_string(),
             mount_path: WORKSPACE_MOUNT_PATH.to_string(),
-            sub_path: effective_sub_path(project),
+            sub_path: None,
             ..Default::default()
         },
         VolumeMount {
@@ -620,9 +601,13 @@ pub fn compute_status(project: &Project, cloned: bool) -> ProjectStatus {
     }
 }
 
-/// Récupère l'Owner référencé par le Project (même namespace).
+/// Récupère l'Owner référencé par le Project. L'Owner vit dans le namespace
+/// d'application (UN OWNER = UN NAMESPACE, `namespace.sdd`) : le namespace du
+/// Project est celui de l'Owner, on résout le namespace d'application par le
+/// label du Namespace — plus jamais par `project.namespace()` directement.
 async fn fetch_owner(project: &Project, ctx: &Context, ns: &str) -> Result<Owner, ControllerError> {
-    let owners: Api<Owner> = Api::namespaced(ctx.client.clone(), ns);
+    let app_ns = namespace::app_namespace_of(&ctx.client, ns).await?;
+    let owners: Api<Owner> = Api::namespaced(ctx.client.clone(), &app_ns);
     Ok(owners.get(&project.spec.owner).await?)
 }
 
@@ -672,7 +657,7 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
         )
         .await?;
 
-    if let Some(pvc) = build_workspace_pvc(
+    let pvc = build_workspace_pvc(
         project,
         owner
             .spec
@@ -689,15 +674,14 @@ async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, Con
             .project_defaults
             .as_ref()
             .and_then(|d| d.storage_access_mode.as_deref()),
-    ) {
-        let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
-        pvcs.patch(
-            &project_pvc_name(&project.name_any()),
-            &pp,
-            &Patch::Apply(&pvc),
-        )
-        .await?;
-    }
+    );
+    let pvcs: Api<PersistentVolumeClaim> = Api::namespaced(ctx.client.clone(), ns);
+    pvcs.patch(
+        &project_pvc_name(&project.name_any()),
+        &pp,
+        &Patch::Apply(&pvc),
+    )
+    .await?;
 
     let job_ctx = ProjectJobContext {
         sandbox_image: ctx.sandbox_image.clone(),
@@ -841,16 +825,15 @@ pub fn build_controller(client: Client) -> Controller<Project> {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
-    use vanyline_crds::{ProjectSpec, PvcRef};
+    use vanyline_crds::ProjectSpec;
 
-    fn make_project(existing_pvc: Option<PvcRef>, storage_size: Option<String>) -> Project {
+    fn make_project(storage_size: Option<String>) -> Project {
         let mut project = Project::new(
             "demo",
             ProjectSpec {
                 owner: "alice".to_string(),
                 repo_url: "https://github.com/owner/repo".to_string(),
                 default_branch: None,
-                existing_pvc,
                 storage_size,
                 storage_class: None,
                 storage_access_mode: None,
@@ -898,7 +881,7 @@ mod tests {
     // 5. effective_caches_default
     #[test]
     fn effective_caches_default() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         assert_eq!(
             effective_caches(&project),
             vec!["cargo".to_string(), "pnpm".to_string(), "pip".to_string()]
@@ -908,7 +891,7 @@ mod tests {
     // 6. effective_caches_custom
     #[test]
     fn effective_caches_custom() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let mut project = project;
         project.spec.caches = Some(vec!["cargo".into()]);
         assert_eq!(effective_caches(&project), vec!["cargo".to_string()]);
@@ -917,69 +900,15 @@ mod tests {
     // 7. effective_pvc_name_generated
     #[test]
     fn effective_pvc_name_generated() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         assert_eq!(effective_pvc_name(&project), "project-demo");
-    }
-
-    // 8. effective_pvc_name_existing
-    #[test]
-    fn effective_pvc_name_existing() {
-        let project = make_project(
-            Some(PvcRef {
-                name: "code-server-home".into(),
-                sub_path: Some("repo".into()),
-            }),
-            None,
-        );
-        assert_eq!(effective_pvc_name(&project), "code-server-home");
-    }
-
-    // 9. effective_sub_path_cases
-    #[test]
-    fn effective_sub_path_cases() {
-        // existing_pvc: None => None
-        let project = make_project(None, None);
-        assert_eq!(effective_sub_path(&project), None);
-
-        // existing_pvc with sub_path
-        let project = make_project(
-            Some(PvcRef {
-                name: "x".into(),
-                sub_path: Some("repo".into()),
-            }),
-            None,
-        );
-        assert_eq!(effective_sub_path(&project), Some("repo".to_string()));
-
-        // existing_pvc without sub_path
-        let project = make_project(
-            Some(PvcRef {
-                name: "x".into(),
-                sub_path: None,
-            }),
-            None,
-        );
-        assert_eq!(effective_sub_path(&project), None);
-    }
-
-    // 10. build_workspace_pvc_none_when_existing
-    #[test]
-    fn build_workspace_pvc_none_when_existing() {
-        let project = make_project(
-            Some(PvcRef {
-                name: "code-server-home".into(),
-                sub_path: None,
-            }),
-            None,
-        );
-        assert!(build_workspace_pvc(&project, None, None, None).is_none());
     }
 
     // 11. build_workspace_pvc_default_size
     #[test]
     fn build_workspace_pvc_default_size() {
-        let project = make_project(None, None);
-        let pvc = build_workspace_pvc(&project, None, None, None).expect("PVC should be built");
+        let project = make_project(None);
+        let pvc = build_workspace_pvc(&project, None, None, None);
         let requests = pvc
             .spec
             .as_ref()
@@ -1000,9 +929,8 @@ mod tests {
     // 12. build_workspace_pvc_owner_default_size
     #[test]
     fn build_workspace_pvc_owner_default_size() {
-        let project = make_project(None, None);
-        let pvc =
-            build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
+        let project = make_project(None);
+        let pvc = build_workspace_pvc(&project, Some("20Gi"), None, None);
         let requests = pvc
             .spec
             .as_ref()
@@ -1018,9 +946,8 @@ mod tests {
 
     #[test]
     fn build_workspace_pvc_access_mode_owner_default() {
-        let project = make_project(None, None);
-        let pvc = build_workspace_pvc(&project, None, None, Some("ReadWriteMany"))
-            .expect("PVC should be built");
+        let project = make_project(None);
+        let pvc = build_workspace_pvc(&project, None, None, Some("ReadWriteMany"));
         assert_eq!(
             pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
             &vec!["ReadWriteMany".to_string()]
@@ -1029,10 +956,9 @@ mod tests {
 
     #[test]
     fn build_workspace_pvc_access_mode_spec_overrides_default() {
-        let mut project = make_project(None, None);
+        let mut project = make_project(None);
         project.spec.storage_access_mode = Some("ReadWriteOncePod".to_string());
-        let pvc = build_workspace_pvc(&project, None, None, Some("ReadWriteMany"))
-            .expect("PVC should be built");
+        let pvc = build_workspace_pvc(&project, None, None, Some("ReadWriteMany"));
         assert_eq!(
             pvc.spec.as_ref().unwrap().access_modes.as_ref().unwrap(),
             &vec!["ReadWriteOncePod".to_string()]
@@ -1042,9 +968,8 @@ mod tests {
     // 13. build_workspace_pvc_spec_overrides_default
     #[test]
     fn build_workspace_pvc_spec_overrides_default() {
-        let project = make_project(None, Some("5Gi".to_string()));
-        let pvc =
-            build_workspace_pvc(&project, Some("20Gi"), None, None).expect("PVC should be built");
+        let project = make_project(Some("5Gi".to_string()));
+        let pvc = build_workspace_pvc(&project, Some("20Gi"), None, None);
         let requests = pvc
             .spec
             .as_ref()
@@ -1061,8 +986,8 @@ mod tests {
     // 14. build_workspace_pvc_owner_reference
     #[test]
     fn build_workspace_pvc_owner_reference() {
-        let project = make_project(None, None);
-        let pvc = build_workspace_pvc(&project, None, None, None).expect("PVC should be built");
+        let project = make_project(None);
+        let pvc = build_workspace_pvc(&project, None, None, None);
         let refs = pvc
             .metadata
             .owner_references
@@ -1093,21 +1018,21 @@ mod tests {
     // 16. fetch_schedule_default
     #[test]
     fn fetch_schedule_default() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         assert_eq!(fetch_schedule(&project), "@every 1h");
     }
 
     // 17. fetch_schedule_custom
     #[test]
     fn fetch_schedule_custom() {
-        let mut project = make_project(None, None);
+        let mut project = make_project(None);
         project.spec.fetch_interval = Some("30m".to_string());
         assert_eq!(fetch_schedule(&project), "@every 30m");
     }
 
     #[test]
     fn git_pod_template_runs_as_non_root() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let template = git_pod_template(
             &project,
@@ -1132,7 +1057,7 @@ mod tests {
     // 18. build_init_job_shape
     #[test]
     fn build_init_job_shape() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let job = build_init_job(&project, &ctx);
 
@@ -1198,7 +1123,7 @@ mod tests {
     // 19. build_init_job_ignores_git_secret
     #[test]
     fn build_init_job_ignores_git_secret() {
-        let mut project = make_project(None, None);
+        let mut project = make_project(None);
         project.spec.git_secret = Some("demo-deploy-key".to_string());
         let ctx = make_ctx();
 
@@ -1241,48 +1166,10 @@ mod tests {
         );
     }
 
-    // 20. build_init_job_existing_pvc_sub_path
-    #[test]
-    fn build_init_job_existing_pvc_sub_path() {
-        let project = make_project(
-            Some(PvcRef {
-                name: "code-server-home".into(),
-                sub_path: Some("demo".into()),
-            }),
-            None,
-        );
-        let ctx = make_ctx();
-
-        let job = build_init_job(&project, &ctx);
-        let pod_spec = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();
-
-        // Volume "workspace" should reference the existing PVC
-        let workspace_vol = pod_spec
-            .volumes
-            .as_ref()
-            .unwrap()
-            .iter()
-            .find(|v| v.name == "workspace")
-            .unwrap();
-        assert_eq!(
-            workspace_vol
-                .persistent_volume_claim
-                .as_ref()
-                .unwrap()
-                .claim_name,
-            "code-server-home"
-        );
-
-        // VolumeMount "workspace" should have sub_path
-        let mounts = pod_spec.containers[0].volume_mounts.as_ref().unwrap();
-        let ws_mount = mounts.iter().find(|m| m.name == "workspace").unwrap();
-        assert_eq!(ws_mount.sub_path, Some("demo".to_string()));
-    }
-
     // 21. build_fetch_cronjob_shape
     #[test]
     fn build_fetch_cronjob_shape() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
 
         let cronjob = build_fetch_cronjob(&project, &ctx);
@@ -1334,7 +1221,7 @@ mod tests {
     // 22. build_purge_job_shape
     #[test]
     fn build_purge_job_shape() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
 
         let job = build_purge_job(&project, &ctx);
@@ -1356,7 +1243,7 @@ mod tests {
     // 23. git_jobs_service_account
     #[test]
     fn git_jobs_service_account() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
 
         let init_job = build_init_job(&project, &ctx);
@@ -1407,7 +1294,7 @@ mod tests {
     // 24. git_pod_template_no_shell
     #[test]
     fn git_pod_template_no_shell() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
 
         let init_job = build_init_job(&project, &ctx);
@@ -1487,7 +1374,7 @@ mod tests {
     // 25. compute_status_cloned_true
     #[test]
     fn compute_status_cloned_true() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let status = compute_status(&project, true);
         assert!(status.cloned);
         assert_eq!(status.pvc_name.as_ref().unwrap(), "project-demo");
@@ -1501,7 +1388,7 @@ mod tests {
     // 26. compute_status_cloned_false
     #[test]
     fn compute_status_cloned_false() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let status = compute_status(&project, false);
         assert!(!status.cloned);
         assert_eq!(status.pvc_name.as_ref().unwrap(), "project-demo");
@@ -1515,7 +1402,7 @@ mod tests {
     // 27. compute_status_worktrees_and_last_fetch_empty
     #[test]
     fn compute_status_worktrees_and_last_fetch_empty() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let status_true = compute_status(&project, true);
         assert!(status_true.worktrees.is_empty());
         assert!(status_true.last_fetch.is_none());
@@ -1536,7 +1423,7 @@ mod tests {
     // 29. build_maint_service_account_shape
     #[test]
     fn build_maint_service_account_shape() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let sa = build_maint_service_account(&project);
 
         assert_eq!(sa.metadata.name, Some("project-demo-maint".to_string()));
@@ -1554,7 +1441,7 @@ mod tests {
     // 30. build_maint_role_shape
     #[test]
     fn build_maint_role_shape() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let role = build_maint_role(&project);
 
         assert_eq!(role.metadata.name, Some("project-demo-maint".to_string()));
@@ -1580,7 +1467,7 @@ mod tests {
     // 31. build_maint_role_binding_shape
     #[test]
     fn build_maint_role_binding_shape() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let rb = build_maint_role_binding(&project);
 
         assert_eq!(rb.metadata.name, Some("project-demo-maint".to_string()));
@@ -1601,7 +1488,7 @@ mod tests {
     // 32. init_job_detect_container_order
     #[test]
     fn init_job_detect_container_order() {
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let job = build_init_job(&project, &ctx);
         let p = job.spec.as_ref().unwrap().template.spec.as_ref().unwrap();

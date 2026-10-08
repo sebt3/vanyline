@@ -9,13 +9,17 @@ use crate::error::CfgStoreError;
 use crate::layers::{
     Layers, RawConfigFile, list_layer_files, list_layer_skill_dirs, load_config_layer,
 };
-use crate::store::{ConfigStore, Layer};
+use crate::store::{ConfigStore, Layer, patch_array_names, patch_names, patch_str};
 
 /// Contrainte anti-traversal : `name` devient une clé de map dans `config.yaml`
 /// (et, tâche 2, un nom de fichier/répertoire). `^[a-zA-Z0-9][a-zA-Z0-9._-]*$`,
 /// longueur ≤ 64, et rejette explicitement `..` (sous-chaîne), `/`, `\`, un `.`
 /// ou `..` seul, tout chemin absolu (couvert par le premier caractère
 /// alphanumérique + le rejet de `/` et `\`).
+///
+/// # Errors
+///
+/// `CfgStoreError::InvalidName` si `name` ne satisfait pas la contrainte.
 pub fn validate_name(name: &str) -> Result<(), CfgStoreError> {
     let valid = !name.is_empty()
         && name.len() <= 64
@@ -41,12 +45,16 @@ pub struct FsConfigStore {
 }
 
 impl FsConfigStore {
+    /// Store adossé aux couches données.
     #[allow(dead_code)]
+    #[must_use]
     pub const fn new(layers: Layers) -> Self {
         Self { layers }
     }
 
+    /// Les couches sous-jacentes.
     #[allow(dead_code)]
+    #[must_use]
     pub const fn layers(&self) -> &Layers {
         &self.layers
     }
@@ -64,11 +72,7 @@ impl FsConfigStore {
         }
     }
 
-    async fn write_config_layer(
-        &self,
-        dir: &std::path::Path,
-        raw: RawConfigFile,
-    ) -> Result<(), CfgStoreError> {
+    fn write_config_layer(dir: &std::path::Path, raw: &RawConfigFile) -> Result<(), CfgStoreError> {
         std::fs::create_dir_all(dir).map_err(CfgStoreError::from)?;
         let path = dir.join("config.yaml");
         let content = yaml_serde::to_string(&raw).map_err(|e| {
@@ -235,7 +239,7 @@ fn parse_toolset_file(name: &str, path: &Path) -> Result<Toolset, CfgStoreError>
 /// Forme fichier d'un toolset : `description?`, `prompt?`, `tools: { local?,
 /// mcp? }` — `local` et `mcp` inclus seulement si non vides, `tools: {}` si
 /// les deux sont vides. `mcp` est une map serveur -> liste d'outils.
-fn toolset_to_yaml_json(t: &Toolset) -> Result<serde_json::Value, CfgStoreError> {
+fn toolset_to_yaml_json(t: &Toolset) -> serde_json::Value {
     let mut tools = serde_json::Map::new();
     if !t.local_tools.is_empty() {
         tools.insert(
@@ -273,7 +277,7 @@ fn toolset_to_yaml_json(t: &Toolset) -> Result<serde_json::Value, CfgStoreError>
         obj.insert("prompt".into(), serde_json::Value::String(p.clone()));
     }
     obj.insert("tools".into(), serde_json::Value::Object(tools));
-    Ok(serde_json::Value::Object(obj))
+    serde_json::Value::Object(obj)
 }
 
 /// `---\n<frontmatter yaml>\n---\n<corps>` — frontmatter : `description?`,
@@ -473,7 +477,7 @@ impl ConfigStore for FsConfigStore {
         let entry = yaml_serde::to_value(&json_entry)
             .map_err(|e| CfgStoreError::WriteError(format!("provider '{}': {e}", item.name)))?;
         raw.providers.insert(item.name.clone(), entry);
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn update_provider(
@@ -546,7 +550,7 @@ impl ConfigStore for FsConfigStore {
         yaml_serde::from_value::<RawProviderEntry>(entry.clone())
             .map_err(|e| CfgStoreError::Validation(format!("provider '{name}': {e}")))?;
         raw.providers.insert(name.to_string(), entry);
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn delete_provider(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
@@ -560,7 +564,7 @@ impl ConfigStore for FsConfigStore {
                 layer,
             });
         }
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn create_model(&self, layer: Layer, item: ModelProfile) -> Result<(), CfgStoreError> {
@@ -585,7 +589,7 @@ impl ConfigStore for FsConfigStore {
         let entry = yaml_serde::to_value(&json_entry)
             .map_err(|e| CfgStoreError::WriteError(format!("model '{}': {e}", item.name)))?;
         raw.models.insert(item.name.clone(), entry);
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn update_model(
@@ -648,7 +652,7 @@ impl ConfigStore for FsConfigStore {
         yaml_serde::from_value::<RawModelEntry>(entry.clone())
             .map_err(|e| CfgStoreError::Validation(format!("model '{name}': {e}")))?;
         raw.models.insert(name.to_string(), entry);
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn delete_model(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
@@ -662,7 +666,7 @@ impl ConfigStore for FsConfigStore {
                 layer,
             });
         }
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn create_mcp_server(&self, layer: Layer, item: McpServer) -> Result<(), CfgStoreError> {
@@ -687,7 +691,7 @@ impl ConfigStore for FsConfigStore {
         let entry = yaml_serde::to_value(&json_entry)
             .map_err(|e| CfgStoreError::WriteError(format!("mcp server '{}': {e}", item.name)))?;
         raw.mcp.insert(item.name.clone(), entry);
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn update_mcp_server(
@@ -758,7 +762,7 @@ impl ConfigStore for FsConfigStore {
         yaml_serde::from_value::<RawMcpEntry>(entry.clone())
             .map_err(|e| CfgStoreError::Validation(format!("mcp server '{name}': {e}")))?;
         raw.mcp.insert(name.to_string(), entry);
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn delete_mcp_server(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
@@ -772,7 +776,7 @@ impl ConfigStore for FsConfigStore {
                 layer,
             });
         }
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn set_default_agent(&self, layer: Layer, name: &str) -> Result<(), CfgStoreError> {
@@ -782,7 +786,7 @@ impl ConfigStore for FsConfigStore {
             "agent".to_string(),
             yaml_serde::Value::String(name.to_string()),
         );
-        self.write_config_layer(&dir, raw).await
+        Self::write_config_layer(&dir, &raw)
     }
 
     async fn create_toolset(&self, layer: Layer, item: Toolset) -> Result<(), CfgStoreError> {
@@ -796,7 +800,7 @@ impl ConfigStore for FsConfigStore {
                 layer,
             });
         }
-        let content = yaml_serde::to_string(&toolset_to_yaml_json(&item)?)
+        let content = yaml_serde::to_string(&toolset_to_yaml_json(&item))
             .map_err(|e| CfgStoreError::WriteError(format!("toolset '{}': {e}", item.name)))?;
         std::fs::create_dir_all(dir.join("toolsets")).map_err(CfgStoreError::from)?;
         std::fs::write(
@@ -906,12 +910,12 @@ impl ConfigStore for FsConfigStore {
         validate_name(name)?;
         let dir = self.layer_dir(layer)?;
         let files = list_layer_files(&dir.join("toolsets"), "yaml")?;
-        let path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
+        let file_path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
             kind: "toolset",
             name: name.to_string(),
             layer,
         })?;
-        let mut toolset = parse_toolset_file(name, path)?;
+        let mut toolset = parse_toolset_file(name, file_path)?;
         let Some(obj) = patch.as_object() else {
             return Err(CfgStoreError::Config(
                 "update patch must be a JSON object".to_string(),
@@ -923,51 +927,21 @@ impl ConfigStore for FsConfigStore {
                     toolset.description = if v.is_null() {
                         None
                     } else {
-                        Some(
-                            v.as_str()
-                                .ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "toolset: 'description' must be a string".to_string(),
-                                    )
-                                })?
-                                .to_string(),
-                        )
+                        Some(patch_str(v, "toolset: 'description'")?.to_string())
                     };
                 }
                 "prompt" => {
                     toolset.prompt = if v.is_null() {
                         None
                     } else {
-                        Some(
-                            v.as_str()
-                                .ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "toolset: 'prompt' must be a string".to_string(),
-                                    )
-                                })?
-                                .to_string(),
-                        )
+                        Some(patch_str(v, "toolset: 'prompt'")?.to_string())
                     };
                 }
                 "local_tools" => {
                     toolset.local_tools = if v.is_null() {
                         Vec::new()
                     } else {
-                        let arr = v.as_array().ok_or_else(|| {
-                            CfgStoreError::Validation(
-                                "toolset: 'local_tools' must be an array".to_string(),
-                            )
-                        })?;
-                        arr.iter()
-                            .map(|x| {
-                                x.as_str().map(String::from).ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "toolset: 'local_tools' entries must be strings"
-                                            .to_string(),
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
+                        patch_array_names(v, "toolset: 'local_tools'")?
                     };
                 }
                 "mcp" => {
@@ -995,16 +969,7 @@ impl ConfigStore for FsConfigStore {
                                                 .to_string(),
                                         )
                                     })?;
-                                    arr.iter()
-                                        .map(|x| {
-                                            x.as_str().map(String::from).ok_or_else(|| {
-                                                CfgStoreError::Validation(
-                                                    "toolset: 'mcp' entry tools must be strings"
-                                                        .to_string(),
-                                                )
-                                            })
-                                        })
-                                        .collect::<Result<Vec<_>, _>>()?
+                                    patch_names(arr, "toolset: 'mcp' entry tools")?
                                 }
                             };
                             out.push(McpSelection {
@@ -1018,9 +983,9 @@ impl ConfigStore for FsConfigStore {
                 _ => {} // clés inconnues ignorées
             }
         }
-        let content = yaml_serde::to_string(&toolset_to_yaml_json(&toolset)?)
+        let content = yaml_serde::to_string(&toolset_to_yaml_json(&toolset))
             .map_err(|e| CfgStoreError::WriteError(format!("toolset '{name}': {e}")))?;
-        std::fs::write(path, content).map_err(CfgStoreError::from)?;
+        std::fs::write(file_path, content).map_err(CfgStoreError::from)?;
         Ok(())
     }
 
@@ -1033,12 +998,12 @@ impl ConfigStore for FsConfigStore {
         validate_name(name)?;
         let dir = self.layer_dir(layer)?;
         let files = list_layer_files(&dir.join("agents"), "md")?;
-        let path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
+        let file_path = files.get(name).ok_or_else(|| CfgStoreError::NotFound {
             kind: "agent",
             name: name.to_string(),
             layer,
         })?;
-        let mut agent = parse_agent_file(name, path)?;
+        let mut agent = parse_agent_file(name, file_path)?;
         let Some(obj) = patch.as_object() else {
             return Err(CfgStoreError::Config(
                 "update patch must be a JSON object".to_string(),
@@ -1050,21 +1015,11 @@ impl ConfigStore for FsConfigStore {
                     agent.description = if v.is_null() {
                         None
                     } else {
-                        Some(
-                            v.as_str()
-                                .ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "agent: 'description' must be a string".to_string(),
-                                    )
-                                })?
-                                .to_string(),
-                        )
+                        Some(patch_str(v, "agent: 'description'")?.to_string())
                     };
                 }
                 "mode" => {
-                    let m = v.as_str().ok_or_else(|| {
-                        CfgStoreError::Validation("agent: 'mode' must be a string".to_string())
-                    })?;
+                    let m = patch_str(v, "agent: 'mode'")?;
                     agent.mode = match m {
                         "primary" => AgentMode::Primary,
                         "subagent" => AgentMode::Subagent,
@@ -1077,31 +1032,13 @@ impl ConfigStore for FsConfigStore {
                     };
                 }
                 "model" => {
-                    agent.model = v
-                        .as_str()
-                        .ok_or_else(|| {
-                            CfgStoreError::Validation("agent: 'model' must be a string".to_string())
-                        })?
-                        .to_string();
+                    agent.model = patch_str(v, "agent: 'model'")?.to_string();
                 }
                 "toolsets" => {
                     agent.toolsets = if v.is_null() {
                         Vec::new()
                     } else {
-                        let arr = v.as_array().ok_or_else(|| {
-                            CfgStoreError::Validation(
-                                "agent: 'toolsets' must be an array".to_string(),
-                            )
-                        })?;
-                        arr.iter()
-                            .map(|x| {
-                                x.as_str().map(String::from).ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "agent: 'toolsets' entries must be strings".to_string(),
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
+                        patch_array_names(v, "agent: 'toolsets'")?
                     };
                 }
                 "skills" => {
@@ -1111,18 +1048,9 @@ impl ConfigStore for FsConfigStore {
                         match v {
                             serde_json::Value::String(s) if s == "auto" => SkillSelection::Auto,
                             serde_json::Value::String(s) if s == "none" => SkillSelection::None,
-                            serde_json::Value::Array(arr) => SkillSelection::Named(
-                                arr.iter()
-                                    .map(|x| {
-                                        x.as_str().map(String::from).ok_or_else(|| {
-                                            CfgStoreError::Validation(
-                                                "agent: 'skills' entries must be strings"
-                                                    .to_string(),
-                                            )
-                                        })
-                                    })
-                                    .collect::<Result<Vec<_>, _>>()?,
-                            ),
+                            serde_json::Value::Array(arr) => {
+                                SkillSelection::Named(patch_names(arr, "agent: 'skills'")?)
+                            }
                             _ => {
                                 return Err(CfgStoreError::Validation(
                                     "agent: 'skills' must be 'auto', 'none' or an array"
@@ -1133,20 +1061,13 @@ impl ConfigStore for FsConfigStore {
                     };
                 }
                 "system_prompt" => {
-                    agent.system_prompt = v
-                        .as_str()
-                        .ok_or_else(|| {
-                            CfgStoreError::Validation(
-                                "agent: 'system_prompt' must be a string".to_string(),
-                            )
-                        })?
-                        .to_string();
+                    agent.system_prompt = patch_str(v, "agent: 'system_prompt'")?.to_string();
                 }
                 _ => {} // clés inconnues ignorées
             }
         }
         let content = agent_to_md(&agent)?;
-        std::fs::write(path, content).map_err(CfgStoreError::from)?;
+        std::fs::write(file_path, content).map_err(CfgStoreError::from)?;
         Ok(())
     }
 
@@ -1159,15 +1080,15 @@ impl ConfigStore for FsConfigStore {
         validate_name(name)?;
         let dir = self.layer_dir(layer)?;
         let skills = list_layer_skill_dirs(&dir.join("skills"))?;
-        let path = skills.get(name).ok_or_else(|| CfgStoreError::NotFound {
+        let file_path = skills.get(name).ok_or_else(|| CfgStoreError::NotFound {
             kind: "skill",
             name: name.to_string(),
             layer,
         })?;
-        let content = std::fs::read_to_string(path).map_err(CfgStoreError::from)?;
-        let (frontmatter, body) = split_frontmatter(path, &content)?;
+        let content = std::fs::read_to_string(file_path).map_err(CfgStoreError::from)?;
+        let (frontmatter, body) = split_frontmatter(file_path, &content)?;
         let raw: RawSkillFrontmatter = yaml_serde::from_str(&frontmatter)
-            .map_err(|e| CfgStoreError::Config(format!("{}: {}", path.display(), e)))?;
+            .map_err(|e| CfgStoreError::Config(format!("{}: {}", file_path.display(), e)))?;
         let mut meta = SkillMeta {
             name: name.to_string(),
             description: raw.description,
@@ -1202,7 +1123,7 @@ impl ConfigStore for FsConfigStore {
             }
         }
         let content = skill_to_md(&meta, &body)?;
-        std::fs::write(path, content).map_err(CfgStoreError::from)?;
+        std::fs::write(file_path, content).map_err(CfgStoreError::from)?;
         Ok(())
     }
 }
@@ -1461,7 +1382,7 @@ Tu es un agent d'implémentation.",
         assert_eq!(a.name, "simple");
         assert_eq!(a.mode, AgentMode::Primary);
         assert!(a.description.is_none());
-        assert!(a.toolsets.is_empty());
+        assert_eq!(a.toolsets, Vec::<String>::new());
         assert_eq!(a.skills, SkillSelection::Auto);
     }
 
@@ -1566,8 +1487,8 @@ tools:
         assert_eq!(t.name, "empty");
         assert!(t.description.is_none());
         assert!(t.prompt.is_none());
-        assert!(t.local_tools.is_empty());
-        assert!(t.mcp.is_empty());
+        assert_eq!(t.local_tools, Vec::<String>::new());
+        assert_eq!(t.mcp.len(), 0);
     }
 
     // 16. list_agents_and_toolsets_two_layer_override
@@ -1642,7 +1563,6 @@ Tu es un agent d'implémentation.",
         std::fs::create_dir_all(&skills_dir).unwrap();
         std::fs::create_dir_all(skills_dir.join("pdf")).unwrap();
         let mut buf = std::fs::File::create(skills_dir.join("pdf").join("SKILL.md")).unwrap();
-        use std::io::Write;
         buf.write_all(b"---\nname: something-else\ndescription: PDF processing\n---\n# body\n")
             .unwrap();
         drop(buf);
@@ -1826,7 +1746,7 @@ Tu es un agent d'implémentation.",
         // Nothing should have been created
         let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert!(
             entries.is_empty(),
@@ -2062,7 +1982,7 @@ Tu es un agent d'implémentation.",
                     name: "m1".to_string(),
                     transport: McpTransport::HttpStreamable,
                     url: "http://x".to_string(),
-                    headers: Default::default(),
+                    headers: std::collections::BTreeMap::default(),
                 },
             )
             .await
@@ -2205,7 +2125,7 @@ Tu es un agent d'implémentation.",
                     name: "s1".to_string(),
                     transport: McpTransport::HttpStreamable,
                     url: "http://x".to_string(),
-                    headers: Default::default(),
+                    headers: std::collections::BTreeMap::default(),
                 },
             )
             .await
@@ -2375,7 +2295,7 @@ Tu es un agent d'implémentation.",
                     name: "s1".to_string(),
                     transport: McpTransport::HttpStreamable,
                     url: "http://x".to_string(),
-                    headers: Default::default(),
+                    headers: std::collections::BTreeMap::default(),
                 },
             )
             .await
@@ -2580,7 +2500,7 @@ Tu es un agent d'implémentation.",
         let non_existent = tmp.path().join("does-not-exist-yet");
         assert!(!non_existent.exists());
         let layers = Layers {
-            global_dir: non_existent.to_path_buf(),
+            global_dir: non_existent.clone(),
             workspace_dir: None,
         };
         let store = FsConfigStore::new(layers);
@@ -2784,7 +2704,7 @@ Tu es un agent d'implémentation.",
         // No files created outside config directory
         let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert!(
             entries.is_empty(),
@@ -2891,8 +2811,8 @@ Tu es un agent d'implémentation.",
 
         let list = store.list_toolsets().await.unwrap();
         assert_eq!(list.len(), 1);
-        assert!(list[0].local_tools.is_empty());
-        assert!(list[0].mcp.is_empty());
+        assert_eq!(list[0].local_tools, Vec::<String>::new());
+        assert_eq!(list[0].mcp.len(), 0);
         assert!(list[0].description.is_none());
         assert!(list[0].prompt.is_none());
     }
@@ -3064,7 +2984,7 @@ Tu es un agent d'implémentation.",
         // No files created outside config directory
         let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert!(
             entries.is_empty(),
@@ -3177,7 +3097,7 @@ Tu es un agent d'implémentation.",
         assert!(result.description.is_none());
         assert_eq!(result.mode, AgentMode::Primary);
         assert_eq!(result.model, "model-x");
-        assert!(result.toolsets.is_empty());
+        assert_eq!(result.toolsets, Vec::<String>::new());
         assert_eq!(result.skills, SkillSelection::Auto);
         assert_eq!(result.system_prompt, "Minimal agent prompt.");
     }
@@ -3331,7 +3251,7 @@ Tu es un agent d'implémentation.",
         // No files created outside config directory
         let entries: std::vec::Vec<_> = std::fs::read_dir(tmp.path())
             .unwrap()
-            .filter_map(|e| e.ok())
+            .filter_map(std::result::Result::ok)
             .collect();
         assert!(
             entries.is_empty(),
@@ -3542,7 +3462,7 @@ Tu es un agent d'implémentation.",
             .unwrap();
 
         let list = store.list_toolsets().await.unwrap();
-        assert!(list[0].local_tools.is_empty());
+        assert_eq!(list[0].local_tools, Vec::<String>::new());
     }
 
     // 4. update_toolset_unknown_key_ignored
@@ -3913,7 +3833,7 @@ Tu es un agent d'implémentation.",
             .unwrap();
 
         let list = store.list_agents().await.unwrap();
-        assert!(list[0].toolsets.is_empty());
+        assert_eq!(list[0].toolsets, Vec::<String>::new());
     }
 
     // 4. update_agent_mode_invalid → Validation
@@ -4117,7 +4037,7 @@ Tu es un agent d'implémentation.",
         assert_eq!(result.name, "rt");
         assert_eq!(result.model, "qwen2.5");
         assert_eq!(result.system_prompt, "You are updated.");
-        assert!(result.toolsets.is_empty());
+        assert_eq!(result.toolsets, Vec::<String>::new());
         assert_eq!(result.mode, AgentMode::Primary);
     }
 

@@ -5,14 +5,17 @@ use std::pin::Pin;
 use crate::error::ToolsError;
 use crate::output;
 
+/// Future boxed `Send` — type d'effacement des outils asynchrones du crate.
 pub type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 // ---------------------------------------------------------------------------
 // Options
 // ---------------------------------------------------------------------------
 
+/// Options de `read_file`.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ReadFileOptions {
+    /// Chemin du fichier à lire.
     pub path: String,
     /// Offset 0-based en lignes. Défaut 0.
     #[serde(default)]
@@ -28,34 +31,50 @@ pub struct ReadFileOptions {
     pub raw: bool,
 }
 
+/// Options de `write_file`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WriteFileOptions {
+    /// Chemin de la cible (créée ou remplacée).
     pub path: String,
+    /// Contenu complet à écrire.
     pub content: String,
 }
 
+/// Options de `edit_file`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct EditFileOptions {
+    /// Chemin du fichier à éditer.
     pub path: String,
+    /// Motif exact à remplacer.
     pub old_string: String,
+    /// Texte de remplacement.
     pub new_string: String,
+    /// Remplacer toutes les occurrences (sinon exige l'unicité de
+    /// `old_string`).
     #[serde(default)]
     pub replace_all: bool,
 }
 
+/// Options de `delete_file`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DeleteFileOptions {
+    /// Chemin du fichier (ou répertoire vide) à supprimer.
     pub path: String,
 }
 
+/// Options de `mkdir`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MkdirOptions {
+    /// Chemin du répertoire à créer (répertoires parents inclus).
     pub path: String,
 }
 
+/// Options de `rename_file`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct RenameFileOptions {
+    /// Chemin de la source.
     pub path: String,
+    /// Chemin de destination (dont le parent doit exister).
     pub to: String,
 }
 
@@ -104,12 +123,15 @@ pub(crate) fn file_not_found_hint(path: &str) -> String {
 // read_file
 // ---------------------------------------------------------------------------
 
-#[must_use]
+/// Lit `opts.path` (numéroté et borné façon `cat -n`, ou brut si `raw`) et
+/// retourne le texte ; erreurs via `ToolsError`.
 pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError>> {
-    let path = opts.path.clone();
-    let offset = opts.offset;
-    let limit = opts.limit;
-    let raw = opts.raw;
+    let ReadFileOptions {
+        path,
+        offset,
+        limit,
+        raw,
+    } = opts;
 
     Box::pin(async move {
         // 1. metadata → file not found / io / dir
@@ -179,7 +201,7 @@ pub fn read_file(opts: ReadFileOptions) -> BoxedFuture<Result<String, ToolsError
         // 6. number_lines before bounding
         let sliced: Vec<&str> = content.lines().skip(offset).collect();
         let sliced_text = sliced.join("\n");
-        let numbered = output::number_lines(&sliced_text, offset + 1);
+        let numbered = output::number_lines(&sliced_text, offset.saturating_add(1));
         let result =
             output::bound_lines(&numbered, offset, effective_limit, output::READ_MAX_BYTES);
 
@@ -232,7 +254,8 @@ async fn atomic_write(path: &str, content: impl AsRef<[u8]>) -> std::io::Result<
 // write_file
 // ---------------------------------------------------------------------------
 
-#[must_use]
+/// Écrit `opts.content` dans `opts.path` (voir `atomic_write`) ; crée les
+/// répertoires parents ; erreurs via `ToolsError`.
 pub fn write_file(opts: WriteFileOptions) -> BoxedFuture<Result<(), ToolsError>> {
     let path = opts.path.clone();
     let content = opts.content;
@@ -279,12 +302,15 @@ pub fn write_file(opts: WriteFileOptions) -> BoxedFuture<Result<(), ToolsError>>
 // edit_file
 // ---------------------------------------------------------------------------
 
-#[must_use]
+/// Remplace `old_string` par `new_string` dans `path` (une occurrence, ou
+/// toutes si `replace_all`) et retourne le message de résumé.
 pub fn edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, ToolsError>> {
-    let path = opts.path.clone();
-    let old_string = opts.old_string.clone();
-    let new_string = opts.new_string.clone();
-    let replace_all = opts.replace_all;
+    let EditFileOptions {
+        path,
+        old_string,
+        new_string,
+        replace_all,
+    } = opts;
 
     Box::pin(async move {
         // 1. empty old_string
@@ -374,6 +400,8 @@ pub fn edit_file(opts: EditFileOptions) -> BoxedFuture<Result<String, ToolsError
 // ---------------------------------------------------------------------------
 
 /// Classic Levenshtein distance (insertion/deletion/substitution = cost 1).
+// Indexation DP bornée par len_a/len_b : les +/- d'index ne peuvent déborder.
+#[allow(clippy::arithmetic_side_effects)]
 fn levenshtein_distance(a: &str, b: &str) -> usize {
     let a_bytes = a.as_bytes();
     let b_bytes = b.as_bytes();
@@ -434,15 +462,84 @@ fn closest_line_hint(content: &str, needle: &str) -> String {
 // list_directory v2 — compact tree, bounded by depth
 // ---------------------------------------------------------------------------
 
+/// Options de `list_directory`.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ListDirectoryOptions {
+    /// Racine du listage.
     pub path: String,
     /// Recursion depth. 0 = default (1), same convention as `ReadFileOptions::limit`.
     #[serde(default)]
     pub depth: usize,
 }
 
-#[must_use]
+/// Ajoute une entrée à `output` et descend l'arborescence jusqu'à
+/// `depth_remaining` niveaux, en s'arrêtant dès que `max_entries` entrées
+/// ont été produites (`limit_reached` posé alors). Une erreur de `read_dir`
+/// sur un sous-répertoire est ignorée silencieusement.
+// Compteurs bornés : count < max_entries (retour anticipé), depth_remaining
+// décrémenté sous garde > 1, indent_level < depth.
+#[allow(clippy::arithmetic_side_effects)]
+fn recurse(
+    dir: &std::path::Path,
+    depth_remaining: usize,
+    indent_level: usize,
+    output: &mut Vec<String>,
+    count: &mut usize,
+    max_entries: usize,
+    limit_reached: &std::cell::Cell<bool>,
+) {
+    if limit_reached.get() || *count >= max_entries {
+        return;
+    }
+
+    let mut entries: Vec<(_, _)> = Vec::new();
+    let Ok(reader) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in reader.flatten() {
+        entries.push((entry.file_name(), entry.path()));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+
+    for (file_name, full_path) in entries {
+        if limit_reached.get() {
+            break;
+        }
+
+        let is_dir = full_path.is_dir();
+        let indent = "  ".repeat(indent_level);
+        let suffix = if is_dir { "/" } else { "" };
+        output.push(format!(
+            "{}{}{}",
+            indent,
+            file_name.to_string_lossy(),
+            suffix
+        ));
+        *count += 1;
+
+        // Check limit after adding the entry
+        if *count >= max_entries {
+            limit_reached.set(true);
+            break;
+        }
+
+        // Only descend if there are remaining levels
+        if is_dir && depth_remaining > 1 {
+            recurse(
+                &full_path,
+                depth_remaining - 1,
+                indent_level + 1,
+                output,
+                count,
+                max_entries,
+                limit_reached,
+            );
+        }
+    }
+}
+
+/// Liste l'arborescence de `opts.path` (indentée, bornée en profondeur et en
+/// nombre d'entrées) et retourne l'arbre en texte.
 pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let path = opts.path;
     let path_for_err = path.clone();
@@ -475,66 +572,6 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
             let max_entries = output::LIST_MAX_ENTRIES;
             let limit_reached = std::cell::Cell::new(false);
 
-            fn recurse(
-                dir: &std::path::Path,
-                depth_remaining: usize,
-                indent_level: usize,
-                output: &mut Vec<String>,
-                count: &mut usize,
-                max_entries: usize,
-                limit_reached: &std::cell::Cell<bool>,
-            ) {
-                if limit_reached.get() || *count >= max_entries {
-                    return;
-                }
-
-                let mut entries: Vec<(_, _)> = Vec::new();
-                let reader = match std::fs::read_dir(dir) {
-                    Ok(r) => r,
-                    Err(_) => return,
-                };
-                for entry in reader.flatten() {
-                    entries.push((entry.file_name(), entry.path()));
-                }
-                entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-                for (file_name, full_path) in entries {
-                    if limit_reached.get() {
-                        break;
-                    }
-
-                    let is_dir = full_path.is_dir();
-                    let indent = "  ".repeat(indent_level);
-                    let suffix = if is_dir { "/" } else { "" };
-                    output.push(format!(
-                        "{}{}{}",
-                        indent,
-                        file_name.to_string_lossy(),
-                        suffix
-                    ));
-                    *count += 1;
-
-                    // Check limit after adding the entry
-                    if *count >= max_entries {
-                        limit_reached.set(true);
-                        break;
-                    }
-
-                    // Only descend if there are remaining levels
-                    if is_dir && depth_remaining > 1 {
-                        recurse(
-                            &full_path,
-                            depth_remaining - 1,
-                            indent_level + 1,
-                            output,
-                            count,
-                            max_entries,
-                            limit_reached,
-                        );
-                    }
-                }
-            }
-
             recurse(
                 std::path::Path::new(&path),
                 effective_depth,
@@ -550,10 +587,13 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
             } else {
                 let mut result = output.join("\n");
                 if limit_reached.get() {
-                    result.push_str(&format!(
+                    use std::fmt::Write as _;
+                    // write! sur String ne peut pas échouer.
+                    let _ = write!(
+                        result,
                         "\n[truncated at {} entries — narrow the path or reduce depth]",
                         output::LIST_MAX_ENTRIES
-                    ));
+                    );
                 }
                 Ok(result)
             }
@@ -566,7 +606,8 @@ pub fn list_directory(opts: ListDirectoryOptions) -> BoxedFuture<Result<String, 
     })
 }
 
-#[must_use]
+/// Supprime `opts.path` : fichier via `remove_file`, répertoire via
+/// `remove_dir` (refusé non vide) ; erreurs via `ToolsError`.
 pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError>> {
     let path = opts.path;
     Box::pin(async move {
@@ -616,7 +657,8 @@ pub fn delete_file(opts: DeleteFileOptions) -> BoxedFuture<Result<(), ToolsError
 // mkdir
 // ---------------------------------------------------------------------------
 
-#[must_use]
+/// Crée `opts.path` et ses parents (`create_dir_all`) ; erreurs via
+/// `ToolsError`.
 pub fn mkdir(opts: MkdirOptions) -> BoxedFuture<Result<(), ToolsError>> {
     let path = opts.path;
     Box::pin(async move {
@@ -637,7 +679,8 @@ pub fn mkdir(opts: MkdirOptions) -> BoxedFuture<Result<(), ToolsError>> {
 // rename_file
 // ---------------------------------------------------------------------------
 
-#[must_use]
+/// Renomme `opts.path` en `opts.to` (le parent de la destination doit exister
+/// et être un répertoire) ; erreurs via `ToolsError`.
 pub fn rename_file(opts: RenameFileOptions) -> BoxedFuture<Result<(), ToolsError>> {
     let path = opts.path;
     let to = opts.to;
@@ -666,7 +709,7 @@ pub fn rename_file(opts: RenameFileOptions) -> BoxedFuture<Result<(), ToolsError
         {
             return Err(ToolsError::InvalidArgument {
                 name: "to".into(),
-                reason: format!("parent of '{}' is a file, not a directory", to),
+                reason: format!("parent of '{to}' is a file, not a directory"),
             });
         }
         if let Some(parent) = std::path::Path::new(&to).parent()
@@ -675,7 +718,7 @@ pub fn rename_file(opts: RenameFileOptions) -> BoxedFuture<Result<(), ToolsError
             if e.kind() == std::io::ErrorKind::NotFound {
                 return Err(ToolsError::InvalidArgument {
                     name: "to".into(),
-                    reason: format!("parent of '{}' does not exist or is not a directory", to),
+                    reason: format!("parent of '{to}' does not exist or is not a directory"),
                 });
             }
             if e.kind() == std::io::ErrorKind::PermissionDenied {

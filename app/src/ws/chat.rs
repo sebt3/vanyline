@@ -275,14 +275,14 @@ async fn resolve_extra_mcp(
         }
     };
 
-    let sandbox = match client.get_sandbox(sandbox_name).await {
+    let sandbox = match client.get_sandbox(&owner, sandbox_name).await {
         Ok(s) => s,
         Err(e) => {
             send_tool_unavailable(tx, sandbox_name, &e.to_string());
             return Ok(Vec::new());
         }
     };
-    let project = match client.get_project(&sandbox.spec.project).await {
+    let project = match client.get_project(&owner, &sandbox.spec.project).await {
         Ok(p) => p,
         Err(e) => {
             send_tool_unavailable(tx, sandbox_name, &e.to_string());
@@ -298,7 +298,7 @@ async fn resolve_extra_mcp(
         return Ok(Vec::new());
     }
 
-    let url = match client.sandbox_mcp_url(sandbox_name).await {
+    let url = match client.sandbox_mcp_url(&owner, sandbox_name).await {
         Ok(url) => url,
         Err(e) => {
             send_tool_unavailable(tx, sandbox_name, &e.to_string());

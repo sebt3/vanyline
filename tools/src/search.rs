@@ -6,21 +6,40 @@ use crate::error::ToolsError;
 use crate::filesystem::file_not_found_hint;
 use crate::output;
 
+/// Future boxed `Send` — type d'effacement des outils asynchrones du crate.
 pub type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 // ---------------------------------------------------------------------------
 // find_files
 // ---------------------------------------------------------------------------
 
+/// Construit un promeneur d'arbre avec les exclusions fixes (`.git`,
+/// `target`, `node_modules`), partagé par `find_files` et `search`.
+fn tree_walker(root: &str) -> ignore::Walk {
+    ignore::WalkBuilder::new(root)
+        .git_ignore(true)
+        .git_global(false)
+        .filter_entry(|entry| {
+            entry
+                .file_name()
+                .to_str()
+                .is_none_or(|name| name != ".git" && name != "target" && name != "node_modules")
+        })
+        .build()
+}
+
+/// Options de `find_files`.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct FindFilesOptions {
+    /// Pattern glob appliqué aux chemins relatifs à `path`.
     pub pattern: String,
     /// Root directory. Empty = current directory (".").
     #[serde(default)]
     pub path: String,
 }
 
-#[must_use]
+/// Cherche les fichiers dont le chemin relatif correspond au glob
+/// `opts.pattern` sous `opts.path`, liste triée et bornée.
 pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let pattern = opts.pattern.clone();
     let effective_path = if opts.path.is_empty() {
@@ -69,27 +88,14 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
         let max_entries = output::LIST_MAX_ENTRIES;
         let limit_reached = std::cell::Cell::new(false);
 
-        let walker = ignore::WalkBuilder::new(&effective_path)
-            .git_ignore(true)
-            .git_global(false)
-            .filter_entry(|entry| {
-                // Always exclude .git, target, node_modules
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_none_or(|name| name != ".git" && name != "target" && name != "node_modules")
-            })
-            .build();
+        let walker = tree_walker(&effective_path);
 
         for entry in walker {
             if limit_reached.get() {
                 break;
             }
 
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+            let Ok(entry) = entry else { continue };
 
             // Only process regular files
             if entry.file_type().is_none_or(|ft| !ft.is_file()) {
@@ -98,9 +104,8 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
 
             // Match against the glob
             let path = &effective_path;
-            let relative = match entry.path().strip_prefix(path) {
-                Ok(r) => r,
-                Err(_) => continue,
+            let Ok(relative) = entry.path().strip_prefix(path) else {
+                continue;
             };
 
             if glob_matcher.is_match(relative) {
@@ -121,10 +126,13 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
         } else {
             let mut line = results.join("\n");
             if limit_reached.get() {
-                line.push_str(&format!(
+                use std::fmt::Write as _;
+                // write! sur String ne peut pas échouer.
+                let _ = write!(
+                    line,
                     "\n[truncated at {} matches — narrow the pattern or path]",
                     output::LIST_MAX_ENTRIES
-                ));
+                );
             }
             Ok(line)
         }
@@ -135,8 +143,10 @@ pub fn find_files(opts: FindFilesOptions) -> BoxedFuture<Result<String, ToolsErr
 // search
 // ---------------------------------------------------------------------------
 
+/// Options de `search`.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct SearchOptions {
+    /// Motif regex recherché, par ligne.
     pub pattern: String,
     /// Root directory. Empty = current directory (".").
     #[serde(default)]
@@ -146,7 +156,23 @@ pub struct SearchOptions {
     pub glob: String,
 }
 
-#[must_use]
+/// Compile le filtre glob optionnel de `search` : `None` si vide,
+/// `InvalidArgument("glob")` si le motif est invalide.
+fn compile_glob_filter(glob: &str) -> Result<Option<globset::GlobMatcher>, ToolsError> {
+    if glob.is_empty() {
+        return Ok(None);
+    }
+    let g = globset::Glob::new(glob).map_err(|e| ToolsError::InvalidArgument {
+        name: "glob".into(),
+        reason: e.to_string(),
+    })?;
+    // compile_matcher() returns GlobMatcher directly
+    Ok(Some(g.compile_matcher()))
+}
+
+/// Cherche le motif regex `opts.pattern` dans les fichiers sous `opts.path`
+/// (filtrés par `opts.glob`) et retourne les lignes `fichier:ligne: contenu`,
+/// bornées à `output::SEARCH_MAX_MATCHES`.
 pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let pattern = opts.pattern.clone();
     let effective_path = if opts.path.is_empty() {
@@ -189,47 +215,21 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
         };
 
         // 3. Compile optional glob filter
-        let glob_matcher: Option<globset::GlobMatcher> = if glob_filter.is_empty() {
-            None
-        } else {
-            let g = match globset::Glob::new(&glob_filter) {
-                Ok(g) => g,
-                Err(e) => {
-                    return Err(ToolsError::InvalidArgument {
-                        name: "glob".into(),
-                        reason: e.to_string(),
-                    });
-                }
-            };
-            // compile_matcher() returns GlobMatcher directly
-            Some(g.compile_matcher())
-        };
+        let glob_matcher = compile_glob_filter(&glob_filter)?;
 
         // 4. Walk the tree
         let max_matches = output::SEARCH_MAX_MATCHES;
         let mut results = Vec::new();
         let limit_reached = std::cell::Cell::new(false);
 
-        let walker = ignore::WalkBuilder::new(&effective_path)
-            .git_ignore(true)
-            .git_global(false)
-            .filter_entry(|entry| {
-                entry
-                    .file_name()
-                    .to_str()
-                    .is_none_or(|name| name != ".git" && name != "target" && name != "node_modules")
-            })
-            .build();
+        let walker = tree_walker(&effective_path);
 
         for entry in walker {
             if limit_reached.get() {
                 break;
             }
 
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
+            let Ok(entry) = entry else { continue };
 
             // Only process regular files
             if entry.file_type().is_none_or(|ft| !ft.is_file()) {
@@ -238,9 +238,8 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
 
             // Apply glob filter if provided
             if let Some(ref matcher) = glob_matcher {
-                let rel = match entry.path().strip_prefix(&effective_path) {
-                    Ok(r) => r,
-                    Err(_) => continue,
+                let Ok(rel) = entry.path().strip_prefix(&effective_path) else {
+                    continue;
                 };
                 if !matcher.is_match(rel) {
                     continue;
@@ -248,9 +247,8 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
             }
 
             // Read file; skip binary (non-UTF8) silently
-            let content = match tokio::fs::read_to_string(entry.path()).await {
-                Ok(c) => c,
-                Err(_) => continue,
+            let Ok(content) = tokio::fs::read_to_string(entry.path()).await else {
+                continue;
             };
 
             let rel = entry
@@ -266,7 +264,12 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
                     break;
                 }
                 if regex.is_match(line) {
-                    results.push(format!("{}:{}: {}", rel_str, line_number + 1, line));
+                    results.push(format!(
+                        "{}:{}: {}",
+                        rel_str,
+                        line_number.saturating_add(1),
+                        line
+                    ));
                 }
             }
         }
@@ -276,10 +279,13 @@ pub fn search(opts: SearchOptions) -> BoxedFuture<Result<String, ToolsError>> {
         } else {
             let mut line = results.join("\n");
             if limit_reached.get() {
-                line.push_str(&format!(
+                use std::fmt::Write as _;
+                // write! sur String ne peut pas échouer.
+                let _ = write!(
+                    line,
                     "\n[truncated at {} matches — narrow the pattern, path, or glob]",
                     output::SEARCH_MAX_MATCHES
-                ));
+                );
             }
             Ok(line)
         }

@@ -1,9 +1,13 @@
 /// Bornes par défaut, centralisées et documentées. Les outils les référencent —
 /// jamais de nombre magique dans un outil.
 pub const READ_MAX_LINES: usize = 200;
+/// Plafond de la lecture `read_file` en octets (troncature par bytes).
 pub const READ_MAX_BYTES: usize = 16 * 1024;
+/// Plafond d'entrées remontées par `list_directory` / `find_files`.
 pub const LIST_MAX_ENTRIES: usize = 200;
+/// Plafond de lignes de résultat pour `search`.
 pub const SEARCH_MAX_MATCHES: usize = 50;
+/// Plafond de sortie stdout/stderr par flux pour `execute_command`.
 pub const COMMAND_MAX_BYTES: usize = 8 * 1024;
 
 /// Tronque `text` à `max_lines`/`max_bytes` (première limite atteinte).
@@ -46,8 +50,8 @@ pub fn bound_lines(text: &str, offset: usize, max_lines: usize, max_bytes: usize
     let truncated = returned_count < total_lines;
 
     if truncated {
-        let remaining = total_lines - returned_count;
-        let next_offset = offset + returned_count;
+        let remaining = total_lines.saturating_sub(returned_count);
+        let next_offset = offset.saturating_add(returned_count);
         let marker =
             format!("\n[truncated — {remaining} more lines, call again with offset={next_offset}]");
         format!("{result}{marker}")
@@ -69,11 +73,14 @@ pub fn bound_head_tail(text: &str, max_bytes: usize) -> String {
 
     let lines: Vec<&str> = text.lines().collect();
     let total_bytes = text.len();
-    let marker = format!("[... {} bytes truncated ...]", total_bytes - max_bytes);
+    let marker = format!(
+        "[... {} bytes truncated ...]",
+        total_bytes.saturating_sub(max_bytes)
+    );
 
     // Budget restant pour le contenu : max_bytes - marker.len() - 2 newlines
-    let budget = max_bytes.saturating_sub(marker.len() + 2);
-    let half = budget / 2;
+    let budget = max_bytes.saturating_sub(marker.len().saturating_add(2));
+    let half = budget.div_euclid(2);
 
     // --- Header : lignes depuis le début (jusqu'à half bytes) ---
     let split_point = find_split(&lines, half);
@@ -86,7 +93,7 @@ pub fn bound_head_tail(text: &str, max_bytes: usize) -> String {
 
     // --- Construction ---
     let header = lines[..split_point].join("\n");
-    let footer_start = lines.len() - footer_len;
+    let footer_start = lines.len().saturating_sub(footer_len);
     let footer = if footer_start >= lines.len() {
         String::new()
     } else {
@@ -105,10 +112,10 @@ pub fn bound_head_tail(text: &str, max_bytes: usize) -> String {
                 lines[start..].join("\n")
             };
             let r = format!("{header}\n{marker}\n{foot}");
-            if r.len() <= max_bytes || start >= lines.len() - 1 {
+            if r.len() <= max_bytes || start >= lines.len().saturating_sub(1) {
                 return r;
             }
-            start += 1;
+            start = start.saturating_add(1);
         }
     }
 
@@ -117,10 +124,14 @@ pub fn bound_head_tail(text: &str, max_bytes: usize) -> String {
 
 /// Trouve le nombre de lignes depuis le début qui tiennent dans `max_bytes`.
 fn find_split(lines: &[&str], max_bytes: usize) -> usize {
-    let mut result_len = 0;
+    let mut result_len: usize = 0;
     for (i, line) in lines.iter().enumerate() {
         // bytes = sum(len) + (count-1) * 1 pour les '\n' entre lignes
-        let next_len = result_len + if i == 0 { line.len() } else { line.len() + 1 };
+        let next_len = result_len.saturating_add(if i == 0 {
+            line.len()
+        } else {
+            line.len().saturating_add(1)
+        });
         if next_len > max_bytes {
             return i;
         }
@@ -131,20 +142,19 @@ fn find_split(lines: &[&str], max_bytes: usize) -> usize {
 
 /// Trouve le nombre de lignes depuis la fin qui tiennent dans `max_bytes`.
 fn find_count_from_end(lines: &[&str], max_bytes: usize) -> usize {
-    let mut result_len = 0;
-    let mut count = 0;
+    let mut result_len: usize = 0;
+    let mut count: usize = 0;
     for line in lines.iter().rev() {
-        let next_len = result_len
-            + if count == 0 {
-                line.len()
-            } else {
-                line.len() + 1
-            };
+        let next_len = result_len.saturating_add(if count == 0 {
+            line.len()
+        } else {
+            line.len().saturating_add(1)
+        });
         if next_len > max_bytes {
             break;
         }
         result_len = next_len;
-        count += 1;
+        count = count.saturating_add(1);
     }
     count
 }
@@ -158,7 +168,7 @@ pub fn number_lines(text: &str, start_line: usize) -> String {
     }
     text.lines()
         .enumerate()
-        .map(|(i, line)| format!("{:>5}\t{}", start_line + i, line))
+        .map(|(i, line)| format!("{:>5}\t{}", start_line.saturating_add(i), line))
         .collect::<Vec<_>>()
         .join("\n")
 }

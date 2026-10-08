@@ -62,12 +62,20 @@ Exposes:
       @AppError>`. Route `GET /api/projects`.
   - @get_project — `pub async fn(State(@AppState), @AuthUser, @Path(@String)) ->
       @Result<@Json<Project>, @AppError>`. Route `GET /api/projects/{name}`.
-  - @create_project — `pub async fn(State(@AppState), @AuthUser, @Json<CreateProjectBody>)
+  - @create_project — `pub async fn(State(@AppState), @AuthPrincipal, @Json<CreateProjectBody>)
       -> @Result<(@StatusCode, @Json<Project>), @AppError>`. Route `POST /api/projects`.
+      Extracteur @AuthPrincipal (miryad-core 0.1.5, session OU token API) depuis le
+      2026-10-07 — c'est lui qui porte `preferred_username`, que @ensure_owner consomme
+      pour le nommage (décision Sébastien ; le chemin token API, `preferred_username`
+      `@None`, nomme d'après `subject`).
   - @delete_project — `pub async fn(State(@AppState), @AuthUser, @Path(@String)) ->
       @Result<@StatusCode, @AppError>`. Route `DELETE /api/projects/{name}`.
-  - `#[cfg(test)] mod tests` : 2 tests d'auth uniquement (`list_projects_without_cookie_returns_401`,
-    `get_project_without_cookie_returns_401`) + fabriques `test_key` / `make_app`
+  - `#[cfg(test)] mod tests` : 3 tests d'auth (`list_projects_without_cookie_returns_401`,
+    `get_project_without_cookie_returns_401`, et le test du Scenario « créer et
+    supprimer sans cookie retournent 401 » — @post(@create_project) + @delete(@delete_project)
+    sur le router étendu, la route @create_project étant passée en extracteur dual
+    @AuthPrincipal le 2026-10-07, son refus sans cookie NI bearer doit être verrouillé)
+    + fabriques `test_key` / `make_app`
     (config figé, `k8s_namespace: @None`, cache k8s `None`, @test_auth_state de
     `../auth/mod.rs`, router partiel GET-seuls — voir Tasks `[!]`).
   - Aucun type d'erreur propre, aucune constante, aucune couche, aucun `#[cfg(feature = …)]`.

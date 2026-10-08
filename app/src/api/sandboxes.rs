@@ -41,13 +41,13 @@ pub async fn list_sandboxes(
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
     };
     let client = k8s::client(&state).await?;
-    let projects = client.list_projects().await?;
+    let projects = client.list_projects(&owner).await?;
     let owner_projects: Vec<String> = projects
         .into_iter()
         .filter(|p| p.spec.owner == owner)
         .filter_map(|p| p.metadata.name)
         .collect();
-    let sandboxes = client.list_sandboxes().await?;
+    let sandboxes = client.list_sandboxes(&owner).await?;
     Ok(Json(
         sandboxes
             .into_iter()
@@ -69,8 +69,8 @@ pub async fn get_sandbox(
         None => return Err(AppError::Forbidden),
     };
     let client = k8s::client(&state).await?;
-    let sandbox = client.get_sandbox(&name).await?;
-    let project = client.get_project(&sandbox.spec.project).await?;
+    let sandbox = client.get_sandbox(&owner, &name).await?;
+    let project = client.get_project(&owner, &sandbox.spec.project).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
@@ -93,11 +93,11 @@ pub async fn create_sandbox(
         None => return Err(AppError::Forbidden),
     };
     let client = k8s::client(&state).await?;
-    let project = client.get_project(&body.spec.project).await?;
+    let project = client.get_project(&owner, &body.spec.project).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
-    let sandbox = client.create_sandbox(&body.name, body.spec).await?;
+    let sandbox = client.create_sandbox(&owner, &body.name, body.spec).await?;
     Ok((StatusCode::CREATED, Json(sandbox)))
 }
 
@@ -114,12 +114,12 @@ pub async fn delete_sandbox(
         None => return Err(AppError::Forbidden),
     };
     let client = k8s::client(&state).await?;
-    let sandbox = client.get_sandbox(&name).await?;
-    let project = client.get_project(&sandbox.spec.project).await?;
+    let sandbox = client.get_sandbox(&owner, &name).await?;
+    let project = client.get_project(&owner, &sandbox.spec.project).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
-    client.delete_sandbox(&name).await?;
+    client.delete_sandbox(&owner, &name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -137,12 +137,14 @@ pub async fn set_sandbox_suspended(
         None => return Err(AppError::Forbidden),
     };
     let client = k8s::client(&state).await?;
-    let sandbox = client.get_sandbox(&name).await?;
-    let project = client.get_project(&sandbox.spec.project).await?;
+    let sandbox = client.get_sandbox(&owner, &name).await?;
+    let project = client.get_project(&owner, &sandbox.spec.project).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
-    let updated = client.set_sandbox_suspended(&name, body.suspended).await?;
+    let updated = client
+        .set_sandbox_suspended(&owner, &name, body.suspended)
+        .await?;
     Ok(Json(updated))
 }
 
@@ -158,9 +160,10 @@ pub struct WsTicketOut {
 
 /// Relais de ticket WS : scoping owner identique à `get_sandbox`, host
 /// public résolu via la CR Application (owner → `application_ref` →
-/// `spec.host`), ticket miné auprès de la sandbox en présentant le
-/// `id_token` OIDC de l'utilisateur (Bearer). Le navigateur reçoit
-/// `{ ticket, wsHost }` — jamais le JWT.
+/// `spec.host`), ticket miné auprès de la sandbox en présentant le jeton du
+/// `ServiceAccount` de l'Owner (`VnlK8sClient::owner_token`, Bearer — décision
+/// 2026-10-04 : l'`id_token` de l'utilisateur n'est JAMAIS transmis à la
+/// sandbox). Le navigateur reçoit `{ ticket, wsHost }` — jamais le JWT.
 pub async fn ws_ticket(
     State(state): State<AppState>,
     user: AuthUser,
@@ -175,8 +178,8 @@ pub async fn ws_ticket(
         None => return Err(AppError::Forbidden),
     };
     let client = k8s::client(&state).await?;
-    let sandbox = client.get_sandbox(&name).await?;
-    let project = client.get_project(&sandbox.spec.project).await?;
+    let sandbox = client.get_sandbox(&owner, &name).await?;
+    let project = client.get_project(&owner, &sandbox.spec.project).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
@@ -189,8 +192,13 @@ pub async fn ws_ticket(
     let application = client.get_application(&app_ref).await?;
     let ws_host = format!("{name}.sandboxes.{}", application.spec.host);
 
-    // 3. relais : POST /ws/ticket interne avec le id_token OIDC (Bearer)
-    let url = client.sandbox_ws_ticket_url(&name).await?;
+    // 3. jeton d'Owner : demandé SEULEMENT ici, après la chaîne de scoping
+    // complète — un non-owner n'a jamais atteint ce point et n'obtient
+    // jamais de jeton (spec `Must`, 2026-10-04).
+    let owner_token = client.owner_token(&owner).await?;
+
+    // 4. relais : POST /ws/ticket interne avec le jeton du SA de l'Owner (Bearer)
+    let url = client.sandbox_ws_ticket_url(&owner, &name).await?;
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -199,7 +207,7 @@ pub async fn ws_ticket(
         .post(&url)
         .header(
             reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", user.id_token),
+            format!("Bearer {}", owner_token.token),
         )
         .send()
         .await?
@@ -219,7 +227,8 @@ pub async fn ws_ticket(
 /// headers optionnels, body, `Authorization: Bearer {token}`),
 /// l'envoie, et retourne `(statut, JSON)` de la réponse TELS QUELS — y compris
 /// les erreurs HTTP de la sandbox (pas de `error_for_status`, pas de
-/// transformation). Le token OIDC n'est jamais renvoyé au navigateur.
+/// transformation). Le `token` est le jeton du SA de l'Owner (obtenu par
+/// `VnlK8sClient::owner_token`) ; il n'est jamais renvoyé au navigateur.
 async fn proxy_git_request(
     http: &reqwest::Client,
     url: &str,
@@ -253,7 +262,8 @@ async fn proxy_git_request(
 /// identique à `ws_ticket` (get_or_create_user → resolve_owner_name →
 /// get_sandbox → get_project → assert owner match), URL interne via
 /// `sandbox_git_url`, forward méthode + path + query + body vers la sandbox
-/// avec le `id_token` OIDC (Bearer), réponse passthrough.
+/// en présentant le jeton du SA de l'Owner (`owner_token`, Bearer — décision
+/// 2026-10-04 : jamais l'`id_token` de l'utilisateur), réponse passthrough.
 /// Extrait le sous-chemin brut (encore percent-encodé) après
 /// `/sandboxes/{name}/git/`, à partir du chemin RAW de la requête — pas
 /// via l'extractor `Path`, qui décode le wildcard `{*path}` (vérifié
@@ -305,14 +315,14 @@ pub async fn git_proxy(
         return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
-    let sandbox = client.get_sandbox(&name).await?;
-    let project = client.get_project(&sandbox.spec.project).await?;
+    let sandbox = client.get_sandbox(&owner, &name).await?;
+    let project = client.get_project(&owner, &sandbox.spec.project).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
 
     // 2. URL interne
-    let mut base_url = client.sandbox_git_url(&name, &raw_path).await?;
+    let mut base_url = client.sandbox_git_url(&owner, &name, &raw_path).await?;
 
     // 3. Query string
     let query = req.uri().query().map(String::from);
@@ -344,9 +354,14 @@ pub async fn git_proxy(
         .await
         .map_err(|e| AppError::InternalError(e.to_string()))?;
 
+    // 5bis. Jeton d'Owner : demandé seulement ici, la chaîne de scoping est
+    // complète — un non-owner a été rejeté plus haut et n'obtient jamais de
+    // jeton (spec `Must`, 2026-10-04).
+    let owner_token = client.owner_token(&owner).await?;
+
     // 6. Appel proxy + retour passthrough
     let (status, value) =
-        proxy_git_request(&http, &base_url, method, headers, body, &user.id_token).await?;
+        proxy_git_request(&http, &base_url, method, headers, body, &owner_token.token).await?;
 
     Ok((status, Json(value)))
 }
@@ -398,8 +413,8 @@ mod tests {
         cookie::Key::from(&[0u8; 64])
     }
 
-    fn make_app(cookie_key: cookie::Key) -> Router {
-        let config = crate::config::Config {
+    fn test_config() -> crate::config::Config {
+        crate::config::Config {
             oidc_issuer_url: "https://issuer.example.com".to_string(),
             oidc_client_id: "client-id".to_string(),
             oidc_client_secret: "client-secret".to_string(),
@@ -418,10 +433,49 @@ mod tests {
             default_home_access_mode: None,
             default_project_storage_class: None,
             default_project_access_mode: None,
-        };
+        }
+    }
 
+    /// `AuthUser` de test avec un `id_token` reconnaissable : les Scenarios
+    /// d'auth 2026-10-04 verrouillent qu'il ne sort JAMAIS vers la sandbox.
+    fn test_user() -> AuthUser {
+        AuthUser {
+            subject: "alice".to_string(),
+            email: Some("alice@example.com".to_string()),
+            id_token: "id-token-utilisateur".to_string(),
+        }
+    }
+
+    /// État de test branché sur une vraie base (migrations appliquées,
+    /// `db::test_support::real_db`) — mêmes conventions que `conversations.rs`.
+    fn test_state_with_db(db: sea_orm::DatabaseConnection) -> AppState {
+        AppState {
+            config: test_config(),
+            cookie_key: test_key(),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state_with_db(db),
+            shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
+        }
+    }
+
+    /// État de test sur base simulée SANS résultat programmé : toute
+    /// interrogation de la base (ex. `resolve_user` atteinte) échoue — les
+    /// tests de refus pré-scoping en déduisent que le handler n'a rien lu.
+    fn test_state_mock_db() -> AppState {
+        AppState {
+            config: test_config(),
+            cookie_key: test_key(),
+            busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
+            k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            auth: crate::auth::test_support::test_auth_state(),
+            shared_sandbox_state: crate::ws::sandbox_state::SharedState::new(),
+        }
+    }
+
+    fn make_app(cookie_key: cookie::Key) -> Router {
         let state = AppState {
-            config,
+            config: test_config(),
             cookie_key,
             busy: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashSet::new())),
             k8s: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
@@ -433,6 +487,7 @@ mod tests {
             .route("/sandboxes", get(list_sandboxes).post(create_sandbox))
             .route("/sandboxes/{name}", get(get_sandbox).delete(delete_sandbox))
             .route("/sandboxes/{name}/ws-ticket", post(ws_ticket))
+            .route("/sandboxes/{name}/suspend", post(set_sandbox_suspended))
             .route("/sandboxes/{name}/git/{*path}", any(git_proxy))
             .with_state(state)
     }
@@ -492,5 +547,291 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Scenario: les_six_handlers_sans_session_retournent_401 (6e route :
+    // `/suspend`, harnais enrichi — cf. Tasks `[!]` harnais) ──
+    #[tokio::test]
+    async fn set_sandbox_suspended_without_cookie_returns_401() {
+        let app = make_app(test_key());
+        let req = Request::builder()
+            .uri("/sandboxes/my-sandbox/suspend")
+            .method("POST")
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"suspended":true}"#))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ── Scenario: raw_git_tail_rejette_le_segment_vide_et_le_decodage_utf8_invalide
+    // (test À AJOUTER pour l'UTF-8 — `raw_git_tail_rejects_empty_segment` couvre
+    // déjà le segment vide) ──
+    #[test]
+    fn raw_git_tail_rejette_le_decodage_utf8_invalide() {
+        assert!(
+            matches!(
+                raw_git_tail("/sandboxes/foo/git/%ff%fe"),
+                Err(AppError::GitPathInvalid)
+            ),
+            "un segment dont decode_utf8 échoue doit rendre GitPathInvalid"
+        );
+    }
+
+    // ── Scenario: raw_git_tail_sous_chemin_totalement_absent_retourne_vide
+    // (asymétrie avec `/git/` — segment vide → Err — verrouillée telle quelle,
+    // cf. Tasks `[?]`) ──
+    #[test]
+    fn raw_git_tail_sous_chemin_totalement_absent_retourne_vide() {
+        assert_eq!(raw_git_tail("/sandboxes/foo/git").unwrap(), "");
+    }
+
+    // ── Scenario: ws_ticket_ok_rend_ticket_et_wsHost_sans_exposer_le_jwt
+    // (enveloppe verrouillée hors cluster : exactement 2 clés `ticket`/`wsHost`,
+    // ni jeton, ni expires_in_secs. Le relais lui-même suppose la sandbox —
+    // Scenario d'intégration cluster, cf. Tasks `[!]`) ──
+    #[test]
+    fn ws_ticket_out_serrialise_exactement_deux_cles() {
+        let out = WsTicketOut {
+            ticket: "t32".to_string(),
+            ws_host: "s1.sandboxes.app.example.com".to_string(),
+        };
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({"ticket": "t32", "wsHost": "s1.sandboxes.app.example.com"})
+        );
+        let keys: Vec<&str> = json
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(keys, ["ticket", "wsHost"], "exactement 2 clés");
+    }
+
+    // ── Scenario: liste_sans_owner_retourne_200_vide_et_pas_403 ──
+    // Base réelle sans `vanyline_owner_links` : 200 liste vide ET aucun client
+    // K8s découvert (le `None` court-circuite avant `k8s::client`).
+    #[tokio::test]
+    async fn liste_sans_owner_retourne_200_vide_et_pas_403() {
+        let db = crate::db::test_support::real_db().await;
+        let state = test_state_with_db(db);
+        let Json(list) = list_sandboxes(State(state.clone()), test_user())
+            .await
+            .expect("list_sandboxes sans owner doit rendre Ok");
+        assert!(list.is_empty(), "aucun Owner -> liste vide");
+        assert!(
+            state.k8s.lock().await.is_none(),
+            "aucun client K8s ne doit être découvert quand l'Owner est absent"
+        );
+    }
+
+    // ── Scenario: creation_branch_vide_ou_blanc_est_rejetee_avant_tout_acces_k8s
+    // Utilisateur authentifié SANS owner lié : le contrôle `branch` précède
+    // `resolve_owner_name` (sinon ce serait 403 Forbidden) et précède K8s. ──
+    #[tokio::test]
+    async fn creation_branch_vide_ou_blanc_est_rejetee_avant_tout_acces_k8s() {
+        let db = crate::db::test_support::real_db().await;
+        let state = test_state_with_db(db);
+        for branch in ["", "   "] {
+            let body: CreateSandboxBody = serde_json::from_str(&format!(
+                r#"{{"name":"s","project":"p","branch":"{branch}"}}"#
+            ))
+            .unwrap();
+            let err = create_sandbox(State(state.clone()), test_user(), Json(body))
+                .await
+                .expect_err("branch vide/blanc doit être rejeté");
+            assert!(
+                matches!(err, AppError::SandboxBranchEmpty),
+                "branch={branch:?} : attendu SandboxBranchEmpty (422), obtenu {err:?}"
+            );
+        }
+        assert!(
+            state.k8s.lock().await.is_none(),
+            "aucun accès K8s avant le contrôle de branch"
+        );
+    }
+
+    // ── Scenario: git_proxy_traversee_rejete_400_sans_appel_aval ──
+    // Base simulée SANS résultat programmé : si `resolve_user` était atteint
+    // (contrairement au contrat « raw_git_tail en première ligne »), l'erreur
+    // serait InternalError (VNL-DB-006) et non GitPathInvalid.
+    #[tokio::test]
+    async fn git_proxy_traversee_rejete_400_sans_appel_aval() {
+        let state = test_state_mock_db();
+        let mut req = Request::new(Body::empty());
+        *req.uri_mut() = "/sandboxes/s1/git/%2e%2e/mcp".parse().unwrap();
+        let err = git_proxy(
+            State(state),
+            test_user(),
+            Path(("s1".to_string(), "..%2F..%2Fmcp".to_string())),
+            req,
+        )
+        .await
+        .expect_err("traversal encodé doit être rejeté");
+        assert!(
+            matches!(err, AppError::GitPathInvalid),
+            "attendu GitPathInvalid (400), obtenu {err:?}"
+        );
+    }
+
+    // ── Serveur de capture « sandbox » pour proxy_git_request ──
+    // Les Scenarios ws_ticket/git_proxy qui exigent l'apiserver (owner_token,
+    // scoping K8s) restent des Scenarios d'intégration cluster (cf. Tasks
+    // `[!]`). Ce harnais teste hors cluster ce que proxy_git_request maîtrise :
+    // en-tête Bearer exactement tel qu'on le lui donne, méthode, query brute,
+    // corps, passthrough des statuts, enveloppe non-JSON, conservation du
+    // percent-encodage.
+    #[derive(Clone)]
+    struct Captured {
+        method: String,
+        path_and_query: String,
+        authorization: Option<String>,
+        content_type: Option<String>,
+        body: String,
+    }
+
+    /// Démarre un serveur axum sur port éphémère qui capture les requêtes
+    /// reçues et répond `(status, content_type, body)`. Retourne l'URL de base
+    /// et la liste des captures.
+    async fn spawn_sandbox_capture(
+        status: u16,
+        content_type: &'static str,
+        body: &'static str,
+    ) -> (String, std::sync::Arc<std::sync::Mutex<Vec<Captured>>>) {
+        let cap = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap_handler = cap.clone();
+        let body = body.to_string();
+        let app = axum::Router::new().route(
+            "/{*path}",
+            axum::routing::any(move |req: axum::extract::Request| {
+                let cap = cap_handler.clone();
+                let body = body.clone();
+                async move {
+                    let method = req.method().to_string();
+                    let path_and_query = match req.uri().query() {
+                        Some(q) => format!("{}?{q}", req.uri().path()),
+                        None => req.uri().path().to_string(),
+                    };
+                    let authorization = req
+                        .headers()
+                        .get("authorization")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let seen_ct = req
+                        .headers()
+                        .get("content-type")
+                        .and_then(|v| v.to_str().ok())
+                        .map(str::to_string);
+                    let bytes = axum::body::to_bytes(req.into_body(), usize::MAX)
+                        .await
+                        .unwrap_or_default();
+                    cap.lock().unwrap().push(Captured {
+                        method,
+                        path_and_query,
+                        authorization,
+                        content_type: seen_ct,
+                        body: String::from_utf8_lossy(&bytes).into_owned(),
+                    });
+                    (
+                        StatusCode::from_u16(status).unwrap(),
+                        [(axum::http::header::CONTENT_TYPE, content_type)],
+                        bytes::Bytes::from(body),
+                    )
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), cap)
+    }
+
+    // ── Scenario: git_proxy_forward_methode_query_bearer_owner_et_passthrough_statut
+    // (partie hors cluster : le relais présente le Bearer qu'on lui donne — le
+    // jeton du SA de l'Owner — et PAS l'id_token ; la méthode, la query brute,
+    // le content-type et le corps transitent ; statut 409 et JSON passthrough).
+    // L'enchaînement handler → owner_token(apiserver) est un Scenario
+    // d'intégration cluster (Tasks `[!]`). ──
+    #[tokio::test]
+    async fn proxy_git_request_presente_le_bearer_recu_et_passe_statut_et_json_tels_quels() {
+        let (base, cap) =
+            spawn_sandbox_capture(409, "application/json", r#"{"error":"merge conflict"}"#).await;
+        let http = reqwest::Client::new();
+        let (status, value) = proxy_git_request(
+            &http,
+            &format!("{base}/git/commit?retry=1"),
+            reqwest::Method::POST,
+            vec![("content-type".to_string(), "application/json".to_string())],
+            Bytes::from_static(br#"{"message":"m"}"#),
+            "owner-sa-jeton-alice",
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CONFLICT, "passthrough du 409");
+        assert_eq!(value, serde_json::json!({"error": "merge conflict"}));
+        let seen = cap.lock().unwrap().remove(0);
+        assert_eq!(seen.method, "POST");
+        assert_eq!(seen.path_and_query, "/git/commit?retry=1", "query brute");
+        assert_eq!(
+            seen.authorization.as_deref(),
+            Some("Bearer owner-sa-jeton-alice"),
+            "le Bearer présenté est le jeton d'Owner passé en paramètre"
+        );
+        assert!(
+            !seen
+                .authorization
+                .as_deref()
+                .unwrap_or_default()
+                .contains("id-token-utilisateur"),
+            "l'id_token de l'utilisateur ne traverse jamais la sandbox : {:?}",
+            seen.authorization
+        );
+        assert_eq!(seen.content_type.as_deref(), Some("application/json"));
+        assert_eq!(seen.body, r#"{"message":"m"}"#, "corps d'origine forwardé");
+    }
+
+    // ── Scenario: git_proxy_enveloppe_le_corps_non_json_sans_changer_le_statut ──
+    #[tokio::test]
+    async fn proxy_git_request_enveloppe_le_corps_non_json_sans_changer_le_statut() {
+        let (base, _cap) = spawn_sandbox_capture(404, "text/plain", "route not found").await;
+        let http = reqwest::Client::new();
+        let (status, value) = proxy_git_request(
+            &http,
+            &format!("{base}/git/nope"),
+            reqwest::Method::GET,
+            Vec::new(),
+            Bytes::new(),
+            "owner-sa-jeton",
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::NOT_FOUND, "statut d'origine conservé");
+        assert_eq!(value, serde_json::json!({"error": "route not found"}));
+    }
+
+    // ── Scenario: git_proxy_preserve_le_percent_encodage_d_une_branche ──
+    #[tokio::test]
+    async fn proxy_git_request_preserve_le_percent_encodage_d_une_branche() {
+        let (base, cap) = spawn_sandbox_capture(200, "application/json", "{}").await;
+        let http = reqwest::Client::new();
+        proxy_git_request(
+            &http,
+            &format!("{base}/git/branches/feature%2Fx"),
+            reqwest::Method::GET,
+            Vec::new(),
+            Bytes::new(),
+            "owner-sa-jeton",
+        )
+        .await
+        .unwrap();
+        let seen = cap.lock().unwrap().remove(0);
+        assert_eq!(
+            seen.path_and_query, "/git/branches/feature%2Fx",
+            "le %2F d'un nom de branche ne doit jamais redevenir un séparateur"
+        );
     }
 }

@@ -10,13 +10,14 @@ use globset::Glob;
 use crate::domain::{McpSelection, McpServer as DomainMcpServer, McpTransport};
 use crate::error::VnyError;
 
-/// McpRunningService générique pour un client MCP `()` (pas de handler côté
+/// `McpRunningService` générique pour un client MCP `()` (pas de handler côté
 /// client — vanyline ne reçoit pas de requêtes serveur->client). Alias pour
 /// lisibilité : c'est le type exact retourné par `rmcp::serve_client((), _)`.
 pub type McpRunningService = rmcp::service::RunningService<rmcp::RoleClient, ()>;
 
 /// Create a fresh, running tool-server handle. Callers add tools to it
 /// (local tools and/or MCP tools) before handing it to `run_chat_turn`.
+#[must_use]
 pub fn new_tool_handle() -> ToolServerHandle {
     rig_core::tool::server::ToolServer::new().run()
 }
@@ -31,7 +32,11 @@ pub struct PrefixedMcpTool {
 }
 
 impl PrefixedMcpTool {
-    pub fn new(tools: Vec<Tool>, client: ServerSink, prefix: &str) -> Vec<Self> {
+    /// Construit un tool préfixé par tool déclaré : nom `"{prefix}/{original}"`,
+    /// reste des champs recopiés. Le `ServerSink` est partagé (cloné par outil),
+    /// jamais consommé. Sans validation (cf. `./prefixed_mcp.sdd`).
+    #[must_use]
+    pub fn new(tools: Vec<Tool>, client: &ServerSink, prefix: &str) -> Vec<Self> {
         let prefix = format!("{prefix}/");
         tools
             .into_iter()
@@ -45,16 +50,16 @@ impl PrefixedMcpTool {
                         .unwrap_or(std::borrow::Cow::Borrowed("")),
                     original.input_schema.clone(),
                 );
-                prefixed.title = original.title.clone();
-                prefixed.output_schema = original.output_schema.clone();
-                prefixed.annotations = original.annotations.clone();
-                prefixed.execution = original.execution.clone();
-                prefixed.icons = original.icons.clone();
-                prefixed.meta = original.meta.clone();
+                prefixed.title.clone_from(&original.title);
+                prefixed.output_schema.clone_from(&original.output_schema);
+                prefixed.annotations.clone_from(&original.annotations);
+                prefixed.execution.clone_from(&original.execution);
+                prefixed.icons.clone_from(&original.icons);
+                prefixed.meta.clone_from(&original.meta);
                 Self {
                     original,
                     prefixed,
-                    client: client.clone(),
+                    client: ServerSink::clone(client),
                 }
             })
             .collect()
@@ -88,9 +93,12 @@ impl ToolDyn for PrefixedMcpTool {
             let arguments: Option<rmcp::model::JsonObject> =
                 serde_json::from_str(&args).unwrap_or_default();
 
-            let request = arguments
-                .map(|a| rmcp::model::CallToolRequestParams::new(name.clone()).with_arguments(a))
-                .unwrap_or_else(|| rmcp::model::CallToolRequestParams::new(name));
+            // Équivalent du map(..).unwrap_or_else(..) d'origine (lint
+            // map_unwrap_or) : Some clone `name`, None le consomme.
+            let request = match arguments {
+                Some(a) => rmcp::model::CallToolRequestParams::new(name.clone()).with_arguments(a),
+                None => rmcp::model::CallToolRequestParams::new(name),
+            };
 
             let result = client.call_tool(request).await.map_err(|e| {
                 rig_core::tool::ToolError::ToolCallError(Box::new(McpToolCallError(e.to_string())))
@@ -100,7 +108,7 @@ impl ToolDyn for PrefixedMcpTool {
                 let error_msg = result
                     .content
                     .into_iter()
-                    .map(|x| x.raw.as_text().map(|y| y.to_owned()))
+                    .map(|x| x.raw.as_text().map(std::borrow::ToOwned::to_owned))
                     .map(|x| x.map(|x| x.text))
                     .collect::<Option<Vec<String>>>();
 
@@ -151,7 +159,7 @@ impl ToolDyn for PrefixedMcpTool {
                             ),
                         )));
                     }
-                    thing => {
+                    thing @ rmcp::model::RawContent::ResourceLink(_) => {
                         return Err(rig_core::tool::ToolError::ToolCallError(Box::new(
                             McpToolCallError(format!(
                                 "MCP tool returned unsupported content: {thing:?}"
@@ -189,12 +197,9 @@ fn tool_matches(patterns: &[String], name: &str) -> bool {
     if patterns.is_empty() {
         return true;
     }
-    patterns.iter().any(|pattern| {
-        Glob::new(pattern)
-            .ok()
-            .map(|g| g.compile_matcher().is_match(name))
-            .unwrap_or(false)
-    })
+    patterns
+        .iter()
+        .any(|pattern| Glob::new(pattern).is_ok_and(|g| g.compile_matcher().is_match(name)))
 }
 
 /// Résout, pour un ensemble de `McpSelection`, les paires (sélection, serveur)
@@ -230,14 +235,13 @@ async fn connect_domain_mcp_server_inner(
         McpTransport::HttpStreamable => {
             let mut headers = std::collections::HashMap::new();
             for (name, value) in &server.headers {
-                match (
+                if let (Ok(header_name), Ok(header_value)) = (
                     reqwest::header::HeaderName::from_bytes(name.as_bytes()),
                     reqwest::header::HeaderValue::from_str(value),
                 ) {
-                    (Ok(name), Ok(value)) => {
-                        headers.insert(name, value);
-                    }
-                    _ => tracing::warn!("invalid MCP header for server {}: {name}", server.name),
+                    headers.insert(header_name, header_value);
+                } else {
+                    tracing::warn!("invalid MCP header for server {}: {name}", server.name);
                 }
             }
             let config = rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
@@ -261,6 +265,13 @@ async fn connect_domain_mcp_server_inner(
 /// Liste les noms des tools exposés par un serveur MCP, sans les ajouter à un
 /// handle. Réutilise `connect_domain_mcp_server_inner` (même logique de
 /// connexion/listing) — alimente `POST /api/mcp-servers/{id}/test` (app).
+///
+/// # Errors
+///
+/// [`VnyError::SseNotImplemented`] (`VNL-MCP-004`) si le transport est SSE,
+/// [`VnyError::McpConnectError`] (`VNL-MCP-005`) si la connexion échoue,
+/// [`VnyError::McpToolsError`] (`VNL-MCP-006`) si le listing échoue
+/// (cf. `./prefixed_mcp.sdd`, section `Raises`).
 pub async fn list_mcp_server_tools(server: &DomainMcpServer) -> Result<Vec<String>, VnyError> {
     let (tools, _client, _running) = connect_domain_mcp_server_inner(server).await?;
     Ok(tools.into_iter().map(|t| t.name.to_string()).collect())
@@ -271,7 +282,9 @@ pub async fn list_mcp_server_tools(server: &DomainMcpServer) -> Result<Vec<Strin
 /// perdu dans les logs, comme c'était le cas avant ce fix.
 #[derive(Debug, Clone)]
 pub struct McpConnectFailure {
+    /// Nom du serveur MCP en échec.
     pub server: String,
+    /// Affichage de l'erreur de connexion (marqueur `VNL-MCP-*` en tête).
     pub reason: String,
 }
 
@@ -283,6 +296,12 @@ pub struct McpConnectFailure {
 /// l'appelant le signale au client plutôt que de le laisser silencieux.
 /// Retourne les `McpRunningService` connectés — l'appelant est responsable de
 /// les garder en vie (pour le fix R12) et de les annuler à la fin du tour.
+///
+/// # Errors
+///
+/// Aucune erreur aujourd'hui : les pannes par serveur transitent par le second
+/// élément du tuple (`failures`) et le `Result` n'a qu'un seul habitant, `Ok` —
+/// ligne défensive d'avenir, tranché en `[?]` de `./prefixed_mcp.sdd`.
 pub async fn connect_mcp_servers_selected(
     selections: &[McpSelection],
     all_servers: &[DomainMcpServer],
@@ -297,7 +316,7 @@ pub async fn connect_mcp_servers_selected(
                     .into_iter()
                     .filter(|tool| tool_matches(&selection.tools, &tool.name))
                     .collect();
-                let prefixed_tools = PrefixedMcpTool::new(matching_tools, client, &server.name);
+                let prefixed_tools = PrefixedMcpTool::new(matching_tools, &client, &server.name);
                 for tool in prefixed_tools {
                     if let Err(e) = handle.add_tool(tool).await {
                         tracing::warn!("failed to add prefixed tool: {e}");
@@ -323,9 +342,10 @@ pub async fn connect_mcp_servers_selected(
 /// `Toolset.local_tools`. Retourne `(trouvés, absents)` — les absents sont à
 /// logger par l'appelant (pas une erreur bloquante, même philosophie que les
 /// échecs MCP par serveur).
-pub fn select_local_tools<'a, V>(
+#[must_use]
+pub fn select_local_tools<'a, V, S: std::hash::BuildHasher>(
     requested: &'a [String],
-    available: &'a std::collections::HashMap<String, V>,
+    available: &'a std::collections::HashMap<String, V, S>,
 ) -> (Vec<&'a str>, Vec<String>) {
     let mut found = Vec::with_capacity(requested.len());
     let mut missing = Vec::new();
@@ -344,7 +364,7 @@ mod tests {
     use super::*;
     use crate::domain::McpServer as DomainMcpServer;
     use crate::domain::McpTransport;
-    use std::collections::HashMap;
+    use std::collections::{BTreeMap, HashMap};
 
     // ---- tool_matches ----
 
@@ -387,19 +407,19 @@ mod tests {
                 name: "a".to_string(),
                 transport: McpTransport::HttpStreamable,
                 url: "http://a".to_string(),
-                headers: Default::default(),
+                headers: BTreeMap::default(),
             },
             DomainMcpServer {
                 name: "b".to_string(),
                 transport: McpTransport::HttpStreamable,
                 url: "http://b".to_string(),
-                headers: Default::default(),
+                headers: BTreeMap::default(),
             },
             DomainMcpServer {
                 name: "c".to_string(),
                 transport: McpTransport::HttpStreamable,
                 url: "http://c".to_string(),
-                headers: Default::default(),
+                headers: BTreeMap::default(),
             },
         ];
         let selections = vec![McpSelection {
@@ -418,7 +438,7 @@ mod tests {
             name: "a".to_string(),
             transport: McpTransport::HttpStreamable,
             url: "http://a".to_string(),
-            headers: Default::default(),
+            headers: BTreeMap::default(),
         }];
         let selections = vec![McpSelection {
             server: "z".to_string(),
@@ -432,9 +452,11 @@ mod tests {
 
     #[test]
     fn select_local_tools_found_and_missing() {
-        let mut available: HashMap<String, ()> = HashMap::new();
-        available.insert("read_file".to_string(), ());
-        available.insert("write_file".to_string(), ());
+        // Valeur `u8` : la fonction est générique sur `V` (testable sans
+        // instancier de vrais ToolDyn), pas de sémantique attachée à la valeur.
+        let mut available: HashMap<String, u8> = HashMap::new();
+        available.insert("read_file".to_string(), 1);
+        available.insert("write_file".to_string(), 1);
         let requested = vec!["read_file".to_string(), "delete_file".to_string()];
         let (found, missing) = select_local_tools(&requested, &available);
         assert_eq!(found, vec!["read_file"]);
@@ -443,10 +465,13 @@ mod tests {
 
     #[test]
     fn select_local_tools_empty_requested() {
-        let available: HashMap<String, ()> = HashMap::new();
+        let available: HashMap<String, u8> = HashMap::new();
         let requested: Vec<String> = vec![];
         let (found, missing) = select_local_tools(&requested, &available);
-        assert!(found.is_empty());
-        assert!(missing.is_empty());
+        assert!(found.is_empty(), "attendu aucun tool trouvé, got {found:?}");
+        assert!(
+            missing.is_empty(),
+            "attendu aucun tool manquant, got {missing:?}"
+        );
     }
 }

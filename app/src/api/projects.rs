@@ -4,9 +4,9 @@ use axum::{
     http::StatusCode,
 };
 use serde::Deserialize;
-use vanyline_crds::{EgressRule, Project, ProjectSpec, PvcRef};
+use vanyline_crds::{EgressRule, Project, ProjectSpec};
 
-use miryad_core::auth::AuthUser;
+use miryad_core::auth::{AuthPrincipal, AuthUser};
 use miryad_core::users::resolve_user;
 
 use crate::{AppState, api::owners, error::AppError, k8s};
@@ -21,8 +21,6 @@ pub struct CreateProjectBody {
     pub repo_url: String,
     #[serde(default)]
     pub default_branch: Option<String>,
-    #[serde(default)]
-    pub existing_pvc: Option<PvcRef>,
     #[serde(default)]
     pub storage_size: Option<String>,
     #[serde(default)]
@@ -51,7 +49,7 @@ pub async fn list_projects(
         None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
     };
     let client = k8s::client(&state).await?;
-    let projects = client.list_projects().await?;
+    let projects = client.list_projects(&owner).await?;
     Ok(Json(
         projects
             .into_iter()
@@ -73,7 +71,7 @@ pub async fn get_project(
         None => return Err(AppError::Forbidden),
     };
     let client = k8s::client(&state).await?;
-    let project = client.get_project(&name).await?;
+    let project = client.get_project(&owner, &name).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
@@ -82,7 +80,7 @@ pub async fn get_project(
 
 pub async fn create_project(
     State(state): State<AppState>,
-    user: AuthUser,
+    user: AuthPrincipal,
     Json(body): Json<CreateProjectBody>,
 ) -> Result<(StatusCode, Json<Project>), AppError> {
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
@@ -93,7 +91,6 @@ pub async fn create_project(
         owner: owner.clone(),
         repo_url: body.repo_url,
         default_branch: body.default_branch,
-        existing_pvc: body.existing_pvc,
         storage_size: body.storage_size,
         storage_class: body.storage_class,
         storage_access_mode: body.storage_access_mode,
@@ -103,7 +100,7 @@ pub async fn create_project(
         egress: body.egress,
     };
     let client = k8s::client(&state).await?;
-    let project = client.create_project(&body.name, spec).await?;
+    let project = client.create_project(&owner, &body.name, spec).await?;
     Ok((StatusCode::CREATED, Json(project)))
 }
 
@@ -120,11 +117,11 @@ pub async fn delete_project(
         None => return Err(AppError::Forbidden),
     };
     let client = k8s::client(&state).await?;
-    let project = client.get_project(&name).await?;
+    let project = client.get_project(&owner, &name).await?;
     if project.spec.owner != owner {
         return Err(AppError::Forbidden);
     }
-    client.delete_project(&name).await?;
+    client.delete_project(&owner, &name).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -135,7 +132,7 @@ mod tests {
     use axum::{
         Router,
         body::Body,
-        http::{Request, StatusCode},
+        http::{Request, StatusCode, header},
         routing::get,
     };
     use tower::ServiceExt;
@@ -176,8 +173,8 @@ mod tests {
         };
 
         Router::new()
-            .route("/projects", get(list_projects))
-            .route("/projects/{name}", get(get_project))
+            .route("/projects", get(list_projects).post(create_project))
+            .route("/projects/{name}", get(get_project).delete(delete_project))
             .with_state(state)
     }
 
@@ -200,6 +197,31 @@ mod tests {
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // Scenario: créer et supprimer sans cookie retournent 401 (projects.sdd, gelé).
+    // POST /projects avec corps JSON valide + DELETE /projects/p sans cookie :
+    // refus 401 avant le corps des handlers — rien écrit ni demandé au cluster
+    // (l'@AppState est hors-ligne : cache k8s `None`, aucun cluster joignable).
+    #[tokio::test]
+    async fn creer_et_supprimer_sans_cookie_retournent_401() {
+        let app = make_app(test_key());
+        let post_req = Request::builder()
+            .method("POST")
+            .uri("/projects")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(r#"{"name":"p","repoUrl":"u"}"#))
+            .unwrap();
+        let resp = app.clone().oneshot(post_req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let del_req = Request::builder()
+            .method("DELETE")
+            .uri("/projects/p")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(del_req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

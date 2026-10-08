@@ -2,6 +2,7 @@
 
 mod application;
 mod error;
+mod namespace;
 mod owner;
 mod project;
 mod sandbox;

@@ -15,7 +15,7 @@ use crate::rpc::protocol::{
     ConfigLayer, ConfigTestParams, ConfigUpdateParams, ConversationCreateParams,
     ConversationIdParams, ConversationSummary, InitializeParams, InitializeResult,
     JsonRpcNotification, JsonRpcRequest, JsonRpcResponse, McpTestResult, NameParams,
-    OwnerCreateParams, PROTOCOL_VERSION, ProjectCreateParams, ProviderTestResult,
+    OwnerCreateParams, OwnerParams, PROTOCOL_VERSION, ProjectCreateParams, ProviderTestResult,
     SandboxCreateParams, jsonrpc_code, vnl_code,
 };
 use crate::store;
@@ -180,6 +180,24 @@ fn k8s_client_error(id: Value, e: vanyline_lib::VnyError) -> String {
         vnl_code::K8S_ERROR,
     ))
     .expect("serialize k8s error response")
+}
+
+/// Sérialise une réponse d'erreur JSON-RPC `VNL-RPC-000` sans passer par un
+/// `expect` (harnais `/tooling.sdd` : `expect_used` deny, dette cli non purgée
+/// mais non grossie) : en cas d'échec de sérialisation d'une réponse d'erreur
+/// (quasi impossible), rend une envelopme minimale écrite à la main.
+fn malformed_response(id: &Value, message: &str) -> String {
+    let response = JsonRpcResponse::error(
+        id.clone(),
+        jsonrpc_code::PARSE_ERROR,
+        message,
+        vnl_code::MALFORMED_REQUEST,
+    );
+    serde_json::to_string(&response).unwrap_or_else(|e| {
+        format!(
+            r#"{{"jsonrpc":"2.0","id":{id},"error":{{"code":-32700,"message":"serialization failure: {e}"}}}}"#
+        )
+    })
 }
 
 /// Convertit le résultat d'un appel `VnlK8sClient::*` en réponse JSON-RPC —
@@ -749,11 +767,11 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
         "owners/get" => Some(handle_owners_get(state, id, request.params).await),
         "owners/create" => Some(handle_owners_create(state, id, request.params).await),
         "owners/delete" => Some(handle_owners_delete(state, id, request.params).await),
-        "projects/list" => Some(handle_projects_list(state, id).await),
+        "projects/list" => Some(handle_projects_list(state, id, request.params).await),
         "projects/get" => Some(handle_projects_get(state, id, request.params).await),
         "projects/create" => Some(handle_projects_create(state, id, request.params).await),
         "projects/delete" => Some(handle_projects_delete(state, id, request.params).await),
-        "sandboxes/list" => Some(handle_sandboxes_list(state, id).await),
+        "sandboxes/list" => Some(handle_sandboxes_list(state, id, request.params).await),
         "sandboxes/get" => Some(handle_sandboxes_get(state, id, request.params).await),
         "sandboxes/create" => Some(handle_sandboxes_create(state, id, request.params).await),
         "sandboxes/delete" => Some(handle_sandboxes_delete(state, id, request.params).await),
@@ -1569,16 +1587,28 @@ async fn handle_owners_delete(
     k8s_result_response(id, client.delete_owner(&params.name).await)
 }
 
-/// `projects/list` : retourne tous les `Project` du namespace résolu.
-async fn handle_projects_list(state: &mut ServerState, id: Value) -> String {
+/// `projects/list` : params -> `OwnerParams`, puis la liste des `Project` du
+/// namespace de l'Owner (`<app-ns>-<owner>`, UN OWNER = UN NAMESPACE 2026-10-04).
+async fn handle_projects_list(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
+    let Ok(params) = serde_json::from_value::<OwnerParams>(params) else {
+        return malformed_response(
+            &id,
+            "Malformed request: params could not be deserialized as OwnerParams (missing field \"owner\")",
+        );
+    };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.list_projects().await)
+    k8s_result_response(id, client.list_projects(&params.owner).await)
 }
 
-/// `projects/get` : params -> `NameParams`, puis `client.get_project(&name)`.
+/// `projects/get` : params -> `NameParams` (owner requis), puis
+/// `client.get_project(&owner, &name)` dans le namespace de l'Owner.
 async fn handle_projects_get(
     state: &mut ServerState,
     id: Value,
@@ -1600,10 +1630,17 @@ async fn handle_projects_get(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.get_project(&params.name).await)
+    let Some(owner) = params.owner else {
+        return malformed_response(
+            &id,
+            "Malformed request: missing required params field \"owner\" (UN OWNER = UN NAMESPACE)",
+        );
+    };
+    k8s_result_response(id, client.get_project(&owner, &params.name).await)
 }
 
-/// `projects/create` : params -> `ProjectCreateParams` (name + spec aplati).
+/// `projects/create` : params -> `ProjectCreateParams` (name + spec aplati) ;
+/// le namespace cible est celui de `spec.owner` (UN OWNER = UN NAMESPACE).
 async fn handle_projects_create(
     state: &mut ServerState,
     id: Value,
@@ -1625,10 +1662,20 @@ async fn handle_projects_create(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.create_project(&params.name, params.spec).await)
+    // L'Owner du namespace cible est celui porte par la spec (UN OWNER = UN
+    // NAMESPACE 2026-10-04) : la liste comme le creneau vivent dans
+    // `<app-ns>-<spec.owner>`.
+    let owner = params.spec.owner.clone();
+    k8s_result_response(
+        id,
+        client
+            .create_project(&owner, &params.name, params.spec)
+            .await,
+    )
 }
 
-/// `projects/delete` : params -> `NameParams`, puis `client.delete_project(&name)`.
+/// `projects/delete` : params -> `NameParams` (owner requis), puis
+/// `client.delete_project(&owner, &name)`.
 async fn handle_projects_delete(
     state: &mut ServerState,
     id: Value,
@@ -1650,19 +1697,37 @@ async fn handle_projects_delete(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.delete_project(&params.name).await)
+    let Some(owner) = params.owner else {
+        return malformed_response(
+            &id,
+            "Malformed request: missing required params field \"owner\" (UN OWNER = UN NAMESPACE)",
+        );
+    };
+    k8s_result_response(id, client.delete_project(&owner, &params.name).await)
 }
 
-/// `sandboxes/list` : retourne tous les `Sandbox` du namespace résolu.
-async fn handle_sandboxes_list(state: &mut ServerState, id: Value) -> String {
+/// `sandboxes/list` : params -> `OwnerParams`, puis la liste des `Sandbox` du
+/// namespace de l'Owner (UN OWNER = UN NAMESPACE 2026-10-04).
+async fn handle_sandboxes_list(
+    state: &mut ServerState,
+    id: Value,
+    params: serde_json::Value,
+) -> String {
+    let Ok(params) = serde_json::from_value::<OwnerParams>(params) else {
+        return malformed_response(
+            &id,
+            "Malformed request: params could not be deserialized as OwnerParams (missing field \"owner\")",
+        );
+    };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.list_sandboxes().await)
+    k8s_result_response(id, client.list_sandboxes(&params.owner).await)
 }
 
-/// `sandboxes/get` : params -> `NameParams`, puis `client.get_sandbox(&name)`.
+/// `sandboxes/get` : params -> `NameParams` (owner requis), puis
+/// `client.get_sandbox(&owner, &name)`.
 async fn handle_sandboxes_get(
     state: &mut ServerState,
     id: Value,
@@ -1684,10 +1749,17 @@ async fn handle_sandboxes_get(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.get_sandbox(&params.name).await)
+    let Some(owner) = params.owner else {
+        return malformed_response(
+            &id,
+            "Malformed request: missing required params field \"owner\" (UN OWNER = UN NAMESPACE)",
+        );
+    };
+    k8s_result_response(id, client.get_sandbox(&owner, &params.name).await)
 }
 
-/// `sandboxes/create` : params -> `SandboxCreateParams` (name + spec aplati).
+/// `sandboxes/create` : params -> `SandboxCreateParams` (name + `owner` + spec
+/// aplati) ; `owner` designe le namespace cible `<app-ns>-<owner>`.
 async fn handle_sandboxes_create(
     state: &mut ServerState,
     id: Value,
@@ -1709,10 +1781,22 @@ async fn handle_sandboxes_create(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.create_sandbox(&params.name, params.spec).await)
+    let Some(owner) = params.owner else {
+        return malformed_response(
+            &id,
+            "Malformed request: missing required params field \"owner\" (UN OWNER = UN NAMESPACE)",
+        );
+    };
+    k8s_result_response(
+        id,
+        client
+            .create_sandbox(&owner, &params.name, params.spec)
+            .await,
+    )
 }
 
-/// `sandboxes/delete` : params -> `NameParams`, puis `client.delete_sandbox(&name)`.
+/// `sandboxes/delete` : params -> `NameParams` (owner requis), puis
+/// `client.delete_sandbox(&owner, &name)`.
 async fn handle_sandboxes_delete(
     state: &mut ServerState,
     id: Value,
@@ -1734,11 +1818,17 @@ async fn handle_sandboxes_delete(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.delete_sandbox(&params.name).await)
+    let Some(owner) = params.owner else {
+        return malformed_response(
+            &id,
+            "Malformed request: missing required params field \"owner\" (UN OWNER = UN NAMESPACE)",
+        );
+    };
+    k8s_result_response(id, client.delete_sandbox(&owner, &params.name).await)
 }
 
-/// `sandboxes/stop` : params -> `NameParams`, puis
-/// `client.set_sandbox_suspended(&name, true)`.
+/// `sandboxes/stop` : params -> `NameParams` (owner requis), puis
+/// `client.set_sandbox_suspended(&owner, &name, true)`.
 async fn handle_sandboxes_stop(
     state: &mut ServerState,
     id: Value,
@@ -1760,11 +1850,22 @@ async fn handle_sandboxes_stop(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.set_sandbox_suspended(&params.name, true).await)
+    let Some(owner) = params.owner else {
+        return malformed_response(
+            &id,
+            "Malformed request: missing required params field \"owner\" (UN OWNER = UN NAMESPACE)",
+        );
+    };
+    k8s_result_response(
+        id,
+        client
+            .set_sandbox_suspended(&owner, &params.name, true)
+            .await,
+    )
 }
 
-/// `sandboxes/start` : params -> `NameParams`, puis
-/// `client.set_sandbox_suspended(&name, false)`.
+/// `sandboxes/start` : params -> `NameParams` (owner requis), puis
+/// `client.set_sandbox_suspended(&owner, &name, false)`.
 async fn handle_sandboxes_start(
     state: &mut ServerState,
     id: Value,
@@ -1786,7 +1887,18 @@ async fn handle_sandboxes_start(
         Ok(c) => c,
         Err(e) => return k8s_client_error(id, e),
     };
-    k8s_result_response(id, client.set_sandbox_suspended(&params.name, false).await)
+    let Some(owner) = params.owner else {
+        return malformed_response(
+            &id,
+            "Malformed request: missing required params field \"owner\" (UN OWNER = UN NAMESPACE)",
+        );
+    };
+    k8s_result_response(
+        id,
+        client
+            .set_sandbox_suspended(&owner, &params.name, false)
+            .await,
+    )
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ use crate::store::ConfigStore;
 /// (ex. si aucun toolset n'a de prompt ET aucun skill n'est sélectionné, le
 /// résultat est juste `agent.system_prompt` + éventuellement le contexte
 /// workspace, sans lignes blanches en trop).
+#[must_use]
 pub fn assemble_system_prompt(
     agent: &Agent,
     all_toolsets: &[Toolset],
@@ -137,7 +138,7 @@ fn resolve_skill_index(selection: &SkillSelection, all_skills: &[SkillMeta]) -> 
         SkillSelection::Auto => all_skills.to_vec(),
         SkillSelection::Named(names) => {
             let name_set: std::collections::HashSet<&str> =
-                names.iter().map(|n| n.as_str()).collect();
+                names.iter().map(String::as_str).collect();
             all_skills
                 .iter()
                 .filter(|s| name_set.contains(s.name.as_str()))
@@ -172,17 +173,17 @@ impl rig_core::tool::ToolDyn for ArcToolDyn {
         self.0.name()
     }
 
-    fn definition<'a>(
-        &'a self,
+    fn definition(
+        &self,
         prompt: String,
-    ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, rig_core::completion::ToolDefinition> {
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<'_, rig_core::completion::ToolDefinition> {
         self.0.definition(prompt)
     }
 
-    fn call<'a>(
-        &'a self,
+    fn call(
+        &self,
         args: String,
-    ) -> rig_core::wasm_compat::WasmBoxedFuture<'a, Result<String, rig_core::tool::ToolError>> {
+    ) -> rig_core::wasm_compat::WasmBoxedFuture<'_, Result<String, rig_core::tool::ToolError>> {
         self.0.call(args)
     }
 }
@@ -193,9 +194,16 @@ impl rig_core::tool::ToolDyn for ArcToolDyn {
 /// la tâche 8, pas par cette tâche).
 #[derive(Clone)]
 pub struct SessionContext {
+    /// Store de configuration résolvant agents, modèles, providers, toolsets et
+    /// skills au fil du tour.
     pub store: Arc<dyn ConfigStore>,
+    /// Sink d'événements destinataire des [`ChatEvent`](crate::event::ChatEvent) du
+    /// tour.
     pub sink: Arc<dyn EventSink>,
+    /// Local tools fournis par l'hôte (cli : filesystem/command ; app : aucun),
+    /// référencés par nom via `Toolset::local_tools` et partagés par clonage d'Arc.
     pub local_tools: HashMap<String, Arc<dyn rig_core::tool::ToolDyn>>,
+    /// Garde de profondeur des tours imbriqués (tool builtin `task`).
     pub subagent_depth_max: u8,
     /// Serveurs MCP forces par l'hote pour CE tour, en plus de ceux resolves
     /// via les toolsets de l'agent — fourni directement (pas par nom via
@@ -204,7 +212,7 @@ pub struct SessionContext {
     /// injecter la sandbox comme serveur MCP du tour sans passer par la
     /// config `mcp:` de l'utilisateur. Deduplie par nom de serveur contre
     /// les serveurs des toolsets, meme mecanique que `dedupe_mcp_selections`
-    /// — connecte AVANT la boucle des toolsets pour que l'extra_mcp
+    /// — connecte AVANT la boucle des toolsets pour que l'`extra_mcp`
     /// "gagne" en cas de collision de nom.
     pub extra_mcp: Vec<(McpServer, McpSelection)>,
     /// Override du modele pour CE tour, fourni par l'hote (ex. flag CLI
@@ -217,7 +225,7 @@ pub struct SessionContext {
     /// `Conversation.todo` et relit apres le tour pour persister), l'outil
     /// builtin (lit/ecrit pendant le tour) et les tours imbriques (clone de
     /// l'Arc). `Some(json)` = serialisation JSON de la liste de taches ; `None`
-    /// = aucun etat pose. Clone de SessionContext partage l'Arc (meme etat).
+    /// = aucun etat pose. Clone de `SessionContext` partage l'Arc (meme etat).
     pub todo_state: Arc<std::sync::Mutex<Option<String>>>,
 }
 
@@ -334,6 +342,16 @@ where
 /// Point d'entrée unique de la session engine, à la profondeur 0 (un appel
 /// top-level, jamais un subagent). Voir `run_agent_turn_at_depth` pour
 /// l'implémentation — ce raccourci fixe simplement `current_depth = 0`.
+///
+/// # Errors
+///
+/// [`VnyError::UnknownReference`] (`VNL-CFG-003`) pour agent, modèle (y compris
+/// l'override), provider ou toolset inconnu, ainsi que pour toute erreur du
+/// store sur `list_skills`/`list_agents` ; [`VnyError::DuplicateName`]
+/// (`VNL-CFG-002`) sur référence ambiguë ; [`VnyError::ModelBuildError`] si la
+/// construction du modèle échoue ; erreurs de transport/stream de
+/// `stream_agent_events` propagées sans enveloppement (cf. `./session.sdd`,
+/// section `Raises`).
 pub async fn run_agent_turn(
     ctx: &SessionContext,
     agent_name: &str,
@@ -351,6 +369,10 @@ pub async fn run_agent_turn(
 /// `run_agent_turn` (profondeur 0 implicite). Résout l'agent par nom, assemble
 /// le prompt, peuple un handle de tools frais (local + MCP filtrés par
 /// toolset + builtins `skill`/`task`) et streame le tour.
+// Phases (extra_mcp, boucle toolsets, builtins, dispatch provider) partageant
+// les mêmes ensembles de dédup et le handle : factoriser changerait la structure
+// sans enlever une ligne de comportement (session.sdd, @run_agent_turn_at_depth).
+#[allow(clippy::too_many_lines)]
 pub(crate) async fn run_agent_turn_at_depth(
     ctx: &SessionContext,
     agent_name: &str,
@@ -815,7 +837,7 @@ mod tests {
         let result = resolve_turn_context(&ctx, "nope", None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(format!("{}", err).contains("VNL-CFG-003"));
+        assert!(format!("{err}").contains("VNL-CFG-003"));
     }
 
     // 3. unknown model — agent references non-existent model
@@ -847,7 +869,7 @@ mod tests {
         let result = resolve_turn_context(&ctx, "broken-model", None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(format!("{}", err).contains("VNL-CFG-003"));
+        assert!(format!("{err}").contains("VNL-CFG-003"));
     }
 
     // 4. unknown provider — model references non-existent provider
@@ -881,7 +903,7 @@ mod tests {
         let result = resolve_turn_context(&ctx, "broken-model", None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(format!("{}", err).contains("VNL-CFG-003"));
+        assert!(format!("{err}").contains("VNL-CFG-003"));
     }
 
     // 5. unknown toolset — agent references non-existent toolset
@@ -920,7 +942,7 @@ mod tests {
         let result = resolve_turn_context(&ctx, "test-agent", None).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        assert!(format!("{}", err).contains("VNL-CFG-003"));
+        assert!(format!("{err}").contains("VNL-CFG-003"));
     }
 
     // 6. workspace_context included

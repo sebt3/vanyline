@@ -8,11 +8,13 @@ use std::pin::Pin;
 use std::process::Stdio;
 use std::time::Instant;
 
+/// Future boxed `Send` — type d'effacement des outils asynchrones du crate.
 pub type BoxedFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
 
 /// Options d'exécution de commande.
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ExecuteCommandOptions {
+    /// Commande passée à `sh -c`.
     pub command: String,
     /// 0 = pas de timeout (comportement déjà existant, inchangé).
     #[serde(default)]
@@ -32,7 +34,6 @@ pub struct ExecuteCommandOptions {
 
 /// Retourne un `String` formaté (exit code, duration, stdout, stderr).
 /// Erreurs remontent via `ToolsError`.
-#[must_use]
 pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsError>> {
     let command = opts.command;
     let timeout_secs = opts.timeout_secs;
@@ -123,10 +124,14 @@ pub fn execute(opts: ExecuteCommandOptions) -> BoxedFuture<Result<String, ToolsE
                         // mais tous ses descendants. Best-effort : ESRCH (déjà mort) ou
                         // toute autre erreur n'est pas remontée, le timeout reste
                         // l'erreur pertinente à propager à l'appelant.
-                        #[allow(unsafe_code)]
-                        // SAFETY: kill(2) sur pgid du process_group(0) — voir commentaire au-dessus
-                        unsafe {
-                            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                        // pid_t == i32 et tout pid du noyau tient en i32 : try_from échoue
+                        // uniquement hors plage POSIX, où le kill serait sans objet.
+                        if let Ok(pgid) = libc::pid_t::try_from(pid) {
+                            #[allow(unsafe_code)]
+                            // SAFETY: kill(2) sur pgid du process_group(0) — voir commentaire au-dessus
+                            unsafe {
+                                libc::kill(pgid.wrapping_neg(), libc::SIGKILL);
+                            }
                         }
                     }
                     return Err(ToolsError::CommandTimeout(timeout_secs));

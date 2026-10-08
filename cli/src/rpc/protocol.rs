@@ -209,9 +209,24 @@ pub struct ChatCancelParams {
 
 /// Params partagés par `owners/get`, `owners/delete`,
 /// `projects/get`, `projects/delete`, `sandboxes/get`, `sandboxes/delete`.
+/// `owner` (UN OWNER = UN NAMESPACE, 2026-10-04) : namespace cible
+/// `<app-ns>-<owner>` pour les méthodes project/sandbox (requis pour
+/// celles-ci, absent des `owners/*`). Optionnel côté désérialisation pour
+/// ne pas casser l'enveloppe des `owners/*` ; les handlers project/sandbox
+/// le refusent manquant en `VNL-RPC-000`.
 #[derive(Debug, Deserialize)]
 pub struct NameParams {
     pub name: String,
+    #[serde(default)]
+    pub owner: Option<String>,
+}
+
+/// Params des méthodes de liste scopées par Owner (`projects/list`,
+/// `sandboxes/list`) : la liste est celle du namespace de l'Owner
+/// (`<app-ns>-<owner>`, UN OWNER = UN NAMESPACE 2026-10-04).
+#[derive(Debug, Deserialize)]
+pub struct OwnerParams {
+    pub owner: String,
 }
 
 /// `owners/create` — `spec` aplati (`#[serde(flatten)]`) : le JSON attendu
@@ -236,9 +251,14 @@ pub struct ProjectCreateParams {
 }
 
 /// `sandboxes/create` — même principe que `OwnerCreateParams`/`ProjectCreateParams`.
+/// `owner` (UN OWNER = UN NAMESPACE, 2026-10-04) : namespace cible
+/// `<app-ns>-<owner>` où poser la CR, requis (le `SandboxSpec` aplati ne porte
+/// pas l'Owner, contrairement au `ProjectSpec`).
 #[derive(Debug, Deserialize)]
 pub struct SandboxCreateParams {
     pub name: String,
+    #[serde(default)]
+    pub owner: Option<String>,
     #[serde(flatten)]
     pub spec: vanyline_crds::SandboxSpec,
 }

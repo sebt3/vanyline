@@ -39,10 +39,11 @@ Structure:
   ./lib.rs — quatre blocs @CustomResource (Owner, Project, Sandbox, Application), types
     partagés entre specs (@EgressRule, @EgressPort), types d'appui par spec
     (@ProjectDefaults, @IngressControllerRef, @Toolchain, @LspSpec,
-    @ApplicationStorageDefaults), quatre structs de status, deux items d'interface publique
-    hors types (@crd_manifests, @MCP_PORT + @service_name), et le module `#[cfg(test)]`.
+    @ApplicationStorageDefaults), quatre structs de status, trois items d'interface publique
+    hors types (@crd_manifests, @MCP_PORT + @service_name, @owner_namespace_name), et le
+    module `#[cfg(test)]`.
     Ordre physique : Owner (avec ses types annexes) → Project → Sandbox → Application →
-    @crd_manifests → @MCP_PORT / @service_name → tests.
+    @crd_manifests → @MCP_PORT / @service_name / @owner_namespace_name → tests.
     Consommation externe : `controller` (reconcilers + `--crds`), `vanyline-lib` feature
     `k8s` (@service_name, @MCP_PORT dans @VnlK8sClient::sandbox_mcp_url — spec sœur
     `k8s.sdd` de `vanyline-lib`), `cli` (construction des specs + enveloppes RPC), `app`
@@ -233,6 +234,7 @@ Exposes:
   @crd_manifests — `pub fn () -> String`, @must_use.
   @MCP_PORT — `pub const i32` = `3000`.
   @service_name — `pub fn (&str) -> String`, @must_use.
+  @owner_namespace_name — `pub fn (&str, &str) -> Result<String, String>`, @must_use.
   Rien d'autre : le module `tests` est privé ; tout item non-`pub` est absent du fichier.
 
 Accepts:
@@ -240,6 +242,8 @@ Accepts:
     invalides pour un nom K8s compris (aucune vérification ; la validité RFC 1123 relève de
     l'appelant).
   @crd_manifests : aucune entrée.
+  @owner_namespace_name : `app_namespace: &str`, `owner: &str` — entrées acceptées sans
+    validation ; c'est le RÉSULTAT de la concaténation qui est validé (cf. Raises).
   Contrat de désérialisation (subi par les Spec/Status) : tout document JSON/YAML d'une CR,
     produit par le CLI (`cli/src/{owner,project,sandbox}_cmd.rs`), `app`, les tests du
     controller ou `kubectl`.
@@ -249,6 +253,7 @@ Returns:
     Project, Sandbox, Application ; chaque document est un @CustomResourceDefinition valide
     contenant `kind: CustomResourceDefinition` et le groupe `vanyline.solidite.fr`.
   @service_name : le @String `sandbox-<sandbox_name>` concaténé sans séparateur ajouté.
+  @owner_namespace_name : le @String `{app_namespace}-{owner}` en cas de validation réussie.
   @MCP_PORT : l'entier `3000`.
   Sérialisation serde : clés camelCase ; `Option::None` ⇒ `"clé": null` SAUF
     @ProjectStatus::detectedAt (clé omise) ; vec/map `#[serde(default)]` vides ⇒ `[]` / `{}`
@@ -263,6 +268,9 @@ Raises:
     échouait sur un schéma connu à la compilation — jugée impossible en pratique par la
     justification de l'`#[allow]` (seul point de panique du code de production du crate).
   @service_name, @MCP_PORT : aucune erreur possible (fonctions totales).
+  @owner_namespace_name : @Err(@String) portant la raison quand la concaténation n'est pas un
+    label DNS-1123 valide (majuscules, `_`, point, `-` en tête/queue, chaîne vide) ou dépasse
+    63 caractères ; jamais de panique.
   Désérialisation d'un document invalide (clé requise absente — `owner`/`repoUrl` de
     @ProjectSpec, `project`/`branch` de @SandboxSpec, les cinq requis d'@ApplicationSpec,
     `description` de @EgressRule, `name`/`image` de @Toolchain,
@@ -332,16 +340,16 @@ Tasks:
     `["cargo", "pnpm"]` alors que `effective_caches` et le doc comment de @ProjectSpec::caches
     disent `["cargo", "pnpm", "pip"]` — commentaire périmé côté controller, à corriger dans
     sa spec/sa tâche.
-  [ ] Couverture existante (./lib.rs module `tests`, 18 tests) : `crd_names`,
-    `crd_manifests_yaml`, `spec_camel_case`, `sandbox_defaults`, `owner_schema_fields`,
-    `egress_camel_case`, `egress_defaults_to_empty`, `suspended_defaults_to_false`,
-    `sandbox_schema_fields_suspended`, `application_schema_fields`, `application_defaults`,
-    `application_camel_case`, `owner_application_ref_camel_case`,
+  [x] Couverture existante (./lib.rs module `tests`) : les 18 tests listés à la relecture de
+    reverse-engineering (`crd_names`, `crd_manifests_yaml`, `spec_camel_case`,
+    `sandbox_defaults`, `owner_schema_fields`, `egress_camel_case`, `egress_defaults_to_empty`,
+    `suspended_defaults_to_false`, `sandbox_schema_fields_suspended`, `application_schema_fields`,
+    `application_defaults`, `application_camel_case`, `owner_application_ref_camel_case`,
     `ingress_controller_ref_camel_case`, `project_status_languages_default_empty`,
     `project_status_languages_skipped_when_empty`, `project_status_languages_present_when_set`,
-    `lsp_spec_absent_defaults_to_none` — ils verrouillent les Scenarios homonymes ou listés
-    ci-dessous.
-  [ ] Convertir en tests taggés par leur titre les Scenarios sans test existant :
+    `lsp_spec_absent_defaults_to_none`) verrouillent les Scenarios homonymes ou listés
+    ci-dessous — ressynchronisé 2026-10-06 : le crate compte 35 tests.
+  [x] Convertir en tests taggés par leur titre les Scenarios sans test existant :
     `crd_manifests_ordre_documents`, `crd_scope_namespaced_version_v1alpha1`,
     `crd_printcolumns_et_absence_shortnames`, `owner_spec_deserialise_depuis_objet_vide`,
     `project_spec_champs_requis`, `sandbox_spec_champs_requis`, `application_spec_champs_requis`,
@@ -349,11 +357,16 @@ Tasks:
     `egress_rule_minimale_defauts`,
     `service_name_prefixe_sandbox`, `mcp_port_vaut_3000`,
     `status_structures_defaut_deserialisables` — puis faire passer la synthèse du validator
-    au vert.
-  [ ] Étendre deux tests existants pour couvrir l'intégralité du Scenario homonyme :
+    au vert. — fait 2026-10-06 (étape 4a), validator scopé vert.
+  [x] Étendre deux tests existants pour couvrir l'intégralité du Scenario homonyme :
     `sandbox_defaults` ne vérifie pas `resources: None` ; `application_defaults` ne vérifie
     pas `storage_defaults: None` (le test `application_camel_case` les exerce en sérialisation
-    seulement).
+    seulement). — fait 2026-10-06 (étape 4a).
+  [ ] Convertir en tests taggés par leur titre les quatre Scenarios ajoutés le 2026-10-06 :
+    `owner_namespace_name_valide`, `owner_namespace_name_hors_dns_1123`,
+    `owner_namespace_name_trop_long`, `git_secret_transport_conservé` — les trois premiers
+    existent déjà en tests (dérivés du `Must`, sans Scenario dédié) : les retagger sous les
+    titres des Scenarios ; le quatrième (transport de `gitSecret`) est neuf.
 
 Done when:
   Chaque Scenario est couvert par au moins un test taggé par son titre et passe.
@@ -579,3 +592,26 @@ Scenario: status_structures_defaut_deserialisables
   Then chacun réussit : `conditions` vide partout, `pvcName`/`serviceAccount` (Owner) et
     `phase`/`service` (Sandbox, Application) `None` — les Status tolèrent un sous-document
     posé par un patch partiel
+
+Scenario: owner_namespace_name_valide
+  Given `app_namespace = "media-test"` et `owner = "seb"`
+  When @owner_namespace_name
+  Then `Ok("media-test-seb")` ; une concaténation de exactement 63 caractères est aussi `Ok`
+
+Scenario: owner_namespace_name_hors_dns_1123
+  Given une paire dont la concaténation contient une majuscule, `_`, un point, ou un `-` en
+    tête ou en queue
+  When @owner_namespace_name
+  Then `Err` portant la raison, aucune valeur concaténée rendue
+
+Scenario: owner_namespace_name_trop_long
+  Given une paire dont la concaténation dépasse 63 caractères
+  When @owner_namespace_name
+  Then `Err` portant la raison
+
+Scenario: git_secret_transport_conservé
+  Given un document @ProjectSpec portant `gitSecret: "cle-git"`
+  When aller-retour serde (désérialisation puis resérialisation)
+  Then le champ se désérialise (`Some("cle-git")`) et se resérialise sous `gitSecret` ; un
+    @ProjectSpec par défaut rend `"gitSecret": null` (pas de `skip_serializing_if`) — le champ
+    est DÉPRÉCIÉ (cf. `[?]` de la section `Tasks`) mais son transport reste contractuel

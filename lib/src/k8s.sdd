@@ -105,7 +105,7 @@ Must not:
     `/`) et un vrai séparateur de chemin. Le @encode_git_path de ./lib.rs n'est plus
     appelé depuis ce module.
   Propager `namespace_override` dans le client kube lui-même : l'override ne vit que dans
-    le champ `namespace` du @VnlK8sClient.
+    le champ `app_namespace` du @VnlK8sClient.
   Offrir d'opération cluster-scopée ou de CRUD sur @Application autre que
     @VnlK8sClient::get_application.
   Unit-tester un appel API K8s avec un mock d'API server : convention du projet (aucun
@@ -134,37 +134,50 @@ Exposes:
   @WatchEvent — énumération publique, @Clone + @Debug, variantes @WatchEvent::Added,
     @WatchEvent::Modified, @WatchEvent::Deleted, @WatchEvent::Error(`String`) ; forme
     normalisée pour la diffusion WS des événements du watcher.
-  @VnlK8sClient — `pub`, @Clone ; champs `client` et `namespace` privés.
+  @VnlK8sClient — `pub`, @Clone ; champs privés `client`, `app_namespace` (namespace
+    d'application : CR @Owner/@Application) et `owner_tokens`
+    (@Arc<@Mutex<@HashMap<@String, @OwnerToken>>> — cache de jetons PARTAGÉ par le clone
+    du @Arc entre tous les clones du client, jamais persisté).
+  @OWNER_TOKEN_AUDIENCE — `pub const &str` = `"vanyline-sandbox"` (même valeur que
+    `token_audience` par défaut de /sandbox/src/config.sdd).
+  @OwnerToken — `pub struct { pub token: String, pub expires_at: chrono::DateTime<Utc> }`,
+    @Clone (requis par le cache) ; son @Debug MASQUE `token`
+    (`OwnerToken { token: "<redacted>", expires_at: … }`), aucun @Display, jamais sérialisé.
   @VnlK8sClient::discover — `pub` : construit le client (namespace résolu, override optionnel).
   @VnlK8sClient::list_owners / @VnlK8sClient::get_owner / @VnlK8sClient::create_owner /
     @VnlK8sClient::delete_owner — `pub` CRUD Owner.
   @VnlK8sClient::get_application — `pub` : lecture seule d'une @Application.
   @VnlK8sClient::list_projects / @VnlK8sClient::get_project / @VnlK8sClient::create_project /
-    @VnlK8sClient::delete_project — `pub` CRUD Project.
+    @VnlK8sClient::delete_project — `pub` CRUD Project, TOUJOURS préfixés par le paramètre
+    `owner: &str` (le CR vit dans `<app-ns>-<owner>`, calculé sans appel cluster).
   @VnlK8sClient::list_sandboxes / @VnlK8sClient::get_sandbox / @VnlK8sClient::create_sandbox /
-    @VnlK8sClient::delete_sandbox — `pub` CRUD Sandbox.
-  @VnlK8sClient::set_sandbox_suspended — `pub` : merge patch de `spec.suspended`,
-    retourne le @Sandbox patché.
-  @VnlK8sClient::sandbox_mcp_url — `pub` : URL MCP HTTP-streamable interne (`…/mcp`).
-  @VnlK8sClient::sandbox_ws_ticket_url — `pub` : URL interne `POST /ws/ticket` (`…/ws/ticket`).
-  @VnlK8sClient::sandbox_git_url — `pub` : URL interne du proxy git (`…/git/{raw_path}`,
-    `raw_path` pré-encodé et validé par l'appelant).
-  @VnlK8sClient::watch_sandboxes — `pub` : stream boxé `Send` de @WatchEvent de @Sandbox.
+    @VnlK8sClient::delete_sandbox — `pub` CRUD Sandbox, `owner` préfixé de même.
+  @VnlK8sClient::set_sandbox_suspended — `pub` : `set_sandbox_suspended(owner, name, suspended)`
+    — merge patch de `spec.suspended`, retourne le @Sandbox patché.
+  @VnlK8sClient::sandbox_mcp_url — `pub` : `sandbox_mcp_url(owner, name)` — URL MCP
+    HTTP-streamable interne (`…/mcp`).
+  @VnlK8sClient::sandbox_ws_ticket_url — `pub` : `sandbox_ws_ticket_url(owner, name)` — URL
+    interne `POST /ws/ticket` (`…/ws/ticket`).
+  @VnlK8sClient::sandbox_git_url — `pub` : `sandbox_git_url(owner, name, raw_path)` — URL
+    interne du proxy git (`…/git/{raw_path}`, `raw_path` pré-encodé et validé par l'appelant).
+  @VnlK8sClient::watch_sandboxes — `pub` : `watch_sandboxes(owner)` — stream boxé `Send` de
+    @WatchEvent de @Sandbox, flux du namespace de cet Owner uniquement, jamais cluster-wide.
   @VnlK8sClient::owner_token(owner: &str) -> `Result<@OwnerToken, VnyError>` — `pub async` :
     jeton d'authentification de l'Owner auprès de SES sandboxes (voir `Must`).
-  @OwnerToken — `pub struct { pub token: String, pub expires_at: chrono::DateTime<Utc> }` ;
-    son @Debug MASQUE `token` (`OwnerToken { token: "<redacted>", expires_at: … }`), aucun
-    @Display, jamais sérialisé.
-  @OWNER_TOKEN_AUDIENCE — `pub const &str = "vanyline-sandbox"` (même valeur que
-    `token_audience` par défaut de /sandbox/src/config.sdd).
   @list / @get / @create / @delete — fonctions privées du module, génériques sur les
     ressources namespaced ; leur comportement est contractuel : tout le CRUD public n'est
     que leur application aux trois CRD.
 
 Accepts:
-  @VnlK8sClient::discover : `Option<String>` de namespace override (`None` = contexte kubeconfig).
-  get/delete par CRD : un `name: &str` (nom de la ressource dans le namespace).
-  create par CRD : un `name: &str` et la Spec correspondante (@OwnerSpec, @ProjectSpec, @SandboxSpec).
+  @VnlK8sClient::discover : `Option<String>` de namespace override (`None` = contexte kubeconfig)
+    — l'override (ou le namespace du contexte) est le NAMESPACE D'APPLICATION.
+  CRUD Owner / @get_application : pas de paramètre owner (namespace d'application).
+  get/delete par CRD Project/Sandbox : `owner: &str` puis `name: &str` (la ressource vit dans
+    `<app-ns>-<owner>`) ; le namespace de l'Owner est validé localement (DNS-1123, ≤ 63 car.).
+  create par CRD Project/Sandbox : `owner: &str`, un `name: &str` et la Spec correspondante
+    (@ProjectSpec, @SandboxSpec) ; @OwnerSpec se crée sans paramètre owner.
+  @VnlK8sClient::watch_sandboxes : un `owner: &str` — le namespace et le client viennent du
+    @VnlK8sClient.
   @VnlK8sClient::set_sandbox_suspended : un `name: &str` et un booléen `suspended`.
   @VnlK8sClient::sandbox_mcp_url / @VnlK8sClient::sandbox_ws_ticket_url : un `name: &str` de sandbox.
   @VnlK8sClient::sandbox_git_url : un `name: &str` de sandbox et un `raw_path: &str` déjà
@@ -178,11 +191,17 @@ Returns:
   get_X / create_X : l'objet lu ou créé (création : réponse de l'API, pas l'objet envoyé).
   delete_X : unité.
   @VnlK8sClient::set_sandbox_suspended : le @Sandbox retourné par l'API après patch.
-  @VnlK8sClient::sandbox_mcp_url : `http://sandbox-{name}.{namespace}.svc:3000/mcp`.
-  @VnlK8sClient::sandbox_ws_ticket_url : `http://sandbox-{name}.{namespace}.svc:3000/ws/ticket`.
-  @VnlK8sClient::sandbox_git_url : `http://sandbox-{name}.{namespace}.svc:3000/git/{raw_path}`
+  @VnlK8sClient::sandbox_mcp_url : `http://sandbox-{name}.{app_namespace}-{owner}.svc:3000/mcp`.
+  @VnlK8sClient::sandbox_ws_ticket_url : `http://sandbox-{name}.{app_namespace}-{owner}.svc:3000/ws/ticket`.
+  @VnlK8sClient::sandbox_git_url : `http://sandbox-{name}.{app_namespace}-{owner}.svc:3000/git/{raw_path}`
     — `raw_path` recopié tel quel, y compris vide (URL finissant par `/git/`).
-  @VnlK8sClient::watch_sandboxes : stream infini d'@WatchEvent de @Sandbox, jamais terminé par le module.
+  @VnlK8sClient::watch_sandboxes : stream infini d'@WatchEvent de @Sandbox, jamais terminé par le
+    module SUR LE CHEMIN NOMINAL (erreurs de flux = items @WatchEvent::Error) ; exception depuis
+    4c : un `owner` produisant un nom de namespace invalide rend un stream d'UN SEUL item
+    @WatchEvent::Error puis se termine (le watch est impossible, le répéter n'aurait pas de sens).
+  @VnlK8sClient::owner_token : un @OwnerToken — `token` rendu par l'apiserver (jamais loggé),
+    `expires_at` = `status.expirationTimestamp` de la réponse TokenRequest, repli
+    `now + 900 s` si l'apiserver ne le pose pas.
 
 Raises:
   @VnyError::K8sConfigError (marqueur `"VNL-K8S-001"`) dans @VnlK8sClient::discover si
@@ -192,6 +211,11 @@ Raises:
     list/get/create/delete des trois CRD, @VnlK8sClient::get_application, patch de
     @VnlK8sClient::set_sandbox_suspended, et le @VnlK8sClient::get_sandbox de garde des
     trois constructeurs d'URL (ressource absente = NotFound aplati dans ce marqueur).
+  @VnyError::K8sApiError (même marqueur `"VNL-K8S-002"`) AUSSI sur REJET LOCAL d'un nom
+    d'Owner produisant un namespace DNS-1123 invalide ou > 63 caractères, AVANT tout appel à
+    l'apiserver (résolution `owner_namespace_name` du `Must`) ; l'affichage porte le gabarit
+    kube (« Kubernetes API error: … ») bien que la cause soit locale — cosmétique connu, la
+    variante dédiée serait du luxe pour un cas non atteignable par l'app (noms sanitizés).
   Message d'erreur = l'affichage de l'erreur kube : aucun typage de la cause (NotFound,
     conflit de patch, transport) — aplatissement contractuel, cf. `Tasks`.
   @VnlK8sClient::watch_sandboxes ne lève jamais : les erreurs du flux deviennent des items
@@ -218,7 +242,10 @@ Handles:
   Erreur de connexion kube en cours de watch : item @WatchEvent::Error avec le message de
     l'erreur ; le stream n'est pas terminé par le module (`kube-runtime` se reconnecte en
     interne, avec re-list si le bookmark est perdu) — la stratégie de reprise côté
-    appelant est en arbitrage aux `Tasks`.
+    appelant est en arbitrage aux `Tasks`. SEULE exception de terminaison : le rejet local
+    du nom d'Owner (un item @WatchEvent::Error puis fin du stream, cf. `Returns`).
+  Nom d'Owner invalide pour `owner_token` / CRUD / URL : erreur `VNL-K8S-002` rendue sans
+    appel (idem `Raises`).
   Namespace sans aucune ressource : list_X retourne le vecteur vide — pas d'erreur.
 
 Tasks:
@@ -228,9 +255,12 @@ Tasks:
     namespaces ; `deploy/` : ClusterRole `vanyline-app-owner-scope` (voir namespace.sdd).
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
-  [ ] Implémenter @VnlK8sClient::owner_token (cache par Owner partagé entre clones, marge de
+  [x] Implémenter @VnlK8sClient::owner_token (cache par Owner partagé entre clones, marge de
     120 s). `kube-client` 4.x expose `Api::<ServiceAccount>::create_token_request` (vérifié dans
     les sources locales, 4.0.0 et 4.2.0) : l'utiliser, pas de `create_subresource` à la main.
+    — fait 2026-10-06 (étape 4c), validator vert. Le partage du cache entre clones est tenu
+    structurellement (le champ est un @Arc cloné par @derive(Clone), vérifié par lecture
+    validator) ; les Scenarios apiserver restent à l'intégration cluster.
   [ ] RBAC à fournir par le déploiement (hors de ce fichier, `/deploy/`) : le ServiceAccount
     de `app` (et de tout autre appelant de @VnlK8sClient::owner_token) doit pouvoir `create`
     la ressource `serviceaccounts/token` dans le namespace des Owners. C'est le pouvoir le plus

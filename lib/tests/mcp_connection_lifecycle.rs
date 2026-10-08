@@ -1,5 +1,6 @@
 //! Fix lib MCP (R3 + R12) — test d'intégration bout-en-bout, avec un vrai
 //! serveur MCP HTTP local (pas de mock) et le code réel de `vanyline-lib`.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -40,11 +41,16 @@ impl EchoServer {
 #[tool_router]
 impl EchoServer {
     #[tool(description = "Echo back the given text")]
+    // Le recepteur &self est impose par la macro rmcp #[tool] : inutilisable ici.
+    #[allow(clippy::unused_self)]
     fn echo(&self, Parameters(EchoRequest { text }): Parameters<EchoRequest>) -> String {
         text
     }
 }
 
+// tool_handler genere un handle_request async sans .await dans ce serveur
+// minimal : lint sur code genere, rien a factoriser cote test.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for EchoServer {
     fn get_info(&self) -> ServerInfo {
@@ -63,7 +69,7 @@ async fn spawn_echo_server() -> (String, CancellationToken, CapturedHeaders) {
     let service: StreamableHttpService<EchoServer, LocalSessionManager> =
         StreamableHttpService::new(
             || Ok(EchoServer::new()),
-            Default::default(),
+            Arc::default(),
             StreamableHttpServerConfig::default()
                 .with_sse_keep_alive(None)
                 .with_cancellation_token(ct.child_token()),

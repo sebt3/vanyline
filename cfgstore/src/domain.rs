@@ -2,35 +2,49 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::SeqAccess, ser::SerializeSeq};
 
+/// Provider LLM : type, endpoint et clé API optionnelle. La clé n'est
+/// sérialisée que si présente (`skip_serializing_if`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Provider {
+    /// Nom stable de la carte nomméée dans `config.yaml`.
     pub name: String,
+    /// Type de provider (champ JSON `type`).
     #[serde(rename = "type")]
     pub provider_type: ProviderType,
+    /// URL de base de l'API.
     pub endpoint: String,
+    /// Clé API optionnelle — absente du wire si `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
 }
 
+/// Type de provider pris en charge (valeurs kebab-case sur le wire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ProviderType {
+    /// Serveur local Ollama.
     Ollama,
+    /// API compatible avec le format `OpenAI`.
     OpenaiCompatible,
 }
 
 /// Un modèle PARAMÉTRÉ : la seule chose qu'un agent peut référencer.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelProfile {
+    /// Nom stable de la carte nommée dans `config.yaml`.
     pub name: String,
+    /// Nom du provider référencé (référence simple, non résolue ici).
     pub provider: String,
+    /// Nom du modèle côté provider (champ JSON `model`).
     #[serde(rename = "model")]
     pub model: String,
+    /// Température optionnelle.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Nombre maximal de tokens optionnel.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u64>,
-    /// Passthrough provider-spécifique (ex. ollama: num_ctx, top_k).
+    /// Passthrough provider-spécifique (ex. ollama : `num_ctx`, `top_k`).
     #[serde(
         default,
         skip_serializing_if = "serde_json::Map::is_empty",
@@ -65,25 +79,31 @@ where
     match value {
         serde_json::Value::Object(map) => Ok(map),
         _ => Err(serde::de::Error::custom(format!(
-            "expected object for 'options', got {}",
-            value
+            "expected object for 'options', got {value}"
         ))),
     }
 }
 
+/// Serveur MCP distant (transport + URL + en-têtes optionnels).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServer {
+    /// Nom stable de la carte nommée dans `config.yaml`.
     pub name: String,
+    /// Transport de connexion (champ JSON `type`).
     #[serde(rename = "type")]
     pub transport: McpTransport,
+    /// URL du serveur MCP.
     pub url: String,
+    /// En-têtes HTTP additionnels — map vide par défaut.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
 }
 
+/// Transport MCP accepté en configuration (valeurs kebab-case sur le wire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum McpTransport {
+    /// HTTP streamable (seul transport réellement connecté).
     HttpStreamable,
     /// Transport SSE — accepté en configuration (le miroir TS
     /// `@vanyline/protocol/config-domain.ts` l'expose), mais la connexion
@@ -95,45 +115,62 @@ pub enum McpTransport {
 /// Groupe cohérent d'outils + fragment de prompt système.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Toolset {
+    /// Nom stable de la carte nommée (clé de map ou fichier `*.yaml`).
     pub name: String,
+    /// Description optionnelle (absente du wire si `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Fragment de prompt système optionnel (absent du wire si `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt: Option<String>,
+    /// Noms d'outils locaux — liste vide par défaut.
     #[serde(default)]
     pub local_tools: Vec<String>,
+    /// Sélections de serveurs MCP — liste vide par défaut.
     #[serde(default)]
     pub mcp: Vec<McpSelection>,
 }
 
+/// Sélection d'un serveur MCP par un toolset, avec filtres d'outils.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpSelection {
+    /// Nom du serveur référencé.
     pub server: String,
     /// Patterns glob sur les noms d'outils du serveur. Vide = tous ("*").
     #[serde(default)]
     pub tools: Vec<String>,
 }
 
+/// Index léger d'un skill : nom + description seulement.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillMeta {
+    /// Nom du skill (nom du répertoire `skills/<nom>/`).
     pub name: String,
+    /// Description tirée du frontmatter du `SKILL.md`.
     pub description: String,
 }
 
+/// Rôle jouable par un agent (valeurs lowercase sur le wire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AgentMode {
+    /// Agent principal de session.
     Primary,
+    /// Agent délégué.
     Subagent,
+    /// Les deux rôles à la fois.
     All,
 }
 
 /// `auto` (tous les skills), `none`, ou une liste explicite de noms.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SkillSelection {
+    /// Tous les skills découverts (valeur par défaut, wire `"auto"`).
     #[default]
     Auto,
+    /// Aucun skill (wire `"none"`).
     None,
+    /// Liste explicite de noms de skills (wire : tableau de chaînes).
     Named(Vec<String>),
 }
 
@@ -181,8 +218,7 @@ impl<'de> Deserialize<'de> for SkillSelection {
                     "auto" => Ok(SkillSelection::Auto),
                     "none" => Ok(SkillSelection::None),
                     other => Err(serde::de::Error::custom(format!(
-                        "expected \"auto\" or \"none\", got {:?}",
-                        other
+                        "expected \"auto\" or \"none\", got {other:?}"
                     ))),
                 }
             }
@@ -203,18 +239,26 @@ impl<'de> Deserialize<'de> for SkillSelection {
     }
 }
 
+/// Agent : modèle, toolsets, skills et prompt système.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Agent {
+    /// Nom stable de la carte nommée (clé de map ou fichier `*.md`).
     pub name: String,
+    /// Description optionnelle (absente du wire si `None`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Rôle jouable — `Primary` par défaut.
     #[serde(default = "default_agent_mode")]
     pub mode: AgentMode,
+    /// Nom du `ModelProfile` référencé.
     pub model: String,
+    /// Noms de toolsets référencés — liste vide par défaut.
     #[serde(default)]
     pub toolsets: Vec<String>,
+    /// Sélection de skills — `Auto` par défaut.
     #[serde(default)]
     pub skills: SkillSelection,
+    /// Prompt système complet (corps du fichier `*.md` côté store).
     pub system_prompt: String,
 }
 
@@ -325,7 +369,7 @@ mod tests {
         assert_eq!(agent.model, "m");
         assert_eq!(agent.system_prompt, "p");
         assert_eq!(agent.mode, AgentMode::Primary);
-        assert!(agent.toolsets.is_empty());
+        assert_eq!(agent.toolsets, Vec::<String>::new());
         assert_eq!(agent.skills, SkillSelection::Auto);
         assert!(agent.description.is_none());
     }
@@ -362,8 +406,7 @@ mod tests {
         for field in opt_fields {
             assert!(
                 !serialized.as_object().unwrap().contains_key(*field),
-                "field '{}' should not be serialized for minimal profile",
-                field
+                "field '{field}' should not be serialized for minimal profile"
             );
         }
     }
@@ -376,8 +419,9 @@ mod tests {
         assert_eq!(toolset.name, "t");
         assert!(toolset.description.is_none());
         assert!(toolset.prompt.is_none());
-        assert!(toolset.local_tools.is_empty());
-        assert!(toolset.mcp.is_empty());
+        assert_eq!(toolset.local_tools, Vec::<String>::new());
+        // McpSelection n'est pas PartialEq : assertion sur la longueur.
+        assert_eq!(toolset.mcp.len(), 0);
     }
 
     #[test]

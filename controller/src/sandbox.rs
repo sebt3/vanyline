@@ -24,12 +24,12 @@ use kube::{Client, Resource, ResourceExt};
 
 use crate::application::APP_LABEL;
 use crate::error::ControllerError;
+use crate::namespace;
 use crate::owner;
 use crate::owner::HOME_MOUNT_PATH;
 use crate::project::{self, ProjectJobContext};
 use crate::project::{
-    WORKSPACE_MOUNT_PATH, cache_dir_name, effective_caches, effective_pvc_name, effective_sub_path,
-    worktree_path,
+    WORKSPACE_MOUNT_PATH, cache_dir_name, effective_caches, effective_pvc_name, worktree_path,
 };
 use vanyline_crds::{
     Application, EgressPort, EgressRule, LspSpec, MCP_PORT, Owner, Project, Sandbox, SandboxStatus,
@@ -409,17 +409,6 @@ fn cache_env_var(cache: &str) -> Option<(&'static str, String)> {
     }
 }
 
-/// Combine le `subPath` existant du Project (cas `existing_pvc`, ex.
-/// kydah-code) avec un chemin relatif du layout (`worktree_path`, `cache_path`).
-/// `None` côté Project => le chemin relatif est utilisé tel quel (le PVC créé
-/// n'appartient qu'à ce Project, pas de préfixe nécessaire).
-fn combine_sub_path(project: &Project, relative: &str) -> String {
-    match effective_sub_path(project) {
-        Some(base) => format!("{base}/{relative}"),
-        None => relative.to_string(),
-    }
-}
-
 /// Context résolu par l'appelant (le reconciler Sandbox ira chercher l'Owner du
 /// Project référencé — cette fonction reste pure, aucun appel réseau).
 pub struct SandboxPodContext {
@@ -484,10 +473,7 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         VolumeMount {
             name: "workspace".to_string(),
             mount_path: format!("{HOME_MOUNT_PATH}/workspace"),
-            sub_path: Some(combine_sub_path(
-                project,
-                &worktree_path(&sandbox.name_any()),
-            )),
+            sub_path: Some(worktree_path(&sandbox.name_any())),
             ..Default::default()
         },
     ];
@@ -499,7 +485,7 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
     mounts.push(VolumeMount {
         name: "workspace".to_string(),
         mount_path: format!("{WORKSPACE_MOUNT_PATH}/{}", project::bare_repo_path()),
-        sub_path: Some(combine_sub_path(project, project::bare_repo_path())),
+        sub_path: Some(project::bare_repo_path().to_string()),
         ..Default::default()
     });
 
@@ -513,10 +499,7 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         mounts.push(VolumeMount {
             name: "workspace".to_string(),
             mount_path: format!("/project-cache/{}", cache_dir_name(&cache)),
-            sub_path: Some(combine_sub_path(
-                project,
-                &crate::project::cache_path(&cache),
-            )),
+            sub_path: Some(crate::project::cache_path(&cache)),
             ..Default::default()
         });
         if let Some((key, value)) = cache_env_var(&cache) {
@@ -1211,7 +1194,12 @@ async fn fetch_project(
 }
 
 async fn fetch_owner(project: &Project, ctx: &Context, ns: &str) -> Result<Owner, ControllerError> {
-    let owners: Api<Owner> = Api::namespaced(ctx.client.clone(), ns);
+    // L'Owner vit dans le namespace d'application (UN OWNER = UN NAMESPACE,
+    // `namespace.sdd`) : le namespace de la Sandbox (et de son Project) est
+    // celui de l'Owner, on résout le namespace d'application par le label du
+    // Namespace.
+    let app_ns = namespace::app_namespace_of(&ctx.client, ns).await?;
+    let owners: Api<Owner> = Api::namespaced(ctx.client.clone(), &app_ns);
     Ok(owners.get(&project.spec.owner).await?)
 }
 
@@ -1223,7 +1211,10 @@ async fn fetch_application(
     let Some(name) = owner.spec.application_ref.as_deref() else {
         return Ok(None);
     };
-    let applications: Api<Application> = Api::namespaced(ctx.client.clone(), ns);
+    // L'Application vit aussi dans le namespace d'application, résolu par le
+    // label du Namespace de la Sandbox.
+    let app_ns = namespace::app_namespace_of(&ctx.client, ns).await?;
+    let applications: Api<Application> = Api::namespaced(ctx.client.clone(), &app_ns);
     Ok(Some(applications.get(name).await?))
 }
 
@@ -1490,7 +1481,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use vanyline_crds::{
-        ApplicationSpec, IngressControllerRef, ProjectSpec, ProjectStatus, PvcRef, SandboxSpec,
+        ApplicationSpec, IngressControllerRef, ProjectSpec, ProjectStatus, SandboxSpec,
     };
 
     fn make_ctx() -> SandboxPodContext {
@@ -1555,14 +1546,13 @@ mod tests {
         }
     }
 
-    fn make_project(existing_pvc: Option<PvcRef>, caches: Option<Vec<String>>) -> Project {
+    fn make_project(caches: Option<Vec<String>>) -> Project {
         let mut project = Project::new(
             "demo",
             ProjectSpec {
                 owner: "alice".to_string(),
                 repo_url: "https://github.com/owner/repo".to_string(),
                 default_branch: None,
-                existing_pvc,
                 storage_size: None,
                 storage_class: None,
                 storage_access_mode: None,
@@ -1584,7 +1574,7 @@ mod tests {
     }
 
     fn make_project_with_languages(languages: Vec<&str>) -> Project {
-        let mut project = make_project(None, None);
+        let mut project = make_project(None);
         project.status = Some(ProjectStatus {
             languages: languages.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
@@ -1829,7 +1819,7 @@ mod tests {
     #[test]
     fn effective_toolchains_empty_when_no_languages() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project(None, None); // no status
+        let project = make_project(None); // no status
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1951,7 +1941,7 @@ mod tests {
     #[test]
     fn pod_name_and_namespace() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -1962,7 +1952,7 @@ mod tests {
     #[test]
     fn pod_runs_as_non_root() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -1982,7 +1972,7 @@ mod tests {
     #[test]
     fn owner_reference_and_labels() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2017,7 +2007,7 @@ mod tests {
     #[test]
     fn service_account_from_context() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2029,7 +2019,7 @@ mod tests {
     fn image_default_vs_spec() {
         // No image -> use default
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
@@ -2046,7 +2036,7 @@ mod tests {
     #[test]
     fn no_auth_arg() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2058,7 +2048,7 @@ mod tests {
     #[test]
     fn mcp_port_and_probes() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2096,7 +2086,7 @@ mod tests {
     #[test]
     fn vnl_sandbox_root_env() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2118,7 +2108,7 @@ mod tests {
         let rust = make_rust_tc(Default::default());
         let node = make_node_tc(Default::default());
         let sandbox = make_sandbox("demo-branch", vec![rust, node], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2157,7 +2147,7 @@ mod tests {
     #[test]
     fn worktree_mount_no_existing_pvc() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2179,15 +2169,9 @@ mod tests {
     }
 
     #[test]
-    fn worktree_mount_with_existing_pvc_subpath() {
+    fn worktree_mount_with_subpath() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(
-            Some(PvcRef {
-                name: "code-server-home".into(),
-                sub_path: Some("demo".into()),
-            }),
-            None,
-        );
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2205,17 +2189,14 @@ mod tests {
             ws_mount.mount_path.as_str(),
             &(format!("{HOME_MOUNT_PATH}/workspace"))
         );
-        assert_eq!(
-            ws_mount.sub_path,
-            Some("demo/worktrees/demo-branch".to_string())
-        );
+        assert_eq!(ws_mount.sub_path, Some("worktrees/demo-branch".to_string()));
     }
 
     #[test]
     fn cache_mounts_and_env() {
         // No caches specified -> default ["cargo", "pnpm"]
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None); // caches: None -> defaults
+        let project = make_project(None); // caches: None -> defaults
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2275,7 +2256,7 @@ mod tests {
         let mut sandbox = sandbox;
         sandbox.spec.resources = Some(rr);
 
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2316,7 +2297,7 @@ mod tests {
     #[test]
     fn build_checkout_job_argv_no_default_branch() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let job_ctx = make_job_ctx();
         let job = build_checkout_job(&sandbox, &project, &job_ctx);
 
@@ -2339,7 +2320,7 @@ mod tests {
 
     #[test]
     fn build_checkout_job_argv_with_default_branch() {
-        let mut project = make_project(None, None);
+        let mut project = make_project(None);
         project.spec.default_branch = Some("develop".to_string());
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let job_ctx = make_job_ctx();
@@ -2367,7 +2348,7 @@ mod tests {
     #[test]
     fn build_checkout_job_owner_reference() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let job_ctx = make_job_ctx();
         let job = build_checkout_job(&sandbox, &project, &job_ctx);
 
@@ -2386,7 +2367,7 @@ mod tests {
     #[test]
     fn build_worktree_remove_job_argv() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let job_ctx = make_job_ctx();
         let job = build_worktree_remove_job(&sandbox, &project, &job_ctx);
 
@@ -2602,7 +2583,7 @@ mod tests {
     #[test]
     fn bare_repo_mount_present_no_existing_pvc() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2622,15 +2603,9 @@ mod tests {
     }
 
     #[test]
-    fn bare_repo_mount_present_with_existing_pvc_subpath() {
+    fn bare_repo_mount_present_without_subpath_prefix() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(
-            Some(PvcRef {
-                name: "code-server-home".into(),
-                sub_path: Some("demo".into()),
-            }),
-            None,
-        );
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -2645,13 +2620,13 @@ mod tests {
             .find(|m| m.mount_path == "/workspace/repo.git")
             .expect("should have bare repo mount at /workspace/repo.git");
 
-        assert_eq!(bare_repo_mount.sub_path, Some("demo/repo.git".to_string()));
+        assert_eq!(bare_repo_mount.sub_path, Some("repo.git".to_string()));
     }
 
     #[test]
     fn bare_repo_mount_is_writable() {
         let sandbox = make_sandbox("demo-branch", vec![], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
 
@@ -3393,7 +3368,7 @@ mod tests {
             lsp: Some(lsp),
         };
         let sandbox = make_sandbox("sb", vec![rust_tc], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3448,7 +3423,7 @@ mod tests {
             lsp: None,
         };
         let sandbox = make_sandbox("sb", vec![toolchain], None);
-        let project = make_project(None, None);
+        let project = make_project(None);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);

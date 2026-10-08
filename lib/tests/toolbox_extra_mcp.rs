@@ -1,6 +1,7 @@
 //! Test dintegration : `SessionContext.extra_mcp` connecte bien un serveur
 //! MCP reel pendant un tour, independamment des toolsets de l'agent -- c'est
 //! le mecanisme sur lequel repose la toolbox (--toolbox, tache 05b).
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -45,11 +46,16 @@ impl EchoServer {
 #[tool_router]
 impl EchoServer {
     #[tool(description = "Echo back the given text")]
+    // Le recepteur &self est impose par la macro rmcp #[tool] : inutilisable ici.
+    #[allow(clippy::unused_self)]
     fn echo(&self, Parameters(EchoRequest { text }): Parameters<EchoRequest>) -> String {
         text
     }
 }
 
+// tool_handler genere un handle_request async sans .await dans ce serveur
+// minimal : lint sur code genere, rien a factoriser cote test.
+#[allow(clippy::unused_async_trait_impl)]
 #[tool_handler(router = self.tool_router)]
 impl ServerHandler for EchoServer {
     fn get_info(&self) -> ServerInfo {
@@ -69,7 +75,7 @@ async fn spawn_echo_server() -> (String, CancellationToken, Arc<Mutex<bool>>) {
     let service: StreamableHttpService<EchoServer, LocalSessionManager> =
         StreamableHttpService::new(
             || Ok(EchoServer::new()),
-            Default::default(),
+            Arc::default(),
             StreamableHttpServerConfig::default()
                 .with_sse_keep_alive(None)
                 .with_cancellation_token(ct.child_token()),

@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, PoisonError};
 
 use async_trait::async_trait;
 
@@ -71,52 +71,107 @@ fn resolve_by_name<T: HasName>(
 
 /// Couche ciblée par une écriture. La résolution "workspace si dispo sinon
 /// global" est faite par l'appelant (handler RPC) — le trait prend un Layer
-/// explicite. InMemoryConfigStore ignore ce paramètre (jeu unique en mémoire).
+/// explicite. `InMemoryConfigStore` ignore ce paramètre (jeu unique en
+/// mémoire).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layer {
+    /// Couche globale (`~/.vanyline` ou équivalent).
     Global,
+    /// Couche workspace (optionnelle).
     Workspace,
 }
 
+/// Extrait une valeur de patch comme chaîne ; `<ctx> must be a string` sinon.
+pub(crate) fn patch_str<'a>(v: &'a serde_json::Value, ctx: &str) -> Result<&'a str, CfgStoreError> {
+    v.as_str()
+        .ok_or_else(|| CfgStoreError::Validation(format!("{ctx} must be a string")))
+}
+
+/// Extrait un tableau JSON de chaînes ; `<ctx> entries must be strings` si un
+/// élément n'est pas une chaîne.
+pub(crate) fn patch_names(
+    arr: &[serde_json::Value],
+    ctx: &str,
+) -> Result<Vec<String>, CfgStoreError> {
+    arr.iter()
+        .map(|x| {
+            x.as_str()
+                .map(String::from)
+                .ok_or_else(|| CfgStoreError::Validation(format!("{ctx} entries must be strings")))
+        })
+        .collect()
+}
+
+/// Équivalent de `patch_names` sur une valeur non encore déballée ;
+/// `<ctx> must be an array` si ce n'est pas un tableau.
+pub(crate) fn patch_array_names(
+    v: &serde_json::Value,
+    ctx: &str,
+) -> Result<Vec<String>, CfgStoreError> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| CfgStoreError::Validation(format!("{ctx} must be an array")))?;
+    patch_names(arr, ctx)
+}
+
+/// Contrat d'accès (lecture + écriture) à la configuration du domaine, par
+/// couche. Les méthodes d'écriture ont un défaut `ReadOnly` : seules les
+/// implémentations persistantes les soulèvent.
+// async_trait génère un #[must_use] sur le future boxed de chaque méthode, déjà
+// must_use car `Result` : exemption ciblée justifiée (tooling.sdd).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait ConfigStore: Send + Sync {
     // --- Read methods ---
+    /// Liste tous les providers, ou une erreur de configuration/E/S.
     async fn list_providers(&self) -> Result<Vec<Provider>, CfgStoreError>;
+    /// Liste tous les profils de modèles.
     async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError>;
+    /// Liste tous les serveurs MCP.
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError>;
+    /// Liste tous les toolsets.
     async fn list_toolsets(&self) -> Result<Vec<Toolset>, CfgStoreError>;
+    /// Liste tous les agents.
     async fn list_agents(&self) -> Result<Vec<Agent>, CfgStoreError>;
     /// Index léger : name + description uniquement (lazy-loading de la liste).
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError>;
     /// Corps du skill, chargé à la demande uniquement. Erreur
     /// `UnknownReference("skill", name)` si absent.
     async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError>;
+    /// Nom de l'agent par défaut (`defaults.agent`), `None` si non réglé.
     async fn default_agent(&self) -> Result<Option<String>, CfgStoreError>;
 
     /// Méthodes défaut — résolution par nom, filtrent `list_x()`.
     async fn get_provider(&self, name: &str) -> Result<Provider, CfgStoreError> {
         resolve_by_name(self.list_providers().await?, "provider", name)
     }
+    /// Résout un modèle par nom via `list_models()`.
     async fn get_model(&self, name: &str) -> Result<ModelProfile, CfgStoreError> {
         resolve_by_name(self.list_models().await?, "model", name)
     }
+    /// Résout un serveur MCP par nom via `list_mcp_servers()`.
     async fn get_mcp_server(&self, name: &str) -> Result<McpServer, CfgStoreError> {
         resolve_by_name(self.list_mcp_servers().await?, "mcp_server", name)
     }
+    /// Résout un toolset par nom via `list_toolsets()`.
     async fn get_toolset(&self, name: &str) -> Result<Toolset, CfgStoreError> {
         resolve_by_name(self.list_toolsets().await?, "toolset", name)
     }
+    /// Résout un agent par nom via `list_agents()`.
     async fn get_agent(&self, name: &str) -> Result<Agent, CfgStoreError> {
         resolve_by_name(self.list_agents().await?, "agent", name)
     }
+    /// Résout le méta d'un skill par nom via `list_skills()`.
     async fn get_skill(&self, name: &str) -> Result<SkillMeta, CfgStoreError> {
         resolve_by_name(self.list_skills().await?, "skill", name)
     }
 
     // --- Write method signatures (défaut CfgStoreError::ReadOnly dans cette tâche) ---
+    /// Crée un provider dans la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn create_provider(&self, _layer: Layer, _item: Provider) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Applique un patch JSON à un provider de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn update_provider(
         &self,
         _layer: Layer,
@@ -125,12 +180,15 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Supprime un provider de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn delete_provider(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Crée un modèle dans la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn create_model(&self, _layer: Layer, _item: ModelProfile) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Applique un patch JSON à un modèle de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn update_model(
         &self,
         _layer: Layer,
@@ -139,9 +197,11 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Supprime un modèle de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn delete_model(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Crée un serveur MCP dans la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn create_mcp_server(
         &self,
         _layer: Layer,
@@ -149,6 +209,7 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Applique un patch JSON à un serveur MCP de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn update_mcp_server(
         &self,
         _layer: Layer,
@@ -157,12 +218,15 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Supprime un serveur MCP de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn delete_mcp_server(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Crée un toolset dans la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn create_toolset(&self, _layer: Layer, _item: Toolset) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Applique un patch JSON à un toolset de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn update_toolset(
         &self,
         _layer: Layer,
@@ -171,12 +235,15 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Supprime un toolset de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn delete_toolset(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Crée un agent dans la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn create_agent(&self, _layer: Layer, _item: Agent) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Applique un patch JSON à un agent de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn update_agent(
         &self,
         _layer: Layer,
@@ -185,9 +252,11 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Supprime un agent de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn delete_agent(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Crée un skill (méta + corps) dans la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn create_skill(
         &self,
         _layer: Layer,
@@ -196,6 +265,7 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Applique un patch JSON (`description`, `body`) à un skill de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn update_skill(
         &self,
         _layer: Layer,
@@ -204,9 +274,11 @@ pub trait ConfigStore: Send + Sync {
     ) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Supprime un skill de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn delete_skill(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
+    /// Règle l'agent par défaut (`defaults.agent`) de la couche visée. Défaut : `CfgStoreError::ReadOnly`.
     async fn set_default_agent(&self, _layer: Layer, _name: &str) -> Result<(), CfgStoreError> {
         Err(CfgStoreError::ReadOnly)
     }
@@ -220,19 +292,28 @@ pub trait ConfigStore: Send + Sync {
 /// du module `pub mod store;`).
 #[derive(Default)]
 pub struct InMemoryConfigStore {
+    /// Providers du jeu (verrou de liste : le store est partagé `&self`).
     pub providers: Mutex<Vec<Provider>>,
+    /// Profils de modèles du jeu.
     pub models: Mutex<Vec<ModelProfile>>,
+    /// Serveurs MCP du jeu.
     pub mcp_servers: Mutex<Vec<McpServer>>,
+    /// Toolsets du jeu.
     pub toolsets: Mutex<Vec<Toolset>>,
+    /// Agents du jeu.
     pub agents: Mutex<Vec<Agent>>,
+    /// Index léger des skills (name + description).
     pub skills: Mutex<Vec<SkillMeta>>,
     /// Corps des skills, séparé de `skills` (qui ne porte que name+description) —
     /// même distinction lazy-loading que dans `ConfigStore`.
     pub skill_bodies: Mutex<HashMap<String, String>>,
+    /// Nom de l'agent par défaut, `None` si non réglé.
     pub default_agent: Mutex<Option<String>>,
 }
 
 impl InMemoryConfigStore {
+    /// Store vide (toutes collections vides, pas d'agent par défaut).
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -244,7 +325,7 @@ impl ConfigStore for InMemoryConfigStore {
         Ok(self
             .providers
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone())
     }
 
@@ -252,7 +333,7 @@ impl ConfigStore for InMemoryConfigStore {
         Ok(self
             .models
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone())
     }
 
@@ -260,7 +341,7 @@ impl ConfigStore for InMemoryConfigStore {
         Ok(self
             .mcp_servers
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone())
     }
 
@@ -268,7 +349,7 @@ impl ConfigStore for InMemoryConfigStore {
         Ok(self
             .toolsets
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone())
     }
 
@@ -276,7 +357,7 @@ impl ConfigStore for InMemoryConfigStore {
         Ok(self
             .agents
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone())
     }
 
@@ -284,14 +365,14 @@ impl ConfigStore for InMemoryConfigStore {
         Ok(self
             .skills
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone())
     }
 
     async fn load_skill(&self, name: &str) -> Result<String, CfgStoreError> {
         self.skill_bodies
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .get(name)
             .cloned()
             .ok_or_else(|| CfgStoreError::UnknownReference("skill", name.to_string()))
@@ -301,7 +382,7 @@ impl ConfigStore for InMemoryConfigStore {
         Ok(self
             .default_agent
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .clone())
     }
 
@@ -309,7 +390,10 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn create_provider(&self, _layer: Layer, item: Provider) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut providers = self.providers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut providers = self
+            .providers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if providers.iter().any(|p| p.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "provider",
@@ -328,7 +412,10 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut providers = self.providers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut providers = self
+            .providers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let provider = providers
             .iter_mut()
             .find(|p| p.name == name)
@@ -391,7 +478,10 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_provider(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut providers = self.providers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut providers = self
+            .providers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let idx = providers
             .iter()
             .position(|p| p.name == name)
@@ -406,7 +496,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn create_model(&self, _layer: Layer, item: ModelProfile) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
+        let mut models = self.models.lock().unwrap_or_else(PoisonError::into_inner);
         if models.iter().any(|m| m.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "model",
@@ -425,7 +515,7 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
+        let mut models = self.models.lock().unwrap_or_else(PoisonError::into_inner);
         let model =
             models
                 .iter_mut()
@@ -494,7 +584,7 @@ impl ConfigStore for InMemoryConfigStore {
                     } else {
                         match v.as_object() {
                             Some(o) => {
-                                model.options = o.clone();
+                                model.options.clone_from(o);
                             }
                             None => {
                                 return Err(CfgStoreError::Validation(
@@ -512,7 +602,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_model(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut models = self.models.lock().unwrap_or_else(|e| e.into_inner());
+        let mut models = self.models.lock().unwrap_or_else(PoisonError::into_inner);
         let idx =
             models
                 .iter()
@@ -528,7 +618,10 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn create_mcp_server(&self, _layer: Layer, item: McpServer) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut servers = self.mcp_servers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut servers = self
+            .mcp_servers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         if servers.iter().any(|s| s.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "mcp_server",
@@ -547,7 +640,10 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut servers = self.mcp_servers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut servers = self
+            .mcp_servers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let server =
             servers
                 .iter_mut()
@@ -618,7 +714,10 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_mcp_server(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut servers = self.mcp_servers.lock().unwrap_or_else(|e| e.into_inner());
+        let mut servers = self
+            .mcp_servers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
         let idx =
             servers
                 .iter()
@@ -633,13 +732,16 @@ impl ConfigStore for InMemoryConfigStore {
     }
 
     async fn set_default_agent(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
-        *self.default_agent.lock().unwrap_or_else(|e| e.into_inner()) = Some(name.to_string());
+        *self
+            .default_agent
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(name.to_string());
         Ok(())
     }
 
     async fn create_toolset(&self, _layer: Layer, item: Toolset) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut toolsets = self.toolsets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut toolsets = self.toolsets.lock().unwrap_or_else(PoisonError::into_inner);
         if toolsets.iter().any(|t| t.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "toolset",
@@ -658,7 +760,7 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut toolsets = self.toolsets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut toolsets = self.toolsets.lock().unwrap_or_else(PoisonError::into_inner);
         let toolset = toolsets
             .iter_mut()
             .find(|t| t.name == name)
@@ -678,51 +780,21 @@ impl ConfigStore for InMemoryConfigStore {
                     toolset.description = if v.is_null() {
                         None
                     } else {
-                        Some(
-                            v.as_str()
-                                .ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "toolset: 'description' must be a string".to_string(),
-                                    )
-                                })?
-                                .to_string(),
-                        )
+                        Some(patch_str(v, "toolset: 'description'")?.to_string())
                     };
                 }
                 "prompt" => {
                     toolset.prompt = if v.is_null() {
                         None
                     } else {
-                        Some(
-                            v.as_str()
-                                .ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "toolset: 'prompt' must be a string".to_string(),
-                                    )
-                                })?
-                                .to_string(),
-                        )
+                        Some(patch_str(v, "toolset: 'prompt'")?.to_string())
                     };
                 }
                 "local_tools" => {
                     toolset.local_tools = if v.is_null() {
                         Vec::new()
                     } else {
-                        let arr = v.as_array().ok_or_else(|| {
-                            CfgStoreError::Validation(
-                                "toolset: 'local_tools' must be an array".to_string(),
-                            )
-                        })?;
-                        arr.iter()
-                            .map(|x| {
-                                x.as_str().map(String::from).ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "toolset: 'local_tools' entries must be strings"
-                                            .to_string(),
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
+                        patch_array_names(v, "toolset: 'local_tools'")?
                     };
                 }
                 "mcp" => {
@@ -750,16 +822,7 @@ impl ConfigStore for InMemoryConfigStore {
                                                 .to_string(),
                                         )
                                     })?;
-                                    arr.iter()
-                                        .map(|x| {
-                                            x.as_str().map(String::from).ok_or_else(|| {
-                                                CfgStoreError::Validation(
-                                                    "toolset: 'mcp' entry tools must be strings"
-                                                        .to_string(),
-                                                )
-                                            })
-                                        })
-                                        .collect::<Result<Vec<_>, _>>()?
+                                    patch_names(arr, "toolset: 'mcp' entry tools")?
                                 }
                             };
                             out.push(McpSelection {
@@ -778,7 +841,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_toolset(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut toolsets = self.toolsets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut toolsets = self.toolsets.lock().unwrap_or_else(PoisonError::into_inner);
         let idx = toolsets
             .iter()
             .position(|t| t.name == name)
@@ -793,7 +856,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn create_agent(&self, _layer: Layer, item: Agent) -> Result<(), CfgStoreError> {
         validate_name(&item.name)?;
-        let mut agents = self.agents.lock().unwrap_or_else(|e| e.into_inner());
+        let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         if agents.iter().any(|a| a.name == item.name) {
             return Err(CfgStoreError::NameConflict {
                 kind: "agent",
@@ -812,7 +875,7 @@ impl ConfigStore for InMemoryConfigStore {
         patch: serde_json::Value,
     ) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut agents = self.agents.lock().unwrap_or_else(|e| e.into_inner());
+        let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         let agent =
             agents
                 .iter_mut()
@@ -833,21 +896,11 @@ impl ConfigStore for InMemoryConfigStore {
                     agent.description = if v.is_null() {
                         None
                     } else {
-                        Some(
-                            v.as_str()
-                                .ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "agent: 'description' must be a string".to_string(),
-                                    )
-                                })?
-                                .to_string(),
-                        )
+                        Some(patch_str(v, "agent: 'description'")?.to_string())
                     };
                 }
                 "mode" => {
-                    let m = v.as_str().ok_or_else(|| {
-                        CfgStoreError::Validation("agent: 'mode' must be a string".to_string())
-                    })?;
+                    let m = patch_str(v, "agent: 'mode'")?;
                     agent.mode = match m {
                         "primary" => AgentMode::Primary,
                         "subagent" => AgentMode::Subagent,
@@ -860,31 +913,13 @@ impl ConfigStore for InMemoryConfigStore {
                     };
                 }
                 "model" => {
-                    agent.model = v
-                        .as_str()
-                        .ok_or_else(|| {
-                            CfgStoreError::Validation("agent: 'model' must be a string".to_string())
-                        })?
-                        .to_string();
+                    agent.model = patch_str(v, "agent: 'model'")?.to_string();
                 }
                 "toolsets" => {
                     agent.toolsets = if v.is_null() {
                         Vec::new()
                     } else {
-                        let arr = v.as_array().ok_or_else(|| {
-                            CfgStoreError::Validation(
-                                "agent: 'toolsets' must be an array".to_string(),
-                            )
-                        })?;
-                        arr.iter()
-                            .map(|x| {
-                                x.as_str().map(String::from).ok_or_else(|| {
-                                    CfgStoreError::Validation(
-                                        "agent: 'toolsets' entries must be strings".to_string(),
-                                    )
-                                })
-                            })
-                            .collect::<Result<Vec<_>, _>>()?
+                        patch_array_names(v, "agent: 'toolsets'")?
                     };
                 }
                 "skills" => {
@@ -894,18 +929,9 @@ impl ConfigStore for InMemoryConfigStore {
                         match v {
                             serde_json::Value::String(s) if s == "auto" => SkillSelection::Auto,
                             serde_json::Value::String(s) if s == "none" => SkillSelection::None,
-                            serde_json::Value::Array(arr) => SkillSelection::Named(
-                                arr.iter()
-                                    .map(|x| {
-                                        x.as_str().map(String::from).ok_or_else(|| {
-                                            CfgStoreError::Validation(
-                                                "agent: 'skills' entries must be strings"
-                                                    .to_string(),
-                                            )
-                                        })
-                                    })
-                                    .collect::<Result<Vec<_>, _>>()?,
-                            ),
+                            serde_json::Value::Array(arr) => {
+                                SkillSelection::Named(patch_names(arr, "agent: 'skills'")?)
+                            }
                             _ => {
                                 return Err(CfgStoreError::Validation(
                                     "agent: 'skills' must be 'auto', 'none' or an array"
@@ -916,14 +942,7 @@ impl ConfigStore for InMemoryConfigStore {
                     };
                 }
                 "system_prompt" => {
-                    agent.system_prompt = v
-                        .as_str()
-                        .ok_or_else(|| {
-                            CfgStoreError::Validation(
-                                "agent: 'system_prompt' must be a string".to_string(),
-                            )
-                        })?
-                        .to_string();
+                    agent.system_prompt = patch_str(v, "agent: 'system_prompt'")?.to_string();
                 }
                 _ => {} // clés inconnues ignorées
             }
@@ -933,7 +952,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_agent(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut agents = self.agents.lock().unwrap_or_else(|e| e.into_inner());
+        let mut agents = self.agents.lock().unwrap_or_else(PoisonError::into_inner);
         let idx =
             agents
                 .iter()
@@ -955,7 +974,7 @@ impl ConfigStore for InMemoryConfigStore {
     ) -> Result<(), CfgStoreError> {
         validate_name(&meta.name)?;
         {
-            let skills = self.skills.lock().unwrap_or_else(|e| e.into_inner());
+            let skills = self.skills.lock().unwrap_or_else(PoisonError::into_inner);
             if skills.iter().any(|s| s.name == meta.name) {
                 return Err(CfgStoreError::NameConflict {
                     kind: "skill",
@@ -967,11 +986,11 @@ impl ConfigStore for InMemoryConfigStore {
         let name = meta.name.clone();
         self.skills
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .push(meta);
         self.skill_bodies
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .insert(name, body);
         Ok(())
     }
@@ -988,7 +1007,7 @@ impl ConfigStore for InMemoryConfigStore {
                 "update patch must be a JSON object".to_string(),
             ));
         };
-        let mut skills = self.skills.lock().unwrap_or_else(|e| e.into_inner());
+        let mut skills = self.skills.lock().unwrap_or_else(PoisonError::into_inner);
         let meta =
             skills
                 .iter_mut()
@@ -1019,7 +1038,7 @@ impl ConfigStore for InMemoryConfigStore {
                         .to_string();
                     self.skill_bodies
                         .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .unwrap_or_else(PoisonError::into_inner)
                         .insert(name.to_string(), body);
                 }
                 _ => {} // clés inconnues ignorées
@@ -1030,7 +1049,7 @@ impl ConfigStore for InMemoryConfigStore {
 
     async fn delete_skill(&self, _layer: Layer, name: &str) -> Result<(), CfgStoreError> {
         validate_name(name)?;
-        let mut skills = self.skills.lock().unwrap_or_else(|e| e.into_inner());
+        let mut skills = self.skills.lock().unwrap_or_else(PoisonError::into_inner);
         let idx =
             skills
                 .iter()
@@ -1043,7 +1062,7 @@ impl ConfigStore for InMemoryConfigStore {
         skills.remove(idx);
         self.skill_bodies
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(PoisonError::into_inner)
             .remove(name);
         Ok(())
     }
@@ -1074,7 +1093,7 @@ mod tests {
                 name: "fs".to_string(),
                 transport: crate::domain::McpTransport::HttpStreamable,
                 url: "http://mcp-fs:3000".to_string(),
-                headers: Default::default(),
+                headers: std::collections::BTreeMap::default(),
             }]),
             toolsets: Mutex::new(vec![Toolset {
                 name: "default".to_string(),
@@ -1120,7 +1139,7 @@ mod tests {
         let result = store.get_provider("nope").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("VNL-CFG-003"));
         assert!(msg.contains("nope"));
     }
@@ -1147,7 +1166,7 @@ mod tests {
         let result = store.get_provider("dup").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("VNL-CFG-002"));
     }
 
@@ -1166,7 +1185,7 @@ mod tests {
         let result = store.get_agent("nope").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("VNL-CFG-003"));
         assert!(msg.contains("nope"));
     }
@@ -1199,7 +1218,7 @@ mod tests {
         let result = store.get_agent("dup").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("VNL-CFG-002"));
     }
 
@@ -1227,7 +1246,7 @@ mod tests {
         let result = store.load_skill("absent").await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        let msg = format!("{}", err);
+        let msg = format!("{err}");
         assert!(msg.contains("VNL-CFG-003"));
         assert!(msg.contains("absent"));
     }
@@ -1354,7 +1373,7 @@ mod tests {
             .await
             .unwrap();
         let ts = store.get_toolset("default").await.unwrap();
-        assert!(ts.local_tools.is_empty());
+        assert_eq!(ts.local_tools, Vec::<String>::new());
     }
 
     #[tokio::test]
@@ -1392,7 +1411,7 @@ mod tests {
             vec!["read".to_string(), "write".to_string()]
         );
         assert_eq!(ts.mcp[1].server, "git");
-        assert!(ts.mcp[1].tools.is_empty());
+        assert_eq!(ts.mcp[1].tools, Vec::<String>::new());
     }
 
     #[tokio::test]
@@ -1473,7 +1492,7 @@ mod tests {
             .create_toolset(
                 Layer::Global,
                 Toolset {
-                    name: "".to_string(),
+                    name: String::new(),
                     description: None,
                     prompt: None,
                     local_tools: vec![],
@@ -1554,7 +1573,7 @@ mod tests {
         let a = store.get_agent("build").await.unwrap();
         assert!(a.description.is_none());
         // description was Some → stays None after null, toolsets was non-empty→ empty
-        assert!(a.toolsets.is_empty());
+        assert_eq!(a.toolsets, Vec::<String>::new());
     }
 
     #[tokio::test]
@@ -1822,7 +1841,7 @@ mod tests {
             .create_skill(
                 Layer::Global,
                 SkillMeta {
-                    name: "".to_string(),
+                    name: String::new(),
                     description: "d".to_string(),
                 },
                 "---\n---\n".to_string(),

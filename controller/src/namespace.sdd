@@ -34,8 +34,9 @@ Exposes:
     @APP_SCOPE_CLUSTER_ROLE = `vanyline-app-owner-scope` (nom du ClusterRole fourni par le
     déploiement, ./../../deploy/controller/controller.yaml).
   @owner_namespace_name(app_namespace: &str, owner: &str) -> Result<String, ControllerError> —
-    définie dans `vanyline-crds` (fonction pure partagée avec `app`, comme `service_name`) et
-    ré-exportée ; valeur `"{app_namespace}-{owner}"`.
+    la valeur est calculée par la fonction pure homonyme de `vanyline-crds` (partagée avec
+    `app`, comme `service_name`) ; ./namespace.rs en est un WRAPPER qui convertit l'@Err
+    (`String` → `InvalidNamespaceName`, VNL-CTL-007), pas une ré-exportation crue.
   @build_owner_namespace(owner: &Owner, app_namespace: &str) -> Result<Namespace, ControllerError>
     — pur : `metadata.name` = @owner_namespace_name, labels @OWNER_LABEL = nom de l'Owner,
     @APP_NAMESPACE_LABEL = `app_namespace`, `app.kubernetes.io/managed-by` =
@@ -113,13 +114,17 @@ Must not:
     fichier : les NetworkPolicies de sandbox restent celles de ./sandbox.rs.
 
 Tasks:
-  [ ] `vanyline-crds` : `owner_namespace_name`, `OwnerStatus.namespace` (/crds/src/lib.sdd).
-  [ ] Droits du controller (`/deploy/controller/controller.yaml`) : `namespaces`
+  [x] `vanyline-crds` : `owner_namespace_name`, `OwnerStatus.namespace` (/crds/src/lib.sdd).
+    — fait 2026-10-06 (étape 4a), validator scopé vert.
+  [x] Droits du controller (`/deploy/controller/controller.yaml`) : `namespaces`
     (get, list, watch, create, patch, delete), `rolebindings` (déjà), et le droit de lier
     @APP_SCOPE_CLUSTER_ROLE (`bind` sur ce ClusterRole, ou détenir ses droits) ; créer le
     ClusterRole @APP_SCOPE_CLUSTER_ROLE (projects, sandboxes : get, list, watch, create, delete,
     patch ; `serviceaccounts` get ; `serviceaccounts/token` create ; `pods`, `services`,
-    `events` : get, list, watch selon besoin de l'app).
+    `events` : get, list, watch selon besoin de l'app). — manifests en place depuis le commit
+    4755bf6, vérifiés conformes au contenu requis le 2026-10-06 ; `pods`/`services`/`events`
+    non delegués à ce jour (à ajouter si un besoin de l'app apparaît, cf. `[?]` ci-dessous) ;
+    effet réel sur cluster à revérifier au prochain cycle release.
   [ ] `ControllerError` : variantes `VNL-CTL-007..010` (./error.sdd).
   [-] TRANCHÉ (2026-10-04) : `existing_pvc` est RETIRÉ de @OwnerSpec (un PVC ne se monte pas d'un
     namespace à un autre) ; le home de l'Owner est toujours créé par le controller dans son

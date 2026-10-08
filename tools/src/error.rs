@@ -1,40 +1,76 @@
 use thiserror::Error;
 
+/// Erreurs des outils, à identifiants stables `VNL-TLS-001..009`.
 #[derive(Debug, Error)]
 pub enum ToolsError {
+    /// VNL-TLS-001 : chemin inexistant ; `hint` documente le contenu du
+    /// parent quand il est listable.
     #[error("VNL-TLS-001: file not found: {path}{hint}")]
-    FileNotFound { path: String, hint: String },
+    FileNotFound {
+        /// Chemin cherché.
+        path: String,
+        /// Suffixe actionnable (« parent directory contains: […] » ou
+        /// « parent does not exist either »), vide si sans objet.
+        hint: String,
+    },
     // `hint` : ", parent directory contains: [a, b, c]" si le parent existe,
     // ", parent directory does not exist either" sinon. Toujours actionnable.
+    /// VNL-TLS-002 : le chemin est un répertoire, pas un fichier.
     #[error("VNL-TLS-002: not a file: {0} (it is a directory — use list_directory)")]
     NotAFile(String),
 
+    /// VNL-TLS-003 : le chemin est un fichier, pas un répertoire.
     #[error("VNL-TLS-003: not a directory: {0} (it is a file — use read_file)")]
     NotADirectory(String),
 
+    /// VNL-TLS-004 : permission refusée sur le chemin.
     #[error("VNL-TLS-004: permission denied: {0}")]
     PermissionDenied(String),
 
+    /// VNL-TLS-005 : argument invalide.
     #[error("VNL-TLS-005: invalid argument {name}: {reason}")]
-    InvalidArgument { name: String, reason: String },
+    InvalidArgument {
+        /// Nom de l'argument fautif.
+        name: String,
+        /// Motif du rejet.
+        reason: String,
+    },
 
+    /// VNL-TLS-006 : aucun endroit du fichier ne correspond à `old_string`.
     #[error(
         "VNL-TLS-006: string not found in {path}: no occurrence of the provided old_string{hint}"
     )]
-    EditNoMatch { path: String, hint: String },
-    // `hint` : ". Closest line in file: '<ligne>'" — aide le modèle à corriger
-    // son old_string (indentation, espaces).
+    EditNoMatch {
+        /// Chemin du fichier édité.
+        path: String,
+        // `hint` : ". Closest line in file: '<ligne>'" — aide le modèle à corriger
+        // son old_string (indentation, espaces).
+        /// Indice de la ligne la plus proche (Levenshtein), vide si fichier vide.
+        hint: String,
+    },
+    /// VNL-TLS-007 : `old_string` ambigu — plusieurs occurrences sans
+    /// `replace_all`.
     #[error(
         "VNL-TLS-007: {count} occurrences of old_string in {path} — pass replace_all=true or provide a more specific old_string"
     )]
-    EditAmbiguous { path: String, count: usize },
+    EditAmbiguous {
+        /// Chemin du fichier édité.
+        path: String,
+        /// Nombre d'occurrences trouvées.
+        count: usize,
+    },
 
+    /// VNL-TLS-008 : commande interrompue après expiration du timeout
+    /// (sortie partielle conservée côté appelant).
     #[error("VNL-TLS-008: command timed out after {0}s (partial output kept)")]
     CommandTimeout(u64),
 
+    /// VNL-TLS-009 : erreur d'E/S sous-jacente sur un chemin.
     #[error("VNL-TLS-009: I/O error on {path}: {source}")]
     Io {
+        /// Chemin (ou descripteur d'opération) concerné.
         path: String,
+        /// Erreur d'E/S d'origine.
         #[source]
         source: std::io::Error,
     },

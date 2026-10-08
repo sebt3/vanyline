@@ -5,15 +5,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::CfgStoreError;
 
+/// Paires de répertoires de couches : global obligatoire, workspace
+/// optionnel. Pointe vers les racines contenant `config.yaml` et les
+/// sous-répertoires `agents/`, `toolsets/`, `skills/`.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct Layers {
+    /// Répertoire de la couche globale.
     pub global_dir: PathBuf,
+    /// Répertoire de la couche workspace, absente si `None`.
     pub workspace_dir: Option<PathBuf>,
 }
 
 #[allow(dead_code)]
 impl Layers {
+    /// Charge et fusionne le `config.yaml` des couches (global + workspace si
+    /// présente).
+    ///
+    /// # Errors
+    ///
+    /// `CfgStoreError::Config` si un `config.yaml` est illisible (YAML
+    /// invalide), `CfgStoreError::Io` pour toute autre erreur d'E/S.
     pub fn load_merged_config(&self) -> Result<RawConfigFile, CfgStoreError> {
         let global = load_config_layer(&self.global_dir)?;
         let workspace = match &self.workspace_dir {
@@ -23,6 +35,13 @@ impl Layers {
         Ok(merge_config_layers(global, workspace))
     }
 
+    /// Découvre les fichiers d'extension `ext` sous `<couche>/<subdir>/` pour
+    /// chaque couche, fusionnés (workspace gagne à stem égal).
+    ///
+    /// # Errors
+    ///
+    /// `CfgStoreError::Io` en cas d'erreur de lecture de répertoire (hors
+    /// répertoire absent, traité comme vide).
     pub fn resolve_named_files(
         &self,
         subdir: &str,
@@ -36,6 +55,13 @@ impl Layers {
         Ok(merge_layer_files(global, workspace))
     }
 
+    /// Découvre les `skills/<nom>/SKILL.md` des deux couches, fusionnés
+    /// (workspace gagne à nom égal).
+    ///
+    /// # Errors
+    ///
+    /// `CfgStoreError::Io` en cas d'erreur de lecture de répertoire (hors
+    /// répertoire absent, traité comme vide).
     pub fn resolve_skill_files(&self) -> Result<BTreeMap<String, PathBuf>, CfgStoreError> {
         let global = list_layer_skill_dirs(&self.global_dir.join("skills"))?;
         let workspace = match &self.workspace_dir {
@@ -46,19 +72,32 @@ impl Layers {
     }
 }
 
+/// Contenu brut d'un `config.yaml` : maps nommées non typées, fusionnables
+/// couche par couche (le typage du domaine se fait à la lecture, pas ici).
 #[allow(dead_code)]
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RawConfigFile {
+    /// Map `providers:` brute, indexée par nom.
     #[serde(default)]
     pub providers: BTreeMap<String, yaml_serde::Value>,
+    /// Map `models:` brute, indexée par nom.
     #[serde(default)]
     pub models: BTreeMap<String, yaml_serde::Value>,
+    /// Map `mcp:` brute, indexée par nom.
     #[serde(default)]
     pub mcp: BTreeMap<String, yaml_serde::Value>,
+    /// Map `defaults:` brute (ex. clé `agent` = agent par défaut).
     #[serde(default)]
     pub defaults: BTreeMap<String, yaml_serde::Value>,
 }
 
+/// Charge `<dir>/config.yaml` ; fichier absent -> `RawConfigFile::default()`
+/// (une couche peut n'avoir aucun `config.yaml`).
+///
+/// # Errors
+///
+/// `CfgStoreError::Config` si le YAML est invalide, `CfgStoreError::Io` pour
+/// toute autre erreur de lecture.
 #[allow(dead_code)]
 pub fn load_config_layer(dir: &std::path::Path) -> Result<RawConfigFile, CfgStoreError> {
     let path = dir.join("config.yaml");
@@ -78,6 +117,7 @@ pub fn load_config_layer(dir: &std::path::Path) -> Result<RawConfigFile, CfgStor
 /// (pas de deep-merge intra-entrée, cf. design). `workspace: None` -> retourne
 /// `global` inchangé.
 #[allow(dead_code)]
+#[must_use]
 pub fn merge_config_layers(
     global: RawConfigFile,
     workspace: Option<RawConfigFile>,
@@ -104,6 +144,11 @@ pub fn merge_config_layers(
 /// `skills/<name>/`, sont ignorés), indexés par `stem` (nom de fichier sans
 /// extension). `dir` absent -> map vide, PAS une erreur (une couche peut ne
 /// pas avoir ce sous-répertoire).
+///
+/// # Errors
+///
+/// `CfgStoreError::Io` en cas d'erreur de lecture de répertoire (hors
+/// répertoire absent, traité comme vide).
 #[allow(dead_code)]
 pub fn list_layer_files(
     dir: &std::path::Path,
@@ -132,6 +177,7 @@ pub fn list_layer_files(
 /// `global` à stem égal (remplacement de la valeur, comme
 /// `merge_config_layers`). `None` -> `global` inchangé.
 #[allow(dead_code)]
+#[must_use]
 pub fn merge_layer_files(
     global: BTreeMap<String, PathBuf>,
     workspace: Option<BTreeMap<String, PathBuf>>,
@@ -147,6 +193,11 @@ pub fn merge_layer_files(
 /// `SKILL.md` (pas le répertoire lui-même — évite de le rejoindre à chaque
 /// usage). Un sous-répertoire sans `SKILL.md` est ignoré silencieusement.
 /// `dir` absent -> map vide (comme `list_layer_files`).
+///
+/// # Errors
+///
+/// `CfgStoreError::Io` en cas d'erreur de lecture de répertoire (hors
+/// répertoire absent, traité comme vide).
 #[allow(dead_code)]
 pub fn list_layer_skill_dirs(
     dir: &std::path::Path,
@@ -195,6 +246,7 @@ pub fn config_entry_source(
 /// "workspace" si `name` est présent parmi les fichiers d'extension `ext`
 /// sous `<workspace>/<subdir>/`. Même permissivité que `config_entry_source`
 /// en cas d'erreur de lecture.
+#[must_use]
 pub fn file_entry_source(layers: &Layers, subdir: &str, ext: &str, name: &str) -> &'static str {
     match &layers.workspace_dir {
         Some(dir) => match list_layer_files(&dir.join(subdir), ext) {
@@ -208,6 +260,7 @@ pub fn file_entry_source(layers: &Layers, subdir: &str, ext: &str, name: &str) -
 /// Équivalent de `file_entry_source` pour `skills/<name>/SKILL.md`
 /// (découverte par répertoire, pas par extension — cf.
 /// `list_layer_skill_dirs`).
+#[must_use]
 pub fn skill_entry_source(layers: &Layers, name: &str) -> &'static str {
     match &layers.workspace_dir {
         Some(dir) => match list_layer_skill_dirs(&dir.join("skills")) {

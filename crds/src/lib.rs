@@ -1,3 +1,10 @@
+//! Définitions des quatre CRDs namespacées du controller
+//! (`vanyline.solidite.fr/v1alpha1` — Owner, Project, Sandbox, Application) :
+//! specs, statuses et leurs schémas `OpenAPI`, génération des manifests
+//! (`crd_manifests`) et conventions de nommage partagées du monorepo
+//! (`owner_namespace_name`, `service_name`, `MCP_PORT`). Aucune logique de
+//! reconcile : le comportement observable est intégralement de la
+//! (dé)sérialisation. Contrat détaillé : `lib.sdd`.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 use std::collections::BTreeMap;
@@ -7,6 +14,10 @@ use kube::{CustomResource, CustomResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+/// Spec de l'`Owner` (identité cluster d'un utilisateur) — entièrement
+/// optionnelle : un `spec: {}` est valide et produit le `OwnerSpec` par défaut.
+/// Les défauts métier (`"1Gi"`, modes d'accès) sont appliqués au reconcile,
+/// jamais ici.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "vanyline.solidite.fr",
@@ -19,34 +30,45 @@ use serde::{Deserialize, Serialize};
 )]
 #[serde(rename_all = "camelCase")]
 pub struct OwnerSpec {
-    /// PVC home existant (ex. celui de code-server). None: créé (`owner-<name>-home`).
-    pub existing_pvc: Option<String>,
-    pub home_size: Option<String>, // défaut appliqué au reconcile: "1Gi"
-    pub home_storage_class: Option<String>, // RWX recommandé (CephFS)
+    /// Taille du PVC home. None => le défaut métier `"1Gi"` est appliqué au
+    /// reconcile, jamais ici.
+    pub home_size: Option<String>,
+    /// `StorageClass` du PVC home. None => classe par défaut du cluster
+    /// (RWX recommandé, ex. `CephFS`).
+    pub home_storage_class: Option<String>,
     /// Mode d'accès du PVC home. None => "`ReadWriteMany`" (défaut historique —
     /// le home est partagé entre les sandboxes concurrentes d'un même Owner).
     /// À ajuster (ex. "`ReadWriteOnce`") sur un cluster sans `StorageClass` RWX
     /// (ex. single-node local-path) — aucun partage concurrent alors possible.
     pub home_access_mode: Option<String>,
+    /// Replis de stockage appliqués aux Projects futurs de cet Owner.
     pub project_defaults: Option<ProjectDefaults>,
     /// Nom de la CR Application dont l'Ingress sert de base aux sous-domaines
     /// de sandbox (`{sandbox}.sandboxes.{application.host}`). None => la
     /// Sandbox reste ClusterIP-only (comportement actuel, pas d'erreur).
     pub application_ref: Option<String>,
+    /// White-list egress du namespace de l'Owner. Absent => vec vide.
     #[serde(default)]
     pub egress: Vec<EgressRule>,
 }
 
+/// Replis de stockage servant de défaut pour les champs de [`ProjectSpec`] quand
+/// il ne les pose pas ; le repli final est interprété par le controller.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectDefaults {
+    /// Taille de PVC workspace par défaut pour les Projects de l'Owner.
     pub storage_size: Option<String>,
+    /// `StorageClass` de PVC workspace par défaut pour les Projects de l'Owner.
     pub storage_class: Option<String>,
     /// Défaut de repli pour `ProjectSpec.storage_access_mode` quand ce
     /// dernier est absent. None => "`ReadWriteOnce`" (défaut historique).
     pub storage_access_mode: Option<String>,
 }
 
+/// Référence au controller d'Ingress du cluster (pods à autoriser comme peer
+/// `NetworkPolicy` des sandboxes). Une map `pod_labels` vide sérialisée `{}`
+/// est valide ; aucun `#[serde(default)]`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct IngressControllerRef {
@@ -66,31 +88,52 @@ pub struct IngressControllerRef {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EgressRule {
+    /// Description humaine de la règle (non vide — NON vérifiée ici).
     pub description: String,
+    /// Bloc CIDR destinataire. Exclusif avec `pod_selector` (porté par le
+    /// netpol-builder, pas par ce type).
     pub cidr: Option<String>,
+    /// Pods destinataires. Exclusif avec `cidr`.
     pub pod_selector: Option<LabelSelector>,
+    /// Sélecteur de namespaces, combinable avec `pod_selector`.
     pub namespace_selector: Option<LabelSelector>,
+    /// Ports autorisés. Absent => vec vide ; TCP-pour-`None` est une
+    /// interprétation du netpol-builder, pas une valeur posée ici.
     #[serde(default)]
     pub ports: Vec<EgressPort>,
 }
 
+/// Port autorisé dans une [`EgressRule`].
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct EgressPort {
+    /// Numéro de port ; aucune validation de contenu ici (c'est l'apiserver
+    /// qui rejette un hors-plage à l'usage).
     pub port: i32,
     /// "TCP" | "UDP". `None` => TCP (interprété par `netpol-builder`, pas ici).
     pub protocol: Option<String>,
 }
 
+/// Status de l'Owner, posé par son reconciler.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct OwnerStatus {
+    /// Nom du PVC home de l'Owner.
     pub pvc_name: Option<String>,
+    /// Nom du `ServiceAccount` de l'Owner.
     pub service_account: Option<String>,
+    /// Namespace de l'Owner (`{app_namespace}-{owner}`, calculé par
+    /// [`owner_namespace_name`]) — posé par le reconciler. UN OWNER = UN NAMESPACE
+    /// (décision 2026-10-04).
+    pub namespace: Option<String>,
+    /// Conditions K8s standard. Absent => vec vide.
     #[serde(default)]
     pub conditions: Vec<Condition>,
 }
 
+/// Spec du `Project` (dépôt git d'un Owner) : seuls `owner` et `repoUrl` sont
+/// requis ; les replis (`caches`, `fetchInterval`, modes d'accès) vivent côté
+/// controller.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "vanyline.solidite.fr",
@@ -104,12 +147,16 @@ pub struct OwnerStatus {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectSpec {
+    /// Owner (utilisateur) auquel appartient le projet. REQUIS.
     pub owner: String,
+    /// URL du dépôt git. REQUIS.
     pub repo_url: String,
+    /// Branche par défaut du repo.
     pub default_branch: Option<String>,
-    /// Le repo vit dans un PVC existant (cas kydah-code). None: PVC créé (`project-<name>`).
-    pub existing_pvc: Option<PvcRef>,
+    /// Taille du PVC workspace. Repli : `Owner.spec.project_defaults`, puis
+    /// défaut du controller.
     pub storage_size: Option<String>,
+    /// `StorageClass` du PVC workspace. Repli : `Owner.spec.project_defaults`.
     pub storage_class: Option<String>,
     /// Mode d'accès du PVC workspace. None => repli sur
     /// `Owner.spec.project_defaults.storage_access_mode`, puis
@@ -119,30 +166,33 @@ pub struct ProjectSpec {
     /// (la clé SSH vit dans le PVC Owner, cf. docs/features/git-integration.md
     /// section 0). Champ conservé pour la migration, pas supprimé.
     pub git_secret: Option<String>,
-    /// Caches partagés. None => ["cargo", "pnpm", "pip"].
+    /// Caches partagés. None => `["cargo", "pnpm", "pip"]`.
     pub caches: Option<Vec<String>>,
     /// Intervalle du `CronJob` de fetch. None => "1h".
     pub fetch_interval: Option<String>,
+    /// White-list egress du namespace du projet. Absent => vec vide.
     #[serde(default)]
     pub egress: Vec<EgressRule>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct PvcRef {
-    pub name: String,
-    pub sub_path: Option<String>,
-}
-
+/// Status du Project. Les couples `skip_serializing_if` de
+/// `languages`/`detected_at` sont LE contrat anti-écrasement du merge-patch
+/// de routine (ils protègent les valeurs écrites par le Job `detect`).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectStatus {
+    /// Nom du PVC workspace (toujours celui créé par le controller).
     pub pvc_name: Option<String>,
+    /// Le clone bare initial est en place. Sérialisé même à `false` :
+    /// `compute_status` est la seule source de ce champ.
     #[serde(default)]
     pub cloned: bool,
+    /// Horodatage du dernier fetch réussi.
     pub last_fetch: Option<Time>,
+    /// Worktree présents dans le workspace. Absent => vec vide.
     #[serde(default)]
     pub worktrees: Vec<String>,
+    /// Conditions K8s standard. Absent => vec vide.
     #[serde(default)]
     pub conditions: Vec<Condition>,
     /// Langages détectés. Valeurs possibles : "rust", "js-ts", "vue",
@@ -163,6 +213,9 @@ pub struct ProjectStatus {
     pub detected_at: Option<Time>,
 }
 
+/// Spec de la `Sandbox` (pod de travail d'un Owner sur un Project) : seuls
+/// `project` et `branch` sont requis ; l'image par défaut et la sémantique de
+/// `suspended` sont du ressort du controller.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "vanyline.solidite.fr",
@@ -176,13 +229,18 @@ pub struct ProjectStatus {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxSpec {
+    /// Project (nom de la CR) dont le workspace est monté. REQUIS.
     pub project: String,
+    /// Branche checkout dans le worktree de la sandbox. REQUIS.
     pub branch: String,
+    /// Toolchains montées via `volumes[].image`. Absent => vec vide.
     #[serde(default)]
     pub toolchains: Vec<Toolchain>,
     /// Image du serveur sandbox. None => défaut du controller (env).
     pub image: Option<String>,
+    /// `ResourceRequirements` du conteneur, transmis tels quels à l'apiserver.
     pub resources: Option<k8s_openapi::api::core::v1::ResourceRequirements>,
+    /// White-list egress du pod. Absent => vec vide.
     #[serde(default)]
     pub egress: Vec<EgressRule>,
     /// Arrêt manuel : true => le reconciler supprime le Pod (worktree, PVC,
@@ -199,17 +257,23 @@ pub struct SandboxSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct LspSpec {
+    /// Image OCI du serveur LSP (montée sur `/toolchains/<name>-lsp`).
     pub image: String,
+    /// Binaire du serveur LSP : chemin absolu dans le pod (point de montage
+    /// inclus), non validé ici.
     pub bin: String,
+    /// Arguments du serveur. Absent => vec vide.
     #[serde(default)]
     pub args: Vec<String>,
 }
 
+/// Toolchain montée dans une sandbox via `volumes[].image`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Toolchain {
     /// Nom du mount /toolchains/<name>. "rust" et "node" ont des presets d'env.
     pub name: String,
+    /// Image OCI de la toolchain.
     pub image: String,
     /// Env à injecter, template `{root}` = point de montage. Vide => preset.
     #[serde(default)]
@@ -221,15 +285,25 @@ pub struct Toolchain {
     pub lsp: Option<LspSpec>,
 }
 
+/// Status de la Sandbox, posé par son reconciler.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SandboxStatus {
-    pub phase: Option<String>, // Provisioning | Running | Failed
+    /// Provisioning | Running | Failed | Suspended — chaîne libre, pas d'enum,
+    /// pas de validation.
+    pub phase: Option<String>,
+    /// Nom du `Service` K8s exposant la sandbox (`sandbox-<name>`).
     pub service: Option<String>,
+    /// Conditions K8s standard. Absent => vec vide.
     #[serde(default)]
     pub conditions: Vec<Condition>,
 }
 
+/// Spec de l'`Application` (instance déployée d'`app`) : les cinq refs
+/// secrets/Ingress (`oidcSecretRef`, `databaseSecretRef`, `host`,
+/// `ingressClassName`, `tlsIssuerName`) sont requises ; le dérivé
+/// `redirectUrl` et les replis d'image sont du ressort du reconciler
+/// `controller/src/application.rs`.
 #[derive(CustomResource, Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[kube(
     group = "vanyline.solidite.fr",
@@ -246,6 +320,7 @@ pub struct ApplicationSpec {
     /// controller/src/application.rs). Même convention de repli que `SANDBOX_IMAGE`
     /// côté sandbox.rs.
     pub image: Option<String>,
+    /// Réplicas du Deployment `app`. None => défaut du controller.
     pub replicas: Option<i32>,
     /// Secret contenant issuerUrl/clientId/clientSecret/scopes (+ caCert optionnel).
     /// PAS redirectUrl — dérivé de `host` au reconcile, jamais dupliqué dans le
@@ -261,6 +336,7 @@ pub struct ApplicationSpec {
     /// Nom de domaine public de l'Ingress. Sert aussi à dériver
     /// `OIDC_REDIRECT_URL` (`https://{host}/auth/callback`).
     pub host: String,
+    /// `IngressClass` utilisé pour l'Ingress de l'application.
     pub ingress_class_name: String,
     /// Nom du `CertManager` (Cluster)Issuer utilisé pour l'Ingress de l'application
     /// (`cert-manager.io/cluster-issuer` ou `cert-manager.io/issuer` selon
@@ -297,21 +373,35 @@ pub struct ApplicationSpec {
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationStorageDefaults {
+    /// `StorageClass` du PVC home des Owners, propagée en env à `app`.
     pub home_storage_class: Option<String>,
+    /// Mode d'accès du PVC home des Owners, propagé en env à `app`.
     pub home_access_mode: Option<String>,
+    /// `StorageClass` des PVC workspace de Projects, propagée en env à `app`.
     pub project_storage_class: Option<String>,
+    /// Mode d'accès des PVC workspace de Projects, propagé en env à `app`.
     pub project_access_mode: Option<String>,
 }
 
+/// Status de l'Application, posé par son reconciler.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplicationStatus {
-    pub phase: Option<String>, // Provisioning | Running | Failed
+    /// Provisioning | Running | Failed — chaîne libre, mêmes valeurs
+    /// documentées que `SandboxStatus::phase`, pas de validation.
+    pub phase: Option<String>,
+    /// Conditions K8s standard. Absent => vec vide.
     #[serde(default)]
     pub conditions: Vec<Condition>,
 }
 
 /// Returns the four CRD manifests as YAML, separated by `---\n`.
+///
+/// # Panics
+///
+/// En théorie si `serde_yaml` échouait sur un schéma connu à la compilation —
+/// jugé impossible en pratique (justification de l'`#[allow]` ci-dessous, seul
+/// point de panique du code de production du crate).
 #[allow(clippy::unwrap_used)]
 // serialisation YAML d un schema Rust connu a la compilation, sans entree externe : ne peut pas echouer en pratique
 #[must_use]
@@ -325,8 +415,8 @@ pub fn crd_manifests() -> String {
     docs.join("---\n")
 }
 
-/// Port MCP expose par `vanyline-sandbox` (`MCP_LISTEN` par defaut `0.0.0.0:3000
-/// cote binaire — cf. `sandbox/src/config.rs`).
+/// Port MCP exposé par `vanyline-sandbox` (`MCP_LISTEN` par défaut
+/// `0.0.0.0:3000` côté binaire — cf. `sandbox/src/config.rs`).
 pub const MCP_PORT: i32 = 3000;
 
 /// Nom du Service K8s exposeant le port MCP d'une sandbox.
@@ -335,10 +425,46 @@ pub fn service_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}")
 }
 
+/// Nom du namespace d'un Owner — `"{app_namespace}-{owner}"`. Source unique du
+/// nommage UN OWNER = UN NAMESPACE (décision 2026-10-04), partagée par le
+/// controller et `app` (qui calcule le namespace d'un Owner sans interroger le
+/// cluster) : elles ne doivent jamais diverger.
+///
+/// Le résultat n'est accepté que s'il est un label DNS-1123 valide (minuscules,
+/// chiffres, `-`, commence et finit par un alphanumérique) d'au plus 63
+/// caractères.
+///
+/// # Errors
+///
+/// Chaîne décrivant la raison du rejet : longueur supérieure à 63 caractères,
+/// ou contenu hors label DNS-1123.
+pub fn owner_namespace_name(app_namespace: &str, owner: &str) -> Result<String, String> {
+    let name = format!("{app_namespace}-{owner}");
+    if name.len() > 63 {
+        return Err(format!(
+            "namespace d'Owner «{name}» invalide : {} caracteres > 63",
+            name.len()
+        ));
+    }
+    let valid = name
+        .bytes()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && name.starts_with(|c: char| c.is_ascii_alphanumeric())
+        && name.ends_with(|c: char| c.is_ascii_alphanumeric());
+    if !valid {
+        return Err(format!(
+            "namespace d'Owner «{name}» invalide : un label DNS-1123 n'admet que des \
+             minuscules, des chiffres et des `-`, et doit commencer et finir par un alphanumérique"
+        ));
+    }
+    Ok(name)
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use k8s_openapi::apiextensions_apiserver::pkg::apis::apiextensions::v1::CustomResourceDefinition;
     use serde_yaml::Value;
 
     #[test]
@@ -380,7 +506,6 @@ mod tests {
             owner: "test".to_string(),
             repo_url: "https://github.com/test/repo".to_string(),
             default_branch: None,
-            existing_pvc: None,
             storage_size: None,
             storage_class: None,
             storage_access_mode: None,
@@ -406,6 +531,7 @@ mod tests {
             serde_json::from_str(r#"{"project":"p","branch":"main"}"#).expect("should deserialize");
         assert!(spec.toolchains.is_empty());
         assert!(spec.image.is_none());
+        assert!(spec.resources.is_none());
     }
 
     #[test]
@@ -425,8 +551,8 @@ mod tests {
             .unwrap();
 
         assert!(
-            spec_props.contains_key("existingPvc"),
-            "Owner schema should contain 'existingPvc', got: {spec_props:?}"
+            !spec_props.contains_key("existingPvc"),
+            "Owner schema should NOT contain 'existingPvc' (retrait 2026-10-04), got: {spec_props:?}"
         );
         assert!(
             spec_props.contains_key("projectDefaults"),
@@ -581,6 +707,7 @@ mod tests {
         assert!(spec.ingress_annotations.is_empty());
         assert!(spec.ingress_controller.is_none());
         assert!(spec.tls_issuer_kind.is_none());
+        assert!(spec.storage_defaults.is_none());
     }
 
     #[test]
@@ -619,88 +746,44 @@ mod tests {
             }),
         };
         let json = serde_json::to_string(&spec).unwrap();
-        assert!(
-            json.contains(r#""oidcSecretRef""#),
-            "should contain oidcSecretRef (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""databaseSecretRef""#),
-            "should contain databaseSecretRef (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""cookieSecretRef""#),
-            "should contain cookieSecretRef (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""ingressClassName""#),
-            "should contain ingressClassName (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""tlsIssuerName""#),
-            "should contain tlsIssuerName (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""tlsIssuerKind""#),
-            "should contain tlsIssuerKind (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""ingressAnnotations""#),
-            "should contain ingressAnnotations (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""ingressController""#),
-            "should contain ingressController (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""podLabels""#),
-            "should contain podLabels (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""storageDefaults""#),
-            "should contain storageDefaults (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""homeStorageClass""#),
-            "should contain homeStorageClass (camelCase), got: {json}"
-        );
-        assert!(
-            json.contains(r#""homeAccessMode""#),
-            "should contain homeAccessMode (camelCase), got: {json}"
-        );
-        assert!(
-            !json.contains("oidc_secret_ref"),
-            "should not contain oidc_secret_ref (snake_case), got: {json}"
-        );
-        assert!(
-            !json.contains("database_secret_ref"),
-            "should not contain database_secret_ref (snake_case), got: {json}"
-        );
-        assert!(
-            !json.contains("cookie_secret_ref"),
-            "should not contain cookie_secret_ref (snake_case), got: {json}"
-        );
-        assert!(
-            !json.contains("ingress_class_name"),
-            "should not contain ingress_class_name (snake_case), got: {json}"
-        );
-        assert!(
-            !json.contains("ingress_annotations"),
-            "should not contain ingress_annotations (snake_case), got: {json}"
-        );
-        assert!(
-            !json.contains("ingress_controller"),
-            "should not contain ingress_controller (snake_case), got: {json}"
-        );
-        assert!(
-            !json.contains("pod_labels"),
-            "should not contain pod_labels (snake_case), got: {json}"
-        );
+        for key in [
+            "oidcSecretRef",
+            "databaseSecretRef",
+            "cookieSecretRef",
+            "ingressClassName",
+            "tlsIssuerName",
+            "tlsIssuerKind",
+            "ingressAnnotations",
+            "ingressController",
+            "podLabels",
+            "storageDefaults",
+            "homeStorageClass",
+            "homeAccessMode",
+        ] {
+            assert!(
+                json.contains(key),
+                "should contain {key} (camelCase), got: {json}"
+            );
+        }
+        for key in [
+            "oidc_secret_ref",
+            "database_secret_ref",
+            "cookie_secret_ref",
+            "ingress_class_name",
+            "ingress_annotations",
+            "ingress_controller",
+            "pod_labels",
+        ] {
+            assert!(
+                !json.contains(key),
+                "should not contain {key} (snake_case), got: {json}"
+            );
+        }
     }
 
     #[test]
     fn owner_application_ref_camel_case() {
         let spec = OwnerSpec {
-            existing_pvc: None,
             home_size: None,
             home_storage_class: None,
             home_access_mode: None,
@@ -747,7 +830,11 @@ mod tests {
     fn project_status_languages_default_empty() {
         let status: ProjectStatus =
             serde_json::from_str("{}").expect("should deserialize from empty object");
-        assert!(status.languages.is_empty());
+        assert_eq!(
+            status.languages,
+            Vec::<String>::new(),
+            "languages vide depuis {{}}"
+        );
         assert!(status.detected_at.is_none());
     }
 
@@ -810,6 +897,30 @@ mod tests {
         );
     }
 
+    // Scenario: existing_pvc_n_existe_plus
+    // Retire (decision 2026-10-04, un Owner = un namespace) : la cle existingPvc est
+    // inconnue de OwnerSpec et ProjectSpec — serde l'ignore et elle n'est jamais re-emise.
+    #[test]
+    fn existing_pvc_n_existe_plus() {
+        let spec: OwnerSpec =
+            serde_json::from_str(r#"{"existingPvc":"home-pvc"}"#).expect("should deserialize");
+        assert!(spec.home_size.is_none());
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            !json.contains("existingPvc"),
+            "existingPvc doit etre une cle inconnue de OwnerSpec, got: {json}"
+        );
+        let spec: ProjectSpec = serde_json::from_str(
+            r#"{"owner":"o","repoUrl":"r","existingPvc":{"name":"pvc","subPath":"sub"}}"#,
+        )
+        .expect("should deserialize");
+        let json = serde_json::to_string(&spec).unwrap();
+        assert!(
+            !json.contains("existingPvc"),
+            "existingPvc doit etre une cle inconnue de ProjectSpec, got: {json}"
+        );
+    }
+
     // 19. lsp_spec_absent_defaults_to_none
     #[test]
     fn lsp_spec_absent_defaults_to_none() {
@@ -817,5 +928,358 @@ mod tests {
             serde_json::from_str(r#"{"name":"rust","image":"x"}"#).expect("should deserialize");
         assert!(tc.lsp.is_none());
         assert!(tc.env.is_empty());
+    }
+
+    // Scenario: crd_manifests_ordre_documents
+    #[test]
+    fn crd_manifests_ordre_documents() {
+        let m = crd_manifests();
+        let mut prev = 0usize;
+        for kind in [
+            "kind: Owner",
+            "kind: Project",
+            "kind: Sandbox",
+            "kind: Application",
+        ] {
+            let at = m.find(kind).unwrap();
+            assert!(
+                at > prev,
+                "{kind} doit apparaitre apres le precedent (ordre fige Owner, Project, Sandbox, Application)"
+            );
+            prev = at;
+        }
+    }
+
+    // Scenario: crd_scope_namespaced_version_v1alpha1 (+ declaration du sous-ressource status, cf. Must)
+    #[test]
+    fn crd_scope_namespaced_version_v1alpha1() {
+        for crd in [
+            Owner::crd(),
+            Project::crd(),
+            Sandbox::crd(),
+            Application::crd(),
+        ] {
+            assert_eq!(crd.spec.scope, "Namespaced");
+            assert_eq!(crd.spec.group, "vanyline.solidite.fr");
+            assert_eq!(crd.spec.versions.len(), 1);
+            assert_eq!(crd.spec.versions[0].name, "v1alpha1");
+            assert!(
+                crd.spec.versions[0]
+                    .subresources
+                    .as_ref()
+                    .is_some_and(|s| s.status.is_some()),
+                "la version doit declarer le sous-ressource status"
+            );
+        }
+    }
+
+    // Scenario: crd_printcolumns_et_absence_shortnames
+    #[test]
+    fn crd_printcolumns_et_absence_shortnames() {
+        fn columns(crd: &CustomResourceDefinition) -> Vec<(String, String, String)> {
+            crd.spec.versions[0]
+                .additional_printer_columns
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| (c.name, c.type_, c.json_path))
+                .collect()
+        }
+        fn assert_no_shortnames(crd: &CustomResourceDefinition) {
+            assert_eq!(
+                crd.spec.names.short_names.clone().unwrap_or_default(),
+                Vec::<String>::new()
+            );
+        }
+        let owner = Owner::crd();
+        assert_eq!(
+            columns(&owner),
+            vec![
+                (
+                    "SA".to_string(),
+                    "string".to_string(),
+                    ".status.serviceAccount".to_string()
+                ),
+                (
+                    "PVC".to_string(),
+                    "string".to_string(),
+                    ".status.pvcName".to_string()
+                ),
+            ]
+        );
+        assert_no_shortnames(&owner);
+        let project = Project::crd();
+        assert_eq!(
+            columns(&project),
+            vec![
+                (
+                    "Owner".to_string(),
+                    "string".to_string(),
+                    ".spec.owner".to_string()
+                ),
+                (
+                    "Repo".to_string(),
+                    "string".to_string(),
+                    ".spec.repoUrl".to_string()
+                ),
+                (
+                    "Cloned".to_string(),
+                    "boolean".to_string(),
+                    ".status.cloned".to_string()
+                ),
+            ]
+        );
+        assert_no_shortnames(&project);
+        let sandbox = Sandbox::crd();
+        assert_eq!(
+            columns(&sandbox),
+            vec![
+                (
+                    "Project".to_string(),
+                    "string".to_string(),
+                    ".spec.project".to_string()
+                ),
+                (
+                    "Branch".to_string(),
+                    "string".to_string(),
+                    ".spec.branch".to_string()
+                ),
+                (
+                    "Phase".to_string(),
+                    "string".to_string(),
+                    ".status.phase".to_string()
+                ),
+            ]
+        );
+        assert_no_shortnames(&sandbox);
+        let app = Application::crd();
+        assert_eq!(
+            columns(&app),
+            vec![
+                (
+                    "Host".to_string(),
+                    "string".to_string(),
+                    ".spec.host".to_string()
+                ),
+                (
+                    "Ready".to_string(),
+                    "string".to_string(),
+                    ".status.phase".to_string()
+                ),
+            ]
+        );
+        assert_no_shortnames(&app);
+    }
+
+    // Scenario: owner_spec_deserialise_depuis_objet_vide
+    #[test]
+    fn owner_spec_deserialise_depuis_objet_vide() {
+        let spec: OwnerSpec = serde_json::from_str("{}").expect("un Owner sans spec est valide");
+        assert!(spec.home_size.is_none());
+        assert!(spec.home_storage_class.is_none());
+        assert!(spec.home_access_mode.is_none());
+        assert!(spec.project_defaults.is_none());
+        assert!(spec.application_ref.is_none());
+        assert!(spec.egress.is_empty());
+    }
+
+    // Scenario: project_spec_champs_requis
+    #[test]
+    fn project_spec_champs_requis() {
+        let without_owner: Result<ProjectSpec, _> =
+            serde_json::from_str(r#"{"repoUrl":"https://x/repo"}"#);
+        assert!(without_owner.is_err(), "owner est requis");
+        let without_repo: Result<ProjectSpec, _> = serde_json::from_str(r#"{"owner":"o"}"#);
+        assert!(without_repo.is_err(), "repoUrl est requis");
+    }
+
+    // Scenario: sandbox_spec_champs_requis
+    #[test]
+    fn sandbox_spec_champs_requis() {
+        let without_project: Result<SandboxSpec, _> = serde_json::from_str(r#"{"branch":"main"}"#);
+        assert!(without_project.is_err(), "project est requis");
+        let without_branch: Result<SandboxSpec, _> = serde_json::from_str(r#"{"project":"p"}"#);
+        assert!(without_branch.is_err(), "branch est requis");
+    }
+
+    // Scenario: application_spec_champs_requis
+    #[test]
+    fn application_spec_champs_requis() {
+        let docs = [
+            r#"{"ingressClassName":"nginx","oidcSecretRef":"oidc","databaseSecretRef":"db","tlsIssuerName":"self-sign"}"#,
+            r#"{"host":"app.example.com","oidcSecretRef":"oidc","databaseSecretRef":"db","tlsIssuerName":"self-sign"}"#,
+            r#"{"host":"app.example.com","ingressClassName":"nginx","databaseSecretRef":"db","tlsIssuerName":"self-sign"}"#,
+            r#"{"host":"app.example.com","ingressClassName":"nginx","oidcSecretRef":"oidc","tlsIssuerName":"self-sign"}"#,
+            r#"{"host":"app.example.com","ingressClassName":"nginx","oidcSecretRef":"oidc","databaseSecretRef":"db"}"#,
+        ];
+        for doc in docs {
+            let r: Result<ApplicationSpec, _> = serde_json::from_str(doc);
+            assert!(r.is_err(), "une cle requise amputee doit echouer : {doc}");
+        }
+    }
+
+    // Scenario: project_status_autres_champs_optionnels_en_null
+    #[test]
+    fn project_status_autres_champs_optionnels_en_null() {
+        let json = serde_json::to_string(&ProjectStatus::default()).unwrap();
+        for key in [
+            r#""pvcName":null"#,
+            r#""lastFetch":null"#,
+            r#""cloned":false"#,
+            r#""worktrees":[]"#,
+            r#""conditions":[]"#,
+        ] {
+            assert!(
+                json.contains(key),
+                "le ProjectStatus par defaut doit emettre {key} (verrou anti-reression merge-patch), got: {json}"
+            );
+        }
+    }
+
+    // Scenario: lsp_spec_complet_roundtrip
+    #[test]
+    fn lsp_spec_complet_roundtrip() {
+        let mut env = BTreeMap::new();
+        env.insert("PATH".to_string(), "{root}/bin".to_string());
+        let tc = Toolchain {
+            name: "rust".to_string(),
+            image: "img".to_string(),
+            env,
+            lsp: Some(LspSpec {
+                image: "img".to_string(),
+                bin: "/u/b".to_string(),
+                args: Vec::new(),
+            }),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        assert!(
+            json.contains(r#""args":[]"#),
+            "lsp.args vide doit etre serialise [], got: {json}"
+        );
+        assert!(
+            json.contains("{root}"),
+            "le template entre accolades est transporte verbatim, got: {json}"
+        );
+        let back: Toolchain = serde_json::from_str(&json).unwrap();
+        let json2 = serde_json::to_string(&back).unwrap();
+        assert_eq!(
+            json, json2,
+            "env/lsp.image/lsp.bin/lsp.args survivent au roundtrip"
+        );
+    }
+
+    // Scenario: egress_rule_minimale_defauts
+    #[test]
+    fn egress_rule_minimale_defauts() {
+        let rule: EgressRule = serde_json::from_str(r#"{"description":"allow dns"}"#)
+            .expect("une regle minimale doit se deserialiser");
+        assert!(rule.cidr.is_none());
+        assert!(rule.pod_selector.is_none());
+        assert!(rule.namespace_selector.is_none());
+        assert!(rule.ports.is_empty());
+    }
+
+    // Scenario: service_name_prefixe_sandbox
+    #[test]
+    fn service_name_prefixe_sandbox() {
+        assert_eq!(service_name("web"), "sandbox-web");
+        assert_eq!(service_name("db-2"), "sandbox-db-2");
+        assert_eq!(service_name(""), "sandbox-");
+    }
+
+    // Scenario: mcp_port_vaut_3000
+    #[test]
+    fn mcp_port_vaut_3000() {
+        assert_eq!(MCP_PORT, 3000);
+    }
+
+    // Scenario: status_structures_defaut_deserialisables
+    // (+ OwnerStatus.namespace deserialisable et serialise en null explicite, cf. Must/Returns)
+    #[test]
+    fn status_structures_defaut_deserialisables() {
+        let owner: OwnerStatus = serde_json::from_str("{}").expect("OwnerStatus depuis {}");
+        assert!(owner.pvc_name.is_none());
+        assert!(owner.service_account.is_none());
+        assert!(owner.namespace.is_none());
+        assert_eq!(
+            owner.conditions,
+            Vec::<Condition>::new(),
+            "conditions vides depuis {{}}"
+        );
+        let sandbox: SandboxStatus = serde_json::from_str("{}").expect("SandboxStatus depuis {}");
+        assert!(sandbox.phase.is_none());
+        assert!(sandbox.service.is_none());
+        assert_eq!(
+            sandbox.conditions,
+            Vec::<Condition>::new(),
+            "conditions vides depuis {{}}"
+        );
+        let app: ApplicationStatus =
+            serde_json::from_str("{}").expect("ApplicationStatus depuis {}");
+        assert!(app.phase.is_none());
+        assert_eq!(
+            app.conditions,
+            Vec::<Condition>::new(),
+            "conditions vides depuis {{}}"
+        );
+        let json = serde_json::to_string(&owner).unwrap();
+        assert!(
+            json.contains(r#""namespace":null"#),
+            "namespace se serialise en null explicite comme ses freres, got: {json}"
+        );
+    }
+
+    // Contrat Must (pas de Scenario dedie — remonte dans la synthese) :
+    // owner_namespace_name = "{app_namespace}-{owner}", label DNS-1123 <= 63 caracteres.
+    #[test]
+    fn owner_namespace_name_concatene_app_et_owner() {
+        assert_eq!(
+            owner_namespace_name("vanyline-app", "alice").unwrap(),
+            "vanyline-app-alice"
+        );
+        // 63 caracteres exacts : dans la limite.
+        let name = owner_namespace_name(&"a".repeat(31), &"b".repeat(31))
+            .expect("63 caracteres est dans la limite");
+        assert_eq!(name.len(), 63);
+    }
+
+    #[test]
+    fn owner_namespace_name_rejette_hors_dns1123() {
+        let err = owner_namespace_name("Vanyline-App", "alice").expect_err("majuscules interdites");
+        assert!(
+            err.contains("DNS-1123"),
+            "l'erreur porte la raison, got: {err}"
+        );
+        assert!(
+            owner_namespace_name("app", "Alice").is_err(),
+            "majuscule dans owner"
+        );
+        assert!(
+            owner_namespace_name("app", "ali_ce").is_err(),
+            "underscore interdit"
+        );
+        assert!(
+            owner_namespace_name("app", "alice.").is_err(),
+            "point final interdit"
+        );
+        assert!(
+            owner_namespace_name("-app", "alice").is_err(),
+            "tiret en debut interdit"
+        );
+        assert!(
+            owner_namespace_name("app", "alice-").is_err(),
+            "tiret en fin interdit"
+        );
+        assert!(
+            owner_namespace_name("", "").is_err(),
+            "- seul n'est pas un label"
+        );
+    }
+
+    #[test]
+    fn owner_namespace_name_rejette_plus_de_63_caracteres() {
+        let err =
+            owner_namespace_name(&"a".repeat(32), &"b".repeat(31)).expect_err("64 caracteres > 63");
+        assert!(err.contains("63"), "l'erreur porte la raison, got: {err}");
     }
 }

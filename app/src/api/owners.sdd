@@ -51,13 +51,22 @@ Exposes:
     @AppError>` : lecture unique de `vanyline_owner_links.k8s_owner_name` filtrée sur
     @Column::UserId. `Some(nom)` si lien résolu, `None` si aucun lien OU ligne dont la
     colonne est `NULL` (via `@Option::and_then`).
-  - @ensure_owner — `pub async fn(&@AppState, i32, &@AuthUser) -> @Result<@String,
-    @AppError>` : retourne le nom d'Owner de l'utilisateur, en le créant si absent
-    (Owner CR k8s + ligne de lien). Réservé à `POST /api/projects`.
-  - `#[cfg(test)] mod tests` : 4 tests unitaires, tous sur @sanitize_owner_name uniquement
+  - @ensure_owner — `pub async fn(&@AppState, i32, &@AuthPrincipal) -> @Result<@String,
+    @AppError>` : retourne le nom d'Owner de l'appelant, en le créant si absent
+    (Owner CR k8s + ligne de lien). Réservé à `POST /api/projects`. @AuthPrincipal
+    (miryad-core ≥ 0.1.5, extracteur dual session/token) remplace @AuthUser depuis le
+    2026-10-07 : c'est lui qui porte `preferred_username`, source du nommage.
+  - `#[cfg(test)] mod tests` : 9 tests unitaires — 4 sur @sanitize_owner_name
     (`sanitize_prefixed_email_local_part`, `sanitize_owner_empty_local_falls_back`,
-    `sanitize_owner_truncates_to_63`, `sanitize_owner_truncation_never_ends_in_hyphen`) —
-    aucune couverture pour @resolve_owner_name et @ensure_owner (Tasks `[!]`).
+    `sanitize_owner_truncates_to_63`, `sanitize_owner_truncation_never_ends_in_hyphen`)
+    et 5 sur @owner_raw_source, la fonction pure du choix de la source de nommage
+    ajoutée le 2026-10-07 : `owner_raw_source_prefers_preferred_username_over_email`,
+    `owner_raw_source_none_preferred_retombe_sur_subject`,
+    `owner_raw_source_empty_preferred_retombe_sur_subject`,
+    `owner_raw_source_whitespace_only_retombe_sur_subject`,
+    `owner_raw_source_ne_retient_jamais_l_email` — @resolve_owner_name et @ensure_owner
+    eux-mêmes restent sans test unitaire (chemin DB+kube, Scenarios d'intégration ;
+    Tasks `[!]`).
   - Aucun type, aucune constante, aucune route, aucun `#[cfg(feature = ...)]`.
 
 Structure:
@@ -80,11 +89,24 @@ Structure:
   NOM DU OWNER CR = sortie de @sanitize_owner_name, SANS AUCUN PRÉFIXE — vérifié : aucun
   préfixe de type `vny-` n'existe dans le dépôt (grep `vny-` : unique occurrence sans
   rapport, `../../tools/src/filesystem.rs`).
-  Règle de choix du `raw` dans @ensure_owner : `local` = partie avant `@` de
-  `principal.email` (`""` si email absent) ; si `local.trim()` est vide → `raw =
-  principal.subject.as_str()` ; sinon → `raw = principal.email` entier. Le premier caractère
-  de @sanitize_owner_name est redondant sur le split (le `raw` email est resplitté à
-  l'intérieur) ; c'est le test de vide par `trim()` qui décide email vs subject.
+  Règle de choix du `raw` dans @ensure_owner (REFAITE le 2026-10-07, décision Sébastien —
+  l'unicité est désormais garantie par la source, plus par la sanitisation) : `raw` =
+  claim `preferred_username` de la session OIDC quand il est `Some` non vide après
+  `trim()` — miryad-core
+  ≥ 0.1.5 le projette dans la session scellée et authentik le garantit UNIQUE par
+  utilisateur ; sinon (fournisseur sans ce claim, chemin token API où miryad-core pose
+  `None`) → `raw = principal.subject.as_str()`, le `sub` OIDC étant lui aussi garanti
+  unique. L'EMAIL EST RETIRÉ de la chaîne de nommage : son local-part tronqué était le
+  seul facteur de perte d'unicité (deux emails `a@x.com` / `a@y.com` → même Owner). Le
+  handler passe explicitement l'@Option<@String> de `preferred_username` résolu depuis la
+  session (miryad_core::auth::cookie::extract_session, pub ; l'idée que AuthUser ne porte
+  pas ce champ est un trou amont, pas une raison de retomber sur l'email). Conséquence de
+  contrat : deux utilisateurs différents ne peuvent plus jamais dériver le même nom
+  d'Owner, l'adoption silencieuse d'un Owner homonyme d'un AUTRE utilisateur est
+  structurellement impossible ; @ensure_owner garde sa forme (get_owner puis création si
+  Err) parce que le chemin reste idempotent POUR LE MÊME utilisateur.
+  Règle historique (abrogée, tracée) : `raw` = `principal.email` entier si son local-part
+  était non vide, sinon `subject` — remplacée par la règle ci-dessus.
   Ordre des effets dans @ensure_owner : (1) early-return si lien déjà résolu ; (2) calcul
   du nom ; (3) @crate::k8s::client ; (4) @VnlK8sClient::get_owner — création @OwnerSpec
   seulement si get_owner est en `Err` (TOUTE erreur, y compris non-404, traitée comme
@@ -183,11 +205,13 @@ Handles:
     absente ; @ensure_owner la traverse donc jusqu'à l'upsert, qui la convertit en
     `Some(nom)` via DO UPDATE — c'est le seul chemin qui « répare » un NULL (état licite
     du schéma, cf. Tasks `[?]`).
-  - Fait à confirmer comme règle définitive : le nom du CR ne porte AUCUN préfixe de
-    namespace ou de produit (aucun `vny-`) — deux utilisateurs dont les emails partagent la
-    même partie locale SANITISÉE convergent vers le même nom et donc le même Owner CR
-    (get_owner Ok → pas de création → second lien posé sur le CR du premier). Danger
-    documenté en Tasks `[!]`, comportement actuel non corrigé ici.
+  - Règle définitive : le nom du CR ne porte AUCUN préfixe de namespace ou de produit
+    (aucun `vny-`). Le danger de convergence de deux utilisateurs vers un même Owner CR
+    (emails de même local-part sanitizé) est RÉSOLU le 2026-10-07 par la règle de
+    nommage : la source est `preferred_username` (garanti unique par authentik) ou
+    `subject` (garanti unique par le fournisseur), jamais l'email — deux utilisateurs
+    ne peuvent plus dériver le même nom. L'adoption `get_owner Ok` reste le chemin
+    idempotent du MÊME utilisateur.
 
 Must:
   UN OWNER = UN NAMESPACE (2026-10-04, /controller/src/namespace.sdd) : @ensure_owner crée la CR
@@ -206,8 +230,8 @@ Must:
   - Lire le lien par filtre @Column::UserId seul, et traiter indifféremment absence de
     ligne et ligne à nom `NULL` comme `Ok(@None)` (via `and_then`).
   - Dans @ensure_owner : early-return sur @resolve_owner_name `Some` AVANT tout accès k8s
-    ou DB en écriture ; choix `subject` (et non email) quand la partie locale de l'email
-    est vide ou uniquement whitespace (`trim()`).
+    ou DB en écriture ; choix `subject` quand `preferred_username` est `@None`, vide ou
+    uniquement whitespace (`trim()`) — jamais l'email (règle 2026-10-07).
   - Ne créer le CR que si @VnlK8sClient::get_owner est en erreur (comportement actuel :
     toute erreur vaut « absent ») ; ne jamais appeler create_owner deux fois pour un même
     lien déjà posé.
@@ -274,14 +298,16 @@ Depends on:
 
 Tasks:
   [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04, voir `Must`) : namespace d'Owner calculé par `vanyline_crds::owner_namespace_name`, les Scenario où Owner, Project et Sandbox partagent un namespace sont à rejouer avec deux namespaces.
-  [!] Collision de noms d'Owner — le plus grave du fichier : @sanitize_owner_name n'est
-    pas injective (`alice@x.com` et `alice@y.com` → `"alice"` ; `jean-pierre@x` et
-    `jean_pierre@y` → `"jean-pierre"`). Deux utilisateurs distincts convergent vers le même
-    nom : get_owner trouve le CR du premier → pas de création → le second pose un lien sur
-    LE MÊME Owner CR → home PVC, quotas et projects partagés entre comptes, sans erreur.
-    Comportement actuel documenté, non jugé. Faut-il une composante d'unicité (suffixe
-    dérivé du subject, hash court, contre-partie : noms illisibles) ? À trancher avec
-    Sébastien — c'est un choix produit, pas une correction obvious.
+  [x] RESOLU 2026-10-07 (décision Sébastien) — Collision de noms d'Owner : l'origine
+    était l'email, non injectif une fois tronqué à son local-part (`alice@x.com` et
+    `alice@y.com` → `"alice"`). La source de nommage est désormais `preferred_username`
+    (miryad-core 0.1.5, garanti UNIQUE par authentik) avec repli `subject` (unique par
+    construction) — l'email ne participe plus au nommage, la convergence de deux
+    utilisateurs vers un même Owner CR est structurellement impossible. Pas de suffixe
+    d'unicité : jugé inutile source unique. Les Scenarios d'intégration amendés le
+    verrouillent ; le cas whitespace-only est tranché au `Must` (`trim()`), corrigé dans
+    le code (`!p.trim().is_empty()`, test `owner_raw_source_whitespace_only…` vert) et
+    validator-vert le 2026-10-07 (le premier jet comparait `!is_empty()` littéral).
   [!] get_owner errors swallowed : `if k8s.get_owner(&name).await.is_err()` confond 404,
     interdiction RBAC, timeout réseau et Owner existant. Conséquence observable : Owner
     existant + erreur transitoire du get → create_owner → AlreadyExists → @AppError::K8sApiError
@@ -436,27 +462,31 @@ Scenario: ensure_owner hors-ligne n'écrit rien en base
   And `vanyline_owner_links` ne contient toujours AUCUNE ligne pour `user_id = 5` —
     l'écriture DB est conditionnée à la réussite du chemin k8s (ordre CR-puis-lien)
 
-Scenario: ensure_owner crée un Owner nommé d'après la partie locale de l'email
+Scenario: ensure_owner nomme d'après preferred_username et ignore l'email
   # Test d'intégration cluster (convention anti-mock kube de `../k8s.sdd`) — non
-  # exécutable en CI sans cluster de test.
+  # exécutable en CI sans cluster de test. Décision Sébastien 2026-10-07.
   Given un cluster de test joignable avec un @AppState dont `config` a tous les défauts
     home/project à `@None` et `application_name` à `@None`, base réelle sans lien pour
-    `user_id = 1`, @AuthUser d'email `"Alice.Doe@corp.example"`
+    `user_id = 1`, @AuthPrincipal d'email `"Alice.Doe@corp.example"` et
+    `preferred_username = Some("Alice.Doe")`
   When @ensure_owner est appelé une première fois
-  Then le résultat est `@Ok("alice-doe")` — sans aucun préfixe type `vny-`
+  Then le résultat est `@Ok("alice-doe")` — nom dérivé de `preferred_username` sanitizé,
+    l'email n'entre jamais dans le calcul ; sans aucun préfixe type `vny-`
   And un Owner CR nommé exactement `"alice-doe"` existe dans le namespace du client
   And le CR porte `spec.project_defaults` ABSENT (les deux défauts projet sont `@None`),
     `application_ref` absent, `home_size` absent et `egress` vide
   And une unique ligne `vanyline_owner_links (user_id = 1, k8s_owner_name = 'alice-doe')`
     existe en base
 
-Scenario: ensure_owner retombe sur le subject quand la partie locale est vide
-  # Test d'intégration cluster.
-  Given le même dispositif de cluster, base sans lien pour `user_id = 2`, @AuthUser dont
-    `email` vaut `"@corp.example"` (local-part vide) et `subject` vaut `"sub-42"`
+Scenario: ensure_owner retombe sur le subject sans preferred_username
+  # Test d'intégration cluster. Décision Sébastien 2026-10-07.
+  Given le même dispositif de cluster, base sans lien pour `user_id = 2`, @AuthPrincipal
+    dont `preferred_username` vaut `@None` (chemin token API, ou fournisseur sans le
+    claim) et `subject` vaut `"sub-42"`
   When @ensure_owner est appelé
-  Then le résultat est `@Ok("sub-42")` et l'Owner CR créé porte ce nom — le calcul est
-    calqué sur `subject`, jamais sur l'email vide ni sur le repli `"owner"`
+  Then le résultat est `@Ok("sub-42")` et l'Owner CR créé porte ce nom — le repli est le
+    `subject` (garanti unique par le fournisseur), jamais un nom dérivé de l'email ni le
+    repli `"owner"`
 
 Scenario: ensure_owner est idempotent au second appel
   # Test d'intégration cluster.

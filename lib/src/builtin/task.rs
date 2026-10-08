@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use rig_core::completion::ToolDefinition;
@@ -54,6 +55,10 @@ pub struct TaskTool {
 }
 
 impl TaskTool {
+    /// Construit le tool pour UN tour, sans validation : les champs sont
+    /// stockés tels quels (la garde de profondeur est évaluée à chaque `call`,
+    /// pas à la construction — cf. `./task.sdd`).
+    #[must_use]
     pub fn new(ctx: SessionContext, current_depth: u8, available_agents: Vec<Agent>) -> Self {
         Self {
             ctx,
@@ -92,7 +97,9 @@ impl ToolDyn for TaskTool {
                     .description
                     .as_deref()
                     .unwrap_or("(pas de description)");
-                s.push_str(&format!("- {} : {}\n", agent.name, desc));
+                // fmt::Write sur String est infaillible : le let _ ignore un
+                // Result qui n'a qu'un habitant.
+                let _ = writeln!(s, "- {} : {}", agent.name, desc);
             }
             s
         };
@@ -119,8 +126,7 @@ impl ToolDyn for TaskTool {
             // 2. Garde de profondeur
             if current_depth >= subagent_depth_max {
                 return Err(ToolError::ToolCallError(Box::new(SubagentError(format!(
-                    "subagent depth limit ({}) reached, cannot delegate further",
-                    subagent_depth_max
+                    "subagent depth limit ({subagent_depth_max}) reached, cannot delegate further"
                 )))));
             }
 
@@ -171,7 +177,10 @@ impl ToolDyn for TaskTool {
                 Vec::new(),
                 &parsed.prompt,
                 None,
-                current_depth + 1,
+                // La garde « current_depth < subagent_depth_max » ci-dessus borne
+                // current_depth à 254 : saturating_add rend exactement +1, sans
+                // débordement possible (task.sdd, garde de profondeur).
+                current_depth.saturating_add(1),
             )
             .await;
 
@@ -202,6 +211,7 @@ impl ToolDyn for TaskTool {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
+    use crate::domain::SkillSelection;
     use crate::event::ChatEvent;
     use crate::store::{ConfigStore, InMemoryConfigStore};
     use std::sync::Mutex;
@@ -261,7 +271,7 @@ mod tests {
                 mode: AgentMode::Subagent,
                 model: "m".to_string(),
                 toolsets: vec![],
-                skills: Default::default(),
+                skills: SkillSelection::default(),
                 system_prompt: "prompt".to_string(),
             },
             Agent {
@@ -270,7 +280,7 @@ mod tests {
                 mode: AgentMode::All,
                 model: "m".to_string(),
                 toolsets: vec![],
-                skills: Default::default(),
+                skills: SkillSelection::default(),
                 system_prompt: "prompt".to_string(),
             },
         ];
@@ -287,7 +297,7 @@ mod tests {
             0,
             available_agents,
         );
-        let def = task_tool.definition("".into()).await;
+        let def = task_tool.definition(String::new()).await;
 
         assert!(def.description.contains("- sub : A subagent"));
         assert!(def.description.contains("- all : An all agent"));
@@ -314,7 +324,7 @@ mod tests {
             0,
             Vec::new(),
         );
-        let def = task_tool.definition("".into()).await;
+        let def = task_tool.definition(String::new()).await;
 
         assert!(def.description.contains("Aucun subagent disponible"));
         assert!(!def.description.contains("- "));
@@ -356,7 +366,7 @@ mod tests {
                 mode: AgentMode::Subagent,
                 model: "m".to_string(),
                 toolsets: vec![],
-                skills: Default::default(),
+                skills: SkillSelection::default(),
                 system_prompt: "prompt".to_string(),
             }]),
             ..Default::default()
@@ -378,7 +388,11 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(sink.events().is_empty());
+        assert!(
+            sink.events().is_empty(),
+            "attendu aucun événement, got {:?}",
+            sink.events()
+        );
     }
 
     // 6. call_unknown_agent_rejected
@@ -391,7 +405,7 @@ mod tests {
                 mode: AgentMode::Subagent,
                 model: "m".to_string(),
                 toolsets: vec![],
-                skills: Default::default(),
+                skills: SkillSelection::default(),
                 system_prompt: "prompt".to_string(),
             }]),
             ..Default::default()
@@ -413,7 +427,11 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(sink.events().is_empty());
+        assert!(
+            sink.events().is_empty(),
+            "attendu aucun événement, got {:?}",
+            sink.events()
+        );
     }
 
     // 7. call_primary_mode_rejected
@@ -426,7 +444,7 @@ mod tests {
                 mode: AgentMode::Primary,
                 model: "m".to_string(),
                 toolsets: vec![],
-                skills: Default::default(),
+                skills: SkillSelection::default(),
                 system_prompt: "prompt".to_string(),
             }]),
             ..Default::default()
@@ -448,6 +466,10 @@ mod tests {
             .await;
 
         assert!(result.is_err());
-        assert!(sink.events().is_empty());
+        assert!(
+            sink.events().is_empty(),
+            "attendu aucun événement, got {:?}",
+            sink.events()
+        );
     }
 }

@@ -4,10 +4,16 @@ use rig_core::providers::{ollama, openai};
 use crate::domain::{ModelProfile, Provider};
 use crate::error::VnyError;
 
-/// Construit le CompletionModel ollama depuis les types v2. Même logique que
+/// Construit le `CompletionModel` ollama depuis les types v2. Même logique que
 /// `crate::llm::build_ollama_model` (ancien, inchangé) mais sur `domain::Provider`
 /// / `domain::ModelProfile` — `profile.model` remplace le `model_name: &str` séparé
 /// (le nom du modèle brut chez le provider est désormais porté par le profil).
+///
+/// # Errors
+///
+/// [`VnyError::ModelBuildError`] (`VNL-LLM-006`) quand le `build()` de rig échoue —
+/// seule cause atteignable sur rig-core 0.38 : la conversion de la clé d'API en
+/// en-tête HTTP (caractères interdits). L'`endpoint` n'est jamais validé au build.
 pub fn build_ollama_model(
     provider: &Provider,
     profile: &ModelProfile,
@@ -27,8 +33,14 @@ pub fn build_ollama_model(
 }
 
 /// Idem pour openai-compatible. Même construction que
-/// `crate::llm::build_openai_compat_model` (ancien, inchangé) : base_url suffixé
-/// `/v1`, api_key vide si absent.
+/// `crate::llm::build_openai_compat_model` (ancien, inchangé) : `base_url` suffixé
+/// `/v1`, `api_key` vide si absent.
+///
+/// # Errors
+///
+/// [`VnyError::ModelBuildError`] (`VNL-LLM-006`) quand le `build()` de rig échoue —
+/// sur ce chemin la conversion de la clé en en-tête `Bearer` est tentée dans TOUS
+/// les cas (clé vide incluse). L'`endpoint` n'est jamais validé au build.
 pub fn build_openai_compat_model(
     provider: &Provider,
     profile: &ModelProfile,
@@ -50,7 +62,9 @@ pub fn build_openai_compat_model(
 /// (session-engine) qui les appliquera lors de la construction de l'`Agent<M>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AgentParams {
+    /// Température (`profile.temperature`), `None` = défaut du provider.
     pub temperature: Option<f64>,
+    /// Plafond de tokens (`profile.max_tokens`), `None` = défaut du provider.
     pub max_tokens: Option<u64>,
     /// `None` si `profile.options` est vide ; sinon
     /// `Some(serde_json::Value::Object(profile.options.clone()))` — c'est la forme
@@ -58,6 +72,9 @@ pub struct AgentParams {
     pub additional_params: Option<serde_json::Value>,
 }
 
+/// Dérive les [`AgentParams`] d'un `ModelProfile`. Pure : aucune I/O, aucun
+/// réseau, aucun log, ne lève jamais d'erreur (cf. `./model.sdd`).
+#[must_use]
 pub fn agent_params(profile: &ModelProfile) -> AgentParams {
     let additional_params = if profile.options.is_empty() {
         None

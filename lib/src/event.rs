@@ -13,12 +13,14 @@ use rig_core::streaming::{StreamedAssistantContent, StreamedUserContent, Streami
 use crate::error::VnyError;
 
 /// L'événement de session unique — circule sur stdout REPL, WebSocket app et
-/// notifications JSON-RPC (cf. design harness-core.md). Tag "type", snake_case.
+/// notifications JSON-RPC (cf. design harness-core.md). Tag `"type"`, `snake_case`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ChatEvent {
+    /// Delta de texte de la réponse finale (`token`), à accumuler côté client.
     Token {
+        /// Contenu du delta.
         content: String,
     },
     /// Contenu de raisonnement (thinking) — même sémantique que `Token`
@@ -27,11 +29,17 @@ pub enum ChatEvent {
     /// (`StreamedAssistantContent::Reasoning`/`ReasoningDelta`) mais rien ne
     /// le captait avant ce fix — jeté silencieusement par `StreamAccumulator`.
     ReasoningDelta {
+        /// Contenu du delta de raisonnement.
         content: String,
     },
+    /// Appel d'outil annoncé par le modèle (`tool_call`). L'`id` est
+    /// l'`internal_call_id` de rig, partagé avec le `tool_result` corrélé.
     ToolCall {
+        /// `internal_call_id` de rig (id de corrélation, jamais l'id fournisseur).
         id: String,
+        /// Nom de l'outil appelé.
         name: String,
+        /// Arguments de l'appel (tout JSON ; `any` côté TypeScript).
         #[cfg_attr(feature = "ts-rs", ts(type = "any"))]
         args: serde_json::Value,
     },
@@ -40,47 +48,87 @@ pub enum ChatEvent {
     /// l'information n'atteint jamais ce code. Limite connue et documentée
     /// (`docs/architecture.md`, section "Limites connues"), pas un bug local.
     ToolResult {
+        /// `internal_call_id` de rig, identique à celui du `tool_call` corrélé.
         id: String,
+        /// Nom de l'outil restauré depuis l'appel ; vide si l'id n'a jamais
+        /// été annoncé.
         name: String,
+        /// Contenu texte du résultat (contenus `Text` concaténés, `Image` ignorés).
         result: String,
+        /// Drapeau d'erreur — toujours `false` sur ce chemin (limite rig-core,
+        /// voir le commentaire de l'enum).
         is_error: bool,
     },
+    /// Un skill a été chargé par le tool builtin `skill` (`skill_loaded`).
+    /// Produit hors de ce fichier (`builtin/skill.rs`).
     SkillLoaded {
+        /// Nom du skill chargé.
         name: String,
     },
+    /// Démarrage d'un tour de subagent (`subagent_start`). Produit hors de ce
+    /// fichier (`builtin/task.rs`).
     SubagentStart {
+        /// Identifiant du subagent (UUID v4).
         id: String,
+        /// Nom de l'agent invoqué.
         agent: String,
+        /// Prompt transmis au subagent.
         task: String,
     },
+    /// Événement émis PAR un tour imbriqué, encapsulé (`subagent_event`).
+    /// Produit hors de ce fichier (`builtin/task.rs`) ; nesting récursif autorisé.
     SubagentEvent {
+        /// Identifiant du subagent qui a émis l'événement.
         id: String,
+        /// L'événement imbriqué, quel qu'il soit (y compris `error`/`done`).
         event: Box<ChatEvent>,
     },
+    /// Fin d'un tour de subagent (`subagent_end`). Produit hors de ce fichier
+    /// (`builtin/task.rs`).
     SubagentEnd {
+        /// Identifiant du subagent terminé.
         id: String,
+        /// Texte de sa réponse finale, ou `Error: …` si son tour a échoué.
         result: String,
     },
+    /// Compteurs de tokens d'un appel de complétion (`usage`) ; seuls entrée et
+    /// sortie sont conservés.
     Usage {
+        /// Tokens d'entrée.
         input_tokens: u64,
+        /// Tokens de sortie.
         output_tokens: u64,
     },
+    /// Fin de tour (`done`) — émis sur tout chemin de succès de
+    /// [`stream_agent_events`], jamais après [`ChatEvent::Error`].
     Done,
+    /// Erreur terminale pour les consommateurs (`error`) : aucun `done` ne la
+    /// suit.
     Error {
+        /// Marqueur `VNL-*` (ex. `"VNL-LLM-001"` sur le chemin stream).
         code: String,
+        /// Message lisible de l'erreur.
         message: String,
     },
     /// Un serveur MCP sélectionné pour ce tour n'a pas pu être joint — contrairement
     /// à `Error`, non terminale : le tour continue sans les tools de ce serveur
     /// (cf. `connect_mcp_servers_selected`, avant ce fix l'échec était seulement loggé).
     ToolUnavailable {
+        /// Nom du serveur MCP injoignable.
         server: String,
+        /// Motif de l'échec (affichage de l'erreur de connexion).
         reason: String,
     },
 }
 
+/// Destinataire des [`ChatEvent`] d'un tour : un sink est infaillible à cette
+/// interface, la politique de perte est propre à chaque implémentation.
+// async_trait génère un #[must_use] sur le future boxed de chaque méthode, déjà
+// must_use : exemption ciblée justifiée (tooling.sdd).
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait EventSink: Send + Sync {
+    /// Publie un événement (par valeur, sans valeur de retour).
     async fn emit(&self, event: ChatEvent);
 }
 
@@ -90,15 +138,25 @@ pub trait EventSink: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "ts-rs", derive(ts_rs::TS))]
 pub struct ToolCallRecord {
+    /// `internal_call_id` de rig — id de corrélation avec le résultat.
     pub id: String,
+    /// Nom de l'outil appelé.
     pub name: String,
+    /// Arguments de l'appel (tout JSON ; `any` côté TypeScript).
     #[cfg_attr(feature = "ts-rs", ts(type = "any"))]
     pub arguments: serde_json::Value,
+    /// Résultat une fois le `tool_result` corrélé reçu ; `None` si l'appel
+    /// n'a jamais été résolu dans le tour.
     pub result: Option<String>,
 }
 
+/// Bilan d'un tour d'agent retourné par [`stream_agent_events`] — type
+/// purement interne Rust, pas de derive serde ni ts-rs (cf. `./event.sdd`).
 pub struct ChatTurnResult {
+    /// Texte de réponse finale : deltas assistant `Text` concaténés (le
+    /// raisonnement n'y rejoint jamais).
     pub response_text: String,
+    /// Tool calls collectés durant le tour, dans l'ordre d'arrivée.
     pub tool_calls: Vec<ToolCallRecord>,
 }
 
@@ -106,17 +164,39 @@ pub struct ChatTurnResult {
 /// et corrélation id → nom de tool en attente de son résultat.
 #[derive(Default)]
 pub struct StreamAccumulator {
+    /// Texte assistant concaténé (deltas `Text` uniquement).
     pub response_text: String,
+    /// Tool calls collectés, dans l'ordre d'arrivée.
     pub tool_calls: Vec<ToolCallRecord>,
     pending_names: HashMap<String, String>,
 }
 
+/// Extrait et concatène SANS séparateur les contenus textuels (Text/Summary)
+/// d'un bloc `Reasoning` rig. Pur — extraite de `StreamAccumulator::apply`
+/// (garde `too_many_lines`, harnais tooling.sdd).
+fn reasoning_text(reasoning: &rig_core::message::Reasoning) -> String {
+    reasoning
+        .content
+        .iter()
+        .filter_map(|c| match c {
+            rig_core::message::ReasoningContent::Text { text, .. } => Some(text.clone()),
+            rig_core::message::ReasoningContent::Summary(s) => Some(s.clone()),
+            // `#[non_exhaustive]` côté rig-core : Encrypted, Redacted et
+            // futures variantes ignorées plutôt que de casser la compilation
+            // à chaque upgrade.
+            _ => None,
+        })
+        .collect()
+}
+
 impl StreamAccumulator {
+    /// Accumulateur vide, identique à `Default::default()`.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Traduit UN item du stream rig en zéro ou plusieurs ChatEvent, en mettant
+    /// Traduit UN item du stream rig en zéro ou plusieurs `ChatEvent`, en mettant
     /// à jour l'état interne. **Pure — aucune I/O, aucun réseau** : c'est la
     /// fonction testée unitairement (cf. section Tests). Retourne
     /// `(events, is_final)` — `is_final = true` signifie que l'appelant doit
@@ -125,7 +205,7 @@ impl StreamAccumulator {
     ///
     /// Corrélation ToolCall/ToolResult : utiliser `internal_call_id` (généré par
     /// rig, cf. `StreamedAssistantContent::ToolCall` et
-    /// `StreamedUserContent::ToolResult`) comme `id` du ChatEvent — PAS
+    /// `StreamedUserContent::ToolResult`) comme `id` du `ChatEvent` — PAS
     /// `tool_call.id`/`tool_result.id` (id fournisseur, pas fiable pour la
     /// corrélation selon la doc rig elle-même).
     pub fn apply<R>(&mut self, item: MultiTurnStreamItem<R>) -> (Vec<ChatEvent>, bool) {
@@ -143,21 +223,7 @@ impl StreamAccumulator {
             MultiTurnStreamItem::StreamAssistantItem(StreamedAssistantContent::Reasoning(
                 reasoning,
             )) => {
-                let text: String = reasoning
-                    .content
-                    .iter()
-                    .filter_map(|c| match c {
-                        rig_core::message::ReasoningContent::Text { text, .. } => {
-                            Some(text.clone())
-                        }
-                        rig_core::message::ReasoningContent::Summary(s) => Some(s.clone()),
-                        rig_core::message::ReasoningContent::Encrypted(_)
-                        | rig_core::message::ReasoningContent::Redacted { .. } => None,
-                        // `#[non_exhaustive]` côté rig-core : futures variantes ignorées
-                        // plutôt que de casser la compilation à chaque upgrade.
-                        _ => None,
-                    })
-                    .collect();
+                let text = reasoning_text(&reasoning);
                 if text.is_empty() {
                     (Vec::new(), false)
                 } else {
@@ -212,7 +278,7 @@ impl StreamAccumulator {
                 // Mettre à jour le record existant par internal_call_id.
                 // Si aucun record ne correspond (corrélation perdue), on
                 // n'écrit pas dans tool_calls.
-                for record in self.tool_calls.iter_mut() {
+                for record in &mut self.tool_calls {
                     if record.id == internal_call_id {
                         record.result = Some(result_concat.clone());
                         break;
@@ -249,11 +315,18 @@ impl StreamAccumulator {
     }
 }
 
-/// Streame un tour d'agent en émettant des ChatEvent sur `sink`. Remplace, pour
+/// Streame un tour d'agent en émettant des `ChatEvent` sur `sink`. Remplace, pour
 /// le nouveau cœur, l'ancien `stream_agent_response` (qui reste inchangé dans
 /// chat.rs pour l'instant). Émet `Done` à la fin dans tous les cas (succès ou
-/// arrêt sur FinalResponse) ; sur erreur du stream, émet `Error` puis retourne
+/// arrêt sur `FinalResponse`) ; sur erreur du stream, émet `Error` puis retourne
 /// `Err` sans émettre `Done`.
+///
+/// # Errors
+///
+/// Seule erreur possible : [`VnyError::LlmError`] (`VNL-LLM-001`) quand le stream
+/// rig émet une erreur — juste avant, un unique [`ChatEvent::Error`] du même code
+/// et du même message est émis sur le sink, et `Done` n'est jamais émis sur ce
+/// chemin (cf. `./event.sdd`).
 pub async fn stream_agent_events<M, S>(
     sink: Arc<S>,
     agent: Agent<M>,
@@ -282,10 +355,10 @@ where
             Some(Err(e)) => {
                 sink.emit(ChatEvent::Error {
                     code: "VNL-LLM-001".to_string(),
-                    message: format!("{}", e),
+                    message: format!("{e}"),
                 })
                 .await;
-                return Err(VnyError::LlmError(format!("{}", e)));
+                return Err(VnyError::LlmError(format!("{e}")));
             }
             None => {
                 // Stream ended without FinalResponse — emit Done anyway
@@ -412,7 +485,7 @@ mod tests {
         assert_eq!(error_evt["type"], "error");
     }
 
-    /// Test de nesting de l'événement SubagentEvent — roundtrip serde.
+    /// Test de nesting de l'événement `SubagentEvent` — roundtrip serde.
     #[test]
     fn subagent_event_nesting() {
         let original = ChatEvent::SubagentEvent {
@@ -508,7 +581,7 @@ mod tests {
         );
     }
 
-    /// ToolCall puis ToolResult — corrélation par internal_call_id.
+    /// `ToolCall` puis `ToolResult` — corrélation par `internal_call_id`.
     #[test]
     fn apply_tool_call_then_result_correlates() {
         let mut acc = StreamAccumulator::new();
@@ -584,12 +657,12 @@ mod tests {
         assert_eq!(
             tool_call_event_id, tool_result_event_id,
             "ToolCall and ToolResult events for the same tool call must share the same id \
-             (used by consumers to correlate them) — got {:?} vs {:?}",
-            tool_call_event_id, tool_result_event_id
+             (used by consumers to correlate them) — got {tool_call_event_id:?} vs \
+             {tool_result_event_id:?}"
         );
     }
 
-    /// ToolResult avec internal_call_id jamais vu — name vide, pas de panique.
+    /// `ToolResult` avec `internal_call_id` jamais vu — name vide, pas de panique.
     #[test]
     fn apply_tool_result_without_matching_call() {
         let mut acc = StreamAccumulator::new();
@@ -610,15 +683,19 @@ mod tests {
             events,
             vec![ChatEvent::ToolResult {
                 id: "never-seen".into(),
-                name: "".into(),
+                name: String::new(),
                 result: "result".into(),
                 is_error: false,
             }]
         );
-        assert!(acc.tool_calls.is_empty());
+        assert!(
+            acc.tool_calls.is_empty(),
+            "attendu aucun tool_call, got {:?}",
+            acc.tool_calls
+        );
     }
 
-    /// CompletionCall avec usage — émet Usage, sans usage — émet [].
+    /// `CompletionCall` avec usage — émet Usage, sans usage — émet [].
     #[test]
     fn apply_completion_call_usage() {
         let mut acc = StreamAccumulator::new();
@@ -649,12 +726,17 @@ mod tests {
         let (events2, _is_final2) = acc2.apply(MultiTurnStreamItem::<()>::CompletionCall(
             CompletionCall::new(1, None),
         ));
-        assert!(events2.is_empty());
+        assert!(
+            events2.is_empty(),
+            "attendu aucun événement, got {events2:?}"
+        );
     }
 
     /// Mock sink — vérifie que les événements sont émis dans l'ordre.
     #[test]
     fn mock_sink_emit() {
+        fn assert_sink<T: EventSink>() {}
+
         #[derive(Default)]
         struct MockSink {
             events: Mutex<Vec<ChatEvent>>,
@@ -667,19 +749,17 @@ mod tests {
             }
         }
 
-        let sink = Arc::new(MockSink::default());
-
         // Le trait EventSink est implémenté et synchrone dans sa signature (async fn).
         // On ne peut pas await dans un test synchrone, donc on vérifie uniquement
         // la compilation via un type check statique.
-        fn _assert_sink<T: EventSink>() {}
-        _assert_sink::<MockSink>();
+        assert_sink::<MockSink>();
 
         // On utilise Arc<T>::clone + drop comme preuve que le type est Send + Sync.
-        let _s1 = sink.clone();
-        let _s2 = sink.clone();
-        drop(_s1);
-        drop(_s2);
+        let sink = Arc::new(MockSink::default());
+        let s1 = sink.clone();
+        let s2 = sink.clone();
+        drop(s1);
+        drop(s2);
         drop(sink);
     }
 
