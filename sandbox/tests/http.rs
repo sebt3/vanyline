@@ -1,7 +1,8 @@
 //! Tests d'intégration HTTP bout-en-bouche du serveur sandbox : routes de
 //! `build_app` (`/mcp` protégé par jeton d'Owner — authentification et tools
-//! MCP —, relais `/git/status` et `/git/unpushed`, `/health`, absence de
-//! découverte OAuth) et de `build_metrics_app` (`/metrics`) — motif
+//! MCP —, relais `/git/status` et `/git/unpushed`, absence de découverte
+//! OAuth, aucune route publique) et du port d'exploitation (`build_ops_app` /
+//! `spawn_ops_server` : `/health`, `/metrics` sans authentification) — motif
 //! une-request-une-assertion sur l'app complète. Les tickets et sessions WS
 //! ne sont pas couverts ici.
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
@@ -15,7 +16,7 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 use vanyline_sandbox::auth::test_support;
-use vanyline_sandbox::{AppState, build_app, build_metrics_app};
+use vanyline_sandbox::{AppState, build_app, build_ops_app, spawn_ops_server};
 
 // ── Prometheus recorder (one-time global init for the test process) ───────────
 
@@ -86,11 +87,14 @@ async fn body_json(body: axum::body::Body) -> serde_json::Value {
     serde_json::from_slice(&bytes).unwrap()
 }
 
-// ── /health ───────────────────────────────────────────────────────────────────
+// ── Port d'exploitation (`build_ops_app` / `spawn_ops_server`) ────────────────
 
+/// Scenario `sante_repond_sans_autorisation_sur_le_port_d_exploitation`
+/// (`lib.sdd`) — remplace `health_returns_200_ok`, qui interrogeait
+/// `build_app` (le port principal ne porte plus `/health`).
 #[tokio::test]
-async fn health_returns_200_ok() {
-    let app = build_app(test_state_default());
+async fn sante_repond_sans_autorisation_sur_le_port_d_exploitation() {
+    let app = build_ops_app();
     let resp = app
         .oneshot(
             Request::builder()
@@ -103,7 +107,94 @@ async fn health_returns_200_ok() {
 
     assert_eq!(resp.status(), StatusCode::OK);
     let json = body_json(resp.into_body()).await;
-    assert_eq!(json["status"], "ok");
+    assert_eq!(json, serde_json::json!({"status": "ok"}));
+}
+
+/// Scenario `sante_absente_du_port_principal` (`lib.sdd`) : aucune des trois
+/// routes non authentifiées n'est atteignable sur le routeur principal, avec
+/// ou sans jeton d'Owner valide — trois 404.
+#[tokio::test]
+async fn sante_absente_du_port_principal() {
+    let app = build_app(test_state_default());
+    for uri in [
+        "/health",
+        "/metrics",
+        "/.well-known/oauth-protected-resource",
+    ] {
+        for auth in [None, Some(bearer())] {
+            let mut builder = Request::builder().uri(uri);
+            if let Some(token) = &auth {
+                builder = builder.header("authorization", token);
+            }
+            let resp = app
+                .clone()
+                .oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "{uri} ne doit pas être servie sur le port principal (jeton : {auth:?})"
+            );
+        }
+    }
+}
+
+/// Scenario `spawn_ops_server_sur_port_occupe_rend_erreur` (`lib.sdd`) : un
+/// bind sur adresse déjà liée rend `Err` (échec propagé, jamais avalé), sans
+/// panic.
+#[tokio::test]
+async fn spawn_ops_server_sur_port_occupe_rend_erreur() {
+    let holder = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = holder.local_addr().unwrap();
+    let result = spawn_ops_server(addr).await;
+    assert!(
+        result.is_err(),
+        "spawn_ops_server({addr}) devrait rendre Err sur port occupé, rendu : {result:?}"
+    );
+}
+
+/// Scenario `spawn_ops_server_expose_health_et_metrics_sur_port_lie`
+/// (`lib.sdd`) : une fois lié, le serveur d'exploitation sert `/health` et
+/// `/metrics` sur le port choisi, sans authentification. Convention
+/// « ports sondés » (`main.sdd` Tasks) : se lier à `127.0.0.1:0`, lire
+/// `local_addr()`, relâcher, passer l'adresse explicite.
+#[tokio::test]
+async fn spawn_ops_server_expose_health_et_metrics_sur_port_lie() {
+    ensure_prometheus();
+
+    let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = probe.local_addr().unwrap();
+    drop(probe);
+
+    spawn_ops_server(addr).await.expect("bind sur port libre");
+
+    let resp = reqwest::get(format!("http://{addr}/health")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let json: serde_json::Value = resp.json().await.unwrap();
+    assert_eq!(json, serde_json::json!({"status": "ok"}));
+
+    let resp = reqwest::get(format!("http://{addr}/metrics"))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let ct = resp
+        .headers()
+        .get("content-type")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(ct.contains("text/plain"), "content-type inattendu : {ct}");
+    assert!(
+        ct.contains("0.0.4"),
+        "version d'exposition absente du content-type : {ct}"
+    );
+    let body = resp.text().await.unwrap();
+    assert!(
+        !body.is_empty(),
+        "corps Prometheus vide sur le port d'exploitation"
+    );
 }
 
 // ── Auth enforcement ──────────────────────────────────────────────────────────
@@ -1273,13 +1364,13 @@ async fn aucune_decouverte_oauth() {
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
-// ── Metrics endpoint ──────────────────────────────────────────────────────────
+// ── Metrics endpoint (servi par `build_ops_app` sur le port d'exploitation) ───
 
 #[tokio::test]
 async fn metrics_returns_200_with_prometheus_content_type() {
     ensure_prometheus();
 
-    let app = build_metrics_app();
+    let app = build_ops_app();
     let resp = app
         .oneshot(
             Request::builder()
@@ -1311,7 +1402,7 @@ async fn metrics_body_is_valid_prometheus_text() {
     // Emit a known counter so we have at least one metric to assert on.
     metrics::counter!("test_counter_total", "label" => "value").increment(1);
 
-    let app = build_metrics_app();
+    let app = build_ops_app();
     let resp = app
         .oneshot(
             Request::builder()

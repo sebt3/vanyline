@@ -208,14 +208,14 @@ Tasks:
   [ ] Relecture par Sébastien — spec produite en reverse-engineering ; le comportement
     accidentel ne devient contrat qu'après cette relecture (`.specdd/bootstrap.project.md`).
   [ ] Cartographie couverture existante (à re-tagger par les titres de Scenario ; noms
-    ressynchronisés le 2026-10-08 après l'étape auth 5A) : `health_returns_200_ok`
-    (../tests/http.rs — route encore servie par @build_app, port principal, cf. tâche
-    « port d'exploitation complet ») ; auth MCP `mcp_without_token_returns_401`,
+    ressynchronisés le 2026-10-09 après la tâche « port d'exploitation complet » 5D) :
+    `sante_repond_sans_autorisation_sur_le_port_d_exploitation`,
+    `sante_absente_du_port_principal` (../tests/http.rs) ; auth MCP `mcp_without_token_returns_401`,
     `mcp_with_malformed_bearer_returns_401`, `mcp_with_garbage_token_returns_401`,
     `mcp_with_valid_owner_token_returns_200`, `mcp_with_foreign_owner_token_returns_403`,
     `aucune_decouverte_oauth` ; métriques
     `metrics_returns_200_with_prometheus_content_type`, `metrics_body_is_valid_prometheus_text`
-    (via @build_metrics_app) ; tickets `issuance_without_auth_returns_401`,
+    (via @build_ops_app) ; tickets `issuance_without_auth_returns_401`,
     `issuance_with_owner_token_returns_ticket`
     (./ws/ticket.rs) ; gardes WS `ticket_query_required` (./ws/fs.rs),
     `terminal_ticket_required` (./ws/terminal.rs), `lsp_ticket_required_with_valid_ticket`
@@ -228,9 +228,7 @@ Tasks:
     `flush_sans_abonne_rend_faux_au_timeout`, `ids_de_flush_uniques_et_monotoniques_depuis_un`,
     `canal_fs_events_capacite_soixante_quatre`,
     `middleware_metriques_compte_requete_sante_avec_labels`,
-    `middleware_metriques_compte_les_chemins_inconnus`,
-    `spawn_ops_server_sur_port_occupe_rend_erreur`,
-    `spawn_ops_server_expose_health_et_metrics_sur_port_lie`.
+    `middleware_metriques_compte_les_chemins_inconnus`.
   [?] Cardinalité des labels de @track_metrics : le `path` est l'URI BRUTE et le code
     affirme « routes are static in this template so cardinality is low », alors que
     `DELETE /git/branches/{name}` et `GET /ws/lsp/{toolchain}` sont paramétrées ET que le
@@ -244,23 +242,23 @@ Tasks:
     `/metrics` servi sur le port d'exploitation (`ops_listen`). Les décisions du 2026-09-27
     sur le RBAC Read/Admin étaient CADUQUES, rien implémenté. RESTE (parties non faites,
     scindées ci-dessous) :
-  [ ] Port d'exploitation complet — les Scenarios gelés
-    `sante_repond_sans_autorisation_sur_le_port_d_exploitation`,
-    `sante_absente_du_port_principal`, `spawn_ops_server_sur_port_occupe_rend_erreur` et
-    `spawn_ops_server_expose_health_et_metrics_sur_port_lie` ne sont pas écrits et le code
-    est en retard : exposer `/health` sur le port d'exploitation en plus de `/metrics`,
-    bind FATAL (port occupé ⇒ erreur, pas un warn), retirer `/health` de @build_app ;
-    renommer @build_metrics_app/@spawn_metrics_server en @build_ops_app/@spawn_ops_server
-    (noms du contrat) ; écrire les tests des quatre Scenarios.
+  [x] Port d'exploitation complet — FAIT 5D, validator-verte 2026-10-09 : les quatre
+    Scenarios gelés (`sante_repond_sans_autorisation_sur_le_port_d_exploitation`,
+    `sante_absente_du_port_principal`, `spawn_ops_server_sur_port_occupe_rend_erreur`,
+    `spawn_ops_server_expose_health_et_metrics_sur_port_lie`) écrits aux titres exacts et
+    verts (../tests/http.rs, 48 tests) ; `/health` exposé sur le port d'exploitation,
+    bind FATAL propagé, `/health` retiré de @build_app (sous-routeur public disparu) ;
+    @build_metrics_app/@spawn_metrics_server renommés @build_ops_app/@spawn_ops_server
+    (noms du contrat). Effet bord réel vérifié : les sondes readiness/liveness du
+    controller (port ops) répondent enfin.
   [ ] Ajouter les routes `/code-health/*` — prérequis : câblage de `vanyline-health` dans
     le crate (santé du code, hors migration auth).
   [x] Migration mécanique des Scenario d'auth — FAITE (5A, validator-verte 2026-10-08) :
     plus aucun Scenario de CE fichier ne dit « configuré avec `no_auth` » ou
     « `static_token` = `s3cret` » ; les tests présentent un jeton d'Owner de test valide
-    (`auth::test_support`, ./auth.sdd) et vérifient le `sub` du jeton. Le volet « /health
-    et /metrics interrogent le routeur d'exploitation » est reporté à la tâche
-    « port d'exploitation complet » (le test `health_returns_200_ok` interroge encore
-    @build_app).
+    (`auth::test_support`, ./auth.sdd) et vérifient le `sub` du jeton. Volet « /health
+    et /metrics interrogent le routeur d'exploitation » : FAIT (5D, voir tâche
+    « port d'exploitation complet »).
   [ ] Scrub du paramètre `ticket` dans le @TraceLayer (voir `Must`).
   [?] Interaction garde d'auth × 404/405 sur le router fusionné (sémantique axum des
     `route_layers` après `merge` : `GET /mcp` sans jeton fait-il tourner @require_auth

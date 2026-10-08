@@ -155,7 +155,7 @@ Handles:
     chemins d'erreur `?` (bind, TLS, erreur du serveur) l'enjambent et les spans en file
     peuvent être perdues. Signalé `[?]`.
   Consommation par ./lib.rs — @metrics_handler rend 503 tant que @render_metrics vaut
-    `None` (recorder non posé, ex. tests appelant @build_metrics_app sans @init_prometheus),
+    `None` (recorder non posé, ex. tests appelant @build_ops_app sans @init_prometheus),
     200 avec `content-type: text/plain; version=0.0.4; charset=utf-8` sinon.
   @track_metrics sans recorder — les macros @metrics sur un recorder absent sont des
     no-op silencieux : pas de compteur avant @init_prometheus, aucune erreur.

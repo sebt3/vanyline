@@ -8,7 +8,7 @@ use anyhow::Result;
 use clap::Parser as _;
 use vanyline_sandbox::{
     AppState, LspManager, auth::AuthState, build_app, config::Config, fs_push_channels,
-    spawn_metrics_server, ws::ticket::TicketStore,
+    spawn_ops_server, ws::ticket::TicketStore,
 };
 
 #[tokio::main]
@@ -20,10 +20,11 @@ async fn main() -> Result<()> {
     config.validate()?;
     let config = Arc::new(config);
 
-    // Spawn the ops server (separate port, non-fatal bind failure): /health and
-    // /metrics, no auth, never published.
+    // Spawn the ops server (separate port, FATAL bind failure): /health and
+    // /metrics, no auth, never published. Health probes depend on it — a
+    // sandbox without its ops port must never half-start (main.sdd: exit 1).
     let ops_addr: std::net::SocketAddr = config.ops_listen.parse()?;
-    spawn_metrics_server(ops_addr).await;
+    spawn_ops_server(ops_addr).await?;
 
     let auth = Arc::new(AuthState::new(config.clone())?);
     let lsp = Arc::new(LspManager::from_env(config.sandbox_root.clone())?);

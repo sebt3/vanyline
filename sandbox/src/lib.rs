@@ -195,9 +195,10 @@ impl FsFlushRequests {
     }
 }
 
-/// Build the main MCP application router (MCP + public routes).
-///
-/// The metrics server runs on a separate port — see [`spawn_metrics_server`].
+/// Construit le routeur principal du port d'écoute (`listen`) : routes
+/// protégées par le jeton d'Owner et upgrades WS par ticket. AUCUNE route
+/// publique : `/health` et `/metrics` vivent sur le port d'exploitation
+/// ([`build_ops_app`], [`spawn_ops_server`]), jamais ici (spec `./lib.sdd`).
 pub fn build_app(state: AppState) -> Router {
     let protected = Router::new()
         .route("/mcp", post(mcp::handle))
@@ -223,8 +224,7 @@ pub fn build_app(state: AppState) -> Router {
             auth::require_auth,
         ));
 
-    let public = Router::new()
-        .route("/health", get(health))
+    let ws = Router::new()
         .route(
             "/ws/fs",
             get(crate::ws::fs::handle_ws_fs).layer(middleware::from_fn_with_state(
@@ -249,18 +249,21 @@ pub fn build_app(state: AppState) -> Router {
 
     Router::new()
         .merge(protected)
-        .merge(public)
+        .merge(ws)
         .layer(middleware::from_fn(track_metrics))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }
 
-/// Build the internal metrics router (`GET /metrics`).
-///
-/// Bind on `config.metrics_listen` (default `0.0.0.0:9090`). Never expose this
-/// port externally — protect it at the network/infra layer (`NetworkPolicy`, etc.).
-pub fn build_metrics_app() -> Router {
-    Router::new().route("/metrics", get(metrics_handler))
+/// Construit le routeur d'exploitation nu : exactement `GET /health` et
+/// `GET /metrics`, sans état, sans `TraceLayer`, sans `track_metrics`, sans
+/// AUCUNE authentification (spec `./lib.sdd`, `@build_ops_app`). Le port
+/// d'exploitation n'est jamais publié (ni Service ni Ingress) ; seuls kubelet
+/// (sondes) et la supervision y accèdent.
+pub fn build_ops_app() -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/metrics", get(metrics_handler))
 }
 
 /// Handler for `POST /ws/ticket` — issues a short-lived, single-use ticket
@@ -284,28 +287,32 @@ async fn handle_ws_ticket(
     )
 }
 
-/// Spawn the metrics HTTP server as a background task.
+/// Lie `addr` AVANT de rendre la main puis sert le routeur d'exploitation
+/// ([`build_ops_app`] : `/health`, `/metrics`) dans une tâche détachée.
+/// L'échec de bind est PROPAGÉ (`io::Result`, jamais avalé) : les sondes de
+/// santé en dépendent, un pod sans port d'exploitation ne doit jamais démarrer
+/// à moitié (spec `./lib.sdd` ; `./main.rs` : fatal, exit 1). Une erreur
+/// d'`axum::serve` en service est loggée `warn` dans la tâche détachée.
 ///
-/// A bind failure is logged as a warning but does **not** abort startup —
-/// the main MCP server continues without an exposed `/metrics` endpoint.
-pub async fn spawn_metrics_server(addr: std::net::SocketAddr) {
-    match tokio::net::TcpListener::bind(addr).await {
-        Ok(listener) => {
-            tracing::info!("metrics server listening on {addr}");
-            tokio::spawn(async move {
-                if let Err(e) = axum::serve(listener, build_metrics_app()).await {
-                    tracing::warn!("metrics server error: {e}");
-                }
-            });
+/// # Errors
+///
+/// `Err` (kind `AddrInUse` typiquement) si le bind sur `addr` échoue —
+/// l'échec est propagé, jamais avalé (fatal pour `./main.rs`).
+pub async fn spawn_ops_server(addr: std::net::SocketAddr) -> std::io::Result<()> {
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+    tracing::info!("ops server listening on {addr}");
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, build_ops_app()).await {
+            tracing::warn!("ops server error: {e}");
         }
-        Err(e) => {
-            tracing::warn!("could not bind metrics server on {addr}: {e} — /metrics unavailable");
-        }
-    }
+    });
+    Ok(())
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────────
 
+/// `GET /health` : `200` + `{"status":"ok"}`, sans auth ni état, sur le seul
+/// port d'exploitation ([`build_ops_app`]).
 async fn health() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({ "status": "ok" }))
 }
