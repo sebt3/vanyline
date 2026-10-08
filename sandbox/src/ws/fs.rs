@@ -277,11 +277,11 @@ pub async fn dispatch_fs_message(state: &AppState, raw: &str) -> serde_json::Val
 
 // Helper to create an AppState with a fresh TempDir for each test.
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 fn make_state(test_name: &str) -> AppState {
-    use crate::{AuthState, config::Config};
+    use crate::auth::test_support;
 
-    let tmpdir = std::env::temp_dir().join(format!("vanyline-sandbox-fs-test/{}", test_name));
+    let tmpdir = std::env::temp_dir().join(format!("vanyline-sandbox-fs-test/{test_name}"));
     let sandbox_root = std::path::PathBuf::from(format!("{}/sandbox", tmpdir.display()));
 
     std::fs::create_dir_all(&sandbox_root).unwrap();
@@ -291,23 +291,8 @@ fn make_state(test_name: &str) -> AppState {
         "hello\nline2\nline3\nline4\nline5\nline6\nline7\nline8\nline9\nline10\nline11\nline12\nline13\nline14\nline15\nline16\nline17\nline18\nline19\nline20\n",
     ).unwrap();
 
-    let config = std::sync::Arc::new(Config {
-        listen: "0.0.0.0:3000".into(),
-        tls_cert: None,
-        tls_key: None,
-        oidc_issuer: None,
-        oidc_audience: None,
-        auth_groups_admin: "kubernetes-admin".into(),
-        auth_groups_read: "kubernetes-view".into(),
-        no_auth: false,
-        static_token: None,
-        public_url: None,
-        oidc_ca_cert: None,
-        metrics_listen: "0.0.0.0:9090".into(),
-        otel_endpoint: None,
-        sandbox_root: sandbox_root.clone(),
-    });
-    let auth = AuthState::new(config.clone()).unwrap();
+    let config = std::sync::Arc::new(test_support::test_config(&sandbox_root));
+    let auth = test_support::auth_state(config.clone());
 
     let (fs_events, fs_flush) = crate::fs_push_channels();
     AppState {

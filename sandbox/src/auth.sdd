@@ -75,7 +75,7 @@ Exposes:
     `resource_metadata` : aucune découverte OAuth n'existe, cf. ./mcp.sdd) ; 403 et 503 n'en
     portent pas.
   @require_auth — `pub async fn` middleware (`State(@AppState)`, @Request, @Next -> @Response).
-  Module `test_support` (gated `#[cfg(any(test, feature = "test-support"))]`, jamais dans le
+  Module `test_support` (gated `#[cfg(any(test, feature = "test"))]`, jamais dans le
     binaire de production) : générateur de paire de clés de test, fabrication de @AuthState
     avec JWKS injecté, @mint_owner_token(subject, audience, issuer, ttl) qui signe un jeton de
     test. C'est ainsi que les tests (unitaires et `sandbox/tests/`) s'authentifient — il n'y a
@@ -93,7 +93,10 @@ Returns:
 
 Raises:
   @AuthState::new : @anyhow::Error si un paramètre requis est vide, si `jwks_ca_file` est
-    illisible ou non-PEM, ou si le builder HTTP échoue (échec de démarrage fatal).
+    illisible ou non-PEM, **si `jwks_file` est illisible ou ne parse pas comme JWKS**
+    (pré-lecture au démarrage — décision fail-fast Sébastien 2026-10-08 : on ne démarre pas
+    sur une source de clés non exploitable, cf. `aucun_contournement`), ou si le builder HTTP
+    échoue (échec de démarrage fatal).
   @AuthState::validate_token — @AuthError uniquement ; ordre d'évaluation verrouillé :
     1. décodage du header et présence d'un `kid` (sinon @InvalidToken) AVANT tout réseau ;
     2. clés de vérification disponibles (@KeysUnavailable sinon) ;
@@ -185,8 +188,10 @@ Tasks:
   [ ] Convertir chaque Scenario en test taggé par son titre (`test_support` fournit clés et
     jetons) ; les tests des autres specs qui s'authentifiaient en `no_auth` ou `static_token`
     présentent désormais un jeton de test valide pour l'Owner configuré.
-  [ ] Feature cargo `test-support` du crate sandbox (dev-dependency d'elle-même pour
-    `sandbox/tests/`).
+  [ ] Feature cargo `test` du crate sandbox (dev-dependency d'elle-même pour
+    `sandbox/tests/`) — nommée `test` et non `test-support` : le harnais `cargo` (deny) rend
+    `clippy::redundant_feature_names` qui interdit le suffixe `-support` (diagnostic reproduit
+    par validator clippy 1.99). Le module reste `test_support`.
 
 Done when:
   Chaque Scenario a un test dédié taggé par son titre, vert ; aucune référence à
@@ -262,6 +267,16 @@ Scenario: formats_de_reponse
     `resource_metadata` ; 403 (006) et 503 (003) sans ce header ; corps JSON conformes à `Exposes`
 
 Scenario: aucun_contournement
-  Given une @Config sans `jwks_url` ni `jwks_file`, ou avec `owner_subject` vide
+  # Given réécrit le 2026-10-08 (décision Sébastien, arbitrage de la contradiction relevée
+  # par validator avec `configuration_nominale` de ./config.sdd) : une config SANS drapeau
+  # `jwks_*` EST le mode nominal in-cluster (`Url(DEFAULT_JWKS_URL)`, validation Ok) — elle
+  # ne peut pas échouer au démarrage. Ce que le Scenario verrouille : configuration dont le
+  # MATÉRIEL DE VÉRIFICATION est non exploitable ou identité vide ⇒ crash, jamais un serveur
+  # ouvert. La non-exploitabilité se materiallyse au démarrage : `jwks_ca_file` illisible ou
+  # non-PEM (mode `Url`), `jwks_file` illisible ou ne parseant pas comme JWKS (mode `File`,
+  # pré-lecture — fail-fast 2026-10-08), `owner_subject` vide/absent, source de clés vide.
+  Given une @Config dont le matériel de vérification est non exploitable (CA illisible ou
+    non-PEM en mode `Url` ; `jwks_file` illisible ou non-JWKS en mode `File`), ou dont
+    `owner_subject` est vide
   When @AuthState::new ou @Config::validate s'exécute
   Then échec de démarrage, jamais un serveur ouvert

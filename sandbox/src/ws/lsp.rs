@@ -396,43 +396,27 @@ async fn lsp_session(state: AppState, toolchain: String, mut ws: WebSocket) {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
 
-    use crate::{
-        AppState, AuthState, LspManager, build_app, config::Config, ws::ticket::TicketStore,
-    };
+    use crate::auth::test_support;
+    use crate::{AppState, LspManager, build_app, ws::ticket::TicketStore};
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode, header};
     use std::sync::Arc;
     use tower::ServiceExt;
 
-    /// Helper : construit un AppState avec `static_token: Some("s3cret")`
-    /// pour émettre un ticket via `POST /ws/ticket`.
+    /// Helper : construit un AppState pour l'Owner de test de `test_support`
+    /// (le jeton d'Owner à présenter est renvoyé par la config du test).
     fn make_state(test_name: &str) -> AppState {
-        let tmpdir = std::env::temp_dir().join(format!("vanyline-sandbox-lsp-test/{}", test_name));
+        let tmpdir = std::env::temp_dir().join(format!("vanyline-sandbox-lsp-test/{test_name}"));
         let sandbox_root = tmpdir.join("sandbox");
 
         std::fs::create_dir_all(&sandbox_root).unwrap();
 
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view".into(),
-            no_auth: false,
-            static_token: Some("s3cret".into()),
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: sandbox_root.clone(),
-        });
-        let auth = AuthState::new(config.clone()).unwrap();
+        let config = Arc::new(test_support::test_config(&sandbox_root));
+        let auth = test_support::auth_state(config.clone());
 
         // TicketStore externe partagé (pattern de ticket.rs)
         let external_store = TicketStore::new();
@@ -508,7 +492,18 @@ mod tests {
                 Request::builder()
                     .method(Method::POST)
                     .uri("/ws/ticket")
-                    .header(header::AUTHORIZATION, "Bearer s3cret")
+                    .header(
+                        header::AUTHORIZATION,
+                        format!(
+                            "Bearer {}",
+                            test_support::mint_owner_token(
+                                test_support::TEST_OWNER,
+                                test_support::TEST_AUDIENCE,
+                                test_support::TEST_ISSUER,
+                                600,
+                            )
+                        ),
+                    )
                     .body(Body::empty())
                     .unwrap(),
             )

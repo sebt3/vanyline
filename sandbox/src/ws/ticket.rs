@@ -9,7 +9,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use crate::auth::AccessLevel;
 use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
@@ -65,13 +64,14 @@ impl IntoResponse for WsAuthError {
 /// chain `POST /ws/ticket` then the WS handshake. Not a full session.
 pub const TICKET_TTL_SECS: u64 = 30;
 
-/// What a ticket authenticates — same shape as `AuthInfo` (auth.rs):
-/// `subject` + `access`. This is the data that the ticket path must produce,
-/// not a shortcut less rich than the JWT path.
+/// What a ticket authenticates — same shape as `AuthInfo` (auth.rs): the
+/// owner's `subject` only. This is the data that the ticket path must carry,
+/// not a shortcut less rich than the JWT path. Aucun niveau d'accès n'existe
+/// (auth.sdd, décision 2026-10-04).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TicketClaims {
+    /// `sub` du jeton d'Owner, copié de l'`AuthInfo` à l'émission.
     pub subject: String,
-    pub access: AccessLevel,
 }
 
 /// Error returned by the WS extractor when the ticket is missing/consumed.
@@ -166,14 +166,41 @@ pub fn redeem_from_query(
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use crate::{AppState, AuthState, build_app, config::Config};
+    use crate::auth::test_support;
+    use crate::{AppState, build_app};
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode, header::AUTHORIZATION};
     use std::sync::Arc;
     use tower::ServiceExt;
+
+    /// `AuthState` de test dont la config vise l'`test_support::TEST_OWNER` ;
+    /// l'AppState et le jeton d'Owner à présenter sont cohérents (pas de
+    /// contournement : un vrai jeton signé par la clé de test).
+    fn state_with_test_owner() -> (AppState, String) {
+        let config = Arc::new(test_support::test_config(std::path::Path::new(
+            "/tmp/vanyline-ticket-test",
+        )));
+        let auth = test_support::auth_state(config.clone());
+        let (fs_events, fs_flush) = crate::fs_push_channels();
+        let state = AppState {
+            config,
+            auth: Arc::new(auth),
+            tickets: TicketStore::new(),
+            lsp: Arc::new(crate::lsp::LspManager::default()),
+            fs_events,
+            fs_flush,
+        };
+        let token = test_support::mint_owner_token(
+            test_support::TEST_OWNER,
+            test_support::TEST_AUDIENCE,
+            test_support::TEST_ISSUER,
+            600,
+        );
+        (state, token)
+    }
 
     // Test 1: ticket_redeem_returns_claims
     #[test]
@@ -181,14 +208,12 @@ mod tests {
         let store = TicketStore::new();
         let claims = TicketClaims {
             subject: "user-u".into(),
-            access: AccessLevel::Admin,
         };
         let ticket = store.issue(claims.clone());
         let redeemed = store.redeem(&ticket);
         assert!(redeemed.is_some());
         let r = redeemed.unwrap();
         assert_eq!(r.subject, "user-u");
-        assert_eq!(r.access, AccessLevel::Admin);
     }
 
     // Test 2: ticket_is_single_use
@@ -197,7 +222,6 @@ mod tests {
         let store = TicketStore::new();
         let claims = TicketClaims {
             subject: "u".into(),
-            access: AccessLevel::Admin,
         };
         let ticket = store.issue(claims);
         // First redeem succeeds
@@ -214,7 +238,6 @@ mod tests {
         // mod tests is inside the same module, so it has access to the private field.
         let claims = TicketClaims {
             subject: "u".into(),
-            access: AccessLevel::Admin,
         };
         // Overwrite the Arc with a new map containing an expired entry
         let expired_instant = Instant::now() - Duration::from_secs(60);
@@ -234,17 +257,8 @@ mod tests {
     // Route-level test: POST /ws/ticket without Authorization → 401
     #[tokio::test]
     async fn issuance_without_auth_returns_401() {
-        let config = make_config("admin", "reader");
-        let auth = AuthState::new(config.clone()).unwrap();
-        let (fs_events, fs_flush) = crate::fs_push_channels();
-        let app = build_app(AppState {
-            config,
-            auth: Arc::new(auth),
-            tickets: TicketStore::new(),
-            lsp: Arc::new(crate::lsp::LspManager::default()),
-            fs_events,
-            fs_flush,
-        });
+        let (state, _token) = state_with_test_owner();
+        let app = build_app(state);
 
         let resp = app
             .oneshot(
@@ -260,33 +274,26 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // Test 5: issuance_with_static_token_returns_ticket
-    // Route-level test: POST /ws/ticket with static_token auth → 200 + ticket,
-    // and the issued ticket redeems to the same subject/access it was minted for.
+    // Test 5: issuance_with_owner_token_returns_ticket
+    // Route-level test: POST /ws/ticket with a signed test owner token →
+    // 200 + ticket, and the issued ticket redeems to the same subject it was
+    // minted for.
     #[tokio::test]
-    async fn issuance_with_static_token_returns_ticket() {
-        let config = make_config_with_static_token("s3cret");
-        let auth = AuthState::new(config.clone()).unwrap();
+    async fn issuance_with_owner_token_returns_ticket() {
+        let (mut state, token) = state_with_test_owner();
         // Keep a clone of the store outside the app. Since TicketStore internally
         // uses Arc<Mutex<...>>, the clone shares the same underlying map — we can
         // verify redemptions after the request completes.
         let external_store = TicketStore::new();
-        let (fs_events, fs_flush) = crate::fs_push_channels();
-        let app = build_app(AppState {
-            config,
-            auth: Arc::new(auth),
-            tickets: external_store.clone(),
-            lsp: Arc::new(crate::lsp::LspManager::default()),
-            fs_events,
-            fs_flush,
-        });
+        state.tickets = external_store.clone();
+        let app = build_app(state);
 
         let resp = app
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
                     .uri("/ws/ticket")
-                    .header(AUTHORIZATION, "Bearer s3cret")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -308,49 +315,10 @@ mod tests {
         let claims = external_store
             .redeem(ticket)
             .expect("the ticket issued by the handler must be redeemable");
-        assert_eq!(claims.subject, "static-token");
-        assert_eq!(claims.access, AccessLevel::Admin);
+        assert_eq!(claims.subject, test_support::TEST_OWNER);
         // The ticket is single-use: a second redeem must fail.
         assert!(external_store.redeem(ticket).is_none());
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    fn make_config(admin: &str, read: &str) -> Arc<Config> {
-        Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: admin.into(),
-            auth_groups_read: read.into(),
-            no_auth: false,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: std::path::PathBuf::from("/workspace"),
-        })
-    }
-
-    fn make_config_with_static_token(token: &str) -> Arc<Config> {
-        Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
-            no_auth: false,
-            static_token: Some(token.into()),
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: std::path::PathBuf::from("/workspace"),
-        })
-    }
 }

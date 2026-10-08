@@ -145,61 +145,23 @@ pub(crate) async fn handle_tools_call(
     }
 }
 
-// ── GET /.well-known/oauth-protected-resource (RFC 9728) ─────────────────────
-
-pub async fn oauth_metadata(State(state): State<AppState>) -> Json<Value> {
-    let resource = state
-        .config
-        .public_url
-        .as_deref()
-        .unwrap_or(crate::config::DEFAULT_PUBLIC_URL);
-
-    let auth_servers: Vec<_> = state
-        .config
-        .oidc_issuer
-        .iter()
-        .map(|s| s.as_str())
-        .collect();
-
-    Json(serde_json::json!({
-        "resource": resource,
-        "authorization_servers": auth_servers,
-        "bearer_methods_supported": ["header"],
-    }))
-}
-
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
     use super::*;
-    use crate::auth::AuthState;
-    use crate::config::Config;
+    use crate::auth::test_support;
     use std::sync::Arc;
 
     fn make_state() -> AppState {
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
-            no_auth: true,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: std::path::Path::new("/tmp").into(),
-        });
-        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let config = Arc::new(test_support::test_config(std::path::Path::new("/tmp")));
+        let auth = test_support::auth_state(config.clone());
         let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
             config,
-            auth,
+            auth: Arc::new(auth),
             tickets: crate::ws::ticket::TicketStore::new(),
             lsp: std::sync::Arc::new(crate::lsp::LspManager::default()),
             fs_events,

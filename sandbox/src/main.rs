@@ -10,15 +10,16 @@ use vanyline_sandbox::{
 #[tokio::main]
 async fn main() -> Result<()> {
     // Parse CLI/env before starting tracing so we can pass otel_endpoint.
-    // Full validation (OIDC checks) runs after tracing is initialised.
+    // Full validation (owner identity, JWKS source) runs after tracing is initialised.
     let config = Config::parse();
     vanyline_sandbox::telemetry::init(config.otel_endpoint.as_deref())?;
     config.validate()?;
     let config = Arc::new(config);
 
-    // Spawn the internal metrics server (separate port, non-fatal bind failure).
-    let metrics_addr: std::net::SocketAddr = config.metrics_listen.parse()?;
-    spawn_metrics_server(metrics_addr).await;
+    // Spawn the ops server (separate port, non-fatal bind failure): /health and
+    // /metrics, no auth, never published.
+    let ops_addr: std::net::SocketAddr = config.ops_listen.parse()?;
+    spawn_metrics_server(ops_addr).await;
 
     let auth = Arc::new(AuthState::new(config.clone())?);
     let lsp = Arc::new(LspManager::from_env(config.sandbox_root.clone())?);

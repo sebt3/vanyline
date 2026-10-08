@@ -177,7 +177,12 @@ Scenario: sandbox_root_par_defaut
   When @Config est parsée
   Then `sandbox_root` vaut `/home/vanyline/workspace`
 
-Scenario: cooldown_par_defaut_et_surcharge
-  Given aucun drapeau, puis `VNL_HEALTH_COOLDOWN_SECS=5`
+Scenario: cooldown_par_defaut
+  # Restreint le 2026-10-08 (décision Sébastien 6B) : le volet surcharge par env
+  # (`VNL_HEALTH_COOLDOWN_SECS=5`) est retiré du Scenario — la surcharge est déjà testée
+  # hors-ctx global par @try_parse_from sur argv explicite ; poser une env process-level
+  # (`set_var`) est `unsafe` en edition 2024 et pollue le processus de test (cf. le `[!]`
+  # partagé `set_var` sous verrou ailleurs dans le workspace). Ne restent que les défauts.
+  Given aucun drapeau
   When @Config est parsée
-  Then `health_cooldown_secs` vaut `30`, puis `5`
+  Then `health_cooldown_secs` vaut `30`

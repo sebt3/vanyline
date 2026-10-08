@@ -3139,10 +3139,9 @@ fn diff_diagnostics(before: &[Value], after: &[Value]) -> DiagnosticsDiff {
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
-    use crate::auth::AuthState;
-    use crate::config::Config;
+    use crate::auth::test_support;
     use crate::lsp::LspManager;
     use crate::lsp_client::lsp_test_fakes;
     use std::sync::Arc;
@@ -3370,23 +3369,8 @@ mod tests {
         let rust_home = tmpdir.path().join("main.rs");
         std::fs::write(&rust_home, "fn main() {}").unwrap();
 
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
-            no_auth: true,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: tmpdir.path().to_path_buf(),
-        });
-        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let config = Arc::new(test_support::test_config(tmpdir.path()));
+        let auth = Arc::new(test_support::auth_state(config.clone()));
         let lsp = Arc::new(LspManager::new(
             vec![crate::lsp::LspToolchain {
                 name: "rust".to_string(),
@@ -3414,23 +3398,8 @@ mod tests {
         let rust_home = tmpdir.path().join("main.rs");
         std::fs::write(&rust_home, "fn main() {}").unwrap();
 
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
-            no_auth: true,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: tmpdir.path().to_path_buf(),
-        });
-        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let config = Arc::new(test_support::test_config(tmpdir.path()));
+        let auth = Arc::new(test_support::auth_state(config.clone()));
         let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {
             config,
@@ -4425,23 +4394,8 @@ mod tests {
         let rust_home = tmpdir.path().join("main.rs");
         std::fs::write(&rust_home, "fn main() {}").unwrap();
 
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
-            no_auth: true,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: tmpdir.path().to_path_buf(),
-        });
-        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let config = Arc::new(test_support::test_config(tmpdir.path()));
+        let auth = Arc::new(test_support::auth_state(config.clone()));
         let lsp = Arc::new(LspManager::new(
             vec![crate::lsp::LspToolchain {
                 name: "rust".to_string(),
@@ -5807,23 +5761,8 @@ mod tests {
         let observer_log = root.join(format!("observer_{name}.log"));
         std::fs::write(root.join("main.rs"), "x\n").unwrap();
 
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view,kubernetes-edit".into(),
-            no_auth: true,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: root.clone(),
-        });
-        let auth = Arc::new(AuthState::new(config.clone()).unwrap());
+        let config = Arc::new(test_support::test_config(tmpdir.path()));
+        let auth = Arc::new(test_support::auth_state(config.clone()));
         let lsp = Arc::new(LspManager::new(
             vec![crate::lsp::LspToolchain {
                 name: "rust".to_string(),

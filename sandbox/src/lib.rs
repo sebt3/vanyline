@@ -1,4 +1,4 @@
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod auth;
 pub mod config;
@@ -201,10 +201,6 @@ pub fn build_app(state: AppState) -> Router {
     let public = Router::new()
         .route("/health", get(health))
         .route(
-            "/.well-known/oauth-protected-resource",
-            get(mcp::oauth_metadata),
-        )
-        .route(
             "/ws/fs",
             get(crate::ws::fs::handle_ws_fs).layer(middleware::from_fn_with_state(
                 state.clone(),
@@ -253,7 +249,6 @@ async fn handle_ws_ticket(
     let store = &state.tickets;
     let ticket = store.issue(TicketClaims {
         subject: auth.subject,
-        access: auth.access,
     });
     (
         StatusCode::OK,

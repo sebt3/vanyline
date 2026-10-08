@@ -246,10 +246,11 @@ pub fn kill_process_group(child: &mut Box<dyn portable_pty::Child + Send + Sync>
 
 #[cfg(test)]
 mod tests {
-    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
-    use crate::{AppState, AuthState, build_app, config::Config};
+    use crate::auth::test_support;
+    use crate::{AppState, build_app};
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use std::io::Write;
@@ -265,23 +266,8 @@ mod tests {
 
         std::fs::create_dir_all(&sandbox_root).unwrap();
 
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view".into(),
-            no_auth: false,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: sandbox_root.clone(),
-        });
-        let auth = AuthState::new(config.clone()).unwrap();
+        let config = Arc::new(test_support::test_config(&sandbox_root));
+        let auth = test_support::auth_state(config.clone());
 
         let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
@@ -454,23 +440,8 @@ mod tests {
         let sandbox_root = tmpdir.join("sandbox");
         std::fs::create_dir_all(&sandbox_root).unwrap();
 
-        let config = Arc::new(Config {
-            listen: "0.0.0.0:3000".into(),
-            tls_cert: None,
-            tls_key: None,
-            oidc_issuer: None,
-            oidc_audience: None,
-            auth_groups_admin: "kubernetes-admin".into(),
-            auth_groups_read: "kubernetes-view".into(),
-            no_auth: false,
-            static_token: None,
-            public_url: None,
-            oidc_ca_cert: None,
-            metrics_listen: "0.0.0.0:9090".into(),
-            otel_endpoint: None,
-            sandbox_root: sandbox_root.clone(),
-        });
-        let auth = AuthState::new(config.clone()).unwrap();
+        let config = Arc::new(test_support::test_config(&sandbox_root));
+        let auth = test_support::auth_state(config.clone());
 
         let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {

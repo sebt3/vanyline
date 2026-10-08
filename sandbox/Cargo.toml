@@ -4,6 +4,17 @@ version.workspace = true
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Serveur embarqué dans le pod sandbox : MCP, git, santé du code, jobs et WebSocket éditeur ; embarque l'utilitaire vanyline-maint."
+repository = "https://github.com/sebt3/vanyline"
+readme = "../README.md"
+keywords = ["kubernetes", "mcp", "sandbox"]
+categories = ["web-programming", "asynchronous"]
+
+[features]
+# Expose `auth::test_support` (clés et jetons de test signés) aux tests
+# d'intégration `sandbox/tests/`. Jamais activée dans le binaire de production
+# — il n'existe aucun mode de contournement d'authentification (auth.sdd).
+test = []
 
 [[bin]]
 name = "vanyline-sandbox"
@@ -31,7 +42,12 @@ tower-http = { version = "0.7", features = ["trace"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 clap = { version = "4", features = ["derive", "env"] }
-jsonwebtoken = "11"
+# `rust_crypto` : jsonwebtoken 11 ne fournit aucun CryptoProvider par défaut et
+# panique au premier encode/decode sans lui (ambiguïté aws_lc_rs/ring déjà
+# documentée pour rustls ci-dessous — jsonwebtoken n'en dépend pas). Le
+# provider pur-Rust est le choix déterministe pour la vérification JWT
+# (auth.sdd).
+jsonwebtoken = { version = "11", features = ["rust_crypto"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -61,6 +77,9 @@ k8s-openapi = { version = "0.28", features = ["latest", "schemars"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
 
 [dev-dependencies]
+# Auto-dépendance avec feature : expose `auth::test_support` à `sandbox/tests/`
+# (prescription de sandbox/src/auth.sdd, tâche « feature cargo test »).
+vanyline-sandbox = { path = ".", features = ["test"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
