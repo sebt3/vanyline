@@ -347,11 +347,9 @@ mod tests {
         assert_eq!(c.sandbox_root, Path::new("/home/vanyline/workspace"));
     }
 
-    // Scenario: cooldown_par_defaut_et_surcharge (volet défaut — le volet
-    // surcharge par variable d'environnement exigerait de muter l'environnement
-    // du processus de test, non contractualisé ici).
+    // Scenario: cooldown_par_defaut
     #[test]
-    fn cooldown_par_defaut() {
+    fn scenario_cooldown_par_defaut() {
         let c = Config::try_parse_from(["vanyline-sandbox"]).unwrap();
         assert_eq!(c.health_cooldown_secs, 30);
         assert_eq!(c.health_poll_secs, 60);

@@ -782,7 +782,7 @@ mod tests {
     // 7. Scenario: mode_toolbox_remplace_les_tools_locaux — local_tools vide,
     // serveur toolbox @HttpStreamable, headers [(`authorization`,
     // `Bearer jeton-de-test`)] (jamais vides, décision 2026-10-08), sélection
-    // totale, profondeur 1.
+    // totale, profondeur 1, `model_override`/`todo_state` reflètent les arguments.
     #[test]
     fn mode_toolbox_remplace_les_tools_locaux() {
         let global_dir = tempdir().unwrap();
@@ -794,8 +794,8 @@ mod tests {
         let ctx = build_session_context(
             Some(("http://sbx:3000/mcp", "jeton-de-test")),
             false,
-            None,
-            None,
+            Some("modele-de-test"),
+            Some("[{\"content\":\"todo-de-test\"}]".to_string()),
         );
         assert!(ctx.local_tools.is_empty());
         assert_eq!(ctx.extra_mcp.len(), 1);
@@ -811,6 +811,16 @@ mod tests {
         assert_eq!(selection.server, "toolbox");
         assert!(selection.tools.is_empty());
         assert_eq!(ctx.subagent_depth_max, 1);
+        assert_eq!(
+            ctx.model_override.as_deref(),
+            Some("modele-de-test"),
+            "model_override doit refléter l'argument"
+        );
+        assert_eq!(
+            ctx.todo_state.lock().unwrap().clone(),
+            Some("[{\"content\":\"todo-de-test\"}]".to_string()),
+            "todo_state doit être seedé depuis l'argument todo_seed"
+        );
     }
 
     // 8. build_session_context_none_json

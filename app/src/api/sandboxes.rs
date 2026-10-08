@@ -388,11 +388,6 @@ mod tests {
     }
 
     #[test]
-    fn raw_git_tail_rejects_empty_segment() {
-        assert!(raw_git_tail("/sandboxes/foo/git/branches//x").is_err());
-    }
-
-    #[test]
     fn raw_git_tail_name_containing_git_is_not_ambiguous() {
         // Nom de sandbox == "git" : le split positionnel (pas une recherche
         // de sous-chaîne "/git/") ne doit pas se tromper de frontière.
@@ -564,11 +559,16 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // ── Scenario: raw_git_tail_rejette_le_segment_vide_et_le_decodage_utf8_invalide
-    // (test À AJOUTER pour l'UTF-8 — `raw_git_tail_rejects_empty_segment` couvre
-    // déjà le segment vide) ──
+    // ── Scenario: raw_git_tail_rejette_le_segment_vide_et_le_decodage_utf8_invalide ──
     #[test]
-    fn raw_git_tail_rejette_le_decodage_utf8_invalide() {
+    fn raw_git_tail_rejette_le_segment_vide_et_le_decodage_utf8_invalide() {
+        assert!(
+            matches!(
+                raw_git_tail("/sandboxes/foo/git/branches//x"),
+                Err(AppError::GitPathInvalid)
+            ),
+            "un segment vide doit rendre GitPathInvalid"
+        );
         assert!(
             matches!(
                 raw_git_tail("/sandboxes/foo/git/%ff%fe"),
@@ -591,7 +591,7 @@ mod tests {
     // ni jeton, ni expires_in_secs. Le relais lui-même suppose la sandbox —
     // Scenario d'intégration cluster, cf. Tasks `[!]`) ──
     #[test]
-    fn ws_ticket_out_serrialise_exactement_deux_cles() {
+    fn ws_ticket_ok_rend_ticket_et_ws_host_sans_exposer_le_jwt() {
         let out = WsTicketOut {
             ticket: "t32".to_string(),
             ws_host: "s1.sandboxes.app.example.com".to_string(),
@@ -757,7 +757,7 @@ mod tests {
     // L'enchaînement handler → owner_token(apiserver) est un Scenario
     // d'intégration cluster (Tasks `[!]`). ──
     #[tokio::test]
-    async fn proxy_git_request_presente_le_bearer_recu_et_passe_statut_et_json_tels_quels() {
+    async fn git_proxy_forward_methode_query_bearer_owner_et_passthrough_statut() {
         let (base, cap) =
             spawn_sandbox_capture(409, "application/json", r#"{"error":"merge conflict"}"#).await;
         let http = reqwest::Client::new();
@@ -796,7 +796,7 @@ mod tests {
 
     // ── Scenario: git_proxy_enveloppe_le_corps_non_json_sans_changer_le_statut ──
     #[tokio::test]
-    async fn proxy_git_request_enveloppe_le_corps_non_json_sans_changer_le_statut() {
+    async fn git_proxy_enveloppe_le_corps_non_json_sans_changer_le_statut() {
         let (base, _cap) = spawn_sandbox_capture(404, "text/plain", "route not found").await;
         let http = reqwest::Client::new();
         let (status, value) = proxy_git_request(
@@ -815,7 +815,7 @@ mod tests {
 
     // ── Scenario: git_proxy_preserve_le_percent_encodage_d_une_branche ──
     #[tokio::test]
-    async fn proxy_git_request_preserve_le_percent_encodage_d_une_branche() {
+    async fn git_proxy_preserve_le_percent_encodage_d_une_branche() {
         let (base, cap) = spawn_sandbox_capture(200, "application/json", "{}").await;
         let http = reqwest::Client::new();
         proxy_git_request(

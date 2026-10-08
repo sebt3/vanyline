@@ -253,10 +253,13 @@ Handles:
   Namespace sans aucune ressource : list_X retourne le vecteur vide — pas d'erreur.
 
 Tasks:
-  [ ] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04) : signatures `*_project`, `*_sandbox`,
-    `sandbox_*_url`, `watch_sandboxes`, `owner_token` (SA lu dans le namespace de l'Owner) ; le
-    champ `namespace` unique devient `app_namespace` ; les Scenario d'intégration passent à deux
-    namespaces ; `deploy/` : ClusterRole `vanyline-app-owner-scope` (voir namespace.sdd).
+  [x] ALIGNEMENT « UN OWNER = UN NAMESPACE » (2026-10-04) — parties CODE et DEPLOY FAITES,
+    validator-vertes étape 4c (2026-10-06) : signatures `*_project`, `*_sandbox`,
+    `sandbox_*_url`, `watch_sandboxes`, `owner_token` (SA lu dans le namespace de l'Owner) ;
+    le champ `namespace` unique devenu `app_namespace` ; `deploy/controller/controller.yaml` :
+    ClusterRole `vanyline-app-owner-scope` fourni (commit `4755bf6`). Scindé :
+  [ ] Scenario d'intégration cluster à deux namespaces (application + namespace d'Owner) —
+    non écrit, convention anti-mock kube ; à écrire lors de la passe d'intégration cluster.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.
     Relecture de reverse-engineering du 2026-09-25.
   [x] Implémenter @VnlK8sClient::owner_token (cache par Owner partagé entre clones, marge de

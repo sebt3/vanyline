@@ -734,6 +734,45 @@ fn scenario_aucun_contournement() {
     let mut cfg4 = test_support::test_config(std::path::Path::new("/workspace"));
     cfg4.jwks_url = Some(String::new());
     assert!(cfg4.validate().is_err());
+
+    // (d) `jwks_file` illisible en mode `File` : la pré-lecture au démarrage
+    //     (fail-fast Sébastien 2026-10-08, Given réécrit du Scenario) doit faire
+    //     échouer AuthState::new — jamais un serveur ouvert rendant 503 à chaque
+    //     requête faute de clés.
+    let mut cfg5 = test_support::test_config(std::path::Path::new("/workspace"));
+    cfg5.jwks_url = None;
+    cfg5.jwks_file = Some("/nonexistent-dir-vnl/jwks.json".into());
+    assert!(
+        AuthState::new(Arc::new(cfg5)).is_err(),
+        "un jwks_file illisible doit faire échouer AuthState::new au démarrage (fail-fast)"
+    );
+
+    // (e) `jwks_file` lisible mais ne parsant pas comme JWKS : même refus.
+    let junk_jwks = tmp.path().join("not-a-jwks.json");
+    std::fs::write(&junk_jwks, b"pas du tout du JWKS").unwrap();
+    let mut cfg6 = test_support::test_config(std::path::Path::new("/workspace"));
+    cfg6.jwks_url = None;
+    cfg6.jwks_file = Some(junk_jwks.to_string_lossy().into_owned());
+    assert!(
+        AuthState::new(Arc::new(cfg6)).is_err(),
+        "un jwks_file non-JWKS doit faire échouer AuthState::new au démarrage (fail-fast)"
+    );
+
+    // (f) cas nominal `File` valide : la pré-lecture accepte un vrai JWKS — le
+    //     fail-fast de (d)/(e) n'est pas un refus du mode `File` en général.
+    let good_jwks = tmp.path().join("jwks.json");
+    std::fs::write(
+        &good_jwks,
+        serde_json::to_vec(&test_support::test_jwks()).unwrap(),
+    )
+    .unwrap();
+    let mut cfg7 = test_support::test_config(std::path::Path::new("/workspace"));
+    cfg7.jwks_url = None;
+    cfg7.jwks_file = Some(good_jwks.to_string_lossy().into_owned());
+    assert!(
+        AuthState::new(Arc::new(cfg7)).is_ok(),
+        "un jwks_file valide doit démarrer (mode dev nominal)"
+    );
 }
 
 // ── Passage réel par require_auth sur le routeur protégé (POST /ws/ticket) ────

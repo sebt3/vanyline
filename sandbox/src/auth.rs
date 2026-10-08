@@ -176,14 +176,28 @@ pub struct AuthState {
 impl AuthState {
     /// Construit l'état. Échoue (erreur `anyhow`, fatale au démarrage) si un
     /// paramètre requis est vide, si `jwks_ca_file` est illisible ou non-PEM
-    /// (source `Url`), ou si le client HTTP ne peut pas être construit.
+    /// (source `Url`), si `jwks_file` est illisible ou ne parse pas comme JWKS
+    /// (source `File` — pré-lecture fail-fast, `auth.sdd` `Raises` 2026-10-08),
+    /// ou si le client HTTP ne peut pas être construit.
     ///
     /// # Errors
     ///
     /// Erreur `anyhow` si un paramètre requis est vide, si le fichier CA est
-    /// illisible ou non-PEM, ou si le client HTTP est impossible à construire.
+    /// illisible ou non-PEM, si le fichier JWKS est illisible ou non-JWKS, ou
+    /// si le client HTTP est impossible à construire.
     pub fn new(config: Arc<Config>) -> Result<Self> {
         Self::check_params(&config)?;
+        // Fail-fast 2026-10-08 (`auth.sdd` Raises / Scenario
+        // `aucun_contournement`) : en mode `File`, la source de clés est
+        // pré-lue et parsée ici — on ne démarre pas sur du matériel de
+        // vérification non exploitable (jamais un serveur ouvert rendant 503
+        // à chaque requête).
+        if let JwksSource::File(path) = config.jwks_source() {
+            let body = std::fs::read_to_string(&path)
+                .with_context(|| format!("reading JWKS file: {}", path.display()))?;
+            serde_json::from_str::<JwkSet>(&body)
+                .with_context(|| format!("parsing JWKS file: {}", path.display()))?;
+        }
         let mut builder = reqwest::Client::builder().timeout(JWKS_HTTP_TIMEOUT);
         // Le CA ne sert qu'à vérifier le TLS du point JWKS : inutile (et
         // contre-productif hors cluster) de l'exiger en mode `jwks_file`.
