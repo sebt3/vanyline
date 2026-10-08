@@ -18,6 +18,7 @@ pub const CACHE_DIR: &str = "cache";
 
 /// Nom du répertoire de cache pour un identifiant donné.
 /// Doit rester identique à `controller/src/project.rs::cache_dir_name`.
+#[must_use]
 pub fn cache_dir_name(cache: &str) -> String {
     match cache {
         "pnpm" => "pnpm-store".to_string(),
@@ -27,43 +28,95 @@ pub fn cache_dir_name(cache: &str) -> String {
 
 /// Chemin (relatif) du répertoire de cache : `cache/<cache_dir_name>`.
 /// Doit rester identique à `controller/src/project.rs::cache_path`.
+#[must_use]
 pub fn cache_path(cache: &str) -> String {
     format!("cache/{}", cache_dir_name(cache))
 }
 
+/// Erreur de l'utilitaire de maintenance — chaque variante porte son
+/// identifiant `VNL-MAINT-NNN` (contrat `Raises` de `maint.sdd`).
 #[derive(Debug, thiserror::Error)]
 pub enum MaintError {
+    /// `VNL-MAINT-001` — nom de branche invalide : refus local (vide, `-`
+    /// initial, caractère de contrôle) ou refus de `git check-ref-format`.
     #[error("VNL-MAINT-001: invalid branch name '{name}': {reason}")]
-    InvalidBranch { name: String, reason: String },
+    InvalidBranch {
+        /// Nom rejeté.
+        name: String,
+        /// Raison du refus (motif local, stderr `trim()` de `check-ref-format`
+        /// ou message d'échec de spawn).
+        reason: String,
+    },
 
+    /// `VNL-MAINT-002` — URL/chemin de repo invalide (vide, `-` initial ou
+    /// caractère de contrôle) ; levée par le CLI `bin/maint.rs`, jamais par
+    /// `run_init` lui-même.
     #[error("VNL-MAINT-002: invalid repo url '{url}': {reason}")]
-    InvalidRepo { url: String, reason: String },
+    InvalidRepo {
+        /// URL/chemin rejeté.
+        url: String,
+        /// Raison du refus local.
+        reason: String,
+    },
 
+    /// `VNL-MAINT-003` — nom de sandbox impropre à entrer dans
+    /// `worktrees/<name>` (vide, `-` initial, `.`/`..`, hors `A-Za-z0-9._-`).
     #[error("VNL-MAINT-003: invalid sandbox name '{name}': {reason}")]
-    InvalidSandboxName { name: String, reason: String },
+    InvalidSandboxName {
+        /// Nom rejeté.
+        name: String,
+        /// Raison du refus local.
+        reason: String,
+    },
 
+    /// `VNL-MAINT-004` — commande git exécutée sortant avec un statut non nul,
+    /// ou échec de spawn (`git` absent/non exécutable, `stderr` vide).
     #[error("VNL-MAINT-004: git {args:?} failed with {status}: {stderr}")]
     GitFailed {
+        /// argv complet de l'appel.
         args: Vec<String>,
+        /// Display de l'`ExitStatus` (`"exit status: N"`), ou de l'`std::io::Error`
+        /// en cas d'échec de spawn.
         status: String,
+        /// stderr lossy BRUT (non `trim()`) — vide en échec de spawn.
         stderr: String,
     },
 
+    /// `VNL-MAINT-005` — erreur d'E/S sur un chemin (mkdir des caches dans
+    /// `run_init`, `remove_dir_all` dans `run_purge`).
     #[error("VNL-MAINT-005: io error on {path}: {source}")]
     Io {
+        /// Chemin en cause (forme lossy).
         path: String,
+        /// Erreur d'E/S d'origine.
         #[source]
         source: std::io::Error,
     },
 
+    /// `VNL-MAINT-006` — échec du patch `Project.status` (infer de config,
+    /// construction du client ou `patch_status`), seulement en mode
+    /// `run_detect_and_patch` avec `project` `Some`.
     #[error("VNL-MAINT-006: k8s patch status project '{project}' failed: {message}")]
-    K8sPatch { project: String, message: String },
+    K8sPatch {
+        /// Nom du Project visé par le patch.
+        project: String,
+        /// Message d'erreur (préfixes `"config: "` / `"client: "` ou erreur
+        /// kube verbatim — cf. `maint.sdd` `Raises`).
+        message: String,
+    },
 }
 
 /// Valide un nom de branche via `git check-ref-format --branch <name>`
 /// (subprocess en argv). Rejette AVANT l'appel git : chaîne vide, chaîne
 /// commençant par `-`, chaîne contenant un caractère de contrôle (dont `\n`).
 /// Utilisée par `checkout` dans la tâche suivante ; livrée et testée ici.
+///
+/// # Errors
+///
+/// Rend [`MaintError::InvalidBranch`] (`VNL-MAINT-001`) : refus local (nom vide,
+/// `-` initial, caractère de contrôle), refus de `git check-ref-format` (stderr
+/// `trim()` dans `reason`) ou échec de spawn du `git` (varianté `InvalidBranch`,
+/// pas `GitFailed` — choix de classification contracté par `maint.sdd` `Raises`).
 pub fn validate_branch(name: &str) -> Result<(), MaintError> {
     if name.is_empty() {
         return Err(MaintError::InvalidBranch {
@@ -77,7 +130,7 @@ pub fn validate_branch(name: &str) -> Result<(), MaintError> {
             reason: "branch name starts with '-'".into(),
         });
     }
-    if name.chars().any(|c| c.is_control()) {
+    if name.chars().any(char::is_control) {
         return Err(MaintError::InvalidBranch {
             name: name.to_string(),
             reason: "branch name contains control characters".into(),
@@ -105,6 +158,11 @@ pub fn validate_branch(name: &str) -> Result<(), MaintError> {
 /// pas par `-`, aucun caractère de contrôle. (Pas de parsing d'URL complet —
 /// git accepte des URLs, des chemins et des formes scp-like ; on ferme juste
 /// l'injection d'argument et les entrées malformées.)
+///
+/// # Errors
+///
+/// Rend [`MaintError::InvalidRepo`] (`VNL-MAINT-002`) : URL vide, `-` initial ou
+/// caractère de contrôle.
 pub fn validate_repo(url: &str) -> Result<(), MaintError> {
     if url.is_empty() {
         return Err(MaintError::InvalidRepo {
@@ -118,7 +176,7 @@ pub fn validate_repo(url: &str) -> Result<(), MaintError> {
             reason: "repo url starts with '-'".into(),
         });
     }
-    if url.chars().any(|c| c.is_control()) {
+    if url.chars().any(char::is_control) {
         return Err(MaintError::InvalidRepo {
             url: url.to_string(),
             reason: "repo url contains control characters".into(),
@@ -131,6 +189,11 @@ pub fn validate_repo(url: &str) -> Result<(), MaintError> {
 /// uniquement `[A-Za-z0-9._-]`, différent de `.` et `..`, ne commence pas
 /// par `-`. (Le nom entre dans `worktrees/<name>` — ferme le path traversal.)
 /// Utilisée par `checkout`/`remove` dans la tâche suivante ; livrée et testée ici.
+///
+/// # Errors
+///
+/// Rend [`MaintError::InvalidSandboxName`] (`VNL-MAINT-003`) : nom vide, `-`
+/// initial, `.`/`..` (path traversal) ou caractère hors `A-Za-z0-9._-`.
 pub fn validate_sandbox_name(name: &str) -> Result<(), MaintError> {
     if name.is_empty() {
         return Err(MaintError::InvalidSandboxName {
@@ -170,6 +233,18 @@ pub fn validate_sandbox_name(name: &str) -> Result<(), MaintError> {
 ///
 /// Pose ensuite la refspec de fetch (idempotent, appliqué que le clone
 /// vienne d'être fait ou préexistait déjà).
+///
+/// # Errors
+///
+/// - [`MaintError::Io`] (`VNL-MAINT-005`) : `create_dir_all` en échec sur un
+///   cache ;
+/// - [`MaintError::GitFailed`] (`VNL-MAINT-004`) : `git clone --bare` ou la pose
+///   de refspec en échec (sortie non nulle ou échec de spawn).
+///
+/// # Panics
+///
+/// Si `workspace.join("repo.git")` n'est pas UTF-8 (`to_str().unwrap()` toléré
+/// « toujours UTF-8 dans ce déploiement », cf. `maint.sdd` `Raises`).
 #[allow(clippy::unwrap_used)] // chemin construit en interne a partir d un nom deja valide (MaintError valide les entrees en amont), toujours UTF-8 dans ce deploiement
 pub fn run_init(workspace: &Path, repo: &str, caches: &[String]) -> Result<(), MaintError> {
     // Create all cache directories (always, even if clone already exists).
@@ -220,6 +295,16 @@ pub fn run_init(workspace: &Path, repo: &str, caches: &[String]) -> Result<(), M
 }
 
 /// `fetch` : `git --git-dir=<workspace>/repo.git fetch --prune`.
+///
+/// # Errors
+///
+/// Rend [`MaintError::GitFailed`] (`VNL-MAINT-004`) : `git fetch --prune` en
+/// échec (sortie non nulle — bare absent compris — ou échec de spawn).
+///
+/// # Panics
+///
+/// Si `workspace.join("repo.git")` n'est pas UTF-8 (même tolérance que
+/// `run_init`, cf. `maint.sdd` `Raises`).
 #[allow(clippy::unwrap_used)] // chemin construit en interne a partir d un nom deja valide (MaintError valide les entrees en amont), toujours UTF-8 dans ce deploiement
 pub fn run_fetch(workspace: &Path) -> Result<(), MaintError> {
     let git_dir = workspace.join(BARE_REPO_DIR);
@@ -256,15 +341,24 @@ pub fn run_fetch(workspace: &Path) -> Result<(), MaintError> {
 
 /// Chemin (relatif au workspace) du worktree d'une sandbox donnée.
 /// Doit rester identique à `controller/src/project.rs::worktree_path`.
+#[must_use]
 pub fn worktree_path(sandbox_name: &str) -> String {
     format!("worktrees/{sandbox_name}")
 }
 
 /// `checkout` : crée le worktree `worktrees/<sandbox>` pour `branch` s'il
-/// n'existe pas déjà (idempotent). Valide `sandbox` (validate_sandbox_name),
-/// `branch` (validate_branch) et, si fourni et non vide, `default_branch`
-/// (validate_branch) AVANT toute action. `default_branch: None` ou `Some("")`
+/// n'existe pas déjà (idempotent). Valide `sandbox` (`validate_sandbox_name`),
+/// `branch` (`validate_branch`) et, si fourni et non vide, `default_branch`
+/// (`validate_branch`) AVANT toute action. `default_branch: None` ou `Some("")`
 /// => résolution via symbolic-ref, repli "main" (voir Contexte).
+///
+/// # Errors
+///
+/// - [`MaintError::InvalidSandboxName`] (`VNL-MAINT-003`) puis
+///   [`MaintError::InvalidBranch`] (`VNL-MAINT-001`) : validations préalables ;
+/// - [`MaintError::GitFailed`] (`VNL-MAINT-004`) : `show-ref` ou `worktree add`
+///   en échec (l'échec de résolution symbolic-ref n'est PAS une erreur — repli
+///   "main").
 pub fn run_checkout(
     workspace: &Path,
     sandbox: &str,
@@ -331,7 +425,7 @@ pub fn run_checkout(
             .current_dir(workspace)
             .output()
             .map_err(|e| MaintError::GitFailed {
-                args: args.iter().cloned().map(String::from).collect(),
+                args: args.iter().copied().map(String::from).collect(),
                 status: e.to_string(),
                 stderr: String::new(),
             })?;
@@ -340,7 +434,7 @@ pub fn run_checkout(
         } else {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             Err(MaintError::GitFailed {
-                args: args.iter().cloned().map(String::from).collect(),
+                args: args.iter().copied().map(String::from).collect(),
                 status: output.status.to_string(),
                 stderr,
             })
@@ -410,6 +504,13 @@ fn resolve_default_branch(workspace: &Path) -> Result<String, MaintError> {
 
 /// `remove` : retire le worktree `worktrees/<sandbox>` (worktree remove
 /// --force, repli rm -rf) puis `worktree prune`. Valide `sandbox` d'abord.
+///
+/// # Errors
+///
+/// - [`MaintError::InvalidSandboxName`] (`VNL-MAINT-003`) : sandbox invalide ;
+/// - [`MaintError::GitFailed`] (`VNL-MAINT-004`) : `worktree prune` en échec
+///   (sortie non nulle ou spawn). La sortie non nulle de `worktree remove`
+///   n'EST PAS une erreur ici — branche de logique (repli `rm -rf`).
 pub fn run_remove(workspace: &Path, sandbox: &str) -> Result<(), MaintError> {
     validate_sandbox_name(sandbox)?;
 
@@ -500,6 +601,7 @@ const PYTHON_FILE_MARKERS: [&str; 2] = ["pyproject.toml", "setup.cfg"];
 /// (`frontend/src/components/panels/dockerfileName.ts`, feature
 /// editor-syntax-highlighting) — les deux évoluent ensemble (risque n° 7 du
 /// design docker-lsp : cohérence détection / mapping sandbox / éditeur).
+#[must_use]
 pub fn is_dockerfile_path(path: &str) -> bool {
     if path.is_empty() {
         return false;
@@ -507,7 +609,7 @@ pub fn is_dockerfile_path(path: &str) -> bool {
     // Dernier segment après le dernier '/' (pas de segment ⟹ whole string),
     // mis en minuscules, puis les trois règles du helper frontend.
     let base = match path.rfind('/') {
-        Some(idx) => &path[idx + 1..],
+        Some(idx) => &path[idx.saturating_add(1)..],
         None => path,
     };
     let base = base.to_lowercase();
@@ -584,6 +686,11 @@ const LANGUAGE_ORDER: [&str; 5] = ["rust", "js-ts", "vue", "python", "dockerfile
 /// Détecte les langages utilisés à partir des marqueurs de fichiers de
 /// l'arbre HEAD. Résultat dans l'ordre fixe
 /// `["rust", "js-ts", "vue", "python", "dockerfile"]` (filtré).
+///
+/// # Errors
+///
+/// Rend [`MaintError::GitFailed`] (`VNL-MAINT-004`) si `git ls-tree` échoue
+/// (ex: `repo.git` absent — `detect` appelé avant `init`).
 pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
     let paths = list_head_tree(workspace)?;
     let has_rust = paths
@@ -617,6 +724,11 @@ pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
 }
 
 /// `detect` : sérialise `detect_languages` en JSON `{"languages": [...]}`.
+///
+/// # Errors
+///
+/// Comme [`detect_languages`] : [`MaintError::GitFailed`] (`VNL-MAINT-004`) si
+/// le listing de l'arbre HEAD échoue.
 pub fn run_detect(workspace: &Path) -> Result<String, MaintError> {
     let languages = detect_languages(workspace)?;
     Ok(serde_json::json!({ "languages": languages }).to_string())
@@ -627,7 +739,14 @@ pub fn run_detect(workspace: &Path) -> Result<String, MaintError> {
 /// sandbox` en CLI hors cluster). `project = Some(name)` : patche en plus
 /// `Project.status.{languages,detectedAt}` du Project `name`, dans le
 /// namespace résolu par `kube::Config::infer()` (in-cluster — le pod du Job
-/// tourne avec un ServiceAccount, cf. tâche 04 pour le RBAC).
+/// tourne avec un `ServiceAccount`, cf. tâche 04 pour le RBAC).
+///
+/// # Errors
+///
+/// - comme [`detect_languages`] : [`MaintError::GitFailed`] (`VNL-MAINT-004`) ;
+/// - [`MaintError::K8sPatch`] (`VNL-MAINT-006`) : `project` `Some` et échec de
+///   `Config::infer` (préfixe `"config: "`), de `Client::try_from` (préfixe
+///   `"client: "`) ou de `patch_status` (message kube verbatim).
 pub async fn run_detect_and_patch(
     workspace: &Path,
     project: Option<&str>,
@@ -691,6 +810,11 @@ async fn patch_project_languages(
 
 /// `purge` : supprime récursivement `repo.git`, `worktrees` et `cache` sous
 /// `workspace`. `std::fs::remove_dir_all` ; un `NotFound` est ignoré (succès).
+///
+/// # Errors
+///
+/// Rend [`MaintError::Io`] (`VNL-MAINT-005`) : `remove_dir_all` en échec avec
+/// une erreur autre que `NotFound`.
 pub fn run_purge(workspace: &Path) -> Result<(), MaintError> {
     for dir in [BARE_REPO_DIR, WORKTREES_DIR, CACHE_DIR] {
         let path = workspace.join(dir);
@@ -731,7 +855,7 @@ fn set_fetch_refspec(bare_path: &Path) -> Result<(), MaintError> {
         .args(args)
         .output()
         .map_err(|e| MaintError::GitFailed {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(std::string::ToString::to_string).collect(),
             status: e.to_string(),
             stderr: String::new(),
         })?;
@@ -740,7 +864,7 @@ fn set_fetch_refspec(bare_path: &Path) -> Result<(), MaintError> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         Err(MaintError::GitFailed {
-            args: args.iter().map(|s| s.to_string()).collect(),
+            args: args.iter().map(std::string::ToString::to_string).collect(),
             status: output.status.to_string(),
             stderr,
         })

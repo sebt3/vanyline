@@ -8,17 +8,30 @@ use thiserror::Error;
 use crate::AppState;
 use crate::lsp_client::LspClient;
 
+/// Erreurs de la garde anti-évasion du workspace (marqueurs `VNL-SBX-001`/`002`/`003`).
 #[derive(Debug, Error)]
 pub enum SandboxError {
+    /// `VNL-SBX-001` : le chemin résolu sort de la racine de confinement.
     #[error("VNL-SBX-001: path escapes sandbox root: {path} (resolved outside {root})")]
-    PathEscape { path: String, root: String },
+    PathEscape {
+        /// Chemin demandé par l'utilisateur, tel que rendu dans le message.
+        path: String,
+        /// Racine canonique de confinement, telle que rendue dans le message.
+        root: String,
+    },
 
+    /// `VNL-SBX-002` : la racine de confinement (racine du process, jamais une
+    /// entrée utilisateur) est invalide ou impossible à canonicaliser.
     #[error("VNL-SBX-002: invalid sandbox root: {0}")]
     InvalidRoot(String),
 
+    /// `VNL-SBX-003` : échec de canonicalisation d'un ancêtre du chemin (distinct
+    /// de `002` — la racine elle-même est valide).
     #[error("VNL-SBX-003: failed to resolve path ancestor {ancestor}: {source}")]
     AncestorResolutionFailed {
+        /// Ancêtre le plus profond existant dont la canonicalisation a échoué.
         ancestor: String,
+        /// Cause de l'échec de canonicalisation.
         #[source]
         source: std::io::Error,
     },
@@ -31,6 +44,10 @@ pub enum SandboxError {
 /// legitimately rejects the result.
 fn join_lexical(base: &Path, suffix: &Path) -> PathBuf {
     let mut result = base.to_path_buf();
+    // tooling.sdd D3b — bras CurDir et garde `_` explicitement contractés par
+    // tools_impl.sdd (« Normal/ParentDir/CurDir écartés ») : fusionner les corps
+    // perdrait la lecture du contrat.
+    #[allow(clippy::match_same_arms)]
     for component in suffix.components() {
         match component {
             std::path::Component::ParentDir => {
@@ -58,6 +75,14 @@ fn join_lexical(base: &Path, suffix: &Path) -> PathBuf {
 ///   `write_file` can target a not-yet-existing file), and finally check that
 ///   the result starts with canonicalised `sandbox_root`.
 /// - `sandbox_root` must exist and be canonicalisable, else `InvalidRoot`.
+///
+/// # Errors
+///
+/// [`SandboxError::InvalidRoot`] (`VNL-SBX-002`) when `sandbox_root` cannot be
+/// canonicalised; [`SandboxError::AncestorResolutionFailed`] (`VNL-SBX-003`)
+/// when the deepest existing ancestor cannot be canonicalised;
+/// [`SandboxError::PathEscape`] (`VNL-SBX-001`) when the resolved path lands
+/// outside the canonicalised root.
 pub fn confine_path(sandbox_root: &Path, user_path: &str) -> Result<PathBuf, SandboxError> {
     let root = std::fs::canonicalize(sandbox_root).map_err(|e| {
         tracing::warn!("invalid sandbox root {sandbox_root:?}: canonicalize failed: {e}");
@@ -136,19 +161,38 @@ use vanyline_tools::filesystem::{
 use vanyline_tools::search::{self, FindFilesOptions, SearchOptions};
 
 /// Successful MCP tool-result envelope (`isError: false`).
+// tooling.sdd D3b — constructeurs d'enveloppe Exposes par tools_impl.sdd, signature
+// publique contractée (appelés par valeur dans tout le crate et les tests) : figée.
+#[allow(clippy::needless_pass_by_value)]
+#[must_use]
 pub fn ok_result(text: String) -> Value {
     serde_json::json!({ "content": [{"type": "text", "text": text}], "isError": false })
 }
 
 /// Failed MCP tool-result envelope (`isError: true`) — a *tool-level* failure,
 /// not a JSON-RPC protocol error. The tool name was valid; execution failed.
+// tooling.sdd D3b — constructeurs d'enveloppe Exposes par tools_impl.sdd, signature
+// publique contractée (appelés par valeur dans tout le crate et les tests) : figée.
+#[allow(clippy::needless_pass_by_value)]
+#[must_use]
 pub fn err_result(text: String) -> Value {
     serde_json::json!({ "content": [{"type": "text", "text": text}], "isError": true })
 }
 
 /// Resolves `raw_path` under `sandbox_root`, off the tokio executor thread
-/// (confine_path does blocking filesystem I/O). On confinement failure, returns
+/// ([`confine_path`] does blocking filesystem I/O). On confinement failure, returns
 /// an `err_result` envelope ready to hand straight back to the MCP caller.
+///
+/// # Errors
+///
+/// Returns the `err_result` envelope (never a [`SandboxError`]): confinement
+/// failure [`confine_path`] renders into `isError: true` MCP text.
+///
+/// # Panics
+///
+/// Panics if the blocking task panics internally (`JoinError` — an internal
+/// defect, not a path error); the blocking call itself never panics on
+/// invalid paths.
 #[allow(clippy::expect_used)] // JoinError signifie un panic interne dans confine_path, pas une erreur de chemin normale
 pub async fn confine(sandbox_root: &Path, raw_path: &str) -> Result<String, Value> {
     let root = sandbox_root.to_path_buf();
@@ -161,9 +205,13 @@ pub async fn confine(sandbox_root: &Path, raw_path: &str) -> Result<String, Valu
 }
 
 /// Dispatches a `tools/call` for one of the 5 filesystem tools
-/// (read_file, write_file, edit_file, delete_file, list_directory).
+/// (`read_file`, `write_file`, `edit_file`, `delete_file`, `list_directory`).
 /// Returns `None` if `name` isn't one of them, so the caller can try other
 /// tool families (search, command — added in follow-up tasks).
+// tooling.sdd D3b — tools_impl.sdd §Purpose 1/2 : @dispatch_filesystem est le
+// dispatcheur unique contracté des 5 tools filesystem (ordre strict, premier `Some`
+// gagnant) ; scinder sortirait le contrat du seul fichier qui le porte.
+#[allow(clippy::too_many_lines)]
 pub async fn dispatch_filesystem(
     sandbox_root: &Path,
     name: &str,
@@ -277,7 +325,7 @@ pub async fn dispatch_filesystem(
 }
 
 /// Dispatches a `tools/call` for `find_files` or `search`. Same shape as
-/// `dispatch_filesystem`: confine `path` (empty → sandbox_root, per
+/// `dispatch_filesystem`: confine `path` (empty → `sandbox_root`, per
 /// `confine_path`'s own rule), overwrite it, call the tools-v2 function, map
 /// the result. Returns `None` if `name` isn't one of these two.
 pub async fn dispatch_search(sandbox_root: &Path, name: &str, arguments: Value) -> Option<Value> {
@@ -332,8 +380,8 @@ pub async fn dispatch_search(sandbox_root: &Path, name: &str, arguments: Value) 
 /// Dispatches a `tools/call` for `execute_command`. Same shape as the other
 /// `dispatch_*` functions: `cwd` (even empty) always goes through `confine()`,
 /// so the effective default cwd is `sandbox_root` — matching the design's
-/// requirement that execute_command defaults to VNL_SANDBOX_ROOT, not the
-/// sandbox process's own cwd (which is what tools::command::execute does when
+/// requirement that `execute_command` defaults to `VNL_SANDBOX_ROOT`, not the
+/// sandbox process's own cwd (which is what `tools::command::execute` does when
 /// given an empty cwd directly, unconfined).
 pub async fn dispatch_command(sandbox_root: &Path, name: &str, arguments: Value) -> Option<Value> {
     if name != "execute_command" {
@@ -370,12 +418,14 @@ pub async fn dispatch_command(sandbox_root: &Path, name: &str, arguments: Value)
 /// Argument parsing for `lsp_diagnostics`.
 #[derive(serde::Deserialize)]
 pub struct LspDiagnosticsArgs {
+    /// Chemin du fichier dont on veut les diagnostics (relatif ou absolu confiné).
     pub path: String,
 }
 
 /// Args de `lsp_document_symbols`.
 #[derive(serde::Deserialize)]
 pub struct LspDocumentSymbolsArgs {
+    /// Chemin du document dont on veut les symboles (relatif ou absolu confiné).
     pub path: String,
 }
 
@@ -384,8 +434,11 @@ pub struct LspDocumentSymbolsArgs {
 /// opération de fichier sur cette valeur).
 #[derive(serde::Deserialize)]
 pub struct LspWorkspaceSymbolsArgs {
+    /// Requête de recherche transmise à `workspace/symbol`.
     pub query: String,
     #[serde(default)]
+    /// Chemin optionnel : indice de toolchain (`toolchain_for_path` uniquement),
+    /// jamais ouvert ni lu (R5).
     pub path: Option<String>,
 }
 
@@ -393,7 +446,9 @@ pub struct LspWorkspaceSymbolsArgs {
 #[derive(serde::Deserialize, Clone)]
 pub struct LspRenameArgs {
     #[serde(flatten)]
+    /// Position cible partagée (path + line + symbol/character 1-based).
     pub target: LspSymbolTarget,
+    /// Nouveau nom proposé par l'agent pour le symbole ciblé.
     pub new_name: String,
     /// Tâche 05 — `true` : calcule le `WorkspaceEdit` et liste les sites
     /// sans AUCUNE écriture ; `false` (défaut) : applique et rend le rapport
@@ -409,8 +464,9 @@ pub struct LspRenameArgs {
 /// Entrées 1-based (alignées `read_file`), conversion interne 0-based LSP.
 #[derive(serde::Deserialize, Clone, Debug)]
 pub struct LspSymbolTarget {
+    /// Chemin du fichier cible (relatif ou absolu confiné).
     pub path: String,
-    /// Ligne 1-based (comme read_file). Requis (pas de `serde(default)`).
+    /// Ligne 1-based (comme `read_file`). Requis (pas de `serde(default)`).
     pub line: u64,
     /// Nom de l'identifiant à cibler sur cette ligne. Mode recommandé.
     /// Le tool résout lui-même la colonne de la 1re occurrence délimitée.
@@ -426,8 +482,11 @@ pub struct LspSymbolTarget {
 /// d'ambiguïté du mode symbole à rendre dans la réponse de l'outil (design R6).
 #[derive(Debug, PartialEq, Eq)]
 pub enum PositionResolution {
+    /// Position résolue sans ambiguïté (mode symbole à 1 occurrence, ou mode colonne).
     Unique {
+        /// Ligne 0-based (position LSP).
         line0: u64,
+        /// Colonne 0-based (position LSP).
         character0: u64,
     },
     /// Mode symbole : `symbol` trouvé `matches` fois (≥ 2) sur la ligne.
@@ -435,9 +494,13 @@ pub enum PositionResolution {
     /// `second_char1` = colonne **1-based** de la 2e occurrence, à citer dans
     /// la note d'ambiguïté de la réponse de l'outil.
     Ambiguous {
+        /// Ligne 0-based (position LSP) de la 1re occurrence retenue.
         line0: u64,
+        /// Colonne 0-based de la 1re occurrence retenue.
         character0: u64,
+        /// Nombre d'occurrences délimitées trouvées sur la ligne (≥ 2).
         matches: usize,
+        /// Colonne 1-based de la 2e occurrence (note d'ambiguïté).
         second_char1: u64,
     },
 }
@@ -466,8 +529,9 @@ fn is_ident_char(c: char) -> bool {
 /// 2. sinon `character = Some(c)` → colonne `c.saturating_sub(1)`.
 /// 3. sinon → colonne 0 (début de ligne, comportement conservé).
 ///
-/// Erreurs (messages `anyhow` portant le code, même style que
-/// `position_to_offset`) :
+/// # Errors
+///
+/// Messages `anyhow` portant le code, même style que `position_to_offset` :
 /// - `line == 0` ou `line > nombre de lignes` → `VNL-SBX-LSP-007: line {line}
 ///   out of range ({n} lines)` — réutilise le sens existant « ligne hors
 ///   limites » de ce code.
@@ -480,16 +544,25 @@ pub fn resolve_position(
     // Découpage en lignes : même convention que `position_to_offset`
     // (`content.lines()` gère `\r\n`). Un contenu vide rend 1 ligne vide :
     // la ligne 1 existe donc (pas d'erreur de limites sur un fichier vide).
-    let lines: Vec<&str> = content.lines().collect();
-    if target.line == 0 || target.line as usize > lines.len() {
+    let file_lines: Vec<&str> = content.lines().collect();
+    if target.line == 0 || usize::try_from(target.line).map_or(true, |l| l > file_lines.len()) {
         return Err(anyhow::anyhow!(
             "VNL-SBX-LSP-007: line {} out of range ({} lines)",
             target.line,
-            lines.len()
+            file_lines.len()
         ));
     }
-    let line0 = target.line - 1;
-    let chars: Vec<char> = lines[line0 as usize].chars().collect();
+    let line0 = target.line.saturating_sub(1);
+    let Ok(line_index) = usize::try_from(line0) else {
+        // Inatteignable 64 bits : le contrôle de bornes ci-dessus garantit
+        // line0 ≤ file_lines.len() ; ne conserve le sens `007` que sur 32 bits.
+        return Err(anyhow::anyhow!(
+            "VNL-SBX-LSP-007: line {} out of range ({} lines)",
+            target.line,
+            file_lines.len()
+        ));
+    };
+    let chars: Vec<char> = file_lines[line_index].chars().collect();
 
     // Mode symbole : `symbol` non vide. `Some("")` n'active pas ce mode (il
     // retombe sur les modes 2/3 ci-dessous).
@@ -499,16 +572,17 @@ pub fn resolve_position(
         // compilée depuis l'entrée utilisateur (anti-ReDoS, design R5).
         let mut hits: Vec<usize> = Vec::new();
         let mut start = 0usize;
-        while start + sym_chars.len() <= chars.len() {
-            if chars[start..start + sym_chars.len()] == sym_chars[..] {
-                let left_ok = start == 0 || !is_ident_char(chars[start - 1]);
-                let after = start + sym_chars.len();
-                let right_ok = after == chars.len() || !is_ident_char(chars[after]);
+        // Bornes garanties par la condition du `while` (saturations = identiques).
+        while start.saturating_add(sym_chars.len()) <= chars.len() {
+            let end = start.saturating_add(sym_chars.len());
+            if chars[start..end] == sym_chars[..] {
+                let left_ok = start == 0 || !is_ident_char(chars[start.saturating_sub(1)]);
+                let right_ok = end == chars.len() || !is_ident_char(chars[end]);
                 if left_ok && right_ok {
                     hits.push(start);
                 }
             }
-            start += 1;
+            start = start.saturating_add(1);
         }
 
         return match hits.len() {
@@ -526,7 +600,7 @@ pub fn resolve_position(
                 line0,
                 character0: hits[0] as u64,
                 matches: hits.len(),
-                second_char1: hits[1] as u64 + 1,
+                second_char1: (hits[1] as u64).saturating_add(1),
             }),
         };
     }
@@ -541,9 +615,10 @@ pub fn resolve_position(
 /// contenu `content`, borné (`.trim()` des deux côtés). `None` si la ligne
 /// n'existe pas.
 fn line_snippet(content: &str, line0: u64) -> Option<String> {
+    let line_index = usize::try_from(line0).ok()?;
     content
         .lines()
-        .nth(line0 as usize)
+        .nth(line_index)
         .map(|l| l.trim().to_string())
 }
 
@@ -578,19 +653,16 @@ async fn display_path_for_uri(sandbox_root: &std::path::Path, uri: &str) -> Stri
         Some(raw_path) => confine(sandbox_root, raw_path).await.ok(),
         None => None,
     };
-    match confined {
-        Some(resolved) => {
-            let root_prefix = format!("file://{}/", sandbox_root.display());
-            match uri.strip_prefix(&root_prefix) {
-                Some(rel) => rel.to_string(),
-                None => resolved,
-            }
+    if let Some(resolved) = confined {
+        let root_prefix = format!("file://{}/", sandbox_root.display());
+        match uri.strip_prefix(&root_prefix) {
+            Some(rel) => rel.to_string(),
+            None => resolved,
         }
-        None => {
-            // URI non-`file://` ou hors workspace : rendu brut, aucune lecture tentée.
-            tracing::debug!("LSP location outside workspace, rendered raw: {uri}");
-            uri.to_string()
-        }
+    } else {
+        // URI non-`file://` ou hors workspace : rendu brut, aucune lecture tentée.
+        tracing::debug!("LSP location outside workspace, rendered raw: {uri}");
+        uri.to_string()
     }
 }
 
@@ -626,7 +698,7 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
         .or_else(|| loc.get("targetSelectionRange"))
         .and_then(|r| r.get("start"))
         .and_then(|s| s.get("line"))
-        .and_then(|l| l.as_u64());
+        .and_then(serde_json::Value::as_u64);
 
     // R5 : confine AVANT toute lecture — le chemin d'affichage passe par
     // `display_path_for_uri` (qui confine en son sein : relatif si confiné,
@@ -650,15 +722,15 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
         .ok()
         .and_then(|content| line_snippet(&content, line0));
         return match snippet {
-            Some(snippet) => format!("{display_path}:{}: {snippet}", line0 + 1),
-            None => format!("{display_path}:{}", line0 + 1),
+            Some(snippet) => format!("{display_path}:{}: {snippet}", line0.saturating_add(1)),
+            None => format!("{display_path}:{}", line0.saturating_add(1)),
         };
     }
 
     // URI non-`file://` ou hors workspace : rendu brut, aucune lecture tentée
     // (`display_path_for_uri` a rendu l'URI brute et déjà tracé le debug).
     match line0 {
-        Some(line0) => format!("{raw_uri}:{}", line0 + 1),
+        Some(line0) => format!("{raw_uri}:{}", line0.saturating_add(1)),
         None => raw_uri.to_string(),
     }
 }
@@ -688,6 +760,12 @@ async fn render_location(sandbox_root: &std::path::Path, loc: &serde_json::Value
 /// frontend `lspToolchainForPath`, risque n° 7) évaluée AVANT les extensions —
 /// helper partagé avec la détection (`maint::is_dockerfile_path`).
 /// `None` if the extension is not covered (fallback: no LSP).
+// tooling.sdd D3b — tools_impl.sdd §Purpose 3 : @toolchain_for_path est le MIROIR de
+// `lspToolchainForPath` du frontend (comparaison de suffixe sur le chemin complet,
+// `endsWith`) ; passer à `Path::extension()` divergerait sur les dotfiles (`.rs`
+// seul) et casserait le miroir. Sensibilité à la casse déjà neutralisée par to_lowercase.
+#[allow(clippy::case_sensitive_file_extension_comparisons)]
+#[must_use]
 pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
     if crate::maint::is_dockerfile_path(path) {
         return Some(("docker", "dockerfile"));
@@ -726,6 +804,11 @@ pub fn toolchain_for_path(path: &str) -> Option<(&'static str, &'static str)> {
 /// appel, nom sans préfixe `lsp_` — design §tableau tools) ; since task 08d,
 /// `edit_and_check` (édition + diff de diagnostics — 16 tools MCP au
 /// total).
+// tooling.sdd D3b — tools_impl.sdd §Purpose 3 : @lsp_tools porte les 8 déclarations
+// `tools/list` contractées (une entrée = un bloc json littéral) ; scinder viderait
+// le contrat hors du seul fichier qui le porte.
+#[allow(clippy::too_many_lines)]
+#[must_use]
 pub fn lsp_tools() -> Vec<serde_json::Value> {
     vec![
         serde_json::json!({
@@ -971,7 +1054,7 @@ fn split_fenced_code_blocks(text: &str) -> (Vec<String>, Vec<String>) {
 /// structure des éléments `{language, value}` vs `{value}`/string brute) en
 /// (signature, doc) :
 /// - signature = 1re section de CODE : bloc clôturé ```…``` dans un texte
-///   (markdown), ou 1re entrée `{language, value}` d'un array MarkedString.
+///   (markdown), ou 1re entrée `{language, value}` d'un array `MarkedString`.
 ///   Rendu sans les fences.
 /// - doc = prose restante (sections de code exclues), amputée de ses fences
 ///   résiduelles, tronquée à 3 lignes non vides (rejointes par `\n`).
@@ -1009,23 +1092,20 @@ fn hover_signature_and_doc(contents: &Value) -> (String, String) {
         .filter(|line| !line.trim().is_empty())
         .collect();
 
-    match signature {
-        Some(signature) => {
-            let doc = doc_candidates
-                .into_iter()
-                .take(3)
-                .collect::<Vec<_>>()
-                .join("\n");
-            (signature, doc)
-        }
+    if let Some(signature) = signature {
+        let doc = doc_candidates
+            .into_iter()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join("\n");
+        (signature, doc)
+    } else {
         // Aucune section de code nulle part : 1re ligne non vide = signature,
         // les 3 suivantes = doc.
-        None => {
-            let mut lines = doc_candidates.into_iter();
-            let signature = lines.next().unwrap_or_default().to_string();
-            let doc = lines.take(3).collect::<Vec<_>>().join("\n");
-            (signature, doc)
-        }
+        let mut lines = doc_candidates.into_iter();
+        let signature = lines.next().unwrap_or_default().to_string();
+        let doc = lines.take(3).collect::<Vec<_>>().join("\n");
+        (signature, doc)
     }
 }
 
@@ -1066,6 +1146,10 @@ async fn hover_sections(
 }
 
 /// Severity helper: maps LSP severity code → display string.
+// tooling.sdd D3b — table de sévérités LSP contractée (1=error, 2=warning,
+// 3=information, 4=hint, défaut error) ; fusionner `1` avec le défaut brouillerait
+// la table explicite que la spec énumère.
+#[allow(clippy::match_same_arms)]
 fn severity_label(severity: i64) -> &'static str {
     match severity {
         1 => "error",
@@ -1111,11 +1195,14 @@ fn symbol_kind_label(kind: i64) -> String {
     .to_string()
 }
 
-/// Partie commune d'une ligne de symbole (lsp_document_symbols) :
+/// Partie commune d'une ligne de symbole (`lsp_document_symbols`) :
 /// `"{kind-label} {name}"` + `" · {detail}"` si `detail` est une chaîne non
-/// vide (c'est là que les serveurs mettent la signature d'un DocumentSymbol).
+/// vide (c'est là que les serveurs mettent la signature d'un `DocumentSymbol`).
 fn symbol_name_and_detail(sym: &Value) -> String {
-    let kind = sym.get("kind").and_then(|k| k.as_i64()).unwrap_or(0);
+    let kind = sym
+        .get("kind")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0);
     let name = sym.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let mut label = format!("{} {name}", symbol_kind_label(kind));
     if let Some(detail) = sym
@@ -1123,7 +1210,9 @@ fn symbol_name_and_detail(sym: &Value) -> String {
         .and_then(|d| d.as_str())
         .filter(|d| !d.is_empty())
     {
-        label.push_str(&format!(" · {detail}"));
+        // tooling.sdd D3b — write_fmt direct (format_push_string), pas de String
+        // intermédiaire : rien à vérifier, le formattage d'un `String` est infaillible.
+        let _ = std::fmt::Write::write_fmt(&mut label, format_args!(" · {detail}"));
     }
     label
 }
@@ -1134,38 +1223,38 @@ fn symbol_name_and_detail(sym: &Value) -> String {
 /// `selectionRange.start.line`.
 fn render_document_symbol_entry(sym: &Value, depth: usize, lines: &mut Vec<String>) {
     let indent = "  ".repeat(depth);
-    let line1 = sym
+    let line_num = sym
         .get("selectionRange")
         .and_then(|r| r.get("start"))
         .and_then(|s| s.get("line"))
-        .and_then(|l| l.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or(0)
-        + 1;
+        .saturating_add(1);
     lines.push(format!(
-        "{indent}{} — L{line1}",
+        "{indent}{} — L{line_num}",
         symbol_name_and_detail(sym)
     ));
     if let Some(children) = sym.get("children").and_then(|c| c.as_array()) {
         for child in children {
-            render_document_symbol_entry(child, depth + 1, lines);
+            render_document_symbol_entry(child, depth.saturating_add(1), lines);
         }
     }
 }
 
 /// Rend le résultat de `textDocument/documentSymbol` pour `lsp_document_symbols`.
 ///
-/// Résultat normalisé en tableau ; chaque entrée est soit **SymbolInformation**
+/// Résultat normalisé en tableau ; chaque entrée est soit `SymbolInformation`
 /// (forme plate — possède `location` : c'est celle que rendent réellement
 /// rust-analyzer ET typescript-language-server avec `capabilities: {}`, vérif
-/// R2 sur cluster), soit **DocumentSymbol** (hiérarchique — possède
+/// R2 sur cluster), soit `DocumentSymbol` (hiérarchique — possède
 /// `selectionRange`) :
 /// - ligne = `"{kind-label} {name}"` + (` · {detail}` si `detail` chaîne non
-///   vide) + `" — L{n}"` (1-based : `selectionRange.start.line` du DocumentSymbol
-///   ou `location.range.start.line` du SymbolInformation) ;
+///   vide) + `" — L{n}"` (1-based : `selectionRange.start.line` du `DocumentSymbol`
+///   ou `location.range.start.line` du `SymbolInformation`) ;
 /// - plates triées par `(line, name)` — le serveur peut ne pas être ordonné ;
 /// - plate dont le `location.uri` diffère du fichier ouvert → préfixé du chemin
 ///   d'affichage (`display_path_for_uri`, R5 : rendu de chemin, aucune lecture) ;
-/// - DocumentSymbol : arbre indenté (2 espaces par niveau), children après le
+/// - `DocumentSymbol` : arbre indenté (2 espaces par niveau), children après le
 ///   parent, ordre du serveur conservé ;
 /// - tableau vide (ou null) → message explicite, distinct d'un échec de requête
 ///   (même cohérence « pas encore analysé » qu'un `lsp_diagnostics` vide).
@@ -1188,9 +1277,9 @@ async fn render_document_symbols(sandbox_root: &Path, opened_uri: &str, result: 
                 .get("range")
                 .and_then(|r| r.get("start"))
                 .and_then(|s| s.get("line"))
-                .and_then(|l| l.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .unwrap_or(0)
-                + 1;
+                .saturating_add(1);
             let name = sym
                 .get("name")
                 .and_then(|n| n.as_str())
@@ -1222,7 +1311,7 @@ async fn render_document_symbols(sandbox_root: &Path, opened_uri: &str, result: 
         .join("\n")
 }
 
-/// Rendu plat du résultat `workspace/symbol` : une ligne par SymbolInformation,
+/// Rendu plat du résultat `workspace/symbol` : une ligne par `SymbolInformation`,
 /// **ordre du serveur conservé** (les serveurs classent par pertinence — vérif
 /// R2 cluster ; re-trier détruirait le ranking). Format design §4 :
 /// `<uri relatif>:<ligne 1-based>: <kind-label> <nom>` (+ ` · <detail>` si
@@ -1246,16 +1335,16 @@ async fn render_workspace_symbols(sandbox_root: &Path, query: &str, result: &Val
         let Some(uri) = loc.get("uri").and_then(|u| u.as_str()) else {
             continue;
         };
-        let line1 = loc
+        let line_num = loc
             .get("range")
             .and_then(|r| r.get("start"))
             .and_then(|s| s.get("line"))
-            .and_then(|l| l.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0)
-            + 1;
+            .saturating_add(1);
         let display = display_path_for_uri(sandbox_root, uri).await;
         lines.push(format!(
-            "{display}:{line1}: {}",
+            "{display}:{line_num}: {}",
             symbol_name_and_detail(sym)
         ));
     }
@@ -1264,7 +1353,7 @@ async fn render_workspace_symbols(sandbox_root: &Path, query: &str, result: &Val
 }
 
 /// Englobant sur forme PLATE (arbitrage développeur R2 2026-09-04, tâche 04) :
-/// parmi les SymbolInformation du même fichier, celui dont
+/// parmi les `SymbolInformation` du même fichier, celui dont
 /// `location.range.start.line` est maximal sous la contrainte `<= ref_line0`
 /// (dernier symbole démarré **à ou avant** la réf, ordre document). Égalité de
 /// ligne de départ : premier rencontré (stabilité). Vide/aucun → `None`.
@@ -1286,7 +1375,7 @@ fn flat_enclosing(file_symbols: &[Value], ref_line0: i64) -> Option<&Value> {
             .and_then(|l| l.get("range"))
             .and_then(|r| r.get("start"))
             .and_then(|s| s.get("line"))
-            .and_then(|l| l.as_i64())
+            .and_then(serde_json::Value::as_i64)
         else {
             continue;
         };
@@ -1322,11 +1411,11 @@ fn deepest_containing(file_symbols: &[Value], ref_line0: i64) -> Option<&Value> 
         let start = range
             .get("start")
             .and_then(|s| s.get("line"))
-            .and_then(|l| l.as_i64());
+            .and_then(serde_json::Value::as_i64);
         let end = range
             .get("end")
             .and_then(|s| s.get("line"))
-            .and_then(|l| l.as_i64());
+            .and_then(serde_json::Value::as_i64);
         let (Some(start), Some(end)) = (start, end) else {
             continue;
         };
@@ -1378,6 +1467,7 @@ async fn collect_reference_context(
     // Le fichier cible est traité en tête — il compte dans le cap de 20 et son
     // statut (déjà lu/ouvert par le préambule) ne doit pas dépendre de l'ordre
     // de tri des URI.
+    const MAX_REFERENCE_FILES: usize = 20;
     let mut uris: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     for loc in locations {
         if let Some(u) = loc.get("uri").and_then(|u| u.as_str()) {
@@ -1386,7 +1476,6 @@ async fn collect_reference_context(
             uris.insert(u.to_string());
         }
     }
-    const MAX_REFERENCE_FILES: usize = 20;
     let mut ordered_uris: Vec<String> = Vec::with_capacity(uris.len());
     if uris.remove(file_uri) {
         ordered_uris.push(file_uri.to_string());
@@ -1426,7 +1515,7 @@ async fn collect_reference_context(
             }
             continue;
         }
-        files_in_pipeline += 1;
+        files_in_pipeline = files_in_pipeline.saturating_add(1);
 
         // Fichier cible : texte du préambule réutilisé — pas de relecture (et
         // didOpen déjà fait au-dessus).
@@ -1504,6 +1593,10 @@ async fn collect_reference_context(
 /// - réf confinée = `    L<1-based>: {snippet}` (snippet via `line_snippet` sur
 ///   le contenu déjà lu ; snippet impossible → `    L<1-based>` sans suffixe) ;
 ///   réf sans englobant → même forme nue directement sous l'en-tête fichier.
+// tooling.sdd D3b — tools_impl.sdd Handles @render_references_grouped : le rendu
+// groupé (préambule cible, en-têtes englobants, réfs nues) est un seul contrat de
+// rendu ; scinder le noierait dans un module intermédiaire hors spec.
+#[allow(clippy::too_many_lines)]
 async fn render_references_grouped(
     sandbox_root: &Path,
     locations: &[Value],
@@ -1533,7 +1626,7 @@ async fn render_references_grouped(
             .or_else(|| loc.get("targetSelectionRange"))
             .and_then(|r| r.get("start"))
             .and_then(|s| s.get("line"))
-            .and_then(|l| l.as_i64())
+            .and_then(serde_json::Value::as_i64)
             .unwrap_or(0);
         // R5 : `display_path_for_uri` est un rendu de chemin (confinement en
         // son sein), jamais une lecture.
@@ -1595,7 +1688,7 @@ async fn render_references_grouped(
         // En-tête de bloc au premier run de l'englobant seulement (runs
         // consécutifs, ordre de ligne conservé).
         if let Some((sym, hierarchical)) = enclosing {
-            let run_ptr = sym as *const Value;
+            let run_ptr = std::ptr::from_ref::<Value>(sym);
             if !matches!(current_run, Some(Some(ptr)) if ptr == run_ptr) {
                 let enc_line0 = if hierarchical {
                     sym.get("selectionRange")
@@ -1604,7 +1697,7 @@ async fn render_references_grouped(
                 }
                 .and_then(|rg| rg.get("start"))
                 .and_then(|s| s.get("line"))
-                .and_then(|l| l.as_i64())
+                .and_then(serde_json::Value::as_i64)
                 .unwrap_or(0);
                 let has_detail = sym
                     .get("detail")
@@ -1618,9 +1711,9 @@ async fn render_references_grouped(
                 } else {
                     contents_by_uri
                         .get(r.uri)
-                        .and_then(|c| line_snippet(c, enc_line0.max(0) as u64))
+                        .and_then(|c| line_snippet(c, enc_line0.max(0).cast_unsigned()))
                 };
-                let enc_line1 = enc_line0 + 1;
+                let enc_line1 = enc_line0.saturating_add(1);
                 let label = symbol_name_and_detail(sym);
                 out.push(match signature {
                     Some(sig) => format!("  dans {label} · {sig} — L{enc_line1}"),
@@ -1635,9 +1728,9 @@ async fn render_references_grouped(
         // Ligne de réf : snippet sur le contenu déjà lu (`line_snippet` ne
         // relit jamais — R5). URI jamais lue (absente de `contents_by_uri`) →
         // `L<1-based>` seul, comme un groupe hors workspace.
-        let line1 = r.line0 + 1;
+        let line1 = r.line0.saturating_add(1);
         match contents_by_uri.get(r.uri) {
-            Some(content) => match line_snippet(content, r.line0.max(0) as u64) {
+            Some(content) => match line_snippet(content, r.line0.max(0).cast_unsigned()) {
                 Some(snippet) => out.push(format!("    L{line1}: {snippet}")),
                 None => out.push(format!("    L{line1}")),
             },
@@ -1653,6 +1746,11 @@ async fn render_references_grouped(
 /// `lsp_workspace_symbols`/`inspect_symbol`. Returns `None` if `name` is not
 /// one of these. Consumes `state.lsp` (shared LSP process) and
 /// `state.config.sandbox_root`.
+// tooling.sdd D3b — tools_impl.sdd §Purpose 3 : @dispatch_lsp est le dispatcheur
+// unique contracté des 7 tools LSP (chaque branche = un contrat de rendu) ; les
+// `unreachable!` sont les gardes d'invariants contractées (section Raises de la
+// spec — la tâche `[?]` de remplacement par `err_result` reste à trancher).
+#[allow(clippy::too_many_lines, clippy::unreachable)]
 pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Option<Value> {
     let lsp_tools = [
         "lsp_diagnostics",
@@ -1825,8 +1923,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     let symbol_target: Option<&LspSymbolTarget> = match &args {
         LspArgs::Target(t) => Some(t),
         LspArgs::Rename(r) => Some(&r.target),
-        LspArgs::Diagnostics(_) => None,
-        LspArgs::DocumentSymbols(_) => None,
+        LspArgs::Diagnostics(_) | LspArgs::DocumentSymbols(_) => None,
     };
     let target_info = match symbol_target {
         None => None,
@@ -1852,21 +1949,23 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                 Err(e) => return Some(err_result(e.to_string())),
             };
             let target_line = match line_snippet(&text, line0) {
-                Some(snippet) => format!("cible: {display_path}:{}: {snippet}{note}", line0 + 1),
-                None => format!("cible: {display_path}:{}{note}", line0 + 1),
+                Some(snippet) => {
+                    format!(
+                        "cible: {display_path}:{}: {snippet}{note}",
+                        line0.saturating_add(1)
+                    )
+                }
+                None => format!("cible: {display_path}:{}{note}", line0.saturating_add(1)),
             };
             Some((line0, character0, target_line))
         }
     };
 
     // Step 5: toolchain_for_path
-    let (toolchain, language_id) = match toolchain_for_path(&resolved) {
-        Some(pair) => pair,
-        None => {
-            return Some(err_result(
-                "VNL-SBX-LSP-006: no LSP for file extension".to_string(),
-            ));
-        }
+    let Some((toolchain, language_id)) = toolchain_for_path(&resolved) else {
+        return Some(err_result(
+            "VNL-SBX-LSP-006: no LSP for file extension".to_string(),
+        ));
     };
 
     // Step 6: get_or_spawn
@@ -1907,8 +2006,8 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                     let Some(start) = d["range"]["start"].as_object() else {
                         continue;
                     };
-                    let line = start["line"].as_i64().unwrap_or(0) + 1;
-                    let col = start["character"].as_i64().unwrap_or(0) + 1;
+                    let line = start["line"].as_i64().unwrap_or(0).saturating_add(1);
+                    let col = start["character"].as_i64().unwrap_or(0).saturating_add(1);
                     let severity = d["severity"].as_i64().unwrap_or(1);
                     let message = d["message"].as_str().unwrap_or("");
                     let label = severity_label(severity);
@@ -1919,9 +2018,8 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
             Err(e) => Some(err_result(e.to_string())),
         },
         "lsp_definition" => {
-            let (line0, character0, target_line) = match target_info {
-                Some(t) => t,
-                None => unreachable!("target_info is Some for target-based tools"),
+            let Some((line0, character0, target_line)) = target_info else {
+                unreachable!("target_info is Some for target-based tools")
             };
             match (
                 client.initialize().await,
@@ -1994,9 +2092,8 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
                 LspArgs::Rename(a) => a.clone(),
                 _ => unreachable!(),
             };
-            let (line0, character0, target_line) = match target_info {
-                Some(t) => t,
-                None => unreachable!("target_info is Some for target-based tools"),
+            let Some((line0, character0, target_line)) = target_info else {
+                unreachable!("target_info is Some for target-based tools")
             };
             match (
                 client.initialize().await,
@@ -2074,9 +2171,8 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         // composition `inspect_symbol` — comportement identique), puis rendu
         // groupé.
         "lsp_references" => {
-            let (line0, character0, target_line) = match target_info {
-                Some(t) => t,
-                None => unreachable!("target_info is Some for target-based tools"),
+            let Some((line0, character0, target_line)) = target_info else {
+                unreachable!("target_info is Some for target-based tools")
             };
             match (
                 client.initialize().await,
@@ -2146,9 +2242,8 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
         // Les sections vides sont omises, jamais rendues comme vides (cohérent
         // 02).
         "inspect_symbol" => {
-            let (line0, character0, target_line) = match target_info {
-                Some(t) => t,
-                None => unreachable!("target_info is Some for target-based tools"),
+            let Some((line0, character0, target_line)) = target_info else {
+                unreachable!("target_info is Some for target-based tools")
             };
             match (
                 client.initialize().await,
@@ -2290,7 +2385,7 @@ pub async fn dispatch_lsp(state: &AppState, name: &str, arguments: Value) -> Opt
     }
 }
 
-/// Extrait les `(uri, edits)` d'un `WorkspaceEdit` LSP : `changes` (map uri → TextEdit[])
+/// Extrait les `(uri, edits)` d'un `WorkspaceEdit` LSP : `changes` (map uri → `TextEdit[]`)
 /// et `documentChanges` (array de `{ textDocument: { uri }, edits }`). Ordre : d'abord
 /// `changes`, puis `documentChanges` (déduplication par URI conservée — les edits d'une
 /// même URI sont concaténés).
@@ -2298,7 +2393,7 @@ fn workspace_edit_files(edit: &Value) -> Vec<(String, Vec<Value>)> {
     let mut result = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Process `changes` first (map uri → TextEdit[])
+    // Process `changes` first (map uri → `TextEdit[]`)
     if let Some(changes) = edit.get("changes").and_then(|v| v.as_object()) {
         for (uri, edits) in changes {
             if let Some(edits_arr) = edits.as_array() {
@@ -2340,9 +2435,18 @@ fn workspace_edit_files(edit: &Value) -> Vec<(String, Vec<Value>)> {
 /// Clamp si `character` dépasse la fin de ligne. Erreur `VNL-SBX-LSP-007` si `line`
 /// hors limites.
 fn position_to_offset(content: &str, line: u64, character: u64) -> anyhow::Result<usize> {
-    let line = line as usize;
-    let char_offset = character as usize;
+    // tooling.sdd D3b — try_from plutôt que `as` : sur 32 bits une ligne hors capacité
+    // est hors limites et une colonne hors capacité est clampée, jamais wrapée
+    // (64 bits : strictement identique).
+    let char_offset = usize::try_from(character).unwrap_or(usize::MAX);
     let lines: Vec<&str> = content.lines().collect();
+    let Ok(line) = usize::try_from(line) else {
+        return Err(anyhow::anyhow!(
+            "VNL-SBX-LSP-007: line {} out of range ({} lines)",
+            line,
+            lines.len()
+        ));
+    };
 
     if line >= lines.len() {
         return Err(anyhow::anyhow!(
@@ -2362,10 +2466,11 @@ fn position_to_offset(content: &str, line: u64, character: u64) -> anyhow::Resul
     // Compute byte offset: sum of byte lengths of all previous lines + byte offset in current line
     let mut byte_offset: usize = 0;
     for &line_str in &lines[..line] {
-        byte_offset += line_str.len() + 1; // +1 for the newline
+        byte_offset = byte_offset.saturating_add(line_str.len()).saturating_add(1); // +1 for the newline
     }
     // Add the byte offset within the current line
-    byte_offset += chars[..clamped].iter().map(|c| c.len_utf8()).sum::<usize>();
+    byte_offset =
+        byte_offset.saturating_add(chars[..clamped].iter().map(|c| c.len_utf8()).sum::<usize>());
 
     Ok(byte_offset)
 }
@@ -2383,35 +2488,26 @@ fn apply_text_edits(content: &str, edits: &[Value]) -> anyhow::Result<String> {
 
     let mut parsed = Vec::new();
 
-    for edit in edits.iter() {
-        let range = match edit.get("range") {
-            Some(r) => r,
-            None => {
-                return Err(anyhow::anyhow!("VNL-SBX-LSP-008: TextEdit missing 'range'"));
-            }
+    for edit in edits {
+        let Some(range) = edit.get("range") else {
+            return Err(anyhow::anyhow!("VNL-SBX-LSP-008: TextEdit missing 'range'"));
         };
 
         let start_offset = {
             let start_val = range.get("start");
             let start_line_val = start_val.and_then(|s| s.get("line"));
             let start_char_val = start_val.and_then(|s| s.get("character"));
-            let line = match start_line_val.and_then(|v| v.as_u64()) {
-                Some(n) => n as usize,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "VNL-SBX-LSP-008: TextEdit range missing 'start' line"
-                    ));
-                }
+            let Some(line) = start_line_val.and_then(serde_json::Value::as_u64) else {
+                return Err(anyhow::anyhow!(
+                    "VNL-SBX-LSP-008: TextEdit range missing 'start' line"
+                ));
             };
-            let char_off = match start_char_val.and_then(|v| v.as_u64()) {
-                Some(n) => n as usize,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "VNL-SBX-LSP-008: TextEdit range missing 'start' character"
-                    ));
-                }
+            let Some(char_off) = start_char_val.and_then(serde_json::Value::as_u64) else {
+                return Err(anyhow::anyhow!(
+                    "VNL-SBX-LSP-008: TextEdit range missing 'start' character"
+                ));
             };
-            match position_to_offset(content, line as u64, char_off as u64) {
+            match position_to_offset(content, line, char_off) {
                 Ok(offset) => offset,
                 Err(_) => {
                     return Err(anyhow::anyhow!(
@@ -2425,23 +2521,17 @@ fn apply_text_edits(content: &str, edits: &[Value]) -> anyhow::Result<String> {
             let end_val = range.get("end");
             let end_line_val = end_val.and_then(|e| e.get("line"));
             let end_char_val = end_val.and_then(|e| e.get("character"));
-            let line = match end_line_val.and_then(|v| v.as_u64()) {
-                Some(n) => n as usize,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "VNL-SBX-LSP-008: TextEdit range missing 'end' line"
-                    ));
-                }
+            let Some(line) = end_line_val.and_then(serde_json::Value::as_u64) else {
+                return Err(anyhow::anyhow!(
+                    "VNL-SBX-LSP-008: TextEdit range missing 'end' line"
+                ));
             };
-            let char_off = match end_char_val.and_then(|v| v.as_u64()) {
-                Some(n) => n as usize,
-                None => {
-                    return Err(anyhow::anyhow!(
-                        "VNL-SBX-LSP-008: TextEdit range missing 'end' character"
-                    ));
-                }
+            let Some(char_off) = end_char_val.and_then(serde_json::Value::as_u64) else {
+                return Err(anyhow::anyhow!(
+                    "VNL-SBX-LSP-008: TextEdit range missing 'end' character"
+                ));
             };
-            match position_to_offset(content, line as u64, char_off as u64) {
+            match position_to_offset(content, line, char_off) {
                 Ok(offset) => offset,
                 Err(_) => {
                     return Err(anyhow::anyhow!(
@@ -2503,12 +2593,12 @@ struct AppliedFile {
 
 /// Applique un `WorkspaceEdit` sur le filesystem sandbox : pour chaque `(uri, edits)`,
 /// convertit l'URI en chemin (`strip_prefix("file://")`), confine sous `sandbox_root`
-/// (échec → `VNL-SBX-LSP-009` avec le message du confine), lit (read_file raw), applique
-/// `apply_text_edits`, écrit (write_file). Retour (tâche 05) : par fichier, le détail
+/// (échec → `VNL-SBX-LSP-009` avec le message du confine), lit (`read_file` raw), applique
+/// `apply_text_edits`, écrit (`write_file`). Retour (tâche 05) : par fichier, le détail
 /// des sites — snippets calculés AU POINT D'ÉCRITURE, sur le contenu lu et sur
 /// `new_text` déjà en main (jamais un second aller-retour LSP, jamais une relecture
 /// après écriture, design §5). Comportement d'écriture et garde-fous INCHANGÉS
-/// (confinement R5, VNL-SBX-LSP-009 sur URI hors workspace, erreurs apply_text_edits).
+/// (confinement R5, VNL-SBX-LSP-009 sur URI hors workspace, erreurs `apply_text_edits`).
 async fn apply_workspace_edit(
     sandbox_root: &Path,
     edit: &Value,
@@ -2550,7 +2640,7 @@ async fn apply_workspace_edit(
                 .get("range")
                 .and_then(|r| r.get("start"))
                 .and_then(|s| s.get("line"))
-                .and_then(|l| l.as_u64())
+                .and_then(serde_json::Value::as_u64)
             {
                 sites.push(AppliedSite {
                     line0,
@@ -2591,7 +2681,7 @@ fn format_applied_files(files: &[(String, Vec<AppliedSite>)]) -> String {
         for site in sites {
             out.push(format!(
                 "  L{}: {} → {}",
-                site.line0 + 1,
+                site.line0.saturating_add(1),
                 site.old_line,
                 site.new_line
             ));
@@ -2618,7 +2708,7 @@ async fn render_rename_preview(sandbox_root: &Path, edit: &Value) -> String {
         /// Contenu actuel — `None` = jamais lu (hors workspace/non-`file://`)
         /// ou lecture échouée → lignes nues sans snippet.
         content: Option<String>,
-        /// Positions 0-based (`range.start`) de chaque TextEdit. Un edit sans
+        /// Positions 0-based (`range.start`) de chaque `TextEdit`. Un edit sans
         /// `range.start` exploitable ne peut pas être localisé : sauté
         /// (jamais attendu d'un serveur conforme — en mode apply il lèverait
         /// VNL-SBX-LSP-008).
@@ -2641,41 +2731,37 @@ async fn render_rename_preview(sandbox_root: &Path, edit: &Value) -> String {
         // R5 : confinement avant toute lecture — seul le chemin confiné résolu
         // est lu, jamais l'URI brute. Display : relatif au root (même logique
         // que la ligne « cible: »), URI brute sinon.
-        let (display, content) = match uri.strip_prefix("file://") {
-            Some(raw_path) => match confine(sandbox_root, raw_path).await.ok() {
-                Some(resolved) => {
-                    let root_prefix = format!("{}/", sandbox_root.display());
-                    let display = match resolved.strip_prefix(&root_prefix) {
-                        Some(rel) => rel.to_string(),
-                        None => resolved.clone(),
-                    };
-                    let content = match filesystem::read_file(ReadFileOptions {
-                        path: resolved,
-                        offset: 0,
-                        limit: 0,
-                        raw: true,
-                    })
-                    .await
-                    {
-                        Ok(c) => Some(c),
-                        Err(e) => {
-                            // Best effort : le site est rendu nu, jamais une
-                            // erreur tool.
-                            tracing::warn!("lsp_rename preview: cannot read {uri}: {e}");
-                            None
-                        }
-                    };
-                    (display, content)
-                }
-                None => {
-                    tracing::debug!("lsp_rename preview: outside workspace, rendered raw: {uri}");
-                    (uri.clone(), None)
-                }
-            },
-            None => {
-                tracing::debug!("lsp_rename preview: non-file URI, rendered raw: {uri}");
+        let (display, content) = if let Some(raw_path) = uri.strip_prefix("file://") {
+            if let Ok(resolved) = confine(sandbox_root, raw_path).await {
+                let root_prefix = format!("{}/", sandbox_root.display());
+                let display = match resolved.strip_prefix(&root_prefix) {
+                    Some(rel) => rel.to_string(),
+                    None => resolved.clone(),
+                };
+                let content = match filesystem::read_file(ReadFileOptions {
+                    path: resolved,
+                    offset: 0,
+                    limit: 0,
+                    raw: true,
+                })
+                .await
+                {
+                    Ok(c) => Some(c),
+                    Err(e) => {
+                        // Best effort : le site est rendu nu, jamais une
+                        // erreur tool.
+                        tracing::warn!("lsp_rename preview: cannot read {uri}: {e}");
+                        None
+                    }
+                };
+                (display, content)
+            } else {
+                tracing::debug!("lsp_rename preview: outside workspace, rendered raw: {uri}");
                 (uri.clone(), None)
             }
+        } else {
+            tracing::debug!("lsp_rename preview: non-file URI, rendered raw: {uri}");
+            (uri.clone(), None)
         };
 
         files.push(PreviewFile {
@@ -2693,8 +2779,8 @@ async fn render_rename_preview(sandbox_root: &Path, edit: &Value) -> String {
     for f in &files {
         out.push(f.display.clone());
         for &(line0, character0) in &f.sites {
-            let line1 = line0 + 1;
-            let col1 = character0 + 1;
+            let line1 = line0.saturating_add(1);
+            let col1 = character0.saturating_add(1);
             match f.content.as_deref().and_then(|c| line_snippet(c, line0)) {
                 Some(snippet) => out.push(format!("  L{line1}:{col1}: {snippet}")),
                 None => out.push(format!("  L{line1}:{col1}")),
@@ -2721,15 +2807,20 @@ enum LspArgs {
 /// tagging externe).
 #[derive(serde::Deserialize)]
 pub struct EditAndCheckArgs {
+    /// Chemin du fichier à éditer (relatif ou absolu confiné).
     pub path: String,
     /// "write" | "edit" — toute autre valeur : invalid arguments tool-result.
     pub mode: String,
+    /// Contenu complet en mode `write` (obligatoire alors).
     #[serde(default)]
-    pub content: Option<String>, // mode write (obligatoire alors)
+    pub content: Option<String>,
+    /// Texte à remplacer en mode `edit` (obligatoire alors).
     #[serde(default)]
-    pub old_string: Option<String>, // mode edit (obligatoires alors)
+    pub old_string: Option<String>,
+    /// Texte de remplacement en mode `edit` (obligatoire alors).
     #[serde(default)]
     pub new_string: Option<String>,
+    /// `true` : remplacer toutes les occurrences de `old_string` (mode `edit`).
     #[serde(default)]
     pub replace_all: bool,
 }
@@ -2759,7 +2850,7 @@ pub async fn dispatch_edit_and_check(
             state,
             args,
             std::time::Duration::from_secs(crate::FS_FLUSH_TIMEOUT_SECS),
-            crate::lsp_client::DIAGNOSTICS_TIMEOUT * 2,
+            crate::lsp_client::DIAGNOSTICS_TIMEOUT.saturating_mul(2),
         )
         .await,
     )
@@ -2768,6 +2859,10 @@ pub async fn dispatch_edit_and_check(
 /// Coeur testable avec timeouts injectés (les tests passent ~200 ms pour ne
 /// pas dormir 4 s par test — même code que la prod, constantes séparées).
 /// Numérotation des étapes = design §7 de `lsp-agent-interface`.
+// tooling.sdd D3b — tools_impl.sdd §7 : @run_edit_and_check porte le pipeline
+// contracté étapes 1-7 (capture avant, édition, flush éditeur, ré-analyse, diff)
+// du seul outil qui le définit ; chaque étape est un contrat de rendu.
+#[allow(clippy::too_many_lines)]
 async fn run_edit_and_check(
     state: &AppState,
     args: EditAndCheckArgs,
@@ -2822,11 +2917,8 @@ async fn run_edit_and_check(
     };
 
     // Toolchain + session (sinon -006, mêmes messages que dispatch_lsp).
-    let (toolchain, language_id) = match toolchain_for_path(&resolved) {
-        Some(pair) => pair,
-        None => {
-            return err_result("VNL-SBX-LSP-006: no LSP for file extension".to_string());
-        }
+    let Some((toolchain, language_id)) = toolchain_for_path(&resolved) else {
+        return err_result("VNL-SBX-LSP-006: no LSP for file extension".to_string());
     };
     let session = match state.lsp.get_or_spawn(toolchain).await {
         Ok(Some(s)) => s,
@@ -2956,27 +3048,23 @@ async fn run_edit_and_check(
 
     // Étape 6 — attente de la ré-analyse. `None` = timeout → -011 rendu en
     // ok_result (ÉTAT MOU, jamais err_result : l'édition est appliquée).
-    let after = match session.wait_for_diagnostics(&file_uri, analysis_wait).await {
-        None => {
-            let mut out = vec![header];
-            if case_b && !flushed {
-                out.push(FLUSH_FALLBACK_NOTE.to_string());
-            }
-            out.push(format!(
+    let Some(after) = session.wait_for_diagnostics(&file_uri, analysis_wait).await else {
+        let mut out = vec![header];
+        if case_b && !flushed {
+            out.push(FLUSH_FALLBACK_NOTE.to_string());
+        }
+        out.push(format!(
                 "ré-analyse pas encore stabilisée après {} s — relance edit_and_check ou lsp_diagnostics dans quelques secondes (VNL-SBX-LSP-011).",
                 analysis_wait.as_secs_f64()
             ));
-            out.push("L'édition EST appliquée sur le disque.".to_string());
-            if case_b {
-                // R1 sq5 : le message dit explicitement qui tient la balle.
-                out.push(
-                    "ré-analyse en attente de l'éditeur (fichier ouvert dans un onglet)."
-                        .to_string(),
-                );
-            }
-            return ok_result(out.join("\n"));
+        out.push("L'édition EST appliquée sur le disque.".to_string());
+        if case_b {
+            // R1 sq5 : le message dit explicitement qui tient la balle.
+            out.push(
+                "ré-analyse en attente de l'éditeur (fichier ouvert dans un onglet).".to_string(),
+            );
         }
-        Some(diags) => diags,
+        return ok_result(out.join("\n"));
     };
 
     // Étape 7 — diff par identifiants en COMPTEURS (doublons légaux).
@@ -3046,9 +3134,20 @@ fn diag_key(d: &Value) -> DiagKey {
         .and_then(|r| r.get("start"))
         .cloned()
         .unwrap_or(Value::Null);
-    let line = start.get("line").and_then(|l| l.as_i64()).unwrap_or(0) + 1;
-    let col = start.get("character").and_then(|c| c.as_i64()).unwrap_or(0) + 1;
-    let severity = d.get("severity").and_then(|s| s.as_i64()).unwrap_or(1);
+    let line = start
+        .get("line")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let col = start
+        .get("character")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(0)
+        .saturating_add(1);
+    let severity = d
+        .get("severity")
+        .and_then(serde_json::Value::as_i64)
+        .unwrap_or(1);
     let message = d
         .get("message")
         .and_then(|m| m.as_str())
@@ -3058,7 +3157,7 @@ fn diag_key(d: &Value) -> DiagKey {
 }
 
 /// Rendu d'une ligne de diff : même forme que `lsp_diagnostics` (chemin
-/// confiné relatif, severity_label), en indenté sous sa section.
+/// confiné relatif, `severity_label`), en indenté sous sa section.
 fn render_diag_line(display_path: &str, key: &DiagKey) -> String {
     let (line, col, severity, message) = key;
     format!(
@@ -3083,7 +3182,8 @@ struct DiagnosticsDiff {
 fn count_diag_keys(diags: &[Value]) -> HashMap<DiagKey, usize> {
     let mut counts: HashMap<DiagKey, usize> = HashMap::new();
     for d in diags {
-        *counts.entry(diag_key(d)).or_insert(0) += 1;
+        let count = counts.entry(diag_key(d)).or_insert(0);
+        *count = count.saturating_add(1);
     }
     counts
 }
@@ -3107,7 +3207,7 @@ fn diff_diagnostics(before: &[Value], after: &[Value]) -> DiagnosticsDiff {
             let available = before_counts.get(&key).copied().unwrap_or(0);
             let used = paired.entry(key.clone()).or_insert(0);
             if *used < available {
-                *used += 1;
+                *used = used.saturating_add(1);
             } else {
                 appeared.push(key);
             }
@@ -3123,7 +3223,7 @@ fn diff_diagnostics(before: &[Value], after: &[Value]) -> DiagnosticsDiff {
             let available = after_counts.get(&key).copied().unwrap_or(0);
             let used = paired.entry(key.clone()).or_insert(0);
             if *used < available {
-                *used += 1;
+                *used = used.saturating_add(1);
             } else {
                 gone.push(key);
             }
@@ -3140,6 +3240,8 @@ fn diff_diagnostics(before: &[Value], after: &[Value]) -> DiagnosticsDiff {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+    // tooling.sdd D3b — assertions de tests intactes : clippy::assert_is_empty
+    #![allow(clippy::assert_is_empty)]
     use super::*;
     use crate::auth::test_support;
     use crate::lsp::LspManager;
@@ -3244,14 +3346,14 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SandboxError::InvalidRoot(_) => {}
-            e => panic!("expected InvalidRoot, got {:?}", e),
+            e => panic!("expected InvalidRoot, got {e:?}"),
         }
     }
 
     // ── Regression tests for task 03b (confinement fix) ──────────────────────
 
     /// Test 1 — repro exact de la review : `..` dans un cheminement qui traverse
-    /// des segments inexistants n'évade pas sandbox_root.
+    /// des segments inexistants n'évade pas `sandbox_root`.
     #[test]
     fn dotdot_via_nonexistent_intermediate_rejected() {
         let root = make_root();
@@ -3262,7 +3364,7 @@ mod tests {
         );
         match result.unwrap_err() {
             SandboxError::PathEscape { path, .. } => {
-                assert_eq!(path, "sub/newdir/../../../etc/evilfile")
+                assert_eq!(path, "sub/newdir/../../../etc/evilfile");
             }
             _ => panic!("expected PathEscape"),
         }
@@ -3290,7 +3392,7 @@ mod tests {
         );
         match result.unwrap_err() {
             SandboxError::PathEscape { path, .. } => {
-                assert_eq!(path, "bogus/../../.ssh/authorized_keys")
+                assert_eq!(path, "bogus/../../.ssh/authorized_keys");
             }
             _ => panic!("expected PathEscape"),
         }
@@ -3308,6 +3410,9 @@ mod tests {
     /// correctement câblée dans `confine_path`, mais aucune condition de test
     /// réaliste ne permet de la déclencher dans un conteneur userland normal.
     /// Le CI ne doit pas échouer à cause de ce test.
+    // tooling.sdd D3b — eprintln! = canal d'affichage de `cargo test` (message de
+    // skip) ; tracing ne serait pas rendu dans la sortie du test.
+    #[allow(clippy::print_stderr)]
     #[test]
     #[cfg(unix)]
     fn ancestor_resolution_failure_is_distinct_from_invalid_root() {
@@ -3352,7 +3457,7 @@ mod tests {
         );
         match result.unwrap_err() {
             SandboxError::PathEscape { path, .. } => {
-                assert_eq!(path, "../../etc/hosts")
+                assert_eq!(path, "../../etc/hosts");
             }
             _ => panic!("expected PathEscape"),
         }
@@ -3360,8 +3465,11 @@ mod tests {
 
     // ── Tests LSP dispatch (task 04) ────────────────────────────────────────
 
-    /// Helper: creates an AppState with a fake Rust LSP (Python script).
+    /// Helper: creates an `AppState` with a fake Rust LSP (Python script).
     /// Writes `main.rs` with `"fn main() {}"` into the tempdir.
+    // tooling.sdd D3b — helper async sans await : retirer `async` imposerait de
+    // retirer les `.await` chez tous les appelants (hors périmètre D3b).
+    #[allow(clippy::unused_async)]
     async fn make_lsp_state(name: &str) -> (AppState, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let script_path = tmpdir.path().join(format!("fake_lsp_{name}.py"));
@@ -3392,7 +3500,10 @@ mod tests {
         (state, tmpdir)
     }
 
-    /// Helper: creates a minimal AppState with no LSP toolchains.
+    /// Helper: creates a minimal `AppState` with no LSP toolchains.
+    // tooling.sdd D3b — helper async sans await : retirer `async` imposerait de
+    // retirer les `.await` chez tous les appelants (hors périmètre D3b).
+    #[allow(clippy::unused_async)]
     async fn make_empty_lsp_state() -> (AppState, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let rust_home = tmpdir.path().join("main.rs");
@@ -4302,7 +4413,7 @@ mod tests {
         );
     }
 
-    /// ── apply_text_edits unit tests ──────────────────────────────────────────
+    /// ── `apply_text_edits` unit tests ──────────────────────────────────────────
 
     #[test]
     fn apply_text_edits_replaces_range() {
@@ -4353,12 +4464,11 @@ mod tests {
         let err = apply_text_edits(content, &[edit]).unwrap_err();
         assert!(
             err.to_string().contains("VNL-SBX-LSP-008"),
-            "start > end should return VNL-SBX-LSP-008, got: {}",
-            err
+            "start > end should return VNL-SBX-LSP-008, got: {err}"
         );
     }
 
-    /// ── workspace_edit_files unit tests ──────────────────────────────────────
+    /// ── `workspace_edit_files` unit tests ──────────────────────────────────────
 
     #[test]
     fn workspace_edit_files_both_forms() {
@@ -4385,8 +4495,11 @@ mod tests {
     }
 
     /// ── Rename integration tests ─────────────────────────────────────────────
-    /// Helper: creates an AppState with a fake Rust LSP (nodiag script).
+    /// Helper: creates an `AppState` with a fake Rust LSP (nodiag script).
     /// Writes `main.rs` with `"fn main() {}"` into the tempdir.
+    // tooling.sdd D3b — helper async sans await : retirer `async` imposerait de
+    // retirer les `.await` chez tous les appelants (hors périmètre D3b).
+    #[allow(clippy::unused_async)]
     async fn make_lsp_state_nodiag(name: &str) -> (AppState, tempfile::TempDir) {
         let tmpdir = tempfile::TempDir::new().unwrap();
         let script_path = tmpdir.path().join(format!("fake_lsp_{name}.py"));
@@ -4419,7 +4532,7 @@ mod tests {
 
     #[tokio::test]
     async fn lsp_rename_modifies_file() {
-        let (state, _tmpdir) = make_lsp_state("rename").await;
+        let (state, tmpdir) = make_lsp_state("rename").await;
         let result = tokio::time::timeout(
             Duration::from_secs(10),
             dispatch_lsp(
@@ -4461,7 +4574,7 @@ mod tests {
         );
         // Check the file on disk was modified (le fake édite les caractères
         // 0..2 quoi qu'il en soit).
-        let disk_content = std::fs::read_to_string(_tmpdir.path().join("main.rs")).unwrap();
+        let disk_content = std::fs::read_to_string(tmpdir.path().join("main.rs")).unwrap();
         assert_eq!(disk_content, "X main() {}");
     }
 
@@ -4947,7 +5060,7 @@ mod tests {
         let target = LspSymbolTarget {
             path: "m.rs".to_string(),
             line: 1,
-            symbol: Some("".to_string()),
+            symbol: Some(String::new()),
             character: Some(3),
         };
         assert_eq!(
@@ -5751,6 +5864,9 @@ mod tests {
     /// méthode LSP reçue y est appendue, à la pose des fakes 08a/08c).
     /// Chaque test appelle ce helper → son propre tmpdir et sa propre
     /// session : les enchaînements d'appels sont déterministes.
+    // tooling.sdd D3b — helper async sans await : retirer `async` imposerait de
+    // retirer les `.await` chez tous les appelants (hors périmètre D3b).
+    #[allow(clippy::unused_async)]
     async fn make_edit_check_state(
         name: &str,
     ) -> (AppState, tempfile::TempDir, std::path::PathBuf) {
@@ -5858,6 +5974,9 @@ mod tests {
     /// didOpen) → avant = [v1]. Édition sans BAD → après = [] → DISPARUS
     /// (1) avec la ligne de v1 ; variante dans un nouveau tmpdir vers un
     /// contenu contenant BAD → après = [v2] → APPARUS (1) avec diag v2.
+    // tooling.sdd D3b — Scenario contracté en une variante a + b ; scinder le test
+    // serait un refactoring hors périmètre, assertions intactes.
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn edit_and_check_case_a_apparus_et_disparus() {
         // Variante a : v1 → [] (disparus).
@@ -5973,7 +6092,7 @@ mod tests {
     /// Test 3 — cas B : le tool n'envoie JAMAIS didChange (observer.log du
     /// fake), notifie l'éditeur via le broadcast `file-changed`, écrit sur
     /// le disque, et l'attente sans re-publication aboutit au -011 EN ÉTAT
-    /// MOU (ok_result, jamais err_result).
+    /// MOU (`ok_result`, jamais `err_result`).
     #[tokio::test]
     async fn edit_and_check_case_b_never_didchanges_and_notifies() {
         let (state, _tmpdir, root) = make_edit_check_state("ec_case_b").await;
@@ -6173,9 +6292,9 @@ mod tests {
     }
 
     /// Test 6 — validation de l'union discriminée : mode inconnu, write sans
-    /// content, edit sans old_string → err_result « invalid arguments… »
+    /// content, edit sans `old_string` → `err_result` « invalid arguments… »
     /// (préfixe existant) SANS écrire. Un nom étranger → None (frère de
-    /// dispatch_lsp, même forme).
+    /// `dispatch_lsp`, même forme).
     #[tokio::test]
     async fn edit_and_check_mode_validation() {
         let (state, _tmpdir, root) = make_edit_check_state("ec_mode").await;
@@ -6317,7 +6436,7 @@ mod tests {
     }
 
     /// Test 9 — le diff compte des MULTIPLICITÉS : deux diagnostics
-    /// identiques avant, un après → DISPARUS 1 et INCHANGÉS 1 (un HashSet
+    /// identiques avant, un après → DISPARUS 1 et INCHANGÉS 1 (un `HashSet`
     /// perdrait le doublon et rendrait 0/1 — le design impose des compteurs).
     #[test]
     fn diagnostics_diff_counts_duplicates() {

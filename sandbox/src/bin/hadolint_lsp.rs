@@ -15,7 +15,7 @@
 //! (`spawn_aux_startup` : `current_dir(sandbox_root)`) — hadolint y trouve le
 //! `.hadolint.yaml` du projet, zéro interpolation (question ouverte tranchée).
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -83,7 +83,7 @@ impl State {
     /// en vol et les debounce en sommeil) et la rend.
     fn bump_gen(&self, uri: &str) -> u64 {
         let mut inner = self.inner();
-        let next = inner.gens.get(uri).copied().unwrap_or(0) + 1;
+        let next = inner.gens.get(uri).copied().unwrap_or(0).saturating_add(1);
         inner.gens.insert(uri.to_string(), next);
         next
     }
@@ -238,6 +238,10 @@ async fn run_hadolint(buffer: &str) -> Result<String, String> {
 /// est re-déclenché. Spawn en échec / stdout non-JSON ⟹ contribution vide +
 /// message sur stderr : le wrapper ne meurt jamais (le primaire sert encore —
 /// dégradation silencieuse du design).
+// tooling.sdd D3b — hadolint_lsp.sdd Returns : les lignes stderr (`eprintln!`,
+// codes contractés) sont le seul canal de diagnostic du wrapper, stdout réservée
+// aux trames LSP.
+#[allow(clippy::print_stderr)]
 async fn run_lint(state: Arc<State>, uri: String, text: String, version: i64, generation: u64) {
     let diagnostics = match run_hadolint(&text).await {
         Ok(stdout) => {
@@ -264,6 +268,9 @@ async fn run_lint(state: Arc<State>, uri: String, text: String, version: i64, ge
 
 /// Traite une trame décodée. `true` = la boucle principale doit rendre la main
 /// (notification `exit`).
+// tooling.sdd D3b — hadolint_lsp.sdd Must : handle_frame est le dispatcheur unique
+// des requêtes + 5 notifications contractées ; le découper sortirait du contrat.
+#[allow(clippy::too_many_lines)]
 async fn handle_frame(state: &Arc<State>, frame: &[u8]) -> bool {
     let Ok(msg) = serde_json::from_slice::<Value>(frame) else {
         return false; // trame non-JSON : ignorée (le flux n'est pas corrompu).
@@ -480,23 +487,25 @@ fn utf16_offset(text: &str, line: i64, character: i64) -> usize {
     let mut starts = vec![0_usize];
     for (idx, ch) in text.char_indices() {
         if ch == '\n' {
-            starts.push(idx + 1);
+            starts.push(idx.saturating_add(1));
         }
     }
-    let line_idx = usize::try_from(line).unwrap_or(0).min(starts.len() - 1);
+    let line_idx = usize::try_from(line)
+        .unwrap_or(0)
+        .min(starts.len().saturating_sub(1));
     let line_str = &text[starts[line_idx]..];
     let line_len = line_str.find('\n').unwrap_or(line_str.len());
     let target = usize::try_from(character).unwrap_or(0);
     let mut units = 0_usize;
     let mut bytes = 0_usize;
     for ch in line_str[..line_len].chars() {
-        if units + ch.len_utf16() > target {
+        if units.saturating_add(ch.len_utf16()) > target {
             break;
         }
-        units += ch.len_utf16();
-        bytes += ch.len_utf8();
+        units = units.saturating_add(ch.len_utf16());
+        bytes = bytes.saturating_add(ch.len_utf8());
     }
-    starts[line_idx] + bytes
+    starts[line_idx].saturating_add(bytes)
 }
 
 /// Convertit la sortie `hadolint --format json` (tableau d'objets
@@ -523,6 +532,10 @@ fn convert_hadolint_output(hadolint_json: &str, doc_text: &str) -> Vec<Value> {
             let line = obj.get("line")?.as_i64()?;
             let column = obj.get("column").and_then(Value::as_i64).unwrap_or(1);
             let level = obj.get("level").and_then(Value::as_str).unwrap_or_default();
+            // tooling.sdd D3b — hadolint_lsp.sdd Must : sévérités contractées
+            // énumérées (info⟹3 explicite, distincte du repli « tout le reste
+            // inconnu ou absent ⟹ 3 ») ; fusionner perdrait l'explicitation.
+            #[allow(clippy::match_same_arms)]
             let severity = match level {
                 "error" => 1,
                 "warning" => 2,
@@ -532,11 +545,15 @@ fn convert_hadolint_output(hadolint_json: &str, doc_text: &str) -> Vec<Value> {
             };
             // 1-based → 0-based, ligne clampée au document (hadolint peut
             // signaler au-delà d'un buffer édité entre-temps).
-            let line_idx = usize::try_from(line - 1).unwrap_or(0).min(lines.len() - 1);
+            let line_idx = usize::try_from(line.saturating_sub(1))
+                .unwrap_or(0)
+                .min(lines.len().saturating_sub(1));
             let content = lines[line_idx];
             // Fin de range = fin de ligne, en unités UTF-16 comme le spec LSP.
             let line_units = content.encode_utf16().count();
-            let start_char = usize::try_from(column - 1).unwrap_or(0).min(line_units);
+            let start_char = usize::try_from(column.saturating_sub(1))
+                .unwrap_or(0)
+                .min(line_units);
             let message = obj
                 .get("message")
                 .and_then(Value::as_str)
@@ -560,13 +577,16 @@ fn convert_hadolint_output(hadolint_json: &str, doc_text: &str) -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // tooling.sdd D3b — assertions de tests intactes : clippy::assert_is_empty
+    // imposerait assert_eq!(…) et changerait la forme d'échec.
+    #![allow(clippy::assert_is_empty)]
 
     use super::*;
     use serde_json::json;
 
     // ── convert_hadolint_output ─────────────────────────────────────────────
 
-    /// Test 1 : convert_hadolint_output_example — l'exemple du fichier de tâche,
+    /// Test 1 : `convert_hadolint_output_example` — l'exemple du fichier de tâche,
     /// equality structurelle exacte (ranges, sévérités, code, source, ordre).
     /// Note : la ligne 3 du doc (`ADD --link x /y`) fait 15 unités UTF-16 — le
     /// `end.character` est la fin de ligne CONTRACTUELLE (règle « fin de range =
@@ -587,7 +607,7 @@ mod tests {
         assert_eq!(Value::Array(out), expected);
     }
 
-    /// Test 2 : convert_hadolint_output_levels — les 4 niveaux + un inconnu
+    /// Test 2 : `convert_hadolint_output_levels` — les 4 niveaux + un inconnu
     /// (⟹ severity 3).
     #[test]
     fn convert_hadolint_output_levels() {
@@ -606,7 +626,7 @@ mod tests {
         assert_eq!(severities, vec![1, 2, 3, 4, 3]);
     }
 
-    /// Test 3 : convert_hadolint_output_clamps — ligne hors bornes (line 99
+    /// Test 3 : `convert_hadolint_output_clamps` — ligne hors bornes (line 99
     /// dans un doc de 2 lignes ⟹ clamp ligne 1), colonne hors borne ⟹ clamp fin
     /// de ligne ; ligne vide ⟹ range 0..0.
     #[test]
@@ -630,7 +650,7 @@ mod tests {
         assert_eq!(out[0]["range"]["end"], json!({"line":1,"character":0}));
     }
 
-    /// Test 4 : convert_hadolint_output_utf16 — ligne contenant un emoji
+    /// Test 4 : `convert_hadolint_output_utf16` — ligne contenant un emoji
     /// (2 unités UTF-16) : clamp et fin de ligne en unités UTF-16, pas en
     /// chars/bytes.
     #[test]
@@ -646,7 +666,7 @@ mod tests {
         assert_eq!(out[1]["range"]["end"], json!({"line":0,"character":12}));
     }
 
-    /// Test 5 : convert_hadolint_output_garbage — `"{}"`, `"not json"`,
+    /// Test 5 : `convert_hadolint_output_garbage` — `"{}"`, `"not json"`,
     /// tableau d'un objet sans `line` ⟹ `vec![]`.
     #[test]
     fn convert_hadolint_output_garbage() {
@@ -663,7 +683,7 @@ mod tests {
 
     // ── apply_content_changes ───────────────────────────────────────────────
 
-    /// Test 6 : apply_content_changes_full_replace — changement sans `range`
+    /// Test 6 : `apply_content_changes_full_replace` — changement sans `range`
     /// (ni `range: null`).
     #[test]
     fn apply_content_changes_full_replace() {
@@ -675,7 +695,7 @@ mod tests {
         assert_eq!(text, "nul");
     }
 
-    /// Test 7 : apply_content_changes_incremental — remplacement intra-ligne
+    /// Test 7 : `apply_content_changes_incremental` — remplacement intra-ligne
     /// (`latest` → `22.04`), insertion en fin de fichier, suppression
     /// multi-lignes.
     #[test]
@@ -714,7 +734,7 @@ mod tests {
         assert_eq!(text, "c\n");
     }
 
-    /// Test 8 : apply_content_changes_bounded — range au-delà de la fin du
+    /// Test 8 : `apply_content_changes_bounded` — range au-delà de la fin du
     /// document ⟹ clamp, texte résultat déterministe, pas de panique.
     #[test]
     fn apply_content_changes_bounded() {
@@ -749,7 +769,7 @@ mod tests {
         assert_eq!(text, "intact");
     }
 
-    /// Test 9 : apply_content_changes_sequence — plusieurs changements
+    /// Test 9 : `apply_content_changes_sequence` — plusieurs changements
     /// séquentiels appliqués dans l'ordre (chacun sur le texte muté par le
     /// précédent).
     #[test]

@@ -16,7 +16,7 @@
 //! (`spawn_aux_startup` : `current_dir(sandbox_root)`) — ruff y trouve le
 //! `pyproject.toml`/`ruff.toml`/`.ruff.toml` du projet, zéro interpolation.
 
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -84,7 +84,7 @@ impl State {
     /// en vol et les debounce en sommeil) et la rend.
     fn bump_gen(&self, uri: &str) -> u64 {
         let mut inner = self.inner();
-        let next = inner.gens.get(uri).copied().unwrap_or(0) + 1;
+        let next = inner.gens.get(uri).copied().unwrap_or(0).saturating_add(1);
         inner.gens.insert(uri.to_string(), next);
         next
     }
@@ -240,6 +240,10 @@ async fn run_ruff(buffer: &str) -> Result<String, String> {
 /// est re-déclenché. Spawn en échec / stdout non-JSON ⟹ contribution vide +
 /// message sur stderr : le wrapper ne meurt jamais (le primaire sert encore —
 /// dégradation silencieuse du design).
+// tooling.sdd D3b — ruff_lsp.sdd Returns : les lignes stderr (`eprintln!`, codes
+// VNL-SBX-LSP-012/013 contractés) sont le seul canal de diagnostic du wrapper,
+// stdout réservée aux trames LSP.
+#[allow(clippy::print_stderr)]
 async fn run_lint(state: Arc<State>, uri: String, text: String, version: i64, generation: u64) {
     let diagnostics = match run_ruff(&text).await {
         Ok(stdout) => {
@@ -266,6 +270,9 @@ async fn run_lint(state: Arc<State>, uri: String, text: String, version: i64, ge
 
 /// Traite une trame décodée. `true` = la boucle principale doit rendre la main
 /// (notification `exit`).
+// tooling.sdd D3b — ruff_lsp.sdd Must : handle_frame est le dispatcheur unique
+// des requêtes + 5 notifications contractées ; le découper sortirait du contrat.
+#[allow(clippy::too_many_lines)]
 async fn handle_frame(state: &Arc<State>, frame: &[u8]) -> bool {
     let Ok(msg) = serde_json::from_slice::<Value>(frame) else {
         return false; // trame non-JSON : ignorée (le flux n'est pas corrompu).
@@ -482,23 +489,25 @@ fn utf16_offset(text: &str, line: i64, character: i64) -> usize {
     let mut starts = vec![0_usize];
     for (idx, ch) in text.char_indices() {
         if ch == '\n' {
-            starts.push(idx + 1);
+            starts.push(idx.saturating_add(1));
         }
     }
-    let line_idx = usize::try_from(line).unwrap_or(0).min(starts.len() - 1);
+    let line_idx = usize::try_from(line)
+        .unwrap_or(0)
+        .min(starts.len().saturating_sub(1));
     let line_str = &text[starts[line_idx]..];
     let line_len = line_str.find('\n').unwrap_or(line_str.len());
     let target = usize::try_from(character).unwrap_or(0);
     let mut units = 0_usize;
     let mut bytes = 0_usize;
     for ch in line_str[..line_len].chars() {
-        if units + ch.len_utf16() > target {
+        if units.saturating_add(ch.len_utf16()) > target {
             break;
         }
-        units += ch.len_utf16();
-        bytes += ch.len_utf8();
+        units = units.saturating_add(ch.len_utf16());
+        bytes = bytes.saturating_add(ch.len_utf8());
     }
-    starts[line_idx] + bytes
+    starts[line_idx].saturating_add(bytes)
 }
 
 /// Convertit la sortie `ruff check --output-format json` (tableau d'objets
@@ -548,9 +557,13 @@ fn convert_ruff_output(ruff_json: &str, doc_text: &str) -> Vec<Value> {
             let column = location.get("column").and_then(Value::as_i64).unwrap_or(1);
             // 1-based → 0-based, ligne clampée au document (ruff peut
             // signaler au-delà d'un buffer édité entre-temps).
-            let line_idx = usize::try_from(row - 1).unwrap_or(0).min(lines.len() - 1);
+            let line_idx = usize::try_from(row.saturating_sub(1))
+                .unwrap_or(0)
+                .min(lines.len().saturating_sub(1));
             let line_units = lines[line_idx].encode_utf16().count();
-            let start_char = usize::try_from(column - 1).unwrap_or(0).min(line_units);
+            let start_char = usize::try_from(column.saturating_sub(1))
+                .unwrap_or(0)
+                .min(line_units);
             // End depuis `end_location` (même conversion, même clamp) ; absent/
             // `null`/malformé ⟹ fin de la ligne de start (repli à-la-hadolint).
             let mut end = obj
@@ -562,11 +575,13 @@ fn convert_ruff_output(ruff_json: &str, doc_text: &str) -> Vec<Value> {
                         .get("column")
                         .and_then(Value::as_i64)
                         .unwrap_or(1);
-                    let end_idx = usize::try_from(end_row - 1)
+                    let end_idx = usize::try_from(end_row.saturating_sub(1))
                         .unwrap_or(0)
-                        .min(lines.len() - 1);
+                        .min(lines.len().saturating_sub(1));
                     let end_units = lines[end_idx].encode_utf16().count();
-                    let end_char = usize::try_from(end_column - 1).unwrap_or(0).min(end_units);
+                    let end_char = usize::try_from(end_column.saturating_sub(1))
+                        .unwrap_or(0)
+                        .min(end_units);
                     Some((end_idx, end_char))
                 })
                 .unwrap_or((line_idx, line_units));
@@ -618,6 +633,10 @@ fn convert_ruff_output(ruff_json: &str, doc_text: &str) -> Vec<Value> {
 /// 2026-09-08 : on relaie la sévérité ruff quand elle existe (ruff 0.16.6 pose
 /// `"error"` y compris sur les lints de style comme `I001`), Warning ne reste
 /// que le repli quand ruff n'en fournit aucune.
+// tooling.sdd D3b — ruff_lsp.sdd Must @ruff_severity : mapping contracté énuméré
+// (warning⟹2 explicite, distinct du repli « absente/null/inconnue ⟹ 2 ») ;
+// fusionner perdrait l'explicitation.
+#[allow(clippy::match_same_arms)]
 fn ruff_severity(obj: &serde_json::Map<String, Value>) -> i64 {
     match obj.get("severity").and_then(Value::as_str) {
         Some("error" | "fatal") => 1,
@@ -631,13 +650,16 @@ fn ruff_severity(obj: &serde_json::Map<String, Value>) -> i64 {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
+    // tooling.sdd D3b — assertions de tests intactes : clippy::assert_is_empty
+    // imposerait assert_eq!(…) et changerait la forme d'échec.
+    #![allow(clippy::assert_is_empty)]
 
     use super::*;
     use serde_json::json;
 
     // ── convert_ruff_output ─────────────────────────────────────────────────
 
-    /// Test 1 : convert_ruff_output_example — TRACE-A verbatim (sortie réelle
+    /// Test 1 : `convert_ruff_output_example` — TRACE-A verbatim (sortie réelle
     /// `ruff 0.16.6 check --output-format json --force-exclude -`), equality
     /// structurelle exacte (ranges, sévérités, code, source, ordre). Les `\n`
     /// internes des valeurs `fix.edits.content` sont des newlines littéraux
@@ -663,7 +685,7 @@ mod tests {
         assert_eq!(Value::Array(out), expected);
     }
 
-    /// Test 2 : convert_ruff_output_severity_relayed — la sévérité ruff est
+    /// Test 2 : `convert_ruff_output_severity_relayed` — la sévérité ruff est
     /// RELAYÉE quand c'est une chaîne connue (`"error"` → 1, `"warning"` → 2,
     /// `"info"` → 3, `"hint"` → 4) ; absente ou valeur inconnue ⟹ 2 (Warning)
     /// par défaut (décision 2026-09-08).
@@ -686,7 +708,7 @@ mod tests {
         assert_eq!(severities, vec![1, 2, 2, 3, 4, 2]);
     }
 
-    /// Test 3 : convert_ruff_output_url_null_omits_code_description — TRACE-B
+    /// Test 3 : `convert_ruff_output_url_null_omits_code_description` — TRACE-B
     /// verbatim (2 items `invalid-syntax`, `url: null`) : le `codeDescription`
     /// est OMIS (`href` doit être une chaîne en LSP, jamais `null`), mais
     /// `code` reste présent.
@@ -708,7 +730,7 @@ mod tests {
         assert_eq!(out[1]["range"]["end"], json!({"line":1,"character":0}));
     }
 
-    /// Test 4 : convert_ruff_output_filename_guard — item avec `filename`
+    /// Test 4 : `convert_ruff_output_filename_guard` — item avec `filename`
     /// `"-"` conservé, `filename` absent conservé, `filename` étranger ignoré
     /// (on passe toujours `-` en argv).
     #[test]
@@ -726,9 +748,9 @@ mod tests {
         assert_eq!(out[1]["code"], json!("B"));
     }
 
-    /// Test 5 : convert_ruff_output_clamps — ligne hors bornes (row 99 dans un
+    /// Test 5 : `convert_ruff_output_clamps` — ligne hors bornes (row 99 dans un
     /// doc de 2 lignes ⟹ clamp ligne 1), colonne hors borne ⟹ clamp fin de
-    /// ligne (début comme fin) ; end_location antérieur au start après clamp
+    /// ligne (début comme fin) ; `end_location` antérieur au start après clamp
     /// (fabrication défensive) ⟹ end remplacé par la fin de la ligne de start.
     #[test]
     fn convert_ruff_output_clamps() {
@@ -752,7 +774,7 @@ mod tests {
         assert_eq!(out[0]["range"]["end"], json!({"line":0,"character":5}));
     }
 
-    /// Test 6 : convert_ruff_output_end_location_missing_falls_back_to_line_end
+    /// Test 6 : `convert_ruff_output_end_location_missing_falls_back_to_line_end`
     /// — item avec `location` présent, SANS la clé `end_location` (objet d'un
     /// autre émetteur / version passée) ⟹ end = fin de la ligne de start en
     /// unités UTF-16. Doc `x = "🐛"\n` : la ligne fait 8 unités UTF-16 (`x`,
@@ -771,7 +793,7 @@ mod tests {
         assert_eq!(out[0]["range"]["end"], json!({"line":0,"character":8}));
     }
 
-    /// Test 7 : convert_ruff_output_utf16_shift_documented — TRACE-C verbatim
+    /// Test 7 : `convert_ruff_output_utf16_shift_documented` — TRACE-C verbatim
     /// (doc `x = print("🐛") ; import os\n`) : le F401 (colonne 25 en scalaires
     /// Unicode ruff) atterrit `character: 24` en sortie (24 = 25−1, conversion
     /// triviale), là où l'UTF-16 strict serait 25 — décalage de 1 unité ASSUMÉ
@@ -793,7 +815,7 @@ mod tests {
         assert_eq!(out[1]["range"]["start"], json!({"line":0,"character":24}));
     }
 
-    /// Test 8 : convert_ruff_output_garbage — `"{}"`, `"not json"`, tableau
+    /// Test 8 : `convert_ruff_output_garbage` — `"{}"`, `"not json"`, tableau
     /// d'un objet sans `location`, tableau d'un objet avec `location.row`
     /// non-numérique ⟹ `vec![]` / items ignorés.
     #[test]
@@ -818,7 +840,7 @@ mod tests {
 
     // ── apply_content_changes ───────────────────────────────────────────────
 
-    /// Test 9 : apply_content_changes_full_replace — changement sans `range`
+    /// Test 9 : `apply_content_changes_full_replace` — changement sans `range`
     /// (ni `range: null`).
     #[test]
     fn apply_content_changes_full_replace() {
@@ -830,7 +852,7 @@ mod tests {
         assert_eq!(text, "nul");
     }
 
-    /// Test 10 : apply_content_changes_incremental — remplacement intra-ligne
+    /// Test 10 : `apply_content_changes_incremental` — remplacement intra-ligne
     /// (`latest` → `22.04`), insertion en fin de fichier, suppression
     /// multi-lignes.
     #[test]
@@ -869,7 +891,7 @@ mod tests {
         assert_eq!(text, "c\n");
     }
 
-    /// Test 11 : apply_content_changes_bounded — range au-delà de la fin du
+    /// Test 11 : `apply_content_changes_bounded` — range au-delà de la fin du
     /// document ⟹ clamp, texte résultat déterministe, pas de panique.
     #[test]
     fn apply_content_changes_bounded() {
