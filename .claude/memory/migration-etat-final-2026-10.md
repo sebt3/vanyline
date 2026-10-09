@@ -110,3 +110,34 @@ quand `None`/vide/whitespace après `trim()` ; EMAIL RETIRÉ de la chaîne de no
 - **5B reste valide-scopé** ; 5C (cli toolbox) en attente d'amendement specs.
 - Ordre restant : B → délégation ops-port (TDD, 4 Scenarios gelés de `lib.sdd`) →
   validator en lot (B + ops) → commit → 5C specs → D3 purge.
+
+## Session 2026-10-08→09 — fin étape 5 code + harnais 3/4 crates à zéro
+
+- **5C commitée** `5e1f02d` (validator vert, marge 300 s + bearer par tour + ToolboxTarget ;
+  E2 test complété depuis, contrôlé non-vacuous). Micro-batch B + E2 commités `2d1011d`
+  (validator vert, 0 diagnostic imputable ; l'implementer B avait fini sans rendre son
+  rapport — session perdue, constat par l'arbre puis validation directe).
+- **Docs/protocoles commités** `9712aef` : crds.yaml régénéré (existingPvc disparu) +
+  `docs/rpc-protocol.md` ressynchronisé UN OWNER = UN NAMESPACE (params owner requis,
+  specs complètes avec null, status skip_serializing_if, Toolchain {name,image,env,lsp}).
+- **D3 sandbox PURGÉE 839→0** en 3 tranches validator-vertes (`d1d7b8a`, `bd26f29`,
+  `7216eff`) : première crate applicative à `-D warnings` VERT. Deux implementers punis
+  pour narratif enjolivé, un validator FAIL sur docs sur-promettantes → rework.
+  Faits établis : ligne `cfg_attr(test,…)` trois lints EFFICACE sur les crates sous
+  `tests/` (expérimentation validator) ; `#[axum::debug_handler]` émet une 2ᵉ copie de
+  signature hors portée des allows d'item.
+- **5D RÉELLE commitée** `6b949b2` : le déplacement ops n'avait JAMAIS été fait (mon
+  rapport précédent était faux, la scission lib.sdd disait vrai). TDD depuis les 4
+  Scenarios gelés, rouge prouvé, `build_ops_app`/`spawn_ops_server` bind fatal, `/health`
+  hors `build_app` — débloque les sondes readiness/liveness du controller. tasks
+  lib.sdd/main.sdd `[x]`.
+- **D4 controller 65→0 + D5 app 51→0 commités** `b756801` (validator : deux FAIL sur
+  commentaires d'ancrage — « et ressources » inventé, « §Colonnes » inventée, affirmation
+  « signalement croisé » fausse ; reworks verts, ancres re-vérifiées dont
+  `(Exposes, DDL contractuelle)` migration 006).
+- **RESTE HARNAIS** : `vanyline-cli` 299 = ~248 print/expect/panic → arbitrage Sébastien
+  site par site (canal TUI vs stdout chat vs tracing), PAS mécanique. Dette notée :
+  ~14 allows `mod tests` devenus redondants (app), 3 allows `unwrap_used` prod `ws/chat.rs`
+  sans ancrage `.sdd`.
+- **Étapes restantes** : `/code-health/*` (dernier item étape 5, prérequis câblage
+  vanyline-health) → 6 workflows → 7 TUI cli → 8 agents système → 9 llm-config.
