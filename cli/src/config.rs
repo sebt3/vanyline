@@ -12,6 +12,12 @@ pub fn data_dir() -> PathBuf {
     base.join("vanyline")
 }
 
+// tooling.sdd D6a — config.sdd §Raises/@Returns : échec de création ⇒ stderr
+// commençant par `Failed to create config dir: ` suivi de l'erreur d'I/O, puis
+// exit(1) (Scenario dédié). La question de la FORME (tracing/propagation,
+// survie du code 1) reste le [?] ouvert config.sdd Tasks l.205 — non tranchée
+// ici.
+#[allow(clippy::print_stderr)]
 pub fn ensure_config_dir() {
     std::fs::create_dir_all(config_dir()).unwrap_or_else(|e| {
         eprintln!("Failed to create config dir: {e}");
@@ -19,6 +25,10 @@ pub fn ensure_config_dir() {
     });
 }
 
+// tooling.sdd D6a — config.sdd §Raises : @ensure_data_dir en échec, même motif
+// avec le préfixe `Failed to create data dir: ` + exit(1) (Scenario dédié).
+// Cf. [?] config.sdd Tasks l.205 pour la forme.
+#[allow(clippy::print_stderr)]
 pub fn ensure_data_dir() {
     std::fs::create_dir_all(data_dir().join("conversations")).unwrap_or_else(|e| {
         eprintln!("Failed to create data dir: {e}");

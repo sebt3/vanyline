@@ -152,10 +152,25 @@ Tasks:
     `mod tests` devenus REDONDANTS avec la ligne canonique de la racine — candidats purge
     au prochain passage sur ces fichiers ; les 3 allows `unwrap_used` de prod de
     `ws/chat.rs` (mutex empoisonné) ne citent pas de `.sdd` — à régulariser).
-    RESTE (convention de comptage gelée ci-dessous) : `vanyline-cli` 299 (dont ~248 de
-    restrictions dures print/expect/panic — un purge là dedans est un arbitrage site par
-    site des specs cli (canal TUI vs stdout de chat vs tracing), PAS une purge mécanique ;
-    ~40 seulement sont de la mécanique des tranches D3) — purge au fil
+    Et `vanyline-cli` (D6 2026-10-09 : 299 → 0 en trois lots validator-verts — D6a
+    `chat.rs`/`tests/rpc_stdio_smoke.rs`/petits (57), D6b `main.rs` (142 spans), D6c
+    `rpc/handlers.rs` (100) ; 52 sites résolus par réécriture sans allow — let-else,
+    assert_is_empty machine ×5, needless_pass_by_value, unused_async retiré à l'unique
+    call site, etc. ; 75 attributes allow + 2 `cfg_attr` de racine : ~169 allows ancrés
+    sur des contrats écrits (rendus §Handles/§Returns de main.sdd et chat.sdd, §Raises
+    mutex/seq et surfaces de panic de handlers.sdd, too_many_lines des tables contractées)
+    et ~78 allows « en attente d'arbitrage [?] », explicitement non tranchés et
+    comptabilisés comme tels : ~68 expect-sérialisation `handlers.rs` (suspendus au `[?]`
+    fusionné de `rpc/handlers.sdd`), 5 expect `main.rs` (`[?]` main.sdd l.547), 3 panic
+    `tools.rs` (`[!]` tools.sdd l.267), 2 prints `config.rs` (`[?]` config.sdd l.205) ;
+    la ligne racine de main.rs passe aux trois lints canoniques + `unsafe_code`
+    (exception préexistante couvrant les `unsafe { set_var }` de test de rpc/handlers.rs)
+    — §Must de main.sdd ressynchronisé le 2026-10-09).
+    DETTE HARNAIS WORKSPACE : ZÉRO — `cargo clippy --workspace --all-targets
+    -- -D warnings` VERT (validator 2026-10-09, 8 crates ; 1121 tests verts) ; les
+    « traités » en attente de ratification `[?]`/`[!]` sont listés ci-dessus et à solder
+    par les arbitrages de Sébastien (ratifier ⇒ allow confirmé ; refuser ⇒ correction
+    avec changement de contrat à rédiger d'abord). — purge au fil
     des étapes de la migration qui les touchent (interleaved). Les 2 `unnecessary_wraps`
     imputables à 4a (`controller/src/{owner,project}.rs::build_*_pvc`) SOLDÉS en 4b.
     Exemptions pedantic restantes en `lib` (2, les seules) : `too_many_lines` sur
@@ -174,6 +189,26 @@ Tasks:
     (`generated N warnings`, spans `-->`) ne sont plus utilisables pour confronter d'une purge
     à l'autre. Les chiffres RESTENT ci-dessus sont des uniques sous cette convention
     (mesure 2026-10-07, lib purgée). RATIFIÉE par Sébastien le 2026-10-08.
+  [?] Clarification `Can modify` des racines de crate : la clause « `./<crate>/src/main.rs`
+    : ligne d'exemption `cfg(test)` seulement » borne-t-elle la CONFIG de lint de la racine
+    (lecture appliquée en D3c/D5 : les docs `missing_docs` des racines sont inévitables
+    sous la tâche « Doc missing_docs purgée partout ») ou interdit-elle littéralement
+    d'y toucher ? Ratifier la clarification d'une ligne si la première lecture tient.
+  [?] Style `assert_is_empty` : clippy 1.99 (pedantic, deny) prescrit la forme machine
+    `assert_eq!(x, [] as [T; 0])` — appliquée au caractère en D4/D5, laide et verbeuse.
+    Alternative : exemption ciblée marqueur sur ces sites (précédent sandbox/tests sous
+    `#![allow]`). Trancher UNE politique pour tout le workspace.
+  [?] Nommage des fn de test : « test taggé par son titre » porte sur le TAG de
+    commentaire, mais les fn oscillent entre `scenario_<titre>` (sandbox/tests/auth.rs,
+    config.rs) et `<titre>` nu (app, cli, 5D). Deux coexistent dans `config.rs` même.
+    Trancher un seul style ; la migration est mécanique (renommages sans assert modifié).
+  [?] Dettes de nettoyage nées des purges (constatées par validator D5, préexistantes) :
+    ~14 `#![allow(clippy::unwrap_used, clippy::expect_used)]` de `mod tests` dans `app/`
+    devenus REDONDANTS avec la ligne canonique trois lints de la racine — les retirer ;
+    les 3 allows `unwrap_used` de prod `app/src/ws/chat.rs:70/90/327` (« mutex empoisonné »)
+    ne citent aucune spec — ancrer `chat.sdd` (ratifier le droit à l'expect sur mutex
+    empoisonné) ou propager. Les deux sont hors quota de dette (déjà exemptés) mais
+    contraires à l'esprit « allow citant la spec ».
   [x] Compléter les metadata `[package]` des 9 Cargo.toml membres (a éliminé les 45
     `cargo_common_metadata`) — autorisation Sébastien 2026-10-06, cf. `Can modify`.
     — fait et vérifié 2026-10-06, validator vert.
@@ -184,9 +219,18 @@ Tasks:
   [ ] Cosmétique : `cfgstore/Cargo.toml` `categories = ["config", …]` — « config » n'est pas
     une catégorie crates.io canonique (sans effet sur le harnais, vitrine `cargo publish`
     seulement). Corriger à l'occasion d'une prochaine touche sur le fichier.
-  [ ] Doc `missing_docs` purgée partout, puis basculer `missing_docs = "deny"` (aval de Sébastien).
-  [ ] Basculer la vérification harnais en tout-vert (compteur de dette à zéro) et retirer
-    les exemptions `cfg(test)` devenues inutiles si applicable.
+  [x] Doc `missing_docs` purgée partout — FAIT 2026-10-09 (0 diagnostic `missing_docs`
+    sous cap sur le workspace entier, validation D6). La bascule en deny est l'objet du
+    `[?]` ci-dessous.
+  [?] Bascule `missing_docs = "deny"` dans `[workspace.lints]` : la purge est faite
+    partout, le passage en deny est désormais sans coût — GO ? (contrevient seulement
+    si un crate futur veut s'en dispenser ; le retirer plus tard est trivial.)
+  [x] Basculer la vérification harnais en tout-vert (compteur de dette à zéro) — FAIT
+    2026-10-09, validator-vert : `cargo clippy --workspace --all-targets -- -D warnings`
+    VERT sur les 8 crates, 0 unique sous cap. Les exemptions `cfg(test)` restent toutes
+    utiles (les tests unwrap/expect/panquent partout) : rien à retirer ; la clause
+    « si applicable » est vérifiée non applicable. RESTE OUVERT : les ~78 sites cli sous
+    allows « en attente [?] » ci-dessus (la dette est à zéro, l'arbitrage reste dû).
 
 Done when:
   `cargo clippy --workspace --all-targets -- -D warnings` et `cargo fmt --all -- --check`

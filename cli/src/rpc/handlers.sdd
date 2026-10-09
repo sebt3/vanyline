@@ -586,6 +586,18 @@ Must not:
     line: &@str) -> @Option<@String>` (./mod.rs l'appelle mot pour mot).
 
 Tasks:
+  [?] Invariant de sérialisation des réponses (fusionne l'ancien `[?]` « ~90 expects
+    passés au travers du harnais ? » — la réponse à sa question interne est : oui, le
+    fichier était bien compté, 100 uniques dont ~68 sites d'expect, tous traités en D6c
+    sous allows « en attente de CE [?] ») : le `Must not` ci-dessus interdit déjà le
+    silence (`let _ =`) — « une réponse qui ne peut pas être sérialisée doit panic
+    bruyamment ». RATIFIER l'invariant comme contrat positif — « une @JsonRpcResponse
+    construite à partir de types @Serialize fermés ne peut pas échouer à la
+    sérialisation ; les `.expect(…)` sont des surfaces de panic contractées » — ce qui
+    convertit les allows D6c en exemptions justifiées et ferme CE [?] ? Ou propager :
+    le returning `@Option<@String>`/`@String` de chaque handler devrait changer de
+    forme, contrat que CE fichier ne pose pas (et ./mod.sdd fige @handle_line mot pour
+    mot). Lié aux `[?]` canaux de ../main.sdd l.541/547.
   [ ] Dériver les Scenario non couverts en tests taggés par leur titre :
     assertion de la clé `"source"` (listes + `skills/get`), `skills/get` happy
     path, timeout 10 s de `config/mcpServers/test`, réponses nominales K8s
@@ -667,9 +679,6 @@ Tasks:
   [?] La clé `"source"` des listes n'est assertée par AUCUN test Rust (seuls
     les tests TS de l'extension la consomment) : ajouter les asserts manquant
     au lieu de déléguer la vérification au TS.
-  [?] ~90 `.expect("serialize …")` + `.lock().unwrap()` : passés au travers
-    du harnais expect_used/unwrap_used ? (tooling.sdd tient la dette — vérifier
-    que ce fichier y est bien compté, et ne pas en ajouter.)
   [?] Les helpers @conversation_history_to_messages/@chat_turn_result_to_
     message/@read_workspace_context sont des doublons assumés de ../chat.rs
     (commentaires in-file « DUPLIQUE intentionnellement ») : factoriser

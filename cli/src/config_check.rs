@@ -160,7 +160,7 @@ mod tests {
                 name: "fs".to_string(),
                 transport: McpTransport::HttpStreamable,
                 url: "http://mcp-fs:3000".to_string(),
-                headers: Default::default(),
+                headers: std::collections::BTreeMap::default(),
             }]),
             toolsets: Mutex::new(vec![Toolset {
                 name: "default".to_string(),
@@ -185,7 +185,7 @@ mod tests {
                 name: "pdf".to_string(),
                 description: "PDF processing".to_string(),
             }]),
-            skill_bodies: Mutex::new(Default::default()),
+            skill_bodies: Mutex::new(std::collections::HashMap::default()),
             default_agent: Mutex::new(Some("build".to_string())),
         }
     }
@@ -306,7 +306,7 @@ mod tests {
             mcp_servers: Mutex::new(vec![]),
             toolsets: Mutex::new(vec![]),
             skills: Mutex::new(vec![]),
-            skill_bodies: Mutex::new(Default::default()),
+            skill_bodies: Mutex::new(std::collections::HashMap::default()),
             default_agent: Mutex::new(None),
         };
         let problems = check_config(&store).await;
@@ -454,7 +454,7 @@ mod tests {
                 name: "pdf".to_string(),
                 description: "PDF".to_string(),
             }]),
-            skill_bodies: Mutex::new(Default::default()),
+            skill_bodies: Mutex::new(std::collections::HashMap::default()),
             default_agent: Mutex::new(None),
         };
         let store = ErrSkillsStore { inner };

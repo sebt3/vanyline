@@ -1,4 +1,12 @@
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, unsafe_code))]
+//! Racine du binaire `vanyline` (crate `cli`, package cargo `vanyline`) : point
+//! d'entrée du processus, grammaire clap complète et handlers `run_*` qui rendent
+//! la sortie stdout/stderr et fixent les codes de sortie de la quasi-totalité des
+//! commandes — contrat complet : `main.sdd` §Purpose.
+
+#![cfg_attr(
+    test,
+    allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, unsafe_code)
+)]
 
 mod chat;
 mod config;
@@ -219,7 +227,7 @@ async fn main() {
             )
             .await;
         }
-        Some(Commands::Conversations(cmd)) => run_conversation(cmd).await,
+        Some(Commands::Conversations(cmd)) => run_conversation(cmd),
         Some(Commands::Agents(cmd)) => run_agent(cmd).await,
         Some(Commands::Providers(cmd)) => run_provider(cmd).await,
         Some(Commands::Models(cmd)) => run_models(cmd).await,
@@ -227,6 +235,10 @@ async fn main() {
         Some(Commands::Skills(cmd)) => run_skills(cmd).await,
         Some(Commands::Mcp(cmd)) => run_mcp(cmd).await,
         Some(Commands::Config(cmd)) => run_config(cmd).await,
+        // tooling.sdd D6b — terminaison contractée : main.sdd §Handles « `serve`
+        // nu → stderr `vanyline serve: only --stdio is currently supported` +
+        // exit 1 » et §Raises (message exact en Handles).
+        #[allow(clippy::print_stderr)]
         Some(Commands::Serve { stdio }) => {
             if stdio {
                 rpc::run_stdio_server().await;
@@ -241,7 +253,15 @@ async fn main() {
     }
 }
 
-async fn run_conversation(cmd: conversation::Commands) {
+// tooling.sdd D6b — canal rendu contracté : §Returns « Handlers de config »
+// (sortie texte uniquement sur stdout hors erreurs) + §Handles « Rendu
+// `conversations list` », « Rendu `conversations show` » et messages §Returns
+// `Created/Deleted/Active conversation: {uuid}` ; référence irrésolue → message
+// @Display sur stderr + exit 1 (§Raises « référence de conversation irrésolue »).
+// Non-async mécanique : ce handler n'attendait rien (zéro `.await`), le rendu est
+// identique.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
+fn run_conversation(cmd: conversation::Commands) {
     use conversation::Commands::{Delete, List, New, Set, Show};
     match cmd {
         List => {
@@ -254,7 +274,7 @@ async fn run_conversation(cmd: conversation::Commands) {
                     let title = c.title.as_deref().unwrap_or("(untitled)");
                     println!(
                         "  [{}] {} | {} | {} messages | {}",
-                        i + 1,
+                        i.saturating_add(1),
                         c.id,
                         title,
                         c.messages.len(),
@@ -272,6 +292,11 @@ async fn run_conversation(cmd: conversation::Commands) {
                 messages: Vec::new(),
                 todo: None,
             };
+            // tooling.sdd D6b — panic code 101 contracté : main.sdd §Raises
+            // « Code 101 (panic par @expect — divergence documentée, jamais
+            // nettoyée) » pour `failed to save conversation` ; convergence
+            // [?] main.sdd l.547 non soldée.
+            #[allow(clippy::expect_used)]
             store::save_conversation(&conv).expect("failed to save conversation");
             println!("Created conversation: {id}");
         }
@@ -282,6 +307,9 @@ async fn run_conversation(cmd: conversation::Commands) {
                     eprintln!("{e}");
                     std::process::exit(1);
                 });
+            // tooling.sdd D6b — panic code 101 contracté : §Raises Code 101,
+            // `conversation not found` (course listing↔rechargement) ; [?] l.547.
+            #[allow(clippy::expect_used)]
             let conv = store::get_conversation(&id).expect("conversation not found");
             for msg in &conv.messages {
                 println!("[{}] {}", msg.role, msg.content);
@@ -294,6 +322,9 @@ async fn run_conversation(cmd: conversation::Commands) {
                     eprintln!("{e}");
                     std::process::exit(1);
                 });
+            // tooling.sdd D6b — panic code 101 contracté : §Raises Code 101,
+            // `failed to delete conversation` ; [?] l.547.
+            #[allow(clippy::expect_used)]
             store::delete_conversation(&id).expect("failed to delete conversation");
             println!("Deleted conversation: {id}");
         }
@@ -304,13 +335,29 @@ async fn run_conversation(cmd: conversation::Commands) {
                     eprintln!("{e}");
                     std::process::exit(1);
                 });
+            // tooling.sdd D6b — panic code 101 contracté : §Raises Code 101,
+            // `conversation not found` (course) ; [?] l.547.
+            #[allow(clippy::expect_used)]
             store::get_conversation(&id).expect("conversation not found");
+            // tooling.sdd D6b — panic code 101 contracté : §Raises Code 101,
+            // `failed to set active conversation` ; [?] l.547.
+            #[allow(clippy::expect_used)]
             store::set_active_conversation(&id).expect("failed to set active conversation");
             println!("Active conversation: {id}");
         }
     }
 }
 
+// tooling.sdd D6b — une seule fonction par famille contractée : §Exposes
+// « Handlers privés de rendu/dispatch (contrat de ce fichier) : … @run_agent »
+// et §Structure « les handlers `run_*` ».
+#[allow(clippy::too_many_lines)]
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `agents list` »,
+// « Rendu `agents show {name}` » (littéraux exacts) ; `Default agent set to:`
+// §Returns ; §Raises « erreur store sur … `agents list`, `agents show`,
+// `agents set-default` (écriture) » et `agent not found: {name}` sur stderr
+// + exit 1.
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_agent(cmd: agent::Commands) {
     use agent::Commands::{List, SetDefault, Show};
     use vanyline_lib::store::ConfigStore;
@@ -430,6 +477,10 @@ async fn run_agent(cmd: agent::Commands) {
     }
 }
 
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `providers list` »
+// ; erreur store sur stderr + exit 1 (§Raises « erreur store sur
+// `agents/providers/models/toolsets/skills/mcp list` »).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_provider(cmd: provider::Commands) {
     use provider::Commands::List;
     use vanyline_lib::store::ConfigStore;
@@ -454,6 +505,9 @@ async fn run_provider(cmd: provider::Commands) {
 }
 
 pub(crate) fn discover_fs_store() -> vanyline_cfgstore::fs_store::FsConfigStore {
+    // tooling.sdd D6b — terminaison contractée : main.sdd §Raises « `Failed to
+    // read current directory: {e}` dans @discover_fs_store » (stderr + exit 1).
+    #[allow(clippy::print_stderr)]
     let cwd = std::env::current_dir().unwrap_or_else(|e| {
         eprintln!("Failed to read current directory: {e}");
         std::process::exit(1);
@@ -461,6 +515,12 @@ pub(crate) fn discover_fs_store() -> vanyline_cfgstore::fs_store::FsConfigStore 
     vanyline_cfgstore::fs_store::FsConfigStore::new(config::discover_layers(&cwd))
 }
 
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `config check` » —
+// zéro problème → stdout `Config OK — no problems found.` exit 0 ; sinon CHAQUE
+// problème sur STDOUT puis exit 1 (§Raises « au moins un problème », §Must not
+// « jamais sur stderr un diagnostic de `config check` »). Rendu des diagnostiques
+// sur stdout en attente du [?] main.sdd l.551 (non tranché).
+#[allow(clippy::print_stdout)]
 async fn run_config(cmd: config_cmd::Commands) {
     use config_cmd::Commands::Check;
     match cmd {
@@ -479,6 +539,10 @@ async fn run_config(cmd: config_cmd::Commands) {
     }
 }
 
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `models list` » ;
+// erreur store sur stderr + exit 1 (§Raises « erreur store sur
+// `agents/providers/models/toolsets/skills/mcp list` »).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_models(cmd: model_cmd::Commands) {
     use model_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
@@ -501,6 +565,10 @@ async fn run_models(cmd: model_cmd::Commands) {
     }
 }
 
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `toolsets list` » ;
+// erreur store sur stderr + exit 1 (§Raises « erreur store sur
+// `agents/providers/models/toolsets/skills/mcp list` »).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_toolsets(cmd: toolset_cmd::Commands) {
     use toolset_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
@@ -524,6 +592,10 @@ async fn run_toolsets(cmd: toolset_cmd::Commands) {
     }
 }
 
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `skills list` » ;
+// erreur store sur stderr + exit 1 (§Raises « erreur store sur
+// `agents/providers/models/toolsets/skills/mcp list` »).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_skills(cmd: skill_cmd::Commands) {
     use skill_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
@@ -546,6 +618,10 @@ async fn run_skills(cmd: skill_cmd::Commands) {
     }
 }
 
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `mcp list` » ;
+// erreur store sur stderr + exit 1 (§Raises « erreur store sur
+// `agents/providers/models/toolsets/skills/mcp list` »).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_mcp(cmd: mcp_cmd::Commands) {
     use mcp_cmd::Commands::List;
     use vanyline_lib::store::ConfigStore;
@@ -576,6 +652,12 @@ async fn run_mcp(cmd: mcp_cmd::Commands) {
 /// n'est joignable — affichée et le process quitte en erreur ; le reste du
 /// CLI (chat, agents, config...) n'est pas affecté par cette fonction, elle
 /// n'est appelée que par les commandes K8s.
+// tooling.sdd D6b — terminaison contractée : §Handles @discover_k8s_client
+// « échec de discover → stderr + exit 1 » et §Raises (marqueur `VNL-K8S-001`
+// porté par @VnyError, message @Display sans reformatage local). Portée sur la
+// fonction : l'eprintln est dans l'expression finale (attribut de statement
+// impossible — leçon D6a).
+#[allow(clippy::print_stderr)]
 async fn discover_k8s_client(namespace_flag: Option<String>) -> vanyline_lib::k8s::VnlK8sClient {
     let store = discover_fs_store();
     let namespace = namespace_flag.or_else(|| config::configured_namespace(store.layers()));
@@ -622,6 +704,10 @@ async fn resolve_toolbox_target(
     let name = toolbox_flag.or_else(|| config::configured_toolbox(store.layers()))?;
     let owner = require_owner(owner_flag);
     let client = discover_k8s_client(namespace).await;
+    // tooling.sdd D6b — terminaison contractée : §Handles @resolve_toolbox_target
+    // « @client.sandbox_mcp_url(&owner, &name) — échec → stderr + exit 1 » et
+    // §Raises (VNL-K8S-001, message @Display sans reformatage local).
+    #[allow(clippy::print_stderr)]
     let url = client
         .sandbox_mcp_url(&owner, &name)
         .await
@@ -645,6 +731,15 @@ fn require_owner(owner_flag: Option<String>) -> String {
     })
 }
 
+// tooling.sdd D6b — une seule fonction par famille contractée : §Exposes
+// « Handlers privés de rendu/dispatch (contrat de ce fichier) : … @run_owner_k8s »
+// et §Structure « les handlers `run_*` ».
+#[allow(clippy::too_many_lines)]
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `owner list` » et
+// « Rendu `owner show {name}` » (littéraux exacts) ; `Created/Deleted owner:`
+// §Returns « Handlers K8s » ; échecs client K8s (`VNL-K8S-001`) sur stderr +
+// exit 1, message @Display sans reformatage local (§Raises, §Must).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
     use kube::ResourceExt;
     use owner_cmd::Commands::{Create, Delete, List, Show};
@@ -769,6 +864,15 @@ async fn run_owner_k8s(cmd: owner_cmd::Commands, namespace: Option<String>) {
     }
 }
 
+// tooling.sdd D6b — une seule fonction par famille contractée : §Exposes
+// « Handlers privés de rendu/dispatch (contrat de ce fichier) : …
+// @run_project_k8s » et §Structure « les handlers `run_*` ».
+#[allow(clippy::too_many_lines)]
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `project list` »
+// et « Rendu `project show {name}` » (littéraux exacts) ; `Created/Deleted
+// project:` §Returns « Handlers K8s » ; échecs client K8s (`VNL-K8S-001`) sur
+// stderr + exit 1, message @Display sans reformatage local (§Raises, §Must).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_project_k8s(
     cmd: project_cmd::Commands,
     namespace: Option<String>,
@@ -905,6 +1009,16 @@ async fn run_project_k8s(
     }
 }
 
+// tooling.sdd D6b — une seule fonction par famille contractée : §Exposes
+// « Handlers privés de rendu/dispatch (contrat de ce fichier) : …
+// @run_sandbox_k8s » et §Structure « les handlers `run_*` ».
+#[allow(clippy::too_many_lines)]
+// tooling.sdd D6b — canal rendu contracté : §Handles « Rendu `sandbox list` »
+// et « Rendu `sandbox show {name}` » (littéraux exacts) ; `Created/Deleted/
+// Stopped/Started sandbox:` §Returns « Handlers K8s » ; échecs client K8s
+// (`VNL-K8S-001`) sur stderr + exit 1, message @Display sans reformatage local
+// (§Raises, §Must).
+#[allow(clippy::print_stdout, clippy::print_stderr)]
 async fn run_sandbox_k8s(
     cmd: sandbox_cmd::Commands,
     namespace: Option<String>,

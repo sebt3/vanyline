@@ -28,23 +28,21 @@ pub async fn run_stdio_server() {
     let stdin = tokio::io::stdin();
     let mut lines = BufReader::new(stdin).lines();
 
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                if line.trim().is_empty() {
-                    continue;
-                }
-                if let Some(response) = handlers::handle_line(&mut state, &line).await
-                    && tx.send(response).is_err()
-                {
-                    break;
-                }
-                if state.shutdown_requested {
-                    break;
-                }
-            }
-            Ok(None) => break, // EOF
-            Err(_) => break,
+    // tooling.sdd D6a — rpc/mod.sdd §Exposes @run_stdio_server, « Séquence
+    // interne (contractuelle) » point 5 : sortie de boucle sur shutdown, EOF
+    // `Ok(None)` ou erreur de lecture `Err(_)` — le `while let` rend ces deux
+    // dernières par non-correspondance du motif, même terminaison.
+    while let Ok(Some(line)) = lines.next_line().await {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Some(response) = handlers::handle_line(&mut state, &line).await
+            && tx.send(response).is_err()
+        {
+            break;
+        }
+        if state.shutdown_requested {
+            break;
         }
     }
 

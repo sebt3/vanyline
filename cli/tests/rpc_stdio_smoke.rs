@@ -1,4 +1,16 @@
-#![allow(clippy::unwrap_used, clippy::expect_used)]
+//! Tests d'intégration bout-en-bouche de `vanyline serve --stdio` sur le binaire
+//! réel : client ndjson minimal (une requête en attente à la fois), XDG isolé par
+//! tempdir injecté au child uniquement (la config de la machine n'est jamais
+//! lue ni touchée). Couvrent : cycle `initialize`/`shutdown`, round-trips des
+//! six domaines config (providers, models, mcp, toolsets, agents, skills),
+//! lecture de config globale seedée sur disque, codes d'erreur VNL-RPC (013
+//! conflit, 012 inconnu, 014 noms invalides, 015 type de provider, 006
+//! provider/mcp/skills get inconnus, 000 argument manquant), isolation des
+//! cibles de couche, `local/tools` (huit tools), `skills/get` (body + source)
+//! et injection `source` par couche dans les listes (spec :
+//! `../src/rpc/mod.sdd`, `../src/rpc/handlers.sdd`).
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -86,7 +98,7 @@ impl Client {
             reader,
             next_id: 0,
         };
-        let resp = client.call("initialize", params);
+        let resp = client.call("initialize", &params);
         assert_eq!(
             Client::vnl_code(&resp),
             None,
@@ -98,9 +110,9 @@ impl Client {
     /// Une requête -> une ligne de réponse (lecture synchrone bloquante,
     /// pattern `read_line` du test existant). Retourne la réponse complète
     /// parseée (Value avec `result` et/ou `error`). id auto-incrémenté.
-    fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+    fn call(&mut self, method: &str, params: &serde_json::Value) -> serde_json::Value {
         let id = self.next_id;
-        self.next_id += 1;
+        self.next_id = self.next_id.wrapping_add(1);
         let request = json!({
             "jsonrpc": "2.0",
             "id": id,
@@ -129,7 +141,7 @@ impl Client {
     /// `shutdown` + attente exit status success. À appeler à la fin de
     /// chaque test (sinon le child reste vivant jusqu'au drop du test).
     fn shutdown(mut self) {
-        let resp = self.call("shutdown", serde_json::Value::Null);
+        let resp = self.call("shutdown", &serde_json::Value::Null);
         assert_eq!(
             resp["result"],
             serde_json::Value::Null,
@@ -146,7 +158,7 @@ impl Client {
 /// Une lecture `<list_method>` : succès asserté, retourne le tableau des
 /// entrées telles que sérialisées par le binaire réel.
 fn list_entries(c: &mut Client, list_method: &str) -> Vec<serde_json::Value> {
-    let resp = c.call(list_method, serde_json::Value::Null);
+    let resp = c.call(list_method, &serde_json::Value::Null);
     assert_eq!(
         Client::vnl_code(&resp),
         None,
@@ -180,9 +192,9 @@ fn roundtrip(
     domain: &str,      // ex. "config/providers"
     list_method: &str, // ex. "config/providers"
     name: &str,
-    create_params: serde_json::Value,
-    update_patch: serde_json::Value,
-    changed: (&str, serde_json::Value),
+    create_params: &serde_json::Value,
+    update_patch: &serde_json::Value,
+    changed: &(&str, serde_json::Value),
 ) {
     // 1. create -> succès `result: null`
     let resp = c.call(&format!("{domain}/create"), create_params);
@@ -203,7 +215,7 @@ fn roundtrip(
     // 3. update (patch partiel) -> succès `result: null`
     let resp = c.call(
         &format!("{domain}/update"),
-        json!({ "name": name, "patch": update_patch }),
+        &json!({ "name": name, "patch": update_patch }),
     );
     assert_eq!(
         Client::vnl_code(&resp),
@@ -224,7 +236,7 @@ fn roundtrip(
     );
 
     // 5. delete -> succès `result: null`
-    let resp = c.call(&format!("{domain}/delete"), json!({ "name": name }));
+    let resp = c.call(&format!("{domain}/delete"), &json!({ "name": name }));
     assert_eq!(
         Client::vnl_code(&resp),
         None,
@@ -264,18 +276,18 @@ fn smoke_roundtrip_providers() {
         "config/providers",
         "config/providers",
         "prov-s",
-        create_params.clone(),
-        patch.clone(),
-        ("endpoint", json!("http://smoke:1")),
+        &create_params,
+        &patch,
+        &("endpoint", json!("http://smoke:1")),
     );
 
     // Le round-trip complet a supprimé l'entrée à l'étape 6 : on rejoue
     // create + update pour vérifier qu'un champ non patché survit au patch
     // partiel (sérialisé par le binaire réel).
-    c.call("config/providers/create", create_params);
+    c.call("config/providers/create", &create_params);
     c.call(
         "config/providers/update",
-        json!({ "name": "prov-s", "patch": patch }),
+        &json!({ "name": "prov-s", "patch": patch }),
     );
     let entry = find_entry(&mut c, "config/providers", "prov-s");
     assert_eq!(
@@ -302,15 +314,15 @@ fn smoke_roundtrip_models() {
         "config/models",
         "config/models",
         "m-s",
-        create_params.clone(),
-        patch.clone(),
-        ("model", json!("smoke-model")),
+        &create_params,
+        &patch,
+        &("model", json!("smoke-model")),
     );
 
-    c.call("config/models/create", create_params);
+    c.call("config/models/create", &create_params);
     c.call(
         "config/models/update",
-        json!({ "name": "m-s", "patch": patch }),
+        &json!({ "name": "m-s", "patch": patch }),
     );
     let entry = find_entry(&mut c, "config/models", "m-s");
     assert_eq!(
@@ -337,15 +349,15 @@ fn smoke_roundtrip_mcp_servers() {
         "config/mcpServers",
         "config/mcpServers",
         "srv-s",
-        create_params.clone(),
-        patch.clone(),
-        ("url", json!("http://y/mcp")),
+        &create_params,
+        &patch,
+        &("url", json!("http://y/mcp")),
     );
 
-    c.call("config/mcpServers/create", create_params);
+    c.call("config/mcpServers/create", &create_params);
     c.call(
         "config/mcpServers/update",
-        json!({ "name": "srv-s", "patch": patch }),
+        &json!({ "name": "srv-s", "patch": patch }),
     );
     let entry = find_entry(&mut c, "config/mcpServers", "srv-s");
     assert_eq!(
@@ -372,15 +384,15 @@ fn smoke_roundtrip_toolsets() {
         "config/toolsets",
         "config/toolsets",
         "ts-s",
-        create_params.clone(),
-        patch.clone(),
-        ("description", json!("patchée")),
+        &create_params,
+        &patch,
+        &("description", json!("patchée")),
     );
 
-    c.call("config/toolsets/create", create_params);
+    c.call("config/toolsets/create", &create_params);
     c.call(
         "config/toolsets/update",
-        json!({ "name": "ts-s", "patch": patch }),
+        &json!({ "name": "ts-s", "patch": patch }),
     );
     let entry = find_entry(&mut c, "config/toolsets", "ts-s");
     assert_eq!(
@@ -408,15 +420,15 @@ fn smoke_roundtrip_agents() {
         "config/agents",
         "config/agents",
         "ag-s",
-        create_params.clone(),
-        patch.clone(),
-        ("model", json!("m2")),
+        &create_params,
+        &patch,
+        &("model", json!("m2")),
     );
 
-    c.call("config/agents/create", create_params);
+    c.call("config/agents/create", &create_params);
     c.call(
         "config/agents/update",
-        json!({ "name": "ag-s", "patch": patch }),
+        &json!({ "name": "ag-s", "patch": patch }),
     );
     let entry = find_entry(&mut c, "config/agents", "ag-s");
     assert_eq!(
@@ -442,12 +454,12 @@ fn smoke_roundtrip_skills() {
         "config/skills",
         "config/skills",
         "sk-s",
-        json!({
+        &json!({
             "item": { "name": "sk-s", "description": "skill smoke" },
             "body": "corps initial"
         }),
-        json!({ "description": "skill patché" }),
-        ("description", json!("skill patché")),
+        &json!({ "description": "skill patché" }),
+        &("description", json!("skill patché")),
     );
 
     c.shutdown();
@@ -518,13 +530,13 @@ fn smoke_conflict_returns_013() {
     // providers (couche workspace par défaut) : create deux fois le même
     // name dans la même couche -> NameConflict côté store -> 013.
     let item = json!({ "name": "prov-c", "type": "ollama", "endpoint": "http://x" });
-    let resp = c.call("config/providers/create", json!({ "item": item.clone() }));
+    let resp = c.call("config/providers/create", &json!({ "item": item.clone() }));
     assert_eq!(
         Client::vnl_code(&resp),
         None,
         "first providers/create should succeed, got: {resp}"
     );
-    let resp = c.call("config/providers/create", json!({ "item": item }));
+    let resp = c.call("config/providers/create", &json!({ "item": item }));
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
         Some("VNL-RPC-013"),
@@ -533,13 +545,13 @@ fn smoke_conflict_returns_013() {
 
     // agents (domaine fichier, représentatif des 3 domaines fichiers)
     let item = json!({ "name": "ag-c", "model": "m", "system_prompt": "p" });
-    let resp = c.call("config/agents/create", json!({ "item": item.clone() }));
+    let resp = c.call("config/agents/create", &json!({ "item": item.clone() }));
     assert_eq!(
         Client::vnl_code(&resp),
         None,
         "first agents/create should succeed, got: {resp}"
     );
-    let resp = c.call("config/agents/create", json!({ "item": item }));
+    let resp = c.call("config/agents/create", &json!({ "item": item }));
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
         Some("VNL-RPC-013"),
@@ -571,7 +583,7 @@ fn smoke_not_found_returns_012() {
         ("config/agents/delete", json!({ "name": "ghost" })),
     ];
     for (method, params) in cases {
-        let resp = c.call(method, params);
+        let resp = c.call(method, &params);
         assert_eq!(
             Client::vnl_code(&resp).as_deref(),
             Some("VNL-RPC-012"),
@@ -596,7 +608,7 @@ fn smoke_invalid_names_return_014() {
     for name in ["../evil", "a/b", "..", "/abs"] {
         let resp = c.call(
             "config/agents/create",
-            json!({ "item": { "name": name, "model": "m", "system_prompt": "p" } }),
+            &json!({ "item": { "name": name, "model": "m", "system_prompt": "p" } }),
         );
         assert_eq!(
             Client::vnl_code(&resp).as_deref(),
@@ -640,7 +652,7 @@ fn smoke_bad_provider_type_returns_015() {
     // handler -> VNL-RPC-015 (avant même d'atteindre le store).
     let resp = c.call(
         "config/providers/create",
-        json!({ "item": { "name": "prov-b", "type": "bogus", "endpoint": "http://x" } }),
+        &json!({ "item": { "name": "prov-b", "type": "bogus", "endpoint": "http://x" } }),
     );
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
@@ -666,7 +678,7 @@ fn smoke_layer_targets_isolated() {
     // create global -> le store crée <home>/vanyline/config.yaml avec prov-g
     let resp = c.call(
         "config/providers/create",
-        json!({
+        &json!({
             "layer": "global",
             "item": { "name": "prov-g", "type": "ollama", "endpoint": "http://g" }
         }),
@@ -691,7 +703,7 @@ fn smoke_layer_targets_isolated() {
     // create workspace
     let resp = c.call(
         "config/providers/create",
-        json!({
+        &json!({
             "layer": "workspace",
             "item": { "name": "prov-w", "type": "ollama", "endpoint": "http://w" }
         }),
@@ -729,7 +741,7 @@ fn smoke_layer_targets_isolated() {
     // delete ciblé global : prov-g disparaît du global, prov-w survit
     let resp = c.call(
         "config/providers/delete",
-        json!({ "layer": "global", "name": "prov-g" }),
+        &json!({ "layer": "global", "name": "prov-g" }),
     );
     assert_eq!(
         Client::vnl_code(&resp),
@@ -765,7 +777,7 @@ fn smoke_local_tools_returns_eight() {
     std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
     let mut c = Client::spawn(home.path(), Some(ws.path()));
 
-    let resp = c.call("config/localTools", serde_json::Value::Null);
+    let resp = c.call("config/localTools", &serde_json::Value::Null);
     assert_eq!(
         Client::vnl_code(&resp),
         None,
@@ -802,7 +814,10 @@ fn smoke_provider_test_unknown_name_returns_006() {
     std::fs::create_dir_all(ws.path().join(".vanyline")).unwrap();
     let mut c = Client::spawn(home.path(), Some(ws.path()));
 
-    let resp = c.call("config/providers/test", json!({ "name": "does-not-exist" }));
+    let resp = c.call(
+        "config/providers/test",
+        &json!({ "name": "does-not-exist" }),
+    );
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
         Some("VNL-RPC-006"),
@@ -827,14 +842,14 @@ fn smoke_provider_test_unreachable_endpoint_returns_006() {
 
     c.call(
         "config/providers/create",
-        json!({ "item": {
+        &json!({ "item": {
             "name": "prov-dead",
             "type": "ollama",
             "endpoint": format!("http://127.0.0.1:{closed_port}"),
         }}),
     );
 
-    let resp = c.call("config/providers/test", json!({ "name": "prov-dead" }));
+    let resp = c.call("config/providers/test", &json!({ "name": "prov-dead" }));
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
         Some("VNL-RPC-006"),
@@ -853,7 +868,7 @@ fn smoke_mcp_test_unknown_name_returns_006() {
 
     let resp = c.call(
         "config/mcpServers/test",
-        json!({ "name": "does-not-exist" }),
+        &json!({ "name": "does-not-exist" }),
     );
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
@@ -897,7 +912,7 @@ fn smoke_mcp_test_black_hole_times_out_without_hanging() {
 
     c.call(
         "config/mcpServers/create",
-        json!({ "item": {
+        &json!({ "item": {
             "name": "srv-blackhole",
             "type": "http-streamable",
             "url": format!("http://127.0.0.1:{port}/mcp"),
@@ -905,7 +920,10 @@ fn smoke_mcp_test_black_hole_times_out_without_hanging() {
     );
 
     let started = std::time::Instant::now();
-    let resp = c.call("config/mcpServers/test", json!({ "name": "srv-blackhole" }));
+    let resp = c.call(
+        "config/mcpServers/test",
+        &json!({ "name": "srv-blackhole" }),
+    );
     let elapsed = started.elapsed();
 
     assert_eq!(
@@ -923,7 +941,7 @@ fn smoke_mcp_test_black_hole_times_out_without_hanging() {
          failure — returned in {elapsed:?}"
     );
     // Le serveur reste vivant et répond à la requête suivante.
-    let follow = c.call("config/providers", serde_json::Value::Null);
+    let follow = c.call("config/providers", &serde_json::Value::Null);
     assert_eq!(
         Client::vnl_code(&follow),
         None,
@@ -948,7 +966,7 @@ fn smoke_skills_get_returns_body_and_source() {
     // create sans `layer` -> couche workspace (pattern de smoke_roundtrip_skills)
     let resp = c.call(
         "config/skills/create",
-        json!({
+        &json!({
             "item": { "name": "sk-get", "description": "d" },
             "body": "ligne 1\nligne 2"
         }),
@@ -962,7 +980,7 @@ fn smoke_skills_get_returns_body_and_source() {
     // get -> {name, description, body, source}. body exact : écrit sans
     // whitespace de bord, le trim de load_skill n'est pas visible ; source =
     // "workspace" (le skill vit sous <ws>/.vanyline/skills/).
-    let resp = c.call("config/skills/get", json!({ "name": "sk-get" }));
+    let resp = c.call("config/skills/get", &json!({ "name": "sk-get" }));
     assert_eq!(
         Client::vnl_code(&resp),
         None,
@@ -1006,7 +1024,7 @@ fn smoke_skills_get_unknown_name_returns_006() {
     // Config vide : UnknownReference côté store -> VNL-RPC-006 (message
     // porteur du VNL-CFG-*), comme les 6 lectures config — VNL-RPC-012 reste
     // réservé aux écritures.
-    let resp = c.call("config/skills/get", json!({ "name": "absent" }));
+    let resp = c.call("config/skills/get", &json!({ "name": "absent" }));
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
         Some("VNL-RPC-006"),
@@ -1025,7 +1043,7 @@ fn smoke_skills_get_missing_name_returns_000() {
 
     // `name` requis : params {} -> échec de désérialisation de l'enveloppe
     // -> VNL-RPC-000, comme les bras d'écriture.
-    let resp = c.call("config/skills/get", json!({}));
+    let resp = c.call("config/skills/get", &json!({}));
     assert_eq!(
         Client::vnl_code(&resp).as_deref(),
         Some("VNL-RPC-000"),
@@ -1042,6 +1060,12 @@ fn smoke_skills_get_missing_name_returns_000() {
 // présentes dans les deux portent source:"workspace" (workspace gagne).
 // ---------------------------------------------------------------------------
 
+// tooling.sdd D6a — script bout-en-bouche linéaire du Scenario
+// `lecture_config_injecte_source_workspace_ou_global` (cli/src/rpc/handlers.sdd)
+// étendu aux six kinds : deux couches seedées au FORMAT DISQUE puis assertions
+// `source` par kind. Le découper changerait le compte des tests du crate
+// (22, épinglé par la batterie) sans changer le contrat rendu.
+#[allow(clippy::too_many_lines)]
 #[test]
 fn smoke_list_entries_carry_layer_source() {
     let home = tempdir().unwrap();

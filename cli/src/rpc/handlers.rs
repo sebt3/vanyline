@@ -75,6 +75,11 @@ fn resolve_layers(workspace: Option<&str>) -> vanyline_cfgstore::layers::Layers 
 /// Convertit une opération de config (`Result<T, CfgStoreError>`) en réponse
 /// JSON-RPC : `Ok` → succès (sérielisé en Value), `Err` → erreur
 /// `VNL-RPC-006` ("config read error", message = format!("{}", err)).
+// tooling.sdd D6c — `.expect("serialize …")` de la réponse assumée par
+// handlers.sdd §Raises (« ~90 serde_json::to_string(…).expect("serialize …")
+// sur des types censés sérialiser sans échec »), en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (non tranché).
+#[allow(clippy::expect_used)]
 fn config_error_response<T: serde::Serialize>(
     id: Value,
     result: Result<T, CfgStoreError>,
@@ -117,6 +122,9 @@ fn resolve_layer(
 /// Mapping design « Codes d'erreur RPC » (table VNL-RPC-011..015) ; les autres
 /// variantes (`Config`, `DuplicateName`, `UnknownReference`, `ReadOnly`)
 /// retombent sur `VNL-RPC-006` comme la lecture (`config_error_response`).
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn config_write_response(id: Value, result: Result<(), CfgStoreError>) -> String {
     let response = match result {
         Ok(()) => JsonRpcResponse::success(id, Value::Null),
@@ -141,6 +149,9 @@ fn config_write_response(id: Value, result: Result<(), CfgStoreError>) -> String
 /// handlers existants : code JSON-RPC `PARSE_ERROR`, `VNL-RPC-000`, `id`
 /// conservé. Utilisé uniquement par les bras d'écriture (les bras existants
 /// gardent leur pattern en ligne).
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn malformed_params_response(id: Value) -> String {
     serde_json::to_string(&JsonRpcResponse::error(
         id,
@@ -160,6 +171,10 @@ async fn ensure_k8s_client(
     if let Some(client) = &state.k8s_client {
         return Ok(client.clone());
     }
+    // tooling.sdd D6c — invariant posé par handlers.sdd §Exposes @handle_line :
+    // « `initialized == true` implique `store = Some` (posés ensemble par
+    // @handle_initialize, jamais dissociés) », surface de panic assumée §Raises.
+    #[allow(clippy::expect_used)]
     let store = state
         .store
         .as_ref()
@@ -172,7 +187,10 @@ async fn ensure_k8s_client(
 
 /// Sérialise une erreur `VnyError` survenue AVANT la résolution du client
 /// (`ensure_k8s_client` a échoué) en réponse JSON-RPC `VNL-RPC-010`.
-fn k8s_client_error(id: Value, e: vanyline_lib::VnyError) -> String {
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
+fn k8s_client_error(id: Value, e: &vanyline_lib::VnyError) -> String {
     serde_json::to_string(&JsonRpcResponse::error(
         id,
         jsonrpc_code::SERVER_ERROR,
@@ -202,6 +220,9 @@ fn malformed_response(id: &Value, message: &str) -> String {
 
 /// Convertit le résultat d'un appel `VnlK8sClient::*` en réponse JSON-RPC —
 /// même convention que `config_error_response` pour `VNL-RPC-006`.
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn k8s_result_response<T: serde::Serialize>(
     id: Value,
     result: Result<T, vanyline_lib::VnyError>,
@@ -212,7 +233,7 @@ fn k8s_result_response<T: serde::Serialize>(
             serde_json::to_value(v).expect("serialize k8s response"),
         ))
         .expect("serialize k8s success response"),
-        Err(e) => k8s_client_error(id, e),
+        Err(e) => k8s_client_error(id, &e),
     }
 }
 
@@ -234,6 +255,19 @@ fn k8s_result_response<T: serde::Serialize>(
 /// 3. Si initialisé et méthode == "shutdown" -> traiter.
 /// 4. Sinon (méthode inconnue de cette tâche) -> erreur `VNL-RPC-004`, code
 ///    `METHOD_NOT_FOUND`.
+// tooling.sdd D6c — expect_used : les `.expect("serialize …")`/`.expect(
+// "initialized implies store = Some")` des bras ci-dessous sont assumés par
+// handlers.sdd §Raises (surfaces de panic) ; les seconds sont l'invariant contracté
+// §Exposes @handle_line (« initialized == true implique store = Some, posés
+// ensemble par @handle_initialize, jamais dissociés »), cf. allows ciblés in-file.
+// Les expects de sérialisation sont en attente du [?] handlers.sdd §Tasks
+// « Invariant de sérialisation des réponses » (non tranché).
+// too_many_lines : la table de dispatch à 50 méthodes dans UN seul match est un
+// contrat §Must (« Maintenir la table de dispatch à 50 méthodes nommées
+// EXACTEMENT telles qu'aujourd'hui ») + §Exposes @handle_line (ordre de
+// validation STRICT, séquence commentée in-file, verrouillée) — scinder le match
+// ferait deux sources d'ordre de validation.
+#[allow(clippy::expect_used, clippy::too_many_lines)]
 pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> {
     let request: JsonRpcRequest = match serde_json::from_str(line) {
         Ok(req) => req,
@@ -274,6 +308,10 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
     }
 
     // Dispatch on known methods
+    // tooling.sdd D6c — invariant posé par handlers.sdd §Exposes @handle_line :
+    // « `initialized == true` implique `store = Some` (posés ensemble par
+    // @handle_initialize, jamais dissociés) », surface de panic assumée §Raises.
+    #[allow(clippy::expect_used)]
     let store = state
         .store
         .as_ref()
@@ -790,12 +828,16 @@ pub async fn handle_line(state: &mut ServerState, line: &str) -> Option<String> 
 }
 
 /// Réponse d'une lecture `config/<domain>` : tableau dont CHAQUE entrée porte,
-/// en plus de ses clés natives snake_case, une clé additive
+/// en plus de ses clés natives `snake_case`, une clé additive
 /// `"source": "workspace" | "global"` (couche dont l'entrée est résolue —
 /// workspace gagne en cas de collision, cf. `pick`/`*_entry_source` de
 /// `vanyline_cfgstore::layers`, mêmes valeurs que la colonne source des
 /// sous-commandes `vnl … list`). Erreur du store → VNL-RPC-006, comme
 /// `config_error_response` (inchangé sur ce point).
+// tooling.sdd D6c — `.expect("serialize …")` (entrée de liste + réponse) en
+// attente du [?] handlers.sdd §Tasks « Invariant de sérialisation des réponses »
+// (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn config_list_sourced_response<T: serde::Serialize>(
     id: Value,
     layers: &vanyline_cfgstore::layers::Layers,
@@ -820,9 +862,9 @@ fn config_list_sourced_response<T: serde::Serialize>(
 /// Probe des modèles d'un provider — MÊME logique que
 /// `app/src/api/llm_providers.rs::discover_models` (adaptée au type typé
 /// `ProviderType`, exhaustive donc sans cas « type inconnu ») :
-/// - Ollama : GET {endpoint}/api/tags (sans slash final) -> resp["models"][].name
-/// - OpenaiCompatible : GET {endpoint}/v1/models, header `Authorization: Bearer`
-///   si api_key présente -> resp["data"][].id
+/// - Ollama : GET {endpoint}/api/tags (sans slash final) -> `resp["models"][].name`
+/// - `OpenaiCompatible` : GET {endpoint}/v1/models, header `Authorization: Bearer`
+///   si `api_key` présente -> `resp["data"][].id`
 ///
 /// Timeout 10 s. Erreurs (build client / requête / parse JSON) : String porteur
 /// du code interne (VNL-LLM-003/004) + détail — le handler répond VNL-RPC-006.
@@ -895,6 +937,9 @@ async fn discover_provider_models(
 /// (ou `None` si aucun marqueur `.vanyline`/`.git`), `default_agent`
 /// = `store.default_agent()` (`Ok(Some(name))` -> `Some(name)`,
 /// `Ok(None)` ou `Err` -> `None`).
+// tooling.sdd D6c — `.expect("serialize InitializeResult")` en attente du [?]
+// handlers.sdd §Tasks « Invariant de sérialisation des réponses » (§Raises).
+#[allow(clippy::expect_used)]
 async fn handle_initialize(
     state: &mut ServerState,
     id: Value,
@@ -942,8 +987,14 @@ async fn handle_initialize(
     state.initialized = true;
     state.shutdown_requested = false;
     state.store = Some(Arc::new(store));
-    state.busy.lock().unwrap().clear();
-    state.seq.lock().unwrap().clear();
+    // tooling.sdd D6c — §Raises : « @std::sync::Mutex::lock().unwrap() sur
+    // `busy`/`seq` (empoisonnement si une tâche de tour panicait EN détenant le
+    // verrou — fenêtre non identifiée) », panic assumée par la spec.
+    #[allow(clippy::unwrap_used)]
+    {
+        state.busy.lock().unwrap().clear();
+        state.seq.lock().unwrap().clear();
+    }
     state.k8s_client = None;
 
     JsonRpcResponse::success(
@@ -969,6 +1020,9 @@ fn shutdown_response(id: Value) -> JsonRpcResponse {
 /// `ConversationSummary` (PAS la `Conversation` complète — pas de
 /// `messages` dans la liste, cf. design : `Conversation` complète
 /// seulement pour `conversations/get`).
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn handle_conversations_list(id: Value) -> String {
     let result = store::list_conversations();
     match result {
@@ -1004,6 +1058,9 @@ fn handle_conversations_list(id: Value) -> String {
 /// autre erreur io -> `VNL-RPC-007`. Succès -> la `Conversation` COMPLÈTE
 /// (`vanyline_lib::Conversation`, déjà `Serialize`), PAS un
 /// `ConversationSummary`.
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
     let params: ConversationIdParams = match serde_json::from_value(params) {
         Ok(p) => p,
@@ -1017,17 +1074,14 @@ fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
             .expect("serialize get error response");
         }
     };
-    let uuid = match Uuid::parse_str(&params.id) {
-        Ok(u) => u,
-        Err(_) => {
-            return serde_json::to_string(&JsonRpcResponse::error(
-                id,
-                jsonrpc_code::PARSE_ERROR,
-                format!("Invalid UUID in id: {}", params.id),
-                vnl_code::MALFORMED_REQUEST,
-            ))
-            .expect("serialize get error response");
-        }
+    let Ok(uuid) = Uuid::parse_str(&params.id) else {
+        return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            format!("Invalid UUID in id: {}", params.id),
+            vnl_code::MALFORMED_REQUEST,
+        ))
+        .expect("serialize get error response");
     };
     match store::get_conversation(&uuid) {
         Ok(conv) => serde_json::to_string(&JsonRpcResponse::success(
@@ -1065,6 +1119,9 @@ fn handle_conversations_get(id: Value, params: serde_json::Value) -> String {
 /// `main.rs::run_conversation::New` déjà lu — ne pas introduire une
 /// vérification que la CLI elle-même ne fait pas). `store::save_conversation(&conv)` :
 /// `Err` -> `VNL-RPC-007` ; succès -> `ConversationSummary::from(&conv)`.
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
     let params: ConversationCreateParams =
         match serde_json::from_value(params) {
@@ -1113,6 +1170,9 @@ fn handle_conversations_create(id: Value, params: serde_json::Value) -> String {
 /// silencieusement, exactement comme la commande CLI. Seule une vraie
 /// erreur io (permissions, disque...) -> `VNL-RPC-007`. Succès -> `result:
 /// null` (même pattern que `shutdown`, tâche 01 : `JsonRpcResponse::success(id, Value::Null)`).
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn handle_conversations_delete(
     state: &ServerState,
     id: Value,
@@ -1130,22 +1190,24 @@ fn handle_conversations_delete(
             .expect("serialize delete error response");
         }
     };
-    let uuid = match Uuid::parse_str(&params.id) {
-        Ok(u) => u,
-        Err(_) => {
-            return serde_json::to_string(&JsonRpcResponse::error(
-                id,
-                jsonrpc_code::PARSE_ERROR,
-                format!("Invalid UUID in id: {}", params.id),
-                vnl_code::MALFORMED_REQUEST,
-            ))
-            .expect("serialize delete error response");
-        }
+    let Ok(uuid) = Uuid::parse_str(&params.id) else {
+        return serde_json::to_string(&JsonRpcResponse::error(
+            id,
+            jsonrpc_code::PARSE_ERROR,
+            format!("Invalid UUID in id: {}", params.id),
+            vnl_code::MALFORMED_REQUEST,
+        ))
+        .expect("serialize delete error response");
     };
     match store::delete_conversation(&uuid) {
         Ok(()) => {
-            state.seq.lock().unwrap().remove(&uuid);
-            state.busy.lock().unwrap().remove(&uuid);
+            // tooling.sdd D6c — §Raises : lock().unwrap() sur `busy`/`seq`,
+            // empoisonnement = seule surface de panic (fenêtre non identifiée).
+            #[allow(clippy::unwrap_used)]
+            {
+                state.seq.lock().unwrap().remove(&uuid);
+                state.busy.lock().unwrap().remove(&uuid);
+            }
             serde_json::to_string(&JsonRpcResponse::success(id, Value::Null))
                 .expect("serialize delete response")
         }
@@ -1164,6 +1226,9 @@ fn handle_conversations_delete(
 /// formé (`VNL-RPC-000` sinon) ; n'exige PAS que la conversation existe ni
 /// qu'un tour soit effectivement en cours — pur no-op accepté, cohérent
 /// avec le fait que l'annulation réelle n'existe pas encore côté lib.
+// tooling.sdd D6c — `.expect("serialize …")` en attente du [?] handlers.sdd
+// §Tasks « Invariant de sérialisation des réponses » (§Raises, surface assumée).
+#[allow(clippy::expect_used)]
 fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
     let params: ChatCancelParams = match serde_json::from_value(params) {
         Ok(p) => p,
@@ -1225,6 +1290,14 @@ fn handle_chat_cancel(id: Value, params: serde_json::Value) -> String {
 ///    son `Drop` retire `conv_id`, garanti même si la tâche panique).
 ///    Retourne `None` dès que le spawn a lieu — la réponse arrivera plus
 ///    tard sur `tx`, avec le MÊME `id` que la requête originale.
+// tooling.sdd D6c — expect_used : les `.expect("serialize …")` sont en attente
+// du [?] handlers.sdd §Tasks « Invariant de sérialisation des réponses »
+// (§Raises, surface assumée) ; l'expect « initialized implies store = Some » est
+// l'invariant contracté §Exposes @handle_line (permet le allow ciblé in-file).
+// too_many_lines : la séquence contractuelle des 6 étapes « commentées in-file »
+// (§Handles chat/send) avec l'ordre verrouillé par §Must not (« Réordonner les
+// étapes de @handle_chat_send … ») tient dans cette seule fonction.
+#[allow(clippy::expect_used, clippy::too_many_lines)]
 async fn handle_chat_send(
     state: &ServerState,
     id: Value,
@@ -1244,19 +1317,16 @@ async fn handle_chat_send(
             );
         }
     };
-    let conv_id = match Uuid::parse_str(&params.conversation_id) {
-        Ok(u) => u,
-        Err(_) => {
-            return Some(
-                serde_json::to_string(&JsonRpcResponse::error(
-                    id,
-                    jsonrpc_code::PARSE_ERROR,
-                    format!("Invalid UUID in conversationId: {}", params.conversation_id),
-                    vnl_code::MALFORMED_REQUEST,
-                ))
-                .expect("serialize chat/send error response"),
-            );
-        }
+    let Ok(conv_id) = Uuid::parse_str(&params.conversation_id) else {
+        return Some(
+            serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::PARSE_ERROR,
+                format!("Invalid UUID in conversationId: {}", params.conversation_id),
+                vnl_code::MALFORMED_REQUEST,
+            ))
+            .expect("serialize chat/send error response"),
+        );
     };
     let conv = match store::get_conversation(&conv_id) {
         Ok(c) => c,
@@ -1285,6 +1355,9 @@ async fn handle_chat_send(
     };
 
     {
+        // tooling.sdd D6c — §Raises : lock().unwrap() sur `busy`/`seq`,
+        // empoisonnement = seule surface de panic (fenêtre non identifiée).
+        #[allow(clippy::unwrap_used)]
         let mut busy = state.busy.lock().unwrap();
         if busy.contains(&conv_id) {
             return Some(
@@ -1300,6 +1373,10 @@ async fn handle_chat_send(
         busy.insert(conv_id);
     }
 
+    // tooling.sdd D6c — invariant posé par handlers.sdd §Exposes @handle_line :
+    // « `initialized == true` implique `store = Some` (posés ensemble par
+    // @handle_initialize, jamais dissociés) », surface de panic assumée §Raises.
+    #[allow(clippy::expect_used)]
     let store = state
         .store
         .as_ref()
@@ -1309,17 +1386,23 @@ async fn handle_chat_send(
         Some(a) => Some(a),
         None => store.default_agent().await.ok().flatten(),
     };
-    let agent_name =
-        if let Some(a) = agent_name {
-            a
-        } else {
+    let Some(agent_name) = agent_name else {
+        // tooling.sdd D6c — rollback `busy` contractuel (§Handles chat/send,
+        // étape 5) ; lock().unwrap() = surface de panic assumée §Raises.
+        #[allow(clippy::unwrap_used)]
+        {
             state.busy.lock().unwrap().remove(&conv_id);
-            return Some(serde_json::to_string(&JsonRpcResponse::error(
-            id, jsonrpc_code::SERVER_ERROR,
-            "No agent specified, no agent on the conversation, and no default agent configured",
-            vnl_code::NO_AGENT_RESOLVED,
-        )).expect("serialize chat/send error response"));
-        };
+        }
+        return Some(
+            serde_json::to_string(&JsonRpcResponse::error(
+                id,
+                jsonrpc_code::SERVER_ERROR,
+                "No agent specified, no agent on the conversation, and no default agent configured",
+                vnl_code::NO_AGENT_RESOLVED,
+            ))
+            .expect("serialize chat/send error response"),
+        );
+    };
 
     let tx = state.tx.clone();
     let busy = state.busy.clone();
@@ -1397,6 +1480,11 @@ struct BusyGuard {
 }
 
 impl Drop for BusyGuard {
+    // tooling.sdd D6c — §Raises : « @std::sync::Mutex::lock().unwrap() sur
+    // `busy`/`seq` (empoisonnement si une tâche de tour panicait EN détenant le
+    // verrou — fenêtre non identifiée, le @Drop de @BusyGuard ne fait que retirer
+    // l'id) », panic assumée par la spec.
+    #[allow(clippy::unwrap_used)]
     fn drop(&mut self) {
         self.busy.lock().unwrap().remove(&self.conv_id);
     }
@@ -1482,10 +1570,21 @@ impl EventSink for RpcEventSink {
     /// silencieusement ignorée.
     async fn emit(&self, event: ChatEvent) {
         let seq = {
+            // tooling.sdd D6c — lock().unwrap() : §Raises, empoisonnement des
+            // verrous `busy`/`seq` = seule surface de panic (fenêtre non
+            // identifiée).
+            #[allow(clippy::unwrap_used)]
             let mut map = self.seq.lock().unwrap();
             let counter = map.entry(self.conversation_id).or_insert(0);
             let current = *counter;
-            *counter += 1;
+            // tooling.sdd D6c — l'incrément est le contrat §Exposes @RpcEventSink
+            // (« @emit lit-incrémente le compteur de SA conversation », numéroté à
+            // partir de 0) ; un débordement u64 du compteur de notifications
+            // n'est pas un cas pratique.
+            #[allow(clippy::arithmetic_side_effects)]
+            {
+                *counter += 1;
+            }
             current
         };
         let notif = JsonRpcNotification {
@@ -1507,7 +1606,7 @@ impl EventSink for RpcEventSink {
 async fn handle_owners_list(state: &mut ServerState, id: Value) -> String {
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     k8s_result_response(id, client.list_owners().await)
 }
@@ -1518,6 +1617,10 @@ async fn handle_owners_get(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1532,7 +1635,7 @@ async fn handle_owners_get(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     k8s_result_response(id, client.get_owner(&params.name).await)
 }
@@ -1543,6 +1646,10 @@ async fn handle_owners_create(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: OwnerCreateParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1557,7 +1664,7 @@ async fn handle_owners_create(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     k8s_result_response(id, client.create_owner(&params.name, params.spec).await)
 }
@@ -1568,6 +1675,10 @@ async fn handle_owners_delete(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1582,7 +1693,7 @@ async fn handle_owners_delete(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     k8s_result_response(id, client.delete_owner(&params.name).await)
 }
@@ -1602,7 +1713,7 @@ async fn handle_projects_list(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     k8s_result_response(id, client.list_projects(&params.owner).await)
 }
@@ -1614,6 +1725,10 @@ async fn handle_projects_get(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1628,7 +1743,7 @@ async fn handle_projects_get(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     let Some(owner) = params.owner else {
         return malformed_response(
@@ -1646,6 +1761,10 @@ async fn handle_projects_create(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: ProjectCreateParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1660,7 +1779,7 @@ async fn handle_projects_create(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     // L'Owner du namespace cible est celui porte par la spec (UN OWNER = UN
     // NAMESPACE 2026-10-04) : la liste comme le creneau vivent dans
@@ -1681,6 +1800,10 @@ async fn handle_projects_delete(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1695,7 +1818,7 @@ async fn handle_projects_delete(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     let Some(owner) = params.owner else {
         return malformed_response(
@@ -1721,7 +1844,7 @@ async fn handle_sandboxes_list(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     k8s_result_response(id, client.list_sandboxes(&params.owner).await)
 }
@@ -1733,6 +1856,10 @@ async fn handle_sandboxes_get(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1747,7 +1874,7 @@ async fn handle_sandboxes_get(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     let Some(owner) = params.owner else {
         return malformed_response(
@@ -1765,6 +1892,10 @@ async fn handle_sandboxes_create(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: SandboxCreateParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1779,7 +1910,7 @@ async fn handle_sandboxes_create(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     let Some(owner) = params.owner else {
         return malformed_response(
@@ -1802,6 +1933,10 @@ async fn handle_sandboxes_delete(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1816,7 +1951,7 @@ async fn handle_sandboxes_delete(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     let Some(owner) = params.owner else {
         return malformed_response(
@@ -1834,6 +1969,10 @@ async fn handle_sandboxes_stop(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1848,7 +1987,7 @@ async fn handle_sandboxes_stop(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     let Some(owner) = params.owner else {
         return malformed_response(
@@ -1871,6 +2010,10 @@ async fn handle_sandboxes_start(
     id: Value,
     params: serde_json::Value,
 ) -> String {
+    // tooling.sdd D6c — `.expect("serialize …")` de l'enveloppe d'erreur
+    // VNL-RPC-000 en attente du [?] handlers.sdd §Tasks « Invariant de
+    // sérialisation des réponses » (§Raises, surface assumée).
+    #[allow(clippy::expect_used)]
     let params: NameParams = match serde_json::from_value(params) {
         Ok(p) => p,
         Err(_) => {
@@ -1885,7 +2028,7 @@ async fn handle_sandboxes_start(
     };
     let client = match ensure_k8s_client(state).await {
         Ok(c) => c,
-        Err(e) => return k8s_client_error(id, e),
+        Err(e) => return k8s_client_error(id, &e),
     };
     let Some(owner) = params.owner else {
         return malformed_response(
@@ -2439,7 +2582,7 @@ mod tests {
         let created = &resp.result.as_ref().expect("result should be Some");
         assert!(created["id"].is_string());
         let created_id = created["id"].as_str().unwrap();
-        assert!(!created_id.is_empty());
+        assert_ne!(created_id, "");
         assert_eq!(created["agent"], "build");
         assert_eq!(created["title"], "Test");
         assert_eq!(created["messageCount"], 0);
@@ -3388,10 +3531,16 @@ defaults:
     /// `providers_create_list_update_delete_roundtrip` — `layer` omis avec un
     /// workspace résolu (tempdir contenant `.vanyline/`) : défaut = workspace.
     /// Cycle complet create -> list -> update (patch partiel endpoint, puis
-    /// api_key ajouté puis effacé par `null`) -> delete -> list vide.
+    /// `api_key` ajouté puis effacé par `null`) -> delete -> list vide.
     /// `isolated_config_dir()` : la lecture `config/providers` est FUSIONNÉE —
     /// sans isolation, un `~/.config/vanyline` réel fuite dans la liste (et le
     /// `[]` final de fin de test serait impossible).
+    // tooling.sdd D6c — script de round-trip linéaire verrouillé par handlers.sdd
+    // §Done when (« Les 73 tests existants restent verts sans modification (ils
+    // verrouillent mapping 012/013/014/015, gating, …) ») : scinder casserait le
+    // tag du test et ferait bouger les assertions (précédent D6a, même allow sur
+    // rpc_stdio_smoke.rs).
+    #[allow(clippy::too_many_lines)]
     #[tokio::test]
     async fn providers_create_list_update_delete_roundtrip() {
         let (_config_tmp, _config_guard) = isolated_config_dir();
@@ -4151,7 +4300,7 @@ defaults:
     // -- New tests for task 3b (config write: toolsets/agents/skills) --
 
     /// `toolsets_create_list_update_delete_roundtrip` — cycle complet du domaine
-    /// fichier toolsets (couche workspace, `layer` omis). `item` snake_case
+    /// fichier toolsets (couche workspace, `layer` omis). `item` `snake_case`
     /// natif du domaine (`local_tools`) ; patch `{"prompt":...}` préserve le
     /// reste, delete retire l'entrée de `config/toolsets`.
     #[tokio::test]
@@ -4267,7 +4416,7 @@ defaults:
     }
 
     /// `agents_create_list_update_delete_roundtrip` — cycle agents ; `item`
-    /// snake_case (`system_prompt`) ; patch `{"description":...}` ajoute la
+    /// `snake_case` (`system_prompt`) ; patch `{"description":...}` ajoute la
     /// description et préserve `model` ; delete retire `ag1`.
     #[tokio::test]
     async fn agents_create_list_update_delete_roundtrip() {
@@ -4381,7 +4530,7 @@ defaults:
     }
 
     /// `skills_create_update_delete_roundtrip` — `config/skills/create` porte
-    /// `item` (SkillMeta) + `body` séparé ; la lecture `config/skills`
+    /// `item` (`SkillMeta`) + `body` séparé ; la lecture `config/skills`
     /// n'expose que name/description (le corps n'est PAS vérifiable via RPC —
     /// pas de méthode de load, cf. design).
     #[tokio::test]
@@ -4488,7 +4637,7 @@ defaults:
 
     /// `config_file_domain_conflict_returns_013` — create du même nom deux fois
     /// dans la même couche pour CHACUN des 3 domaines fichiers -> 2e create ->
-    /// `VNL-RPC-013` (NameConflict côté store, jamais côté handler).
+    /// `VNL-RPC-013` (`NameConflict` côté store, jamais côté handler).
     #[tokio::test]
     async fn config_file_domain_conflict_returns_013() {
         let (_config_tmp, _config_guard) = isolated_config_dir();
@@ -5057,7 +5206,7 @@ defaults:
     /// `config_providers_test_openai_compatible_happy_path` — provider
     /// `openai-compatible` + `api_key` -> succès, `result.models` = les `id` du
     /// corps `{"data":[…]}` renvoyé par le stub (GET {endpoint}/v1/models,
-    /// header Bearer émis dès que api_key présente — le stub ne le vérifie pas,
+    /// header Bearer émis dès que `api_key` présente — le stub ne le vérifie pas,
     /// c'est la logique partagée avec l'app qui porte ce comportement).
     #[tokio::test]
     async fn config_providers_test_openai_compatible_happy_path() {

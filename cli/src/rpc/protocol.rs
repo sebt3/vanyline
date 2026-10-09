@@ -273,7 +273,7 @@ pub enum ConfigLayer {
     Workspace,
 }
 
-/// `config/<domain>/create` — `item` est le type de domaine snake_case tel quel.
+/// `config/<domain>/create` — `item` est le type de domaine `snake_case` tel quel.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConfigCreateParams {

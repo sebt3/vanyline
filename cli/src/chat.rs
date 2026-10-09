@@ -15,6 +15,12 @@ struct StdoutSink;
 
 #[async_trait]
 impl EventSink for StdoutSink {
+    // tooling.sdd D6a — canal rendu contracté : chat.sdd §Handles « Rendu
+    // @StdoutSink » (et Scenarios `stdout_sink_*`) — @Token nu + flush,
+    // @ToolCall `[tool] {name}({args})`, @Done ligne vide sur stdout ; @Error
+    // `[{code}] {message}` sur stderr. stdout/stderr EST le produit (§Returns :
+    // contrat observable = {stdout, stderr, code de sortie}).
+    #[allow(clippy::print_stdout, clippy::print_stderr)]
     async fn emit(&self, event: ChatEvent) {
         match event {
             ChatEvent::Token { content } => {
@@ -71,6 +77,10 @@ async fn run_one_shot(
     model: Option<String>,
 ) {
     let (mut conv, agent_name, is_new) = resolve_context(agent, continue_active).await;
+    // tooling.sdd D6a — chat.sdd §Returns « Rendu one-shot lisible » + §Must
+    // littéraux : `Session: {id}` uniquement si conversation neuve ET non
+    // @json (Scenario `one_shot_ligne_session_saufen_json`).
+    #[allow(clippy::print_stdout)]
     if is_new && !json {
         println!("Session: {}", conv.id);
     }
@@ -87,6 +97,10 @@ async fn run_one_shot(
         workspace_context.as_deref(),
         user_msg,
     );
+    // tooling.sdd D6a — chat.sdd §Raises : timeout atteint ⇒ stderr exact
+    // `[VNL-CLI-001] run timed out after {secs} seconds` puis exit(1)
+    // (Scenario `one_shot_timeout_tue_et_sort_en_1`).
+    #[allow(clippy::print_stderr)]
     let result = match timeout_secs {
         Some(secs) if secs > 0 => {
             if let Ok(inner) =
@@ -120,6 +134,13 @@ async fn run_one_shot(
     }
 }
 
+// tooling.sdd D6a — canal rendu contracté : chat.sdd §Returns « Rendu REPL :
+// bannière exacte » (quatre lignes + ligne vide), prompt `> ` flushé avant
+// chaque lecture (§Must littéraux, Scenario `repl_banniere_exacte_puis_prompt`)
+// et dernier `println!()` nu sur EOF (§Returns « Code 0 »). Le REPL texte reste
+// le chemin vivant ; son remplacement par le TUI est la tâche `[ ]` « ALIGNEMENT
+// TUI » de chat.sdd Tasks, pas une décision de purge.
+#[allow(clippy::print_stdout)]
 async fn run_repl(
     agent: Option<String>,
     continue_active: bool,
@@ -290,6 +311,12 @@ async fn build_turn_context(
 /// fatale du chemin toolbox : message sur stderr puis exit(1), comme les
 /// autres terminaisons du CLI.
 async fn owner_token_for_turn(target: &crate::ToolboxTarget) -> String {
+    // tooling.sdd D6a — terminaison standard du CLI : main.sdd §Raises
+    // « Code 1, sur stderr, message = @Display de l'erreur (aucun reformatage
+    // local) » — échec fatal de @owner_token sur le chemin toolbox (chat.sdd
+    // §Must « JETON DU TOOLBOX PAR TOUR », doc in-line : message sur stderr
+    // puis exit(1) comme les autres terminaisons).
+    #[allow(clippy::print_stderr)]
     let jeton = target
         .client
         .owner_token(&target.owner)
@@ -381,6 +408,12 @@ struct JsonSink;
 
 #[async_trait]
 impl EventSink for JsonSink {
+    // tooling.sdd D6a — canal rendu contracté : chat.sdd §Exposes/§Handles
+    // « Rendu @JsonSink » + §Must « Réserver tout rendu non JSONL sur stdout au
+    // cas @json @false » — toute variante d'événement sérialisée puis rendue en
+    // JSONL sur stdout, @Error en texte `[{code}] {message}` sur stderr (jamais
+    // en JSON). Scenarios `json_sink_*`.
+    #[allow(clippy::print_stdout, clippy::print_stderr)]
     async fn emit(&self, event: ChatEvent) {
         match event {
             ChatEvent::Error { code, message } => eprintln!("[{code}] {message}"),
@@ -532,6 +565,11 @@ async fn workspace_source_summary(
 
 /// Affiche l'en-tête + les lignes de `workspace_source_summary`, rien si
 /// cette dernière retourne une liste vide.
+// tooling.sdd D6a — canal rendu contracté : chat.sdd §Returns —
+// @print_workspace_sources préfixe de `Sources workspace ({racine}):` et ne rend
+// RIEN (en-tête compris) si la couche est absente ou sans ligne (§Must
+// littéraux, Scenario `sources_workspace_en_tete_et_ordre_des_kinds`).
+#[allow(clippy::print_stdout)]
 async fn print_workspace_sources() {
     let store = crate::discover_fs_store();
     let Some(ws_dir) = store.layers().workspace_dir.clone() else {
@@ -573,6 +611,11 @@ fn git_diff_stat(root: &std::path::Path) -> Option<String> {
 /// Résout la racine workspace depuis le cwd courant puis affiche
 /// `git diff --stat`. Silencieux si le cwd n'est pas dans un dépôt git,
 /// si `git` échoue, ou si le diff est vide.
+// tooling.sdd D6a — canal rendu contracté : chat.sdd §Returns « Rendu one-shot
+// lisible » — la sortie de @git_diff_stat, uniquement après sauvegarde du tour
+// réussi et uniquement en non-@json (§Handles @print_git_diff_stat, Scenario
+// `git_diff_stat_rend_le_stat_des_modifications`).
+#[allow(clippy::print_stdout)]
 fn print_git_diff_stat() {
     let Ok(cwd) = std::env::current_dir() else {
         return;
@@ -594,6 +637,12 @@ async fn resolve_context(
     let agents = config_store.list_agents().await.unwrap_or_default();
     let default_agent_name = config_store.default_agent().await.ok().flatten();
 
+    // tooling.sdd D6a — chat.sdd §Raises « @resolve_context » : stderr exact
+    // `No agent specified. Use --agent or set a default agent.` puis
+    // `Available agents:` (stderr) puis les noms sur STDOUT (une ligne
+    // `  {name}` chacun) + exit(1) — mélange stdout/stderr contracté tel quel,
+    // en attente du [?] chat.sdd Tasks l.586 (tout stderr ou tout stdout ?).
+    #[allow(clippy::print_stdout, clippy::print_stderr)]
     let agent_name = agent.or(default_agent_name).unwrap_or_else(|| {
         if agents.len() == 1 {
             agents[0].name.clone()
@@ -607,6 +656,10 @@ async fn resolve_context(
         }
     });
 
+    // tooling.sdd D6a — chat.sdd §Raises « @resolve_context » : agent absent de
+    // @list_agents ⇒ stderr exact `Agent not found: {agent_name}` + exit(1)
+    // (Scenario `agent_inconnu_sort_en_1_avec_message`).
+    #[allow(clippy::print_stderr)]
     if !agents.iter().any(|a| a.name == agent_name) {
         eprintln!("Agent not found: {agent_name}");
         std::process::exit(1);
@@ -620,6 +673,12 @@ async fn resolve_context(
         todo: None,
     };
 
+    // tooling.sdd D6a — chat.sdd §Handles « Reprise -c » : pointeur absent/
+    // corrompu ⇒ stdout `No active conversation found, starting a new one.` et
+    // conversation neuve (jamais d'erreur ; §Must littéraux). Sa pollution du
+    // flux JSONL en mode @json est ouverte au [?] chat.sdd Tasks l.594 — le
+    // contrat stdout reste celui-ci.
+    #[allow(clippy::print_stdout)]
     let (conv, is_new) = if continue_active {
         if let Some(existing) =
             store::get_active_conversation().and_then(|id| store::get_conversation(&id).ok())
@@ -664,7 +723,7 @@ mod tests {
         };
         let store = FsConfigStore::new(layers);
         let result = workspace_source_summary(&store).await;
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [std::string::String; 0]);
     }
 
     // 2. workspace_layer_with_no_overrides_yields_empty_summary
@@ -678,7 +737,7 @@ mod tests {
         };
         let store = FsConfigStore::new(layers);
         let result = workspace_source_summary(&store).await;
-        assert!(result.is_empty());
+        assert_eq!(result, [] as [std::string::String; 0]);
     }
 
     // 3. workspace_agent_reported
@@ -809,7 +868,7 @@ mod tests {
             "l'en-tete authorization Bearer du tour doit être posé (jamais de headers vides)"
         );
         assert_eq!(selection.server, "toolbox");
-        assert!(selection.tools.is_empty());
+        assert_eq!(selection.tools, [] as [std::string::String; 0]);
         assert_eq!(ctx.subagent_depth_max, 1);
         assert_eq!(
             ctx.model_override.as_deref(),
@@ -864,7 +923,7 @@ mod tests {
             Some("Bearer jeton-de-test")
         );
         assert_eq!(selection.server, "toolbox");
-        assert!(selection.tools.is_empty());
+        assert_eq!(selection.tools, [] as [std::string::String; 0]);
         // Même logique que le cas non-json : local_tools vides, toolbox dans extra_mcp
     }
 

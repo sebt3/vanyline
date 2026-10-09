@@ -15,6 +15,12 @@ use vanyline_tools::search;
 /// source unique des schémas, partagée avec la sandbox. Panique si `name` ne
 /// correspond à aucun schéma : erreur de programmation (nom mal orthographié),
 /// pas un cas d'exécution normal.
+// tooling.sdd D6a — panic + `as_str().unwrap()` DOCUMENTÉS par tools.sdd
+// §Raises : « erreurs de programmation (nom mal orthographié), jamais atteints
+// avec les 8 noms actuels » (Scenario `tool_definition_inconnu_panique`).
+// Conversion en erreur ou exemption assumée : en attente du [!] tools.sdd
+// Tasks l.267 — arbitrage Sébastien, pas de décision prise ici.
+#[allow(clippy::panic, clippy::unwrap_used)]
 fn tool_definition(name: &str) -> ToolDefinition {
     mcp::filesystem_tools()
         .into_iter()

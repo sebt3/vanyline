@@ -94,7 +94,9 @@ pub fn resolve_conversation_reference(
 
     if is_clean_decimal && let Ok(index) = reference.parse::<usize>() {
         if index >= 1 && index <= convs.len() {
-            return Ok(convs[index - 1].id);
+            // tooling.sdd D6a — `saturating_sub` rendu mécanique identique sous
+            // le garde `index >= 1` ci-dessus (aucun débordement possible).
+            return Ok(convs[index.saturating_sub(1)].id);
         }
         return Err(format!(
             "No conversation at index {index} (have {})",

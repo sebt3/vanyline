@@ -19,7 +19,7 @@ fn parse_toolchain(s: &str) -> Result<vanyline_crds::Toolchain, String> {
     Ok(vanyline_crds::Toolchain {
         name: name.to_string(),
         image: image.to_string(),
-        env: Default::default(),
+        env: std::collections::BTreeMap::default(),
         lsp: None,
     })
 }
