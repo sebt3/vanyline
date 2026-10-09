@@ -135,9 +135,21 @@ quand `None`/vide/whitespace après `trim()` ; EMAIL RETIRÉ de la chaîne de no
   commentaires d'ancrage — « et ressources » inventé, « §Colonnes » inventée, affirmation
   « signalement croisé » fausse ; reworks verts, ancres re-vérifiées dont
   `(Exposes, DDL contractuelle)` migration 006).
-- **RESTE HARNAIS** : `vanyline-cli` 299 = ~248 print/expect/panic → arbitrage Sébastien
-  site par site (canal TUI vs stdout chat vs tracing), PAS mécanique. Dette notée :
-  ~14 allows `mod tests` devenus redondants (app), 3 allows `unwrap_used` prod `ws/chat.rs`
-  sans ancrage `.sdd`.
+- **D6 cli 299→0 commité `6975abc` — DETTE HARNAIS WORKSPACE ZÉRO** : 3 lots
+  validator-verts (D6a chat/tests/petits 57, D6b main.rs 142, D6c handlers.rs 100) ;
+  gate `--workspace --all-targets -- -D warnings` VERT 8 crates, 1121 tests, fmt et
+  specdd 0/0. ~169 allows ancrés sur contrats écrits, ~78 allows « en attente [?] »
+  explicitement non tranchés (~68 expect-sérialisation handlers.rs sous le [?] fusionné
+  de handlers.sdd, expect main.rs l.547, panic tools.rs, prints config.rs). Ligne
+  racine main.rs = 3 canoniques + `unsafe_code` (set_var de test), §Must main.sdd
+  ressynchronisé. Leçons : `#[allow]` sur une macro `println!` seule INEFFICACE
+  (porter sur statement/block/fn) ; un [?] déjà ouvert dans une spec peut absorber la
+  purge (« en attente ») sans arbitrage immédiat — gate vert, décision gardée.
+- **QUESTIONS POSÉES DANS LES SPECS (passe d'arbitrage Sébastien à venir)** : tooling.sdd
+  5 nouveaux `[?]` (Can modify racines, style assert_is_empty machine, nommage
+  scenario_*, nettoyages D5 — allows mod tests redondants + ws/chat.rs sans ancrage —,
+  bascule missing_docs deny) ; handlers.sdd `[?]` sérialisation fusionné ; main.sdd
+  l.541/547/551 déjà ouverts. Tâches bougées sur synthèse validator : tooling.sdd
+  tout-vert `[x]`, missing_docs purgée `[x]`, vanyline.sdd purge crate `[x]`.
 - **Étapes restantes** : `/code-health/*` (dernier item étape 5, prérequis câblage
   vanyline-health) → 6 workflows → 7 TUI cli → 8 agents système → 9 llm-config.

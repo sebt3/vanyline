@@ -77,7 +77,11 @@ Tasks:
   [ ] Reverse-engineering des specs par fichier, crate par crate, avec relecture attentive par
     Sébastien sur les incertitudes `[?]` — ordre : `vanyline-lib`, `vanyline-crds`,
     `vanyline-tools`, `vanyline-cfgstore`, `controller`, `sandbox`, `app`, `cli`.
-  [ ] Purger la dette harnais crate par crate (backlog dans ./tooling.sdd).
+  [x] Purger la dette harnais crate par crate — FAIT 2026-10-09 : les 8 crates à zéro,
+    `cargo clippy --workspace --all-targets -- -D warnings` VERT, 1121 tests verts
+    (registre et evidence crate par crate dans ./tooling.sdd ; ~78 sites cli restent
+    sous allows « en attente [?] » — la dette est à zéro, l'arbitrage de ces [?] reste
+    dû, listé dans tooling.sdd).
   [ ] Specs TS/Vue au fil de l'eau : tout fichier `frontend/`, `packages/` touché
     par une tâche est specé avant modification.
   [ ] Spec du déploiement (`deploy/`) et des images (`toolchains/`) quand la migration
