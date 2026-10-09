@@ -114,6 +114,11 @@ Must not:
     n'est pas bornée.
 
 Tasks:
+  [x] Dériver @Scenario `code_neuf_inclut_le_non_committe` en test — FAIT 2026-10-09
+    (validator-vert : test `runner::tests::code_neuf_inclut_le_non_committe`, module
+    tests seulement, assertions distinctes lignes commitées/non commitées ; discrimination
+    prouvée par mutation two-dot `merge-base..HEAD` ⇒ rouge 2≠4, restaurée mot pour mot ;
+    97 tests health verts).
   [?] Une sortie stdout de gigaoctets (clippy très bruyant) remplit `out_dir` : plafond de
     taille du fichier à décider.
   [?] Isolation des artefacts (`CARGO_TARGET_DIR`, caches) : passe par `env` ; la stratégie de
@@ -178,6 +183,14 @@ Scenario: code_neuf
   Given un dépôt git de test avec une base et un commit ajoutant des lignes, et un lcov couvrant partiellement
   When @run_checks avec `base`
   Then `new_code.coverage` ne contient que les lignes ajoutées
+
+Scenario: code_neuf_inclut_le_non_committe
+  Given les mêmes dépôts, et par-dessus le commit une MODIFICATION NON COMMITÉE d'une
+    autre ligne d'un fichier suivi (`Handles` : le diff est l'ÉTAT DU WORKTREE contre le
+    merge-base, « modifications non commitées incluses » — l'aspect n'avait pas
+    d'assertion dédiée avant 2026-10-09, constat validation sandbox H1)
+  When @run_checks avec `base`
+  Then `new_code` couvre les lignes du commit ET celles de la modification non commitée
 
 Scenario: echec_du_diff
   Given une `base` inexistante dans le dépôt

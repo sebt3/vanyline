@@ -1680,6 +1680,82 @@ mod tests {
         fx.cleanup();
     }
 
+    /// Scenario `code_neuf_inclut_le_non_committe` — le diff est l'ÉTAT DU WORKTREE contre
+    /// le merge-base : les lignes d'une modification non commitée d'un fichier suivi sont
+    /// nouvelles au même titre que celles du commit (`Handles`, l.86).
+    #[tokio::test]
+    async fn code_neuf_inclut_le_non_committe() {
+        let fx = Fixture::new("neufwc");
+        init_repo(&fx.root);
+        std::fs::write(fx.root.join("a.rs"), "l1\n").expect("a.rs v1");
+        git(&fx.root, &["add", "-A"]);
+        git(&fx.root, &["commit", "-q", "-m", "v1"]);
+        let base = git(&fx.root, &["rev-parse", "HEAD"]);
+        // Lignes A (2-3) : commit v2 au-dessus de la base.
+        std::fs::write(fx.root.join("a.rs"), "l1\nl2\nl3\n").expect("a.rs v2");
+        git(&fx.root, &["add", "-A"]);
+        git(&fx.root, &["commit", "-q", "-m", "v2"]);
+        // Lignes B (4-5) : MODIFICATION NON COMMITÉE du même fichier suivi (jamais
+        // `git add` : le worktree porte la modification, l'index non).
+        std::fs::write(fx.root.join("a.rs"), "l1\nl2\nl3\nl4\nl5\n").expect("a.rs v3 non commitée");
+        // lcov : 1 et 2 couvertes, 3 non couverte, 4 couverte, 5 non couverte
+        // (chemins absolus sous root).
+        let lcov_fixture = fx.out.join("data.lcov");
+        std::fs::write(
+            &lcov_fixture,
+            format!(
+                "SF:{}/a.rs\nDA:1,1\nDA:2,1\nDA:3,0\nDA:4,1\nDA:5,0\nend_of_record\n",
+                fx.root.display()
+            ),
+        )
+        .expect("lcov fixture");
+        let mut opts = options(&fx);
+        opts.base = Some(base.clone());
+        let mut cov = probe(
+            "cov",
+            &[
+                "cp",
+                &lcov_fixture.display().to_string(),
+                "{out_dir}/cov.lcov",
+            ],
+        );
+        cov.kind = CheckKind::Coverage;
+        cov.output = OutputKind::Lcov {
+            path: "cov.lcov".to_string(),
+        };
+        let report = run_checks(&opts, &[cov]).await.expect("rapport rendu");
+        assert_eq!(result(&report, "cov").status, CheckStatus::Passed);
+        let new_code = report.new_code.as_ref().expect("new_code calculé");
+        assert_eq!(new_code.base, base);
+        assert_eq!(new_code.coverage.files.len(), 1);
+        let file = &new_code.coverage.files[0];
+        assert_eq!(file.path, "a.rs");
+        // Assertion distincte pour A : si le diff s'arrêtait à HEAD (two-dot
+        // merge-base..HEAD), lines_found serait 2 et ce premier assert passerait — c'est
+        // le second qui doit dire si seule A est couverte.
+        assert_eq!(
+            file.lines_found, 4,
+            "lignes A (2-3) ET B (4-5) doivent être comptées nouvelles, obtenu {}",
+            file.lines_found
+        );
+        assert_eq!(
+            file.lines_hit, 2,
+            "seules les lignes couvertes parmi A∪B comptent (2 et 4 touchées)"
+        );
+        // Assertion distincte pour B : le diff en two-dot révs (merge-base..HEAD)
+        // ignorerait les lignes 4-5 → uncovered = [{2,2}] et cet assert ROUGE.
+        assert_eq!(
+            file.uncovered,
+            vec![
+                crate::report::LineRange { start: 3, end: 3 },
+                crate::report::LineRange { start: 5, end: 5 },
+            ],
+            "les lignes non commitées B (4-5) doivent être dans le périmètre, \
+             avec la 3 (A non couverte)"
+        );
+        fx.cleanup();
+    }
+
     /// Scenario `echec_du_diff`.
     #[tokio::test]
     async fn echec_du_diff() {
