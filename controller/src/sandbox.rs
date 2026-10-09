@@ -71,19 +71,13 @@ fn toolchain_preset(name: &str) -> Option<BTreeMap<String, String>> {
                 "{root}/usr/local/rustup".to_string(),
             ),
         ])),
-        "node" => Some(BTreeMap::from([
-            ("PATH".to_string(), "{root}/usr/local/bin".to_string()),
-            (
-                "LD_LIBRARY_PATH".to_string(),
-                "{root}/usr/lib/x86_64-linux-gnu:{root}/usr/lib/aarch64-linux-gnu:{root}/usr/local/lib".to_string(),
-            ),
-        ])),
-        // Pas d'env spécifique (décision design docker-lsp) : le runtime node
-        // de l'image (bâtie sur `node:trixie-slim`) pour `docker-langserver`
-        // exige le `LD_LIBRARY_PATH` standard des presets d'images à runtime,
-        // cf. AGENTS.md ; `hadolint` est statique, le wrapper
+        // Node et docker partagent LE même preset (sandbox.sdd : « docker = preset
+        // runtime node »). Pas d'env spécifique (décision design docker-lsp) : le
+        // runtime node de l'image (bâtie sur `node:trixie-slim`) pour
+        // `docker-langserver` exige le `LD_LIBRARY_PATH` standard des presets
+        // d'images à runtime, cf. AGENTS.md ; `hadolint` est statique, le wrapper
         // `vnl-hadolint-lsp` est lié sur le base du pod — rien de plus.
-        "docker" => Some(BTreeMap::from([
+        "node" | "docker" => Some(BTreeMap::from([
             ("PATH".to_string(), "{root}/usr/local/bin".to_string()),
             (
                 "LD_LIBRARY_PATH".to_string(),
@@ -366,7 +360,7 @@ pub fn effective_toolchains(
         toolchains.push(Toolchain {
             name: "rust".to_string(),
             image: ctx.toolchain_image_rust.clone(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         });
     }
@@ -374,7 +368,7 @@ pub fn effective_toolchains(
         toolchains.push(Toolchain {
             name: "node".to_string(),
             image: ctx.toolchain_image_node.clone(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         });
     }
@@ -382,7 +376,7 @@ pub fn effective_toolchains(
         toolchains.push(Toolchain {
             name: "python".to_string(),
             image: ctx.toolchain_image_python.clone(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         });
     }
@@ -390,7 +384,7 @@ pub fn effective_toolchains(
         toolchains.push(Toolchain {
             name: "docker".to_string(),
             image: ctx.toolchain_image_docker.clone(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         });
     }
@@ -443,6 +437,11 @@ pub struct SandboxPodContext {
 /// `--no-auth` (voir décisions de cette tâche), probes `/health`, labels
 /// `vanyline.solidite.fr/{owner,project,sandbox}`, `ownerReference` vers la
 /// Sandbox (GC en cascade).
+// tooling.sdd D4 — sandbox.sdd §"Construire le Pod" : @build_sandbox_pod déroule le
+// Pod contracté — home Owner + worktree + caches + toolchains, presets env agrégés,
+// probes /health, labels et ownerReference ; la taille suit la table des volumes/env
+// de la spec, la scinder diluerait le motif unique du builder.
+#[allow(clippy::too_many_lines)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodContext) -> Pod {
     let workspace_pvc = effective_pvc_name(project);
@@ -1218,6 +1217,12 @@ async fn fetch_application(
     Ok(Some(applications.get(name).await?))
 }
 
+// tooling.sdd D4 — sandbox.sdd §"Gate d'@apply" et règles de réconciliation :
+// @apply déroule séquentiellement le gate cloned, le Job checkout, la suspension,
+// le Pod, le Service, la netpol egress et l'Ingress (miroir application_ref) —
+// chaque bloc est un Scenario de la spec ; la scinder diluerait l'ordre contracté
+// (status figé en dernier, server-side apply).
+#[allow(clippy::too_many_lines)]
 async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
     let project = fetch_project(sandbox, ctx, ns).await?;
     if !project.status.as_ref().is_some_and(|s| s.cloned) {
@@ -1339,26 +1344,23 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
     }
 
     let ingresses: Api<Ingress> = Api::namespaced(ctx.client.clone(), ns);
-    match app_opt {
-        Some(application) => {
-            let ingress = build_sandbox_ingress(sandbox, &application);
-            ingresses
-                .patch(
-                    &ingress_name(&sandbox.name_any()),
-                    &pp,
-                    &Patch::Apply(&ingress),
-                )
-                .await?;
-        }
+    if let Some(application) = app_opt {
+        let ingress = build_sandbox_ingress(sandbox, &application);
+        ingresses
+            .patch(
+                &ingress_name(&sandbox.name_any()),
+                &pp,
+                &Patch::Apply(&ingress),
+            )
+            .await?;
+    } else {
         // `application_ref` absent ou retiré après coup : pas d'Ingress à
         // maintenir. Miroir du traitement de la netpol egress ci-dessus —
         // sans ce nettoyage, un Ingress déjà créé resterait orphelin
         // indéfiniment si l'Owner perd son `application_ref`.
-        None => {
-            let name = ingress_name(&sandbox.name_any());
-            if ingresses.get_opt(&name).await?.is_some() {
-                ingresses.delete(&name, &DeleteParams::default()).await?;
-            }
+        let name = ingress_name(&sandbox.name_any());
+        if ingresses.get_opt(&name).await?.is_some() {
+            ingresses.delete(&name, &DeleteParams::default()).await?;
         }
     }
 
@@ -1383,9 +1385,7 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
 }
 
 async fn cleanup(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
-    let project = if let Ok(p) = fetch_project(sandbox, ctx, ns).await {
-        p
-    } else {
+    let Ok(project) = fetch_project(sandbox, ctx, ns).await else {
         tracing::warn!(
             sandbox = %sandbox.name_any(),
             "project introuvable pendant le cleanup — retrait de worktree ignoré (best-effort v1)"
@@ -1415,17 +1415,7 @@ async fn cleanup(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, C
         Some(job) if job.status.clone().and_then(|s| s.succeeded).unwrap_or(0) > 0 => {
             Ok(Action::await_change())
         }
-        Some(_) => {
-            jobs.create(
-                &PostParams::default(),
-                &build_worktree_remove_job(sandbox, &project, &job_ctx),
-            )
-            .await?;
-            Err(ControllerError::WorktreeRemovalPending {
-                sandbox: sandbox.name_any(),
-            })
-        }
-        None => {
+        Some(_) | None => {
             jobs.create(
                 &PostParams::default(),
                 &build_worktree_remove_job(sandbox, &project, &job_ctx),
@@ -1573,10 +1563,13 @@ mod tests {
         }
     }
 
-    fn make_project_with_languages(languages: Vec<&str>) -> Project {
+    fn make_project_with_languages(languages: &[&str]) -> Project {
         let mut project = make_project(None);
         project.status = Some(ProjectStatus {
-            languages: languages.iter().map(|s| s.to_string()).collect(),
+            languages: languages
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             ..Default::default()
         });
         project
@@ -1586,7 +1579,7 @@ mod tests {
 
     #[test]
     fn rust_preset() {
-        let toolchain = make_rust_tc(Default::default());
+        let toolchain = make_rust_tc(BTreeMap::default());
         let env = aggregate_toolchain_env(&[toolchain]);
 
         // PATH must contain resolved paths
@@ -1619,7 +1612,7 @@ mod tests {
 
     #[test]
     fn node_preset() {
-        let toolchain = make_node_tc(Default::default());
+        let toolchain = make_node_tc(BTreeMap::default());
         let env = aggregate_toolchain_env(&[toolchain]);
 
         let path = env
@@ -1643,8 +1636,8 @@ mod tests {
 
     #[test]
     fn multiple_toolchains_order_preserved() {
-        let rust = make_rust_tc(Default::default());
-        let node = make_node_tc(Default::default());
+        let rust = make_rust_tc(BTreeMap::default());
+        let node = make_node_tc(BTreeMap::default());
         let env = aggregate_toolchain_env(&[rust, node]);
 
         let path = env
@@ -1675,7 +1668,7 @@ mod tests {
         // des images à runtime (l'image est bâtie sur node:trixie-slim,
         // docker-langserver s'exécute sur le runtime node du volume) — aucune
         // env « particulière » type RUSTUP_HOME (décision design).
-        let toolchain = make_docker_tc(Default::default());
+        let toolchain = make_docker_tc(BTreeMap::default());
         let env = resolve_toolchain_env(&toolchain);
         assert_eq!(
             env.get("PATH").expect("must have PATH"),
@@ -1692,8 +1685,8 @@ mod tests {
         // Agrégat rust+node+docker : PATH concaténé dans l'ordre figé de
         // `effective_toolchains`, docker en dernier avant BASE_PATH.
         let env = aggregate_toolchain_env(&[
-            make_rust_tc(Default::default()),
-            make_node_tc(Default::default()),
+            make_rust_tc(BTreeMap::default()),
+            make_node_tc(BTreeMap::default()),
             toolchain,
         ]);
         let path = env
@@ -1743,7 +1736,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "unknown".to_string(),
             image: "x".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         };
         let env_result = aggregate_toolchain_env(&[toolchain]);
@@ -1764,9 +1757,9 @@ mod tests {
 
     #[test]
     fn effective_toolchains_explicit_spec_priority() {
-        let rust = make_rust_tc(Default::default());
+        let rust = make_rust_tc(BTreeMap::default());
         let sandbox = make_sandbox("sb", vec![rust], None);
-        let project = make_project_with_languages(vec!["rust"]);
+        let project = make_project_with_languages(&["rust"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1779,7 +1772,7 @@ mod tests {
     #[test]
     fn effective_toolchains_derives_rust() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["rust"]);
+        let project = make_project_with_languages(&["rust"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1792,7 +1785,7 @@ mod tests {
     #[test]
     fn effective_toolchains_derives_js_ts() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["js-ts"]);
+        let project = make_project_with_languages(&["js-ts"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1805,7 +1798,7 @@ mod tests {
     #[test]
     fn effective_toolchains_derives_both() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["rust", "js-ts"]);
+        let project = make_project_with_languages(&["rust", "js-ts"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1830,7 +1823,7 @@ mod tests {
     fn effective_toolchains_derives_node_from_vue_alone() {
         // Le marqueur `vue` implique `node` indépendamment de `js-ts` (invariant 5).
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["vue"]);
+        let project = make_project_with_languages(&["vue"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1847,7 +1840,7 @@ mod tests {
 
         let result = effective_toolchains(
             &sandbox,
-            &make_project_with_languages(vec!["js-ts", "vue"]),
+            &make_project_with_languages(&["js-ts", "vue"]),
             &ctx,
         );
         assert_eq!(result.len(), 1);
@@ -1855,7 +1848,7 @@ mod tests {
 
         let result = effective_toolchains(
             &sandbox,
-            &make_project_with_languages(vec!["rust", "vue"]),
+            &make_project_with_languages(&["rust", "vue"]),
             &ctx,
         );
         assert_eq!(result.len(), 2);
@@ -1868,7 +1861,7 @@ mod tests {
         // Le marqueur `dockerfile` (détection tâche 01) implique le toolchain
         // `docker` (feature docker-lsp).
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["dockerfile"]);
+        let project = make_project_with_languages(&["dockerfile"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1884,7 +1877,7 @@ mod tests {
         // Ordre figé complet de la dérivation : rust, node, docker (push
         // séquentiel sur l'axe des `languages`, pas l'ordre des marqueurs).
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["rust", "vue", "dockerfile"]);
+        let project = make_project_with_languages(&["rust", "vue", "dockerfile"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -1898,7 +1891,7 @@ mod tests {
     #[test]
     fn build_sandbox_pod_derived_toolchain_volumes() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["rust"]);
+        let project = make_project_with_languages(&["rust"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -2105,8 +2098,8 @@ mod tests {
 
     #[test]
     fn volumes_home_workspace_and_toolchains() {
-        let rust = make_rust_tc(Default::default());
-        let node = make_node_tc(Default::default());
+        let rust = make_rust_tc(BTreeMap::default());
+        let node = make_node_tc(BTreeMap::default());
         let sandbox = make_sandbox("demo-branch", vec![rust, node], None);
         let project = make_project(None);
         let ctx = make_ctx();
@@ -3204,7 +3197,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "rust".to_string(),
             image: "rust:slim-trixie".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: Some(lsp.clone()),
         };
         let ctx = make_ctx();
@@ -3218,7 +3211,7 @@ mod tests {
 
     #[test]
     fn resolve_toolchain_lsp_preset_rust() {
-        let toolchain = make_rust_tc(Default::default());
+        let toolchain = make_rust_tc(BTreeMap::default());
         let ctx = make_ctx();
         let result = resolve_toolchain_lsp(&toolchain, &ctx);
         assert!(result.is_some());
@@ -3228,12 +3221,12 @@ mod tests {
             resolved.bin,
             "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
         );
-        assert!(resolved.args.is_empty());
+        assert_eq!(resolved.args, [] as [std::string::String; 0]);
     }
 
     #[test]
     fn resolve_toolchain_lsp_preset_node() {
-        let toolchain = make_node_tc(Default::default());
+        let toolchain = make_node_tc(BTreeMap::default());
         let ctx = make_ctx();
         let result = resolve_toolchain_lsp(&toolchain, &ctx);
         assert!(result.is_some());
@@ -3248,7 +3241,7 @@ mod tests {
 
     #[test]
     fn resolve_toolchain_lsp_preset_docker() {
-        let toolchain = make_docker_tc(Default::default());
+        let toolchain = make_docker_tc(BTreeMap::default());
         let ctx = make_ctx();
         let result = resolve_toolchain_lsp(&toolchain, &ctx);
         assert!(result.is_some());
@@ -3269,7 +3262,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "docker".to_string(),
             image: "toolchains-docker:test".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: Some(lsp.clone()),
         };
         let resolved = resolve_toolchain_lsp(&toolchain, &ctx).expect("custom lsp wins");
@@ -3283,7 +3276,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "custom".to_string(),
             image: "x".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         };
         let ctx = make_ctx();
@@ -3296,7 +3289,7 @@ mod tests {
     #[test]
     fn build_sandbox_pod_derived_lsp_volume_and_env() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["rust"]);
+        let project = make_project_with_languages(&["rust"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3364,7 +3357,7 @@ mod tests {
         let rust_tc = Toolchain {
             name: "rust".to_string(),
             image: "rust:slim-trixie".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: Some(lsp),
         };
         let sandbox = make_sandbox("sb", vec![rust_tc], None);
@@ -3411,7 +3404,7 @@ mod tests {
         assert_eq!(entries[0]["bin"], "/toolchains/rust-lsp/custom/bin");
         assert_eq!(entries[0]["args"], serde_json::json!(["--x"]));
         // custom lsp : jamais d'`aux` additionnée (invariant 2, tâche 10 vue-lsp)
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
     }
 
     #[test]
@@ -3419,7 +3412,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "custom".to_string(),
             image: "x".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         };
         let sandbox = make_sandbox("sb", vec![toolchain], None);
@@ -3447,7 +3440,7 @@ mod tests {
     #[test]
     fn build_sandbox_pod_lsp_env_order_rust_then_node() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["rust", "js-ts"]);
+        let project = make_project_with_languages(&["rust", "js-ts"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3488,7 +3481,7 @@ mod tests {
     #[test]
     fn build_sandbox_pod_node_vue_composite_entry_exact() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["js-ts", "vue"]);
+        let project = make_project_with_languages(&["js-ts", "vue"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3571,14 +3564,14 @@ mod tests {
         // Garde de non-régression stricte : node sans vue = JSON identique à
         // avant (clé `aux` OMISE, pas `"aux":[]`).
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["js-ts"]);
+        let project = make_project_with_languages(&["js-ts"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "node");
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
         assert_eq!(
             entries[0]["bin"],
             "/toolchains/node-lsp/usr/local/bin/typescript-language-server"
@@ -3591,15 +3584,15 @@ mod tests {
         // spec.toolchains explicite court-circuite la dérivation : même un
         // `node` nommé explicitement + languages ["vue"] ne reçoit jamais la
         // variante composite (invariant 1).
-        let sandbox = make_sandbox("sb", vec![make_node_tc(Default::default())], None);
-        let project = make_project_with_languages(vec!["vue"]);
+        let sandbox = make_sandbox("sb", vec![make_node_tc(BTreeMap::default())], None);
+        let project = make_project_with_languages(&["vue"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "node");
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
         assert_eq!(
             entries[0]["bin"],
             "/toolchains/node-lsp/usr/local/bin/typescript-language-server"
@@ -3619,11 +3612,11 @@ mod tests {
         let node_tc = Toolchain {
             name: "node".to_string(),
             image: "node:trixie-slim".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: Some(lsp),
         };
         let sandbox = make_sandbox("sb", vec![node_tc], None);
-        let project = make_project_with_languages(vec!["vue"]);
+        let project = make_project_with_languages(&["vue"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3632,7 +3625,7 @@ mod tests {
         assert_eq!(entries[0]["name"], "node");
         assert_eq!(entries[0]["bin"], "/toolchains/node-lsp/custom/bin");
         assert_eq!(entries[0]["args"], serde_json::json!(["--y"]));
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
     }
 
     #[test]
@@ -3640,7 +3633,7 @@ mod tests {
         // Ordre de `effective_toolchains` (rust puis node), pas celui de
         // `languages` (["vue", "rust"]).
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["vue", "rust"]);
+        let project = make_project_with_languages(&["vue", "rust"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3651,7 +3644,7 @@ mod tests {
             entries[0]["bin"],
             "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
         );
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
         assert_eq!(entries[1]["name"], "node");
         assert_eq!(
             entries[1]["bin"],
@@ -3665,7 +3658,7 @@ mod tests {
     #[test]
     fn build_pod_docker_composite_json() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["dockerfile"]);
+        let project = make_project_with_languages(&["dockerfile"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3687,7 +3680,7 @@ mod tests {
         assert_eq!(entries[0]["aux"][0]["args"], serde_json::json!([]));
         // Pas de clé `initOptions` sur CET aux (défaut Null côté parseur
         // sandbox `LspAux` — contrairement au composite node qui en a une).
-        assert!(!entries[0]["aux"][0].get("initOptions").is_some());
+        assert!(entries[0]["aux"][0].get("initOptions").is_none());
 
         // Entrée EXACTEMENT le JSON contrat (aucune clé superflue).
         assert_eq!(
@@ -3758,7 +3751,7 @@ mod tests {
         // (node ⟹ tsserver-forward, docker ⟹ diagnostics-merge), ordre figé
         // node puis docker.
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["vue", "dockerfile"]);
+        let project = make_project_with_languages(&["vue", "dockerfile"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3785,15 +3778,15 @@ mod tests {
         // spec.toolchains explicite court-circuite la dérivation : un `docker`
         // nommé explicitement + languages ["dockerfile"] ne reçoit jamais le
         // composite (invariant 1 du patron volar, côté docker) — mono preset.
-        let sandbox = make_sandbox("sb", vec![make_docker_tc(Default::default())], None);
-        let project = make_project_with_languages(vec!["dockerfile"]);
+        let sandbox = make_sandbox("sb", vec![make_docker_tc(BTreeMap::default())], None);
+        let project = make_project_with_languages(&["dockerfile"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "docker");
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
         assert_eq!(
             entries[0]["bin"],
             "/toolchains/docker-lsp/usr/local/bin/docker-langserver"
@@ -3811,7 +3804,7 @@ mod tests {
         let docker_tc = Toolchain {
             name: "docker".to_string(),
             image: "toolchains-docker:test".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: Some(lsp),
         };
         let sandbox = make_sandbox("sb", vec![docker_tc], None);
@@ -3821,7 +3814,7 @@ mod tests {
         assert_eq!(entries[0]["name"], "docker");
         assert_eq!(entries[0]["bin"], "/toolchains/docker-lsp/custom/bin");
         assert_eq!(entries[0]["args"], serde_json::json!(["--z"]));
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
     }
 
     // ===== python-support (toolchain python, composite pyright/ruff, cache pip) =====
@@ -3837,7 +3830,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "python".to_string(),
             image: "toolchains-python:test".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         };
         let env = resolve_toolchain_env(&toolchain);
@@ -3864,7 +3857,7 @@ mod tests {
         // Le marqueur `python` (détection tâche 01) implique le toolchain
         // `python` (feature python-support).
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["python"]);
+        let project = make_project_with_languages(&["python"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -3882,7 +3875,7 @@ mod tests {
         // d'entrée (volontairement non conforme ici).
         let sandbox = make_sandbox("sb", vec![], None);
         let project =
-            make_project_with_languages(vec!["dockerfile", "python", "vue", "js-ts", "rust"]);
+            make_project_with_languages(&["dockerfile", "python", "vue", "js-ts", "rust"]);
         let ctx = make_ctx();
 
         let result = effective_toolchains(&sandbox, &project, &ctx);
@@ -3895,7 +3888,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "python".to_string(),
             image: "toolchains-python:test".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         };
         let ctx = make_ctx();
@@ -3918,7 +3911,7 @@ mod tests {
         let toolchain = Toolchain {
             name: "python".to_string(),
             image: "toolchains-python:test".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: Some(lsp.clone()),
         };
         let resolved = resolve_toolchain_lsp(&toolchain, &ctx).expect("custom lsp wins");
@@ -3930,7 +3923,7 @@ mod tests {
     #[test]
     fn build_pod_python_composite_json() {
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["python"]);
+        let project = make_project_with_languages(&["python"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -3953,7 +3946,7 @@ mod tests {
         // Pas de clé `initOptions` sur CET aux (contrat JSON interne, mêmes
         // clés role/bin/args que l'aux hadolint — l'auto-découverte .venv /
         // python3+user-site du primaire suffit).
-        assert!(!entries[0]["aux"][0].get("initOptions").is_some());
+        assert!(entries[0]["aux"][0].get("initOptions").is_none());
 
         // Entrée EXACTEMENT le JSON contrat (aucune clé superflue).
         assert_eq!(
@@ -4027,18 +4020,18 @@ mod tests {
         let python_tc = Toolchain {
             name: "python".to_string(),
             image: "IMG-PYTHON-EXPLICIT".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: None,
         };
         let sandbox = make_sandbox("sb", vec![python_tc], None);
-        let project = make_project_with_languages(vec!["python"]);
+        let project = make_project_with_languages(&["python"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "python");
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
         assert_eq!(
             entries[0]["bin"],
             "/toolchains/python-lsp/usr/local/bin/pyright-langserver"
@@ -4058,11 +4051,11 @@ mod tests {
         let python_tc = Toolchain {
             name: "python".to_string(),
             image: "IMG-PYTHON-EXPLICIT".to_string(),
-            env: Default::default(),
+            env: BTreeMap::default(),
             lsp: Some(lsp),
         };
         let sandbox = make_sandbox("sb", vec![python_tc], None);
-        let project = make_project_with_languages(vec!["python"]);
+        let project = make_project_with_languages(&["python"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -4071,7 +4064,7 @@ mod tests {
         assert_eq!(entries[0]["name"], "python");
         assert_eq!(entries[0]["bin"], "/toolchains/python-lsp/custom/bin");
         assert_eq!(entries[0]["args"], serde_json::json!(["--y"]));
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
     }
 
     #[test]
@@ -4079,7 +4072,7 @@ mod tests {
         // Ordre de `effective_toolchains` (rust puis python), pas celui de
         // `languages` (["python", "rust"]).
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["python", "rust"]);
+        let project = make_project_with_languages(&["python", "rust"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);
@@ -4090,7 +4083,7 @@ mod tests {
             entries[0]["bin"],
             "/toolchains/rust-lsp/usr/local/bin/rust-analyzer"
         );
-        assert!(!entries[0].get("aux").is_some());
+        assert!(entries[0].get("aux").is_none());
         assert_eq!(entries[1]["name"], "python");
         assert_eq!(
             entries[1]["bin"],
@@ -4105,7 +4098,7 @@ mod tests {
         // python COMPLET (avec son /home/vanyline/.local/bin), puis BASE_PATH ;
         // PYTHONUSERBASE/PIP_USER posés tels quels dans l'env.
         let sandbox = make_sandbox("sb", vec![], None);
-        let project = make_project_with_languages(vec!["rust", "python"]);
+        let project = make_project_with_languages(&["rust", "python"]);
         let ctx = make_ctx();
 
         let pod = build_sandbox_pod(&sandbox, &project, &ctx);

@@ -16,7 +16,7 @@ use crate::AppState;
 
 /// Endpoints métier non-CRUD des ressources `resource_router` (`llm-providers`, `mcp-servers`) —
 /// montés à part sous `/api/v1`, au même préfixe que le CRUD généré de ces mêmes ressources
-/// (décision Phase 1 : "conservés en handlers axum custom, à côté de resource_router"). Vivaient
+/// (décision Phase 1 : "conservés en handlers axum custom, à côté de `resource_router`). Vivaient
 /// auparavant sous `/api` non versionné, en désaccord avec cette décision (trouvé en revue
 /// Phase 3, cf. `docs/features/miryad-core-integration.md`).
 pub fn api_v1_router() -> Router<AppState> {

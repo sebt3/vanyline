@@ -14,7 +14,7 @@ use crate::{
 };
 use vanyline_lib::domain::{McpServer as DomainMcpServer, McpTransport};
 
-/// Mappe le Model SeaORM sur le type domaine `lib`. `server_type: "sse"` -> erreur
+/// Mappe le Model `SeaORM` sur le type domaine `lib`. `server_type: "sse"` -> erreur
 /// claire. `server_type: "sse"` mappe sur `McpTransport::Sse` — accepté, mais la
 /// découverte de tools remonte `VNL-MCP-004` via `prefixed_mcp` (connexion SSE
 /// pas encore implémentée). Pure, testable.

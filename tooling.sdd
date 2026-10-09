@@ -124,12 +124,38 @@ Tasks:
     workspace à rendre `cargo clippy -p vanyline-sandbox --all-targets -- -D warnings`
     VERT (475 tests verts, assertions intactes ; rework docs sur-promettantes
     `tests/{http,maint}.rs` corrigé à la suite du FAIL strict du validator).
-    RESTENT (convention de comptage gelée ci-dessous) : `vanyline-cli` 299 (dont ~248 de
+    `vanyline-controller` (D4 2026-10-09 : 65 → 0, gate `-p vanyline-controller
+    --all-targets -- -D warnings` VERT, 166 tests verts, assertions intactes — mécanique :
+    `default_trait_access` 32, `nonminimal_bool` 12, `assert_is_empty` 4 (suggestions machine
+    appliquées au caractère), puis 2 `match_same_arms` dont `toolchain_preset` « docker =
+    preset runtime node » (sandbox.sdd l.73-75), docs, let-else/if-else, helper de test
+    `&[&str]` ; 6 allows marqueur « tooling.sdd D4 » dont 5 `too_many_lines` aux builders
+    contractés et `print_stdout` sur la branche `--crds` (main.sdd §Purpose (1), stdout
+    contracté) ; racine main.rs alignée ligne canonique trois lints. FAIL d'abord sur un
+    commentaire d'ancrage sur-promettant (« et ressources » alors qu'application.sdd
+    n'en contracte pas), corrigé à la seconde passe), et
+    `vanyline-app` (D5 2026-10-09 : 51 → 0, gate `-p vanyline-app --all-targets
+    -- -D warnings` VERT après clean, 115/115 assertions intactes — `match_same_arms` ×5
+    sur error.rs sans réassignation de statut (16 variants vérifiés), `manual_let_else` ×11,
+    `needless_pass_by_value` ×3 (`todo_to_persist` en `Option<&String>`, None reste None),
+    `cast_sign_loss` par `i64::cast_unsigned` (wrapping identique `as u64`), docs main.rs
+    (crate + @AppState + 6 champs fidèles aux Returns de main.sdd — clause « Can modify »
+    lue comme bornant la CONFIG de lint de la racine, précédent D3c sandbox), panic
+    cfg(test) résolu par la ligne canonique trois lints ; 4 allows marqueur « tooling.sdd
+    D5 » : `too_many_lines` main.sdd §Séquence, `unused_async` PORTÉE FICHIER
+    ws/sandbox_state.rs (la macro `debug_handler` émet une seconde copie de signature hors
+    portée de l'allow d'item — écart de portée ASSUMÉ et consigné : future `async fn` sans
+    `.await` y échapperait ; les 6 autres en ont ≥1, vérifié), `struct_field_names` ×2
+    entités DB (colonnes wire contractées — ancres DDL 006 `Exposes` et 005 `Structure`,
+    corrigées à la seconde passe après FAIL sur ancre « §Colonnes » inventée).
+    Dette préexistante notée hors D5 : ~14 `#![allow(unwrap_used, expect_used)]` de
+    `mod tests` devenus REDONDANTS avec la ligne canonique de la racine — candidats purge
+    au prochain passage sur ces fichiers ; les 3 allows `unwrap_used` de prod de
+    `ws/chat.rs` (mutex empoisonné) ne citent pas de `.sdd` — à régulariser).
+    RESTE (convention de comptage gelée ci-dessous) : `vanyline-cli` 299 (dont ~248 de
     restrictions dures print/expect/panic — un purge là dedans est un arbitrage site par
     site des specs cli (canal TUI vs stdout de chat vs tracing), PAS une purge mécanique ;
-    ~40 seulement sont de la mécanique des tranches D3), `vanyline-app` 51 (~90 % mécanique,
-    avant-goûts validator 2026-10-09), `vanyline-controller` 65 (~95 % mécanique :
-    `default_trait_access` 32 + `nonminimal_bool` 12) — purgées au fil
+    ~40 seulement sont de la mécanique des tranches D3) — purge au fil
     des étapes de la migration qui les touchent (interleaved). Les 2 `unnecessary_wraps`
     imputables à 4a (`controller/src/{owner,project}.rs::build_*_pvc`) SOLDÉS en 4b.
     Exemptions pedantic restantes en `lib` (2, les seules) : `too_many_lines` sur

@@ -32,6 +32,10 @@ pub struct Model {
     pub description: Option<String>,
     #[serde(default = "default_mode")]
     pub mode: String,
+    // tooling.sdd D5 — m20260825_000006_create_vanyline_agents.sdd (Exposes, DDL contractuelle) :
+    // `model_profile_id` — integer().not_null(), sans DEFAULT ; wire snake_case contracté
+    // par ./agents.sdd (JSON REST identique aux colonnes, corps de création du frontend).
+    #[allow(clippy::struct_field_names)]
     pub model_profile_id: i32,
     #[serde(default = "default_json_array")]
     pub toolsets: serde_json::Value,
@@ -216,7 +220,7 @@ mod resource_router_regression {
         .token
     }
 
-    fn json_request(uri: &str, token: &str, body: serde_json::Value) -> Request<Body> {
+    fn json_request(uri: &str, token: &str, body: &serde_json::Value) -> Request<Body> {
         Request::builder()
             .method("POST")
             .uri(uri)
@@ -253,7 +257,7 @@ mod resource_router_regression {
 
         let first = app
             .clone()
-            .oneshot(json_request("/api/v1/agents", &token, body("coder")))
+            .oneshot(json_request("/api/v1/agents", &token, &body("coder")))
             .await
             .expect("router does not fail");
         assert_eq!(
@@ -270,7 +274,7 @@ mod resource_router_regression {
         // Nom différent : `(owner_id, name)` est unique côté schéma (comportement voulu, pas
         // lié au bug testé ici) — un même nom sur le même owner collide légitimement.
         let second = app
-            .oneshot(json_request("/api/v1/agents", &token, body("reviewer")))
+            .oneshot(json_request("/api/v1/agents", &token, &body("reviewer")))
             .await
             .expect("router does not fail");
         assert_eq!(

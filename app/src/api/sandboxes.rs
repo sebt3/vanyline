@@ -36,9 +36,8 @@ pub async fn list_sandboxes(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Ok(Json(Vec::new())); // aucun Owner -> liste vide
     };
     let client = k8s::client(&state).await?;
     let projects = client.list_projects(&owner).await?;
@@ -64,9 +63,8 @@ pub async fn get_sandbox(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Err(AppError::Forbidden),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
     let sandbox = client.get_sandbox(&owner, &name).await?;
@@ -88,9 +86,8 @@ pub async fn create_sandbox(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Err(AppError::Forbidden),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
     let project = client.get_project(&owner, &body.spec.project).await?;
@@ -109,9 +106,8 @@ pub async fn delete_sandbox(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Err(AppError::Forbidden),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
     let sandbox = client.get_sandbox(&owner, &name).await?;
@@ -132,9 +128,8 @@ pub async fn set_sandbox_suspended(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Err(AppError::Forbidden),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
     let sandbox = client.get_sandbox(&owner, &name).await?;
@@ -173,9 +168,8 @@ pub async fn ws_ticket(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Err(AppError::Forbidden),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
     let sandbox = client.get_sandbox(&owner, &name).await?;
@@ -259,8 +253,8 @@ async fn proxy_git_request(
 }
 
 /// Relais REST `ANY /api/sandboxes/{name}/git/{*path}` — scoping owner
-/// identique à `ws_ticket` (get_or_create_user → resolve_owner_name →
-/// get_sandbox → get_project → assert owner match), URL interne via
+/// identique à `ws_ticket` (`get_or_create_user` → `resolve_owner_name` →
+/// `get_sandbox` → `get_project` → assert owner match), URL interne via
 /// `sandbox_git_url`, forward méthode + path + query + body vers la sandbox
 /// en présentant le jeton du SA de l'Owner (`owner_token`, Bearer — décision
 /// 2026-10-04 : jamais l'`id_token` de l'utilisateur), réponse passthrough.

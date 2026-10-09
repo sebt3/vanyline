@@ -1,3 +1,13 @@
+// tooling.sdd D5 — ws/sandbox_state.sdd Exposes : @ws_sandbox_state_handler est contracté
+// « `pub async` + #[axum::debug_handler] » ; retirer `async` contredirait la spec. L'allow est
+// ici (portée module) car l'allow d'item n'atteint pas la seconde copie de signature émise par
+// la macro debug_handler — vérifié expérimentalement : macro retirée, l'allow d'item éteint
+// tout. Écart assumé : l'allow couvre le fichier entier (la seconde copie de signature par la
+// macro debug_handler échappe à l'allow d'item) ; une future `async fn` sans `.await` y
+// échapperait au lint — vérifié 2026-10-09 : les 6 autres `async fn` du fichier contiennent
+// toutes au moins un `.await` ; seule la sienne est contractée `pub async` par ./sandbox_state.sdd.
+#![allow(clippy::unused_async)] // ws/sandbox_state.sdd : signature `pub async` contractée (macro ci-dessus)
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -178,6 +188,8 @@ async fn watch_loop(client: VnlK8sClient, shared: SharedState, owner: String) {
     }
 }
 
+// tooling.sdd D5 — signature `pub async` + debug_handler contractées par ws/sandbox_state.sdd
+// (exemption portée en tête de fichier : la macro annule les allows d'item).
 #[axum::debug_handler]
 pub async fn ws_sandbox_state_handler(
     State(state): State<AppState>,
@@ -220,9 +232,8 @@ async fn run_socket(socket: WebSocket, state: AppState, user: AuthUser) -> Resul
         .map_err(AppError::from)?;
 
     // Pas d'owner K8s → close silencieusement (rien à watcher).
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Ok(()),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Ok(());
     };
 
     let shared = state.shared_sandbox_state.clone();

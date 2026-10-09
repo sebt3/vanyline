@@ -99,7 +99,7 @@ fn owner_reference(
 }
 
 /// Nom commun des objets RBAC des Jobs de maintenance d'un Project :
-/// ServiceAccount, Role et RoleBinding — `project-<name>-maint` (même patron
+/// `ServiceAccount`, Role et `RoleBinding` — `project-<name>-maint` (même patron
 /// que `owner-<name>` / `application-<name>`).
 #[allow(dead_code)]
 pub fn maint_sa_name(project_name: &str) -> String {
@@ -296,7 +296,7 @@ pub fn sandbox_security_context() -> PodSecurityContext {
 /// shell) — c'est le mécanisme qui garantit `detect` après `init`/`fetch`.
 /// Si `None`, un seul container nommé `"git"` exécute `command` (comportement
 /// actuel, ex: `purge`). `service_account_name` : posé sur `PodSpec` quand le
-/// job appelle l'API K8s (`detect`). Les env (HOME, GIT_SSH_COMMAND) et les
+/// job appelle l'API K8s (`detect`). Les env (HOME, `GIT_SSH_COMMAND`) et les
 /// volumeMounts sont appliqués aux deux containers (init et principal).
 #[allow(dead_code)]
 pub fn git_pod_template(
@@ -613,6 +613,11 @@ async fn fetch_owner(project: &Project, ctx: &Context, ns: &str) -> Result<Owner
 
 /// `Event::Apply` : PVC workspace (si à créer) + Job init (une fois) + `CronJob`
 /// fetch (une fois cloné) + status.
+// tooling.sdd D4 — project.sdd §"Appliquer dans l'ordre, à chaque Event::Apply" :
+// @apply déroule précondition Owner puis ServiceAccount/RBAC, PVC workspace, Job
+// init, CronJob fetch (une fois cloné) et status — l'ordre est contracté par la
+// spec ; la scinder diluerait la séquence transactionnelle.
+#[allow(clippy::too_many_lines)]
 async fn apply(project: &Project, ctx: &Context, ns: &str) -> Result<Action, ControllerError> {
     let owner = fetch_owner(project, ctx, ns).await?;
     let owner_pvc_name = owner
@@ -1404,11 +1409,11 @@ mod tests {
     fn compute_status_worktrees_and_last_fetch_empty() {
         let project = make_project(None);
         let status_true = compute_status(&project, true);
-        assert!(status_true.worktrees.is_empty());
+        assert_eq!(status_true.worktrees, [] as [std::string::String; 0]);
         assert!(status_true.last_fetch.is_none());
 
         let status_false = compute_status(&project, false);
-        assert!(status_false.worktrees.is_empty());
+        assert_eq!(status_false.worktrees, [] as [std::string::String; 0]);
         assert!(status_false.last_fetch.is_none());
     }
 
@@ -1447,21 +1452,21 @@ mod tests {
         assert_eq!(role.metadata.name, Some("project-demo-maint".to_string()));
         let rules = role.rules.as_ref().expect("should have rules");
         assert_eq!(rules.len(), 1);
-        let rule = &rules[0];
+        let first_rule = &rules[0];
         assert_eq!(
-            rule.api_groups.as_ref().unwrap().as_slice(),
+            first_rule.api_groups.as_ref().unwrap().as_slice(),
             &["vanyline.solidite.fr".to_string()]
         );
         assert_eq!(
-            rule.resources.as_ref().unwrap().as_slice(),
+            first_rule.resources.as_ref().unwrap().as_slice(),
             &["projects/status".to_string()]
         );
         assert_eq!(
-            rule.resource_names.as_ref().unwrap().as_slice(),
+            first_rule.resource_names.as_ref().unwrap().as_slice(),
             &["demo".to_string()],
             "scoped to this Project only — must not grant patch on other Projects' status"
         );
-        assert_eq!(rule.verbs.as_slice(), &["patch".to_string()]);
+        assert_eq!(first_rule.verbs.as_slice(), &["patch".to_string()]);
     }
 
     // 31. build_maint_role_binding_shape

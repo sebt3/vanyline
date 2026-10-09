@@ -1,4 +1,10 @@
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+//! Binaire `vanyline-controller` : point d'entrée unique de l'opérateur —
+//! arbre de modules du crate, parsing de la configuration de démarrage
+//! (@Cli, 13 drapeaux), client kube unique et lancement parallèle des quatre
+//! reconcileurs (Owner, Project, Sandbox, Application) (spec : `./main.sdd` ;
+//! les contrats de reconcile vivent dans les modules respectifs).
+
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod application;
 mod error;
@@ -141,6 +147,10 @@ struct Cli {
 async fn main() {
     let cli = Cli::parse();
 
+    // tooling.sdd D4 — main.sdd §Purpose (1) : le mode `--crds` imprime les
+    // manifests CRD sur stdout, canal contracté (source de
+    // deploy/controller/crds.yaml) ; unique écriture stdout hors logs.
+    #[allow(clippy::print_stdout)]
     if cli.crds {
         print!("{}", vanyline_crds::crd_manifests());
         return;

@@ -33,7 +33,7 @@ pub fn sanitize_owner_name(raw: &str) -> String {
     label
 }
 
-/// Lit `vanyline_owner_links.k8s_owner_name` pour `user_id` (id miryad_users).
+/// Lit `vanyline_owner_links.k8s_owner_name` pour `user_id` (id `miryad_users`).
 /// `Some(...)` si l'Owner a déjà été résolu ; `None` sinon (routes de lecture :
 /// « aucun Owner »).
 pub async fn resolve_owner_name(
@@ -71,6 +71,9 @@ pub async fn ensure_owner(
     user_id: i32,
     principal: &AuthPrincipal,
 ) -> Result<String, AppError> {
+    use crate::db::entities::owner_links::Column;
+    use crate::db::entities::owner_links::Entity as OwnerLinkEntity;
+
     if let Some(name) = resolve_owner_name(state, user_id).await? {
         return Ok(name);
     }
@@ -104,9 +107,6 @@ pub async fn ensure_owner(
         )
         .await?;
     }
-
-    use crate::db::entities::owner_links::Column;
-    use crate::db::entities::owner_links::Entity as OwnerLinkEntity;
 
     // Upsert atomique (INSERT ... ON CONFLICT (user_id) DO UPDATE) : élimine la fenêtre de
     // course du find-then-insert précédent, où deux requêtes concurrentes passant toutes les

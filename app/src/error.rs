@@ -77,21 +77,24 @@ impl From<vanyline_cfgstore::CfgStoreError> for AppError {
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
-            Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::LlmError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            Self::LlmProviderNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::McpError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            Self::AgentNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::UnprocessableReference(_) => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
-            Self::ConversationNotFound => (StatusCode::NOT_FOUND, self.to_string()),
-            Self::ConversationAccessDenied => (StatusCode::FORBIDDEN, self.to_string()),
-            Self::RequestError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            Self::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            Self::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
-            Self::K8sApiError(_) => (StatusCode::INTERNAL_SERVER_ERROR, self.to_string()),
-            Self::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::Forbidden | Self::ConversationAccessDenied => {
+                (StatusCode::FORBIDDEN, self.to_string())
+            }
+            Self::LlmError(_)
+            | Self::McpError(_)
+            | Self::RequestError(_)
+            | Self::K8sConfigError(_) => (StatusCode::BAD_GATEWAY, self.to_string()),
+            Self::LlmProviderNotFound
+            | Self::AgentNotFound
+            | Self::ConversationNotFound
+            | Self::K8sNotFound(_) => (StatusCode::NOT_FOUND, self.to_string()),
+            Self::UnprocessableReference(_) | Self::SandboxBranchEmpty => {
+                (StatusCode::UNPROCESSABLE_ENTITY, self.to_string())
+            }
+            Self::InternalError(_) | Self::K8sApiError(_) => {
+                (StatusCode::INTERNAL_SERVER_ERROR, self.to_string())
+            }
             Self::SandboxNotExposed => (StatusCode::CONFLICT, self.to_string()),
-            Self::SandboxBranchEmpty => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             Self::GitPathInvalid => (StatusCode::BAD_REQUEST, self.to_string()),
         };
 

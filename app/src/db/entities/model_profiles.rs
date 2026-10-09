@@ -21,6 +21,10 @@ pub struct Model {
     pub owner_id: i32,
     pub name: String,
     pub provider_id: i32,
+    // tooling.sdd D5 — m20260825_000005_create_vanyline_model_profiles.sdd (Structure) :
+    // `model` — SQL VARCHAR NOT NULL ; wire contracté par ./model_profiles.sdd (traduction
+    // frontend).
+    #[allow(clippy::struct_field_names)]
     pub model: String,
     pub temperature: Option<f64>,
     pub max_tokens: Option<i64>,

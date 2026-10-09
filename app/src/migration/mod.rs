@@ -49,15 +49,16 @@ mod migrations_apply_cleanly {
 
     #[tokio::test]
     async fn full_migration_set_applies_against_a_real_schema() {
+        use sea_orm::EntityTrait;
+
         let db = crate::db::test_support::real_db().await;
         // `real_db()` applique déjà les deux migrateurs ; un échec y aurait paniqué avant
         // d'atteindre cette ligne. Une requête réelle contre une table créée confirme un schéma
         // effectivement utilisable, pas seulement "la migration n'a pas paniqué".
-        use sea_orm::EntityTrait;
         let count = crate::db::entities::skills::Entity::find()
             .all(&db)
             .await
             .expect("querying a freshly migrated table succeeds");
-        assert!(count.is_empty());
+        assert_eq!(count, [] as [crate::db::entities::skills::Model; 0]);
     }
 }

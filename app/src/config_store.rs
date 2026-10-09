@@ -87,7 +87,7 @@ fn domain_model_profile(
         provider: provider.name.clone(),
         model: row.model.clone(),
         temperature: row.temperature,
-        max_tokens: row.max_tokens.map(|v| v as u64),
+        max_tokens: row.max_tokens.map(i64::cast_unsigned),
         options,
     })
 }
@@ -167,7 +167,7 @@ fn domain_skill_meta(row: &DbSkill) -> SkillMeta {
     }
 }
 
-fn cfg_err(e: VnyError) -> CfgStoreError {
+fn cfg_err(e: &VnyError) -> CfgStoreError {
     CfgStoreError::Config(e.to_string())
 }
 
@@ -237,7 +237,7 @@ impl ConfigStore for PgConfigStore {
         rows.iter()
             .map(domain_provider)
             .collect::<Result<Vec<_>, _>>()
-            .map_err(cfg_err)
+            .map_err(|e| cfg_err(&e))
     }
 
     async fn list_models(&self) -> Result<Vec<ModelProfile>, CfgStoreError> {
@@ -246,7 +246,7 @@ impl ConfigStore for PgConfigStore {
         rows.iter()
             .map(|r| domain_model_profile(r, &providers))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(cfg_err)
+            .map_err(|e| cfg_err(&e))
     }
 
     async fn list_mcp_servers(&self) -> Result<Vec<McpServer>, CfgStoreError> {
@@ -280,7 +280,7 @@ impl ConfigStore for PgConfigStore {
         rows.iter()
             .map(|r| domain_agent_record(r, &profiles))
             .collect::<Result<Vec<_>, _>>()
-            .map_err(cfg_err)
+            .map_err(|e| cfg_err(&e))
     }
 
     async fn list_skills(&self) -> Result<Vec<SkillMeta>, CfgStoreError> {
@@ -568,7 +568,7 @@ mod tests {
             mcp: serde_json::Value::Null,
         };
         let toolset = domain_toolset(&row);
-        assert!(toolset.local_tools.is_empty());
+        assert_eq!(toolset.local_tools, [] as [String; 0]);
         assert!(toolset.mcp.is_empty());
     }
 
@@ -756,7 +756,7 @@ mod tests {
             serde_json::json!([]),
         );
         let result = domain_agent_record(&agent, &[row]).unwrap();
-        assert!(result.toolsets.is_empty());
+        assert_eq!(result.toolsets, [] as [String; 0]);
     }
 
     // 28. domain_agent_record_invalid_skills_json_defaults_auto

@@ -185,6 +185,10 @@ pub fn build_application_role_binding(app: &Application) -> RoleBinding {
 /// - `DeploymentSpec.selector` sans wrapper `Option` (type `LabelSelector` direct)
 /// - `DeploymentSpec.template` sans wrapper `Option` (type `PodTemplateSpec` direct)
 /// - `PodTemplateSpec.metadata` optionnel (type `Option<ObjectMeta>`)
+// tooling.sdd D4 — table des env contractée application.sdd §"Construire
+// @build_application_deployment" (container unique `app`, image effective, secrets
+// refs) — la taille suit la spec, la scinder diluerait le motif unique du builder.
+#[allow(clippy::too_many_lines)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_application_deployment(app: &Application, default_image: &str) -> Deployment {
     let mut labels = BTreeMap::new();
@@ -847,6 +851,10 @@ mod tests {
     }
 
     // 6. build_application_deployment_env
+    // tooling.sdd D4 — application.sdd §Scenario "build_application_deployment_env" :
+    // le test énumère les 10 env contractées une par une (un bloc par variable) ;
+    // la taille suit la table des env de la spec.
+    #[allow(clippy::too_many_lines)]
     #[test]
     fn build_application_deployment_env() {
         let app = make_application("demo");
@@ -1339,7 +1347,7 @@ mod tests {
         use base64::Engine;
 
         let value = generate_cookie_secret_value();
-        assert!(!value.is_empty());
+        assert_ne!(value, "");
 
         // STANDARD.decode gives exactly 64 bytes
         let decoded = base64::engine::general_purpose::STANDARD

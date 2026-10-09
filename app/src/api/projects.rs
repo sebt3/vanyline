@@ -44,9 +44,8 @@ pub async fn list_projects(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Ok(Json(Vec::new())), // aucun Owner -> liste vide
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Ok(Json(Vec::new())); // aucun Owner -> liste vide
     };
     let client = k8s::client(&state).await?;
     let projects = client.list_projects(&owner).await?;
@@ -66,9 +65,8 @@ pub async fn get_project(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Err(AppError::Forbidden),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
     let project = client.get_project(&owner, &name).await?;
@@ -112,9 +110,8 @@ pub async fn delete_project(
     let principal_user = resolve_user(&state.auth.db, &user.subject, user.email.as_deref())
         .await
         .map_err(AppError::from)?;
-    let owner = match owners::resolve_owner_name(&state, principal_user.id).await? {
-        Some(o) => o,
-        None => return Err(AppError::Forbidden),
+    let Some(owner) = owners::resolve_owner_name(&state, principal_user.id).await? else {
+        return Err(AppError::Forbidden);
     };
     let client = k8s::client(&state).await?;
     let project = client.get_project(&owner, &name).await?;

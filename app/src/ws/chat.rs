@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use axum::{
@@ -134,9 +134,7 @@ async fn run_socket(
             continue;
         }
 
-        let agent_id = if let Some(id) = conv.agent_id {
-            id
-        } else {
+        let Some(agent_id) = conv.agent_id else {
             send_error(&tx, "VNL-AGT-001", "No agent assigned to conversation");
             continue;
         };
@@ -311,7 +309,7 @@ async fn resolve_extra_mcp(
             name: "sandbox".to_string(),
             transport: McpTransport::HttpStreamable,
             url,
-            headers: Default::default(),
+            headers: BTreeMap::default(),
         },
         McpSelection {
             server: "sandbox".to_string(),
@@ -387,7 +385,7 @@ async fn handle_message(
     .await?;
 
     let current_todo = ctx.todo_state.lock().unwrap().clone();
-    if let Some(todo) = todo_to_persist(current_todo, todo_initial) {
+    if let Some(todo) = todo_to_persist(current_todo, todo_initial.as_ref()) {
         let mut active: crate::db::entities::conversations::ActiveModel =
             crate::db::entities::conversations::Entity::find_by_id(conversation_id)
                 .one(db)
@@ -425,9 +423,9 @@ fn tool_calls_for_persistence(records: &[ToolCallRecord]) -> Vec<vanyline_lib::T
 /// a été modifié par rapport au seed `initial` ET si le résultat est non-NULL.
 /// `None` sinon (aucun changement, ou résultat NULL) — on ne NULL-e jamais un état
 /// antérieur par un update systématique.
-fn todo_to_persist(current: Option<String>, initial: Option<String>) -> Option<String> {
+fn todo_to_persist(current: Option<String>, initial: Option<&String>) -> Option<String> {
     match current {
-        Some(_) if current != initial => current,
+        Some(_) if current.as_ref() != initial => current,
         _ => None,
     }
 }
@@ -583,14 +581,14 @@ mod tests {
     #[test]
     fn todo_to_persist_unchanged_returns_none() {
         assert_eq!(
-            todo_to_persist(Some("x".to_string()), Some("x".to_string())),
+            todo_to_persist(Some("x".to_string()), Some(&"x".to_string())),
             None
         );
     }
 
     #[test]
     fn todo_to_persist_changed_to_none_does_not_null_previous() {
-        assert_eq!(todo_to_persist(None, Some("old".to_string())), None);
+        assert_eq!(todo_to_persist(None, Some(&"old".to_string())), None);
     }
 
     #[test]

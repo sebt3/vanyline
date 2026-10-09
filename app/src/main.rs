@@ -1,4 +1,7 @@
-#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+//! Binaire `vanyline-app` : SÉQUENCE de démarrage ordonnée (config → DB →
+//! migrations → OIDC → routeur) et assemblage du routeur racine — contrat :
+//! `main.sdd`.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 mod api;
 mod auth;
@@ -24,13 +27,26 @@ use tower_http::services::{ServeDir, ServeFile};
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use vanyline_lib::k8s::VnlK8sClient;
 
+/// État global partagé par tout le routeur (visibilité limitée au crate :
+/// binaire, aucun consommateur externe) — champ à champ : `main.sdd`.
 #[derive(Clone)]
 pub struct AppState {
+    /// Configuration lue depuis l'environnement (`config.sdd`).
     pub config: Config,
+    /// Clé de scellement des cookies, dérivée de `COOKIE_SECRET` (64 premiers
+    /// octets) ; seul consommateur en production : le clone injecté dans
+    /// `MiryadAuthState` au démarrage.
     pub cookie_key: cookie::Key,
+    /// Verrou de tour de chat par `conversation_id` (i32 = PK des
+    /// conversations) — consommateurs : `ws/chat.rs`.
     pub busy: Arc<Mutex<HashSet<i32>>>,
+    /// Client K8s lazy : initialisé `None`, découverte à la première requête,
+    /// jamais au démarrage (`k8s.sdd`).
     pub k8s: Arc<tokio::sync::Mutex<Option<VnlK8sClient>>>,
+    /// État miryad-core construit au démarrage ; c'est LE porteur de la
+    /// connexion DB (`db` y est mové, pas de champ `db` distinct).
     pub auth: MiryadAuthState,
+    /// Hub de push des phases de sandbox (`ws/sandbox_state.sdd`).
     pub shared_sandbox_state: ws::sandbox_state::SharedState,
 }
 
@@ -40,6 +56,11 @@ impl FromRef<AppState> for MiryadAuthState {
     }
 }
 
+// tooling.sdd D5 — main.sdd §Séquence de démarrage : l'ordre contractuel des étapes
+// (rustls → tracing → config → cookie → DB → migrations → OIDC → routeur → bind/serve)
+// est LE contrat de cette fonction ; toute extraction en sous-fonctions fragmenterait
+// la séquence vérifiable telle quelle.
+#[allow(clippy::too_many_lines)] // main.sdd : séquence de démarrage ordonnée contractée en une fonction
 #[tokio::main]
 async fn main() {
     // reqwest (rustls-tls) et kube (rustls-tls) tirent chacun un backend crypto
@@ -184,7 +205,7 @@ async fn health() -> &'static str {
     "ok"
 }
 
-/// Document OpenAPI combiné des 6 ressources `resource_router` — un fragment par entité
+/// Document `OpenAPI` combiné des 6 ressources `resource_router` — un fragment par entité
 /// (`resource_openapi`), fusionnés (`OpenApi::merge`, dédoublonne le schéma Bearer commun),
 /// `info` renseigné une fois sur le document final (les fragments ne le fixent pas). Sert
 /// `GET /api/swagger-ui` (feature Cargo `swagger-ui` de miryad-core) et `/api/openapi.json`.

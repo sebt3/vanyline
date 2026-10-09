@@ -40,7 +40,7 @@ pub struct CreateConversation {
     pub context: ChatContextInput,
 }
 
-/// Type alias pour la réponse de `get_messages` : le Model SeaORM
+/// Type alias pour la réponse de `get_messages` : le Model `SeaORM`
 /// `vanyline_messages`.
 type MessageOut = MessageModel;
 
@@ -55,8 +55,8 @@ pub struct ConversationOut {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-/// Résout `conv.agent_id` en nom (SELECT name FROM vanyline_agents WHERE id = $1),
-/// charge le ChatContext depuis vanyline_chat_contexts (N+1 accepté, comme aujourd'hui).
+/// Résout `conv.agent_id` en nom (SELECT name FROM `vanyline_agents` WHERE id = $1),
+/// charge le `ChatContext` depuis `vanyline_chat_contexts` (N+1 accepté, comme aujourd'hui).
 async fn to_output(state: &AppState, conv: ConversationModel) -> Result<ConversationOut, AppError> {
     let db = &state.auth.db;
 
@@ -90,7 +90,7 @@ async fn to_output(state: &AppState, conv: ConversationModel) -> Result<Conversa
 }
 
 /// Résout `agent_name` en id depuis `vanyline_agents`
-/// (WHERE owner_id = user_id AND name = agent_name).
+/// (WHERE `owner_id` = `user_id` AND name = `agent_name`).
 /// Retourne `AppError::UnprocessableReference(UnknownReference("agent", name))`
 /// si l'agent n'est pas trouvé.
 async fn resolve_agent_id(
