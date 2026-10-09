@@ -6399,6 +6399,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "vanyline-crds",
+ "vanyline-health",
  "vanyline-sandbox",
  "vanyline-tools",
 ]

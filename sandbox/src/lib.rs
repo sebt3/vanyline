@@ -11,6 +11,9 @@ pub mod auth;
 /// source des clés de vérification (spec : `./config.sdd`).
 pub mod config;
 pub mod git;
+/// État de santé du code du pod : machine `CodeHealth`, routes `/code-health/*`
+/// (spec : `./health.sdd`).
+pub mod health;
 pub mod lsp;
 pub mod lsp_client;
 pub mod maint;
@@ -71,6 +74,11 @@ pub struct AppState {
     /// Consommatrice : `edit_and_check` (08d), via
     /// [`FsFlushRequests::request_flush`].
     pub fs_flush: Arc<FsFlushRequests>,
+    /// État partagé de la santé du code du pod (spéc `./health.sdd`) : machine
+    /// d'état calculée en tâche de fond, lue par `GET /code-health` et (lot H2)
+    /// l'outil MCP `code_health`. Décision SOLDÉ 2026-10-09 : champ `Arc` dans
+    /// `AppState`, pas de registre statique.
+    pub health: Arc<health::CodeHealth>,
 }
 
 /// Capacité du canal `fs_events` (frames de push /ws/fs, tâche 08b).
@@ -200,8 +208,15 @@ impl FsFlushRequests {
 /// publique : `/health` et `/metrics` vivent sur le port d'exploitation
 /// ([`build_ops_app`], [`spawn_ops_server`]), jamais ici (spec `./lib.sdd`).
 pub fn build_app(state: AppState) -> Router {
+    // Tâche de fond de la santé du code (spec `./health.sdd`) : premier calcul
+    // dès que le worktree existe, sans bloquer le démarrage ni les sondes.
+    // Idempotent : plusieurs `build_app` sur le même `CodeHealth` ne lancent
+    // qu'un seul cycle.
+    state.health.spawn_background();
     let protected = Router::new()
         .route("/mcp", post(mcp::handle))
+        .route("/code-health", get(health::handle_get))
+        .route("/code-health/refresh", post(health::handle_refresh))
         .route("/git/status", get(git::handle_status))
         .route("/git/unpushed", get(git::handle_unpushed))
         .route("/git/diff", get(git::handle_diff))

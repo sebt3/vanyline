@@ -285,6 +285,7 @@ mod tests {
 
         let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
+            health: crate::health::CodeHealth::new(config.clone()),
             config,
             auth: Arc::new(auth),
             tickets: TicketStore::new(),
@@ -459,6 +460,7 @@ mod tests {
 
         let (fs_events, fs_flush) = crate::fs_push_channels();
         let state = AppState {
+            health: crate::health::CodeHealth::new(config.clone()),
             config,
             auth: Arc::new(auth),
             tickets: crate::ws::ticket::TicketStore::new(),

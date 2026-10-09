@@ -23,8 +23,18 @@ Owns:
 Can modify:
   ./lib.rs
   ./config.rs
+  ./Cargo.toml (ratifié spec-dd 2026-10-09 : une dépendance `vanyline-health = { path =
+    "../health" }`, exigée par le contrat « calculé par le MÊME code
+    (`vanyline_health::runner`) » du Purpose — rien d'autre).
+  ./main.rs (ratifié 2026-10-09 : la LIGNE du champ `health:` dans la construction
+    d'@AppState, rien d'autre — même précédente lecture que le SOLDÉ « champ » de Tasks).
   ./tools_impl.rs
   ./mcp.rs
+  ./ws/fs.rs
+  ./maint.rs (extraction de la fonction pure « chemins → langages » seulement — la
+    tâche Tasks ci-dessous ; la décision 2026-10-04 vise `maint::detect_languages`,
+    déjà appelé par le binaire `vanyline-maint` : c'est CE fichier qui doit consommer
+    la version pure, pas un second détecteur)
 
 Can read:
   ./auth.sdd
@@ -40,7 +50,15 @@ Can read:
 Exposes:
   @CodeHealth — état partagé du pod (`Arc`, dans @AppState), handle unique de ce module :
     @CodeHealth::notify_modified() — appelé par les points de modification (voir `Handles`),
-    @CodeHealth::snapshot() -> @HealthState, @CodeHealth::refresh(base) — recalcul forcé.
+    @CodeHealth::snapshot() -> @HealthState, @CodeHealth::refresh(base, languages) — recalcul forcé.
+    @CodeHealth::with_timing(config, source, cooldown, poll) — constructeur d'injection
+    pour les tests d'intégration (durées @std::time::Duration explicites et source de
+    @Check factice @CheckSource = `Arc<dyn Fn(&[@str]) -> Vec<Check>>` ; en production
+    @new(config) porte les secondes de @Config et @CheckSource = presets par détection).
+    La surface est `pub` par nécessité : les tests d'intégration ne voient ni
+    `pub(crate)` ni `cfg(test)`.
+  @spawn_background(&self) — démarrage idempotent de la tâche de fond (appelé par
+    @build_app de ./lib.sdd ; ne bloque pas le routage, second appel sans effet).
   @HealthState — `{ phase: "computing" | "fresh" | "stale", report: Option<HealthReport>,
     computed_at: Option<timestamp>, stale_since: Option<timestamp>, base: Option<String> }` :
     `computing` (un calcul est en cours ; `report` est le dernier terminé, `null` pendant le
@@ -111,12 +129,41 @@ Must not:
   Écrire dans le worktree, ni déclencher un calcul depuis une lecture.
   Lancer un calcul pendant qu'un autre tourne.
 
+Raises:
+  @HealthError::InvalidRef (@VNL-SBX-CH-001, 400) — `POST /code-health/refresh` avec une
+    `base` refusée par la garde syntaxique (vide, préfixe `-`, espace, NUL, retour ligne —
+    la base ne vit qu'en argv, jamais interpolée dans un shell) ou par
+    `git rev-parse --verify`. La base sticky est laissée inchangée.
+  @HealthError::RefCheckUnavailable (@VNL-SBX-CH-002, 400 — statut sous le `[?]`
+    « 002 : 400 ou 500 ? » ci-dessous) — `git rev-parse` non lançable : la base n'a pas
+    pu être vérifiée ; CE fichier refuse plutôt que de calculer sur une base non validée.
+  400 + corps @Json `{"error": "VNL-SBX-CH-003: …"}` — corps JSON invalide sur
+    `/code-health/refresh` (les erreurs d'@HealthError rendent le même corps, message
+    @Display verbatim). Corps absent = légal (202).
+  @VNL-SBX-CH-004/005/006/007 — identifiants sur lignes @tracing::warn uniquement,
+    aucune surface HTTP : tâche de fond disparue au notify (004, notification perdue —
+    le sondage rattrape), aucun runtime au @spawn_background (005), calcul échoué (006),
+    détection de langages échouée ⇒ sélection vide (007). Jamais silencieux.
+  Codes HTTP : 200 (@GET /code-health, @HealthState ci-dessus), 202 (refresh accepté et
+    planifié), 400 (les trois ci-dessus), 401/403 (./auth.sdd, garde du routeur).
+  Horodatages @HealthState (@computed_at, @stale_since) : millisecondes unix (@u64).
+
 Tasks:
+  [?] @out_dir `<tmp>/vanyline-health/<n>` est machine-global (dette notée validation
+    2026-10-09) : deux @cargo test du crate en parallèle sur une même machine se croisent (le
+    nettoyage du test `calcul_echoue_ne_ment_jamais` peut retirer le poison d'une autre
+    instance). Ajouter un identifiant d'instance (pid ou suffixe aléatoire) au chemin —
+    amendement `Handles` à trancher (le compteur séquentiel `<n>` est contracté aujourd'hui).
+  [?] @VNL-SBX-CH-002 au HTTP : 400 (choix du code à ce jour — « le client ne peut pas
+    être servi » traité comme refus) ou 500 (cause serveur : git non lançable) ? Trancher
+    ; le code suit la spec.
   [ ] Câbler `notify_modified` dans les dispatchs d'écriture de ./tools_impl.rs, les opérations
     d'écriture de ./ws/fs.rs et les handlers git concernés ; déclarer l'outil `code_health` dans
     ./tools_impl.rs et ./mcp.rs (amender ces specs).
-  [ ] Extraire de `vanyline-maint` la fonction pure « chemins → langages » (décision
-    2026-10-04) et la réutiliser ici.
+  [x] Extraire de `vanyline-maint` la fonction pure « chemins → langages » — FAIT
+    2026-10-09 (validator-vert : @maint::languages_from_paths pure `#[must_use]`,
+    @detect_languages réduite au wrapper git + délégation, suite maint 47 tests intacte ;
+    @health.rs consomme la pure ; export contracté dans ./maint.sdd @Exposes).
   [-] TRANCHÉ (2026-10-04) : sondage périodique de l'empreinte du worktree (`health_poll_secs`,
     défaut 60, `0` = désactivé) : une modification faite hors des outils (terminal, éditeur
     externe) fait passer l'état à `stale` au sondage suivant, puis suit le délai de calme.
@@ -124,8 +171,11 @@ Tasks:
     (`nice -n 10`, ./runner.sdd `niveau de priorité`).
   [-] TRANCHÉ (2026-10-04) : le rapport n'est publié qu'à la fin d'un calcul en v1 ; la
     publication vérification par vérification est une évolution ultérieure.
-  [?] `AppState` est construit à une vingtaine d'endroits : y ajouter `health: Arc<CodeHealth>`
-    les touche tous. Décision d'implémentation (champ, ou registre statique paresseux).
+  [-] SOLDÉ (décision d'implémentation, spec-dd 2026-10-09) : CHAMP `health:
+    Arc<CodeHealth>` dans @AppState. Le registre statique paresseux est un global caché,
+    contraire au contrat « état partagé du pod (`Arc`, dans @AppState) » de `Exposes` et
+    injoignable en test ; les ~20 constructions de @AppState des tests sont une retouche
+    mécanique, et `fs_flush` a été ajouté exactement ainsi (précédent lib.sdd 08c).
   [ ] Sandbox sur une RÉFÉRENCE (SHA/ref) et non une branche : prérequis du mode central, porté
     par `/controller/src/sandbox.sdd` et `/crds/src/lib.sdd` (`SandboxSpec.branch`).
   [ ] Images toolchain (`/toolchains/*`) : outils de vérification présents et versions
@@ -213,7 +263,11 @@ Scenario: auth_exigee
   Then 401 ; avec le jeton valide d'un autre Owner : 403
 
 Scenario: langage_sans_preset_rapporte
-  Given un worktree dont les langages détectés incluent `go`
+  Given un calcul dont la sélection de langages inclut `go` — par `POST
+    /code-health/refresh {"languages": ["go"]}` : la détection de marqueurs (./maint.sdd)
+    ne produit que les cinq langages à preset, `go` n'est atteignable que par sélection
+    explicite (amendé 2026-10-09 après validation H1 — le contrat `Handles` « sauf
+    `languages` fourni à `/refresh` » est la porte prévue)
   When le calcul se termine
   Then `report.unchecked_languages` contient `go`
 
@@ -226,6 +280,18 @@ Scenario: ne_pas_confondre_avec_la_sonde
   Given un @build_app et le routeur d'exploitation
   When `GET /health` est appelé sur le port principal puis sur le port d'exploitation
   Then 404 sur le port principal (l'état du code est sous `/code-health`), 200 sur le port d'exploitation
+
+Scenario: calcul_echoue_ne_ment_jamais
+  Given un état `fresh` avec un `report`, puis une modification (empreinte différente)
+    qui planifie un recalcul, et ce recalcul qui ÉCHOUE (ex : la base sticky a disparu
+    entre la planification et l'exécution, ou le runner rend une @HealthError)
+  When l'échec est journalisé (@VNL-SBX-CH-006)
+  Then la phase ne devient PAS `fresh` sur l'empreinte divergente (elle reste `stale` :
+    `Must` « un rapport périmé n'est jamais présenté comme `fresh` »), l'empreinte du
+    dernier calcul TERMINÉ n'est pas posée, et le cycle suivant sur la même empreinte
+    retente le calcul (jamais abandonné par empreinte « consommée »). Hors ce cas
+    congruent — si le rapport en place porte déjà exactement l'empreinte du calcul
+    échoué (ex. refresh forcé sur worktree inchangé), `fresh` est honnête et permis.
 
 Scenario: diagnostics_lsp_transmis_au_calcul
   Given un serveur LSP du pod portant des diagnostics connus

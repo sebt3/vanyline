@@ -299,6 +299,7 @@ fn make_state(test_name: &str) -> AppState {
 
     let (fs_events, fs_flush) = crate::fs_push_channels();
     AppState {
+        health: crate::health::CodeHealth::new(config.clone()),
         config,
         auth: std::sync::Arc::new(auth),
         tickets: crate::ws::ticket::TicketStore::new(),

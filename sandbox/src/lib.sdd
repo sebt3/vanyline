@@ -251,8 +251,12 @@ Tasks:
     @build_metrics_app/@spawn_metrics_server renommés @build_ops_app/@spawn_ops_server
     (noms du contrat). Effet bord réel vérifié : les sondes readiness/liveness du
     controller (port ops) répondent enfin.
-  [ ] Ajouter les routes `/code-health/*` — prérequis : câblage de `vanyline-health` dans
-    le crate (santé du code, hors migration auth).
+  [x] Ajouter les routes `/code-health/*` — FAIT 2026-10-09 (H1+H1-fix, validator-verts :
+    @health.rs neuf, GET + POST /refresh sur le routeur protégé (401/403 réels), tâche de
+    fond non bloquante, champ @AppState::health ; câble `vanyline-health = path` ajouté à
+    @Cargo.toml ; 19 tests d'intégration `tests/health.rs`). RESTE OUVERT (suivi
+    ./health.sdd Tasks) : câblage `notify_modified` dans tools_impl/ws-fs/git et outil MCP
+    `code_health` (lot H2), `preliminary_issues` LSP, base par défaut du Project.
   [x] Migration mécanique des Scenario d'auth — FAITE (5A, validator-verte 2026-10-08) :
     plus aucun Scenario de CE fichier ne dit « configuré avec `no_auth` » ou
     « `static_token` = `s3cret` » ; les tests présentent un jeton d'Owner de test valide

@@ -427,6 +427,7 @@ mod tests {
         let external_store = TicketStore::new();
         let (fs_events, fs_flush) = crate::fs_push_channels();
         AppState {
+            health: crate::health::CodeHealth::new(config.clone()),
             config,
             auth: Arc::new(auth),
             tickets: external_store.clone(),

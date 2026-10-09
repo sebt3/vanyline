@@ -687,12 +687,28 @@ const LANGUAGE_ORDER: [&str; 5] = ["rust", "js-ts", "vue", "python", "dockerfile
 /// l'arbre HEAD. Résultat dans l'ordre fixe
 /// `["rust", "js-ts", "vue", "python", "dockerfile"]` (filtré).
 ///
+/// Wrapper git : liste l'arbre HEAD ([`list_head_tree`]) puis délègue à la
+/// fonction pure [`languages_from_paths`] (décision 2026-10-04, `./health.sdd`
+/// Tasks — le sandbox santé du code consomme LA MÊME mapping, pas un second
+/// détecteur).
+///
 /// # Errors
 ///
 /// Rend [`MaintError::GitFailed`] (`VNL-MAINT-004`) si `git ls-tree` échoue
 /// (ex: `repo.git` absent — `detect` appelé avant `init`).
 pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
     let paths = list_head_tree(workspace)?;
+    Ok(languages_from_paths(&paths))
+}
+
+/// Fonction pure « chemins → langages » : mapping des marqueurs de fichiers
+/// (chemins relatifs POSIX, format `git ls-tree` / `git ls-files`) vers les
+/// langages, dans l'ordre fixe `["rust", "js-ts", "vue", "python", "dockerfile"]`
+/// (filtré). Aucun git, aucun I/O — partagée par [`detect_languages`]
+/// (`vanyline-maint detect`, arbre HEAD du bare) et par la santé du code
+/// (`./health.rs`, fichiers du worktree).
+#[must_use]
+pub fn languages_from_paths(paths: &[String]) -> Vec<String> {
     let has_rust = paths
         .iter()
         .any(|p| p == RUST_MARKER || p.ends_with(&format!("/{RUST_MARKER}")));
@@ -720,7 +736,7 @@ pub fn detect_languages(workspace: &Path) -> Result<Vec<String>, MaintError> {
             languages.push(lang.to_string());
         }
     }
-    Ok(languages)
+    languages
 }
 
 /// `detect` : sérialise `detect_languages` en JSON `{"languages": [...]}`.
@@ -1020,5 +1036,43 @@ mod tests {
         // Piège : la règle suffixe est `.dockerfile` AVEC le point.
         assert!(!is_dockerfile_path("mydockerfile"));
         assert!(!is_dockerfile_path("notes.dockerfile.txt"));
+    }
+
+    // ===== languages_from_paths =====
+
+    // Pureté « chemins → langages » (décision 2026-10-04, health.sdd Tasks) : le
+    // mapping est la fonction pure consommée par health.rs, `detect_languages`
+    // n'est plus que le wrapper git + pur.
+    #[test]
+    fn languages_from_paths_pure() {
+        let paths: Vec<String> = [
+            "Cargo.toml",
+            "src/App.vue",
+            "pkg/x.py",
+            "Dockerfile",
+            "package.json",
+            "random.txt",
+        ]
+        .map(String::from)
+        .to_vec();
+        assert_eq!(
+            languages_from_paths(&paths),
+            vec!["rust", "js-ts", "vue", "python", "dockerfile"],
+            "ordre fixe quel que soit l'ordre d'entrée"
+        );
+
+        assert!(
+            languages_from_paths(&[String::from("README.md")]).is_empty(),
+            "aucun marqueur, aucun langage"
+        );
+
+        let rev: Vec<String> = ["Dockerfile", "pyproject.toml", "Cargo.toml"]
+            .map(String::from)
+            .to_vec();
+        assert_eq!(
+            languages_from_paths(&rev),
+            vec!["rust", "python", "dockerfile"],
+            "ordre de sortie figé, pas l'ordre d'entrée"
+        );
     }
 }

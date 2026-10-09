@@ -56,6 +56,11 @@ Exposes:
   Constantes de layout : @BARE_REPO_DIR (`pub const &str` = `"repo.git"`), @WORKTREES_DIR
     (`"worktrees"`), @CACHE_DIR (`"cache"`).
   Helpers de layout : @cache_dir_name, @cache_path, @worktree_path (fonctions pures).
+  @languages_from_paths(&[@str]) -> @Vec<@str> (pure, `#[must_use]` ; extraite de
+    @detect_languages le 2026-10-09 sur la tâche de ../sandbox/src/health.sdd « fonction
+    pure chemins → langages », décision 2026-10-04) — mapping marqueurs → langages sans
+    I/O ; @detect_languages devient le wrapper git (liste des suivis) + cet appel.
+    Consommatrice : ./health.sdd (sélection des presets).
   Validateurs : @validate_branch, @validate_repo, @validate_sandbox_name.
   Sous-commandes : @run_init, @run_fetch, @run_checkout, @run_remove, @run_purge
     (sync), @run_detect (sync), @run_detect_and_patch (async).

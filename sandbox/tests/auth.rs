@@ -50,6 +50,7 @@ fn app_state_with(auth: AuthState, root: &std::path::Path) -> AppState {
     let config = Arc::new(test_support::test_config(root));
     let (fs_events, fs_flush) = fs_push_channels();
     AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth: Arc::new(auth),
         tickets: TicketStore::new(),

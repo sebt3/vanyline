@@ -36,6 +36,7 @@ fn test_state(root: &std::path::Path) -> AppState {
     let auth = Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1482,6 +1483,7 @@ async fn git_status_endpoint_nominal() {
     let auth = std::sync::Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1528,6 +1530,7 @@ async fn git_status_endpoint_clean() {
     let auth = std::sync::Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1571,6 +1574,7 @@ async fn git_status_endpoint_not_a_repo() {
     let auth = std::sync::Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1705,6 +1709,7 @@ async fn git_unpushed_endpoint_with_upstream() {
     let auth = std::sync::Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1758,6 +1763,7 @@ async fn git_unpushed_endpoint_without_upstream() {
     let auth = std::sync::Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1805,6 +1811,7 @@ async fn git_unpushed_endpoint_no_local_commits() {
     let auth = std::sync::Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
@@ -1852,6 +1859,7 @@ async fn git_unpushed_endpoint_detached_head() {
     let auth = std::sync::Arc::new(test_support::auth_state(config.clone()));
     let (fs_events, fs_flush) = vanyline_sandbox::fs_push_channels();
     let state = vanyline_sandbox::AppState {
+        health: vanyline_sandbox::health::CodeHealth::new(config.clone()),
         config,
         auth,
         tickets: vanyline_sandbox::ws::ticket::TicketStore::new(),
