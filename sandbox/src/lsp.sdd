@@ -216,6 +216,12 @@ Exposes:
     - @from_env(racine) -> `Result<Self>` — @lsp_toolchains_from_env ; ne spawn
       AUCUN process au construction (spawn 100 % paresseux).
     - @has(&@str) -> `bool` — toolchain configurée (indépendant de l'état de session).
+    - @all_cached_diagnostics(&self) -> `@Vec<(@str, Vec<@Value>)>` (`#[must_use]`,
+      sync ; ajoutée le 2026-10-10 pour la collecte santé, ./health.sdd `Handles`
+      preliminary_issues) — le dernier fondu @publishDiagnostics par URI sur toutes les
+      sessions vivantes (fusion multi-sessions ORDONNÉE par URI — déterminisme hors
+      @HashMap ; pathologique en pratique) ; sync, jamais de verrou tenue à travers un
+      @await ; repli poison = sans entrée (même repli que @cached_diagnostics).
     - @get_or_spawn(&@str) -> `Result<@Option<@Arc<LspSession>>>` async : toolchain
       inconnue ⇒ `Ok(None)` ; session existante vivante ⇒ la cloner ; sinon spawn
       (échec ⇒ `Err` propagé, le bridge le traduit `4005`, ./ws/lsp.sdd) ; course :

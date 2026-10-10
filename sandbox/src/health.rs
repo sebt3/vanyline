@@ -19,10 +19,14 @@
 //! (branchés par `./mcp.rs`, lecture pure du snapshot — jamais de refresh).
 //! Le câblage de `notify_modified` est fait dans les dispatchs d'écriture
 //! `./tools_impl.rs`, les ops d'écriture `./ws/fs.rs` et les handlers git
-//! (`checkout`, `merge`, `merge/abort`, succès seulement). Les diagnostics LSP
-//! (`preliminary_issues`) sont transmis vides tant que `./lsp.rs` n'expose pas
-//! de collecte globale — l'accroche est le champ `preliminary_issues` de
-//! [`vanyline_health::runner::RunOptions`].
+//! (`checkout`, `merge`, `merge/abort`, succès seulement). Les diagnostics
+//! LSP sont collectés AVANT les commandes et transmis au runner comme
+//! `preliminary_issues` (lot H3a) : le collecteur est une fermeture
+//! `PreliminarySource` injectée — `with_lsp` branche la collecte réelle
+//! `lsp_preliminary_source` (surface `LspManager::all_cached_diagnostics`
+//! de `./lsp.rs`), tandis que `new` et `with_timing` gardent un collecteur
+//! vide `empty_preliminary` (les constructeurs existants des `AppState`
+//! de test gardent leur sens).
 
 use std::path::Path;
 use std::sync::Arc;
@@ -33,13 +37,15 @@ use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use tokio::process::Command as TokioCommand;
 use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use vanyline_health::checks::Check;
-use vanyline_health::report::HealthReport;
+use vanyline_health::report::{HealthReport, Issue, Severity};
 use vanyline_health::runner::{DEFAULT_TAIL_BYTES, RunOptions, run_checks};
 
 use crate::AppState;
+use crate::LspManager;
 use crate::config::Config;
 use crate::maint::languages_from_paths;
 use crate::venv::venv_overlay;
@@ -60,6 +66,18 @@ const NICENESS: i32 = 10;
 /// passe `vanyline_health::checks::checks_for_languages` ; les tests
 /// d'intégration injectent des presets factices (`/bin/echo`) sans toolchain.
 pub type CheckSource = Arc<dyn Fn(&[String]) -> Vec<Check> + Send + Sync>;
+
+/// Collecteur des diagnostics LSP déjà connus du pod, convertis en
+/// [`Issue`] préliminaires (spec : `./health.sdd`, `Handles` — « les
+/// diagnostics déjà connus des serveurs LSP du pod sont collectés AVANT les
+/// commandes et transmis comme `preliminary_issues` », lot H3a). Fermure
+/// synchrone sans `await` (jamais de verrou tenue à travers un point de
+/// suspension), injectée comme [`CheckSource`] pour rester testable sans
+/// serveur LSP réel. La production branche
+/// [`lsp_preliminary_source`] (constructeur [`CodeHealth::with_lsp`]) ;
+/// les tests et les constructeurs historiques gardent
+/// [`empty_preliminary`] (comportement « cache vide » inchangé).
+pub type PreliminarySource = Arc<dyn Fn() -> Vec<Issue> + Send + Sync>;
 
 /// Phase de la machine d'état (spec : `./health.sdd`, `@HealthState`.phase).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -156,6 +174,9 @@ struct Fields {
 struct Inner {
     config: Arc<Config>,
     source: CheckSource,
+    /// Collecteur des diagnostics LSP préliminaires (spec : `Handles`, lot
+    /// H3a) — appelé AVANT `run_checks` à chaque calcul.
+    preliminary: PreliminarySource,
     /// Délai de calme (`health_cooldown_secs`) — `ZERO` = recalcul immédiat.
     cooldown: Duration,
     /// Période de sondage (`health_poll_secs`) — `ZERO` = sondage désactivé.
@@ -179,8 +200,12 @@ pub struct CodeHealth {
 }
 
 impl CodeHealth {
-    /// Poignée de production : source = presets réels du crate, délais pris
-    /// dans `config` (`health_cooldown_secs`, `health_poll_secs`).
+    /// Poignée de production historique : source = presets réels du crate,
+    /// délais pris dans `config` (`health_cooldown_secs`, `health_poll_secs`),
+    /// et collecteur de diagnostics LSP VIDE — n'ayant pas d'`LspManager`, ce
+    /// constructeur ne peut pas brancher la collecte réelle ; le constructeur
+    /// de production qui la branche est [`CodeHealth::with_lsp`] (utilisé par
+    /// `./main.rs`).
     #[must_use]
     pub fn new(config: Arc<Config>) -> Arc<Self> {
         let cooldown = Duration::from_secs(config.health_cooldown_secs);
@@ -190,25 +215,49 @@ impl CodeHealth {
             Arc::new(vanyline_health::checks::checks_for_languages),
             cooldown,
             poll,
+            empty_preliminary(),
         )
     }
 
-    /// Constructeur explicite : horloges et source de vérifications injectées
-    /// (les tests d'intégration y branchent des presets factices et des délais
-    /// réduits — l'horloge simulée de tokio est incompatible avec les faux
-    /// subprocesses du runner, cf. `../tests/health.rs`).
+    /// Poignée de production complète (lot H3a) : comme [`CodeHealth::new`]
+    /// (presets réels, délais de `config`) PLUS la collecte réelle des
+    /// diagnostics LSP du pod ([`lsp_preliminary_source`] sur `lsp`), versés
+    /// au runner comme `preliminary_issues` avant le lancement des commandes
+    /// (spec : `./health.sdd`, `Handles`).
+    #[must_use]
+    pub fn with_lsp(config: Arc<Config>, lsp: Arc<LspManager>) -> Arc<Self> {
+        let cooldown = Duration::from_secs(config.health_cooldown_secs);
+        let poll = Duration::from_secs(config.health_poll_secs);
+        let preliminary = lsp_preliminary_source(Arc::clone(&config), lsp);
+        Self::with_timing(
+            config,
+            Arc::new(vanyline_health::checks::checks_for_languages),
+            cooldown,
+            poll,
+            preliminary,
+        )
+    }
+
+    /// Constructeur explicite : horloges, source de vérifications et
+    /// collecteur préliminaire injectés (les tests d'intégration y branchent
+    /// des presets factices et des délais réduits — l'horloge simulée de
+    /// tokio est incompatible avec les faux subprocesses du runner, cf.
+    /// `../tests/health.rs` ; le collecteur réel se branche via
+    /// [`lsp_preliminary_source`]).
     #[must_use]
     pub fn with_timing(
         config: Arc<Config>,
         source: CheckSource,
         cooldown: Duration,
         poll: Duration,
+        preliminary: PreliminarySource,
     ) -> Arc<Self> {
         let (tx, rx) = mpsc::unbounded_channel();
         Arc::new(Self {
             inner: Arc::new(Inner {
                 config,
                 source,
+                preliminary,
                 cooldown,
                 poll,
                 tx,
@@ -467,6 +516,10 @@ impl CodeHealth {
         };
         let checks = (self.inner.source)(&languages);
         let unchecked_languages = vanyline_health::checks::unchecked_languages(&languages);
+        // Diagnostics LSP préliminaires : collectés AVANT le lancement des
+        // commandes (spec `Handles`, lot H3a). Appel synchrone : aucun verrou
+        // des caches LSP n'est tenu à travers un `await` vers le runner.
+        let preliminary_issues = (self.inner.preliminary)();
         let out_dir = std::env::temp_dir().join("vanyline-health").join(
             self.inner
                 .out_seq
@@ -482,9 +535,11 @@ impl CodeHealth {
             tail_bytes: DEFAULT_TAIL_BYTES,
             unchecked_languages,
             max_parallel: MAX_PARALLEL,
-            // Diagnostics LSP : collecte globale hors lot H1 (./lsp.sdd) ;
-            // l'accroche contractuelle est le champ du runner.
-            preliminary_issues: Vec::new(),
+            // Diagnostics LSP : collecte AVANT les commandes (spec `Handles`,
+            // lot H3a) — le collecteur injecté (`lsp_preliminary_source` en
+            // production, `empty_preliminary` ou factice en test) est appelé
+            // ici, jamais le runner ne le déclenche lui-même.
+            preliminary_issues,
             niceness: Some(NICENESS),
         };
 
@@ -646,6 +701,88 @@ enum GitRun {
     Failed(String),
 }
 
+/// Collecteur vide : aucun diagnostic préliminaire (comportement historique
+/// de [`CodeHealth::new`] et des `with_timing` de test sans collecte LSP —
+/// `preliminary_issues` rendu vide, donc aucun résultat `lsp` au rapport).
+#[must_use]
+pub fn empty_preliminary() -> PreliminarySource {
+    let none: fn() -> Vec<Issue> = Vec::new;
+    Arc::new(none)
+}
+
+/// Collecteur réel des diagnostics LSP du pod (spec : `./health.sdd`,
+/// `Handles`, lot H3a) : snapshot [`LspManager::all_cached_diagnostics`]
+/// (dernier `publishDiagnostics` par URI, `./lsp.rs`), converti en [`Issue`]
+/// par [`lsp_issue`] — URI hors `sandbox_root` ou non-`file://` ignorées.
+/// Fermure synchrone : le lock des caches est pris et rendu sans aucun
+/// `await` (`./lsp.sdd`).
+#[must_use]
+pub fn lsp_preliminary_source(config: Arc<Config>, lsp: Arc<LspManager>) -> PreliminarySource {
+    Arc::new(move || {
+        let root = config.sandbox_root.as_path(); // emprunt valable jusqu'au
+        // `collect` : l'emprunt est Copié dans chaque fermeture intérieure.
+        lsp.all_cached_diagnostics()
+            .into_iter()
+            .flat_map(|(uri, diagnostics)| {
+                diagnostics
+                    .into_iter()
+                    .filter_map(move |diagnostic| lsp_issue(root, &uri, &diagnostic))
+            })
+            .collect()
+    })
+}
+
+/// Convertit un diagnostic LSP publié sur `uri` en [`Issue`] préliminaire
+/// (spec : `./health.sdd` `Handles`, lot H3a ; `health/src/report.sdd`
+/// @Issue). Forme consommée : le diagnostic `PublishDiagnostics` du LSP
+/// (`range.start.line`/`character` 0-based, `severity` 1..4, `code` chaîne
+/// ou nombre, `message`). Mapping @Issue : `check_id` `lsp` (le résultat du
+/// runner), `path` RELATIF à la racine, `line`/`column` 1-based (règle du
+/// crate health), `severity` : 1 ⇒ `error`, toute autre valeur (2/3/4,
+/// absente) ⇒ `warning` (@Severity n'a que deux niveaux). Ignoré, sans
+/// erreur : URI non-`file://` ou hors racine (aucun chemin relatif
+/// possible — `report.sdd` `Must not` « chemin absolu »), `message` ou
+/// `range.start` absents, position non numérique.
+///
+/// Règle URI→chemin RÉUTILISÉE de `display_path_for_uri` (`./tools_impl.rs`) :
+/// chemin relatif = URI amputée de son préfixe `file://{sandbox_root}/`
+/// (`sandbox_root` rendu sans slash final) ; tout ce qui ne porte pas ce
+/// préfixe est hors contrat de rendu — ici ignoré (le rendu brut de
+/// `tools_impl` n'a pas de sens dans un @Issue).
+fn lsp_issue(root: &Path, uri: &str, diagnostic: &Value) -> Option<Issue> {
+    let path = uri.strip_prefix(&format!("file://{}/", root.display()))?;
+    if path.is_empty() {
+        return None; // l'URI de la racine elle-même : aucun fichier derrière.
+    }
+    let message = diagnostic.get("message").and_then(Value::as_str)?;
+    let start = diagnostic.get("range")?.get("start")?;
+    let line = u32::try_from(start.get("line")?.as_u64()?)
+        .ok()?
+        .saturating_add(1);
+    let column = u32::try_from(start.get("character")?.as_u64()?)
+        .ok()?
+        .saturating_add(1);
+    let severity = if diagnostic.get("severity").and_then(Value::as_u64) == Some(1) {
+        Severity::Error
+    } else {
+        Severity::Warning
+    };
+    let code = diagnostic.get("code").and_then(|code| {
+        code.as_str()
+            .map(str::to_string)
+            .or_else(|| code.as_i64().map(|n| n.to_string()))
+    });
+    Some(Issue {
+        check_id: "lsp".to_string(),
+        path: path.to_string(),
+        line,
+        column,
+        severity,
+        code,
+        message: message.to_string(),
+    })
+}
+
 // ── Handlers HTTP (routes protégées du routeur de ./lib.rs) ──────────────────
 
 /// Corps optionnel de `POST /code-health/refresh` :
@@ -703,4 +840,111 @@ fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+
+    fn root() -> std::path::PathBuf {
+        std::path::PathBuf::from("/workspace")
+    }
+
+    /// Le volet LSP du Scenario `diagnostics_lsp_transmis_au_calcul` (côté
+    /// conversion, lot H3a) : un diagnostic `PublishDiagnostics` sur une URI
+    /// `file://` sous la racine rend une [`Issue`] — `check_id` `lsp`, chemin
+    /// RELATIF à la racine, position 1-based (LSP est 0-based, `report.sdd`
+    /// est 1-based), severité LSP 1 ⇒ `error`, code conservé en chaîne.
+    #[test]
+    fn lsp_issue_maps_relative_path_1based_and_error() {
+        let diag = serde_json::json!({
+            "range": {
+                "start": { "line": 2, "character": 4 },
+                "end": { "line": 2, "character": 9 }
+            },
+            "severity": 1,
+            "code": "E0308",
+            "message": "mismatched types"
+        });
+        let issue = lsp_issue(&root(), "file:///workspace/src/a.rs", &diag).expect("issue rendue");
+        assert_eq!(issue.check_id, "lsp");
+        assert_eq!(issue.path, "src/a.rs");
+        assert_eq!(issue.line, 3, "ligne LSP 2 ⇒ 1-based 3");
+        assert_eq!(issue.column, 5, "character LSP 4 ⇒ 1-based 5");
+        assert_eq!(issue.severity, Severity::Error);
+        assert_eq!(issue.code.as_deref(), Some("E0308"));
+        assert_eq!(issue.message, "mismatched types");
+    }
+
+    /// Severités LSP 2 (Warning), 3 (Information), 4 (Hint) et absente ⇒
+    /// `warning` (@Severity n'a que deux niveaux ; jamais d'erreur inventée) ;
+    /// code numérique rendu en chaîne.
+    #[test]
+    fn lsp_issue_maps_other_severities_to_warning_and_numeric_code() {
+        for severity in [2u64, 3, 4] {
+            let diag = serde_json::json!({
+                "range": { "start": { "line": 0, "character": 0 },
+                           "end": { "line": 0, "character": 1 } },
+                "severity": severity,
+                "code": 42,
+                "message": "soft"
+            });
+            let issue = lsp_issue(&root(), "file:///workspace/a.rs", &diag).expect("issue rendue");
+            assert_eq!(issue.severity, Severity::Warning, "severity LSP {severity}");
+            assert_eq!(issue.code.as_deref(), Some("42"));
+            assert_eq!(issue.line, 1);
+            assert_eq!(issue.column, 1);
+        }
+        let no_sev = serde_json::json!({
+            "range": { "start": { "line": 0, "character": 0 },
+                       "end": { "line": 0, "character": 1 } },
+            "message": "no severity"
+        });
+        let issue = lsp_issue(&root(), "file:///workspace/a.rs", &no_sev).expect("issue rendue");
+        assert_eq!(issue.severity, Severity::Warning);
+        assert_eq!(issue.code, None);
+    }
+
+    /// Diagnostic hors contrat de rendu : sans `message` exploitable ⇒ ignoré
+    /// (pas d'issue vide au rapport).
+    #[test]
+    fn lsp_issue_without_message_is_ignored() {
+        let diag = serde_json::json!({
+            "range": { "start": { "line": 0, "character": 0 },
+                       "end": { "line": 0, "character": 1 } },
+            "severity": 1
+        });
+        assert!(lsp_issue(&root(), "file:///workspace/a.rs", &diag).is_none());
+    }
+
+    /// URI non-`file://` ou hors `sandbox_root` ⇒ ignorées, sans erreur (spec :
+    /// « diagnostics sans URI file:// ou hors root : ignorés » — ils ne
+    /// peuvent être rendus en chemin relatif au dépôt, `report.sdd` `Must`).
+    #[test]
+    fn lsp_issue_ignores_non_file_and_outside_root() {
+        let diag = serde_json::json!({
+            "range": { "start": { "line": 0, "character": 0 },
+                       "end": { "line": 0, "character": 1 } },
+            "severity": 1,
+            "message": "x"
+        });
+        assert!(lsp_issue(&root(), "untitled:untitled-1", &diag).is_none());
+        assert!(lsp_issue(&root(), "file:///elsewhere/lib.rs", &diag).is_none());
+        // URI de la racine elle-même (aucun fichier derrière) : ignorée.
+        assert!(lsp_issue(&root(), "file:///workspace/", &diag).is_none());
+    }
+
+    /// Cache vide ⇒ vec vide (comportement historique préservé) : le
+    /// collecteur réel sur un manager sans aucune session ne verse rien et ne
+    /// produit aucune erreur.
+    #[test]
+    fn lsp_preliminary_source_empty_manager_rend_empty() {
+        let config = Arc::new(crate::auth::test_support::test_config(Path::new(
+            "/workspace",
+        )));
+        let source = lsp_preliminary_source(config, Arc::new(LspManager::default()));
+        assert!(source().is_empty(), "manager sans session ⇒ rien à verser");
+    }
 }

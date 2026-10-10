@@ -18,10 +18,18 @@
 //! testé), `merge` et `merge/abort` git (même handler de succès que
 //! `checkout`, testé).
 //!
-//! Hors périmètre (Tasks de `./health.sdd`) : les diagnostics LSP transmis
-//! comme `preliminary_issues` (câblage `./lsp.rs`, hors H2), et la vue
-//! `new_code` du worktree non commité (mécanique du runner, couverte par
-//! `health/src/runner.rs` — cf. le test `code_neuf`).
+//! Volet H3a : le Scenario `diagnostics_lsp_transmis_au_calcul` est testé
+//! bout-en-bouche (`diagnostics_lsp_transmis_au_calcul` ci-dessous) sur un
+//! VRAI `LspManager` du crate montant un faux serveur LSP `python3` qui
+//! publie des diagnostics (motif des faux LSP de `src/lsp.rs`) — la collecte
+//! `preliminary_issues` branchée par `lsp_preliminary_source` doit les verser
+//! au rapport final sous le résultat `lsp` du runner. La conversion
+//! URI→`Issue` elle-même (URI non-`file://`, hors racine, sévérités) est
+//! verrouillée par les tests unitaires de `src/health.rs`.
+//!
+//! Hors périmètre (Tasks de `./health.sdd`) : la vue `new_code` du worktree
+//! non commité (mécanique du runner, couverte par `health/src/runner.rs` —
+//! cf. le test `code_neuf`).
 //!
 //! Horloges : l'horloge simulée de tokio est INCOMPATIBLE avec les faux
 //! subprocesses du runner (auto-advance : avancer le temps déclenche le
@@ -46,9 +54,13 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 use vanyline_health::checks::{Check, OutputKind};
-use vanyline_health::report::{CheckKind, CheckStatus};
+use vanyline_health::report::{CheckKind, CheckStatus, Severity};
 use vanyline_sandbox::auth::test_support;
-use vanyline_sandbox::health::{CheckSource, CodeHealth};
+use vanyline_sandbox::health::{
+    CheckSource, CodeHealth, empty_preliminary, lsp_preliminary_source,
+};
+use vanyline_sandbox::lsp::LspToolchain;
+use vanyline_sandbox::lsp_client::LspClient;
 use vanyline_sandbox::ws::fs::dispatch_fs_message;
 use vanyline_sandbox::ws::ticket::TicketStore;
 use vanyline_sandbox::{AppState, LspManager, build_app, build_ops_app, fs_push_channels};
@@ -184,6 +196,7 @@ fn health_on(
         source,
         Duration::from_millis(cooldown),
         Duration::from_millis(poll),
+        empty_preliminary(),
     );
     let auth = Arc::new(test_support::auth_state(Arc::clone(&config)));
     let (fs_events, fs_flush) = fs_push_channels();
@@ -1614,5 +1627,174 @@ async fn non_declencheur_lecture_ne_calcule_rien() {
         counter.load(Ordering::SeqCst),
         1,
         "aucune lecture ne doit déclencher de calcul"
+    );
+}
+
+// ── Diagnostics LSP préliminaires (lot H3a) ──────────────────────────────────
+
+/// Faux serveur LSP `python3` : publie un diagnostic `PublishDiagnostics`
+/// (severity 1, code `E0001`, ligne LSP 2 caractère 4) à chaque
+/// `textDocument/didOpen`, répond `result` aux requêtes (motif
+/// `FAKE_LSP_REPUBLISH_PY` de `src/lsp.rs`).
+const FAKE_LSP_PUBLISH_PY: &str = r#"
+import sys, json
+
+def read_frame():
+    header = b""
+    while True:
+        ch = sys.stdin.buffer.read(1)
+        if not ch:
+            return None
+        header += ch
+        if header.endswith(b"\r\n\r\n"):
+            break
+    text = header.decode("ascii", errors="replace")
+    length = 0
+    for line in text.strip().split("\r\n"):
+        if line.lower().startswith("content-length:"):
+            length = int(line.split(":")[1].strip())
+    if length <= 0:
+        return b""
+    data = b""
+    while len(data) < length:
+        chunk = sys.stdin.buffer.read(length - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+def write_frame(obj):
+    out = json.dumps(obj).encode("utf-8")
+    sys.stdout.buffer.write(f"Content-Length: {len(out)}\r\n\r\n".encode("ascii"))
+    sys.stdout.buffer.write(out)
+    sys.stdout.buffer.flush()
+
+while True:
+    raw = read_frame()
+    if not raw:
+        break
+    try:
+        msg = json.loads(raw)
+        method = msg.get("method", "")
+        if method == "textDocument/didOpen":
+            uri = msg.get("params", {}).get("textDocument", {}).get("uri", "")
+            write_frame({
+                "jsonrpc": "2.0",
+                "method": "textDocument/publishDiagnostics",
+                "params": {
+                    "uri": uri,
+                    "diagnostics": [{
+                        "range": {
+                            "start": {"line": 2, "character": 4},
+                            "end": {"line": 2, "character": 9}
+                        },
+                        "severity": 1,
+                        "code": "E0001",
+                        "message": "lsp says boom"
+                    }]
+                }
+            })
+        elif "id" in msg:
+            write_frame({"jsonrpc": "2.0", "id": msg["id"], "result": {}})
+    except Exception:
+        pass
+"#;
+
+/// Scenario `diagnostics_lsp_transmis_au_calcul` (lot H3a) — forme la plus
+/// fidèle : un VRAI `LspManager` du crate monte un faux serveur LSP qui
+/// PUBLIE des diagnostics connus (via `LspClient::did_open`, cache
+/// `diagnostics_cache` de `src/lsp.rs` atteint par le vrai chemin), puis un
+/// calcul complet (preset factice `/bin/echo`, AUCUNE issue propre) est
+/// observé jusqu'à `fresh`. Le rapport final doit porter le résultat `lsp`
+/// (`lint`, `failed` : severity 1 ⇒ issue `error`) et l'issue convertie —
+/// chemin RELATIF à la racine, position 1-based. Le runner verse les
+/// `preliminary_issues` dans le rapport AVANT l'exécution des commandes
+/// (`health/src/runner.sdd` `diagnostics_lsp_preliminaires`) : la seule issue
+/// du rapport vient donc de la collecte LSP branchée par
+/// `lsp_preliminary_source`, et la commande du check n'y est pour rien.
+#[tokio::test]
+async fn diagnostics_lsp_transmis_au_calcul() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(&root).unwrap();
+    init_worktree(&root);
+
+    // Serveur LSP du pod : manager avec une toolchain factice, session spawnée,
+    // didOpen → publication mise en cache par la session.
+    let script = tmp.path().join("fake_publish.py");
+    std::fs::write(&script, FAKE_LSP_PUBLISH_PY).expect("fake LSP écrit");
+    let manager = Arc::new(LspManager::new(
+        vec![LspToolchain {
+            name: "fake".to_string(),
+            bin: "python3".to_string(),
+            args: vec![script.to_string_lossy().into_owned()],
+            aux: vec![],
+        }],
+        root.clone(),
+    ));
+    let session = manager
+        .get_or_spawn("fake")
+        .await
+        .unwrap()
+        .expect("toolchain configurée");
+    let client = LspClient::new(Arc::clone(&session), format!("file://{}", root.display()));
+    let uri = format!("file://{}/hello.rs", root.display());
+    client.did_open(&uri, "rust", "fn main(){}").await.unwrap();
+    let diags = session
+        .wait_for_diagnostics(&uri, Duration::from_secs(5))
+        .await
+        .expect("diagnostic publié en cache");
+    assert!(!diags.is_empty(), "le faux serveur a bien publié");
+
+    // Calcul complet avec la collecte réelle branchée (preflight factice :
+    // echo ne produit AUCUNE issue lui-même).
+    let counter = Arc::new(AtomicUsize::new(0));
+    let config = Arc::new(test_support::test_config(&root));
+    let health = CodeHealth::with_timing(
+        Arc::clone(&config),
+        echo_source(&counter),
+        Duration::ZERO,
+        Duration::ZERO,
+        lsp_preliminary_source(config, manager),
+    );
+    health.spawn_background();
+    wait_until("calcul terminé en fresh avec rapport", || {
+        let snap = health.snapshot();
+        snap.phase == vanyline_sandbox::health::Phase::Fresh && snap.report.is_some()
+    })
+    .await;
+
+    let report = health.snapshot().report.expect("rapport rendu");
+    // Le preset factice a bien tourné (le rapport est le fruit d'un calcul).
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    let lsp_check = report
+        .checks
+        .iter()
+        .find(|c| c.id == "lsp")
+        .expect("résultat `lsp` présent au rapport (preliminary_issues versés)");
+    assert_eq!(lsp_check.kind, CheckKind::Lint);
+    assert_eq!(
+        lsp_check.status,
+        CheckStatus::Failed,
+        "severity 1 ⇒ au moins une issue error"
+    );
+    // L'unique issue du rapport vient des diagnostics LSP (echo n'en produit
+    // aucune) — convertie : chemin relatif, 1-based.
+    let issues: Vec<_> = report
+        .issues
+        .iter()
+        .filter(|i| i.check_id == "lsp")
+        .collect();
+    assert_eq!(issues.len(), 1, "une issue LSP : {issues:?}");
+    let issue = &issues[0];
+    assert_eq!(issue.path, "hello.rs", "chemin relatif à sandbox_root");
+    assert_eq!(issue.line, 3, "ligne LSP 2 ⇒ 1-based 3");
+    assert_eq!(issue.column, 5, "character LSP 4 ⇒ 1-based 5");
+    assert_eq!(issue.severity, Severity::Error);
+    assert_eq!(issue.code.as_deref(), Some("E0001"));
+    assert_eq!(issue.message, "lsp says boom");
+    assert!(
+        report.checks.iter().any(|c| c.id == "echo"),
+        "la commande du check a bien tourné à côté du résultat lsp"
     );
 }

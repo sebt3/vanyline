@@ -2898,6 +2898,47 @@ impl LspManager {
 
         Ok(Some(new_session))
     }
+
+    /// Snapshot instantané de TOUS les diagnostics en cache des sessions du
+    /// manager : `(uri, diagnostics)` pour chaque entrée du `diagnostics_cache`
+    /// de chaque session (surface de collecte contractée par `./health.sdd`
+    /// `Handles` — les diagnostics connus des serveurs LSP du pod, collectés
+    /// AVANT les commandes de vérification). Une URI publiée par plusieurs
+    /// sessions est fusionnée (concat dans l'ordre des sessions, cas
+    /// pathologique : des toolchains distinctes ne publient pas la même URI).
+    /// Ordonné par URI (dénominal, `HashMap` sinon). Aucun verrou tenu à
+    /// travers un `await` (méthode sync). Manager sans session (ou caches
+    /// vides/empoisonnés) ⇒ vec vide.
+    #[must_use]
+    pub fn all_cached_diagnostics(&self) -> Vec<(String, Vec<Value>)> {
+        // Les Arc de session sont clonés hors du verrou de la map : seul le
+        // verrou du `diagnostics_cache` de chaque session est repris juste
+        // après (jamais deux verrous simultanés, jamais à travers un `await`).
+        let sessions: Vec<Arc<LspSession>> = self
+            .sessions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect();
+        let mut merged: HashMap<String, Vec<Value>> = HashMap::new();
+        for session in sessions {
+            // Cache empoisonné ⇒ sans entrée, même repli que
+            // `cached_diagnostics` (le poison ne fait jamais échouer la
+            // collecte : elle est best-effort en amont d'un calcul).
+            if let Ok(cache) = session.inner.diagnostics_cache.lock() {
+                for (uri, diags) in cache.iter() {
+                    merged
+                        .entry(uri.clone())
+                        .or_default()
+                        .extend(diags.iter().cloned());
+                }
+            }
+        }
+        let mut out: Vec<(String, Vec<Value>)> = merged.into_iter().collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -3831,6 +3872,62 @@ while True:
             .await
             .expect("second publish should reach wait_for_diagnostics");
         assert_eq!(fresh[0]["message"].as_str().unwrap(), "diag #1");
+
+        drop(tmpdir);
+    }
+
+    /// Test 16b : `manager_all_cached_diagnostics_collects_sessions` — la
+    /// surface de collecte globale du manager (health.sdd `Handles`, lot H3a :
+    /// « les diagnostics déjà connus des serveurs LSP du pod sont collectés
+    /// AVANT les commandes ») : `all_cached_diagnostics` rend une entrée par
+    /// URI du `diagnostics_cache` des sessions, avec les diagnostics fusionnés
+    /// tels que `cached_diagnostics` les rend. Manager sans session ⇒ vec vide
+    /// (comportement « cache vide » préservé).
+    #[tokio::test]
+    async fn manager_all_cached_diagnostics_collects_sessions() {
+        let (spec, tmpdir) = make_fake_toolchain("republish", FAKE_LSP_REPUBLISH_PY).await;
+        let root = tmpdir.path().to_path_buf();
+        let manager = LspManager::new(vec![spec], root.clone());
+        assert!(
+            manager.all_cached_diagnostics().is_empty(),
+            "aucune session encore : rien à collecter"
+        );
+
+        let session = manager
+            .get_or_spawn("republish")
+            .await
+            .unwrap()
+            .expect("toolchain configurée");
+        let uri = format!("file://{}/main.rs", root.display());
+        let (client_id, _rx) = session.subscribe();
+        let open = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "textDocument/didOpen",
+            "params": {
+                "textDocument": {
+                    "uri": uri,
+                    "languageId": "rust",
+                    "version": 1,
+                    "text": "fn main(){}"
+                }
+            }
+        })
+        .to_string()
+        .into_bytes();
+        session.send(client_id, open).await.expect("didOpen ok");
+        session
+            .wait_for_diagnostics(&uri, Duration::from_secs(5))
+            .await
+            .expect("publication cached");
+
+        let collected = manager.all_cached_diagnostics();
+        assert_eq!(collected.len(), 1, "une URI collectée");
+        assert_eq!(collected[0].0, uri);
+        assert_eq!(
+            collected[0].1[0]["message"].as_str().unwrap(),
+            "diag #0",
+            "le contenu collecté est le fondu en cache"
+        );
 
         drop(tmpdir);
     }

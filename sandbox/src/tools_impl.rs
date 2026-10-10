@@ -6832,6 +6832,7 @@ mod tests {
             source,
             Duration::ZERO,
             Duration::ZERO,
+            crate::health::empty_preliminary(),
         );
         state.health = Arc::clone(&health);
         health.spawn_background();

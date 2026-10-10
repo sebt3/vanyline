@@ -31,6 +31,11 @@ Can modify:
   ./tools_impl.rs
   ./mcp.rs
   ./ws/fs.rs
+  ./tests/health.rs (régularisé 2026-10-10 — les tests d'intégration de CE fichier y
+    vivent depuis H1, précédent validé sans trace jusqu'ici).
+  ./lsp.rs (ratifié 2026-10-10 pour le lot H3 — LA SURFACE DE COLLECTE des diagnostics
+    en cache seulement (« les diagnostics déjà connus des serveurs LSP du pod
+    (./lsp.sdd) sont collectés AVANT les commandes » du Handles) ; rien d'autre.)
   ./git.rs (ratifié 2026-10-09 — `Handles` nomme les endpoints git qui changent
     l'arbre : ajout des appels @notify_modified dans @handle_checkout, @handle_merge,
     @handle_merge_abort sur succès seulement, rien d'autre).
@@ -54,12 +59,19 @@ Exposes:
   @CodeHealth — état partagé du pod (`Arc`, dans @AppState), handle unique de ce module :
     @CodeHealth::notify_modified() — appelé par les points de modification (voir `Handles`),
     @CodeHealth::snapshot() -> @HealthState, @CodeHealth::refresh(base, languages) — recalcul forcé.
-    @CodeHealth::with_timing(config, source, cooldown, poll) — constructeur d'injection
-    pour les tests d'intégration (durées @std::time::Duration explicites et source de
-    @Check factice @CheckSource = `Arc<dyn Fn(&[@str]) -> Vec<Check>>` ; en production
-    @new(config) porte les secondes de @Config et @CheckSource = presets par détection).
-    La surface est `pub` par nécessité : les tests d'intégration ne voient ni
-    `pub(crate)` ni `cfg(test)`.
+    @CodeHealth::with_timing(config, source, cooldown, poll, preliminary) —
+    constructeur d'injection pour les tests (durées @std::time::Duration explicites,
+    source de @Check factice @CheckSource = `Arc<dyn Fn(&[@str]) -> Vec<Check>>` et
+    @PreliminarySource injectée). La surface est `pub` par nécessité : les tests
+    d'intégration ne voient ni `pub(crate)` ni `cfg(test)`.
+    @CodeHealth::with_lsp(config, lsp) — POIGNÉE DE PRODUCTION (branchée par ./main.rs) :
+    secondes de @Config, presets par détection, collecte des diagnostics en cache par
+    @lsp_preliminary_source. @CodeHealth::new(config) garde sa signification (secondes
+    de @Config) mais collecte preliminary VIDe — poignée d'histoire et de tests.
+  @PreliminarySource — `Arc<dyn Fn() -> Vec<@health Issue> + Send + Sync>` (symétrique
+    de @CheckSource) : collecte synchrone appelée à chaque cycle AVANT `run_checks` ;
+    @empty_preliminary() poignée vide, @lsp_preliminary_source(config, lsp) collecte
+    @LspManager::all_cached_diagnostics (./lsp.sdd) et convertit (voir `Handles`).
   @spawn_background(&self) — démarrage idempotent de la tâche de fond (appelé par
     @build_app de ./lib.sdd ; ne bloque pas le routage, second appel sans effet).
   @HealthState — `{ phase: "computing" | "fresh" | "stale", report: Option<HealthReport>,
@@ -112,6 +124,15 @@ Handles:
   environnement du calcul = environnement hérité + overlay `.venv` (./venv.sdd) : les toolchains
   injectées au démarrage du pod restent visibles. Les diagnostics déjà connus des serveurs LSP du
   pod (./lsp.sdd) sont collectés AVANT les commandes et transmis comme `preliminary_issues`.
+  Conversion en @health @Issue (@lsp_preliminary_source, contractée 2026-10-10 après
+  validation H3a) : règle TEXTUELLE sur le préfixe `file://<sandbox_root>/` — chemin
+  relatif rendu ; ligne et colonne LSP 0-based +1 (convention 1-based du crate) ;
+  @check_id `lsp` ; sévérité 1⇒`error`, 2/3/4/absente⇒`warning` (@Severity n'a que deux
+  niveaux, jamais d'erreur inventée) ; `code` chaîne ou nombre ⇒ @str. Ce qui n'a pas ce
+  préfixe (non-`file://`, hors racine, URI de la racine) ou pas de `message` est IGNORÉ
+  sans trace (jurisprudence `ruff_json::relativize` ; les URI du cache proviennent de
+  didOpen déjà confinés — la règle textuelle sans canonicalisation est retenue telle
+  quelle, ratifié validation H3a).
   Vue « code neuf » : calculée seulement si une `base` est connue (sticky via `/refresh`, ou la
   branche par défaut du Project quand elle est fournie par le controller) ; le diff est pris entre
   le merge-base de `base` et l'ÉTAT DU WORKTREE (modifications non commitées incluses), pas
@@ -176,10 +197,17 @@ Tasks:
     EXHAUSTIVE par contrat (⇒ lsp_rename reste rattrapé par le sondage
     `health_poll_secs`, conforme) ou illustrative (⇒ l'ajouter aux déclencheurs et
     câble) ? Trancher.
-  [ ] Verrou unitaire du site `edit_and_check` (constat validation H2 : site conforme en
-    lecture, famille verrouillée via `write_file`, mais non verrouillé nommément —
-    l'infra existe : `make_edit_check_state` + fake LSP, troquer `CodeHealth::new` par
-    `with_timing` source compteuse).
+  [x] Verrou unitaire du site `edit_and_check` — FAIT 2026-10-10 (validator-vert :
+    `edit_and_check_notifies_health_on_success_only` dans les `mod tests` de
+    ./tools_impl.rs, bidirectionnel succès⇒1→2 / échec-avant-écriture⇒figé, preuve par
+    mutation du site l.3032, `make_edit_check_state` + `with_timing` source compteuse
+    comme prescrit).
+  [x] Diagnostics LSP → `preliminary_issues` (lot H3a) — FAIT 2026-10-10
+    (validator-PASS : collecte @LspManager::all_cached_diagnostics branchée dans
+    `compute()` AVANT `run_checks` à chaque cycle, conversion contractée dans `Handles`,
+    Scenario `diagnostics_lsp_transmis_au_calcul` verrouillé bout-en-bout sur vrai
+    @LspManager + faux LSP (rapport final, pas de stub) + 5 unitaires de conversion ;
+    513 tests sandbox, 0 allow de prod).
   [x] Extraire de `vanyline-maint` la fonction pure « chemins → langages » — FAIT
     2026-10-09 (validator-vert : @maint::languages_from_paths pure `#[must_use]`,
     @detect_languages réduite au wrapper git + délégation, suite maint 47 tests intacte ;
