@@ -324,8 +324,15 @@ Tasks:
     (/crds/src/lib.sdd) ; builders `build_restate_statefulset`/`build_restate_service` ; test du
     Role à DEUX règles (l'ancien Scenario à trois règles est remplacé) ; NetworkPolicy du
     namespace d'application : l'ingress et l'admin de Restate sont joignables par le Deployment
-    `app` ET par les pods de sandbox des namespaces d'Owner (callback d'awakeable, voir
-    /sandbox/src/jobs.sdd) — règle d'egress de la sandbox vers le Service Restate à prévoir.
+    `app` ; les pods de sandbox des namespaces d'Owner n'appellent QUE l'ingress 8080
+    (callback d'awakeable, voir /sandbox/src/jobs.sdd ; la règle d'egress sandbox est
+    LIVRÉE S6b 2026-10-10 — ./sandbox.sdd `netpol_egress_restate_regle_terminale_combinee`) ;
+    OBLIGATION CONTRACTUELLE S6b : le pod template de @build_restate_statefulset DOIT
+    porter le label `vanyline.solidite.fr/restate: <nom CR nu de l'Application>`
+    (@RESTATE_LABEL de ./sandbox.sdd — cible des règles egress des sandbox et de la
+    netpol du namespace d'application ; sans lui les règles ne matchent rien) ; le nom
+    du Service est `<nom CR nu>-restate` (@restate_service_name de ./sandbox.sdd — PAS
+    @application_name).
   [?] Restate en StatefulSet mono-nœud sans réplication : suffisant pour un cluster de
     développement/homelab ; la haute disponibilité (cluster Restate) est hors périmètre.
   [ ] Trancher chaque entrée `[?]` ci-dessous avec Sébastien avant toute tâche `[x]`.

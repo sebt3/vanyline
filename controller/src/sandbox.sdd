@@ -168,7 +168,11 @@ Must:
     puis `VNL_HEALTH_BASE_REF` = `project.spec.default_branch` seulement si `Some` et
     non vide (même règle de vacuité que le `--default-branch` du Job checkout, plus
     haut ; absente sinon — vue « code neuf » initiale, ../sandbox/src/health.sdd
-    `Handles`, H3b 2026-10-10), puis les env de caches dans l'ordre d'@effective_caches, puis
+    `Handles`, H3b 2026-10-10), puis `VNL_RESTATE_INGRESS_URL` = la valeur du 4ᵉ
+    paramètre `restate_ingress_url` de @build_sandbox_pod, posée par l'appelant ONLY
+    quand l'Application de l'Owner porte `spec.restate` (absente sinon — S6b
+    2026-10-10 ; @restate_ingress_url pour la forme), puis les env de caches dans
+    l'ordre d'@effective_caches, puis
     @aggregate_toolchain_env (`PATH`, éventuellement `LD_LIBRARY_PATH`, autres clés
     triées), puis `VNL_LSP_TOOLCHAINS` si au moins une toolchain a un LSP résolu.
   Construire les Jobs git (@build_checkout_job, @build_worktree_remove_job) en argv de
@@ -209,6 +213,17 @@ Must:
     (précédence explicite, `pod_selector`/`namespace_selector` ignorés même posés), sinon
     les selectors passés tels quels ; `ports` vides ⇒ `None` (sémantique K8s « tous les
     ports »), `protocol: None` ⇒ `"TCP"` explicite posé ; ownerReference Sandbox.
+    Quand le paramètre `restate` `Some((application, app_ns))` est fourni : règle
+    TERMINALE (après DNS et l'union) autorisant ce seul Service Restate — peer unique
+    combinant sur le MÊME objet `namespaceSelector` `kubernetes.io/metadata.name:
+    <app_ns>` + `podSelector` `@RESTATE_LABEL: <application>` (motif du peer
+    ingress-controller, l.199-200), ports `[{@RESTATE_INGRESS_PORT, TCP}]` SEULS
+    (seule destination utile au pod sandbox : le callback d'awakeable de
+    ../sandbox/src/jobs.sdd — l'admin 9070 reste réservé au Deployment app,
+    ./application.sdd) ; le ⚠ CONTRACTUEL : @RESTATE_LABEL doit être posé sur le pod
+    template de `build_restate_statefulset` (tâche ./application.sdd l.323) sinon la
+    règle ne matche rien. Le GATE d'absence (union vide ⇒ `None`) PRÉCÈDE la règle
+    restate : jamais de netpol « restate-only » qui fermerait tout le reste.
   Construire l'Ingress (@build_sandbox_ingress), quand l'Application de l'Owner est
     résolue : nom @ingress_name (`sandbox-<n>`), host `{sandbox}.sandboxes.{application.spec.host}`,
     `ingressClassName` = `application.spec.ingress_class_name`, annotations = copie de
@@ -360,12 +375,20 @@ Exposes:
     @reconcile, @error_policy, @build_controller. Builders et helpers pub (consommés
     par ./main.rs et le module de tests, calibrés pour l'exercer sans cluster) :
     @pod_name, @toolchain_root, @aggregate_toolchain_env, @effective_toolchains,
-    @SandboxPodContext (owner, PVC home, SA + 9 images), @build_sandbox_pod,
+    @SandboxPodContext (owner, PVC home, SA + 9 images), @build_sandbox_pod (4ᵉ
+    paramètre `restate_ingress_url: Option<&str>`, S6b),
+    @RESTATE_INGRESS_PORT, @RESTATE_LABEL, @restate_service_name (nom du Service =
+    NOM CR NU de l'Application + `-restate` — PAS @application_name : convention du
+    contrat ./application.sdd, du `cookie_secret_name` et de deploy/web/configmap.yaml),
+    @restate_ingress_url (FQDN cross-namespace
+    `http://<app>-restate.<app-ns>.svc:8080` — le pod sandbox vit dans un autre
+    namespace, le nom court ne résoudrait pas),
     @checkout_job_name, @worktree_remove_job_name, @netpol_name, @netpol_egress_name,
     @ingress_name, @build_checkout_job, @build_worktree_remove_job,
     @build_sandbox_service, @build_sandbox_ingress, @build_sandbox_netpol,
     @build_sandbox_egress_netpol, @compute_status.
-  Privés : @BASE_PATH, @FINALIZER, @SERVICE_PORT_NAME, @toolchain_preset,
+  Privés : @BASE_PATH, @FINALIZER, @SERVICE_PORT_NAME, @restate_egress_rule,
+    @toolchain_preset,
     @resolve_toolchain_env, @resolve_toolchain_lsp, @node_lsp_composite,
     @docker_lsp_composite, @python_lsp_composite, @cache_env_var,
     @egress_rule_to_peer, @egress_ports_to_netpol_ports, @dns_egress_rule,
@@ -436,6 +459,12 @@ Handles:
     (suppression de la CR jamais bloquée éternellement par un prérequis manquant).
 
 Tasks:
+  [ ] Activer le wiring restate de @apply (S6b 2026-10-10) : remplacer le `None`
+    marqué « BLOQUÉE CRDS » dans le code par le bloc commenté livré (résolution de
+    l'Application via `namespace::app_namespace_of` + @fetch_application, motif Ingress
+    cross-namespace) et passer @restate_ingress_url aux builders. Bloquant :
+    `ApplicationSpec.restate` dans /crds/src/lib.sdd (tâche ./application.sdd
+    l.323 — qui porte aussi l'obligation @RESTATE_LABEL sur le pod template).
   [ ] Passer la branche par défaut du Project au pod de la sandbox (var d'environnement
     `VNL_HEALTH_BASE_REF`, valeur `project.spec.default_branch` seulement, absente si
     `None`/vide — même règle de vacuité que le `--default-branch` du Job checkout,
@@ -1044,10 +1073,51 @@ Scenario: netpol_ingress_ajoute_peer_controleur_ingress
     `build_sandbox_netpol_ingress_controller_peer`)
 
 Scenario: netpol_egress_none_quand_les_trois_niveaux_sont_vides
-  Given owner_egress, project_egress et `sandbox.spec.egress` vides
+  Given owner_egress, project_egress et `sandbox.spec.egress` vides — MÊME si le
+    paramètre `restate` est `Some` (prééminence du GATE, amendé S6b 2026-10-10 :
+    jamais de netpol restrictive n'autorisant que Restate, elle fermerait tout le
+    reste de l'egress)
   When @build_sandbox_egress_netpol construit
   Then `None` — aucune netpol egress, l'egress du pod reste libre (test existant
-    `build_sandbox_egress_netpol_none_when_all_empty`)
+    `build_sandbox_egress_netpol_none_when_all_empty` + test S6b
+    `netpol_egress_none_quand_union_vide_malgre_restate`)
+
+Scenario: pod_env_restate_ingress_url_presente_apres_base_ref
+  # Ajouté S6b 2026-10-10 (validation) — porte le test `pod_env_restate_ingress_url_presente_apres_base_ref`.
+  Given un @SandboxPodContext et `default_branch` posé, @build_sandbox_pod appelé
+    avec `restate_ingress_url` `Some(url)`
+  When le manifeste du pod est construit
+  Then l'env `VNL_RESTATE_INGRESS_URL` porte `url`, positionnée APRÈS
+    `VNL_HEALTH_BASE_REF` et AVANT les env de caches (ordre Must)
+
+Scenario: pod_env_restate_ingress_url_absente_quand_none
+  # Ajouté S6b — porte le test `pod_env_restate_ingress_url_absente_quand_none`.
+  Given @build_sandbox_pod appelé avec `restate_ingress_url` `None`
+  When le manifeste est construit
+  Then aucune env `VNL_RESTATE_INGRESS_URL` n'est posée
+
+Scenario: restate_ingress_url_forme_fqdn
+  # Ajouté S6b — porte le test `restate_ingress_url_forme_service_interne`.
+  Given une Application `demo` dans le namespace d'application `vscode`
+  When @restate_ingress_url est appelée
+  Then `http://demo-restate.vscode.svc:8080` — nom CR nu + `-restate` (PAS
+    `application-<nom>`), FQDN obligatoire car le pod sandbox vit dans
+    `<app-ns>-<owner>` ; motif deploy/web/configmap.yaml
+
+Scenario: netpol_egress_restate_regle_terminale_combinee
+  # Ajouté S6b — porte le test `netpol_egress_restate_regle_combinee_namespace_et_label`.
+  Given des règles d'egress non vides (l'union rend une netpol) et `restate`
+    `Some(("demo", "vscode"))`
+  When @build_sandbox_egress_netpol construit
+  Then la DERNIÈRE règle est le pair unique combinant sur le même objet
+    `namespaceSelector` `kubernetes.io/metadata.name: vscode` + `podSelector`
+    `vanyline.solidite.fr/restate: demo`, ports `[{8080, TCP}]` seuls
+
+Scenario: netpol_egress_sans_regle_restate_quand_none
+  # Ajouté S6b — porte le test `netpol_egress_restate_absente_quand_none`.
+  Given les mêmes règles d'egress et `restate` `None`
+  When @build_sandbox_egress_netpol construit
+  Then aucune règle ne porte @RESTATE_LABEL
 
 Scenario: netpol_egress_dns_toujours_en_tete_sans_destination
   Given une unique @EgressRule cidr quelconque

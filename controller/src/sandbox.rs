@@ -443,7 +443,12 @@ pub struct SandboxPodContext {
 // de la spec, la scinder diluerait le motif unique du builder.
 #[allow(clippy::too_many_lines)]
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
-pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodContext) -> Pod {
+pub fn build_sandbox_pod(
+    sandbox: &Sandbox,
+    project: &Project,
+    ctx: &SandboxPodContext,
+    restate_ingress_url: Option<&str>,
+) -> Pod {
     let workspace_pvc = effective_pvc_name(project);
     let mut volumes = vec![
         Volume {
@@ -503,6 +508,19 @@ pub fn build_sandbox_pod(sandbox: &Sandbox, project: &Project, ctx: &SandboxPodC
         env.push(EnvVar {
             name: "VNL_HEALTH_BASE_REF".to_string(),
             value: Some(db.clone()),
+            ..Default::default()
+        });
+    }
+
+    // URL interne du Service Restate (sandbox.sdd « UN OWNER = UN NAMESPACE ») :
+    // posée seulement quand l'appelant l'a résolue — Application de l'Owner
+    // portant `spec.restate` ; la résolution appartient au reconciler, le
+    // builder reste pur. Absente sinon. Position contractée : après
+    // `VNL_HEALTH_BASE_REF`, avant les env de caches.
+    if let Some(url) = restate_ingress_url {
+        env.push(EnvVar {
+            name: "VNL_RESTATE_INGRESS_URL".to_string(),
+            value: Some(url.to_string()),
             ..Default::default()
         });
     }
@@ -755,6 +773,41 @@ pub fn ingress_name(sandbox_name: &str) -> String {
 /// déclare d'egress) alors que l'ingress est toujours produite.
 pub fn netpol_egress_name(sandbox_name: &str) -> String {
     format!("sandbox-{sandbox_name}-egress")
+}
+
+/// Port d'ingress du Service Restate — `application.sdd` « Moteur de workflow » :
+/// le Service `<application>-restate` expose l'ingress (8080), l'admin (9070) et
+/// le port de nœud (5122). Seule l'ingress est une destination egress des pods
+/// sandbox (callbacks d'awakeable des jobs, ../../sandbox/src/jobs.sdd).
+pub const RESTATE_INGRESS_PORT: i32 = 8080;
+
+/// Label portant le nom de l'Application sur les pods Restate de cette
+/// Application — cible de la règle egress de la sandbox vers le Service Restate
+/// (« ce seul Service », sandbox.sdd « UN OWNER = UN NAMESPACE »). ⚠ Ce label
+/// n'est pas encore contracté par `application.sdd` (le builder
+/// `build_restate_statefulset` est une tâche `[ ]`) : il devra être posé sur le
+/// pod template du `StatefulSet` pour que la règle matche réellement.
+pub const RESTATE_LABEL: &str = "vanyline.solidite.fr/restate";
+
+/// Nom du Service Restate d'une Application : `<application>-restate`
+/// (`application.sdd` « Moteur de workflow » ; précédent opérationnel :
+/// `vanyline-restate` dans `deploy/web/configmap.yaml`).
+pub fn restate_service_name(application_name: &str) -> String {
+    format!("{application_name}-restate")
+}
+
+/// URL interne du Service Restate de l'Application, pour l'env
+/// `VNL_RESTATE_INGRESS_URL` des pods sandbox. Le FQDN avec le namespace
+/// d'application est obligatoire : le pod sandbox vit dans le namespace de
+/// l'Owner (`<app-ns>-<owner>`), le Service dans le namespace d'application —
+/// le nom court ne résoudrait pas. Même forme que le précèdent opérationnel de
+/// `deploy/web/configmap.yaml` (`http://vanyline-restate.media-station.svc:8080`).
+pub fn restate_ingress_url(application_name: &str, app_namespace: &str) -> String {
+    format!(
+        "http://{}.{}.svc:{RESTATE_INGRESS_PORT}",
+        restate_service_name(application_name),
+        app_namespace
+    )
 }
 
 /// Job une fois : crée le worktree de la branche (le crée depuis
@@ -1019,6 +1072,43 @@ fn dns_egress_rule() -> NetworkPolicyEgressRule {
     }
 }
 
+/// Règle egress ciblant CE SEUL Service Restate de l'Application (sandbox.sdd
+/// « UN OWNER = UN NAMESPACE ») : peer unique combinant `namespaceSelector`
+/// `kubernetes.io/metadata.name` (le Service vit dans le namespace
+/// d'application, pas dans celui de la sandbox) et `pod_selector`
+/// `RESTATE_LABEL` sur le même objet — motif d'appairage identique au peer
+/// ingress controller de `build_sandbox_netpol`. Ports restreints à l'ingress
+/// (8080/TCP, `application.sdd` « Moteur de workflow ») : seule destination
+/// utile aux pods sandbox, les callbacks d'awakeable des jobs
+/// (../../sandbox/src/jobs.sdd) ; l'admin (9070) et le port de nœud (5122) ne
+/// les concernent pas.
+fn restate_egress_rule(application_name: &str, app_namespace: &str) -> NetworkPolicyEgressRule {
+    NetworkPolicyEgressRule {
+        to: Some(vec![NetworkPolicyPeer {
+            namespace_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([(
+                    "kubernetes.io/metadata.name".to_string(),
+                    app_namespace.to_string(),
+                )])),
+                ..Default::default()
+            }),
+            pod_selector: Some(LabelSelector {
+                match_labels: Some(BTreeMap::from([(
+                    RESTATE_LABEL.to_string(),
+                    application_name.to_string(),
+                )])),
+                ..Default::default()
+            }),
+            ip_block: None,
+        }]),
+        ports: Some(vec![NetworkPolicyPort {
+            port: Some(IntOrString::Int(RESTATE_INGRESS_PORT)),
+            protocol: Some("TCP".to_string()),
+            end_port: None,
+        }]),
+    }
+}
+
 /// `NetworkPolicy` : cible le Pod de cette Sandbox, autorise l'ingress
 /// uniquement depuis (1) les pods du même namespace portant
 /// `vanyline.solidite.fr/owner: <owner_name>` (même Owner — code-server,
@@ -1117,16 +1207,22 @@ pub fn build_sandbox_netpol(
 /// Construit la `NetworkPolicy` egress d'une Sandbox à partir de l'union des
 /// règles `owner_egress` + `project_egress` + `sandbox.spec.egress` (dans
 /// cet ordre). `None` si les trois sont vides — pas de netpol egress
-/// produite (l'egress du pod reste libre, cf. design section 2). Sinon,
-/// une règle par `EgressRule` de l'union, plus toujours `dns_egress_rule()`
-/// en tête. `ownerReference` vers la Sandbox (GC en cascade), même
-/// `pod_selector` ciblant `vanyline.solidite.fr/sandbox` que la netpol
-/// ingress (`build_sandbox_netpol`).
+/// produite (l'egress du pod reste libre, cf. design section 2), y compris
+/// quand `restate` est `Some` : une netpol posée avec la seule règle Restate
+/// fermerait tout le reste de l'egress ; egress libre ⇒ Restate déjà
+/// joignable. Sinon, une règle par `EgressRule` de l'union, plus toujours
+/// `dns_egress_rule()` en tête, et — quand `restate` est `Some((application,
+/// namespace d'application))` — la règle `restate_egress_rule` en position
+/// terminale, autorisant le seul Service Restate. `ownerReference` vers la
+/// Sandbox (GC en cascade), même `pod_selector` ciblant
+/// `vanyline.solidite.fr/sandbox` que la netpol ingress
+/// (`build_sandbox_netpol`).
 #[allow(clippy::expect_used)] // garanti par #[derive(CustomResource)] : apiVersion/kind toujours renseignes
 pub fn build_sandbox_egress_netpol(
     sandbox: &Sandbox,
     owner_egress: &[EgressRule],
     project_egress: &[EgressRule],
+    restate: Option<(&str, &str)>,
 ) -> Option<NetworkPolicy> {
     let all_rules: Vec<&EgressRule> = owner_egress
         .iter()
@@ -1143,6 +1239,9 @@ pub fn build_sandbox_egress_netpol(
         to: Some(vec![egress_rule_to_peer(rule)]),
         ports: egress_ports_to_netpol_ports(&rule.ports),
     }));
+    if let Some((application_name, app_namespace)) = restate {
+        egress_rules.push(restate_egress_rule(application_name, app_namespace));
+    }
 
     let mut pod_selector_labels = BTreeMap::new();
     pod_selector_labels.insert(
@@ -1279,6 +1378,33 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         false
     };
 
+    // S6b — URL interne du Service Restate pour le Pod et la netpol egress
+    // (sandbox.sdd « UN OWNER = UN NAMESPACE ») : résolue par l'appelant, les
+    // builders restent purs. ⚠ LA DÉTECTION EST BLOQUÉE CRDS : `ApplicationSpec`
+    // ne porte pas encore `restate` (tâche `[ ]` de application.sdd l.323,
+    // /crds/src/lib.sdd) ; la CRD générée depuis crds émonde ce champ des CR
+    // soumises (pruning du schéma structural) — une lecture brute ne le verrait
+    // pas non plus. Dès que le champ existe, remplacer le `None` ci-dessous par
+    // (motif `fetch_application` / Ingress, cross-namespace) :
+    //   let restate = match owner.spec.application_ref.as_deref() {
+    //       Some(name) => {
+    //           let app_ns = namespace::app_namespace_of(&ctx.client, ns).await?;
+    //           let apps: Api<Application> =
+    //               Api::namespaced(ctx.client.clone(), &app_ns);
+    //           apps.get(name)
+    //               .await?
+    //               .spec
+    //               .restate
+    //               .as_ref()
+    //               .map(|_| (name.to_string(), app_ns))
+    //       }
+    //       None => None,
+    //   };
+    let restate: Option<(String, String)> = None; // (application, namespace d'application)
+    let restate_url = restate
+        .as_ref()
+        .map(|(app, app_ns)| restate_ingress_url(app, app_ns));
+
     let pp = PatchParams::apply(owner::FIELD_MANAGER).force();
     let pods: Api<k8s_openapi::api::core::v1::Pod> = Api::namespaced(ctx.client.clone(), ns);
     let phase = if sandbox.spec.suspended {
@@ -1311,7 +1437,7 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
                 _ => "Provisioning".to_string(),
             }
         } else {
-            let pod = build_sandbox_pod(sandbox, &project, &pod_ctx);
+            let pod = build_sandbox_pod(sandbox, &project, &pod_ctx, restate_url.as_deref());
             pods.create(&PostParams::default(), &pod).await?;
             "Provisioning".to_string()
         }
@@ -1339,9 +1465,14 @@ async fn apply(sandbox: &Sandbox, ctx: &Context, ns: &str) -> Result<Action, Con
         )
         .await?;
 
-    if let Some(egress_netpol) =
-        build_sandbox_egress_netpol(sandbox, &owner.spec.egress, &project.spec.egress)
-    {
+    if let Some(egress_netpol) = build_sandbox_egress_netpol(
+        sandbox,
+        &owner.spec.egress,
+        &project.spec.egress,
+        restate
+            .as_ref()
+            .map(|(app, app_ns)| (app.as_str(), app_ns.as_str())),
+    ) {
         netpols
             .patch(
                 &netpol_egress_name(&sandbox.name_any()),
@@ -1907,7 +2038,7 @@ mod tests {
         let project = make_project_with_languages(&["rust"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let volumes = pod
             .spec
@@ -1949,7 +2080,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         assert_eq!(pod.metadata.name, Some("sandbox-demo-branch".to_string()));
         assert_eq!(pod.metadata.namespace, Some("ns".to_string()));
@@ -1960,7 +2091,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let sc = pod
             .spec
@@ -1980,7 +2111,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let refs = pod
             .metadata
@@ -2015,7 +2146,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let spec = pod.spec.as_ref().expect("should have spec");
         assert_eq!(spec.service_account_name, Some("owner-alice".to_string()));
@@ -2027,14 +2158,14 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         assert_eq!(container.image, Some(ctx.default_image.clone()));
 
         // With image -> use spec
         let sandbox_with_image =
             make_sandbox("demo-branch", vec![], Some("custom:tag".to_string()));
-        let pod2 = build_sandbox_pod(&sandbox_with_image, &project, &ctx);
+        let pod2 = build_sandbox_pod(&sandbox_with_image, &project, &ctx, None);
         let container2 = pod2.spec.as_ref().unwrap().containers[0].clone();
         assert_eq!(container2.image, Some("custom:tag".to_string()));
     }
@@ -2044,7 +2175,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let args = container.args.as_ref().expect("should have args");
@@ -2056,7 +2187,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
 
@@ -2094,7 +2225,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let env = container.env.as_ref().expect("should have env");
@@ -2117,7 +2248,7 @@ mod tests {
         let mut project = make_project(None);
         project.spec.default_branch = Some("develop".to_string());
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let env = container.env.as_ref().expect("should have env");
@@ -2138,7 +2269,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let env = container.env.as_ref().expect("should have env");
@@ -2156,13 +2287,91 @@ mod tests {
         let mut project = make_project(None);
         project.spec.default_branch = Some(String::new());
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let env = container.env.as_ref().expect("should have env");
         assert!(
             !env.iter().any(|e| e.name == "VNL_HEALTH_BASE_REF"),
             "VNL_HEALTH_BASE_REF must be absent when default_branch is empty"
+        );
+    }
+
+    // ===== VNL_RESTATE_INGRESS_URL (S6b) =====
+
+    /// Forme de l'URL interne du Service Restate — `application.sdd` « Moteur de
+    /// workflow » : Service `<application>-restate`, ingress 8080. FQDN avec
+    /// namespace car le pod sandbox vit dans le namespace de l'Owner, pas dans
+    /// celui de l'Application (précédent : `deploy/web/configmap.yaml`,
+    /// `http://vanyline-restate.media-station.svc:8080`).
+    #[test]
+    fn restate_ingress_url_forme_service_interne() {
+        assert_eq!(restate_service_name("main"), "main-restate");
+        assert_eq!(
+            restate_ingress_url("main", "vanyline-app"),
+            "http://main-restate.vanyline-app.svc:8080"
+        );
+    }
+
+    /// `Some(url)` ⇒ env `VNL_RESTATE_INGRESS_URL` posée APRÈS
+    /// `VNL_HEALTH_BASE_REF` et AVANT les env de caches (ordre contracté de
+    /// sandbox.sdd « Poser l'env du Pod dans cet ordre »).
+    #[test]
+    fn pod_env_restate_ingress_url_presente_apres_base_ref() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut project = make_project(None);
+        project.spec.default_branch = Some("develop".to_string());
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(
+            &sandbox,
+            &project,
+            &ctx,
+            Some("http://main-restate.vanyline-app.svc:8080"),
+        );
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        let names: Vec<&str> = env.iter().map(|e| e.name.as_str()).collect();
+        let pos_restate = names
+            .iter()
+            .position(|n| *n == "VNL_RESTATE_INGRESS_URL")
+            .expect("should have VNL_RESTATE_INGRESS_URL");
+        let pos_base = names
+            .iter()
+            .position(|n| *n == "VNL_HEALTH_BASE_REF")
+            .expect("should have VNL_HEALTH_BASE_REF");
+        let pos_cargo = names
+            .iter()
+            .position(|n| *n == "CARGO_HOME")
+            .expect("should have CARGO_HOME (default caches)");
+        assert!(
+            pos_base < pos_restate && pos_restate < pos_cargo,
+            "VNL_RESTATE_INGRESS_URL must sit between VNL_HEALTH_BASE_REF and caches: {names:?}"
+        );
+        assert_eq!(
+            env[pos_restate]
+                .value
+                .as_ref()
+                .expect("VNL_RESTATE_INGRESS_URL should have value"),
+            "http://main-restate.vanyline-app.svc:8080"
+        );
+    }
+
+    /// `None` (Owner sans Application, ou Application sans `spec.restate`) ⇒ env
+    /// absente.
+    #[test]
+    fn pod_env_restate_ingress_url_absente_quand_none() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let mut project = make_project(None);
+        project.spec.default_branch = Some("develop".to_string());
+        let ctx = make_ctx();
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
+
+        let container = pod.spec.as_ref().unwrap().containers[0].clone();
+        let env = container.env.as_ref().expect("should have env");
+        assert!(
+            !env.iter().any(|e| e.name == "VNL_RESTATE_INGRESS_URL"),
+            "VNL_RESTATE_INGRESS_URL must be absent when restate_ingress_url is None"
         );
     }
 
@@ -2173,7 +2382,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![rust, node], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let volumes = pod
             .spec
@@ -2212,7 +2421,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let mounts = container
@@ -2236,7 +2445,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let mounts = container
@@ -2261,7 +2470,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None); // caches: None -> defaults
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let mounts = container
@@ -2321,7 +2530,7 @@ mod tests {
 
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         assert!(container.resources.is_some());
@@ -2333,7 +2542,7 @@ mod tests {
 
         // Without resources
         let sandbox_no_res = make_sandbox("demo-branch", vec![], None);
-        let pod_no_res = build_sandbox_pod(&sandbox_no_res, &project, &ctx);
+        let pod_no_res = build_sandbox_pod(&sandbox_no_res, &project, &ctx, None);
         assert!(
             pod_no_res.spec.as_ref().unwrap().containers[0]
                 .resources
@@ -2648,7 +2857,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let mounts = container
@@ -2670,7 +2879,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let mounts = container
@@ -2691,7 +2900,7 @@ mod tests {
         let sandbox = make_sandbox("demo-branch", vec![], None);
         let project = make_project(None);
         let ctx = make_ctx();
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let mounts = container
@@ -2726,7 +2935,7 @@ mod tests {
         let owner_egress: &[EgressRule] = &[];
         let project_egress: &[EgressRule] = &[];
 
-        let result = build_sandbox_egress_netpol(&sandbox, owner_egress, project_egress);
+        let result = build_sandbox_egress_netpol(&sandbox, owner_egress, project_egress, None);
         assert!(result.is_none());
     }
 
@@ -2742,7 +2951,7 @@ mod tests {
         }];
         let project_egress: &[EgressRule] = &[];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, project_egress)
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, project_egress, None)
             .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
@@ -2794,7 +3003,7 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &project_egress)
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &project_egress, None)
             .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
@@ -2832,8 +3041,8 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol =
-            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -2871,8 +3080,8 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol =
-            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -2924,8 +3133,8 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol =
-            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -2962,8 +3171,8 @@ mod tests {
             }],
         }];
 
-        let netpol =
-            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -2992,8 +3201,8 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol =
-            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -3020,8 +3229,8 @@ mod tests {
             }],
         }];
 
-        let netpol =
-            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
 
         let spec = netpol.spec.as_ref().expect("should have spec");
         let egress = spec.egress.as_ref().expect("should have egress");
@@ -3046,8 +3255,8 @@ mod tests {
             ports: vec![],
         }];
 
-        let netpol =
-            build_sandbox_egress_netpol(&sandbox, &owner_egress, &[]).expect("should return Some");
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
 
         assert_eq!(
             netpol.metadata.name,
@@ -3082,6 +3291,134 @@ mod tests {
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0].kind, "Sandbox");
         assert_eq!(refs[0].name, "demo-branch");
+    }
+
+    // ===== restate egress (S6b) =====
+
+    /// `Some((application, app-ns))` ⇒ règle egress terminale ciblant CE SEUL
+    /// Service : peer unique combinant `namespaceSelector`
+    /// `kubernetes.io/metadata.name: <app-ns>` ET `podSelector`
+    /// `RESTATE_LABEL: <application>`, ports `[{8080, TCP}]` seul (l'egress de la
+    /// sandbox ne sert qu'aux callbacks d'awakeable — port ingress).
+    #[test]
+    fn netpol_egress_restate_regle_combinee_namespace_et_label() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "owner rule".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(
+            &sandbox,
+            &owner_egress,
+            &[],
+            Some(("main", "vanyline-app")),
+        )
+        .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+        // DNS + owner + restate = 3
+        assert_eq!(egress.len(), 3);
+
+        let rule = egress.last().expect("restate rule is last");
+        let peers = rule
+            .to
+            .as_ref()
+            .expect("restate rule must restrict destination");
+        assert_eq!(peers.len(), 1, "this Service only — one peer");
+        let peer = &peers[0];
+        assert!(peer.ip_block.is_none());
+        let ns_labels = peer
+            .namespace_selector
+            .as_ref()
+            .expect("restate peer combines namespaceSelector")
+            .match_labels
+            .as_ref()
+            .expect("namespaceSelector match_labels");
+        assert_eq!(
+            ns_labels
+                .get("kubernetes.io/metadata.name")
+                .map(String::as_str),
+            Some("vanyline-app"),
+            "restate Service lives in the application namespace"
+        );
+        let pod_labels = peer
+            .pod_selector
+            .as_ref()
+            .expect("restate peer combines podSelector on the same object")
+            .match_labels
+            .as_ref()
+            .expect("podSelector match_labels");
+        assert_eq!(
+            pod_labels.get(RESTATE_LABEL).map(String::as_str),
+            Some("main")
+        );
+
+        let ports = rule.ports.as_ref().expect("restate rule restricts ports");
+        assert_eq!(ports.len(), 1, "ingress port only");
+        assert_eq!(ports[0].port, Some(IntOrString::Int(8080)));
+        assert_eq!(ports[0].protocol.as_deref(), Some("TCP"));
+    }
+
+    /// `None` ⇒ aucune règle ne référence `RESTATE_LABEL`.
+    #[test]
+    fn netpol_egress_restate_absente_quand_none() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress = vec![EgressRule {
+            description: "owner rule".into(),
+            cidr: Some("10.0.0.0/24".into()),
+            pod_selector: None,
+            namespace_selector: None,
+            ports: vec![],
+        }];
+
+        let netpol = build_sandbox_egress_netpol(&sandbox, &owner_egress, &[], None)
+            .expect("should return Some");
+
+        let spec = netpol.spec.as_ref().expect("should have spec");
+        let egress = spec.egress.as_ref().expect("should have egress");
+        assert_eq!(egress.len(), 2, "DNS + owner only");
+        for rule in egress {
+            if let Some(peers) = &rule.to {
+                for peer in peers {
+                    let has_restate_label = peer
+                        .pod_selector
+                        .as_ref()
+                        .and_then(|s| s.match_labels.as_ref())
+                        .is_some_and(|m| m.contains_key(RESTATE_LABEL));
+                    assert!(
+                        !has_restate_label,
+                        "no restate rule expected when restate is None"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Les trois niveaux d'egress vides ⇒ `None` MÊME avec restate : la netpol
+    /// egress reste absente, l'egress du pod reste libre (créer une netpol avec
+    /// la seule règle restate fermerait tout le reste de l'egress — contrat
+    /// « les trois vides ⇒ None » de sandbox.sdd).
+    #[test]
+    fn netpol_egress_none_quand_union_vide_malgre_restate() {
+        let sandbox = make_sandbox("demo-branch", vec![], None);
+        let owner_egress: &[EgressRule] = &[];
+        let project_egress: &[EgressRule] = &[];
+
+        let result = build_sandbox_egress_netpol(
+            &sandbox,
+            owner_egress,
+            project_egress,
+            Some(("main", "vanyline-app")),
+        );
+        assert!(
+            result.is_none(),
+            "three empty levels ⇒ egress netpol absent (egress libre), even with restate"
+        );
     }
 
     // ===== ingress_name =====
@@ -3362,7 +3699,7 @@ mod tests {
         let project = make_project_with_languages(&["rust"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let volumes = pod
             .spec
@@ -3434,7 +3771,7 @@ mod tests {
         let project = make_project(None);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let volumes = pod
             .spec
@@ -3489,7 +3826,7 @@ mod tests {
         let project = make_project(None);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let volumes = pod
             .spec
@@ -3513,7 +3850,7 @@ mod tests {
         let project = make_project_with_languages(&["rust", "js-ts"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
 
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let env = container.env.as_ref().expect("should have env");
@@ -3554,7 +3891,7 @@ mod tests {
         let project = make_project_with_languages(&["js-ts", "vue"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "node");
@@ -3637,7 +3974,7 @@ mod tests {
         let project = make_project_with_languages(&["js-ts"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "node");
@@ -3658,7 +3995,7 @@ mod tests {
         let project = make_project_with_languages(&["vue"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "node");
@@ -3689,7 +4026,7 @@ mod tests {
         let project = make_project_with_languages(&["vue"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "node");
@@ -3706,7 +4043,7 @@ mod tests {
         let project = make_project_with_languages(&["vue", "rust"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["name"], "rust");
@@ -3731,7 +4068,7 @@ mod tests {
         let project = make_project_with_languages(&["dockerfile"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "docker");
@@ -3824,7 +4161,7 @@ mod tests {
         let project = make_project_with_languages(&["vue", "dockerfile"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["name"], "node");
@@ -3852,7 +4189,7 @@ mod tests {
         let project = make_project_with_languages(&["dockerfile"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "docker");
@@ -3878,7 +4215,7 @@ mod tests {
             lsp: Some(lsp),
         };
         let sandbox = make_sandbox("sb", vec![docker_tc], None);
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "docker");
@@ -3996,7 +4333,7 @@ mod tests {
         let project = make_project_with_languages(&["python"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "python");
@@ -4097,7 +4434,7 @@ mod tests {
         let project = make_project_with_languages(&["python"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "python");
@@ -4128,7 +4465,7 @@ mod tests {
         let project = make_project_with_languages(&["python"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0]["name"], "python");
@@ -4145,7 +4482,7 @@ mod tests {
         let project = make_project_with_languages(&["python", "rust"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let entries = lsp_env_entries(&pod);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["name"], "rust");
@@ -4171,7 +4508,7 @@ mod tests {
         let project = make_project_with_languages(&["rust", "python"]);
         let ctx = make_ctx();
 
-        let pod = build_sandbox_pod(&sandbox, &project, &ctx);
+        let pod = build_sandbox_pod(&sandbox, &project, &ctx, None);
         let container = pod.spec.as_ref().unwrap().containers[0].clone();
         let env = container.env.as_ref().expect("should have env");
 
