@@ -11,6 +11,7 @@ mod db;
 mod error;
 mod k8s;
 mod migration;
+mod workflow;
 mod ws;
 
 use std::collections::HashSet;

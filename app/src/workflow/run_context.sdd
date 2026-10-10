@@ -13,6 +13,12 @@ Purpose:
 Owns:
   ./run_context.rs
 
+Can modify:
+  ./mod.rs et ./../../main.rs (ratifié W1 2026-10-10 — UNIQUEMENT le squelette
+    déclaratif : `pub mod run_context;`/`pub mod status;` dans un ./mod.rs réduit aux
+    déclarations, et `mod workflow;` dans ./../../main.rs. La consistance de ./mod.rs
+    arrive en W2 sous ./mod.sdd ; rien d'autre n'est autorisé ici.)
+
 Can read:
   ./mod.sdd
   ./steps/mod.sdd
@@ -27,9 +33,19 @@ Exposes:
   @materialize(definition: &DagSteps, scope: RunScope, ctx: &RunContext) ->
     Result<DagSteps, WorkflowError> — pure : copie le DAG et pose `config._run = ctx` (sérialisé) à
     chaque step ; une clé `_run` déjà présente dans la config d'un step est ÉCRASÉE (un auteur de
-    workflow ne peut pas usurper un contexte).
+    workflow ne peut pas usurper un contexte). Tranche W1 2026-10-10 : une `config`
+    NON-objet (scalaire ou `null` — le champ est un @serde_json::Value) devient un objet
+    ne portant QUE `_run` ; un step de kind `subworkflow` (natif de miryad-core, hors
+    @allowed_kinds) est refusé dans les deux portées — voir `Tasks`.
   @allowed_kinds(scope: RunScope) -> &'static [&'static str] — `Project` : `agent`, `rhai` ;
     `Sandbox` : `agent`, `rhai`, `shell`, `gate`.
+
+Tasks:
+  [?] `subworkflow` (kind natif de miryad-core, embarque un sous-DAG en ligne) n'est
+    PAS dans l'énumération d'@allowed_kinds, donc @materialize le refuse dans les deux
+    portées (validation W1 2026-10-10). L'autoriser, et dans quelle(s) portée(s) — un
+    sous-DAG n'exige a priori pas de sandbox ? Trancher avant ./steps/, sinon tout
+    workflow qui l'utilise meurt en `MRD-WORKFLOW-004`.
 
 Raises:
   @WorkflowError::InvalidDag (`MRD-WORKFLOW-004`, 422) — step dont le `kind` n'est pas autorisé

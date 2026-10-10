@@ -13,6 +13,12 @@ Purpose:
 Owns:
   ./status.rs
 
+Can modify:
+  ./mod.rs et ./../../main.rs (ratifié W1 2026-10-10 — UNIQUEMENT le squelette
+    déclaratif : `pub mod run_context;`/`pub mod status;` dans un ./mod.rs réduit aux
+    déclarations, et `mod workflow;` dans ./../../main.rs. La consistance de ./mod.rs
+    arrive en W2 sous ./mod.sdd ; rien d'autre n'est autorisé ici.)
+
 Can read:
   ./runtime.sdd
   ../db/entities/workflow_runs.sdd
@@ -21,13 +27,21 @@ Exposes:
   @RunState — enum `Pending` | `Running` | `Suspended` | `BackingOff` | `Succeeded` | `Failed` |
     `Cancelled` | `Unknown` (`Unknown` quand Restate ne connaît plus l'invocation : purgée).
   @RunStatus — `{ invocation_id, state: RunState, started_at: Option<…>, ended_at: Option<…>,
-    error: Option<String> (message du step en échec), steps: Vec<StepStatus> }`, `StepStatus`
+    error: Option<String> (message d'échec d'exécution — `completion_failure`/
+    `last_failure` de l'invocation), steps: Vec<StepStatus> }`, `StepStatus`
     `{ step_id, state, started_at, ended_at, error }` quand Restate expose le journal.
+    W1 2026-10-10 : @StepStatus.error est TOUJOURS `None` en l'état (le journal
+    introspecté ne porte pas de message par step) ; le peupler exige le format réel —
+    voir `[?]` formes.
   @fetch_statuses(runtime, invocation_ids: &[String]) -> Result<HashMap<String, RunStatus>,
     WorkflowError> (async) — UNE requête groupée pour tous les ids (au plus 50 par appel), jamais
     une requête par run.
   @fetch_status(runtime, invocation_id) -> Result<RunStatus, WorkflowError> (async) — avec le
     détail des steps.
+  @RestateAdmin — trait local (déclaré ICI, ce fichier ne dépend pas de ./runtime.rs) :
+    `admin_url() -> &@str` + `http() -> &@reqwest::Client` (client partagé). Implémenté
+    par @WorkflowRuntime en W2 (runtime.sdd expose déjà « l'URL d'admin et le client
+    HTTP partagé ») ; le type du paramètre `runtime` des deux @fetch_* est ce trait.
   @cancel(runtime, invocation_id) -> Result<(), WorkflowError> (async).
 
 Handles:
@@ -48,10 +62,28 @@ Must:
 Must not:
   Interpréter la sortie d'un run : `output` éventuel est transmis tel quel.
 
+Raises:
+  @miryad_core WorkflowError::RestateUnreachable (`MRD-WORKFLOW-001`) — admin injoignable
+    ou délai `ADMIN_TIMEOUT` (5 s) dépassé.
+  @WorkflowError::RestateRejected (`MRD-WORKFLOW-002`) — réponse hors 2xx. Tolérance :
+    `404` en lecture de DÉTAIL rend `Unknown` (jamais en lecture groupée : là, un id
+    absent est une absence de ligne, pré-positionnée `Unknown`).
+  @WorkflowError::Serialization (`MRD-WORKFLOW-003`) — réponse non desérialisable (le
+    classement transport-vs-décodage reproduit celui de miryad-core).
+
 Tasks:
-  [?] Formes exactes des endpoints d'introspection et d'annulation de l'admin Restate sur la
-    version déployée : à vérifier contre le Restate réel (aucun n'est déployé sur le cluster
-    aujourd'hui) avant d'implémenter ; la spec porte le contrat, pas les URL.
+  [?] Formes exactes des endpoints d'admin Restate sur la version déployée : IMPLÉMENTATION
+    W1 2026-10-10 sur la doc officielle Restate 1.7 (lecture groupée `POST /query` sur
+    `sys_invocation`, journal `sys_journal`, annulation `PATCH /invocations/{id}/cancel`),
+    testée contre faux admin — AUCUN Restate réel déployé : le format n'est PAS contracté.
+    Lettre amendée (validation W1) : l'implémentation sur doc est admise ; la vérification
+    contre le cluster réel est le follow-up bloquant la contraction du format. Hypothèses
+    non verrouillées : vocabulaire `sys_invocation.status` (`paused`⇒`Suspended`,
+    `killed`⇒`Failed` ; `cancelled` pourrait arriver réel en `completed`+failure⇒`Failed`),
+    enveloppe `{"rows": […]}`, horodatages RFC 3339 OU millisecondes epoch (parse
+    tolérant, autre forme ⇒ `None`), et le `404`⇒`Unknown` de la lecture de détail.
+    Note : le @StepDispatcher de miryad-core 0.1.5 journalise dans un `ctx.run()` sans
+    nom ⇒ `steps` probablement vide en réel — jamais inventé.
   [?] Rétention : durée de conservation des invocations terminées côté Restate à configurer pour
     couvrir l'affichage (2 semaines / 50 derniers) ; `Unknown` est l'effet d'une purge.
 
