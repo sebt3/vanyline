@@ -50,8 +50,11 @@ Must not:
   Contenir de logique de step ou de contexte : elle vit dans les sous-modules.
 
 Tasks:
-  [ ] Cargo.toml de l'app : `miryad-core = { version = "0.1", features = ["swagger-ui", "workflow", "mcp"] }` ;
-    mettre à jour `Cargo.lock` vers ≥ 0.1.4.
+  [x] Cargo.toml de l'app — FAIT 2026-10-10 (validation W0 : `miryad-core = { version =
+    "0.1.5", default-features = false, features = ["swagger-ui", "workflow", "mcp"] }` —
+    `default-features = false` conservé (convention du fichier, la lettre de cette tâche
+    l'omettait) ; `Cargo.lock` résout restate-sdk 0.12.1 + rhai/handlebars/typify —
+    graphe attendu sans dérive, version 0.1.5 ≥ 0.1.4.)
   [ ] Mettre à jour /docs/architecture.md (section « Backend web ») : moteur de workflow, endpoint
     embarqué, Restate comme sous-ressource de l'Application.
 

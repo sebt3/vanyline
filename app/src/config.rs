@@ -33,6 +33,20 @@ pub struct Config {
     pub default_home_access_mode: Option<String>,
     pub default_project_storage_class: Option<String>,
     pub default_project_access_mode: Option<String>,
+    /// URL d'administration Restate du moteur de workflow (`VNL_RESTATE_ADMIN_URL`,
+    /// posée par le reconciler Application quand la CR porte `spec.restate`) — `None`
+    /// ⇒ moteur non configuré (aucun port ouvert, aucune requête sortante).
+    pub restate_admin_url: Option<String>,
+    /// URL d'ingress Restate pour lancer les runs (`VNL_RESTATE_INGRESS_URL`) — `None`
+    /// ⇒ moteur non configuré.
+    pub restate_ingress_url: Option<String>,
+    /// Adresse d'écoute de l'endpoint Restate embarqué (`VNL_WORKFLOW_LISTEN`, défaut
+    /// `"0.0.0.0:9080"`) — `String` brut, aucune validation de parse ici (même contrat
+    /// que `listen_addr`).
+    pub workflow_listen: String,
+    /// URL publique de déploiement de l'`app` déclarée à Restate pour l'enregistrement
+    /// de l'endpoint (`VNL_WORKFLOW_DEPLOYMENT_URL`) — `None` ⇒ moteur non configuré.
+    pub workflow_deployment_url: Option<String>,
 }
 
 impl Config {
@@ -81,6 +95,11 @@ impl Config {
             default_home_access_mode: read("VNL_DEFAULT_HOME_ACCESS_MODE").ok(),
             default_project_storage_class: read("VNL_DEFAULT_PROJECT_STORAGE_CLASS").ok(),
             default_project_access_mode: read("VNL_DEFAULT_PROJECT_ACCESS_MODE").ok(),
+            restate_admin_url: read("VNL_RESTATE_ADMIN_URL").ok(),
+            restate_ingress_url: read("VNL_RESTATE_INGRESS_URL").ok(),
+            workflow_listen: read("VNL_WORKFLOW_LISTEN")
+                .unwrap_or_else(|_| "0.0.0.0:9080".to_string()),
+            workflow_deployment_url: read("VNL_WORKFLOW_DEPLOYMENT_URL").ok(),
         })
     }
 
@@ -157,6 +176,10 @@ mod tests {
             default_home_access_mode: None,
             default_project_storage_class: None,
             default_project_access_mode: None,
+            restate_admin_url: None,
+            restate_ingress_url: None,
+            workflow_listen: "0.0.0.0:9080".to_string(),
+            workflow_deployment_url: None,
         }
     }
 
@@ -252,5 +275,73 @@ mod tests {
         assert!(config.default_home_access_mode.is_none());
         assert!(config.default_project_storage_class.is_none());
         assert!(config.default_project_access_mode.is_none());
+    }
+
+    /// Scenario (config.sdd `Tasks`, variables du moteur de workflow 2026-10-04) :
+    /// `from_env_workflow_absentes_a_defaut` — les quatre variables sont absentes : les trois
+    /// URL sont `@None` (moteur non configuré), `workflow_listen` porte le défaut
+    /// `"0.0.0.0:9080"` (même contrat « jamais d'échec » que `LISTEN_ADDR`).
+    #[test]
+    fn from_env_workflow_absentes_a_defaut() {
+        let config = Config::from_env_with(env_read(required_env())).unwrap();
+
+        assert!(config.restate_admin_url.is_none());
+        assert!(config.restate_ingress_url.is_none());
+        assert!(config.workflow_deployment_url.is_none());
+        assert_eq!(config.workflow_listen, "0.0.0.0:9080");
+    }
+
+    /// Scenario : `from_env_workflow_fournies` — les quatre variables posées sont recopiées
+    /// telles quelles (aucune validation d'URL ni de parse d'adresse ici, même contrat que
+    /// `LISTEN_ADDR`).
+    #[test]
+    fn from_env_workflow_fournies() {
+        let mut env = required_env();
+        env.insert(
+            "VNL_RESTATE_ADMIN_URL",
+            "http://restate-admin:9070".to_string(),
+        );
+        env.insert(
+            "VNL_RESTATE_INGRESS_URL",
+            "http://restate-ingress:8080".to_string(),
+        );
+        env.insert("VNL_WORKFLOW_LISTEN", "127.0.0.1:9090".to_string());
+        env.insert(
+            "VNL_WORKFLOW_DEPLOYMENT_URL",
+            "http://app.internal:8080".to_string(),
+        );
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(
+            config.restate_admin_url.as_deref(),
+            Some("http://restate-admin:9070")
+        );
+        assert_eq!(
+            config.restate_ingress_url.as_deref(),
+            Some("http://restate-ingress:8080")
+        );
+        assert_eq!(config.workflow_listen, "127.0.0.1:9090");
+        assert_eq!(
+            config.workflow_deployment_url.as_deref(),
+            Some("http://app.internal:8080")
+        );
+    }
+
+    /// Scenario : `from_env_workflow_vide_conservee` — valeur présente vide : `env::var`
+    /// réussit ⇒ PRESENCE conservée (`Some("")`) pour les trois URL, contrat des optionnels
+    /// du fichier (cf. `Accepts` de config.sdd, `[?]` « Some("") sur les optionnels ») ;
+    /// `VNL_WORKFLOW_LISTEN=""` conserve `""` (pas de repli sur le défaut), contrat de
+    /// `LISTEN_ADDR` (« jamais traiter une valeur vide comme une absence »).
+    #[test]
+    fn from_env_workflow_vide_conservee() {
+        let mut env = required_env();
+        env.insert("VNL_RESTATE_ADMIN_URL", String::new());
+        env.insert("VNL_WORKFLOW_LISTEN", String::new());
+
+        let config = Config::from_env_with(env_read(env)).unwrap();
+
+        assert_eq!(config.restate_admin_url.as_deref(), Some(""));
+        assert_eq!(config.workflow_listen, "");
     }
 }

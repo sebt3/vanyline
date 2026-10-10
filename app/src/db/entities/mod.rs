@@ -6,5 +6,7 @@ pub mod mcp_servers;
 pub mod messages;
 pub mod model_profiles;
 pub mod owner_links;
+pub mod project_workflows;
 pub mod skills;
 pub mod toolsets;
+pub mod workflow_runs;

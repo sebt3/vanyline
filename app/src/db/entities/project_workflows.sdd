@@ -29,7 +29,9 @@ Exposes:
     Option<String>`.
   `impl MiryadResource` : `resource_name() == "project-workflows"`, lecture et écriture
     `AccessPolicy::OwnerOnly`, `owner_column() == Some(Column::OwnerId)`, hook `before_create` :
-    `scope` hors de `{project, sandbox}` ⇒ `HookError` (422) ; le hook ne charge pas la définition
+    `scope` hors de `{project, sandbox}` ⇒ `HookError` (422) code `VNL-WFA-001` (identifiant
+    contracté W0 2026-10-10, règle AGENTS.md « messages d'erreur avec identifiant unique ») ;
+    le hook ne charge pas la définition
     (il est synchrone et sans base) — la validation des kinds contre la portée est faite au
     rattachement par ../../api/workflows.sdd et refaite à chaque lancement
     (../../workflow/run_context.sdd).
@@ -51,7 +53,7 @@ Scenario: contrat_de_ressource
 Scenario: scope_invalide
   Given un corps de création avec `scope = "global"`
   When `before_create`
-  Then `HookError` (422)
+  Then `HookError` (422) dont le `code` est `"VNL-WFA-001"` (assert de code dans le test)
 
 Scenario: payload_du_frontend_sans_id_ni_owner
   Given un corps `{project_name, definition_id, scope}`

@@ -30,7 +30,12 @@ Exposes:
     `AdminOnly` (aucun client ne crée, modifie ni supprime une ligne par le CRUD générique),
     `owner_column() == Some(Column::OwnerId)`.
   @purge_older_than(db, days: i64) -> Result<u64, DbErr> — supprime les lignes dont `started_at`
-    dépasse `days` jours (défaut d'usage : 30) et rend le nombre supprimé.
+    dépasse `days` jours (défaut d'usage : 30) et rend le nombre supprimé. Fenêtre
+    aberrante (`days` trop grand pour @chrono::TimeDelta::try_days ou pour le
+    @checked_sub_signed du moment de coupure — jamais de panic, harnais
+    `arithmetic_side_effects`) ⇒ @DbErr::Custom
+    `"VNL-WFR-001: purge window out of range: <days> days"` (identifiant contracté W0
+    2026-10-10, règle AGENTS.md).
 
 Handles:
   Fenêtre d'affichage (voir ../../api/workflows.sdd) : les 14 derniers jours ET au plus 50 lignes

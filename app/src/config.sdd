@@ -4,7 +4,8 @@ Platform: Rust/vanyline-app/std
 
 Purpose:
   Configuration de démarrage de l'`app` : lecture unique et fail-fast des variables
-  d'environnement en @Config (18 champs @pub), plus le mapping Config →
+  d'environnement en @Config (22 champs @pub — les 4 variables du moteur de
+  workflow ajoutées W0 2026-10-10), plus le mapping Config →
   @miryad_core::auth::OidcConfig. Le fichier ne fait aucun réseau, aucune validation
   sémantique, aucun logging : il lit l'environnement et retourne soit un @Config complet,
   soit une @Err(@String) dont le message porte un marqueur en dur `"VNL-CFG-001"` …
@@ -96,6 +97,10 @@ Accepts:
       aucune vérification qu'il se parse en @SocketAddr ici (le parse et son échec
       `"VNL-CFG-008"` + `exit(1)` vivent dans ./main.rs).
     `STATIC_DIR` (défaut `"./static"`) → racine du @ServeDir serving la SPA (./main.rs).
+    `VNL_WORKFLOW_LISTEN` (défaut `"0.0.0.0:9080"`) → @Config::workflow_listen en @String
+      brut, même motif que @listen_addr (aucun parse en @SocketAddr ici — consommateur
+      ./workflow/runtime.sdd) ; la valeur présente vide est CONSERVÉE (`""`, jamais
+      remplacée par le défaut — same rule que `LISTEN_ADDR`).
   Variables optionnelles — @env::var(…).ok(), absente ⇒ @None :
     `OIDC_CA_CERT` → @Config::oidc_ca_cert (PEM de la CA de l'émetteur, transmis tel quel
       à miryad-core via @oidc_config).
@@ -117,6 +122,19 @@ Accepts:
     du controller appliquent leurs propres défauts historiques (RWX/RWO). Le reconciler
     Application ne pose `VNL_DEFAULT_*` que si `Application.spec.storageDefaults` et le
     sous-champ correspondant existent.
+    `VNL_RESTATE_ADMIN_URL` → @Config::restate_admin_url — admin HTTP du Restate de
+      l'Application (enregistrement des deployments, lecture de statut —
+      ./workflow/runtime.sdd, ./workflow/status.sdd). Posé par le reconciler Application
+      quand `spec.restate` (../../controller/src/application.sdd).
+    `VNL_RESTATE_INGRESS_URL` → @Config::restate_ingress_url — ingress (port 8080) du
+      Service Restate, déclenchement des runs (miryad-core @trigger_run).
+    `VNL_WORKFLOW_DEPLOYMENT_URL` → @Config::workflow_deployment_url — URL publique de
+      l'endpoint Restate embarqué de l'app (enregistrement du deployment,
+      ./workflow/runtime.sdd).
+    Ces trois variables + `VNL_WORKFLOW_LISTEN` (variables à défaut ci-dessus) sont la
+    signature de configuration du moteur : les TROIS URL absentes ⇒ moteur de workflow
+    non configuré, l'app tourne sans workflows et les routes répondent `503`
+    (./workflow/mod.sdd). Posées par le controller ; W0 2026-10-10.
   Valeur présente vide (`FOO=""`) : @env::var réussit → traitée comme PRESENTE pour les
     requises (champ @String vide dans le @Config), et comme `Some("")` pour les
     optionnelles. Cf. `Tasks`.
@@ -238,10 +256,10 @@ Depends on:
     `[!]` dans `Tasks`).
 
 Tasks:
-  [ ] Variables du moteur de workflow (2026-10-04) : `VNL_RESTATE_ADMIN_URL`,
-    `VNL_RESTATE_INGRESS_URL`, `VNL_WORKFLOW_LISTEN` (défaut `0.0.0.0:9080`),
-    `VNL_WORKFLOW_DEPLOYMENT_URL` — toutes optionnelles ; absentes ⇒ moteur non configuré
-    (../workflow/runtime.sdd). Le controller les pose quand l'Application porte `spec.restate`.
+  [x] Variables du moteur de workflow (2026-10-04) — FAIT 2026-10-10 (validation W0 :
+    les 4 variables contractées ci-dessus — 3 en optionnelles, `VNL_WORKFLOW_LISTEN` en
+    défaut `0.0.0.0:9080` vide conservé ; 3 tests `from_env_workflow_*` portant les
+    Scenario ci-dessous ; 133 tests app, clippy -D warnings VERT, validator-PASS).
   [!] Collision d'espace de noms `"VNL-CFG-*"` avec vanyline-cfgstore — cohérence avec
     le `[?]` de ../../cfgstore/src/error.sdd : ./config.rs (001–006) et ./main.rs (005
     bis, 008) émettent EN DUR les mêmes marqueurs que @CfgStoreError::001…010 pour des
@@ -460,6 +478,30 @@ Scenario: from_env_timeout_non_parseable_defaut
   Then le résultat est un @Ok — aucune erreur pour une valeur de défaut non parseable
   And oidc_timeout vaut @Duration::from_secs(15) et oidc_connect_timeout
     @Duration::from_secs(5) (repli silencieux sur les défauts, vide comprise)
+
+Scenario: moteur_workflow_absentes_a_defaut
+  # Ajouté W0 2026-10-10 — porte le test `from_env_workflow_absentes_a_defaut`.
+  Given aucune des variables du moteur de workflow (aucune `VNL_RESTATE_*`, aucun
+    `VNL_WORKFLOW_*`)
+  When @from_env lit l'environnement
+  Then @Config::restate_admin_url, @Config::restate_ingress_url et
+    @Config::workflow_deployment_url sont `@None` (moteur non configuré)
+  And @Config::workflow_listen porte le défaut `"0.0.0.0:9080"`
+
+Scenario: moteur_workflow_fournies_recopiees
+  # Ajouté W0 — porte le test `from_env_workflow_fournies`.
+  Given les quatre variables posées (`VNL_RESTATE_ADMIN_URL`, `VNL_RESTATE_INGRESS_URL`,
+    `VNL_WORKFLOW_DEPLOYMENT_URL`, `VNL_WORKFLOW_LISTEN` avec une valeur non défaut)
+  When @from_env lit
+  Then les quatre champs @Config recopient les valeurs BRUTES (aucun parse, aucune
+    normalisation)
+
+Scenario: moteur_workflow_vide_conservee
+  # Ajouté W0 — porte le test `from_env_workflow_vide_conservee`.
+  Given les quatre variables posées MAIS VIDES (`FOO=""`)
+  When @from_env lit
+  Then les trois optionnels sont `@Some("")` et @Config::workflow_listen est `""`
+    (règle « valeur présente vide = PRÉSENTE », comme `LISTEN_ADDR`)
 
 Scenario: from_env_timeouts_classees_a_defaut
   Given un environnement complet en requises et en variables à défaut, et les SEPT

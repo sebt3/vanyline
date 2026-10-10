@@ -2,7 +2,7 @@ Spec: Db Entities
 
 Purpose:
   Module `entities` de la couche base de données de l'`app` : registre déclaratif des
-  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les dix
+  entités SeaORM de l'application. Le fichier ./mod.rs ne fait que déclarer les douze
   sous-modules d'entités — aucun comportement propre, aucune réexportation, aucune
   fonction utilitaire : le contrat table ↔ entité (colonnes, clé primaire, relations)
   vit dans chaque fichier enfant (specs séparées en cours de rédaction, règle
@@ -17,11 +17,11 @@ Owns:
   ./mod.rs
 
 Structure:
-  ./mod.rs — dix déclarations `pub mod`, dans cet ordre, rien d'autre :
+  ./mod.rs — douze déclarations `pub mod`, dans cet ordre alphabétique, rien d'autre :
     `pub mod agents;`, `pub mod chat_contexts;`, `pub mod conversations;`,
     `pub mod llm_providers;`, `pub mod mcp_servers;`, `pub mod messages;`,
-    `pub mod model_profiles;`, `pub mod owner_links;`, `pub mod skills;`,
-    `pub mod toolsets;`.
+    `pub mod model_profiles;`, `pub mod owner_links;`, `pub mod project_workflows;`,
+    `pub mod skills;`, `pub mod toolsets;`, `pub mod workflow_runs;`.
   ./agents.sdd — entité `agents` (table `vanyline_agents`), spec à venir.
   ./chat_contexts.sdd — entité `chat_contexts` (table `vanyline_chat_contexts`), spec à venir.
   ./conversations.sdd — entité `conversations` (table `vanyline_conversations`), spec à venir.
@@ -32,6 +32,10 @@ Structure:
   ./owner_links.sdd — entité `owner_links` (table `vanyline_owner_links`), spec à venir.
   ./skills.sdd — entité `skills` (table `vanyline_skills`), spec à venir.
   ./toolsets.sdd — entité `toolsets` (table `vanyline_toolsets`), spec à venir.
+  ./project_workflows.sdd — entité `project_workflows` (table
+    `vanyline_project_workflows`), spec écrite (W0 2026-10-10).
+  ./workflow_runs.sdd — entité `workflow_runs` (table `vanyline_workflow_runs`),
+    spec écrite (W0 2026-10-10).
 
 Must:
   - Exposer chaque sous-module en `pub` : les consommateurs y accèdent par le chemin
@@ -47,9 +51,13 @@ Must not:
 Depends on:
   ./agents.rs, ./chat_contexts.rs, ./conversations.rs, ./llm_providers.rs,
     ./mcp_servers.rs, ./messages.rs, ./model_profiles.rs, ./owner_links.rs,
-    ./skills.rs, ./toolsets.rs — chaque enfant dépend de `sea_orm`.
+    ./project_workflows.rs, ./skills.rs, ./toolsets.rs, ./workflow_runs.rs — chaque
+    enfant dépend de `sea_orm`.
 
 Tasks:
+  [ ] Enregistrer dans ./mod.rs toute entité enfant issue de sa propre spec (ordre
+      alphabétique, rien d'autre) — fait au fil de l'eau : `project_workflows` et
+      `workflow_runs` enregistrés W0 2026-10-10 (validator-PASS).
   [ ] Spec de chaque entité enfant (colonnes, clé primaire, relations, correspondance
       avec les migrations) — en cours, une spec par fichier enfant.
   [?] Le préfixe de table `vanyline_` est une convention portée par les enfants, pas

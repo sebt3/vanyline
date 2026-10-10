@@ -176,6 +176,10 @@ mod tests {
             default_home_access_mode: None,
             default_project_storage_class: None,
             default_project_access_mode: None,
+            restate_admin_url: None,
+            restate_ingress_url: None,
+            workflow_listen: "0.0.0.0:9080".to_string(),
+            workflow_deployment_url: None,
         }
     }
 
