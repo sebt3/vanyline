@@ -263,7 +263,14 @@ Tasks:
     (`auth::test_support`, ./auth.sdd) et vérifient le `sub` du jeton. Volet « /health
     et /metrics interrogent le routeur d'exploitation » : FAIT (5D, voir tâche
     « port d'exploitation complet »).
-  [ ] Scrub du paramètre `ticket` dans le @TraceLayer (voir `Must`).
+  [x] Scrub du paramètre `ticket` dans le @TraceLayer — FAIT 2026-10-10 (validation
+    S5 + correction citation : @make_span_with/@on_request custom sur le layer le plus
+    externe de @build_app (fallback 404/405 compris, port ops sans layer intact),
+    @scrub_ticket_uri pure `#[must_use]` mêmes règles que la garde `ws/ticket.rs`
+    (aucune fuite `tick%65t` : la garde ne la reconnaît pas non plus), Scenario
+    `trace_ne_jamais_journalise_la_valeur_d_un_ticket` ajouté au contrat portant les
+    tests (11 : 9 unitaires + 2 intégration dont volet 404), 532 tests sandbox,
+    0 unique sous cap. Reste ouvert : le `[?]` parsing maison de la query l.278.
   [?] Interaction garde d'auth × 404/405 sur le router fusionné (sémantique axum des
     `route_layers` après `merge` : `GET /mcp` sans jeton fait-il tourner @require_auth
     d'abord (401) ou le method-mismatch d'abord (405) ? `POST /git/inconnu` ?). Comportement
@@ -423,6 +430,19 @@ Scenario: spawn_ops_server_sur_port_occupe_rend_erreur
   Given un @tokio::net::TcpListener déjà lié sur une adresse
   When @spawn_ops_server est appelé sur cette même adresse
   Then l'appel rend `Err` (échec de bind propagé, jamais avalé) sans panic
+
+Scenario: trace_ne_jamais_journalise_la_valeur_d_un_ticket
+  # Ajouté 2026-10-10 sur la tâche scrub (le `Must` du TraceLayer préexistait ;
+  # la validation S5 a exigé le Scenario portant les tests déjà écrits).
+  Given un @build_app et une valeur de ticket `SECRET-INTROUVABLE`
+  When `GET /ws/fs?ticket=SECRET-INTROUVABLE` (le span part AVANT la garde :
+    401 en aval) et `GET /inconnu?ticket=SECRET-INTROUVABLE` (fallback 404 —
+    @TraceLayer plus externe que tout, `Must` ordre des couches) sont exécutées
+    sous harnais de capture de logs
+  Then AUCUNE ligne capturée ne porte la valeur du ticket
+  And le log scrubé est bien émis (path rendu + `ticket=***`) — la capture
+    prouve que le log part, pas seulement qu'il tait le secret
+  And une requête sans ticket (`?other=val1`) rend son URI byte-intacte
 
 Scenario: spawn_ops_server_expose_health_et_metrics_sur_port_lie
   Given le recorder Prometheus installé et une adresse libre

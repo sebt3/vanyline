@@ -266,8 +266,77 @@ pub fn build_app(state: AppState) -> Router {
         .merge(protected)
         .merge(ws)
         .layer(middleware::from_fn(track_metrics))
-        .layer(TraceLayer::new_for_http())
+        // Le @TraceLayer ne doit JAMAIS journaliser la valeur du paramètre
+        // de query `ticket` (spec `./lib.sdd`, `Must`) : le span et l'event
+        // « incoming request » portent l'URI scrubée (valeur masquée
+        // `ticket=***`), méthode et version inchangées, niveau INFO.
+        .layer(
+            TraceLayer::new_for_http()
+                .make_span_with(scrubbed_request_span)
+                .on_request(scrubbed_on_request),
+        )
         .with_state(state)
+}
+
+/// Span du `@TraceLayer` portant l'URI scrubée — même forme que le span par
+/// défaut (`request`, `method`/`uri`/`version`, niveau INFO) mais avec la
+/// valeur du paramètre `ticket` masquée (spec `./lib.sdd`, `Must`).
+fn scrubbed_request_span<B>(req: &axum::http::Request<B>) -> tracing::Span {
+    let uri = req.uri().to_string();
+    let uri = scrub_ticket_uri(&uri);
+    tracing::info_span!(
+        "request",
+        method = %req.method(),
+        uri = %uri,
+        version = ?req.version(),
+    )
+}
+
+/// Masque la valeur du paramètre de query `ticket` dans une URI (spec
+/// `./lib.sdd`, `Must` : le `@TraceLayer` ne doit JAMAIS journaliser un
+/// ticket — un ticket loggé reste rejouable jusqu'à 30 s, cf.
+/// `./ws/ticket.sdd`). Découpage brut de la query sur `&`, clé retenue
+/// avant le PREMIER `=`, sans percent-décodage (mêmes règles que
+/// l'extraction côté `./ws/ticket.rs`) ; toutes les occurrences de la clé
+/// exacte `ticket` sont masquées en `ticket=***`, les autres paramètres et
+/// le chemin restent byte-exacts. Rend [`std::borrow::Cow::Borrowed`]
+/// quand il n'y a rien à masquer.
+#[must_use]
+pub(crate) fn scrub_ticket_uri(uri: &str) -> std::borrow::Cow<'_, str> {
+    let Some((path, query)) = uri.split_once('?') else {
+        return std::borrow::Cow::Borrowed(uri);
+    };
+    if !query
+        .split('&')
+        .any(|p| p.split('=').next() == Some("ticket"))
+    {
+        return std::borrow::Cow::Borrowed(uri);
+    }
+    let scrubbed: Vec<&str> = query
+        .split('&')
+        .map(|p| {
+            if p.split('=').next() == Some("ticket") {
+                "ticket=***"
+            } else {
+                p
+            }
+        })
+        .collect();
+    std::borrow::Cow::Owned(format!("{path}?{}", scrubbed.join("&")))
+}
+
+/// Event « requête entrante » du `@TraceLayer`, sur l'URI scrubée (spec
+/// `./lib.sdd`, `Must`). Remplace l'event par défaut (`DefaultOnRequest`,
+/// niveau DEBUG, sans URI) par un event INFO `méthode + URI scrubée`.
+fn scrubbed_on_request<B>(req: &axum::http::Request<B>, span: &tracing::Span) {
+    let uri = req.uri().to_string();
+    let uri = scrub_ticket_uri(&uri);
+    tracing::info!(
+        parent: span,
+        method = %req.method(),
+        uri = %uri,
+        "incoming request"
+    );
 }
 
 /// Construit le routeur d'exploitation nu : exactement `GET /health` et
@@ -372,4 +441,80 @@ async fn track_metrics(req: Request, next: Next) -> Response {
     .record(duration);
 
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scrub_ticket_uri;
+
+    #[test]
+    fn scrub_ticket_masque_la_valeur() {
+        assert_eq!(
+            scrub_ticket_uri("/ws/fs?ticket=abc123"),
+            "/ws/fs?ticket=***"
+        );
+    }
+
+    #[test]
+    fn scrub_ticket_laisse_l_uri_sans_query_intacte() {
+        assert_eq!(scrub_ticket_uri("/ws/fs"), "/ws/fs");
+    }
+
+    #[test]
+    fn scrub_ticket_laisse_les_uris_sans_ticket_intactes() {
+        assert_eq!(scrub_ticket_uri("/ws/fs?other=val1"), "/ws/fs?other=val1");
+        assert_eq!(scrub_ticket_uri("/mcp?a=1&b=2"), "/mcp?a=1&b=2");
+        // Query vide (URI finissant par « ? ») : rien à masquer, intact.
+        assert_eq!(scrub_ticket_uri("/ws/fs?"), "/ws/fs?");
+    }
+
+    #[test]
+    fn scrub_ticket_vide_masque_quand_meme() {
+        assert_eq!(scrub_ticket_uri("/ws/fs?ticket="), "/ws/fs?ticket=***");
+    }
+
+    #[test]
+    fn scrub_ticket_sans_signe_equal_masque() {
+        assert_eq!(scrub_ticket_uri("/ws/fs?ticket"), "/ws/fs?ticket=***");
+    }
+
+    #[test]
+    fn scrub_ticket_parametres_autres_intacts() {
+        assert_eq!(
+            scrub_ticket_uri("/ws/fs?a=1&ticket=xyz&b=2"),
+            "/ws/fs?a=1&ticket=***&b=2"
+        );
+    }
+
+    #[test]
+    fn scrub_ticket_duplique_tous_masques() {
+        assert_eq!(
+            scrub_ticket_uri("/ws/fs?ticket=abc&ticket=def"),
+            "/ws/fs?ticket=***&ticket=***"
+        );
+    }
+
+    #[test]
+    fn scrub_ticket_ne_decode_pas_le_percent_encoding() {
+        // « %3F » (%26, %3D) dans les AUTRES paramètres restent intacts :
+        // découpage brut sur « & »/« = », sans percent-décodage (mêmes
+        // règles que l'extraction côté ./ws/ticket.rs).
+        assert_eq!(
+            scrub_ticket_uri("/ws/fs?q=a%3Fb%26c%3Dd&ticket=x"),
+            "/ws/fs?q=a%3Fb%26c%3Dd&ticket=***"
+        );
+        // Clé percent-encodée : pas la clé exacte « ticket », non masquée
+        // (elle n'authentifie pas non plus — même règle côté garde).
+        assert_eq!(scrub_ticket_uri("/ws/fs?tick%65t=x"), "/ws/fs?tick%65t=x");
+    }
+
+    #[test]
+    fn scrub_ticket_ancre_et_valeurs_avec_equal() {
+        // La valeur peut contenir des « = » : seule la PREMIÈRE paire clé/
+        // valeur compte, le reste de la valeur est masqué avec elle.
+        assert_eq!(
+            scrub_ticket_uri("/ws/fs?ticket=a=b=c&z=9"),
+            "/ws/fs?ticket=***&z=9"
+        );
+    }
 }

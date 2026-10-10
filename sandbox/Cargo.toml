@@ -84,5 +84,10 @@ vanyline-sandbox = { path = ".", features = ["test"] }
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
 tempfile = "3"
+# Harnais de capture tracing des tests d'intégration (scrub `ticket`, lib.sdd
+# `Must` sur @TraceLayer) — mêmes versions que les dépendances directes du
+# crate (aucune version dupliquée dans le graphe).
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 [lints]
 workspace = true

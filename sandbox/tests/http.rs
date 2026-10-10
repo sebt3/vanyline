@@ -3,8 +3,10 @@
 //! MCP —, relais `/git/status` et `/git/unpushed`, absence de découverte
 //! OAuth, aucune route publique) et du port d'exploitation (`build_ops_app` /
 //! `spawn_ops_server` : `/health`, `/metrics` sans authentification) — motif
-//! une-request-une-assertion sur l'app complète. Les tickets et sessions WS
-//! ne sont pas couverts ici.
+//! une-request-une-assertion sur l'app complète. Les sessions WS elles-mêmes
+//! ne sont pas couvertes ici ; en revanche le scrub du paramètre `ticket`
+//! par le `@TraceLayer` (lib.sdd `Must`) l'est, via un harnais de capture
+//! tracing local (`log_capture`).
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 use std::process::Command;
@@ -1888,5 +1890,165 @@ async fn git_unpushed_endpoint_detached_head() {
     assert!(
         error_text.contains("VNL-SBX-006"),
         "expected VNL-SBX-006 in: {error_text}"
+    );
+}
+
+// ── Scrub du paramètre `ticket` dans le TraceLayer (lib.sdd `Must`) ──────────
+
+mod log_capture {
+    use std::io::Write;
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::fmt::MakeWriter;
+    use tracing_subscriber::layer::SubscriberExt;
+
+    /// Buffer partagé : la couche `fmt` y écrit chaque ligne déjà formatée
+    /// (spans avec leurs champs — dont `uri` — et events avec leur message).
+    #[derive(Clone)]
+    struct Shared(Arc<Mutex<String>>);
+
+    impl Write for Shared {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut sink = self
+                .0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let s = String::from_utf8_lossy(buf);
+            sink.push_str(&s);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl MakeWriter<'_> for Shared {
+        type Writer = Self;
+        fn make_writer(&self) -> Self {
+            self.clone()
+        }
+    }
+
+    /// Exécute `fut` avec la capture installée comme subscriber par défaut
+    /// (garde thread-local `set_default`) et rend les lignes capturées (une
+    /// par span — dont le span du `TraceLayer` avec son champ `uri` — et une
+    /// par event). Le runtime monothreadé de `#[tokio::test]` garantit que
+    /// `fut` tourne sur CE thread, donc sous la garde.
+    pub async fn capture<T, F: std::future::Future<Output = T>>(fut: F) -> (T, Vec<String>) {
+        let buf = Arc::new(Mutex::new(String::new()));
+        let layer = tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .without_time()
+            .with_writer(Shared(buf.clone()))
+            .with_span_events(tracing_subscriber::fmt::format::FmtSpan::NEW);
+        let sub = tracing_subscriber::registry::Registry::default().with(layer);
+        // Garde thread-local : la capture ne vit que dans cette fonction, le
+        // runtime monothreadé de `#[tokio::test]` garantit que `fut` tourne
+        // sur CE thread. Les lignes sont clonées avant la sortie de scope.
+        let _guard = tracing::subscriber::set_default(sub);
+        let out = fut.await;
+        let all = buf
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        (out, all.lines().map(str::to_owned).collect::<Vec<_>>())
+    }
+}
+
+/// Scenario `trace_ne_jamais_journalise_la_valeur_d_un_ticket` (`lib.sdd`
+/// `Must`) : la valeur du paramètre de query `ticket` ne doit JAMAIS
+/// apparaître dans un log — sur `GET /ws/fs?ticket=…` (l'upgrade est rejeté
+/// 401 par la garde d'auth, mais le span du `TraceLayer`, couche la plus
+/// externe, est créé AVANT la garde) et sur `GET /inconnu?ticket=…`
+/// (fallback 404 : le scrub est plus externe que le routage, l'URI est
+/// loggée scrubée quel que soit le sort de la requête). Le marqueur de
+/// contrôle (path rendu + `ticket=***`) prouve que le log part, pas
+/// seulement qu'il tait le secret.
+#[tokio::test]
+async fn trace_ne_jamais_journalise_la_valeur_d_un_ticket() {
+    let app = build_app(test_state_default());
+    let (_resp, lines) = log_capture::capture(
+        app.clone().oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ws/fs?ticket=SECRET-INTROUVABLE")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await;
+
+    let joined = lines.join("\n");
+    assert!(
+        !joined.contains("SECRET-INTROUVABLE"),
+        "la valeur du ticket a fuité dans les logs:\n{joined}"
+    );
+    // Marqueur contrôle : le log part bien, avec le path intact et la valeur
+    // du ticket masquée.
+    assert!(
+        joined.contains("/ws/fs"),
+        "aucune trace de la requête /ws/fs (le TraceLayer ne loggue plus ?):\n{joined}"
+    );
+    assert!(
+        joined.contains("ticket=***"),
+        "le paramètre ticket n'est pas masqué dans l'URI loggée:\n{joined}"
+    );
+
+    // Volet fallback 404 (`Must` ordre des couches : @TraceLayer plus
+    // externe que le routage) : une route inconnue loggue aussi son URI
+    // scrubée, sans jamais porter la valeur du ticket.
+    let (resp, lines) = log_capture::capture(
+        app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/inconnu?ticket=SECRET-INTROUVABLE")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await;
+    let resp = resp.unwrap();
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "l'URI doit bien tomber sur le fallback 404 pour tester ce volet"
+    );
+
+    let joined = lines.join("\n");
+    assert!(
+        !joined.contains("SECRET-INTROUVABLE"),
+        "la valeur du ticket a fuité dans les logs du fallback 404:\n{joined}"
+    );
+    assert!(
+        joined.contains("/inconnu"),
+        "aucune trace de la requête /inconnu (le TraceLayer ne loggue plus le fallback ?):\n{joined}"
+    );
+    assert!(
+        joined.contains("ticket=***"),
+        "le paramètre ticket n'est pas masqué dans l'URI du fallback:\n{joined}"
+    );
+}
+
+/// Volet « requête sans ticket inchangée » : le scrub ne casse pas le log
+/// normal — l'URI complète (avec un autre paramètre de query) est journalisée
+/// telle quelle.
+#[tokio::test]
+async fn trace_requete_sans_ticket_loggue_l_uri_intacte() {
+    let app = build_app(test_state_default());
+    let (_resp, lines) = log_capture::capture(
+        app.oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/ws/fs?other=val1")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    )
+    .await;
+
+    let joined = lines.join("\n");
+    assert!(
+        joined.contains("/ws/fs?other=val1"),
+        "l'URI sans ticket doit rester intacte dans le log:\n{joined}"
     );
 }
