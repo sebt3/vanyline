@@ -153,3 +153,46 @@ quand `None`/vide/whitespace après `trim()` ; EMAIL RETIRÉ de la chaîne de no
   tout-vert `[x]`, missing_docs purgée `[x]`, vanyline.sdd purge crate `[x]`.
 - **Étapes restantes** : `/code-health/*` (dernier item étape 5, prérequis câblage
   vanyline-health) → 6 workflows → 7 TUI cli → 8 agents système → 9 llm-config.
+
+## Session 2026-10-09→10 — étape 5 TERMINÉE (code) : /code-health/* + scrub
+- **D6 cli 299→0** `6975abc` + registre `faddafb` (dette harnais workspace ZÉRO,
+  gate `-D warnings` VERT 8 crates — voir tooling.sdd ; ~78 sites cli sous allows
+  « en attente [?] » à solder par arbitrages Sébastien).
+- **Leçon séance** : l'outil `question` est PROHIBÉ à TOUS les agents (timeout qui
+  tue les sessions — arrivée en plein lot H2, reprise par l'arbre). Tous les prompts
+  d'implementer portent désormais l'interdiction explicite.
+- **H1+fix** `614fdcc` : `sandbox/src/health.rs` neuf (machine computing/fresh/
+  stale, debounce, empreinte HEAD+diff+non-suivis, sondage, un-seul-calcul sans
+  annulation, base sticky validée argv-only, out_dir hors worktree, niceness 10),
+  routes GET/POST `/code-health*` protégées, `AppState::health` (décision SOLDÉE :
+  champ, pas registre), extraction `maint::languages_from_paths` pure, dépendance
+  vanyline-health au crate. FAIL validator attrapé : branche Err qui posait
+  l'empreinte en échec et mentait `fresh` → Scenario `calcul_echoue_ne_ment_jamais`
+  + correctif + resserrage base_sticky (validator-vert). 19 tests.
+- **H2** `31c7e40` : 12 sites `notify_modified` succès-seul (tools_impl, ws/fs,
+  git — merge en conflit NOTIFIE : arbre muté, ratifié), outil MCP `code_health`
+  (summary/issues/coverage, path préfixe, limit, plafond bound_lines 200/16K,
+  lecture pure snapshot). Inventaire tools/list 16→17 : Specs mcp.sdd/tools_impl.sdd/
+  tools/src/mcp.sdd alignées, Scenario `…_17_entrees`. Le `[ ]` mkdir/rename du
+  Handles vivait seulement en WS — re-formulé.
+- **H3a** `5189be7` : `LspManager::all_cached_diagnostics` + `PreliminarySource`
+  injectée, seed AVANT run_checks à chaque cycle, `with_lsp` = poignée de production
+  (main.rs), conversion URI→Issue contractée (règle textuelle file://<root>/,
+  0-based+1, sévérités fondues 2 niveaux, ignorés sans trace). Test bout-en-bout
+  vrai LspManager + faux LSP.
+- **H3b** `936a916` : controller pose `VNL_HEALTH_BASE_REF` (default_branch non
+  vide) → `Config::health_base_ref` → seed de la base sticky. `/refresh {}`
+  N'EFFACE PAS (contractuellement sûr). **Nouveau `[?]` health.sdd** : aucun chemin
+  pour revenir à « pas de base » (Option serde indiscernable) — décider sentinelle.
+- **S5** `03842c5` : scrub `ticket` du TraceLayer (make_span custom, mêmes règles
+  que la garde — pas de fuite `tick%65t`), Scenario ajouté, volet 404.
+- **Comptes** : sandbox 478→532 tests, controller 166→169, health 96→97,
+  workspace `-D warnings` VERT, specdd 0/0 throughout.
+- **[?] posés cette session (passe d'arbitrage Sébastien)** : health.sdd — 002
+  400/500, out_dir machine-global, lsp_rename déclencheur (liste exhaustive ?),
+  effacement base sticky ; tooling.sdd — 5 (déjà listés plus haut).
+- **Etape 5 code CLOSE.** Reste hors périmètre sandbox : mode RÉFÉRENCE SHA
+  (`controller/src/sandbox.sdd`), images toolchains (spec `toolchains/` à écrire).
+- **Séquence suite** : étape 6 couche workflow `app/src/workflow/` (specs gelées,
+  zéro code : mod/runtime/run_context/status/steps//api/workflows.sdd) → 7 TUI cli
+  → 8 agents système → 9 llm-config.
